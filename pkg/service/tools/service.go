@@ -3,14 +3,14 @@ package tools
 
 import (
 	"context"
-	"fmt"
-	"os"
+
+	"go.keploy.io/server/v2/config"
 )
 
 type Service interface {
 	Update(ctx context.Context) error
 	CreateConfig(ctx context.Context, filePath string, config string) error
-	Normalise(ctx context.Context) error
+	Normalise(ctx context.Context, cfg *config.Config) error
 }
 
 type teleDB interface {
@@ -46,38 +46,6 @@ type TestCaseFile struct {
 		Created int64 `yaml:"created"`
 	} `yaml:"spec"`
 	Curl string `yaml:"curl"`
-}
-
-func getDirectories(path string) ([]string, error) {
-	var dirs []string
-
-	// Open the directory
-	dir, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if cerr := dir.Close(); cerr != nil {
-			// If there is an error during close, log it or handle it appropriately
-			// In this case, you could log the error
-			fmt.Printf("Error closing directory: %v", cerr)
-		}
-	}()
-
-	// Read the directory entries
-	fileInfos, err := dir.Readdir(-1)
-	if err != nil {
-		return nil, err
-	}
-
-	// Filter directories
-	for _, fileInfo := range fileInfos {
-		if fileInfo.IsDir() {
-			dirs = append(dirs, fileInfo.Name())
-		}
-	}
-
-	return dirs, nil
 }
 
 func contains(list []string, item string) bool {

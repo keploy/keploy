@@ -13,8 +13,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/glamour"
@@ -289,60 +287,30 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 }
 
 // Normalise initiates the normalise process for normalising the test cases.
-func (t *Tools) Normalise(_ context.Context) error {
-	path := viper.GetString("path")
-	testSet := viper.GetString("test-set")
+func (t *Tools) Normalise(_ context.Context, cfg *config.Config) error {
+	path := cfg.Path
+	testSets := viper.GetString("test-sets")
 	testCases := viper.GetString("test-cases")
+	testRun := viper.GetString("test-run")
 	t.logger.Info("Test cases and Mock Path", zap.String("path", path))
-	testReportPath := filepath.Join(path, "testReports")
-
-	// Get a list of directories in the testReportPath
-	dirs, err := getDirectories(testReportPath)
-	if err != nil {
-		utils.LogError(t.logger, err, "Failed to get TestReports")
-		return err
-	}
-
-	// Find the last-run folder
-	sort.Strings(dirs)
-	var lastRunFolder string
-	maxFolderNumber := -1
-	for i := len(dirs) - 1; i >= 0; i-- {
-		if strings.HasPrefix(dirs[i], "test-run-") {
-			folderNumberStr := strings.TrimPrefix(dirs[i], "test-run-")
-			folderNumber, err := strconv.Atoi(folderNumberStr)
-			if err != nil {
-				utils.LogError(t.logger, err, "Failed to parse folder number")
-				continue
-			}
-			if folderNumber > maxFolderNumber {
-				maxFolderNumber = folderNumber
-				lastRunFolder = dirs[i]
-			}
-		}
-	}
-	lastRunFolderPath := filepath.Join(testReportPath, lastRunFolder)
-	t.logger.Info("Test Run Folder", zap.String("folder", lastRunFolderPath))
-
-	// Get list of YAML files in the last run folder
-	files, err := fs.ReadDir(os.DirFS(lastRunFolderPath), ".")
+	testRunPath := filepath.Join(path, "testReports", testRun)
+	t.logger.Info("Test Run Folder", zap.String("folder", testRunPath))
+	// Get list of YAML files in the test run folder
+	files, err := fs.ReadDir(os.DirFS(testRunPath), ".")
 	if err != nil {
 		utils.LogError(t.logger, err, "Failed to read directory")
 		return err
 	}
-
-	// Iterate over each YAML file
+	// Iterate over each YAML file in the test run folder
 	for _, file := range files {
 		if strings.HasSuffix(file.Name(), ".yaml") {
-			filePath := filepath.Join(lastRunFolderPath, file.Name())
-
+			filePath := filepath.Join(testRunPath, file.Name())
 			// Read the YAML file
 			yamlData, err := os.ReadFile(filePath)
 			if err != nil {
 				utils.LogError(t.logger, err, "Failed to read YAML file")
 				continue
 			}
-
 			// Unmarshal YAML into TestReport
 			var testReport models.TestReport
 			err = yaml.Unmarshal(yamlData, &testReport)
@@ -351,11 +319,16 @@ func (t *Tools) Normalise(_ context.Context) error {
 				continue
 			}
 			testCasesArr := strings.Split(testCases, " ")
+			testSetsArr := strings.Split(testSets, " ")
+			for i := range testSetsArr {
+				testSetsArr[i] = filepath.Join(path, testSetsArr[i])
+			}
+			t.logger.Info("testSetsArr", zap.Strings("testSetsArr", testSetsArr))
+			t.logger.Info("testCasesArr", zap.Strings("testCasesArr", testCasesArr))
 			// Iterate over tests in the TestReport
 			for _, test := range testReport.Tests {
-				testCasePath := filepath.Join(path, testSet)
-				if test.Status == models.TestStatusFailed && test.TestCasePath == testCasePath && contains(testCasesArr, test.TestCaseID) {
-
+				if test.Status == models.TestStatusFailed && contains(testSetsArr, test.TestCasePath) && contains(testCasesArr, test.TestCaseID) {
+					t.logger.Info("Updating testcase file", zap.String("testCaseID", test.TestCaseID))
 					// Read the contents of the testcase file
 					testCaseFilePath := filepath.Join(test.TestCasePath, "tests", test.TestCaseID+".yaml")
 					t.logger.Info("Updating testcase file", zap.String("filePath", testCaseFilePath))
@@ -367,7 +340,6 @@ func (t *Tools) Normalise(_ context.Context) error {
 
 					// Unmarshal YAML into TestCase
 					var testCase TestCaseFile
-
 					err = yaml.Unmarshal(testCaseContent, &testCase)
 					if err != nil {
 						utils.LogError(t.logger, err, "Failed to unmarshal YAML")
@@ -389,7 +361,6 @@ func (t *Tools) Normalise(_ context.Context) error {
 						utils.LogError(t.logger, err, "Failed to write updated YAML to file", zap.Error(err))
 						continue
 					}
-
 					t.logger.Info("Updated testcase file successfully", zap.String("testCaseFilePath", testCaseFilePath))
 				}
 			}

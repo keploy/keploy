@@ -10,28 +10,16 @@ import (
 	"go.uber.org/zap"
 )
 
-// func NewCmdNormalise(logger *zap.Logger) *Normalise {
-// 	normaliser := normalise.NewNormaliser(logger)
-// 	return &Normalise{
-// 		normaliser: normaliser,
-// 		logger:     logger,
-// 	}
-// }
-
-//	type Normalise struct {
-//		normaliser normalise.Normaliser
-//		logger     *zap.Logger
-//	}
 func init() {
 	Register("normalise", Normalise)
 }
 
 // Normalise retrieves the command to normalise Keploy
-func Normalise(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
+func Normalise(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var normaliseCmd = &cobra.Command{
 		Use:     "normalise",
 		Short:   "Normalise Keploy",
-		Example: "keploy normalise --path /path/to/localdir --test-set testset --test-cases testcases",
+		Example: "keploy normalise  --test-run testrun --test-sets testsets --test-cases testcases",
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.ValidateFlags(ctx, cmd)
 		},
@@ -47,7 +35,7 @@ func Normalise(ctx context.Context, logger *zap.Logger, _ *config.Config, servic
 				utils.LogError(logger, nil, "service doesn't satisfy normalise service interface")
 				return nil
 			}
-			if err := tools.Normalise(ctx); err != nil {
+			if err := tools.Normalise(ctx, cfg); err != nil {
 				utils.LogError(logger, err, "failed to normalise test cases")
 				return err
 			}
