@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -208,4 +209,18 @@ func NewID(IDs []string, identifier string) string {
 		}
 	}
 	return fmt.Sprintf("%s%v", identifier, latestIndx)
+}
+
+func GetAllSubDirs(path string) ([]string, error) {
+	var dirs []string
+	files, err := os.ReadDir(path)
+	if err != nil {
+		return dirs, err
+	}
+	for _, file := range files {
+		if file.IsDir() {
+			dirs = append(dirs, filepath.Join(path, file.Name()))
+		}
+	}
+	return dirs, nil
 }

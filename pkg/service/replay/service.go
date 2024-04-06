@@ -27,7 +27,7 @@ type Service interface {
 	Start(ctx context.Context) error
 	BootReplay(ctx context.Context) (string, uint64, context.CancelFunc, error)
 	GetAllTestSetIDs(ctx context.Context) ([]string, error)
-	RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error)
+	RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, gocoverdirEnv string, serveTest bool) (models.TestSetStatus, error)
 	GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error)
 	RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError
 	ProvideMocks(ctx context.Context) error

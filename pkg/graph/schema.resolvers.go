@@ -68,7 +68,7 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSetID string, tes
 	r.logger.Debug("running test set", zap.String("testSetID", testSetID), zap.String("testRunID", testRunID), zap.Int("appID", appID))
 	go func(testSetID, testRunID string, appID int) {
 		ctx := context.WithoutCancel(ctx)
-		status, err := r.replay.RunTestSet(ctx, testSetID, testRunID, uint64(appID), true)
+		status, err := r.replay.RunTestSet(ctx, testSetID, testRunID, uint64(appID), "", true)
 		if err != nil {
 			return
 		}
