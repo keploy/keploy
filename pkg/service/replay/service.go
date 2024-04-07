@@ -31,6 +31,7 @@ type Service interface {
 	GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error)
 	RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError
 	ProvideMocks(ctx context.Context) error
+	UpdateReportWithCoverage(ctx context.Context, testRunID string, testSetID string, coverageData map[string]string) error
 }
 
 type TestDB interface {

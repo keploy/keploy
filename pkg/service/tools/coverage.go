@@ -107,35 +107,112 @@ type pyCoverage struct {
 	} `json:"totals"`
 }
 
-func CalPythonCoverage(ctx context.Context, logger *zap.Logger) map[string]string {
+func CalPythonCoverage(ctx context.Context, logger *zap.Logger) (map[string]string, error) {
 	covfile, err := utils.GetRecentFile(".", ".coverage.keploy")
-	fmt.Println(covfile)
 	if err != nil {
 		utils.LogError(logger, err, "failed to get the coverage data file")
-		return nil
+		return nil, err
 	}
 	generateCovJSONCmd := exec.CommandContext(ctx, "coverage", "json", "--data-file="+covfile)
-	fmt.Println(generateCovJSONCmd.String())
 	_, err = generateCovJSONCmd.Output()
 	if err != nil {
 		utils.LogError(logger, err, "failed to create a json report of coverage", zap.Any("cmd", generateCovJSONCmd.String()))
-		return nil
+		return nil, err
 	}
 	coverageData, err := os.ReadFile("coverage.json")
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the coverage.json file")
-		return nil
+		return nil, err
 	}
 	var cov pyCoverage
 	err = json.Unmarshal(coverageData, &cov)
 	if err != nil {
 		utils.LogError(logger, err, "failed to unmarshal the coverage data")
-		return nil
+		return nil, err
 	}
 	coveragePerFile := make(map[string]string)
 	for filename, file := range cov.Files {
 		coveragePerFile[filename] = file.Summary.PercentCoveredDisplay
 	}
-	fmt.Println(coveragePerFile)
-	return coveragePerFile
+	return coveragePerFile, nil
+}
+
+type Start struct {
+	Line   int `json:"line"`
+	Column int `json:"column"`
+}
+
+type End struct {
+	Line   int `json:"line"`
+	Column int `json:"column"`
+}
+
+type Loc struct {
+	Start `json:"start"`
+	End   `json:"end"`
+}
+
+type TypescriptCoverage map[string]struct {
+	Path         string `json:"path"`
+	StatementMap map[string]struct {
+		Start `json:"start"`
+		End   `json:"end"`
+	} `json:"statementMap"`
+	FnMap map[string]struct {
+		Name string `json:"name"`
+		Decl struct {
+			Start `json:"start"`
+			End   `json:"end"`
+		} `json:"decl"`
+		Loc `json:"loc"`
+		Line int `json:"line"`
+	} `json:"fnMap"`
+	BranchMap map[string]struct {
+		Loc `json:"loc"`
+		Type      string `json:"type"`
+		Locations []struct {
+			Start `json:"start"`
+			End   `json:"end"`
+		} `json:"locations"`
+		Line int `json:"line"`
+	} `json:"branchMap"`
+	S              map[string]int `json:"s"`
+	F              map[string]int `json:"f"`
+	B              map[string]int `json:"b"`
+	CoverageSchema string         `json:"_coverageSchema"`
+	Hash           string         `json:"hash"`
+	ContentHash    string         `json:"contentHash"`
+}
+
+func CalTypescriptCoverage(ctx context.Context, logger *zap.Logger) (map[string]string, error) {
+	covfile, err := utils.GetLargestFile(".nyc_output")
+	if err != nil {
+		utils.LogError(logger, err, "failed to get the coverage data file")
+		return nil, err
+	}
+	coverageData, err := os.ReadFile(covfile)
+	if err != nil {
+		utils.LogError(logger, err, "failed to read the coverage data file")
+		return nil, err
+	}
+	var cov TypescriptCoverage
+	err = json.Unmarshal(coverageData, &cov)
+	if err != nil {
+		utils.LogError(logger, err, "failed to unmarshal the coverage data")
+		return nil, err
+	}
+	coveragePerFile := make(map[string]string)
+	for filename, file := range cov {
+		// coverage is calculated as: (no of statements covered / total no of statements) * 100
+		// no of statements covered is the no of entries in S which has a value greater than 0
+		// Total no of statements is len of S
+		var totalLinesCovered int
+		for _, isStatementCovered := range file.S {
+			if isStatementCovered > 0 {
+				totalLinesCovered++
+			}
+		} 
+		coveragePerFile[filename] = strconv.FormatFloat(float64(totalLinesCovered*100)/float64(len(file.S)), 'f', 2, 64) + "%"
+	}
+	return coveragePerFile, nil
 }

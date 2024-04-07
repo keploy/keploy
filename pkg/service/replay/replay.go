@@ -232,15 +232,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if r.config.Test.GoCoverage {
 			coverageData := tools.CalGoCoverage(ctx, r.logger, testSetID)
 			// update the test set report with the coverage entry
-			testReport, err := r.reportDB.GetReport(ctx, testRunID, testSetID)
+			err := r.UpdateReportWithCoverage(ctx, testRunID, testSetID, coverageData)
 			if err != nil {
-				utils.LogError(r.logger, err, "failed to get report")
-			}
-
-			testReport.Coverage = coverageData
-			err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to insert coverage data in report")
+				utils.LogError(r.logger, err, "failed to update report with the coverage data")	
 			}
 		}
 		close(exitLoopChan)
@@ -750,5 +744,19 @@ func (r *Replayer) ProvideMocks(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 	<-ctx.Done()
+	return nil
+}
+
+func (r *Replayer) UpdateReportWithCoverage(ctx context.Context, testRunID string, testSetID string, coverageData map[string]string) error {
+	testReport, err := r.reportDB.GetReport(ctx, testRunID, testSetID)
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to get report")
+		return err
+	}
+	testReport.Coverage = coverageData
+	err = r.reportDB.InsertReport(ctx, testRunID, testSetID, testReport)
+	if err != nil {
+		return err
+	}
 	return nil
 }

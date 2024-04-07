@@ -107,33 +107,3 @@ func (fe *TestReport) InsertReport(ctx context.Context, testRunID string, testSe
 	}
 	return nil
 }
-
-func (fe *TestReport) ModifyReport(ctx context.Context, testRunID string, testSetID string, testReport *models.TestReport) error {
-	reportPath := filepath.Join(fe.Path, testRunID)
-	if testReport.Name == "" {
-		testReport.Name = testSetID + "-report"
-	}
-	existingReport, err := fe.GetReport(ctx, testRunID, testSetID)
-	if err != nil {
-		return fmt.Errorf("failed to get report: %w", err)
-	}
-	if existingReport.Name != testReport.Name {
-		return fmt.Errorf("report name mismatch: %s != %s", existingReport.Name, testReport.Name)
-	}
-	if existingReport.Status != "" {
-		testReport.Status = existingReport.Status
-	}
-	data := []byte{}
-	d, err := yamlLib.Marshal(&testReport)
-	if err != nil {
-		return fmt.Errorf("%s failed to marshal document to yaml. error: %s", utils.Emoji, err.Error())
-	}
-	data = append(data, d...)
-
-	err = yaml.WriteFile(ctx, fe.Logger, reportPath, testReport.Name, data, false)
-	if err != nil {
-		utils.LogError(fe.Logger, err, "failed to write the report to yaml", zap.Any("session", filepath.Base(reportPath)))
-		return err
-	}
-	return nil
-}

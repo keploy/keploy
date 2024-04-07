@@ -79,6 +79,33 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSetID string, tes
 	return true, nil
 }
 
+func (r *mutationResolver) UpdateReportWithCov(ctx context.Context, testRunId string, testSetId string, language string) (bool, error) {
+	if r.Resolver == nil {
+		err := fmt.Errorf(utils.Emoji + "failed to get Resolver")
+		return false, err
+	}
+	var coverageData map[string]string
+	var err error
+	switch language {
+	case "python":
+		coverageData, err = tools.CalPythonCoverage(ctx, r.logger)
+	case "typescript":
+		coverageData, err = tools.CalTypescriptCoverage(ctx, r.logger)
+		// case "java":
+		// 	coverageData = tools.CalJavaCoverage(ctx, r.logger)
+	}
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to calculate coverage data")
+		return false, err
+	}
+	err = r.replay.UpdateReportWithCoverage(ctx, testRunId, testSetId, coverageData)
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to update the report with coverage data")
+		return false, err
+	}
+	return true, nil
+}
+
 // StartApp is the resolver for the startApp field.
 func (r *mutationResolver) StartApp(ctx context.Context, appID int) (bool, error) {
 	if r.Resolver == nil {
@@ -158,9 +185,6 @@ func (r *mutationResolver) StopApp(ctx context.Context, appId int) (bool, error)
 		utils.LogError(r.logger, err, "failed to stop the app")
 		return false, err
 	}
-	coverageData := tools.CalPythonCoverage(ctx, r.logger)
-	fmt.Println(coverageData)
-	// TODO: update the test set report with the coverage entry
 	r.logger.Info("application stopped successfully", zap.Int("appID", appId))
 
 	return true, nil
