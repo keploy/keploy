@@ -111,6 +111,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 
+	if len(testSetIDs) == 0 {
+		recordCmd := models.HighlightGrayString("keploy record")
+		errMsg := fmt.Sprintf("No test sets found in the keploy folder. Please record testcases using %s command", recordCmd)
+		utils.LogError(r.logger, err, errMsg)
+		return fmt.Errorf(errMsg)
+	}
+
 	testSetResult := false
 	testRunResult := true
 	abortTestRun := false
@@ -246,6 +253,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if len(testCases) == 0 {
+		errMsg := fmt.Sprint("No test cases found for the test set: ", models.HighlightGrayString(testSetID))
+		r.logger.Warn(errMsg)
 		return models.TestSetStatusPassed, nil
 	}
 
