@@ -288,6 +288,8 @@ func findBinaryStreamMatch(logger *zap.Logger, tcsMocks []*models.Mock, requestB
 	mxIdx := -1
 
 	for idx, mock := range tcsMocks {
+		// merging the mocks as well before comparing
+		mock.Spec.PostgresRequests = mergeMocks(mock.Spec.PostgresRequests, logger)
 
 		if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
 			for requestIndex, reqBuf := range requestBuffers {
@@ -354,10 +356,10 @@ func findPGStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger 
 	match := false
 	// loop for the exact match of the request
 	for idx, mock := range tcsMocks {
-		// this is sync packet problem in pg req ..
-		mmocks := mergeMocks(mock.Spec.PostgresRequests, logger)
-		mock.Spec.PostgresRequests = mmocks
-		if len(mock.Spec.PostgresRequests) == len(requestBuffers) { //|| (isSorted && (len(mock.Spec.PostgresRequests)+1) == len(requestBuffers))
+		// merging the mocks as well before comparing
+		mock.Spec.PostgresRequests = mergeMocks(mock.Spec.PostgresRequests, logger)
+
+		if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
 			for _, reqBuff := range requestBuffers {
 				actualPgReq := decodePgRequest(reqBuff, logger)
 				if actualPgReq == nil {
@@ -381,6 +383,9 @@ func findPGStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger 
 	// loop for the ps match of the request
 	if !match {
 		for idx, mock := range tcsMocks {
+			// merging the mocks as well before comparing
+			mock.Spec.PostgresRequests = mergeMocks(mock.Spec.PostgresRequests, logger)
+
 			if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
 				for _, reqBuff := range requestBuffers {
 					actualPgReq := decodePgRequest(reqBuff, logger)
@@ -409,7 +414,11 @@ func findPGStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger 
 	}
 
 	if !match {
+
 		for idx, mock := range tcsMocks {
+			// merging the mocks as well before comparing
+			mock.Spec.PostgresRequests = mergeMocks(mock.Spec.PostgresRequests, logger)
+
 			if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
 				for _, reqBuff := range requestBuffers {
 					actualPgReq := decodePgRequest(reqBuff, logger)
@@ -581,7 +590,6 @@ func PreparedStatementMatch(mock *models.Mock, actualPgReq *models.Backend, logg
 		logger.Debug("Current Query for this prepared statement", zap.String("Query", currentQuery), zap.String("Identifier", currentPs))
 		foo = false
 
-		// for _, mb := range mockBinds {
 		// check if the query for mock ps (v.PreparedStatement) is same as the current query
 		for _, querydata := range recordedPrep[mockConn] {
 			if querydata.Query == currentQuery && mockBinds[idx].PreparedStatement == querydata.PrepIdentifier {
@@ -589,7 +597,7 @@ func PreparedStatementMatch(mock *models.Mock, actualPgReq *models.Backend, logg
 				foo = true
 				break
 			}
-			// }
+
 		}
 	}
 	if foo {
@@ -746,12 +754,11 @@ func validateMock(tcsMocks []*models.Mock, idx int, requestBuffers [][]byte, log
 			// logger.Debug("Inside Validate Mock for B, E, B, E")
 			if mock.Parses[0].Query == actualPgReq.Parses[0].Query {
 				// no need to do anything
-				// logger.Debug("Matched with the query AHHAHAHAHAH", mock.Parses[0].Query)
+
 				copyMock := *tcsMocks[idx]
 				copyMock.Spec.PostgresResponses[0].PacketTypes = []string{"1", "2", "T", "C", "Z"}
 				copyMock.Spec.PostgresResponses[0].Payload = ""
 				copyMock.Spec.PostgresResponses[0].CommandCompletes = copyMock.Spec.PostgresResponses[0].CommandCompletes[1:]
-				// logger.Debug("Matched with the query AHHAHAHAHAH", copyMock)
 				return false, &copyMock
 			}
 		}
