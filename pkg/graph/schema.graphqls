@@ -19,7 +19,7 @@ type Query {
 
 type Mutation {
   runTestSet(testSetId: String!, testRunId: String!, appId: Int!): Boolean!
-  updateReportWithCov(testRunId: String!, testSetId: String!, language String!): Boolean!
+  updateReportWithCov(testRunId: String!, testSetId: String!, language: String!): Boolean!
   startHooks: TestRunInfo!
   startApp(appId: Int!): Boolean!
   stopHooks: Boolean!
