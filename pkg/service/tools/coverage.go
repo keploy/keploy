@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -164,11 +166,11 @@ type TypescriptCoverage map[string]struct {
 			Start `json:"start"`
 			End   `json:"end"`
 		} `json:"decl"`
-		Loc `json:"loc"`
+		Loc  `json:"loc"`
 		Line int `json:"line"`
 	} `json:"fnMap"`
 	BranchMap map[string]struct {
-		Loc `json:"loc"`
+		Loc       `json:"loc"`
 		Type      string `json:"type"`
 		Locations []struct {
 			Start `json:"start"`
@@ -176,21 +178,21 @@ type TypescriptCoverage map[string]struct {
 		} `json:"locations"`
 		Line int `json:"line"`
 	} `json:"branchMap"`
-	S              map[string]int `json:"s"`
-	F              map[string]int `json:"f"`
-	B              map[string]int `json:"b"`
-	CoverageSchema string         `json:"_coverageSchema"`
-	Hash           string         `json:"hash"`
-	ContentHash    string         `json:"contentHash"`
+	S              map[string]interface{} `json:"s"`
+	F              map[string]interface{} `json:"f"`
+	B              map[string]interface{} `json:"b"`
+	CoverageSchema string                 `json:"_coverageSchema"`
+	Hash           string                 `json:"hash"`
+	ContentHash    string                 `json:"contentHash"`
 }
 
 func CalTypescriptCoverage(ctx context.Context, logger *zap.Logger) (map[string]string, error) {
-	covfile, err := utils.GetLargestFile(".nyc_output")
+	coverageFilePath, err := getCoverageFilePathTypescript(filepath.Join(".", ".nyc_output", "processinfo"))
 	if err != nil {
 		utils.LogError(logger, err, "failed to get the coverage data file")
 		return nil, err
 	}
-	coverageData, err := os.ReadFile(covfile)
+	coverageData, err := os.ReadFile(coverageFilePath)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the coverage data file")
 		return nil, err
@@ -208,11 +210,59 @@ func CalTypescriptCoverage(ctx context.Context, logger *zap.Logger) (map[string]
 		// Total no of statements is len of S
 		var totalLinesCovered int
 		for _, isStatementCovered := range file.S {
-			if isStatementCovered > 0 {
+			if isStatementCovered.(float64) > 0 {
 				totalLinesCovered++
 			}
-		} 
+		}
 		coveragePerFile[filename] = strconv.FormatFloat(float64(totalLinesCovered*100)/float64(len(file.S)), 'f', 2, 64) + "%"
 	}
 	return coveragePerFile, nil
+}
+
+type ProcessInfo struct {
+	Parent           string   `json:"parent"`
+	Pid              int      `json:"pid"`
+	Argv             []string `json:"argv"`
+	ExecArgv         []string `json:"execArgv"`
+	Cwd              string   `json:"cwd"`
+	Time             int      `json:"time"`
+	Ppid             int      `json:"ppid"`
+	CoverageFilename string   `json:"coverageFilename"`
+	ExternalId       string   `json:"externalId"`
+	Uuid             string   `json:"uuid"`
+	Files            []string `json:"files"`
+}
+
+func getCoverageFilePathTypescript(path string) (string, error) {
+	files := utils.ByTime{}
+	walkfn := func(path string, info os.FileInfo, err error) error {
+		if !info.IsDir() && !strings.HasSuffix(path, "index.json") {
+			fileData, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			var processInfo ProcessInfo
+			err = json.Unmarshal(fileData, &processInfo)
+			if err != nil {
+				return err
+			}
+			if len(processInfo.Files) > 0 {
+				coverageFileInfo, err := os.Lstat(processInfo.CoverageFilename)
+				if err != nil {
+					return err
+				}
+				files = append(files, utils.File{Info: coverageFileInfo, Path: processInfo.CoverageFilename})
+			}
+		}
+		return nil
+	}
+	err := filepath.Walk(path, walkfn)
+	if err != nil {
+		return "", err
+	}
+	sort.Sort(files)
+	if len(files) == 0 {
+		return "", err
+	}
+	return files[0].Path, nil
 }
