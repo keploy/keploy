@@ -284,8 +284,6 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 	return nil
 }
 
-
-
 // func (ts *TestYaml) EditTestCase(ctx context.Context, tc *models.TestCase, testSetID string) error {
 // 	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
 // 	var tcsName string
