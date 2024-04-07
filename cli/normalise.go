@@ -2,10 +2,11 @@ package cli
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
-	toolsSvc "go.keploy.io/server/v2/pkg/service/tools"
+	replaySvc "go.keploy.io/server/v2/pkg/service/replay"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -23,19 +24,20 @@ func Normalise(ctx context.Context, logger *zap.Logger, cfg *config.Config, serv
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.ValidateFlags(ctx, cmd)
 		},
-		RunE: func(_ *cobra.Command, _ []string) error {
-
-			svc, err := serviceFactory.GetService(ctx, "normalise")
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
-				return err
-			}
-			var tools toolsSvc.Service
-			var ok bool
-			if tools, ok = svc.(toolsSvc.Service); !ok {
-				utils.LogError(logger, nil, "service doesn't satisfy normalise service interface")
+				utils.LogError(logger, err, "failed to get service")
 				return nil
 			}
-			if err := tools.Normalise(ctx, cfg); err != nil {
+			var replay replaySvc.Service
+			var ok bool
+			if replay, ok = svc.(replaySvc.Service); !ok {
+				utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
+				return nil
+			}
+			fmt.Println("Normalising test cases")
+			if err := replay.Normalise(ctx, cfg); err != nil {
 				utils.LogError(logger, err, "failed to normalise test cases")
 				return err
 			}

@@ -16,9 +16,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/glamour"
-	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -286,85 +284,34 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 	return nil
 }
 
-// Normalise initiates the normalise process for normalising the test cases.
-func (t *Tools) Normalise(_ context.Context, cfg *config.Config) error {
-	path := cfg.Path
-	testSets := viper.GetString("test-sets")
-	testCases := viper.GetString("test-cases")
-	testRun := viper.GetString("test-run")
-	t.logger.Info("Test cases and Mock Path", zap.String("path", path))
-	testRunPath := filepath.Join(path, "testReports", testRun)
-	t.logger.Info("Test Run Folder", zap.String("folder", testRunPath))
-	// Get list of YAML files in the test run folder
-	files, err := fs.ReadDir(os.DirFS(testRunPath), ".")
-	if err != nil {
-		utils.LogError(t.logger, err, "Failed to read directory")
-		return err
-	}
-	// Iterate over each YAML file in the test run folder
-	for _, file := range files {
-		if strings.HasSuffix(file.Name(), ".yaml") {
-			filePath := filepath.Join(testRunPath, file.Name())
-			// Read the YAML file
-			yamlData, err := os.ReadFile(filePath)
-			if err != nil {
-				utils.LogError(t.logger, err, "Failed to read YAML file")
-				continue
-			}
-			// Unmarshal YAML into TestReport
-			var testReport models.TestReport
-			err = yaml.Unmarshal(yamlData, &testReport)
-			if err != nil {
-				utils.LogError(t.logger, err, "Failed to unmarshal YAML")
-				continue
-			}
-			testCasesArr := strings.Split(testCases, " ")
-			testSetsArr := strings.Split(testSets, " ")
-			for i := range testSetsArr {
-				testSetsArr[i] = filepath.Join(path, testSetsArr[i])
-			}
-			t.logger.Info("testSetsArr", zap.Strings("testSetsArr", testSetsArr))
-			t.logger.Info("testCasesArr", zap.Strings("testCasesArr", testCasesArr))
-			// Iterate over tests in the TestReport
-			for _, test := range testReport.Tests {
-				if test.Status == models.TestStatusFailed && contains(testSetsArr, test.TestCasePath) && contains(testCasesArr, test.TestCaseID) {
-					t.logger.Info("Updating testcase file", zap.String("testCaseID", test.TestCaseID))
-					// Read the contents of the testcase file
-					testCaseFilePath := filepath.Join(test.TestCasePath, "tests", test.TestCaseID+".yaml")
-					t.logger.Info("Updating testcase file", zap.String("filePath", testCaseFilePath))
-					testCaseContent, err := os.ReadFile(testCaseFilePath)
-					if err != nil {
-						utils.LogError(t.logger, err, "Failed to read testcase file")
-						continue
-					}
 
-					// Unmarshal YAML into TestCase
-					var testCase TestCaseFile
-					err = yaml.Unmarshal(testCaseContent, &testCase)
-					if err != nil {
-						utils.LogError(t.logger, err, "Failed to unmarshal YAML")
-						continue
-					}
-					t.logger.Info("Updating Response body from :" + testCase.Spec.Resp.Body + " to :" + test.Result.BodyResult[0].Actual)
-					testCase.Spec.Resp.Body = test.Result.BodyResult[0].Actual
 
-					// Marshal TestCase back to YAML
-					updatedYAML, err := yaml.Marshal(&testCase)
-					if err != nil {
-						utils.LogError(t.logger, err, "Failed to marshal YAML", zap.Error(err))
-						continue
-					}
-
-					// Write the updated YAML content back to the file
-					err = os.WriteFile(testCaseFilePath, updatedYAML, 0644)
-					if err != nil {
-						utils.LogError(t.logger, err, "Failed to write updated YAML to file", zap.Error(err))
-						continue
-					}
-					t.logger.Info("Updated testcase file successfully", zap.String("testCaseFilePath", testCaseFilePath))
-				}
-			}
-		}
-	}
-	return nil
-}
+// func (ts *TestYaml) EditTestCase(ctx context.Context, tc *models.TestCase, testSetID string) error {
+// 	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
+// 	var tcsName string
+// 	if tc.Name == "" {
+// 		lastIndx, err := yaml.FindLastIndex(tcsPath, ts.logger)
+// 		if err != nil {
+// 			return err
+// 		}
+// 		tcsName = fmt.Sprintf("test-%v", lastIndx)
+// 	} else {
+// 		tcsName = tc.Name
+// 	}
+// 	yamlTc, err := EncodeTestcase(*tc, ts.logger)
+// 	if err != nil {
+// 		return err
+// 	}
+// 	yamlTc.Name = tcsName
+// 	data, err := yamlLib.Marshal(&yamlTc)
+// 	if err != nil {
+// 		return err
+// 	}
+// 	err = yaml.WriteFile(ctx, ts.logger, tcsPath, tcsName, data, false)
+// 	if err != nil {
+// 		utils.LogError(ts.logger, err, "failed to write testcase yaml file")
+// 		return err
+// 	}
+// 	ts.logger.Info("🟠 Keploy has updated test case for the user's application.", zap.String("path", tcsPath), zap.String("testcase name", tcsName))
+// 	return nil
+// }
