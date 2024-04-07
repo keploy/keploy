@@ -650,25 +650,16 @@ func calculateJSONDiffs(json1 []byte, json2 []byte) (string, error) {
 
 	return strings.Join(diffStrings, "\n"), nil
 }
-func writeKeyValuePair(sb *strings.Builder, key string, value interface{}, isDifferent bool, indent string, colorize func(a ...interface{}) string) {
-	var valStr string
-	switch reflect.TypeOf(value).Kind() {
-	case reflect.Slice, reflect.Map:
-		marshaledValue, err := json.Marshal(value)
-		if err != nil {
-			valStr = "error"
-		} else {
-			valStr = string(marshaledValue)
-		}
-	default:
-		valStr = fmt.Sprint(value)
+func writeKeyValuePair(builder *strings.Builder, key string, value interface{}, indent string, colorFunc func(a ...interface{}) string) {
+	serializedValue, _ := json.MarshalIndent(value, "", "  ")
+	valueStr := string(serializedValue)
+	if colorFunc != nil && !reflect.DeepEqual(value, "") {
+		// Apply color only to the value, not the key
+		builder.WriteString(fmt.Sprintf("%s\"%s\": %s,\n", indent, key, colorFunc(valueStr)))
+	} else {
+		// No color function provided, or the value is an empty string (which should not be colorized)
+		builder.WriteString(fmt.Sprintf("%s\"%s\": %s,\n", indent, key, valueStr))
 	}
-
-	if isDifferent {
-		valStr = colorize(valStr)
-	}
-
-	sb.WriteString(fmt.Sprintf("%s\"%s\": %s,\n", indent, key, valStr))
 }
 
 // compareAndColorizeSlices compares two slices of interfaces and outputs color-coded differences.
@@ -681,8 +672,7 @@ func compareAndColorizeSlices(a, b []interface{}, indent string, red, green func
 	if len(b) > maxLength {
 		maxLength = len(b)
 	}
-	reds := color.New(color.FgRed).SprintFunc()
-	greens := color.New(color.FgGreen).SprintFunc()
+
 	for i := 0; i < maxLength; i++ {
 		var aValue, bValue interface{}
 		var aExists, bExists bool
@@ -698,19 +688,28 @@ func compareAndColorizeSlices(a, b []interface{}, indent string, red, green func
 		}
 
 		if aExists && bExists {
-			// Both slices have this index, compare values
-			expectedText, actualText := compareValues(aValue, bValue, indent+"  ", reds, greens)
-			if expectedText != "" {
-				expectedOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, expectedText))
-			}
-			if actualText != "" {
-				actualOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, actualText))
+			switch v1 := aValue.(type) {
+			case map[string]interface{}:
+				if v2, ok := bValue.(map[string]interface{}); ok {
+					expectedText, actualText := compareAndColorizeMaps(v1, v2, indent+"  ", red, green)
+					expectedOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, expectedText))
+					actualOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, actualText))
+				} else {
+					expectedOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, red("%v", aValue)))
+					actualOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, green("%v", bValue)))
+				}
+			default:
+				if aValue != bValue {
+					expectedOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, red("%v", aValue)))
+					actualOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, green("%v", bValue)))
+				} else {
+					expectedOutput.WriteString(fmt.Sprintf("%s[%d]: %v\n", indent, i, aValue))
+					actualOutput.WriteString(fmt.Sprintf("%s[%d]: %v\n", indent, i, bValue))
+				}
 			}
 		} else if aExists {
-			// Only a has this index, it's a deletion
 			expectedOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, red("%v", aValue)))
 		} else if bExists {
-			// Only b has this index, it's an addition
 			actualOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, green("%v", bValue)))
 		}
 	}
@@ -720,18 +719,43 @@ func compareAndColorizeSlices(a, b []interface{}, indent string, red, green func
 
 // compare compares the values and decides whether to call compareAndColorizeMap or compareAndColorizeSlices.
 func compare(key string, val1, val2 interface{}, indent string, expect, actual *strings.Builder, red, green func(a ...interface{}) string) {
+	fmt.Println(val1, val2, reflect.TypeOf(val1), reflect.TypeOf(val2))
 	switch v1 := val1.(type) {
-	case string:
-		if v2, ok := val2.(string); ok {
-			// When both values are strings, highlight word differences
-			diff1, diff2 := highlightDifferences(v1, v2, red, green)
-			writeKeyValuePair(expect, key, diff1, true, indent, red)
-			writeKeyValuePair(actual, key, diff2, true, indent, green)
+	case map[string]interface{}:
+		fmt.Println("here")
+		if v2, ok := val2.(map[string]interface{}); ok {
+			expectedText, actualText := compareAndColorizeMaps(v1, v2, indent+"  ", red, green)
+			expect.WriteString(fmt.Sprintf("%s\"%s\": %s\n", indent, key, expectedText))
+			actual.WriteString(fmt.Sprintf("%s\"%s\": %s\n", indent, key, actualText))
+		} else {
+			// Different types, or the key is not present in one of the maps
+			writeKeyValuePair(expect, key, val1, indent, red)
+			writeKeyValuePair(actual, key, val2, indent, green)
+		}
+	case []interface{}:
+		if v2, ok := val2.([]interface{}); ok {
+			expectedText, actualText := compareAndColorizeSlices(v1, v2, indent+"  ", red, green)
+			expect.WriteString(fmt.Sprintf("%s\"%s\": [\n%s\n%s]\n", indent, key, expectedText, indent))
+			actual.WriteString(fmt.Sprintf("%s\"%s\": [\n%s\n%s]\n", indent, key, actualText, indent))
+		} else {
+			// Different types
+			writeKeyValuePair(expect, key, val1, indent, red)
+			writeKeyValuePair(actual, key, val2, indent, green)
 		}
 	default:
-		// Fallback to simple comparison for non-string types or if types differ
-		writeKeyValuePair(expect, key, val1, true, indent, red)
-		writeKeyValuePair(actual, key, val2, true, indent, green)
+		// Use reflection to handle other types that are not directly comparable, such as slices or maps
+		if !reflect.DeepEqual(val1, val2) {
+			// Serialize only if the values are different to prevent unnecessary serialization
+			val1Str, _ := json.MarshalIndent(val1, "", "  ")
+			val2Str, _ := json.MarshalIndent(val2, "", "  ")
+			expect.WriteString(fmt.Sprintf("%s\"%s\": %s,\n", indent, key, red(string(val1Str))))
+			actual.WriteString(fmt.Sprintf("%s\"%s\": %s,\n", indent, key, green(string(val2Str))))
+		} else {
+			// Serialize the value since they are the same and do not require color
+			valStr, _ := json.MarshalIndent(val1, "", "  ")
+			expect.WriteString(fmt.Sprintf("%s\"%s\": %s,\n", indent, key, string(valStr)))
+			actual.WriteString(fmt.Sprintf("%s\"%s\": %s,\n", indent, key, string(valStr)))
+		}
 	}
 }
 
@@ -768,60 +792,38 @@ func highlightDifferences(str1, str2 string, red, green func(a ...interface{}) s
 	return strings.Join(diff1, " "), strings.Join(diff2, " ")
 }
 
-type JSONMap map[string]interface{}
+func compareAndColorizeMaps(a, b map[string]interface{}, indent string, red, green func(a ...interface{}) string) (string, string) {
+	var expectedOutput, actualOutput strings.Builder
 
-func compareAndColorizeMaps(a, b JSONMap, indent string) (string, string) {
-	var expectedOutput strings.Builder
-	var actualOutput strings.Builder
-	red := color.New(color.FgRed).SprintFunc()
-	green := color.New(color.FgGreen).SprintFunc()
-
-	// Serialize the value to JSON, handle errors properly in your production code.
-	serialize := func(value interface{}) string {
-		bytes, err := json.MarshalIndent(value, "", "  ")
-		if err != nil {
-			// Handle error in your actual code
-			return "error"
-		}
-		return string(bytes)
-	}
-
-	// Compare the maps and build a serialized JSON string for each
-	var aSerialized, bSerialized strings.Builder
+	// Iterate through all keys in map 'a' and compare with 'b'
 	for key, aValue := range a {
-		aSerialized.WriteString(fmt.Sprintf("%s\"%s\": %s,\n", indent, key, serialize(aValue)))
-	}
-	for key, bValue := range b {
-		bSerialized.WriteString(fmt.Sprintf("%s\"%s\": %s,\n", indent, key, serialize(bValue)))
-	}
-
-	// Split the serialized JSON into lines for line-by-line comparison
-	aLines := strings.Split(aSerialized.String(), "\n")
-	bLines := strings.Split(bSerialized.String(), "\n")
-
-	// Compare lines and colorize differences
-	for i, lineA := range aLines {
-		if i >= len(bLines) {
-			expectedOutput.WriteString(red(lineA) + "\n")
+		bValue, bHasKey := b[key]
+		if !bHasKey {
+			// Key is missing in map 'b', so the whole line is red
+			writeKeyValuePair(&expectedOutput, key, aValue, indent, red)
 			continue
 		}
-		lineB := bLines[i]
-		if lineA != lineB {
-			// If lines are different, colorize them
-			expectedOutput.WriteString(red(lineA) + "\n")
-			actualOutput.WriteString(green(lineB) + "\n")
-		} else {
-			// If lines are the same, write them without color
-			expectedOutput.WriteString(lineA + "\n")
-			actualOutput.WriteString(lineB + "\n")
-		}
+		fmt.Println("ok?")
+		// Key exists in both maps, compare the values
+		compare(key, aValue, bValue, indent, &expectedOutput, &actualOutput, red, green)
 	}
-	// If b has more lines, colorize them as additions
-	for i := len(aLines); i < len(bLines); i++ {
-		actualOutput.WriteString(green(bLines[i]) + "\n")
+
+	// Now check for any keys that are in 'b' but not in 'a'
+	for key, bValue := range b {
+		if _, aHasKey := a[key]; !aHasKey {
+			// Key is missing in map 'a', so the whole line is green
+			writeKeyValuePair(&actualOutput, key, bValue, indent, green)
+		}
 	}
 
 	return expectedOutput.String(), actualOutput.String()
+}
+func serialize(value interface{}) string {
+	bytes, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return "error" // Handle error properly in production code
+	}
+	return string(bytes)
 }
 
 // writeKeyValuePair writes a key-value pair with optional color.
@@ -848,11 +850,10 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 				var jsonObj map[string]interface{}
 				err := json.Unmarshal([]byte(value), &jsonObj)
 				if err != nil {
-					fmt.Println("Error parsing JSON:", err)
 					s = false
 				}
 
-				expects = map[string]interface{}{key: jsonObj}
+				expects = map[string]interface{}{key[:len(key)-1]: jsonObj}
 			}
 
 			// Remove the leading "- " or "+ "
@@ -865,15 +866,18 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 				var jsonObj map[string]interface{}
 				err := json.Unmarshal([]byte(value), &jsonObj)
 				if err != nil {
-					fmt.Println("Error parsing JSON:", err)
 					s = false
 				}
 
-				actuals = map[string]interface{}{key: jsonObj}
+				actuals = map[string]interface{}{key[:len(key)-1]: jsonObj}
 
 			}
+			red := color.New(color.FgRed).SprintFunc()
+			green := color.New(color.FgGreen).SprintFunc()
+			fmt.Println(expects, actuals)
+
 			// diffs := diffJSONObjects(expects, actuals)
-			expectedText, actualText := compareAndColorizeMaps(expects, actuals, " ")
+			expectedText, actualText := compareAndColorizeMaps(expects, actuals, " ", red, green)
 			// sds, ads = diffJSONObjects(expects, actuals)
 			fmt.Println(expectedText, actualText)
 			sd += breakLines(expectedText)
@@ -994,6 +998,8 @@ func breakWithColor(input string, c *color.Attribute, highlightRanges []Range) s
 func compareValues(a, b interface{}, indent string, red, green func(a ...interface{}) string) (string, string) {
 	var expectedOutput strings.Builder
 	var actualOutput strings.Builder
+	// reds := color.New(color.FgRed).SprintFunc()
+	// green := color.New(color.FgGreen).SprintFunc()
 
 	if reflect.DeepEqual(a, b) {
 		return "", ""
@@ -1001,9 +1007,9 @@ func compareValues(a, b interface{}, indent string, red, green func(a ...interfa
 	reds := color.New(color.FgRed).SprintFunc()
 	greens := color.New(color.FgGreen).SprintFunc()
 	switch aValue := a.(type) {
-	case JSONMap:
-		if bValue, ok := b.(JSONMap); ok {
-			expectedText, actualText := compareAndColorizeMaps(aValue, bValue, indent)
+	case map[string]interface{}:
+		if bValue, ok := b.(map[string]interface{}); ok {
+			expectedText, actualText := compareAndColorizeMaps(aValue, bValue, indent, red, green)
 			expectedOutput.WriteString(expectedText)
 			actualOutput.WriteString(actualText)
 		} else {
