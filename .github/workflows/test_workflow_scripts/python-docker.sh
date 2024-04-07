@@ -22,7 +22,7 @@ sleep 5
 docker build -t flask-app:1.0 .
 
 for i in {1..2}; do
-sudo -E env PATH=$PATH ./../../keployv2 record -c "docker compose up" --containerName flask-app --buildDelay 40s  &
+sudo -E env PATH=$PATH ./../../keployv2 record -c "docker compose up" --containerName flask-app --buildDelay 40s --generateGithubActions=false  &
 
 # Wait for the application to start.
 app_started=false

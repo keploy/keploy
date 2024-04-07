@@ -17,7 +17,7 @@ rm -rf keploy/
 
 for i in {1..2}; do
 # Start keploy in record mode.
-sudo -E env PATH=$PATH ./../../keployv2 record -c 'npm start' &
+sudo -E env PATH=$PATH ./../../keployv2 record -c 'npm start' --generateGithubActions=false &
 
 # Wait for the application to start.
 app_started=false

@@ -34,7 +34,7 @@ sleep 5
 
 for i in {1..2}; do
 # Start the django-postgres app in record mode and record testcases and mocks.
-sudo -E env PATH="$PATH" ./../../../keployv2 record -c "python3 manage.py runserver" &
+sudo -E env PATH="$PATH" ./../../../keployv2 record -c "python3 manage.py runserver"  --generateGithubActions=false &
 
 # Wait for the application to start.
 app_started=false

@@ -31,7 +31,7 @@ go build -o ginApp
 
 for i in {1..2}; do
 # Start the gin-mongo app in record mode and record testcases and mocks.
-sudo -E env PATH="$PATH" ./../../keployv2 record -c "./ginApp" &
+sudo -E env PATH="$PATH" ./../../keployv2 record -c "./ginApp" --generateGithubActions=false &
 
 # Wait for the application to start.
 app_started=false
