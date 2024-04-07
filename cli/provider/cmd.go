@@ -303,7 +303,7 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 			}
 			return errors.New("missing required -c flag or appCmd in config file")
 		}
-		if cmd.Name() == "record" && c.cfg.GenerateGithubActions {
+		if c.cfg.GenerateGithubActions {
 			defer utils.GenerateGithubActions(c.logger, c.cfg.Command)
 		}
 		if c.cfg.InDocker {

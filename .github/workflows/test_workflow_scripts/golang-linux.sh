@@ -81,7 +81,7 @@ sleep 5
 done
 
 # Start the gin-mongo app in test mode.
-sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7
+sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7 --generateGithubActions=false 
 
 # # move keployv2 to /usr/local/bin/keploy
 # mv ./../../keployv2 /usr/local/bin/keploy

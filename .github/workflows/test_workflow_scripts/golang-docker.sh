@@ -63,7 +63,7 @@ for i in {1..2}; do
 done
 
 # Start the keploy in test mode.
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "ginApp_test" --apiTimeout 60 --delay 20
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "ginApp_test" --apiTimeout 60 --delay 20 --generateGithubActions=false 
 docker rm -f ginApp_test
 
 # Get the test results from the testReport file.
