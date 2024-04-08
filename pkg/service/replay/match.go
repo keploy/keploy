@@ -688,28 +688,40 @@ func compareAndColorizeSlices(a, b []interface{}, indent string, red, green func
 		}
 
 		if aExists && bExists {
+			// If both slices have this index, compare values
 			switch v1 := aValue.(type) {
 			case map[string]interface{}:
 				if v2, ok := bValue.(map[string]interface{}); ok {
+					// When both values are maps, compare and colorize the maps
 					expectedText, actualText := compareAndColorizeMaps(v1, v2, indent+"  ", red, green)
 					expectedOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, expectedText))
 					actualOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, actualText))
 				} else {
+					// Fallback to simple comparison if types differ
 					expectedOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, red("%v", aValue)))
 					actualOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, green("%v", bValue)))
 				}
+			case []interface{}:
+				// Handle nested slices
+				expectedText, actualText := compareAndColorizeSlices(v1, v2.([]interface{}), indent+"  ", red, green)
+				expectedOutput.WriteString(fmt.Sprintf("%s[%d]: [\n%s%s]\n", indent, i, expectedText, indent))
+				actualOutput.WriteString(fmt.Sprintf("%s[%d]: [\n%s%s]\n", indent, i, actualText, indent))
 			default:
-				if aValue != bValue {
+				// For non-map types, highlight differences
+				if !reflect.DeepEqual(aValue, bValue) {
 					expectedOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, red("%v", aValue)))
 					actualOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, green("%v", bValue)))
 				} else {
+					// Write without highlighting if values are the same
 					expectedOutput.WriteString(fmt.Sprintf("%s[%d]: %v\n", indent, i, aValue))
 					actualOutput.WriteString(fmt.Sprintf("%s[%d]: %v\n", indent, i, bValue))
 				}
 			}
 		} else if aExists {
+			// Only a has this index, it's a deletion
 			expectedOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, red("%v", aValue)))
 		} else if bExists {
+			// Only b has this index, it's an addition
 			actualOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, green("%v", bValue)))
 		}
 	}
