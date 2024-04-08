@@ -17,6 +17,7 @@ dnsPort: 26789
 debug: false
 disableTele: false
 inDocker: false
+generateGithubActions: true
 containerName: ""
 networkName: ""
 buildDelay: 30s
@@ -28,6 +29,7 @@ test:
   delay: 5
   apiTimeout: 5
   coverage: false
+  goCoverage: false
   coverageReportPath: ""
   ignoreOrdering: true
   mongoPassword: "default@123"

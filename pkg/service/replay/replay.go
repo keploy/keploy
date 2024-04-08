@@ -26,7 +26,15 @@ var totalTests int
 var totalTestPassed int
 var totalTestFailed int
 
-type replayer struct {
+// emulator contains the struct instance that implements RequestEmulator interface. This is done for
+// attaching the objects dynamically as plugins.
+var emulator RequestEmulator
+
+func SetTestUtilInstance(instance RequestEmulator) {
+	emulator = instance
+}
+
+type Replayer struct {
 	logger          *zap.Logger
 	testDB          TestDB
 	mockDB          MockDB
@@ -37,7 +45,12 @@ type replayer struct {
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, telemetry Telemetry, instrumentation Instrumentation, config config.Config) Service {
-	return &replayer{
+	// set the request emulator for simulating test case requests, if not set
+	if emulator == nil {
+		SetTestUtilInstance(NewTestUtils(config.Test.APITimeout, logger))
+	}
+
+	return &Replayer{
 		logger:          logger,
 		testDB:          testDB,
 		mockDB:          mockDB,
@@ -48,7 +61,7 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 	}
 }
 
-func (r *replayer) Start(ctx context.Context) error {
+func (r *Replayer) Start(ctx context.Context) error {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	g, ctx := errgroup.WithContext(ctx)
@@ -152,7 +165,7 @@ func (r *replayer) Start(ctx context.Context) error {
 	return nil
 }
 
-func (r *replayer) BootReplay(ctx context.Context) (string, uint64, context.CancelFunc, error) {
+func (r *Replayer) BootReplay(ctx context.Context) (string, uint64, context.CancelFunc, error) {
 
 	var cancel context.CancelFunc
 
@@ -194,11 +207,11 @@ func (r *replayer) BootReplay(ctx context.Context) (string, uint64, context.Canc
 	return newTestRunID, appID, cancel, nil
 }
 
-func (r *replayer) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
+func (r *Replayer) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
 	return r.testDB.GetAllTestSetIDs(ctx)
 }
 
-func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error) {
+func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error) {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
@@ -376,7 +389,26 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		started := time.Now().UTC()
-		resp, loopErr := r.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
+
+		cmdType := utils.FindDockerCmd(r.config.Command)
+
+		if cmdType == utils.Docker || cmdType == utils.DockerCompose {
+
+			userIP, err := r.instrumentation.GetAppIP(ctx, appID)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to get the app ip")
+				break
+			}
+
+			testCase.HTTPReq.URL, err = replaceHostToIP(testCase.HTTPReq.URL, userIP)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to replace host to docker container's IP")
+				break
+			}
+			r.logger.Debug("", zap.Any("replaced URL in case of docker env", testCase.HTTPReq.URL))
+		}
+
+		resp, loopErr := emulator.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
 		if loopErr != nil {
 			utils.LogError(r.logger, err, "failed to simulate request")
 			break
@@ -531,7 +563,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	return testSetStatus, nil
 }
 
-func (r *replayer) GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error) {
+func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error) {
 	testReport, err := r.reportDB.GetReport(ctx, testRunID, testSetID)
 	if err != nil {
 		return models.TestSetStatusFailed, fmt.Errorf("failed to get report: %w", err)
@@ -543,36 +575,7 @@ func (r *replayer) GetTestSetStatus(ctx context.Context, testRunID string, testS
 	return status, nil
 }
 
-func (r *replayer) SimulateRequest(ctx context.Context, appID uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error) {
-	switch tc.Kind {
-	case models.HTTP:
-		r.logger.Debug("Before simulating the request", zap.Any("Test case", tc))
-		cmdType := utils.FindDockerCmd(r.config.Command)
-		if cmdType == utils.Docker || cmdType == utils.DockerCompose {
-			var err error
-
-			userIP, err := r.instrumentation.GetAppIP(ctx, appID)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to get the app ip")
-				return nil, err
-			}
-
-			tc.HTTPReq.URL, err = replaceHostToIP(tc.HTTPReq.URL, userIP)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to replace host to docker container's IP")
-			}
-			r.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HTTPReq.URL))
-		}
-		r.logger.Debug(fmt.Sprintf("the url of the testcase: %v", tc.HTTPReq.URL))
-		resp, err := pkg.SimulateHTTP(ctx, *tc, testSetID, r.logger, r.config.Test.APITimeout)
-		r.logger.Debug("After simulating the request", zap.Any("test case id", tc.Name))
-		r.logger.Debug("After GetResp of the request", zap.Any("test case id", tc.Name))
-		return resp, err
-	}
-	return nil, nil
-}
-
-func (r *replayer) compareResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string) (bool, *models.Result) {
+func (r *Replayer) compareResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string) (bool, *models.Result) {
 
 	noiseConfig := r.config.Test.GlobalNoise.Global
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
@@ -581,7 +584,7 @@ func (r *replayer) compareResp(tc *models.TestCase, actualResponse *models.HTTPR
 	return match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
 }
 
-func (r *replayer) printSummary(ctx context.Context, testRunResult bool) {
+func (r *Replayer) printSummary(ctx context.Context, testRunResult bool) {
 	if totalTests > 0 {
 		testSuiteNames := make([]string, 0, len(completeTestReport))
 		for testSuiteName := range completeTestReport {
@@ -624,7 +627,7 @@ func (r *replayer) printSummary(ctx context.Context, testRunResult bool) {
 			return
 		}
 		r.logger.Info("test run completed", zap.Bool("passed overall", testRunResult))
-		if r.config.Test.Coverage {
+		if r.config.Test.GoCoverage {
 			r.logger.Info("there is a opportunity to get the coverage here")
 			coverCmd := exec.CommandContext(ctx, "go", "tool", "covdata", "percent", "-i="+os.Getenv("GOCOVERDIR"))
 			output, err := coverCmd.Output()
@@ -644,11 +647,11 @@ func (r *replayer) printSummary(ctx context.Context, testRunResult bool) {
 	}
 }
 
-func (r *replayer) RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError {
+func (r *Replayer) RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError {
 	return r.instrumentation.Run(ctx, appID, opts)
 }
 
-func (r *replayer) ProvideMocks(ctx context.Context) error {
+func (r *Replayer) ProvideMocks(ctx context.Context) error {
 	var stopReason string
 	var hookCancel context.CancelFunc
 	defer func() {

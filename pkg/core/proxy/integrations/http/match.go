@@ -6,7 +6,6 @@ import (
 	"net/url"
 
 	"github.com/agnivade/levenshtein"
-	"github.com/cloudflare/cfssl/log"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models"
@@ -144,7 +143,7 @@ func findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 		shingles2 := util.CreateShingles(reqBuff, k)
 		similarity := util.JaccardSimilarity(shingles1, shingles2)
 
-		log.Debugf("Jaccard Similarity:%f\n", similarity)
+		// log.Debugf("Jaccard Similarity:%f\n", similarity)
 
 		if mxSim < similarity {
 			mxSim = similarity

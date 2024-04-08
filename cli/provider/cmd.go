@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
@@ -153,6 +154,15 @@ func NewCmdConfigurator(logger *zap.Logger, config *config.Config) *CmdConfigura
 }
 
 func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
+	//sets the displayment of flag-related errors
+	cmd.SilenceErrors = true
+	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+		color.Red(fmt.Sprintf("❌ error: %v", err))
+		fmt.Println()
+		return err
+	})
+
+	//add flags
 	var err error
 	switch cmd.Name() {
 	case "update":
@@ -184,6 +194,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("containerName", c.cfg.ContainerName, "Name of the application's docker container")
 		cmd.Flags().StringP("networkName", "n", c.cfg.NetworkName, "Name of the application's docker network")
 		cmd.Flags().UintSlice("passThroughPorts", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server and ignore the traffic")
+		cmd.Flags().Bool("generateGithubActions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
 		err = cmd.Flags().MarkHidden("port")
 		if err != nil {
 			errMsg := "failed to mark port as hidden flag"
@@ -200,6 +211,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().Bool("ignoreOrdering", c.cfg.Test.IgnoreOrdering, "Ignore ordering of array in response")
 			cmd.Flags().Bool("coverage", c.cfg.Test.Coverage, "Enable coverage reporting for the testcases. for golang please set language flag to golang, ref https://keploy.io/docs/server/sdk-installation/go/")
 			cmd.Flags().Bool("removeUnusedMocks", false, "Clear the unused mocks for the passed test-sets")
+			cmd.Flags().Bool("goCoverage", c.cfg.Test.GoCoverage, "Enable go coverage reporting for the testcases")
 		} else {
 			cmd.Flags().Uint64("recordTimer", 0, "User provided time to record its application")
 		}
@@ -292,7 +304,9 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 			}
 			return errors.New("missing required -c flag or appCmd in config file")
 		}
-
+		if c.cfg.GenerateGithubActions {
+			defer utils.GenerateGithubActions(c.logger, c.cfg.Command)
+		}
 		if c.cfg.InDocker {
 			c.logger.Info("detected that Keploy is running in a docker container")
 			if len(c.cfg.Path) > 0 {
