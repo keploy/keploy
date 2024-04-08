@@ -17,6 +17,7 @@ dnsPort: 26789
 debug: false
 disableTele: false
 inDocker: false
+generateGithubActions: true
 containerName: ""
 networkName: ""
 buildDelay: 30s
