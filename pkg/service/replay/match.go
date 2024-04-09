@@ -576,7 +576,6 @@ func sprintJSONDiff(json1 []byte, json2 []byte, field string, noise map[string][
 	}
 	expect, actual := separateAndColorize(diffString, noise)
 	result := expectActualTable(expect, actual, field, false)
-
 	return result, nil
 }
 
@@ -884,8 +883,8 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 
 			expectedText, actualText := compareAndColorizeMaps(expects, actuals, " ", red, green)
 
-			expect += breakLines(expectedText)
-			actual += breakLines(actualText)
+			expect += breakLines(expectedText) + "\n"
+			actual += breakLines(actualText) + "\n"
 			expects = make(map[string]interface{}, 0)
 			actuals = make(map[string]interface{}, 0)
 
@@ -1079,13 +1078,76 @@ func breakLines(input string) string {
 // Will return a string in a two columns table where the left
 // side is the expected string and the right is the actual
 // field: body, header, status...
+
+var ansiRegex = regexp.MustCompile(`(\x1b\[[0-9;]*m)`)
+
+// This function splits the string into ANSI codes and text segments.
+func splitAnsi(s string) []string {
+	return ansiRegex.Split(s, -1)
+}
+
+// This function finds all ANSI codes in the string.
+func findAllAnsi(s string) []string {
+	return ansiRegex.FindAllString(s, -1)
+}
+
+// This function wraps text taking into account ANSI escape codes.
+func wrapTextWithAnsi(s string, lim int) string {
+	// Split the string into plain text and ANSI codes
+	parts := splitAnsi(s)
+	ansiCodes := findAllAnsi(s)
+
+	wrapped := ""
+	line := ""
+	currentLen := 0
+	codeIndex := 0
+
+	for _, part := range parts {
+		words := strings.Fields(part)
+		for _, word := range words {
+			wordLen := len(word)
+			if currentLen+wordLen+1 > lim && currentLen > 0 {
+				// Add a new line with the necessary ANSI reset and reapply codes
+				wrapped += line + ansiCodes[len(ansiCodes)-1] + "\n" + strings.Join(ansiCodes[:codeIndex], "") + word + " "
+				line = ""
+				currentLen = wordLen + 1
+			} else {
+				line += word + " "
+				currentLen += wordLen + 1
+			}
+		}
+
+		// Append ANSI codes at the end of the line if present
+		if codeIndex < len(ansiCodes) {
+			line += ansiCodes[codeIndex]
+			codeIndex++
+		}
+	}
+
+	// Append any remaining text
+	if currentLen > 0 {
+		wrapped += line
+	}
+
+	// Ensure that wrapped lines are properly closed with an ANSI reset if needed
+	if len(ansiCodes) > 0 {
+		wrapped += ansiCodes[len(ansiCodes)-1]
+	}
+
+	return wrapped
+}
+
 func expectActualTable(exp string, act string, field string, centerize bool) string {
 	buf := &bytes.Buffer{}
 	table := tablewriter.NewWriter(buf)
 
 	if centerize {
 		table.SetAlignment(tablewriter.ALIGN_CENTER)
+	} else {
+		table.SetAlignment(tablewriter.ALIGN_LEFT)
 	}
+	exp = wrapTextWithAnsi(exp, 20)
+	act = wrapTextWithAnsi(act, 20)
 
 	table.SetHeader([]string{fmt.Sprintf("Expect %v", field), fmt.Sprintf("Actual %v", field)})
 	table.SetAutoWrapText(false)
