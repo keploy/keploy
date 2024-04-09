@@ -1062,94 +1062,52 @@ func breakLines(input string) string {
 
 var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
-// This function splits the string into ANSI codes and text segments.
-func splitAnsi(s string) []string {
-	return ansiRegex.Split(s, -1)
-}
+// var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+var ansiResetCode = "\x1b[0m"
 
-// This function finds all ANSI codes in the string.
-func findAllAnsi(s string) []string {
-	return ansiRegex.FindAllString(s, -1)
-}
+// wrapTextWithAnsi processes the string with ANSI codes and wraps text accordingly
+func wrapTextWithAnsi(input string, lim int) string {
+	scanner := bufio.NewScanner(strings.NewReader(input))
+	var wrappedBuilder strings.Builder
+	currentAnsiCode := ""
+	lastAnsiCode := ""
 
-// This function wraps text taking into account ANSI escape codes.
-func wrapTextWithAnsi(s string, lim int) string {
-	parts := splitAnsi(s)
-	ansiCodes := findAllAnsi(s)
+	for scanner.Scan() {
+		line := scanner.Text()
 
-	wrapped := ""
-	line := ""
-	currentLen := 0
-	codeIndex := 0
-	indentLevel := 0
-	const indentSize = 2 // Define how many spaces per indent level
+		// Add current ANSI code at the start of the line if needed
+		if currentAnsiCode != "" {
+			wrappedBuilder.WriteString(currentAnsiCode)
+		}
 
-	// Helper function to calculate the current indentation
-	calculateIndent := func() string {
-		return strings.Repeat(" ", indentLevel*indentSize)
-	}
+		// Check if the line has a starting ANSI code
+		startAnsiCodes := ansiRegex.FindAllString(line, -1)
+		if len(startAnsiCodes) > 0 {
+			// The last ANSI code in the line is considered the current color
+			lastAnsiCode = startAnsiCodes[len(startAnsiCodes)-1]
+		}
 
-	// Helper function to append words to the line with proper wrapping.
-	appendWord := func(word string) {
-		wordLen := len(word)
-		if currentLen+wordLen > lim {
-			wrapped += line + "\n"
-			line = calculateIndent() + word
-			currentLen = wordLen + (indentLevel * indentSize)
+		// Write the actual line content
+		wrappedBuilder.WriteString(line)
+
+		// If the line has a starting ANSI code and no ending, or if it is continuing a color, add a reset at the end
+		if (currentAnsiCode != "" && !strings.HasSuffix(line, ansiResetCode)) || len(startAnsiCodes) > 0 {
+			wrappedBuilder.WriteString(ansiResetCode)
+			// If the line did not end with a reset, continue this ANSI code to the next line
+			currentAnsiCode = lastAnsiCode
 		} else {
-			if currentLen > 0 {
-				line += " "
-				currentLen++
-			}
-			line += word
-			currentLen += wordLen
-		}
-	}
-
-	// Helper function to adjust the indent level based on braces and brackets
-	adjustIndent := func(lineText string) {
-		for _, char := range lineText {
-			if char == '{' || char == '[' {
-				indentLevel++
-			} else if char == '}' || char == ']' {
-				indentLevel--
-				if indentLevel < 0 {
-					indentLevel = 0
-				}
-			}
-		}
-	}
-
-	for _, part := range parts {
-		lines := strings.Split(part, "\n")
-		for i, lineText := range lines {
-			// Adjust the indent level before processing the line
-			adjustIndent(lineText)
-			words := strings.Fields(lineText)
-			for _, word := range words {
-				appendWord(word)
-			}
-			// Handle line breaks within the part.
-			if i < len(lines)-1 {
-				wrapped += line + "\n"
-				line = calculateIndent()
-				currentLen = indentLevel * indentSize
-			}
+			// If the line ended with a reset, clear the current ANSI code
+			currentAnsiCode = ""
 		}
 
-		// Append ANSI codes at the end of the line if present.
-		if codeIndex < len(ansiCodes) {
-			line += ansiCodes[codeIndex]
-			codeIndex++
-		}
+		// If the current line length is more than lim, and there's no explicit line break,
+		// you'd insert a logic here to wrap the line properly.
+
+		// Add a new line after processing the current line
+		wrappedBuilder.WriteString("\n")
 	}
 
-	// Append any remaining text.
-	if currentLen > 0 {
-		wrapped += line
-	}
-
-	return wrapped
+	return wrappedBuilder.String()
 }
 
 func expectActualTable(exp string, act string, field string, centerize bool) string {
