@@ -411,7 +411,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 		logger.Debug("the external call is tls-encrypted", zap.Any("isTLS", isTLS))
 		cfg := &tls.Config{
-			InsecureSkipVerify: true,
+			InsecureSkipVerify: false,
 			ServerName:         dstURL,
 		}
 
@@ -477,7 +477,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if isTLS {
 			logger.Debug("the external call is tls-encrypted", zap.Any("isTLS", isTLS))
 			cfg := &tls.Config{
-				InsecureSkipVerify: true,
+				InsecureSkipVerify: false,
 				ServerName:         dstURL,
 			}
 
