@@ -22,7 +22,7 @@ docker exec mypostgres psql -U petclinic -d petclinic -f /initDB.sql
 for i in {1..2}; do
 # Start keploy in record mode.
 mvn clean install -Dmaven.test.skip=true
-sudo -E env PATH=$PATH ./../../../keployv2 record -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' &
+sudo -E env PATH=$PATH ./../../../keployv2 record -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --generateGithubActions=false &
 
 # Wait for the application to start.
 app_started=false
@@ -72,7 +72,7 @@ sleep 5
 done
 
 # Start keploy in test mode.
-sudo -E env PATH=$PATH ./../../../keployv2 test -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --delay 20
+sudo -E env PATH=$PATH ./../../../keployv2 test -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --delay 20 --generateGithubActions=false 
 
 # Get the test results from the testReport file.
 report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"
