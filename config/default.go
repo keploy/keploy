@@ -18,6 +18,7 @@ debug: false
 EnableANSIColor: true
 disableTele: false
 inDocker: false
+generateGithubActions: true
 containerName: ""
 networkName: ""
 buildDelay: 30s
