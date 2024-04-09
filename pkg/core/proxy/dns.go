@@ -207,7 +207,10 @@ func (p *Proxy) stopUDPDNSServer() error {
 	return nil
 }
 
-const nsSwitchConfig = "/etc/nsswitch.conf"
+const (
+	nsSwitchConfig = "/etc/nsswitch.conf"
+	nsSwitchPerm   = 0644
+)
 
 // setting up the dns routing for the linux system
 func (p *Proxy) setupNsswitchConfig() error {
@@ -234,9 +237,8 @@ func (p *Proxy) setupNsswitchConfig() error {
 		data = []byte(strings.Join(lines, "\n"))
 
 		// Write the modified nsswitch.conf back to the file
-		err = os.WriteFile(nsSwitchConfig, data, 0644)
+		err = writeNsswitchConfig(p.logger, nsSwitchConfig, data, nsSwitchPerm)
 		if err != nil {
-			utils.LogError(p.logger, err, "failed to write the configuration to the nsswitch.conf file to redirect the DNS queries to proxy")
 			return errors.New("failed to setup the nsswitch.conf file to redirect the DNS queries to proxy")
 		}
 
@@ -250,9 +252,8 @@ func (p *Proxy) resetNsSwitchConfig() error {
 	data := p.nsswitchData
 
 	// Write the original data back to the nsswitch.conf file
-	err := os.WriteFile(nsSwitchConfig, data, 0644)
+	err := writeNsswitchConfig(p.logger, nsSwitchConfig, data, nsSwitchPerm)
 	if err != nil {
-		p.logger.Error("failed to write the configuration to the nsswitch.conf file to redirect the DNS queries to proxy", zap.Error(err))
 		return errors.New("failed to reset the nsswitch.conf back to the original state")
 	}
 
