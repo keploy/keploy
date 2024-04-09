@@ -5,7 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"	
+	"os"
 	"path"
 	"path/filepath"
 	"sort"
@@ -59,7 +59,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 	hookCtx, hookCtxCancel := context.WithCancel(hookCtx)
 	hookCtx = context.WithValue(hookCtx, models.ErrGroupKey, hookErrGrp)
 	reRecordCtx, reRecordCancel := context.WithCancel(ctx)
-    defer reRecordCancel() // Cancel the context when the function returns
+	defer reRecordCancel() // Cancel the context when the function returns
 
 	var stopReason string
 
@@ -203,14 +203,14 @@ func (r *Recorder) Start(ctx context.Context) error {
 		return nil
 	})
 	time.Sleep(2 * time.Second) // Example sleep, adjust according to your application's startup time
-    go func(){
-	if len(r.config.ReRecord) != 0 {
-		err = r.ReRecord(reRecordCtx)
-		time.Sleep(5 * time.Second) // Example sleep, adjust according to your application's startup time
-		reRecordCancel()
+	go func() {
+		if len(r.config.ReRecord) != 0 {
+			err = r.ReRecord(reRecordCtx)
+			time.Sleep(5 * time.Second) // Example sleep, adjust according to your application's startup time
+			reRecordCancel()
 
-	}
-}()
+		}
+	}()
 
 	// setting a timer for recording
 	if r.config.Record.RecordTimer != 0 {
@@ -332,7 +332,7 @@ func (r *Recorder) StartMock(ctx context.Context) error {
 }
 
 func (r *recorder) ReRecord(ctx context.Context) error {
-    tcs, err := r.ReadTestCase();
+	tcs, err := r.ReadTestCase()
 	for _, tc := range tcs {
 		host, port, err := extractHostAndPort(tc.Curl)
 		if err != nil {
@@ -350,17 +350,16 @@ func (r *recorder) ReRecord(ctx context.Context) error {
 			r.logger.Error("Failed to simulate HTTP request", zap.Error(err))
 			continue // Proceed with the next command
 		}
-		r.logger.Info("Re-recorded HTTP command successfully", zap.String("curl", tc.Curl), zap.Any("response",(resp)))
+		r.logger.Info("Re-recorded HTTP command successfully", zap.String("curl", tc.Curl), zap.Any("response", (resp)))
 		select {
-        case <-ctx.Done():
-            return ctx.Err()
-        default:
-        }
-
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 
 	}
 	time.Sleep(10 * time.Second) // Example sleep, adjust according to your application's startup time
-	err=utils.Stop(r.logger, "Re-recorded all HTTP commands successfully")
+	err = utils.Stop(r.logger, "Re-recorded all HTTP commands successfully")
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to stop recording")
 	}
@@ -369,7 +368,7 @@ func (r *recorder) ReRecord(ctx context.Context) error {
 }
 
 func (r *recorder) ReadTestCase() ([]*models.TestCase, error) {
-    testSet := r.config.ReRecord
+	testSet := r.config.ReRecord
 	// Construct the full path to the test cases directory.
 	testCasesPath := path.Join(r.config.Path, testSet, "tests")
 
