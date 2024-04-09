@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"bytes"
 	"os"
@@ -650,12 +651,231 @@ func calculateJSONDiffs(json1 []byte, json2 []byte) (string, error) {
 
 	return strings.Join(diffStrings, "\n"), nil
 }
+func writeKeyValuePair(builder *strings.Builder, key string, value interface{}, indent string, colorFunc func(a ...interface{}) string) {
+	serializedValue, _ := json.MarshalIndent(value, "", "  ")
+	valueStr := string(serializedValue)
+	if colorFunc != nil && !reflect.DeepEqual(value, "") {
+		// Apply color only to the value, not the key
+		builder.WriteString(fmt.Sprintf("%s\"%s\": %s,\n", indent, key, colorFunc(valueStr)))
+	} else {
+		// No color function provided, or the value is an empty string (which should not be colorized)
+		builder.WriteString(fmt.Sprintf("%s\"%s\": %s,\n", indent, key, valueStr))
+	}
+}
+
+// compareAndColorizeSlices compares two slices of interfaces and outputs color-coded differences.
+// compareAndColorizeSlices compares two slices of interfaces and outputs color-coded differences.
+func compareAndColorizeSlices(a, b []interface{}, indent string, red, green func(a ...interface{}) string) (string, string) {
+	var expectedOutput strings.Builder
+	var actualOutput strings.Builder
+
+	maxLength := len(a)
+	if len(b) > maxLength {
+		maxLength = len(b)
+	}
+
+	for i := 0; i < maxLength; i++ {
+		var aValue, bValue interface{}
+		var aExists, bExists bool
+
+		if i < len(a) {
+			aValue = a[i]
+			aExists = true
+		}
+
+		if i < len(b) {
+			bValue = b[i]
+			bExists = true
+		}
+
+		if aExists && bExists {
+			// If both slices have this index, compare values
+			switch v1 := aValue.(type) {
+			case map[string]interface{}:
+				if v2, ok := bValue.(map[string]interface{}); ok {
+					// When both values are maps, compare and colorize the maps
+					expectedText, actualText := compareAndColorizeMaps(v1, v2, indent+"  ", red, green)
+					expectedOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, expectedText))
+					actualOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, actualText))
+				} else {
+					// Fallback to simple comparison if types differ
+					expectedOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, red("%v", aValue)))
+					actualOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, green("%v", bValue)))
+				}
+			case []interface{}:
+
+				// Handle nested slices
+				if v2, ok := bValue.([]interface{}); ok {
+					// Handle nested slices
+					expectedText, actualText := compareAndColorizeSlices(v1, v2, indent+"  ", red, green)
+					expectedOutput.WriteString(fmt.Sprintf("%s[%d]: [\n%s%s]\n", indent, i, expectedText, indent))
+					actualOutput.WriteString(fmt.Sprintf("%s[%d]: [\n%s%s]\n", indent, i, actualText, indent))
+				} else {
+					// Fallback to simple comparison if types differ
+					expectedOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, red("%v", aValue)))
+					actualOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, green("%v", bValue)))
+				}
+
+			default:
+				// For non-map types, highlight differences
+				if !reflect.DeepEqual(aValue, bValue) {
+					expectedOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, red("%v", aValue)))
+					actualOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, green("%v", bValue)))
+				} else {
+					// Write without highlighting if values are the same
+					expectedOutput.WriteString(fmt.Sprintf("%s[%d]: %v\n", indent, i, aValue))
+					actualOutput.WriteString(fmt.Sprintf("%s[%d]: %v\n", indent, i, bValue))
+				}
+			}
+		} else if aExists {
+
+			// Only a has this index, it's a deletion
+			expectedOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, red(serialize(aValue))))
+		} else if bExists {
+			// Only b has this index, it's an addition
+			actualOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, green(serialize(bValue))))
+		}
+	}
+
+	return expectedOutput.String(), actualOutput.String()
+}
+
+// compare compares the values and decides whether to call compareAndColorizeMap or compareAndColorizeSlices.
+func compare(key string, val1, val2 interface{}, indent string, expect, actual *strings.Builder, red, green func(a ...interface{}) string) {
+	switch v1 := val1.(type) {
+	case map[string]interface{}:
+		if v2, ok := val2.(map[string]interface{}); ok {
+			expectedText, actualText := compareAndColorizeMaps(v1, v2, indent+"  ", red, green)
+			expect.WriteString(fmt.Sprintf("%s\"%s\": %s\n", indent, key, expectedText))
+			actual.WriteString(fmt.Sprintf("%s\"%s\": %s\n", indent, key, actualText))
+		} else {
+			// Different types, or the key is not present in one of the maps
+			writeKeyValuePair(expect, key, val1, indent, red)
+			writeKeyValuePair(actual, key, val2, indent, green)
+		}
+	case []interface{}:
+		if v2, ok := val2.([]interface{}); ok {
+			expectedText, actualText := compareAndColorizeSlices(v1, v2, indent+"  ", red, green)
+			expect.WriteString(fmt.Sprintf("%s\"%s\": [\n%s\n%s]\n", indent, key, expectedText, indent))
+			actual.WriteString(fmt.Sprintf("%s\"%s\": [\n%s\n%s]\n", indent, key, actualText, indent))
+		} else {
+			// Different types
+			writeKeyValuePair(expect, key, val1, indent, red)
+			writeKeyValuePair(actual, key, val2, indent, green)
+		}
+	default:
+		// Use reflection to handle other types that are not directly comparable, such as slices or maps
+		if !reflect.DeepEqual(val1, val2) {
+			// Serialize only if the values are different to prevent unnecessary serialization
+			val1Str, _ := json.MarshalIndent(val1, "", "  ")
+			val2Str, _ := json.MarshalIndent(val2, "", "  ")
+			expect.WriteString(fmt.Sprintf("%s\"%s\": %s,\n", indent, key, red(string(val1Str))))
+			actual.WriteString(fmt.Sprintf("%s\"%s\": %s,\n", indent, key, green(string(val2Str))))
+		} else {
+			// Serialize the value since they are the same and do not require color
+			valStr, _ := json.MarshalIndent(val1, "", "  ")
+			expect.WriteString(fmt.Sprintf("%s\"%s\": %s,\n", indent, key, string(valStr)))
+			actual.WriteString(fmt.Sprintf("%s\"%s\": %s,\n", indent, key, string(valStr)))
+		}
+	}
+}
+
+func compareAndColorizeMaps(a, b map[string]interface{}, indent string, red, green func(a ...interface{}) string) (string, string) {
+	var expectedOutput, actualOutput strings.Builder
+
+	// Iterate through all keys in map 'a' and compare with 'b'
+	for key, aValue := range a {
+		bValue, bHasKey := b[key]
+		if !bHasKey {
+			// Key is missing in map 'b', so the whole line is red
+			writeKeyValuePair(&expectedOutput, key, aValue, indent, red)
+			continue
+		}
+		// Key exists in both maps, compare the values
+		compare(key, aValue, bValue, indent, &expectedOutput, &actualOutput, red, green)
+	}
+
+	// Now check for any keys that are in 'b' but not in 'a'
+	for key, bValue := range b {
+		if _, aHasKey := a[key]; !aHasKey {
+			// Key is missing in map 'a', so the whole line is green
+			writeKeyValuePair(&actualOutput, key, bValue, indent, green)
+		}
+	}
+
+	return expectedOutput.String(), actualOutput.String()
+}
+func serialize(value interface{}) string {
+	bytes, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return "error" // Handle error properly in production code
+	}
+	return string(bytes)
+}
+
+// writeKeyValuePair writes a key-value pair with optional color.
+// writeKeyValuePair writes a key-value pair with optional color.
 
 // Will receive a string that has the differences represented
 // by a plus or a minus sign and separate it. Just works with json
 // Modified separateAndColorize function to handle nested JSON paths for noise keys
 // Updated separateAndColorize function
 func separateAndColorize(diffStr string, noise map[string][]string) (string, string) {
+	lines := strings.Split(diffStr, "\n")
+	expects := make(map[string]interface{}, 0)
+	actuals := make(map[string]interface{}, 0)
+	isJson := true
+	expectedOutput, actualOutput := "", ""
+	for i, line := range lines {
+		if len(line) > 0 && line[0] == '-' && i != len(lines)-1 {
+
+			// Remove the leading "- " or "+ "
+			actualTrimmedLine := lines[i+1][3:]
+			actualkeyValue := strings.SplitN(actualTrimmedLine, ":", 2)
+			if len(actualkeyValue) == 2 {
+				key := strings.TrimSpace(actualkeyValue[0])
+				value := strings.TrimSpace(actualkeyValue[1])
+
+				var jsonObj map[string]interface{}
+				err := json.Unmarshal([]byte(value), &jsonObj)
+				if err != nil {
+					isJson = false
+				}
+
+				expects = map[string]interface{}{key[:len(key)-1]: jsonObj}
+			}
+
+			// Remove the leading "- " or "+ "
+			expectedtrimmedLine := line[3:]
+			expectedkeyValue := strings.SplitN(expectedtrimmedLine, ":", 2)
+			if len(expectedkeyValue) == 2 {
+				key := strings.TrimSpace(expectedkeyValue[0])
+				value := strings.TrimSpace(expectedkeyValue[1])
+
+				var jsonObj map[string]interface{}
+				err := json.Unmarshal([]byte(value), &jsonObj)
+				if err != nil {
+					isJson = false
+				}
+
+				actuals = map[string]interface{}{key[:len(key)-1]: jsonObj}
+
+			}
+			red := color.New(color.FgRed).SprintFunc()
+			green := color.New(color.FgGreen).SprintFunc()
+
+			expectedText, actualText := compareAndColorizeMaps(expects, actuals, " ", red, green)
+			expectedOutput += breakLines(expectedText)
+			actualOutput += breakLines(actualText)
+			expects = make(map[string]interface{}, 0)
+			actuals = make(map[string]interface{}, 0)
+		}
+
+	}
+	if isJson {
+		return expectedOutput, actualOutput
+
+	}
 	expect, actual := "", ""
 	diffLines := strings.Split(diffStr, "\n")
 	jsonPath := []string{} // Stack to keep track of nested paths
@@ -739,7 +959,6 @@ func breakWithColor(input string, c *color.Attribute, highlightRanges []Range) s
 	if c != nil {
 		paint = color.New(*c).SprintFunc()
 	}
-
 	var output strings.Builder
 	var isColorRange bool
 	lineLen := 0
@@ -775,6 +994,150 @@ func breakWithColor(input string, c *color.Attribute, highlightRanges []Range) s
 	}
 
 	return output.String()
+}
+func compareValues(a, b interface{}, indent string, red, green func(a ...interface{}) string) (string, string) {
+	var expectedOutput strings.Builder
+	var actualOutput strings.Builder
+	// reds := color.New(color.FgRed).SprintFunc()
+	// green := color.New(color.FgGreen).SprintFunc()
+
+	if reflect.DeepEqual(a, b) {
+		return "", ""
+	}
+	reds := color.New(color.FgRed).SprintFunc()
+	greens := color.New(color.FgGreen).SprintFunc()
+	switch aValue := a.(type) {
+	case map[string]interface{}:
+		if bValue, ok := b.(map[string]interface{}); ok {
+			expectedText, actualText := compareAndColorizeMaps(aValue, bValue, indent, red, green)
+			expectedOutput.WriteString(expectedText)
+			actualOutput.WriteString(actualText)
+		} else {
+			expectedOutput.WriteString(red("%v", aValue))
+			actualOutput.WriteString(green("%v", b))
+		}
+	case []interface{}:
+		if bValue, ok := b.([]interface{}); ok {
+			expectedText, actualText := compareAndColorizeSlices(aValue, bValue, indent, reds, greens)
+			expectedOutput.WriteString(expectedText)
+			actualOutput.WriteString(actualText)
+		} else {
+			expectedOutput.WriteString(red("%v", aValue))
+			actualOutput.WriteString(green("%v", b))
+		}
+	case string:
+		if bValue, ok := b.(string); ok {
+			expectedOutput.WriteString(red(aValue))
+			actualOutput.WriteString(green(bValue))
+		} else {
+			expectedOutput.WriteString(red("%v", aValue))
+			actualOutput.WriteString(green("%v", b))
+		}
+	default:
+		expectedOutput.WriteString(red("%v", aValue))
+		actualOutput.WriteString(green("%v", b))
+	}
+
+	return expectedOutput.String(), actualOutput.String()
+}
+
+func highlightWords(str1, str2 string, red, green func(format string, a ...interface{}) string) (string, string) {
+	words1 := strings.Fields(str1)
+	words2 := strings.Fields(str2)
+	var diff1, diff2 []string
+
+	maxLen := len(words1)
+	if len(words2) > maxLen {
+		maxLen = len(words2)
+	}
+
+	for i := 0; i < maxLen; i++ {
+		word1 := ""
+		word2 := ""
+		if i < len(words1) {
+			word1 = words1[i]
+		}
+		if i < len(words2) {
+			word2 = words2[i]
+		}
+
+		if word1 != word2 {
+			diff1 = append(diff1, red(word1))
+			diff2 = append(diff2, green(word2))
+		} else {
+			diff1 = append(diff1, word1)
+			diff2 = append(diff2, word2)
+		}
+	}
+
+	return strings.Join(diff1, " "), strings.Join(diff2, " ")
+}
+
+var ansiColorCodeRegex = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+func visibleLength(str string) int {
+	re := regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	return len(re.ReplaceAllString(str, ""))
+}
+
+const ansiStart = "\033[31m" // Example: red font
+const ansiEnd = "\033[0m"    // Reset to default
+
+// breakLines breaks long lines into a specified length and ensures ANSI codes are correctly placed.
+func breakLines(input string) string {
+	const MAX_LINE_LENGTH = 50 // Set your desired max line length
+	var output strings.Builder
+	var currentLine strings.Builder
+	inANSISequence := false
+	lineLength := 0
+
+	// We'll collect ANSI sequences here and then reapply them as needed
+	var ansiSequenceBuilder strings.Builder
+
+	for _, char := range input {
+		// Check for the beginning of an ANSI sequence
+		if char == '\x1b' {
+			inANSISequence = true
+		}
+		if inANSISequence {
+			// Continue collecting the ANSI sequence
+			ansiSequenceBuilder.WriteRune(char)
+			if char == 'm' {
+				// End of the ANSI sequence
+				inANSISequence = false
+				// Reapply the ANSI sequence to the current line and the output
+				currentLine.WriteString(ansiSequenceBuilder.String())
+				output.WriteString(ansiSequenceBuilder.String())
+				ansiSequenceBuilder.Reset()
+				continue
+			}
+		} else {
+			// Time to wrap the line if we reach the max length or end of input
+			if lineLength >= MAX_LINE_LENGTH || char == '\n' {
+				output.WriteString(currentLine.String())
+				if char != '\n' {
+					output.WriteRune('\n')
+				}
+				currentLine.Reset()
+				lineLength = 0
+			}
+
+			if !isControlCharacter(char) {
+				lineLength++
+				currentLine.WriteRune(char)
+			}
+		}
+	}
+
+	// Write any remaining content in currentLine to output
+	if currentLine.Len() > 0 {
+		output.WriteString(currentLine.String())
+	}
+	return output.String()
+}
+
+func isControlCharacter(char rune) bool {
+	return !unicode.IsPrint(char) && !unicode.IsSpace(char)
 }
 
 // Will return a string in a two columns table where the left
