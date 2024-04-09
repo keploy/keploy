@@ -3,6 +3,7 @@ package v1
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
 	"strconv"
@@ -172,7 +173,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 						logger.Debug("Inside the Pg request for loop")
 						pg.BackendWrapper.BodyLen = int(binary.BigEndian.Uint32(buffer[i+1:])) - 4
 						if len(buffer) < (i + pg.BackendWrapper.BodyLen + 5) {
-							utils.LogError(logger, nil, "failed to translate the postgres request message due to shorter network packet buffer. Length of buffer is "+string(len(buffer)))
+							utils.LogError(logger, nil, "failed to translate the postgres request message due to shorter network packet buffer. Length of buffer is "+fmt.Sprint(len(buffer))+" buffer value :"+string(buffer)+" and pg.BackendWrapper.BodyLen is "+fmt.Sprint(pg.BackendWrapper.BodyLen))
 							break
 						}
 						pg.BackendWrapper.MsgType = buffer[i]
