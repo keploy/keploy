@@ -38,6 +38,10 @@ func postgresDecoderFrontend(response models.Frontend) ([]byte, error) {
 		case string('c'):
 			msg = &pgproto3.CopyDone{}
 		case string('C'):
+			if len(response.CommandCompletes) == 0 {
+				cc++
+				continue
+			}
 			msg = &pgproto3.CommandComplete{
 				CommandTag:     response.CommandCompletes[cc].CommandTag,
 				CommandTagType: response.CommandCompletes[cc].CommandTagType,
@@ -454,4 +458,43 @@ func decodePgRequest(buffer []byte, logger *zap.Logger) *models.Backend {
 	}
 
 	return nil
+}
+
+func mergePgRequests(requestBuffers [][]byte, logger *zap.Logger) [][]byte {
+	logger.Debug("MERGING REQUESTS")
+	// Check for PBDE first
+	var mergeBuff []byte
+	for _, v := range requestBuffers {
+		backend := decodePgRequest(v, logger)
+
+		if backend == nil {
+			logger.Debug("Rerurning nil while merging ")
+			break
+		}
+		buf, _ := postgresDecoderBackend(*backend)
+		mergeBuff = append(mergeBuff, buf...)
+	}
+	if len(mergeBuff) > 0 {
+		return [][]byte{mergeBuff}
+	}
+
+	return requestBuffers
+}
+
+func mergeMocks(pgmocks []models.Backend, logger *zap.Logger) []models.Backend {
+	logger.Debug("MERGING Mocks")
+	// Check for PBDE first
+	if len(pgmocks[0].PacketTypes) == 0 || pgmocks[0].PacketTypes[0] != "P" {
+		return pgmocks
+	}
+	var mergeBuff []byte
+	for _, v := range pgmocks {
+		buf, _ := postgresDecoderBackend(v)
+		mergeBuff = append(mergeBuff, buf...)
+	}
+	if len(mergeBuff) > 0 {
+		return []models.Backend{*decodePgRequest(mergeBuff, logger)}
+	}
+
+	return pgmocks
 }
