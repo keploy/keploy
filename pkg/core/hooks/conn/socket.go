@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	// "runtime"
 	"time"
 	"unsafe"
 
@@ -25,8 +26,8 @@ var eventAttributesSize = int(unsafe.Sizeof(SocketDataEvent{}))
 
 // ListenSocket starts the socket event listeners
 func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap *ebpf.Map) (<-chan *models.TestCase, error) {
-	t := make(chan *models.TestCase, 500)
-	event := make(chan Event, 1000)
+	t := make(chan *models.TestCase, 5000)
+	event := make(chan Event, 10000)
 	err := initRealTimeOffset()
 	if err != nil {
 		utils.LogError(l, err, "failed to initialize real time offset")
@@ -45,8 +46,12 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 				select {
 				case <-ctx.Done():
 					return
-				case event := <- c.EventChan:
-					fmt.Println("got an event")
+				case event := <-c.EventChan:
+					if event.Type == "open" {
+						fmt.Println("got an event with connID", event.Msg.OpenEvent.ConnID)
+					} else if event.Type == "data" {
+						fmt.Println("got a data event with connID", event.Msg.DataEvent.ConnID)
+					}
 					c.ProcessActiveTrackers(ctx, t, event)
 				}
 			}
@@ -92,6 +97,7 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 			defer utils.Recover(l)
 			for {
 				rec, err := r.Read()
+				// fmt.Println("This is the record from the perf reader", rec)
 				if err != nil {
 					if errors.Is(err, perf.ErrClosed) {
 						return
@@ -118,6 +124,7 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 						OpenEvent: &event,
 					},
 				}
+				fmt.Println("This is the value of the conn ID for open event", event.ConnID)
 				c.EventChan <- newEvent
 			}
 		}()
@@ -148,6 +155,7 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 			defer utils.Recover(l)
 			for {
 				record, err := r.Read()
+				// fmt.Println("Got a record from the ring buffer", record)
 				if err != nil {
 					if !errors.Is(err, ringbuf.ErrClosed) {
 						utils.LogError(l, err, "failed to receive signal from ringbuf socketDataEvent reader")
@@ -181,14 +189,15 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 
 				// c.GetOrCreate(event.ConnID).AddDataEvent(event)
 				eventChan := c.EventChan
+				fmt.Println("This is the event chan is data", eventChan)
 				newEvent := Event{
 					Type: "data",
 					Msg: Events{
 						DataEvent: &event,
 					},
 				}
+				fmt.Println("sending the event")
 				eventChan <- newEvent
-				// c.connections[event.ConnID].eventChannel.DataChan <- event
 			}
 		}()
 		<-ctx.Done() // Check for context cancellation
@@ -219,6 +228,7 @@ func exit(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 			defer utils.Recover(l)
 			for {
 				rec, err := r.Read()
+				// fmt.Println("This is the rec that we received from the perf reader", rec)
 				if err != nil {
 					if errors.Is(err, perf.ErrClosed) {
 						return
@@ -239,9 +249,9 @@ func exit(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 				}
 
 				event.TimestampNano += getRealTimeOffset()
-				// if c.connections[event.ConnID] != nil {
-				// // c.connections[event.ConnID].eventChannel.CloseChan <- event
-				// }
+				if c.connections[event.ConnID] != nil {
+					// c.connections[event.ConnID].eventChannel.CloseChan <- event
+				}
 			}
 		}()
 

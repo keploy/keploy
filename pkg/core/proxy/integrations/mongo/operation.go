@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"sync"
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"

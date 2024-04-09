@@ -119,7 +119,6 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 }
 
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {
-	fmt.Println("insert mock called")
 	mock.Name = fmt.Sprint("mock-", ys.getNextID())
 	mockYaml, err := EncodeMock(mock, ys.Logger)
 	if err != nil {

@@ -1,6 +1,7 @@
 package conn
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -8,9 +9,8 @@ import (
 	"sync"
 
 	// "text/template/parse"
-	"time"
-
 	"go.uber.org/zap"
+	"time"
 
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
@@ -54,11 +54,30 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 	switch event.Type {
 	case "open":
 		connectionId = event.Msg.OpenEvent.ConnID
+		factory.mu.Lock()
+		if factory.connections[connectionId] != nil {
+			return
+		}
 		workerChan := make(chan SocketDataEvent, 1000)
 		factory.connections[connectionId] = workerChan
+		fmt.Println("This is the connection Id", connectionId)
 		go factory.Worker(ctx, t, workerChan)
+		factory.mu.Unlock()
+		fmt.Println("successfully created the go routine for the connection id ", connectionId)
 	case "data":
+		// fmt.Println("got a data event")
+		factory.mu.Lock()
 		connectionId = event.Msg.DataEvent.ConnID
+		fmt.Println("Connection id for the channel", connectionId)
+		factory.mu.Unlock()
+		if factory.connections[connectionId] == nil {
+			println("got a nil channel")
+			workerChan := make(chan SocketDataEvent, 1000)
+			factory.connections[connectionId] = workerChan
+			go factory.Worker(ctx, t, workerChan)
+			workerChan <- *event.Msg.DataEvent
+			return
+		}
 		factory.connections[connectionId] <- *event.Msg.DataEvent
 	case "close":
 		connectionId = event.Msg.CloseEvent.ConnID
@@ -69,54 +88,69 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 
 func (factory *Factory) Worker(ctx context.Context, t chan *models.TestCase, workerChan chan SocketDataEvent) {
 	var lastEventType TrafficDirectionEnum = -1
+	var lastEvent SocketDataEvent
+	var twoSecondTimer = time.NewTimer(2 * time.Second)
 	var req []byte
 	var res []byte
 	for {
 		select {
 		case dataEvent := <-workerChan:
+			fmt.Println("got a data event")
 			switch dataEvent.Direction {
-				case IngressTraffic:
-					req = append(req, dataEvent.Msg[:]...)
-				case EgressTraffic:
-					res = append(res, dataEvent.Msg[:]...)
+			case IngressTraffic:
+				initializedLength := bytes.IndexByte(dataEvent.Msg[:], 0)
+				req = append(req, dataEvent.Msg[:initializedLength]...)
+				// fmt.Println("This is the req", string(req))
+			case EgressTraffic:
+				initializedLength := bytes.IndexByte(dataEvent.Msg[:], 0)
+				res = append(res, dataEvent.Msg[:initializedLength]...)
 			}
 			if dataEvent.Direction == IngressTraffic && lastEventType == EgressTraffic {
 				// This means that the testcase is ready to be recorded.
-				// fmt.Println("This is the request and the response", string(req), string(res))
-				// Parsing the request and the response.
-				parsedHTTPReq, err := pkg.ParseHTTPRequest(req)
-				if err != nil {
-					factory.logger.Error("failed to parse the http request from byte array", zap.Any("request", string(req)))
-				}
-				parsedHTTPRes, err := pkg.ParseHTTPResponse(res, parsedHTTPReq)
-				if err != nil {
-					factory.logger.Error("failed to parse the http response from byte array", zap.Any("response", string(res)))
-				}
-				factory.mu.Lock()
-				capture(context.Background(), factory.logger, t, parsedHTTPReq, parsedHTTPRes, time.Now(), time.Now())
-				factory.mu.Unlock()
+				parseTc(ctx, t, factory, req, res, lastEvent)
+				req = []byte{}
+				res = []byte{}
 			}
 			lastEventType = dataEvent.Direction
-		case <-time.After(2 * time.Second):
+			lastEvent = dataEvent
+			twoSecondTimer.Reset(2 * time.Second)
+		case <-twoSecondTimer.C:
+			fmt.Println("The direction of the last event type is", lastEventType, lastEvent.ConnID)
 			if lastEventType == EgressTraffic {
 				// We expect the response to be complete now.
-				parsedHTTPReq, err := pkg.ParseHTTPRequest(req)
-				if err != nil {
-					factory.logger.Error("failed to parse the http request from byte array", zap.Any("request", string(req)))
-				}
-				parsedHTTPRes, err := pkg.ParseHTTPResponse(res, parsedHTTPReq)
-				if err != nil {
-					factory.logger.Error("failed to parse the http response from byte array", zap.Any("response", string(res)))
-				}
-				factory.mu.Lock()
-				capture(context.Background(), factory.logger, t, parsedHTTPReq, parsedHTTPRes, time.Now(), time.Now())
-				factory.mu.Unlock()
+				parseTc(ctx, t, factory, req, res, lastEvent)
+				req = []byte{}
+				res = []byte{}
 			}
 			lastEventType = -1
+		case <-time.After(4 * time.Second):
+			// This means that the connection is inactive for a long time.
+			// We should close the connection.
+			fmt.Println("Closing the connection", lastEvent.ConnID)
+			return
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+func parseTc(ctx context.Context, t chan *models.TestCase, factory *Factory, req []byte, res []byte, lastEvent SocketDataEvent) {
+	parsedHTTPReq, err := pkg.ParseHTTPRequest(req)
+	if err != nil {
+		factory.logger.Error("failed to parse the http request from byte array", zap.Any("request", string(req)))
+		fmt.Println("This is the last event conn id", lastEvent.ConnID)
+		return
+	}
+	parsedHTTPRes, err := pkg.ParseHTTPResponse(res, parsedHTTPReq)
+	if err != nil {
+		factory.logger.Error("failed to parse the http response from byte array", zap.Any("response", string(res)))
+		fmt.Println("This is the last event conn id", lastEvent.ConnID)
+		return
+	}
+
+	fmt.Println("locked the factory")
+	capture(context.Background(), factory.logger, t, parsedHTTPReq, parsedHTTPRes, time.Now(), time.Now())
+
 }
 
 // GetOrCreate returns a tracker that related to the given conn and transaction ids. If there is no such tracker

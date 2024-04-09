@@ -43,18 +43,18 @@ var Examples = `
 Golang Application
 	Record:
 	sudo -E env PATH=$PATH keploy record -c "/path/to/user/app/binary"
-	
+
 	Test:
 	sudo -E env PATH=$PATH keploy test -c "/path/to/user/app/binary" --delay 2
 
 Node Application
 	Record:
 	sudo -E env PATH=$PATH keploy record -c “npm start --prefix /path/to/node/app"
-	
+
 	Test:
 	sudo -E env PATH=$PATH keploy test -c “npm start --prefix /path/to/node/app" --delay 2
 
-Java 
+Java
 	Record:
 	sudo -E env PATH=$PATH keploy record -c "java -jar /path/to/java-project/target/jar"
 
@@ -78,18 +78,18 @@ var ExampleOneClickInstall = `
 Golang Application
 	Record:
 	keploy record -c "/path/to/user/app/binary"
-	
+
 	Test:
 	keploy test -c "/path/to/user/app/binary" --delay 2
 
 Node Application
 	Record:
 	keploy record -c “npm start --prefix /path/to/node/app"
-	
+
 	Test:
 	keploy test -c “npm start --prefix /path/to/node/app" --delay 2
 
-Java 
+Java
 	Record:
 	keploy record -c "java -jar /path/to/java-project/target/jar"
 
@@ -303,7 +303,7 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 			return errors.New("missing required -c flag or appCmd in config file")
 		}
 
-		defer utils.GenerateGithubActions(c.logger, c.cfg.Command)
+		// defer utils.GenerateGithubActions(c.logger, c.cfg.Command)
 
 		if c.cfg.InDocker {
 			c.logger.Info("detected that Keploy is running in a docker container")
