@@ -881,10 +881,8 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 
 			expectedText, actualText := compareAndColorizeMaps(expects, actuals, " ", red, green)
 
-			dsa := breakLines(expectedText)
-			dsb := breakLines(actualText)
-			expect += dsa
-			actual += dsb
+			expect += breakLines(expectedText)
+			actual += breakLines(actualText)
 			expects = make(map[string]interface{}, 0)
 			actuals = make(map[string]interface{}, 0)
 
