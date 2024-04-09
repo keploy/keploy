@@ -93,7 +93,7 @@ func (a *App) ContainerIPv4Addr() string {
 
 func (a *App) SetupDocker() error {
 	var err error
-	cont, net, err := parseDockerCmd(a.cmd)
+	cont, net, err := ParseDockerCmd(a.cmd)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to parse container name from given docker command", zap.String("cmd", a.cmd))
 		return err
@@ -440,7 +440,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// Set the cancel function for the command
 	cmd.Cancel = func() error {
 
-		return utils.InterruptProcessTree(cmd, a.logger, cmd.Process.Pid, syscall.SIGINT)
+		return utils.InterruptProcessTree(a.logger, cmd.Process.Pid, syscall.SIGINT)
 	}
 	// wait after sending the interrupt signal, before sending the kill signal
 	cmd.WaitDelay = 10 * time.Second
