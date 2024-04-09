@@ -31,3 +31,17 @@ type SetupOptions struct {
 type RunOptions struct {
 	//IgnoreErrors bool
 }
+
+//For test bench
+
+type ModeKey uint32
+
+// These are the keys used to send the keploy record and test ports and pids to the ebpf program when testbench is enabled
+const (
+	RecordKey ModeKey = 0
+	TestKey   ModeKey = 1
+)
+
+type TestingOptions struct {
+	Mode Mode
+}

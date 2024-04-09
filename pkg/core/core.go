@@ -5,10 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"strings"
 	"sync"
-	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -19,20 +16,21 @@ import (
 )
 
 type Core struct {
-	Proxy         // embedding the Proxy interface to transfer the proxy methods to the core object
-	Hooks         // embedding the Hooks interface to transfer the hooks methods to the core object
-	logger        *zap.Logger
-	id            utils.AutoInc
-	apps          sync.Map
-	proxyStarted  bool
-	hostConfigStr string // hosts string in the nsswitch.conf of linux system. To restore the system hosts configuration after completion of test
+	Proxy        // embedding the Proxy interface to transfer the proxy methods to the core object
+	Hooks        // embedding the Hooks interface to transfer the hooks methods to the core object
+	Tester       // embedding the Tester interface to transfer the tester methods to the core object
+	logger       *zap.Logger
+	id           utils.AutoInc
+	apps         sync.Map
+	proxyStarted bool
 }
 
-func New(logger *zap.Logger, hook Hooks, proxy Proxy) *Core {
+func New(logger *zap.Logger, hook Hooks, proxy Proxy, tester Tester) *Core {
 	return &Core{
 		logger: logger,
 		Hooks:  hook,
 		Proxy:  proxy,
+		Tester: tester,
 	}
 }
 
@@ -123,13 +121,6 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 			utils.LogError(c.logger, err, "failed to unload the hooks")
 		}
 
-		// reset the hosts config in nsswitch.conf of the system (in test mode)
-		if opts.Mode == models.MODE_TEST && c.hostConfigStr != "" {
-			err := c.resetNsSwitchConfig()
-			if err != nil {
-				utils.LogError(c.logger, err, "")
-			}
-		}
 		return nil
 	})
 
@@ -171,32 +162,18 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 
 	c.proxyStarted = true
 
-	if opts.Mode == models.MODE_TEST {
-		// setting up the dns routing in test mode (helpful in fedora distro)
-		err = c.setupNsswitchConfig()
-		if err != nil {
-			return err
-		}
-	}
-
 	// For keploy test bench
 	if opts.EnableTesting {
-		c.logger.Info("🧪 setting up environment for testing keploy with itself")
+
 		// enable testing in the app
 		a.EnableTesting = true
 		a.Mode = opts.Mode
 
-		if opts.Mode == models.MODE_TEST {
-			err := c.setUpReplayTesting(ctx)
-			if err != nil {
-				return err
-			}
-			return nil
-		}
-
-		err := c.setUpRecordTesting(ctx)
+		// Setting up the test bench
+		err := c.Tester.Setup(ctx, models.TestingOptions{Mode: opts.Mode})
 		if err != nil {
-			return err
+			utils.LogError(c.logger, err, "error while setting up the test bench environment")
+			return errors.New("failed to setup the test bench")
 		}
 	}
 
@@ -274,147 +251,4 @@ func (c *Core) GetAppIP(_ context.Context, id uint64) (string, error) {
 	}
 
 	return a.ContainerIPv4Addr(), nil
-}
-
-// setting up the dns routing for the linux system
-func (c *Core) setupNsswitchConfig() error {
-	nsSwitchConfig := "/etc/nsswitch.conf"
-
-	// Check if the nsswitch.conf present for the system
-	if _, err := os.Stat(nsSwitchConfig); err == nil {
-		// Read the current nsswitch.conf
-		data, err := os.ReadFile(nsSwitchConfig)
-		if err != nil {
-			utils.LogError(c.logger, err, "failed to read the nsswitch.conf file from system")
-			return errors.New("failed to setup the nsswitch.conf file to redirect the DNS queries to proxy")
-		}
-
-		// Replace the hosts field value if it exists
-		lines := strings.Split(string(data), "\n")
-		for i, line := range lines {
-			if strings.HasPrefix(line, "hosts:") {
-				c.hostConfigStr = lines[i]
-				lines[i] = "hosts: files dns"
-			}
-		}
-
-		// Write the modified nsswitch.conf back to the file
-		err = os.WriteFile("/etc/nsswitch.conf", []byte(strings.Join(lines, "\n")), 0644)
-		if err != nil {
-			utils.LogError(c.logger, err, "failed to write the configuration to the nsswitch.conf file to redirect the DNS queries to proxy")
-			return errors.New("failed to setup the nsswitch.conf file to redirect the DNS queries to proxy")
-		}
-
-		c.logger.Debug("Successfully written to nsswitch config of linux")
-	}
-	return nil
-}
-
-// resetNsSwitchConfig resets the hosts config of nsswitch of the system
-func (c *Core) resetNsSwitchConfig() error {
-	nsSwitchConfig := "/etc/nsswitch.conf"
-	data, err := os.ReadFile(nsSwitchConfig)
-	if err != nil {
-		c.logger.Error("failed to read the nsswitch.conf file from system", zap.Error(err))
-		return errors.New("failed to reset the nsswitch.conf back to the original state")
-	}
-
-	// Replace the hosts field value if it exists with the actual system hosts value
-	lines := strings.Split(string(data), "\n")
-	for i, line := range lines {
-		if strings.HasPrefix(line, "hosts:") {
-			lines[i] = c.hostConfigStr
-		}
-	}
-
-	// Write the modified nsswitch.conf back to the file
-	err = os.WriteFile(nsSwitchConfig, []byte(strings.Join(lines, "\n")), 0644)
-	if err != nil {
-		c.logger.Error("failed to write the configuration to the nsswitch.conf file to redirect the DNS queries to proxy", zap.Error(err))
-		return errors.New("failed to reset the nsswitch.conf back to the original state")
-	}
-
-	c.logger.Debug("Successfully reset the nsswitch config of linux")
-	return nil
-}
-
-const (
-	keployTestPort   = 56789
-	keployRecordPort = 36789
-)
-
-func (c *Core) setUpReplayTesting(ctx context.Context) error {
-	setUpErr := errors.New("failed to setup the keploy replay testing")
-
-	keployRecordPid, err := utils.GetPIDByPort(ctx, c.logger, keployRecordPort)
-	if err != nil {
-		c.logger.Error("failed to get the keployRecord pid", zap.Error(err))
-		utils.LogError(c.logger, err, "failed to get the keployRecord pid from port", zap.Any("port", keployRecordPort))
-		return setUpErr
-	}
-	c.logger.Debug(fmt.Sprintf("keployRecord pid:%v", keployRecordPid))
-
-	err = c.TransmitTestBenchKeployPIDs(0, keployRecordPid)
-	if err != nil {
-		return setUpErr
-	}
-
-	err = c.TransmitTestBenchKeployPorts(0, uint32(keployRecordPort))
-	if err != nil {
-		return setUpErr
-	}
-
-	err = c.TransmitTestBenchKeployPorts(1, uint32(keployTestPort))
-	if err != nil {
-		return setUpErr
-	}
-
-	// to get the pid of keployTest binary in keployRecord binary, we have to wait for some time till the proxy server is started
-	// TODO: find other way to filter child process (keployTest) pid in parent process binary (keployRecord)
-	time.Sleep(10 * time.Second) // just for test bench.
-
-	return nil
-}
-
-func (c *Core) setUpRecordTesting(ctx context.Context) error {
-
-	go func() {
-		timeout := 30 * time.Second
-		startTime := time.Now()
-
-		ticker := time.NewTicker(500 * time.Millisecond)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-				keployTestPid, err := utils.GetPIDByPort(ctx, c.logger, keployTestPort)
-				if err != nil {
-					c.logger.Debug("failed to get the keploytest pid", zap.Error(err))
-					continue
-				}
-
-				if keployTestPid == 0 {
-					continue
-				}
-
-				c.logger.Debug("keploytest pid", zap.Uint32("pid", keployTestPid))
-
-				// sending keploytest binary pid in keployrecord binary to filter out ingress/egress calls related to keploytest binary.
-				_ = c.Hooks.TransmitTestBenchKeployPIDs(1, keployTestPid)
-
-				return
-
-			case <-time.After(timeout - time.Since(startTime)):
-				c.logger.Debug("Timeout reached, exiting loop from setupRecordTesting")
-				return // Exit the goroutine
-
-			case <-ctx.Done():
-				c.logger.Debug("Context cancelled, exiting loop from setupRecordTesting")
-				return // Exit the goroutine
-			}
-		}
-	}()
-
-	return nil
 }

@@ -82,7 +82,7 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 	return logger, nil
 }
 
-func AddModeTologger(mode string) (*zap.Logger, error) {
+func AddMode(mode string) (*zap.Logger, error) {
 	// Get the current logger configuration
 	cfg := logCfg
 	// Update the time encoder with the new values

@@ -292,7 +292,7 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 
 	if c.cfg.EnableTesting {
 		// Add mode to logger to debug the keploy during testing
-		logger, err := log.AddModeTologger(cmd.Name())
+		logger, err := log.AddMode(cmd.Name())
 		*c.logger = *logger
 		if err != nil {
 			errMsg := "failed to add mode to logger"

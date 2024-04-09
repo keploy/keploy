@@ -29,11 +29,18 @@ func New(logger *zap.Logger, tcsPath string) *TestYaml {
 	}
 }
 
+type tcsInfo struct {
+	name string
+	path string
+}
+
 func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string) error {
-	err := ts.saveOrUpdate(ctx, tc, testSetID, false)
+	tcsInfo, err := ts.upsert(ctx, testSetID, tc)
 	if err != nil {
 		return err
 	}
+
+	ts.logger.Info("🟠 Keploy has captured test cases for the user's application.", zap.String("path", tcsInfo.path), zap.String("testcase name", tcsInfo.name))
 
 	return nil
 }
@@ -98,21 +105,22 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 
 func (ts *TestYaml) UpdateTestCase(ctx context.Context, tc *models.TestCase, testSetID string) error {
 
-	err := ts.saveOrUpdate(ctx, tc, testSetID, true)
+	tcsInfo, err := ts.upsert(ctx, testSetID, tc)
 	if err != nil {
 		return err
 	}
 
+	ts.logger.Info("🔄 Keploy has updated the test cases for the user's application.", zap.String("path", tcsInfo.path), zap.String("testcase name", tcsInfo.name))
 	return nil
 }
 
-func (ts *TestYaml) saveOrUpdate(ctx context.Context, tc *models.TestCase, testSetID string, isUpdate bool) error {
+func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.TestCase) (tcsInfo, error) {
 	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
 	var tcsName string
 	if tc.Name == "" {
 		lastIndx, err := yaml.FindLastIndex(tcsPath, ts.logger)
 		if err != nil {
-			return err
+			return tcsInfo{name: "", path: tcsPath}, err
 		}
 		tcsName = fmt.Sprintf("test-%v", lastIndx)
 	} else {
@@ -120,24 +128,18 @@ func (ts *TestYaml) saveOrUpdate(ctx context.Context, tc *models.TestCase, testS
 	}
 	yamlTc, err := EncodeTestcase(*tc, ts.logger)
 	if err != nil {
-		return err
+		return tcsInfo{name: tcsName, path: tcsPath}, err
 	}
 	yamlTc.Name = tcsName
 	data, err := yamlLib.Marshal(&yamlTc)
 	if err != nil {
-		return err
+		return tcsInfo{name: tcsName, path: tcsPath}, err
 	}
 	err = yaml.WriteFile(ctx, ts.logger, tcsPath, tcsName, data, false)
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to write testcase yaml file")
-		return err
+		return tcsInfo{name: tcsName, path: tcsPath}, err
 	}
 
-	if isUpdate {
-		ts.logger.Info("🔄 Keploy has updated the test cases for the user's application.", zap.String("path", tcsPath), zap.String("testcase name", tcsName))
-	} else {
-		ts.logger.Info("🟠 Keploy has captured test cases for the user's application.", zap.String("path", tcsPath), zap.String("testcase name", tcsName))
-	}
-
-	return nil
+	return tcsInfo{name: tcsName, path: tcsPath}, nil
 }

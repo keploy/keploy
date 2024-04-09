@@ -661,7 +661,7 @@ func findChildPIDs(parentPID int) ([]int, error) {
 	return childPIDs, nil
 }
 
-func GetPIDByPort(_ context.Context, logger *zap.Logger, port int) (uint32, error) {
+func GetPIDFromPort(_ context.Context, logger *zap.Logger, port int) (uint32, error) {
 	logger.Debug("Getting pid using port", zap.Int("port", port))
 
 	connections, err := netLib.Connections("inet")

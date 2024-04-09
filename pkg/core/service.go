@@ -58,10 +58,17 @@ type AppInfo interface {
 	SendInode(ctx context.Context, id uint64, inode uint64) error
 }
 
-type TestBenchInfo interface {
-	TransmitTestBenchKeployPIDs(key, pid uint32) error
-	TransmitTestBenchKeployPorts(key, port uint32) error
+// For keploy test bench
+
+type Tester interface {
+	Setup(ctx context.Context, opts models.TestingOptions) error
 }
+type TestBenchInfo interface {
+	SendKeployPids(key models.ModeKey, pid uint32) error
+	SendKeployPorts(key models.ModeKey, port uint32) error
+}
+
+// ----------------------
 
 type OutgoingInfo interface {
 	PassThroughPortsInKernel(ctx context.Context, id uint64, ports []uint) error
