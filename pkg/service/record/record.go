@@ -331,7 +331,7 @@ func (r *Recorder) StartMock(ctx context.Context) error {
 	return fmt.Errorf(stopReason)
 }
 
-func (r *recorder) ReRecord(ctx context.Context) error {
+func (r *Recorder) ReRecord(ctx context.Context) error {
 	tcs, err := r.ReadTestCase()
 	for _, tc := range tcs {
 		host, port, err := extractHostAndPort(tc.Curl)
@@ -367,7 +367,7 @@ func (r *recorder) ReRecord(ctx context.Context) error {
 	return nil
 }
 
-func (r *recorder) ReadTestCase() ([]*models.TestCase, error) {
+func (r *Recorder) ReadTestCase() ([]*models.TestCase, error) {
 	testSet := r.config.ReRecord
 	// Construct the full path to the test cases directory.
 	testCasesPath := path.Join(r.config.Path, testSet, "tests")
