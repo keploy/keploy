@@ -470,7 +470,7 @@ func (d *DiffsPrinter) Render() error {
 		if json.Valid(bE) && json.Valid(bA) {
 			difference, err := sprintJSONDiff(bE, bA, "body", d.bodyNoise)
 			if err != nil {
-				// difference = sprintDiff(d.bodyExp, d.bodyAct, "body")
+				difference = sprintDiff(d.bodyExp, d.bodyAct, "body")
 			}
 			diffs = append(diffs, difference)
 		} else {
