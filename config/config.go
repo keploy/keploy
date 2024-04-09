@@ -4,24 +4,24 @@ package config
 import "time"
 
 type Config struct {
-	Path            string        `json:"path" yaml:"path" mapstructure:"path" `
-	Command         string        `json:"command" yaml:"command" mapstructure:"command"`
-	Port            uint32        `json:"port" yaml:"port" mapstructure:"port"`
-	DNSPort         uint32        `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
-	ProxyPort       uint32        `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
-	Debug           bool          `json:"debug" yaml:"debug" mapstructure:"debug"`
-	DisableTele     bool          `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
-	EnableANSIColor bool          `json:"enableANSIColor" yaml:"enableANSIColor" mapstructure:"enableANSIColor"`
-	InDocker        bool          `json:"inDocker" yaml:"inDocker" mapstructure:"inDocker"`
-	ContainerName   string        `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
-	NetworkName     string        `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
-	BuildDelay      time.Duration `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
-	Test            Test          `json:"test" yaml:"test" mapstructure:"test"`
-	Record          Record        `json:"record" yaml:"record" mapstructure:"record"`
-	ConfigPath      string        `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
-	BypassRules     []BypassRule  `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
-	KeployContainer string        `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
-	KeployNetwork   string        `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
+	Path                  string        `json:"path" yaml:"path" mapstructure:"path" `
+	Command               string        `json:"command" yaml:"command" mapstructure:"command"`
+	Port                  uint32        `json:"port" yaml:"port" mapstructure:"port"`
+	DNSPort               uint32        `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
+	ProxyPort             uint32        `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
+	Debug                 bool          `json:"debug" yaml:"debug" mapstructure:"debug"`
+	DisableTele           bool          `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
+	EnableANSIColor       bool          `json:"enableANSIColor" yaml:"enableANSIColor" mapstructure:"enableANSIColor"`
+	InDocker              bool          `json:"inDocker" yaml:"inDocker" mapstructure:"inDocker"`
+	ContainerName         string        `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
+	NetworkName           string        `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
+	BuildDelay            time.Duration `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
+	Test                  Test          `json:"test" yaml:"test" mapstructure:"test"`
+	Record                Record        `json:"record" yaml:"record" mapstructure:"record"`
+	ConfigPath            string        `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
+	BypassRules           []BypassRule  `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
+	KeployContainer       string        `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
+	KeployNetwork         string        `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
 	GenerateGithubActions bool          `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`
 }
 
