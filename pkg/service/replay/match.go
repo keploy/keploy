@@ -1079,7 +1079,7 @@ func breakLines(input string) string {
 // side is the expected string and the right is the actual
 // field: body, header, status...
 
-var ansiRegex = regexp.MustCompile(`(\x1b\[[0-9;]*m)`)
+var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
 // This function splits the string into ANSI codes and text segments.
 func splitAnsi(s string) []string {
@@ -1093,7 +1093,6 @@ func findAllAnsi(s string) []string {
 
 // This function wraps text taking into account ANSI escape codes.
 func wrapTextWithAnsi(s string, lim int) string {
-	// Split the string into plain text and ANSI codes
 	parts := splitAnsi(s)
 	ansiCodes := findAllAnsi(s)
 
@@ -1101,37 +1100,72 @@ func wrapTextWithAnsi(s string, lim int) string {
 	line := ""
 	currentLen := 0
 	codeIndex := 0
+	indentLevel := 0
+	const indentSize = 2 // Define how many spaces per indent level
+
+	// Helper function to calculate the current indentation
+	calculateIndent := func() string {
+		return strings.Repeat(" ", indentLevel*indentSize)
+	}
+
+	// Helper function to append words to the line with proper wrapping.
+	appendWord := func(word string) {
+		wordLen := len(word)
+		if currentLen+wordLen > lim {
+			wrapped += line + "\n"
+			line = calculateIndent() + word
+			currentLen = wordLen + (indentLevel * indentSize)
+		} else {
+			if currentLen > 0 {
+				line += " "
+				currentLen++
+			}
+			line += word
+			currentLen += wordLen
+		}
+	}
+
+	// Helper function to adjust the indent level based on braces and brackets
+	adjustIndent := func(lineText string) {
+		for _, char := range lineText {
+			if char == '{' || char == '[' {
+				indentLevel++
+			} else if char == '}' || char == ']' {
+				indentLevel--
+				if indentLevel < 0 {
+					indentLevel = 0
+				}
+			}
+		}
+	}
 
 	for _, part := range parts {
-		words := strings.Fields(part)
-		for _, word := range words {
-			wordLen := len(word)
-			if currentLen+wordLen+1 > lim && currentLen > 0 {
-				// Add a new line with the necessary ANSI reset and reapply codes
-				wrapped += line + ansiCodes[len(ansiCodes)-1] + "\n" + strings.Join(ansiCodes[:codeIndex], "") + word + " "
-				line = ""
-				currentLen = wordLen + 1
-			} else {
-				line += word + " "
-				currentLen += wordLen + 1
+		lines := strings.Split(part, "\n")
+		for i, lineText := range lines {
+			// Adjust the indent level before processing the line
+			adjustIndent(lineText)
+			words := strings.Fields(lineText)
+			for _, word := range words {
+				appendWord(word)
+			}
+			// Handle line breaks within the part.
+			if i < len(lines)-1 {
+				wrapped += line + "\n"
+				line = calculateIndent()
+				currentLen = indentLevel * indentSize
 			}
 		}
 
-		// Append ANSI codes at the end of the line if present
+		// Append ANSI codes at the end of the line if present.
 		if codeIndex < len(ansiCodes) {
 			line += ansiCodes[codeIndex]
 			codeIndex++
 		}
 	}
 
-	// Append any remaining text
+	// Append any remaining text.
 	if currentLen > 0 {
 		wrapped += line
-	}
-
-	// Ensure that wrapped lines are properly closed with an ANSI reset if needed
-	if len(ansiCodes) > 0 {
-		wrapped += ansiCodes[len(ansiCodes)-1]
 	}
 
 	return wrapped
@@ -1146,8 +1180,8 @@ func expectActualTable(exp string, act string, field string, centerize bool) str
 	} else {
 		table.SetAlignment(tablewriter.ALIGN_LEFT)
 	}
-	exp = wrapTextWithAnsi(exp, 20)
-	act = wrapTextWithAnsi(act, 20)
+	exp = wrapTextWithAnsi(exp, 50)
+	act = wrapTextWithAnsi(act, 50)
 
 	table.SetHeader([]string{fmt.Sprintf("Expect %v", field), fmt.Sprintf("Actual %v", field)})
 	table.SetAutoWrapText(false)
