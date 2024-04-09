@@ -38,6 +38,10 @@ func postgresDecoderFrontend(response models.Frontend) ([]byte, error) {
 		case string('c'):
 			msg = &pgproto3.CopyDone{}
 		case string('C'):
+			if len(response.CommandCompletes) == 0 {
+				cc++
+				continue
+			}
 			msg = &pgproto3.CommandComplete{
 				CommandTag:     response.CommandCompletes[cc].CommandTag,
 				CommandTagType: response.CommandCompletes[cc].CommandTagType,
