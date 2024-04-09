@@ -396,13 +396,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	wg.Add(2) // Two goroutines to wait for
 	initialBuf := []byte("")
 	var dstConn2 net.Conn
-	doneTls := false
-	isSmtp := false
+	doneTLS := false
+	isSMTP := false
 	var szSrc int
 	doneExchange := make(chan bool, 1)
 	if isTLS && dstURL == "smtp.gmail.com" {
-		isSmtp = true
-		doneTls = true
+		isSMTP = true
+		doneTLS = true
 		//Dialing for tls conn
 		destConnID := util.GetNextID()
 		logger := p.logger.With(zap.Any("Client IP Address", srcConn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnID), zap.Any("Destination IP Address", dstAddr), zap.Any("Destination ConnectionID", destConnID))
@@ -430,9 +430,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		dstCfg.Addr = addr
 		go func() {
 			szSrc, initialBuf, err = transferData(srcConn, dstConn2, doneExchange)
-			if err != nil {
-				// Handle error within the goroutine
-			}
 			wg.Done()
 		}()
 		go func() {
@@ -446,7 +443,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 	wg.Wait() // Block until both goroutines finish
 
-	if !doneTls {
+	if !doneTLS {
 
 		// attempt to read conn until buffer is either filled or conn is closed
 		initialBuf, err = util.ReadInitialBuf(parserCtx, p.logger, srcConn)
@@ -456,7 +453,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}
 
-	if doneTls {
+	if doneTLS {
 		initialBuf = initialBuf[:szSrc]
 	}
 	//update the src connection to have the initial buffer
@@ -473,7 +470,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	//make new connection to the destination server
-	if !doneTls {
+	if !doneTLS {
 		if isTLS {
 			logger.Debug("the external call is tls-encrypted", zap.Any("isTLS", isTLS))
 			cfg := &tls.Config{
@@ -540,7 +537,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if generic {
 		logger.Debug("The external dependency is not supported. Hence using generic parser")
 		if rule.Mode == models.MODE_RECORD {
-			if isSmtp {
+			if isSMTP {
 				err := p.Integrations["generic"].RecordOutgoing(parserCtx, srcConn, dstConn2, rule.MC, rule.OutgoingOptions)
 				if err != nil {
 					utils.LogError(logger, err, "failed to record the outgoing message")
