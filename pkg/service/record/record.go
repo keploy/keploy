@@ -15,7 +15,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-type recorder struct {
+type Recorder struct {
 	logger          *zap.Logger
 	testDB          TestDB
 	mockDB          MockDB
@@ -25,7 +25,7 @@ type recorder struct {
 }
 
 func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, config config.Config) Service {
-	return &recorder{
+	return &Recorder{
 		logger:          logger,
 		testDB:          testDB,
 		mockDB:          mockDB,
@@ -35,7 +35,7 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, 
 	}
 }
 
-func (r *recorder) Start(ctx context.Context) error {
+func (r *Recorder) Start(ctx context.Context) error {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	errGrp, _ := errgroup.WithContext(ctx)
@@ -242,7 +242,7 @@ func (r *recorder) Start(ctx context.Context) error {
 	return fmt.Errorf(stopReason)
 }
 
-func (r *recorder) StartMock(ctx context.Context) error {
+func (r *Recorder) StartMock(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
 	var stopReason string

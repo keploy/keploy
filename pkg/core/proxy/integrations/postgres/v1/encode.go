@@ -169,13 +169,14 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 				if !isStartupPacket(buffer) && len(buffer) > 5 {
 					bufferCopy := buffer
 					for i := 0; i < len(bufferCopy)-5; {
-						logger.Debug("Inside the if condition")
-						pg.BackendWrapper.MsgType = buffer[i]
+						logger.Debug("Inside the Pg request for loop")
 						pg.BackendWrapper.BodyLen = int(binary.BigEndian.Uint32(buffer[i+1:])) - 4
 						if len(buffer) < (i + pg.BackendWrapper.BodyLen + 5) {
-							utils.LogError(logger, nil, "failed to translate the postgres request message due to shorter network packet buffer")
+							utils.LogError(logger, nil, "failed to translate the postgres request message due to shorter network packet buffer. Length of buffer is "+string(len(buffer)))
 							break
 						}
+						pg.BackendWrapper.MsgType = buffer[i]
+
 						msg, err = pg.translateToReadableBackend(buffer[i:(i + pg.BackendWrapper.BodyLen + 5)])
 						if err != nil && buffer[i] != 112 {
 							utils.LogError(logger, err, "failed to translate the request message to readable")
@@ -240,7 +241,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 						logger.Debug("failed to decode the response message in proxy for postgres dependency", zap.Error(err))
 					}
 
-					if len(afterEncoded) != len(buffer) && pgMock.PacketTypes[0] != "p" {
+					if len(afterEncoded) != len(buffer) && len(pgMock.PacketTypes) > 0 && pgMock.PacketTypes[0] != "p" {
 						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(afterEncoded)), zap.Any("buffer", len(buffer)))
 						pgMock.Payload = bufStr
 					}
@@ -367,7 +368,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 					if err != nil {
 						logger.Debug("failed to decode the response message in proxy for postgres dependency", zap.Error(err))
 					}
-					if len(afterEncoded) != len(buffer) && pgMock.PacketTypes[0] != "R" {
+					if len(afterEncoded) != len(buffer) && len(pgMock.PacketTypes) > 0 && pgMock.PacketTypes[0] != "R" {
 						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(afterEncoded)), zap.Any("buffer", len(buffer)))
 						pgMock.Payload = bufStr
 					}
