@@ -18,9 +18,10 @@ func (e AppError) Error() string {
 
 // AppErrorType is a type of error that can be returned by the application
 const (
-	ErrCommandError AppErrorType = "exited due to command error"
-	ErrUnExpected   AppErrorType = "an unexpected error occurred"
-	ErrInternal     AppErrorType = "an internal error occurred"
-	ErrAppStopped   AppErrorType = "app stopped"
-	ErrCtxCanceled  AppErrorType = "context canceled"
+	ErrCommandError   AppErrorType = "exited due to command error"
+	ErrUnExpected     AppErrorType = "an unexpected error occurred"
+	ErrInternal       AppErrorType = "an internal error occurred"
+	ErrAppStopped     AppErrorType = "app stopped"
+	ErrCtxCanceled    AppErrorType = "context canceled"
+	ErrTestBinStopped AppErrorType = "test binary stopped"
 )

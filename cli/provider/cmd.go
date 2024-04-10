@@ -193,6 +193,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("containerName", c.cfg.ContainerName, "Name of the application's docker container")
 		cmd.Flags().StringP("networkName", "n", c.cfg.NetworkName, "Name of the application's docker network")
 		cmd.Flags().UintSlice("passThroughPorts", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server and ignore the traffic")
+		cmd.Flags().Bool("generateGithubActions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
 		err = cmd.Flags().MarkHidden("port")
 		if err != nil {
 			errMsg := "failed to mark port as hidden flag"
@@ -219,6 +220,13 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		err = cmd.PersistentFlags().MarkHidden("disableTele")
 		if err != nil {
 			errMsg := "failed to mark telemetry as hidden flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		cmd.PersistentFlags().Bool("enableTesting", c.cfg.EnableTesting, "Enable testing keploy with keploy")
+		err = cmd.PersistentFlags().MarkHidden("enableTesting")
+		if err != nil {
+			errMsg := "failed to mark enableTesting as hidden flag"
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
@@ -281,6 +289,19 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 			return errors.New(errMsg)
 		}
 	}
+
+	if c.cfg.EnableTesting {
+		// Add mode to logger to debug the keploy during testing
+		logger, err := log.AddMode(cmd.Name())
+		*c.logger = *logger
+		if err != nil {
+			errMsg := "failed to add mode to logger"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.DisableTele = true
+	}
+
 	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", c.cfg))
 
 	switch cmd.Name() {
@@ -302,9 +323,9 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 			}
 			return errors.New("missing required -c flag or appCmd in config file")
 		}
-
-		defer utils.GenerateGithubActions(c.logger, c.cfg.Command)
-
+		if c.cfg.GenerateGithubActions {
+			defer utils.GenerateGithubActions(c.logger, c.cfg.Command)
+		}
 		if c.cfg.InDocker {
 			c.logger.Info("detected that Keploy is running in a docker container")
 			if len(c.cfg.Path) > 0 {

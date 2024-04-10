@@ -138,8 +138,4 @@ func capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 		Noise: map[string][]string{},
 		// Mocks: mocks,
 	}
-	if err != nil {
-		utils.LogError(logger, err, "failed to record the ingress requests")
-		return
-	}
 }
