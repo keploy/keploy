@@ -483,6 +483,9 @@ func mergePgRequests(requestBuffers [][]byte, logger *zap.Logger) [][]byte {
 
 func mergeMocks(pgmocks []models.Backend, logger *zap.Logger) []models.Backend {
 	logger.Debug("MERGING Mocks")
+	if len(pgmocks) == 0 {
+		return pgmocks
+	}
 	// Check for PBDE first
 	if len(pgmocks[0].PacketTypes) == 0 || pgmocks[0].PacketTypes[0] != "P" {
 		return pgmocks

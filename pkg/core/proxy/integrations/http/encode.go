@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"golang.org/x/sync/errgroup"
 	"io"
 	"net"
 	"strings"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
@@ -226,6 +227,7 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 					logger.Debug("failed to read the request message from the user client", zap.Error(err))
 					logger.Debug("This was the last response from the server: " + string(resp))
 					errCh <- nil
+					return nil
 				}
 				errCh <- err
 				return nil
