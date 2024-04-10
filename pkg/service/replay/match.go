@@ -961,7 +961,7 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 			if line[0] == '-' {
 				c := color.FgRed
 				// Workaround to get the exact index where the diff begins
-				if diffLines[i+1][0] == '+' {
+				if i > 0 && len(line) > 1 && diffLines[i-1] != "" && diffLines[i-1][0] == '+' {
 
 					/* As we want to get the exact difference where the line's
 					 * diff begin we must to, first, get the expect (this) and
@@ -973,17 +973,17 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 				} else {
 					// In the case where there isn't in fact an actual
 					// version to compare, it was just expect to have this
-					expect += breakWithColor(line, &c, []Range{})
+					expect += breakWithColor(line, &c, []Range{{Start: 0, End: len(line) - 1}})
 				}
 			} else if line[0] == '+' {
 				c := color.FgGreen
-
 				// Here we do the same thing as above, just inverted
-				if diffLines[i-1][0] == '-' {
+				if i > 0 && len(line) > 1 && diffLines[i-1] != "" && diffLines[i-1][0] == '-' {
+
 					offsets, _ := diffIndexRange(line[1:], diffLines[i-1][1:])
 					actual += breakWithColor(line, &c, offsets)
 				} else {
-					actual += breakWithColor(line, &c, []Range{})
+					actual += breakWithColor(line, &c, []Range{{Start: 0, End: len(line) - 1}})
 				}
 			} else {
 				expect += breakWithColor(line, nil, []Range{})
