@@ -115,6 +115,7 @@ require (
 	github.com/getsentry/sentry-go v0.17.0
 	github.com/jackc/pgproto3/v2 v2.3.2
 	github.com/spf13/viper v1.18.2
+	github.com/tk103331/jacocogo v0.0.0-20191208102644-a45197032288
 	github.com/vektah/gqlparser/v2 v2.5.11
 	github.com/wI2L/jsondiff v0.5.0
 	github.com/xdg-go/pbkdf2 v1.0.0
