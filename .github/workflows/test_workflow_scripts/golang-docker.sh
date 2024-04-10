@@ -23,8 +23,7 @@ docker build -t gin-mongo .
 docker rm -f ginApp 2>/dev/null || true
 
 for i in {1..2}; do
-    container_name="ginApp_${i}"
-    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p8080:8080 --net keploy-network --rm --name ${container_name} gin-mongo" --containerName "${container_name}" --generateGithubActions=false  &
+    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p8080:8080 --net keploy-network --rm --name ginApp_test gin-mongo" --containerName "ginApp_test" --generateGithubActions=false  &
 
     sleep 5
 

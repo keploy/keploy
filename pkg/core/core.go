@@ -57,8 +57,6 @@ func (c *Core) UpdateAppInfo(ctx context.Context, id uint64, cmd string, opts mo
 		Container:     opts.Container,
 		DockerDelay:   opts.DockerDelay,
 	})
-	fmt.Println("Updating app info")
-	fmt.Println(cmd)
 	c.apps.Store(id, a)
 	err := a.Setup(ctx)
 	if err != nil {
