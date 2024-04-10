@@ -1125,7 +1125,7 @@ var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 var ansiResetCode = "\x1b[0m"
 
 // wrapTextWithAnsi processes the string with ANSI codes and wraps text accordingly
-func wrapTextWithAnsi(input string, lim int) string {
+func wrapTextWithAnsi(input string) string {
 	scanner := bufio.NewScanner(strings.NewReader(input))
 	var wrappedBuilder strings.Builder
 	currentAnsiCode := ""
@@ -1178,8 +1178,8 @@ func expectActualTable(exp string, act string, field string, centerize bool) str
 	} else {
 		table.SetAlignment(tablewriter.ALIGN_LEFT)
 	}
-	exp = wrapTextWithAnsi(exp, 50)
-	act = wrapTextWithAnsi(act, 50)
+	exp = wrapTextWithAnsi(exp)
+	act = wrapTextWithAnsi(act)
 
 	table.SetHeader([]string{fmt.Sprintf("Expect %v", field), fmt.Sprintf("Actual %v", field)})
 	table.SetAutoWrapText(false)
