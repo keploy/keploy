@@ -129,7 +129,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 		return nil
 	default:
 		// Starting the hooks and proxy
-		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_RECORD})
+		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_RECORD, EnableTesting: r.config.EnableTesting})
 		if err != nil {
 			stopReason = "failed to start the hooks and proxy"
 			utils.LogError(r.logger, err, stopReason)
@@ -247,6 +247,9 @@ func (r *Recorder) Start(ctx context.Context) error {
 			r.logger.Warn(stopReason, zap.Error(appErr))
 			return nil
 		case models.ErrCtxCanceled:
+			return nil
+		case models.ErrTestBinStopped:
+			stopReason = "keploy test mode binary stopped, hence stopping keploy"
 			return nil
 		default:
 			stopReason = "unknown error recieved from application, hence stopping keploy"
