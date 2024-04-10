@@ -29,6 +29,7 @@ func (b ByTime) Less(i, j int) bool {
 }
 
 func GetRecentFile(path string, prefix string) (string, error) {
+	fmt.Println("curpath: ", path)
 	files := ByTime{}
 	walkfn := func(path string, info os.FileInfo, err error) error {
 		if !info.IsDir() && strings.HasPrefix(info.Name(), prefix) {

@@ -90,9 +90,9 @@ func (r *mutationResolver) UpdateReportWithCov(ctx context.Context, testRunId st
 	case "python":
 		coverageData, err = tools.CalPythonCoverage(ctx, r.logger)
 	case "typescript":
-		coverageData, err = tools.CalTypescriptCoverage(ctx, r.logger)
-		// case "java":
-		// 	coverageData = tools.CalJavaCoverage(ctx, r.logger)
+		coverageData, err = tools.CalTypescriptCoverage(r.logger)
+	case "java":
+		coverageData, err = tools.CalJavaCoverage(r.logger, testSetId)
 	}
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to calculate coverage data")
