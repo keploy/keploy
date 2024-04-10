@@ -231,8 +231,8 @@ type ProcessInfo struct {
 	Time             int      `json:"time"`
 	Ppid             int      `json:"ppid"`
 	CoverageFilename string   `json:"coverageFilename"`
-	ExternalId       string   `json:"externalId"`
-	Uuid             string   `json:"uuid"`
+	ExternalID       string   `json:"externalId"`
+	UUID             string   `json:"uuid"`
 	Files            []string `json:"files"`
 }
 
@@ -273,7 +273,7 @@ func getCoverageFilePathTypescript(path string) (string, error) {
 type sessionVisitor struct {
 }
 
-func (sessionVisitor) VisitSessionInfo(info data.SessionInfo) error {
+func (sessionVisitor) VisitSessionInfo(_ data.SessionInfo) error {
 	return nil
 }
 
@@ -292,7 +292,14 @@ func (executionVisitor) VisitExecutionData(data data.ExecutionData) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+
+	defer func() {
+		err := file.Close()
+		if err != nil {
+			utils.LogError(nil, err, "failed to close the file")
+		}
+	}()
+
 	w := bufio.NewWriter(file)
 
 	fmt.Fprintf(w, "%3d %3d %s\n", count, len(data.Probes), data.Name)
@@ -305,19 +312,28 @@ func (executionVisitor) VisitExecutionData(data data.ExecutionData) error {
 	return nil
 }
 
-func CalJavaCoverage(logger *zap.Logger, testSetId string) (map[string]string, error) {
-	covExecFile, err := os.Open(filepath.Join("target", testSetId))
+func CalJavaCoverage(logger *zap.Logger, testSetID string) (map[string]string, error) {
+	covExecFile, err := os.Open(filepath.Join("target", testSetID + ".exec"))
 	if err != nil {
 		utils.LogError(logger, err, "failed to open the coverage exec file")
 		return nil, err
 	}
-	defer covExecFile.Close()
+	defer func() {
+		err := covExecFile.Close()
+		if err != nil {
+			utils.LogError(logger, err, "failed to close the coverage exec file")
+		}
+	}()
 
 	// parse the exec file and write the coverage data to a file
 	reader := data.NewReader(covExecFile)
 	reader.SetSessionVisitor(sessionVisitor{})
 	reader.SetExecutionVisitor(executionVisitor{})
-	reader.Read()
+	_, err = reader.Read()
+	if err != nil {
+		utils.LogError(logger, err, "failed to read the coverage exec file")
+		return nil, err
+	}
 
 	// fetch all the classes in the target folder
 	classFolder := filepath.Join(".", "target", "classes")
@@ -338,7 +354,12 @@ func CalJavaCoverage(logger *zap.Logger, testSetId string) (map[string]string, e
 		return nil, err
 	}
 
-	defer os.Remove("testSetCoverage.txt")
+	defer func() {
+		err := os.Remove("testSetCoverage.txt")
+		if err != nil {
+			utils.LogError(logger, err, "failed to remove the coverage file")
+		}
+	}()
 
 	covdata, err := os.ReadFile("testSetCoverage.txt")
 	if err != nil {
