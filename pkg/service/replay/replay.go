@@ -234,7 +234,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// update the test set report with the coverage entry
 			err := r.UpdateReportWithCoverage(ctx, testRunID, testSetID, coverageData)
 			if err != nil {
-				utils.LogError(r.logger, err, "failed to update report with the coverage data")	
+				utils.LogError(r.logger, err, "failed to update report with the coverage data")
 			}
 		}
 		close(exitLoopChan)

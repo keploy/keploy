@@ -313,7 +313,7 @@ func (executionVisitor) VisitExecutionData(data data.ExecutionData) error {
 }
 
 func CalJavaCoverage(logger *zap.Logger, testSetID string) (map[string]string, error) {
-	covExecFile, err := os.Open(filepath.Join("target", testSetID + ".exec"))
+	covExecFile, err := os.Open(filepath.Join("target", testSetID+".exec"))
 	if err != nil {
 		utils.LogError(logger, err, "failed to open the coverage exec file")
 		return nil, err
