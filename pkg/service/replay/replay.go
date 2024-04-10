@@ -163,27 +163,26 @@ func (r *Replayer) Start(ctx context.Context) error {
 			stopApp = true
 		}
 
-		err := r.SetUpRunTestSet(ctx, testSetID, appID)
-		if err != nil {
-			stopReason = fmt.Sprintf("failed to setup run test set: %v", err)
-			utils.LogError(r.logger, err, stopReason)
-			testSetResult = false
-			if stopApp {
-				if appCtxCancel != nil {
-					appCtxCancel()
-				}
-				if runAppErrGrp != nil {
-					err := runAppErrGrp.Wait()
-					if err != nil {
-						utils.LogError(r.logger, err, "error in runAppErrGrp")
+		if previousCmd != currentCmd || restartApp {
+			err := r.SetUpRunTestSet(ctx, testSetID, appID)
+			if err != nil {
+				stopReason = fmt.Sprintf("failed to setup run test set: %v", err)
+				utils.LogError(r.logger, err, stopReason)
+				testSetResult = false
+				if stopApp {
+					if appCtxCancel != nil {
+						appCtxCancel()
+					}
+					if runAppErrGrp != nil {
+						err := runAppErrGrp.Wait()
+						if err != nil {
+							utils.LogError(r.logger, err, "error in runAppErrGrp")
+						}
 					}
 				}
+				continue
 			}
-			continue
-		}
-
-		if previousCmd != currentCmd || restartApp {
-			err := r.instrumentation.UpdateAppInfo(ctx, appID, currentCmd, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
+			err = r.instrumentation.UpdateAppInfo(ctx, appID, currentCmd, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to setup instrumentation")
 				continue
