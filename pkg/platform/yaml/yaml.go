@@ -141,11 +141,6 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 				utils.LogError(Logger, err, "failed to create a directory for the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
 				return false, err
 			}
-			err = os.Chmod(path, 0777)
-			if err != nil {
-				utils.LogError(Logger, err, "failed to set permissions for the directory", zap.String("path directory", path))
-				return false, err
-			}
 			file, err := os.OpenFile(yamlPath, os.O_CREATE, 0777) // Set file permissions to 777
 			if err != nil {
 				utils.LogError(Logger, err, "failed to create a yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
@@ -156,7 +151,7 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 				utils.LogError(Logger, err, "failed to close the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
 				return false, err
 			}
-			err = os.Chmod(yamlPath, 0777)
+			err = chmodRecursive(yamlPath, 0777)
 			if err != nil {
 				utils.LogError(Logger, err, "failed to set permissions for the directory", zap.String("path directory", path))
 				return false, err
@@ -187,4 +182,18 @@ func ReadSessionIndices(_ context.Context, path string, Logger *zap.Logger) ([]s
 		}
 	}
 	return indices, nil
+}
+
+func chmodRecursive(path string, mode os.FileMode) error {
+	cleanPath := filepath.Clean(path)
+	for {
+		if err := os.Chmod(cleanPath, mode); err != nil {
+			return err
+		}
+		if filepath.Base(cleanPath) == "keploy" || cleanPath == "/" {
+			break
+		}
+		cleanPath = filepath.Dir(cleanPath)
+	}
+	return nil
 }
