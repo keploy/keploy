@@ -115,8 +115,13 @@ func (ts *TestYaml) UpdateTestCase(ctx context.Context, tc *models.TestCase, tes
 }
 
 func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.TestCase) (tcsInfo, error) {
-	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
 	var tcsName string
+	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
+	err := os.Chmod(ts.TcsPath, 0777)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to set permissions for the directory", zap.String("path directory", ts.TcsPath))
+		return tcsInfo{name: tcsName, path: tcsPath}, err
+	}
 	if tc.Name == "" {
 		lastIndx, err := yaml.FindLastIndex(tcsPath, ts.logger)
 		if err != nil {

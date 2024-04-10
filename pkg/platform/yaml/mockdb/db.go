@@ -119,6 +119,11 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 }
 
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {
+	err := os.Chmod(ys.MockPath, 0777)
+	if err != nil {
+		utils.LogError(ys.Logger, err, "failed to set permissions for the directory", zap.String("path directory", ys.MockPath))
+		return err
+	}
 	mock.Name = fmt.Sprint("mock-", ys.getNextID())
 	mockYaml, err := EncodeMock(mock, ys.Logger)
 	if err != nil {

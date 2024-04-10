@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 
@@ -88,6 +89,12 @@ func (fe *TestReport) GetReport(ctx context.Context, testRunID string, testSetID
 func (fe *TestReport) InsertReport(ctx context.Context, testRunID string, testSetID string, testReport *models.TestReport) error {
 
 	reportPath := filepath.Join(fe.Path, testRunID)
+
+	err := os.Chmod(fe.Path, 0777)
+	if err != nil {
+		utils.LogError(fe.Logger, err, "failed to set permissions for the directory", zap.String("path directory", fe.Path))
+		return err
+	}
 
 	if testReport.Name == "" {
 		testReport.Name = testSetID + "-report"
