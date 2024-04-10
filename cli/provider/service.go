@@ -13,6 +13,7 @@ import (
 	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
 	reportdb "go.keploy.io/server/v2/pkg/platform/yaml/reportdb"
 	testdb "go.keploy.io/server/v2/pkg/platform/yaml/testdb"
+	"go.keploy.io/server/v2/pkg/platform/yaml/userdb"
 
 	"go.keploy.io/server/v2/pkg/service/record"
 	"go.keploy.io/server/v2/pkg/service/replay"
@@ -22,28 +23,29 @@ import (
 )
 
 type ServiceProvider struct {
-	logger   *zap.Logger
-	configDb *configdb.ConfigDb
-	cfg      *config.Config
+	logger *zap.Logger
+	userDb *userdb.UserDb
+	cfg    *config.Config
 }
 
 type CommonInternalService struct {
 	YamlTestDB      *testdb.TestYaml
 	YamlMockDb      *mockdb.MockYaml
 	YamlReportDb    *reportdb.TestReport
+	YamlConfigDb    *configdb.ConfigYaml
 	Instrumentation *core.Core
 }
 
-func NewServiceProvider(logger *zap.Logger, configDb *configdb.ConfigDb, cfg *config.Config) *ServiceProvider {
+func NewServiceProvider(logger *zap.Logger, userDb *userdb.UserDb, cfg *config.Config) *ServiceProvider {
 	return &ServiceProvider{
-		logger:   logger,
-		configDb: configDb,
-		cfg:      cfg,
+		logger: logger,
+		userDb: userDb,
+		cfg:    cfg,
 	}
 }
 
 func (n *ServiceProvider) GetTelemetryService(ctx context.Context, config config.Config) (*telemetry.Telemetry, error) {
-	installationID, err := n.configDb.GetInstallationID(ctx)
+	installationID, err := n.userDb.GetInstallationID(ctx)
 	if err != nil {
 		return nil, errors.New("failed to get installation id")
 	}
@@ -63,11 +65,13 @@ func (n *ServiceProvider) GetCommonServices(config config.Config) *CommonInterna
 	testDB := testdb.New(n.logger, config.Path)
 	mockDB := mockdb.New(n.logger, config.Path, "")
 	reportDB := reportdb.New(n.logger, config.Path+"/reports")
+	configDB := configdb.New(n.logger, config.Path)
 	return &CommonInternalService{
 		Instrumentation: instrumentation,
 		YamlTestDB:      testDB,
 		YamlMockDb:      mockDB,
 		YamlReportDb:    reportDB,
+		YamlConfigDb:    configDB,
 	}
 }
 
@@ -84,10 +88,10 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 	case "record", "test", "mock":
 		commonServices := n.GetCommonServices(*n.cfg)
 		if cmd == "record" {
-			return record.New(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, *n.cfg), nil
+			return record.New(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlConfigDb, tel, commonServices.Instrumentation, *n.cfg), nil
 		}
 		if cmd == "test" {
-			return replay.NewReplayer(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, tel, commonServices.Instrumentation, *n.cfg), nil
+			return replay.NewReplayer(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlConfigDb, tel, commonServices.Instrumentation, *n.cfg), nil
 		}
 		return nil, errors.New("invalid command")
 	default:

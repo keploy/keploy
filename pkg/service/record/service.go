@@ -3,6 +3,7 @@ package record
 import (
 	"context"
 
+	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 )
 
@@ -29,6 +30,10 @@ type TestDB interface {
 
 type MockDB interface {
 	InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error
+}
+
+type ConfigDB interface {
+	InsertConfig(ctx context.Context, testSetID string, testSetConfig config.TestSetConfig) error
 }
 
 type Telemetry interface {
