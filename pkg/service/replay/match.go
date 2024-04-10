@@ -2,6 +2,7 @@
 package replay
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -828,6 +829,44 @@ func serialize(value interface{}) string {
 
 // writeKeyValuePair writes a key-value pair with optional color.
 // writeKeyValuePair writes a key-value pair with optional color.
+func truncateToMatchWithEllipsis(expectedText, actualText string) (string, string) {
+	expectedLines := strings.Split(expectedText, "\n")
+	actualLines := strings.Split(actualText, "\n")
+
+	// Determine the number of lines to match based on the shorter text
+	matchLineCount := len(expectedLines)
+	if len(actualLines) < matchLineCount {
+		matchLineCount = len(actualLines)
+	}
+
+	// ANSI escape code for yellow and reset
+	yellow := "\x1b[33m"
+	reset := "\x1b[0m"
+	ellipsis := yellow + ".\n.\n." + reset // Each dot on a separate line
+
+	// Function to truncate text with yellow ellipses on separate lines in the middle
+	truncate := func(lines []string, matchLineCount int) string {
+		if len(lines) <= matchLineCount {
+			return strings.Join(lines, "\n")
+		}
+
+		// Calculate how many lines to keep from the top and bottom halves
+		// Subtracting 3 from matchLineCount to account for the ellipsis lines
+		topHalfLineCount := (matchLineCount - 3) / 2
+		bottomHalfLineCount := matchLineCount - 3 - topHalfLineCount
+
+		// Create a slice with the top half, ellipsis on separate lines, and bottom half
+		truncated := append(lines[:topHalfLineCount], ellipsis)
+		truncated = append(truncated, lines[len(lines)-bottomHalfLineCount:]...)
+		return strings.Join(truncated, "\n")
+	}
+
+	// Apply truncation to both expected and actual text if needed
+	truncatedExpected := truncate(expectedLines, matchLineCount)
+	truncatedActual := truncate(actualLines, matchLineCount)
+
+	return truncatedExpected, truncatedActual
+}
 
 // Will receive a string that has the differences represented
 // by a plus or a minus sign and separate it. Just works with json
@@ -879,9 +918,10 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 			green := color.New(color.FgGreen).SprintFunc()
 
 			expectedText, actualText := compareAndColorizeMaps(expects, actuals, " ", red, green)
+			expectOutput, actualOutput := truncateToMatchWithEllipsis(breakLines(expectedText), breakLines(actualText))
 
-			expect += breakLines(expectedText) + "\n"
-			actual += breakLines(actualText) + "\n"
+			expect += breakLines(expectOutput) + "\n"
+			actual += breakLines(actualOutput) + "\n"
 			expects = make(map[string]interface{}, 0)
 			actuals = make(map[string]interface{}, 0)
 
