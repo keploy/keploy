@@ -333,6 +333,10 @@ func (r *Recorder) StartMock(ctx context.Context) error {
 
 func (r *Recorder) ReRecord(ctx context.Context) error {
 	tcs, err := r.ReadTestCase()
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to read test cases")
+		return fmt.Errorf("failed to read test cases")
+	}
 	for _, tc := range tcs {
 		host, port, err := extractHostAndPort(tc.Curl)
 		if err != nil {
