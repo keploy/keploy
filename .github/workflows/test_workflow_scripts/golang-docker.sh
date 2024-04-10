@@ -58,7 +58,7 @@ for i in {1..2}; do
 
     # Stop keploy.
     docker rm -f keploy-v2
-    docker rm -f "${container_name}"
+    docker rm -f ginApp_test
 done
 
 # Start the keploy in test mode.
