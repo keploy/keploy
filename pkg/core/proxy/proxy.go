@@ -48,6 +48,8 @@ type Proxy struct {
 
 	Listener net.Listener
 
+	//to store the nsswitch.conf file data
+	nsswitchData []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
 	UDPDNSServer *dns.Server
 	TCPDNSServer *dns.Server
 }
@@ -205,6 +207,14 @@ func (p *Proxy) start(ctx context.Context) error {
 		for _, mc := range p.sessions.GetAllMC() {
 			if mc != nil {
 				close(mc)
+			}
+		}
+
+		if string(p.nsswitchData) != "" {
+			// reset the hosts config in nsswitch.conf of the system (in test mode)
+			err = p.resetNsSwitchConfig()
+			if err != nil {
+				utils.LogError(p.logger, err, "failed to reset the nsswitch config")
 			}
 		}
 	}()
@@ -551,6 +561,15 @@ func (p *Proxy) Mock(_ context.Context, id uint64, opts models.OutgoingOptions) 
 		OutgoingOptions: opts,
 	})
 	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
+
+	if string(p.nsswitchData) == "" {
+		// setup the nsswitch config to redirect the DNS queries to the proxy
+		err := p.setupNsswitchConfig()
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to setup nsswitch config")
+			return errors.New("failed to mock the outgoing message")
+		}
+	}
 
 	////set the new proxy ip:port for a new session
 	//err := p.setProxyIP(opts.DnsIPv4Addr, opts.DnsIPv6Addr)

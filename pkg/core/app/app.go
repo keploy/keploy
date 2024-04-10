@@ -50,6 +50,8 @@ type App struct {
 	keployContainer  string
 	keployIPv4       string
 	inodeChan        chan uint64
+	EnableTesting    bool
+	Mode             models.Mode
 }
 
 type Options struct {
@@ -397,7 +399,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 		}
 	}()
 
-	errCh := make(chan error)
+	errCh := make(chan error, 1)
 	// listen for the "create container" event in order to send the inode of the container to the kernel
 	errCh2 := a.getDockerMeta(ctx)
 
@@ -415,16 +417,16 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 	select {
 	case err := <-errCh:
 		if err != nil && errors.Is(err, context.Canceled) {
-			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}
+			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 		}
 		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 	case err := <-errCh2:
 		if err != nil && errors.Is(err, context.Canceled) {
-			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}
+			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 		}
 		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 	case <-ctx.Done():
-		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}
+		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 	}
 }
 
@@ -481,8 +483,15 @@ func (a *App) run(ctx context.Context) models.AppError {
 	select {
 	case <-ctx.Done():
 		a.logger.Debug("context cancelled, error while waiting for the app to exit", zap.Error(ctx.Err()))
-		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}
+		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 	default:
+		if a.Mode == models.MODE_RECORD && a.EnableTesting {
+			a.logger.Info("waiting for some time before returning the error to allow recording of test cases when testing keploy with itself")
+			time.Sleep(3 * time.Second)
+			a.logger.Debug("test binary stopped", zap.Error(err))
+			return models.AppError{AppErrorType: models.ErrTestBinStopped, Err: context.Canceled}
+		}
+
 		if err != nil {
 			return models.AppError{AppErrorType: models.ErrUnExpected, Err: err}
 		}

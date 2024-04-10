@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/getsentry/sentry-go"
+	netLib "github.com/shirou/gopsutil/v3/net"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -666,6 +667,27 @@ func findChildPIDs(parentPID int) ([]int, error) {
 	findDescendants(parentPID)
 
 	return childPIDs, nil
+}
+
+func GetPIDFromPort(_ context.Context, logger *zap.Logger, port int) (uint32, error) {
+	logger.Debug("Getting pid using port", zap.Int("port", port))
+
+	connections, err := netLib.Connections("inet")
+	if err != nil {
+		return 0, err
+	}
+
+	for _, conn := range connections {
+		if conn.Status == "LISTEN" && conn.Laddr.Port == uint32(port) {
+			if conn.Pid > 0 {
+				return uint32(conn.Pid), nil
+			}
+			return 0, fmt.Errorf("pid %d is out of bounds", conn.Pid)
+		}
+	}
+
+	// If we get here, no process was found using the given port
+	return 0, fmt.Errorf("no process found using port %d", port)
 }
 
 func EnsureRmBeforeName(cmd string) string {
