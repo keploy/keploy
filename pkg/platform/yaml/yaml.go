@@ -190,7 +190,7 @@ func chmodRecursive(path string, mode os.FileMode) error {
 		if err := os.Chmod(cleanPath, mode); err != nil {
 			return err
 		}
-		if filepath.Base(cleanPath) == "keploy" || cleanPath == "/" {
+		if filepath.Base(cleanPath) == "keploy" || filepath.Base(cleanPath) == ".keploy" || cleanPath == "/" {
 			break
 		}
 		cleanPath = filepath.Dir(cleanPath)
