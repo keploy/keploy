@@ -49,6 +49,7 @@ type App struct {
 	keployNetwork    string
 	keployContainer  string
 	keployIPv4       string
+	containerCreated bool
 	inodeChan        chan uint64
 	EnableTesting    bool
 	Mode             models.Mode
@@ -345,6 +346,7 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 				errCh <- ctx.Err()
 				return nil
 			case e := <-messages:
+				a.containerCreated = true
 				eventCaptured, err := a.handleDockerEvents(ctx, e)
 				if err != nil {
 					errCh <- err
@@ -363,6 +365,31 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 		}
 	})
 	return errCh
+}
+
+func (a *App) removeAppContainers() {
+
+	if a.kind == utils.DockerCompose {
+		composeFile := findComposeFile()
+		containerNames, composeErr := getContainerFromComposeFile(composeFile)
+		if composeErr != nil {
+			utils.LogError(a.logger, composeErr, "Failed to get the containers from the docker compose file")
+		}
+
+		for _, containerName := range containerNames {
+			if len(containerName) != 0 {
+				composeErr = a.docker.StopAndRemoveByID(containerName)
+				if composeErr != nil {
+					utils.LogError(a.logger, composeErr, fmt.Sprintf("Failed to stop/remove the docker container %s. Please stop and remove the application container manually.", containerName))
+				}
+			}
+		}
+	} else if a.kind == utils.Docker {
+		composeErr := a.docker.StopAndRemoveByID(a.container)
+		if composeErr != nil {
+			utils.LogError(a.logger, composeErr, fmt.Sprintf("Failed to stop/remove the docker container %s. Please stop and remove the application container manually.", a.container))
+		}
+	}
 }
 
 func (a *App) runDocker(ctx context.Context) models.AppError {
@@ -393,12 +420,16 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 		if err.Err != nil {
 			utils.LogError(a.logger, err.Err, "Application stopped with the error")
 			errCh <- err.Err
+			return err.Err
 		}
 		return nil
 	})
 
 	select {
 	case err := <-errCh:
+		if a.containerCreated {
+			a.removeAppContainers()
+		}
 		if err != nil && errors.Is(err, context.Canceled) {
 			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 		}

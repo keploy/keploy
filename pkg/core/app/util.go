@@ -88,7 +88,6 @@ func getInode(pid int) (uint64, error) {
 	return i, nil
 }
 
-
 // getContainerFromComposeFile parses docker-compose file to get all container names
 func getContainerFromComposeFile(filePath string) ([]string, error) {
 	yamlFile, err := os.ReadFile(filePath)
