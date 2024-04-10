@@ -205,6 +205,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 				appErrChan <- appErr
 				return nil
 			})
+			// Delay for user application to run
+			select {
+			case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
+			case <-ctx.Done():
+				return nil
+			}
 		}
 		previousCmd = currentCmd
 
@@ -222,16 +228,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 			totalTestPassed += passed
 			totalTestFailed += failed
 
-			if testSetStatus == models.TestSetStatusPassed {
-				pp.SetColorScheme(models.PassingColorScheme)
-			} else {
-				pp.SetColorScheme(models.FailingColorScheme)
-			}
-			if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", testSetID, total, passed, failed); err != nil {
-				utils.LogError(r.logger, err, "failed to print testrun summary")
-			}
-
 			r.telemetry.TestSetRun(passed, failed, testSetID, string(testSetStatus))
+		} else {
+			continue
 		}
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)
@@ -251,6 +250,14 @@ func (r *Replayer) Start(ctx context.Context) error {
 				}
 			}
 			continue
+		}
+		if testSetStatus == models.TestSetStatusPassed {
+			pp.SetColorScheme(models.PassingColorScheme)
+		} else {
+			pp.SetColorScheme(models.FailingColorScheme)
+		}
+		if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", testSetID, total, passed, failed); err != nil {
+			utils.LogError(r.logger, err, "failed to print testrun summary")
 		}
 		switch testSetStatus {
 		case models.TestSetStatusAppHalted:
@@ -399,8 +406,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	testSetStatus := models.TestSetStatusPassed
 	testSetStatusByErrChan := models.TestSetStatusRunning
 
-	r.logger.Info("running", zap.Any("test-set", models.HighlightString(testSetID)))
-
 	testCases, err := r.testDB.GetTestCases(runTestSetCtx, testSetID)
 	if err != nil {
 		return models.TestSetStatusFailed, 0, 0, 0, fmt.Errorf("failed to get test cases: %w", err)
@@ -409,6 +414,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if len(testCases) == 0 {
 		return models.TestSetStatusPassed, 0, 0, 0, nil
 	}
+
+	r.logger.Info("running", zap.Any("test-set", models.HighlightString(testSetID)))
 
 	// Checking for errors in the mocking and application
 	runTestSetErrGrp.Go(func() error {
@@ -437,13 +444,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		runTestSetCtxCancel()
 		return nil
 	})
-
-	// Delay for user application to run
-	select {
-	case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
-	case <-runTestSetCtx.Done():
-		return testSetStatusByErrChan, len(testCases), 0, len(testCases), nil
-	}
 
 	selectedTests := ArrayToMap(r.config.Test.SelectedTests[testSetID])
 
