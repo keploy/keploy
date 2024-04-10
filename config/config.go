@@ -23,6 +23,10 @@ type Config struct {
 	KeployNetwork   string        `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
 }
 
+type TestSetConfig struct {
+	Cmd string `json:"cmd" yaml:"cmd" mapstructure:"cmd"`
+}
+
 type Record struct {
 	Filters     []Filter      `json:"filters" yaml:"filters" mapstructure:"filters"`
 	RecordTimer time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`

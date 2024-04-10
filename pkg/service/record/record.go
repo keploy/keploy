@@ -19,16 +19,18 @@ type recorder struct {
 	logger          *zap.Logger
 	testDB          TestDB
 	mockDB          MockDB
+	configDB        ConfigDB
 	telemetry       Telemetry
 	instrumentation Instrumentation
 	config          config.Config
 }
 
-func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, config config.Config) Service {
+func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, configDB ConfigDB, telemetry Telemetry, instrumentation Instrumentation, config config.Config) Service {
 	return &recorder{
 		logger:          logger,
 		testDB:          testDB,
 		mockDB:          mockDB,
+		configDB:        configDB,
 		telemetry:       telemetry,
 		instrumentation: instrumentation,
 		config:          config,
@@ -180,6 +182,14 @@ func (r *recorder) Start(ctx context.Context) error {
 		}
 		return nil
 	})
+
+	testSetConfig := config.TestSetConfig{Cmd: r.config.Command}
+	err = r.configDB.InsertConfig(ctx, newTestSetID, testSetConfig)
+	if err != nil {
+		stopReason = "failed to insert test set config into db"
+		utils.LogError(r.logger, err, stopReason)
+		return fmt.Errorf(stopReason)
+	}
 
 	// running the user application
 	runAppErrGrp.Go(func() error {

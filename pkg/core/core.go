@@ -44,13 +44,27 @@ func (c *Core) Setup(ctx context.Context, cmd string, opts models.SetupOptions) 
 		DockerDelay:   opts.DockerDelay,
 	})
 	c.apps.Store(id, a)
-
 	err := a.Setup(ctx)
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to setup app")
 		return 0, err
 	}
 	return id, nil
+}
+
+func (c *Core) UpdateAppInfo(ctx context.Context, id uint64, cmd string, opts models.SetupOptions) error {
+	a := app.NewApp(c.logger, id, cmd, app.Options{
+		DockerNetwork: opts.DockerNetwork,
+		Container:     opts.Container,
+		DockerDelay:   opts.DockerDelay,
+	})
+	c.apps.Store(id, a)
+	err := a.Setup(ctx)
+	if err != nil {
+		utils.LogError(c.logger, err, "failed to setup app")
+		return err
+	}
+	return nil
 }
 
 func (c *Core) getApp(id uint64) (*app.App, error) {
