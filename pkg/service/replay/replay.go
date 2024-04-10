@@ -190,6 +190,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 			}
 			appCtx, appCtxCancel = context.WithCancel(ctx)
 			runAppErrGrp, _ := errgroup.WithContext(appCtx)
+
+			defer func() {
+				if appCtxCancel != nil {
+					appCtxCancel()
+				}
+			}()
+
 			runAppErrGrp.Go(func() error {
 				defer utils.Recover(r.logger)
 				appErr = r.RunApplication(appCtx, appID, models.RunOptions{})
@@ -206,8 +213,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if total != 0 && testSetStatus != models.TestSetStatusUserAbort {
 			verdict := TestReportVerdict{
 				total:  total,
-				failed: passed,
-				passed: failed,
+				failed: failed,
+				passed: passed,
 				status: testSetStatus == models.TestSetStatusPassed,
 			}
 

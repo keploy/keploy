@@ -2,7 +2,6 @@ package mongo
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -56,8 +55,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				readRequestDelay = time.Since(started)
 			}
 			if len(reqBuf) == 0 {
-				errCh <- errors.New("the request buffer is empty")
-				return
+				continue
 			}
 			logger.Debug(fmt.Sprintf("the loop starts with the time delay: %v", time.Since(startedDecoding)))
 			opReq, requestHeader, mongoRequest, err := Decode(reqBuf, logger)
