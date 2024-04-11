@@ -427,9 +427,6 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 
 	select {
 	case err := <-errCh:
-		if a.containerCreated {
-			a.removeAppContainers()
-		}
 		if err != nil && errors.Is(err, context.Canceled) {
 			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 		}
@@ -494,6 +491,9 @@ func (a *App) run(ctx context.Context) models.AppError {
 	}
 
 	err = cmd.Wait()
+	if a.containerCreated && cmd.ProcessState.Exited() {
+		a.removeAppContainers()
+	}
 	select {
 	case <-ctx.Done():
 		a.logger.Debug("context cancelled, error while waiting for the app to exit", zap.Error(ctx.Err()))
