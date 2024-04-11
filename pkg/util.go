@@ -82,6 +82,9 @@ func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logge
 	// Creating the client and disabling redirects
 	var client *http.Client
 
+	_, hasAcceptEncoding := req.Header["Accept-Encoding"]
+	disableCompression := !hasAcceptEncoding
+
 	keepAlive, ok := req.Header["Connection"]
 	if ok && strings.EqualFold(keepAlive[0], "keep-alive") {
 		logger.Debug("simulating request with conn:keep-alive")
@@ -89,6 +92,9 @@ func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logge
 			Timeout: time.Second * time.Duration(apiTimeout),
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
+			},
+			Transport: &http.Transport{
+				DisableCompression: disableCompression,
 			},
 		}
 	} else if ok && strings.EqualFold(keepAlive[0], "close") {
@@ -99,7 +105,8 @@ func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logge
 				return http.ErrUseLastResponse
 			},
 			Transport: &http.Transport{
-				DisableKeepAlives: true,
+				DisableKeepAlives:  true,
+				DisableCompression: disableCompression,
 			},
 		}
 	} else {
@@ -110,8 +117,9 @@ func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logge
 				return http.ErrUseLastResponse
 			},
 			Transport: &http.Transport{
-				DisableKeepAlives: false,
-				MaxIdleConns:      1,
+				DisableKeepAlives:  false,
+				MaxIdleConns:       1,
+				DisableCompression: disableCompression,
 			},
 		}
 	}
