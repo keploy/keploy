@@ -513,11 +513,12 @@ func GetAbsPath(path string) (string, error) {
 // makeDirectory creates a directory if not exists with all user access
 func makeDirectory(path string) error {
 	oldUmask := syscall.Umask(0)
+	defer syscall.Umask(oldUmask)
 	err := os.MkdirAll(path, 0777)
 	if err != nil {
 		return err
 	}
-	syscall.Umask(oldUmask)
+
 	return nil
 }
 
