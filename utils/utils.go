@@ -518,7 +518,6 @@ func makeDirectory(path string) error {
 	if err != nil {
 		return err
 	}
-
 	return nil
 }
 
