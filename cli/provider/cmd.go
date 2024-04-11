@@ -284,7 +284,6 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 		}
 	}
 	if !c.cfg.EnableANSIColor {
-		c.logger.Info("Color encoding is disabled")
 		logger, err := log.ChangeColorEncoding()
 		*c.logger = *logger
 		if err != nil {
@@ -292,6 +291,7 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+		c.logger.Info("Color encoding is disabled")
 	}
 
 	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", c.cfg))
