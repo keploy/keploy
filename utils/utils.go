@@ -380,37 +380,6 @@ const (
 	Native        CmdType = "native"
 )
 
-type RecordFlags struct {
-	Path             string
-	Command          string
-	ContainerName    string
-	Proxyport        uint32
-	NetworkName      string
-	Delay            uint64
-	BuildDelay       time.Duration
-	PassThroughPorts []uint
-	ConfigPath       string
-	EnableTele       bool
-}
-
-type TestFlags struct {
-	Path               string
-	Proxyport          uint32
-	Command            string
-	Testsets           []string
-	ContainerName      string
-	NetworkName        string
-	Delay              uint64
-	BuildDelay         time.Duration
-	APITimeout         uint64
-	PassThroughPorts   []uint
-	ConfigPath         string
-	MongoPassword      string
-	CoverageReportPath string
-	EnableTele         bool
-	WithCoverage       bool
-}
-
 func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 	// Get the name of the operating system.
 	osName := runtime.GOOS
@@ -532,6 +501,68 @@ func SentryInit(logger *zap.Logger, dsn string) {
 //
 //	return os.Getenv("HOME") + configFolder
 //}
+
+func GetAbsPath(path string) (string, error) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return absPath, nil
+}
+
+// makeDirectory creates a directory if not exists with all user access
+func makeDirectory(path string) error {
+	oldUmask := syscall.Umask(0)
+	err := os.MkdirAll(path, 0777)
+	if err != nil {
+		return err
+	}
+	syscall.Umask(oldUmask)
+	return nil
+}
+
+// SetCoveragePath takes a goCovPath and sets the coverage path accordingly.
+// It returns an error if the path is a file or if the path does not exist.
+func SetCoveragePath(logger *zap.Logger, goCovPath string) (string, error) {
+	if goCovPath == "" {
+		// Calculate the current path and create a coverage-reports directory
+		currentPath, err := GetAbsPath("")
+		if err != nil {
+			LogError(logger, err, "failed to get the current working directory")
+			return "", err
+		}
+		goCovPath = currentPath + "/coverage-reports"
+		if err := makeDirectory(goCovPath); err != nil {
+			LogError(logger, err, "failed to create coverage-reports directory", zap.String("CoverageReportPath", goCovPath))
+			return "", err
+		}
+		return goCovPath, nil
+	}
+
+	goCovPath, err := GetAbsPath(goCovPath)
+	if err != nil {
+		LogError(logger, err, "failed to get the absolute path for the coverage report path", zap.String("CoverageReportPath", goCovPath))
+		return "", err
+	}
+	// Check if the path is a directory
+	dirInfo, err := os.Stat(goCovPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			LogError(logger, err, "the provided path does not exist", zap.String("CoverageReportPath", goCovPath))
+			return "", err
+		}
+		LogError(logger, err, "failed to check the coverage report path", zap.String("CoverageReportPath", goCovPath))
+		return "", err
+	}
+	if !dirInfo.IsDir() {
+		msg := "the coverage report path is not a directory. Please provide a valid path to a directory for go coverage reports"
+
+		LogError(logger, nil, msg, zap.String("CoverageReportPath", goCovPath))
+		return "", errors.New("the path provided is not a directory")
+	}
+
+	return goCovPath, nil
+}
 
 // InterruptProcessTree interrupts an entire process tree using the given signal
 func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) error {
