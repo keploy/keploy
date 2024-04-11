@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -82,6 +83,23 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 		return nil, fmt.Errorf("failed to build config for logger: %v", err)
 	}
 	return logger, nil
+}
+
+func AddMode(mode string) (*zap.Logger, error) {
+	// Get the current logger configuration
+	cfg := logCfg
+	// Update the time encoder with the new values
+	cfg.EncoderConfig.EncodeTime = func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
+		emoji := "\U0001F430"
+		mode := fmt.Sprintf("Keploy(%s):", mode)
+		enc.AppendString(emoji + " " + mode + " " + t.Format(time.RFC3339) + " ")
+	}
+	// Rebuild the logger with the updated configuration
+	newLogger, err := cfg.Build()
+	if err != nil {
+		return nil, fmt.Errorf("failed to add mode to logger: %v", err)
+	}
+	return newLogger, nil
 }
 
 func ChangeColorEncoding() (*zap.Logger, error) {

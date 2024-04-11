@@ -20,9 +20,10 @@ type Config struct {
 	Record                Record        `json:"record" yaml:"record" mapstructure:"record"`
 	ConfigPath            string        `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
 	BypassRules           []BypassRule  `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
+	EnableTesting         bool          `json:"enableTesting" yaml:"enableTesting" mapstructure:"enableTesting"`
+	GenerateGithubActions bool          `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`
 	KeployContainer       string        `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
 	KeployNetwork         string        `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
-	GenerateGithubActions bool          `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`
 }
 
 type Record struct {
