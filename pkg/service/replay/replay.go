@@ -203,7 +203,7 @@ func (r *Replayer) BootReplay(ctx context.Context) (string, uint64, context.Canc
 	default:
 		hookCtx := context.WithoutCancel(ctx)
 		hookCtx, cancel = context.WithCancel(hookCtx)
-		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_TEST})
+		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_TEST, EnableTesting: r.config.EnableTesting})
 		if err != nil {
 			cancel()
 			if errors.Is(err, context.Canceled) {
@@ -492,6 +492,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		} else {
 			utils.LogError(r.logger, nil, "test result is nil")
 			break
+		}
+
+		// We need to sleep for a second to avoid mismatching of mocks during keploy testing via test-bench
+		if r.config.EnableTesting {
+			r.logger.Debug("sleeping for a second to avoid mismatching of mocks during keploy testing via test-bench")
+			time.Sleep(time.Second)
 		}
 	}
 
