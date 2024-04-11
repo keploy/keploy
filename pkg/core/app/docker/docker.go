@@ -141,7 +141,7 @@ func (idc *Impl) StopAndRemoveDockerContainer() error {
 	return idc.StopAndRemoveByID(containerID)
 }
 
-// StopAndRemoveByID will stop and remove the docker container using containerID
+// StopAndRemoveByID will stop and remove the docker container using ContainerID
 func (idc *Impl) StopAndRemoveByID(containerID string) error {
 	dockerClient := idc
 
