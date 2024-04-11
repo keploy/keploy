@@ -384,11 +384,6 @@ func (a *App) removeAppContainers() {
 				}
 			}
 		}
-	} else if a.kind == utils.Docker {
-		composeErr := a.docker.StopAndRemoveByID(a.container)
-		if composeErr != nil {
-			utils.LogError(a.logger, composeErr, fmt.Sprintf("Failed to stop/remove the docker container %s. Please stop and remove the application container manually.", a.container))
-		}
 	}
 }
 
