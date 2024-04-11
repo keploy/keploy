@@ -3,9 +3,10 @@ package mysql
 import (
 	"context"
 	"errors"
-	"golang.org/x/sync/errgroup"
 	"net"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
@@ -30,7 +31,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 
 	//for keeping conn alive
 	g.Go(func() error {
-		defer utils.Recover(logger)
+		defer utils.RecoverFromParser(logger, clientConn, destConn)
 		defer close(errCh)
 		for {
 			lastCommand = 0x00 //resetting last command for new loop

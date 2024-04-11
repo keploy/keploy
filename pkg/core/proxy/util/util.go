@@ -113,7 +113,7 @@ func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byt
 	for {
 		// Start a goroutine to perform the read operation
 		g.Go(func() error {
-			defer utils.Recover(logger)
+			defer utils.RecoverFromParser(logger, nil, nil)
 			buf := make([]byte, 1024)
 			n, err := reader.Read(buf)
 			if ctx.Err() != nil {
@@ -182,7 +182,7 @@ func ReadRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader
 	for numBytes > 0 {
 		// Start a goroutine to perform the read operation
 		g.Go(func() error {
-			defer utils.Recover(logger)
+			defer utils.RecoverFromParser(logger, nil, nil)
 			buf := make([]byte, numBytes)
 			n, err := reader.Read(buf)
 			if ctx.Err() != nil {
@@ -249,12 +249,10 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 
 	// channels for writing messages from proxy to destination or client
 	destBufferChannel := make(chan []byte)
-	errChannel := make(chan error)
-	//TODO:Should I even close this error channel here?
-	defer close(errChannel)
+	errChannel := make(chan error, 1)
 
 	go func() {
-		defer utils.Recover(logger)
+		defer utils.RecoverFromParser(logger, clientConn, nil)
 		defer close(destBufferChannel)
 		defer close(errChannel)
 		defer func(destConn net.Conn) {

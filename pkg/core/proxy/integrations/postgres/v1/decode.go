@@ -22,6 +22,7 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 	errCh := make(chan error, 1)
 
 	go func(errCh chan error, pgRequests [][]byte) {
+		defer utils.RecoverFromParser(logger, clientConn, nil)
 		// close should be called from the producer of the channel
 		defer close(errCh)
 		for {

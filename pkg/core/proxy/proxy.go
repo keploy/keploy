@@ -101,7 +101,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 
 	// start the proxy server
 	g.Go(func() error {
-		utils.Recover(p.logger)
+		defer utils.Recover(p.logger)
 		err := p.start(ctx)
 		if err != nil {
 			utils.LogError(p.logger, err, "error while running the proxy server")
@@ -122,9 +122,10 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 	// start the TCP DNS server
 	p.logger.Debug("Starting Tcp Dns Server for handling Dns queries over TCP")
 	g.Go(func() error {
-		utils.Recover(p.logger)
+		defer utils.Recover(p.logger)
 		errCh := make(chan error, 1)
 		go func(errCh chan error) {
+			defer utils.Recover(p.logger)
 			err := p.startTCPDNSServer(ctx)
 			if err != nil {
 				errCh <- err
@@ -147,9 +148,10 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 	// start the UDP DNS server
 	p.logger.Debug("Starting Udp Dns Server for handling Dns queries over UDP")
 	g.Go(func() error {
-		utils.Recover(p.logger)
+		defer utils.Recover(p.logger)
 		errCh := make(chan error, 1)
 		go func(errCh chan error) {
+			defer utils.Recover(p.logger)
 			err := p.startUDPDNSServer(ctx)
 			if err != nil {
 				errCh <- err
@@ -223,6 +225,7 @@ func (p *Proxy) start(ctx context.Context) error {
 		clientConnCh := make(chan net.Conn, 1)
 		errCh := make(chan error, 1)
 		go func() {
+			defer utils.Recover(p.logger)
 			conn, err := listener.Accept()
 			if err != nil {
 				if strings.Contains(err.Error(), "use of closed network connection") {
@@ -243,7 +246,7 @@ func (p *Proxy) start(ctx context.Context) error {
 		// handle the client connection
 		case clientConn := <-clientConnCh:
 			clientConnErrGrp.Go(func() error {
-				defer utils.Recover(p.logger)
+				defer utils.RecoverFromParser(p.logger, clientConn, nil)
 				err := p.handleConnection(clientConnCtx, clientConn)
 				if err != nil && err != io.EOF {
 					utils.LogError(p.logger, err, "failed to handle the client connection")
@@ -318,7 +321,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		err := srcConn.Close()
 		if err != nil {
-			utils.LogError(p.logger, err, "failed to close the source connection")
+			utils.LogError(p.logger, err, "failed to close the source connection", zap.Any("clientConnID", clientConnID))
 			return
 		}
 

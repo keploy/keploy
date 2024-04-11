@@ -31,6 +31,7 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 	errCh := make(chan error, 1)
 
 	go func(errCh chan error, reqBuf []byte, opts models.OutgoingOptions) {
+		defer utils.RecoverFromParser(logger, clientConn, nil)
 		defer close(errCh)
 		for {
 			//Check if the expected header is present
@@ -109,6 +110,8 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 					errCh <- err
 					return
 				}
+				errCh <- nil
+				return
 			}
 
 			statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", stub.Spec.HTTPReq.ProtoMajor, stub.Spec.HTTPReq.ProtoMinor, stub.Spec.HTTPResp.StatusCode, http.StatusText(stub.Spec.HTTPResp.StatusCode))

@@ -27,7 +27,7 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 	}
 
 	g.Go(func() error {
-		defer utils.Recover(logger)
+		defer utils.RecoverFromParser(logger, clientConn, destConn)
 		defer close(errCh)
 		for {
 			var err error

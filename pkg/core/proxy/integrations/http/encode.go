@@ -48,7 +48,7 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 
 	//for keeping conn alive
 	g.Go(func() error {
-		defer utils.Recover(logger)
+		defer utils.RecoverFromParser(logger, clientConn, destConn)
 		defer close(errCh)
 		for {
 			//check if expect : 100-continue header is present

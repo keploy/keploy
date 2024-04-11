@@ -239,6 +239,18 @@ func attachLogFileToSentry(logger *zap.Logger, logFilePath string) error {
 	return nil
 }
 
+// handleRecovery handles the common logic for recovering from a panic.
+func handleRecovery(logger *zap.Logger, r interface{}, errMsg string) {
+	err := attachLogFileToSentry(logger, "./keploy-logs.txt")
+	if err != nil {
+		LogError(logger, err, "failed to attach log file to sentry")
+	}
+	sentry.CaptureException(errors.New(fmt.Sprint(r)))
+	// Get the stack trace
+	stackTrace := debug.Stack()
+	LogError(logger, nil, errMsg, zap.String("stack trace", string(stackTrace)))
+}
+
 // Recover recovers from a panic and logs the stack trace to Sentry.
 // It also stops the global context.
 func Recover(logger *zap.Logger) {
@@ -248,20 +260,48 @@ func Recover(logger *zap.Logger) {
 	}
 	sentry.Flush(2 * time.Second)
 	if r := recover(); r != nil {
-		err := attachLogFileToSentry(logger, "./keploy-logs.txt")
-		if err != nil {
-			LogError(logger, err, "failed to attach log file to sentry")
-		}
-		sentry.CaptureException(errors.New(fmt.Sprint(r)))
-		// Get the stack trace
-		stackTrace := debug.Stack()
-		LogError(logger, nil, "Recovered from panic", zap.String("stack trace", string(stackTrace)))
-		//stopping the global context
-		err = Stop(logger, fmt.Sprintf("Recovered from: %s", r))
+		handleRecovery(logger, r, "Recovered from panic")
+		err := Stop(logger, fmt.Sprintf("Recovered from: %s", r))
 		if err != nil {
 			LogError(logger, err, "failed to stop the global context")
-			//return
 		}
+		sentry.Flush(2 * time.Second)
+	}
+}
+
+// RecoverFromParser recovers from a panic and logs the stack trace to Sentry.
+// It also closes the client and destination connection.
+func RecoverFromParser(logger *zap.Logger, client, dest net.Conn) {
+	if logger == nil {
+		fmt.Println(Emoji + "Failed to recover from panic. Logger is nil.")
+		return
+	}
+
+	sentry.Flush(2 * time.Second)
+	if r := recover(); r != nil {
+		logger.Error("Recovered from panic in parser, closing active connections")
+		if client != nil {
+			err := client.Close()
+			if err != nil {
+				// Use string matching as a last resort to check for the specific error
+				if !strings.Contains(err.Error(), "use of closed network connection") {
+					// Log other errors
+					LogError(logger, err, "failed to close the client connection")
+				}
+			}
+		}
+
+		if dest != nil {
+			err := dest.Close()
+			if err != nil {
+				// Use string matching as a last resort to check for the specific error
+				if !strings.Contains(err.Error(), "use of closed network connection") {
+					// Log other errors
+					LogError(logger, err, "failed to close the destination connection")
+				}
+			}
+		}
+		handleRecovery(logger, r, "Recovered from panic")
 		sentry.Flush(time.Second * 2)
 	}
 }

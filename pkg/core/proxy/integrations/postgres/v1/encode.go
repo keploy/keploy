@@ -81,7 +81,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 
 	// read requests from client
 	g.Go(func() error {
-		defer utils.Recover(logger)
+		defer utils.RecoverFromParser(logger, clientConn, destConn)
 		defer close(clientBuffChan)
 		pUtil.ReadBuffConn(ctx, logger, clientConn, clientBuffChan, errChan)
 		return nil
@@ -89,13 +89,14 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 
 	// read responses from destination
 	g.Go(func() error {
-		defer utils.Recover(logger)
+		defer utils.RecoverFromParser(logger, clientConn, destConn)
 		defer close(destBuffChan)
 		pUtil.ReadBuffConn(ctx, logger, destConn, destBuffChan, errChan)
 		return nil
 	})
 
 	go func() {
+		defer utils.RecoverFromParser(logger, clientConn, destConn)
 		err := g.Wait()
 		if err != nil {
 			logger.Info("error group is returning an error", zap.Error(err))

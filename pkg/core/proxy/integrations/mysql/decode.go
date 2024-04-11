@@ -33,7 +33,7 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 	errCh := make(chan error, 1)
 
 	go func(errCh chan error, configMocks []*models.Mock, tcsMocks []*models.Mock, prevRequest string, requestBuffers [][]byte) {
-		defer utils.Recover(logger)
+		defer utils.RecoverFromParser(logger, clientConn, nil)
 		defer close(errCh)
 		for {
 			//log.Debug("Config and TCS Mocks", zap.Any("configMocks", configMocks), zap.Any("tcsMocks", tcsMocks))
