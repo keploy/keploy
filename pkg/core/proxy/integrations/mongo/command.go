@@ -1,6 +1,8 @@
 // Package mongo provides functionality for working with MongoDB outgoing calls.
 package mongo
 
+// This file contains code from the coinbase mongobetween
+// https://github.com/coinbase/mongobetween/blob/1034c5a0c3f10cb1dd84af2981bc55ea1d3b45c0/mongo/command.go#L10
 import (
 	"go.mongodb.org/mongo-driver/x/bsonx/bsoncore"
 )

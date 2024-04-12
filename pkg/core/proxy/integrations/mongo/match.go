@@ -15,6 +15,7 @@ import (
 	"go.uber.org/zap"
 )
 
+// match mathces and returns the best matching mock for the incoming mongo requests.
 func match(ctx context.Context, logger *zap.Logger, mongoRequests []models.MongoRequest, mockDb integrations.MockMemDb) (bool, *models.Mock, error) {
 	for {
 		select {
@@ -27,15 +28,18 @@ func match(ctx context.Context, logger *zap.Logger, mongoRequests []models.Mongo
 			}
 			maxMatchScore := 0.0
 			bestMatchIndex := -1
+			// iterate over the tcsMocks and compare the incoming mongo requests with the recorded mongo requests.
 			for tcsIndx, tcsMock := range tcsMocks {
 				if ctx.Err() != nil {
 					return false, nil, ctx.Err()
 				}
+				// check for the number of chunks in the incoming mongo requests and the recorded mongo requests.
 				if len(tcsMock.Spec.MongoRequests) == len(mongoRequests) {
 					for i, req := range tcsMock.Spec.MongoRequests {
 						if ctx.Err() != nil {
 							return false, nil, ctx.Err()
 						}
+						// check for the opcode of the incoming mongo requests and the recorded mongo requests.
 						if len(tcsMock.Spec.MongoRequests) != len(mongoRequests) || req.Header.Opcode != mongoRequests[i].Header.Opcode {
 							logger.Debug("the recieved request is not of same type with the tcmocks", zap.Any("at index", tcsIndx))
 							continue
