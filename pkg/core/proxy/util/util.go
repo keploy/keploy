@@ -4,6 +4,7 @@ package util
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -234,11 +235,29 @@ func ReadRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader
 // PassThrough function is used to pass the network traffic to the destination connection.
 // It also closes the destination connection if the function returns an error.
 func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, requestBuffer [][]byte) ([]byte, error) {
+	logger.Debug("passing through the network traffic to the destination server", zap.Any("Destination Addr", dstCfg.Addr))
 	// making destConn
-	destConn, err := net.Dial("tcp", dstCfg.Addr)
-	if err != nil {
-		utils.LogError(logger, err, "failed to dial the destination server")
-		return nil, err
+	var destConn net.Conn
+	var err error
+	if dstCfg.TLSCfg != nil {
+		logger.Debug("trying to establish a TLS connection with the destination server", zap.Any("Destination Addr", dstCfg.Addr))
+		dialer := &net.Dialer{
+			Timeout: 4 * time.Second,
+		}
+		destConn, err = tls.DialWithDialer(dialer, "tcp", dstCfg.Addr, dstCfg.TLSCfg)
+		if err != nil {
+			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("server address", dstCfg.Addr))
+			return nil, err
+		}
+		logger.Debug("TLS connection established with the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
+	} else {
+		logger.Debug("trying to establish a connection with the destination server", zap.Any("Destination Addr", dstCfg.Addr))
+		destConn, err = net.Dial("tcp", dstCfg.Addr)
+		if err != nil {
+			utils.LogError(logger, err, "failed to dial the destination server")
+			return nil, err
+		}
+		logger.Debug("connection established with the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 	}
 
 	logger.Debug("trying to forward requests to target", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
