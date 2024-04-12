@@ -202,11 +202,10 @@ func (r *Recorder) Start(ctx context.Context) error {
 		appErrChan <- runAppError
 		return nil
 	})
-	time.Sleep(2 * time.Second) // Example sleep, adjust according to your application's startup time
+	time.Sleep(2 * time.Second)
 	go func() {
 		if len(r.config.ReRecord) != 0 {
 			err = r.ReRecord(reRecordCtx)
-			time.Sleep(5 * time.Second) // Example sleep, adjust according to your application's startup time
 			reRecordCancel()
 
 		}
