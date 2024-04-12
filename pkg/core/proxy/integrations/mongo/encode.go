@@ -4,25 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"golang.org/x/sync/errgroup"
 	"io"
 	"net"
 	"time"
 
-	"go.keploy.io/server/v2/pkg/core/proxy/util"
+	"golang.org/x/sync/errgroup"
+
+	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
-func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
-	//closing the destination conn
-	defer func(destConn net.Conn) {
-		err := destConn.Close()
-		if err != nil {
-			utils.LogError(logger, err, "failed to close the destination connection")
-		}
-	}(destConn)
+func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
 
 	errCh := make(chan error, 1)
 
@@ -33,7 +27,7 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 	}
 
 	g.Go(func() error {
-		defer utils.Recover(logger)
+		defer pUtil.Recover(logger, clientConn, destConn)
 		defer close(errCh)
 		for {
 			var err error
@@ -44,7 +38,7 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			if string(reqBuf) == "read form client conn" {
 				// lstr := ""
 				started := time.Now()
-				reqBuf, err = util.ReadBytes(ctx, logger, clientConn)
+				reqBuf, err = pUtil.ReadBytes(ctx, logger, clientConn)
 				logger.Debug("reading from the mongo conn", zap.Any("", string(reqBuf)))
 				if err != nil {
 					if err == io.EOF {
@@ -91,7 +85,7 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			// logStr += fmt.Sprintln("after writing the request to the destination: ", time.Since(started))
 			if val, ok := mongoRequest.(*models.MongoOpMessage); ok && hasSecondSetBit(val.FlagBits) {
 				for {
-					requestBuffer1, err := util.ReadBytes(ctx, logger, clientConn)
+					requestBuffer1, err := pUtil.ReadBytes(ctx, logger, clientConn)
 
 					// logStr += tmpStr
 					if err != nil {
@@ -144,7 +138,7 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			// tmpStr := ""
 			reqTimestampMock := time.Now()
 			started := time.Now()
-			responsePckLengthBuffer, err := util.ReadRequiredBytes(ctx, logger, destConn, 4)
+			responsePckLengthBuffer, err := pUtil.ReadRequiredBytes(ctx, logger, destConn, 4)
 			if err != nil {
 				if err == io.EOF {
 					logger.Debug("recieved response buffer is empty in record mode for mongo call")
@@ -161,7 +155,7 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			pckLength := getPacketLength(responsePckLengthBuffer)
 			logger.Debug("received pck length ", zap.Any("packet length", pckLength))
 
-			responsePckDataBuffer, err := util.ReadRequiredBytes(ctx, logger, destConn, int(pckLength)-4)
+			responsePckDataBuffer, err := pUtil.ReadRequiredBytes(ctx, logger, destConn, int(pckLength)-4)
 
 			logger.Debug("recieved these packets", zap.Any("packets", responsePckDataBuffer))
 
@@ -207,10 +201,10 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			if val, ok := mongoResponse.(*models.MongoOpMessage); ok && hasSecondSetBit(val.FlagBits) {
 				for i := 0; ; i++ {
 					if i == 0 && isHeartBeat(logger, opReq, *mongoRequests[0].Header, mongoRequests[0].Message) {
-						recordMessage(ctx, logger, mongoRequests, mongoResponses, opReq, reqTimestampMock, mocks)
+						m.recordMessage(ctx, logger, mongoRequests, mongoResponses, opReq, reqTimestampMock, mocks)
 					}
 					started = time.Now()
-					responseBuffer, err = util.ReadBytes(ctx, logger, destConn)
+					responseBuffer, err = pUtil.ReadBytes(ctx, logger, destConn)
 					// logStr += tmpStr
 					if err != nil {
 						if err == io.EOF {
@@ -262,7 +256,7 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				}
 			}
 
-			recordMessage(ctx, logger, mongoRequests, mongoResponses, opReq, reqTimestampMock, mocks)
+			m.recordMessage(ctx, logger, mongoRequests, mongoResponses, opReq, reqTimestampMock, mocks)
 			reqBuf = []byte("read form client conn")
 		}
 	})
@@ -271,6 +265,9 @@ func encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 	case <-ctx.Done():
 		return ctx.Err()
 	case err := <-errCh:
+		if err == io.EOF {
+			return nil
+		}
 		return err
 	}
 }

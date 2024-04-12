@@ -14,6 +14,7 @@ type Hooks interface {
 	AppInfo
 	DestInfo
 	OutgoingInfo
+	TestBenchInfo
 	Load(ctx context.Context, id uint64, cfg HookCfg) error
 	Record(ctx context.Context, id uint64) (<-chan *models.TestCase, error)
 }
@@ -38,6 +39,7 @@ type Proxy interface {
 	Record(ctx context.Context, id uint64, mocks chan<- *models.Mock, opts models.OutgoingOptions) error
 	Mock(ctx context.Context, id uint64, opts models.OutgoingOptions) error
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
+	GetConsumedMocks(ctx context.Context, id uint64) ([]string, error)
 }
 
 type ProxyOptions struct {
@@ -55,6 +57,18 @@ type DestInfo interface {
 type AppInfo interface {
 	SendInode(ctx context.Context, id uint64, inode uint64) error
 }
+
+// For keploy test bench
+
+type Tester interface {
+	Setup(ctx context.Context, opts models.TestingOptions) error
+}
+type TestBenchInfo interface {
+	SendKeployPids(key models.ModeKey, pid uint32) error
+	SendKeployPorts(key models.ModeKey, port uint32) error
+}
+
+// ----------------------
 
 type OutgoingInfo interface {
 	PassThroughPortsInKernel(ctx context.Context, id uint64, ports []uint) error

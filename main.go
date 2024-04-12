@@ -8,9 +8,12 @@ import (
 
 	"go.keploy.io/server/v2/cli"
 	"go.keploy.io/server/v2/cli/provider"
+	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb"
 	"go.keploy.io/server/v2/utils"
 	"go.keploy.io/server/v2/utils/log"
+	//pprof for debugging
+	// _ "net/http/pprof"
 )
 
 // version is the version of the server and will be injected during build by ldflags, same with dsn
@@ -32,6 +35,12 @@ const logo string = `
 `
 
 func main() {
+
+	// Uncomment the following code to enable pprof for debugging
+	// go func() {
+	// 	fmt.Println("Starting pprof server for debugging...")
+	// 	http.ListenAndServe("localhost:6060", nil)
+	// }()
 	printLogo()
 	ctx := utils.NewCtx()
 	start(ctx)
@@ -45,8 +54,6 @@ func printLogo() {
 	if binaryToDocker := os.Getenv("BINARY_TO_DOCKER"); binaryToDocker != "true" {
 		fmt.Println(logo, " ")
 		fmt.Printf("version: %v\n\n", version)
-	} else {
-		fmt.Println("Starting keploy in docker environment.")
 	}
 }
 
@@ -63,8 +70,9 @@ func start(ctx context.Context) {
 		utils.SentryInit(logger, dsn)
 		//logger = utils.ModifyToSentryLogger(ctx, logger, sentry.CurrentHub().Client(), configDb)
 	}
-	svcProvider := provider.NewServiceProvider(logger, configDb)
-	cmdConfigurator := provider.NewCmdConfigurator(logger)
+	conf := config.New()
+	svcProvider := provider.NewServiceProvider(logger, configDb, conf)
+	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

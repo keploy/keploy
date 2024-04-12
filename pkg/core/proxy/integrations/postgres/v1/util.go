@@ -1,11 +1,16 @@
 package v1
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"strconv"
+	"time"
 
 	"github.com/jackc/pgproto3/v2"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.uber.org/zap"
 )
 
 func postgresDecoderFrontend(response models.Frontend) ([]byte, error) {
@@ -13,7 +18,7 @@ func postgresDecoderFrontend(response models.Frontend) ([]byte, error) {
 	var resbuffer []byte
 	// list of packets available in the buffer
 	packets := response.PacketTypes
-	var cc, dtr, ps = 0, 0, 0
+	var cc, dtr, ps int = 0, 0, 0
 	for _, packet := range packets {
 		var msg pgproto3.BackendMessage
 
@@ -33,8 +38,13 @@ func postgresDecoderFrontend(response models.Frontend) ([]byte, error) {
 		case string('c'):
 			msg = &pgproto3.CopyDone{}
 		case string('C'):
+			if len(response.CommandCompletes) == 0 {
+				cc++
+				continue
+			}
 			msg = &pgproto3.CommandComplete{
-				CommandTag: response.CommandCompletes[cc].CommandTag,
+				CommandTag:     response.CommandCompletes[cc].CommandTag,
+				CommandTagType: response.CommandCompletes[cc].CommandTagType,
 			}
 			cc++
 		case string('d'):
@@ -168,7 +178,6 @@ func postgresDecoderFrontend(response models.Frontend) ([]byte, error) {
 		}
 
 		encoded := msg.Encode([]byte{})
-		// fmt.Println("Encoded packet ", packet, " is ", i, "-----", encoded)
 		resbuffer = append(resbuffer, encoded...)
 	}
 	return resbuffer, nil
@@ -284,4 +293,211 @@ func postgresDecoderBackend(request models.Backend) ([]byte, error) {
 		reqbuffer = append(reqbuffer, encoded...)
 	}
 	return reqbuffer, nil
+}
+
+func checkIfps(array []string) bool {
+	n := len(array)
+	if n%2 != 0 {
+		// If the array length is odd, it cannot match the pattern
+		return false
+	}
+
+	for i := 0; i < n; i += 2 {
+		// Check if consecutive elements are "B" and "E"
+		if array[i] != "B" || array[i+1] != "E" {
+			return false
+		}
+	}
+
+	return true
+}
+
+func sliceCommandTag(mock *models.Mock, logger *zap.Logger, prep []QueryData, actualPgReq *models.Backend, psCase int) *models.Mock {
+
+	logger.Debug("Inside Slice Command Tag for ", zap.Int("psCase", psCase))
+	logger.Debug("Prep Query Data", zap.Any("prep", prep))
+	switch psCase {
+	case 1:
+
+		copyMock := *mock
+		// fmt.Println("Inside Slice Command Tag for ", psCase)
+		mockPackets := copyMock.Spec.PostgresResponses[0].PacketTypes
+		for idx, v := range mockPackets {
+			if v == "1" {
+				mockPackets = append(mockPackets[:idx], mockPackets[idx+1:]...)
+			}
+		}
+		copyMock.Spec.PostgresResponses[0].Payload = ""
+		copyMock.Spec.PostgresResponses[0].PacketTypes = mockPackets
+
+		return &copyMock
+	case 2:
+		// ["2", D, C, Z]
+		copyMock := *mock
+		// fmt.Println("Inside Slice Command Tag for ", psCase)
+		mockPackets := copyMock.Spec.PostgresResponses[0].PacketTypes
+		for idx, v := range mockPackets {
+			if v == "1" || v == "T" {
+				mockPackets = append(mockPackets[:idx], mockPackets[idx+1:]...)
+			}
+		}
+		copyMock.Spec.PostgresResponses[0].Payload = ""
+		copyMock.Spec.PostgresResponses[0].PacketTypes = mockPackets
+		rsFormat := actualPgReq.Bind.ResultFormatCodes
+
+		for idx, datarow := range copyMock.Spec.PostgresResponses[0].DataRows {
+			for column, rowVal := range datarow.RowValues {
+				// fmt.Println("datarow.RowValues", len(datarow.RowValues))
+				if rsFormat[column] == 1 {
+					// datarows := make([]byte, 4)
+					newRow, _ := getChandedDataRow(rowVal)
+					// logger.Info("New Row Value", zap.String("newRow", newRow))
+					copyMock.Spec.PostgresResponses[0].DataRows[idx].RowValues[column] = newRow
+				}
+			}
+		}
+		return &copyMock
+	default:
+	}
+	return nil
+}
+
+func getChandedDataRow(input string) (string, error) {
+	// Convert input1 (integer input as string) to integer
+	buffer := make([]byte, 4)
+	if intValue, err := strconv.Atoi(input); err == nil {
+
+		binary.BigEndian.PutUint32(buffer, uint32(intValue))
+		return ("b64:" + util.EncodeBase64(buffer)), nil
+	} else if dateValue, err := time.Parse("2006-01-02", input); err == nil {
+		// Perform additional operations on the date
+		epoch := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+		difference := dateValue.Sub(epoch).Hours() / 24
+		// fmt.Printf("Difference in days from epoch: %.2f days\n", difference)
+		binary.BigEndian.PutUint32(buffer, uint32(difference))
+		return ("b64:" + util.EncodeBase64(buffer)), nil
+	}
+	return "b64:AAAAAA==", errors.New("Invalid input")
+
+}
+
+func decodePgRequest(buffer []byte, logger *zap.Logger) *models.Backend {
+
+	pg := NewBackend()
+
+	if !isStartupPacket(buffer) && len(buffer) > 5 {
+		bufferCopy := buffer
+		for i := 0; i < len(bufferCopy)-5; {
+			logger.Debug("Inside the if condition")
+			pg.BackendWrapper.MsgType = buffer[i]
+			pg.BackendWrapper.BodyLen = int(binary.BigEndian.Uint32(buffer[i+1:])) - 4
+			if len(buffer) < (i + pg.BackendWrapper.BodyLen + 5) {
+				logger.Debug("failed to translate the postgres request message due to shorter network packet buffer")
+				break
+			}
+			msg, err := pg.translateToReadableBackend(buffer[i:(i + pg.BackendWrapper.BodyLen + 5)])
+			if err != nil && buffer[i] != 112 {
+				logger.Debug("failed to translate the request message to readable", zap.Error(err))
+			}
+			if pg.BackendWrapper.MsgType == 'p' {
+				pg.BackendWrapper.PasswordMessage = *msg.(*pgproto3.PasswordMessage)
+			}
+
+			if pg.BackendWrapper.MsgType == 'P' {
+				pg.BackendWrapper.Parse = *msg.(*pgproto3.Parse)
+				pg.BackendWrapper.Parses = append(pg.BackendWrapper.Parses, pg.BackendWrapper.Parse)
+			}
+
+			if pg.BackendWrapper.MsgType == 'B' {
+				pg.BackendWrapper.Bind = *msg.(*pgproto3.Bind)
+				pg.BackendWrapper.Binds = append(pg.BackendWrapper.Binds, pg.BackendWrapper.Bind)
+			}
+
+			if pg.BackendWrapper.MsgType == 'E' {
+				pg.BackendWrapper.Execute = *msg.(*pgproto3.Execute)
+				pg.BackendWrapper.Executes = append(pg.BackendWrapper.Executes, pg.BackendWrapper.Execute)
+			}
+
+			pg.BackendWrapper.PacketTypes = append(pg.BackendWrapper.PacketTypes, string(pg.BackendWrapper.MsgType))
+
+			i += (5 + pg.BackendWrapper.BodyLen)
+		}
+
+		pgMock := &models.Backend{
+			PacketTypes: pg.BackendWrapper.PacketTypes,
+			Identfier:   "ClientRequest",
+			Length:      uint32(len(buffer)),
+			// Payload:             bufStr,
+			Bind:                pg.BackendWrapper.Bind,
+			Binds:               pg.BackendWrapper.Binds,
+			PasswordMessage:     pg.BackendWrapper.PasswordMessage,
+			CancelRequest:       pg.BackendWrapper.CancelRequest,
+			Close:               pg.BackendWrapper.Close,
+			CopyData:            pg.BackendWrapper.CopyData,
+			CopyDone:            pg.BackendWrapper.CopyDone,
+			CopyFail:            pg.BackendWrapper.CopyFail,
+			Describe:            pg.BackendWrapper.Describe,
+			Execute:             pg.BackendWrapper.Execute,
+			Executes:            pg.BackendWrapper.Executes,
+			Flush:               pg.BackendWrapper.Flush,
+			FunctionCall:        pg.BackendWrapper.FunctionCall,
+			GssEncRequest:       pg.BackendWrapper.GssEncRequest,
+			Parse:               pg.BackendWrapper.Parse,
+			Parses:              pg.BackendWrapper.Parses,
+			Query:               pg.BackendWrapper.Query,
+			SSlRequest:          pg.BackendWrapper.SSlRequest,
+			StartupMessage:      pg.BackendWrapper.StartupMessage,
+			SASLInitialResponse: pg.BackendWrapper.SASLInitialResponse,
+			SASLResponse:        pg.BackendWrapper.SASLResponse,
+			Sync:                pg.BackendWrapper.Sync,
+			Terminate:           pg.BackendWrapper.Terminate,
+			MsgType:             pg.BackendWrapper.MsgType,
+			AuthType:            pg.BackendWrapper.AuthType,
+		}
+		return pgMock
+	}
+
+	return nil
+}
+
+func mergePgRequests(requestBuffers [][]byte, logger *zap.Logger) [][]byte {
+	logger.Debug("MERGING REQUESTS")
+	// Check for PBDE first
+	var mergeBuff []byte
+	for _, v := range requestBuffers {
+		backend := decodePgRequest(v, logger)
+
+		if backend == nil {
+			logger.Debug("Rerurning nil while merging ")
+			break
+		}
+		buf, _ := postgresDecoderBackend(*backend)
+		mergeBuff = append(mergeBuff, buf...)
+	}
+	if len(mergeBuff) > 0 {
+		return [][]byte{mergeBuff}
+	}
+
+	return requestBuffers
+}
+
+func mergeMocks(pgmocks []models.Backend, logger *zap.Logger) []models.Backend {
+	logger.Debug("MERGING Mocks")
+	if len(pgmocks) == 0 {
+		return pgmocks
+	}
+	// Check for PBDE first
+	if len(pgmocks[0].PacketTypes) == 0 || pgmocks[0].PacketTypes[0] != "P" {
+		return pgmocks
+	}
+	var mergeBuff []byte
+	for _, v := range pgmocks {
+		buf, _ := postgresDecoderBackend(v)
+		mergeBuff = append(mergeBuff, buf...)
+	}
+	if len(mergeBuff) > 0 {
+		return []models.Backend{*decodePgRequest(mergeBuff, logger)}
+	}
+
+	return pgmocks
 }

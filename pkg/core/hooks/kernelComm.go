@@ -7,6 +7,7 @@ import (
 	"github.com/cilium/ebpf"
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/hooks/structs"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -174,3 +175,28 @@ func (h *Hooks) SendPassThroughPorts(filterPorts []uint) error {
 	}
 	return nil
 }
+
+// For keploy test bench
+// The below function is used to send the keploy record binary server port to the ebpf so that the flow first reaches to the keploy record proxy and then keploy test proxy
+
+// SendKeployPorts is used to send keploy recordServer(key-0) or testServer(key-1) Port to the ebpf program
+func (h *Hooks) SendKeployPorts(key models.ModeKey, port uint32) error {
+
+	err := h.tbenchFilterPort.Update(key, &port, ebpf.UpdateAny)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// SendKeployPids is used to send keploy recordServer(key-0) or testServer(key-1) Pid to the ebpf program
+func (h *Hooks) SendKeployPids(key models.ModeKey, pid uint32) error {
+
+	err := h.tbenchFilterPid.Update(key, &pid, ebpf.UpdateAny)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+//---------------------------

@@ -16,11 +16,12 @@ import (
 
 // NetworkTrafficDoc stores the request-response data of a network call (ingress or egress)
 type NetworkTrafficDoc struct {
-	Version models.Version `json:"version" yaml:"version"`
-	Kind    models.Kind    `json:"kind" yaml:"kind"`
-	Name    string         `json:"name" yaml:"name"`
-	Spec    yamlLib.Node   `json:"spec" yaml:"spec"`
-	Curl    string         `json:"curl" yaml:"curl,omitempty"`
+	Version      models.Version `json:"version" yaml:"version"`
+	Kind         models.Kind    `json:"kind" yaml:"kind"`
+	Name         string         `json:"name" yaml:"name"`
+	Spec         yamlLib.Node   `json:"spec" yaml:"spec"`
+	Curl         string         `json:"curl" yaml:"curl,omitempty"`
+	ConnectionID string         `json:"connectionId" yaml:"connectionId,omitempty"`
 }
 
 // ctxReader wraps an io.Reader with a context for cancellation support
@@ -46,18 +47,13 @@ type ctxWriter struct {
 
 func (cw *ctxWriter) Write(p []byte) (n int, err error) {
 	for len(p) > 0 {
-		select {
-		case <-cw.ctx.Done():
-			return n, cw.ctx.Err()
-		default:
-			var written int
-			written, err = cw.writer.Write(p)
-			n += written
-			if err != nil {
-				return n, err
-			}
-			p = p[written:]
+		var written int
+		written, err = cw.writer.Write(p)
+		n += written
+		if err != nil {
+			return n, err
 		}
+		p = p[written:]
 	}
 	return n, nil
 }
@@ -140,9 +136,14 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 	}
 	if _, err := os.Stat(yamlPath); err != nil {
 		if ctx.Err() == nil {
-			err = os.MkdirAll(filepath.Join(path), fs.ModePerm)
+			err = os.MkdirAll(filepath.Join(path), 0777)
 			if err != nil {
 				utils.LogError(Logger, err, "failed to create a directory for the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
+				return false, err
+			}
+			err = os.Chmod(path, 0777)
+			if err != nil {
+				utils.LogError(Logger, err, "failed to set permissions for the directory", zap.String("path directory", path))
 				return false, err
 			}
 			file, err := os.OpenFile(yamlPath, os.O_CREATE, 0777) // Set file permissions to 777
@@ -153,6 +154,11 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 			err = file.Close()
 			if err != nil {
 				utils.LogError(Logger, err, "failed to close the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
+				return false, err
+			}
+			err = os.Chmod(yamlPath, 0777)
+			if err != nil {
+				utils.LogError(Logger, err, "failed to set permissions for the directory", zap.String("path directory", path))
 				return false, err
 			}
 			return true, nil
