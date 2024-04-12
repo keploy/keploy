@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"go.keploy.io/server/v2/cli"
 	"go.keploy.io/server/v2/cli/provider"
@@ -21,6 +22,14 @@ import (
 
 var version string
 var dsn string
+
+var gradientColors = []string{
+	"\033[38;5;202m", // Red
+	"\033[38;5;202m", // Orange-Red
+	"\033[38;5;208m", // Orange
+	"\033[38;5;214m", // Yellow-Orange
+	"\033[38;5;220m", // Yellow
+}
 
 const logo string = `
        ▓██▓▄
@@ -52,7 +61,15 @@ func printLogo() {
 	}
 	utils.Version = version
 	if binaryToDocker := os.Getenv("BINARY_TO_DOCKER"); binaryToDocker != "true" {
-		fmt.Println(logo, " ")
+		const reset = "\033[0m"
+
+		// Print each line of the logo with a different color from the gradient
+		lines := strings.Split(logo, "\n")
+		for i, line := range lines {
+			color := gradientColors[i%len(gradientColors)]
+			fmt.Println(color, line, reset)
+		}
+
 		fmt.Printf("version: %v\n\n", version)
 	}
 }
