@@ -239,6 +239,18 @@ func attachLogFileToSentry(logger *zap.Logger, logFilePath string) error {
 	return nil
 }
 
+// HandleRecovery handles the common logic for recovering from a panic.
+func HandleRecovery(logger *zap.Logger, r interface{}, errMsg string) {
+	err := attachLogFileToSentry(logger, "./keploy-logs.txt")
+	if err != nil {
+		LogError(logger, err, "failed to attach log file to sentry")
+	}
+	sentry.CaptureException(errors.New(fmt.Sprint(r)))
+	// Get the stack trace
+	stackTrace := debug.Stack()
+	LogError(logger, nil, errMsg, zap.String("stack trace", string(stackTrace)))
+}
+
 // Recover recovers from a panic and logs the stack trace to Sentry.
 // It also stops the global context.
 func Recover(logger *zap.Logger) {
@@ -248,21 +260,12 @@ func Recover(logger *zap.Logger) {
 	}
 	sentry.Flush(2 * time.Second)
 	if r := recover(); r != nil {
-		err := attachLogFileToSentry(logger, "./keploy-logs.txt")
-		if err != nil {
-			LogError(logger, err, "failed to attach log file to sentry")
-		}
-		sentry.CaptureException(errors.New(fmt.Sprint(r)))
-		// Get the stack trace
-		stackTrace := debug.Stack()
-		LogError(logger, nil, "Recovered from panic", zap.String("stack trace", string(stackTrace)))
-		//stopping the global context
-		err = Stop(logger, fmt.Sprintf("Recovered from: %s", r))
+		HandleRecovery(logger, r, "Recovered from panic")
+		err := Stop(logger, fmt.Sprintf("Recovered from: %s", r))
 		if err != nil {
 			LogError(logger, err, "failed to stop the global context")
-			//return
 		}
-		sentry.Flush(time.Second * 2)
+		sentry.Flush(2 * time.Second)
 	}
 }
 
