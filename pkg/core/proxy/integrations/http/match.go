@@ -106,7 +106,6 @@ func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mo
 					}
 				}
 			}
-			logger.Debug("Schema matched failed, trying fuzzy match")
 			isMatched, bestMatch := fuzzyMatch(eligibleMocks, matchParams.reqBuf)
 			if isMatched {
 				isDeleted := mockDb.DeleteFilteredMock(bestMatch)
