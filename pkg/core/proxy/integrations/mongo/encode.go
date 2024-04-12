@@ -89,8 +89,7 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 			// check for the request packet streaming for the mongo wire message
 			if val, ok := mongoRequest.(*models.MongoOpMessage); ok && hasSecondSetBit(val.FlagBits) {
 				for {
-<
-          // read the streaming request packets
+          				// read the streaming request packets
 					requestBuffer1, err := pUtil.ReadBytes(ctx, logger, clientConn)
 					if err != nil {
 						if err == io.EOF {
