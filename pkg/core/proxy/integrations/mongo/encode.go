@@ -10,7 +10,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"go.keploy.io/server/v2/pkg/core/proxy/util"
+	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -30,7 +30,7 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 	}
 
 	g.Go(func() error {
-		defer utils.Recover(logger)
+		defer pUtil.Recover(logger, clientConn, destConn)
 		defer close(errCh)
 		for {
 			var err error
@@ -40,7 +40,7 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 			// Since, that is already read in the RecordOutgoing function.
 			if string(reqBuf) == "read form client conn" {
 				started := time.Now()
-				reqBuf, err = util.ReadBytes(ctx, logger, clientConn)
+				reqBuf, err = pUtil.ReadBytes(ctx, logger, clientConn)
 				logger.Debug("reading from the mongo conn", zap.Any("", string(reqBuf)))
 				if err != nil {
 					if err == io.EOF {
@@ -89,8 +89,9 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 			// check for the request packet streaming for the mongo wire message
 			if val, ok := mongoRequest.(*models.MongoOpMessage); ok && hasSecondSetBit(val.FlagBits) {
 				for {
-					// read the streaming request packets
-					requestBuffer1, err := util.ReadBytes(ctx, logger, clientConn)
+<
+          // read the streaming request packets
+					requestBuffer1, err := pUtil.ReadBytes(ctx, logger, clientConn)
 					if err != nil {
 						if err == io.EOF {
 							logger.Debug("recieved request buffer is empty in record mode for mongo request")
@@ -139,8 +140,9 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 
 			reqTimestampMock := time.Now()
 			started := time.Now()
+
 			// read reply message length from the destination mongo server
-			responsePckLengthBuffer, err := util.ReadRequiredBytes(ctx, logger, destConn, 4)
+			responsePckLengthBuffer, err := pUtil.ReadRequiredBytes(ctx, logger, destConn, 4)
 			if err != nil {
 				if err == io.EOF {
 					logger.Debug("recieved response buffer is empty in record mode for mongo call")
@@ -158,8 +160,9 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 			pckLength := getPacketLength(responsePckLengthBuffer)
 			logger.Debug("received pck length ", zap.Any("packet length", pckLength))
 
+
 			// read the entire response packet
-			responsePckDataBuffer, err := util.ReadRequiredBytes(ctx, logger, destConn, int(pckLength)-4)
+			responsePckDataBuffer, err := pUtil.ReadRequiredBytes(ctx, logger, destConn, int(pckLength)-4)
 
 			logger.Debug("recieved these packets", zap.Any("packets", responsePckDataBuffer))
 
@@ -208,8 +211,9 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 						m.recordMessage(ctx, logger, mongoRequests, mongoResponses, opReq, reqTimestampMock, mocks)
 					}
 					started = time.Now()
+
 					// read the response packets from the destination server
-					responseBuffer, err = util.ReadBytes(ctx, logger, destConn)
+					responseBuffer, err = pUtil.ReadBytes(ctx, logger, destConn)
 					if err != nil {
 						if err == io.EOF {
 							logger.Debug("recieved response buffer is empty in record mode for mongo call")
