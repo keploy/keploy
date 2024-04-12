@@ -18,7 +18,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// decodeMongo decodes the mongo wire message from the client connection 
+// decodeMongo decodes the mongo wire message from the client connection
 // and sends the response back to the client.
 func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	startedDecoding := time.Now()
@@ -77,7 +77,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				Message:   mongoRequest,
 				ReadDelay: int64(readRequestDelay),
 			})
-			// check for the more_to_come flag bit in the mongo request 
+			// check for the more_to_come flag bit in the mongo request
 			// header to read the next chunks of the request
 			if val, ok := mongoRequest.(*models.MongoOpMessage); ok && hasSecondSetBit(val.FlagBits) {
 				for {

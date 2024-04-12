@@ -44,7 +44,7 @@ type Operation interface {
 }
 
 // Decode decodes the wire message binary into the operation and the mongo message.
-// 
+//
 // see https://github.com/mongodb/mongo-go-driver/blob/v1.7.2/x/mongo/driver/operation.go#L1361-L1426
 func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, interface{}, error) {
 	wmLength := len(wm)
@@ -66,7 +66,7 @@ func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, inter
 		err      error
 		mongoMsg interface{}
 	)
-	
+
 	switch opCode {
 	case wiremessage.OpQuery:
 		// decodeQuery is a helper function to decode the OpQuery operation

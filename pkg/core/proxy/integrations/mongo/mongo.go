@@ -38,13 +38,13 @@ func (m *Mongo) MatchType(_ context.Context, buffer []byte) bool {
 	if len(buffer) < 4 {
 		return false
 	}
-	// identifies by the starting 4 bytes of the message, since that 
+	// identifies by the starting 4 bytes of the message, since that
 	// are the length of the message.
 	messageLength := binary.LittleEndian.Uint32(buffer[0:4])
 	return int(messageLength) == len(buffer)
 }
 
-// RecordOutgoing records the outgoing mongo messages of the client connection into the yaml file. 
+// RecordOutgoing records the outgoing mongo messages of the client connection into the yaml file.
 // The database connection is keep-alive so, this function will be called during the connection establishment.
 func (m *Mongo) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	logger := m.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)))
@@ -54,10 +54,10 @@ func (m *Mongo) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, 
 		return err
 	}
 
-	// the mongo messages are converted to the yaml format. 
+	// the mongo messages are converted to the yaml format.
 	//
-	// initially the reqBuf contains the first network packet 
-	// from the client connection which is used to determine 
+	// initially the reqBuf contains the first network packet
+	// from the client connection which is used to determine
 	// the packet type in MatchType.
 	err = m.encodeMongo(ctx, logger, reqBuf, src, dst, mocks, opts)
 	if err != nil {
@@ -71,8 +71,8 @@ func (m *Mongo) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, 
 // mocks the responses from the yaml file. The database connection is keep-alive
 func (m *Mongo) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	logger := m.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
-	
-	// read the initial buffer from the client connection. Initially the 
+
+	// read the initial buffer from the client connection. Initially the
 	// reqBuf contains the first network packet from the client connection
 	// which is used to determine the packet type in MatchType.
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
@@ -92,13 +92,13 @@ func (m *Mongo) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrat
 
 // recordMessage records the mongo messages into the yaml file.
 func (m *Mongo) recordMessage(_ context.Context, logger *zap.Logger, mongoRequests []models.MongoRequest, mongoResponses []models.MongoResponse, opReq Operation, reqTimestampMock time.Time, mocks chan<- *models.Mock) {
-	shouldRecordCalls := true // boolean to check for already saved config mocks 
+	shouldRecordCalls := true // boolean to check for already saved config mocks
 	name := "mocks"
 	meta1 := map[string]string{
 		"operation": opReq.String(),
 	}
 
-	// check that the packet is heartbeat or not. 
+	// check that the packet is heartbeat or not.
 	// See: https://github.com/mongodb/mongo-go-driver/blob/8489898c64a2d8c2e2160006eb851a11a9db9e9d/x/mongo/driver/operation/hello.go#L503
 	if isHeartBeat(logger, opReq, *mongoRequests[0].Header, mongoRequests[0].Message) {
 		meta1["type"] = "config"
