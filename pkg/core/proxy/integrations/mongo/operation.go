@@ -202,7 +202,7 @@ type opQuery struct {
 	returnFieldsSelector bsoncore.Document
 }
 
-func (opQuery) IsIsAdminDB() bool {
+func (q *opQuery) IsIsAdminDB() bool {
 	return false
 }
 
