@@ -94,16 +94,9 @@ func decodeMySQLHandshakeV10(data []byte) (*HandshakeV10Packet, error) {
 	return packet, nil
 }
 
-// Helper function to calculate minimum of two integers
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
 func encodeHandshakePacket(packet *models.MySQLHandshakeV10Packet) ([]byte, error) {
 	buf := new(bytes.Buffer)
-	AuthPluginDataValue, _ := base64.StdEncoding.DecodeString(string(packet.AuthPluginData))
+	AuthPluginDataValue, _ := base64.StdEncoding.DecodeString(packet.AuthPluginData)
 	// Protocol version
 	buf.WriteByte(packet.ProtocolVersion)
 
