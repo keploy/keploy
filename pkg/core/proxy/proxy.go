@@ -246,7 +246,7 @@ func (p *Proxy) start(ctx context.Context) error {
 		// handle the client connection
 		case clientConn := <-clientConnCh:
 			clientConnErrGrp.Go(func() error {
-				defer utils.RecoverFromParser(p.logger, clientConn, nil)
+				defer util.Recover(p.logger, clientConn, nil)
 				err := p.handleConnection(clientConnCtx, clientConn)
 				if err != nil && err != io.EOF {
 					utils.LogError(p.logger, err, "failed to handle the client connection")

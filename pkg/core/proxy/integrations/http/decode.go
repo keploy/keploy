@@ -14,7 +14,7 @@ import (
 
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
-	"go.keploy.io/server/v2/pkg/core/proxy/util"
+	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -31,7 +31,7 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 	errCh := make(chan error, 1)
 
 	go func(errCh chan error, reqBuf []byte, opts models.OutgoingOptions) {
-		defer utils.RecoverFromParser(logger, clientConn, nil)
+		defer pUtil.Recover(logger, clientConn, nil)
 		defer close(errCh)
 		for {
 			//Check if the expected header is present
@@ -49,7 +49,7 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				}
 				logger.Debug("The 100 continue response has been sent to the user application")
 				//Read the request buffer again
-				newRequest, err := util.ReadBytes(ctx, logger, clientConn)
+				newRequest, err := pUtil.ReadBytes(ctx, logger, clientConn)
 				if err != nil {
 					utils.LogError(logger, err, "failed to read the request buffer from the user application")
 					errCh <- err
@@ -104,7 +104,7 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 					utils.LogError(logger, nil, "Didn't match any preExisting http mock", zap.Any("metadata", getReqMeta(request)))
 				}
 
-				_, err = util.PassThrough(ctx, logger, clientConn, dstCfg, [][]byte{reqBuf})
+				_, err = pUtil.PassThrough(ctx, logger, clientConn, dstCfg, [][]byte{reqBuf})
 				if err != nil {
 					utils.LogError(logger, err, "failed to passThrough http request", zap.Any("metadata", getReqMeta(request)))
 					errCh <- err
@@ -171,7 +171,7 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				return
 			}
 
-			reqBuf, err = util.ReadBytes(ctx, logger, clientConn)
+			reqBuf, err = pUtil.ReadBytes(ctx, logger, clientConn)
 			if err != nil {
 				logger.Debug("failed to read the request buffer from the client", zap.Error(err))
 				logger.Debug("This was the last response from the server:\n" + string(responseString))

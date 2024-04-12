@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/getsentry/sentry-go"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"golang.org/x/sync/errgroup"
 
@@ -25,6 +26,8 @@ import (
 	"strconv"
 	"strings"
 )
+
+var Emoji = "\U0001F430" + " Keploy:"
 
 // idCounter is used to generate random ID for each request
 var idCounter int64 = -1
@@ -113,7 +116,7 @@ func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byt
 	for {
 		// Start a goroutine to perform the read operation
 		g.Go(func() error {
-			defer utils.RecoverFromParser(logger, nil, nil)
+			defer Recover(logger, nil, nil)
 			buf := make([]byte, 1024)
 			n, err := reader.Read(buf)
 			if ctx.Err() != nil {
@@ -182,7 +185,7 @@ func ReadRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader
 	for numBytes > 0 {
 		// Start a goroutine to perform the read operation
 		g.Go(func() error {
-			defer utils.RecoverFromParser(logger, nil, nil)
+			defer Recover(logger, nil, nil)
 			buf := make([]byte, numBytes)
 			n, err := reader.Read(buf)
 			if ctx.Err() != nil {
@@ -252,7 +255,7 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 	errChannel := make(chan error, 1)
 
 	go func() {
-		defer utils.RecoverFromParser(logger, clientConn, nil)
+		defer Recover(logger, clientConn, nil)
 		defer close(destBufferChannel)
 		defer close(errChannel)
 		defer func(destConn net.Conn) {
@@ -448,4 +451,41 @@ func GetJavaHome(ctx context.Context) (string, error) {
 	}
 
 	return "", fmt.Errorf("java.home not found in command output")
+}
+
+// Recover recovers from a panic in any parser and logs the stack trace to Sentry.
+// It also closes the client and destination connection.
+func Recover(logger *zap.Logger, client, dest net.Conn) {
+	if logger == nil {
+		fmt.Println(Emoji + "Failed to recover from panic. Logger is nil.")
+		return
+	}
+
+	sentry.Flush(2 * time.Second)
+	if r := recover(); r != nil {
+		logger.Error("Recovered from panic in parser, closing active connections")
+		if client != nil {
+			err := client.Close()
+			if err != nil {
+				// Use string matching as a last resort to check for the specific error
+				if !strings.Contains(err.Error(), "use of closed network connection") {
+					// Log other errors
+					utils.LogError(logger, err, "failed to close the client connection")
+				}
+			}
+		}
+
+		if dest != nil {
+			err := dest.Close()
+			if err != nil {
+				// Use string matching as a last resort to check for the specific error
+				if !strings.Contains(err.Error(), "use of closed network connection") {
+					// Log other errors
+					utils.LogError(logger, err, "failed to close the destination connection")
+				}
+			}
+		}
+		utils.HandleRecovery(logger, r, "Recovered from panic")
+		sentry.Flush(time.Second * 2)
+	}
 }

@@ -12,6 +12,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
+	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -48,7 +49,7 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 
 	//for keeping conn alive
 	g.Go(func() error {
-		defer utils.RecoverFromParser(logger, clientConn, destConn)
+		defer pUtil.Recover(logger, clientConn, destConn)
 		defer close(errCh)
 		for {
 			//check if expect : 100-continue header is present
