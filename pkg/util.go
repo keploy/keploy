@@ -58,15 +58,16 @@ func ToHTTPHeader(mockHeader map[string]string) http.Header {
 
 // IsTime verifies whether a given string represents a valid date or not.
 func IsTime(stringDate string) bool {
-	s := strings.TrimSpace(stringDate)
+	date := strings.TrimSpace(stringDate)
 	if seconds, err := strconv.ParseInt(stringDate, 10, 64); err == nil {
-		t := time.Unix(seconds, 0)
-		if t.Year() >= 1970 {
+		expectedTime := time.Unix(seconds, 0)
+		currentTime := time.Now()
+		if currentTime.Sub(expectedTime) < 24*time.Hour && currentTime.Sub(expectedTime) > -24*time.Hour {
 			return true
 		}
 	}
 	for _, dateFormat := range dateFormats {
-		_, err := time.Parse(dateFormat, s)
+		_, err := time.Parse(dateFormat, date)
 		if err == nil {
 			return true
 		}
