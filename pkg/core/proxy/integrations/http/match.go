@@ -2,9 +2,9 @@ package http
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/url"
-	"encoding/json"
 
 	"github.com/agnivade/levenshtein"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
@@ -102,7 +102,7 @@ func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mo
 						break
 					}
 
-					if schemaMatch(mockData, reqData){
+					if schemaMatch(mockData, reqData) {
 						isDeleted := mockDb.DeleteFilteredMock(mock)
 						if isDeleted {
 							return true, mock, nil
