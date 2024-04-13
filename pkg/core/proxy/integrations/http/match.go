@@ -107,6 +107,7 @@ func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mo
 						if isDeleted {
 							return true, mock, nil
 						}
+						logger.Debug("found match but did not delete it")
 					}
 				}
 			}
