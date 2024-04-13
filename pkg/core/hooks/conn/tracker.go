@@ -267,11 +267,11 @@ func (conn *Tracker) reset() {
 }
 
 func (conn *Tracker) verifyRequestData(expectedRecvBytes, actualRecvBytes uint64) bool {
-	return (expectedRecvBytes == actualRecvBytes)
+	return expectedRecvBytes == actualRecvBytes
 }
 
 func (conn *Tracker) verifyResponseData(expectedSentBytes, actualSentBytes uint64) bool {
-	return (expectedSentBytes == actualSentBytes)
+	return expectedSentBytes == actualSentBytes
 }
 
 // func (conn *Tracker) Malformed() bool {
