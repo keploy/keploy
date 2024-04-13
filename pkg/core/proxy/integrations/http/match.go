@@ -84,6 +84,7 @@ func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mo
 
 			// If the body is JSON we do a schema match.
 			if matchParams.reqBodyIsJSON {
+				logger.Debug("Performing schema match")
 				for _, mock := range eligibleMocks {
 					if ctx.Err() != nil {
 						return false, nil, ctx.Err()
@@ -109,6 +110,7 @@ func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mo
 					}
 				}
 			}
+			logger.Debug("Performing fuzzy match")
 			isMatched, bestMatch := fuzzyMatch(eligibleMocks, matchParams.reqBuf)
 			if isMatched {
 				isDeleted := mockDb.DeleteFilteredMock(bestMatch)
