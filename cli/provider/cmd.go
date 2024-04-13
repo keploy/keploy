@@ -189,6 +189,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint32("proxyPort", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint32("dnsPort", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
+		cmd.Flags().String("cmdType", c.cfg.CommandType, "Type of command to start the user application (native/docker/docker-compose)")
 		cmd.Flags().DurationP("buildDelay", "b", c.cfg.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().String("containerName", c.cfg.ContainerName, "Name of the application's docker container")
 		cmd.Flags().StringP("networkName", "n", c.cfg.NetworkName, "Name of the application's docker network")
@@ -236,7 +237,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	return nil
 }
 
-func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
+func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
 	// used to bind common flags for commands like record, test. For eg: PATH, PORT, COMMAND etc.
 	err := viper.BindPFlags(cmd.Flags())
 	if err != nil {
@@ -323,6 +324,10 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 			}
 			return errors.New("missing required -c flag or appCmd in config file")
 		}
+
+		// set the command type
+		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
+
 		if c.cfg.GenerateGithubActions {
 			defer utils.GenerateGithubActions(c.logger, c.cfg.Command)
 		}
@@ -336,12 +341,12 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 					return errors.New(errMsg)
 				}
 				if strings.Contains(c.cfg.Path, "..") {
-					c.cfg.Path, err = filepath.Abs(filepath.Clean(c.cfg.Path))
+
+					c.cfg.Path, err = utils.GetAbsPath(filepath.Clean(c.cfg.Path))
 					if err != nil {
-						errMsg := "failed to get the absolute path from relative path"
-						utils.LogError(c.logger, err, errMsg)
-						return errors.New(errMsg)
+						return fmt.Errorf("failed to get the absolute path from relative path: %w", err)
 					}
+
 					relativePath, err := filepath.Rel(curDir, c.cfg.Path)
 					if err != nil {
 						errMsg := "failed to get the relative path from absolute path"
@@ -374,12 +379,12 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 			return err
 		}
 
-		absPath, err := filepath.Abs(c.cfg.Path)
+		absPath, err := utils.GetAbsPath(c.cfg.Path)
 		if err != nil {
-			errMsg := "failed to get the absolute path from relative path"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
+			utils.LogError(c.logger, err, "error while getting absolute path")
+			return errors.New("failed to get the absolute path")
 		}
+
 		c.cfg.Path = absPath + "/keploy"
 		if cmd.Name() == "test" {
 			testSets, err := cmd.Flags().GetStringSlice("testsets")
@@ -389,6 +394,16 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 				return errors.New(errMsg)
 			}
 			config.SetSelectedTests(c.cfg, testSets)
+
+			if utils.CmdType(c.cfg.CommandType) == utils.Native && c.cfg.Test.GoCoverage {
+				goCovPath, err := utils.SetCoveragePath(c.logger, c.cfg.Test.CoverageReportPath)
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to set go coverage path")
+					return errors.New("failed to set go coverage path")
+				}
+				c.cfg.Test.CoverageReportPath = goCovPath
+			}
+
 			if c.cfg.Test.Delay <= 5 {
 				c.logger.Warn(fmt.Sprintf("Delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay", c.cfg.Test.Delay))
 				if c.cfg.InDocker {

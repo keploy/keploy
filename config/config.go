@@ -1,7 +1,9 @@
 // Package config provides configuration structures for the application.
 package config
 
-import "time"
+import (
+	"time"
+)
 
 type Config struct {
 	Path                  string        `json:"path" yaml:"path" mapstructure:"path" `
@@ -23,6 +25,7 @@ type Config struct {
 	GenerateGithubActions bool          `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`
 	KeployContainer       string        `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
 	KeployNetwork         string        `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
+	CommandType           string        `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
 }
 
 type Record struct {
