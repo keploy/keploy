@@ -241,10 +241,8 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 	var err error
 	if dstCfg.TLSCfg != nil {
 		logger.Debug("trying to establish a TLS connection with the destination server", zap.Any("Destination Addr", dstCfg.Addr))
-		dialer := &net.Dialer{
-			Timeout: 4 * time.Second,
-		}
-		destConn, err = tls.DialWithDialer(dialer, "tcp", dstCfg.Addr, dstCfg.TLSCfg)
+
+		destConn, err = tls.Dial("tcp", dstCfg.Addr, dstCfg.TLSCfg)
 		if err != nil {
 			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("server address", dstCfg.Addr))
 			return nil, err
