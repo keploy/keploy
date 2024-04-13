@@ -91,7 +91,7 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				reqBodyIsJSON: isJSON(reqBody),
 				reqBuf:        reqBuf,
 			}
-			match, stub, err := match(ctx, logger, param, mockDb)
+			ok, stub, err := match(ctx, logger, param, mockDb)
 			if err != nil {
 				utils.LogError(logger, err, "error while matching http mocks", zap.Any("metadata", getReqMeta(request)))
 				errCh <- err
@@ -99,7 +99,7 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			}
 			logger.Debug("after matching the http request", zap.Any("isMatched", match), zap.Any("stub", stub), zap.Error(err))
 
-			if !match {
+			if !ok {
 				if !isPassThrough(logger, request, dstCfg.Port, opts) {
 					utils.LogError(logger, nil, "Didn't match any preExisting http mock", zap.Any("metadata", getReqMeta(request)))
 				}
