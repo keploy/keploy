@@ -102,7 +102,10 @@ func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mo
 					}
 
 					if schemaMatch(mockData, reqData){
-						return true, mock, nil
+						isDeleted := mockDb.DeleteFilteredMock(mock)
+						if isDeleted {
+							return true, mock, nil
+						}
 					}
 				}
 			}
