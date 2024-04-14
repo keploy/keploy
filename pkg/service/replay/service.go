@@ -4,12 +4,14 @@ import (
 	"context"
 	"time"
 
+	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 )
 
 type Instrumentation interface {
 	//Setup prepares the environment for the recording
 	Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error)
+	UpdateAppInfo(ctx context.Context, id uint64, cmd string, opts models.SetupOptions) error
 	//Hook will load hooks and start the proxy server.
 	Hook(ctx context.Context, id uint64, opts models.HookOptions) error
 	MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error
@@ -27,7 +29,7 @@ type Service interface {
 	Start(ctx context.Context) error
 	BootReplay(ctx context.Context) (string, uint64, context.CancelFunc, error)
 	GetAllTestSetIDs(ctx context.Context) ([]string, error)
-	RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error)
+	RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, appErrorChan chan models.AppError) (models.TestSetStatus, int, int, int, error)
 	GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error)
 	RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError
 	ProvideMocks(ctx context.Context) error
@@ -50,6 +52,10 @@ type ReportDB interface {
 	GetReport(ctx context.Context, testRunID string, testSetID string) (*models.TestReport, error)
 	InsertTestCaseResult(ctx context.Context, testRunID string, testSetID string, result *models.TestResult) error
 	InsertReport(ctx context.Context, testRunID string, testSetID string, testReport *models.TestReport) error
+}
+
+type ConfigDB interface {
+	GetConfig(ctx context.Context, testSetID string) (config.TestSetConfig, error)
 }
 
 type Telemetry interface {

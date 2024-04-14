@@ -28,6 +28,10 @@ type Config struct {
 	CommandType           string        `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
 }
 
+type TestSetConfig struct {
+	Cmd string `json:"cmd" yaml:"cmd" mapstructure:"cmd"`
+}
+
 type Record struct {
 	Filters     []Filter      `json:"filters" yaml:"filters" mapstructure:"filters"`
 	RecordTimer time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
