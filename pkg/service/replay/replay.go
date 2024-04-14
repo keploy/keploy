@@ -327,6 +327,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	} else {
 		select {
 		case <-appStartedChan:
+			// Adding a delay for synchronisation
 			time.Sleep(1 * time.Second)
 		case <-runTestSetCtx.Done():
 			return models.TestSetStatusUserAbort, context.Canceled
