@@ -180,7 +180,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 	return nil
 }
 
-func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.AppError {
+func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError {
 	a, err := c.getApp(id)
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to get app")
@@ -209,6 +209,9 @@ func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.A
 		}
 		select {
 		case inode := <-inodeChan:
+			if opts.AppStartedChan != nil {
+				opts.AppStartedChan <- struct{}{}
+			}
 			err := c.Hooks.SendInode(ctx, id, inode)
 			if err != nil {
 				utils.LogError(c.logger, err, "")

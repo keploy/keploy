@@ -29,6 +29,7 @@ type SetupOptions struct {
 }
 
 type RunOptions struct {
+	AppStartedChan chan struct{}
 	//IgnoreErrors bool
 }
 

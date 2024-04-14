@@ -234,6 +234,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var success int
 	var failure int
 	var totalConsumedMocks = map[string]bool{}
+	var appStartedChan = make(chan struct{}, 1)
 
 	testSetStatus := models.TestSetStatusPassed
 	testSetStatusByErrChan := models.TestSetStatusRunning
@@ -279,7 +280,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if !serveTest {
 		runTestSetErrGrp.Go(func() error {
 			defer utils.Recover(r.logger)
-			appErr = r.RunApplication(runTestSetCtx, appID, models.RunOptions{})
+			appErr = r.RunApplication(runTestSetCtx, appID, models.RunOptions{AppStartedChan: appStartedChan})
 			if appErr.AppErrorType == models.ErrCtxCanceled {
 				return nil
 			}
@@ -317,10 +318,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	})
 
 	// Delay for user application to run
-	select {
-	case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
-	case <-runTestSetCtx.Done():
-		return models.TestSetStatusUserAbort, context.Canceled
+	if utils.FindDockerCmd(r.config.Command) == utils.Native {
+		select {
+		case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
+		case <-runTestSetCtx.Done():
+			return models.TestSetStatusUserAbort, context.Canceled
+		}
+	} else {
+		select {
+		case <-appStartedChan:
+		case <-runTestSetCtx.Done():
+			return models.TestSetStatusUserAbort, context.Canceled
+		}
 	}
 
 	selectedTests := ArrayToMap(r.config.Test.SelectedTests[testSetID])
