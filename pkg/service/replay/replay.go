@@ -317,7 +317,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return nil
 	})
 
-	// Delay for user application to run 
+	// Delay for user application to run
 	if utils.FindDockerCmd(r.config.Command) == utils.Native {
 		select {
 		case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
