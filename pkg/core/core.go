@@ -209,14 +209,14 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 		}
 		select {
 		case inode := <-inodeChan:
-			if opts.AppStartedChan != nil {
-				opts.AppStartedChan <- struct{}{}
-			}
 			err := c.Hooks.SendInode(ctx, id, inode)
 			if err != nil {
 				utils.LogError(c.logger, err, "")
 
 				inodeErrCh <- errors.New("failed to send inode to the kernel")
+			}
+			if opts.AppStartedChan != nil {
+				opts.AppStartedChan <- struct{}{}
 			}
 		case <-ctx.Done():
 			return nil
