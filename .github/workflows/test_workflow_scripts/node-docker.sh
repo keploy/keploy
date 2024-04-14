@@ -14,7 +14,7 @@ docker build -t node-app:1.0 .
 
 for i in {1..2}; do
 # Start keploy in record mode.
-sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p 8000:8000 --name nodeMongoApp --network keploy-network node-app:1.0" --containerName nodeMongoApp &
+sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p 8000:8000 --name nodeMongoApp --network keploy-network node-app:1.0" --containerName nodeMongoApp --generateGithubActions=false &
 
 # Wait for the application to start.
 app_started=false
@@ -55,7 +55,7 @@ docker rm -f nodeMongoApp
 done
 
 # Start keploy in test mode.
-sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p 8000:8000 --name nodeMongoApp --network keploy-network node-app:1.0" --containerName nodeMongoApp --apiTimeout 30 --delay 30
+sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p 8000:8000 --name nodeMongoApp --network keploy-network node-app:1.0" --containerName nodeMongoApp --apiTimeout 30 --delay 30 --generateGithubActions=false 
 
 # Get the test results from the testReport file.
 report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"

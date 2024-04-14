@@ -201,7 +201,7 @@ func (r *Replayer) BootReplay(ctx context.Context) (string, uint64, context.Canc
 	default:
 		hookCtx := context.WithoutCancel(ctx)
 		hookCtx, cancel = context.WithCancel(hookCtx)
-		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_TEST})
+		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_TEST, EnableTesting: r.config.EnableTesting})
 		if err != nil {
 			cancel()
 			if errors.Is(err, context.Canceled) {
@@ -491,6 +491,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, nil, "test result is nil")
 			break
 		}
+
+		// We need to sleep for a second to avoid mismatching of mocks during keploy testing via test-bench
+		if r.config.EnableTesting {
+			r.logger.Debug("sleeping for a second to avoid mismatching of mocks during keploy testing via test-bench")
+			time.Sleep(time.Second)
+		}
 	}
 
 	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
@@ -634,8 +640,10 @@ func (r *Replayer) printSummary(ctx context.Context, testRunResult bool) {
 			return
 		}
 		r.logger.Info("test run completed", zap.Bool("passed overall", testRunResult))
-		if r.config.Test.GoCoverage {
-			r.logger.Info("there is a opportunity to get the coverage here")
+
+		if utils.CmdType(r.config.CommandType) == utils.Native && r.config.Test.GoCoverage {
+			r.logger.Info("there is an opportunity to get the coverage here")
+
 			coverCmd := exec.CommandContext(ctx, "go", "tool", "covdata", "percent", "-i="+os.Getenv("GOCOVERDIR"))
 			output, err := coverCmd.Output()
 			if err != nil {

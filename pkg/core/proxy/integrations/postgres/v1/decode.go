@@ -22,6 +22,7 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 	errCh := make(chan error, 1)
 
 	go func(errCh chan error, pgRequests [][]byte) {
+		defer pUtil.Recover(logger, clientConn, nil)
 		// close should be called from the producer of the channel
 		defer close(errCh)
 		for {
@@ -64,6 +65,7 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 			}
 
 			if !matched {
+				logger.Debug("MISMATCHED REQ is" + string(pgRequests[0]))
 				_, err = pUtil.PassThrough(ctx, logger, clientConn, dstCfg, pgRequests)
 				if err != nil {
 					utils.LogError(logger, err, "failed to pass the request", zap.Any("request packets", len(pgRequests)))

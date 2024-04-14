@@ -179,8 +179,8 @@ func (idc *Impl) NetworkExists(networkName string) (bool, error) {
 	}
 
 	// Check if the specified network is in the list.
-	for _, network := range networks {
-		if network.Name == networkName {
+	for _, net := range networks {
+		if net.Name == networkName {
 			return true, nil
 		}
 	}
