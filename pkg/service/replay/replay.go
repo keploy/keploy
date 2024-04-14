@@ -90,17 +90,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 	}()
 
-	// BootReplay will start the hooks and proxy and return the testRunID and appID
-	testRunID, appID, hookCancel, err := r.BootReplay(ctx)
-	if err != nil {
-		stopReason = fmt.Sprintf("failed to boot replay: %v", err)
-		utils.LogError(r.logger, err, stopReason)
-		if err == context.Canceled {
-			return err
-		}
-		return fmt.Errorf(stopReason)
-	}
-
 	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get all test set ids: %v", err)
@@ -116,6 +105,17 @@ func (r *Replayer) Start(ctx context.Context) error {
 		errMsg := fmt.Sprintf("No test sets found in the keploy folder. Please record testcases using %s command", recordCmd)
 		utils.LogError(r.logger, err, errMsg)
 		return fmt.Errorf(errMsg)
+	}
+
+	// BootReplay will start the hooks and proxy and return the testRunID and appID
+	testRunID, appID, hookCancel, err := r.BootReplay(ctx)
+	if err != nil {
+		stopReason = fmt.Sprintf("failed to boot replay: %v", err)
+		utils.LogError(r.logger, err, stopReason)
+		if err == context.Canceled {
+			return err
+		}
+		return fmt.Errorf(stopReason)
 	}
 
 	testSetResult := false
@@ -253,8 +253,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if len(testCases) == 0 {
-		errMsg := fmt.Sprint("No test cases found for the test set: ", models.HighlightGrayString(testSetID))
-		r.logger.Warn(errMsg)
 		return models.TestSetStatusPassed, nil
 	}
 
