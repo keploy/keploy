@@ -53,6 +53,10 @@ type Hooks struct {
 	passthroughPorts *ebpf.Map
 	DockerCmdMap     *ebpf.Map
 	DNSPort          *ebpf.Map
+	// for test bench
+	tbenchFilterPid  *ebpf.Map
+	tbenchFilterPort *ebpf.Map
+	//--------------
 
 	// eBPF C shared objectsobjects
 	// ebpf objects and events
@@ -168,6 +172,10 @@ func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 	h.DNSPort = objs.DnsPortMap
 	h.DockerCmdMap = objs.DockerCmdMap
 	h.objects = objs
+	// For test bench
+	h.tbenchFilterPid = objs.TbenchFilterPid
+	h.tbenchFilterPort = objs.TbenchFilterPort
+	// ---------------
 
 	// ----- used in case of wsl -----
 	socket, err := link.Kprobe("sys_socket", objs.SyscallProbeEntrySocket, nil)

@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.keploy.io/server/v2/utils/log"
 	"go.uber.org/zap"
@@ -189,6 +190,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint32("proxyPort", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint32("dnsPort", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
+		cmd.Flags().String("cmdType", c.cfg.CommandType, "Type of command to start the user application (native/docker/docker-compose)")
 		cmd.Flags().DurationP("buildDelay", "b", c.cfg.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().String("containerName", c.cfg.ContainerName, "Name of the application's docker container")
 		cmd.Flags().StringP("networkName", "n", c.cfg.NetworkName, "Name of the application's docker network")
@@ -209,8 +211,9 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().StringP("language", "l", c.cfg.Test.Language, "application programming language")
 			cmd.Flags().Bool("ignoreOrdering", c.cfg.Test.IgnoreOrdering, "Ignore ordering of array in response")
 			cmd.Flags().Bool("coverage", c.cfg.Test.Coverage, "Enable coverage reporting for the testcases. for golang please set language flag to golang, ref https://keploy.io/docs/server/sdk-installation/go/")
-			cmd.Flags().Bool("removeUnusedMocks", false, "Clear the unused mocks for the passed test-sets")
+			cmd.Flags().Bool("removeUnusedMocks", c.cfg.Test.RemoveUnusedMocks, "Clear the unused mocks for the passed test-sets")
 			cmd.Flags().Bool("goCoverage", c.cfg.Test.GoCoverage, "Enable go coverage reporting for the testcases")
+			cmd.Flags().Bool("fallBackOnMiss", c.cfg.Test.FallBackOnMiss, "Enable connecting to actual service if mock not found during test mode")
 		} else {
 			cmd.Flags().Uint64("recordTimer", 0, "User provided time to record its application")
 		}
@@ -223,13 +226,20 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+		cmd.PersistentFlags().Bool("enableTesting", c.cfg.EnableTesting, "Enable testing keploy with keploy")
+		err = cmd.PersistentFlags().MarkHidden("enableTesting")
+		if err != nil {
+			errMsg := "failed to mark enableTesting as hidden flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
 	default:
 		return errors.New("unknown command name")
 	}
 	return nil
 }
 
-func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
+func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
 	// used to bind common flags for commands like record, test. For eg: PATH, PORT, COMMAND etc.
 	err := viper.BindPFlags(cmd.Flags())
 	if err != nil {
@@ -282,6 +292,19 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 			return errors.New(errMsg)
 		}
 	}
+
+	if c.cfg.EnableTesting {
+		// Add mode to logger to debug the keploy during testing
+		logger, err := log.AddMode(cmd.Name())
+		*c.logger = *logger
+		if err != nil {
+			errMsg := "failed to add mode to logger"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.DisableTele = true
+	}
+
 	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", c.cfg))
 
 	switch cmd.Name() {
@@ -303,6 +326,10 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 			}
 			return errors.New("missing required -c flag or appCmd in config file")
 		}
+
+		// set the command type
+		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
+
 		if c.cfg.GenerateGithubActions {
 			defer utils.GenerateGithubActions(c.logger, c.cfg.Command)
 		}
@@ -316,12 +343,12 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 					return errors.New(errMsg)
 				}
 				if strings.Contains(c.cfg.Path, "..") {
-					c.cfg.Path, err = filepath.Abs(filepath.Clean(c.cfg.Path))
+
+					c.cfg.Path, err = utils.GetAbsPath(filepath.Clean(c.cfg.Path))
 					if err != nil {
-						errMsg := "failed to get the absolute path from relative path"
-						utils.LogError(c.logger, err, errMsg)
-						return errors.New(errMsg)
+						return fmt.Errorf("failed to get the absolute path from relative path: %w", err)
 					}
+
 					relativePath, err := filepath.Rel(curDir, c.cfg.Path)
 					if err != nil {
 						errMsg := "failed to get the relative path from absolute path"
@@ -354,14 +381,22 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 			return err
 		}
 
-		absPath, err := filepath.Abs(c.cfg.Path)
+		absPath, err := utils.GetAbsPath(c.cfg.Path)
 		if err != nil {
-			errMsg := "failed to get the absolute path from relative path"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
+			utils.LogError(c.logger, err, "error while getting absolute path")
+			return errors.New("failed to get the absolute path")
 		}
+
 		c.cfg.Path = absPath + "/keploy"
 		if cmd.Name() == "test" {
+			//check if the keploy folder exists
+			if _, err := os.Stat(c.cfg.Path); os.IsNotExist(err) {
+				recordCmd := models.HighlightGrayString("keploy record")
+				errMsg := fmt.Sprintf("No test-sets found. Please record testcases using %s command", recordCmd)
+				utils.LogError(c.logger, nil, errMsg)
+				return errors.New(errMsg)
+			}
+
 			testSets, err := cmd.Flags().GetStringSlice("testsets")
 			if err != nil {
 				errMsg := "failed to get the testsets"
@@ -369,6 +404,16 @@ func (c CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) 
 				return errors.New(errMsg)
 			}
 			config.SetSelectedTests(c.cfg, testSets)
+
+			if utils.CmdType(c.cfg.CommandType) == utils.Native && c.cfg.Test.GoCoverage {
+				goCovPath, err := utils.SetCoveragePath(c.logger, c.cfg.Test.CoverageReportPath)
+				if err != nil {
+					utils.LogError(c.logger, err, "failed to set go coverage path")
+					return errors.New("failed to set go coverage path")
+				}
+				c.cfg.Test.CoverageReportPath = goCovPath
+			}
+
 			if c.cfg.Test.Delay <= 5 {
 				c.logger.Warn(fmt.Sprintf("Delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay", c.cfg.Test.Delay))
 				if c.cfg.InDocker {
