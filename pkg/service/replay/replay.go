@@ -90,10 +90,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 	}()
 
-	// BootReplay will start the hooks and proxy and return the testRunID and appID
-	testRunID, appID, hookCancel, err := r.BootReplay(ctx)
+	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
-		stopReason = fmt.Sprintf("failed to boot replay: %v", err)
+		stopReason = fmt.Sprintf("failed to get all test set ids: %v", err)
 		utils.LogError(r.logger, err, stopReason)
 		if err == context.Canceled {
 			return err
@@ -101,9 +100,17 @@ func (r *Replayer) Start(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 
-	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
+	if len(testSetIDs) == 0 {
+		recordCmd := models.HighlightGrayString("keploy record")
+		errMsg := fmt.Sprintf("No test sets found in the keploy folder. Please record testcases using %s command", recordCmd)
+		utils.LogError(r.logger, err, errMsg)
+		return fmt.Errorf(errMsg)
+	}
+
+	// BootReplay will start the hooks and proxy and return the testRunID and appID
+	testRunID, appID, hookCancel, err := r.BootReplay(ctx)
 	if err != nil {
-		stopReason = fmt.Sprintf("failed to get all test set ids: %v", err)
+		stopReason = fmt.Sprintf("failed to boot replay: %v", err)
 		utils.LogError(r.logger, err, stopReason)
 		if err == context.Canceled {
 			return err
@@ -633,8 +640,10 @@ func (r *Replayer) printSummary(ctx context.Context, testRunResult bool) {
 			return
 		}
 		r.logger.Info("test run completed", zap.Bool("passed overall", testRunResult))
-		if r.config.Test.GoCoverage {
-			r.logger.Info("there is a opportunity to get the coverage here")
+
+		if utils.CmdType(r.config.CommandType) == utils.Native && r.config.Test.GoCoverage {
+			r.logger.Info("there is an opportunity to get the coverage here")
+
 			coverCmd := exec.CommandContext(ctx, "go", "tool", "covdata", "percent", "-i="+os.Getenv("GOCOVERDIR"))
 			output, err := coverCmd.Output()
 			if err != nil {
