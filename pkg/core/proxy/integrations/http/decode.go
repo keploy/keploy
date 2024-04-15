@@ -105,12 +105,13 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				if !isPassThrough(logger, request, dstCfg.Port, opts) {
 					utils.LogError(logger, nil, "Didn't match any preExisting http mock", zap.Any("metadata", getReqMeta(request)))
 				}
-
-				_, err = pUtil.PassThrough(ctx, logger, clientConn, dstCfg, [][]byte{reqBuf})
-				if err != nil {
-					utils.LogError(logger, err, "failed to passThrough http request", zap.Any("metadata", getReqMeta(request)))
-					errCh <- err
-					return
+				if opts.FallBackOnMiss {
+					_, err = pUtil.PassThrough(ctx, logger, clientConn, dstCfg, [][]byte{reqBuf})
+					if err != nil {
+						utils.LogError(logger, err, "failed to passThrough http request", zap.Any("metadata", getReqMeta(request)))
+						errCh <- err
+						return
+					}
 				}
 				errCh <- nil
 				return
