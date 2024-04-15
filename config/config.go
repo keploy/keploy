@@ -11,7 +11,7 @@ type Config struct {
 	ProxyPort             uint32        `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
 	Debug                 bool          `json:"debug" yaml:"debug" mapstructure:"debug"`
 	DisableTele           bool          `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
-	EnableANSIColor       bool          `json:"enableANSIColor" yaml:"enableANSIColor" mapstructure:"enableANSIColor"`
+	EnableANSI       bool          `json:"enableANSI" yaml:"enableANSI" mapstructure:"enableANSI"`
 	InDocker              bool          `json:"inDocker" yaml:"inDocker" mapstructure:"inDocker"`
 	ContainerName         string        `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
 	NetworkName           string        `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
