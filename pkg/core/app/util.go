@@ -88,6 +88,17 @@ func getInode(pid int) (uint64, error) {
 	return i, nil
 }
 
+func IsDetachMode(command string) bool {
+	args := strings.Fields(command)
+	for _, arg := range args {
+		if arg == "-d" || arg == "--detach" {
+			return true
+		}
+	}
+
+	return false
+}
+
 // getContainerFromComposeFile parses docker-compose file to get all container names
 func getContainerFromComposeFile(filePath string) ([]string, error) {
 	yamlFile, err := os.ReadFile(filePath)
