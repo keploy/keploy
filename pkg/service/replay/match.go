@@ -961,7 +961,7 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 			if line[0] == '-' {
 				c := color.FgRed
 				// Workaround to get the exact index where the diff begins
-				if i > 0 && len(line) > 1 && diffLines[i-1] != "" && diffLines[i-1][0] == '+' {
+				if i < len(diffLines) && len(line) > 1 && diffLines[i+1] != "" && diffLines[i+1][0] == '+' {
 
 					/* As we want to get the exact difference where the line's
 					 * diff begin we must to, first, get the expect (this) and
