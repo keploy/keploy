@@ -23,6 +23,7 @@ import (
 type matchParams struct {
 	req           *http.Request
 	reqBodyIsJSON bool
+	reqBody       []byte
 	reqBuf        []byte
 }
 
@@ -89,6 +90,7 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			param := &matchParams{
 				req:           request,
 				reqBodyIsJSON: isJSON(reqBody),
+				reqBody:       reqBody,
 				reqBuf:        reqBuf,
 			}
 			ok, stub, err := match(ctx, logger, param, mockDb)
@@ -97,7 +99,7 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				errCh <- err
 				return
 			}
-			logger.Debug("after matching the http request", zap.Any("isMatched", match), zap.Any("stub", stub), zap.Error(err))
+			logger.Debug("after matching the http request", zap.Any("isMatched", ok), zap.Any("stub", stub), zap.Error(err))
 
 			if !ok {
 				if !isPassThrough(logger, request, dstCfg.Port, opts) {

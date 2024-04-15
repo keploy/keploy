@@ -93,12 +93,12 @@ func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mo
 					var reqData map[string]interface{}
 					err := json.Unmarshal([]byte(mock.Spec.HTTPReq.Body), &mockData)
 					if err != nil {
-						utils.LogError(logger, err, "Failed to unmarshal the mock request body")
+						utils.LogError(logger, err, "failed to unmarshal the mock request body", zap.String("Req", mock.Spec.HTTPReq.Body))
 						break
 					}
-					err = json.Unmarshal(matchParams.reqBuf, &reqData)
+					err = json.Unmarshal(matchParams.reqBody, &reqData)
 					if err != nil {
-						utils.LogError(logger, err, "failed to unmarshal the request body")
+						utils.LogError(logger, err, "failed to unmarshal the request body", zap.String("Req", string(matchParams.reqBody)))
 						break
 					}
 
