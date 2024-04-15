@@ -61,14 +61,14 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 
 	// read requests from client
 	g.Go(func() error {
-		defer utils.Recover(logger)
+		defer pUtil.Recover(logger, clientConn, nil)
 		defer close(clientBuffChan)
 		pUtil.ReadBuffConn(ctx, logger, clientConn, clientBuffChan, errChan)
 		return nil
 	})
 	// read responses from destination
 	g.Go(func() error {
-		defer utils.Recover(logger)
+		defer pUtil.Recover(logger, nil, destConn)
 		defer close(destBuffChan)
 		pUtil.ReadBuffConn(ctx, logger, destConn, destBuffChan, errChan)
 		return nil
