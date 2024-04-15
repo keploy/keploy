@@ -391,8 +391,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			//check if the keploy folder exists
 			if _, err := os.Stat(c.cfg.Path); os.IsNotExist(err) {
 				recordCmd := models.HighlightGrayString("keploy record")
-				errMsg := fmt.Sprintf("Keploy folder not found. Please record testcases using %s command", recordCmd)
-				utils.LogError(c.logger, err, errMsg)
+				errMsg := fmt.Sprintf("No test-sets found. Please record testcases using %s command", recordCmd)
+				utils.LogError(c.logger, nil, errMsg)
 				return errors.New(errMsg)
 			}
 
