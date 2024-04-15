@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"go.keploy.io/server/v2/utils"
 )
 
 func findComposeFile() string {
@@ -87,26 +89,25 @@ func getInode(pid int) (uint64, error) {
 	return i, nil
 }
 
-func IsDetachMode(command string) bool {
+func IsDetachMode(command string, kind utils.CmdType) error {
 	args := strings.Fields(command)
+
+	if kind == utils.DockerStart {
+		flags := []string{"-a", "--attach", "-i", "--interactive"}
+
+		for _, arg := range args {
+			if slices.Contains(flags, arg) {
+				return fmt.Errorf("docker start require --attach/-a or --interactive/-i flag")
+			}
+		}
+		return nil
+	}
+
 	for _, arg := range args {
 		if arg == "-d" || arg == "--detach" {
-			return true
+			return fmt.Errorf("detach mode is not allowed in Keploy command")
 		}
 	}
 
-	return false
-}
-
-func isAttachMode(command string) bool {
-	args := strings.Fields(command)
-	flags := []string{"-a", "--attach", "-i", "--interactive"}
-
-	for _, arg := range args {
-		if slices.Contains(flags, arg) {
-			return true
-		}
-	}
-
-	return false
+	return nil
 }

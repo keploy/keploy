@@ -69,13 +69,11 @@ func (a *App) Setup(_ context.Context) error {
 	}
 	a.docker = d
 
-	if (a.kind == utils.DockerRun || a.kind == utils.DockerCompose) && IsDetachMode(a.cmd) {
-		return fmt.Errorf("detach mode is not allowed in Keploy command")
-	}
-
-
-	if a.kind == utils.DockerStart && !isAttachMode(a.cmd) {
-		return fmt.Errorf("docker start require --attach/-a or --interactive/-i flag")
+	if a.kind == utils.DockerStart || a.kind == utils.DockerRun || a.kind == utils.DockerCompose {
+		err = IsDetachMode(a.cmd, a.kind)
+		if err != nil {
+			return err
+		}
 	}
 
 	switch a.kind {
@@ -124,7 +122,7 @@ func (a *App) SetupDocker() error {
 		} else if a.containerNetwork != net {
 			a.logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v)", a.containerNetwork, net))
 		}
-	} else {
+	} else if a.kind == utils.DockerStart {
 		running, err := a.docker.IsContainerRunning(a.container)
 		if err != nil {
 			return err
