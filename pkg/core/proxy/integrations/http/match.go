@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/url"
 
@@ -36,6 +37,7 @@ func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mo
 
 					//the body of mock and request aren't of same type
 					if isMockBodyJSON != matchParams.reqBodyIsJSON {
+						logger.Debug("The body of mock and request aren't of same type")
 						continue
 					}
 
@@ -49,23 +51,27 @@ func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mo
 					//Check if the path matches
 					if parsedURL.Path != matchParams.req.URL.Path {
 						//If it is not the same, continue
+						logger.Debug("The url path of mock and request aren't the same")
 						continue
 					}
 
 					//Check if the method matches
 					if mock.Spec.HTTPReq.Method != models.Method(matchParams.req.Method) {
 						//If it is not the same, continue
+						logger.Debug("The method of mock and request aren't the same")
 						continue
 					}
 
 					// Check if the header keys match
 					if !mapsHaveSameKeys(mock.Spec.HTTPReq.Header, matchParams.req.Header) {
 						// Different headers, so not a match
+						logger.Debug("The header keys of mock and request aren't the same")
 						continue
 					}
 
 					if !mapsHaveSameKeys(mock.Spec.HTTPReq.URLParams, matchParams.req.URL.Query()) {
 						// Different query params, so not a match
+						logger.Debug("The query params of mock and request aren't the same")
 						continue
 					}
 					eligibleMocks = append(eligibleMocks, mock)
@@ -76,10 +82,41 @@ func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mo
 				return false, nil, nil
 			}
 
+			// If the body is JSON we do a schema match.
+			if matchParams.reqBodyIsJSON {
+				logger.Debug("Performing schema match")
+				for _, mock := range eligibleMocks {
+					if ctx.Err() != nil {
+						return false, nil, ctx.Err()
+					}
+					var mockData map[string]interface{}
+					var reqData map[string]interface{}
+					err := json.Unmarshal([]byte(mock.Spec.HTTPReq.Body), &mockData)
+					if err != nil {
+						utils.LogError(logger, err, "failed to unmarshal the mock request body", zap.String("Req", mock.Spec.HTTPReq.Body))
+						break
+					}
+					err = json.Unmarshal(matchParams.reqBody, &reqData)
+					if err != nil {
+						utils.LogError(logger, err, "failed to unmarshal the request body", zap.String("Req", string(matchParams.reqBody)))
+						break
+					}
+
+					if schemaMatch(mockData, reqData) {
+						isDeleted := mockDb.DeleteFilteredMock(mock)
+						if isDeleted {
+							return true, mock, nil
+						}
+						logger.Debug("found match but did not delete it")
+					}
+				}
+			}
+			logger.Debug("Performing fuzzy match")
 			isMatched, bestMatch := fuzzyMatch(eligibleMocks, matchParams.reqBuf)
 			if isMatched {
 				isDeleted := mockDb.DeleteFilteredMock(bestMatch)
 				if !isDeleted {
+					logger.Debug("found match but did not delete it, so ignoring")
 					continue
 				}
 			}
@@ -87,6 +124,16 @@ func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mo
 		}
 	}
 
+}
+
+func schemaMatch(mockData map[string]interface{}, reqData map[string]interface{}) bool {
+	for key := range mockData {
+		_, exists := reqData[key]
+		if !exists {
+			return false
+		}
+	}
+	return true
 }
 
 func mapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
