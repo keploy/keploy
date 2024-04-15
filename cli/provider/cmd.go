@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.keploy.io/server/v2/utils/log"
 	"go.uber.org/zap"
@@ -387,6 +388,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		c.cfg.Path = absPath + "/keploy"
 		if cmd.Name() == "test" {
+			//check if the keploy folder exists
+			if _, err := os.Stat(c.cfg.Path); os.IsNotExist(err) {
+				recordCmd := models.HighlightGrayString("keploy record")
+				errMsg := fmt.Sprintf("No test-sets found. Please record testcases using %s command", recordCmd)
+				utils.LogError(c.logger, nil, errMsg)
+				return errors.New(errMsg)
+			}
+
 			testSets, err := cmd.Flags().GetStringSlice("testsets")
 			if err != nil {
 				errMsg := "failed to get the testsets"
