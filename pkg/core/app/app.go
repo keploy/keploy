@@ -69,7 +69,7 @@ func (a *App) Setup(_ context.Context) error {
 	}
 	a.docker = d
 
-	if (a.kind == utils.Docker || a.kind == utils.DockerCompose) && IsDetachMode(a.cmd) {
+	if (a.kind == utils.DockerRun || a.kind == utils.DockerCompose) && IsDetachMode(a.cmd) {
 		return fmt.Errorf("detach mode is not allowed in Keploy command")
 	}
 
