@@ -20,7 +20,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	logger.Debug("Into the generic parser in test mode")
 	errCh := make(chan error, 1)
 	go func(errCh chan error, genericRequests [][]byte) {
-		defer utils.Recover(logger)
+		defer pUtil.Recover(logger, clientConn, nil)
 		defer close(errCh)
 		for {
 			// Since protocol packets have to be parsed for checking stream end,
