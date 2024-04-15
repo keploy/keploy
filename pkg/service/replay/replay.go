@@ -268,9 +268,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{
-		Rules:         r.config.BypassRules,
-		MongoPassword: r.config.Test.MongoPassword,
-		SQLDelay:      time.Duration(r.config.Test.Delay),
+		Rules:          r.config.BypassRules,
+		MongoPassword:  r.config.Test.MongoPassword,
+		SQLDelay:       time.Duration(r.config.Test.Delay),
+		FallBackOnMiss: r.config.Test.FallBackOnMiss,
 	})
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to mock outgoing")
