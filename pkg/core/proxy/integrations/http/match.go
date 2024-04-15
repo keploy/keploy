@@ -116,6 +116,7 @@ func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mo
 			if isMatched {
 				isDeleted := mockDb.DeleteFilteredMock(bestMatch)
 				if !isDeleted {
+					logger.Debug("found match but did not delete it, so ignoring")
 					continue
 				}
 			}
