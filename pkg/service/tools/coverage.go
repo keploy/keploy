@@ -344,7 +344,7 @@ func CalJavaCoverage(logger *zap.Logger, testSetID string) (map[string]string, e
 			if err != nil {
 				return err
 			}
-			classes = append(classes, p)
+			classes = append(classes, strings.TrimSuffix(p, filepath.Ext(p)))
 		}
 		return nil
 	}
@@ -391,7 +391,7 @@ func CalJavaCoverage(logger *zap.Logger, testSetID string) (map[string]string, e
 		}
 		className := fields[2]
 		if slices.Contains(classes, className) {
-			coveragePerFile[className] = strconv.FormatFloat(float64(count)/float64(total), 'f', 2, 64) + "%"
+			coveragePerFile[className] = strconv.FormatFloat(float64(count*100)/float64(total), 'f', 2, 64) + "%"
 		}
 	}
 	return coveragePerFile, nil
