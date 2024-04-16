@@ -15,7 +15,8 @@ type OutgoingOptions struct {
 	Rules         []config.BypassRule
 	MongoPassword string
 	// TODO: role of SQLDelay should be mentioned in the comments.
-	SQLDelay time.Duration // This is the same as Application delay.
+	SQLDelay       time.Duration // This is the same as Application delay.
+	FallBackOnMiss bool          // this enables to pass the request to the actual server if no mock is found during test mode.
 }
 
 type IncomingOptions struct {
