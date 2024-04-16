@@ -85,3 +85,14 @@ func getInode(pid int) (uint64, error) {
 	}
 	return i, nil
 }
+
+func IsDetachMode(command string) bool {
+	args := strings.Fields(command)
+	for _, arg := range args {
+		if arg == "-d" || arg == "--detach" {
+			return true
+		}
+	}
+
+	return false
+}
