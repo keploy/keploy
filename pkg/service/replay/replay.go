@@ -357,6 +357,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// var to store the error in the loop
 	var loopErr error
 
+	starttestTime := time.Now()
+
 	for _, testCase := range testCases {
 
 		if _, ok := selectedTests[testCase.Name]; !ok && len(selectedTests) != 0 {
@@ -500,6 +502,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
+	testTimeTaken := time.Now().Sub(starttestTime)
+
 	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
 	if err != nil {
 		if runTestSetCtx.Err() != context.Canceled {
@@ -551,10 +555,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	// TODO Need to decide on whether to use global variable or not
 	verdict := TestReportVerdict{
-		total:  testReport.Total,
-		failed: testReport.Failure,
-		passed: testReport.Success,
-		status: testSetStatus == models.TestSetStatusPassed,
+		total:     testReport.Total,
+		failed:    testReport.Failure,
+		passed:    testReport.Success,
+		status:    testSetStatus == models.TestSetStatusPassed,
+		timeTaken: testTimeTaken.Seconds(),
 	}
 
 	completeTestReport[testSetID] = verdict
@@ -568,7 +573,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		} else {
 			pp.SetColorScheme(models.PassingColorScheme)
 		}
-		if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure); err != nil {
+		if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTime taken: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure, testTimeTaken.Seconds()); err != nil {
 			utils.LogError(r.logger, err, "failed to print testrun summary")
 		}
 	}
@@ -621,7 +626,7 @@ func (r *Replayer) printSummary(ctx context.Context, testRunResult bool) {
 			utils.LogError(r.logger, err, "failed to print test run summary")
 			return
 		}
-		if _, err := pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\n"); err != nil {
+		if _, err := pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\tTime Taken\t\n"); err != nil {
 			utils.LogError(r.logger, err, "failed to print test suite summary")
 			return
 		}
@@ -631,7 +636,7 @@ func (r *Replayer) printSummary(ctx context.Context, testRunResult bool) {
 			} else {
 				pp.SetColorScheme(models.FailingColorScheme)
 			}
-			if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed); err != nil {
+			if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed, completeTestReport[testSuiteName].timeTaken); err != nil {
 				utils.LogError(r.logger, err, "failed to print test suite details")
 				return
 			}
