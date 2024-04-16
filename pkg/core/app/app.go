@@ -50,6 +50,7 @@ type App struct {
 	keployContainer  string
 	keployIPv4       string
 	inodeChan        chan uint64
+	userAppCmd       *exec.Cmd
 	EnableTesting    bool
 	Mode             models.Mode
 }
@@ -313,7 +314,6 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 	errCh := make(chan error, 1)
 	timer := time.NewTimer(a.containerDelay)
 	logTicker := time.NewTicker(1 * time.Second)
-	defer logTicker.Stop()
 
 	eventFilter := filters.NewArgs(
 		filters.KeyValuePair{Key: "type", Value: "container"},
@@ -335,9 +335,16 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 	g.Go(func() error {
 		defer utils.Recover(a.logger)
 		defer close(errCh)
+		defer logTicker.Stop()
 		for {
 			select {
 			case <-timer.C:
+				if a.userAppCmd.ProcessState == nil {
+					err := a.userAppCmd.Cancel()
+					if err != nil {
+						errCh <- fmt.Errorf("could not stop the application, %v", err)
+					}
+				}
 				errCh <- errors.New("timeout waiting for the container to start")
 				return nil
 			case <-ctx.Done():
@@ -354,8 +361,10 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 				}
 			// for debugging purposes
 			case <-logTicker.C:
+				if a.userAppCmd.ProcessState != nil {
+					return nil
+				}
 				a.logger.Debug("still waiting for the container to start.", zap.String("containerName", a.container))
-				return nil
 			case err := <-errCh2:
 				errCh <- err
 				return nil
@@ -382,7 +391,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 		}
 	}()
 
-	errCh := make(chan error, 1)
+	errCh := make(chan models.AppError, 1)
 	// listen for the "create container" event in order to send the inode of the container to the kernel
 	errCh2 := a.getDockerMeta(ctx)
 
@@ -392,17 +401,17 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 		err := a.run(ctx)
 		if err.Err != nil {
 			utils.LogError(a.logger, err.Err, "Application stopped with the error")
-			errCh <- err.Err
+			errCh <- err
 		}
 		return nil
 	})
 
 	select {
 	case err := <-errCh:
-		if err != nil && errors.Is(err, context.Canceled) {
+		if err.Err != nil && errors.Is(err.Err, context.Canceled) {
 			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 		}
-		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
+		return err
 	case err := <-errCh2:
 		if err != nil && errors.Is(err, context.Canceled) {
 			return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
@@ -415,7 +424,6 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 
 func (a *App) Run(ctx context.Context, inodeChan chan uint64) models.AppError {
 	a.inodeChan = inodeChan
-
 	if a.kind == utils.DockerCompose || a.kind == utils.Docker {
 		return a.runDocker(ctx)
 	}
@@ -456,6 +464,8 @@ func (a *App) run(ctx context.Context) models.AppError {
 	cmd.Stderr = os.Stderr
 
 	a.logger.Debug("", zap.Any("executing cli", cmd.String()))
+
+	a.userAppCmd = cmd
 
 	err := cmd.Start()
 	if err != nil {

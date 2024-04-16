@@ -192,6 +192,7 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 	inodeErrCh := make(chan error, 1)
 	appErrCh := make(chan models.AppError, 1)
 	inodeChan := make(chan uint64, 1) //send inode to the hook
+	appErrCh2 := make(chan struct{}, 1)
 
 	defer func() {
 		err := runAppErrGrp.Wait()
@@ -220,6 +221,8 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 			}
 		case <-ctx.Done():
 			return nil
+		case <-appErrCh2:
+			return nil
 		}
 		return nil
 	})
@@ -232,6 +235,7 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 			utils.LogError(c.logger, appErr.Err, "error while running the app")
 			appErrCh <- appErr
 		}
+		appErrCh2 <- struct{}{}
 		return nil
 	})
 
