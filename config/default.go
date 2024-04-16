@@ -57,6 +57,7 @@ keployContainer: "keploy-v2"
 keployNetwork: "keploy-network"
 inDocker: false
 cmdType: "native"
+fallbackOnMiss: false
 `
 
 var config = &Config{}
