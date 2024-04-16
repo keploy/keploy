@@ -663,7 +663,6 @@ func writeKeyValuePair(builder *strings.Builder, key string, value interface{}, 
 }
 
 // compareAndColorizeSlices compares two slices of interfaces and outputs color-coded differences.
-// compareAndColorizeSlices compares two slices of interfaces and outputs color-coded differences.
 func compareAndColorizeSlices(a, b []interface{}, indent string, red, green func(a ...interface{}) string) (string, string) {
 	var expectedOutput strings.Builder
 	var actualOutput strings.Builder
@@ -718,8 +717,8 @@ func compareAndColorizeSlices(a, b []interface{}, indent string, red, green func
 			default:
 				// For non-map types, highlight differences
 				if !reflect.DeepEqual(aValue, bValue) {
-					expectedOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, red("%v", aValue)))
-					actualOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, green("%v", bValue)))
+					expectedOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, red(aValue)))
+					actualOutput.WriteString(fmt.Sprintf("%s[%d]: %s\n", indent, i, green(bValue)))
 				} else {
 					// Write without highlighting if values are the same
 					expectedOutput.WriteString(fmt.Sprintf("%s[%d]: %v\n", indent, i, aValue))
@@ -875,11 +874,15 @@ func truncateToMatchWithEllipsis(expectedText, actualText string) (string, strin
 // Updated separateAndColorize function
 func separateAndColorize(diffStr string, noise map[string][]string) (string, string) {
 	lines := strings.Split(diffStr, "\n")
-	expects := make(map[string]interface{}, 0)
-	actuals := make(map[string]interface{}, 0)
+	expectsMap := make(map[string]interface{}, 0)
+	actualsMap := make(map[string]interface{}, 0)
+	expectsArray := make([]interface{}, 0)
+	actualsArray := make([]interface{}, 0)
+	var isExpectMap, isActualMap bool
 	expect, actual := "", ""
 
 	for i := 0; i < len(lines)-1; i++ {
+		var expectKey, actualKey string
 		line := lines[i]
 		nextLine := lines[i+1]
 
@@ -889,44 +892,61 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 			expectedTrimmedLine := nextLine[3:] // Assuming lines[i+1] starts with "+ "
 			expectedKeyValue := strings.SplitN(expectedTrimmedLine, ":", 2)
 			if len(expectedKeyValue) == 2 {
-				key := strings.TrimSpace(expectedKeyValue[0])
+				expectKey = strings.TrimSpace(expectedKeyValue[0])
 				value := strings.TrimSpace(expectedKeyValue[1])
 
 				var jsonObj map[string]interface{}
 				err := json.Unmarshal([]byte(value), &jsonObj)
 				if err != nil {
-					continue
+					var arrayObj []interface{}
+					arrayError := json.Unmarshal([]byte(value), &arrayObj)
+					if arrayError != nil {
+						continue
+					}
+					expectsArray = arrayObj
+				} else {
+					isActualMap = true
+					expectsMap = map[string]interface{}{expectKey[:len(expectKey)-1]: jsonObj}
 				}
 
-				expects = map[string]interface{}{key[:len(key)-1]: jsonObj}
 			}
 
 			// Remove the leading "- "
 			actualTrimmedLine := line[3:]
 			actualkeyValue := strings.SplitN(actualTrimmedLine, ":", 2)
 			if len(actualkeyValue) == 2 {
-				key := strings.TrimSpace(actualkeyValue[0])
+				actualKey = strings.TrimSpace(actualkeyValue[0])
 				value := strings.TrimSpace(actualkeyValue[1])
-
 				var jsonObj map[string]interface{}
 				err := json.Unmarshal([]byte(value), &jsonObj)
 				if err != nil {
-					continue
+					var arrayObj []interface{}
+					arrayError := json.Unmarshal([]byte(value), &arrayObj)
+					if arrayError != nil {
+						continue
+					}
+					actualsArray = arrayObj
+				} else {
+					isExpectMap = true
+					actualsMap = map[string]interface{}{actualKey[:len(actualKey)-1]: jsonObj}
 				}
-
-				actuals = map[string]interface{}{key[:len(key)-1]: jsonObj}
-
 			}
 			red := color.New(color.FgRed).SprintFunc()
 			green := color.New(color.FgGreen).SprintFunc()
-
-			expectedText, actualText := compareAndColorizeMaps(expects, actuals, " ", red, green)
+			var expectedText, actualText string
+			if isExpectMap && isActualMap {
+				expectedText, actualText = compareAndColorizeMaps(expectsMap, actualsMap, " ", red, green)
+			} else if actualKey == expectKey {
+				expectedText, actualText = compareAndColorizeSlices(expectsArray, actualsArray, " ", red, green)
+			} else {
+				continue
+			}
 			expectOutput, actualOutput := truncateToMatchWithEllipsis(breakLines(expectedText), breakLines(actualText))
 
 			expect += breakLines(expectOutput) + "\n"
 			actual += breakLines(actualOutput) + "\n"
-			expects = make(map[string]interface{}, 0)
-			actuals = make(map[string]interface{}, 0)
+			expectsMap = make(map[string]interface{}, 0)
+			actualsMap = make(map[string]interface{}, 0)
 
 			// Remove current line
 			diffStr = strings.Replace(diffStr, line, "", 1)
