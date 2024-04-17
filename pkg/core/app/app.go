@@ -452,6 +452,8 @@ func (a *App) run(ctx context.Context) models.AppError {
 		cmd = exec.CommandContext(ctx, "sudo", "-E", "-u", os.Getenv("SUDO_USER"), "env", "PATH="+os.Getenv("PATH"), "sh", "-c", userCmd)
 	}
 
+	a.userAppCmd = cmd
+
 	// Set the cancel function for the command
 	cmd.Cancel = func() error {
 
@@ -469,8 +471,6 @@ func (a *App) run(ctx context.Context) models.AppError {
 	cmd.Stderr = os.Stderr
 
 	a.logger.Debug("", zap.Any("executing cli", cmd.String()))
-
-	a.userAppCmd = cmd
 
 	err := cmd.Start()
 	if err != nil {
