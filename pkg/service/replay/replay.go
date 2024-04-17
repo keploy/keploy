@@ -357,6 +357,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// var to store the error in the loop
 	var loopErr error
 
+	// taking the start time of test
 	startTestTime := time.Now()
 
 	for _, testCase := range testCases {
@@ -502,6 +503,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
+	// total duration of test
 	testTimeTaken := time.Now().Sub(startTestTime)
 
 	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
