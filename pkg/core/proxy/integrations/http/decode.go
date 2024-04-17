@@ -21,10 +21,9 @@ import (
 )
 
 type matchParams struct {
-	req           *http.Request
-	reqBodyIsJSON bool
-	reqBody       []byte
-	reqBuf        []byte
+	req     *http.Request
+	reqBody []byte
+	reqBuf  []byte
 }
 
 // Decodes the mocks in test mode so that they can be sent to the user application.
@@ -88,10 +87,9 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			//check if reqBuf body is a json
 
 			param := &matchParams{
-				req:           request,
-				reqBodyIsJSON: isJSON(reqBody),
-				reqBody:       reqBody,
-				reqBuf:        reqBuf,
+				req:     request,
+				reqBody: reqBody,
+				reqBuf:  reqBuf,
 			}
 			ok, stub, err := match(ctx, logger, param, mockDb)
 			if err != nil {

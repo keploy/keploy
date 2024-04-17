@@ -3,8 +3,13 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
+	"fmt"
+	"math"
+	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/agnivade/levenshtein"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
@@ -20,23 +25,38 @@ func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mo
 		case <-ctx.Done():
 			return false, nil, ctx.Err()
 		default:
-			tcsMocks, err := mockDb.GetFilteredMocks()
+			unfilteredMocks, err := mockDb.GetUnFilteredMocks()
 
 			if err != nil {
-				utils.LogError(logger, err, "failed to get tcs mocks")
+				utils.LogError(logger, err, "failed to get unfilteredMocks mocks")
 				return false, nil, errors.New("error while matching the request with the mocks")
 			}
+
+			logger.Info(fmt.Sprintf("Length of unfilteredMocks:%v", len(unfilteredMocks)))
+			for i, mock := range unfilteredMocks {
+				if mock.Kind == models.HTTP {
+					fmt.Printf("unfilteredMocks-%v:%v\n", i, mock.Spec.HTTPReq)
+				}
+			}
+
 			var eligibleMocks []*models.Mock
 
-			for _, mock := range tcsMocks {
+			for _, mock := range unfilteredMocks {
 				if ctx.Err() != nil {
 					return false, nil, ctx.Err()
 				}
 				if mock.Kind == models.HTTP {
-					isMockBodyJSON := isJSON([]byte(mock.Spec.HTTPReq.Body))
 
-					//the body of mock and request aren't of same type
-					if isMockBodyJSON != matchParams.reqBodyIsJSON {
+					//if the content type is present in http request then we need to check for the same type in the mock
+					if matchParams.req.Header.Get("Content-Type") != "" {
+						if matchParams.req.Header.Get("Content-Type") != mock.Spec.HTTPReq.Header["Content-Type"] {
+							logger.Debug("The content type of mock and request aren't the same")
+							continue
+						}
+					}
+
+					// check the type of the body if content type is not present
+					if !matchBodyType(mock.Spec.HTTPReq.Body, matchParams.reqBody) {
 						logger.Debug("The body of mock and request aren't of same type")
 						continue
 					}
@@ -79,61 +99,110 @@ func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mo
 			}
 
 			if len(eligibleMocks) == 0 {
+				// basic schema is not matched with any mock hence returning false
 				return false, nil, nil
 			}
 
-			// If the body is JSON we do a schema match.
-			if matchParams.reqBodyIsJSON {
-				logger.Debug("Performing schema match")
+			// If the request body is empty, we can return the first eligible mock
+			if string(matchParams.reqBody) == "" {
+				ok, bestMatch := getEmptyBodyMock(eligibleMocks)
+				if ok {
+					if !handleMatch(ctx, logger, bestMatch, mockDb) {
+						continue
+					}
+					return true, bestMatch, nil
+				}
+
+				logger.Debug("couldn't find any mock with empty body")
+				return false, nil, nil
+			}
+
+			// If the body is JSON we do a schema match. we can add more custom type matching
+			if isJSON(matchParams.reqBody) {
+				var homogeneousMocks []*models.Mock
+
+				logger.Debug("Performing schema match for body")
 				for _, mock := range eligibleMocks {
 					if ctx.Err() != nil {
 						return false, nil, ctx.Err()
 					}
-					var mockData map[string]interface{}
-					var reqData map[string]interface{}
-					err := json.Unmarshal([]byte(mock.Spec.HTTPReq.Body), &mockData)
+
+					ok, err := schemaMatch(logger, []byte(mock.Spec.HTTPReq.Body), matchParams.reqBody)
 					if err != nil {
-						utils.LogError(logger, err, "failed to unmarshal the mock request body", zap.String("Req", mock.Spec.HTTPReq.Body))
-						break
-					}
-					err = json.Unmarshal(matchParams.reqBody, &reqData)
-					if err != nil {
-						utils.LogError(logger, err, "failed to unmarshal the request body", zap.String("Req", string(matchParams.reqBody)))
+						logger.Error("failed to do schema matching on request body", zap.Error(err))
 						break
 					}
 
-					if schemaMatch(mockData, reqData) {
-						isDeleted := mockDb.DeleteFilteredMock(mock)
-						if isDeleted {
-							return true, mock, nil
-						}
-						logger.Debug("found match but did not delete it")
+					if ok {
+						homogeneousMocks = append(homogeneousMocks, mock)
+						logger.Debug("found a mock with body schema match")
 					}
 				}
+
+				if len(homogeneousMocks) == 0 {
+					logger.Debug("couldn't find any mock with body schema match")
+					return false, nil, nil
+				}
+
+				//if we have only one schema matched mock, we return it
+				if len(homogeneousMocks) == 1 {
+					if !handleMatch(ctx, logger, homogeneousMocks[0], mockDb) {
+						continue
+					}
+					return true, homogeneousMocks[0], nil
+				}
+
+				//if more than one schema matched mocks are present, we perform fuzzy match on rest of the mocks
+				eligibleMocks = homogeneousMocks
 			}
-			logger.Debug("Performing fuzzy match")
+
+			// we should perform fuzzy match if body type is not JSON
+			// or if we have more than one json schema matched mocks. (useful in case of async http requests)
+			logger.Debug("Performing fuzzy match for req buffer")
 			isMatched, bestMatch := fuzzyMatch(eligibleMocks, matchParams.reqBuf)
 			if isMatched {
-				isDeleted := mockDb.DeleteFilteredMock(bestMatch)
-				if !isDeleted {
-					logger.Debug("found match but did not delete it, so ignoring")
+				if !handleMatch(ctx, logger, bestMatch, mockDb) {
 					continue
 				}
+				return true, bestMatch, nil
 			}
-			return isMatched, bestMatch, nil
+			return false, nil, nil
 		}
 	}
 
 }
 
-func schemaMatch(mockData map[string]interface{}, reqData map[string]interface{}) bool {
+func getEmptyBodyMock(eligibleMocks []*models.Mock) (bool, *models.Mock) {
+	for _, mock := range eligibleMocks {
+		if mock.Spec.HTTPReq.Body == "" {
+			return true, mock
+		}
+	}
+	return false, nil
+}
+
+func schemaMatch(logger *zap.Logger, mockBody, reqBody []byte) (bool, error) {
+
+	var mockData map[string]interface{}
+	var reqData map[string]interface{}
+	err := json.Unmarshal(mockBody, &mockData)
+	if err != nil {
+		utils.LogError(logger, err, "failed to unmarshal the mock request body", zap.String("Req", string(mockBody)))
+		return false, err
+	}
+	err = json.Unmarshal(reqBody, &reqData)
+	if err != nil {
+		utils.LogError(logger, err, "failed to unmarshal the request body", zap.String("Req", string(reqBody)))
+		return false, err
+	}
+
 	for key := range mockData {
 		_, exists := reqData[key]
 		if !exists {
-			return false
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
 }
 
 func mapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
@@ -236,4 +305,86 @@ func fuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
 		return true, tcsMocks[idx]
 	}
 	return false, &models.Mock{}
+}
+
+func matchBodyType(mockBody string, reqBody []byte) bool {
+	if mockBody == "" && string(reqBody) == "" {
+		return true
+	}
+
+	mockBodyType := guessContentType([]byte(mockBody))
+	reqBodyType := guessContentType(reqBody)
+
+	return mockBodyType == reqBodyType
+}
+
+type ContentType string
+
+// Constants for different content types.
+const (
+	Unknown   ContentType = "Unknown"
+	JSON      ContentType = "JSON"
+	XML       ContentType = "XML"
+	CSV       ContentType = "CSV"
+	HTML      ContentType = "HTML"
+	TextPlain ContentType = "TextPlain"
+)
+
+// guessContentType attempts to determine the content type of the provided byte slice.
+func guessContentType(data []byte) ContentType {
+	// Use net/http library's DetectContentType for basic MIME type detection
+	mimeType := http.DetectContentType(data)
+
+	// Additional checks to further specify the content type
+	switch {
+	case isJSON(data):
+		return JSON
+	case isXML(data):
+		return XML
+	case strings.Contains(mimeType, "text/html"):
+		return HTML
+	case strings.Contains(mimeType, "text/plain"):
+		if isCSV(data) {
+			return CSV
+		}
+		return TextPlain
+	}
+
+	return Unknown
+}
+
+// isXML tries to unmarshal data into a generic XML struct to check if it's valid XML
+func isXML(data []byte) bool {
+	var xm xml.Name
+	return xml.Unmarshal(data, &xm) == nil
+}
+
+// isCSV checks if data can be parsed as CSV by looking for common characteristics
+func isCSV(data []byte) bool {
+	// Very simple CSV check: look for commas in the first line
+	content := string(data)
+	if lines := strings.Split(content, "\n"); len(lines) > 0 {
+		return strings.Contains(lines[0], ",")
+	}
+	return false
+}
+
+// handleMatch processes the matched mock based on its filtered status.
+func handleMatch(_ context.Context, logger *zap.Logger, matchedMock *models.Mock, mockDb integrations.MockMemDb) bool {
+	if matchedMock.TestModeInfo.IsFiltered {
+		originalMatchedMock := *matchedMock
+		matchedMock.TestModeInfo.IsFiltered = false
+		matchedMock.TestModeInfo.SortOrder = math.MaxInt
+		//UpdateUnFilteredMock also marks the mock as used
+		updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
+		return updated
+	}
+
+	// we don't update the mock if the IsFiltered is false
+	err := mockDb.FlagMockAsUsed(matchedMock)
+	if err != nil {
+		logger.Error("failed to flag mock as used", zap.Error(err))
+	}
+
+	return true
 }
