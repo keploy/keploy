@@ -503,8 +503,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	// total duration of test
-	testTimeTaken := time.Now().Sub(startTestTime)
+	// total duration of the test
+	testTimeTaken := time.Since(startTestTime)
 
 	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
 	if err != nil {
