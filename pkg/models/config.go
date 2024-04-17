@@ -1,6 +1,8 @@
 // Package models provides data models for the keploy.
 package models
 
+//TODO: remove this redundant file, before removing make necessary changes in the pilot repo also: https://github.com/keploy/pilot
+
 import "time"
 
 type Record struct {

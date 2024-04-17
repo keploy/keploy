@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"os"
 
 	"go.keploy.io/server/v2/pkg/graph"
 	"go.keploy.io/server/v2/utils"
@@ -41,6 +42,15 @@ func Test(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 				err := g.Serve(ctx)
 				if err != nil {
 					utils.LogError(logger, err, "failed to start graph service")
+					return nil
+				}
+			}
+
+			cmdType := utils.FindDockerCmd(cfg.Command)
+			if cmdType == utils.Native && cfg.Test.GoCoverage {
+				err := os.Setenv("GOCOVERDIR", cfg.Test.CoverageReportPath)
+				if err != nil {
+					utils.LogError(logger, err, "failed to set GOCOVERDIR")
 					return nil
 				}
 			}
