@@ -32,12 +32,7 @@ func match(ctx context.Context, logger *zap.Logger, matchParams *matchParams, mo
 				return false, nil, errors.New("error while matching the request with the mocks")
 			}
 
-			logger.Info(fmt.Sprintf("Length of unfilteredMocks:%v", len(unfilteredMocks)))
-			for i, mock := range unfilteredMocks {
-				if mock.Kind == models.HTTP {
-					fmt.Printf("unfilteredMocks-%v:%v\n", i, mock.Spec.HTTPReq)
-				}
-			}
+			logger.Debug(fmt.Sprintf("Length of unfilteredMocks:%v", len(unfilteredMocks)))
 
 			var eligibleMocks []*models.Mock
 
