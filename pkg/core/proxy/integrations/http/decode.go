@@ -20,12 +20,6 @@ import (
 	"go.uber.org/zap"
 )
 
-type matchParams struct {
-	req     *http.Request
-	reqBody []byte
-	reqBuf  []byte
-}
-
 // Decodes the mocks in test mode so that they can be sent to the user application.
 func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	errCh := make(chan error, 1)
@@ -84,14 +78,14 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				return
 			}
 
-			//check if reqBuf body is a json
-
-			param := &matchParams{
-				req:     request,
-				reqBody: reqBody,
-				reqBuf:  reqBuf,
+			input := &req{
+				method: request.Method,
+				url:    request.URL,
+				header: request.Header,
+				body:   reqBody,
+				raw:    reqBuf,
 			}
-			ok, stub, err := match(ctx, logger, param, mockDb)
+			ok, stub, err := match(ctx, logger, input, mockDb)
 			if err != nil {
 				utils.LogError(logger, err, "error while matching http mocks", zap.Any("metadata", getReqMeta(request)))
 				errCh <- err
