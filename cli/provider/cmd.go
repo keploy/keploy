@@ -220,7 +220,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
 		cmd.PersistentFlags().Bool("disableTele", c.cfg.DisableTele, "Run in telemetry mode")
-		cmd.PersistentFlags().Bool("enableANSI", c.cfg.EnableANSI, "Enable ANSI color in logs")
+		cmd.PersistentFlags().Bool("disableANSI", c.cfg.DisableANSI, "Disable ANSI color in logs")
 		err = cmd.PersistentFlags().MarkHidden("disableTele")
 		if err != nil {
 			errMsg := "failed to mark telemetry as hidden flag"
@@ -306,7 +306,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		c.cfg.DisableTele = true
 	}
 
-	if !c.cfg.EnableANSI {
+	if c.cfg.DisableANSI {
 		logger, err := log.ChangeColorEncoding()
 		*c.logger = *logger
 		if err != nil {
