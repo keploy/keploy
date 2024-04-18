@@ -68,7 +68,7 @@ type RequestEmulator interface {
 	AfterTestHook(ctx context.Context, testRunID, testSetID string, totalTestSets int) (*models.TestReport, error)
 }
 type TestResult interface {
-	TestRunStatus(status bool, testSetID string)
+	TestRunStatus(ctx context.Context, status bool, testSetID string)
 	MockName() string
-	MockFile(testSetID string)
+	MockFile(ctx context.Context, testSetID string)
 }

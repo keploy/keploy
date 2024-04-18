@@ -133,7 +133,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
 		}
-		runTestSetResult.MockFile(testSetID)
+		runTestSetResult.MockFile(ctx, testSetID)
 		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, appID, false)
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)
@@ -159,7 +159,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			testSetResult = false
 		case models.TestSetStatusPassed:
 			testSetResult = true
-			runTestSetResult.TestRunStatus(testSetResult, testSetID)
+			runTestSetResult.TestRunStatus(ctx, testSetResult, testSetID)
 		}
 		testRunResult = testRunResult && testSetResult
 		if abortTestRun {
