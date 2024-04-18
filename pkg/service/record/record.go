@@ -156,7 +156,13 @@ func (r *Recorder) Start(ctx context.Context) error {
 		return nil
 	})
 
-	outgoingChan, err = r.instrumentation.GetOutgoing(ctx, appID, models.OutgoingOptions{})
+	opts := models.OutgoingOptions{
+		Rules:          r.config.BypassRules,
+		MongoPassword:  r.config.Test.MongoPassword,
+		FallBackOnMiss: r.config.Test.FallBackOnMiss,
+	}
+
+	outgoingChan, err = r.instrumentation.GetOutgoing(ctx, appID, opts)
 	if err != nil {
 		stopReason = "failed to get outgoing frames"
 		utils.LogError(r.logger, err, stopReason)
