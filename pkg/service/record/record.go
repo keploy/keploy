@@ -156,8 +156,18 @@ func (r *Recorder) Start(ctx context.Context) error {
 		return nil
 	})
 
+	// Getting all the bypass rules
+	filterRules := r.config.Record.Filters
+	for _, bypass := range r.config.BypassRules {
+		filterRules = append(filterRules, config.Filter{
+			BypassRule: bypass,
+			URLMethods: nil,
+			Headers:    nil,
+		})
+	}
+
 	opts := models.OutgoingOptions{
-		Rules:          r.config.BypassRules,
+		Rules:          filterRules,
 		MongoPassword:  r.config.Test.MongoPassword,
 		FallBackOnMiss: r.config.Test.FallBackOnMiss,
 	}

@@ -427,6 +427,37 @@ func isPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 				continue
 			}
 		}
+		if bypass.URLMethods != nil && len(bypass.URLMethods) != 0 {
+			for _, method := range bypass.URLMethods {
+				if method == req.Method {
+					passThrough = true
+					break
+				}
+			}
+			if !passThrough {
+				continue
+			}
+		}
+		if bypass.Headers != nil && len(bypass.Headers) != 0 {
+			for bypassHeaderKey, bypassHeaderValue := range bypass.Headers {
+				regex, err := regexp.Compile(bypassHeaderValue)
+				if err != nil {
+					utils.LogError(logger, err, "failed to compile the header regex", zap.Any("metadata", getReqMeta(req)))
+					continue
+				}
+				if req.Header.Get(bypassHeaderKey) != "" {
+					for _, value := range req.Header.Values(bypassHeaderKey) {
+						passThrough = regex.MatchString(value)
+						if passThrough {
+							break
+						}
+					}
+				}
+				if passThrough {
+					break
+				}
+			}
+		}
 
 		if passThrough {
 			if bypass.Port == 0 || bypass.Port == destPort {
