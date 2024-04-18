@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
-	"go.keploy.io/server/v2/pkg/core/proxy/util"
+	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -33,7 +33,7 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 	errCh := make(chan error, 1)
 
 	go func(errCh chan error, configMocks []*models.Mock, tcsMocks []*models.Mock, prevRequest string, requestBuffers [][]byte) {
-		defer utils.Recover(logger)
+		defer pUtil.Recover(logger, clientConn, nil)
 		defer close(errCh)
 		for {
 			//log.Debug("Config and TCS Mocks", zap.Any("configMocks", configMocks), zap.Any("tcsMocks", tcsMocks))
@@ -98,7 +98,7 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 				}
 
 				// Attempt to read from the client
-				requestBuffer, err := util.ReadBytes(ctx, logger, clientConn)
+				requestBuffer, err := pUtil.ReadBytes(ctx, logger, clientConn)
 				if err != nil {
 					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 						// Timeout occurred, no data received from client
@@ -178,7 +178,7 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 				if matchedIndex == -1 {
 					logger.Debug("No matching mock found")
 
-					responseBuffer, err := util.PassThrough(ctx, logger, clientConn, dstCfg, requestBuffers)
+					responseBuffer, err := pUtil.PassThrough(ctx, logger, clientConn, dstCfg, requestBuffers)
 					if err != nil {
 						utils.LogError(logger, err, "Failed to passthrough the mysql request to the actual database server")
 						errCh <- err

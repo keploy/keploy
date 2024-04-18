@@ -326,8 +326,8 @@ func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
 		if resultSet.OptionalPadding {
 			buf.Write([]byte{0x00, 0x00}) // Add padding bytes
 		}
-		bytes, _ := encodeRow(row, row.Columns)
-		buf.Write(bytes)
+		b, _ := encodeRow(row, row.Columns)
+		buf.Write(b)
 	}
 	// Write EOF packet header again
 	// buf.Write([]byte{5, 0, 0, sequenceID})

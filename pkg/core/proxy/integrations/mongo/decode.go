@@ -25,7 +25,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 	errCh := make(chan error, 1)
 
 	go func(errCh chan error, reqBuf []byte, startedDecoding time.Time, requestBuffers [][]byte) {
-		defer utils.Recover(logger)
+		defer util.Recover(logger, clientConn, nil)
 		defer close(errCh)
 		var readRequestDelay time.Duration
 		for {
