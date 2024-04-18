@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/getsentry/sentry-go"
+	netLib "github.com/shirou/gopsutil/v3/net"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -238,6 +239,18 @@ func attachLogFileToSentry(logger *zap.Logger, logFilePath string) error {
 	return nil
 }
 
+// HandleRecovery handles the common logic for recovering from a panic.
+func HandleRecovery(logger *zap.Logger, r interface{}, errMsg string) {
+	err := attachLogFileToSentry(logger, "./keploy-logs.txt")
+	if err != nil {
+		LogError(logger, err, "failed to attach log file to sentry")
+	}
+	sentry.CaptureException(errors.New(fmt.Sprint(r)))
+	// Get the stack trace
+	stackTrace := debug.Stack()
+	LogError(logger, nil, errMsg, zap.String("stack trace", string(stackTrace)))
+}
+
 // Recover recovers from a panic and logs the stack trace to Sentry.
 // It also stops the global context.
 func Recover(logger *zap.Logger) {
@@ -247,21 +260,12 @@ func Recover(logger *zap.Logger) {
 	}
 	sentry.Flush(2 * time.Second)
 	if r := recover(); r != nil {
-		err := attachLogFileToSentry(logger, "./keploy-logs.txt")
-		if err != nil {
-			LogError(logger, err, "failed to attach log file to sentry")
-		}
-		sentry.CaptureException(errors.New(fmt.Sprint(r)))
-		// Get the stack trace
-		stackTrace := debug.Stack()
-		LogError(logger, nil, "Recovered from panic", zap.String("stack trace", string(stackTrace)))
-		//stopping the global context
-		err = Stop(logger, fmt.Sprintf("Recovered from: %s", r))
+		HandleRecovery(logger, r, "Recovered from panic")
+		err := Stop(logger, fmt.Sprintf("Recovered from: %s", r))
 		if err != nil {
 			LogError(logger, err, "failed to stop the global context")
-			//return
 		}
-		sentry.Flush(time.Second * 2)
+		sentry.Flush(2 * time.Second)
 	}
 }
 
@@ -378,37 +382,6 @@ const (
 	DockerCompose CmdType = "docker-compose"
 	Native        CmdType = "native"
 )
-
-type RecordFlags struct {
-	Path             string
-	Command          string
-	ContainerName    string
-	Proxyport        uint32
-	NetworkName      string
-	Delay            uint64
-	BuildDelay       time.Duration
-	PassThroughPorts []uint
-	ConfigPath       string
-	EnableTele       bool
-}
-
-type TestFlags struct {
-	Path               string
-	Proxyport          uint32
-	Command            string
-	Testsets           []string
-	ContainerName      string
-	NetworkName        string
-	Delay              uint64
-	BuildDelay         time.Duration
-	APITimeout         uint64
-	PassThroughPorts   []uint
-	ConfigPath         string
-	MongoPassword      string
-	CoverageReportPath string
-	EnableTele         bool
-	WithCoverage       bool
-}
 
 func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 	// Get the name of the operating system.
@@ -531,6 +504,68 @@ func SentryInit(logger *zap.Logger, dsn string) {
 //
 //	return os.Getenv("HOME") + configFolder
 //}
+
+func GetAbsPath(path string) (string, error) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return absPath, nil
+}
+
+// makeDirectory creates a directory if not exists with all user access
+func makeDirectory(path string) error {
+	oldUmask := syscall.Umask(0)
+	defer syscall.Umask(oldUmask)
+	err := os.MkdirAll(path, 0777)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// SetCoveragePath takes a goCovPath and sets the coverage path accordingly.
+// It returns an error if the path is a file or if the path does not exist.
+func SetCoveragePath(logger *zap.Logger, goCovPath string) (string, error) {
+	if goCovPath == "" {
+		// Calculate the current path and create a coverage-reports directory
+		currentPath, err := GetAbsPath("")
+		if err != nil {
+			LogError(logger, err, "failed to get the current working directory")
+			return "", err
+		}
+		goCovPath = currentPath + "/coverage-reports"
+		if err := makeDirectory(goCovPath); err != nil {
+			LogError(logger, err, "failed to create coverage-reports directory", zap.String("CoverageReportPath", goCovPath))
+			return "", err
+		}
+		return goCovPath, nil
+	}
+
+	goCovPath, err := GetAbsPath(goCovPath)
+	if err != nil {
+		LogError(logger, err, "failed to get the absolute path for the coverage report path", zap.String("CoverageReportPath", goCovPath))
+		return "", err
+	}
+	// Check if the path is a directory
+	dirInfo, err := os.Stat(goCovPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			LogError(logger, err, "the provided path does not exist", zap.String("CoverageReportPath", goCovPath))
+			return "", err
+		}
+		LogError(logger, err, "failed to check the coverage report path", zap.String("CoverageReportPath", goCovPath))
+		return "", err
+	}
+	if !dirInfo.IsDir() {
+		msg := "the coverage report path is not a directory. Please provide a valid path to a directory for go coverage reports"
+
+		LogError(logger, nil, msg, zap.String("CoverageReportPath", goCovPath))
+		return "", errors.New("the path provided is not a directory")
+	}
+
+	return goCovPath, nil
+}
 
 // InterruptProcessTree interrupts an entire process tree using the given signal
 func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) error {
@@ -658,6 +693,27 @@ func findChildPIDs(parentPID int) ([]int, error) {
 	findDescendants(parentPID)
 
 	return childPIDs, nil
+}
+
+func GetPIDFromPort(_ context.Context, logger *zap.Logger, port int) (uint32, error) {
+	logger.Debug("Getting pid using port", zap.Int("port", port))
+
+	connections, err := netLib.Connections("inet")
+	if err != nil {
+		return 0, err
+	}
+
+	for _, conn := range connections {
+		if conn.Status == "LISTEN" && conn.Laddr.Port == uint32(port) {
+			if conn.Pid > 0 {
+				return uint32(conn.Pid), nil
+			}
+			return 0, fmt.Errorf("pid %d is out of bounds", conn.Pid)
+		}
+	}
+
+	// If we get here, no process was found using the given port
+	return 0, fmt.Errorf("no process found using port %d", port)
 }
 
 func EnsureRmBeforeName(cmd string) string {

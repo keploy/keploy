@@ -1,7 +1,9 @@
 // Package config provides configuration structures for the application.
 package config
 
-import "time"
+import (
+	"time"
+)
 
 type Config struct {
 	Path                  string        `json:"path" yaml:"path" mapstructure:"path" `
@@ -19,9 +21,11 @@ type Config struct {
 	Record                Record        `json:"record" yaml:"record" mapstructure:"record"`
 	ConfigPath            string        `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
 	BypassRules           []BypassRule  `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
+	EnableTesting         bool          `json:"enableTesting" yaml:"enableTesting" mapstructure:"enableTesting"`
+	GenerateGithubActions bool          `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`
 	KeployContainer       string        `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
 	KeployNetwork         string        `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
-	GenerateGithubActions bool          `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`
+	CommandType           string        `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
 }
 
 type Record struct {
@@ -53,6 +57,7 @@ type Test struct {
 	MongoPassword      string              `json:"mongoPassword" yaml:"mongoPassword" mapstructure:"mongoPassword"`
 	Language           string              `json:"language" yaml:"language" mapstructure:"language"`
 	RemoveUnusedMocks  bool                `json:"removeUnusedMocks" yaml:"removeUnusedMocks" mapstructure:"removeUnusedMocks"`
+	FallBackOnMiss     bool                `json:"fallBackOnMiss" yaml:"fallBackOnMiss" mapstructure:"fallBackOnMiss"`
 }
 
 type Globalnoise struct {
