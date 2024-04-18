@@ -44,6 +44,7 @@ type MockDB interface {
 	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
 	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
 	UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]bool) error
+	SetMockFileName(mockName string)
 }
 
 type ReportDB interface {
@@ -65,4 +66,9 @@ type Telemetry interface {
 type RequestEmulator interface {
 	SimulateRequest(ctx context.Context, appID uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error)
 	AfterTestHook(ctx context.Context, testRunID, testSetID string, totalTestSets int) (*models.TestReport, error)
+}
+type TestResult interface {
+	TestRunStatus(status bool, testSetID string)
+	MockName() string
+	MockFile(testSetID string)
 }

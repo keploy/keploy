@@ -36,6 +36,10 @@ func New(Logger *zap.Logger, mockPath string, mockName string) *MockYaml {
 	}
 }
 
+func (ys *MockYaml) SetMockFileName(mockName string) {
+	ys.MockName = mockName
+}
+
 // UpdateMocks deletes the mocks from the mock file with given names
 //
 // mockNames is a map which contains the name of the mocks as key and a isConfig boolean as value
@@ -144,7 +148,6 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 
 	var tcsMocks = make([]*models.Mock, 0)
 	var filteredTcsMocks = make([]*models.Mock, 0)
-
 	mockFileName := "mocks"
 	if ys.MockName != "" {
 		mockFileName = ys.MockName
@@ -196,7 +199,6 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 			}
 		}
 	}
-
 	filteredTcsMocks, _ = ys.filterByTimeStamp(ctx, tcsMocks, afterTime, beforeTime, ys.Logger)
 
 	sort.SliceStable(filteredTcsMocks, func(i, j int) bool {

@@ -29,9 +29,14 @@ var totalTestFailed int
 // emulator contains the struct instance that implements RequestEmulator interface. This is done for
 // attaching the objects dynamically as plugins.
 var emulator RequestEmulator
+var runTestSetResult TestResult
 
 func SetTestUtilInstance(instance RequestEmulator) {
 	emulator = instance
+}
+
+func SetRunTestSet(instance TestResult) {
+	runTestSetResult = instance
 }
 
 type Replayer struct {
@@ -48,6 +53,9 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 	// set the request emulator for simulating test case requests, if not set
 	if emulator == nil {
 		SetTestUtilInstance(NewTestUtils(config.Test.APITimeout, logger))
+	}
+	if runTestSetResult == nil {
+		SetRunTestSet(NewTestStatusUtil(logger, config.Path, "mocks"))
 	}
 
 	return &Replayer{
@@ -121,13 +129,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 	testSetResult := false
 	testRunResult := true
 	abortTestRun := false
-
 	for _, testSetID := range testSetIDs {
-
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
 		}
-
+		runTestSetResult.MockFile(testSetID)
 		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, appID, false)
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)
@@ -153,6 +159,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			testSetResult = false
 		case models.TestSetStatusPassed:
 			testSetResult = true
+			runTestSetResult.TestRunStatus(testSetResult, testSetID)
 		}
 		testRunResult = testRunResult && testSetResult
 		if abortTestRun {
@@ -225,7 +232,6 @@ func (r *Replayer) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
 }
 
 func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error) {
-
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
 	runTestSetCtx = context.WithValue(runTestSetCtx, models.ErrGroupKey, runTestSetErrGrp)
@@ -241,6 +247,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		close(exitLoopChan)
 	}()
+
+	r.mockDB.SetMockFileName(runTestSetResult.MockName())
 
 	var appErrChan = make(chan models.AppError, 1)
 	var appErr models.AppError
@@ -438,7 +446,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				totalConsumedMocks[mockName] = true
 			}
 		}
-
 		testPass, testResult = r.compareResp(testCase, resp, testSetID)
 		if !testPass {
 			// log the consumed mocks during the test run of the test case for test set
@@ -477,7 +484,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				},
 				Res:          *resp,
 				TestCasePath: filepath.Join(r.config.Path, testSetID),
-				MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
+				MockPath:     filepath.Join(r.config.Path, testSetID, runTestSetResult.MockName()),
 				Noise:        testCase.Noise,
 				Result:       *testResult,
 			}
