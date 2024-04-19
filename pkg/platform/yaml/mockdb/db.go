@@ -182,7 +182,16 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 		}
 
 		for _, mock := range mocks {
-			if mock.Spec.Metadata["type"] != "config" && mock.Kind != "Generic" && mock.Kind != "Postgres" {
+			isFilteredMock := true
+			switch mock.Kind {
+			case "Generic":
+				isFilteredMock = false
+			case "Postgres":
+				isFilteredMock = false
+			case "Http":
+				isFilteredMock = false
+			}
+			if mock.Spec.Metadata["type"] != "config" && isFilteredMock {
 				tcsMocks = append(tcsMocks, mock)
 			}
 		}
@@ -238,7 +247,16 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 			return nil, err
 		}
 		for _, mock := range mocks {
-			if mock.Spec.Metadata["type"] == "config" || mock.Kind == "Postgres" || mock.Kind == "Generic" {
+			isUnFilteredMock := false
+			switch mock.Kind {
+			case "Generic":
+				isUnFilteredMock = true
+			case "Postgres":
+				isUnFilteredMock = true
+			case "Http":
+				isUnFilteredMock = true
+			}
+			if mock.Spec.Metadata["type"] == "config" || isUnFilteredMock {
 				configMocks = append(configMocks, mock)
 			}
 		}
