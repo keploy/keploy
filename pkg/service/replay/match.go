@@ -579,42 +579,89 @@ func sprintJSONDiff(json1 []byte, json2 []byte, field string, noise map[string][
 	return result, nil
 }
 
-// Find the diff between two strings returning index where
-// the difference begin
+func isStructuredData(s string) bool {
+	parts := strings.Split(s, ": ")
+	if len(parts) > 1 {
+		for i := 1; i < len(parts); i++ {
+			if strings.Contains(parts[i], " ") {
+				return true
+			}
+		}
+	}
+
+	// Assume not structured data if no clear structured pattern is found
+	return false
+}
+
+// diffIndexRange dynamically compares two strings, adapting its method based on the presence of spaces.
 func diffIndexRange(s1, s2 string) ([]Range, bool) {
 	var ranges []Range
 	diff := false
 
-	maxLen := len(s1)
-	if len(s2) > maxLen {
-		maxLen = len(s2)
-	}
+	// Determine whether to treat the strings as phrases (multiple words) or as a single continuous string.
+	isPhrase := isStructuredData(s1) && isStructuredData(s2)
+	if isPhrase {
+		// Phrase mode: split strings into words and compare by words considering order.
+		words1 := strings.Split(s1, " ")
+		words2 := strings.Split(s2, " ")
 
-	var startDiff = -1
-	for i := 0; i < maxLen; i++ {
-		char1, char2 := byte(0), byte(0)
-		if i < len(s1) {
-			char1 = s1[i]
-		}
-		if i < len(s2) {
-			char2 = s2[i]
+		maxLen := len(words1)
+		if len(words2) > maxLen {
+			maxLen = len(words2)
 		}
 
-		if char1 != char2 {
-			if startDiff == -1 {
-				startDiff = i
+		startIndex := 0
+		for i := 0; i < maxLen; i++ {
+			word1, word2 := "", ""
+			if i < len(words1) {
+				word1 = words1[i]
 			}
-			diff = true
-		} else {
-			if startDiff != -1 {
-				ranges = append(ranges, Range{Start: startDiff, End: i - 1})
-				startDiff = -1
+			if i < len(words2) {
+				word2 = words2[i]
+			}
+
+			if word1 != word2 {
+				if !diff {
+					diff = true
+				}
+				endIndex := startIndex + len(word1)
+				ranges = append(ranges, Range{Start: startIndex, End: endIndex - 1})
+			}
+			startIndex += len(word1) + 1 // +1 to account for the space
+		}
+	} else {
+		// Single continuous string mode: compare character by character.
+		maxLen := len(s1)
+		if len(s2) > maxLen {
+			maxLen = len(s2)
+		}
+
+		var startDiff = -1
+		for i := 0; i < maxLen; i++ {
+			char1, char2 := byte(0), byte(0)
+			if i < len(s1) {
+				char1 = s1[i]
+			}
+			if i < len(s2) {
+				char2 = s2[i]
+			}
+
+			if char1 != char2 {
+				if startDiff == -1 {
+					startDiff = i
+				}
+				diff = true
+			} else {
+				if startDiff != -1 {
+					ranges = append(ranges, Range{Start: startDiff, End: i - 1})
+					startDiff = -1
+				}
 			}
 		}
-	}
 
-	if startDiff != -1 {
-		ranges = append(ranges, Range{Start: startDiff, End: maxLen - 1})
+		if startDiff != -1 {
+			ranges = append(ranges, Range{Start: startDiff, End: maxLen - 1})
+		}
 	}
 
 	return ranges, diff
@@ -798,7 +845,7 @@ func compareAndColorizeMaps(a, b map[string]interface{}, indent string, red, gre
 		bValue, bHasKey := b[key]
 		if !bHasKey {
 			// Key is missing in map 'b', so the whole line is red
-			writeKeyValuePair(&expectedOutput, key, aValue, indent+"  ", red)
+			writeKeyValuePair(&expectedOutput, red(key), aValue, indent+"  ", red)
 			continue
 		}
 		compare(key, aValue, bValue, indent+"  ", &expectedOutput, &actualOutput, red, green)
@@ -808,7 +855,7 @@ func compareAndColorizeMaps(a, b map[string]interface{}, indent string, red, gre
 	for key, bValue := range b {
 		if _, aHasKey := a[key]; !aHasKey {
 			// Key is missing in map 'a', so the whole line is green
-			writeKeyValuePair(&actualOutput, key, bValue, indent+"  ", green)
+			writeKeyValuePair(&actualOutput, green(key), bValue, indent+"  ", green)
 		}
 	}
 
@@ -882,38 +929,15 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 		var expectKey, actualKey string
 		line := lines[i]
 		nextLine := lines[i+1]
-
 		if len(line) > 0 && line[0] == '-' && i != len(lines)-1 {
 
 			// Remove the leading  "+ "
-			expectedTrimmedLine := nextLine[3:] // Assuming lines[i+1] starts with "+ "
-			expectedKeyValue := strings.SplitN(expectedTrimmedLine, ":", 2)
-			if len(expectedKeyValue) == 2 {
-				expectKey = strings.TrimSpace(expectedKeyValue[0])
-				value := strings.TrimSpace(expectedKeyValue[1])
+			actualTrimmedLine := nextLine[3:] // Assuming lines[i+1] starts with "+ "
+			actualKeyValue := strings.SplitN(actualTrimmedLine, ":", 2)
+			if len(actualKeyValue) == 2 {
+				actualKey = strings.TrimSpace(actualKeyValue[0])
+				value := strings.TrimSpace(actualKeyValue[1])
 
-				var jsonObj map[string]interface{}
-				err := json.Unmarshal([]byte(value), &jsonObj)
-				if err != nil {
-					var arrayObj []interface{}
-					arrayError := json.Unmarshal([]byte(value), &arrayObj)
-					if arrayError != nil {
-						continue
-					}
-					expectsArray = arrayObj
-				} else {
-					isActualMap = true
-					expectsMap = map[string]interface{}{expectKey[:len(expectKey)-1]: jsonObj}
-				}
-
-			}
-
-			// Remove the leading "- "
-			actualTrimmedLine := line[3:]
-			actualkeyValue := strings.SplitN(actualTrimmedLine, ":", 2)
-			if len(actualkeyValue) == 2 {
-				actualKey = strings.TrimSpace(actualkeyValue[0])
-				value := strings.TrimSpace(actualkeyValue[1])
 				var jsonObj map[string]interface{}
 				err := json.Unmarshal([]byte(value), &jsonObj)
 				if err != nil {
@@ -924,8 +948,30 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 					}
 					actualsArray = arrayObj
 				} else {
-					isExpectMap = true
+					isActualMap = true
 					actualsMap = map[string]interface{}{actualKey[:len(actualKey)-1]: jsonObj}
+				}
+
+			}
+
+			// Remove the leading "- "
+			expectTrimmedLine := line[3:]
+			expectkeyValue := strings.SplitN(expectTrimmedLine, ":", 2)
+			if len(expectkeyValue) == 2 {
+				expectKey = strings.TrimSpace(expectkeyValue[0])
+				value := strings.TrimSpace(expectkeyValue[1])
+				var jsonObj map[string]interface{}
+				err := json.Unmarshal([]byte(value), &jsonObj)
+				if err != nil {
+					var arrayObj []interface{}
+					arrayError := json.Unmarshal([]byte(value), &arrayObj)
+					if arrayError != nil {
+						continue
+					}
+					expectsArray = arrayObj
+				} else {
+					isExpectMap = true
+					expectsMap = map[string]interface{}{expectKey[:len(expectKey)-1]: jsonObj}
 				}
 			}
 			red := color.New(color.FgRed).SprintFunc()
