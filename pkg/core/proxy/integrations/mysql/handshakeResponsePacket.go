@@ -7,9 +7,13 @@ import (
 )
 
 const (
-	CLIENT_PLUGIN_AUTH                = 0x00080000
-	CLIENT_CONNECT_WITH_DB            = 0x00000008
-	CLIENT_CONNECT_ATTRS              = 0x00100000
+	// CLIENT_PLUGIN_AUTH indicates that the client supports plugin authentication.
+	CLIENT_PLUGIN_AUTH = 0x00080000
+	// CLIENT_CONNECT_WITH_DB indicates that client is connecting to server with database name.
+	CLIENT_CONNECT_WITH_DB = 0x00000008
+	// CLIENT_CONNECT_ATTRS indicates that the client supports connection attributes.
+	CLIENT_CONNECT_ATTRS = 0x00100000
+	// CLIENT_ZSTD_COMPRESSION_ALGORITHM indicates support for Zstandard compression algorithm
 	CLIENT_ZSTD_COMPRESSION_ALGORITHM = 0x00010000
 )
 
@@ -131,7 +135,7 @@ func decodeHandshakeResponse(data []byte) (*HandshakeResponse, error) {
 				return nil, errors.New("handshake response packet too short for ZSTD compression level")
 			}
 			packet.ZstdCompressionLevel = data[0]
-			data = data[1:]
+			//data = data[1:]
 		}
 	}
 

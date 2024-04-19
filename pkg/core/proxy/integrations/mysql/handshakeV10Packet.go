@@ -104,7 +104,10 @@ func encodeHandshakePacket(packet *models.MySQLHandshakeV10Packet) ([]byte, erro
 	buf.WriteByte(0x00) // Null terminator
 
 	// Connection ID
-	binary.Write(buf, binary.LittleEndian, packet.ConnectionID)
+	err := binary.Write(buf, binary.LittleEndian, packet.ConnectionID)
+	if err != nil {
+		return nil, err
+	}
 
 	// Auth-plugin-data-part-1 (first 8 bytes)
 	if len(packet.AuthPluginData) < 8 {
@@ -116,15 +119,24 @@ func encodeHandshakePacket(packet *models.MySQLHandshakeV10Packet) ([]byte, erro
 	buf.WriteByte(0x00)
 
 	// Capability flags
-	binary.Write(buf, binary.LittleEndian, uint16(packet.CapabilityFlags))
+	err = binary.Write(buf, binary.LittleEndian, uint16(packet.CapabilityFlags))
+	if err != nil {
+		return nil, err
+	}
 	// binary.Write(buf, binary.LittleEndian, uint16(packet.CapabilityFlags))
 
 	// Character set
 	buf.WriteByte(packet.CharacterSet)
 
 	// Status flags
-	binary.Write(buf, binary.LittleEndian, packet.StatusFlags)
-	binary.Write(buf, binary.LittleEndian, uint16(packet.CapabilityFlags>>16))
+	err = binary.Write(buf, binary.LittleEndian, packet.StatusFlags)
+	if err != nil {
+		return nil, err
+	}
+	err = binary.Write(buf, binary.LittleEndian, uint16(packet.CapabilityFlags>>16))
+	if err != nil {
+		return nil, err
+	}
 
 	// Length of auth-plugin-data
 	if packet.CapabilityFlags&0x800000 != 0 && len(packet.AuthPluginData) >= 21 {

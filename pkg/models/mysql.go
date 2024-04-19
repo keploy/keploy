@@ -122,11 +122,11 @@ type MySQLResultSet struct {
 }
 type PacketHeader struct {
 	PacketLength     uint8 `yaml:"packet_length"`
-	PacketSequenceId uint8 `yaml:"packet_sequence_id"`
+	PacketSequenceID uint8 `yaml:"packet_sequence_id"`
 }
 type RowHeader struct {
 	PacketLength     uint8 `yaml:"packet_length"`
-	PacketSequenceId uint8 `yaml:"packet_sequence_id"`
+	PacketSequenceID uint8 `yaml:"packet_sequence_id"`
 }
 type ColumnDefinition struct {
 	Catalog      string       `yaml:"catalog"`
