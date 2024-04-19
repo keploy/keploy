@@ -8,6 +8,7 @@ import (
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/core/proxy"
+	"go.keploy.io/server/v2/pkg/core/tester"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb"
 	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
@@ -24,6 +25,7 @@ import (
 type ServiceProvider struct {
 	logger   *zap.Logger
 	configDb *configdb.ConfigDb
+	cfg      *config.Config
 }
 
 type CommonInternalService struct {
@@ -33,15 +35,16 @@ type CommonInternalService struct {
 	Instrumentation *core.Core
 }
 
-func NewServiceProvider(logger *zap.Logger, configDb *configdb.ConfigDb) *ServiceProvider {
+func NewServiceProvider(logger *zap.Logger, configDb *configdb.ConfigDb, cfg *config.Config) *ServiceProvider {
 	return &ServiceProvider{
 		logger:   logger,
 		configDb: configDb,
+		cfg:      cfg,
 	}
 }
 
 func (n *ServiceProvider) GetTelemetryService(ctx context.Context, config config.Config) (*telemetry.Telemetry, error) {
-	installtionID, err := n.configDb.GetInstallationID(ctx)
+	installationID, err := n.configDb.GetInstallationID(ctx)
 	if err != nil {
 		return nil, errors.New("failed to get installation id")
 	}
@@ -49,7 +52,7 @@ func (n *ServiceProvider) GetTelemetryService(ctx context.Context, config config
 		Enabled:        !config.DisableTele,
 		Version:        utils.Version,
 		GlobalMap:      map[string]interface{}{},
-		InstallationID: installtionID,
+		InstallationID: installationID,
 	},
 	), nil
 }
@@ -57,7 +60,8 @@ func (n *ServiceProvider) GetTelemetryService(ctx context.Context, config config
 func (n *ServiceProvider) GetCommonServices(config config.Config) *CommonInternalService {
 	h := hooks.NewHooks(n.logger, config)
 	p := proxy.New(n.logger, h, config)
-	instrumentation := core.New(n.logger, h, p)
+	t := tester.New(n.logger, h) //for keploy test bench
+	instrumentation := core.New(n.logger, h, p, t)
 	testDB := testdb.New(n.logger, config.Path)
 	mockDB := mockdb.New(n.logger, config.Path, "")
 	reportDB := reportdb.New(n.logger, config.Path+"/reports")
@@ -69,8 +73,8 @@ func (n *ServiceProvider) GetCommonServices(config config.Config) *CommonInterna
 	}
 }
 
-func (n *ServiceProvider) GetService(ctx context.Context, cmd string, config config.Config) (interface{}, error) {
-	tel, err := n.GetTelemetryService(ctx, config)
+func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface{}, error) {
+	tel, err := n.GetTelemetryService(ctx, *n.cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -80,12 +84,12 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string, config con
 		return tools.NewTools(n.logger, tel), nil
 	// TODO: add case for mock
 	case "record", "test", "mock":
-		commonServices := n.GetCommonServices(config)
+		commonServices := n.GetCommonServices(*n.cfg)
 		if cmd == "record" {
-			return record.New(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, config), nil
+			return record.New(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, *n.cfg), nil
 		}
 		if cmd == "test" {
-			return replay.NewReplayer(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, tel, commonServices.Instrumentation, config), nil
+			return replay.NewReplayer(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, tel, commonServices.Instrumentation, *n.cfg), nil
 		}
 		return nil, errors.New("invalid command")
 	default:

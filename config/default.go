@@ -7,15 +7,18 @@ import (
 	"sigs.k8s.io/kustomize/kyaml/yaml/walk"
 )
 
-const DefaultConfig = `
+// defaultConfig is a variable to store the default configuration of the Keploy CLI. It is not a constant because enterprise need update the default configuration.
+var defaultConfig = `
 path: ""
 command: ""
 port: 0
 proxyPort: 16789
 dnsPort: 26789
 debug: false
+DisableANSI: false
 disableTele: false
 inDocker: false
+generateGithubActions: true
 containerName: ""
 networkName: ""
 buildDelay: 30s
@@ -27,10 +30,12 @@ test:
   delay: 5
   apiTimeout: 5
   coverage: false
+  goCoverage: false
   coverageReportPath: ""
   ignoreOrdering: true
   mongoPassword: "default@123"
   language: ""
+  removeUnusedMocks: false
 record:
   recordTimer: 0s
   filters: []
@@ -38,16 +43,28 @@ configPath: ""
 bypassRules: []
 `
 
+func GetDefaultConfig() string {
+	return defaultConfig
+}
+
+func SetDefaultConfig(cfgStr string) {
+	defaultConfig = cfgStr
+}
+
 const InternalConfig = `
+enableTesting: false
 keployContainer: "keploy-v2"
 keployNetwork: "keploy-network"
+inDocker: false
+cmdType: "native"
+fallbackOnMiss: false
 `
 
 var config = &Config{}
 
 func New() *Config {
 	// merge default config with internal config
-	mergedConfig, err := Merge(DefaultConfig, InternalConfig)
+	mergedConfig, err := Merge(defaultConfig, InternalConfig)
 	if err != nil {
 		panic(err)
 

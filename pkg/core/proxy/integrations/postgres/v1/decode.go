@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
@@ -19,8 +20,11 @@ import (
 func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
 	pgRequests := [][]byte{reqBuf}
 	errCh := make(chan error, 1)
-	defer close(errCh)
+
 	go func(errCh chan error, pgRequests [][]byte) {
+		defer pUtil.Recover(logger, clientConn, nil)
+		// close should be called from the producer of the channel
+		defer close(errCh)
 		for {
 			// Since protocol packets have to be parsed for checking stream end,
 			// clientConnection have deadline for read to determine the end of stream.
@@ -34,12 +38,11 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 			for {
 				buffer, err := pUtil.ReadBytes(ctx, logger, clientConn)
 				if err != nil {
-					if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
+					if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) {
 						if err == io.EOF {
 							logger.Debug("EOF error received from client. Closing conn in postgres !!")
 							errCh <- err
 						}
-						//TODO: why debug log sarthak?
 						logger.Debug("failed to read the request message in proxy for postgres dependency")
 						errCh <- err
 					}
@@ -55,7 +58,6 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 				logger.Debug("the postgres request buffer is empty")
 				continue
 			}
-
 			matched, pgResponses, err := matchingReadablePG(ctx, logger, pgRequests, mockDb)
 			if err != nil {
 				errCh <- fmt.Errorf("error while matching tcs mocks %v", err)
@@ -63,6 +65,7 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 			}
 
 			if !matched {
+				logger.Debug("MISMATCHED REQ is" + string(pgRequests[0]))
 				_, err = pUtil.PassThrough(ctx, logger, clientConn, dstCfg, pgRequests)
 				if err != nil {
 					utils.LogError(logger, err, "failed to pass the request", zap.Any("request packets", len(pgRequests)))
@@ -94,6 +97,52 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 	case <-ctx.Done():
 		return ctx.Err()
 	case err := <-errCh:
+		if err == io.EOF {
+			return nil
+		}
 		return err
 	}
+}
+
+type QueryData struct {
+	PrepIdentifier string `json:"PrepIdentifier" yaml:"PrepIdentifier"`
+	Query          string `json:"Query" yaml:"Query"`
+}
+
+type PrepMap map[string][]QueryData
+
+type TestPrepMap map[string][]QueryData
+
+func getRecordPrepStatement(allMocks []*models.Mock) PrepMap {
+	preparedstatement := make(PrepMap)
+	for _, v := range allMocks {
+		if v.Kind != "Postgres" {
+			continue
+		}
+		for _, req := range v.Spec.PostgresRequests {
+			var querydata []QueryData
+			psMap := make(map[string]string)
+			if len(req.PacketTypes) > 0 && req.PacketTypes[0] != "p" && req.Identfier != "StartupRequest" {
+				p := 0
+				for _, header := range req.PacketTypes {
+					if header == "P" {
+						if strings.Contains(req.Parses[p].Name, "S_") {
+							psMap[req.Parses[p].Query] = req.Parses[p].Name
+							querydata = append(querydata, QueryData{PrepIdentifier: req.Parses[p].Name,
+								Query: req.Parses[p].Query,
+							})
+
+						}
+						p++
+					}
+				}
+			}
+			// also append the query data for the prepared statement
+			if len(querydata) > 0 {
+				preparedstatement[v.ConnectionID] = append(preparedstatement[v.ConnectionID], querydata...)
+			}
+		}
+
+	}
+	return preparedstatement
 }
