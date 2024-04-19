@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 
 	"go.keploy.io/server/v2/config"
@@ -72,4 +73,31 @@ func (t *testUtils) SimulateRequest(ctx context.Context, _ uint64, tc *models.Te
 		return resp, err
 	}
 	return nil, nil
+}
+
+// detectLanguage detects the language of the test command and whether it is a coverage command
+func detectLanguage(cmd string) (string, bool) {
+	cmdFields := strings.Fields(cmd)
+
+	if slices.Contains(cmdFields, "coverage") {
+		return "python", true
+	} else if slices.Contains(cmdFields, "python") {
+		return "python", false
+	}
+
+	if slices.Contains(cmdFields, "node") || slices.Contains(cmdFields, "npm") {
+		if slices.Contains(cmdFields, "nyc") {
+			return "typescript", true
+		}
+		return "typescript", false
+	}
+
+	if slices.Contains(cmdFields, "java") {
+		if strings.Contains(cmd, "jacoco") {
+			return "java", true
+		}
+		return "java", false
+	}
+
+	return "go", false
 }

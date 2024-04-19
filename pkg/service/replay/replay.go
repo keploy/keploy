@@ -119,8 +119,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 
-	gocoverdirEnv := os.Getenv("GOCOVERDIR")
-
 	testSetResult := false
 	testRunResult := true
 	abortTestRun := false
@@ -131,7 +129,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			continue
 		}
 
-		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, appID, gocoverdirEnv, false)
+		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, appID, false)
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)
 			utils.LogError(r.logger, err, stopReason)
@@ -170,7 +168,45 @@ func (r *Replayer) Start(ctx context.Context) error {
 	r.telemetry.TestRun(totalTestPassed, totalTestFailed, len(testSetIDs), testRunStatus)
 
 	if !abortTestRun {
-		r.printSummary(ctx, testRunResult, gocoverdirEnv)
+		r.printSummary(ctx, testRunResult)
+		language, isCov := detectLanguage(r.config.Command)
+		if isCov || r.config.Test.GoCoverage {
+			r.logger.Info("calculating coverage for the test run and inserting it into the report", zap.Any("language", language))
+			switch language {
+			case "go":
+				coverageData, err := tools.CalGoCoverage()
+				if err != nil {
+					utils.LogError(r.logger, err, "failed to calculate coverage for the test run")
+					break
+				}
+				err = r.reportDB.InsertCoverageReport(ctx, testRunID, &coverageData)
+				if err != nil {
+					utils.LogError(r.logger, err, "failed to update report with the coverage data")
+				}
+			case "python":
+				coverageData, err := tools.CalPythonCoverage(ctx)
+				if err != nil {
+					utils.LogError(r.logger, err, "failed to calculate coverage for the test run")
+					break
+				}
+				err = r.reportDB.InsertCoverageReport(ctx, testRunID, &coverageData)
+				if err != nil {
+					utils.LogError(r.logger, err, "failed to update report with the coverage data")
+				}
+			case "typescript":
+				coverageData, err := tools.CalTypescriptCoverage(ctx)
+				if err != nil {
+					utils.LogError(r.logger, err, "failed to calculate coverage for the test run")
+					break
+				}
+				err = r.reportDB.InsertCoverageReport(ctx, testRunID, &coverageData)
+				if err != nil {
+					utils.LogError(r.logger, err, "failed to update report with the coverage data")
+				}
+			}
+		}
+	} else {
+
 	}
 	return nil
 }
@@ -221,7 +257,7 @@ func (r *Replayer) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
 	return r.testDB.GetAllTestSetIDs(ctx)
 }
 
-func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, gocoverdirEnv string, serveTest bool) (models.TestSetStatus, error) {
+func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error) {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
@@ -236,14 +272,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			utils.LogError(r.logger, err, "error in testLoopErrGrp")
 		}
-		if r.config.Test.GoCoverage {
-			coverageData := tools.CalGoCoverage(ctx, r.logger, testSetID)
-			// update the test set report with the coverage entry
-			err := r.UpdateReportWithCoverage(ctx, testRunID, testSetID, coverageData)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to update report with the coverage data")
-			}
-		}
 		close(exitLoopChan)
 	}()
 
@@ -257,19 +285,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	testSetStatusByErrChan := models.TestSetStatusRunning
 
 	r.logger.Info("running", zap.Any("test-set", models.HighlightString(testSetID)))
-
-	if gocoverdirEnv != "" {
-		err := os.Setenv("GOCOVERDIR", filepath.Join(gocoverdirEnv, testSetID))
-		if err != nil {
-			utils.LogError(r.logger, err, fmt.Sprintf("failed to set GOCOVERDIR env to coverage/%s", testSetID), zap.Error(err))
-		}
-		if err := os.MkdirAll(os.Getenv("GOCOVERDIR"), 0777); err != nil {
-			utils.LogError(r.logger, err, fmt.Sprintf("failed to create coverage directory for %s", testSetID), zap.Error(err))
-		}
-		if err := os.Chmod(os.Getenv("GOCOVERDIR"), 0777); err != nil {
-			utils.LogError(r.logger, err, fmt.Sprintf("failed to set permissions for coverage directory for %s", testSetID), zap.Error(err))
-		}
-	}
 
 	testCases, err := r.testDB.GetTestCases(runTestSetCtx, testSetID)
 	if err != nil {
@@ -622,7 +637,7 @@ func (r *Replayer) compareResp(tc *models.TestCase, actualResponse *models.HTTPR
 	return match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
 }
 
-func (r *Replayer) printSummary(ctx context.Context, testRunResult bool, gocoverdirEnv string) {
+func (r *Replayer) printSummary(ctx context.Context, testRunResult bool) {
 	if totalTests > 0 {
 		testSuiteNames := make([]string, 0, len(completeTestReport))
 		for testSuiteName := range completeTestReport {
@@ -675,7 +690,7 @@ func (r *Replayer) printSummary(ctx context.Context, testRunResult bool, gocover
 				utils.LogError(r.logger, err, "failed to get the coverage of the go binary", zap.Any("cmd", coverCmd.String()))
 			}
 			r.logger.Sugar().Infoln("\n", models.HighlightPassingString(string(output)))
-			generateCovTxtCmd := exec.CommandContext(ctx, "go", "tool", "covdata", "textfmt", "-i="+gocoverdirEnv, "-o="+gocoverdirEnv+"/total-coverage.txt")
+			generateCovTxtCmd := exec.CommandContext(ctx, "go", "tool", "covdata", "textfmt", "-i="+os.Getenv("GOCOVERDIR"), "-o="+os.Getenv("GOCOVERDIR")+"/total-coverage.txt")
 			output, err = generateCovTxtCmd.Output()
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get the coverage of the go binary", zap.Any("cmd", coverCmd.String()))
@@ -749,19 +764,5 @@ func (r *Replayer) ProvideMocks(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 	<-ctx.Done()
-	return nil
-}
-
-func (r *Replayer) UpdateReportWithCoverage(ctx context.Context, testRunID string, testSetID string, coverageData map[string]string) error {
-	testReport, err := r.reportDB.GetReport(ctx, testRunID, testSetID)
-	if err != nil {
-		utils.LogError(r.logger, err, "failed to get report")
-		return err
-	}
-	testReport.Coverage = coverageData
-	err = r.reportDB.InsertReport(ctx, testRunID, testSetID, testReport)
-	if err != nil {
-		return err
-	}
 	return nil
 }

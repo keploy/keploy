@@ -10,7 +10,6 @@ import (
 	"fmt"
 
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -69,40 +68,13 @@ func (r *mutationResolver) RunTestSet(ctx context.Context, testSetID string, tes
 	r.logger.Debug("running test set", zap.String("testSetID", testSetID), zap.String("testRunID", testRunID), zap.Int("appID", appID))
 	go func(testSetID, testRunID string, appID int) {
 		ctx := context.WithoutCancel(ctx)
-		status, err := r.replay.RunTestSet(ctx, testSetID, testRunID, uint64(appID), "", true)
+		status, err := r.replay.RunTestSet(ctx, testSetID, testRunID, uint64(appID), true)
 		if err != nil {
 			return
 		}
 		r.logger.Info("test set status", zap.String("status", string(status)))
 	}(testSetID, testRunID, appID)
 
-	return true, nil
-}
-
-func (r *mutationResolver) UpdateReportWithCov(ctx context.Context, testRunId string, testSetId string, language string) (bool, error) {
-	if r.Resolver == nil {
-		err := fmt.Errorf(utils.Emoji + "failed to get Resolver")
-		return false, err
-	}
-	var coverageData map[string]string
-	var err error
-	switch language {
-	case "python":
-		coverageData, err = tools.CalPythonCoverage(ctx, r.logger)
-	case "typescript":
-		coverageData, err = tools.CalTypescriptCoverage(r.logger)
-	case "java":
-		coverageData, err = tools.CalJavaCoverage(r.logger, testSetId)
-	}
-	if err != nil {
-		utils.LogError(r.logger, err, "failed to calculate coverage data")
-		return false, err
-	}
-	err = r.replay.UpdateReportWithCoverage(ctx, testRunId, testSetId, coverageData)
-	if err != nil {
-		utils.LogError(r.logger, err, "failed to update the report with coverage data")
-		return false, err
-	}
 	return true, nil
 }
 

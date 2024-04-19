@@ -27,11 +27,10 @@ type Service interface {
 	Start(ctx context.Context) error
 	BootReplay(ctx context.Context) (string, uint64, context.CancelFunc, error)
 	GetAllTestSetIDs(ctx context.Context) ([]string, error)
-	RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, gocoverdirEnv string, serveTest bool) (models.TestSetStatus, error)
+	RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error)
 	GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error)
 	RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError
 	ProvideMocks(ctx context.Context) error
-	UpdateReportWithCoverage(ctx context.Context, testRunID string, testSetID string, coverageData map[string]string) error
 }
 
 type TestDB interface {
@@ -51,6 +50,7 @@ type ReportDB interface {
 	GetReport(ctx context.Context, testRunID string, testSetID string) (*models.TestReport, error)
 	InsertTestCaseResult(ctx context.Context, testRunID string, testSetID string, result *models.TestResult) error
 	InsertReport(ctx context.Context, testRunID string, testSetID string, testReport *models.TestReport) error
+	InsertCoverageReport(ctx context.Context, testRunID string, testCoverage *models.TestCoverage) error
 }
 
 type Telemetry interface {

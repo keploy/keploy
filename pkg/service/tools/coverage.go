@@ -14,25 +14,24 @@ import (
 	"strings"
 
 	"github.com/tk103331/jacocogo/core/data"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
-func CalGoCoverage(ctx context.Context, logger *zap.Logger, testset string) map[string]string {
-	coveragePerFileTmp := make(map[string][]int) // filename -> [noOfLines, coveredLines]
-	generateCovTxtCmd := exec.CommandContext(ctx, "go", "tool", "covdata", "textfmt", "-i="+os.Getenv("GOCOVERDIR"), "-o="+os.Getenv("GOCOVERDIR")+"/total-coverage.txt")
-	_, err := generateCovTxtCmd.Output()
-	if err != nil {
-		utils.LogError(logger, err, fmt.Sprintf("failed to get the coverage for %s", testset), zap.Any("cmd", generateCovTxtCmd.String()))
-		return nil
+func CalGoCoverage() (models.TestCoverage, error) {
+	testCov := models.TestCoverage{
+		FileCov:  make(map[string]string),
+		TotalCov: "",
 	}
+
+	coveragePerFileTmp := make(map[string][]int) // filename -> [noOfLines, coveredLines]
 	covdata, err := os.ReadFile(os.Getenv("GOCOVERDIR") + "/total-coverage.txt")
 	if err != nil {
-		utils.LogError(logger, err, "failed to read the coverage file", zap.String("file", os.Getenv("GOCOVERDIR")+"/total-coverage.txt"))
-		return nil
+		return testCov, err
 	}
 	// a line is of the form: <filename>:<startLineRow>.<startLineCol>,<endLineRow>.<endLineCol> <noOfLines> <coveredOrNot>
-	for _, line := range strings.Split(string(covdata), "\n") {
+	for idx, line := range strings.Split(string(covdata), "\n") {
 		line = strings.TrimSpace(line)
 		if strings.Split(line, ":")[0] == "mode" || line == "" {
 			continue
@@ -42,21 +41,18 @@ func CalGoCoverage(ctx context.Context, logger *zap.Logger, testset string) map[
 		if len(lineFields) == 3 {
 			noOfLines, err := strconv.Atoi(lineFields[1])
 			if err != nil {
-				utils.LogError(logger, err, malformedErrMsg)
-				return nil
+				return testCov, err
 			}
 			coveredOrNot, err := strconv.Atoi(lineFields[2])
 			if err != nil {
-				utils.LogError(logger, err, malformedErrMsg)
-				return nil
+				return testCov, err
 			}
 			i := strings.Index(line, ":")
 			var filename string
 			if i > 0 {
 				filename = line[:i]
 			} else {
-				utils.LogError(logger, err, malformedErrMsg)
-				return nil
+				return testCov, fmt.Errorf("%s at line %d", malformedErrMsg, idx)
 			}
 
 			if _, ok := coveragePerFileTmp[filename]; !ok {
@@ -68,18 +64,20 @@ func CalGoCoverage(ctx context.Context, logger *zap.Logger, testset string) map[
 				coveragePerFileTmp[filename][1] += noOfLines
 			}
 		} else {
-			utils.LogError(logger, err, malformedErrMsg)
-			return nil
+			return testCov, fmt.Errorf("%s at %d", malformedErrMsg, idx)
 		}
 	}
 
-	// calculate percentage from the coveragePerFileTmp
-	coveragePerFile := make(map[string]string) // filename -> coveragePercentage
+	totalLines := 0
+	totalCoveredLines := 0
 	for filename, lines := range coveragePerFileTmp {
+		totalLines += lines[0]
+		totalCoveredLines += lines[1]
 		covPercentage := float64(lines[1]*100) / float64(lines[0])
-		coveragePerFile[filename] = strconv.FormatFloat(float64(covPercentage), 'f', 2, 64) + "%"
+		testCov.FileCov[filename] = strconv.FormatFloat(float64(covPercentage), 'f', 2, 64) + "%"
 	}
-	return coveragePerFile
+	testCov.TotalCov = strconv.FormatFloat(float64(totalCoveredLines*100)/float64(totalLines), 'f', 2, 64) + "%"
+	return testCov, nil
 }
 
 type pyCoverage struct {
@@ -112,34 +110,35 @@ type pyCoverage struct {
 	} `json:"totals"`
 }
 
-func CalPythonCoverage(ctx context.Context, logger *zap.Logger) (map[string]string, error) {
-	covfile, err := utils.GetRecentFile(".", ".coverage.keploy")
-	if err != nil {
-		utils.LogError(logger, err, "failed to get the coverage data file")
-		return nil, err
+func CalPythonCoverage(ctx context.Context) (models.TestCoverage, error) {
+	testCov := models.TestCoverage{
+		FileCov:  make(map[string]string),
+		TotalCov: "",
 	}
-	generateCovJSONCmd := exec.CommandContext(ctx, "coverage", "json", "--data-file="+covfile)
-	_, err = generateCovJSONCmd.Output()
+
+	covFileName := os.Getenv("COVERAGE_FILE")
+	if covFileName == "" {
+		covFileName = ".coverage"
+	}
+	generateCovJSONCmd := exec.CommandContext(ctx, "coverage", "json", "--data-file="+covFileName)
+	_, err := generateCovJSONCmd.Output()
 	if err != nil {
-		utils.LogError(logger, err, "failed to create a json report of coverage", zap.Any("cmd", generateCovJSONCmd.String()))
-		return nil, err
+		return testCov, err
 	}
 	coverageData, err := os.ReadFile("coverage.json")
 	if err != nil {
-		utils.LogError(logger, err, "failed to read the coverage.json file")
-		return nil, err
+		return testCov, err
 	}
 	var cov pyCoverage
 	err = json.Unmarshal(coverageData, &cov)
 	if err != nil {
-		utils.LogError(logger, err, "failed to unmarshal the coverage data")
-		return nil, err
+		return testCov, err
 	}
-	coveragePerFile := make(map[string]string)
 	for filename, file := range cov.Files {
-		coveragePerFile[filename] = file.Summary.PercentCoveredDisplay
+		testCov.FileCov[filename] = file.Summary.PercentCoveredDisplay + "%"
 	}
-	return coveragePerFile, nil
+	testCov.TotalCov = cov.Totals.PercentCoveredDisplay + "%"
+	return testCov, nil
 }
 
 type Start struct {
@@ -189,37 +188,45 @@ type TypescriptCoverage map[string]struct {
 	ContentHash    string                 `json:"contentHash"`
 }
 
-func CalTypescriptCoverage(logger *zap.Logger) (map[string]string, error) {
-	coverageFilePath, err := getCoverageFilePathTypescript(filepath.Join(".", ".nyc_output", "processinfo"))
-	if err != nil {
-		utils.LogError(logger, err, "failed to get the coverage data file")
-		return nil, err
+func CalTypescriptCoverage(ctx context.Context) (models.TestCoverage, error) {
+	testCov := models.TestCoverage{
+		FileCov:  make(map[string]string),
+		TotalCov: "",
 	}
-	coverageData, err := os.ReadFile(coverageFilePath)
+
+	generateCovJSONCmd := exec.CommandContext(ctx, "nyc", "merge", ".nyc_output")
+	_, err := generateCovJSONCmd.Output()
 	if err != nil {
-		utils.LogError(logger, err, "failed to read the coverage data file")
-		return nil, err
+		return testCov, err
+	}
+	coverageData, err := os.ReadFile("coverage.json")
+	if err != nil {
+		return testCov, err
 	}
 	var cov TypescriptCoverage
 	err = json.Unmarshal(coverageData, &cov)
 	if err != nil {
-		utils.LogError(logger, err, "failed to unmarshal the coverage data")
-		return nil, err
+		return testCov, err
 	}
-	coveragePerFile := make(map[string]string)
+
+	totalLines := 0
+	totalCoveredLines := 0
 	for filename, file := range cov {
 		// coverage is calculated as: (no of statements covered / total no of statements) * 100
 		// no of statements covered is the no of entries in S which has a value greater than 0
 		// Total no of statements is len of S
-		var totalLinesCovered int
+		var linesCovered int
 		for _, isStatementCovered := range file.S {
 			if isStatementCovered.(float64) > 0 {
-				totalLinesCovered++
+				linesCovered++
 			}
 		}
-		coveragePerFile[filename] = strconv.FormatFloat(float64(totalLinesCovered*100)/float64(len(file.S)), 'f', 2, 64) + "%"
+		totalLines += len(file.S)
+		totalCoveredLines += linesCovered
+		testCov.FileCov[filename] = strconv.FormatFloat(float64(linesCovered*100)/float64(len(file.S)), 'f', 2, 64) + "%"
 	}
-	return coveragePerFile, nil
+	testCov.TotalCov = strconv.FormatFloat(float64(totalCoveredLines*100)/float64(totalLines), 'f', 2, 64) + "%"
+	return testCov, nil
 }
 
 type ProcessInfo struct {
