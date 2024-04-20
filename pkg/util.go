@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/araddon/dateparse"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -59,9 +58,23 @@ func ToHTTPHeader(mockHeader map[string]string) http.Header {
 
 // IsTime verifies whether a given string represents a valid date or not.
 func IsTime(stringDate string) bool {
-	s := strings.TrimSpace(stringDate)
-	_, err := dateparse.ParseAny(s)
-	return err == nil
+	date := strings.TrimSpace(stringDate)
+	if secondsFloat, err := strconv.ParseFloat(date, 64); err == nil {
+		seconds := int64(secondsFloat / 1e9)
+		nanoseconds := int64(secondsFloat) % 1e9
+		expectedTime := time.Unix(seconds, nanoseconds)
+		currentTime := time.Now()
+		if currentTime.Sub(expectedTime) < 24*time.Hour && currentTime.Sub(expectedTime) > -24*time.Hour {
+			return true
+		}
+	}
+	for _, dateFormat := range dateFormats {
+		_, err := time.Parse(dateFormat, date)
+		if err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HTTPResp, error) {
@@ -76,11 +89,14 @@ func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logge
 	req.Header = ToHTTPHeader(tc.HTTPReq.Header)
 	req.ProtoMajor = tc.HTTPReq.ProtoMajor
 	req.ProtoMinor = tc.HTTPReq.ProtoMinor
-
+	req.Header.Set("KEPLOY-TEST-ID", tc.Name)
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", req))
 
 	// Creating the client and disabling redirects
 	var client *http.Client
+
+	_, hasAcceptEncoding := req.Header["Accept-Encoding"]
+	disableCompression := !hasAcceptEncoding
 
 	keepAlive, ok := req.Header["Connection"]
 	if ok && strings.EqualFold(keepAlive[0], "keep-alive") {
@@ -89,6 +105,9 @@ func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logge
 			Timeout: time.Second * time.Duration(apiTimeout),
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
+			},
+			Transport: &http.Transport{
+				DisableCompression: disableCompression,
 			},
 		}
 	} else if ok && strings.EqualFold(keepAlive[0], "close") {
@@ -99,7 +118,8 @@ func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logge
 				return http.ErrUseLastResponse
 			},
 			Transport: &http.Transport{
-				DisableKeepAlives: true,
+				DisableKeepAlives:  true,
+				DisableCompression: disableCompression,
 			},
 		}
 	} else {
@@ -110,8 +130,9 @@ func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logge
 				return http.ErrUseLastResponse
 			},
 			Transport: &http.Transport{
-				DisableKeepAlives: false,
-				MaxIdleConns:      1,
+				DisableKeepAlives:  false,
+				MaxIdleConns:       1,
+				DisableCompression: disableCompression,
 			},
 		}
 	}
@@ -209,3 +230,27 @@ func NewID(IDs []string, identifier string) string {
 	}
 	return fmt.Sprintf("%s%v", identifier, latestIndx)
 }
+
+var (
+	dateFormats = []string{
+		time.Layout,
+		time.ANSIC,
+		time.UnixDate,
+		time.RubyDate,
+		time.RFC822,
+		time.RFC822Z,
+		time.RFC850,
+		time.RFC1123,
+		time.RFC1123Z,
+		time.RFC3339,
+		time.RFC3339Nano,
+		time.Kitchen,
+		time.Stamp,
+		time.StampMilli,
+		time.StampMicro,
+		time.StampNano,
+		time.DateTime,
+		time.DateOnly,
+		time.TimeOnly,
+	}
+)
