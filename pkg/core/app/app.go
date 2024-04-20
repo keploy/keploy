@@ -123,7 +123,7 @@ func (a *App) SetupDocker() error {
 		}
 	case utils.DockerStart:
 		if a.container == "" || a.containerNetwork == "" {
-			return fmt.Errorf("container name or network name is not being specified.")
+			return fmt.Errorf("container name or network name is not being specified")
 		}
 		running, err := a.docker.IsContainerRunning(a.container)
 		if err != nil {
