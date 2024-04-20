@@ -70,7 +70,7 @@ func (a *App) Setup(_ context.Context) error {
 	a.docker = d
 
 	if (a.kind == utils.DockerStart || a.kind == utils.DockerRun || a.kind == utils.DockerCompose) && isDetachMode(a.logger, a.cmd, a.kind) {
-		
+
 		return fmt.Errorf("application could not be started in detached mode")
 	}
 
