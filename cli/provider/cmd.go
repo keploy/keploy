@@ -6,12 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/fatih/color"
+	"github.com/moby/moby/pkg/parsers/kernel"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
@@ -242,24 +242,13 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 
 func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) error {
 	//check if the version of the kernel is above 5.15 for eBPF support
-	versionCmd := exec.CommandContext(ctx, "uname", "-r")
-	output, err := versionCmd.Output()
-	if err != nil {
-		errMsg := "failed to get the kernel version"
-		utils.LogError(c.logger, err, errMsg)
-		return errors.New(errMsg)
-	}
-	kernelVersion := strings.Split(string(output), ".")
-	if len(kernelVersion) < 2 {
-		errMsg := "failed to get the kernel version"
-		utils.LogError(c.logger, err, errMsg)
-		return errors.New(errMsg)
-	}
-	if kernelVersion[0] < "5" || (kernelVersion[0] == "5" && kernelVersion[1] < "15") {
+	isValidVersion := kernel.CheckKernelVersion(5, 15, 0)
+	if !isValidVersion {
 		errMsg := "Kernel version is below 5.15. Keploy requires kernel version 5.15 or above"
 		utils.LogError(c.logger, nil, errMsg)
 		return errors.New(errMsg)
 	}
+
 	return c.ValidateFlags(ctx, cmd)
 }
 
