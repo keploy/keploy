@@ -4,6 +4,7 @@ package log
 import (
 	"bytes"
 
+	"go.uber.org/zap"
 	"go.uber.org/zap/buffer"
 	"go.uber.org/zap/zapcore"
 )
@@ -13,12 +14,15 @@ type color struct {
 	zapcore.Encoder
 }
 
-func NewColor(cfg zapcore.EncoderConfig) (enc zapcore.Encoder) {
-	return color{
-		EncoderConfig: &cfg,
-		// Using the default ConsoleEncoder can avoid rewriting interfaces such as ObjectEncoder
-		Encoder: zapcore.NewConsoleEncoder(cfg),
+func NewColor(cfg zapcore.EncoderConfig, enableColor bool) (enc zapcore.Encoder) {
+	if enableColor {
+		return color{
+			EncoderConfig: &cfg,
+			Encoder:       zapcore.NewConsoleEncoder(cfg),
+		}
 	}
+	// fmt.Println("Color is disabled")
+	return zapcore.NewConsoleEncoder(zap.NewDevelopmentEncoderConfig())
 }
 
 // EncodeEntry overrides ConsoleEncoder's EncodeEntry

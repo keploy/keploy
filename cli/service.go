@@ -13,4 +13,5 @@ type ServiceFactory interface {
 type CmdConfigurator interface {
 	AddFlags(cmd *cobra.Command) error
 	ValidateFlags(ctx context.Context, cmd *cobra.Command) error
+	Validate(ctx context.Context, cmd *cobra.Command) error
 }
