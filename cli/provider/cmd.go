@@ -243,8 +243,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 
 func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) error {
 	//check if the version of the kernel is above 5.15 for eBPF support
-	isValidVersion := kernel.CheckKernelVersion(5, 15, 0)
-	if !isValidVersion {
+	isValid := kernel.CheckKernelVersion(5, 15, 0)
+	if !isValid {
 		errMsg := "Kernel version is below 5.15. Keploy requires kernel version 5.15 or above"
 		utils.LogError(c.logger, nil, errMsg)
 		return errors.New(errMsg)
