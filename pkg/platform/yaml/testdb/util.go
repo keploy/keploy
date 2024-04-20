@@ -225,6 +225,9 @@ func HasBannedHeaders(object map[string]string, bannedHeaders map[string]string)
 }
 
 func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.TestCase, error) {
+	if yamlTestcase == nil {
+		return nil, errors.New("test case not present")
+	}
 	tc := models.TestCase{
 		Version: yamlTestcase.Version,
 		Kind:    yamlTestcase.Kind,
