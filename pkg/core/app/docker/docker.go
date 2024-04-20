@@ -527,10 +527,7 @@ func (idc *Impl) IsContainerRunning(containerName string) (bool, error) {
 
 	containerJSON, err := idc.ContainerInspect(ctx, containerName)
 	if err != nil {
-		if nativeDockerClient.IsErrNotFound(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("error retrieving container info: %v", err)
+		return false, err
 	}
 
 	if containerJSON.State.Running {

@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"go.keploy.io/server/v2/utils"
+	"go.uber.org/zap"
 )
 
 func findComposeFile() string {
@@ -89,7 +90,7 @@ func getInode(pid int) (uint64, error) {
 	return i, nil
 }
 
-func IsDetachMode(command string, kind utils.CmdType) error {
+func isDetachMode(logger *zap.Logger, command string, kind utils.CmdType) bool {
 	args := strings.Fields(command)
 
 	if kind == utils.DockerStart {
@@ -97,17 +98,19 @@ func IsDetachMode(command string, kind utils.CmdType) error {
 
 		for _, arg := range args {
 			if slices.Contains(flags, arg) {
-				return fmt.Errorf("docker start require --attach/-a or --interactive/-i flag")
+				return false
 			}
 		}
-		return nil
+		utils.LogError(logger, fmt.Errorf("docker start require --attach/-a or --interactive/-i flag"), "failed to start command")
+		return true
 	}
 
 	for _, arg := range args {
 		if arg == "-d" || arg == "--detach" {
-			return fmt.Errorf("detach mode is not allowed in Keploy command")
+			utils.LogError(logger, fmt.Errorf("detach mode is not allowed in Keploy command"), "failed to start command")
+			return true
 		}
 	}
 
-	return nil
+	return false
 }

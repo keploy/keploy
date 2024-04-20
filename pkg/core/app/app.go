@@ -69,11 +69,9 @@ func (a *App) Setup(_ context.Context) error {
 	}
 	a.docker = d
 
-	if a.kind == utils.DockerStart || a.kind == utils.DockerRun || a.kind == utils.DockerCompose {
-		err = IsDetachMode(a.cmd, a.kind)
-		if err != nil {
-			return err
-		}
+	if (a.kind == utils.DockerStart || a.kind == utils.DockerRun || a.kind == utils.DockerCompose) && isDetachMode(a.logger, a.cmd, a.kind) {
+		
+		return fmt.Errorf("application could not be started in detached mode")
 	}
 
 	switch a.kind {
@@ -104,7 +102,8 @@ func (a *App) ContainerIPv4Addr() string {
 func (a *App) SetupDocker() error {
 	var err error
 
-	if a.kind == utils.DockerRun {
+	switch a.kind {
+	case utils.DockerRun:
 		cont, net, err := ParseDockerCmd(a.cmd)
 
 		if err != nil {
@@ -122,7 +121,10 @@ func (a *App) SetupDocker() error {
 		} else if a.containerNetwork != net {
 			a.logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v)", a.containerNetwork, net))
 		}
-	} else if a.kind == utils.DockerStart {
+	case utils.DockerStart:
+		if a.container == "" || a.containerNetwork == "" {
+			return fmt.Errorf("container name or network name is not being specified.")
+		}
 		running, err := a.docker.IsContainerRunning(a.container)
 		if err != nil {
 			return err
