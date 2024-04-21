@@ -24,6 +24,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 	"golang.org/x/term"
 )
@@ -348,6 +349,23 @@ func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRele
 		return GitHubRelease{}, err
 	}
 	return release, nil
+}
+
+func VersionMsg(Tagname string, currentVersion string) string {
+	updatetext := models.HighlightGrayString("keploy update")
+	versionString := fmt.Sprintf("%-*v  ---->   %-*v ", len(currentVersion), currentVersion, len(Tagname), Tagname)
+	const msg string = `
+							   ╭%v╮
+							   │ New version available:%v│
+							   │ %-*v  ---->   %-*v │
+							   │ Run %v to update%v│
+							   ╰%v╯
+							   `
+	whiteSpaceString1 := strings.Repeat(" ", len(versionString)-len("New version available:"))
+	whiteSpaceString2 := strings.Repeat(" ", len(versionString)-len("Run keploy update to update"))
+	dashString := strings.Repeat("─", len(versionString)+1)
+	versionmsg := fmt.Sprintf(msg, dashString, whiteSpaceString1, len(currentVersion), currentVersion, len(Tagname), Tagname, updatetext, whiteSpaceString2, dashString)
+	return versionmsg
 }
 
 // FindDockerCmd checks if the cli is related to docker or not, it also returns if it is a docker compose file
