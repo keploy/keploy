@@ -1,17 +1,12 @@
 package tools
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
-	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -45,16 +40,16 @@ func (t *Tools) Update(ctx context.Context) error {
 		return nil
 	}
 	if strings.HasSuffix(currentVersion, "-dev") {
-		fmt.Println("you are using a development version of Keploy. Skipping update")
+		fmt.Println("You are using a development version of Keploy. Skipping update")
 		return nil
 	}
 
 	releaseInfo, err := utils.GetLatestGitHubRelease(ctx, t.logger)
 	if err != nil {
 		if errors.Is(err, ErrGitHubAPIUnresponsive) {
-			return errors.New("gitHub API is unresponsive. Update process cannot continue")
+			return errors.New("GitHub API is unresponsive. Update process cannot continue")
 		}
-		return fmt.Errorf("failed to fetch latest GitHub release version: %v", err)
+		return fmt.Errorf("Failed to fetch latest GitHub release version: %v", err)
 	}
 
 	latestVersion := releaseInfo.TagName
@@ -100,58 +95,19 @@ func (t *Tools) Update(ctx context.Context) error {
 	return nil
 }
 
-func (t *Tools) downloadAndUpdate(ctx context.Context, logger *zap.Logger, downloadURL string) error {
-	// Create a new request with context
-	req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
+func (t *Tools) downloadAndUpdate(_ context.Context, _ *zap.Logger, downloadURL string) error {
+	curlPath, err := exec.LookPath("curl")
 	if err != nil {
-		return fmt.Errorf("failed to create request: %v", err)
-	}
-
-	// Create a HTTP client and execute the request
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to download file: %v", err)
-	}
-	defer func() {
-		if cerr := resp.Body.Close(); cerr != nil {
-			utils.LogError(logger, cerr, "failed to close response body")
-		}
-	}()
-
-	// Create a temporary file to store the downloaded tar.gz
-	tmpFile, err := os.CreateTemp("", "keploy-download-*.tar.gz")
-	if err != nil {
-		return fmt.Errorf("failed to create temporary file: %v", err)
-	}
-	defer func() {
-		if err := tmpFile.Close(); err != nil {
-			utils.LogError(logger, err, "failed to close temporary file")
-		}
-		if err := os.Remove(tmpFile.Name()); err != nil {
-			utils.LogError(logger, err, "failed to remove temporary file")
-		}
-	}()
-
-	// Write the downloaded content to the temporary file
-	_, err = io.Copy(tmpFile, resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to write to temporary file: %v", err)
-	}
-
-	// Extract the tar.gz file
-	if err := extractTarGz(tmpFile.Name(), "/tmp"); err != nil {
-		return fmt.Errorf("failed to extract tar.gz file: %v", err)
+		return errors.New("curl command not found on the system")
 	}
 
 	// Determine the path based on the alias "keploy"
-	aliasPath := "/usr/local/bin/keploy" // Default path
-
-	keployPath, err := exec.LookPath("keploy")
-	if err == nil && keployPath != "" {
-		aliasPath = keployPath
+	aliasPath := "/usr/local/bin/keploybin" // Default path
+	aliasCmd := exec.Command("which", "keploy")
+	aliasOutput, err := aliasCmd.Output()
+	if err == nil && len(aliasOutput) > 0 {
+		aliasPath = strings.TrimSpace(string(aliasOutput))
 	}
-
 	// Check if the aliasPath is a valid path
 	_, err = os.Stat(aliasPath)
 	if os.IsNotExist(err) {
@@ -161,82 +117,37 @@ func (t *Tools) downloadAndUpdate(ctx context.Context, logger *zap.Logger, downl
 	// Check if the aliasPath is a directory
 	if fileInfo, err := os.Stat(aliasPath); err == nil && fileInfo.IsDir() {
 		return fmt.Errorf("alias path %s is a directory, not a file", aliasPath)
+
 	}
 
-	// Move the extracted binary to the alias path
-	if err := os.Rename("/tmp/keploy", aliasPath); err != nil {
-		return fmt.Errorf("failed to move keploy binary to %s: %v", aliasPath, err)
+	downloadCmd := exec.Command(curlPath, "--silent", "--location", downloadURL)
+	untarCmd := exec.Command("tar", "xz", "-C", "/tmp")
+
+	// Pipe the output of the first command to the second command
+	untarCmd.Stdin, _ = downloadCmd.StdoutPipe()
+
+	if err := downloadCmd.Start(); err != nil {
+		return fmt.Errorf("Failed to start download command: %v", err)
+	}
+	if err := untarCmd.Start(); err != nil {
+		return fmt.Errorf("Failed to start untar command: %v", err)
 	}
 
-	if err := os.Chmod(aliasPath, 0777); err != nil {
-		return fmt.Errorf("failed to set execute permission on %s: %v", aliasPath, err)
+	if err := downloadCmd.Wait(); err != nil {
+		return fmt.Errorf("Failed to wait download command: %v", err)
+
+	}
+	if err := untarCmd.Wait(); err != nil {
+		return fmt.Errorf("Failed to wait untar command: %v", err)
+
 	}
 
-	return nil
-}
+	moveCmd := exec.Command("sudo", "mv", "/tmp/keploy", aliasPath)
+	if err := moveCmd.Run(); err != nil {
+		return fmt.Errorf("Failed to move keploy binary to %s: %v", aliasPath, err)
 
-func extractTarGz(gzipPath, destDir string) error {
-	file, err := os.Open(gzipPath)
-	if err != nil {
-		return err
 	}
 
-	defer func() {
-		if err := file.Close(); err != nil {
-			utils.LogError(nil, err, "failed to close file")
-		}
-	}()
-
-	gzipReader, err := gzip.NewReader(file)
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		if err := gzipReader.Close(); err != nil {
-			utils.LogError(nil, err, "failed to close gzip reader")
-		}
-	}()
-
-	tarReader := tar.NewReader(gzipReader)
-
-	for {
-		header, err := tarReader.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
-
-		fileName := filepath.Clean(header.Name)
-		if strings.Contains(fileName, "..") {
-			return fmt.Errorf("invalid file path: %s", fileName)
-		}
-
-		target := filepath.Join(destDir, header.Name)
-
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0777); err != nil {
-				return err
-			}
-		case tar.TypeReg:
-			outFile, err := os.Create(target)
-			if err != nil {
-				return err
-			}
-			if _, err := io.Copy(outFile, tarReader); err != nil {
-				if err := outFile.Close(); err != nil {
-					return err
-				}
-				return err
-			}
-			if err := outFile.Close(); err != nil {
-				return err
-			}
-		}
-	}
 	return nil
 }
 
