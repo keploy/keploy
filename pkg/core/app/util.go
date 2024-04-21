@@ -78,7 +78,7 @@ func ParseDockerCmd(cmd string, kind utils.CmdType, idc docker.Client) (string, 
 		if err != nil {
 			return containerName, "", err
 		}
-		for i, _ := range networks {
+		for i := range networks {
 			return containerName, i, nil
 		}
 	}
