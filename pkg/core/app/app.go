@@ -102,29 +102,25 @@ func (a *App) ContainerIPv4Addr() string {
 func (a *App) SetupDocker() error {
 	var err error
 
-	switch a.kind {
-	case utils.DockerRun:
-		cont, net, err := ParseDockerCmd(a.cmd)
+	cont, net, err := ParseDockerCmd(a.cmd, a.kind, a.docker)
 
-		if err != nil {
-			utils.LogError(a.logger, err, "failed to parse container name from given docker command", zap.String("cmd", a.cmd))
-			return err
-		}
-		if a.container == "" {
-			a.container = cont
-		} else if a.container != cont {
-			a.logger.Warn(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v)", a.container, cont))
-		}
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to parse container name from given docker command", zap.String("cmd", a.cmd))
+		return err
+	}
+	if a.container == "" {
+		a.container = cont
+	} else if a.container != cont {
+		a.logger.Warn(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v)", a.container, cont))
+	}
 
-		if a.containerNetwork == "" {
-			a.containerNetwork = net
-		} else if a.containerNetwork != net {
-			a.logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v)", a.containerNetwork, net))
-		}
-	case utils.DockerStart:
-		if a.container == "" || a.containerNetwork == "" {
-			return fmt.Errorf("container name or network name is not being specified")
-		}
+	if a.containerNetwork == "" {
+		a.containerNetwork = net
+	} else if a.containerNetwork != net {
+		a.logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v)", a.containerNetwork, net))
+	}
+
+	if a.kind == utils.DockerStart {
 		running, err := a.docker.IsContainerRunning(a.container)
 		if err != nil {
 			return err

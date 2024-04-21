@@ -10,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 
+	"go.keploy.io/server/v2/pkg/core/app/docker"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -51,9 +52,17 @@ func modifyDockerComposeCommand(appCmd, newComposeFile string) string {
 	return fmt.Sprintf("%s -f %s", appCmd, newComposeFile)
 }
 
-func ParseDockerCmd(cmd string) (string, string, error) {
+func ParseDockerCmd(cmd string, kind utils.CmdType, idc docker.Client) (string, string, error) {
+
 	// Regular expression patterns
-	containerNamePattern := `--name\s+([^\s]+)`
+	var containerNamePattern string
+	switch kind {
+	case utils.DockerStart:
+		containerNamePattern = `start\s+(?:-[^\s]+\s+)*([^\s]*)`
+	default:
+		containerNamePattern = `--name\s+([^\s]+)`
+	}
+
 	networkNamePattern := `(--network|--net)\s+([^\s]+)`
 
 	// Extract container name
@@ -63,6 +72,16 @@ func ParseDockerCmd(cmd string) (string, string, error) {
 		return "", "", fmt.Errorf("failed to parse container name")
 	}
 	containerName := containerNameMatches[1]
+
+	if kind == utils.DockerStart {
+		networks, err := idc.ExtractNetworksForContainer(containerName)
+		if err != nil {
+			return containerName, "", err
+		}
+		for i, _ := range networks {
+			return containerName, i, nil
+		}
+	}
 
 	// Extract network name
 	networkNameRegex := regexp.MustCompile(networkNamePattern)
