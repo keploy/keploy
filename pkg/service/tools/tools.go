@@ -33,7 +33,7 @@ var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
 
 // Update initiates the tools process for the Keploy binary file.
 func (t *Tools) Update(ctx context.Context) error {
-	currentVersion := "v" + utils.Version
+	currentVersion := utils.Version
 	isKeployInDocker := len(os.Getenv("KEPLOY_INDOCKER")) > 0
 	if isKeployInDocker {
 		fmt.Println("As you are using docker version of keploy, please pull the latest Docker image of keploy to update keploy")
@@ -53,6 +53,8 @@ func (t *Tools) Update(ctx context.Context) error {
 	}
 
 	latestVersion := releaseInfo.TagName
+	fmt.Println("Current Version: " + currentVersion)
+	fmt.Println("Latest Version: " + latestVersion)
 	changelog := releaseInfo.Body
 
 	if currentVersion == latestVersion {
