@@ -2,8 +2,10 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"sync"
 
@@ -202,5 +204,59 @@ func (p *Proxy) stopUDPDNSServer() error {
 		}
 		p.logger.Info("Udp Dns server stopped successfully")
 	}
+	return nil
+}
+
+const (
+	nsSwitchConfig = "/etc/nsswitch.conf"
+	nsSwitchPerm   = 0644
+)
+
+// setting up the dns routing for the linux system
+func (p *Proxy) setupNsswitchConfig() error {
+
+	// Check if the nsswitch.conf present for the system
+	if _, err := os.Stat(nsSwitchConfig); err == nil {
+		// Read the current nsswitch.conf
+		data, err := os.ReadFile(nsSwitchConfig)
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to read the nsswitch.conf file from system")
+			return errors.New("failed to setup the nsswitch.conf file to redirect the DNS queries to proxy")
+		}
+		// copy the data of the nsswitch.conf file in order to reset it back to the original state in the end
+		p.nsswitchData = data
+
+		// Replace the hosts field value if it exists
+		lines := strings.Split(string(data), "\n")
+		for i, line := range lines {
+			if strings.HasPrefix(line, "hosts:") {
+				lines[i] = "hosts: files dns"
+			}
+		}
+
+		data = []byte(strings.Join(lines, "\n"))
+
+		// Write the modified nsswitch.conf back to the file
+		err = writeNsswitchConfig(p.logger, nsSwitchConfig, data, nsSwitchPerm)
+		if err != nil {
+			return errors.New("failed to setup the nsswitch.conf file to redirect the DNS queries to proxy")
+		}
+
+		p.logger.Debug("Successfully written to nsswitch config of linux")
+	}
+	return nil
+}
+
+// resetNsSwitchConfig resets the hosts config of nsswitch of the system
+func (p *Proxy) resetNsSwitchConfig() error {
+	data := p.nsswitchData
+
+	// Write the original data back to the nsswitch.conf file
+	err := writeNsswitchConfig(p.logger, nsSwitchConfig, data, nsSwitchPerm)
+	if err != nil {
+		return errors.New("failed to reset the nsswitch.conf back to the original state")
+	}
+
+	p.logger.Debug("Successfully reset the nsswitch config of linux")
 	return nil
 }
