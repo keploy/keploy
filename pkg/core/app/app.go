@@ -420,7 +420,6 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 		if err.Err != nil {
 			utils.LogError(a.logger, err.Err, "Application stopped with the error")
 			errCh <- err.Err
-			return err.Err
 		}
 		return nil
 	})
