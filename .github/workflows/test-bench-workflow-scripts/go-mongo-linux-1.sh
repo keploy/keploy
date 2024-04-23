@@ -50,6 +50,9 @@ done
 
 ## Check whether the original tests passed or failed
 
+sleep 2
+
+ls -l $pre_rec/keploy/reports/test-run-0
 overallStatus=true
 
 # Iterate over each directory in test_sets
@@ -119,6 +122,8 @@ fi
 ## Run tests for pre-recorded test cases
 sudo -E env PATH=$PATH kTestBuild test -c "./ginApp" --delay=7 --generateGithubActions=false
 
+sleep 2
+
 # Get the status of pre-recorded test cases after preparation of mock assertion
 overallStatus=true
 
@@ -149,6 +154,9 @@ fi
 sudo -E env PATH=$PATH kTestBuild test -c "./ginApp" --path "./test-bench" --delay=7 --generateGithubActions=false
 
 test_bench_rec="./test-bench"
+
+sleep 2
+
 # Get the status of pre-recorded test cases after preparation of mock assertion
 overallStatus=true
 
