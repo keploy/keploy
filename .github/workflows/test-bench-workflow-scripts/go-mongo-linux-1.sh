@@ -187,11 +187,14 @@ if [ "$overallStatus" = false ]; then
     exit 1
 fi
 
+ls -l $test_bench_rec
+
 # Delete the tests and mocks generated via test-bench.
 if [ -d "$test_bench_rec" ]; then
     sudo rm -rf "$test_bench_rec"
 fi
 
+echo "Tests and mocks are consistent for this application."
 exit 0
 
 
