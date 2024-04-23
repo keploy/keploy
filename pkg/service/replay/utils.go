@@ -1,9 +1,16 @@
 package replay
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -100,4 +107,109 @@ func detectLanguage(cmd string) (string, bool) {
 	}
 
 	return "go", false
+}
+
+func downloadAndExtractJaCoCoBinaries(version, dir string) error {
+	cliPath := filepath.Join(dir, "jacococli.jar")
+	agentPath := filepath.Join(dir, "jacocoagent.jar")
+
+	downloadURL := fmt.Sprintf("https://github.com/jacoco/jacoco/releases/download/v%s/jacoco-%s.zip", version, version)
+
+	_, err := os.Stat(cliPath)
+	if err == nil {
+		_, err := os.Stat(agentPath)
+		if err == nil {
+			return nil
+		}
+	}
+
+	resp, err := http.Get(downloadURL)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	zipReader, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		return err
+	}
+
+	for _, file := range zipReader.File {
+		if strings.HasSuffix(file.Name, "jacococli.jar") {
+			cliFile, err := file.Open()
+			if err != nil {
+				return err
+			}
+			defer cliFile.Close()
+
+			outFile, err := os.Create(cliPath)
+			if err != nil {
+				return err
+			}
+			defer outFile.Close()
+
+			_, err = io.Copy(outFile, cliFile)
+			if err != nil {
+				return err
+			}
+		} else if strings.HasSuffix(file.Name, "jacocoagent.jar") {
+			agentFile, err := file.Open()
+			if err != nil {
+				return err
+			}
+			defer agentFile.Close()
+
+			outFile, err := os.Create(agentPath)
+			if err != nil {
+				return err
+			}
+			defer outFile.Close()
+
+			_, err = io.Copy(outFile, agentFile)
+			if err != nil {
+				return err
+			}
+		}
+
+	}
+
+	cliStat, err := os.Stat(cliPath)
+	agentStat, err := os.Stat(agentPath)
+
+	if os.IsNotExist(err) || (cliStat != nil && agentStat != nil) {
+		return fmt.Errorf("failed to find JaCoCo binaries in the distribution")
+	}
+
+	return nil
+}
+
+func dumpJacocoCovData(ctx context.Context, jacocoCliPath, testSet string) error {
+	dest := fmt.Sprintf("target/%s.exec", testSet)
+	command := []string{
+		"java",
+		"-jar",
+		jacocoCliPath,
+		"dump",
+		"--address",
+		"localhost",
+		"--port",
+		"36320",
+		"--destfile",
+		dest,
+	}
+
+	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to execute command: %w", err)
+	}
+
+	return nil
 }

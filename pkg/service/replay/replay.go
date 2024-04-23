@@ -71,6 +71,23 @@ func (r *Replayer) Start(ctx context.Context) error {
 	var stopReason = "replay completed successfully"
 	var hookCancel context.CancelFunc
 
+	language, isCov := detectLanguage(r.config.Command)
+	if isCov {
+		switch language {
+		case "typescript":
+			err := os.Setenv("NYC_CLEAN", "true")
+			if err != nil {
+				isCov = false
+				utils.LogError(r.logger, err, "failed to set NYC_CLEAN env variable, coverage won't be calculated.")
+			}
+			r.config.Command = strings.Replace(r.config.Command, "nyc", "nyc --clean=${NYC_CLEAN}", 1)
+		case "java":
+			cmdFields := strings.Fields(r.config.Command)
+			cmdFields[1] += fmt.Sprintf("=destfile=target/${TESTSETID}.exec")
+			r.config.Command = strings.Join(cmdFields, " ")
+			r.logger.Info("updated command for jacoco", zap.String("command", r.config.Command))
+		}
+	}
 	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
 	defer func() {
 		select {
@@ -119,14 +136,38 @@ func (r *Replayer) Start(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 
+	jacocoPath := ""
+	jacocoBinariesDownloaded := false
+	if language == "java" && isCov {
+		jacocoPath = filepath.Join(os.TempDir(), "jacoco")
+		err = os.MkdirAll(jacocoPath, 0777)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to create jacoco directory")
+		} else {
+			err := downloadAndExtractJaCoCoBinaries("0.8.12", jacocoPath)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to download and extract jacoco binaries")
+			} else {
+				jacocoBinariesDownloaded = true
+			}
+		}
+	}
+
 	testSetResult := false
 	testRunResult := true
 	abortTestRun := false
 
-	for _, testSetID := range testSetIDs {
+	for i, testSetID := range testSetIDs {
 
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
+		}
+
+		if language == "java" && isCov {
+			err = os.Setenv("TESTSETID", testSetID)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to set TESTSETID env variable")
+			}
 		}
 
 		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, appID, false)
@@ -159,6 +200,21 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if abortTestRun {
 			break
 		}
+		// dump the jacoco coverage data for the current test set of java application run
+		if jacocoBinariesDownloaded {
+			err := dumpJacocoCovData(ctx, filepath.Join(jacocoPath, "jacococli.jar"), testSetID)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to dump jacoco coverage data")
+			}
+		}
+
+		if i == 0 && language == "typescript" && isCov {
+			err = os.Setenv("NYC_CLEAN", "false")
+			if err != nil {
+				isCov = false
+				utils.LogError(r.logger, err, "failed to set NYC_CLEAN env variable, coverage won't be calculated.")
+			}
+		}
 	}
 
 	testRunStatus := "fail"
@@ -169,7 +225,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
-		language, isCov := detectLanguage(r.config.Command)
+
 		if isCov || r.config.Test.GoCoverage {
 			r.logger.Info("calculating coverage for the test run and inserting it into the report", zap.Any("language", language))
 			switch language {
@@ -203,6 +259,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to update report with the coverage data")
 				}
+			case "java":
+
 			}
 		}
 	} else {

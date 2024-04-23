@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -194,36 +193,62 @@ func CalTypescriptCoverage(ctx context.Context) (models.TestCoverage, error) {
 		TotalCov: "",
 	}
 
-	generateCovJSONCmd := exec.CommandContext(ctx, "nyc", "merge", ".nyc_output")
-	_, err := generateCovJSONCmd.Output()
+	coverageFilePaths, err := getCoverageFilePathsTypescript(filepath.Join(".", ".nyc_output", "processinfo"))
 	if err != nil {
 		return testCov, err
 	}
-	coverageData, err := os.ReadFile("coverage.json")
-	if err != nil {
-		return testCov, err
+	if len(coverageFilePaths) == 0 {
+		return testCov, fmt.Errorf("no coverage files found")
 	}
-	var cov TypescriptCoverage
-	err = json.Unmarshal(coverageData, &cov)
-	if err != nil {
-		return testCov, err
+
+	// coverage is calculated as: (no of statements covered / total no of statements) * 100
+	// no of statements covered is the no of entries in S which has a value greater than 0
+	// Total no of statements is len of S
+
+	linesCoveredPerFile := make(map[string]map[string]bool) // filename -> line -> covered/not covered
+
+	for _, coverageFilePath := range coverageFilePaths {
+
+		coverageData, err := os.ReadFile(coverageFilePath)
+		if err != nil {
+			return testCov, err
+		}
+		var cov TypescriptCoverage
+		err = json.Unmarshal(coverageData, &cov)
+		if err != nil {
+			return testCov, err
+		}
+
+		for filename, file := range cov {
+			if _, ok := linesCoveredPerFile[filename]; !ok {
+				linesCoveredPerFile[filename] = make(map[string]bool)
+			}
+			for line, isStatementCovered := range file.S {
+				if _, ok := linesCoveredPerFile[filename][line]; !ok {
+					linesCoveredPerFile[filename][line] = false
+				}
+				if isStatementCovered.(float64) > 0 {
+					linesCoveredPerFile[filename][line] = true
+				}
+			}
+		}
 	}
 
 	totalLines := 0
 	totalCoveredLines := 0
-	for filename, file := range cov {
-		// coverage is calculated as: (no of statements covered / total no of statements) * 100
-		// no of statements covered is the no of entries in S which has a value greater than 0
-		// Total no of statements is len of S
-		var linesCovered int
-		for _, isStatementCovered := range file.S {
-			if isStatementCovered.(float64) > 0 {
-				linesCovered++
+	coveredLinesPerFile := make(map[string]int) // filename -> no of covered lines
+	for filename, lines := range linesCoveredPerFile {
+		for _, isCovered := range lines {
+			totalLines++
+			if isCovered {
+				totalCoveredLines++
+				coveredLinesPerFile[filename]++
 			}
 		}
-		totalLines += len(file.S)
-		totalCoveredLines += linesCovered
-		testCov.FileCov[filename] = strconv.FormatFloat(float64(linesCovered*100)/float64(len(file.S)), 'f', 2, 64) + "%"
+	}
+
+	for filename, lines := range linesCoveredPerFile {
+		testCov.FileCov[filename] = strconv.FormatFloat(float64(coveredLinesPerFile[filename]*100)/float64(len(lines)), 'f', 2, 64) + "%"
 	}
 	testCov.TotalCov = strconv.FormatFloat(float64(totalCoveredLines*100)/float64(totalLines), 'f', 2, 64) + "%"
 	return testCov, nil
@@ -243,8 +268,8 @@ type ProcessInfo struct {
 	Files            []string `json:"files"`
 }
 
-func getCoverageFilePathTypescript(path string) (string, error) {
-	files := utils.ByTime{}
+func getCoverageFilePathsTypescript(path string) ([]string, error) {
+	filePaths := []string{}
 	walkfn := func(path string, info os.FileInfo, err error) error {
 		if !info.IsDir() && !strings.HasSuffix(path, "index.json") {
 			fileData, err := os.ReadFile(path)
@@ -257,24 +282,16 @@ func getCoverageFilePathTypescript(path string) (string, error) {
 				return err
 			}
 			if len(processInfo.Files) > 0 {
-				coverageFileInfo, err := os.Lstat(processInfo.CoverageFilename)
-				if err != nil {
-					return err
-				}
-				files = append(files, utils.File{Info: coverageFileInfo, Path: processInfo.CoverageFilename})
+				filePaths = append(filePaths, processInfo.CoverageFilename)
 			}
 		}
 		return nil
 	}
 	err := filepath.Walk(path, walkfn)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	sort.Sort(files)
-	if len(files) == 0 {
-		return "", err
-	}
-	return files[0].Path, nil
+	return filePaths, nil
 }
 
 type sessionVisitor struct {
