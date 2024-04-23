@@ -157,6 +157,7 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 	}
 
 	reqHeaderNoise := map[string][]string{}
+	reqHeaderNoise["Keploy-Test-Id"] = []string{}
 
 	// compare http req headers
 	ok := CompareHeaders(pkg.ToHTTPHeader(tcs1.HTTPReq.Header), pkg.ToHTTPHeader(tcs2.HTTPReq.Header), &reqCompare.HeaderResult, reqHeaderNoise)
@@ -422,6 +423,7 @@ func CompareCurl(curl1, curl2 string, logger *zap.Logger) bool {
 	}
 
 	curlHeaderNoise := map[string][]string{}
+	curlHeaderNoise["Keploy-Test-Id"] = []string{}
 
 	hres := []models.HeaderResult{}
 	ok := CompareHeaders(pkg.ToHTTPHeader(headers1), pkg.ToHTTPHeader(headers2), &hres, curlHeaderNoise)
