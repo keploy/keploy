@@ -1,4 +1,4 @@
-name: Golang Mongo On Linux (record-hosted -- test-build)
+name: Golang Mongo On Linux (record-build -- test-hosted)
 on: [pull_request]
 jobs:
   go-mongo-linux:
@@ -9,7 +9,7 @@ jobs:
 
     - name: Build binary
       run: |
-        go build -tags=viper_bind_struct -o kTestBuild . && sudo mv kTestBuild /usr/local/bin/
+        go build -tags=viper_bind_struct -o kRecordBuild . && sudo mv kRecordBuild /usr/local/bin/
     - name: Checkout the samples-go repository
       uses: actions/checkout@v2
       with:
@@ -18,4 +18,4 @@ jobs:
     - name: Run samples-go application
       run: |
         cd samples-go/gin-mongo
-        source ./../../.github/workflows/test-bench-workflow-scripts/mongo/go-mongo-linux-1.sh
+        source ./../../.github/workflows/test-bench-workflow-scripts/mongo/go-mongo-linux-2.sh

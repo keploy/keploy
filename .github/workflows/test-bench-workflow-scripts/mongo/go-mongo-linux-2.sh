@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# In this script, latest version of keploy is used for testing, build version of keploy is used for recording
+
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 download_and_setup() {
@@ -16,10 +18,6 @@ delete_if_exists() {
     fi
 }
 
-run_keploy_command() {
-    local command=$1
-    sudo -E env PATH=$PATH kRecordHosted $command
-}
 
 check_test_status() {
     local path=$1
@@ -51,13 +49,13 @@ git checkout native-linux
 
 # Get the hosted version of keploy
 curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
-sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/kRecordHosted
+sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/kTestHosted
 
 # Check and remove keploy config file if exists
 delete_if_exists "./keploy.yml"
 
 # Generate the keploy-config file
-kTestBuild config --generate
+kRecordBuild config --generate
 
 # # Update the global noise to ts.
 # config_file="./keploy.yml"
@@ -78,7 +76,7 @@ test_sets=$(find "$pre_rec/keploy/" -mindepth 1 -maxdepth 1 -type d ! -name "rep
 # Loop over each directory stored in 'test_sets'
 for dir in $test_sets; do
     echo "Recording and replaying for (test-set): $dir"
-    sudo -E env PATH=$PATH kRecordHosted record -c "sudo -E env PATH=$PATH kTestBuild test -c ./ginApp --proxyPort 56789 --dnsPort 46789  --delay=10 --testsets $dir --enableTesting --generateGithubActions=false" --path "./test-bench/" --proxyPort=36789 --dnsPort 26789 --enableTesting --generateGithubActions=false 
+    sudo -E env PATH=$PATH kRecordBuild record -c "sudo -E env PATH=$PATH kTestHosted test -c ./ginApp --proxyPort 56789 --dnsPort 46789  --delay=10 --testsets $dir --enableTesting --generateGithubActions=false" --path "./test-bench/" --proxyPort=36789 --dnsPort 26789 --enableTesting --generateGithubActions=false 
     # Wait for 1 second before new test-set
     sleep 1
 done
@@ -123,7 +121,7 @@ echo "Mock assertion prepared successfully."
 delete_if_exists "$pre_rec/keploy/reports"
 
 ## Run tests for pre-recorded test cases
-sudo -E env PATH=$PATH kTestBuild test -c "./ginApp" --delay=7 --generateGithubActions=false
+sudo -E env PATH=$PATH kTestHosted test -c "./ginApp" --delay=7 --generateGithubActions=false
 
 sleep 2
 
@@ -138,7 +136,7 @@ echo "New mocks are consistent with the pre-recorded mocks."
 test_bench_rec="./test-bench"
 
 ## Run tests for test-bench-recorded test cases
-sudo -E env PATH=$PATH kTestBuild test -c "./ginApp" --path "$test_bench_rec" --delay=7 --generateGithubActions=false
+sudo -E env PATH=$PATH kTestHosted test -c "./ginApp" --path "$test_bench_rec" --delay=7 --generateGithubActions=false
 
 sleep 2
 
