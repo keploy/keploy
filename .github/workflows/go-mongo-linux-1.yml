@@ -1,4 +1,4 @@
-name: Golang Mongo On Linux
+name: Golang Mongo On Linux (record-hosted -- test-build)
 on: [pull_request]
 jobs:
   go-mongo-linux:
