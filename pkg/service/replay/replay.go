@@ -248,8 +248,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		close(exitLoopChan)
 	}()
 
-	r.mockDB.SetMockFileName(runTestSetResult.MockName())
-
 	var appErrChan = make(chan models.AppError, 1)
 	var appErr models.AppError
 	var success int
