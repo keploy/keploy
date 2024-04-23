@@ -12,7 +12,7 @@ type HookOptions struct {
 }
 
 type OutgoingOptions struct {
-	Rules         []config.Filter
+	Rules         []config.BypassRule
 	MongoPassword string
 	// TODO: role of SQLDelay should be mentioned in the comments.
 	SQLDelay       time.Duration // This is the same as Application delay.
@@ -20,7 +20,7 @@ type OutgoingOptions struct {
 }
 
 type IncomingOptions struct {
-	//Filters []config.Filter
+	Filters []config.Filter
 }
 
 type SetupOptions struct {

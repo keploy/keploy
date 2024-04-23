@@ -129,8 +129,12 @@ func (r *Recorder) Start(ctx context.Context) error {
 		}
 	}
 
+	incomingOpts := models.IncomingOptions{
+		Filters: r.config.Record.Filters,
+	}
+
 	// fetching test cases and mocks from the application and inserting them into the database
-	incomingChan, err = r.instrumentation.GetIncoming(ctx, appID, models.IncomingOptions{})
+	incomingChan, err = r.instrumentation.GetIncoming(ctx, appID, incomingOpts)
 	if err != nil {
 		stopReason = "failed to get incoming frames"
 		utils.LogError(r.logger, err, stopReason)
@@ -156,23 +160,13 @@ func (r *Recorder) Start(ctx context.Context) error {
 		return nil
 	})
 
-	// Getting all the bypass rules
-	filterRules := r.config.Record.Filters
-	for _, bypass := range r.config.BypassRules {
-		filterRules = append(filterRules, config.Filter{
-			BypassRule: bypass,
-			URLMethods: nil,
-			Headers:    nil,
-		})
-	}
-
-	opts := models.OutgoingOptions{
-		Rules:          filterRules,
+	outgoingOpts := models.OutgoingOptions{
+		Rules:          r.config.BypassRules,
 		MongoPassword:  r.config.Test.MongoPassword,
 		FallBackOnMiss: r.config.Test.FallBackOnMiss,
 	}
 
-	outgoingChan, err = r.instrumentation.GetOutgoing(ctx, appID, opts)
+	outgoingChan, err = r.instrumentation.GetOutgoing(ctx, appID, outgoingOpts)
 	if err != nil {
 		stopReason = "failed to get outgoing frames"
 		utils.LogError(r.logger, err, stopReason)

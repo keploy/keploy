@@ -2,6 +2,11 @@ package conn
 
 import (
 	"fmt"
+	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
+	"go.uber.org/zap"
+	"net/http"
+	"regexp"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -38,6 +43,68 @@ func convertUnixNanoToTime(unixNano uint64) time.Time {
 	seconds := int64(unixNano / uint64(time.Second))
 	nanoRemainder := int64(unixNano % uint64(time.Second))
 	return time.Unix(seconds, nanoRemainder)
+}
+
+func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptions) bool {
+	filtered := false
+
+	for _, filter := range opts.Filters {
+		if filter.Host != "" {
+			regex, err := regexp.Compile(filter.Host)
+			if err != nil {
+				utils.LogError(logger, err, "failed to compile the host regex")
+				continue
+			}
+			filtered = regex.MatchString(req.Host)
+			if !filtered {
+				continue
+			}
+		}
+		if filter.Path != "" {
+			regex, err := regexp.Compile(filter.Path)
+			if err != nil {
+				utils.LogError(logger, err, "failed to compile the path regex")
+				continue
+			}
+			filtered = regex.MatchString(req.URL.String())
+			if !filtered {
+				continue
+			}
+		}
+		if filter.URLMethods != nil && len(filter.URLMethods) != 0 {
+			for _, method := range filter.URLMethods {
+				if method == req.Method {
+					filtered = true
+					break
+				}
+			}
+			if !filtered {
+				continue
+			}
+		}
+		if filter.Headers != nil && len(filter.Headers) != 0 {
+			for bypassHeaderKey, bypassHeaderValue := range filter.Headers {
+				regex, err := regexp.Compile(bypassHeaderValue)
+				if err != nil {
+					utils.LogError(logger, err, "failed to compile the header regex")
+					continue
+				}
+				if req.Header.Get(bypassHeaderKey) != "" {
+					for _, value := range req.Header.Values(bypassHeaderKey) {
+						filtered = regex.MatchString(value)
+						if filtered {
+							break
+						}
+					}
+				}
+				if filtered {
+					break
+				}
+			}
+		}
+	}
+
+	return filtered
 }
 
 //// LogAny appends input of any type to a logs.txt file in the current directory

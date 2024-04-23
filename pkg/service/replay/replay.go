@@ -267,18 +267,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusFailed, err
 	}
 
-	// Getting all the bypass rules
-	filterRules := r.config.Record.Filters
-	for _, bypass := range r.config.BypassRules {
-		filterRules = append(filterRules, config.Filter{
-			BypassRule: bypass,
-			URLMethods: nil,
-			Headers:    nil,
-		})
-	}
-
 	err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{
-		Rules:          filterRules,
+		Rules:          r.config.BypassRules,
 		MongoPassword:  r.config.Test.MongoPassword,
 		SQLDelay:       time.Duration(r.config.Test.Delay),
 		FallBackOnMiss: r.config.Test.FallBackOnMiss,
