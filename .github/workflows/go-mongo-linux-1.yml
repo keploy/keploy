@@ -1,4 +1,4 @@
-name: Golang On Linux
+name: Golang Mongo On Linux
 on: [pull_request]
 jobs:
   go-mongo-linux:

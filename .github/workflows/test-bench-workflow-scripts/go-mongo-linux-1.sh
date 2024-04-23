@@ -52,14 +52,16 @@ done
 
 sleep 15
 
-ls -l $pre_rec/keploy/reports/test-run-0
+# Initialize the index
+idx=0
+
 overallStatus=true
 
 # Iterate over each directory in test_sets
 for dir in $test_sets; do
-    ls -l $pre_rec/keploy/reports/test-run-0
+
     # Construct the path to the report file
-    report_file="$pre_rec/keploy/reports/test-run-0/$dir-report.yaml"
+    report_file="$pre_rec/keploy/reports/test-run-$idx/$dir-report.yaml"
     
     # Extract the status from the report file
     test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
@@ -69,6 +71,8 @@ for dir in $test_sets; do
         # Set overallStatus to false if any test fails
         overallStatus=false
     fi
+
+    idx=$((idx + 1))
 done
 
 # Output the final status
