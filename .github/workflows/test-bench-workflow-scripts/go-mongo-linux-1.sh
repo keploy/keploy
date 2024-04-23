@@ -33,7 +33,7 @@ pre_rec="."
 
 ## Delete the reports directory if it exists in pre_rec
 if [ -d "$pre_rec/keploy/reports" ]; then
-    rm -rf "$pre_rec/keploy/reports"
+    sudo rm -rf "$pre_rec/keploy/reports"
 fi
 
 # Get all directories except the 'reports' directory
@@ -55,7 +55,7 @@ sleep 2
 # Initialize the index
 idx=0
 
-overallStatus=true
+overallStatus=1 #(true)
 
 # Iterate over each directory in test_sets
 for dir in $test_sets; do
@@ -69,7 +69,7 @@ for dir in $test_sets; do
     # Check if the test status is not PASSED
     if [ "$test_status" != "PASSED" ]; then
         # Set overallStatus to false if any test fails
-        overallStatus=false
+        overallStatus=0 #(false)
     fi
 
     idx=$((idx + 1))
@@ -77,7 +77,7 @@ done
 
 # Output the final status
 echo "Overall TestRun status for pre-recorded testscase ran via test-bench: $overallStatus"
-if [ "$overallStatus" = false ]; then
+if [ "$overallStatus" -eq 0 ]; then
     exit 1
 fi
 
@@ -120,7 +120,7 @@ fi
 
 # Delete the previously generated reports for pre-recorded test cases
 if [ -d "$pre_rec/keploy/reports" ]; then
-    rm -rf "$pre_rec/keploy/reports"
+   sudo rm -rf "$pre_rec/keploy/reports"
 fi
 
 
@@ -130,7 +130,7 @@ sudo -E env PATH=$PATH kTestBuild test -c "./ginApp" --delay=7 --generateGithubA
 sleep 2
 
 # Get the status of pre-recorded test cases after preparation of mock assertion
-overallStatus=true
+overallStatus=1 #(true)
 
 # Iterate over each directory in test_sets
 for dir in $test_sets; do
@@ -143,17 +143,18 @@ for dir in $test_sets; do
     # Check if the test status is not PASSED
     if [ "$test_status" != "PASSED" ]; then
         # Set overallStatus to false if any test fails
-        overallStatus=false
+        overallStatus=0 #(false)
     fi
 done
 
 # Output the final status
 echo "Overall TestRun status for pre-recorded testscase (after mock assertion): $overallStatus"
-if [ "$overallStatus" = false ]; then
+if [ "$overallStatus" -eq 0 ]; then
     echo "Newly recorded mocks are not consistent with the pre-recorded mocks."
     exit 1
 fi
 
+echo "New mocks are consistent with the pre-recorded mocks."
 
 ## Run tests for test-bench-recorded test cases
 sudo -E env PATH=$PATH kTestBuild test -c "./ginApp" --path "./test-bench" --delay=7 --generateGithubActions=false
@@ -163,7 +164,7 @@ test_bench_rec="./test-bench"
 sleep 2
 
 # Get the status of pre-recorded test cases after preparation of mock assertion
-overallStatus=true
+overallStatus=1 #(true)
 
 # Iterate over each directory in test_sets
 for dir in $test_sets; do
@@ -176,18 +177,19 @@ for dir in $test_sets; do
     # Check if the test status is not PASSED
     if [ "$test_status" != "PASSED" ]; then
         # Set overallStatus to false if any test fails
-        overallStatus=false
+        overallStatus=0 #(false)
     fi
 done
 
 # Output the final status
 echo "Overall TestRun status for test_bench_rec testscase (after mock assertion): $overallStatus"
-if [ "$overallStatus" = false ]; then
+if [ "$overallStatus" -eq 0 ]; then
     echo "Old recorded mocks are not consistent with the test-bench-recorded mocks."
     exit 1
 fi
 
-ls -l $test_bench_rec
+echo "Old mocks are consistent with the test-bench-recorded mocks."
+
 
 # Delete the tests and mocks generated via test-bench.
 if [ -d "$test_bench_rec" ]; then
