@@ -4,13 +4,6 @@
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
-download_and_setup() {
-    local url=$1
-    local target_bin=$2
-    curl --silent --location "$url" | tar xz -C /tmp
-    sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/$target_bin
-}
-
 delete_if_exists() {
     local path=$1
     if [ -e "$path" ]; then
