@@ -50,13 +50,14 @@ done
 
 ## Check whether the original tests passed or failed
 
-sleep 5
+sleep 15
 
 ls -l $pre_rec/keploy/reports/test-run-0
 overallStatus=true
 
 # Iterate over each directory in test_sets
 for dir in $test_sets; do
+    ls -l $pre_rec/keploy/reports/test-run-0
     # Construct the path to the report file
     report_file="$pre_rec/keploy/reports/test-run-0/$dir-report.yaml"
     
