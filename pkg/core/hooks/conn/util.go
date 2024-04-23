@@ -83,14 +83,14 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 			}
 		}
 		if filter.Headers != nil && len(filter.Headers) != 0 {
-			for bypassHeaderKey, bypassHeaderValue := range filter.Headers {
-				regex, err := regexp.Compile(bypassHeaderValue)
+			for filterHeaderKey, filterHeaderValue := range filter.Headers {
+				regex, err := regexp.Compile(filterHeaderValue)
 				if err != nil {
 					utils.LogError(logger, err, "failed to compile the header regex")
 					continue
 				}
-				if req.Header.Get(bypassHeaderKey) != "" {
-					for _, value := range req.Header.Values(bypassHeaderKey) {
+				if req.Header.Get(filterHeaderKey) != "" {
+					for _, value := range req.Header.Values(filterHeaderKey) {
 						filtered = regex.MatchString(value)
 						if filtered {
 							break
