@@ -50,7 +50,7 @@ done
 
 ## Check whether the original tests passed or failed
 
-sleep 2
+sleep 5
 
 ls -l $pre_rec/keploy/reports/test-run-0
 overallStatus=true
