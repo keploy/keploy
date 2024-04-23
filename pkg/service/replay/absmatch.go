@@ -47,11 +47,10 @@ func AbsMatch(tcs1, tcs2 *models.TestCase, noiseConfig map[string]map[string][]s
 		pass = false
 	}
 
-	//compare name
+	//compare name (just for debugging)
 	if tcs1.Name != tcs2.Name {
 		nameResult.Normal = false
 		logger.Debug("test case name is not equal", zap.Any("tcs1Name", tcs1.Name), zap.Any("tcs2Name", tcs2.Name))
-		pass = false
 	}
 
 	//compare curl
@@ -76,6 +75,7 @@ func AbsMatch(tcs1, tcs2 *models.TestCase, noiseConfig map[string]map[string][]s
 		pass = false
 	}
 
+	absResult.Name = nameResult
 	absResult.Kind = kindResult
 	absResult.Req = reqCompare
 	absResult.Resp = respCompare
