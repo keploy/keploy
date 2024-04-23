@@ -189,7 +189,7 @@ fi
 
 # Delete the tests and mocks generated via test-bench.
 if [ -d "$test_bench_rec" ]; then
-    rm -rf "$test_bench_rec"
+    sudo rm -rf "$test_bench_rec"
 fi
 
 exit 0
