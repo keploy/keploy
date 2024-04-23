@@ -50,7 +50,7 @@ done
 
 ## Check whether the original tests passed or failed
 
-sleep 15
+sleep 2
 
 # Initialize the index
 idx=0
