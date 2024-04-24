@@ -2,23 +2,15 @@ name: Test Stage
 
 on:
   workflow_run:
-    workflows: [Keploy]
-    types: [completed]
+    workflows: ["Build keploy binary"]
+    types: ["completed"]
 
 jobs:
-  on-success:
-    runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
-    steps:
-      - run: echo 'The triggering workflow passed'
-  on-failure:
-    runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
-    steps:
-      - run: echo 'The triggering workflow failed'
-
   test-go-mongo:
     runs-on: ubuntu-latest
+    if: >
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v2

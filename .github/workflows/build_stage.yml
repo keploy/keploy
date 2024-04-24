@@ -1,4 +1,4 @@
-name: Keploy
+name: Build keploy binary
 
 on: [pull_request]
 
