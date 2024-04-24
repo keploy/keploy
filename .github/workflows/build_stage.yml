@@ -1,10 +1,13 @@
 name: Build keploy binary
 
-on: [pull_request]
+on:
+  workflow_call:  # This workflow can now be called from other workflows
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      artifact-url: ${{ steps.upload.outputs.download-url }}  # Output the artifact URL to be used in other workflows
     steps:
       - name: Checkout repository
         uses: actions/checkout@v2
@@ -14,6 +17,7 @@ jobs:
 
       - name: Upload Keploy Binary as Artifact
         uses: actions/upload-artifact@v2
+        id: upload  # Set an ID for referencing in outputs
         with:
           name: keploy-binary
           path: kTestBuild
