@@ -1,52 +1,29 @@
-# name: Golang Mongo On Linux (record-hosted -- test-build)
-# on: [pull_request]
-# jobs:
-#   go-mongo-linux:
-#     runs-on: ubuntu-latest
-#     steps:
-#     - name: Checkout repository
-#       uses: actions/checkout@v2
-
-#     - name: Build binary
-#       run: |
-#         go build -tags=viper_bind_struct -o kTestBuild . && sudo mv kTestBuild /usr/local/bin/
-#     - name: Checkout the samples-go repository
-#       uses: actions/checkout@v2
-#       with:
-#         repository: keploy/samples-go
-#         path: samples-go
-#     - name: Run samples-go application
-#       run: |
-#         cd samples-go/gin-mongo
-#         source ./../../.github/workflows/test-bench-workflow-scripts/mongo/go-mongo-linux-1.sh
-
 name: Test Keploy with Golang-Mongo
 on: [pull_request]
-
 jobs:
   test-go-mongo:
     needs: [build] # This ensures the test job waits for the 'build' job to complete successfully
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v2
+    - name: Checkout repository
+      uses: actions/checkout@v2
 
-      - name: Download Keploy Binary
-        uses: actions/download-artifact@v2
-        with:
-          name: keploy-binary
-          path: /usr/local/bin
+    - name: Download Keploy Binary
+      uses: actions/download-artifact@v2
+      with:
+        name: keploy-binary
+        path: /usr/local/bin
       
-      - name: Set execute permissions for keploy binary
-        run: sudo chmod +x /usr/local/bin/kTestBuild
+    - name: Set execute permissions for keploy binary
+      run: sudo chmod +x /usr/local/bin/kTestBuild
     
-      - name: Checkout the samples-go repository
-        uses: actions/checkout@v2
-        with:
-          repository: keploy/samples-go
-          path: samples-go
+    - name: Checkout the samples-go repository
+      uses: actions/checkout@v2
+      with:
+        repository: keploy/samples-go
+        path: samples-go
 
-      - name: Run samples-go application
-        run: |
-          cd samples-go/gin-mongo
-          source ./../../.github/workflows/test-bench-workflow-scripts/mongo/go-mongo-linux-1.sh
+    - name: Run samples-go application
+      run: |
+        cd samples-go/gin-mongo
+        source ./../../.github/workflows/test-bench-workflow-scripts/mongo/go-mongo-linux-1.sh
