@@ -3,12 +3,15 @@ name: Test Stage
 on:
   workflow_run:
     workflows: ["Build keploy binary"]
-    types: ["completed"]
+    types:
+      - completed
+    branches:
+      - main # Ensure this matches the branch you want to trigger on
 
 jobs:
   test-go-mongo:
-    runs-on: ubuntu-latest
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v2
@@ -18,7 +21,8 @@ jobs:
         with:
           name: keploy-binary
           path: /usr/local/bin
-      
+
+      # Uncomment and adjust the following step to set execute permissions if necessary
       # - name: Set execute permissions for keploy binary
       #   run: sudo chmod +x /usr/local/bin/keploy-binary
     
