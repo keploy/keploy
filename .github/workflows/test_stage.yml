@@ -1,8 +1,13 @@
 name: Test Keploy with Golang-Mongo
-on: [pull_request]
+
+on:
+  workflow_run:
+    workflows: ["Build Keploy Binary"]
+    types:
+      - completed
+
 jobs:
   test-go-mongo:
-    needs: [build] # This ensures the test job waits for the 'build' job to complete successfully
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
