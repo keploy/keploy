@@ -1,4 +1,4 @@
-name: Build Keploy Binary
+name: Build
 
 on: 
   pull_request:

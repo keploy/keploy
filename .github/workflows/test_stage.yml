@@ -1,41 +1,44 @@
 name: Test Keploy with Golang-Mongo
-'on':
+
+on:
   workflow_run:
-    workflows:
-      - Build Keploy Binary
-    types:
-      - completed
+    workflows: [Build]
+    types: [completed]
+
 jobs:
   on-success:
     runs-on: ubuntu-latest
-    if: '${{ github.event.workflow_run.conclusion == ''success'' }}'
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     steps:
       - run: echo 'The triggering workflow passed'
   on-failure:
     runs-on: ubuntu-latest
-    if: '${{ github.event.workflow_run.conclusion == ''failure'' }}'
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
     steps:
       - run: echo 'The triggering workflow failed'
+
   test-go-mongo:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v2
+
       - name: Download Keploy Binary
         uses: actions/download-artifact@v2
         with:
           name: keploy-binary
           path: /usr/local/bin
+      
       - name: Set execute permissions for keploy binary
         run: sudo chmod +x /usr/local/bin/keploy-binary
+    
       - name: Checkout the samples-go repository
         uses: actions/checkout@v2
         with:
           repository: keploy/samples-go
           path: samples-go
-      - name: Run samples-go application
-        run: >
-          cd samples-go/gin-mongo
 
-          source
-          ./../../.github/workflows/test-bench-workflow-scripts/mongo/go-mongo-linux-1.sh
+      - name: Run samples-go application
+        run: |
+          cd samples-go/gin-mongo
+          source ./../../.github/workflows/test-bench-workflow-scripts/mongo/go-mongo-linux-1.sh
