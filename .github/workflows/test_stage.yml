@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    uses: ./.github/workflows/build.yml  # Call the build workflow
+    uses: ./build_stage.yml  # Call the build workflow
 
   test-go-mongo:
     needs: build  # Ensure this job runs after the build job
