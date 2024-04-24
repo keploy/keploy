@@ -1,4 +1,4 @@
-name: Test Keploy with Golang-Mongo
+name: Test Stage
 
 on:
   workflow_run:
