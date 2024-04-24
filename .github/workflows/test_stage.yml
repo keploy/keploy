@@ -21,14 +21,10 @@
 #         source ./../../.github/workflows/test-bench-workflow-scripts/mongo/go-mongo-linux-1.sh
 
 name: Test Keploy with Golang-Mongo
-
-on: 
-  pull_request:
-    branches:
-      - main
+on: [pull_request]
 
 jobs:
-  test-mongo:
+  test-go-mongo:
     needs: [build] # This ensures the test job waits for the 'build' job to complete successfully
     runs-on: ubuntu-latest
     steps:
@@ -42,7 +38,7 @@ jobs:
           path: /usr/local/bin
       
       - name: Set execute permissions for keploy binary
-        run: sudo chmod +x /usr/local/bin/keployB
+        run: sudo chmod +x /usr/local/bin/kTestBuild
     
       - name: Checkout the samples-go repository
         uses: actions/checkout@v2
