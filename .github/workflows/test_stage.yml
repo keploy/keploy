@@ -4,6 +4,12 @@ on:
   pull_request:
 
 jobs:
+  printHello:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print Hello
+        run: echo "Hello"
+
   build:
     uses: .github/workflows/build_stage.yml@gouravkrosx:test-bench-workflow  # Call the build workflow
 
