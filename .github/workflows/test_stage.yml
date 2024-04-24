@@ -4,13 +4,7 @@ on:
   pull_request:
 
 jobs:
-  printHello:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Print Hello
-        run: echo "Hello"
-
-  build:
+  build-keploy:
     uses: gouravkrosx/keploy/.github/workflows/build_stage.yml@test-bench-workflow
 
   test-go-mongo:
