@@ -1,4 +1,4 @@
-name: Build
+name: Keploy
 
 on: 
   pull_request:

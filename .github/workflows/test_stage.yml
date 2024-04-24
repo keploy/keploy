@@ -2,7 +2,7 @@ name: Test Keploy with Golang-Mongo
 
 on:
   workflow_run:
-    workflows: [Build]
+    workflows: [Keploy]
     types: [completed]
 
 jobs:
@@ -29,8 +29,8 @@ jobs:
           name: keploy-binary
           path: /usr/local/bin
       
-      - name: Set execute permissions for keploy binary
-        run: sudo chmod +x /usr/local/bin/keploy-binary
+      # - name: Set execute permissions for keploy binary
+      #   run: sudo chmod +x /usr/local/bin/keploy-binary
     
       - name: Checkout the samples-go repository
         uses: actions/checkout@v2
