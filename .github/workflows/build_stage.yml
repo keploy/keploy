@@ -1,0 +1,22 @@
+name: Build Keploy Binary
+
+on: 
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Build binary
+        run: go build -tags=viper_bind_struct -o kTestBuild .
+
+      - name: Upload Keploy Binary as Artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: keploy-binary
+          path: kTestBuild
