@@ -11,7 +11,7 @@ jobs:
         run: echo "Hello"
 
   build:
-    uses: .github/workflows/build_stage.yml@gouravkrosx:test-bench-workflow  # Call the build workflow
+    uses: gouravkrosx/keploy/.github/workflows/build_stage.yml@test-bench-workflow
 
   test-go-mongo:
     needs: build  # Ensure this job runs after the build job
