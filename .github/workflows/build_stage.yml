@@ -18,3 +18,8 @@ jobs:
         with:
           name: keploy-binary
           path: kTestBuild
+  
+  test:
+    uses: ./.github/workflows/test_stage.yml
+
+

@@ -1,14 +1,9 @@
 name: Test Stage
 on:
-  workflow_dispatch:
-  workflow_run:
-    workflows: ["Build Keploy Binary"]  # Ensure this name matches exactly with the build workflow's name
-    types:
-      - completed
+  workflow_call: 
 
 jobs:
   test-go-mongo:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
