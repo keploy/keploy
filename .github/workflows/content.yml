@@ -8,6 +8,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v2
+        with :
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.head_ref }}
       
       - name: Display content of the test-stage.yml
         run: cat ${{ github.event.pull_request.head.repo.owner.login }}/keploy/.github/workflows/test_stage.yml@${{ github.head_ref }}
