@@ -16,5 +16,4 @@ jobs:
         uses: benc-uk/workflow-dispatch@v1
         with:
           workflow: Test Stage
-          token: ${{ secrets.GITHUB_TOKEN }}
           inputs: '{"binary_path": "kTestBuild"}'
