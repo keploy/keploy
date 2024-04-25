@@ -1,6 +1,7 @@
 name: Build keploy binary
 
-on: [pull_request]
+on:
+  pull_request:
 
 jobs:
   build:
@@ -12,8 +13,13 @@ jobs:
       - name: Build binary
         run: go build -tags=viper_bind_struct -o kTestBuild
 
-      - name: Trigger Testing Workflow
-        uses: benc-uk/workflow-dispatch@v1
+      - name: Upload Keploy Binary as Artifact
+        uses: actions/upload-artifact@v2
         with:
-          workflow: Test Stage
-          inputs: '{"binary_path": "kTestBuild"}'
+          name: keploy-binary
+          path: kTestBuild
+
+      - name: Test Stage
+        uses: ./.github/workflows/test_stage.yml@${{ github.head_ref }}
+        with:
+          artifact_name: 'keploy-binary'

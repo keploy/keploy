@@ -1,11 +1,9 @@
 name: Test Stage
 
-# will be triggered only if the build_stage.yml workflow is successful
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
-      binary_path:
-        description: 'Path to the Keploy binary'
+      artifact_name:
         required: true
         type: string
 
@@ -16,10 +14,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v2
 
-      - name: Setup Binary from Input
+      - name: Download Keploy Binary
+        uses: actions/download-artifact@v2
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: /usr/local/bin
+
+      - name: Giving permission to binary
         run: |
-          mkdir -p /usr/local/bin
-          cp ${{ github.event.inputs.binary_path }} /usr/local/bin/kTestBuild
           sudo chmod +x /usr/local/bin/kTestBuild
 
       - name: Checkout the samples-go repository
