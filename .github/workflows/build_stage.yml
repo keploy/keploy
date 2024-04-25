@@ -1,4 +1,4 @@
-name: Build keploy binary
+name: Build Keploy Binary
 
 on:
   pull_request:
@@ -18,8 +18,3 @@ jobs:
         with:
           name: keploy-binary
           path: kTestBuild
-
-      - name: Test Stage
-        uses: gouravkrosx/keploy/./.github/workflows/test_stage.yml@test-bench-workflow
-        with:
-          artifact_name: 'keploy-binary'

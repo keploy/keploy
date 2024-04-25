@@ -1,14 +1,14 @@
 name: Test Stage
-
 on:
-  workflow_call:
-    inputs:
-      artifact_name:
-        required: true
-        type: string
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Build Keploy Binary"]  # Ensure this name matches exactly with the build workflow's name
+    types:
+      - completed
 
 jobs:
   test-go-mongo:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -17,7 +17,7 @@ jobs:
       - name: Download Keploy Binary
         uses: actions/download-artifact@v2
         with:
-          name: ${{ inputs.artifact_name }}
+          name: keploy-binary
           path: /usr/local/bin
 
       - name: Giving permission to binary
