@@ -1,23 +1,20 @@
 name: Build keploy binary
 
-on:
-  workflow_call:  # This workflow can now be called from other workflows
+on: [pull_request]
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    outputs:
-      artifact-url: ${{ steps.upload.outputs.download-url }}  # Output the artifact URL to be used in other workflows
     steps:
       - name: Checkout repository
         uses: actions/checkout@v2
 
       - name: Build binary
-        run: go build -tags=viper_bind_struct -o kTestBuild .
+        run: go build -tags=viper_bind_struct -o kTestBuild
 
-      - name: Upload Keploy Binary as Artifact
-        uses: actions/upload-artifact@v2
-        id: upload  # Set an ID for referencing in outputs
+      - name: Trigger Testing Workflow
+        uses: benc-uk/workflow-dispatch@v1
         with:
-          name: keploy-binary
-          path: kTestBuild
+          workflow: Test Stage
+          token: ${{ secrets.GITHUB_TOKEN }}
+          inputs: '{"binary_path": "kTestBuild"}'

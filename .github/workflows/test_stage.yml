@@ -1,27 +1,25 @@
 name: Test Stage
 
+# will be triggered only if the build_stage.yml workflow is successful
 on:
-  pull_request:
+  workflow_dispatch:
+    inputs:
+      binary_path:
+        description: 'Path to the Keploy binary'
+        required: true
+        type: string
 
 jobs:
-  build-keploy:
-    uses: gouravkrosx/keploy/.github/workflows/build_stage.yml@test-bench-workflow
-
   test-go-mongo:
-    needs: build  # Ensure this job runs after the build job
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v2
 
-      - name: Download Keploy Binary
-        uses: actions/download-artifact@v2
-        with:
-          name: keploy-binary
-          path: /usr/local/bin
-
-      - name: Giving permission to binary
+      - name: Setup Binary from Input
         run: |
+          mkdir -p /usr/local/bin
+          cp ${{ github.event.inputs.binary_path }} /usr/local/bin/kTestBuild
           sudo chmod +x /usr/local/bin/kTestBuild
 
       - name: Checkout the samples-go repository
