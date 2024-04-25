@@ -20,6 +20,10 @@ jobs:
           name: keploy-binary
           path: /usr/local/bin
 
+      - name: Giving permission to binary
+        run: |
+          sudo chmod +x /usr/local/bin/kTestBuild
+
       - name: Checkout the samples-go repository
         uses: actions/checkout@v2
         with:
