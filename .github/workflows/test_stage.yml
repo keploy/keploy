@@ -1,10 +1,16 @@
 name: Test Stage
 on:
   workflow_call: 
+    outputs:
+      test_status:
+        description: "Exit status of the test script"
+        value: ${{ jobs.test-go-mongo.outputs.test_result }}
 
 jobs:
   test-go-mongo:
     runs-on: ubuntu-latest
+    outputs:
+      test_result: ${{ steps.test_script.outcome }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v2
@@ -26,6 +32,8 @@ jobs:
           path: samples-go
 
       - name: Run samples-go application
+        id: test_script
         run: |
           cd samples-go/gin-mongo
-          source ./../../.github/workflows/test-bench-workflow-scripts/mongo/go-mongo-linux-1.sh
+          ./../../.github/workflows/test-bench-workflow-scripts/mongo/go-mongo-linux-1.sh
+          echo "::set-output name=outcome::${?}"

@@ -19,12 +19,18 @@ jobs:
           name: keploy-binary
           path: kTestBuild
 
-      - name: sleep for 10 seconds
+      - name: Sleep for 10 seconds
         run: sleep 10
-      
-  
+
   test:
     needs: build
     uses: ./.github/workflows/test_stage.yml
+    outputs:
+      test_status: ${{ steps.call_test_stage.outputs.test_status }}
 
-
+  check_status:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get Test Status
+        run: echo "Test script status code: ${{ needs.test.outputs.test_status }}"
