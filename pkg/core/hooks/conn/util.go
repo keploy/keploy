@@ -72,17 +72,20 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 			}
 		}
 		if filter.URLMethods != nil && len(filter.URLMethods) != 0 {
+			urlMethodMatch := false
 			for _, method := range filter.URLMethods {
 				if method == req.Method {
-					filtered = true
+					urlMethodMatch = true
 					break
 				}
 			}
+			filtered = urlMethodMatch
 			if !filtered {
 				continue
 			}
 		}
 		if filter.Headers != nil && len(filter.Headers) != 0 {
+			headerMatch := false
 			for filterHeaderKey, filterHeaderValue := range filter.Headers {
 				regex, err := regexp.Compile(filterHeaderValue)
 				if err != nil {
@@ -91,12 +94,13 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 				}
 				if req.Header.Get(filterHeaderKey) != "" {
 					for _, value := range req.Header.Values(filterHeaderKey) {
-						filtered = regex.MatchString(value)
-						if filtered {
+						headerMatch = regex.MatchString(value)
+						if headerMatch {
 							break
 						}
 					}
 				}
+				filtered = headerMatch
 				if filtered {
 					break
 				}
