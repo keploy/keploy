@@ -31,4 +31,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Get Test Status
-        run: echo "Test script status code: ${{ needs.test.outputs.test_status }}"
+        run: echo "Test script status code ${{ needs.test.outputs.test_status }}"
+
