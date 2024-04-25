@@ -7,4 +7,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Display content of the test-stage.yml
-        run: cat ${{ github.event.pull_request.head.repo.owner.login }}/{{github.repository}}/.github/workflows/test-stage.yml@${{ github.head_ref }}
+        run: cat ${{ github.event.pull_request.head.repo.owner.login }}/${{github.repository}}/.github/workflows/test-stage.yml@${{ github.head_ref }}
