@@ -1,0 +1,10 @@
+name: Display Workflow Content
+
+on: [pull_request]
+
+jobs:
+  show-workflow-file:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Display content of the test-stage.yml
+        run: cat ${{ github.repository }}/.github/workflows/test-stage.yml@${{ github.head_ref }}
