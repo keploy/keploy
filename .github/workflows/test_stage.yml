@@ -35,5 +35,6 @@ jobs:
         id: test_script
         run: |
           cd samples-go/gin-mongo
+          chmod +x ./../../.github/workflows/test-bench-workflow-scripts/mongo/go-mongo-linux-1.sh
           ./../../.github/workflows/test-bench-workflow-scripts/mongo/go-mongo-linux-1.sh
           echo "::set-output name=outcome::${?}"
