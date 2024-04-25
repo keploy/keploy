@@ -6,5 +6,8 @@ jobs:
   show-workflow-file:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+      
       - name: Display content of the test-stage.yml
         run: cat ${{ github.event.pull_request.head.repo.owner.login }}/keploy/.github/workflows/test_stage.yml@${{ github.head_ref }}
