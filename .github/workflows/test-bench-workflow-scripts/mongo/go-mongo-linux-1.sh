@@ -85,8 +85,6 @@ if [ "$overallStatus" -eq 0 ]; then
     exit 1
 fi
 
-echo "Deliberately exiting the script to check the exit status of the script."
-exit 1
 
 #### Testing Phase of test-bench ####
 
