@@ -18,6 +18,8 @@ jobs:
         with:
           name: keploy-binary
           path: kTestBuild
+      - name: sleep
+        run: sleep 10
   
   test:
   needs: build
