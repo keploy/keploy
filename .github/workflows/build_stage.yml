@@ -20,6 +20,7 @@ jobs:
           path: kTestBuild
   
   test:
+  needs: build
     uses: ./.github/workflows/test_stage.yml
 
 
