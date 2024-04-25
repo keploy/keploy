@@ -20,6 +20,6 @@ jobs:
           path: kTestBuild
 
       - name: Test Stage
-        uses: ./.github/workflows/test_stage.yml@${{ github.head_ref }}
+        uses: ./.github/workflows/test_stage.yml
         with:
           artifact_name: 'keploy-binary'
