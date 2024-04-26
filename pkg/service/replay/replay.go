@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fatih/color"
 	"github.com/k0kubun/pp/v3"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
@@ -576,9 +575,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		} else {
 			pp.SetColorScheme(models.PassingColorScheme)
 		}
-		timeTakenString := color.BlueString(fmt.Sprintf("%ss", testTimeTaken.Seconds()))
-
-		if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTime taken: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure, timeTakenString); err != nil {
+		if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTime taken: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure, testTimeTaken.Seconds()); err != nil {
 			utils.LogError(r.logger, err, "failed to print testrun summary")
 		}
 	}
@@ -641,9 +638,7 @@ func (r *Replayer) printSummary(ctx context.Context, testRunResult bool) {
 			} else {
 				pp.SetColorScheme(models.FailingColorScheme)
 			}
-			timeTakenString := color.BlueString(fmt.Sprintf("%ss", completeTestReport[testSuiteName].timeTaken))
-			
-			if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed, timeTakenString); err != nil {
+			if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed, completeTestReport[testSuiteName].timeTaken); err != nil {
 				utils.LogError(r.logger, err, "failed to print test suite details")
 				return
 			}
