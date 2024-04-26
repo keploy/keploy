@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fatih/color"
+	"github.com/moby/moby/pkg/parsers/kernel"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
@@ -238,6 +239,18 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		return errors.New("unknown command name")
 	}
 	return nil
+}
+
+func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) error {
+	//check if the version of the kernel is above 5.15 for eBPF support
+	isValid := kernel.CheckKernelVersion(5, 15, 0)
+	if !isValid {
+		errMsg := "Kernel version is below 5.15. Keploy requires kernel version 5.15 or above"
+		utils.LogError(c.logger, nil, errMsg)
+		return errors.New(errMsg)
+	}
+
+	return c.ValidateFlags(ctx, cmd)
 }
 
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
