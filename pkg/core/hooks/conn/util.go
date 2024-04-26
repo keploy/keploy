@@ -7,6 +7,8 @@ import (
 	"go.uber.org/zap"
 	"net/http"
 	"regexp"
+	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -106,6 +108,19 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 				}
 			}
 		}
+
+		destPort, err := strconv.Atoi(strings.Split(req.Host, ":")[1])
+		if err != nil {
+			utils.LogError(logger, err, "failed to obtain destination port from request")
+			return filtered
+		}
+		if filtered {
+			if filter.Port == 0 || filter.Port == uint(destPort) {
+				return true
+			}
+			filtered = false
+		}
+
 	}
 
 	return filtered
