@@ -73,3 +73,9 @@ func (t *testUtils) SimulateRequest(ctx context.Context, _ uint64, tc *models.Te
 	}
 	return nil, nil
 }
+
+
+func (t *testUtils) AfterTestHook(ctx context.Context, testRunID, testSetID string) (*models.TestReport, error) {
+	
+	return nil, nil
+}
