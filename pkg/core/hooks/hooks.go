@@ -445,7 +445,7 @@ func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 
 	h.logger.Info("keploy initialized and probes added to the kernel.")
 
-	switch models.GetMode() {
+	switch opts.Mode {
 	case models.MODE_RECORD:
 		err := h.SetKeployModeInKernel(1)
 		if err != nil {
