@@ -29,18 +29,18 @@ func main() {
 	// 	fmt.Println("Starting pprof server for debugging...")
 	// 	http.ListenAndServe("localhost:6060", nil)
 	// }()
-	printLogo()
+
 	ctx := utils.NewCtx()
 	start(ctx)
 }
 
-func printLogo() {
+func printLogo(disableANSI bool) {
 	if version == "" {
 		version = "2-dev"
 	}
 	utils.Version = version
 	if binaryToDocker := os.Getenv("BINARY_TO_DOCKER"); binaryToDocker != "true" {
-		cli.PrintKeployLogo(true)
+		cli.PrintKeployLogo(disableANSI)
 		fmt.Printf("version: %v\n\n", version)
 	}
 }
@@ -61,6 +61,7 @@ func start(ctx context.Context) {
 	conf := config.New()
 	svcProvider := provider.NewServiceProvider(logger, configDb, conf)
 	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
+	printLogo(conf.DisableANSI)
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
