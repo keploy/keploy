@@ -40,6 +40,7 @@ jobs:
         uses: actions/checkout@v2
         with:
           repository: keploy/samples-go
+          ref: native-linux
           path: samples-go
           run: |
             cd samples-go/gin-mongo
@@ -51,7 +52,7 @@ jobs:
           echo "You can add the noisy fields in the config file if any."
           
       - name: Run testing script for gin-mongo application
-        uses: keploy/testgpt@main
+        uses: keploy/testgpt@test
         with:
           repository: keploy/samples-go
           branch: native-linux
