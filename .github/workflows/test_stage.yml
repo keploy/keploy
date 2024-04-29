@@ -15,7 +15,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v2
 
-      - name: Download Keploy Binary
+      - name: Download Keploy Build Binary
         uses: actions/download-artifact@v2
         with:
           name: keploy-binary
@@ -24,6 +24,17 @@ jobs:
       - name: Giving permission to binary
         run: |
           sudo chmod +x /usr/local/bin/kTestBuild
+
+      - name: Download the latest released binary of keploy
+        run: |
+          curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
+sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/kRecordHosted
+      
+      ## Get the pilot for tests and mocks assertion
+      - name: Download the latest version of pilot
+        run: |
+          curl --silent -o pilot --location "https://github.com/keploy/pilot/releases/latest/download/pilot_linux_amd64" && 
+sudo chmod a+x pilot && sudo mkdir -p /usr/local/bin && sudo mv pilot /usr/local/bin
 
       - name: Checkout the samples-go repository
         uses: actions/checkout@v2

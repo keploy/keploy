@@ -41,10 +41,6 @@ check_test_status() {
 git fetch origin
 git checkout native-linux
 
-# Get the hosted version of keploy
-curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
-sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/kRecordHosted
-
 # Check and remove keploy config file if exists
 delete_if_exists "./keploy.yml"
 
@@ -87,10 +83,6 @@ fi
 
 
 #### Testing Phase of test-bench ####
-
-## Get the pilot for tests and mocks assertion
-curl --silent -o pilot --location "https://github.com/keploy/pilot/releases/latest/download/pilot_linux_amd64" && 
-sudo chmod a+x pilot && sudo mkdir -p /usr/local/bin && sudo mv pilot /usr/local/bin
 
 ## Test assertion
 pilot -test-assert -preRecPath . -testBenchPath ./test-bench
