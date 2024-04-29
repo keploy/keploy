@@ -1,21 +1,16 @@
 package tools
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 
-	"github.com/tk103331/jacocogo/core/data"
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/utils"
-	"go.uber.org/zap"
 )
 
 func CalGoCoverage() (models.TestCoverage, error) {
@@ -294,129 +289,129 @@ func getCoverageFilePathsTypescript(path string) ([]string, error) {
 	return filePaths, nil
 }
 
-type sessionVisitor struct {
-}
+// type sessionVisitor struct {
+// }
 
-func (sessionVisitor) VisitSessionInfo(_ data.SessionInfo) error {
-	return nil
-}
+// func (sessionVisitor) VisitSessionInfo(_ data.SessionInfo) error {
+// 	return nil
+// }
 
-type executionVisitor struct {
-}
+// type executionVisitor struct {
+// }
 
-func (executionVisitor) VisitExecutionData(data data.ExecutionData) error {
-	count := 0
-	for _, p := range data.Probes {
-		if p {
-			count++
-		}
-	}
+// func (executionVisitor) VisitExecutionData(data data.ExecutionData) error {
+// 	count := 0
+// 	for _, p := range data.Probes {
+// 		if p {
+// 			count++
+// 		}
+// 	}
 
-	file, err := os.OpenFile("testSetCoverage.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0777)
-	if err != nil {
-		return err
-	}
+// 	file, err := os.OpenFile("testSetCoverage.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0777)
+// 	if err != nil {
+// 		return err
+// 	}
 
-	defer func() {
-		err := file.Close()
-		if err != nil {
-			utils.LogError(nil, err, "failed to close the file")
-		}
-	}()
+// 	defer func() {
+// 		err := file.Close()
+// 		if err != nil {
+// 			utils.LogError(nil, err, "failed to close the file")
+// 		}
+// 	}()
 
-	w := bufio.NewWriter(file)
+// 	w := bufio.NewWriter(file)
 
-	fmt.Fprintf(w, "%3d %3d %s\n", count, len(data.Probes), data.Name)
+// 	fmt.Fprintf(w, "%3d %3d %s\n", count, len(data.Probes), data.Name)
 
-	err = w.Flush()
-	if err != nil {
-		return err
-	}
+// 	err = w.Flush()
+// 	if err != nil {
+// 		return err
+// 	}
 
-	return nil
-}
+// 	return nil
+// }
 
-func CalJavaCoverage(logger *zap.Logger, testSetID string) (map[string]string, error) {
-	covExecFile, err := os.Open(filepath.Join("target", testSetID+".exec"))
-	if err != nil {
-		utils.LogError(logger, err, "failed to open the coverage exec file")
-		return nil, err
-	}
-	defer func() {
-		err := covExecFile.Close()
-		if err != nil {
-			utils.LogError(logger, err, "failed to close the coverage exec file")
-		}
-	}()
+// func CalJavaCoverage(logger *zap.Logger, testSetID string) (map[string]string, error) {
+// 	covExecFile, err := os.Open(filepath.Join("target", testSetID+".exec"))
+// 	if err != nil {
+// 		utils.LogError(logger, err, "failed to open the coverage exec file")
+// 		return nil, err
+// 	}
+// 	defer func() {
+// 		err := covExecFile.Close()
+// 		if err != nil {
+// 			utils.LogError(logger, err, "failed to close the coverage exec file")
+// 		}
+// 	}()
 
-	// parse the exec file and write the coverage data to a file
-	reader := data.NewReader(covExecFile)
-	reader.SetSessionVisitor(sessionVisitor{})
-	reader.SetExecutionVisitor(executionVisitor{})
-	_, err = reader.Read()
-	if err != nil {
-		utils.LogError(logger, err, "failed to read the coverage exec file")
-		return nil, err
-	}
+// 	// parse the exec file and write the coverage data to a file
+// 	reader := data.NewReader(covExecFile)
+// 	reader.SetSessionVisitor(sessionVisitor{})
+// 	reader.SetExecutionVisitor(executionVisitor{})
+// 	_, err = reader.Read()
+// 	if err != nil {
+// 		utils.LogError(logger, err, "failed to read the coverage exec file")
+// 		return nil, err
+// 	}
 
-	// fetch all the classes in the target folder
-	classFolder := filepath.Join(".", "target", "classes")
-	classes := []string{}
-	walkfn := func(path string, info os.FileInfo, err error) error {
-		if !info.IsDir() && filepath.Ext(path) == ".class" {
-			p, err := filepath.Rel(classFolder, path)
-			if err != nil {
-				return err
-			}
-			classes = append(classes, strings.TrimSuffix(p, filepath.Ext(p)))
-		}
-		return nil
-	}
-	err = filepath.Walk(classFolder, walkfn)
-	if err != nil {
-		utils.LogError(logger, err, "failed to walk the classes directory in target folder")
-		return nil, err
-	}
+// 	// fetch all the classes in the target folder
+// 	classFolder := filepath.Join(".", "target", "classes")
+// 	classes := []string{}
+// 	walkfn := func(path string, info os.FileInfo, err error) error {
+// 		if !info.IsDir() && filepath.Ext(path) == ".class" {
+// 			p, err := filepath.Rel(classFolder, path)
+// 			if err != nil {
+// 				return err
+// 			}
+// 			classes = append(classes, strings.TrimSuffix(p, filepath.Ext(p)))
+// 		}
+// 		return nil
+// 	}
+// 	err = filepath.Walk(classFolder, walkfn)
+// 	if err != nil {
+// 		utils.LogError(logger, err, "failed to walk the classes directory in target folder")
+// 		return nil, err
+// 	}
 
-	defer func() {
-		err := os.Remove("testSetCoverage.txt")
-		if err != nil {
-			utils.LogError(logger, err, "failed to remove the coverage file")
-		}
-	}()
+// 	defer func() {
+// 		err := os.Remove("testSetCoverage.txt")
+// 		if err != nil {
+// 			utils.LogError(logger, err, "failed to remove the coverage file")
+// 		}
+// 	}()
 
-	covdata, err := os.ReadFile("testSetCoverage.txt")
-	if err != nil {
-		utils.LogError(logger, err, "failed to read the coverage file")
-		return nil, err
-	}
-	coveragePerFile := make(map[string]string)
-	malformedErrMsg := "java coverage file is malformed"
-	for _, line := range strings.Split(string(covdata), "\n") {
-		if line == "" {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) != 3 {
-			utils.LogError(logger, err, malformedErrMsg)
-			return nil, err
-		}
-		countStr := fields[0]
-		count, err := strconv.Atoi(countStr)
-		if err != nil {
-			utils.LogError(logger, err, malformedErrMsg)
-			return nil, err
-		}
-		totalStr := fields[1]
-		total, err := strconv.Atoi(totalStr)
-		if err != nil {
-			utils.LogError(logger, err, malformedErrMsg)
-			return nil, err
-		}
-		className := fields[2]
-		if slices.Contains(classes, className) {
-			coveragePerFile[className] = strconv.FormatFloat(float64(count*100)/float64(total), 'f', 2, 64) + "%"
-		}
-	}
-	return coveragePerFile, nil
-}
+// 	covdata, err := os.ReadFile("testSetCoverage.txt")
+// 	if err != nil {
+// 		utils.LogError(logger, err, "failed to read the coverage file")
+// 		return nil, err
+// 	}
+// 	coveragePerFile := make(map[string]string)
+// 	malformedErrMsg := "java coverage file is malformed"
+// 	for _, line := range strings.Split(string(covdata), "\n") {
+// 		if line == "" {
+// 			continue
+// 		}
+// 		fields := strings.Fields(line)
+// 		if len(fields) != 3 {
+// 			utils.LogError(logger, err, malformedErrMsg)
+// 			return nil, err
+// 		}
+// 		countStr := fields[0]
+// 		count, err := strconv.Atoi(countStr)
+// 		if err != nil {
+// 			utils.LogError(logger, err, malformedErrMsg)
+// 			return nil, err
+// 		}
+// 		totalStr := fields[1]
+// 		total, err := strconv.Atoi(totalStr)
+// 		if err != nil {
+// 			utils.LogError(logger, err, malformedErrMsg)
+// 			return nil, err
+// 		}
+// 		className := fields[2]
+// 		if slices.Contains(classes, className) {
+// 			coveragePerFile[className] = strconv.FormatFloat(float64(count*100)/float64(total), 'f', 2, 64) + "%"
+// 		}
+// 	}
+// 	return coveragePerFile, nil
+// }

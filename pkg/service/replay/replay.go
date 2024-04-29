@@ -71,15 +71,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 	var stopReason = "replay completed successfully"
 	var hookCancel context.CancelFunc
 
-	language, isCov := detectLanguage(r.config.Command)
-	if isCov && language == "typescript" {
-		err := os.Setenv("NYC_CLEAN", "true")
-		if err != nil {
-			isCov = false
-			utils.LogError(r.logger, err, "failed to set NYC_CLEAN env variable, coverage won't be calculated.")
-		}
-		r.config.Command = strings.Replace(r.config.Command, "nyc", "nyc --clean=${NYC_CLEAN}", 1)
-	}
 	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
 	defer func() {
 		select {
@@ -128,6 +119,14 @@ func (r *Replayer) Start(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 
+	if r.config.Test.IsCmdCoverage && r.config.Test.Language == "typescript" {
+		err := os.Setenv("CLEAN", "true")
+		if err != nil {
+			r.config.Test.Coverage = false
+			utils.LogError(r.logger, err, "failed to set CLEAN env variable, coverage won't be calculated.")
+		}
+	}
+
 	testSetResult := false
 	testRunResult := true
 	abortTestRun := false
@@ -138,7 +137,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			continue
 		}
 
-		if language == "java" && isCov {
+		if r.config.Test.Language == "java" && r.config.Test.IsCmdCoverage {
 			err = os.Setenv("TESTSETID", testSetID)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to set TESTSETID env variable")
@@ -176,11 +175,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 			break
 		}
 
-		if i == 0 && language == "typescript" && isCov {
-			err = os.Setenv("NYC_CLEAN", "false")
+		if i == 0 && r.config.Test.Language == "typescript" && r.config.Test.IsCmdCoverage {
+			err = os.Setenv("CLEAN", "false")
 			if err != nil {
-				isCov = false
-				utils.LogError(r.logger, err, "failed to set NYC_CLEAN env variable, coverage won't be calculated.")
+				r.config.Test.Coverage = false
+				utils.LogError(r.logger, err, "failed to set CLEAN env variable, coverage won't be calculated.")
 			}
 		}
 	}
@@ -193,10 +192,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
-
-		if isCov || r.config.Test.GoCoverage {
-			r.logger.Info("calculating coverage for the test run and inserting it into the report", zap.Any("language", language))
-			switch language {
+		if r.config.Test.Coverage && r.config.Test.IsCmdCoverage {
+			r.logger.Info("calculating coverage for the test run and inserting it into the report", zap.Any("language", r.config.Test.Language))
+			switch r.config.Test.Language {
 			case "go":
 				coverageData, err := tools.CalGoCoverage()
 				if err != nil {
@@ -227,8 +225,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to update report with the coverage data")
 				}
-			case "java":
-
 			}
 		}
 	} else {
@@ -707,7 +703,7 @@ func (r *Replayer) printSummary(ctx context.Context, testRunResult bool) {
 		}
 		r.logger.Info("test run completed", zap.Bool("passed overall", testRunResult))
 
-		if utils.CmdType(r.config.CommandType) == utils.Native && r.config.Test.GoCoverage {
+		if utils.CmdType(r.config.CommandType) == utils.Native && r.config.Test.Coverage && r.config.Test.Language == "go" {
 			r.logger.Info("there is an opportunity to get the coverage here")
 
 			coverCmd := exec.CommandContext(ctx, "go", "tool", "covdata", "percent", "-i="+os.Getenv("GOCOVERDIR"))

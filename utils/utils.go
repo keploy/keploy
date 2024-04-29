@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -734,4 +735,31 @@ func EnsureRmBeforeName(cmd string) string {
 	}
 
 	return strings.Join(parts, " ")
+}
+
+// detectLanguage detects the language of the test command and whether it is a coverage command
+func DetectLanguage(cmd string) (string, bool) {
+	cmdFields := strings.Fields(cmd)
+
+	if slices.Contains(cmdFields, "coverage") {
+		return "python", true
+	} else if slices.Contains(cmdFields, "python") {
+		return "python", false
+	}
+
+	if slices.Contains(cmdFields, "node") || slices.Contains(cmdFields, "npm") {
+		if slices.Contains(cmdFields, "nyc") {
+			return "typescript", true
+		}
+		return "typescript", false
+	}
+
+	if slices.Contains(cmdFields, "java") {
+		if strings.Contains(cmd, "jacoco") {
+			return "java", true
+		}
+		return "java", false
+	}
+
+	return "go", false
 }

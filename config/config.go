@@ -52,7 +52,7 @@ type Test struct {
 	APITimeout         uint64              `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
 	Coverage           bool                `json:"coverage" yaml:"coverage" mapstructure:"coverage"`                                // boolean to capture the coverage in test
 	CoverageReportPath string              `json:"coverageReportPath" yaml:"coverageReportPath " mapstructure:"coverageReportPath"` // directory path to store the coverage files
-	GoCoverage         bool                `json:"goCoverage" yaml:"goCoverage" mapstructure:"goCoverage"`                          // boolean to capture the coverage in test
+	IsCmdCoverage      bool                // whether the command contains coverage related text
 	IgnoreOrdering     bool                `json:"ignoreOrdering" yaml:"ignoreOrdering" mapstructure:"ignoreOrdering"`
 	MongoPassword      string              `json:"mongoPassword" yaml:"mongoPassword" mapstructure:"mongoPassword"`
 	Language           string              `json:"language" yaml:"language" mapstructure:"language"`
