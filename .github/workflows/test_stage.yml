@@ -30,7 +30,7 @@ jobs:
           curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
 sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/kRecordHosted
       
-      ## Get the pilot for tests and mocks assertion
+      # Get the pilot for tests and mocks assertion
       - name: Download the latest version of pilot
         run: |
           curl --silent -o pilot --location "https://github.com/keploy/pilot/releases/latest/download/pilot_linux_amd64" && 
