@@ -72,21 +72,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 	var hookCancel context.CancelFunc
 
 	language, isCov := detectLanguage(r.config.Command)
-	if isCov {
-		switch language {
-		case "typescript":
-			err := os.Setenv("NYC_CLEAN", "true")
-			if err != nil {
-				isCov = false
-				utils.LogError(r.logger, err, "failed to set NYC_CLEAN env variable, coverage won't be calculated.")
-			}
-			r.config.Command = strings.Replace(r.config.Command, "nyc", "nyc --clean=${NYC_CLEAN}", 1)
-		case "java":
-			cmdFields := strings.Fields(r.config.Command)
-			cmdFields[1] += fmt.Sprintf("=destfile=target/${TESTSETID}.exec")
-			r.config.Command = strings.Join(cmdFields, " ")
-			r.logger.Info("updated command for jacoco", zap.String("command", r.config.Command))
+	if isCov && language == "typescript" {
+		err := os.Setenv("NYC_CLEAN", "true")
+		if err != nil {
+			isCov = false
+			utils.LogError(r.logger, err, "failed to set NYC_CLEAN env variable, coverage won't be calculated.")
 		}
+		r.config.Command = strings.Replace(r.config.Command, "nyc", "nyc --clean=${NYC_CLEAN}", 1)
 	}
 	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
 	defer func() {
@@ -136,23 +128,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 
-	jacocoPath := ""
-	jacocoBinariesDownloaded := false
-	if language == "java" && isCov {
-		jacocoPath = filepath.Join(os.TempDir(), "jacoco")
-		err = os.MkdirAll(jacocoPath, 0777)
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to create jacoco directory")
-		} else {
-			err := downloadAndExtractJaCoCoBinaries("0.8.12", jacocoPath)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to download and extract jacoco binaries")
-			} else {
-				jacocoBinariesDownloaded = true
-			}
-		}
-	}
-
 	testSetResult := false
 	testRunResult := true
 	abortTestRun := false
@@ -199,13 +174,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 		testRunResult = testRunResult && testSetResult
 		if abortTestRun {
 			break
-		}
-		// dump the jacoco coverage data for the current test set of java application run
-		if jacocoBinariesDownloaded {
-			err := dumpJacocoCovData(ctx, filepath.Join(jacocoPath, "jacococli.jar"), testSetID)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to dump jacoco coverage data")
-			}
 		}
 
 		if i == 0 && language == "typescript" && isCov {
