@@ -83,9 +83,10 @@ fi
 
 
 #### Testing Phase of test-bench ####
+test_bench_rec="./test-bench"
 
 ## Test assertion
-pilot -test-assert -preRecPath . -testBenchPath ./test-bench
+pilot -test-assert -preRecPath . -testBenchPath $test_bench_rec
 exit_status=$?
 if [ $exit_status -ne 0 ]; then
     echo "Test assertion failed with exit status $exit_status."
@@ -95,7 +96,8 @@ fi
 echo "Tests are asserted successfully."
 
 ## Mock assertion preparation
-pilot -mock-assert -preRecPath . -testBenchPath ./test-bench
+
+pilot -mock-assert -preRecPath . -testBenchPath $test_bench_rec
 exit_status=$?
 if [ $exit_status -ne 0 ]; then
     echo "Mock assertion preparation failed with exit status $exit_status."
@@ -120,7 +122,6 @@ if [ "$overallStatus" -eq 0 ]; then
 fi
 echo "New mocks are consistent with the pre-recorded mocks."
 
-test_bench_rec="./test-bench"
 
 ## Run tests for test-bench-recorded test cases
 sudo -E env PATH=$PATH kTestBuild test -c "./ginApp" --path "$test_bench_rec" --delay=7 --generateGithubActions=false
