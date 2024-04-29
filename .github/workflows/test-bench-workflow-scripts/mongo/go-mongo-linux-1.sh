@@ -110,7 +110,7 @@ echo "Mock assertion prepared successfully."
 delete_if_exists "$pre_rec/keploy/reports"
 
 ## Run tests for pre-recorded test cases
-sudo -E env PATH=$PATH kTestBuild test -c "./ginApp" --delay=7 --generateGithubActions=false
+sudo -E env PATH=$PATH kRecordHosted test -c "./ginApp" --delay=7 --generateGithubActions=false
 
 sleep 2
 
@@ -124,7 +124,7 @@ echo "New mocks are consistent with the pre-recorded mocks."
 
 
 ## Run tests for test-bench-recorded test cases
-sudo -E env PATH=$PATH kTestBuild test -c "./ginApp" --path "$test_bench_rec" --delay=7 --generateGithubActions=false
+sudo -E env PATH=$PATH kRecordHosted test -c "./ginApp" --path "$test_bench_rec" --delay=7 --generateGithubActions=false
 
 sleep 2
 
