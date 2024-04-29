@@ -23,6 +23,10 @@ jobs:
     needs: build
     uses: ./.github/workflows/test_stage.yml
 
+  test-ginApp:
+    needs: build
+    uses: ./.github/workflows/test-ginApp.yml  
+
   check_status:
     needs: test
     runs-on: ubuntu-latest
