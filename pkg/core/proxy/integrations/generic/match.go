@@ -12,6 +12,12 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 )
 
+// fuzzyMatch performs a fuzzy matching algorithm to find the best matching mock for the given request.
+// It takes a context, a request buffer, and a mock database as input parameters.
+// The function iterates over the mocks in the database and applies the fuzzy matching algorithm to find the best match.
+// If a match is found, it returns the corresponding response mock and a boolean value indicating success.
+// If no match is found, it returns false and a nil response.
+// If an error occurs during the matching process, it returns an error.
 func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockMemDb) (bool, []models.GenericPayload, error) {
 	for {
 		select {

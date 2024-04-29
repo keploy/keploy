@@ -17,7 +17,7 @@ rm -rf keploy/
 
 for i in {1..2}; do
 # Start keploy in record mode.
-sudo -E env PATH=$PATH ./../../keployv2 record -c 'npm start' &
+sudo -E env PATH=$PATH ./../../keployv2 record -c 'npm start' --generateGithubActions=false &
 
 # Wait for the application to start.
 app_started=false
@@ -63,17 +63,17 @@ sleep 5
 done
 
 # Start keploy in test mode.
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --generateGithubActions=false 
 
 # sudo -E env PATH=$PATH ./../../keployv2 test -c "npm test" --delay 5 --coverage
 
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testsets test-set-0
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testsets test-set-0 --generateGithubActions=false 
 
 # Update the global noise to ts.
 config_file="./keploy.yml"
 sed -i 's/selectedTests: {}/selectedTests: {"test-set-0": ["test-1", "test-2"]}/' "$config_file"
 
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --apiTimeout 30 --delay 10
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --apiTimeout 30 --delay 10 --generateGithubActions=false 
 
 # Get the test results from the testReport file.
 report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"
