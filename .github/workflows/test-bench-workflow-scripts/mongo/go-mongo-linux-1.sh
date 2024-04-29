@@ -66,7 +66,7 @@ test_sets=$(find "$pre_rec/keploy/" -mindepth 1 -maxdepth 1 -type d ! -name "rep
 # Loop over each directory stored in 'test_sets'
 for dir in $test_sets; do
     echo "Recording and replaying for (test-set): $dir"
-    sudo -E env PATH=$PATH kRecordHosted record -c "sudo -E env PATH=$PATH kTestBuild test -c 'go run main.go handler.go' --proxyPort 56789 --dnsPort 46789  --delay=10 --testsets $dir --enableTesting --generateGithubActions=false" --path "./test-bench/" --proxyPort=36789 --dnsPort 26789 --enableTesting --generateGithubActions=false 
+    sudo -E env PATH=$PATH kRecordHosted record -c "sudo -E env PATH=$PATH kTestBuild test -c 'go run main.go handler.go' --proxyPort 56789 --dnsPort 46789  --delay=10 --testsets $dir --path '$pre_rec' --enableTesting --generateGithubActions=false" --path "./test-bench/" --proxyPort=36789 --dnsPort 26789 --enableTesting --generateGithubActions=false 
     # Wait for 1 second before new test-set
     sleep 1
 done
