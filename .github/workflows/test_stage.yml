@@ -41,7 +41,10 @@ jobs:
         with:
           repository: keploy/samples-go
           path: samples-go
-      # add the noisy fields in the config file if any.  
+      # add the noisy fields in the config file if any.
+      - name: Add noisy fields in the config file
+        run: |
+          echo "You can add the noisy fields in the config file if any."
       - name: Run samples-go application
         id: test_script
         run: |
