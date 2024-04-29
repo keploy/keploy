@@ -1,18 +1,22 @@
+// Package main is the entry point for the keploy application.
 package main
 
 import (
+	"context"
 	"fmt"
-	_ "net/http/pprof"
 	"os"
-	"time"
 
-	"github.com/cloudflare/cfssl/log"
-	sentry "github.com/getsentry/sentry-go"
-	"go.keploy.io/server/cmd"
-	"go.keploy.io/server/utils"
+	"go.keploy.io/server/v2/cli"
+	"go.keploy.io/server/v2/cli/provider"
+	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/platform/yaml/configdb"
+	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v2/utils/log"
+	//pprof for debugging
+	// _ "net/http/pprof"
 )
 
-// version is the version of the server and will be injected during build by ldflags
+// version is the version of the server and will be injected during build by ldflags, same with dsn
 // see https://goreleaser.com/customization/build/
 
 var version string
@@ -31,6 +35,18 @@ const logo string = `
 `
 
 func main() {
+
+	// Uncomment the following code to enable pprof for debugging
+	// go func() {
+	// 	fmt.Println("Starting pprof server for debugging...")
+	// 	http.ListenAndServe("localhost:6060", nil)
+	// }()
+	printLogo()
+	ctx := utils.NewCtx()
+	start(ctx)
+}
+
+func printLogo() {
 	if version == "" {
 		version = "2-dev"
 	}
@@ -38,19 +54,27 @@ func main() {
 	if binaryToDocker := os.Getenv("BINARY_TO_DOCKER"); binaryToDocker != "true" {
 		fmt.Println(logo, " ")
 		fmt.Printf("version: %v\n\n", version)
-	} else {
-		fmt.Println("Starting keploy in docker environment.")
 	}
-	//Initialise sentry.
-	err := sentry.Init(sentry.ClientOptions{
-		Dsn:              dsn,
-		TracesSampleRate: 1.0,
-	})
-	log.Level = 0
+}
+
+func start(ctx context.Context) {
+	logger, err := log.New()
 	if err != nil {
-		log.Debug("Could not initialise sentry.", err)
+		fmt.Println("Failed to start the logger for the CLI", err)
+		return
 	}
-	defer utils.HandlePanic()
-	defer sentry.Flush(2 * time.Second)
-	cmd.Execute()
+	defer utils.DeleteLogs(logger)
+	defer utils.Recover(logger)
+	configDb := configdb.NewConfigDb(logger)
+	if dsn != "" {
+		utils.SentryInit(logger, dsn)
+		//logger = utils.ModifyToSentryLogger(ctx, logger, sentry.CurrentHub().Client(), configDb)
+	}
+	conf := config.New()
+	svcProvider := provider.NewServiceProvider(logger, configDb, conf)
+	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
+	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
+	}
 }

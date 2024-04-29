@@ -2,193 +2,121 @@ package graph
 
 import (
 	"context"
-	"log"
+	"fmt"
 	"net/http"
-	"os"
-	"os/signal"
 	"strconv"
 	"sync"
-	"syscall"
-	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/playground"
-	"go.keploy.io/server/pkg"
-	"go.keploy.io/server/pkg/hooks"
-	"go.keploy.io/server/pkg/models"
-	"go.keploy.io/server/pkg/platform/fs"
-	"go.keploy.io/server/pkg/platform/telemetry"
-	"go.keploy.io/server/pkg/platform/yaml"
-	"go.keploy.io/server/pkg/proxy"
-	"go.keploy.io/server/pkg/service/test"
-	"go.keploy.io/server/utils"
+	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/service/replay"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
-type graph struct {
+type Graph struct {
 	logger *zap.Logger
 	mutex  sync.Mutex
+	replay replay.Service
+	config config.Config
 }
 
-func NewGraph(logger *zap.Logger) graphInterface {
-	return &graph{
+func NewGraph(logger *zap.Logger, replay replay.Service, config config.Config) *Graph {
+	return &Graph{
 		logger: logger,
 		mutex:  sync.Mutex{},
+		config: config,
+		replay: replay,
 	}
 }
 
 const defaultPort = 6789
 
-// Serve is called by the serve command and is used to run a graphql server, to run tests separately via apis.
-func (g *graph) Serve(path string, proxyPort uint32, mongopassword, testReportPath string, generateTestReport bool, Delay uint64, pid, port uint32, lang string, passThroughPorts []uint, apiTimeout uint64, appCmd string, enableTele bool, testFilters map[string][]string) {
-	var ps *proxy.ProxySet
+func (g *Graph) Serve(ctx context.Context) error {
 
-	defer pkg.DeleteTestReports(g.logger, generateTestReport)
-
-	if port == 0 {
-		port = defaultPort
+	if g.config.Port == 0 {
+		g.config.Port = defaultPort
 	}
 
-	// Listen for the interrupt signal
-	stopper := make(chan os.Signal, 1)
-	signal.Notify(stopper, syscall.SIGINT, syscall.SIGTERM)
+	graphGrp, graphCtx := errgroup.WithContext(ctx)
 
-	models.SetMode(models.MODE_TEST)
-	tester := test.NewTester(g.logger)
-	testReportFS := yaml.NewTestReportFS(g.logger)
-	teleFS := fs.NewTeleFS(g.logger)
-	tele := telemetry.NewTelemetry(enableTele, false, teleFS, g.logger, "", nil)
-	tele.Ping(false)
-	ys := yaml.NewYamlStore(path, path, "", "", g.logger, tele)
-	routineId := pkg.GenerateRandomID()
-	// Initiate the hooks
-	loadedHooks, err := hooks.NewHook(ys, routineId, g.logger)
-	if err != nil {
-		g.logger.Error("error while creating hooks", zap.Error(err))
-		return
+	resolver := &Resolver{
+		logger: g.logger,
+		replay: g.replay,
 	}
-
-	err = proxy.SetupCA(g.logger, pid, lang)
-	if err != nil {
-		g.logger.Error("error while setting up CA", zap.Error(err))
-		return
-	}
-
-	// Recover from panic and gracefully shutdown
-	defer loadedHooks.Recover(routineId)
 
 	srv := handler.NewDefaultServer(NewExecutableSchema(Config{
-		Resolvers: &Resolver{
-			TestFilter:         testFilters,
-			Tester:             tester,
-			TestReportFS:       testReportFS,
-			Storage:            ys,
-			LoadedHooks:        loadedHooks,
-			KeployServerPort:   port,
-			PassThroughPorts:   passThroughPorts,
-			Lang:               lang,
-			MongoPassword:      mongopassword,
-			ProxyPort:          proxyPort,
-			Logger:             g.logger,
-			Path:               path,
-			TestReportPath:     testReportPath,
-			GenerateTestReport: generateTestReport,
-			Delay:              Delay,
-			AppPid:             pid,
-			ApiTimeout:         apiTimeout,
-			ServeTest:          len(appCmd) != 0,
-		},
+		Resolvers: resolver,
 	}))
+
+	defer func() {
+		// cancel the context of the hooks to stop proxy and ebpf hooks
+		hookCtx, hookCancel := resolver.getHookCtxWithCancel()
+		if hookCtx != nil && hookCancel != nil {
+			hookCancel()
+			hookErrGrp, ok := hookCtx.Value(models.ErrGroupKey).(*errgroup.Group)
+			if ok {
+				if err := hookErrGrp.Wait(); err != nil {
+					utils.LogError(g.logger, err, "failed to stop the hooks gracefully")
+				}
+			}
+		}
+
+		// cancel the context of the app in case of sudden stop if the app was started
+		appCtx, appCancel := resolver.getAppCtxWithCancel()
+		if appCtx != nil && appCancel != nil {
+			appCancel()
+			appErrGrp, ok := appCtx.Value(models.ErrGroupKey).(*errgroup.Group)
+			if ok {
+				if err := appErrGrp.Wait(); err != nil {
+					utils.LogError(g.logger, err, "failed to stop the application gracefully")
+				}
+			}
+		}
+
+		err := graphGrp.Wait()
+		if err != nil {
+			utils.LogError(g.logger, err, "failed to stop the graphql server gracefully")
+		}
+	}()
 
 	http.Handle("/", playground.Handler("GraphQL playground", "/query"))
 	http.Handle("/query", srv)
 
 	// Create a new http.Server instance
 	httpSrv := &http.Server{
-		Addr:    ":" + strconv.Itoa(int(port)),
+		Addr:    ":" + strconv.Itoa(int(g.config.Port)),
 		Handler: nil, // Use the default http.DefaultServeMux
 	}
 
-	// Create a shutdown channel
+	graphGrp.Go(func() error {
+		defer utils.Recover(g.logger)
+		return g.stopGraphqlServer(graphCtx, httpSrv)
+	})
 
-	// Start your server in a goroutine
-	go func() {
-		// Recover from panic and gracefully shutdown
-		defer loadedHooks.Recover(pkg.GenerateRandomID())
-		defer utils.HandlePanic()
-		log.Printf(Emoji+"connect to http://localhost:%d/ for GraphQL playground", port)
-		if err := httpSrv.ListenAndServe(); err != http.ErrServerClosed {
-			log.Fatalf(Emoji+"listen: %s\n", err)
+	g.logger.Debug(fmt.Sprintf("connect to http://localhost:%d/ for GraphQL playground", int(g.config.Port)))
+	g.logger.Info("Graphql server started", zap.Int("port", int(g.config.Port)))
+	if err := httpSrv.ListenAndServe(); err != http.ErrServerClosed {
+		stopErr := utils.Stop(g.logger, "Graphql server failed to start")
+		if stopErr != nil {
+			utils.LogError(g.logger, stopErr, "failed to stop Graphql server gracefully")
 		}
-		g.logger.Debug("graphql server stopped")
-	}()
-
-	defer g.stopGraphqlServer(httpSrv)
-
-	abortStopHooksInterrupt := make(chan bool) // channel to stop closing of keploy via interrupt
-	exitCmd := make(chan bool)                 // channel to exit this command
-
-	// Block until we receive one
-	abortStopHooksForcefully := false
-	select {
-	case <-stopper:
-		loadedHooks.Stop(true)
-		if ps != nil {
-			ps.StopProxyServer()
-		}
-		return
-	default:
-		go func() {
-			if err := loadedHooks.LaunchUserApplication(appCmd, "", "", Delay, 30*time.Second, true); err != nil {
-				switch err {
-				case hooks.ErrInterrupted:
-					g.logger.Info("keploy terminated user application")
-					return
-				case hooks.ErrFailedUnitTest:
-					g.logger.Debug("unit tests failed hence stopping keploy")
-				case hooks.ErrUnExpected:
-					g.logger.Debug("unit tests ran successfully hence stopping keploy")
-				default:
-					g.logger.Error("unknown error recieved from application", zap.Error(err))
-				}
-			}
-			if !abortStopHooksForcefully {
-				abortStopHooksInterrupt <- true
-				// stop listening for the eBPF events
-				loadedHooks.Stop(true)
-				if ps != nil {
-					ps.StopProxyServer()
-				}
-				exitCmd <- true
-				//stop listening for proxy server
-			} else {
-				return
-			}
-
-		}()
+		return err
 	}
-	select {
-	case <-stopper:
-		abortStopHooksForcefully = true
-		loadedHooks.Stop(false)
-		if ps != nil {
-			ps.StopProxyServer()
-		}
-		return
-	case <-abortStopHooksInterrupt:
-		//telemetry event can be added here
-	}
-	<-exitCmd
+	g.logger.Info("Graphql server stopped gracefully")
+	return nil
 }
 
-// Gracefully shut down the HTTP server with a timeout
-func (g *graph) stopGraphqlServer(httpSrv *http.Server) {
-	shutdown := make(chan struct{})
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+// Gracefully shut down the HTTP server
+func (g *Graph) stopGraphqlServer(ctx context.Context, httpSrv *http.Server) error {
+	<-ctx.Done()
 	if err := httpSrv.Shutdown(ctx); err != nil {
-		g.logger.Error("Graphql server shutdown failed", zap.Error(err))
+		utils.LogError(g.logger, err, "Graphql server shutdown failed")
+		return err
 	}
-	// If you have other goroutines that should listen for this, you can use this channel to notify them.
-	close(shutdown)
+	return nil
 }

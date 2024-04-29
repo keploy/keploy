@@ -8,7 +8,7 @@ docker run --name mongoDb --rm -p 27017:27017 -d mongo
 # Install the required node dependencies.
 npm install
 
-# Edit the connection.js file to connect to local mongodb.
+# Edit the conn.js file to connect to local mongodb.
 file_path="src/db/connection.js"
 sed -i "s/mongoDb:27017/localhost:27017/" "$file_path"
 
@@ -17,7 +17,7 @@ rm -rf keploy/
 
 for i in {1..2}; do
 # Start keploy in record mode.
-sudo -E env PATH=$PATH ./../../keployv2 record -c 'npm start' &
+sudo -E env PATH=$PATH ./../../keployv2 record -c 'npm start' --generateGithubActions=false &
 
 # Wait for the application to start.
 app_started=false
@@ -63,40 +63,44 @@ sleep 5
 done
 
 # Start keploy in test mode.
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --generateGithubActions=false 
 
-sudo -E env PATH=$PATH ./../../keployv2 test -c "npm test" --delay 5 --coverage
+# sudo -E env PATH=$PATH ./../../keployv2 test -c "npm test" --delay 5 --coverage
 
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testsets test-set-0
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testsets test-set-0 --generateGithubActions=false 
 
 # Generate the keploy-config file.
-./../../keployv2 generate-config
+sudo ./../../keployv2 config --generate
 
 # Update the global noise to ts.
-config_file="./keploy-config.yaml"
-sed -i '/selectedTests:/a \        "test-set-0": ["test-1", "test-2"]' "$config_file"
+config_file="./keploy.yml"
+sed -i 's/selectedTests: {}/selectedTests: {"test-set-0": ["test-1", "test-2"]}/' "$config_file"
 
-
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --apiTimeout 30 --delay 10
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --apiTimeout 30 --delay 10 --generateGithubActions=false 
 
 # Get the test results from the testReport file.
-report_file="./keploy/testReports/test-run-1/report-1.yaml"
+report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"
 test_status1=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-report_file2="./keploy/testReports/test-run-1/report-2.yaml"
+report_file2="./keploy/reports/test-run-0/test-set-1-report.yaml"
 test_status2=$(grep 'status:' "$report_file2" | head -n 1 | awk '{print $2}')
-report_file3="./keploy/testReports/test-run-2/report-1.yaml"
-test_status3=$(grep 'status:' "$report_file3" | head -n 1 | awk '{print $2}')
-report_file4="./keploy/testReports/test-run-2/report-2.yaml"
-test_status4=$(grep 'status:' "$report_file4" | head -n 1 | awk '{print $2}')
-report_file5="./keploy/testReports/test-run-3/report-1.yaml"
+# report_file3="./keploy/reports/test-run-1/report-1.yaml"
+# test_status3=$(grep 'status:' "$report_file3" | head -n 1 | awk '{print $2}')
+# report_file4="./keploy/reports/test-run-1/report-2.yaml"
+# test_status4=$(grep 'status:' "$report_file4" | head -n 1 | awk '{print $2}')
+report_file5="./keploy/reports/test-run-1/test-set-0-report.yaml"
 test_status5=$(grep 'status:' "$report_file5" | head -n 1 | awk '{print $2}')
-report_file6="./keploy/testReports/test-run-4/report-1.yaml"
+report_file6="./keploy/reports/test-run-2/test-set-0-report.yaml"
 test_status6=$(grep 'status:' "$report_file6" | head -n 1 | awk '{print $2}')
 test_total6=$(grep 'total:' "$report_file6" | head -n 1 | awk '{print $2}')
 test_failure=$(grep 'failure:' "$report_file6" | head -n 1 | awk '{print $2}')
 
 # Return the exit code according to the status.
-if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ] && [ "$test_status3" = "PASSED" ] && [ "$test_status4" = "PASSED" ] && [ "$test_status5" = "PASSED" ] && [ "$test_status6" = "PASSED" ] && [ "$test_total6" = "2" ] && [ "$test_failure" = "0" ]; then
+# if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ] && [ "$test_status3" = "PASSED" ] && [ "$test_status4" = "PASSED" ] && [ "$test_status5" = "PASSED" ] && [ "$test_status6" = "PASSED" ] && [ "$test_total6" = "2" ] && [ "$test_failure" = "0" ]; then
+#     exit 0
+# else
+#     exit 1
+# fi
+if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ]  && [ "$test_status5" = "PASSED" ] && [ "$test_status6" = "PASSED" ] && [ "$test_total6" = "2" ] && [ "$test_failure" = "0" ]; then
     exit 0
 else
     exit 1

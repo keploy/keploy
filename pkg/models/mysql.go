@@ -1,5 +1,28 @@
 package models
 
+import (
+	"gopkg.in/yaml.v3"
+)
+
+type MySQLSpec struct {
+	Metadata  map[string]string   `json:"metadata" yaml:"metadata"`
+	Requests  []MysqlRequestYaml  `json:"requests" yaml:"requests"`
+	Response  []MysqlResponseYaml `json:"responses" yaml:"responses"`
+	CreatedAt int64               `json:"created" yaml:"created,omitempty"`
+}
+
+type MysqlRequestYaml struct {
+	Header    *MySQLPacketHeader `json:"header,omitempty" yaml:"header"`
+	Message   yaml.Node          `json:"message,omitempty" yaml:"message"`
+	ReadDelay int64              `json:"read_delay,omitempty" yaml:"read_delay,omitempty"`
+}
+
+type MysqlResponseYaml struct {
+	Header    *MySQLPacketHeader `json:"header,omitempty" yaml:"header"`
+	Message   yaml.Node          `json:"message,omitempty" yaml:"message"`
+	ReadDelay int64              `json:"read_delay,omitempty" yaml:"read_delay,omitempty"`
+}
+
 type MySQLPacketHeader struct {
 	PacketLength uint32 `json:"packet_length,omitempty" yaml:"packet_length,omitempty,flow" bson:"packet_length,omitempty"`
 	PacketNumber uint8  `json:"packet_number,omitempty" yaml:"packet_number,omitempty,flow" bson:"packet_number,omitempty"`
@@ -111,13 +134,13 @@ type MySQLResultSet struct {
 }
 
 type PacketHeader struct {
-	PacketLength     uint8 `json:"packet_length,omitempty" yaml:"packet_length,omitempty,flow" bson:"packet_length,omitempty"`
-	PacketSequenceId uint8 `json:"packet_sequence_id,omitempty" yaml:"packet_sequence_id,omitempty,flow" bson:"packet_sequence_id,omitempty"`
+	PacketLength     uint32 `json:"packet_length,omitempty" yaml:"packet_length,omitempty,flow" bson:"packet_length,omitempty"`
+	PacketSequenceID uint8  `json:"packet_sequence_id,omitempty" yaml:"packet_sequence_id,omitempty,flow" bson:"packet_sequence_id,omitempty"`
 }
 
 type RowHeader struct {
 	PacketLength     uint8 `json:"packet_length,omitempty" yaml:"packet_length,omitempty,flow" bson:"packet_length,omitempty"`
-	PacketSequenceId uint8 `json:"packet_sequence_id,omitempty" yaml:"packet_sequence_id,omitempty,flow" bson:"packet_sequence_id,omitempty"`
+	PacketSequenceID uint8 `json:"packet_sequence_id,omitempty" yaml:"packet_sequence_id,omitempty,flow" bson:"packet_sequence_id,omitempty"`
 }
 
 type ColumnDefinition struct {
@@ -161,13 +184,13 @@ type MySQLComStmtPreparePacket struct {
 	Query string `json:"query,omitempty" yaml:"query,omitempty,flow" bson:"query,omitempty"`
 }
 
-type MySQLCOM_STMT_SEND_LONG_DATA struct {
+type MySQLComStmtSendLongData struct {
 	StatementID uint32 `json:"statement_id,omitempty" yaml:"statement_id,omitempty,flow" bson:"statement_id,omitempty"`
 	ParameterID uint16 `json:"parameter_id,omitempty" yaml:"parameter_id,omitempty,flow" bson:"parameter_id,omitempty"`
 	Data        string `json:"data,omitempty" yaml:"data,omitempty,flow" bson:"data,omitempty"`
 }
 
-type MySQLCOM_STMT_RESET struct {
+type MySQLcomStmtReset struct {
 	StatementID uint32 `json:"statement_id,omitempty" yaml:"statement_id,omitempty,flow" bson:"statement_id,omitempty"`
 }
 
