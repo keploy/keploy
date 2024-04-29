@@ -114,9 +114,27 @@ Keploy proxy captures and replays **ALL** (CRUD operations, including non-idempo
 
 Take a journey to **[How Keploy Works?](https://keploy.io/docs/keploy-explained/how-keploy-works/)** to discover the tricks behind the curtain!
 
+
+To get started let's set Keploy alias by running. 
+To install latest version of keploy
+```shell
+curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh && installKeploy
+```
+
+To install particular fuction of keploy 
+```shell
+curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh && installKeploy -version=$version
+```
+
+Example :
+```shell
+curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh && installKeploy -version=v2.0.0-alpha43
+```
+
 Here are Keploy's core features: 🛠
 
 - ♻️ **Combined Test Coverage:** Merge your Keploy Tests with your fave testing libraries(JUnit, go-test, py-test, jest) to see a combined test coverage.
+
 
 
 - 🤖 **EBPF Instrumentation:** Keploy uses EBPF like a secret sauce to make integration code-less, language-agnostic, and oh-so-lightweight.
