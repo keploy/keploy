@@ -19,9 +19,6 @@ jobs:
           name: keploy-binary
           path: kTestBuild
 
-      - name: Sleep for 10 seconds
-        run: sleep 10
-
   test:
     needs: build
     uses: ./.github/workflows/test_stage.yml
