@@ -128,7 +128,7 @@ sudo -E env PATH=$PATH kRecordHosted test -c "./ginApp" --path "$test_bench_rec"
 
 sleep 2
 
-overallStatus=$(check_test_status "." 1)
+overallStatus=$(check_test_status "$test_bench_rec" 1)
 echo "Overall TestRun status for test-bench-recorded testscase (after mock assertion): $overallStatus"
 if [ "$overallStatus" -eq 0 ]; then
     echo "Old recorded mocks are not consistent with the test-bench-recorded mocks."
