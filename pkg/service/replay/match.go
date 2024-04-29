@@ -569,11 +569,60 @@ func sprintDiff(expect, actual, field string) string {
  * the body isnt in the rest-api formats (what means it is not json-based)
  * its better to use a generic diff output as the SprintDiff.
  */
+func extractKey(diffString string) (string, error) {
+	diffStrings := strings.Split(diffString, "\n")
+	var keys []string
+	for _, str := range diffStrings {
+		str = strings.TrimSpace(str[1:])
+
+		// Find the position of the first colon
+		colonIndex := strings.Index(str, ":")
+		if colonIndex == -1 {
+			continue
+		}
+
+		// Extract the key, which is everything before the colon
+		key := strings.TrimSpace(str[:colonIndex])
+
+		// Remove any surrounding quotes from the key
+		key = strings.Trim(key, `"'`)
+		keys = append(keys, key)
+	}
+
+	// Remove the initial + or - along with any leading whitespaces
+
+	return strings.Join(keys, "|"), nil
+}
+
+func checkKeyInMaps(jsonMap1, jsonMap2 []byte, key string) (string, bool) {
+	var map1, map2 map[string]interface{}
+	if err := json.Unmarshal(jsonMap1, &map1); err != nil {
+		return "", false
+	}
+	if err := json.Unmarshal(jsonMap2, &map2); err != nil {
+		return "", false
+	}
+
+	for k, v1 := range map1 {
+		if v2, ok := map2[k]; ok && !strings.Contains(key, k) && v2 == v1 { // Ensure the key is not the modifiedKey
+			return fmt.Sprintf("%v:%v", k, v1), true
+		}
+	}
+	return "", false
+
+}
+
 func sprintJSONDiff(json1 []byte, json2 []byte, field string, noise map[string][]string) (string, error) {
 	diffString, err := calculateJSONDiffs(json1, json2)
 	if err != nil {
 		return "", err
 	}
+	modifiedKeys, err := extractKey(diffString)
+	additionalContext, exists := checkKeyInMaps(json1, json2, modifiedKeys)
+	if exists {
+		diffString = additionalContext + "\n" + diffString
+	}
+
 	expect, actual := separateAndColorize(diffString, noise)
 	result := expectActualTable(expect, actual, field, false)
 	return result, nil
