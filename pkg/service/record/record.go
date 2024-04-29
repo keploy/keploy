@@ -356,7 +356,7 @@ func (r *Recorder) ReRecord(ctx context.Context) error {
 			r.logger.Error("Failed to simulate HTTP request", zap.Error(err))
 			continue // Proceed with the next command
 		}
-		r.logger.Info("Re-recorded HTTP command successfully", zap.String("curl", tc.Curl), zap.Any("response", (resp)))
+		r.logger.Debug("Re-recorded HTTP command successfully", zap.String("curl", tc.Curl), zap.Any("response", (resp)))
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
