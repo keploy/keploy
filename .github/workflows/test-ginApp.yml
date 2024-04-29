@@ -36,21 +36,26 @@ jobs:
           curl --silent -o pilot --location "https://github.com/keploy/pilot/releases/latest/download/pilot_linux_amd64" && 
           sudo chmod a+x pilot && sudo mkdir -p /usr/local/bin && sudo mv pilot /usr/local/bin
 
-      # - name: Checkout the samples-go repository
-      #   uses: actions/checkout@v2
-      #   with:
-      #     repository: keploy/samples-go
-      #     path: samples-go
+      - name: Checkout the samples-go repository and build the application
+        uses: actions/checkout@v2
+        with:
+          repository: keploy/samples-go
+          path: samples-go
+          run: |
+            cd samples-go/gin-mongo
+            go build -o ginApp .
+
       # add the noisy fields in the config file if any.
       - name: Add noisy fields in the config file
         run: |
           echo "You can add the noisy fields in the config file if any."
+          
       - name: Run testing script for gin-mongo application
         uses: keploy/testgpt@main
         with:
           repository: keploy/samples-go
           branch: native-linux
           working-directory: gin-mongo
-          command: go run main.go handler.go
+          command: ./ginApp
           delay: 7
           ci-mode: 0
