@@ -56,6 +56,8 @@ jobs:
           ls
           cd samples-go/gin-mongo
           go build -o ginApp .
+          pwd
+          ls
 
       # add the noisy fields in the config file if any.
       - name: Add noisy fields in the config file
@@ -67,7 +69,7 @@ jobs:
         with:
           repository: keploy/samples-go
           branch: native-linux
-          working-directory: gin-mongo
+          working-directory: samples-go/gin-mongo
           command: ./ginApp
           delay: 7
           ci-mode: 0
