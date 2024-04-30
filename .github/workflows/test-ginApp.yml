@@ -49,14 +49,11 @@ jobs:
           ref: native-linux
           path: samples-go
           run: |
+            echo "Current github workspace after checkout: $GITHUB_WORKSPACE"
+            pwd
+            ls
             cd samples-go/gin-mongo
             go build -o ginApp .
-
-      - name: Print the workspace after checking out the samples-go repository
-        run: |
-          echo "Current github workspace: $GITHUB_WORKSPACE"
-          pwd
-          ls
 
       # add the noisy fields in the config file if any.
       - name: Add noisy fields in the config file
