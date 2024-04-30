@@ -48,6 +48,8 @@ type Proxy struct {
 
 	Listener net.Listener
 
+	//to store the nsswitch.conf file data
+	nsswitchData []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
 	UDPDNSServer *dns.Server
 	TCPDNSServer *dns.Server
 }
@@ -99,7 +101,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 
 	// start the proxy server
 	g.Go(func() error {
-		utils.Recover(p.logger)
+		defer utils.Recover(p.logger)
 		err := p.start(ctx)
 		if err != nil {
 			utils.LogError(p.logger, err, "error while running the proxy server")
@@ -120,9 +122,10 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 	// start the TCP DNS server
 	p.logger.Debug("Starting Tcp Dns Server for handling Dns queries over TCP")
 	g.Go(func() error {
-		utils.Recover(p.logger)
+		defer utils.Recover(p.logger)
 		errCh := make(chan error, 1)
 		go func(errCh chan error) {
+			defer utils.Recover(p.logger)
 			err := p.startTCPDNSServer(ctx)
 			if err != nil {
 				errCh <- err
@@ -145,9 +148,10 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 	// start the UDP DNS server
 	p.logger.Debug("Starting Udp Dns Server for handling Dns queries over UDP")
 	g.Go(func() error {
-		utils.Recover(p.logger)
+		defer utils.Recover(p.logger)
 		errCh := make(chan error, 1)
 		go func(errCh chan error) {
+			defer utils.Recover(p.logger)
 			err := p.startUDPDNSServer(ctx)
 			if err != nil {
 				errCh <- err
@@ -193,8 +197,10 @@ func (p *Proxy) start(ctx context.Context) error {
 		p.logger.Info("proxy stopped...")
 	}(listener)
 
-	clientConnErrGrp, clientConnCtx := errgroup.WithContext(ctx)
+	clientConnCtx, clientConnCancel := context.WithCancel(ctx)
+	clientConnErrGrp, _ := errgroup.WithContext(clientConnCtx)
 	defer func() {
+		clientConnCancel()
 		err := clientConnErrGrp.Wait()
 		if err != nil {
 			p.logger.Debug("failed to handle the client connection", zap.Error(err))
@@ -205,12 +211,21 @@ func (p *Proxy) start(ctx context.Context) error {
 				close(mc)
 			}
 		}
+
+		if string(p.nsswitchData) != "" {
+			// reset the hosts config in nsswitch.conf of the system (in test mode)
+			err = p.resetNsSwitchConfig()
+			if err != nil {
+				utils.LogError(p.logger, err, "failed to reset the nsswitch config")
+			}
+		}
 	}()
 
 	for {
 		clientConnCh := make(chan net.Conn, 1)
 		errCh := make(chan error, 1)
 		go func() {
+			defer utils.Recover(p.logger)
 			conn, err := listener.Accept()
 			if err != nil {
 				if strings.Contains(err.Error(), "use of closed network connection") {
@@ -231,9 +246,9 @@ func (p *Proxy) start(ctx context.Context) error {
 		// handle the client connection
 		case clientConn := <-clientConnCh:
 			clientConnErrGrp.Go(func() error {
-				utils.Recover(p.logger)
+				defer util.Recover(p.logger, clientConn, nil)
 				err := p.handleConnection(clientConnCtx, clientConn)
-				if err != nil {
+				if err != nil && err != io.EOF {
 					utils.LogError(p.logger, err, "failed to handle the client connection")
 				}
 				return nil
@@ -254,7 +269,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	// making a new client connection id for each client connection
 	clientConnID := util.GetNextID()
-	p.logger.Debug("New client connection", zap.Any("connectionID", clientConnID))
+	// dstConn stores conn with actual destination for the outgoing network call
+	var dstConn net.Conn
+
+	//Dialing for tls conn
+	destConnID := util.GetNextID()
 
 	remoteAddr := srcConn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
@@ -294,11 +313,28 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// This is used to handle the parser errors
 	parserErrGrp, parserCtx := errgroup.WithContext(ctx)
 	parserCtx = context.WithValue(parserCtx, models.ErrGroupKey, parserErrGrp)
+	parserCtx = context.WithValue(parserCtx, models.ClientConnectionIDKey, fmt.Sprint(clientConnID))
+	parserCtx = context.WithValue(parserCtx, models.DestConnectionIDKey, fmt.Sprint(destConnID))
+	parserCtx, parserCtxCancel := context.WithCancel(parserCtx)
 	defer func() {
+		parserCtxCancel()
+
 		err := srcConn.Close()
 		if err != nil {
-			utils.LogError(p.logger, err, "failed to close the source connection")
+			utils.LogError(p.logger, err, "failed to close the source connection", zap.Any("clientConnID", clientConnID))
 			return
+		}
+
+		if dstConn != nil {
+			err = dstConn.Close()
+			if err != nil {
+				// Use string matching as a last resort to check for the specific error
+				if !strings.Contains(err.Error(), "use of closed network connection") {
+					// Log other errors
+					utils.LogError(p.logger, err, "failed to close the destination connection")
+				}
+				return
+			}
 		}
 
 		err = parserErrGrp.Wait()
@@ -383,12 +419,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		logger: p.logger,
 	}
 
-	// dstConn stores conn with actual destination for the outgoing network call
-	var dstConn net.Conn
-
-	//Dialing for tls conn
-	destConnID := util.GetNextID()
-
 	logger := p.logger.With(zap.Any("Client IP Address", srcConn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnID), zap.Any("Destination IP Address", dstAddr), zap.Any("Destination ConnectionID", destConnID))
 
 	dstCfg := &integrations.ConditionalDstCfg{
@@ -405,10 +435,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
 		if rule.Mode != models.MODE_TEST {
-			dialer := &net.Dialer{
-				Timeout: 1 * time.Second,
-			}
-			dstConn, err = tls.DialWithDialer(dialer, "tcp", addr, cfg)
+			dstConn, err = tls.Dial("tcp", addr, cfg)
 			if err != nil {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
 				return err
@@ -437,6 +464,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	generic := true
+
 	//Checking for all the parsers.
 	for _, parser := range p.Integrations {
 		if parser.MatchType(parserCtx, initialBuf) {
@@ -448,7 +476,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				}
 			} else {
 				err := parser.MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
-				if err != nil {
+				if err != nil && err != io.EOF {
 					utils.LogError(logger, err, "failed to mock the outgoing message")
 					return err
 				}
@@ -515,7 +543,7 @@ func (p *Proxy) Record(_ context.Context, id uint64, mocks chan<- *models.Mock, 
 		OutgoingOptions: opts,
 	})
 
-	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator)))
+	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 
 	////set the new proxy ip:port for a new session
 	//err := p.setProxyIP(opts.DnsIPv4Addr, opts.DnsIPv6Addr)
@@ -532,7 +560,16 @@ func (p *Proxy) Mock(_ context.Context, id uint64, opts models.OutgoingOptions) 
 		Mode:            models.MODE_TEST,
 		OutgoingOptions: opts,
 	})
-	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator)))
+	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
+
+	if string(p.nsswitchData) == "" {
+		// setup the nsswitch config to redirect the DNS queries to the proxy
+		err := p.setupNsswitchConfig()
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to setup nsswitch config")
+			return errors.New("failed to mock the outgoing message")
+		}
+	}
 
 	////set the new proxy ip:port for a new session
 	//err := p.setProxyIP(opts.DnsIPv4Addr, opts.DnsIPv6Addr)
@@ -555,4 +592,13 @@ func (p *Proxy) SetMocks(_ context.Context, id uint64, filtered []*models.Mock, 
 	}
 
 	return nil
+}
+
+// GetConsumedMocks returns the consumed filtered mocks for a given app id
+func (p *Proxy) GetConsumedMocks(_ context.Context, id uint64) ([]string, error) {
+	m, ok := p.MockManagers.Load(id)
+	if !ok {
+		return nil, fmt.Errorf("mock manager not found to get consumed filtered mocks")
+	}
+	return m.(*MockManager).GetConsumedMocks(), nil
 }

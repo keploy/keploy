@@ -1,5 +1,5 @@
 # === Build Stage ===
-FROM golang:1.21 AS build
+FROM golang:1.22 AS build
 
 # Set the working directory
 WORKDIR /app
@@ -16,7 +16,7 @@ RUN go mod download
 COPY . /app
 
 # Build the keploy binary
-RUN go build -ldflags="-X main.dsn=$SENTRY_DSN_DOCKER -X main.version=$VERSION" -o keploy .
+RUN go build -tags=viper_bind_struct -ldflags="-X main.dsn=$SENTRY_DSN_DOCKER -X main.version=$VERSION" -o keploy .
 
 # === Runtime Stage ===
 FROM debian:bookworm-slim
@@ -24,8 +24,8 @@ FROM debian:bookworm-slim
 ENV KEPLOY_INDOCKER=true
 
 # Update the package lists and install required packages
-RUN apt-get tools && \
-    apt-get install -y ca-certificates curl sudo && \
+RUN apt-get update
+RUN apt-get install -y ca-certificates curl sudo && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 

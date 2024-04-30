@@ -26,7 +26,15 @@ var totalTests int
 var totalTestPassed int
 var totalTestFailed int
 
-type replayer struct {
+// emulator contains the struct instance that implements RequestEmulator interface. This is done for
+// attaching the objects dynamically as plugins.
+var emulator RequestEmulator
+
+func SetTestUtilInstance(instance RequestEmulator) {
+	emulator = instance
+}
+
+type Replayer struct {
 	logger          *zap.Logger
 	testDB          TestDB
 	mockDB          MockDB
@@ -37,7 +45,12 @@ type replayer struct {
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, telemetry Telemetry, instrumentation Instrumentation, config config.Config) Service {
-	return &replayer{
+	// set the request emulator for simulating test case requests, if not set
+	if emulator == nil {
+		SetTestUtilInstance(NewTestUtils(config.Test.APITimeout, logger))
+	}
+
+	return &Replayer{
 		logger:          logger,
 		testDB:          testDB,
 		mockDB:          mockDB,
@@ -48,7 +61,7 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 	}
 }
 
-func (r *replayer) Start(ctx context.Context) error {
+func (r *Replayer) Start(ctx context.Context) error {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	g, ctx := errgroup.WithContext(ctx)
@@ -77,10 +90,9 @@ func (r *replayer) Start(ctx context.Context) error {
 		}
 	}()
 
-	// BootReplay will start the hooks and proxy and return the testRunID and appID
-	testRunID, appID, hookCancel, err := r.BootReplay(ctx)
+	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
-		stopReason = fmt.Sprintf("failed to boot replay: %v", err)
+		stopReason = fmt.Sprintf("failed to get all test set ids: %v", err)
 		utils.LogError(r.logger, err, stopReason)
 		if err == context.Canceled {
 			return err
@@ -88,9 +100,17 @@ func (r *replayer) Start(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 
-	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
+	if len(testSetIDs) == 0 {
+		recordCmd := models.HighlightGrayString("keploy record")
+		errMsg := fmt.Sprintf("No test sets found in the keploy folder. Please record testcases using %s command", recordCmd)
+		utils.LogError(r.logger, err, errMsg)
+		return fmt.Errorf(errMsg)
+	}
+
+	// BootReplay will start the hooks and proxy and return the testRunID and appID
+	testRunID, appID, hookCancel, err := r.BootReplay(ctx)
 	if err != nil {
-		stopReason = fmt.Sprintf("failed to get all test set ids: %v", err)
+		stopReason = fmt.Sprintf("failed to boot replay: %v", err)
 		utils.LogError(r.logger, err, stopReason)
 		if err == context.Canceled {
 			return err
@@ -152,7 +172,7 @@ func (r *replayer) Start(ctx context.Context) error {
 	return nil
 }
 
-func (r *replayer) BootReplay(ctx context.Context) (string, uint64, context.CancelFunc, error) {
+func (r *Replayer) BootReplay(ctx context.Context) (string, uint64, context.CancelFunc, error) {
 
 	var cancel context.CancelFunc
 
@@ -166,7 +186,7 @@ func (r *replayer) BootReplay(ctx context.Context) (string, uint64, context.Canc
 
 	newTestRunID := pkg.NewID(testRunIDs, models.TestRunTemplateName)
 
-	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{})
+	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return "", 0, nil, err
@@ -181,7 +201,7 @@ func (r *replayer) BootReplay(ctx context.Context) (string, uint64, context.Canc
 	default:
 		hookCtx := context.WithoutCancel(ctx)
 		hookCtx, cancel = context.WithCancel(hookCtx)
-		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_TEST})
+		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_TEST, EnableTesting: r.config.EnableTesting})
 		if err != nil {
 			cancel()
 			if errors.Is(err, context.Canceled) {
@@ -194,11 +214,11 @@ func (r *replayer) BootReplay(ctx context.Context) (string, uint64, context.Canc
 	return newTestRunID, appID, cancel, nil
 }
 
-func (r *replayer) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
+func (r *Replayer) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
 	return r.testDB.GetAllTestSetIDs(ctx)
 }
 
-func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error) {
+func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error) {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
@@ -220,6 +240,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var appErr models.AppError
 	var success int
 	var failure int
+	var totalConsumedMocks = map[string]bool{}
 
 	testSetStatus := models.TestSetStatusPassed
 	testSetStatusByErrChan := models.TestSetStatusRunning
@@ -235,18 +256,23 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusPassed, nil
 	}
 
-	filteredMocks, err := r.mockDB.GetFilteredMocks(runTestSetCtx, testSetID, time.Time{}, time.Now())
+	filteredMocks, err := r.mockDB.GetFilteredMocks(runTestSetCtx, testSetID, models.BaseTime, time.Now())
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to get filtered mocks")
 		return models.TestSetStatusFailed, err
 	}
-	unfilteredMocks, err := r.mockDB.GetUnFilteredMocks(runTestSetCtx, testSetID, time.Time{}, time.Now())
+	unfilteredMocks, err := r.mockDB.GetUnFilteredMocks(runTestSetCtx, testSetID, models.BaseTime, time.Now())
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to get unfiltered mocks")
 		return models.TestSetStatusFailed, err
 	}
 
-	err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{})
+	err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{
+		Rules:          r.config.BypassRules,
+		MongoPassword:  r.config.Test.MongoPassword,
+		SQLDelay:       time.Duration(r.config.Test.Delay),
+		FallBackOnMiss: r.config.Test.FallBackOnMiss,
+	})
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to mock outgoing")
 		return models.TestSetStatusFailed, err
@@ -371,14 +397,45 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		started := time.Now().UTC()
-		resp, loopErr := r.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
+
+		cmdType := utils.FindDockerCmd(r.config.Command)
+
+		if cmdType == utils.Docker || cmdType == utils.DockerCompose {
+
+			userIP, err := r.instrumentation.GetAppIP(ctx, appID)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to get the app ip")
+				break
+			}
+
+			testCase.HTTPReq.URL, err = replaceHostToIP(testCase.HTTPReq.URL, userIP)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to replace host to docker container's IP")
+				break
+			}
+			r.logger.Debug("", zap.Any("replaced URL in case of docker env", testCase.HTTPReq.URL))
+		}
+
+		resp, loopErr := emulator.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
 		if loopErr != nil {
 			utils.LogError(r.logger, err, "failed to simulate request")
 			break
 		}
+
+		consumedMocks, err := r.instrumentation.GetConsumedMocks(runTestSetCtx, appID)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
+		}
+		if r.config.Test.RemoveUnusedMocks {
+			for _, mockName := range consumedMocks {
+				totalConsumedMocks[mockName] = true
+			}
+		}
+
 		testPass, testResult = r.compareResp(testCase, resp, testSetID)
 		if !testPass {
-			r.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(testCase.Name)), zap.Any("testset id", models.HighlightFailingString(testSetID)), zap.Any("passed", models.HighlightFailingString(testPass)))
+			// log the consumed mocks during the test run of the test case for test set
+			r.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(testCase.Name)), zap.Any("testset id", models.HighlightFailingString(testSetID)), zap.Any("passed", models.HighlightFailingString(testPass)), zap.Any("consumed mocks", consumedMocks))
 		} else {
 			r.logger.Info("result", zap.Any("testcase id", models.HighlightPassingString(testCase.Name)), zap.Any("testset id", models.HighlightPassingString(testSetID)), zap.Any("passed", models.HighlightPassingString(testPass)))
 		}
@@ -388,6 +445,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		} else {
 			testStatus = models.TestStatusFailed
 			failure++
+			testSetStatus = models.TestSetStatusFailed
 		}
 
 		if testResult != nil {
@@ -430,12 +488,15 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				utils.LogError(r.logger, err, "failed to insert test case result")
 				break
 			}
-			if !testPass {
-				testSetStatus = models.TestSetStatusFailed
-			}
 		} else {
 			utils.LogError(r.logger, nil, "test result is nil")
 			break
+		}
+
+		// We need to sleep for a second to avoid mismatching of mocks during keploy testing via test-bench
+		if r.config.EnableTesting {
+			r.logger.Debug("sleeping for a second to avoid mismatching of mocks during keploy testing via test-bench")
+			time.Sleep(time.Second)
 		}
 	}
 
@@ -447,7 +508,7 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	// Checking errors for fina iteration
+	// Checking errors for final iteration
 	// Checking for errors in the loop
 	if loopErr != nil && !errors.Is(loopErr, context.Canceled) {
 		testSetStatus = models.TestSetStatusInternalErr
@@ -478,11 +539,22 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusInternalErr, fmt.Errorf("failed to insert report")
 	}
 
+	// remove the unused mocks by the test cases of a testset
+	if r.config.Test.RemoveUnusedMocks && testSetStatus == models.TestSetStatusPassed {
+		r.logger.Debug("consumed mocks from the completed testset", zap.Any("for test-set", testSetID), zap.Any("consumed mocks", totalConsumedMocks))
+		// delete the unused mocks from the data store
+		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, totalConsumedMocks)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to delete unused mocks")
+		}
+	}
+
 	// TODO Need to decide on whether to use global variable or not
 	verdict := TestReportVerdict{
 		total:  testReport.Total,
 		failed: testReport.Failure,
 		passed: testReport.Success,
+		status: testSetStatus == models.TestSetStatusPassed,
 	}
 
 	completeTestReport[testSetID] = verdict
@@ -490,11 +562,22 @@ func (r *replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	totalTestPassed += testReport.Success
 	totalTestFailed += testReport.Failure
 
+	if testSetStatus == models.TestSetStatusFailed || testSetStatus == models.TestSetStatusPassed {
+		if testSetStatus == models.TestSetStatusFailed {
+			pp.SetColorScheme(models.FailingColorScheme)
+		} else {
+			pp.SetColorScheme(models.PassingColorScheme)
+		}
+		if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure); err != nil {
+			utils.LogError(r.logger, err, "failed to print testrun summary")
+		}
+	}
+
 	r.telemetry.TestSetRun(testReport.Success, testReport.Failure, testSetID, string(testSetStatus))
 	return testSetStatus, nil
 }
 
-func (r *replayer) GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error) {
+func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error) {
 	testReport, err := r.reportDB.GetReport(ctx, testRunID, testSetID)
 	if err != nil {
 		return models.TestSetStatusFailed, fmt.Errorf("failed to get report: %w", err)
@@ -506,36 +589,7 @@ func (r *replayer) GetTestSetStatus(ctx context.Context, testRunID string, testS
 	return status, nil
 }
 
-func (r *replayer) SimulateRequest(ctx context.Context, appID uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error) {
-	switch tc.Kind {
-	case models.HTTP:
-		r.logger.Debug("Before simulating the request", zap.Any("Test case", tc))
-		cmdType := utils.FindDockerCmd(r.config.Command)
-		if cmdType == utils.Docker || cmdType == utils.DockerCompose {
-			var err error
-
-			userIP, err := r.instrumentation.GetAppIP(ctx, appID)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to get the app ip")
-				return nil, err
-			}
-
-			tc.HTTPReq.URL, err = replaceHostToIP(tc.HTTPReq.URL, userIP)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to replace host to docker container's IP")
-			}
-			r.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HTTPReq.URL))
-		}
-		r.logger.Debug(fmt.Sprintf("the url of the testcase: %v", tc.HTTPReq.URL))
-		resp, err := pkg.SimulateHTTP(ctx, *tc, testSetID, r.logger, r.config.Test.APITimeout)
-		r.logger.Debug("After simulating the request", zap.Any("test case id", tc.Name))
-		r.logger.Debug("After GetResp of the request", zap.Any("test case id", tc.Name))
-		return resp, err
-	}
-	return nil, nil
-}
-
-func (r *replayer) compareResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string) (bool, *models.Result) {
+func (r *Replayer) compareResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string) (bool, *models.Result) {
 
 	noiseConfig := r.config.Test.GlobalNoise.Global
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
@@ -544,7 +598,7 @@ func (r *replayer) compareResp(tc *models.TestCase, actualResponse *models.HTTPR
 	return match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
 }
 
-func (r *replayer) printSummary(ctx context.Context, testRunResult bool) {
+func (r *Replayer) printSummary(ctx context.Context, testRunResult bool) {
 	if totalTests > 0 {
 		testSuiteNames := make([]string, 0, len(completeTestReport))
 		for testSuiteName := range completeTestReport {
@@ -572,6 +626,11 @@ func (r *replayer) printSummary(ctx context.Context, testRunResult bool) {
 			return
 		}
 		for _, testSuiteName := range testSuiteNames {
+			if completeTestReport[testSuiteName].status {
+				pp.SetColorScheme(models.PassingColorScheme)
+			} else {
+				pp.SetColorScheme(models.FailingColorScheme)
+			}
 			if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed); err != nil {
 				utils.LogError(r.logger, err, "failed to print test suite details")
 				return
@@ -582,8 +641,10 @@ func (r *replayer) printSummary(ctx context.Context, testRunResult bool) {
 			return
 		}
 		r.logger.Info("test run completed", zap.Bool("passed overall", testRunResult))
-		if r.config.Test.Coverage {
-			r.logger.Info("there is a opportunity to get the coverage here")
+
+		if utils.CmdType(r.config.CommandType) == utils.Native && r.config.Test.GoCoverage {
+			r.logger.Info("there is an opportunity to get the coverage here")
+
 			coverCmd := exec.CommandContext(ctx, "go", "tool", "covdata", "percent", "-i="+os.Getenv("GOCOVERDIR"))
 			output, err := coverCmd.Output()
 			if err != nil {
@@ -602,11 +663,11 @@ func (r *replayer) printSummary(ctx context.Context, testRunResult bool) {
 	}
 }
 
-func (r *replayer) RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError {
+func (r *Replayer) RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError {
 	return r.instrumentation.Run(ctx, appID, opts)
 }
 
-func (r *replayer) ProvideMocks(ctx context.Context) error {
+func (r *Replayer) ProvideMocks(ctx context.Context) error {
 	var stopReason string
 	var hookCancel context.CancelFunc
 	defer func() {
@@ -633,6 +694,7 @@ func (r *replayer) ProvideMocks(ctx context.Context) error {
 		}
 		return fmt.Errorf(stopReason)
 	}
+
 	unfilteredMocks, err := r.mockDB.GetUnFilteredMocks(ctx, "", time.Time{}, time.Now())
 	if err != nil {
 		stopReason = "failed to get unfiltered mocks"

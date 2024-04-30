@@ -3,6 +3,8 @@ package v1
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"time"
@@ -17,13 +19,6 @@ import (
 )
 
 func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
-	//closing the destination conn
-	defer func(destConn net.Conn) {
-		err := destConn.Close()
-		if err != nil {
-			utils.LogError(logger, err, "failed to close the destination connection")
-		}
-	}(destConn)
 
 	logger.Debug("Inside the encodePostgresOutgoing function")
 	var pgRequests []models.Backend
@@ -79,27 +74,35 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 
 	clientBuffChan := make(chan []byte)
 	destBuffChan := make(chan []byte)
-	errChan := make(chan error)
-	defer close(clientBuffChan)
-	defer close(destBuffChan)
-	defer close(errChan)
+	errChan := make(chan error, 1)
 
 	//get the error group from the context
 	g := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 
 	// read requests from client
 	g.Go(func() error {
-		defer utils.Recover(logger)
+		defer pUtil.Recover(logger, clientConn, destConn)
+		defer close(clientBuffChan)
 		pUtil.ReadBuffConn(ctx, logger, clientConn, clientBuffChan, errChan)
 		return nil
 	})
 
 	// read responses from destination
 	g.Go(func() error {
-		defer utils.Recover(logger)
+		defer pUtil.Recover(logger, clientConn, destConn)
+		defer close(destBuffChan)
 		pUtil.ReadBuffConn(ctx, logger, destConn, destBuffChan, errChan)
 		return nil
 	})
+
+	go func() {
+		defer pUtil.Recover(logger, clientConn, destConn)
+		err := g.Wait()
+		if err != nil {
+			logger.Info("error group is returning an error", zap.Error(err))
+		}
+		close(errChan)
+	}()
 
 	prevChunkWasReq := false
 	logger.Debug("the iteration for the pg request starts", zap.Any("pgReqs", len(pgRequests)), zap.Any("pgResps", len(pgResponses)))
@@ -125,6 +128,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 						ResTimestampMock:  resTimestampMock,
 						Metadata:          metadata,
 					},
+					ConnectionID: ctx.Value(models.ClientConnectionIDKey).(string),
 				}
 				return ctx.Err()
 			}
@@ -153,6 +157,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 						ResTimestampMock:  resTimestampMock,
 						Metadata:          metadata,
 					},
+					ConnectionID: ctx.Value(models.ClientConnectionIDKey).(string),
 				}
 				pgRequests = []models.Backend{}
 				pgResponses = []models.Frontend{}
@@ -166,13 +171,14 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 				if !isStartupPacket(buffer) && len(buffer) > 5 {
 					bufferCopy := buffer
 					for i := 0; i < len(bufferCopy)-5; {
-						logger.Debug("Inside the if condition")
-						pg.BackendWrapper.MsgType = buffer[i]
+						logger.Debug("Inside the Pg request for loop")
 						pg.BackendWrapper.BodyLen = int(binary.BigEndian.Uint32(buffer[i+1:])) - 4
 						if len(buffer) < (i + pg.BackendWrapper.BodyLen + 5) {
-							utils.LogError(logger, nil, "failed to translate the postgres request message due to shorter network packet buffer")
+							utils.LogError(logger, nil, "failed to translate the postgres request message due to shorter network packet buffer. Length of buffer is "+fmt.Sprint(len(buffer))+" buffer value :"+string(buffer)+" and pg.BackendWrapper.BodyLen is "+fmt.Sprint(pg.BackendWrapper.BodyLen))
 							break
 						}
+						pg.BackendWrapper.MsgType = buffer[i]
+
 						msg, err = pg.translateToReadableBackend(buffer[i:(i + pg.BackendWrapper.BodyLen + 5)])
 						if err != nil && buffer[i] != 112 {
 							utils.LogError(logger, err, "failed to translate the request message to readable")
@@ -237,7 +243,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 						logger.Debug("failed to decode the response message in proxy for postgres dependency", zap.Error(err))
 					}
 
-					if len(afterEncoded) != len(buffer) && pgMock.PacketTypes[0] != "p" {
+					if len(afterEncoded) != len(buffer) && len(pgMock.PacketTypes) > 0 && pgMock.PacketTypes[0] != "p" {
 						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(afterEncoded)), zap.Any("buffer", len(buffer)))
 						pgMock.Payload = bufStr
 					}
@@ -295,17 +301,19 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 						}
 						if pg.FrontendWrapper.MsgType == 'C' {
 							pg.FrontendWrapper.CommandComplete = *msg.(*pgproto3.CommandComplete)
+							// empty the command tag
+							pg.FrontendWrapper.CommandComplete.CommandTag = []byte{}
 							pg.FrontendWrapper.CommandCompletes = append(pg.FrontendWrapper.CommandCompletes, pg.FrontendWrapper.CommandComplete)
 						}
-						if pg.FrontendWrapper.DataRow.RowValues != nil {
+						if pg.FrontendWrapper.MsgType == 'D' && pg.FrontendWrapper.DataRow.RowValues != nil {
 							// Create a new slice for each DataRow
 							valuesCopy := make([]string, len(pg.FrontendWrapper.DataRow.RowValues))
 							copy(valuesCopy, pg.FrontendWrapper.DataRow.RowValues)
 
 							row := pgproto3.DataRow{
 								RowValues: valuesCopy, // Use the copy of the values
+								Values:    pg.FrontendWrapper.DataRow.Values,
 							}
-							// fmt.Println("row is ", row)
 							dataRows = append(dataRows, row)
 						}
 					}
@@ -362,7 +370,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 					if err != nil {
 						logger.Debug("failed to decode the response message in proxy for postgres dependency", zap.Error(err))
 					}
-					if (len(afterEncoded) != len(buffer) && pgMock.PacketTypes[0] != "R") || len(pgMock.DataRows) > 0 {
+					if len(afterEncoded) != len(buffer) && len(pgMock.PacketTypes) > 0 && pgMock.PacketTypes[0] != "R" {
 						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(afterEncoded)), zap.Any("buffer", len(buffer)))
 						pgMock.Payload = bufStr
 					}
@@ -383,6 +391,9 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 			logger.Debug("the iteration for the postgres response ends with no of postgresReqs:" + strconv.Itoa(len(pgRequests)) + " and pgResps: " + strconv.Itoa(len(pgResponses)))
 			prevChunkWasReq = false
 		case err := <-errChan:
+			if err == io.EOF {
+				return nil
+			}
 			return err
 		}
 	}

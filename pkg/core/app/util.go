@@ -47,7 +47,7 @@ func modifyDockerComposeCommand(appCmd, newComposeFile string) string {
 	return fmt.Sprintf("%s -f %s", appCmd, newComposeFile)
 }
 
-func parseDockerCmd(cmd string) (string, string, error) {
+func ParseDockerCmd(cmd string) (string, string, error) {
 	// Regular expression patterns
 	containerNamePattern := `--name\s+([^\s]+)`
 	networkNamePattern := `(--network|--net)\s+([^\s]+)`
@@ -84,4 +84,15 @@ func getInode(pid int) (uint64, error) {
 		return 0, fmt.Errorf("failed to get the inode of the process")
 	}
 	return i, nil
+}
+
+func IsDetachMode(command string) bool {
+	args := strings.Fields(command)
+	for _, arg := range args {
+		if arg == "-d" || arg == "--detach" {
+			return true
+		}
+	}
+
+	return false
 }

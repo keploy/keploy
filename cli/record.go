@@ -14,16 +14,16 @@ func init() {
 	Register("record", Record)
 }
 
-func Record(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
+func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:     "record",
 		Short:   "record the keploy testcases from the API calls",
 		Example: `keploy record -c "/path/to/user/app"`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
-			return cmdConfigurator.ValidateFlags(ctx, cmd, cfg)
+			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			svc, err := serviceFactory.GetService(ctx, cmd.Name(), *cfg)
+			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service")
 				return nil
@@ -44,12 +44,11 @@ func Record(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 		},
 	}
 
-	err := cmdConfigurator.AddFlags(cmd, cfg)
+	err := cmdConfigurator.AddFlags(cmd)
 	if err != nil {
 		utils.LogError(logger, err, "failed to add record flags")
 		return nil
 	}
-	cmd.SilenceUsage = true
-	cmd.SilenceErrors = true
+
 	return cmd
 }
