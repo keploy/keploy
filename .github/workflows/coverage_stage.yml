@@ -1,0 +1,46 @@
+name: Calculate Coverage
+on:
+  workflow_call:
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Create directories to store coverage data
+        run: |
+          mkdir -p unzipped-cov
+          mkdir -p final-cov
+
+      - name: Download first coverage data of gin-mongo application
+        uses: actions/download-artifact@v2
+        with:
+          name: coverage-reports-samples-go-gin-mongo-0
+          path: ./temp-coverage-dir
+
+      - name: Download second coverage data of gin-mongo application 
+        uses: actions/download-artifact@v2
+        with:
+          name: coverage-reports-samples-go-gin-mongo-1
+          path: ./temp-coverage-dir
+
+      - name: Unzip all coverage data zip files
+        run: |
+          unzip temp-coverage-dir/coverage-reports-samples-go-gin-mongo-0.zip -d unzipped-cov
+          unzip temp-coverage-dir/coverage-reports-samples-go-gin-mongo-1.zip -d unzipped-cov
+          ls -l unzipped-cov
+
+      - name: Combine all coverage data
+        run: |
+          go tool covdata merge -i=./unzipped-cov -o=./final-cov
+
+      - name: Calculate total coverage data
+        run: |
+          go tool covdata textfmt -i="./final-cov" -o="./unfiltered.txt"
+          grep -v "go.keploy.io/server/v2/pkg/graph/generated.go" unfiltered.txt  > total-coverage.txt
+
+      - name: Display the coverage data
+        run: |
+          go tool cover -func total-coverage.txt    
