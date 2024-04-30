@@ -39,6 +39,8 @@ jobs:
       - name: Print the current github workspace
         run: |
           echo "Current github workspace: $GITHUB_WORKSPACE"    
+          pwd
+          ls
 
       - name: Checkout the samples-go repository and build the application
         uses: actions/checkout@v2
@@ -53,6 +55,8 @@ jobs:
       - name: Print the workspace after checking out the samples-go repository
         run: |
           echo "Current github workspace: $GITHUB_WORKSPACE"
+          pwd
+          ls
 
       # add the noisy fields in the config file if any.
       - name: Add noisy fields in the config file
