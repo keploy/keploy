@@ -1,16 +1,10 @@
 name: Test GinApp
 on:
   workflow_call:
-    outputs:
-      test_status:
-        description: "Exit status of the test script"
-        value: ${{ jobs.test-go-mongo.outputs.test_result }}
 
 jobs:
   test-go-mongo:
     runs-on: ubuntu-latest
-    outputs:
-      test_result: ${{ steps.test_script.outcome }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v2
@@ -23,7 +17,7 @@ jobs:
 
       - name: Giving permission to binary
         run: |
-          sudo chmod +x /usr/local/bin/kTestBuild && mv /usr/local/bin/kTestBuild /usr/local/bin/keployB
+          sudo chmod +x /usr/local/bin/keployB 
 
       - name: Download the latest released binary of keploy
         run: |
