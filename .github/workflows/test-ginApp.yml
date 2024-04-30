@@ -36,12 +36,6 @@ jobs:
           curl --silent -o pilot --location "https://github.com/keploy/pilot/releases/latest/download/pilot_linux_amd64" && 
           sudo chmod a+x pilot && sudo mkdir -p /usr/local/bin && sudo mv pilot /usr/local/bin
 
-      - name: Print the current github workspace
-        run: |
-          echo "Current github workspace: $GITHUB_WORKSPACE"    
-          pwd
-          ls
-
       - name: Checkout to the samples-go repository
         uses: actions/checkout@v2
         with:
@@ -49,16 +43,11 @@ jobs:
           ref: native-linux
           path: samples-go
 
-      - name: Print workspace details and build application
+      - name: Build the gin-mongo application
         run: |
-          echo "Current github workspace after checkout: $GITHUB_WORKSPACE"
-          pwd
-          ls
           cd samples-go/gin-mongo
           go build -o ginApp .
-          pwd
-          ls
-
+          
       # add the noisy fields in the config file if any.
       - name: Add noisy fields in the config file
         run: |
@@ -67,8 +56,6 @@ jobs:
       - name: Run testing script for gin-mongo application
         uses: keploy/testgpt@test
         with:
-          repository: keploy/samples-go
-          branch: native-linux
           working-directory: samples-go/gin-mongo
           command: ./ginApp
           delay: 7
