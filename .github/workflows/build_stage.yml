@@ -39,6 +39,5 @@ jobs:
 
   get-coverage:
     needs: wait-for-coverage
-    runs-on: ubuntu-latest
-    uses: ./.github/workflows/coverage_stage.yml      
+    uses: .github/workflows/coverage_stage.yml     
 
