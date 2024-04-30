@@ -740,15 +740,18 @@ func EnsureRmBeforeName(cmd string) string {
 // detectLanguage detects the language of the test command and whether it is a coverage command
 func DetectLanguage(cmd string) (string, bool) {
 	cmdFields := strings.Fields(cmd)
-
 	if slices.Contains(cmdFields, "coverage") {
 		return "python", true
-	} else if slices.Contains(cmdFields, "python") {
-		return "python", false
-	}
+	} else {
+		for _, field := range cmdFields {
+			if strings.HasSuffix(field, ".py") {
+				return "python", false
+			}
+		}
+	}	
 
 	if slices.Contains(cmdFields, "node") || slices.Contains(cmdFields, "npm") {
-		if slices.Contains(cmdFields, "nyc") {
+		if slices.Contains(cmdFields, "E2ETests") {
 			return "typescript", true
 		}
 		return "typescript", false

@@ -175,11 +175,20 @@ func (r *Replayer) Start(ctx context.Context) error {
 			break
 		}
 
-		if i == 0 && r.config.Test.Language == "typescript" && r.config.Test.IsCmdCoverage {
-			err = os.Setenv("CLEAN", "false")
-			if err != nil {
-				r.config.Test.Coverage = false
-				utils.LogError(r.logger, err, "failed to set CLEAN env variable, coverage won't be calculated.")
+		if i == 0 && r.config.Test.IsCmdCoverage {
+			switch r.config.Test.Language {
+			case "typescript":
+				err = os.Setenv("CLEAN", "false")
+				if err != nil {
+					r.config.Test.Coverage = false
+					utils.LogError(r.logger, err, "failed to set CLEAN env variable, coverage won't be calculated.")
+				}
+			case "python":
+				err = os.Setenv("APPEND", " --append")
+				if err != nil {
+					r.config.Test.Coverage = false
+					utils.LogError(r.logger, err, "failed to set APPEND env variable, coverage won't be calculated.")
+				}
 			}
 		}
 	}
@@ -192,6 +201,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
+		r.logger.Info("$$$$$", zap.Any("language", r.config.Test.Language), zap.Any("coverage", r.config.Test.Coverage), zap.Any("isCmdCoverage", r.config.Test.IsCmdCoverage))
 		if r.config.Test.Coverage && r.config.Test.IsCmdCoverage {
 			r.logger.Info("calculating coverage for the test run and inserting it into the report", zap.Any("language", r.config.Test.Language))
 			switch r.config.Test.Language {
