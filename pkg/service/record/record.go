@@ -339,6 +339,10 @@ func (r *Recorder) ReRecord(ctx context.Context) error {
 		utils.LogError(r.logger, err, "failed to read test cases")
 		return fmt.Errorf("failed to read test cases")
 	}
+
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
 	for _, tc := range tcs {
 		host, port, err := extractHostAndPort(tc.Curl)
 		if err != nil {
@@ -362,12 +366,17 @@ func (r *Recorder) ReRecord(ctx context.Context) error {
 			return ctx.Err()
 		default:
 		}
-
 	}
-	time.Sleep(10 * time.Second) // Example sleep, adjust according to your application's startup time
-	err = utils.Stop(r.logger, "Re-recorded all HTTP commands successfully")
-	if err != nil {
-		utils.LogError(r.logger, err, "failed to stop recording")
+
+	// Wait for the ticker to trigger after 10 seconds
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-ticker.C:
+		err = utils.Stop(r.logger, "Re-recorded all HTTP commands successfully")
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to stop recording")
+		}
 	}
 
 	return nil
