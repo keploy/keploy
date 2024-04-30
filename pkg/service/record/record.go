@@ -334,54 +334,65 @@ func (r *Recorder) StartMock(ctx context.Context) error {
 }
 
 func (r *Recorder) ReRecord(ctx context.Context) error {
-	tcs, err := r.ReadTestCase()
-	if err != nil {
-		utils.LogError(r.logger, err, "failed to read test cases")
-		return fmt.Errorf("failed to read test cases")
-	}
+    tcs, err := r.ReadTestCase()
+    if err != nil {
+        utils.LogError(r.logger, err, "failed to read test cases")
+        return fmt.Errorf("failed to read test cases")
+    }
 
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
+    allTestCasesRecorded := true
+    for _, tc := range tcs {
+        host, port, err := extractHostAndPort(tc.Curl)
+        if err != nil {
+            r.logger.Error("Failed to extract host and port", zap.Error(err))
+            allTestCasesRecorded = false
+            continue // Proceed with the next command
+        }
 
-	for _, tc := range tcs {
-		host, port, err := extractHostAndPort(tc.Curl)
-		if err != nil {
-			r.logger.Error("Failed to extract host and port", zap.Error(err))
-			continue // Proceed with the next command
-		}
+        if err := waitForPort(ctx, host, port); err != nil {
+            r.logger.Error("Waiting for port failed", zap.String("host", host), zap.String("port", port), zap.Error(err))
+            allTestCasesRecorded = false
+            continue // Proceed with the next command
+        }
 
-		if err := waitForPort(ctx, host, port); err != nil {
-			r.logger.Error("Waiting for port failed", zap.String("host", host), zap.String("port", port), zap.Error(err))
-			continue // Proceed with the next command
-		}
+        resp, err := pkg.SimulateHTTP(ctx, *tc, r.config.ReRecord, r.logger, r.config.Test.APITimeout)
+        if err != nil {
+            r.logger.Error("Failed to simulate HTTP request", zap.Error(err))
+            allTestCasesRecorded = false
+            continue // Proceed with the next command
+        }
 
-		resp, err := pkg.SimulateHTTP(ctx, *tc, r.config.ReRecord, r.logger, r.config.Test.APITimeout)
-		if err != nil {
-			r.logger.Error("Failed to simulate HTTP request", zap.Error(err))
-			continue // Proceed with the next command
-		}
-		r.logger.Debug("Re-recorded HTTP command successfully", zap.String("curl", tc.Curl), zap.Any("response", (resp)))
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-	}
+        r.logger.Debug("Re-recorded HTTP command successfully", zap.String("curl", tc.Curl), zap.Any("response", (resp)))
 
-	// Wait for the ticker to trigger after 10 seconds
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-ticker.C:
-		err = utils.Stop(r.logger, "Re-recorded all HTTP commands successfully")
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to stop recording")
-		}
-	}
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        default:
+        }
+    }
 
-	return nil
+    if allTestCasesRecorded {
+        ticker := time.NewTicker(10 * time.Second)
+        defer ticker.Stop()
+
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        case <-ticker.C:
+            err = utils.Stop(r.logger, "Re-recorded all HTTP commands successfully")
+            if err != nil {
+                utils.LogError(r.logger, err, "failed to stop recording")
+            }
+        }
+    } else {
+        err = utils.Stop(r.logger, "Failed to re-record some HTTP commands")
+        if err != nil {
+            utils.LogError(r.logger, err, "failed to stop recording")
+        }
+    }
+
+    return nil
 }
-
 func (r *Recorder) ReadTestCase() ([]*models.TestCase, error) {
 	testSet := r.config.ReRecord
 	// Construct the full path to the test cases directory.
