@@ -36,6 +36,10 @@ jobs:
           curl --silent -o pilot --location "https://github.com/keploy/pilot/releases/latest/download/pilot_linux_amd64" && 
           sudo chmod a+x pilot && sudo mkdir -p /usr/local/bin && sudo mv pilot /usr/local/bin
 
+      - name: Print the current github workspace
+        run: |
+          echo "Current github workspace: $GITHUB_WORKSPACE"    
+
       - name: Checkout the samples-go repository and build the application
         uses: actions/checkout@v2
         with:
@@ -45,6 +49,10 @@ jobs:
           run: |
             cd samples-go/gin-mongo
             go build -o ginApp .
+
+      - name: Print the workspace after checking out the samples-go repository
+        run: |
+          echo "Current github workspace: $GITHUB_WORKSPACE"
 
       # add the noisy fields in the config file if any.
       - name: Add noisy fields in the config file
