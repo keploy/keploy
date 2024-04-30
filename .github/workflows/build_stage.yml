@@ -39,5 +39,5 @@ jobs:
 
   get-coverage:
     needs: wait-for-coverage
-    uses: .github/workflows/coverage_stage.yml     
+    uses: ./.github/workflows/coverage_stage.yml     
 
