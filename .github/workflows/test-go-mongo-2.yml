@@ -1,4 +1,4 @@
-name: Test GinApp
+name: Test GinApp 2
 on:
   workflow_call:
 
@@ -53,4 +53,4 @@ jobs:
           working-directory: samples-go/gin-mongo
           command: ./ginApp
           delay: 7
-          ci-mode: 0
+          ci-mode: 1

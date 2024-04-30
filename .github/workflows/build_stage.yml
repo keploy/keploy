@@ -17,20 +17,23 @@ jobs:
         uses: actions/upload-artifact@v2
         with:
           name: keploy-binary
-          path: kTestBuild
+          path: keployB
 
-  test:
+# Add Jobs for testing different applications here.          
+  test-go-mongo-1:
     needs: build
-    uses: ./.github/workflows/test_stage.yml
+    uses: ./.github/workflows/test-go-mongo-1.yml  
 
-  test-ginApp:
-    needs: build
-    uses: ./.github/workflows/test-ginApp.yml  
+  test-go-mongo-2:
+  needs: build
+  uses: ./.github/workflows/test-go-mongo-2.yml    
 
-  check_status:
-    needs: test-ginApp
+
+# Wait for all the test workflows before getting the coverage
+  coverage:
+    needs: [test-go-mongo-1, test-go-mongo-2]
     runs-on: ubuntu-latest
     steps:
       - name: Get Test Status
-        run: echo "Test script status code ${{ needs.test.outputs.test_status }}"
+        run: echo "All workflows are completed, Now calculating the coverage"
 
