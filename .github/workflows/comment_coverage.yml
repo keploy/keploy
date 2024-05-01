@@ -1,0 +1,41 @@
+name: Post Coverage Report Comment
+on:
+  workflow_call:
+    inputs:
+      run_id:
+        required: true
+        description: "The workflow run ID of the coverage calculation workflow"
+      pr_number:
+        required: true
+        description: "The pull request number to comment on"
+
+jobs:
+  post-comment:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Artifacts
+        id: fetch-artifacts
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: ${{ github.event.inputs.run_id }}
+            });
+            const artifact = artifacts.data.artifacts.find(artifact => artifact.name === 'coverage-report-html');
+            return artifact.archive_download_url;
+
+      - name: Comment on PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const prNumber = ${{ github.event.inputs.pr_number }};
+            github.rest.issues.createComment({
+              issue_number: prNumber,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `Coverage report is available [here](${{ steps.fetch-artifacts.outputs.result }}) - directly download the 'coverage-report-html' artifact.`
+            });
