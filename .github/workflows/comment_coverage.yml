@@ -10,9 +10,9 @@ on:
         required: true
         type: string  
 
-permissions:
-  pull-requests: write
-  issues: write
+# permissions:
+#   pull-requests: write
+#   issues: write
 
 jobs:
   comment-coverage:
