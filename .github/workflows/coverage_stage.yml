@@ -15,13 +15,13 @@ jobs:
           mkdir -p final-cov
 
       - name: Download first coverage data of gin-mongo application
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
         with:
           name: coverage-reports-samples-go-gin-mongo-0
           path: ./temp-coverage-dir
 
       - name: Download second coverage data of gin-mongo application 
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
         with:
           name: coverage-reports-samples-go-gin-mongo-1
           path: ./temp-coverage-dir

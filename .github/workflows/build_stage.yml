@@ -34,3 +34,4 @@ jobs:
     needs: [test-go-mongo-1, test-go-mongo-2]
     uses: ./.github/workflows/coverage_stage.yml     
 
+#https://github.com/marketplace/actions/delete-artifact
