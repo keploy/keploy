@@ -29,6 +29,7 @@ jobs:
       - name: Unzip all coverage data zip files
         run: |
           unzip temp-coverage-dir/coverage-reports-samples-go-gin-mongo-0.zip -d unzipped-cov
+          ls -l unzipped-cov
           unzip temp-coverage-dir/coverage-reports-samples-go-gin-mongo-1.zip -d unzipped-cov
           ls -l unzipped-cov
 
