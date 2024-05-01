@@ -51,12 +51,11 @@ jobs:
           name: coverage-report
           path: total-coverage.txt
 
-  display-coverage:
-    runs-on: ubuntu-latest
-    needs: coverage
-    steps:
-      - name: "Code coverage report"
-        uses: fgrosse/go-coverage-report@v1.0.1 # Consider using a Git revision for maximum security
-        with:
-          coverage-artifact-name: "coverage-report" # can be omitted if you used this default value
-          coverage-file-name: "total-coverage.txt" # can be omitted if you used this default value    
+      - name: Install goveralls
+        run: go install github.com/mattn/goveralls@latest
+      
+      - name: Send coverage
+        env:
+          COVERALLS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          goveralls -coverprofile=coverage.txt -service=github

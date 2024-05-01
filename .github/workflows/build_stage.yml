@@ -30,14 +30,7 @@ jobs:
 
 
 # Wait for all the test workflows before getting the coverage
-  wait-for-coverage:
-    needs: [test-go-mongo-1, test-go-mongo-2]
-    runs-on: ubuntu-latest
-    steps:
-      - name: wait for all workflows
-        run: echo "All workflows are completed, Now calculating the coverage"
-
   get-coverage:
-    needs: wait-for-coverage
+    needs: [test-go-mongo-1, test-go-mongo-2]
     uses: ./.github/workflows/coverage_stage.yml     
 
