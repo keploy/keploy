@@ -55,18 +55,22 @@ jobs:
           name: coverage-report-html
           path: coverage.html
 
+      - name: Install jq
+        run: sudo apt-get install jq
+
       - name: Get artifact ID
         id: get-artifact
         run: |
-          ARTIFACT_URL=$(curl -H "Authorization: token ${{ github.token }}" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" | \
-            jq -r '.artifacts[] | select(.name=="coverage-report-html") | .archive_download_url')
-          echo "::set-output name=url::$ARTIFACT_URL"
+          ARTIFACTS_JSON=$(curl -H "Authorization: bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts")
+          ARTIFACT_ID=$(echo "$ARTIFACTS_JSON" | jq -r '.artifacts[] | select(.name=="coverage-report-html").id')
+          echo "::set-output name=id::$ARTIFACT_ID"
 
       - name: Post PR comment with direct artifact link
         uses: peter-evans/create-or-update-comment@v1
         with:
           issue-number: ${{ github.event.pull_request.number }}
-          body: "Coverage report is available [here](${{ steps.get-artifact.outputs.url }}) - directly download the 'coverage-report-html' artifact."
-          token: ${{ github.token }}
+          body: |
+            Coverage report is available [here](https://github.com/${{ github.repository }}/suites/${{ github.run_id }}/artifacts/${{ steps.get-artifact.outputs.id }}) - directly download the 'coverage-report-html' artifact.
+          token: ${{ secrets.GITHUB_TOKEN }}
 
