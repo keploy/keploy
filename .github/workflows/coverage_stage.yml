@@ -56,19 +56,6 @@ jobs:
           name: coverage-report-html
           path: coverage.html 
 
-      - name: Comment on PR
-        if: success()
-        uses: actions/github-script@v6
-        with:
-          github-token: ${{ github.token }}
-          script: |
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: "Coverage report is available [here](${{ steps.artifact-upload-step.outputs.artifact-url }}) - directly download the 'coverage-report-html' artifact."
-            }) 
-
   comment-coverage:
     needs: coverage
     uses: ./.github/workflows/comment_coverage.yml
