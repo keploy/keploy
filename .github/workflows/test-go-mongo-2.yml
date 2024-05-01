@@ -48,7 +48,7 @@ jobs:
           echo "You can add the noisy fields in the config file if any."
           
       - name: Run testing script for gin-mongo application
-        uses: keploy/testgpt@test
+        uses: keploy/testgpt@main
         with:
           working-directory: samples-go/gin-mongo
           command: ./ginApp
