@@ -74,3 +74,7 @@ func (t *testUtils) SimulateRequest(ctx context.Context, _ uint64, tc *models.Te
 	}
 	return nil, nil
 }
+
+func formatTime(timeTaken float64) string {
+	return fmt.Sprintf("%s%.3fs%s", "\033[1;34m", timeTaken, "\033[0m")
+}
