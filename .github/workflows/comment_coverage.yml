@@ -4,9 +4,11 @@ on:
     inputs:
       run_id:
         required: true
+        type: string
         description: "The workflow run ID of the coverage calculation workflow"
       pr_number:
         required: true
+        type: string
         description: "The pull request number to comment on"
 
 jobs:
