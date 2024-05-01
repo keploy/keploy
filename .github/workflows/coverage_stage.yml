@@ -72,6 +72,6 @@ jobs:
   comment-coverage:
     needs: coverage
     uses: ./.github/workflows/comment_coverage.yml
-    inputs:
+    with:
       run_id: ${{ github.event.workflow_run.id }}
       pr_number: ${{ github.event.workflow_run.event.inputs.pr_number }}
