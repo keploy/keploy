@@ -29,9 +29,7 @@ jobs:
       - name: Unzip all coverage data zip files
         run: |
           unzip temp-coverage-dir/coverage-reports-samples-go-gin-mongo-0.zip -d unzipped-cov
-          ls -l unzipped-cov
           unzip temp-coverage-dir/coverage-reports-samples-go-gin-mongo-1.zip -d unzipped-cov
-          ls -l unzipped-cov
 
       - name: Combine all coverage data
         run: |
@@ -41,8 +39,28 @@ jobs:
       - name: Calculate total coverage data and remove generated files
         run: |
           go tool covdata textfmt -i="./final-cov" -o="./unfiltered-cov.txt"
-          grep -v "go.keploy.io/server/v2/pkg/graph/generated.go" unfiltered-cov.txt  > total-coverage.txt
+          grep -v "go.keploy.io/server/v2/pkg/graph/generated.go" unfiltered-cov.txt > total-coverage.txt
 
       - name: Display the coverage data
         run: |
-          go tool cover -func total-coverage.txt    
+          go tool cover -func total-coverage.txt 
+
+      - name: Generate HTML coverage report
+        run: |
+          go tool cover -html=total-coverage.txt -o coverage.html
+
+      - name: Upload HTML coverage report
+        uses: actions/upload-artifact@v2
+        with:
+          name: coverage-report-html
+          path: coverage.html
+
+      # This step is hypothetical and assumes the HTML is accessible via a public URL
+      - name: Comment HTML report on PR
+        uses: peter-evans/create-or-update-comment@v1
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            Coverage report is available [here](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}). Navigate to 'Artifacts' to download the HTML report.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
