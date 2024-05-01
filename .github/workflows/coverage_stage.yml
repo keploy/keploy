@@ -44,21 +44,28 @@ jobs:
       - name: Display the coverage data
         run: |
           go tool cover -func total-coverage.txt
+          tail -n 1 total-coverage.txt > coverage-comment.txt
 
-      - name: Generate the HTML coverage report
-        run: |
-          go tool cover -html=total-coverage.txt -o=coverage.html    
-
-      - name: Upload the HTML coverage report
-        id: artifact-upload-step
-        uses: actions/upload-artifact@v4
+      - name: Comment on the PR with the coverage data
+        uses: actions/github-script@v7
         with:
-          name: coverage-report-html
-          path: coverage.html 
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const coverageComment = fs.readFileSync('coverage-comment.txt', 'utf8');
+            github.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: "Total coverage: " + coverageComment,
+            });
+      # - name: Generate the HTML coverage report
+      #   run: |
+      #     go tool cover -html=total-coverage.txt -o=coverage.html    
 
-  comment-coverage:
-    needs: coverage
-    uses: ./.github/workflows/comment_coverage.yml
-    with:
-      run_id: ${{ github.event.workflow_run.id }}
-      pr_number: ${{ github.event.workflow_run.event.inputs.pr_number }}
+      # - name: Upload the HTML coverage report
+      #   id: artifact-upload-step
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: coverage-report-html
+      #     path: coverage.html 
