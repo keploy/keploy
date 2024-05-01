@@ -571,14 +571,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	if testSetStatus == models.TestSetStatusFailed || testSetStatus == models.TestSetStatusPassed {
 		if testSetStatus == models.TestSetStatusFailed {
-			pp.SetColorScheme(models.FailingColorScheme)
+			scheme := models.FailingColorScheme
+			pp.SetColorScheme(formatTime(scheme))
 		} else {
-			pp.SetColorScheme(models.PassingColorScheme)
+			scheme := models.PassingColorScheme
+			pp.SetColorScheme(formatTime(scheme))
 		}
-		if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure); err != nil {
+		if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTime taken: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure, testTimeTaken.Seconds()); err != nil {
 			utils.LogError(r.logger, err, "failed to print testrun summary")
 		}
-		fmt.Printf("\tTime taken: %s\n <=========================================> \n\n", formatTime(testTimeTaken.Seconds()))
 	}
 
 	r.telemetry.TestSetRun(testReport.Success, testReport.Failure, testSetID, string(testSetStatus))
@@ -635,15 +636,16 @@ func (r *Replayer) printSummary(ctx context.Context, testRunResult bool) {
 		}
 		for _, testSuiteName := range testSuiteNames {
 			if completeTestReport[testSuiteName].status {
-				pp.SetColorScheme(models.PassingColorScheme)
+				scheme := models.PassingColorScheme
+				pp.SetColorScheme(formatTime(scheme))
 			} else {
-				pp.SetColorScheme(models.FailingColorScheme)
+				scheme := models.FailingColorScheme
+				pp.SetColorScheme(formatTime(scheme))
 			}
-			if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed); err != nil {
+			if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed, completeTestReport[testSuiteName].timeTaken); err != nil {
 				utils.LogError(r.logger, err, "failed to print test suite details")
 				return
 			}
-			fmt.Printf("\t\t%s", formatTime(completeTestReport[testSuiteName].timeTaken))
 		}
 		if _, err := pp.Printf("\n<=========================================> \n\n"); err != nil {
 			utils.LogError(r.logger, err, "failed to print separator")
@@ -735,4 +737,9 @@ func (r *Replayer) ProvideMocks(ctx context.Context) error {
 	}
 	<-ctx.Done()
 	return nil
+}
+
+func formatTime(scheme pp.ColorScheme) pp.ColorScheme {
+	scheme.Float = pp.Blue | pp.Bold
+	return scheme
 }
