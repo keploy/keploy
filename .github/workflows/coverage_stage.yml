@@ -55,12 +55,11 @@ jobs:
           name: coverage-report-html
           path: coverage.html
 
-      # This step is hypothetical and assumes the HTML is accessible via a public URL
-      - name: Comment HTML report on PR
+      - name: Post PR comment with artifact link
         uses: peter-evans/create-or-update-comment@v1
         with:
           issue-number: ${{ github.event.pull_request.number }}
           body: |
-            Coverage report is available [here](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}). Navigate to 'Artifacts' to download the HTML report.
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            Coverage report is available [here](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts) - look for the 'coverage-report-html' artifact.
+          token: ${{ github.token }}
+
