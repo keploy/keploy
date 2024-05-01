@@ -35,12 +35,13 @@ jobs:
 
       - name: Combine all coverage data
         run: |
-          go tool covdata merge -i=./unzipped-cov -o=./final-cov
+          find unzipped-cov -mindepth 1 -maxdepth 1 -type d -exec echo {} \; >> cov-dirs.txt
+          go tool covdata merge  -o final-cov -i=`cat cov-dirs.txt | paste -sd ","`
 
-      - name: Calculate total coverage data
+      - name: Calculate total coverage data and remove generated files
         run: |
-          go tool covdata textfmt -i="./final-cov" -o="./unfiltered.txt"
-          grep -v "go.keploy.io/server/v2/pkg/graph/generated.go" unfiltered.txt  > total-coverage.txt
+          go tool covdata textfmt -i="./final-cov" -o="./unfiltered-cov.txt"
+          grep -v "go.keploy.io/server/v2/pkg/graph/generated.go" unfiltered-cov.txt  > total-coverage.txt
 
       - name: Display the coverage data
         run: |
