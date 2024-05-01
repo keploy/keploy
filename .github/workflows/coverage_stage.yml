@@ -56,9 +56,19 @@ jobs:
           name: coverage-report-html
           path: coverage.html 
 
-  comment-coverage:
-    needs: coverage
-    uses: ./.github/workflows/comment_coverage.yml  
-    with: 
-        issue-number: ${{ github.event.pull_request.number }}
-        artifact-url: ${{ steps.artifact-upload-step.outputs.artifact-url }}      
+      - name: Comment Coverage on PR
+        if: success()
+        runs-on: ubuntu-latest
+        steps:
+          - name: Trigger Comment Workflow
+            uses: actions/github-script@v7
+            with:
+              github-token: ${{ secrets.GITHUB_TOKEN }}
+              script: |
+                await github.actions.workflowDispatch({
+                  workflow_file: '.github/workflows/comment_coverage.yml',  
+                  inputs: {
+                    issue-number: ${{ github.event.client_payload.issue-number }},
+                    artifact-url: ${{ steps.artifact-upload-step.outputs.artifact-url }}
+                  }
+                })     
