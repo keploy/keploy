@@ -6,7 +6,13 @@ on:
       issue-number:
         required: true
         type: number
+      artifact-url:
+        required: true
+        type: string  
 
+permissions:
+  pull-requests: write
+  issues: write
 
 jobs:
   comment-coverage:
@@ -15,18 +21,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v2
 
-      - name: Download the coverage report
-        id: coverage-artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: coverage-report-html
-          path: /tmp
-
       - name: Comment HTML report on PR
         uses: peter-evans/create-or-update-comment@v1
         with:
           issue-number: ${{ inputs.issue-number }}
           body: |
-            Coverage report is available [here](${{ steps.upload-artifacts.outputs.artifact-url }}). Navigate to 'Artifacts' to download the HTML report.
+            Coverage report is available [here](${{inputs.artifact-url}}). Navigate to 'Artifacts' to download the HTML report.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

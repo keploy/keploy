@@ -60,4 +60,5 @@ jobs:
     needs: coverage
     uses: ./.github/workflows/comment_coverage.yml  
     with: 
-        issue-number: ${{ github.event.pull_request.number }}      
+        issue-number: ${{ github.event.pull_request.number }}
+        artifact-url: ${{ steps.artifact-upload-step.outputs.artifact-url }}      
