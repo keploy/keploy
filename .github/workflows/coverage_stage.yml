@@ -45,26 +45,21 @@ jobs:
         run: |
           go tool cover -func total-coverage.txt
 
-      - name: Upload the coverage report
-        uses: actions/upload-artifact@v2
-        with:
-          name: coverage-report
-          path: total-coverage.txt
+      - name: Generate the HTML coverage report
+        run: |
+          go tool cover -html=total-coverage.txt -o=coverage.html    
 
-      - name: Download the coverage report
-        uses: actions/download-artifact@v2
+      - name: Upload the HTML coverage report
+        id: artifact-upload-step
+        uses: actions/upload-artifact@v4
         with:
-          name: coverage-report
-          path: ./coverage-report
-          run: |
-            ls -l ./coverage-report 
+          name: coverage-report-html
+          path: coverage.html 
 
-  display-coverage:
-    runs-on: ubuntu-latest
-    needs: coverage
-    steps:
-      - name: "Code coverage report"
-        uses: fgrosse/go-coverage-report@v1.0.1 # Consider using a Git revision for maximum security
+      - name: Post PR comment with direct artifact link
+        uses: peter-evans/create-or-update-comment@v1
         with:
-          coverage-artifact-name: "coverage-report" # can be omitted if you used this default value
-          coverage-file-name: "total-coverage.txt" # can be omitted if you used this default value    
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            Coverage report is available [here](${{ steps.artifact-upload-step.outputs.artifact-url }}) - directly download the 'coverage-report-html' artifact.
+          token: ${{ secrets.GITHUB_TOKEN }}        
