@@ -45,30 +45,30 @@ jobs:
         run: |
           go tool cover -func total-coverage.txt
 
-      - name: Generate the HTML coverage report
-        run: |
-          go tool cover -html=total-coverage.txt -o=coverage.html    
+      # - name: Generate the HTML coverage report
+      #   run: |
+      #     go tool cover -html=total-coverage.txt -o=coverage.html    
 
-      - name: Upload the HTML coverage report
-        id: artifact-upload-step
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report-html
-          path: coverage.html 
+      # - name: Upload the HTML coverage report
+      #   id: artifact-upload-step
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: coverage-report-html
+      #     path: coverage.html 
 
-      - name: Comment Coverage on PR
-        if: success()
-        runs-on: ubuntu-latest
-        steps:
-          - name: Trigger Comment Workflow
-            uses: actions/github-script@v7
-            with:
-              github-token: ${{ secrets.GITHUB_TOKEN }}
-              script: |
-                await github.actions.workflowDispatch({
-                  workflow_file: '.github/workflows/comment_coverage.yml',  
-                  inputs: {
-                    issue-number: ${{ github.event.client_payload.issue-number }},
-                    artifact-url: ${{ steps.artifact-upload-step.outputs.artifact-url }}
-                  }
-                })     
+      # - name: Comment Coverage on PR
+      #   if: success()
+      #   runs-on: ubuntu-latest
+      #   steps:
+      #     - name: Trigger Comment Workflow
+      #       uses: actions/github-script@v7
+      #       with:
+      #         github-token: ${{ secrets.GITHUB_TOKEN }}
+      #         script: |
+      #           await github.actions.workflowDispatch({
+      #             workflow_file: '.github/workflows/comment_coverage.yml',  
+      #             inputs: {
+      #               issue-number: ${{ github.event.client_payload.issue-number }},
+      #               artifact-url: ${{ steps.artifact-upload-step.outputs.artifact-url }}
+      #             }
+      #           })     

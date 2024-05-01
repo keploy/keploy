@@ -1,31 +1,31 @@
-name: Comment Coverage on PR
+# name: Comment Coverage on PR
 
-on:
-  workflow_call:
-    inputs:
-      issue-number:
-        required: true
-        type: number
-      artifact-url:
-        required: true
-        type: string  
+# on:
+#   workflow_call:
+#     inputs:
+#       issue-number:
+#         required: true
+#         type: number
+#       artifact-url:
+#         required: true
+#         type: string  
 
-# permissions:
-#   pull-requests: write
-#   issues: write
+# # permissions:
+# #   pull-requests: write
+# #   issues: write
 
-jobs:
-  comment-coverage:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v2
+# jobs:
+#   comment-coverage:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - name: Checkout repository
+#         uses: actions/checkout@v2
 
-      - name: Comment HTML report on PR
-        uses: peter-evans/create-or-update-comment@v1
-        with:
-          issue-number: ${{ inputs.issue-number }}
-          body: |
-            Coverage report is available [here](${{inputs.artifact-url}}). Navigate to 'Artifacts' to download the HTML report.
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#       - name: Comment HTML report on PR
+#         uses: peter-evans/create-or-update-comment@v1
+#         with:
+#           issue-number: ${{ inputs.issue-number }}
+#           body: |
+#             Coverage report is available [here](${{inputs.artifact-url}}). Navigate to 'Artifacts' to download the HTML report.
+#         env:
+#           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
