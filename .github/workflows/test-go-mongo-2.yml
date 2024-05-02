@@ -46,8 +46,6 @@ jobs:
       - name: Add noisy fields in the config file
         run: |
           echo "You can add the noisy fields in the config file if any."
-          pwd
-          ls
           
       - name: Run testing script for gin-mongo application
         uses: ./.github/actions/tester

@@ -132,7 +132,7 @@ echo "Mock assertion prepared successfully 🎉"
 delete_if_exists "$pre_rec/keploy/reports"
 
 ## Run tests for pre-recorded test cases
-sudo -E env PATH=$PATH keployH test -c "${COMMAND}" --delay ${DELAY} --path "$pre_rec" --generateGithubActions=false
+sudo -E env PATH=$PATH keployR test -c "${COMMAND}" --delay ${DELAY} --path "$pre_rec" --generateGithubActions=false
 
 sleep 2
 
@@ -147,7 +147,7 @@ echo "New mocks are consistent with the pre-recorded mocks 🎉"
 
 
 ## Run tests for test-bench-recorded test cases
-sudo -E env PATH=$PATH keployH test -c "${COMMAND}" --delay ${DELAY} --path "$test_bench_rec" --generateGithubActions=false
+sudo -E env PATH=$PATH keployR test -c "${COMMAND}" --delay ${DELAY} --path "$test_bench_rec" --generateGithubActions=false
 
 sleep 2
 
