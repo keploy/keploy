@@ -169,6 +169,29 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	switch cmd.Name() {
 	case "update":
 		return nil
+	case "normalise":
+		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated config is stored")
+		cmd.Flags().String("test-run", "", "Test Run to be normalised")
+		cmd.Flags().String("test-sets", "", "Test Sets to be normalised")
+		cmd.Flags().String("test-cases", "", "Test Cases to be normalised")
+		err = cmd.MarkFlagRequired("test-run")
+		if err != nil {
+			errMsg := "failed to mark test-run as required flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		err = cmd.MarkFlagRequired("test-cases")
+		if err != nil {
+			errMsg := "failed to mark test-cases as required flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		err = cmd.MarkFlagRequired("test-sets")
+		if err != nil {
+			errMsg := "failed to mark test-sets as required flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
 	case "config":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated config is stored")
 		cmd.Flags().Bool("generate", false, "Generate a new keploy configuration file")
@@ -398,9 +421,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					return errors.New("missing required --containerName flag or containerName in config file")
 				}
 			}
-
 		}
-
 		err = utils.StartInDocker(ctx, c.logger, c.cfg)
 		if err != nil {
 			return err
@@ -448,6 +469,24 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 		}
+	case "normalise":
+		path := c.cfg.Path
+		//if user provides relative path
+		if len(path) > 0 && path[0] != '/' {
+			absPath, err := filepath.Abs(path)
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get the absolute path from relative path")
+			}
+			path = absPath
+		} else if len(path) == 0 { // if user doesn't provide any path
+			cdirPath, err := os.Getwd()
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get the path of current directory")
+			}
+			path = cdirPath
+		}
+		path += "/keploy"
+		c.cfg.Path = path
 	}
 	return nil
 }
