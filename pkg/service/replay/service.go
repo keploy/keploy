@@ -62,5 +62,5 @@ type Telemetry interface {
 // the recorded test case of the user app.
 type RequestEmulator interface {
 	SimulateRequest(ctx context.Context, appID uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error)
-	AfterTestHook(ctx context.Context, testRunID, testSetID string) (*models.TestReport, error)
+	AfterTestHook(ctx context.Context, testRunID, testSetID string, totalTestSets int) (*models.TestReport, error)
 }
