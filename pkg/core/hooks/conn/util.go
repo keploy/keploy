@@ -50,7 +50,6 @@ func convertUnixNanoToTime(unixNano uint64) time.Time {
 }
 
 func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptions) bool {
-	filtered := false
 	destPort, err := strconv.Atoi(strings.Split(req.Host, ":")[1])
 	if err != nil {
 		utils.LogError(logger, err, "failed to obtain destination port from request")
@@ -60,7 +59,18 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 
 	for _, filter := range opts.Filters {
 		bypassRules = append(bypassRules, filter.BypassRule)
+	}
 
+	// Host, Path and Port matching
+	headerOpts := models.OutgoingOptions{
+		Rules:          bypassRules,
+		MongoPassword:  "",
+		SQLDelay:       0,
+		FallBackOnMiss: false,
+	}
+	passThrough := proxyHttp.IsPassThrough(logger, req, uint(destPort), headerOpts)
+
+	for _, filter := range opts.Filters {
 		if filter.URLMethods != nil && len(filter.URLMethods) != 0 {
 			urlMethodMatch := false
 			for _, method := range filter.URLMethods {
@@ -69,8 +79,8 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 					break
 				}
 			}
-			filtered = urlMethodMatch
-			if !filtered {
+			passThrough = urlMethodMatch
+			if !passThrough {
 				continue
 			}
 		}
@@ -90,21 +100,15 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 						}
 					}
 				}
-				filtered = headerMatch
-				if filtered {
+				passThrough = headerMatch
+				if passThrough {
 					break
 				}
 			}
 		}
 	}
 
-	headerOpts := models.OutgoingOptions{
-		Rules:          bypassRules,
-		MongoPassword:  "",
-		SQLDelay:       0,
-		FallBackOnMiss: false,
-	}
-	return proxyHttp.IsPassThrough(logger, req, uint(destPort), headerOpts)
+	return passThrough
 }
 
 //// LogAny appends input of any type to a logs.txt file in the current directory
