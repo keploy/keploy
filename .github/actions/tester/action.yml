@@ -24,9 +24,15 @@ inputs:
     description: Time to start application
     required: true
     default: 10
-  ci-mode:
-    description: The CI mode specifies whether the Keploy binary should be hosted and which one should be built. "recordHosted-testBuild" (0) or "recordBuild-testHosted" (1).
+  keploy-record-bin:
+    description: Path to keploy record binary (Build or Released)
     required: true
+  keploy-test-bin:
+    description: Path to keploy test binary (Build or Released)
+    required: true
+  mode:
+    description: Mode to identify the workflow type
+    required: true    
 
 runs:
   using: "composite"
@@ -38,7 +44,9 @@ runs:
         echo "Keploy Path: ${{ inputs.keploy-path }}"
         echo "Config Path: ${{ inputs.config-path }}"
         echo "Delay: ${{ inputs.delay }}"
-        echo "CI Mode: ${{ inputs.ci-mode }}"
+        echo "Keploy Record Binary: ${{ inputs.keploy-record-bin }}"
+        echo "Keploy Test Binary: ${{ inputs.keploy-test-bin }}"
+        echo "Mode: ${{ inputs.mode }}"
       shell: bash
 
     - name: Grant permissions
@@ -56,7 +64,9 @@ runs:
         KEPLOY_PATH: ${{inputs.keploy-path}}
         CONFIG_PATH: ${{inputs.config-path}}
         DELAY: ${{ inputs.delay }}
-        CI_MODE: ${{ inputs.ci-mode }}
+        KEPLOY_RECORD_BIN: ${{ inputs.keploy-record-bin }}
+        KEPLOY_TEST_BIN: ${{ inputs.keploy-test-bin }}
+        MODE: ${{ inputs.mode }}
 
     - name: Get coverage data and zip it
       if: success()
@@ -67,7 +77,7 @@ runs:
         workdir="${workdir//\//-}"
         workdir="${workdir%-}"
         
-        coverage="coverage-reports-${workdir}-${{ inputs.ci-mode }}"
+        coverage="coverage-reports-${workdir}-${{ inputs.mode }}"
         mv ${{ inputs.working-directory }}/coverage-reports ./$coverage
         echo "coverage=$coverage"
         echo "::set-output name=coverage_name::$coverage"

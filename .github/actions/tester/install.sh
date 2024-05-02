@@ -75,14 +75,14 @@ fi
 # Loop over each directory stored in 'test_sets'
 for dir in $test_sets; do
     echo "Recording and replaying for (test-set): $dir"
-    #CI_MODE (0, recordHosted,testBuild) , (1, recordBuild, testHosted)
-    if [ "$CI_MODE" -eq 0 ]; then
+# MODE (0, recordHosted,testBuild) , (1, recordBuild, testHosted)
+    if [ "$MODE" -eq 0 ]; then
         echo "Latest version of keploy is being used for recording, Build version of keploy is being used for testing" 
-        sudo -E env PATH=$PATH keployH record -c "sudo -E env PATH=$PATH keployB test -c '${COMMAND}' --proxyPort 56789 --dnsPort 46789  --delay=${DELAY} --testsets $dir --configPath '${CONFIG_PATH}' --path '$pre_rec' --enableTesting --generateGithubActions=false" --path "./test-bench/" --proxyPort=36789 --dnsPort 26789 --configPath "${CONFIG_PATH}" --enableTesting --generateGithubActions=false 
     else
         echo "Build version of keploy is being used for recording, Latest version of keploy is being used for testing" 
-        sudo -E env PATH=$PATH keployB record -c "sudo -E env PATH=$PATH keployH test -c '${COMMAND}' --proxyPort 56789 --dnsPort 46789  --delay=${DELAY} --testsets $dir --configPath '${CONFIG_PATH}' --path '$pre_rec' --enableTesting --generateGithubActions=false" --path "./test-bench/" --proxyPort=36789 --dnsPort 26789 --configPath "${CONFIG_PATH}" --enableTesting --generateGithubActions=false 
     fi
+   
+    sudo -E env PATH=$PATH ${KEPLOY_RECORD_BIN} record -c "sudo -E env PATH=$PATH ${KEPLOY_TEST_BIN} test -c '${COMMAND}' --proxyPort 56789 --dnsPort 46789  --delay=${DELAY} --testsets $dir --configPath '${CONFIG_PATH}' --path '$pre_rec' --enableTesting --generateGithubActions=false" --path "./test-bench/" --proxyPort=36789 --dnsPort 26789 --configPath "${CONFIG_PATH}" --enableTesting --generateGithubActions=false 
     # Wait for 1 second before new test-set
     sleep 1
 done
