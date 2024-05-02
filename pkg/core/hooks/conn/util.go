@@ -2,6 +2,8 @@ package conn
 
 import (
 	"fmt"
+	"go.keploy.io/server/v2/config"
+	proxyHttp "go.keploy.io/server/v2/pkg/core/proxy/integrations/http"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -49,30 +51,16 @@ func convertUnixNanoToTime(unixNano uint64) time.Time {
 
 func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptions) bool {
 	filtered := false
+	destPort, err := strconv.Atoi(strings.Split(req.Host, ":")[1])
+	if err != nil {
+		utils.LogError(logger, err, "failed to obtain destination port from request")
+		return false
+	}
+	var bypassRules []config.BypassRule
 
 	for _, filter := range opts.Filters {
-		if filter.Host != "" {
-			regex, err := regexp.Compile(filter.Host)
-			if err != nil {
-				utils.LogError(logger, err, "failed to compile the host regex")
-				continue
-			}
-			filtered = regex.MatchString(req.Host)
-			if !filtered {
-				continue
-			}
-		}
-		if filter.Path != "" {
-			regex, err := regexp.Compile(filter.Path)
-			if err != nil {
-				utils.LogError(logger, err, "failed to compile the path regex")
-				continue
-			}
-			filtered = regex.MatchString(req.URL.String())
-			if !filtered {
-				continue
-			}
-		}
+		bypassRules = append(bypassRules, filter.BypassRule)
+
 		if filter.URLMethods != nil && len(filter.URLMethods) != 0 {
 			urlMethodMatch := false
 			for _, method := range filter.URLMethods {
@@ -108,22 +96,15 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 				}
 			}
 		}
-
-		destPort, err := strconv.Atoi(strings.Split(req.Host, ":")[1])
-		if err != nil {
-			utils.LogError(logger, err, "failed to obtain destination port from request")
-			return filtered
-		}
-		if filtered {
-			if filter.Port == 0 || filter.Port == uint(destPort) {
-				return true
-			}
-			filtered = false
-		}
-
 	}
 
-	return filtered
+	headerOpts := models.OutgoingOptions{
+		Rules:          bypassRules,
+		MongoPassword:  "",
+		SQLDelay:       0,
+		FallBackOnMiss: false,
+	}
+	return proxyHttp.IsPassThrough(logger, req, uint(destPort), headerOpts)
 }
 
 //// LogAny appends input of any type to a logs.txt file in the current directory
