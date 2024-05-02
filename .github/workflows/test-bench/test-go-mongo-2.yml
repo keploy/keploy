@@ -1,4 +1,4 @@
-name: Test GinApp 1
+name: Test GinApp 2
 on:
   workflow_call:
 
@@ -7,7 +7,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Download Keploy Build Binary
         uses: actions/download-artifact@v4
@@ -31,7 +31,7 @@ jobs:
           sudo chmod a+x pilot && sudo mkdir -p /usr/local/bin && sudo mv pilot /usr/local/bin
 
       - name: Checkout to the samples-go repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           repository: keploy/samples-go
           ref: native-linux
@@ -46,18 +46,13 @@ jobs:
       - name: Add noisy fields in the config file
         run: |
           echo "You can add the noisy fields in the config file if any."
+          pwd
+          ls
           
       - name: Run testing script for gin-mongo application
-        uses: keploy/testgpt@main
+        uses: ./.github/actions/tester
         with:
           working-directory: samples-go/gin-mongo
           command: ./ginApp
           delay: 7
-          ci-mode: 0
-
-      - name: Get and Upload the coverage data
-        run: |
-          echo "You can get and upload the coverage data here."
-#          echo "You can use the following command to get the coverage data:"
-#          echo "go tool cover -html=coverage.out -o coverage.html"
-      
+          ci-mode: 1
