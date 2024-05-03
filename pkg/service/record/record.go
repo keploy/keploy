@@ -340,7 +340,7 @@ func (r *Recorder) ReRecord(ctx context.Context) error {
 			continue // Proceed with the next command
 		}
 
-		if err := waitForPort(ctx, host, port); err != nil {
+		if err := waitForPort(ctx, host, &port); err != nil {
 			r.logger.Error("Waiting for port failed", zap.String("host", host), zap.String("port", port), zap.Error(err))
 			allTestCasesRecorded = false
 			continue // Proceed with the next command
