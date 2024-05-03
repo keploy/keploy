@@ -370,13 +370,13 @@ func (r *Recorder) ReRecord(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			err = utils.Stop(r.logger, "Re-recorded all HTTP commands successfully")
+			err = utils.Stop(r.logger, "Re-recorded testcases successfully")
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to stop recording")
 			}
 		}
 	} else {
-		err = utils.Stop(r.logger, "Failed to re-record some HTTP commands")
+		err = utils.Stop(r.logger, "Failed to re-record some testcases")
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
