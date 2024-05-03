@@ -353,7 +353,7 @@ func (r *Recorder) ReRecord(ctx context.Context) error {
 			continue // Proceed with the next command
 		}
 
-		r.logger.Debug("Re-recorded HTTP command successfully", zap.String("curl", tc.Curl), zap.Any("response", (resp)))
+		r.logger.Debug("Re-recorded testcases successfully", zap.String("curl", tc.Curl), zap.Any("response", (resp)))
 
 		select {
 		case <-ctx.Done():
