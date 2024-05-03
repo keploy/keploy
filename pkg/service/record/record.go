@@ -330,21 +330,20 @@ func (r *Recorder) ReRecord(ctx context.Context) error {
 
 	tcs, err := r.testDB.GetTestCases(ctx, r.config.ReRecord)
 	fmt.Print(tcs)
+	host, port, err := extractHostAndPort(tcs[0].Curl)
+	if err != nil {
+		r.logger.Error("Failed to extract host and port", zap.Error(err))
+		return nil
+
+	}
+
+	if err := waitForPort(ctx, host, port); err != nil {
+		r.logger.Error("Waiting for port failed", zap.String("host", host), zap.String("port", port), zap.Error(err))
+		return nil
+	}
 
 	allTestCasesRecorded := true
 	for _, tc := range tcs {
-		host, port, err := extractHostAndPort(tc.Curl)
-		if err != nil {
-			r.logger.Error("Failed to extract host and port", zap.Error(err))
-			allTestCasesRecorded = false
-			continue // Proceed with the next command
-		}
-
-		if err := waitForPort(ctx, host, port); err != nil {
-			r.logger.Error("Waiting for port failed", zap.String("host", host), zap.String("port", port), zap.Error(err))
-			allTestCasesRecorded = false
-			continue // Proceed with the next command
-		}
 
 		resp, err := pkg.SimulateHTTP(ctx, *tc, r.config.ReRecord, r.logger, r.config.Test.APITimeout)
 		if err != nil {
