@@ -26,6 +26,7 @@ type Service interface {
 type TestDB interface {
 	GetAllTestSetIDs(ctx context.Context) ([]string, error)
 	InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string) error
+	GetTestCases(ctx context.Context, testId string) ([]*models.TestCase, error)
 }
 
 type MockDB interface {

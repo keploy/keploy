@@ -5,23 +5,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path"
-	"path/filepath"
-	"sort"
-	"strings"
 
 	"time"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/platform/yaml"
-	"go.keploy.io/server/v2/pkg/platform/yaml/testdb"
+
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
-	yamlLib "gopkg.in/yaml.v3"
 )
 
 type Recorder struct {
@@ -334,121 +327,60 @@ func (r *Recorder) StartMock(ctx context.Context) error {
 }
 
 func (r *Recorder) ReRecord(ctx context.Context) error {
-    tcs, err := r.ReadTestCase()
-    if err != nil {
-        utils.LogError(r.logger, err, "failed to read test cases")
-        return fmt.Errorf("failed to read test cases")
-    }
 
-    allTestCasesRecorded := true
-    for _, tc := range tcs {
-        host, port, err := extractHostAndPort(tc.Curl)
-        if err != nil {
-            r.logger.Error("Failed to extract host and port", zap.Error(err))
-            allTestCasesRecorded = false
-            continue // Proceed with the next command
-        }
+	tcs, err := r.testDB.GetTestCases(ctx, r.config.ReRecord)
+	fmt.Print(tcs)
 
-        if err := waitForPort(ctx, host, port); err != nil {
-            r.logger.Error("Waiting for port failed", zap.String("host", host), zap.String("port", port), zap.Error(err))
-            allTestCasesRecorded = false
-            continue // Proceed with the next command
-        }
-
-        resp, err := pkg.SimulateHTTP(ctx, *tc, r.config.ReRecord, r.logger, r.config.Test.APITimeout)
-        if err != nil {
-            r.logger.Error("Failed to simulate HTTP request", zap.Error(err))
-            allTestCasesRecorded = false
-            continue // Proceed with the next command
-        }
-
-        r.logger.Debug("Re-recorded HTTP command successfully", zap.String("curl", tc.Curl), zap.Any("response", (resp)))
-
-        select {
-        case <-ctx.Done():
-            return ctx.Err()
-        default:
-        }
-    }
-
-    if allTestCasesRecorded {
-        ticker := time.NewTicker(10 * time.Second)
-        defer ticker.Stop()
-
-        select {
-        case <-ctx.Done():
-            return ctx.Err()
-        case <-ticker.C:
-            err = utils.Stop(r.logger, "Re-recorded all HTTP commands successfully")
-            if err != nil {
-                utils.LogError(r.logger, err, "failed to stop recording")
-            }
-        }
-    } else {
-        err = utils.Stop(r.logger, "Failed to re-record some HTTP commands")
-        if err != nil {
-            utils.LogError(r.logger, err, "failed to stop recording")
-        }
-    }
-
-    return nil
-}
-func (r *Recorder) ReadTestCase() ([]*models.TestCase, error) {
-	testSet := r.config.ReRecord
-	// Construct the full path to the test cases directory.
-	testCasesPath := path.Join(r.config.Path, testSet, "tests")
-
-	// Validate the path.
-	validPath, err := yaml.ValidatePath(testCasesPath)
-	if err != nil {
-		return nil, err
-	}
-
-	// Check if the directory exists.
-	if _, err := os.Stat(validPath); err != nil {
-		r.logger.Debug("No tests are recorded for the session", zap.String("index", testSet))
-		return []*models.TestCase{}, nil // Return an empty slice instead of nil.
-	}
-
-	// Read the directory.
-	files, err := os.ReadDir(validPath)
-	if err != nil {
-		utils.LogError(r.logger, err, "Failed to open the directory containing yaml testcases", zap.Any("path", validPath))
-		return nil, err
-	}
-
-	var tcs []*models.TestCase
-	for _, file := range files {
-		if filepath.Ext(file.Name()) != ".yaml" || strings.Contains(file.Name(), "mocks") {
-			continue
-		}
-
-		filePath := filepath.Join(validPath, file.Name())
-		data, err := os.ReadFile(filePath) // Simplified file reading.
+	allTestCasesRecorded := true
+	for _, tc := range tcs {
+		host, port, err := extractHostAndPort(tc.Curl)
 		if err != nil {
-			utils.LogError(r.logger, err, "Failed to read the testcase from yaml", zap.String("file", filePath))
-			continue // Consider whether to continue or return an error.
+			r.logger.Error("Failed to extract host and port", zap.Error(err))
+			allTestCasesRecorded = false
+			continue // Proceed with the next command
 		}
 
-		var testCase yaml.NetworkTrafficDoc
-		if err := yamlLib.Unmarshal(data, &testCase); err != nil {
-			utils.LogError(r.logger, err, "Failed to unmarshall YAML data", zap.String("file", filePath))
-			continue // Consider whether to continue or return an error.
+		if err := waitForPort(ctx, host, port); err != nil {
+			r.logger.Error("Waiting for port failed", zap.String("host", host), zap.String("port", port), zap.Error(err))
+			allTestCasesRecorded = false
+			continue // Proceed with the next command
 		}
 
-		tc, err := testdb.Decode(&testCase, r.logger) // Assuming Decode exists and works correctly.
+		resp, err := pkg.SimulateHTTP(ctx, *tc, r.config.ReRecord, r.logger, r.config.Test.APITimeout)
 		if err != nil {
-			utils.LogError(r.logger, err, "Failed to decode the testcase", zap.String("file", filePath))
-			continue // Consider whether to continue or return an error.
+			r.logger.Error("Failed to simulate HTTP request", zap.Error(err))
+			allTestCasesRecorded = false
+			continue // Proceed with the next command
 		}
 
-		tcs = append(tcs, tc)
+		r.logger.Debug("Re-recorded HTTP command successfully", zap.String("curl", tc.Curl), zap.Any("response", (resp)))
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 	}
 
-	// Sort the slice before returning.
-	sort.SliceStable(tcs, func(i, j int) bool {
-		return tcs[i].HTTPReq.Timestamp.Before(tcs[j].HTTPReq.Timestamp)
-	})
+	if allTestCasesRecorded {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
 
-	return tcs, nil
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			err = utils.Stop(r.logger, "Re-recorded all HTTP commands successfully")
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to stop recording")
+			}
+		}
+	} else {
+		err = utils.Stop(r.logger, "Failed to re-record some HTTP commands")
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to stop recording")
+		}
+	}
+
+	return nil
 }
