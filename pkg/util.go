@@ -77,6 +77,17 @@ func IsTime(stringDate string) bool {
 	return false
 }
 
+func CreateGitIgnore( logger *zap.Logger,filePath string) error {
+	gitIgnoreData := []byte("./reports/\n")
+	err := os.WriteFile(filePath, gitIgnoreData, 0777)
+	if err != nil {
+		utils.LogError(logger, err, "failed to write gitignore file")
+		return err
+	}
+	logger.Info("Gitignore file generated successfully")
+	return nil
+}
+
 func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HTTPResp, error) {
 	var resp *models.HTTPResp
 

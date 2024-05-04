@@ -5,8 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
 	"go.keploy.io/server/v2/config"
@@ -180,15 +178,10 @@ func (r *Recorder) Start(ctx context.Context) error {
 				r.telemetry.RecordedTestCaseMock(mock.GetKind())
 			}
 		}
-		//create  a gitignore file to ignore the test reports folder
-		gitIgnorePath := filepath.Join(r.config.Path, ".gitignore")
-		gitIgnoreData := []byte("./reports/\n")
-		err = os.WriteFile(gitIgnorePath, gitIgnoreData, 0777)
+		err := pkg.CreateGitIgnore(r.logger, r.config.Path)
 		if err != nil {
 			return err
 		}
-		r.logger.Debug("Created Gitignore file to ignore the test reports folder", zap.String("path", gitIgnorePath))
-
 		return nil
 	})
 

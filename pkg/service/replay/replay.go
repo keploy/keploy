@@ -539,6 +539,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusInternalErr, fmt.Errorf("failed to insert report")
 	}
 
+	err = pkg.CreateGitIgnore(r.logger, r.config.Path)
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to write gitignore file")
+		return models.TestSetStatusInternalErr, fmt.Errorf("failed to write gitignore file")
+	}
+
 	// remove the unused mocks by the test cases of a testset
 	if r.config.Test.RemoveUnusedMocks && testSetStatus == models.TestSetStatusPassed {
 		r.logger.Debug("consumed mocks from the completed testset", zap.Any("for test-set", testSetID), zap.Any("consumed mocks", totalConsumedMocks))
