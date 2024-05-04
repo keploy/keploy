@@ -1,0 +1,57 @@
+name: Calculate Coverage
+on:
+  workflow_call:
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create directories to store coverage data
+        run: |
+          mkdir -p unzipped-cov
+          mkdir -p final-cov
+
+      - name: Download first coverage data of gin-mongo application
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-reports-samples-go-gin-mongo-0
+          path: ./temp-coverage-dir
+
+      - name: Download second coverage data of gin-mongo application 
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-reports-samples-go-gin-mongo-1
+          path: ./temp-coverage-dir
+
+      - name: Unzip all coverage data zip files
+        run: |
+          unzip temp-coverage-dir/coverage-reports-samples-go-gin-mongo-0.zip -d unzipped-cov
+          unzip temp-coverage-dir/coverage-reports-samples-go-gin-mongo-1.zip -d unzipped-cov
+
+      - name: Combine all coverage data
+        run: |
+          find unzipped-cov -mindepth 1 -maxdepth 1 -type d -exec echo {} \; >> cov-dirs.txt
+          go tool covdata merge  -o final-cov -i=`cat cov-dirs.txt | paste -sd ","`
+
+      - name: Calculate total coverage data and remove generated files
+        run: |
+          go tool covdata textfmt -i="./final-cov" -o="./unfiltered-cov.txt"
+          grep -v "go.keploy.io/server/v2/pkg/graph/generated.go" unfiltered-cov.txt > total-coverage.txt
+
+      - name: Display the coverage data
+        run: |
+          go tool cover -func total-coverage.txt
+
+      # - name: Generate the HTML coverage report
+      #   run: |
+      #     go tool cover -html=total-coverage.txt -o=coverage.html    
+
+      # - name: Upload the HTML coverage report
+      #   id: artifact-upload-step
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: coverage-report-html
+      #     path: coverage.html 
