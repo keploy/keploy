@@ -13,14 +13,12 @@ import (
 	"time"
 
 	"github.com/k0kubun/pp/v3"
-	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
-	"gopkg.in/yaml.v2"
 )
 
 var completeTestReport = make(map[string]TestReportVerdict)
@@ -730,81 +728,81 @@ func (r *Replayer) ProvideMocks(ctx context.Context) error {
 	return nil
 }
 
-// Normalise initiates the normalise process for normalising the test cases.
-func (r *Replayer) Normalise(_ context.Context, cfg *config.Config) error {
-	path := cfg.Path
-	testSets := viper.GetString("test-sets")
-	testCases := viper.GetString("test-cases")
-	testRun := viper.GetString("test-run")
-	r.logger.Info("Test cases and Mock Path", zap.String("path", path))
-	testRunPath := filepath.Join(path, "reports", testRun)
-	r.logger.Info("Test Run Folder", zap.String("folder", testRunPath))
-	// Get list of YAML files in the test run folder
-	files, err := os.ReadDir(testRunPath)
-	if err != nil {
-		utils.LogError(r.logger, err, "Failed to read directory")
-		return err
+func (r *Replayer) Normalize(ctx context.Context) error {
+
+	var testRun string
+	if r.config.Normalize.TestRun == "" {
+		testRunIDs, err := r.reportDB.GetAllTestRunIDs(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return err
+			}
+			return fmt.Errorf("failed to get all test run ids: %w", err)
+		}
+		testRun = pkg.LastID(testRunIDs, models.TestRunTemplateName)
 	}
-	// Iterate over each YAML file in the test run folder
-	for _, file := range files {
-		if strings.HasSuffix(file.Name(), ".yaml") {
-			filePath := filepath.Join(testRunPath, file.Name())
-			// Read the YAML file
-			yamlData, err := os.ReadFile(filePath)
+
+	if len(r.config.Normalize.SelectedTests) == 0 {
+		testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return err
+			}
+			return fmt.Errorf("failed to get all test set ids: %w", err)
+		}
+		for _, testSetID := range testSetIDs {
+			r.config.Normalize.SelectedTests = append(r.config.Normalize.SelectedTests, config.SelectedTests{TestSet: testSetID})
+		}
+	}
+
+	for _, testSet := range r.config.Normalize.SelectedTests {
+		testSetID := testSet.TestSet
+		testCases := testSet.Tests
+		err := r.normalizeTestCases(ctx, testRun, testSetID, testCases)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Replayer) normalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIds []string) error {
+
+	testReport, err := r.reportDB.GetReport(ctx, testRun, testSetID)
+	if err != nil {
+		return fmt.Errorf("failed to get test report: %w", err)
+	}
+	testCaseResults := testReport.Tests
+	testCaseResultMap := make(map[string]models.TestResult)
+
+	testCases, err := r.testDB.GetTestCases(ctx, testSetID)
+	if err != nil {
+		return fmt.Errorf("failed to get test cases: %w", err)
+	}
+	selectedTestCases := make([]*models.TestCase, 0, len(selectedTestCaseIds))
+
+	if len(selectedTestCaseIds) == 0 {
+		selectedTestCases = testCases
+	} else {
+		for _, testCase := range testCases {
+			if _, ok := ArrayToMap(selectedTestCaseIds)[testCase.Name]; ok {
+				selectedTestCases = append(selectedTestCases, testCase)
+			}
+		}
+	}
+
+	for _, testCaseResult := range testCaseResults {
+		testCaseResultMap[testCaseResult.TestCaseID] = testCaseResult
+	}
+
+	for _, testCase := range selectedTestCases {
+		if _, ok := testCaseResultMap[testCase.Name]; !ok {
+			r.logger.Info("test case not found in the test report", zap.String("test-case-id", testCase.Name), zap.String("test-set-id", testSetID))
+		} else {
+			testCase.HTTPResp = testCaseResultMap[testCase.Name].Res
+			err = r.testDB.InsertTestCase(ctx, testCase, testSetID)
 			if err != nil {
-				utils.LogError(r.logger, err, "Failed to read YAML file")
-				continue
-			}
-			// Unmarshal YAML into TestReport
-			var testReport models.TestReport
-			err = yaml.Unmarshal(yamlData, &testReport)
-			if err != nil {
-				utils.LogError(r.logger, err, "Failed to unmarshal YAML")
-				continue
-			}
-			testCasesArr := strings.Split(testCases, " ")
-			testSetsArr := strings.Split(testSets, " ")
-			for i := range testSetsArr {
-				testSetsArr[i] = filepath.Join(path, testSetsArr[i])
-			}
-			// Iterate over tests in the TestReport
-			for _, test := range testReport.Tests {
-				if test.Status == models.TestStatusFailed && contains(testSetsArr, test.TestCasePath) && contains(testCasesArr, test.TestCaseID) {
-					r.logger.Info("Updating testcase file", zap.String("testCaseID", test.TestCaseID))
-					// Read the contents of the testcase file
-					testCaseFilePath := filepath.Join(test.TestCasePath, "tests", test.TestCaseID+".yaml")
-					r.logger.Info("Updating testcase file", zap.String("filePath", testCaseFilePath))
-					testCaseContent, err := os.ReadFile(testCaseFilePath)
-					if err != nil {
-						utils.LogError(r.logger, err, "Failed to read testcase file")
-						continue
-					}
-
-					// Unmarshal YAML into TestCase
-					var testCase TestCaseFile
-					err = yaml.Unmarshal(testCaseContent, &testCase)
-					if err != nil {
-						utils.LogError(r.logger, err, "Failed to unmarshal YAML")
-						continue
-					}
-					r.logger.Info("Updating Response body from :" + testCase.Spec.Resp.Body + " to :" + test.Result.BodyResult[0].Actual)
-					testCase.Spec.Resp.Body = test.Result.BodyResult[0].Actual
-
-					// Marshal TestCase back to YAML
-					updatedYAML, err := yaml.Marshal(&testCase)
-					if err != nil {
-						utils.LogError(r.logger, err, "Failed to marshal YAML", zap.Error(err))
-						continue
-					}
-
-					// Write the updated YAML content back to the file
-					err = os.WriteFile(testCaseFilePath, updatedYAML, 0644)
-					if err != nil {
-						utils.LogError(r.logger, err, "Failed to write updated YAML to file", zap.Error(err))
-						continue
-					}
-					r.logger.Info("Updated testcase file successfully", zap.String("testCaseFilePath", testCaseFilePath))
-				}
+				return fmt.Errorf("failed to update test case: %w", err)
 			}
 		}
 	}

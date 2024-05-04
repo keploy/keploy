@@ -169,29 +169,10 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	switch cmd.Name() {
 	case "update":
 		return nil
-	case "normalise":
-		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated config is stored")
-		cmd.Flags().String("test-run", "", "Test Run to be normalised")
-		cmd.Flags().String("test-sets", "", "Test Sets to be normalised")
-		cmd.Flags().String("test-cases", "", "Test Cases to be normalised")
-		err = cmd.MarkFlagRequired("test-run")
-		if err != nil {
-			errMsg := "failed to mark test-run as required flag"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		err = cmd.MarkFlagRequired("test-cases")
-		if err != nil {
-			errMsg := "failed to mark test-cases as required flag"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		err = cmd.MarkFlagRequired("test-sets")
-		if err != nil {
-			errMsg := "failed to mark test-sets as required flag"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
+	case "normalize":
+		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks/reports are stored")
+		cmd.Flags().String("test-run", "", "Test Run to be normalized")
+		cmd.Flags().String("tests", "", "Test Sets to be normalized")
 	case "config":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated config is stored")
 		cmd.Flags().Bool("generate", false, "Generate a new keploy configuration file")
@@ -469,7 +450,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 		}
-	case "normalise":
+	case "normalize":
 		path := c.cfg.Path
 		//if user provides relative path
 		if len(path) > 0 && path[0] != '/' {
@@ -487,6 +468,18 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		path += "/keploy"
 		c.cfg.Path = path
+		tests, err := cmd.Flags().GetString("tests")
+		if err != nil {
+			errMsg := "failed to read tests to be normalized"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		err = config.SetSelectedTestsNormalize(c.cfg, tests)
+		if err != nil {
+			errMsg := "failed to normalize the selected tests"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
 	}
 	return nil
 }

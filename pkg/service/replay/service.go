@@ -4,7 +4,6 @@ import (
 	"context"
 	"time"
 
-	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 )
 
@@ -32,12 +31,13 @@ type Service interface {
 	GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error)
 	RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError
 	ProvideMocks(ctx context.Context) error
-	Normalise(ctx context.Context, cfg *config.Config) error
+	Normalize(ctx context.Context) error
 }
 
 type TestDB interface {
 	GetAllTestSetIDs(ctx context.Context) ([]string, error)
 	GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error)
+	InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string) error
 }
 
 type MockDB interface {

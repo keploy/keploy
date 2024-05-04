@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
@@ -12,15 +11,15 @@ import (
 )
 
 func init() {
-	Register("normalise", Normalise)
+	Register("normalize", Normalize)
 }
 
-// Normalise retrieves the command to normalise Keploy
-func Normalise(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
-	var normaliseCmd = &cobra.Command{
-		Use:     "normalise",
-		Short:   "Normalise Keploy",
-		Example: "keploy normalise  --test-run testrun --test-sets testsets --test-cases testcases",
+// Normalize retrieves the command to normalize Keploy
+func Normalize(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
+	var normalizeCmd = &cobra.Command{
+		Use:     "normalize",
+		Short:   "Normalize Keploy",
+		Example: "keploy normalize  --test-run testrun --test-sets testsets --test-cases testcases",
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.ValidateFlags(ctx, cmd)
 		},
@@ -36,17 +35,16 @@ func Normalise(ctx context.Context, logger *zap.Logger, cfg *config.Config, serv
 				utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
 				return nil
 			}
-			fmt.Println("Normalising test cases")
-			if err := replay.Normalise(ctx, cfg); err != nil {
-				utils.LogError(logger, err, "failed to normalise test cases")
-				return err
+			if err := replay.Normalize(ctx); err != nil {
+				utils.LogError(logger, err, "failed to normalize test cases")
+				return nil
 			}
 			return nil
 		},
 	}
-	if err := cmdConfigurator.AddFlags(normaliseCmd); err != nil {
-		utils.LogError(logger, err, "failed to add nornalise cmd flags")
+	if err := cmdConfigurator.AddFlags(normalizeCmd); err != nil {
+		utils.LogError(logger, err, "failed to add normalize cmd flags")
 		return nil
 	}
-	return normaliseCmd
+	return normalizeCmd
 }
