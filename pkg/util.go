@@ -77,7 +77,7 @@ func IsTime(stringDate string) bool {
 	return false
 }
 
-func CreateGitIgnore( logger *zap.Logger,filePath string) error {
+func CreateGitIgnore(logger *zap.Logger, filePath string) error {
 	gitIgnoreData := []byte("./reports/\n")
 	err := os.WriteFile(filePath, gitIgnoreData, 0777)
 	if err != nil {
