@@ -594,13 +594,13 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 	return nil
 }
 
-func SetUmask(mask int) error {
+func SetUmask(mask int) (int, error) {
 	prevUmask := syscall.Umask(mask)
 	// Check if there was an error in setting the umask
 	if prevUmask == mask {
-		return fmt.Errorf("failed to set umask to %o", mask)
+		return 0, fmt.Errorf("failed to set umask to %o", mask)
 	}
-	return nil
+	return prevUmask, nil
 }
 
 func uniqueProcessGroups(pids []int) ([]int, error) {

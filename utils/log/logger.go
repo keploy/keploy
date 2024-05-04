@@ -2,7 +2,6 @@ package log
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"time"
 
@@ -41,17 +40,17 @@ func New() (*zap.Logger, error) {
 	_, err := os.Stat("keploy-logs.txt")
 	if os.IsNotExist(err) {
 		// Set the umask to 0 to ensure that the log file has the correct permissions.
-		err := utils.SetUmask(0)
+		beforeUmask, err := utils.SetUmask(0)
 		if err != nil {
-			log.Println(Emoji, "failed to set umask", err)
-			return nil, fmt.Errorf("failed to set umask: %v", err)
+			return nil, fmt.Errorf("failed to set the umask: %v", err)
 		}
+
 		_, err = os.Create("keploy-logs.txt")
 		if err != nil {
 			return nil, fmt.Errorf("failed to create the log file: %v", err)
 		}
 
-		if err := utils.SetUmask(0022); err != nil {
+		if _, err := utils.SetUmask(beforeUmask); err != nil {
 			return nil, fmt.Errorf("failed to reset the permission: %v", err)
 		}
 

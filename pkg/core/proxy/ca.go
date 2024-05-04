@@ -92,19 +92,21 @@ func getCaPaths() ([]string, error) {
 // to extract ca certificate to temp
 func extractCertToTemp() (string, error) {
 
-	if err := utils.SetUmask(0); err != nil {
-		return "failed to set Umask", err
-	}
-
-	if err := utils.SetUmask(0022); err != nil {
-		return "failed to reset the permission", err
-	}
-
 	tempFile, err := os.CreateTemp("", "ca.crt")
 
 	if err != nil {
 		return "", err
 	}
+
+	beforeUmask, err := utils.SetUmask(0)
+
+	if err != nil {
+		return "", err
+	}
+	if _, err := utils.SetUmask(beforeUmask); err != nil {
+		return "", err
+	}
+
 	defer func(tempFile *os.File) {
 		err := tempFile.Close()
 		if err != nil {

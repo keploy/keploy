@@ -195,13 +195,13 @@ func MakeCurlCommand(method string, url string, header map[string]string, body s
 
 func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 	indices := []string{}
-	err := utils.SetUmask(0)
+	beforeUmask, err := utils.SetUmask(0)
 	if err != nil {
 		Logger.Error("failed to set the permission of keploy directory", zap.Error(err))
 		return indices, err
 	}
 	defer func() {
-		if err := utils.SetUmask(0022); err != nil {
+		if _, err := utils.SetUmask(beforeUmask); err != nil {
 			Logger.Error("failed to reset the permission", zap.Error(err))
 		}
 	}()
