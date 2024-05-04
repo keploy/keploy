@@ -182,7 +182,16 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 		}
 
 		for _, mock := range mocks {
-			if mock.Spec.Metadata["type"] != "config" && mock.Kind != "Generic" && mock.Kind != "Postgres" {
+			isFilteredMock := true
+			switch mock.Kind {
+			case "Generic":
+				isFilteredMock = false
+			case "Postgres":
+				isFilteredMock = false
+			case "Http":
+				isFilteredMock = false
+			}
+			if mock.Spec.Metadata["type"] != "config" && isFilteredMock {
 				tcsMocks = append(tcsMocks, mock)
 			}
 		}
@@ -238,7 +247,16 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 			return nil, err
 		}
 		for _, mock := range mocks {
-			if mock.Spec.Metadata["type"] == "config" || mock.Kind == "Postgres" || mock.Kind == "Generic" {
+			isUnFilteredMock := false
+			switch mock.Kind {
+			case "Generic":
+				isUnFilteredMock = true
+			case "Postgres":
+				isUnFilteredMock = true
+			case "Http":
+				isUnFilteredMock = true
+			}
+			if mock.Spec.Metadata["type"] == "config" || isUnFilteredMock {
 				configMocks = append(configMocks, mock)
 			}
 		}
@@ -285,7 +303,6 @@ func (ys *MockYaml) filterByTimeStamp(_ context.Context, m []*models.Mock, after
 	for _, mock := range m {
 		if mock.Version != "api.keploy.io/v1beta1" && mock.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
-			continue
 		}
 		if mock.Spec.ReqTimestampMock == (time.Time{}) || mock.Spec.ResTimestampMock == (time.Time{}) {
 			logger.Debug("request or response timestamp of mock is missing")
@@ -303,7 +320,7 @@ func (ys *MockYaml) filterByTimeStamp(_ context.Context, m []*models.Mock, after
 		unfilteredMocks = append(unfilteredMocks, mock)
 	}
 	if isNonKeploy {
-		ys.Logger.Warn("Few mocks in the mock File are not recorded by keploy ignoring them")
+		ys.Logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
 	}
 	return filteredMocks, unfilteredMocks
 }

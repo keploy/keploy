@@ -1,0 +1,112 @@
+name: 'Keploy test Keploy'
+description: "An action to test keploy with keploy"
+author: gouravkrosx
+branding:
+  icon: 'refresh-cw'
+  color: 'orange'
+
+inputs:
+  working-directory:
+    description: Relative path where your application code is located
+    required: true
+  command:
+    description: Command to run the application
+    required: true
+  keploy-path:
+    description: Path to keploy pre-recorded test cases
+    required: true
+    default: .
+  config-path: 
+    description: Path to the config file
+    required: true
+    default: .  
+  delay:
+    description: Time to start application
+    required: true
+    default: 10
+  keploy-record-bin:
+    description: Path to keploy record binary (Build or Released)
+    required: true
+  keploy-test-bin:
+    description: Path to keploy test binary (Build or Released)
+    required: true
+  mode:
+    description: Mode to identify the workflow type
+    required: true    
+
+runs:
+  using: "composite"
+  steps:
+    - name: Print the input data.
+      run: |
+        echo "Working Directory: ${{ inputs.working-directory }}"
+        echo "Command: ${{ inputs.command }}"
+        echo "Keploy Path: ${{ inputs.keploy-path }}"
+        echo "Config Path: ${{ inputs.config-path }}"
+        echo "Delay: ${{ inputs.delay }}"
+        echo "Keploy Record Binary: ${{ inputs.keploy-record-bin }}"
+        echo "Keploy Test Binary: ${{ inputs.keploy-test-bin }}"
+        echo "Mode: ${{ inputs.mode }}"
+      shell: bash
+
+    - name: Grant permissions
+      run: chmod +x ${GITHUB_ACTION_PATH}/install.sh
+      shell: sh
+    - id: keploy-test-keploy
+      name: Run Script
+      run: |
+        ${GITHUB_ACTION_PATH}/install.sh
+       
+      shell: bash
+      env:
+        WORKDIR: ${{ inputs.working-directory }}
+        COMMAND : ${{ inputs.command }}
+        KEPLOY_PATH: ${{inputs.keploy-path}}
+        CONFIG_PATH: ${{inputs.config-path}}
+        DELAY: ${{ inputs.delay }}
+        KEPLOY_RECORD_BIN: ${{ inputs.keploy-record-bin }}
+        KEPLOY_TEST_BIN: ${{ inputs.keploy-test-bin }}
+        MODE: ${{ inputs.mode }}
+
+    - name: Get coverage data and zip it
+      if: success()
+      id: coverage-zip  # Unique ID for the step
+      run: |
+        echo "Output from script: ${{ steps.keploy-test-keploy.outputs.script_output }}"        
+        workdir="${{ inputs.working-directory }}/"
+        workdir="${workdir//\//-}"
+        workdir="${workdir%-}"
+        
+        coverage="coverage-reports-${workdir}-${{ inputs.mode }}"
+        mv ${{ inputs.working-directory }}/coverage-reports ./$coverage
+        echo "coverage=$coverage"
+        echo "::set-output name=coverage_name::$coverage"
+        zip -r ${coverage}.zip $coverage
+      shell: bash
+
+    - name: Upload coverage zip as artifact
+      if: steps.coverage-zip.outputs.coverage_name != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.coverage-zip.outputs.coverage_name }}
+        path: ${{ steps.coverage-zip.outputs.coverage_name }}.zip
+                  
+    # - name: Comment on PR
+    #   if: success()
+    #   uses: actions/github-script@v6
+    #   env:
+    #     KEPLOY_REPORT: ${{ steps.keploy-test-report.outputs.KEPLOY_REPORT }}
+    #   with:
+    #     github-token: ${{ github.token }}
+    #     script: |
+    #       if (!process.env.KEPLOY_REPORT) {
+    #         console.error('Error: KEPLOY_REPORT not found.');
+    #         process.exit(1);
+    #       }
+    #       github.rest.issues.createComment({
+    #         issue_number: context.issue.number,
+    #         owner: context.repo.owner,
+    #         repo: context.repo.repo,
+    #         body: process.env.KEPLOY_REPORT
+    #       })
+    #   shell: bash

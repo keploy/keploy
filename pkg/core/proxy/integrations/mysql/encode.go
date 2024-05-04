@@ -3,11 +3,12 @@ package mysql
 import (
 	"context"
 	"errors"
-	"golang.org/x/sync/errgroup"
 	"net"
 	"time"
 
-	"go.keploy.io/server/v2/pkg/core/proxy/util"
+	"golang.org/x/sync/errgroup"
+
+	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -30,7 +31,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 
 	//for keeping conn alive
 	g.Go(func() error {
-		defer utils.Recover(logger)
+		defer pUtil.Recover(logger, clientConn, destConn)
 		defer close(errCh)
 		for {
 			lastCommand = 0x00 //resetting last command for new loop
@@ -54,7 +55,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 					errCh <- err
 					return nil
 				}
-				handshakeResponseFromClient, err := util.ReadBytes(ctx, logger, clientConn)
+				handshakeResponseFromClient, err := pUtil.ReadBytes(ctx, logger, clientConn)
 				if err != nil {
 					utils.LogError(logger, err, "failed to read handshake response from client")
 					errCh <- err
@@ -71,7 +72,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 				}
 				//TODO: why is this sleep here?
 				time.Sleep(100 * time.Millisecond)
-				okPacket1, err := util.ReadBytes(ctx, logger, destConn)
+				okPacket1, err := pUtil.ReadBytes(ctx, logger, destConn)
 				if err != nil {
 					utils.LogError(logger, err, "failed to read packet from server after handshake")
 					errCh <- err
@@ -132,7 +133,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 				})
 				if oprResponse2 == "AUTH_SWITCH_REQUEST" {
 
-					authSwitchResponse, err := util.ReadBytes(ctx, logger, clientConn)
+					authSwitchResponse, err := pUtil.ReadBytes(ctx, logger, clientConn)
 					if err != nil {
 						utils.LogError(logger, err, "failed to read AuthSwitchResponse from client")
 						errCh <- err
@@ -147,7 +148,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 						errCh <- err
 						return nil
 					}
-					serverResponse, err := util.ReadBytes(ctx, logger, destConn)
+					serverResponse, err := pUtil.ReadBytes(ctx, logger, destConn)
 					if err != nil {
 						utils.LogError(logger, err, "failed to read response from server")
 						errCh <- err
@@ -203,7 +204,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 					}
 					if pluginType == "cachingSha2PasswordPerformFullAuthentication" {
 
-						clientResponse, err := util.ReadBytes(ctx, logger, clientConn)
+						clientResponse, err := pUtil.ReadBytes(ctx, logger, clientConn)
 						if err != nil {
 							utils.LogError(logger, err, "failed to read response from client")
 							errCh <- err
@@ -218,7 +219,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 							errCh <- err
 							return nil
 						}
-						finalServerResponse, err := util.ReadBytes(ctx, logger, destConn)
+						finalServerResponse, err := pUtil.ReadBytes(ctx, logger, destConn)
 						if err != nil {
 							utils.LogError(logger, err, "failed to read final response from server")
 							errCh <- err
@@ -263,7 +264,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 							},
 							Message: mysqlRespFinal,
 						})
-						clientResponse1, err := util.ReadBytes(ctx, logger, clientConn)
+						clientResponse1, err := pUtil.ReadBytes(ctx, logger, clientConn)
 						if err != nil {
 							utils.LogError(logger, err, "failed to read response from client")
 							errCh <- err
@@ -278,7 +279,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 							errCh <- err
 							return nil
 						}
-						finalServerResponse1, err := util.ReadBytes(ctx, logger, destConn)
+						finalServerResponse1, err := pUtil.ReadBytes(ctx, logger, destConn)
 						if err != nil {
 							utils.LogError(logger, err, "failed to read final response from server")
 							errCh <- err
@@ -328,7 +329,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 						})
 					} else {
 						// time.Sleep(10 * time.Millisecond)
-						finalServerResponse, err := util.ReadBytes(ctx, logger, destConn)
+						finalServerResponse, err := pUtil.ReadBytes(ctx, logger, destConn)
 						if err != nil {
 							utils.LogError(logger, err, "failed to read final response from server")
 							errCh <- err
@@ -369,7 +370,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 				}
 				if pluginType == "cachingSha2PasswordPerformFullAuthentication" {
 
-					clientResponse, err := util.ReadBytes(ctx, logger, clientConn)
+					clientResponse, err := pUtil.ReadBytes(ctx, logger, clientConn)
 					if err != nil {
 						utils.LogError(logger, err, "failed to read response from client")
 						errCh <- err
@@ -384,7 +385,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 						errCh <- err
 						return nil
 					}
-					finalServerResponse, err := util.ReadBytes(ctx, logger, destConn)
+					finalServerResponse, err := pUtil.ReadBytes(ctx, logger, destConn)
 					if err != nil {
 						utils.LogError(logger, err, "failed to read final response from server")
 						errCh <- err
@@ -429,7 +430,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 						},
 						Message: mysqlRespFinal,
 					})
-					clientResponse1, err := util.ReadBytes(ctx, logger, clientConn)
+					clientResponse1, err := pUtil.ReadBytes(ctx, logger, clientConn)
 					if err != nil {
 						utils.LogError(logger, err, "failed to read response from client")
 						errCh <- err
@@ -444,7 +445,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 						errCh <- err
 						return nil
 					}
-					finalServerResponse1, err := util.ReadBytes(ctx, logger, destConn)
+					finalServerResponse1, err := pUtil.ReadBytes(ctx, logger, destConn)
 					if err != nil {
 						utils.LogError(logger, err, "failed to read final response from server")
 						errCh <- err
@@ -541,7 +542,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, initialBuffer 
 				queryBuffer = initialBuffer
 				firstIteration = false
 			} else {
-				queryBuffer, err = util.ReadBytes(ctx, logger, clientConn)
+				queryBuffer, err = pUtil.ReadBytes(ctx, logger, clientConn)
 				if err != nil {
 					utils.LogError(logger, err, "failed to read query from the mysql client")
 					return err
@@ -574,7 +575,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, initialBuffer 
 			if res == 9 {
 				return nil
 			}
-			queryResponse, err := util.ReadBytes(ctx, logger, destConn)
+			queryResponse, err := pUtil.ReadBytes(ctx, logger, destConn)
 			if err != nil {
 				utils.LogError(logger, err, "failed to read query response from mysql server")
 				return err
