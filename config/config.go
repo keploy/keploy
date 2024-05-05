@@ -114,8 +114,14 @@ func SetSelectedTests(conf *Config, testSets []string) {
 }
 
 func SetSelectedTestsNormalize(conf *Config, value string) error {
-	testSets := strings.Split(value, ",")
+	testSets := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ' '
+	})
 	var tests []SelectedTests
+	if len(testSets) == 0 {
+		conf.Normalize.SelectedTests = tests
+		return nil
+	}
 	for _, ts := range testSets {
 		parts := strings.Split(ts, ":")
 		if len(parts) != 2 {
@@ -127,5 +133,6 @@ func SetSelectedTestsNormalize(conf *Config, value string) error {
 			Tests:   testCases,
 		})
 	}
+	conf.Normalize.SelectedTests = tests
 	return nil
 }

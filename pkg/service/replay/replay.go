@@ -468,16 +468,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					Form:       testCase.HTTPReq.Form,
 					Timestamp:  testCase.HTTPReq.Timestamp,
 				},
-				Res: models.HTTPResp{
-					StatusCode:    testCase.HTTPResp.StatusCode,
-					Header:        testCase.HTTPResp.Header,
-					Body:          testCase.HTTPResp.Body,
-					StatusMessage: testCase.HTTPResp.StatusMessage,
-					ProtoMajor:    testCase.HTTPResp.ProtoMajor,
-					ProtoMinor:    testCase.HTTPResp.ProtoMinor,
-					Binary:        testCase.HTTPResp.Binary,
-					Timestamp:     testCase.HTTPResp.Timestamp,
-				},
+				Res:          *resp,
 				TestCasePath: filepath.Join(r.config.Path, testSetID),
 				MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
 				Noise:        testCase.Noise,
@@ -763,6 +754,7 @@ func (r *Replayer) Normalize(ctx context.Context) error {
 			return err
 		}
 	}
+	r.logger.Info("Normalized test cases successfully. Please run keploy tests to verify the changes.")
 	return nil
 }
 
@@ -799,8 +791,11 @@ func (r *Replayer) normalizeTestCases(ctx context.Context, testRun string, testS
 		if _, ok := testCaseResultMap[testCase.Name]; !ok {
 			r.logger.Info("test case not found in the test report", zap.String("test-case-id", testCase.Name), zap.String("test-set-id", testSetID))
 		} else {
+			if testCaseResultMap[testCase.Name].Status == models.TestStatusPassed {
+				continue
+			}
 			testCase.HTTPResp = testCaseResultMap[testCase.Name].Res
-			err = r.testDB.InsertTestCase(ctx, testCase, testSetID)
+			err = r.testDB.UpdateTestCase(ctx, testCase, testSetID)
 			if err != nil {
 				return fmt.Errorf("failed to update test case: %w", err)
 			}
