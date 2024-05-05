@@ -106,12 +106,3 @@ func (t *testUtils) SimulateRequest(ctx context.Context, _ uint64, tc *models.Te
 	}
 	return nil, nil
 }
-
-func contains(list []string, item string) bool {
-	for _, value := range list {
-		if value == item {
-			return true
-		}
-	}
-	return false
-}
