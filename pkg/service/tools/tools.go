@@ -283,33 +283,3 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 	t.logger.Info("Config file generated successfully")
 	return nil
 }
-
-// func (ts *TestYaml) EditTestCase(ctx context.Context, tc *models.TestCase, testSetID string) error {
-// 	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
-// 	var tcsName string
-// 	if tc.Name == "" {
-// 		lastIndx, err := yaml.FindLastIndex(tcsPath, ts.logger)
-// 		if err != nil {
-// 			return err
-// 		}
-// 		tcsName = fmt.Sprintf("test-%v", lastIndx)
-// 	} else {
-// 		tcsName = tc.Name
-// 	}
-// 	yamlTc, err := EncodeTestcase(*tc, ts.logger)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	yamlTc.Name = tcsName
-// 	data, err := yamlLib.Marshal(&yamlTc)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	err = yaml.WriteFile(ctx, ts.logger, tcsPath, tcsName, data, false)
-// 	if err != nil {
-// 		utils.LogError(ts.logger, err, "failed to write testcase yaml file")
-// 		return err
-// 	}
-// 	ts.logger.Info("🟠 Keploy has updated test case for the user's application.", zap.String("path", tcsPath), zap.String("testcase name", tcsName))
-// 	return nil
-// }
