@@ -195,7 +195,6 @@ func (r *Recorder) Start(ctx context.Context) error {
 		appErrChan <- runAppError
 		return nil
 	})
-	time.Sleep(2 * time.Second)
 	go func() {
 		if len(r.config.ReRecord) != 0 {
 			err = r.ReRecord(reRecordCtx)
@@ -329,7 +328,10 @@ func (r *Recorder) StartMock(ctx context.Context) error {
 func (r *Recorder) ReRecord(ctx context.Context) error {
 
 	tcs, err := r.testDB.GetTestCases(ctx, r.config.ReRecord)
-	fmt.Print(tcs)
+	if err != nil {
+		r.logger.Error("Failed to get testcases", zap.Error(err))
+		return nil
+	}
 	host, port, err := extractHostAndPort(tcs[0].Curl)
 	if err != nil {
 		r.logger.Error("Failed to extract host and port", zap.Error(err))
