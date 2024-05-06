@@ -6,7 +6,8 @@ import (
 )
 
 type Config struct {
-	Path                  string        `json:"path" yaml:"path" mapstructure:"path" `
+	Path                  string        `json:"path" yaml:"path" mapstructure:"path"`
+	ReRecord              string        `json:"rerecord" yaml:"rerecord" mapstructure:"rerecord"`
 	Command               string        `json:"command" yaml:"command" mapstructure:"command"`
 	Port                  uint32        `json:"port" yaml:"port" mapstructure:"port"`
 	DNSPort               uint32        `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
