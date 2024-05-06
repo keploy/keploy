@@ -790,15 +790,15 @@ func (r *Replayer) normalizeTestCases(ctx context.Context, testRun string, testS
 	for _, testCase := range selectedTestCases {
 		if _, ok := testCaseResultMap[testCase.Name]; !ok {
 			r.logger.Info("test case not found in the test report", zap.String("test-case-id", testCase.Name), zap.String("test-set-id", testSetID))
-		} else {
-			if testCaseResultMap[testCase.Name].Status == models.TestStatusPassed {
-				continue
-			}
-			testCase.HTTPResp = testCaseResultMap[testCase.Name].Res
-			err = r.testDB.UpdateTestCase(ctx, testCase, testSetID)
-			if err != nil {
-				return fmt.Errorf("failed to update test case: %w", err)
-			}
+			continue
+		}
+		if testCaseResultMap[testCase.Name].Status == models.TestStatusPassed {
+			continue
+		}
+		testCase.HTTPResp = testCaseResultMap[testCase.Name].Res
+		err = r.testDB.UpdateTestCase(ctx, testCase, testSetID)
+		if err != nil {
+			return fmt.Errorf("failed to update test case: %w", err)
 		}
 	}
 	return nil
