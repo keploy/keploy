@@ -24,6 +24,7 @@ type HookCfg struct {
 	Pid        uint32
 	IsDocker   bool
 	KeployIPV4 string
+	Mode       models.Mode
 }
 
 type App interface {

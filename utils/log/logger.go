@@ -17,7 +17,10 @@ var logCfg zap.Config
 
 func New() (*zap.Logger, error) {
 	_ = zap.RegisterEncoder("colorConsole", func(config zapcore.EncoderConfig) (zapcore.Encoder, error) {
-		return NewColor(config), nil
+		return NewColor(config, true), nil
+	})
+	_ = zap.RegisterEncoder("nonColorConsole", func(config zapcore.EncoderConfig) (zapcore.Encoder, error) {
+		return NewColor(config, false), nil
 	})
 
 	logCfg = zap.NewDevelopmentConfig()
@@ -97,4 +100,13 @@ func AddMode(mode string) (*zap.Logger, error) {
 		return nil, fmt.Errorf("failed to add mode to logger: %v", err)
 	}
 	return newLogger, nil
+}
+
+func ChangeColorEncoding() (*zap.Logger, error) {
+	logCfg.Encoding = "nonColorConsole"
+	logger, err := logCfg.Build()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build config for logger: %v", err)
+	}
+	return logger, nil
 }
