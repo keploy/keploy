@@ -169,6 +169,10 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	switch cmd.Name() {
 	case "update":
 		return nil
+	case "normalize":
+		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks/reports are stored")
+		cmd.Flags().String("test-run", "", "Test Run to be normalized")
+		cmd.Flags().String("tests", "", "Test Sets to be normalized")
 	case "config":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated config is stored")
 		cmd.Flags().Bool("generate", false, "Generate a new keploy configuration file")
@@ -399,9 +403,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					return errors.New("missing required --containerName flag or containerName in config file")
 				}
 			}
-
 		}
-
 		err = utils.StartInDocker(ctx, c.logger, c.cfg)
 		if err != nil {
 			return err
@@ -448,6 +450,36 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					c.logger.Info("Example usage: " + cmd.Example)
 				}
 			}
+		}
+	case "normalize":
+		path := c.cfg.Path
+		//if user provides relative path
+		if len(path) > 0 && path[0] != '/' {
+			absPath, err := filepath.Abs(path)
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get the absolute path from relative path")
+			}
+			path = absPath
+		} else if len(path) == 0 { // if user doesn't provide any path
+			cdirPath, err := os.Getwd()
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get the path of current directory")
+			}
+			path = cdirPath
+		}
+		path += "/keploy"
+		c.cfg.Path = path
+		tests, err := cmd.Flags().GetString("tests")
+		if err != nil {
+			errMsg := "failed to read tests to be normalized"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		err = config.SetSelectedTestsNormalize(c.cfg, tests)
+		if err != nil {
+			errMsg := "failed to normalize the selected tests"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
 		}
 	}
 	return nil

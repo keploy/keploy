@@ -468,16 +468,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					Form:       testCase.HTTPReq.Form,
 					Timestamp:  testCase.HTTPReq.Timestamp,
 				},
-				Res: models.HTTPResp{
-					StatusCode:    testCase.HTTPResp.StatusCode,
-					Header:        testCase.HTTPResp.Header,
-					Body:          testCase.HTTPResp.Body,
-					StatusMessage: testCase.HTTPResp.StatusMessage,
-					ProtoMajor:    testCase.HTTPResp.ProtoMajor,
-					ProtoMinor:    testCase.HTTPResp.ProtoMinor,
-					Binary:        testCase.HTTPResp.Binary,
-					Timestamp:     testCase.HTTPResp.Timestamp,
-				},
+				Res:          *resp,
 				TestCasePath: filepath.Join(r.config.Path, testSetID),
 				MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
 				Noise:        testCase.Noise,
@@ -725,5 +716,90 @@ func (r *Replayer) ProvideMocks(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 	<-ctx.Done()
+	return nil
+}
+
+func (r *Replayer) Normalize(ctx context.Context) error {
+
+	var testRun string
+	if r.config.Normalize.TestRun == "" {
+		testRunIDs, err := r.reportDB.GetAllTestRunIDs(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return err
+			}
+			return fmt.Errorf("failed to get all test run ids: %w", err)
+		}
+		testRun = pkg.LastID(testRunIDs, models.TestRunTemplateName)
+	}
+
+	if len(r.config.Normalize.SelectedTests) == 0 {
+		testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return err
+			}
+			return fmt.Errorf("failed to get all test set ids: %w", err)
+		}
+		for _, testSetID := range testSetIDs {
+			r.config.Normalize.SelectedTests = append(r.config.Normalize.SelectedTests, config.SelectedTests{TestSet: testSetID})
+		}
+	}
+
+	for _, testSet := range r.config.Normalize.SelectedTests {
+		testSetID := testSet.TestSet
+		testCases := testSet.Tests
+		err := r.normalizeTestCases(ctx, testRun, testSetID, testCases)
+		if err != nil {
+			return err
+		}
+	}
+	r.logger.Info("Normalized test cases successfully. Please run keploy tests to verify the changes.")
+	return nil
+}
+
+func (r *Replayer) normalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIds []string) error {
+
+	testReport, err := r.reportDB.GetReport(ctx, testRun, testSetID)
+	if err != nil {
+		return fmt.Errorf("failed to get test report: %w", err)
+	}
+	testCaseResults := testReport.Tests
+	testCaseResultMap := make(map[string]models.TestResult)
+
+	testCases, err := r.testDB.GetTestCases(ctx, testSetID)
+	if err != nil {
+		return fmt.Errorf("failed to get test cases: %w", err)
+	}
+	selectedTestCases := make([]*models.TestCase, 0, len(selectedTestCaseIds))
+
+	if len(selectedTestCaseIds) == 0 {
+		selectedTestCases = testCases
+	} else {
+		for _, testCase := range testCases {
+			if _, ok := ArrayToMap(selectedTestCaseIds)[testCase.Name]; ok {
+				selectedTestCases = append(selectedTestCases, testCase)
+			}
+		}
+	}
+
+	for _, testCaseResult := range testCaseResults {
+		testCaseResultMap[testCaseResult.TestCaseID] = testCaseResult
+	}
+
+	for _, testCase := range selectedTestCases {
+		if _, ok := testCaseResultMap[testCase.Name]; !ok {
+			r.logger.Info("test case not found in the test report", zap.String("test-case-id", testCase.Name), zap.String("test-set-id", testSetID))
+			continue
+		}
+		if testCaseResultMap[testCase.Name].Status == models.TestStatusPassed {
+			continue
+		}
+		testCase.HTTPResp = testCaseResultMap[testCase.Name].Res
+		err = r.testDB.UpdateTestCase(ctx, testCase, testSetID)
+		if err != nil {
+			return fmt.Errorf("failed to update test case: %w", err)
+		}
+	}
 	return nil
 }
