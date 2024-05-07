@@ -1,7 +1,9 @@
 // Package tools provides utility functions for the service package.
 package tools
 
-import "context"
+import (
+	"context"
+)
 
 type Service interface {
 	Update(ctx context.Context) error
