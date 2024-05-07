@@ -137,32 +137,32 @@ var ConfigGuide = `
 # Example on using tests
 #tests:
 #  filters: [
-#	{
+# {
 #     path: "/user/app"
 #     urlMethods: ["GET"]
 #     headers: {
 #       "^asdf*": "^test"
 #     },
 #     host: "dc.services.visualstudio.com"
-#	}
+#   }
 #  ]
 # Example on using stubs
 # stubs:
 #  filters: [
 #   { 
-#	  path: "/user/app",
+#     path: "/user/app",
 #     port: 8080
-#	},
-#	{
+#   },
+#   {
 #     port: 8081,
 #     host: "dc.services.visualstudio.com"
-#     },
-#	{
-#	  port: 8081,
+#    },
+#   {
+#     port: 8081,
 #     host: "dc.services.visualstudio.com",
 #     path: "/user/app"
-#	}
-#
+#    }
+#   ]
 # Example on using globalNoise
 # globalNoise:
 #   global:
