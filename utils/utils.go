@@ -136,32 +136,41 @@ var Emoji = "\U0001F430" + " Keploy:"
 var ConfigGuide = `
 # Example on using tests
 #tests:
-#  filters:
-#   - path: "/user/app"
+#  filters: [
+#	{
+#     path: "/user/app"
 #     urlMethods: ["GET"]
 #     headers: {
 #       "^asdf*": "^test"
-#     }
+#     },
 #     host: "dc.services.visualstudio.com"
-#Example on using stubs
-#stubs:
-#  filters:
-#   - path: "/user/app"
+#	}
+#  ]
+# Example on using stubs
+# stubs:
+#  filters: [
+#   { 
+#	  path: "/user/app",
 #     port: 8080
-#   - port: 8081
-#   - host: "dc.services.visualstudio.com"
-#   - port: 8081
+#	},
+#	{
+#     port: 8081,
 #     host: "dc.services.visualstudio.com"
+#     },
+#	{
+#	  port: 8081,
+#     host: "dc.services.visualstudio.com",
 #     path: "/user/app"
-	#
-#Example on using globalNoise
-#globalNoise:
+#	}
+#
+# Example on using globalNoise
+# globalNoise:
 #   global:
 #     body: {
 #        # to ignore some values for a field,
 #        # pass regex patterns to the corresponding array value
 #        "url": ["https?://\S+", "http://\S+"],
-#     }
+#     },
 #     header: {
 #        # to ignore the entire field, pass an empty array
 #        "Date": [],
