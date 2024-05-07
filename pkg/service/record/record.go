@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"time"
 
@@ -66,13 +67,18 @@ func (r *Recorder) Start(ctx context.Context) error {
 	var appID uint64
 	var newTestSetID string
 	var testCount = 0
+	var mutex = &sync.Mutex{}
+	var waitGroup = &sync.WaitGroup{}
 	var mockCountMap = make(map[string]int)
 
 	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
 	defer func() {
 		select {
 		case <-ctx.Done():
+			waitGroup.Wait()
+			mutex.Lock()
 			r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
+			mutex.Unlock()
 		default:
 			err := utils.Stop(r.logger, stopReason)
 			if err != nil {
@@ -144,6 +150,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 
+	waitGroup.Add(1)
 	errGrp.Go(func() error {
 		for testCase := range incomingChan {
 			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID)
@@ -153,8 +160,10 @@ func (r *Recorder) Start(ctx context.Context) error {
 				}
 				insertTestErrChan <- err
 			} else {
-
+				mutex.Lock()
 				testCount++
+				mutex.Unlock()
+				waitGroup.Done()
 				r.telemetry.RecordedTestAndMocks()
 			}
 		}
