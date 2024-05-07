@@ -569,7 +569,7 @@ func sprintDiff(expect, actual, field string) string {
  * the body isnt in the rest-api formats (what means it is not json-based)
  * its better to use a generic diff output as the SprintDiff.
  */
-func extractKey(diffString string) (string, error) {
+func extractKey(diffString string) string {
 	diffStrings := strings.Split(diffString, "\n")
 	var keys []string
 	for _, str := range diffStrings {
@@ -591,7 +591,7 @@ func extractKey(diffString string) (string, error) {
 
 	// Remove the initial + or - along with any leading whitespaces
 
-	return strings.Join(keys, "|"), nil
+	return strings.Join(keys, "|")
 }
 
 func checkKeyInMaps(jsonMap1, jsonMap2 []byte, key string) (string, bool) {
@@ -604,8 +604,10 @@ func checkKeyInMaps(jsonMap1, jsonMap2 []byte, key string) (string, bool) {
 	}
 
 	for k, v1 := range map1 {
-		if v2, ok := map2[k]; ok && !strings.Contains(key, k) && v2 == v1 { // Ensure the key is not the modifiedKey
-			return fmt.Sprintf("%v:%v", k, v1), true
+		if v2, ok := map2[k]; ok && !strings.Contains(key, k) { // Ensure the key is not the modifiedKey
+			if reflect.DeepEqual(v1, v2) {
+				return fmt.Sprintf("%v:%v", k, v1), true
+			}
 		}
 	}
 	return "", false
@@ -617,7 +619,7 @@ func sprintJSONDiff(json1 []byte, json2 []byte, field string, noise map[string][
 	if err != nil {
 		return "", err
 	}
-	modifiedKeys, err := extractKey(diffString)
+	modifiedKeys := extractKey(diffString)
 	additionalContext, exists := checkKeyInMaps(json1, json2, modifiedKeys)
 	if exists {
 		diffString = additionalContext + "\n" + diffString
@@ -945,6 +947,9 @@ func truncateToMatchWithEllipsis(expectedText, actualText string) (string, strin
 			return strings.Join(lines, "\n")
 		}
 
+		if matchLineCount <= 3 { // Ensure there's enough room for at least one line and the ellipsis
+			return ""
+		}
 		// Calculate how many lines to keep from the top and bottom halves
 		// Subtracting 3 from matchLineCount to account for the ellipsis lines
 		topHalfLineCount := (matchLineCount - 3) / 2
@@ -1076,7 +1081,7 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 			if line[0] == '-' {
 				c := color.FgRed
 				// Workaround to get the exact index where the diff begins
-				if i < len(diffLines) && len(line) > 1 && diffLines[i+1] != "" && diffLines[i+1][0] == '+' {
+				if i < len(diffLines)-1 && len(line) > 1 && diffLines[i+1] != "" && diffLines[i+1][0] == '+' {
 
 					/* As we want to get the exact difference where the line's
 					 * diff begin we must to, first, get the expect (this) and
