@@ -330,7 +330,11 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if c.cfg.Test.Language == "" {
 			c.cfg.Test.Language = language
 		}
-		c.cfg.Test.IsCmdCoverage = isCov
+		if c.cfg.Test.Language == "go" && c.cfg.Test.Coverage {
+			c.cfg.Test.IsCmdCoverage = true
+		} else {
+			c.cfg.Test.IsCmdCoverage = isCov
+		}
 
 		// set the command type
 		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))

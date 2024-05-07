@@ -757,8 +757,8 @@ func DetectLanguage(cmd string) (string, bool) {
 		return "typescript", false
 	}
 
-	if slices.Contains(cmdFields, "java") {
-		if strings.Contains(cmd, "jacoco") {
+	if slices.Contains(cmdFields, "mvn") {
+		if strings.Contains(cmd, "exec:exec") {
 			return "java", true
 		}
 		return "java", false
