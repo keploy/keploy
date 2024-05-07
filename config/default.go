@@ -15,8 +15,10 @@ port: 0
 proxyPort: 16789
 dnsPort: 26789
 debug: false
+disableANSI: false
 disableTele: false
 inDocker: false
+generateGithubActions: true
 containerName: ""
 networkName: ""
 buildDelay: 30s
@@ -50,9 +52,12 @@ func SetDefaultConfig(cfgStr string) {
 }
 
 const InternalConfig = `
+enableTesting: false
 keployContainer: "keploy-v2"
 keployNetwork: "keploy-network"
 inDocker: false
+cmdType: "native"
+fallbackOnMiss: false
 `
 
 var config = &Config{}

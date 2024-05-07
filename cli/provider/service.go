@@ -8,6 +8,7 @@ import (
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/core/proxy"
+	"go.keploy.io/server/v2/pkg/core/tester"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb"
 	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
@@ -60,7 +61,8 @@ func (n *ServiceProvider) GetTelemetryService(ctx context.Context, config config
 func (n *ServiceProvider) GetCommonServices(config config.Config) *CommonInternalService {
 	h := hooks.NewHooks(n.logger, config)
 	p := proxy.New(n.logger, h, config)
-	instrumentation := core.New(n.logger, h, p)
+	t := tester.New(n.logger, h) //for keploy test bench
+	instrumentation := core.New(n.logger, h, p, t)
 	testDB := testdb.New(n.logger, config.Path)
 	mockDB := mockdb.New(n.logger, config.Path, "")
 	reportDB := reportdb.New(n.logger, config.Path+"/reports")

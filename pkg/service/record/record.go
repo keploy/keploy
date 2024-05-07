@@ -5,17 +5,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
 	"time"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
+
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
 
-type recorder struct {
+type Recorder struct {
 	logger          *zap.Logger
 	testDB          TestDB
 	mockDB          MockDB
@@ -25,7 +27,7 @@ type recorder struct {
 }
 
 func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, config config.Config) Service {
-	return &recorder{
+	return &Recorder{
 		logger:          logger,
 		testDB:          testDB,
 		mockDB:          mockDB,
@@ -35,7 +37,7 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, 
 	}
 }
 
-func (r *recorder) Start(ctx context.Context) error {
+func (r *Recorder) Start(ctx context.Context) error {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	errGrp, _ := errgroup.WithContext(ctx)
@@ -49,6 +51,8 @@ func (r *recorder) Start(ctx context.Context) error {
 	hookCtx := context.WithoutCancel(ctx)
 	hookCtx, hookCtxCancel := context.WithCancel(hookCtx)
 	hookCtx = context.WithValue(hookCtx, models.ErrGroupKey, hookErrGrp)
+	reRecordCtx, reRecordCancel := context.WithCancel(ctx)
+	defer reRecordCancel() // Cancel the context when the function returns
 
 	var stopReason string
 
@@ -118,7 +122,7 @@ func (r *recorder) Start(ctx context.Context) error {
 		return nil
 	default:
 		// Starting the hooks and proxy
-		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_RECORD})
+		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_RECORD, EnableTesting: r.config.EnableTesting})
 		if err != nil {
 			stopReason = "failed to start the hooks and proxy"
 			utils.LogError(r.logger, err, stopReason)
@@ -149,6 +153,7 @@ func (r *recorder) Start(ctx context.Context) error {
 				}
 				insertTestErrChan <- err
 			} else {
+
 				testCount++
 				r.telemetry.RecordedTestAndMocks()
 			}
@@ -190,6 +195,13 @@ func (r *recorder) Start(ctx context.Context) error {
 		appErrChan <- runAppError
 		return nil
 	})
+	go func() {
+		if len(r.config.ReRecord) != 0 {
+			err = r.ReRecord(reRecordCtx)
+			reRecordCancel()
+
+		}
+	}()
 
 	// setting a timer for recording
 	if r.config.Record.RecordTimer != 0 {
@@ -227,6 +239,9 @@ func (r *recorder) Start(ctx context.Context) error {
 			return nil
 		case models.ErrCtxCanceled:
 			return nil
+		case models.ErrTestBinStopped:
+			stopReason = "keploy test mode binary stopped, hence stopping keploy"
+			return nil
 		default:
 			stopReason = "unknown error recieved from application, hence stopping keploy"
 		}
@@ -242,7 +257,7 @@ func (r *recorder) Start(ctx context.Context) error {
 	return fmt.Errorf(stopReason)
 }
 
-func (r *recorder) StartMock(ctx context.Context) error {
+func (r *Recorder) StartMock(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
 	var stopReason string
@@ -308,4 +323,65 @@ func (r *recorder) StartMock(ctx context.Context) error {
 	}
 	utils.LogError(r.logger, err, stopReason)
 	return fmt.Errorf(stopReason)
+}
+
+func (r *Recorder) ReRecord(ctx context.Context) error {
+
+	tcs, err := r.testDB.GetTestCases(ctx, r.config.ReRecord)
+	if err != nil {
+		r.logger.Error("Failed to get testcases", zap.Error(err))
+		return nil
+	}
+	host, port, err := extractHostAndPort(tcs[0].Curl)
+	if err != nil {
+		r.logger.Error("Failed to extract host and port", zap.Error(err))
+		return nil
+
+	}
+
+	if err := waitForPort(ctx, host, port); err != nil {
+		r.logger.Error("Waiting for port failed", zap.String("host", host), zap.String("port", port), zap.Error(err))
+		return nil
+	}
+
+	allTestCasesRecorded := true
+	for _, tc := range tcs {
+
+		resp, err := pkg.SimulateHTTP(ctx, *tc, r.config.ReRecord, r.logger, r.config.Test.APITimeout)
+		if err != nil {
+			r.logger.Error("Failed to simulate HTTP request", zap.Error(err))
+			allTestCasesRecorded = false
+			continue // Proceed with the next command
+		}
+
+		r.logger.Debug("Re-recorded testcases successfully", zap.String("curl", tc.Curl), zap.Any("response", (resp)))
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+	}
+
+	if allTestCasesRecorded {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			err = utils.Stop(r.logger, "Re-recorded testcases successfully")
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to stop recording")
+			}
+		}
+	} else {
+		err = utils.Stop(r.logger, "Failed to re-record some testcases")
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to stop recording")
+		}
+	}
+
+	return nil
 }
