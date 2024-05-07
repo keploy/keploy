@@ -3,6 +3,7 @@ package v1
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
 	"strconv"
@@ -80,7 +81,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 
 	// read requests from client
 	g.Go(func() error {
-		defer utils.Recover(logger)
+		defer pUtil.Recover(logger, clientConn, destConn)
 		defer close(clientBuffChan)
 		pUtil.ReadBuffConn(ctx, logger, clientConn, clientBuffChan, errChan)
 		return nil
@@ -88,13 +89,14 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 
 	// read responses from destination
 	g.Go(func() error {
-		defer utils.Recover(logger)
+		defer pUtil.Recover(logger, clientConn, destConn)
 		defer close(destBuffChan)
 		pUtil.ReadBuffConn(ctx, logger, destConn, destBuffChan, errChan)
 		return nil
 	})
 
 	go func() {
+		defer pUtil.Recover(logger, clientConn, destConn)
 		err := g.Wait()
 		if err != nil {
 			logger.Info("error group is returning an error", zap.Error(err))
@@ -169,13 +171,14 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 				if !isStartupPacket(buffer) && len(buffer) > 5 {
 					bufferCopy := buffer
 					for i := 0; i < len(bufferCopy)-5; {
-						logger.Debug("Inside the if condition")
-						pg.BackendWrapper.MsgType = buffer[i]
+						logger.Debug("Inside the Pg request for loop")
 						pg.BackendWrapper.BodyLen = int(binary.BigEndian.Uint32(buffer[i+1:])) - 4
 						if len(buffer) < (i + pg.BackendWrapper.BodyLen + 5) {
-							utils.LogError(logger, nil, "failed to translate the postgres request message due to shorter network packet buffer")
+							utils.LogError(logger, nil, "failed to translate the postgres request message due to shorter network packet buffer. Length of buffer is "+fmt.Sprint(len(buffer))+" buffer value :"+string(buffer)+" and pg.BackendWrapper.BodyLen is "+fmt.Sprint(pg.BackendWrapper.BodyLen))
 							break
 						}
+						pg.BackendWrapper.MsgType = buffer[i]
+
 						msg, err = pg.translateToReadableBackend(buffer[i:(i + pg.BackendWrapper.BodyLen + 5)])
 						if err != nil && buffer[i] != 112 {
 							utils.LogError(logger, err, "failed to translate the request message to readable")
@@ -240,7 +243,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 						logger.Debug("failed to decode the response message in proxy for postgres dependency", zap.Error(err))
 					}
 
-					if len(afterEncoded) != len(buffer) && pgMock.PacketTypes[0] != "p" {
+					if len(afterEncoded) != len(buffer) && len(pgMock.PacketTypes) > 0 && pgMock.PacketTypes[0] != "p" {
 						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(afterEncoded)), zap.Any("buffer", len(buffer)))
 						pgMock.Payload = bufStr
 					}
@@ -367,7 +370,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 					if err != nil {
 						logger.Debug("failed to decode the response message in proxy for postgres dependency", zap.Error(err))
 					}
-					if len(afterEncoded) != len(buffer) && pgMock.PacketTypes[0] != "R" {
+					if len(afterEncoded) != len(buffer) && len(pgMock.PacketTypes) > 0 && pgMock.PacketTypes[0] != "R" {
 						logger.Debug("the length of the encoded buffer is not equal to the length of the original buffer", zap.Any("after_encoded", len(afterEncoded)), zap.Any("buffer", len(buffer)))
 						pgMock.Payload = bufStr
 					}

@@ -31,7 +31,7 @@ go build -o ginApp
 
 for i in {1..2}; do
 # Start the gin-mongo app in record mode and record testcases and mocks.
-sudo -E env PATH="$PATH" ./../../keployv2 record -c "./ginApp" &
+sudo -E env PATH="$PATH" ./../../keployv2 record -c "./ginApp" --generateGithubActions=false &
 
 # Wait for the application to start.
 app_started=false
@@ -81,7 +81,7 @@ sleep 5
 done
 
 # Start the gin-mongo app in test mode.
-sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7
+sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7 --generateGithubActions=false 
 
 # # move keployv2 to /usr/local/bin/keploy
 # mv ./../../keployv2 /usr/local/bin/keploy

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"os"
 
 	"go.keploy.io/server/v2/pkg/graph"
 	"go.keploy.io/server/v2/utils"
@@ -22,7 +23,7 @@ func Test(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 		Short:   "run the recorded testcases and execute assertions",
 		Example: `keploy test -c "/path/to/user/app" --delay 6`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
-			return cmdConfigurator.ValidateFlags(ctx, cmd)
+			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
@@ -44,6 +45,16 @@ func Test(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 					return nil
 				}
 			}
+
+			cmdType := utils.FindDockerCmd(cfg.Command)
+			if cmdType == utils.Native && cfg.Test.GoCoverage {
+				err := os.Setenv("GOCOVERDIR", cfg.Test.CoverageReportPath)
+				if err != nil {
+					utils.LogError(logger, err, "failed to set GOCOVERDIR")
+					return nil
+				}
+			}
+
 			err = replay.Start(ctx)
 			if err != nil {
 				utils.LogError(logger, err, "failed to replay")

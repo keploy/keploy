@@ -1,0 +1,58 @@
+name: Test GinApp 2
+on:
+  workflow_call:
+
+jobs:
+  test-go-mongo:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download Keploy Build Binary
+        uses: actions/download-artifact@v4
+        with:
+          name: keploy-binary
+          path: /usr/local/bin
+
+      - name: Giving permission to binary
+        run: |
+          sudo chmod +x /usr/local/bin/keployB 
+
+      - name: Download the latest released binary of keploy
+        run: |
+          curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
+          sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keployR
+      
+      # Get the pilot for tests and mocks assertion
+      - name: Get the pilot for tests and mocks assertion
+        run: |
+          curl --silent -o pilot --location "https://github.com/keploy/pilot/releases/latest/download/pilot_linux_amd64" && 
+          sudo chmod a+x pilot && sudo mkdir -p /usr/local/bin && sudo mv pilot /usr/local/bin
+
+      - name: Checkout to the samples-go repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          ref: native-linux
+          path: samples-go
+
+      - name: Build the gin-mongo application
+        run: |
+          cd samples-go/gin-mongo
+          go build -o ginApp .
+          
+      # add the noisy fields in the config file if any.
+      - name: Add noisy fields in the config file
+        run: |
+          echo "You can add the noisy fields in the config file if any."
+          
+      - name: Run testing script for gin-mongo application
+        uses: ./.github/actions/tester
+        with:
+          working-directory: samples-go/gin-mongo
+          command: ./ginApp
+          delay: 7
+          keploy-record-bin: /usr/local/bin/keployB
+          keploy-test-bin: /usr/local/bin/keployR
+          mode: 1
