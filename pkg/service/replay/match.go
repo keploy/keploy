@@ -948,7 +948,7 @@ func truncateToMatchWithEllipsis(expectedText, actualText string) (string, strin
 		}
 
 		if matchLineCount <= 3 { // Ensure there's enough room for at least one line and the ellipsis
-			return ""
+			return strings.Join(lines, "\n")
 		}
 		// Calculate how many lines to keep from the top and bottom halves
 		// Subtracting 3 from matchLineCount to account for the ellipsis lines
