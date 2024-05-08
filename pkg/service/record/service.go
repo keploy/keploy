@@ -21,7 +21,7 @@ type Instrumentation interface {
 type Service interface {
 	Start(ctx context.Context) error
 	StartMock(ctx context.Context) error
-	ReRecord(ctx context.Context, appId uint64) error
+	ReRecord(ctx context.Context, appID uint64) error
 }
 
 type TestDB interface {

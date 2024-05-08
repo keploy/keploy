@@ -325,7 +325,7 @@ func (r *Recorder) StartMock(ctx context.Context) error {
 	return fmt.Errorf(stopReason)
 }
 
-func (r *Recorder) ReRecord(ctx context.Context, appId uint64) error {
+func (r *Recorder) ReRecord(ctx context.Context, appID uint64) error {
 
 	tcs, err := r.testDB.GetTestCases(ctx, r.config.ReRecord)
 	if err != nil {
@@ -352,7 +352,7 @@ func (r *Recorder) ReRecord(ctx context.Context, appId uint64) error {
 	for _, tc := range tcs {
 		if cmdType == utils.Docker || cmdType == utils.DockerCompose {
 
-			userIP, err := r.instrumentation.GetAppIP(ctx, appId)
+			userIP, err := r.instrumentation.GetAppIP(ctx, appID)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get the app ip")
 				break
