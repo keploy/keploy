@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
+	"net"
 )
 
 type PacketHeader struct {
@@ -129,7 +129,7 @@ func encodeToBinary(packet interface{}, header *models.MySQLPacketHeader, operat
 	return data, nil
 }
 
-func DecodeMySQLPacket(logger *zap.Logger, packet Packet) (string, SQLPacketHeader, interface{}, error) {
+func DecodeMySQLPacket(logger *zap.Logger, packet Packet, clientConn net.Conn, mode models.Mode) (string, SQLPacketHeader, interface{}, error) {
 	data := packet.Payload
 	header := packet.Header
 	var packetData interface{}
@@ -141,17 +141,17 @@ func DecodeMySQLPacket(logger *zap.Logger, packet Packet) (string, SQLPacketHead
 	}
 
 	switch {
-	case lastCommand == 0x03:
+	case lastCommand[clientConn] == 0x03 && mode == models.MODE_RECORD:
 		switch {
 		case data[0] == 0x00: // OK Packet
 			packetType = "MySQLOK"
 			packetData, err = decodeMySQLOK(data)
-			lastCommand = 0x00 // Reset the last command
+			lastCommand[clientConn] = 0x00 // Reset the last command
 
 		case data[0] == 0xFF: // Error Packet
 			packetType = "MySQLErr"
 			packetData, err = decodeMySQLErr(data)
-			lastCommand = 0x00 // Reset the last command
+			lastCommand[clientConn] = 0x00 // Reset the last command
 
 		case isLengthEncodedInteger(data[0]): // ResultSet Packet
 			packetType = "RESULT_SET_PACKET"
@@ -159,7 +159,7 @@ func DecodeMySQLPacket(logger *zap.Logger, packet Packet) (string, SQLPacketHead
 			if err != nil {
 				fmt.Println("Error parsing result set: ", err)
 			}
-			lastCommand = 0x00 // Reset the last command
+			lastCommand[clientConn] = 0x00 // Reset the last command
 		default:
 			packetType = "Unknown"
 			packetData = data
@@ -168,66 +168,66 @@ func DecodeMySQLPacket(logger *zap.Logger, packet Packet) (string, SQLPacketHead
 	case data[0] == 0x0e: // COM_PING
 		packetType = "COM_PING"
 		packetData, err = decodeComPing(data)
-		lastCommand = 0x0e
+		lastCommand[clientConn] = 0x0e
 	case data[0] == 0x17: // COM_STMT_EXECUTE
 		packetType = "COM_STMT_EXECUTE"
 		packetData, err = decodeComStmtExecute(data)
-		lastCommand = 0x17
+		lastCommand[clientConn] = 0x17
 	case data[0] == 0x1c: // COM_STMT_FETCH
 		packetType = "COM_STMT_FETCH"
 		packetData, err = decodeComStmtFetch(data)
-		lastCommand = 0x1c
+		lastCommand[clientConn] = 0x1c
 	case data[0] == 0x16: // COM_STMT_PREPARE
 		packetType = "COM_STMT_PREPARE"
 		packetData, err = decodeComStmtPrepare(data)
-		lastCommand = 0x16
+		lastCommand[clientConn] = 0x16
 	case data[0] == 0x19: // COM_STMT_CLOSE
 		if len(data) > 11 {
 
 			packetType = "COM_STMT_CLOSE_WITH_PREPARE"
 			packetData, err = decodeComStmtCloseMoreData(data)
-			lastCommand = 0x16
+			lastCommand[clientConn] = 0x16
 		} else {
 			packetType = "COM_STMT_CLOSE"
 			packetData, err = decodeComStmtClose(data)
-			lastCommand = 0x19
+			lastCommand[clientConn] = 0x19
 		}
 	case data[0] == 0x11: // COM_CHANGE_USER
 		packetType = "COM_CHANGE_USER"
 		packetData, err = decodeComChangeUser(data)
-		lastCommand = 0x11
+		lastCommand[clientConn] = 0x11
 
 	case data[0] == 0x04: // Result Set Packet
 		packetType = "RESULT_SET_PACKET"
 		packetData, err = parseResultSet(data)
-		lastCommand = 0x04
+		lastCommand[clientConn] = 0x04
 	case data[0] == 0x0A: // MySQLHandshakeV10
 		packetType = "MySQLHandshakeV10"
 		packetData, err = decodeMySQLHandshakeV10(data)
 		handshakePacket, _ := packetData.(*HandshakeV10Packet)
 		handshakePluginName = handshakePacket.AuthPluginName
-		lastCommand = 0x0A
+		lastCommand[clientConn] = 0x0A
 	case data[0] == 0x03: // MySQLQuery
 		packetType = "MySQLQuery"
 		packetData, err = decodeMySQLQuery(data)
-		lastCommand = 0x03
+		lastCommand[clientConn] = 0x03
 	case data[0] == 0x00: // MySQLOK or COM_STMT_PREPARE_OK
-		if lastCommand == 0x16 {
+		if lastCommand[clientConn] == 0x16 {
 			packetType = "COM_STMT_PREPARE_OK"
 			packetData, err = decodeComStmtPrepareOk(data)
 		} else {
 			packetType = "MySQLOK"
 			packetData, err = decodeMySQLOK(data)
 		}
-		lastCommand = 0x00
+		lastCommand[clientConn] = 0x00
 	case data[0] == 0xFF: // MySQLErr
 		packetType = "MySQLErr"
 		packetData, err = decodeMySQLErr(data)
-		lastCommand = 0xFF
+		lastCommand[clientConn] = 0xFF
 	case data[0] == 0xFE && len(data) > 1: // Auth Switch Packet
 		packetType = "AUTH_SWITCH_REQUEST"
 		packetData, err = decodeAuthSwitchRequest(data)
-		lastCommand = 0xFE
+		lastCommand[clientConn] = 0xFE
 	case data[0] == 0xFE || expectingAuthSwitchResponse:
 		packetType = "AUTH_SWITCH_RESPONSE"
 		packetData, err = decodeAuthSwitchResponse(data)
@@ -235,23 +235,23 @@ func DecodeMySQLPacket(logger *zap.Logger, packet Packet) (string, SQLPacketHead
 	case data[0] == 0xFE: // EOF packet
 		packetType = "MySQLEOF"
 		packetData, err = decodeMYSQLEOF(data)
-		lastCommand = 0xFE
+		lastCommand[clientConn] = 0xFE
 	case data[0] == 0x02: // New packet type
 		packetType = "AUTH_MORE_DATA"
 		packetData, err = decodeAuthMoreData(data)
-		lastCommand = 0x02
+		lastCommand[clientConn] = 0x02
 	case data[0] == 0x18: // SEND_LONG_DATA Packet
 		packetType = "COM_STMT_SEND_LONG_DATA"
 		packetData, err = decodeComStmtSendLongData(data)
-		lastCommand = 0x18
+		lastCommand[clientConn] = 0x18
 	case data[0] == 0x1a: // STMT_RESET Packet
 		packetType = "COM_STMT_RESET"
 		packetData, err = decodeComStmtReset(data)
-		lastCommand = 0x1a
+		lastCommand[clientConn] = 0x1a
 	case data[0] == 0x8d || expectingHandshakeResponse || expectingHandshakeResponseTest: // Handshake Response packet
 		packetType = "HANDSHAKE_RESPONSE"
 		packetData, err = decodeHandshakeResponse(data)
-		lastCommand = 0x8d // This value may differ depending on the handshake response protocol version
+		lastCommand[clientConn] = 0x8d // This value may differ depending on the handshake response protocol version
 	case data[0] == 0x01: // Handshake Response packet
 		if len(data) == 1 {
 			packetType = "COM_QUIT"
@@ -275,7 +275,7 @@ func DecodeMySQLPacket(logger *zap.Logger, packet Packet) (string, SQLPacketHead
 			zap.ByteString("Data", data))
 	}
 	if (models.GetMode()) == "test" {
-		lastCommand = 0x00
+		lastCommand[clientConn] = 0x00
 	}
 	return packetType, header, packetData, nil
 }
@@ -304,7 +304,7 @@ func (p *Packet) Encode() ([]byte, error) {
 	return packet, nil
 }
 
-var lastCommand byte // This is global and will remember the last command
+var lastCommand = make(map[net.Conn]byte)
 
 func encodeLengthEncodedInteger(n uint64) []byte {
 	var buf []byte

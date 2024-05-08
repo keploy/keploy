@@ -288,8 +288,9 @@ func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
 		for _, column := range resultSet.Columns {
 			sequenceID++
 			buf.WriteByte(column.PacketHeader.PacketLength)
-			//buf.WriteByte(column.PacketHeader.PacketLength >> 8)
-			//buf.WriteByte(column.PacketHeader.PacketLength >> 16)
+			// TODO: Find out an appropriate type for Packet Length (since the packet structure has three bytes for packet length
+			buf.WriteByte(0x00)
+			buf.WriteByte(0x00)
 			buf.WriteByte(sequenceID)
 
 			writeLengthEncodedString(buf, column.Catalog)
