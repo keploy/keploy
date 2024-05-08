@@ -215,6 +215,7 @@ func CheckFileExists(path string) bool {
 }
 
 var Version string
+var DockerImage = "ghcr.io/keploy/keploy"
 
 func attachLogFileToSentry(logger *zap.Logger, logFilePath string) error {
 	file, err := os.Open(logFilePath)
@@ -387,7 +388,7 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 	// Get the name of the operating system.
 	osName := runtime.GOOS
 	//TODO: configure the hardcoded port mapping
-	img := "ghcr.io/keploy/keploy:" + "v" + Version
+	img := DockerImage + ":v" + Version
 	logger.Info("Starting keploy in docker with image", zap.String("image:", img))
 
 	var ttyFlag string
