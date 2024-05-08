@@ -338,6 +338,10 @@ func (r *Recorder) ReRecord(ctx context.Context, appId uint64) error {
 		return nil
 
 	}
+	cmdType := utils.FindDockerCmd(r.config.Command)
+	if cmdType == utils.Docker || cmdType == utils.DockerCompose {
+		host = r.config.ContainerName
+	}
 
 	if err := waitForPort(ctx, host, port); err != nil {
 		r.logger.Error("Waiting for port failed", zap.String("host", host), zap.String("port", port), zap.Error(err))
@@ -346,8 +350,6 @@ func (r *Recorder) ReRecord(ctx context.Context, appId uint64) error {
 
 	allTestCasesRecorded := true
 	for _, tc := range tcs {
-		cmdType := utils.FindDockerCmd(r.config.Command)
-
 		if cmdType == utils.Docker || cmdType == utils.DockerCompose {
 
 			userIP, err := r.instrumentation.GetAppIP(ctx, appId)
@@ -355,7 +357,6 @@ func (r *Recorder) ReRecord(ctx context.Context, appId uint64) error {
 				utils.LogError(r.logger, err, "failed to get the app ip")
 				break
 			}
-
 
 			tc.HTTPReq.URL, err = replaceHostToIP(tc.HTTPReq.URL, userIP)
 			if err != nil {
