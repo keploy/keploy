@@ -402,9 +402,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		if cmdType == utils.Docker || cmdType == utils.DockerCompose {
 
-			userIP, err := r.instrumentation.GetAppIP(ctx, appID)
+			userIP, err := r.instrumentation.GetContainerIP(ctx, appID)
 			if err != nil {
-				utils.LogError(r.logger, err, "failed to get the app ip")
+				utils.LogError(r.logger, err, "failed to run test due to missing container ip")
 				break
 			}
 
