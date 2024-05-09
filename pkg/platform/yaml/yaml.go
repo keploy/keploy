@@ -63,14 +63,14 @@ func WriteFile(ctx context.Context, logger *zap.Logger, path, fileName string, d
 	if err != nil {
 		return err
 	}
-	flag := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+	flag := os.O_WRONLY | os.O_TRUNC
 	if isAppend {
 		data := []byte("---\n")
 		if isFileEmpty {
 			data = []byte{}
 		}
 		docData = append(data, docData...)
-		flag = os.O_CREATE | os.O_WRONLY | os.O_APPEND
+		flag = os.O_WRONLY | os.O_APPEND
 	}
 	yamlPath := filepath.Join(path, fileName+".yaml")
 	file, err := os.OpenFile(yamlPath, flag, fs.ModePerm)
@@ -151,11 +151,6 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 				utils.LogError(Logger, err, "failed to close the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
 				return false, err
 			}
-			err = chmodRecursive(yamlPath, 0777)
-			if err != nil {
-				utils.LogError(Logger, err, "failed to set permissions for the directory", zap.String("path directory", path))
-				return false, err
-			}
 			return true, nil
 		}
 		return false, err
@@ -182,18 +177,4 @@ func ReadSessionIndices(_ context.Context, path string, Logger *zap.Logger) ([]s
 		}
 	}
 	return indices, nil
-}
-
-func chmodRecursive(path string, mode os.FileMode) error {
-	cleanPath := filepath.Clean(path)
-	for {
-		if err := os.Chmod(cleanPath, mode); err != nil {
-			return err
-		}
-		if filepath.Base(cleanPath) == "keploy" || filepath.Base(cleanPath) == ".keploy" || cleanPath == "/" {
-			break
-		}
-		cleanPath = filepath.Dir(cleanPath)
-	}
-	return nil
 }

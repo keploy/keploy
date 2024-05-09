@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"syscall"
 
 	"go.keploy.io/server/v2/cli"
 	"go.keploy.io/server/v2/cli/provider"
@@ -65,6 +66,8 @@ func start(ctx context.Context) {
 	}
 	defer utils.DeleteLogs(logger)
 	defer utils.Recover(logger)
+	oldMask := syscall.Umask(0) // set umask to 0 so that keploy can give exact permissions to the files it creates
+	defer syscall.Umask(oldMask)
 	configDb := configdb.NewConfigDb(logger)
 	if dsn != "" {
 		utils.SentryInit(logger, dsn)
