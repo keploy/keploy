@@ -253,7 +253,7 @@ func (c *Core) GetContainerIP(_ context.Context, id uint64) (string, error) {
 
 	ip := a.ContainerIPv4Addr()
 	if ip == "" {
-		return "", fmt.Errorf("failed to get the IP address of the container with id:%v. Please increase --delay flag value", id)
+		return "", fmt.Errorf("failed to get the IP address of the app container. Try increasing --delay (in seconds)")
 	}
 
 	return ip, nil
