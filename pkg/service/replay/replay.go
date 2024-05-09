@@ -331,6 +331,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusUserAbort, context.Canceled
 	}
 
+	cmdType := utils.FindDockerCmd(r.config.Command)
+	var userIP string
+	if cmdType == utils.Docker || cmdType == utils.DockerCompose {
+		userIP, err = r.instrumentation.GetContainerIP(ctx, appID)
+		if err != nil {
+			return models.TestSetStatusFailed, err
+		}
+	}
+
 	selectedTests := ArrayToMap(r.config.Test.SelectedTests[testSetID])
 
 	testCasesCount := len(testCases)
@@ -398,15 +407,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		started := time.Now().UTC()
 
-		cmdType := utils.FindDockerCmd(r.config.Command)
-
 		if cmdType == utils.Docker || cmdType == utils.DockerCompose {
-
-			userIP, err := r.instrumentation.GetAppIP(ctx, appID)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to get the app ip")
-				break
-			}
 
 			testCase.HTTPReq.URL, err = replaceHostToIP(testCase.HTTPReq.URL, userIP)
 			if err != nil {
