@@ -336,7 +336,7 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 			if !ok {
 				return matchJSONComparisonResult, nil
 			}
-			if valueMatchJSONComparisonResult, er := matchJSONWithNoiseHandling(prefix+k, v, val, noiseMap, ignoreOrdering); !valueMatchJSONComparisonResult.matches || er != nil {
+			if valueMatchJSONComparisonResult, er := matchJSONWithNoiseHandling(strings.ToLower(prefix+k), v, val, noiseMap, ignoreOrdering); !valueMatchJSONComparisonResult.matches || er != nil {
 				return valueMatchJSONComparisonResult, nil
 			} else if !valueMatchJSONComparisonResult.isExact {
 				isExact = false
@@ -344,7 +344,8 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 				differences = append(differences, valueMatchJSONComparisonResult.differences...)
 			}
 			// remove the noisy key from both expected and actual JSON.
-			if _, ok := CheckStringExist(prefix+k, noiseMap); ok {
+			// Viper bindings are case insensitive, so we need convert the key to lowercase.
+			if _, ok := CheckStringExist(strings.ToLower(prefix+k), noiseMap); ok {
 				delete(copiedExpMap, prefix+k)
 				delete(copiedActMap, k)
 				continue
@@ -778,7 +779,7 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 	match := true
 	_, isHeaderNoisy := noise["header"]
 	for k, v := range h1 {
-		regexArr, isNoisy := CheckStringExist(k, noise)
+		regexArr, isNoisy := CheckStringExist(strings.ToLower(k), noise)
 		if isNoisy && len(regexArr) != 0 {
 			isNoisy, _ = MatchesAnyRegex(v[0], regexArr)
 		}
@@ -855,7 +856,7 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 		}
 	}
 	for k, v := range h2 {
-		regexArr, isNoisy := CheckStringExist(k, noise)
+		regexArr, isNoisy := CheckStringExist(strings.ToLower(k), noise)
 		if isNoisy && len(regexArr) != 0 {
 			isNoisy, _ = MatchesAnyRegex(v[0], regexArr)
 		}
