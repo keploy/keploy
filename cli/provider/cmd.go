@@ -196,6 +196,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("containerName", c.cfg.ContainerName, "Name of the application's docker container")
 		cmd.Flags().StringP("networkName", "n", c.cfg.NetworkName, "Name of the application's docker network")
 		cmd.Flags().UintSlice("passThroughPorts", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server and ignore the traffic")
+		cmd.Flags().StringP("appId", "a", c.cfg.AppID, "A unique name for the user's application")
 		cmd.Flags().Bool("generateGithubActions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
 		err = cmd.Flags().MarkHidden("port")
 		if err != nil {
