@@ -492,11 +492,11 @@ func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 	return nil
 }
 
-func (h *Hooks) Record(ctx context.Context, _ uint64) (<-chan *models.TestCase, error) {
+func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	// TODO use the session to get the app id
 	// and then use the app id to get the test cases chan
 	// and pass that to eBPF consumers/listeners
-	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents)
+	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
 }
 
 func (h *Hooks) unLoad(_ context.Context) {
