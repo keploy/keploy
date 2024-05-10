@@ -20,7 +20,7 @@ type OutgoingOptions struct {
 }
 
 type IncomingOptions struct {
-	//Filters []config.Filter
+	Filters []config.Filter
 }
 
 type SetupOptions struct {
