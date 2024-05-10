@@ -66,7 +66,10 @@ func start(ctx context.Context) {
 	}
 	defer utils.DeleteLogs(logger)
 	defer utils.Recover(logger)
-	oldMask := syscall.Umask(0) // set umask to 0 so that keploy can give exact permissions to the files it creates
+
+	// setting umask to 0 so that keploy can give exact permissions to the files it creates
+	// this will not work in scenario of mounted volumes because the umask is set by the host which we can't from keploy
+	oldMask := syscall.Umask(0)
 	defer syscall.Umask(oldMask)
 	configDb := configdb.NewConfigDb(logger)
 	if dsn != "" {
