@@ -21,12 +21,25 @@ type TestReportVerdict struct {
 
 func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) config.GlobalNoise {
 	noise := globalNoise
-	for field, regexArr := range tsNoise["body"] {
-		noise["body"][field] = regexArr
+
+	if _, ok := noise["body"]; !ok {
+		noise["body"] = make(map[string][]string)
 	}
-	for field, regexArr := range tsNoise["header"] {
-		noise["header"][field] = regexArr
+	if tsNoiseBody, ok := tsNoise["body"]; ok {
+		for field, regexArr := range tsNoiseBody {
+			noise["body"][field] = regexArr
+		}
 	}
+
+	if _, ok := noise["header"]; !ok {
+		noise["header"] = make(map[string][]string)
+	}
+	if tsNoiseHeader, ok := tsNoise["header"]; ok {
+		for field, regexArr := range tsNoiseHeader {
+			noise["header"][field] = regexArr
+		}
+	}
+
 	return noise
 }
 
