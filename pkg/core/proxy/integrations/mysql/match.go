@@ -55,10 +55,7 @@ func matchRequestWithMock(ctx context.Context, mysqlRequest models.MySQLRequest,
 		configMocks[matchedIndex].Spec.MySQLResponses = append(configMocks[matchedIndex].Spec.MySQLResponses[:matchedReqIndex], configMocks[matchedIndex].Spec.MySQLResponses[matchedReqIndex+1:]...)
 		if len(configMocks[matchedIndex].Spec.MySQLResponses) == 0 {
 			mockDb.DeleteUnFilteredMock(configMocks[matchedIndex])
-			// deleteConfigMock
 		}
-		//h.SetConfigMocks(configMocks)
-		mockDb.SetUnFilteredMocks(configMocks)
 	} else {
 		realIndex := matchedIndex - len(configMocks)
 		if realIndex < 0 || realIndex >= len(tcsMocks) {
@@ -68,11 +65,7 @@ func matchRequestWithMock(ctx context.Context, mysqlRequest models.MySQLRequest,
 		tcsMocks[realIndex].Spec.MySQLResponses = append(tcsMocks[realIndex].Spec.MySQLResponses[:matchedReqIndex], tcsMocks[realIndex].Spec.MySQLResponses[matchedReqIndex+1:]...)
 		if len(tcsMocks[realIndex].Spec.MySQLResponses) == 0 {
 			mockDb.DeleteFilteredMock(tcsMocks[realIndex])
-			// deleteTcsMock
 		}
-		// h.SetTcsMocks(tcsMocks)
-		mockDb.SetFilteredMocks(tcsMocks)
-
 	}
 
 	return bestMatch, matchedIndex, mockType, nil
