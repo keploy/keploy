@@ -19,7 +19,7 @@ func init() {
 func Mock(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:     "mock",
-		Short:   "Record and replay ougoung network traffic for the user application",
+		Short:   "Record and replay outgoing network traffic for the user application",
 		Example: `keploy mock -c "/path/to/user/app" --delay 10`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			record, err := cmd.Flags().GetBool("record")
