@@ -43,7 +43,7 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 					errCh <- err
 					return
 				}
-				sqlMock, found := getFirstSQLMock(configMocks)
+				sqlMock, matchedIndex, found := getFirstSQLMock(configMocks)
 				if !found {
 					logger.Debug("No SQL mock found")
 					errCh <- err
@@ -59,7 +59,6 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 					errCh <- err
 					return
 				}
-
 				_, err = clientConn.Write(binaryPacket)
 				if err != nil {
 					if ctx.Err() != nil {
@@ -69,17 +68,17 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 					errCh <- err
 					return
 				}
-				matchedIndex := 0
 				matchedReqIndex := 0
 				configMocks[matchedIndex].Spec.MySQLResponses = append(configMocks[matchedIndex].Spec.MySQLResponses[:matchedReqIndex], configMocks[matchedIndex].Spec.MySQLResponses[matchedReqIndex+1:]...)
 				if len(configMocks[matchedIndex].Spec.MySQLResponses) == 0 {
-					configMocks = append(configMocks[:matchedIndex], configMocks[matchedIndex+1:]...)
-					err = mockDb.FlagMockAsUsed(configMocks[matchedIndex])
-					if err != nil {
-						utils.LogError(logger, err, "Failed to flag mock as used")
-						errCh <- err
-						return
-					}
+					//configMocks = append(configMocks[:matchedIndex], configMocks[matchedIndex+1:]...)
+					//err = mockDb.FlagMockAsUsed(configMocks[matchedIndex])
+					//if err != nil {
+					//	utils.LogError(logger, err, "Failed to flag mock as used")
+					//	errCh <- err
+					//	return
+					//}
+					mockDb.DeleteUnFilteredMock(configMocks[matchedIndex])
 				}
 				//h.SetConfigMocks(configMocks)
 				firstLoop = false
@@ -131,7 +130,7 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 					expectingHandshakeResponseTest = true
 				}
 
-				oprRequest, requestHeader, decodedRequest, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(requestBuffer))
+				oprRequest, requestHeader, decodedRequest, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(requestBuffer), clientConn, models.MODE_TEST)
 				if err != nil {
 					utils.LogError(logger, err, "Failed to decode MySQL packet")
 					errCh <- err
@@ -206,7 +205,6 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 					errCh <- err
 					return
 				}
-
 				_, err = clientConn.Write(responseBinary)
 				if err != nil {
 					if ctx.Err() != nil {
@@ -228,11 +226,11 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 	}
 }
 
-func getFirstSQLMock(configMocks []*models.Mock) (*models.Mock, bool) {
-	for _, mock := range configMocks {
+func getFirstSQLMock(configMocks []*models.Mock) (*models.Mock, int, bool) {
+	for index, mock := range configMocks {
 		if len(mock.Spec.MySQLResponses) > 0 && mock.Kind == "SQL" && mock.Spec.MySQLResponses[0].Header.PacketType == "MySQLHandshakeV10" {
-			return mock, true
+			return mock, index, true
 		}
 	}
-	return nil, false
+	return nil, 0, false
 }
