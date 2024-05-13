@@ -323,7 +323,7 @@ func decodeMySQLMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 			}
 			req.Message = requestMessage
 		case "COM_STMT_SEND_LONG_DATA":
-			requestMessage := &models.MySQLComStmtSendLongData{}
+			requestMessage := &models.MySQLCOMSTMTSENDLONGDATA{}
 			err := v.Message.Decode(requestMessage)
 			if err != nil {
 				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLCOM_STMT_SEND_LONG_DATA")
@@ -331,7 +331,7 @@ func decodeMySQLMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 			}
 			req.Message = requestMessage
 		case "COM_STMT_RESET":
-			requestMessage := &models.MySQLcomStmtReset{}
+			requestMessage := &models.MySQLCOMSTMTRESET{}
 			err := v.Message.Decode(requestMessage)
 			if err != nil {
 				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLCOM_STMT_RESET")
