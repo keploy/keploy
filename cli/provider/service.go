@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
@@ -88,7 +89,9 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 		// Check if the config file exists on the path or not and if it does not, we create it.
 		if !utils.CheckFileExists(n.cfg.ConfigPath + "/keploy.yml") {
 			toolsService := tools.NewTools(n.logger, tel)
+			n.cfg.Path = strings.TrimSuffix(n.cfg.Path, "/keploy")
 			yamlData, err := yaml.Marshal(n.cfg)
+			n.cfg.Path = n.cfg.Path + "/keploy"
 			if err != nil {
 				n.logger.Debug("failed to marshal the config")
 			}
