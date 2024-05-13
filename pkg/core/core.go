@@ -130,6 +130,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		Pid:        0,
 		IsDocker:   isDocker,
 		KeployIPV4: a.KeployIPv4Addr(),
+		Mode:       opts.Mode,
 	})
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to load hooks")
@@ -242,7 +243,7 @@ func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.A
 	}
 }
 
-func (c *Core) GetAppIP(_ context.Context, id uint64) (string, error) {
+func (c *Core) GetContainerIP(_ context.Context, id uint64) (string, error) {
 
 	a, err := c.getApp(id)
 	if err != nil {
@@ -250,5 +251,10 @@ func (c *Core) GetAppIP(_ context.Context, id uint64) (string, error) {
 		return "", err
 	}
 
-	return a.ContainerIPv4Addr(), nil
+	ip := a.ContainerIPv4Addr()
+	if ip == "" {
+		return "", fmt.Errorf("failed to get the IP address of the app container. Try increasing --delay (in seconds)")
+	}
+
+	return ip, nil
 }
