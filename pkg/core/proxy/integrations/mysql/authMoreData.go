@@ -6,7 +6,7 @@ import (
 )
 
 type NextAuthPacket struct {
-	PluginData byte `json:"plugin_data,omitempty" yaml:"plugin_data,omitempty"`
+	PluginData byte `yaml:"plugin_data"`
 }
 
 func decodeAuthMoreData(data []byte) (*NextAuthPacket, error) {
@@ -17,3 +17,11 @@ func decodeAuthMoreData(data []byte) (*NextAuthPacket, error) {
 		PluginData: data[0],
 	}, nil
 }
+
+// Encode function for Next Authentication method Packet
+//func encodeAuthMoreData(packet *NextAuthPacket) ([]byte, error) {
+//	if packet.PluginData != 0x02 {
+//		return nil, errors.New("invalid PluginData value for NextAuthPacket")
+//	}
+//	return []byte{packet.PluginData}, nil
+//}

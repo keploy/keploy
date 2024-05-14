@@ -63,14 +63,14 @@ func WriteFile(ctx context.Context, logger *zap.Logger, path, fileName string, d
 	if err != nil {
 		return err
 	}
-	flag := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+	flag := os.O_WRONLY | os.O_TRUNC
 	if isAppend {
 		data := []byte("---\n")
 		if isFileEmpty {
 			data = []byte{}
 		}
 		docData = append(data, docData...)
-		flag = os.O_CREATE | os.O_WRONLY | os.O_APPEND
+		flag = os.O_WRONLY | os.O_APPEND
 	}
 	yamlPath := filepath.Join(path, fileName+".yaml")
 	file, err := os.OpenFile(yamlPath, flag, fs.ModePerm)
@@ -141,11 +141,6 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 				utils.LogError(Logger, err, "failed to create a directory for the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
 				return false, err
 			}
-			err = os.Chmod(path, 0777)
-			if err != nil {
-				utils.LogError(Logger, err, "failed to set permissions for the directory", zap.String("path directory", path))
-				return false, err
-			}
 			file, err := os.OpenFile(yamlPath, os.O_CREATE, 0777) // Set file permissions to 777
 			if err != nil {
 				utils.LogError(Logger, err, "failed to create a yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
@@ -154,11 +149,6 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 			err = file.Close()
 			if err != nil {
 				utils.LogError(Logger, err, "failed to close the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
-				return false, err
-			}
-			err = os.Chmod(yamlPath, 0777)
-			if err != nil {
-				utils.LogError(Logger, err, "failed to set permissions for the directory", zap.String("path directory", path))
 				return false, err
 			}
 			return true, nil

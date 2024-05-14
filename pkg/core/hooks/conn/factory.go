@@ -37,7 +37,7 @@ func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger) *Factory 
 
 // ProcessActiveTrackers iterates over all conn the trackers and checks if they are complete. If so, it captures the ingress call and
 // deletes the tracker. If the tracker is inactive for a long time, it deletes it.
-func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *models.TestCase) {
+func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *models.TestCase, opts models.IncomingOptions) {
 	factory.mutex.Lock()
 	defer factory.mutex.Unlock()
 	var trackersToDelete []ID
@@ -64,7 +64,7 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 					utils.LogError(factory.logger, err, "failed to parse the http response from byte array", zap.Any("responseBuf", responseBuf))
 					continue
 				}
-				capture(ctx, factory.logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestampTest, resTimestampTest)
+				capture(ctx, factory.logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestampTest, resTimestampTest, opts)
 
 			} else if tracker.IsInactive(factory.inactivityThreshold) {
 				trackersToDelete = append(trackersToDelete, connID)
@@ -91,7 +91,7 @@ func (factory *Factory) GetOrCreate(connectionID ID) *Tracker {
 	return tracker
 }
 
-func capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time) {
+func capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions) {
 	reqBody, err := io.ReadAll(req.Body)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the http request body")
@@ -110,6 +110,12 @@ func capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 		utils.LogError(logger, err, "failed to read the http response body")
 		return
 	}
+
+	if isFiltered(logger, req, opts) {
+		logger.Debug("The request is a filtered request")
+		return
+	}
+
 	t <- &models.TestCase{
 		Version: models.GetVersion(),
 		Name:    pkg.ToYamlHTTPHeader(req.Header)["Keploy-Test-Name"],

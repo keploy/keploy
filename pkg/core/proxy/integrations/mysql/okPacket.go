@@ -9,11 +9,11 @@ import (
 )
 
 type OKPacket struct {
-	AffectedRows uint64 `json:"affected_rows,omitempty" yaml:"affected_rows,omitempty,flow"`
-	LastInsertID uint64 `json:"last_insert_id,omitempty" yaml:"last_insert_id,omitempty,flow"`
-	StatusFlags  uint16 `json:"status_flags,omitempty" yaml:"status_flags,omitempty,flow"`
-	Warnings     uint16 `json:"warnings,omitempty" yaml:"warnings,omitempty,flow"`
-	Info         string `json:"info,omitempty" yaml:"info,omitempty,flow"`
+	AffectedRows uint64 `json:"affected_rows,omitempty" yaml:"affected_rows"`
+	LastInsertID uint64 `json:"last_insert_id,omitempty" yaml:"last_insert_id"`
+	StatusFlags  uint16 `json:"status_flags,omitempty" yaml:"status_flags"`
+	Warnings     uint16 `json:"warnings,omitempty" yaml:"warnings"`
+	Info         string `json:"info,omitempty" yaml:"info"`
 }
 
 func decodeMySQLOK(data []byte) (*OKPacket, error) {
@@ -24,7 +24,7 @@ func decodeMySQLOK(data []byte) (*OKPacket, error) {
 	packet := &OKPacket{}
 	var err error
 	//identifier of ok packet
-	var offset = 1
+	offset := 1
 	// Decode affected rows
 	packet.AffectedRows, err = readLengthEncodedIntegerOff(data, &offset)
 	if err != nil {
@@ -64,11 +64,13 @@ func encodeMySQLOK(packet *models.MySQLOKPacket, header *models.MySQLPacketHeade
 	//last insert ID
 	payload.Write(encodeLengthEncodedInteger(packet.LastInsertID))
 	// status flags
-	if err := binary.Write(payload, binary.LittleEndian, packet.StatusFlags); err != nil {
+	err := binary.Write(payload, binary.LittleEndian, packet.StatusFlags)
+	if err != nil {
 		return nil, err
 	}
 	// warnings
-	if err := binary.Write(payload, binary.LittleEndian, packet.Warnings); err != nil {
+	err = binary.Write(payload, binary.LittleEndian, packet.Warnings)
+	if err != nil {
 		return nil, err
 	}
 	// info
@@ -90,3 +92,41 @@ func encodeMySQLOK(packet *models.MySQLOKPacket, header *models.MySQLPacketHeade
 
 	return buf.Bytes(), nil
 }
+
+//func encodeMySQLOKConnectionPhase(packet interface{}, _ string, sequence int) ([]byte, error) {
+//	innerPacket, ok := packet.(*interface{})
+//	if ok {
+//		packet = *innerPacket
+//	}
+//	p, ok := packet.(*models.MySQLOKPacket)
+//	if !ok {
+//		return nil, fmt.Errorf("invalid packet type for HandshakeResponse: expected *HandshakeResponse, got %T", packet)
+//	}
+//	buf := new(bytes.Buffer)
+//	payload := new(bytes.Buffer)
+//	// header (0x00)
+//	payload.WriteByte(0x00)
+//	// affected rows
+//	payload.Write(encodeLengthEncodedInteger(p.AffectedRows))
+//	//last insert ID
+//	payload.Write(encodeLengthEncodedInteger(p.LastInsertID))
+//	//status flags
+//	binary.Write(payload, binary.LittleEndian, p.StatusFlags)
+//	// warnings
+//	binary.Write(payload, binary.LittleEndian, p.Warnings)
+//	// info
+//	if len(p.Info) > 0 {
+//		payload.Write([]byte{0})
+//		payload.WriteString(p.Info)
+//	}
+//	// header bytes
+//	// packet length (3 bytes)
+//	packetLength := uint32(payload.Len())
+//	buf.WriteByte(byte(packetLength))
+//	buf.WriteByte(byte(packetLength >> 8))
+//	buf.WriteByte(byte(packetLength >> 16))
+//	buf.WriteByte(byte(sequence))
+//	buf.Write(payload.Bytes())
+//
+//	return buf.Bytes(), nil
+//}
