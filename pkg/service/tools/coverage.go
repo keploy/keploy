@@ -112,7 +112,7 @@ func CalPythonCoverage(ctx context.Context) (models.TestCoverage, error) {
 
 	covFileName := os.Getenv("COVERAGE_FILE")
 	if covFileName == "" {
-		covFileName = ".coverage"
+		covFileName = ".coverage.keploy"
 	}
 	generateCovJSONCmd := exec.CommandContext(ctx, "coverage", "json", "--data-file="+covFileName)
 	_, err := generateCovJSONCmd.Output()

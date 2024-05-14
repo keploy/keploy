@@ -208,9 +208,9 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().Uint64("apiTimeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
 			cmd.Flags().String("mongoPassword", c.cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")
 			cmd.Flags().String("coverageReportPath", c.cfg.Test.CoverageReportPath, "Write a go coverage profile to the file in the given directory.")
-			cmd.Flags().StringP("language", "l", c.cfg.Test.Language, "application programming language")
+			cmd.Flags().StringP("language", "l", c.cfg.Test.Language, "Application programming language")
 			cmd.Flags().Bool("ignoreOrdering", c.cfg.Test.IgnoreOrdering, "Ignore ordering of array in response")
-			cmd.Flags().Bool("coverage", c.cfg.Test.Coverage, "Enable coverage reporting for the testcases")
+			cmd.Flags().Bool("skipCoverage", c.cfg.Test.SkipCoverage, "Skip generation of coverage report")
 			cmd.Flags().Bool("removeUnusedMocks", c.cfg.Test.RemoveUnusedMocks, "Clear the unused mocks for the passed test-sets")
 			cmd.Flags().Bool("fallBackOnMiss", c.cfg.Test.FallBackOnMiss, "Enable connecting to actual service if mock not found during test mode")
 		} else {
@@ -326,15 +326,32 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New("missing required -c flag or appCmd in config file")
 		}
 
-		language, isCov := utils.DetectLanguage(c.cfg.Command)
+		language, executable := utils.DetectLanguage(c.cfg.Command)
 		if c.cfg.Test.Language == "" {
+			c.logger.Warn(fmt.Sprintf("%s language detected. If this is incorrect, please use --language to set the correct language", language))
 			c.cfg.Test.Language = language
 		}
-		if c.cfg.Test.Language == "go" && c.cfg.Test.Coverage {
-			c.cfg.Test.IsCmdCoverage = true
-		} else {
-			c.cfg.Test.IsCmdCoverage = isCov
+		c.cfg.Test.Language = language
+		if c.cfg.Test.Language == "python" {
+			err = utils.RunCommand("coverage")
+			if err == nil {
+				c.cfg.Command = strings.Replace(c.cfg.Command, executable, "coverage run $APPEND --data-file=.coverage.keploy", 1)
+			}
+		} else if c.cfg.Test.Language == "typescript" {
+			err = utils.RunCommand("nyc", "--version")
+			if err == nil {
+				c.cfg.Command = "nyc --clean=$CLEAN " + c.cfg.Command
+			}
+		} else if c.cfg.Test.Language == "go" && !utils.CheckGoBinaryForCoverFlag(c.logger, c.cfg.Command) {
+			c.cfg.Test.SkipCoverage = true
+			utils.LogError(c.logger, nil, "coverage flag not found in go binary")
 		}
+		if err != nil {
+			c.cfg.Test.SkipCoverage = true
+			utils.LogError(c.logger, err, "failed to run coverage tool")
+		}
+		c.cfg.Test.Language = language
+		c.cfg.Test.SkipCoverage = false
 
 		// set the command type
 		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
@@ -414,7 +431,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 			config.SetSelectedTests(c.cfg, testSets)
 
-			if utils.CmdType(c.cfg.CommandType) == utils.Native && c.cfg.Test.Language == "go" && c.cfg.Test.Coverage {
+			if utils.CmdType(c.cfg.CommandType) == utils.Native && c.cfg.Test.Language == "go" && !c.cfg.Test.SkipCoverage {
 				goCovPath, err := utils.SetCoveragePath(c.logger, c.cfg.Test.CoverageReportPath)
 				if err != nil {
 					utils.LogError(c.logger, err, "failed to set go coverage path")

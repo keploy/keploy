@@ -38,7 +38,7 @@ func Test(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 			}
 
 			cmdType := utils.FindDockerCmd(cfg.Command)
-			if cmdType == utils.Native && cfg.Test.Coverage {
+			if cmdType == utils.Native && !cfg.Test.SkipCoverage {
 				err := os.Setenv("GOCOVERDIR", cfg.Test.CoverageReportPath)
 				if err != nil {
 					utils.LogError(logger, err, "failed to set GOCOVERDIR")

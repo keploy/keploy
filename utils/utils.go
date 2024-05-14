@@ -3,6 +3,7 @@ package utils
 import (
 	"bufio"
 	"context"
+	"debug/elf"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,7 +15,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
-	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -737,32 +737,49 @@ func EnsureRmBeforeName(cmd string) string {
 	return strings.Join(parts, " ")
 }
 
-// detectLanguage detects the language of the test command and whether it is a coverage command
-func DetectLanguage(cmd string) (string, bool) {
-	cmdFields := strings.Fields(cmd)
-	if slices.Contains(cmdFields, "coverage") {
-		return "python", true
-	} else {
-		for _, field := range cmdFields {
-			if strings.HasSuffix(field, ".py") {
-				return "python", false
-			}
-		}
-	}	
-
-	if slices.Contains(cmdFields, "node") || slices.Contains(cmdFields, "npm") {
-		if slices.Contains(cmdFields, "E2ETests") {
-			return "typescript", true
-		}
-		return "typescript", false
+// detectLanguage detects the language of the test command and returns the executable
+func DetectLanguage(cmd string) (string, string) {
+	executable := strings.Fields(cmd)[0]
+	if strings.HasPrefix(cmd, "python") {
+		return "python", executable
 	}
 
-	if slices.Contains(cmdFields, "mvn") {
-		if strings.Contains(cmd, "exec:exec") {
-			return "java", true
-		}
-		return "java", false
+	if executable == "node" || executable == "npm" {
+		return "typescript", executable
 	}
 
-	return "go", false
+	// TODO: JAVA
+
+	return "go", executable
+}
+
+func RunCommand(cmdString ...string) error {
+	cmd := exec.Command(cmdString[0], cmdString[1:]...)
+	err := cmd.Run()
+	return err
+}
+
+// TODO: use native approach once https://github.com/golang/go/issues/67366 gets resolved
+func CheckGoBinaryForCoverFlag(logger *zap.Logger, cmd string) bool {
+	file, err := elf.Open(cmd)
+	if err != nil {
+		LogError(logger, err, "failed to open file")
+		fmt.Fprintf(os.Stderr, "Failed to open file: %v\n", err)
+		return false
+	}
+	defer file.Close()
+
+	symbols, err := file.Symbols()
+	if err != nil {
+		LogError(logger, err, "failed to read symbols")
+		return false
+	}
+
+	for _, symbol := range symbols {
+		// Check for symbols that related to Go coverage instrumentation
+		if strings.Contains(symbol.Name, "internal/coverage") {
+			return true
+		}
+	}
+	return false
 }
