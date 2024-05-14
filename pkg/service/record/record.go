@@ -362,7 +362,7 @@ func (r *Recorder) ReRecord(ctx context.Context, appID uint64) error {
 	for _, tc := range tcs {
 		if cmdType == utils.Docker || cmdType == utils.DockerCompose {
 
-			userIP, err := r.instrumentation.GetAppIP(ctx, appID)
+			userIP, err := r.instrumentation.GetContainerIP(ctx, appID)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get the app ip")
 				break
