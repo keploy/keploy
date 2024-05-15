@@ -143,24 +143,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 			continue
 		}
 
-		// if i == len(testSetIDs)-1 {
-		// 	err = os.Setenv("RUN_JACOCO", "-DrunJacoco=true")
-		// 	if err != nil {
-		// 		r.config.Test.Coverage = false
-		// 		utils.LogError(r.logger, err, "failed to set RUN_JACOCO env variable")
-		// 	}
-		// 	r.logger.Info("RUN_JACOCO env variable set")
-		// }
-
-		// if r.config.Test.Language == "java" && r.config.Test.IsCmdCoverage {
-		// 	err = os.Setenv("TESTSETID", testSetID)
-		// 	if err != nil {
-		// 		r.config.Test.Coverage = false
-		// 		utils.LogError(r.logger, err, "failed to set TESTSETID env variable")
-		// 	}
-		// 	r.logger.Info("TESTSETID env variable set", zap.String("testset id", testSetID))
-		// }
-
 		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, appID, false)
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)
