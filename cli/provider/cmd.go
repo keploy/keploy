@@ -335,6 +335,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if c.cfg.Test.Language == "python" {
 			err = utils.RunCommand("coverage")
 			if err == nil {
+				utils.WritePyCoverageConfig(c.logger)
 				c.cfg.Command = strings.Replace(c.cfg.Command, executable, "coverage run $APPEND --data-file=.coverage.keploy", 1)
 			}
 		} else if c.cfg.Test.Language == "typescript" {
@@ -350,8 +351,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			c.cfg.Test.SkipCoverage = true
 			utils.LogError(c.logger, err, "failed to run coverage tool")
 		}
-		c.cfg.Test.Language = language
-		c.cfg.Test.SkipCoverage = false
 
 		// set the command type
 		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))

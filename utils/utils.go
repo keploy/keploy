@@ -783,3 +783,26 @@ func CheckGoBinaryForCoverFlag(logger *zap.Logger, cmd string) bool {
 	}
 	return false
 }
+
+func WritePyCoverageConfig(logger *zap.Logger) {
+	// Define the content of the .coveragerc file
+	configContent := `[run]
+omit =
+    /usr/*
+sigterm = true
+`
+
+	// Create or overwrite the .coveragerc file
+	file, err := os.Create(".coveragerc")
+	if err != nil {
+		LogError(logger, err, "failed to create .coveragerc file")
+	}
+	defer file.Close()
+
+	_, err = file.WriteString(configContent)
+	if err != nil {
+		LogError(logger, err, "failed to write to .coveragerc file")
+	}
+
+	logger.Debug("Configuration written to .coveragerc")
+}
