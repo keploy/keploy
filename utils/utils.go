@@ -166,16 +166,17 @@ var ConfigGuide = `
 #   ]
 # Example on using globalNoise
 # globalNoise:
-#   global:
+#   global:{
 #     body: {
 #        # to ignore some values for a field,
 #        # pass regex patterns to the corresponding array value
-#        "url": ["https?://\S+", "http://\S+"],
+#        "url": ['https?://\S+', 'http://\S+'],
 #     },
 #     header: {
 #        # to ignore the entire field, pass an empty array
 #        "Date": [],
 #      }
+#    }
 #    # to ignore fields or the corresponding values for a specific test-set,
 #    # pass the test-set-name as a key to the "test-sets" object and
 #    # populate the corresponding "body" and "header" objects
