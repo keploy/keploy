@@ -24,7 +24,7 @@ import (
 var eventAttributesSize = int(unsafe.Sizeof(SocketDataEvent{}))
 
 // ListenSocket starts the socket event listeners
-func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap *ebpf.Map) (<-chan *models.TestCase, error) {
+func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap *ebpf.Map, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	t := make(chan *models.TestCase, 500)
 	err := initRealTimeOffset()
 	if err != nil {
@@ -46,7 +46,7 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 					return
 				default:
 					// TODO refactor this to directly consume the events from the maps
-					c.ProcessActiveTrackers(ctx, t)
+					c.ProcessActiveTrackers(ctx, t, opts)
 					time.Sleep(100 * time.Millisecond)
 				}
 			}

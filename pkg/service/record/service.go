@@ -20,11 +20,13 @@ type Instrumentation interface {
 type Service interface {
 	Start(ctx context.Context) error
 	StartMock(ctx context.Context) error
+	ReRecord(ctx context.Context) error
 }
 
 type TestDB interface {
 	GetAllTestSetIDs(ctx context.Context) ([]string, error)
 	InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string) error
+	GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error)
 }
 
 type MockDB interface {
