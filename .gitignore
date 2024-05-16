@@ -47,7 +47,7 @@ test-reports
 **/._.DS_Store
 
 #Ignore the test reports
-test-reports
+reports
 
 #Ignore the c and header files
 *.c

@@ -221,6 +221,10 @@ func (r *Replayer) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
 func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error) {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
+	//return early if the testSetId is .gitignore
+	if testSetID == ".gitignore" {
+		return models.TestSetStatusPassed, nil
+	}
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
 	runTestSetCtx = context.WithValue(runTestSetCtx, models.ErrGroupKey, runTestSetErrGrp)
 
