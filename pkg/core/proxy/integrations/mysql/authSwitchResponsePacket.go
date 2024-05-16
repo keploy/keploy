@@ -5,7 +5,7 @@ import (
 )
 
 type AuthSwitchResponsePacket struct {
-	AuthResponseData string `json:"auth_response_data,omitempty" yaml:"auth_response_data,omitempty"`
+	AuthResponseData string `yaml:"auth_response_data"`
 }
 
 func decodeAuthSwitchResponse(data []byte) (*AuthSwitchResponsePacket, error) {
