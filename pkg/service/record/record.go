@@ -368,7 +368,7 @@ func (r *Recorder) ReRecord(ctx context.Context, appID uint64) error {
 				break
 			}
 
-			tc.HTTPReq.URL, err = replaceHostToIP(tc.HTTPReq.URL, userIP)
+			tc.HTTPReq.URL, err = utils.ReplaceHostToIP(tc.HTTPReq.URL, userIP)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to replace host to docker container's IP")
 				break
