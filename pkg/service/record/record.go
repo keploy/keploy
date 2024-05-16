@@ -193,10 +193,6 @@ func (r *Recorder) Start(ctx context.Context) error {
 				r.telemetry.RecordedTestCaseMock(mock.GetKind())
 			}
 		}
-		err := pkg.CreateGitIgnore(r.logger, r.config.Path)
-		if err != nil {
-			return err
-		}
 		return nil
 	})
 

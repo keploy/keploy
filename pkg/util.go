@@ -77,30 +77,6 @@ func IsTime(stringDate string) bool {
 	return false
 }
 
-func CreateGitIgnore(logger *zap.Logger, filePath string) error {
-	gitIgnoreData := []byte("./reports/\n")
-	filePath = filePath + "/.gitignore"
-	gitIgnoreFIle, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0777)
-	if err != nil {
-		utils.LogError(logger, err, "failed to create gitignore file")
-		return err
-	}
-	defer func() {
-		err := gitIgnoreFIle.Close()
-		if err != nil {
-			utils.LogError(logger, err, "failed to close gitignore file")
-		}
-	}()
-	//writing the data to the file
-	_, err = gitIgnoreFIle.Write(gitIgnoreData)
-	if err != nil {
-		utils.LogError(logger, err, "failed to write data to gitignore file")
-		return err
-	}
-	logger.Info("Gitignore file generated successfully")
-	return nil
-}
-
 func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HTTPResp, error) {
 	var resp *models.HTTPResp
 

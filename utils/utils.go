@@ -595,6 +595,38 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 	return nil
 }
 
+func CreateGitIgnore(logger *zap.Logger, filePath string) error {
+	gitIgnoreData := []byte("./reports/\n")
+	filePath = filePath + "/.gitignore"
+	_, err := os.Stat(filePath)
+	if err == nil {
+		return nil //file already exists
+	}
+	gitIgnoreFIle, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0777)
+	if err != nil {
+		logger.Error("Failed to create gitignore file", zap.Error(err))
+		return err
+	}
+	if err != nil {
+		logger.Error("Failed to create gitignore file", zap.Error(err))
+		return err
+	}
+	defer func() {
+		err := gitIgnoreFIle.Close()
+		if err != nil {
+			logger.Error("Failed to close gitignore file", zap.Error(err))
+		}
+	}()
+	//writing the data to the file
+	_, err = gitIgnoreFIle.Write(gitIgnoreData)
+	if err != nil {
+		logger.Error("Failed to write data to gitignore file", zap.Error(err))
+		return err
+	}
+	logger.Info("Test Reports folder has been added to a gitignore file")
+	return nil
+}
+
 func uniqueProcessGroups(pids []int) ([]int, error) {
 	uniqueGroups := make(map[int]bool)
 	var uniqueGPIDs []int
