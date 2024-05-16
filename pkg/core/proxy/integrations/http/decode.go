@@ -94,7 +94,7 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			logger.Debug("after matching the http request", zap.Any("isMatched", ok), zap.Any("stub", stub), zap.Error(err))
 
 			if !ok {
-				if !isPassThrough(logger, request, dstCfg.Port, opts) {
+				if !IsPassThrough(logger, request, dstCfg.Port, opts) {
 					utils.LogError(logger, nil, "Didn't match any preExisting http mock", zap.Any("metadata", getReqMeta(request)))
 				}
 				if opts.FallBackOnMiss {

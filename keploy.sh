@@ -215,5 +215,6 @@ installKeploy
 
 if command -v keploy &> /dev/null; then
     keploy example
-    rm keploy.sh
+    rm -rf keploy.sh
+    rm -rf install.sh
 fi
