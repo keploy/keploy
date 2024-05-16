@@ -2,7 +2,6 @@ package mysql
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -12,31 +11,28 @@ import (
 )
 
 type ResultSet struct {
-	Columns             []*ColumnDefinition `json:"columns,omitempty" yaml:"columns,omitempty,flow"`
-	Rows                []*Row              `json:"rows,omitempty" yaml:"rows,omitempty,flow"`
-	EOFPresent          bool                `json:"eofPresent,omitempty" yaml:"eofPresent,omitempty,flow"`
-	PaddingPresent      bool                `json:"paddingPresent,omitempty" yaml:"paddingPresent,omitempty,flow"`
-	EOFPresentFinal     bool                `json:"eofPresentFinal,omitempty" yaml:"eofPresentFinal,omitempty,flow"`
-	PaddingPresentFinal bool                `json:"paddingPresentFinal,omitempty" yaml:"paddingPresentFinal,omitempty,flow"`
-	OptionalPadding     bool                `json:"optionalPadding,omitempty" yaml:"optionalPadding,omitempty,flow"`
-	OptionalEOFBytes    string              `json:"optionalEOFBytes,omitempty" yaml:"optionalEOFBytes,omitempty,flow"`
-	EOFAfterColumns     string              `json:"eofAfterColumns,omitempty" yaml:"eofAfterColumns,omitempty,flow"`
+	Columns             []*ColumnDefinition `yaml:"columns,omitempty,flow"`
+	Rows                []*Row              `yaml:"rows,omitempty,flow"`
+	EOFPresent          bool                `yaml:"eofPresent,omitempty,flow"`
+	PaddingPresent      bool                `yaml:"paddingPresent,omitempty,flow"`
+	EOFPresentFinal     bool                `yaml:"eofPresentFinal,omitempty,flow"`
+	PaddingPresentFinal bool                `yaml:"paddingPresentFinal,omitempty,flow"`
+	OptionalPadding     bool                `yaml:"optionalPadding,omitempty,flow"`
+	OptionalEOFBytes    []byte              `yaml:"optionalEOFBytes,omitempty,flow"`
+	EOFAfterColumns     []byte              `yaml:"eofAfterColumns,omitempty,flow"`
 }
-
 type Row struct {
-	Header  RowHeader             `json:"header,omitempty" yaml:"header,omitempty,flow"`
-	Columns []RowColumnDefinition `json:"columns,omitempty" yaml:"row_column_definition,omitempty,flow"`
+	Header  RowHeader             `yaml:"header"`
+	Columns []RowColumnDefinition `yaml:"row_column_definition"`
 }
-
 type RowColumnDefinition struct {
-	Type  models.FieldType `json:"type,omitempty" yaml:"type,omitempty,flow"`
-	Name  string           `json:"name,omitempty" yaml:"name,omitempty,flow"`
-	Value interface{}      `json:"value,omitempty" yaml:"value,omitempty,flow"`
+	Type  models.FieldType `yaml:"type"`
+	Name  string           `yaml:"name"`
+	Value interface{}      `yaml:"value"`
 }
-
 type RowHeader struct {
-	PacketLength int   `json:"packet_length,omitempty" yaml:"packet_length,omitempty,flow"`
-	SequenceID   uint8 `json:"sequence_id,omitempty" yaml:"sequence_id,omitempty,flow"`
+	PacketLength int   `yaml:"packet_length"`
+	SequenceID   uint8 `yaml:"sequence_id"`
 }
 
 func parseResultSet(b []byte) (*ResultSet, error) {
@@ -48,6 +44,9 @@ func parseResultSet(b []byte) (*ResultSet, error) {
 	var eofAfterColumns []byte
 	// Parse the column count packet
 	columnCount, _, n := readLengthEncodedInteger(b)
+	if n == 0 {
+		return nil, errors.New("invalid column count")
+	}
 	b = b[n:]
 
 	// Parse the columns
@@ -96,8 +95,8 @@ func parseResultSet(b []byte) (*ResultSet, error) {
 		EOFPresentFinal:     eofFinal,
 		PaddingPresentFinal: paddingFinal,
 		OptionalPadding:     optionalPadding,
-		OptionalEOFBytes:    base64.StdEncoding.EncodeToString(optionalEOFBytes),
-		EOFAfterColumns:     base64.StdEncoding.EncodeToString(eofAfterColumns),
+		OptionalEOFBytes:    optionalEOFBytes,
+		EOFAfterColumns:     eofAfterColumns,
 	}
 
 	return resultSet, err
@@ -107,35 +106,65 @@ func parseColumnDefinitionPacket(b []byte) (*ColumnDefinition, []byte, error) {
 	packet := &ColumnDefinition{}
 	var n int
 	var m int
-
+	if len(b) < 4 {
+		return nil, nil, fmt.Errorf("invalid column definition packet")
+	}
 	// Read packet header
 	packet.PacketHeader.PacketLength = uint8(readUint24(b[:3]))
 	packet.PacketHeader.PacketSequenceID = uint8(b[3])
 	b = b[4:]
 
 	packet.Catalog, n = readLengthEncodedStrings(b)
-	b = b[n:]
+	if len(b) > n {
+		b = b[n:]
+	}
 	packet.Schema, n = readLengthEncodedStrings(b)
-	b = b[n:]
+	if len(b) > n {
+		b = b[n:]
+	}
 	packet.Table, n = readLengthEncodedStrings(b)
-	b = b[n:]
+	if len(b) > n {
+		b = b[n:]
+	}
 	packet.OrgTable, n = readLengthEncodedStrings(b)
-	b = b[n:]
+	if len(b) > n {
+		b = b[n:]
+	}
 	packet.Name, n = readLengthEncodedStrings(b)
-	b = b[n:]
+	if len(b) > n {
+		b = b[n:]
+	}
 	packet.OrgName, n = readLengthEncodedStrings(b)
-	b = b[n:]
-	b = b[1:] // Skip the next byte (length of the fixed-length fields)
+	if len(b) > n {
+		b = b[n:]
+	}
+
+	if len(b) > 1 {
+		b = b[1:] // Skip the next byte (length of the fixed-length fields)
+	}
 	packet.CharacterSet = binary.LittleEndian.Uint16(b)
-	b = b[2:]
+	if len(b) > 2 {
+		b = b[2:]
+	}
 	packet.ColumnLength = binary.LittleEndian.Uint32(b)
-	b = b[4:]
+	if len(b) > 4 {
+		b = b[4:]
+	}
 	packet.ColumnType = b[0]
-	b = b[1:]
+	if len(b) > 1 {
+		b = b[1:]
+	}
 	packet.Flags = binary.LittleEndian.Uint16(b)
-	b = b[2:]
-	packet.Decimals = b[0]
-	b = b[2:] // Skip filler
+	if len(b) > 2 {
+		b = b[2:]
+	}
+	if len(b) > 0 {
+		packet.Decimals = b[0]
+	}
+	if len(b) > 2 {
+		b = b[2:] // Skip filler
+	}
+
 	if len(b) > 0 {
 		packet.DefaultValue, m = readLengthEncodedStrings(b)
 		b = b[m:]
@@ -253,52 +282,35 @@ func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
 	buf.Write([]byte{0x01, 0x00, 0x00, 0x01})
 	// Write column count
 	lengthColumns := uint64(len(resultSet.Columns))
-	if err := writeLengthEncodedInteger(buf, &lengthColumns); err != nil {
-		return nil, err
-	}
+	writeLengthEncodedInteger(buf, &lengthColumns)
 
 	if len(resultSet.Columns) > 0 {
 		for _, column := range resultSet.Columns {
 			sequenceID++
-			buf.WriteByte(byte(column.PacketHeader.PacketLength))
-			buf.WriteByte(byte(column.PacketHeader.PacketLength >> 8))
-			buf.WriteByte(byte(column.PacketHeader.PacketLength >> 16))
+			buf.WriteByte(column.PacketHeader.PacketLength)
+			// TODO: Find out an appropriate type for Packet Length (since the packet structure has three bytes for packet length
+			buf.WriteByte(0x00)
+			buf.WriteByte(0x00)
 			buf.WriteByte(sequenceID)
 
-			var err error
-			err = writeLengthEncodedString(buf, column.Catalog)
-			if err != nil {
-				return nil, err
-			}
-			err = writeLengthEncodedString(buf, column.Schema)
-			if err != nil {
-				return nil, err
-			}
-			err = writeLengthEncodedString(buf, column.Table)
-			if err != nil {
-				return nil, err
-			}
-			err = writeLengthEncodedString(buf, column.OrgTable)
-			if err != nil {
-				return nil, err
-			}
-			err = writeLengthEncodedString(buf, column.Name)
-			if err != nil {
-				return nil, err
-			}
-			err = writeLengthEncodedString(buf, column.OrgName)
-			if err != nil {
-				return nil, err
-			}
+			writeLengthEncodedString(buf, column.Catalog)
+			writeLengthEncodedString(buf, column.Schema)
+			writeLengthEncodedString(buf, column.Table)
+			writeLengthEncodedString(buf, column.OrgTable)
+			writeLengthEncodedString(buf, column.Name)
+			writeLengthEncodedString(buf, column.OrgName)
 			buf.WriteByte(0x0c) // Length of the fixed-length fields (12 bytes)
-			if err := binary.Write(buf, binary.LittleEndian, column.CharacterSet); err != nil {
+			err := binary.Write(buf, binary.LittleEndian, column.CharacterSet)
+			if err != nil {
 				return nil, err
 			}
-			if err := binary.Write(buf, binary.LittleEndian, column.ColumnLength); err != nil {
+			err = binary.Write(buf, binary.LittleEndian, column.ColumnLength)
+			if err != nil {
 				return nil, err
 			}
 			buf.WriteByte(column.ColumnType)
-			if err := binary.Write(buf, binary.LittleEndian, column.Flags); err != nil {
+			err = binary.Write(buf, binary.LittleEndian, column.Flags)
+			if err != nil {
 				return nil, err
 			}
 			buf.WriteByte(column.Decimals)
@@ -309,8 +321,7 @@ func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
 	// Write EOF packet header
 	if resultSet.EOFPresent {
 		sequenceID++
-		EOFAfterColumnsValue, _ := base64.StdEncoding.DecodeString(resultSet.EOFAfterColumns)
-		buf.Write(EOFAfterColumnsValue)
+		buf.Write(resultSet.EOFAfterColumns)
 		if resultSet.PaddingPresent {
 			buf.Write([]byte{0x00, 0x00}) // Add padding bytes
 		}
@@ -329,10 +340,10 @@ func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
 		b, _ := encodeRow(row, row.Columns)
 		buf.Write(b)
 	}
+	//sequenceID++
 	// Write EOF packet header again
 	// buf.Write([]byte{5, 0, 0, sequenceID})
-	OptionalEOFBytesValue, _ := base64.StdEncoding.DecodeString(resultSet.OptionalEOFBytes)
-	buf.Write(OptionalEOFBytesValue)
+	buf.Write(resultSet.OptionalEOFBytes)
 	if resultSet.PaddingPresentFinal {
 		buf.Write([]byte{0x00, 0x00}) // Add padding bytes
 	}
@@ -344,7 +355,7 @@ func encodeRow(_ *models.Row, columnValues []models.RowColumnDefinition) ([]byte
 
 	// Write the header
 	//binary.Write(&buf, binary.LittleEndian, uint32(row.Header.PacketLength))
-	//buf.WriteByte(row.Header.PacketSequenceId)
+	//buf.WriteByte(row.Header.PacketSequenceID)
 
 	for _, column := range columnValues {
 		value := column.Value
@@ -402,9 +413,7 @@ func encodeRow(_ *models.Row, columnValues []models.RowColumnDefinition) ([]byte
 			} else {
 				length := uint64(len(strValue))
 				// Now pass a pointer to length
-				if err := writeLengthEncodedInteger(&buf, &length); err != nil {
-					return nil, err
-				}
+				writeLengthEncodedInteger(&buf, &length)
 				// Write the string value
 				buf.WriteString(strValue)
 			}
@@ -414,3 +423,21 @@ func encodeRow(_ *models.Row, columnValues []models.RowColumnDefinition) ([]byte
 
 	return buf.Bytes(), nil
 }
+
+//func encodeInt32(val int32) []byte {
+//	buf := make([]byte, 4)
+//	binary.LittleEndian.PutUint32(buf, uint32(val))
+//	return buf
+//}
+//
+//func encodeFloat32(val float32) []byte {
+//	buf := make([]byte, 4)
+//	binary.LittleEndian.PutUint32(buf, math.Float32bits(val))
+//	return buf
+//}
+//
+//func encodeFloat64(val float64) []byte {
+//	buf := make([]byte, 8)
+//	binary.LittleEndian.PutUint64(buf, math.Float64bits(val))
+//	return buf
+//}
