@@ -27,11 +27,19 @@ jobs:
   test-go-mongo-2:
     needs: build
     uses: ./.github/workflows/test-go-mongo-2.yml    
+  
+  test-go-postgres-1:
+    needs: build
+    uses: ./.github/workflows/test-go-postgres-1.yml
+
+  test-go-postgres-2:
+    needs: build
+    uses: ./.github/workflows/test-go-postgres-1=2.yml
 
 
 # Wait for all the test workflows before getting the coverage
   get-coverage:
-    needs: [test-go-mongo-1, test-go-mongo-2]
+    needs: [test-go-mongo-1, test-go-mongo-2, test-go-postgres-1, test-go-postgres-2]
     uses: ./.github/workflows/coverage_stage.yml     
 
 #https://github.com/marketplace/actions/delete-artifact

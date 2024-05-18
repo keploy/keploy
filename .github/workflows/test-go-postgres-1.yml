@@ -1,0 +1,73 @@
+name: Test GinApp Postgres
+on:
+  workflow_call:
+
+jobs:
+  test-go-postgres:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:latest
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download Keploy Build Binary
+        uses: actions/download-artifact@v4
+        with:
+          name: keploy-binary
+          path: /usr/local/bin
+
+      - name: Give permission to binary
+        run: |
+          sudo chmod +x /usr/local/bin/keployB 
+
+      - name: Download the latest released binary of Keploy
+        run: |
+          curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
+          sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keployR
+
+      - name: Get the pilot for tests and mocks assertion
+        run: |
+          curl --silent -o pilot --location "https://github.com/keploy/pilot/releases/latest/download/pilot_linux_amd64"
+          sudo chmod a+x pilot
+          sudo mkdir -p /usr/local/bin && sudo mv pilot /usr/local/bin
+
+      - name: Checkout to the samples-go repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          ref: native-linux
+          path: samples-go
+
+      - name: Build the gin-postgres application
+        run: |
+          cd samples-go/gin-postgres
+          go build -o ginApp .
+
+      - name: Add noisy fields in the config file
+        run: |
+          echo "You can add the noisy fields in the config file if any."
+
+      - name: Run testing script for gin-postgres application
+        uses: ./.github/actions/tester
+        with:
+          working-directory: samples-go/gin-postgres
+          command: ./ginApp
+          delay: 7
+          keploy-record-bin: /usr/local/bin/keployR
+          keploy-test-bin: /usr/local/bin/keployB
+          mode: 0
