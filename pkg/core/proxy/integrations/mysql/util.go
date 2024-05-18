@@ -18,18 +18,18 @@ var (
 	expectingHandshakeResponseTest = false
 )
 
-func bytesToMySQLPacket(buffer []byte) CustomPacket {
+func bytesToMySQLPacket(buffer []byte) Packet {
 	if buffer == nil || len(buffer) < 4 {
 		log.Fatalf("Error: buffer is nil or too short to be a valid MySQL packet")
-		return CustomPacket{}
+		return Packet{}
 	}
 	tempBuffer := make([]byte, 4)
 	copy(tempBuffer, buffer[:3])
 	length := binary.LittleEndian.Uint32(tempBuffer)
 	sequenceID := buffer[3]
 	payload := buffer[4:]
-	return CustomPacket{
-		Header: CustomPacketHeader{
+	return Packet{
+		Header: SQLPacketHeader{
 			PayloadLength: length,
 			SequenceID:    sequenceID,
 		},
