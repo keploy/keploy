@@ -158,23 +158,18 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if abortTestRun {
 			break
 		}
-		fmt.Println("TESTRUNID", testRunID)
-		fmt.Println("TESTSETID", testSetID)
-		testReports, err := emulator.AfterTestHook(ctx, testRunID, testSetID,len(testSetIDs))
+
+		_, err = emulator.AfterTestHook(ctx, testRunID, testSetID, len(testSetIDs))
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to get after test hook")
 		}
-		fmt.Println("THESE ARE THE THE TEST REPORTS", testReports)
 	}
 
 	testRunStatus := "fail"
 	if testRunResult {
 		testRunStatus = "pass"
 	}
-	fmt.Println("totalTestPassed", totalTestPassed)
-	fmt.Println("totalTestFailed", totalTestFailed)
-	fmt.Println("len(testSetIDs)", len(testSetIDs))
-	fmt.Println("testRunStatus", testRunStatus)
+
 	r.telemetry.TestRun(totalTestPassed, totalTestFailed, len(testSetIDs), testRunStatus)
 
 	if !abortTestRun {
