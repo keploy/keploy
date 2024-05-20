@@ -75,6 +75,7 @@ func (t *testUtils) SimulateRequest(ctx context.Context, _ uint64, tc *models.Te
 }
 
 func (t *testUtils) AfterTestHook(ctx context.Context, testRunID, testSetID string, totTestSetCount int) (*models.TestReport, error) {
-
+	t.logger.Debug("AfterTestHook", zap.Any("testRunID", testRunID), zap.Any("testSetID", testSetID), zap.Any("totTestSetCount", totTestSetCount))
+	t.logger.Debug(ctx.Err().Error())
 	return nil, nil
 }
