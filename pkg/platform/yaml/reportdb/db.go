@@ -86,7 +86,7 @@ func (fe *TestReport) GetReport(ctx context.Context, testRunID string, testSetID
 }
 
 func (fe *TestReport) InsertReport(ctx context.Context, testRunID string, testSetID string, testReport *models.TestReport) error {
-	// yha p koi util call  hojaye enterprise ka
+
 	reportPath := filepath.Join(fe.Path, testRunID)
 
 	if testReport.Name == "" {
