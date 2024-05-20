@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fatih/color"
+	"github.com/moby/moby/pkg/parsers/kernel"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
@@ -168,6 +169,10 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	switch cmd.Name() {
 	case "update":
 		return nil
+	case "normalize":
+		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks/reports are stored")
+		cmd.Flags().String("test-run", "", "Test Run to be normalized")
+		cmd.Flags().String("tests", "", "Test Sets to be normalized")
 	case "config":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated config is stored")
 		cmd.Flags().Bool("generate", false, "Generate a new keploy configuration file")
@@ -185,6 +190,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		}
 	case "record", "test":
 		cmd.Flags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
+		cmd.Flags().StringP("rerecord", "r", c.cfg.ReRecord, "Rerecord the testcases/mocks for the given testset(s)")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("port", c.cfg.Port, "GraphQL server port used for executing testcases in unit test library integration")
 		cmd.Flags().Uint32("proxyPort", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
@@ -220,6 +226,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
 		cmd.PersistentFlags().Bool("disableTele", c.cfg.DisableTele, "Run in telemetry mode")
+		cmd.PersistentFlags().Bool("disableANSI", c.cfg.DisableANSI, "Disable ANSI color in logs")
 		err = cmd.PersistentFlags().MarkHidden("disableTele")
 		if err != nil {
 			errMsg := "failed to mark telemetry as hidden flag"
@@ -237,6 +244,18 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		return errors.New("unknown command name")
 	}
 	return nil
+}
+
+func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) error {
+	//check if the version of the kernel is above 5.15 for eBPF support
+	isValid := kernel.CheckKernelVersion(5, 15, 0)
+	if !isValid {
+		errMsg := "Kernel version is below 5.15. Keploy requires kernel version 5.15 or above"
+		utils.LogError(c.logger, nil, errMsg)
+		return errors.New(errMsg)
+	}
+
+	return c.ValidateFlags(ctx, cmd)
 }
 
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
@@ -303,6 +322,17 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.DisableTele = true
+	}
+
+	if c.cfg.DisableANSI {
+		logger, err := log.ChangeColorEncoding()
+		*c.logger = *logger
+		if err != nil {
+			errMsg := "failed to change color encoding"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.logger.Info("Color encoding is disabled")
 	}
 
 	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", c.cfg))
@@ -418,9 +448,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					return errors.New("missing required --containerName flag or containerName in config file")
 				}
 			}
-
 		}
-
 		err = utils.StartInDocker(ctx, c.logger, c.cfg)
 		if err != nil {
 			return err
@@ -467,6 +495,36 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					c.logger.Info("Example usage: " + cmd.Example)
 				}
 			}
+		}
+	case "normalize":
+		path := c.cfg.Path
+		//if user provides relative path
+		if len(path) > 0 && path[0] != '/' {
+			absPath, err := filepath.Abs(path)
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get the absolute path from relative path")
+			}
+			path = absPath
+		} else if len(path) == 0 { // if user doesn't provide any path
+			cdirPath, err := os.Getwd()
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get the path of current directory")
+			}
+			path = cdirPath
+		}
+		path += "/keploy"
+		c.cfg.Path = path
+		tests, err := cmd.Flags().GetString("tests")
+		if err != nil {
+			errMsg := "failed to read tests to be normalized"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		err = config.SetSelectedTestsNormalize(c.cfg, tests)
+		if err != nil {
+			errMsg := "failed to normalize the selected tests"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
 		}
 	}
 	return nil
