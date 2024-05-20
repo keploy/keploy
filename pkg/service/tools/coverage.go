@@ -299,21 +299,18 @@ func CalJavaCoverage(ctx context.Context) (models.TestCoverage, error) {
 	// Define the path to the CSV file
 	csvPath := filepath.Join("target", "site", "keployE2E", "e2e.csv")
 
-	// Open the CSV file
 	file, err := os.Open(csvPath)
 	if err != nil {
 		return testCov, fmt.Errorf("failed to open CSV file: %w", err)
 	}
 	defer file.Close()
 
-	// Create a new CSV reader
 	reader := csv.NewReader(file)
 	records, err := reader.ReadAll()
 	if err != nil {
 		return testCov, fmt.Errorf("failed to read CSV file: %w", err)
 	}
 
-	// Variables to calculate total line coverage
 	var totalLines, coveredLines int
 
 	// Skip header row and process each record
@@ -323,8 +320,14 @@ func CalJavaCoverage(ctx context.Context) (models.TestCoverage, error) {
 		}
 
 		// Parse line coverage data
-		lineMissed, _ := strconv.Atoi(record[7])
-		lineCovered, _ := strconv.Atoi(record[8])
+		lineMissed, err := strconv.Atoi(record[7])
+		if err != nil {
+			return testCov, err
+		}
+		lineCovered, err := strconv.Atoi(record[8])
+		if err != nil {
+			return testCov, err
+		}
 
 		// Calculate total lines and covered lines
 		totalLines += lineMissed + lineCovered
@@ -333,11 +336,10 @@ func CalJavaCoverage(ctx context.Context) (models.TestCoverage, error) {
 		// Calculate coverage percentage for each class
 		if total := lineMissed + lineCovered; total > 0 {
 			coverage := float64(lineCovered) / float64(total) * 100
-			testCov.FileCov[record[2]] = fmt.Sprintf("%.2f%%", coverage) // Class name as key
+			classPath := strings.ReplaceAll(record[1], ".", string(os.PathSeparator)) // Replace dots with path separator
+			testCov.FileCov[filepath.Join(classPath, record[2])] = fmt.Sprintf("%.2f%%", coverage)              // Use class path as key
 		}
 	}
-
-	// Calculate overall coverage if applicable
 	if totalLines > 0 {
 		totalCoverage := float64(coveredLines) / float64(totalLines) * 100
 		testCov.TotalCov = fmt.Sprintf("%.2f%%", totalCoverage)
