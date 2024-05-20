@@ -4,16 +4,14 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"errors"
-
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
@@ -174,7 +172,7 @@ func generateJacocoReport(ctx context.Context, jacocoCliPath string) error {
 	reportDir := "target/site/keployE2E"
 
 	// Ensure the report directory exists
-	if err := os.MkdirAll(reportDir, 0755); err != nil {
+	if err := os.MkdirAll(reportDir + "/html", 0755); err != nil {
 		return fmt.Errorf("failed to create report directory: %w", err)
 	}
 
@@ -189,7 +187,7 @@ func generateJacocoReport(ctx context.Context, jacocoCliPath string) error {
 		"--csv",
 		reportDir + "/e2e.csv",
 		"--html",
-		reportDir,
+		reportDir + "/html",
 	}
 
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
