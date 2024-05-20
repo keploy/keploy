@@ -15,12 +15,13 @@ type Instrumentation interface {
 	GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) (<-chan *models.Mock, error)
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
+	GetContainerIP(ctx context.Context, id uint64) (string, error)
 }
 
 type Service interface {
 	Start(ctx context.Context) error
 	StartMock(ctx context.Context) error
-	ReRecord(ctx context.Context) error
+	ReRecord(ctx context.Context, appID uint64) error
 }
 
 type TestDB interface {
