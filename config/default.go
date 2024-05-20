@@ -22,7 +22,7 @@ inDocker: false
 generateGithubActions: true
 containerName: ""
 networkName: ""
-buildDelay: 30s
+buildDelay: 30
 test:
   selectedTests: {}
   globalNoise:
