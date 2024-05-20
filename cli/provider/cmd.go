@@ -333,29 +333,36 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			c.cfg.Test.Language = language
 		}
 		c.cfg.Test.Language = language
-		if c.cfg.Test.Language == "python" {
+		if cmd.Name() == "record" {
+			c.cfg.Test.SkipCoverage = true
+		}
+		if c.cfg.Test.Language == "python" && !c.cfg.Test.SkipCoverage {
 			err = utils.RunCommand("coverage")
 			if err == nil {
 				utils.WritePyCoverageConfig(c.logger)
 				c.cfg.Command = strings.Replace(c.cfg.Command, executable, "coverage run $APPEND --data-file=.coverage.keploy", 1)
 			}
-		} else if c.cfg.Test.Language == "typescript" {
+		} else if c.cfg.Test.Language == "typescript" && !c.cfg.Test.SkipCoverage {
 			err = utils.RunCommand("nyc", "--version")
 			if err == nil {
 				c.cfg.Command = "nyc --clean=$CLEAN " + c.cfg.Command
 			}
-		} else if c.cfg.Test.Language == "go" && !utils.CheckGoBinaryForCoverFlag(c.logger, c.cfg.Command) {
+		} else if c.cfg.Test.Language == "go" && !c.cfg.Test.SkipCoverage && !utils.CheckGoBinaryForCoverFlag(c.logger, c.cfg.Command) {
 			c.cfg.Test.SkipCoverage = true
 			utils.LogError(c.logger, nil, "coverage flag not found in go binary")
-		} else if c.cfg.Test.Language == "java" {
+		} else if c.cfg.Test.Language == "java" && !c.cfg.Test.SkipCoverage {
 			javaAgentPath := "~/.m2/repository/org/jacoco/org.jacoco.agent/0.8.8/org.jacoco.agent-0.8.8-runtime.jar"
 			if c.cfg.Test.JacocoAgentPath != "" {
 				javaAgentPath = c.cfg.Test.JacocoAgentPath
 			}
-			isFileExist, err := utils.FileExists(javaAgentPath)
-			if err == nil && isFileExist {
-				c.cfg.Command = strings.Replace(c.cfg.Command, executable, fmt.Sprintf("%s -javaagent:%s=destfile=target/${TESTSETID}.exec", executable, javaAgentPath), 1)
-			} else {
+			javaAgentPath, err = utils.ExpandPath(javaAgentPath)
+			if err == nil {
+				isFileExist, err := utils.FileExists(javaAgentPath)
+				if err == nil && isFileExist {
+					c.cfg.Command = strings.Replace(c.cfg.Command, executable, fmt.Sprintf("%s -javaagent:%s=destfile=target/${TESTSETID}.exec", executable, javaAgentPath), 1)
+				}
+			}
+			if err != nil {
 				c.cfg.Test.SkipCoverage = true
 				utils.LogError(c.logger, err, "failed to find jacoco agent. If jacoco agent is present in a different path, please set the path using --jacocoAgentPath")
 			}
@@ -364,7 +371,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			c.cfg.Test.SkipCoverage = true
 			utils.LogError(c.logger, err, "failed to run coverage tool")
 		}
-		c.logger.Info(c.cfg.Command)
 
 		// set the command type
 		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))

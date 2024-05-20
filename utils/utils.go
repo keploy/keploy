@@ -812,15 +812,6 @@ sigterm = true
 
 // FileExists checks if a file exists and is not a directory at the given path.
 func FileExists(path string) (bool, error) {
-	// Expand the tilde to the user's home directory if necessary
-	if strings.HasPrefix(path, "~/") {
-		homeDir, err := getHomeDir()
-		if err != nil {
-			return false, err
-		}
-		path = strings.Replace(path, "~", homeDir, 1)
-	}
-
 	fileInfo, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -829,6 +820,18 @@ func FileExists(path string) (bool, error) {
 		return false, err
 	}
 	return fileInfo.Mode().IsRegular(), nil
+}
+
+// ExpandPath expands a given path, replacing the tilde with the user's home directory
+func ExpandPath(path string) (string, error) {
+	if strings.HasPrefix(path, "~/") {
+		homeDir, err := getHomeDir()
+		if err != nil {
+			return "", err
+		}
+		return strings.Replace(path, "~", homeDir, 1), nil
+	}
+	return path, nil
 }
 
 // getHomeDir retrieves the appropriate home directory based on the execution context

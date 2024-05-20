@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"errors"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
@@ -131,6 +133,76 @@ func downloadAndExtractJaCoCoBinaries(version, dir string) error {
 
 	if os.IsNotExist(err) || cliStat != nil {
 		return fmt.Errorf("failed to find JaCoCo binaries in the distribution")
+	}
+
+	return nil
+}
+
+func mergeJacocoCoverageFiles(ctx context.Context, jacocoCliPath string) error {
+	// Find all .exec files starting with "test-set" in the target directory
+	sourceFiles, err := filepath.Glob("target/test-set*.exec")
+	if err != nil {
+		return fmt.Errorf("error finding coverage files: %w", err)
+	}
+	if len(sourceFiles) == 0 {
+		return errors.New("no coverage files found")
+	}
+
+	// Construct the command arguments
+	args := []string{
+		"java",
+		"-jar",
+		jacocoCliPath,
+		"merge",
+	}
+
+	// Append each source file to the command
+	for _, file := range sourceFiles {
+		args = append(args, file)
+	}
+
+	// Specify the output file
+	args = append(args, "--destfile", "target/keploy-e2e.exec")
+
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to merge coverage files: %w", err)
+	}
+
+	return nil
+}
+
+func generateJacocoReport(ctx context.Context, jacocoCliPath string) error {
+	reportDir := "target/site/keployE2E"
+
+	// Ensure the report directory exists
+	if err := os.MkdirAll(reportDir, 0755); err != nil {
+		return fmt.Errorf("failed to create report directory: %w", err)
+	}
+
+	command := []string{
+		"java",
+		"-jar",
+		jacocoCliPath,
+		"report",
+		"target/keploy-e2e.exec",
+		"--classfiles",
+		"target/classes",
+		"--csv",
+		reportDir + "/e2e.csv",
+		"--html",
+		reportDir,
+	}
+
+	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to generate report: %w", err)
 	}
 
 	return nil

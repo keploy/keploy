@@ -133,6 +133,21 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 	}
 
+	jacocoPath := ""
+	if r.config.Test.Language == "java" && !r.config.Test.SkipCoverage {
+		jacocoPath = filepath.Join(os.TempDir(), "jacoco")
+		err = os.MkdirAll(jacocoPath, 0777)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to create jacoco directory")
+		} else {
+			err := downloadAndExtractJaCoCoBinaries("0.8.12", jacocoPath)
+			if err != nil {
+				r.config.Test.SkipCoverage = true
+				utils.LogError(r.logger, err, "failed to download and extract jacoco binaries")
+			} 
+		}
+	}
+
 	testSetResult := false
 	testRunResult := true
 	abortTestRun := false
@@ -198,6 +213,19 @@ func (r *Replayer) Start(ctx context.Context) error {
 				}
 			}
 		}
+	}
+
+	jacocoCliPath := filepath.Join(jacocoPath, "jacococli.jar")
+	err = mergeJacocoCoverageFiles(ctx, jacocoCliPath)
+	if err == nil {
+		err = generateJacocoReport(ctx, jacocoCliPath)
+		if err != nil {
+			r.config.Test.SkipCoverage = true
+			utils.LogError(r.logger, err, "failed to generate jacoco report")
+		}
+	} else {
+		r.config.Test.SkipCoverage = true
+		utils.LogError(r.logger, err, "failed to merge jacoco coverage data")
 	}
 
 	testRunStatus := "fail"
