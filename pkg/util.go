@@ -231,6 +231,23 @@ func NewID(IDs []string, identifier string) string {
 	return fmt.Sprintf("%s%v", identifier, latestIndx)
 }
 
+func LastID(IDs []string, identifier string) string {
+	latestIndx := 0
+	for _, ID := range IDs {
+		namePackets := strings.Split(ID, "-")
+		if len(namePackets) == 3 {
+			Indx, err := strconv.Atoi(namePackets[2])
+			if err != nil {
+				continue
+			}
+			if latestIndx < Indx {
+				latestIndx = Indx
+			}
+		}
+	}
+	return fmt.Sprintf("%s%v", identifier, latestIndx)
+}
+
 var (
 	dateFormats = []string{
 		time.Layout,

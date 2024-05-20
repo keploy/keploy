@@ -9,13 +9,13 @@ import (
 )
 
 type StmtPrepareOk struct {
-	Status       byte               `json:"status,omitempty" yaml:"status,omitempty,flow"`
-	StatementID  uint32             `json:"statement_id,omitempty" yaml:"statement_id,omitempty,flow"`
-	NumColumns   uint16             `json:"num_columns,omitempty" yaml:"num_columns,omitempty,flow"`
-	NumParams    uint16             `json:"num_params,omitempty" yaml:"num_params,omitempty,flow"`
-	WarningCount uint16             `json:"warning_count,omitempty" yaml:"warning_count,omitempty,flow"`
-	ColumnDefs   []ColumnDefinition `json:"column_definitions,omitempty" yaml:"column_definitions,omitempty,flow"`
-	ParamDefs    []ColumnDefinition `json:"param_definitions,omitempty" yaml:"param_definitions,omitempty,flow"`
+	Status       byte               `yaml:"status"`
+	StatementID  uint32             `yaml:"statement_id"`
+	NumColumns   uint16             `yaml:"num_columns"`
+	NumParams    uint16             `yaml:"num_params"`
+	WarningCount uint16             `yaml:"warning_count"`
+	ColumnDefs   []ColumnDefinition `yaml:"column_definitions,omitempty,flow"`
+	ParamDefs    []ColumnDefinition `yaml:"param_definitions,omitempty,flow"`
 }
 
 func decodeComStmtPrepareOk(data []byte) (*StmtPrepareOk, error) {
@@ -191,24 +191,12 @@ func encodeStmtPrepareOk(packet *models.MySQLStmtPrepareOk) ([]byte, error) {
 
 func encodeColumnDefinition(buf *bytes.Buffer, column *models.ColumnDefinition, seqNum *byte) error {
 	tmpBuf := &bytes.Buffer{}
-	if err := writeLengthEncodedString(tmpBuf, column.Catalog); err != nil {
-		return err
-	}
-	if err := writeLengthEncodedString(tmpBuf, column.Schema); err != nil {
-		return err
-	}
-	if err := writeLengthEncodedString(tmpBuf, column.Table); err != nil {
-		return err
-	}
-	if err := writeLengthEncodedString(tmpBuf, column.OrgTable); err != nil {
-		return err
-	}
-	if err := writeLengthEncodedString(tmpBuf, column.Name); err != nil {
-		return err
-	}
-	if err := writeLengthEncodedString(tmpBuf, column.OrgName); err != nil {
-		return err
-	}
+	writeLengthEncodedString(tmpBuf, column.Catalog)
+	writeLengthEncodedString(tmpBuf, column.Schema)
+	writeLengthEncodedString(tmpBuf, column.Table)
+	writeLengthEncodedString(tmpBuf, column.OrgTable)
+	writeLengthEncodedString(tmpBuf, column.Name)
+	writeLengthEncodedString(tmpBuf, column.OrgName)
 	tmpBuf.WriteByte(0x0C)
 	if err := binary.Write(tmpBuf, binary.LittleEndian, column.CharacterSet); err != nil {
 		return err
