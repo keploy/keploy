@@ -409,7 +409,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		if cmdType == utils.Docker || cmdType == utils.DockerCompose {
 
-			testCase.HTTPReq.URL, err = replaceHostToIP(testCase.HTTPReq.URL, userIP)
+			testCase.HTTPReq.URL, err = utils.ReplaceHostToIP(testCase.HTTPReq.URL, userIP)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to replace host to docker container's IP")
 				break
