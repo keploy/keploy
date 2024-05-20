@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +30,25 @@ import (
 )
 
 var WarningSign = "\U000026A0"
+
+func ReplaceHostToIP(currentURL string, ipAddress string) (string, error) {
+	// Parse the current URL
+	parsedURL, err := url.Parse(currentURL)
+
+	if err != nil {
+		// Return the original URL if parsing fails
+		return currentURL, err
+	}
+
+	if ipAddress == "" {
+		return currentURL, fmt.Errorf("failed to replace url in case of docker env")
+	}
+
+	// Replace hostname with the IP address
+	parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Hostname(), ipAddress, 1)
+	// Return the modified URL
+	return parsedURL.String(), nil
+}
 
 func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix string) error {
 	var bindErr error
