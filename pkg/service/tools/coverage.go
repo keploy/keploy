@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -289,129 +290,58 @@ func getCoverageFilePathsTypescript(path string) ([]string, error) {
 	return filePaths, nil
 }
 
-// type sessionVisitor struct {
-// }
+func CalJavaCoverage(ctx context.Context) (models.TestCoverage, error) {
+	testCov := models.TestCoverage{
+		FileCov:  make(map[string]string),
+		TotalCov: "",
+	}
 
-// func (sessionVisitor) VisitSessionInfo(_ data.SessionInfo) error {
-// 	return nil
-// }
+	// Define the path to the CSV file
+	csvPath := filepath.Join("target", "site", "keployE2E", "e2e.csv")
 
-// type executionVisitor struct {
-// }
+	// Open the CSV file
+	file, err := os.Open(csvPath)
+	if err != nil {
+		return testCov, fmt.Errorf("failed to open CSV file: %w", err)
+	}
+	defer file.Close()
 
-// func (executionVisitor) VisitExecutionData(data data.ExecutionData) error {
-// 	count := 0
-// 	for _, p := range data.Probes {
-// 		if p {
-// 			count++
-// 		}
-// 	}
+	// Create a new CSV reader
+	reader := csv.NewReader(file)
+	records, err := reader.ReadAll()
+	if err != nil {
+		return testCov, fmt.Errorf("failed to read CSV file: %w", err)
+	}
 
-// 	file, err := os.OpenFile("testSetCoverage.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0777)
-// 	if err != nil {
-// 		return err
-// 	}
+	// Variables to calculate total line coverage
+	var totalLines, coveredLines int
 
-// 	defer func() {
-// 		err := file.Close()
-// 		if err != nil {
-// 			utils.LogError(nil, err, "failed to close the file")
-// 		}
-// 	}()
+	// Skip header row and process each record
+	for i, record := range records {
+		if i == 0 {
+			continue // Skip header
+		}
 
-// 	w := bufio.NewWriter(file)
+		// Parse line coverage data
+		lineMissed, _ := strconv.Atoi(record[7])
+		lineCovered, _ := strconv.Atoi(record[8])
 
-// 	fmt.Fprintf(w, "%3d %3d %s\n", count, len(data.Probes), data.Name)
+		// Calculate total lines and covered lines
+		totalLines += lineMissed + lineCovered
+		coveredLines += lineCovered
 
-// 	err = w.Flush()
-// 	if err != nil {
-// 		return err
-// 	}
+		// Calculate coverage percentage for each class
+		if total := lineMissed + lineCovered; total > 0 {
+			coverage := float64(lineCovered) / float64(total) * 100
+			testCov.FileCov[record[2]] = fmt.Sprintf("%.2f%%", coverage) // Class name as key
+		}
+	}
 
-// 	return nil
-// }
+	// Calculate overall coverage if applicable
+	if totalLines > 0 {
+		totalCoverage := float64(coveredLines) / float64(totalLines) * 100
+		testCov.TotalCov = fmt.Sprintf("%.2f%%", totalCoverage)
+	}
 
-// func CalJavaCoverage(logger *zap.Logger, testSetID string) (map[string]string, error) {
-// 	covExecFile, err := os.Open(filepath.Join("target", testSetID+".exec"))
-// 	if err != nil {
-// 		utils.LogError(logger, err, "failed to open the coverage exec file")
-// 		return nil, err
-// 	}
-// 	defer func() {
-// 		err := covExecFile.Close()
-// 		if err != nil {
-// 			utils.LogError(logger, err, "failed to close the coverage exec file")
-// 		}
-// 	}()
-
-// 	// parse the exec file and write the coverage data to a file
-// 	reader := data.NewReader(covExecFile)
-// 	reader.SetSessionVisitor(sessionVisitor{})
-// 	reader.SetExecutionVisitor(executionVisitor{})
-// 	_, err = reader.Read()
-// 	if err != nil {
-// 		utils.LogError(logger, err, "failed to read the coverage exec file")
-// 		return nil, err
-// 	}
-
-// 	// fetch all the classes in the target folder
-// 	classFolder := filepath.Join(".", "target", "classes")
-// 	classes := []string{}
-// 	walkfn := func(path string, info os.FileInfo, err error) error {
-// 		if !info.IsDir() && filepath.Ext(path) == ".class" {
-// 			p, err := filepath.Rel(classFolder, path)
-// 			if err != nil {
-// 				return err
-// 			}
-// 			classes = append(classes, strings.TrimSuffix(p, filepath.Ext(p)))
-// 		}
-// 		return nil
-// 	}
-// 	err = filepath.Walk(classFolder, walkfn)
-// 	if err != nil {
-// 		utils.LogError(logger, err, "failed to walk the classes directory in target folder")
-// 		return nil, err
-// 	}
-
-// 	defer func() {
-// 		err := os.Remove("testSetCoverage.txt")
-// 		if err != nil {
-// 			utils.LogError(logger, err, "failed to remove the coverage file")
-// 		}
-// 	}()
-
-// 	covdata, err := os.ReadFile("testSetCoverage.txt")
-// 	if err != nil {
-// 		utils.LogError(logger, err, "failed to read the coverage file")
-// 		return nil, err
-// 	}
-// 	coveragePerFile := make(map[string]string)
-// 	malformedErrMsg := "java coverage file is malformed"
-// 	for _, line := range strings.Split(string(covdata), "\n") {
-// 		if line == "" {
-// 			continue
-// 		}
-// 		fields := strings.Fields(line)
-// 		if len(fields) != 3 {
-// 			utils.LogError(logger, err, malformedErrMsg)
-// 			return nil, err
-// 		}
-// 		countStr := fields[0]
-// 		count, err := strconv.Atoi(countStr)
-// 		if err != nil {
-// 			utils.LogError(logger, err, malformedErrMsg)
-// 			return nil, err
-// 		}
-// 		totalStr := fields[1]
-// 		total, err := strconv.Atoi(totalStr)
-// 		if err != nil {
-// 			utils.LogError(logger, err, malformedErrMsg)
-// 			return nil, err
-// 		}
-// 		className := fields[2]
-// 		if slices.Contains(classes, className) {
-// 			coveragePerFile[className] = strconv.FormatFloat(float64(count*100)/float64(total), 'f', 2, 64) + "%"
-// 		}
-// 	}
-// 	return coveragePerFile, nil
-// }
+	return testCov, nil
+}

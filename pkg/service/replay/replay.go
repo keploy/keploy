@@ -246,6 +246,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 				coverageData, err = tools.CalPythonCoverage(ctx)
 			case "typescript":
 				coverageData, err = tools.CalTypescriptCoverage(ctx)
+			case "java":
+				coverageData, err = tools.CalJavaCoverage(ctx)
 			}
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to calculate coverage for the test run")
