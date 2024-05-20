@@ -294,7 +294,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}
-			c.logger.Info("config file not found; creating one and proceeding with flags for now.")
+			c.logger.Info("config file not found; creating one and proceeding with flags.")
 		}
 	}
 	if err := viper.Unmarshal(c.cfg); err != nil {

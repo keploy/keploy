@@ -85,13 +85,13 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 	case "config", "update":
 		return tools.NewTools(n.logger, tel), nil
 	// TODO: add case for mock
-	case "record", "test", "mock":
+	case "record", "test", "mock", "normalize":
 		// Check if the config file exists on the path or not and if it does not, we create it.
 		if !utils.CheckFileExists("keploy.yml") {
 			toolsService := tools.NewTools(n.logger, tel)
-			n.cfg.Path = strings.TrimSuffix(n.cfg.Path, "/keploy")
-			yamlData, err := yaml.Marshal(n.cfg)
-			n.cfg.Path = n.cfg.Path + "/keploy"
+			config := n.cfg
+			config.Path = strings.TrimSuffix(n.cfg.Path, "/keploy")
+			yamlData, err := yaml.Marshal(config)
 			if err != nil {
 				n.logger.Debug("failed to marshal the config")
 			}
