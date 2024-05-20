@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
@@ -748,7 +749,9 @@ func DetectLanguage(cmd string) (string, string) {
 		return "typescript", executable
 	}
 
-	// TODO: JAVA
+	if executable == "java" {
+		return "java", executable
+	}
 
 	return "go", executable
 }
@@ -805,4 +808,40 @@ sigterm = true
 	}
 
 	logger.Debug("Configuration written to .coveragerc")
+}
+
+// FileExists checks if a file exists and is not a directory at the given path.
+func FileExists(path string) (bool, error) {
+	// Expand the tilde to the user's home directory if necessary
+	if strings.HasPrefix(path, "~/") {
+		homeDir, err := getHomeDir()
+		if err != nil {
+			return false, err
+		}
+		path = strings.Replace(path, "~", homeDir, 1)
+	}
+
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return fileInfo.Mode().IsRegular(), nil
+}
+
+// getHomeDir retrieves the appropriate home directory based on the execution context
+func getHomeDir() (string, error) {
+	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
+		if usr, err := user.Lookup(sudoUser); err == nil {
+			return usr.HomeDir, nil
+		}
+	}
+	// Fallback to the current user's home directory
+	if usr, err := user.Current(); err == nil {
+		return usr.HomeDir, nil
+	}
+	// Fallback if neither method works
+	return "", errors.New("failed to retrieve current user info")
 }

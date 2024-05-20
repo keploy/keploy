@@ -1,9 +1,15 @@
 package replay
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"go.keploy.io/server/v2/config"
@@ -72,4 +78,60 @@ func (t *testUtils) SimulateRequest(ctx context.Context, _ uint64, tc *models.Te
 		return resp, err
 	}
 	return nil, nil
+}
+
+func downloadAndExtractJaCoCoBinaries(version, dir string) error {
+	cliPath := filepath.Join(dir, "jacococli.jar")
+
+	downloadURL := fmt.Sprintf("https://github.com/jacoco/jacoco/releases/download/v%s/jacoco-%s.zip", version, version)
+
+	_, err := os.Stat(cliPath)
+	if err == nil {
+		return nil
+	}
+
+	resp, err := http.Get(downloadURL)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	zipReader, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		return err
+	}
+
+	for _, file := range zipReader.File {
+		if strings.HasSuffix(file.Name, "jacococli.jar") {
+			cliFile, err := file.Open()
+			if err != nil {
+				return err
+			}
+			defer cliFile.Close()
+
+			outFile, err := os.Create(cliPath)
+			if err != nil {
+				return err
+			}
+			defer outFile.Close()
+
+			_, err = io.Copy(outFile, cliFile)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	cliStat, err := os.Stat(cliPath)
+
+	if os.IsNotExist(err) || cliStat != nil {
+		return fmt.Errorf("failed to find JaCoCo binaries in the distribution")
+	}
+
+	return nil
 }

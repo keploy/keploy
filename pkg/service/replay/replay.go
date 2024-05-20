@@ -125,10 +125,10 @@ func (r *Replayer) Start(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 
-	if r.config.Test.SkipCoverage && r.config.Test.Language == "typescript" {
+	if !r.config.Test.SkipCoverage && r.config.Test.Language == "typescript" {
 		err := os.Setenv("CLEAN", "true")
 		if err != nil {
-			r.config.Test.SkipCoverage = false
+			r.config.Test.SkipCoverage = true
 			utils.LogError(r.logger, err, "failed to set CLEAN env variable, coverage won't be calculated.")
 		}
 	}
@@ -141,6 +141,14 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
+		}
+
+		if r.config.Test.Language == "java" && !r.config.Test.SkipCoverage {
+			err = os.Setenv("TESTSETID", testSetID)
+			if err != nil {
+				r.config.Test.SkipCoverage = true
+				utils.LogError(r.logger, err, "failed to set TESTSETID env variable")
+			}
 		}
 
 		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, appID, false)

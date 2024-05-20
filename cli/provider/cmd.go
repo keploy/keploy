@@ -213,6 +213,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().Bool("skipCoverage", c.cfg.Test.SkipCoverage, "Skip generation of coverage report")
 			cmd.Flags().Bool("removeUnusedMocks", c.cfg.Test.RemoveUnusedMocks, "Clear the unused mocks for the passed test-sets")
 			cmd.Flags().Bool("fallBackOnMiss", c.cfg.Test.FallBackOnMiss, "Enable connecting to actual service if mock not found during test mode")
+			cmd.Flags().String("jacocoAgentPath", c.cfg.Test.JacocoAgentPath, "Path to jacoco agent jar file")
 		} else {
 			cmd.Flags().Uint64("recordTimer", 0, "User provided time to record its application")
 		}
@@ -346,11 +347,24 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		} else if c.cfg.Test.Language == "go" && !utils.CheckGoBinaryForCoverFlag(c.logger, c.cfg.Command) {
 			c.cfg.Test.SkipCoverage = true
 			utils.LogError(c.logger, nil, "coverage flag not found in go binary")
+		} else if c.cfg.Test.Language == "java" {
+			javaAgentPath := "~/.m2/repository/org/jacoco/org.jacoco.agent/0.8.8/org.jacoco.agent-0.8.8-runtime.jar"
+			if c.cfg.Test.JacocoAgentPath != "" {
+				javaAgentPath = c.cfg.Test.JacocoAgentPath
+			}
+			isFileExist, err := utils.FileExists(javaAgentPath)
+			if err == nil && isFileExist {
+				c.cfg.Command = strings.Replace(c.cfg.Command, executable, fmt.Sprintf("%s -javaagent:%s=destfile=target/${TESTSETID}.exec", executable, javaAgentPath), 1)
+			} else {
+				c.cfg.Test.SkipCoverage = true
+				utils.LogError(c.logger, err, "failed to find jacoco agent. If jacoco agent is present in a different path, please set the path using --jacocoAgentPath")
+			}
 		}
 		if err != nil {
 			c.cfg.Test.SkipCoverage = true
 			utils.LogError(c.logger, err, "failed to run coverage tool")
 		}
+		c.logger.Info(c.cfg.Command)
 
 		// set the command type
 		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
