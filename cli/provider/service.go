@@ -90,7 +90,7 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 		if !utils.CheckFileExists("keploy.yml") {
 			toolsService := tools.NewTools(n.logger, tel)
 			config := n.cfg
-			config.Path = strings.TrimSuffix(n.cfg.Path, "/keploy")
+			config.Path = strings.TrimSuffix(config.Path, "/keploy")
 			yamlData, err := yaml.Marshal(config)
 			if err != nil {
 				n.logger.Debug("failed to marshal the config")
