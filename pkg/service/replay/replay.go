@@ -334,9 +334,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusUserAbort, context.Canceled
 	}
 
-	cmdType := utils.FindDockerCmd(r.config.Command)
+	cmdType := utils.CmdType(r.config.CommandType)
 	var userIP string
-	if cmdType == utils.Docker || cmdType == utils.DockerCompose {
+	if utils.IsDockerKind(cmdType) {
 		userIP, err = r.instrumentation.GetContainerIP(ctx, appID)
 		if err != nil {
 			return models.TestSetStatusFailed, err
@@ -410,7 +410,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		started := time.Now().UTC()
 
-		if cmdType == utils.Docker || cmdType == utils.DockerCompose {
+		if utils.IsDockerKind(cmdType) {
 
 			testCase.HTTPReq.URL, err = utils.ReplaceHostToIP(testCase.HTTPReq.URL, userIP)
 			if err != nil {

@@ -518,3 +518,20 @@ func (idc *Impl) SetKeployNetwork(c *Compose) (*NetworkInfo, error) {
 	}
 	return networkInfo, nil
 }
+
+// IsContainerRunning check if the container is already running or not, required for docker start command.
+func (idc *Impl) IsContainerRunning(containerName string) (bool, error) {
+
+	ctx, cancel := context.WithTimeout(context.Background(), idc.timeoutForDockerQuery)
+	defer cancel()
+
+	containerJSON, err := idc.ContainerInspect(ctx, containerName)
+	if err != nil {
+		return false, err
+	}
+
+	if containerJSON.State.Running {
+		return true, nil
+	}
+	return false, nil
+}
