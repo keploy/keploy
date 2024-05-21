@@ -337,7 +337,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusUserAbort, context.Canceled
 	}
 
-	cmdType := utils.FindDockerCmd(r.config.Command)
+	cmdType := utils.CmdType(r.config.CommandType)
 	var userIP string
 	if utils.IsDockerKind(cmdType) {
 		userIP, err = r.instrumentation.GetContainerIP(ctx, appID)
