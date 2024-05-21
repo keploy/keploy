@@ -120,7 +120,7 @@ func (a *App) SetupDocker() error {
 	}
 
 	if a.kind == utils.DockerStart {
-		running, err := a.docker.IsContainerRunning(a.container)
+		running, err := a.docker.IsContainerRunning(cont)
 		if err != nil {
 			return err
 		}
