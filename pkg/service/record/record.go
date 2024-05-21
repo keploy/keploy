@@ -348,7 +348,7 @@ func (r *Recorder) ReRecord(ctx context.Context, appID uint64) error {
 		return nil
 
 	}
-	cmdType := utils.FindDockerCmd(r.config.Command)
+	cmdType := utils.CmdType(r.config.CommandType)
 	if utils.IsDockerKind(cmdType) {
 		host = r.config.ContainerName
 	}
