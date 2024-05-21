@@ -11,6 +11,7 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/service/replay"
 
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -382,9 +383,19 @@ func (r *Recorder) ReRecord(ctx context.Context, appID uint64) error {
 			allTestCasesRecorded = false
 			continue // Proceed with the next command
 		}
+		noiseConfig := r.config.Test.GlobalNoise.Global
+		if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[r.config.ReRecord]; ok {
+			noiseConfig = replay.LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
+		}
+		testPass, result := replay.CompareResp(tc, resp, noiseConfig, r.config.Test.IgnoreOrdering, r.logger, r.config.ReRecord)
 
-		r.logger.Debug("Re-recorded testcases successfully", zap.String("curl", tc.Curl), zap.Any("response", (resp)))
+		if !testPass {
+			r.logger.Info("Re-recorded testcase different from original", zap.String("curl", tc.Curl), zap.Any("response", (resp)), zap.Any("result", result))
+			allTestCasesRecorded = false
+		} else {
 
+			r.logger.Debug("Re-recorded testcases successfully", zap.String("curl", tc.Curl), zap.Any("response", (resp)))
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
