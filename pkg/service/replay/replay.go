@@ -158,7 +158,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			break
 		}
 
-		_, err = emulator.AfterTestHook(ctx, testRunID, testSetID, len(testSetIDs))
+		_, err = requestMockemulator.AfterTestHook(ctx, testRunID, testSetID, len(testSetIDs))
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to get after test hook")
 		}
