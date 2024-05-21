@@ -158,12 +158,18 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if abortTestRun {
 			break
 		}
+
+		_, err = emulator.AfterTestHook(ctx, testRunID, testSetID, len(testSetIDs))
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to get after test hook")
+		}
 	}
 
 	testRunStatus := "fail"
 	if testRunResult {
 		testRunStatus = "pass"
 	}
+
 	r.telemetry.TestRun(totalTestPassed, totalTestFailed, len(testSetIDs), testRunStatus)
 
 	if !abortTestRun {
@@ -409,7 +415,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		if cmdType == utils.Docker || cmdType == utils.DockerCompose {
 
-			testCase.HTTPReq.URL, err = replaceHostToIP(testCase.HTTPReq.URL, userIP)
+			testCase.HTTPReq.URL, err = utils.ReplaceHostToIP(testCase.HTTPReq.URL, userIP)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to replace host to docker container's IP")
 				break
