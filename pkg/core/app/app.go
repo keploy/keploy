@@ -42,7 +42,7 @@ type App struct {
 	id               uint64
 	cmd              string
 	kind             utils.CmdType
-	containerDelay   time.Duration
+	containerDelay   uint64
 	container        string
 	containerNetwork string
 	containerIPv4    string
@@ -58,7 +58,7 @@ type Options struct {
 	// canExit disables any error returned if the app exits by itself.
 	//CanExit       bool
 	Container     string
-	DockerDelay   time.Duration
+	DockerDelay   uint64
 	DockerNetwork string
 }
 
@@ -313,7 +313,7 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 	defer a.logger.Debug("exiting from goroutine of docker daemon event listener")
 
 	errCh := make(chan error, 1)
-	timer := time.NewTimer(a.containerDelay)
+	timer := time.NewTimer(time.Duration(a.containerDelay) * time.Second)
 	logTicker := time.NewTicker(1 * time.Second)
 	defer logTicker.Stop()
 
