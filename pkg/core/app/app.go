@@ -69,8 +69,7 @@ func (a *App) Setup(_ context.Context) error {
 	}
 	a.docker = d
 
-	if (a.kind == utils.DockerStart || a.kind == utils.DockerRun || a.kind == utils.DockerCompose) && isDetachMode(a.logger, a.cmd, a.kind) {
-
+	if utils.IsDockerKind(a.kind) && isDetachMode(a.logger, a.cmd, a.kind) {
 		return fmt.Errorf("application could not be started in detached mode")
 	}
 
@@ -433,7 +432,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 func (a *App) Run(ctx context.Context, inodeChan chan uint64) models.AppError {
 	a.inodeChan = inodeChan
 
-	if a.kind == utils.DockerCompose || a.kind == utils.DockerRun || a.kind == utils.DockerStart {
+	if utils.IsDockerKind(a.kind) {
 		return a.runDocker(ctx)
 	}
 	return a.run(ctx)

@@ -81,6 +81,7 @@ func ParseDockerCmd(cmd string, kind utils.CmdType, idc docker.Client) (string, 
 		for i := range networks {
 			return containerName, i, nil
 		}
+		return containerName, "", fmt.Errorf("failed to parse network name")
 	}
 
 	// Extract network name
