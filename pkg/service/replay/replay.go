@@ -28,15 +28,10 @@ var totalTestFailed int
 
 // emulator contains the struct instance that implements RequestEmulator interface. This is done for
 // attaching the objects dynamically as plugins.
-var emulator RequestEmulator
-var runTestSetResult TestResult
+var requestMockemulator RequestMockHandler
 
-func SetTestUtilInstance(instance RequestEmulator) {
-	emulator = instance
-}
-
-func SetRunTestSet(instance TestResult) {
-	runTestSetResult = instance
+func SetTestUtilInstance(emulatorInstance RequestMockHandler) {
+	requestMockemulator = emulatorInstance
 }
 
 type Replayer struct {
@@ -51,13 +46,10 @@ type Replayer struct {
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, telemetry Telemetry, instrumentation Instrumentation, config config.Config) Service {
 	// set the request emulator for simulating test case requests, if not set
-	if emulator == nil {
-		SetTestUtilInstance(NewTestUtils(config.Test.APITimeout, logger))
+	if requestMockemulator == nil {
+		// SetTestUtilInstance()
+		requestMockemulator = NewRequestMockUtil(logger, config.Path, "mocks", config.Test.APITimeout)
 	}
-	if runTestSetResult == nil {
-		SetRunTestSet(NewTestStatusUtil(logger, config.Path, "mocks"))
-	}
-
 	return &Replayer{
 		logger:          logger,
 		testDB:          testDB,
@@ -133,7 +125,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
 		}
-		runTestSetResult.MockFile(ctx, testSetID)
+		requestMockemulator.ProcessMockFile(ctx, testSetID)
 		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, appID, false)
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)
@@ -159,7 +151,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			testSetResult = false
 		case models.TestSetStatusPassed:
 			testSetResult = true
-			runTestSetResult.TestRunStatus(ctx, testSetResult, testSetID)
+			requestMockemulator.ProcessTestRunStatus(ctx, testSetResult, testSetID)
 		}
 		testRunResult = testRunResult && testSetResult
 		if abortTestRun {
@@ -429,7 +421,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.logger.Debug("", zap.Any("replaced URL in case of docker env", testCase.HTTPReq.URL))
 		}
 
-		resp, loopErr := emulator.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
+		resp, loopErr := requestMockemulator.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
 		if loopErr != nil {
 			utils.LogError(r.logger, err, "failed to simulate request")
 			break
@@ -482,7 +474,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				},
 				Res:          *resp,
 				TestCasePath: filepath.Join(r.config.Path, testSetID),
-				MockPath:     filepath.Join(r.config.Path, testSetID, runTestSetResult.MockName()),
+				MockPath:     filepath.Join(r.config.Path, testSetID, requestMockemulator.FetchMockName()),
 				Noise:        testCase.Noise,
 				Result:       *testResult,
 			}
