@@ -47,8 +47,7 @@ type Replayer struct {
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, telemetry Telemetry, instrumentation Instrumentation, config config.Config) Service {
 	// set the request emulator for simulating test case requests, if not set
 	if requestMockemulator == nil {
-		// SetTestUtilInstance()
-		requestMockemulator = NewRequestMockUtil(logger, config.Path, "mocks", config.Test.APITimeout)
+		SetTestUtilInstance(NewRequestMockUtil(logger, config.Path, "mocks", config.Test.APITimeout))
 	}
 	return &Replayer{
 		logger:          logger,

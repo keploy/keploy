@@ -74,11 +74,7 @@ func (t *requestMockUtil) AfterTestHook(_ context.Context, testRunID, testSetID 
 	return nil, nil
 }
 
-func (t *requestMockUtil) ProcessTestRunStatus(ctx context.Context, status bool, testSetID string) {
-	if err := ctx.Err(); err != nil {
-		t.logger.Debug("Operation cancelled or timed out", zap.Error(err))
-		return
-	}
+func (t *requestMockUtil) ProcessTestRunStatus(_ context.Context, status bool, testSetID string) {
 	if status {
 		t.logger.Debug("Test case passed for", zap.String("testSetID", testSetID))
 	} else {
@@ -90,10 +86,6 @@ func (t *requestMockUtil) FetchMockName() string {
 	return t.mockName
 }
 
-func (t *requestMockUtil) ProcessMockFile(ctx context.Context, testSetID string) {
-	if err := ctx.Err(); err != nil {
-		t.logger.Debug("Operation cancelled or timed out", zap.Error(err))
-		return
-	}
+func (t *requestMockUtil) ProcessMockFile(_ context.Context, testSetID string) {
 	t.logger.Debug("Mock file for test set", zap.String("testSetID", testSetID))
 }
