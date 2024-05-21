@@ -349,7 +349,7 @@ func (r *Recorder) ReRecord(ctx context.Context, appID uint64) error {
 
 	}
 	cmdType := utils.FindDockerCmd(r.config.Command)
-	if cmdType == utils.Docker || cmdType == utils.DockerCompose {
+	if cmdType == utils.DockerRun || cmdType == utils.DockerStart || cmdType == utils.DockerCompose {
 		host = r.config.ContainerName
 	}
 
@@ -360,7 +360,7 @@ func (r *Recorder) ReRecord(ctx context.Context, appID uint64) error {
 
 	allTestCasesRecorded := true
 	for _, tc := range tcs {
-		if cmdType == utils.Docker || cmdType == utils.DockerCompose {
+		if cmdType == utils.DockerRun || cmdType == utils.DockerStart || cmdType == utils.DockerCompose {
 
 			userIP, err := r.instrumentation.GetContainerIP(ctx, appID)
 			if err != nil {
