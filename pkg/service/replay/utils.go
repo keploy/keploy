@@ -3,8 +3,6 @@ package replay
 import (
 	"context"
 	"fmt"
-	"net/url"
-	"strings"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
@@ -41,25 +39,6 @@ func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) c
 	}
 
 	return noise
-}
-
-func replaceHostToIP(currentURL string, ipAddress string) (string, error) {
-	// Parse the current URL
-	parsedURL, err := url.Parse(currentURL)
-
-	if err != nil {
-		// Return the original URL if parsing fails
-		return currentURL, err
-	}
-
-	if ipAddress == "" {
-		return currentURL, fmt.Errorf("failed to replace url in case of docker env")
-	}
-
-	// Replace hostname with the IP address
-	parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Hostname(), ipAddress, 1)
-	// Return the modified URL
-	return parsedURL.String(), nil
 }
 
 type testUtils struct {

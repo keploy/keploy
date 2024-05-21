@@ -34,7 +34,7 @@ func extractHostAndPort(curlCmd string) (string, string, error) {
 	return "", "", fmt.Errorf("no URL found in CURL command")
 }
 
-func waitForPort(ctx context.Context, host, port string) error {
+func waitForPort(ctx context.Context, host string, port string) error {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -43,6 +43,7 @@ func waitForPort(ctx context.Context, host, port string) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
+
 			conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 1*time.Second)
 			if err == nil {
 				err := conn.Close()
