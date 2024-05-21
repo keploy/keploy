@@ -207,7 +207,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 	})
 	go func() {
 		if len(r.config.ReRecord) != 0 {
-			err = r.ReRecord(reRecordCtx)
+			err = r.ReRecord(reRecordCtx, appID)
 			reRecordCancel()
 
 		}
@@ -335,7 +335,7 @@ func (r *Recorder) StartMock(ctx context.Context) error {
 	return fmt.Errorf(stopReason)
 }
 
-func (r *Recorder) ReRecord(ctx context.Context) error {
+func (r *Recorder) ReRecord(ctx context.Context, appID uint64) error {
 
 	tcs, err := r.testDB.GetTestCases(ctx, r.config.ReRecord)
 	if err != nil {
@@ -348,6 +348,10 @@ func (r *Recorder) ReRecord(ctx context.Context) error {
 		return nil
 
 	}
+	cmdType := utils.FindDockerCmd(r.config.Command)
+	if cmdType == utils.Docker || cmdType == utils.DockerCompose {
+		host = r.config.ContainerName
+	}
 
 	if err := waitForPort(ctx, host, port); err != nil {
 		r.logger.Error("Waiting for port failed", zap.String("host", host), zap.String("port", port), zap.Error(err))
@@ -356,6 +360,21 @@ func (r *Recorder) ReRecord(ctx context.Context) error {
 
 	allTestCasesRecorded := true
 	for _, tc := range tcs {
+		if cmdType == utils.Docker || cmdType == utils.DockerCompose {
+
+			userIP, err := r.instrumentation.GetContainerIP(ctx, appID)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to get the app ip")
+				break
+			}
+
+			tc.HTTPReq.URL, err = utils.ReplaceHostToIP(tc.HTTPReq.URL, userIP)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to replace host to docker container's IP")
+				break
+			}
+			r.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HTTPReq.URL))
+		}
 
 		resp, err := pkg.SimulateHTTP(ctx, *tc, r.config.ReRecord, r.logger, r.config.Test.APITimeout)
 		if err != nil {
