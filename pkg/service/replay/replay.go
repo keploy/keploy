@@ -439,6 +439,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 			noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 		}
+		
 
 		testPass, testResult = CompareResp(testCase, resp, noiseConfig, r.config.Test.IgnoreOrdering, r.logger, testSetID)
 		if !testPass {
