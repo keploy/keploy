@@ -398,6 +398,7 @@ func CheckUpdatePrompt(logger *zap.Logger) bool {
 	}
 
 	if config.UpdatePromptDisabled {
+		logger.Warn("Keploy might have an update available.")
 		return false
 	}
 
