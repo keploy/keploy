@@ -15,7 +15,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
+func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	genericRequests := [][]byte{reqBuf}
 	logger.Debug("Into the generic parser in test mode")
 	errCh := make(chan error, 1)
@@ -69,18 +69,19 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					logger.Debug("the genericRequests are:", zap.Any("h", string(genReq)))
 				}
 
-				reqBuffer, err := pUtil.PassThrough(ctx, logger, clientConn, dstCfg, genericRequests)
-				if err != nil {
-					utils.LogError(logger, err, "failed to passthrough the generic request")
-					return
+				if opts.FallBackOnMiss {
+					reqBuffer, err := pUtil.PassThrough(ctx, logger, clientConn, dstCfg, genericRequests)
+					if err != nil {
+						utils.LogError(logger, err, "failed to passthrough the generic request")
+						return
+					}
+					genericRequests = [][]byte{}
+					logger.Debug("the request buffer after pass through in generic", zap.Any("buffer", string(reqBuffer)))
+					if len(reqBuffer) > 0 {
+						genericRequests = [][]byte{reqBuffer}
+					}
+					logger.Debug("the length of genericRequests after passThrough ", zap.Any("length", len(genericRequests)))
 				}
-
-				genericRequests = [][]byte{}
-				logger.Debug("the request buffer after pass through in generic", zap.Any("buffer", string(reqBuffer)))
-				if len(reqBuffer) > 0 {
-					genericRequests = [][]byte{reqBuffer}
-				}
-				logger.Debug("the length of genericRequests after passThrough ", zap.Any("length", len(genericRequests)))
 				continue
 			}
 			for _, genericResponse := range genericResponses {

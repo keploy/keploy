@@ -177,20 +177,22 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 				if matchedIndex == -1 {
 					logger.Debug("No matching mock found")
 
-					responseBuffer, err := pUtil.PassThrough(ctx, logger, clientConn, dstCfg, requestBuffers)
-					if err != nil {
-						utils.LogError(logger, err, "Failed to passthrough the mysql request to the actual database server")
-						errCh <- err
-						return
-					}
-					_, err = clientConn.Write(responseBuffer)
-					if err != nil {
-						if ctx.Err() != nil {
+					if opts.FallBackOnMiss {
+						responseBuffer, err := pUtil.PassThrough(ctx, logger, clientConn, dstCfg, requestBuffers)
+						if err != nil {
+							utils.LogError(logger, err, "Failed to passthrough the mysql request to the actual database server")
+							errCh <- err
 							return
 						}
-						utils.LogError(logger, err, "Failed to write response to clientConn")
-						errCh <- err
-						return
+						_, err = clientConn.Write(responseBuffer)
+						if err != nil {
+							if ctx.Err() != nil {
+								return
+							}
+							utils.LogError(logger, err, "Failed to write response to clientConn")
+							errCh <- err
+							return
+						}
 					}
 					continue
 				}

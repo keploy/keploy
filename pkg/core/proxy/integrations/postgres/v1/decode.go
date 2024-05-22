@@ -17,7 +17,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
+func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	pgRequests := [][]byte{reqBuf}
 	errCh := make(chan error, 1)
 
@@ -66,10 +66,12 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 
 			if !matched {
 				logger.Debug("MISMATCHED REQ is" + string(pgRequests[0]))
-				_, err = pUtil.PassThrough(ctx, logger, clientConn, dstCfg, pgRequests)
-				if err != nil {
-					utils.LogError(logger, err, "failed to pass the request", zap.Any("request packets", len(pgRequests)))
-					errCh <- err
+				if opts.FallBackOnMiss {
+					_, err = pUtil.PassThrough(ctx, logger, clientConn, dstCfg, pgRequests)
+					if err != nil {
+						utils.LogError(logger, err, "failed to pass the request", zap.Any("request packets", len(pgRequests)))
+						errCh <- err
+					}
 				}
 				continue
 			}

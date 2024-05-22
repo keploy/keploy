@@ -246,11 +246,13 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				}
 				if !matched {
 					logger.Debug("mongo request not matched with any tcsMocks", zap.Any("request", mongoRequests))
-					reqBuf, err = util.PassThrough(ctx, logger, clientConn, dstCfg, requestBuffers)
-					if err != nil {
-						utils.LogError(logger, err, "failed to passthrough the mongo request to the actual database server")
-						errCh <- err
-						return
+					if opts.FallBackOnMiss {
+						reqBuf, err = util.PassThrough(ctx, logger, clientConn, dstCfg, requestBuffers)
+						if err != nil {
+							utils.LogError(logger, err, "failed to passthrough the mongo request to the actual database server")
+							errCh <- err
+							return
+						}
 					}
 					continue
 				}
