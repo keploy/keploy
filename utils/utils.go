@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +30,25 @@ import (
 )
 
 var WarningSign = "\U000026A0"
+
+func ReplaceHostToIP(currentURL string, ipAddress string) (string, error) {
+	// Parse the current URL
+	parsedURL, err := url.Parse(currentURL)
+
+	if err != nil {
+		// Return the original URL if parsing fails
+		return currentURL, err
+	}
+
+	if ipAddress == "" {
+		return currentURL, fmt.Errorf("failed to replace url in case of docker env")
+	}
+
+	// Replace hostname with the IP address
+	parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Hostname(), ipAddress, 1)
+	// Return the modified URL
+	return parsedURL.String(), nil
+}
 
 func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix string) error {
 	var bindErr error
@@ -135,51 +155,7 @@ var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
 
 var Emoji = "\U0001F430" + " Keploy:"
 var ConfigGuide = `
-# Example on using tests
-#tests:
-#  filters:
-#   - path: "/user/app"
-#     urlMethods: ["GET"]
-#     headers: {
-#       "^asdf*": "^test"
-#     }
-#     host: "dc.services.visualstudio.com"
-#Example on using stubs
-#stubs:
-#  filters:
-#   - path: "/user/app"
-#     port: 8080
-#   - port: 8081
-#   - host: "dc.services.visualstudio.com"
-#   - port: 8081
-#     host: "dc.services.visualstudio.com"
-#     path: "/user/app"
-	#
-#Example on using globalNoise
-#globalNoise:
-#   global:
-#     body: {
-#        # to ignore some values for a field,
-#        # pass regex patterns to the corresponding array value
-#        "url": ["https?://\S+", "http://\S+"],
-#     }
-#     header: {
-#        # to ignore the entire field, pass an empty array
-#        "Date": [],
-#      }
-#    # to ignore fields or the corresponding values for a specific test-set,
-#    # pass the test-set-name as a key to the "test-sets" object and
-#    # populate the corresponding "body" and "header" objects
-#    test-sets:
-#      test-set-1:
-#        body: {
-#          # ignore all the values for the "url" field
-#          "url": []
-#        }
-#        header: {
-#          # we can also pass the exact value to ignore for a field
-#          "User-Agent": ["PostmanRuntime/7.34.0"]
-#        }
+# Visit [https://keploy.io/docs/running-keploy/configuration-file/] to learn about using keploy through configration file.
 `
 
 // AskForConfirmation asks the user for confirmation. A user must type in "yes" or "no" and
@@ -357,7 +333,8 @@ func FindDockerCmd(cmd string) CmdType {
 	cmdLower := strings.TrimSpace(strings.ToLower(cmd))
 
 	// Define patterns for Docker and Docker Compose
-	dockerPatterns := []string{"docker", "sudo docker"}
+	dockerRunPatterns := []string{"docker run", "sudo docker run"}
+	dockerStartPatterns := []string{"docker start", "sudo docker start"}
 	dockerComposePatterns := []string{"docker-compose", "sudo docker-compose", "docker compose", "sudo docker compose"}
 
 	// Check for Docker Compose command patterns and file extensions
@@ -366,10 +343,16 @@ func FindDockerCmd(cmd string) CmdType {
 			return DockerCompose
 		}
 	}
-	// Check for Docker command patterns
-	for _, pattern := range dockerPatterns {
+	// Check for Docker start command patterns
+	for _, pattern := range dockerStartPatterns {
 		if strings.HasPrefix(cmdLower, pattern) {
-			return Docker
+			return DockerStart
+		}
+	}
+	// Check for Docker run command patterns
+	for _, pattern := range dockerRunPatterns {
+		if strings.HasPrefix(cmdLower, pattern) {
+			return DockerRun
 		}
 	}
 	return Native
@@ -379,7 +362,8 @@ type CmdType string
 
 // CmdType constants
 const (
-	Docker        CmdType = "docker"
+	DockerRun     CmdType = "docker-run"
+	DockerStart   CmdType = "docker-start"
 	DockerCompose CmdType = "docker-compose"
 	Native        CmdType = "native"
 )
@@ -735,4 +719,8 @@ func EnsureRmBeforeName(cmd string) string {
 	}
 
 	return strings.Join(parts, " ")
+}
+
+func IsDockerKind(kind CmdType) bool {
+	return (kind == DockerRun || kind == DockerStart || kind == DockerCompose)
 }
