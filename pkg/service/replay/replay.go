@@ -28,10 +28,10 @@ var totalTestFailed int
 
 // emulator contains the struct instance that implements RequestEmulator interface. This is done for
 // attaching the objects dynamically as plugins.
-var emulator RequestEmulator
+var requestMockemulator RequestMockHandler
 
-func SetTestUtilInstance(instance RequestEmulator) {
-	emulator = instance
+func SetTestUtilInstance(emulatorInstance RequestMockHandler) {
+	requestMockemulator = emulatorInstance
 }
 
 type Replayer struct {
@@ -46,10 +46,9 @@ type Replayer struct {
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, telemetry Telemetry, instrumentation Instrumentation, config config.Config) Service {
 	// set the request emulator for simulating test case requests, if not set
-	if emulator == nil {
-		SetTestUtilInstance(NewTestUtils(config.Test.APITimeout, logger))
+	if requestMockemulator == nil {
+		SetTestUtilInstance(NewRequestMockUtil(logger, config.Path, "mocks", config.Test.APITimeout))
 	}
-
 	return &Replayer{
 		logger:          logger,
 		testDB:          testDB,
@@ -121,13 +120,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 	testSetResult := false
 	testRunResult := true
 	abortTestRun := false
-
 	for _, testSetID := range testSetIDs {
-
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
 		}
-
+		requestMockemulator.ProcessMockFile(ctx, testSetID)
 		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, appID, false)
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)
@@ -153,10 +150,16 @@ func (r *Replayer) Start(ctx context.Context) error {
 			testSetResult = false
 		case models.TestSetStatusPassed:
 			testSetResult = true
+			requestMockemulator.ProcessTestRunStatus(ctx, testSetResult, testSetID)
 		}
 		testRunResult = testRunResult && testSetResult
 		if abortTestRun {
 			break
+		}
+
+		_, err = requestMockemulator.AfterTestHook(ctx, testRunID, testSetID, len(testSetIDs))
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to get after test hook")
 		}
 	}
 
@@ -164,6 +167,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if testRunResult {
 		testRunStatus = "pass"
 	}
+
 	r.telemetry.TestRun(totalTestPassed, totalTestFailed, len(testSetIDs), testRunStatus)
 
 	if !abortTestRun {
@@ -219,7 +223,6 @@ func (r *Replayer) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
 }
 
 func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error) {
-
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
 	runTestSetCtx = context.WithValue(runTestSetCtx, models.ErrGroupKey, runTestSetErrGrp)
@@ -331,6 +334,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusUserAbort, context.Canceled
 	}
 
+	cmdType := utils.CmdType(r.config.CommandType)
+	var userIP string
+	if utils.IsDockerKind(cmdType) {
+		userIP, err = r.instrumentation.GetContainerIP(ctx, appID)
+		if err != nil {
+			return models.TestSetStatusFailed, err
+		}
+	}
+
 	selectedTests := ArrayToMap(r.config.Test.SelectedTests[testSetID])
 
 	testCasesCount := len(testCases)
@@ -398,17 +410,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		started := time.Now().UTC()
 
-		cmdType := utils.FindDockerCmd(r.config.Command)
+		if utils.IsDockerKind(cmdType) {
 
-		if cmdType == utils.Docker || cmdType == utils.DockerCompose {
-
-			userIP, err := r.instrumentation.GetAppIP(ctx, appID)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to get the app ip")
-				break
-			}
-
-			testCase.HTTPReq.URL, err = replaceHostToIP(testCase.HTTPReq.URL, userIP)
+			testCase.HTTPReq.URL, err = utils.ReplaceHostToIP(testCase.HTTPReq.URL, userIP)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to replace host to docker container's IP")
 				break
@@ -416,7 +420,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.logger.Debug("", zap.Any("replaced URL in case of docker env", testCase.HTTPReq.URL))
 		}
 
-		resp, loopErr := emulator.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
+		resp, loopErr := requestMockemulator.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
 		if loopErr != nil {
 			utils.LogError(r.logger, err, "failed to simulate request")
 			break
@@ -431,7 +435,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				totalConsumedMocks[mockName] = true
 			}
 		}
-
 		testPass, testResult = r.compareResp(testCase, resp, testSetID)
 		if !testPass {
 			// log the consumed mocks during the test run of the test case for test set
@@ -468,18 +471,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					Form:       testCase.HTTPReq.Form,
 					Timestamp:  testCase.HTTPReq.Timestamp,
 				},
-				Res: models.HTTPResp{
-					StatusCode:    testCase.HTTPResp.StatusCode,
-					Header:        testCase.HTTPResp.Header,
-					Body:          testCase.HTTPResp.Body,
-					StatusMessage: testCase.HTTPResp.StatusMessage,
-					ProtoMajor:    testCase.HTTPResp.ProtoMajor,
-					ProtoMinor:    testCase.HTTPResp.ProtoMinor,
-					Binary:        testCase.HTTPResp.Binary,
-					Timestamp:     testCase.HTTPResp.Timestamp,
-				},
+				Res:          *resp,
 				TestCasePath: filepath.Join(r.config.Path, testSetID),
-				MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
+				MockPath:     filepath.Join(r.config.Path, testSetID, requestMockemulator.FetchMockName()),
 				Noise:        testCase.Noise,
 				Result:       *testResult,
 			}
@@ -725,5 +719,90 @@ func (r *Replayer) ProvideMocks(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 	<-ctx.Done()
+	return nil
+}
+
+func (r *Replayer) Normalize(ctx context.Context) error {
+
+	var testRun string
+	if r.config.Normalize.TestRun == "" {
+		testRunIDs, err := r.reportDB.GetAllTestRunIDs(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return err
+			}
+			return fmt.Errorf("failed to get all test run ids: %w", err)
+		}
+		testRun = pkg.LastID(testRunIDs, models.TestRunTemplateName)
+	}
+
+	if len(r.config.Normalize.SelectedTests) == 0 {
+		testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return err
+			}
+			return fmt.Errorf("failed to get all test set ids: %w", err)
+		}
+		for _, testSetID := range testSetIDs {
+			r.config.Normalize.SelectedTests = append(r.config.Normalize.SelectedTests, config.SelectedTests{TestSet: testSetID})
+		}
+	}
+
+	for _, testSet := range r.config.Normalize.SelectedTests {
+		testSetID := testSet.TestSet
+		testCases := testSet.Tests
+		err := r.normalizeTestCases(ctx, testRun, testSetID, testCases)
+		if err != nil {
+			return err
+		}
+	}
+	r.logger.Info("Normalized test cases successfully. Please run keploy tests to verify the changes.")
+	return nil
+}
+
+func (r *Replayer) normalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIds []string) error {
+
+	testReport, err := r.reportDB.GetReport(ctx, testRun, testSetID)
+	if err != nil {
+		return fmt.Errorf("failed to get test report: %w", err)
+	}
+	testCaseResults := testReport.Tests
+	testCaseResultMap := make(map[string]models.TestResult)
+
+	testCases, err := r.testDB.GetTestCases(ctx, testSetID)
+	if err != nil {
+		return fmt.Errorf("failed to get test cases: %w", err)
+	}
+	selectedTestCases := make([]*models.TestCase, 0, len(selectedTestCaseIds))
+
+	if len(selectedTestCaseIds) == 0 {
+		selectedTestCases = testCases
+	} else {
+		for _, testCase := range testCases {
+			if _, ok := ArrayToMap(selectedTestCaseIds)[testCase.Name]; ok {
+				selectedTestCases = append(selectedTestCases, testCase)
+			}
+		}
+	}
+
+	for _, testCaseResult := range testCaseResults {
+		testCaseResultMap[testCaseResult.TestCaseID] = testCaseResult
+	}
+
+	for _, testCase := range selectedTestCases {
+		if _, ok := testCaseResultMap[testCase.Name]; !ok {
+			r.logger.Info("test case not found in the test report", zap.String("test-case-id", testCase.Name), zap.String("test-set-id", testSetID))
+			continue
+		}
+		if testCaseResultMap[testCase.Name].Status == models.TestStatusPassed {
+			continue
+		}
+		testCase.HTTPResp = testCaseResultMap[testCase.Name].Res
+		err = r.testDB.UpdateTestCase(ctx, testCase, testSetID)
+		if err != nil {
+			return fmt.Errorf("failed to update test case: %w", err)
+		}
+	}
 	return nil
 }

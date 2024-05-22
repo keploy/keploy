@@ -42,7 +42,7 @@ type App struct {
 	id               uint64
 	cmd              string
 	kind             utils.CmdType
-	containerDelay   time.Duration
+	containerDelay   uint64
 	container        string
 	containerNetwork string
 	containerIPv4    string
@@ -58,7 +58,7 @@ type Options struct {
 	// canExit disables any error returned if the app exits by itself.
 	//CanExit       bool
 	Container     string
-	DockerDelay   time.Duration
+	DockerDelay   uint64
 	DockerNetwork string
 }
 
@@ -69,12 +69,12 @@ func (a *App) Setup(_ context.Context) error {
 	}
 	a.docker = d
 
-	if (a.kind == utils.Docker || a.kind == utils.DockerCompose) && IsDetachMode(a.cmd) {
-		return fmt.Errorf("detach mode is not allowed in Keploy command")
+	if utils.IsDockerKind(a.kind) && isDetachMode(a.logger, a.cmd, a.kind) {
+		return fmt.Errorf("application could not be started in detached mode")
 	}
 
 	switch a.kind {
-	case utils.Docker:
+	case utils.DockerRun, utils.DockerStart:
 		err := a.SetupDocker()
 		if err != nil {
 			return err
@@ -100,7 +100,9 @@ func (a *App) ContainerIPv4Addr() string {
 
 func (a *App) SetupDocker() error {
 	var err error
-	cont, net, err := ParseDockerCmd(a.cmd)
+
+	cont, net, err := ParseDockerCmd(a.cmd, a.kind, a.docker)
+
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to parse container name from given docker command", zap.String("cmd", a.cmd))
 		return err
@@ -115,6 +117,16 @@ func (a *App) SetupDocker() error {
 		a.containerNetwork = net
 	} else if a.containerNetwork != net {
 		a.logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v)", a.containerNetwork, net))
+	}
+
+	if a.kind == utils.DockerStart {
+		running, err := a.docker.IsContainerRunning(cont)
+		if err != nil {
+			return err
+		}
+		if running {
+			return fmt.Errorf("docker container is already in running state")
+		}
 	}
 
 	//injecting appNetwork to keploy.
@@ -263,52 +275,49 @@ func (a *App) injectNetwork(network string) error {
 	return fmt.Errorf("failed to find the network:%v in the keploy container", network)
 }
 
-func (a *App) handleDockerEvents(ctx context.Context, e events.Message) (bool, error) {
-	var inode uint64
-	var iPAddress string
-	switch e.Action {
-	case "start":
-		// Fetch container details by inspecting using container ID to check if container is created
-		info, err := a.docker.ContainerInspect(ctx, e.ID)
-		if err != nil {
-			a.logger.Debug("failed to inspect container by container Id", zap.Error(err))
-			return false, err
-		}
-
-		// Check if the container's name matches the desired name
-		if info.Name != "/"+a.container {
-			a.logger.Debug("ignoring container creation for unrelated container", zap.String("containerName", info.Name))
-			return false, nil
-		}
-
-		// Set Docker Container ID
-		a.docker.SetContainerID(e.ID)
-		a.logger.Debug("checking for container pid", zap.Any("containerDetails.State.Pid", info.State.Pid))
-		if info.State.Pid == 0 {
-			return false, errors.New("failed to get the pid of the container")
-		}
-		a.logger.Debug("", zap.Any("containerDetails.State.Pid", info.State.Pid), zap.String("containerName", a.container))
-		inode, err = getInode(info.State.Pid)
-		if err != nil {
-			return false, err
-		}
-
-		a.inodeChan <- inode
-		a.logger.Debug("container started and successfully extracted inode", zap.Any("inode", inode))
-		if info.NetworkSettings == nil || info.NetworkSettings.Networks == nil {
-			a.logger.Debug("container network settings not available", zap.Any("containerDetails.NetworkSettings", info.NetworkSettings))
-			return false, nil
-		}
-
-		n, ok := info.NetworkSettings.Networks[a.containerNetwork]
-		if !ok || n == nil {
-			a.logger.Debug("container network not found", zap.Any("containerDetails.NetworkSettings.Networks", info.NetworkSettings.Networks))
-			return false, fmt.Errorf("container network not found: %s", fmt.Sprintf("%+v", info.NetworkSettings.Networks))
-		}
-		a.containerIPv4 = n.IPAddress
-		iPAddress = n.IPAddress
+func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
+	if e.Action != "start" {
+		return false, nil
 	}
-	return inode != 0 && iPAddress != "", nil
+	// Fetch container details by inspecting using container ID to check if container is created
+	info, err := a.docker.ContainerInspect(ctx, e.ID)
+	if err != nil {
+		a.logger.Debug("failed to inspect container by container Id", zap.Error(err))
+		return false, err
+	}
+
+	// Check if the container's name matches the desired name
+	if info.Name != "/"+a.container {
+		a.logger.Debug("ignoring container creation for unrelated container", zap.String("containerName", info.Name))
+		return false, nil
+	}
+
+	// Set Docker Container ID
+	a.docker.SetContainerID(e.ID)
+	a.logger.Debug("checking for container pid", zap.Any("containerDetails.State.Pid", info.State.Pid))
+	if info.State.Pid == 0 {
+		return false, errors.New("failed to get the pid of the container")
+	}
+	a.logger.Debug("", zap.Any("containerDetails.State.Pid", info.State.Pid), zap.String("containerName", a.container))
+	inode, err := getInode(info.State.Pid)
+	if err != nil {
+		return false, err
+	}
+
+	a.inodeChan <- inode
+	a.logger.Debug("container started and successfully extracted inode", zap.Any("inode", inode))
+	if info.NetworkSettings == nil || info.NetworkSettings.Networks == nil {
+		a.logger.Debug("container network settings not available", zap.Any("containerDetails.NetworkSettings", info.NetworkSettings))
+		return false, nil
+	}
+
+	n, ok := info.NetworkSettings.Networks[a.containerNetwork]
+	if !ok || n == nil {
+		a.logger.Debug("container network not found", zap.Any("containerDetails.NetworkSettings.Networks", info.NetworkSettings.Networks))
+		return false, fmt.Errorf("container network not found: %s", fmt.Sprintf("%+v", info.NetworkSettings.Networks))
+	}
+	a.containerIPv4 = n.IPAddress
+	return inode != 0 && n.IPAddress != "", nil
 }
 
 func (a *App) getDockerMeta(ctx context.Context) <-chan error {
@@ -316,7 +325,7 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 	defer a.logger.Debug("exiting from goroutine of docker daemon event listener")
 
 	errCh := make(chan error, 1)
-	timer := time.NewTimer(a.containerDelay)
+	timer := time.NewTimer(time.Duration(a.containerDelay) * time.Second)
 	logTicker := time.NewTicker(1 * time.Second)
 	defer logTicker.Stop()
 
@@ -350,11 +359,13 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 				errCh <- ctx.Err()
 				return nil
 			case e := <-messages:
-				eventCaptured, err := a.handleDockerEvents(ctx, e)
+				done, err := a.extractMeta(ctx, e)
 				if err != nil {
 					errCh <- err
 					return nil
-				} else if eventCaptured {
+				}
+
+				if done {
 					return nil
 				}
 			// for debugging purposes
@@ -421,7 +432,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 func (a *App) Run(ctx context.Context, inodeChan chan uint64) models.AppError {
 	a.inodeChan = inodeChan
 
-	if a.kind == utils.DockerCompose || a.kind == utils.Docker {
+	if utils.IsDockerKind(a.kind) {
 		return a.runDocker(ctx)
 	}
 	return a.run(ctx)
@@ -432,7 +443,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	userCmd := a.cmd
 	username := os.Getenv("SUDO_USER")
 
-	if utils.FindDockerCmd(a.cmd) == utils.Docker {
+	if utils.FindDockerCmd(a.cmd) == utils.DockerRun {
 		userCmd = utils.EnsureRmBeforeName(userCmd)
 	}
 

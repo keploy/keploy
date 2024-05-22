@@ -2,36 +2,46 @@
 package config
 
 import (
+	"fmt"
+	"strings"
 	"time"
 )
 
 type Config struct {
-	Path                  string        `json:"path" yaml:"path" mapstructure:"path" `
-	Command               string        `json:"command" yaml:"command" mapstructure:"command"`
-	Port                  uint32        `json:"port" yaml:"port" mapstructure:"port"`
-	DNSPort               uint32        `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
-	ProxyPort             uint32        `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
-	Debug                 bool          `json:"debug" yaml:"debug" mapstructure:"debug"`
-	DisableTele           bool          `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
-	DisableANSI           bool          `json:"disableANSI" yaml:"disableANSI" mapstructure:"disableANSI"`
-	InDocker              bool          `json:"inDocker" yaml:"inDocker" mapstructure:"inDocker"`
-	ContainerName         string        `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
-	NetworkName           string        `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
-	BuildDelay            time.Duration `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
-	Test                  Test          `json:"test" yaml:"test" mapstructure:"test"`
-	Record                Record        `json:"record" yaml:"record" mapstructure:"record"`
-	ConfigPath            string        `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
-	BypassRules           []BypassRule  `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
-	EnableTesting         bool          `json:"enableTesting" yaml:"enableTesting" mapstructure:"enableTesting"`
-	GenerateGithubActions bool          `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`
-	KeployContainer       string        `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
-	KeployNetwork         string        `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
-	CommandType           string        `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
+	Path                  string       `json:"path" yaml:"path" mapstructure:"path" `
+	AppID                 string       `json:"appId" yaml:"appId" mapstructure:"appId"`
+	ReRecord              string       `json:"rerecord" yaml:"rerecord" mapstructure:"rerecord"`
+	Command               string       `json:"command" yaml:"command" mapstructure:"command"`
+	Port                  uint32       `json:"port" yaml:"port" mapstructure:"port"`
+	DNSPort               uint32       `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
+	ProxyPort             uint32       `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
+	Debug                 bool         `json:"debug" yaml:"debug" mapstructure:"debug"`
+	DisableTele           bool         `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
+	DisableANSI           bool         `json:"disableANSI" yaml:"disableANSI" mapstructure:"disableANSI"`
+	InDocker              bool         `json:"inDocker" yaml:"inDocker" mapstructure:"inDocker"`
+	ContainerName         string       `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
+	NetworkName           string       `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
+	BuildDelay            uint64       `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
+	Test                  Test         `json:"test" yaml:"test" mapstructure:"test"`
+	Record                Record       `json:"record" yaml:"record" mapstructure:"record"`
+	Normalize             Normalize    `json:"normalize" yaml:"normalize" mapstructure:"normalize"`
+	ConfigPath            string       `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
+	BypassRules           []BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
+	EnableTesting         bool         `json:"enableTesting" yaml:"enableTesting" mapstructure:"enableTesting"`
+	GenerateGithubActions bool         `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`
+	KeployContainer       string       `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
+	KeployNetwork         string       `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
+	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
 }
 
 type Record struct {
 	Filters     []Filter      `json:"filters" yaml:"filters" mapstructure:"filters"`
 	RecordTimer time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
+}
+
+type Normalize struct {
+	SelectedTests []SelectedTests `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
+	TestRun       string          `json:"testReport" yaml:"testReport" mapstructure:"testReport"`
 }
 
 type BypassRule struct {
@@ -66,6 +76,11 @@ type Globalnoise struct {
 	Testsets TestsetNoise `json:"test-sets" yaml:"test-sets" mapstructure:"test-sets"`
 }
 
+type SelectedTests struct {
+	TestSet string   `json:"testSet" yaml:"testSet" mapstructure:"testSet"`
+	Tests   []string `json:"tests" yaml:"tests" mapstructure:"tests"`
+}
+
 type (
 	Noise        map[string][]string
 	GlobalNoise  map[string]map[string][]string
@@ -98,4 +113,28 @@ func SetSelectedTests(conf *Config, testSets []string) {
 	for _, testSet := range testSets {
 		conf.Test.SelectedTests[testSet] = []string{}
 	}
+}
+
+func SetSelectedTestsNormalize(conf *Config, value string) error {
+	testSets := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ' '
+	})
+	var tests []SelectedTests
+	if len(testSets) == 0 {
+		conf.Normalize.SelectedTests = tests
+		return nil
+	}
+	for _, ts := range testSets {
+		parts := strings.Split(ts, ":")
+		if len(parts) != 2 {
+			return fmt.Errorf("invalid format: %s", ts)
+		}
+		testCases := strings.Split(parts[1], " ")
+		tests = append(tests, SelectedTests{
+			TestSet: parts[0],
+			Tests:   testCases,
+		})
+	}
+	conf.Normalize.SelectedTests = tests
+	return nil
 }
