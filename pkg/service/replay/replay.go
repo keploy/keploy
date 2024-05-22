@@ -16,7 +16,6 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -107,13 +106,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		utils.LogError(r.logger, err, errMsg)
 		return fmt.Errorf(errMsg)
 	}
-	if r.config.Test.Language == "typescript" {
-		err := os.Setenv("CLEAN", "true")
-		if err != nil {
-			r.config.Test.SkipCoverage = true
-			utils.LogError(r.logger, err, "failed to set CLEAN env variable, coverage won't be calculated.")
-		}
-	}
+
 	// BootReplay will start the hooks and proxy and return the testRunID and appID
 	testRunID, appID, hookCancel, err := r.BootReplay(ctx)
 	if err != nil {
@@ -124,9 +117,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 		return fmt.Errorf(stopReason)
 	}
-
-	if !r.config.Test.SkipCoverage && r.config.Test.Language == "typescript" {
-		err := os.Setenv("CLEAN", "true")
+	if !r.config.Test.SkipCoverage {
+		err = os.Setenv("CLEAN", "true")
 		if err != nil {
 			r.config.Test.SkipCoverage = true
 			utils.LogError(r.logger, err, "failed to set CLEAN env variable, coverage won't be calculated.")
@@ -134,7 +126,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 
 	jacocoPath := ""
-	if r.config.Test.Language == "java" && !r.config.Test.SkipCoverage {
+	if r.config.Test.Language == models.Java && !r.config.Test.SkipCoverage {
 		jacocoPath = filepath.Join(os.TempDir(), "jacoco")
 		err = os.MkdirAll(jacocoPath, 0777)
 		if err != nil {
@@ -144,7 +136,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			if err != nil {
 				r.config.Test.SkipCoverage = true
 				utils.LogError(r.logger, err, "failed to download and extract jacoco binaries")
-			} 
+			}
 		}
 	}
 
@@ -158,7 +150,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			continue
 		}
 
-		if r.config.Test.Language == "java" && !r.config.Test.SkipCoverage {
+		if !r.config.Test.SkipCoverage {
 			err = os.Setenv("TESTSETID", testSetID)
 			if err != nil {
 				r.config.Test.SkipCoverage = true
@@ -198,19 +190,15 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 
 		if i == 0 && !r.config.Test.SkipCoverage {
-			switch r.config.Test.Language {
-			case "typescript":
-				err = os.Setenv("CLEAN", "false")
-				if err != nil {
-					r.config.Test.SkipCoverage = true
-					utils.LogError(r.logger, err, "failed to set CLEAN env variable, coverage won't be calculated.")
-				}
-			case "python":
-				err = os.Setenv("APPEND", " --append")
-				if err != nil {
-					r.config.Test.SkipCoverage = true
-					utils.LogError(r.logger, err, "failed to set APPEND env variable, coverage won't be calculated.")
-				}
+			err = os.Setenv("CLEAN", "false")
+			if err != nil {
+				r.config.Test.SkipCoverage = true
+				utils.LogError(r.logger, err, "failed to set CLEAN env variable, coverage won't be calculated.")
+			}
+			err = os.Setenv("APPEND", " --append")
+			if err != nil {
+				r.config.Test.SkipCoverage = true
+				utils.LogError(r.logger, err, "failed to set APPEND env variable, coverage won't be calculated.")
 			}
 		}
 	}
@@ -237,26 +225,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
 		if !r.config.Test.SkipCoverage {
-			var coverageData models.TestCoverage
-			r.logger.Info("calculating coverage for the test run and inserting it into the report")
-			switch r.config.Test.Language {
-			case "go":
-				coverageData, err = tools.CalGoCoverage()
-			case "python":
-				coverageData, err = tools.CalPythonCoverage(ctx)
-			case "typescript":
-				coverageData, err = tools.CalTypescriptCoverage(ctx)
-			case "java":
-				coverageData, err = tools.CalJavaCoverage(ctx)
-			}
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to calculate coverage for the test run")
-			} else {
-				err = r.reportDB.InsertCoverageReport(ctx, testRunID, &coverageData)
-				if err != nil {
-					utils.LogError(r.logger, err, "failed to update report with the coverage data")
-				}
-			}
+			CalculateAndInsertTestCoverage(ctx, r.logger, r.reportDB, testRunID, r.config.Test.Language)
 		}
 	}
 	return nil
@@ -724,7 +693,7 @@ func (r *Replayer) printSummary(ctx context.Context, testRunResult bool) {
 		}
 		r.logger.Info("test run completed", zap.Bool("passed overall", testRunResult))
 
-		if utils.CmdType(r.config.CommandType) == utils.Native && !r.config.Test.SkipCoverage && r.config.Test.Language == "go" {
+		if utils.CmdType(r.config.CommandType) == utils.Native && !r.config.Test.SkipCoverage && r.config.Test.Language == models.Go {
 			r.logger.Info("there is an opportunity to get the coverage here")
 
 			coverCmd := exec.CommandContext(ctx, "go", "tool", "covdata", "percent", "-i="+os.Getenv("GOCOVERDIR"))

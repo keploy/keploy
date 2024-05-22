@@ -27,6 +27,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
+	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 	"golang.org/x/term"
 )
@@ -715,22 +717,45 @@ func EnsureRmBeforeName(cmd string) string {
 	return strings.Join(parts, " ")
 }
 
+func isGoBinary(logger *zap.Logger, filePath string) bool {
+	f, err := elf.Open(filePath)
+	if err != nil {
+		logger.Debug(fmt.Sprintf("failed to open file %s", filePath), zap.Error(err))
+		return false
+	}
+	defer f.Close()
+
+	// Check for section names typical to Go binaries
+	sections := []string{".go.buildinfo", ".gopclntab"}
+	for _, section := range sections {
+		if sect := f.Section(section); sect != nil {
+			fmt.Println(section)
+			return true
+		}
+	}
+	return false
+}
+
 // detectLanguage detects the language of the test command and returns the executable
-func DetectLanguage(cmd string) (string, string) {
-	executable := strings.Fields(cmd)[0]
+func DetectLanguage(logger *zap.Logger, cmd string) (config.Language, string) {
+	fields := strings.Fields(cmd)
+	executable := fields[0]
 	if strings.HasPrefix(cmd, "python") {
-		return "python", executable
+		return models.Python, executable
 	}
 
 	if executable == "node" || executable == "npm" {
-		return "typescript", executable
+		return models.Node, executable
 	}
 
 	if executable == "java" {
-		return "java", executable
+		return models.Java, executable
 	}
 
-	return "go", executable
+	if executable == "go" || (len(fields) == 1 && isGoBinary(logger, executable)) {
+		return models.Go, executable
+	}
+	return models.Unknown, executable
 }
 
 func RunCommand(cmdString ...string) error {
@@ -764,7 +789,7 @@ func CheckGoBinaryForCoverFlag(logger *zap.Logger, cmd string) bool {
 	return false
 }
 
-func WritePyCoverageConfig(logger *zap.Logger) {
+func CreatePyCoverageConfig(logger *zap.Logger) {
 	// Define the content of the .coveragerc file
 	configContent := `[run]
 omit =
