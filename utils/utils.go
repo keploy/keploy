@@ -328,6 +328,103 @@ func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRele
 	return release, nil
 }
 
+// Config struct to store user preferences
+type Config struct {
+	UpdatePromptDisabled bool `json:"update_prompt_disabled"`
+}
+
+// LoadConfig loads the configuration from the cache file
+func loadConfig() (*Config, error) {
+	configPath := getConfigPath()
+	file, err := os.Open(configPath)
+	if os.IsNotExist(err) {
+		return &Config{}, nil
+	} else if err != nil {
+		return nil, err
+	}
+
+	defer func() {
+		if cerr := file.Close(); cerr != nil {
+			err = cerr
+		}
+	}()
+	if err != nil {
+		return nil, err
+	}
+
+	config := &Config{}
+	err = json.NewDecoder(file).Decode(config)
+	if err != nil {
+		return nil, err
+	}
+
+	return config, nil
+}
+
+// SaveConfig saves the configuration to the cache file
+func saveConfig(config *Config) error {
+	configPath := getConfigPath()
+	file, err := os.Create(configPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cerr := file.Close(); cerr != nil {
+			err = cerr
+		}
+	}()
+	if err != nil {
+		return err
+	}
+
+	return json.NewEncoder(file).Encode(config)
+}
+
+// GetConfigPath returns the path to the configuration file
+func getConfigPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		panic(err)
+	}
+	return filepath.Join(home, ".keploy_config.json")
+}
+
+// CheckUpdatePrompt checks if an update prompt should be shown and handles the user response
+func CheckUpdatePrompt(logger *zap.Logger) bool {
+	config, err := loadConfig()
+	if err != nil {
+		logger.Error("Error loading config", zap.Error(err))
+		return false
+	}
+
+	if config.UpdatePromptDisabled {
+		return false
+	}
+
+	fmt.Print("Keploy update available.. (y/n): ")
+	reader := bufio.NewReader(os.Stdin)
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		logger.Error("Error reading user input", zap.Error(err))
+		return false
+	}
+	response = strings.TrimSpace(response)
+	logger.Warn("Keploy update available.")
+
+	// If the user chooses "no", update the config to disable future prompts
+	if strings.ToLower(response) == "n" || strings.ToLower(response) == "no" {
+		config.UpdatePromptDisabled = true
+		err := saveConfig(config)
+		if err != nil {
+			logger.Error("Error saving config", zap.Error(err))
+			return false
+		}
+		return false
+	}
+
+	return true
+}
+
 func VersionMsg(Tagname string, currentVersion string) string {
 	updatetext := models.HighlightGrayString("keploy update")
 	versionString := fmt.Sprintf("%-*v  ---->   %-*v ", len(currentVersion), currentVersion, len(Tagname), Tagname)

@@ -29,8 +29,8 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 	rootCmd.SetVersionTemplate(provider.VersionTemplate)
 
 	currentVersion := utils.Version
-	// Show update message only if it's not a dev version
-	if !strings.HasSuffix(currentVersion, "dev") {
+
+	if !utils.CheckUpdatePrompt(logger) && !strings.HasSuffix(currentVersion, "dev") {
 		// Check for the latest release version
 		releaseInfo, err1 := utils.GetLatestGitHubRelease(ctx, logger)
 		if err1 != nil {
