@@ -144,7 +144,6 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 
 	var tcsMocks = make([]*models.Mock, 0)
 	var filteredTcsMocks = make([]*models.Mock, 0)
-
 	mockFileName := "mocks"
 	if ys.MockName != "" {
 		mockFileName = ys.MockName
@@ -196,7 +195,6 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 			}
 		}
 	}
-
 	filteredTcsMocks, _ = ys.filterByTimeStamp(ctx, tcsMocks, afterTime, beforeTime, ys.Logger)
 
 	sort.SliceStable(filteredTcsMocks, func(i, j int) bool {
