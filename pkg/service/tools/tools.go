@@ -7,8 +7,6 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
-	"runtime"
-	"strings"
 
 	"github.com/charmbracelet/glamour"
 	"go.keploy.io/server/v2/config"
@@ -39,10 +37,10 @@ func (t *Tools) Update(ctx context.Context) error {
 		fmt.Println("As you are using docker version of keploy, please pull the latest Docker image of keploy to update keploy")
 		return nil
 	}
-	if strings.HasSuffix(currentVersion, "-dev") {
-		fmt.Println("You are using a development version of Keploy. Skipping update")
-		return nil
-	}
+	// if strings.HasSuffix(currentVersion, "-dev") {
+	// 	fmt.Println("You are using a development version of Keploy. Skipping update")
+	// 	return nil
+	// }
 
 	releaseInfo, err := utils.GetLatestGitHubRelease(ctx, t.logger)
 	if err != nil {
@@ -64,13 +62,7 @@ func (t *Tools) Update(ctx context.Context) error {
 
 	t.logger.Info("Updating to Version: " + latestVersion)
 
-	downloadURL := ""
-	if runtime.GOARCH == "amd64" {
-		downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
-	} else {
-		downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
-	}
-	err = t.downloadAndUpdate(ctx, t.logger, downloadURL)
+	err = t.downloadAndUpdate(ctx, t.logger)
 	if err != nil {
 		return err
 	}
@@ -97,57 +89,22 @@ func (t *Tools) Update(ctx context.Context) error {
 	return nil
 }
 
-func (t *Tools) downloadAndUpdate(_ context.Context, _ *zap.Logger, downloadURL string) error {
+func (t *Tools) downloadAndUpdate(_ context.Context, _ *zap.Logger) error {
 	curlPath, err := exec.LookPath("curl")
 	if err != nil {
 		return errors.New("curl command not found on the system")
 	}
 
-	// Determine the path based on the alias "keploy"
-	aliasPath := "/usr/local/bin/keploybin" // Default path
-	aliasCmd := exec.Command("which", "keploy")
-	aliasOutput, err := aliasCmd.Output()
-	if err == nil && len(aliasOutput) > 0 {
-		aliasPath = strings.TrimSpace(string(aliasOutput))
-	}
-	// Check if the aliasPath is a valid path
-	_, err = os.Stat(aliasPath)
-	if os.IsNotExist(err) {
-		return fmt.Errorf("alias path %s does not exist", aliasPath)
+	cmd := exec.Command(curlPath, "--silent", "-L", "-o", "install.sh", "https://keploy.io/install.sh")
+	err = cmd.Run()
+	if err != nil {
+		return errors.New("failed to download the latest version of keploy")
 	}
 
-	// Check if the aliasPath is a directory
-	if fileInfo, err := os.Stat(aliasPath); err == nil && fileInfo.IsDir() {
-		return fmt.Errorf("alias path %s is a directory, not a file", aliasPath)
-
-	}
-
-	downloadCmd := exec.Command(curlPath, "--silent", "--location", downloadURL)
-	untarCmd := exec.Command("tar", "xz", "-C", "/tmp")
-
-	// Pipe the output of the first command to the second command
-	untarCmd.Stdin, _ = downloadCmd.StdoutPipe()
-
-	if err := downloadCmd.Start(); err != nil {
-		return fmt.Errorf("Failed to start download command: %v", err)
-	}
-	if err := untarCmd.Start(); err != nil {
-		return fmt.Errorf("Failed to start untar command: %v", err)
-	}
-
-	if err := downloadCmd.Wait(); err != nil {
-		return fmt.Errorf("Failed to wait download command: %v", err)
-
-	}
-	if err := untarCmd.Wait(); err != nil {
-		return fmt.Errorf("Failed to wait untar command: %v", err)
-
-	}
-
-	moveCmd := exec.Command("sudo", "mv", "/tmp/keploy", aliasPath)
-	if err := moveCmd.Run(); err != nil {
-		return fmt.Errorf("Failed to move keploy binary to %s: %v", aliasPath, err)
-
+	cmd = exec.Command("bash", "install.sh")
+	err = cmd.Run()
+	if err != nil {
+		return errors.New("failed to install the latest version of keploy")
 	}
 
 	return nil
