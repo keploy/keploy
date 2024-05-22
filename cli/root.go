@@ -32,9 +32,9 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 	// Show update message only if it's not a dev version
 	if !strings.HasSuffix(currentVersion, "dev") {
 		// Check for the latest release version
-		releaseInfo, err := utils.GetLatestGitHubRelease(ctx, logger)
-		if err != nil {
-			logger.Debug("Failed to fetch the latest release version", zap.Error(err))
+		releaseInfo, err1 := utils.GetLatestGitHubRelease(ctx, logger)
+		if err1 != nil {
+			logger.Debug("Failed to fetch the latest release version", zap.Error(err1))
 		} else {
 			if releaseInfo.TagName != currentVersion {
 				versionMsg := utils.VersionMsg(releaseInfo.TagName, currentVersion)

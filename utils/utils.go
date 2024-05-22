@@ -332,11 +332,11 @@ func VersionMsg(Tagname string, currentVersion string) string {
 	updatetext := models.HighlightGrayString("keploy update")
 	versionString := fmt.Sprintf("%-*v  ---->   %-*v ", len(currentVersion), currentVersion, len(Tagname), Tagname)
 	const msg string = `
-							   ╭%v╮
-							   │ New version available:%v│
-							   │ %-*v  ---->   %-*v │
-							   │ Run %v to update%v│
-							   ╰%v╯
+╭%v╮
+│ New version available:%v│
+│ %-*v  ---->   %-*v │
+│ Run %v to update%v│
+╰%v╯
 							   `
 	whiteSpaceString1 := strings.Repeat(" ", len(versionString)-len("New version available:"))
 	whiteSpaceString2 := strings.Repeat(" ", len(versionString)-len("Run keploy update to update"))
