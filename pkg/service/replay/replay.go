@@ -28,10 +28,10 @@ var totalTestFailed int
 
 // emulator contains the struct instance that implements RequestEmulator interface. This is done for
 // attaching the objects dynamically as plugins.
-var emulator RequestEmulator
+var requestMockemulator RequestMockHandler
 
-func SetTestUtilInstance(instance RequestEmulator) {
-	emulator = instance
+func SetTestUtilInstance(emulatorInstance RequestMockHandler) {
+	requestMockemulator = emulatorInstance
 }
 
 type Replayer struct {
@@ -46,10 +46,9 @@ type Replayer struct {
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, telemetry Telemetry, instrumentation Instrumentation, config config.Config) Service {
 	// set the request emulator for simulating test case requests, if not set
-	if emulator == nil {
-		SetTestUtilInstance(NewTestUtils(config.Test.APITimeout, logger))
+	if requestMockemulator == nil {
+		SetTestUtilInstance(NewRequestMockUtil(logger, config.Path, "mocks", config.Test.APITimeout))
 	}
-
 	return &Replayer{
 		logger:          logger,
 		testDB:          testDB,
@@ -121,13 +120,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 	testSetResult := false
 	testRunResult := true
 	abortTestRun := false
-
 	for _, testSetID := range testSetIDs {
-
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
 		}
-
+		requestMockemulator.ProcessMockFile(ctx, testSetID)
 		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, appID, false)
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)
@@ -153,10 +150,16 @@ func (r *Replayer) Start(ctx context.Context) error {
 			testSetResult = false
 		case models.TestSetStatusPassed:
 			testSetResult = true
+			requestMockemulator.ProcessTestRunStatus(ctx, testSetResult, testSetID)
 		}
 		testRunResult = testRunResult && testSetResult
 		if abortTestRun {
 			break
+		}
+
+		_, err = requestMockemulator.AfterTestHook(ctx, testRunID, testSetID, len(testSetIDs))
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to get after test hook")
 		}
 	}
 
@@ -164,6 +167,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if testRunResult {
 		testRunStatus = "pass"
 	}
+
 	r.telemetry.TestRun(totalTestPassed, totalTestFailed, len(testSetIDs), testRunStatus)
 
 	if !abortTestRun {
@@ -219,7 +223,6 @@ func (r *Replayer) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
 }
 
 func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error) {
-
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
 	runTestSetCtx = context.WithValue(runTestSetCtx, models.ErrGroupKey, runTestSetErrGrp)
@@ -331,9 +334,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusUserAbort, context.Canceled
 	}
 
-	cmdType := utils.FindDockerCmd(r.config.Command)
+	cmdType := utils.CmdType(r.config.CommandType)
 	var userIP string
-	if cmdType == utils.Docker || cmdType == utils.DockerCompose {
+	if utils.IsDockerKind(cmdType) {
 		userIP, err = r.instrumentation.GetContainerIP(ctx, appID)
 		if err != nil {
 			return models.TestSetStatusFailed, err
@@ -407,7 +410,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		started := time.Now().UTC()
 
-		if cmdType == utils.Docker || cmdType == utils.DockerCompose {
+		if utils.IsDockerKind(cmdType) {
 
 			testCase.HTTPReq.URL, err = utils.ReplaceHostToIP(testCase.HTTPReq.URL, userIP)
 			if err != nil {
@@ -417,10 +420,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.logger.Debug("", zap.Any("replaced URL in case of docker env", testCase.HTTPReq.URL))
 		}
 
-		resp, loopErr := emulator.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
+		resp, loopErr := requestMockemulator.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
 		if loopErr != nil {
 			utils.LogError(r.logger, err, "failed to simulate request")
-			break
+			failure++
+			continue
 		}
 
 		consumedMocks, err := r.instrumentation.GetConsumedMocks(runTestSetCtx, appID)
@@ -432,7 +436,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				totalConsumedMocks[mockName] = true
 			}
 		}
-
 		testPass, testResult = r.compareResp(testCase, resp, testSetID)
 		if !testPass {
 			// log the consumed mocks during the test run of the test case for test set
@@ -471,7 +474,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				},
 				Res:          *resp,
 				TestCasePath: filepath.Join(r.config.Path, testSetID),
-				MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
+				MockPath:     filepath.Join(r.config.Path, testSetID, requestMockemulator.FetchMockName()),
 				Noise:        testCase.Noise,
 				Result:       *testResult,
 			}

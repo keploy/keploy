@@ -47,21 +47,21 @@ Golang Application
 	sudo -E env PATH=$PATH keploy record -c "/path/to/user/app/binary"
 
 	Test:
-	sudo -E env PATH=$PATH keploy test -c "/path/to/user/app/binary" --delay 2
+	sudo -E env PATH=$PATH keploy test -c "/path/to/user/app/binary" --delay 10
 
 Node Application
 	Record:
 	sudo -E env PATH=$PATH keploy record -c “npm start --prefix /path/to/node/app"
 
 	Test:
-	sudo -E env PATH=$PATH keploy test -c “npm start --prefix /path/to/node/app" --delay 2
+	sudo -E env PATH=$PATH keploy test -c “npm start --prefix /path/to/node/app" --delay 10
 
 Java
 	Record:
 	sudo -E env PATH=$PATH keploy record -c "java -jar /path/to/java-project/target/jar"
 
 	Test:
-	sudo -E env PATH=$PATH keploy test -c "java -jar /path/to/java-project/target/jar" --delay 2
+	sudo -E env PATH=$PATH keploy test -c "java -jar /path/to/java-project/target/jar" --delay 10
 
 Docker
 	Alias:
@@ -69,10 +69,10 @@ Docker
 	-v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
 
 	Record:
-	keploy record -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --buildDelay 1m
+	keploy record -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --buildDelay 60
 
 	Test:
-	keploy test -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --delay 1 --buildDelay 1m
+	keploy test -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --delay 10 --buildDelay 60
 
 `
 
@@ -82,28 +82,28 @@ Golang Application
 	keploy record -c "/path/to/user/app/binary"
 
 	Test:
-	keploy test -c "/path/to/user/app/binary" --delay 2
+	keploy test -c "/path/to/user/app/binary" --delay 10
 
 Node Application
 	Record:
 	keploy record -c “npm start --prefix /path/to/node/app"
 
 	Test:
-	keploy test -c “npm start --prefix /path/to/node/app" --delay 2
+	keploy test -c “npm start --prefix /path/to/node/app" --delay 10
 
 Java
 	Record:
 	keploy record -c "java -jar /path/to/java-project/target/jar"
 
 	Test:
-	keploy test -c "java -jar /path/to/java-project/target/jar" --delay 2
+	keploy test -c "java -jar /path/to/java-project/target/jar" --delay 10
 
 Docker
 	Record:
-	keploy record -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --buildDelay 1m
+	keploy record -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --buildDelay 60
 
 	Test:
-	keploy test -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --delay 1 --buildDelay 1m
+	keploy test -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --delay 1 --buildDelay 60
 `
 
 var RootCustomHelpTemplate = `{{.Short}}
@@ -132,10 +132,10 @@ Use "{{.CommandPath}} [command] --help" for more information about a command.{{e
 
 var RootExamples = `
   Record:
-	keploy record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --containerName "<containerName>" --delay 1 --buildDelay 1m
+	keploy record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --containerName "<containerName>" --buildDelay 60
 
   Test:
-	keploy test --c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --delay 1 --buildDelay 1m
+	keploy test --c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --delay 10 --buildDelay 60
 
   Config:
 	keploy config --generate -p "/path/to/localdir"
@@ -197,10 +197,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint32("dnsPort", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
 		cmd.Flags().String("cmdType", c.cfg.CommandType, "Type of command to start the user application (native/docker/docker-compose)")
-		cmd.Flags().DurationP("buildDelay", "b", c.cfg.BuildDelay, "User provided time to wait docker container build")
+		cmd.Flags().Uint64P("buildDelay", "b", c.cfg.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().String("containerName", c.cfg.ContainerName, "Name of the application's docker container")
 		cmd.Flags().StringP("networkName", "n", c.cfg.NetworkName, "Name of the application's docker network")
 		cmd.Flags().UintSlice("passThroughPorts", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server and ignore the traffic")
+		cmd.Flags().StringP("appId", "a", c.cfg.AppID, "A unique name for the user's application")
 		cmd.Flags().Bool("generateGithubActions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
 		err = cmd.Flags().MarkHidden("port")
 		if err != nil {
@@ -392,9 +393,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					}
 				}
 			}
-			if c.cfg.BuildDelay <= 30*time.Second {
+			// check if the buildDelay is less than 30 seconds
+			if time.Duration(c.cfg.BuildDelay)*time.Second <= 30*time.Second {
 				c.logger.Warn(fmt.Sprintf("buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay", c.cfg.BuildDelay))
-				c.logger.Info(`Example usage: keploy record -c "docker-compose up --build" --buildDelay 35s`)
+				c.logger.Info(`Example usage: keploy record -c "docker-compose up --build" --buildDelay 35`)
 			}
 			if utils.CmdType(c.cfg.Command) == utils.DockerCompose {
 				if c.cfg.ContainerName == "" {
