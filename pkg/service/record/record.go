@@ -387,7 +387,7 @@ func (r *Recorder) ReRecord(ctx context.Context, appID uint64) error {
 		if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[r.config.ReRecord]; ok {
 			noiseConfig = replay.LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 		}
-		testPass, result := replay.CompareResp(tc, resp, noiseConfig, r.config.Test.IgnoreOrdering, r.logger, r.config.ReRecord)
+		testPass, result := replay.CompareResp(tc, resp, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
 
 		if !testPass {
 			r.logger.Info("Re-recorded testcase different from original", zap.String("curl", tc.Curl), zap.Any("response", (resp)), zap.Any("result", result))
