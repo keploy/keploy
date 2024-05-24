@@ -24,7 +24,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 
 	bufStr := string(reqBuf)
 	dataType := models.String
-	if !util.IsASCIIPrintable(string(reqBuf)) {
+	if !util.IsASCII(string(reqBuf)) {
 		bufStr = util.EncodeBase64(reqBuf)
 		dataType = "binary"
 	}
@@ -144,7 +144,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 
 			bufStr := string(buffer)
 			buffDataType := models.String
-			if !util.IsASCIIPrintable(string(buffer)) {
+			if !util.IsASCII(string(buffer)) {
 				bufStr = util.EncodeBase64(buffer)
 				buffDataType = "binary"
 			}
@@ -176,7 +176,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 
 			bufStr := string(buffer)
 			buffDataType := models.String
-			if !util.IsASCIIPrintable(string(buffer)) {
+			if !util.IsASCII(string(buffer)) {
 				bufStr = base64.StdEncoding.EncodeToString(buffer)
 				buffDataType = "binary"
 			}
