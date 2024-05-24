@@ -423,7 +423,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		resp, loopErr := requestMockemulator.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
 		if loopErr != nil {
 			utils.LogError(r.logger, err, "failed to simulate request")
-			break
+			failure++
+			continue
 		}
 
 		consumedMocks, err := r.instrumentation.GetConsumedMocks(runTestSetCtx, appID)
