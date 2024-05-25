@@ -42,6 +42,9 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	}
 	_, err := destConn.Write(reqBuf)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		utils.LogError(logger, err, "failed to write request message to the destination server")
 		return err
 	}
@@ -110,6 +113,9 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			// Write the request message to the destination
 			_, err := destConn.Write(buffer)
 			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				utils.LogError(logger, err, "failed to write request message to the destination server")
 				return err
 			}
@@ -170,6 +176,9 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			// Write the response message to the client
 			_, err := clientConn.Write(buffer)
 			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				utils.LogError(logger, err, "failed to write response message to the client")
 				return err
 			}

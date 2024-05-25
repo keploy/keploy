@@ -2,11 +2,11 @@ package generic
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"math"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
+	"go.uber.org/zap"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models"
@@ -18,7 +18,7 @@ import (
 // If a match is found, it returns the corresponding response mock and a boolean value indicating success.
 // If no match is found, it returns false and a nil response.
 // If an error occurs during the matching process, it returns an error.
-func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockMemDb) (bool, []models.GenericPayload, error) {
+func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockMemDb, logger *zap.Logger) (bool, []models.GenericPayload, error) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -43,7 +43,7 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 			index := findExactMatch(filteredMocks, reqBuff)
 
 			if index == -1 {
-				index = findBinaryMatch(filteredMocks, reqBuff, 0.9)
+				index = findBinaryMatch(filteredMocks, reqBuff, 0.9, logger)
 			}
 
 			if index != -1 {
@@ -53,7 +53,7 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 				filteredMocks[index].TestModeInfo.IsFiltered = false
 				filteredMocks[index].TestModeInfo.SortOrder = math.MaxInt64
 				isUpdated := mockDb.UpdateUnFilteredMock(&originalFilteredMock, filteredMocks[index])
-				if isUpdated {
+				if !isUpdated {
 					continue
 				}
 				return true, responseMock, nil
@@ -66,9 +66,16 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 				copy(responseMock, unfilteredMocks[index].Spec.GenericResponses)
 				return true, responseMock, nil
 			}
+			logger.Info("################################################################################################################################################################################### start unfiltered  ##########################################################################################################################################################################################################################################################################################################################################")
+
+			logger.Info("index", zap.Any("before", index))
 
 			totalMocks := append(filteredMocks, unfilteredMocks...)
-			index = findBinaryMatch(totalMocks, reqBuff, 0.4)
+			logger.Info("mocklen", zap.Any("mocklen", len(totalMocks)))
+
+			index = findBinaryMatch(totalMocks, reqBuff, 0.4, logger)
+			logger.Info("index", zap.Any("after", index))
+			logger.Info("########################################################################################################################################################################## end unfiltered #####################################################################################################################################################################################################################################################################################################################################################")
 
 			if index != -1 {
 				responseMock := make([]models.GenericPayload, len(totalMocks[index].Spec.GenericResponses))
@@ -78,7 +85,7 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 					totalMocks[index].TestModeInfo.IsFiltered = false
 					totalMocks[index].TestModeInfo.SortOrder = math.MaxInt64
 					isUpdated := mockDb.UpdateUnFilteredMock(&originalFilteredMock, totalMocks[index])
-					if isUpdated {
+					if !isUpdated {
 						continue
 					}
 				}
@@ -90,23 +97,45 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 }
 
 // TODO: need to generalize this function for different types of integrations.
-func findBinaryMatch(tcsMocks []*models.Mock, reqBuffs [][]byte, mxSim float64) int {
+func findBinaryMatch(tcsMocks []*models.Mock, reqBuffs [][]byte, mxSim float64, logger *zap.Logger) int {
 	// TODO: need find a proper similarity index to set a benchmark for matching or need to find another way to do approximate matching
 	mxIdx := -1
 	for idx, mock := range tcsMocks {
+
 		if len(mock.Spec.GenericRequests) == len(reqBuffs) {
 			for requestIndex, reqBuff := range reqBuffs {
-				_ = base64.StdEncoding.EncodeToString(reqBuff)
-				encoded, _ := util.DecodeBase64(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
 
-				similarity := fuzzyCheck(encoded, reqBuff)
+				mockReq, err := util.DecodeBase64(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
+				if err != nil {
+					mockReq = []byte(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
+				}
+
+				similarity := fuzzyCheck(mockReq, reqBuff)
 
 				if mxSim < similarity {
 					mxSim = similarity
 					mxIdx = idx
 				}
 			}
+
+		} else {
+			logger.Info("lenss", zap.Any("GenericRequests", len(mock.Spec.GenericRequests)), zap.Any("reqBuff", len(reqBuffs)))
 		}
+	}
+	if mxIdx == -1 {
+		var reqBuffsStr, reqBuffsStrS []string
+		for _, rb := range reqBuffs {
+			reqBuffsStr = append(reqBuffsStr, string(rb))
+		}
+		for _, rb := range tcsMocks {
+			for _, as := range rb.Spec.GenericRequests {
+				reqBuffsStrS = append(reqBuffsStrS, as.Message[0].Data)
+
+			}
+		}
+
+		logger.Info("notmatched", zap.Any("tcsMocks", reqBuffsStrS))
+		logger.Info("notmatched", zap.Any("reqBuff", (reqBuffsStr)))
 	}
 	return mxIdx
 }

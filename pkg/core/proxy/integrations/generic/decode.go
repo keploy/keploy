@@ -49,10 +49,11 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				logger.Debug("the generic request buffer is empty")
 				continue
 			}
+			logger.Info("the generic rq no", zap.Any("length", len(genericRequests)))
 
 			// bestMatchedIndx := 0
 			// fuzzy match gives the index for the best matched generic mock
-			matched, genericResponses, err := fuzzyMatch(ctx, genericRequests, mockDb)
+			matched, genericResponses, err := fuzzyMatch(ctx, genericRequests, mockDb, logger)
 			if err != nil {
 				utils.LogError(logger, err, "error while matching generic mocks")
 			}
@@ -68,7 +69,11 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				for _, genReq := range genericRequests {
 					logger.Debug("the genericRequests are:", zap.Any("h", string(genReq)))
 				}
+				// fmt.Println("passed through log", genericRequests)
 
+				// for _, request := range genericRequests {
+				// 	logger.Info(string(request))
+				// }
 				reqBuffer, err := pUtil.PassThrough(ctx, logger, clientConn, dstCfg, genericRequests)
 				if err != nil {
 					utils.LogError(logger, err, "failed to passthrough the generic request")
@@ -82,6 +87,12 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				}
 				logger.Debug("the length of genericRequests after passThrough ", zap.Any("length", len(genericRequests)))
 				continue
+			} else {
+				logger.Info("the generic requests matched length ", zap.Any("genericRequests", len(genericRequests)))
+
+				for _, a := range genericRequests {
+					logger.Info("the generic requests matched", zap.String("genericRequests", string(a)))
+				}
 			}
 			for _, genericResponse := range genericResponses {
 				encoded := []byte(genericResponse.Message[0].Data)
