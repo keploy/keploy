@@ -25,13 +25,22 @@ func NewRedis(logger *zap.Logger) integrations.Integrations {
 	}
 }
 
-func (g *Redis) MatchType(_ context.Context, _ []byte) bool {
-	// generic is checked explicitly in the proxy
-	return false
+func (r *Redis) MatchType(_ context.Context, buf []byte) bool {
+	if len(buf) == 0 {
+		return false
+	}
+
+	// Check the first byte to determine the RESP data type
+	switch buf[0] {
+	case '+', '-', ':', '$', '*', '_', '#', ',', '(', '!', '=', '%', '~', '>':
+		return true
+	default:
+		return false
+	}
 }
 
-func (g *Redis) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
-	logger := g.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)))
+func (r *Redis) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+	logger := r.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)))
 
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
@@ -47,8 +56,8 @@ func (g *Redis) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, 
 	return nil
 }
 
-func (g *Redis) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
-	logger := g.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)))
+func (r *Redis) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+	logger := r.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)))
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial redis message")
