@@ -419,8 +419,18 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		logger: p.logger,
 	}
 
-	logger := p.logger.With(zap.Any("Client IP Address", srcConn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnID), zap.Any("Destination IP Address", dstAddr), zap.Any("Destination ConnectionID", destConnID))
+	clientID, ok := parserCtx.Value(models.ClientConnectionIDKey).(string)
+	if !ok {
+		utils.LogError(p.logger, err, "failed to fetch the client connection id")
+		return err
+	}
+	destID, ok := parserCtx.Value(models.DestConnectionIDKey).(string)
+	if !ok {
+		utils.LogError(p.logger, err, "failed to fetch the destination connection id")
+		return err
+	}
 
+	logger := p.logger.With(zap.Any("Client IP Address", srcConn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientID), zap.Any("Destination IP Address", dstAddr), zap.Any("Destination ConnectionID", destID))
 	dstCfg := &integrations.ConditionalDstCfg{
 		Port: uint(destInfo.Port),
 	}

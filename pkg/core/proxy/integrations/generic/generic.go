@@ -48,8 +48,7 @@ func (g *Generic) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn
 }
 
 func (g *Generic) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
-	logger := g.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
-
+	logger := g.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)))
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial generic message")
