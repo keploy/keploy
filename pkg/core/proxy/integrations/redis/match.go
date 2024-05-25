@@ -1,4 +1,4 @@
-package generic
+package redis
 
 import (
 	"context"
@@ -18,7 +18,7 @@ import (
 // If a match is found, it returns the corresponding response mock and a boolean value indicating success.
 // If no match is found, it returns false and a nil response.
 // If an error occurs during the matching process, it returns an error.
-func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockMemDb) (bool, []models.GenericPayload, error) {
+func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockMemDb) (bool, []models.Payload, error) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -47,13 +47,13 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 			}
 
 			if index != -1 {
-				responseMock := make([]models.GenericPayload, len(filteredMocks[index].Spec.GenericResponses))
-				copy(responseMock, filteredMocks[index].Spec.GenericResponses)
+				responseMock := make([]models.Payload, len(filteredMocks[index].Spec.RedisResponses))
+				copy(responseMock, filteredMocks[index].Spec.RedisResponses)
 				originalFilteredMock := *filteredMocks[index]
 				filteredMocks[index].TestModeInfo.IsFiltered = false
 				filteredMocks[index].TestModeInfo.SortOrder = math.MaxInt64
 				isUpdated := mockDb.UpdateUnFilteredMock(&originalFilteredMock, filteredMocks[index])
-				if isUpdated {
+				if !isUpdated {
 					continue
 				}
 				return true, responseMock, nil
@@ -62,8 +62,8 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 			index = findExactMatch(unfilteredMocks, reqBuff)
 
 			if index != -1 {
-				responseMock := make([]models.GenericPayload, len(unfilteredMocks[index].Spec.GenericResponses))
-				copy(responseMock, unfilteredMocks[index].Spec.GenericResponses)
+				responseMock := make([]models.Payload, len(unfilteredMocks[index].Spec.RedisResponses))
+				copy(responseMock, unfilteredMocks[index].Spec.RedisResponses)
 				return true, responseMock, nil
 			}
 
@@ -71,14 +71,14 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 			index = findBinaryMatch(totalMocks, reqBuff, 0.4)
 
 			if index != -1 {
-				responseMock := make([]models.GenericPayload, len(totalMocks[index].Spec.GenericResponses))
-				copy(responseMock, totalMocks[index].Spec.GenericResponses)
+				responseMock := make([]models.Payload, len(totalMocks[index].Spec.RedisResponses))
+				copy(responseMock, totalMocks[index].Spec.RedisResponses)
 				originalFilteredMock := *totalMocks[index]
 				if totalMocks[index].TestModeInfo.IsFiltered {
 					totalMocks[index].TestModeInfo.IsFiltered = false
 					totalMocks[index].TestModeInfo.SortOrder = math.MaxInt64
 					isUpdated := mockDb.UpdateUnFilteredMock(&originalFilteredMock, totalMocks[index])
-					if isUpdated {
+					if !isUpdated {
 						continue
 					}
 				}
@@ -94,10 +94,10 @@ func findBinaryMatch(tcsMocks []*models.Mock, reqBuffs [][]byte, mxSim float64) 
 	// TODO: need find a proper similarity index to set a benchmark for matching or need to find another way to do approximate matching
 	mxIdx := -1
 	for idx, mock := range tcsMocks {
-		if len(mock.Spec.GenericRequests) == len(reqBuffs) {
+		if len(mock.Spec.RedisRequests) == len(reqBuffs) {
 			for requestIndex, reqBuff := range reqBuffs {
 				_ = base64.StdEncoding.EncodeToString(reqBuff)
-				encoded, _ := util.DecodeBase64(mock.Spec.GenericRequests[requestIndex].Message[0].Data)
+				encoded, _ := util.DecodeBase64(mock.Spec.RedisRequests[requestIndex].Message[0].Data)
 
 				similarity := fuzzyCheck(encoded, reqBuff)
 
@@ -121,7 +121,7 @@ func fuzzyCheck(encoded, reqBuf []byte) float64 {
 
 func findExactMatch(tcsMocks []*models.Mock, reqBuffs [][]byte) int {
 	for idx, mock := range tcsMocks {
-		if len(mock.Spec.GenericRequests) == len(reqBuffs) {
+		if len(mock.Spec.RedisRequests) == len(reqBuffs) {
 			matched := true // Flag to track if all requests match
 
 			for requestIndex, reqBuff := range reqBuffs {
@@ -132,7 +132,7 @@ func findExactMatch(tcsMocks []*models.Mock, reqBuffs [][]byte) int {
 				}
 
 				// Compare the encoded data
-				if mock.Spec.GenericRequests[requestIndex].Message[0].Data != bufStr {
+				if mock.Spec.RedisRequests[requestIndex].Message[0].Data != bufStr {
 					matched = false
 					break // Exit the loop if any request doesn't match
 				}

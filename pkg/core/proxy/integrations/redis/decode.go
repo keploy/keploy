@@ -1,5 +1,5 @@
-// Package generic provides functionality for decoding generic dependencies.
-package generic
+// Package redis provides functionality for decoding redis dependencies.
+package redis
 
 import (
 	"context"
@@ -16,10 +16,10 @@ import (
 )
 
 func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
-	genericRequests := [][]byte{reqBuf}
-	logger.Debug("Into the generic parser in test mode")
+	redisRequests := [][]byte{reqBuf}
+	logger.Debug("Into the redis parser in test mode")
 	errCh := make(chan error, 1)
-	go func(errCh chan error, genericRequests [][]byte) {
+	go func(errCh chan error, redisRequests [][]byte) {
 		defer pUtil.Recover(logger, clientConn, nil)
 		defer close(errCh)
 		for {
@@ -35,26 +35,29 @@ func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			for {
 				buffer, err := pUtil.ReadBytes(ctx, logger, clientConn)
 				if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil && err.Error() != "EOF" {
-					utils.LogError(logger, err, "failed to read the request message in proxy for generic dependency")
+					utils.LogError(logger, err, "failed to read the request message in proxy for redis dependency")
 					return
 				}
 				if netErr, ok := err.(net.Error); (ok && netErr.Timeout()) || (err != nil && err.Error() == "EOF") {
-					logger.Debug("the timeout for the client read in generic or EOF")
+					logger.Debug("the timeout for the client read in redis or EOF")
 					break
 				}
-				genericRequests = append(genericRequests, buffer)
+				if len(buffer) > 0 {
+					redisRequests = append(redisRequests, buffer)
+					break
+				}
 			}
 
-			if len(genericRequests) == 0 {
-				logger.Debug("the generic request buffer is empty")
+			if len(redisRequests) == 0 {
+				logger.Debug("the redis request buffer is empty")
 				continue
 			}
 
 			// bestMatchedIndx := 0
-			// fuzzy match gives the index for the best matched generic mock
-			matched, genericResponses, err := fuzzyMatch(ctx, genericRequests, mockDb)
+			// fuzzy match gives the index for the best matched redis mock
+			matched, redisResponses, err := fuzzyMatch(ctx, redisRequests, mockDb)
 			if err != nil {
-				utils.LogError(logger, err, "error while matching generic mocks")
+				utils.LogError(logger, err, "error while matching redis mocks")
 			}
 
 			if !matched {
@@ -64,29 +67,29 @@ func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					return
 				}
 
-				logger.Debug("the genericRequests before pass through are", zap.Any("length", len(genericRequests)))
-				for _, genReq := range genericRequests {
-					logger.Debug("the genericRequests are:", zap.Any("h", string(genReq)))
+				logger.Debug("the redisRequests before pass through are", zap.Any("length", len(redisRequests)))
+				for _, genReq := range redisRequests {
+					logger.Debug("the redisRequests are:", zap.Any("h", string(genReq)))
 				}
 
-				reqBuffer, err := pUtil.PassThrough(ctx, logger, clientConn, dstCfg, genericRequests)
+				reqBuffer, err := pUtil.PassThrough(ctx, logger, clientConn, dstCfg, redisRequests)
 				if err != nil {
-					utils.LogError(logger, err, "failed to passthrough the generic request")
+					utils.LogError(logger, err, "failed to passthrough the redis request")
 					return
 				}
 
-				genericRequests = [][]byte{}
-				logger.Debug("the request buffer after pass through in generic", zap.Any("buffer", string(reqBuffer)))
+				redisRequests = [][]byte{}
+				logger.Debug("the request buffer after pass through in redis", zap.Any("buffer", string(reqBuffer)))
 				if len(reqBuffer) > 0 {
-					genericRequests = [][]byte{reqBuffer}
+					redisRequests = [][]byte{reqBuffer}
 				}
-				logger.Debug("the length of genericRequests after passThrough ", zap.Any("length", len(genericRequests)))
+				logger.Debug("the length of redisRequests after passThrough ", zap.Any("length", len(redisRequests)))
 				continue
 			}
-			for _, genericResponse := range genericResponses {
-				encoded := []byte(genericResponse.Message[0].Data)
-				if genericResponse.Message[0].Type != models.String {
-					encoded, err = util.DecodeBase64(genericResponse.Message[0].Data)
+			for _, redisResponse := range redisResponses {
+				encoded := []byte(redisResponse.Message[0].Data)
+				if redisResponse.Message[0].Type != models.String {
+					encoded, err = util.DecodeBase64(redisResponse.Message[0].Data)
 					if err != nil {
 						utils.LogError(logger, err, "failed to decode the base64 response")
 						return
@@ -102,11 +105,11 @@ func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				}
 			}
 
-			// Clear the genericRequests buffer for the next dependency call
-			genericRequests = [][]byte{}
-			logger.Debug("the genericRequests after the iteration", zap.Any("length", len(genericRequests)))
+			// Clear the redisRequests buffer for the next dependency call
+			redisRequests = [][]byte{}
+			logger.Debug("the redisRequests after the iteration", zap.Any("length", len(redisRequests)))
 		}
-	}(errCh, genericRequests)
+	}(errCh, redisRequests)
 
 	select {
 	case <-ctx.Done():

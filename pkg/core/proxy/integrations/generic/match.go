@@ -18,7 +18,7 @@ import (
 // If a match is found, it returns the corresponding response mock and a boolean value indicating success.
 // If no match is found, it returns false and a nil response.
 // If an error occurs during the matching process, it returns an error.
-func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockMemDb) (bool, []models.GenericPayload, error) {
+func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockMemDb) (bool, []models.Payload, error) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -47,7 +47,7 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 			}
 
 			if index != -1 {
-				responseMock := make([]models.GenericPayload, len(filteredMocks[index].Spec.GenericResponses))
+				responseMock := make([]models.Payload, len(filteredMocks[index].Spec.GenericResponses))
 				copy(responseMock, filteredMocks[index].Spec.GenericResponses)
 				originalFilteredMock := *filteredMocks[index]
 				filteredMocks[index].TestModeInfo.IsFiltered = false
@@ -62,7 +62,7 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 			index = findExactMatch(unfilteredMocks, reqBuff)
 
 			if index != -1 {
-				responseMock := make([]models.GenericPayload, len(unfilteredMocks[index].Spec.GenericResponses))
+				responseMock := make([]models.Payload, len(unfilteredMocks[index].Spec.GenericResponses))
 				copy(responseMock, unfilteredMocks[index].Spec.GenericResponses)
 				return true, responseMock, nil
 			}
@@ -71,7 +71,7 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 			index = findBinaryMatch(totalMocks, reqBuff, 0.4)
 
 			if index != -1 {
-				responseMock := make([]models.GenericPayload, len(totalMocks[index].Spec.GenericResponses))
+				responseMock := make([]models.Payload, len(totalMocks[index].Spec.GenericResponses))
 				copy(responseMock, totalMocks[index].Spec.GenericResponses)
 				originalFilteredMock := *totalMocks[index]
 				if totalMocks[index].TestModeInfo.IsFiltered {

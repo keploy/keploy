@@ -1,4 +1,4 @@
-package generic
+package redis
 
 import (
 	"context"
@@ -20,7 +20,7 @@ import (
 
 func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
 
-	var genericRequests []models.GenericPayload
+	var redisRequests []models.Payload
 
 	bufStr := string(reqBuf)
 	dataType := models.String
@@ -30,7 +30,7 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 	}
 
 	if bufStr != "" {
-		genericRequests = append(genericRequests, models.GenericPayload{
+		redisRequests = append(redisRequests, models.Payload{
 			Origin: models.FromClient,
 			Message: []models.OutputBinary{
 				{
@@ -45,7 +45,7 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 		utils.LogError(logger, err, "failed to write request message to the destination server")
 		return err
 	}
-	var genericResponses []models.GenericPayload
+	var redisResponses []models.Payload
 
 	clientBuffChan := make(chan []byte)
 	destBuffChan := make(chan []byte)
@@ -79,15 +79,15 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 	var resTimestampMock time.Time
 
 	// ticker := time.NewTicker(1 * time.Second)
-	logger.Debug("the iteration for the generic request starts", zap.Any("genericReqs", len(genericRequests)), zap.Any("genericResps", len(genericResponses)))
+	logger.Debug("the iteration for the redis request starts", zap.Any("redisReqs", len(redisRequests)), zap.Any("redisResps", len(redisResponses)))
 	for {
 		select {
 		case <-ctx.Done():
-			if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {
-				genericRequestsCopy := make([]models.GenericPayload, len(genericRequests))
-				genericResponsesCopy := make([]models.GenericPayload, len(genericResponses))
-				copy(genericResponsesCopy, genericResponses)
-				copy(genericRequestsCopy, genericRequests)
+			if !prevChunkWasReq && len(redisRequests) > 0 && len(redisResponses) > 0 {
+				redisRequestsCopy := make([]models.Payload, len(redisRequests))
+				redisResponsesCopy := make([]models.Payload, len(redisResponses))
+				copy(redisResponsesCopy, redisResponses)
+				copy(redisRequestsCopy, redisRequests)
 
 				metadata := make(map[string]string)
 				metadata["type"] = "config"
@@ -95,10 +95,10 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				mocks <- &models.Mock{
 					Version: models.GetVersion(),
 					Name:    "mocks",
-					Kind:    models.GENERIC,
+					Kind:    models.REDIS,
 					Spec: models.MockSpec{
-						GenericRequests:  genericRequestsCopy,
-						GenericResponses: genericResponsesCopy,
+						RedisRequests:    redisRequestsCopy,
+						RedisResponses:   redisResponsesCopy,
 						ReqTimestampMock: reqTimestampMock,
 						ResTimestampMock: resTimestampMock,
 						Metadata:         metadata,
@@ -114,32 +114,32 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				return err
 			}
 
-			logger.Debug("the iteration for the generic request ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
-			if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {
-				genericRequestsCopy := make([]models.GenericPayload, len(genericRequests))
-				genericResponseCopy := make([]models.GenericPayload, len(genericResponses))
-				copy(genericResponseCopy, genericResponses)
-				copy(genericRequestsCopy, genericRequests)
-				go func(reqs []models.GenericPayload, resps []models.GenericPayload) {
+			logger.Debug("the iteration for the redis request ends with no of redisReqs:" + strconv.Itoa(len(redisRequests)) + " and redisResps: " + strconv.Itoa(len(redisResponses)))
+			if !prevChunkWasReq && len(redisRequests) > 0 && len(redisResponses) > 0 {
+				redisRequestsCopy := make([]models.Payload, len(redisRequests))
+				redisResponseCopy := make([]models.Payload, len(redisResponses))
+				copy(redisResponseCopy, redisResponses)
+				copy(redisRequestsCopy, redisRequests)
+				go func(reqs []models.Payload, resps []models.Payload) {
 					metadata := make(map[string]string)
 					metadata["type"] = "config"
 					// Save the mock
 					mocks <- &models.Mock{
 						Version: models.GetVersion(),
 						Name:    "mocks",
-						Kind:    models.GENERIC,
+						Kind:    models.REDIS,
 						Spec: models.MockSpec{
-							GenericRequests:  reqs,
-							GenericResponses: resps,
+							RedisRequests:    reqs,
+							RedisResponses:   resps,
 							ReqTimestampMock: reqTimestampMock,
 							ResTimestampMock: resTimestampMock,
 							Metadata:         metadata,
 						},
 					}
 
-				}(genericRequestsCopy, genericResponseCopy)
-				genericRequests = []models.GenericPayload{}
-				genericResponses = []models.GenericPayload{}
+				}(redisRequestsCopy, redisResponseCopy)
+				redisRequests = []models.Payload{}
+				redisResponses = []models.Payload{}
 			}
 
 			bufStr := string(buffer)
@@ -150,7 +150,7 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			}
 
 			if bufStr != "" {
-				genericRequests = append(genericRequests, models.GenericPayload{
+				redisRequests = append(redisRequests, models.Payload{
 					Origin: models.FromClient,
 					Message: []models.OutputBinary{
 						{
@@ -182,7 +182,7 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			}
 
 			if bufStr != "" {
-				genericResponses = append(genericResponses, models.GenericPayload{
+				redisResponses = append(redisResponses, models.Payload{
 					Origin: models.FromServer,
 					Message: []models.OutputBinary{
 						{
@@ -195,7 +195,7 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 
 			resTimestampMock = time.Now()
 
-			logger.Debug("the iteration for the generic response ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
+			logger.Debug("the iteration for the redis response ends with no of redisReqs:" + strconv.Itoa(len(redisRequests)) + " and redisResps: " + strconv.Itoa(len(redisResponses)))
 			prevChunkWasReq = false
 		case err := <-errChan:
 			if err == io.EOF {
