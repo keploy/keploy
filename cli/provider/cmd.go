@@ -515,7 +515,7 @@ func PreProcessCoverage(logger *zap.Logger, conf *config.Config) {
 	case models.Go:
 		if !utils.CheckGoBinaryForCoverFlag(logger, conf.Command) {
 			conf.Test.SkipCoverage = true
-			utils.LogError(logger, nil, "coverage flag not found in go binary")
+			utils.LogError(logger, nil, "go binary was not built with -cover flag")
 		}
 		if utils.CmdType(conf.CommandType) == utils.Native {
 			goCovPath, err := utils.SetCoveragePath(logger, conf.Test.CoverageReportPath)
