@@ -2,7 +2,6 @@ package redis
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"math"
 
@@ -33,6 +32,9 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 			var unfilteredMocks []*models.Mock
 
 			for _, mock := range mocks {
+				if mock.Kind != "Redis" {
+					continue
+				}
 				if mock.TestModeInfo.IsFiltered {
 					filteredMocks = append(filteredMocks, mock)
 				} else {
@@ -84,6 +86,7 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 				}
 				return true, responseMock, nil
 			}
+
 			return false, nil, nil
 		}
 	}
@@ -96,16 +99,18 @@ func findBinaryMatch(tcsMocks []*models.Mock, reqBuffs [][]byte, mxSim float64) 
 	for idx, mock := range tcsMocks {
 		if len(mock.Spec.RedisRequests) == len(reqBuffs) {
 			for requestIndex, reqBuff := range reqBuffs {
-				_ = base64.StdEncoding.EncodeToString(reqBuff)
-				encoded, _ := util.DecodeBase64(mock.Spec.RedisRequests[requestIndex].Message[0].Data)
+				mockReq, err := util.DecodeBase64(mock.Spec.RedisRequests[requestIndex].Message[0].Data)
+				if err != nil {
+					mockReq = []byte(mock.Spec.RedisRequests[requestIndex].Message[0].Data)
+				}
 
-				similarity := fuzzyCheck(encoded, reqBuff)
-
+				similarity := fuzzyCheck(mockReq, reqBuff)
 				if mxSim < similarity {
 					mxSim = similarity
 					mxIdx = idx
 				}
 			}
+
 		}
 	}
 	return mxIdx

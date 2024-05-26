@@ -1,4 +1,3 @@
-// Package redis provides functionality for decoding redis dependencies.
 package redis
 
 import (
@@ -19,29 +18,25 @@ func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 	redisRequests := [][]byte{reqBuf}
 	logger.Debug("Into the redis parser in test mode")
 	errCh := make(chan error, 1)
+
 	go func(errCh chan error, redisRequests [][]byte) {
 		defer pUtil.Recover(logger, clientConn, nil)
 		defer close(errCh)
 		for {
-			// Since protocol packets have to be parsed for checking stream end,
-			// clientConnection have deadline for read to determine the end of stream.
-			err := clientConn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
-			if err != nil {
-				utils.LogError(logger, err, "failed to set the read deadline for the client conn")
-				return
-			}
 
-			// To read the stream of request packets from the client
+			// Read the stream of request packets from the client
 			for {
-				clientConn.SetReadDeadline(time.Now().Add(1 * time.Second))
-
+				if len(redisRequests) > 0 {
+					break
+				}
+				clientConn.SetReadDeadline(time.Now().Add(10 * time.Second))
 				buffer, err := pUtil.ReadBytes(ctx, logger, clientConn)
 				if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil && err.Error() != "EOF" {
 					utils.LogError(logger, err, "failed to read the request message in proxy for redis dependency")
 					return
 				}
 				if netErr, ok := err.(net.Error); (ok && netErr.Timeout()) || (err != nil && err.Error() == "EOF") {
-					logger.Debug("the timeout for the client read in redis or EOF")
+					logger.Debug("timeout for client read in redis or EOF")
 					break
 				}
 				if len(buffer) > 0 {
@@ -51,12 +46,11 @@ func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			}
 
 			if len(redisRequests) == 0 {
-				logger.Debug("the redis request buffer is empty")
+				logger.Debug("redis request buffer is empty")
 				continue
 			}
 
-			// bestMatchedIndx := 0
-			// fuzzy match gives the index for the best matched redis mock
+			// Fuzzy match to get the best matched redis mock
 			matched, redisResponses, err := fuzzyMatch(ctx, redisRequests, mockDb)
 			if err != nil {
 				utils.LogError(logger, err, "error while matching redis mocks")
@@ -69,9 +63,9 @@ func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					return
 				}
 
-				logger.Debug("the redisRequests before pass through are", zap.Any("length", len(redisRequests)))
-				for _, genReq := range redisRequests {
-					logger.Debug("the redisRequests are:", zap.Any("h", string(genReq)))
+				logger.Debug("redisRequests before pass through:", zap.Any("length", len(redisRequests)))
+				for _, redReq := range redisRequests {
+					logger.Debug("redisRequests:", zap.Any("h", string(redReq)))
 				}
 
 				reqBuffer, err := pUtil.PassThrough(ctx, logger, clientConn, dstCfg, redisRequests)
@@ -81,11 +75,11 @@ func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				}
 
 				redisRequests = [][]byte{}
-				logger.Debug("the request buffer after pass through in redis", zap.Any("buffer", string(reqBuffer)))
+				logger.Debug("request buffer after pass through in redis:", zap.Any("buffer", string(reqBuffer)))
 				if len(reqBuffer) > 0 {
 					redisRequests = [][]byte{reqBuffer}
 				}
-				logger.Debug("the length of redisRequests after passThrough ", zap.Any("length", len(redisRequests)))
+				logger.Debug("length of redisRequests after passThrough:", zap.Any("length", len(redisRequests)))
 				continue
 			}
 			for _, redisResponse := range redisResponses {
@@ -109,7 +103,7 @@ func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 
 			// Clear the redisRequests buffer for the next dependency call
 			redisRequests = [][]byte{}
-			logger.Debug("the redisRequests after the iteration", zap.Any("length", len(redisRequests)))
+			logger.Debug("redisRequests after the iteration:", zap.Any("length", len(redisRequests)))
 		}
 	}(errCh, redisRequests)
 
