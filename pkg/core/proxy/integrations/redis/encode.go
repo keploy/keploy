@@ -41,6 +41,9 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 	}
 	_, err := destConn.Write(reqBuf)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		utils.LogError(logger, err, "failed to write request message to the destination server")
 		return err
 	}
@@ -91,6 +94,9 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			}
 			// Write the request message to the destination
 			if _, err := destConn.Write(buffer); err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				utils.LogError(logger, err, "failed to write request message to the destination server")
 				return err
 			}
