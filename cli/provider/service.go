@@ -50,15 +50,15 @@ func NewServiceProvider(logger *zap.Logger, userDb *user.Db, cfg *config.Config)
 	}
 }
 
-func (n *ServiceProvider) GetTelemetryService(ctx context.Context, config *config.Config) (*telemetry.Telemetry, error) {
-	installationID, err := n.userDb.GetInstallationID(ctx)
+func (n *ServiceProvider) GetTelemetryService(ctx context.Context, config config.Config, globalMap map[string]interface{}) (*telemetry.Telemetry, error) {
+	installationID, err := n.configDb.GetInstallationID(ctx)
 	if err != nil {
 		return nil, errors.New("failed to get installation id")
 	}
 	return telemetry.NewTelemetry(n.logger, telemetry.Options{
 		Enabled:        !config.DisableTele,
 		Version:        utils.Version,
-		GlobalMap:      map[string]interface{}{},
+		GlobalMap:      globalMap,
 		InstallationID: installationID,
 	},
 	), nil
@@ -115,8 +115,8 @@ func (n *ServiceProvider) GetCommonServices(c *config.Config) *CommonInternalSer
 	}
 }
 
-func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface{}, error) {
-	tel, err := n.GetTelemetryService(ctx, n.cfg)
+func (n *ServiceProvider) GetService(ctx context.Context, cmd string, teleGlobalMap map[string]interface{}) (interface{}, error) {
+	tel, err := n.GetTelemetryService(ctx, *n.cfg, teleGlobalMap)
 	if err != nil {
 		return nil, err
 	}
