@@ -228,7 +228,7 @@ func findStringMatch(_ string, mockString []string) int {
 	minDist := int(^uint(0) >> 1) // Initialize with max int value
 	bestMatch := -1
 	for idx, req := range mockString {
-		if !util.IsASCIIPrintable(mockString[idx]) {
+		if !util.IsASCII(mockString[idx]) {
 			continue
 		}
 
@@ -293,7 +293,7 @@ func fuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
 		mockString[i] = tcsMocks[i].Spec.HTTPReq.Body
 	}
 	// find the closest match
-	if util.IsASCIIPrintable(string(reqBuff)) {
+	if util.IsASCII(string(reqBuff)) {
 		idx := findStringMatch(string(reqBuff), mockString)
 		if idx != -1 {
 			return true, tcsMocks[idx]
