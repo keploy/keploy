@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"strconv"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -78,124 +77,49 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 	var reqTimestampMock = time.Now()
 	var resTimestampMock time.Time
 
-	// ticker := time.NewTicker(1 * time.Second)
 	logger.Debug("the iteration for the redis request starts", zap.Any("redisReqs", len(redisRequests)), zap.Any("redisResps", len(redisResponses)))
 	for {
 		select {
 		case <-ctx.Done():
 			if !prevChunkWasReq && len(redisRequests) > 0 && len(redisResponses) > 0 {
-				redisRequestsCopy := make([]models.Payload, len(redisRequests))
-				redisResponsesCopy := make([]models.Payload, len(redisResponses))
-				copy(redisResponsesCopy, redisResponses)
-				copy(redisRequestsCopy, redisRequests)
-
-				metadata := make(map[string]string)
-				metadata["type"] = "config"
-				// Save the mock
-				mocks <- &models.Mock{
-					Version: models.GetVersion(),
-					Name:    "mocks",
-					Kind:    models.REDIS,
-					Spec: models.MockSpec{
-						RedisRequests:    redisRequestsCopy,
-						RedisResponses:   redisResponsesCopy,
-						ReqTimestampMock: reqTimestampMock,
-						ResTimestampMock: resTimestampMock,
-						Metadata:         metadata,
-					},
-				}
+				saveMock(redisRequests, redisResponses, reqTimestampMock, resTimestampMock, mocks)
 				return ctx.Err()
 			}
-		case buffer := <-clientBuffChan:
+		case buffer, ok := <-clientBuffChan:
+			if !ok {
+				return nil // Channel closed, end the loop
+			}
 			// Write the request message to the destination
-			_, err := destConn.Write(buffer)
-			if err != nil {
+			if _, err := destConn.Write(buffer); err != nil {
 				utils.LogError(logger, err, "failed to write request message to the destination server")
 				return err
 			}
 
-			logger.Debug("the iteration for the redis request ends with no of redisReqs:" + strconv.Itoa(len(redisRequests)) + " and redisResps: " + strconv.Itoa(len(redisResponses)))
-			if !prevChunkWasReq && len(redisRequests) > 0 && len(redisResponses) > 0 {
-				redisRequestsCopy := make([]models.Payload, len(redisRequests))
-				redisResponseCopy := make([]models.Payload, len(redisResponses))
-				copy(redisResponseCopy, redisResponses)
-				copy(redisRequestsCopy, redisRequests)
-				go func(reqs []models.Payload, resps []models.Payload) {
-					metadata := make(map[string]string)
-					metadata["type"] = "config"
-					// Save the mock
-					mocks <- &models.Mock{
-						Version: models.GetVersion(),
-						Name:    "mocks",
-						Kind:    models.REDIS,
-						Spec: models.MockSpec{
-							RedisRequests:    reqs,
-							RedisResponses:   resps,
-							ReqTimestampMock: reqTimestampMock,
-							ResTimestampMock: resTimestampMock,
-							Metadata:         metadata,
-						},
-					}
-
-				}(redisRequestsCopy, redisResponseCopy)
-				redisRequests = []models.Payload{}
-				redisResponses = []models.Payload{}
-			}
-
-			bufStr := string(buffer)
-			buffDataType := models.String
-			if !util.IsASCII(string(buffer)) {
-				bufStr = util.EncodeBase64(buffer)
-				buffDataType = "binary"
-			}
-
-			if bufStr != "" {
-				redisRequests = append(redisRequests, models.Payload{
-					Origin: models.FromClient,
-					Message: []models.OutputBinary{
-						{
-							Type: buffDataType,
-							Data: bufStr,
-						},
-					},
-				})
-			}
-
+			processBuffer(buffer, models.FromClient, &redisRequests)
 			prevChunkWasReq = true
-		case buffer := <-destBuffChan:
+		case buffer, ok := <-destBuffChan:
+			if !ok {
+				return nil // Channel closed, end the loop
+			}
 			if prevChunkWasReq {
-				// store the request timestamp
+				// Store the request timestamp
 				reqTimestampMock = time.Now()
 			}
 			// Write the response message to the client
-			_, err := clientConn.Write(buffer)
-			if err != nil {
+			if _, err := clientConn.Write(buffer); err != nil {
 				utils.LogError(logger, err, "failed to write response message to the client")
 				return err
 			}
 
-			bufStr := string(buffer)
-			buffDataType := models.String
-			if !util.IsASCII(string(buffer)) {
-				bufStr = base64.StdEncoding.EncodeToString(buffer)
-				buffDataType = "binary"
-			}
-
-			if bufStr != "" {
-				redisResponses = append(redisResponses, models.Payload{
-					Origin: models.FromServer,
-					Message: []models.OutputBinary{
-						{
-							Type: buffDataType,
-							Data: bufStr,
-						},
-					},
-				})
-			}
-
+			processBuffer(buffer, models.FromServer, &redisResponses)
 			resTimestampMock = time.Now()
 
-			logger.Debug("the iteration for the redis response ends with no of redisReqs:" + strconv.Itoa(len(redisRequests)) + " and redisResps: " + strconv.Itoa(len(redisResponses)))
+			if prevChunkWasReq && len(redisRequests) > 0 && len(redisResponses) > 0 {
+				saveMock(redisRequests, redisResponses, reqTimestampMock, resTimestampMock, mocks)
+				redisRequests = []models.Payload{}
+				redisResponses = []models.Payload{}
+			}
+
 			prevChunkWasReq = false
 		case err := <-errChan:
 			if err == io.EOF {
@@ -203,5 +127,49 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			}
 			return err
 		}
+	}
+}
+
+func processBuffer(buffer []byte, origin models.OriginType, payloads *[]models.Payload) {
+	bufStr := string(buffer)
+	buffDataType := models.String
+	if !util.IsASCII(bufStr) {
+		bufStr = base64.StdEncoding.EncodeToString(buffer)
+		buffDataType = "binary"
+	}
+
+	if bufStr != "" {
+		*payloads = append(*payloads, models.Payload{
+			Origin: origin,
+			Message: []models.OutputBinary{
+				{
+					Type: buffDataType,
+					Data: bufStr,
+				},
+			},
+		})
+	}
+}
+
+func saveMock(requests, responses []models.Payload, reqTimestampMock, resTimestampMock time.Time, mocks chan<- *models.Mock) {
+	redisRequestsCopy := make([]models.Payload, len(requests))
+	redisResponsesCopy := make([]models.Payload, len(responses))
+	copy(redisResponsesCopy, responses)
+	copy(redisRequestsCopy, requests)
+
+	metadata := make(map[string]string)
+	metadata["type"] = "config"
+
+	mocks <- &models.Mock{
+		Version: models.GetVersion(),
+		Name:    "mocks",
+		Kind:    models.REDIS,
+		Spec: models.MockSpec{
+			RedisRequests:    redisRequestsCopy,
+			RedisResponses:   redisResponsesCopy,
+			ReqTimestampMock: reqTimestampMock,
+			ResTimestampMock: resTimestampMock,
+			Metadata:         metadata,
+		},
 	}
 }

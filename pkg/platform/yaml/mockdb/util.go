@@ -250,18 +250,18 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				ResTimestampMock: genericSpec.ResTimestampMock,
 			}
 		case models.REDIS:
-			genericSpec := models.GenericSchema{}
-			err := m.Spec.Decode(&genericSpec)
+			redisSpec := models.RedisSchema{}
+			err := m.Spec.Decode(&redisSpec)
 			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal a yaml doc into generic mock", zap.Any("mock name", m.Name))
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into redis mock", zap.Any("mock name", m.Name))
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
-				Metadata:         genericSpec.Metadata,
-				GenericRequests:  genericSpec.GenericRequests,
-				GenericResponses: genericSpec.GenericResponses,
-				ReqTimestampMock: genericSpec.ReqTimestampMock,
-				ResTimestampMock: genericSpec.ResTimestampMock,
+				Metadata:         redisSpec.Metadata,
+				RedisRequests:    redisSpec.RedisRequests,
+				RedisResponses:   redisSpec.RedisResponses,
+				ReqTimestampMock: redisSpec.ReqTimestampMock,
+				ResTimestampMock: redisSpec.ResTimestampMock,
 			}
 
 		case models.Postgres:
