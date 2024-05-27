@@ -13,7 +13,7 @@ type Config struct {
 	AppID                 string       `json:"appId" yaml:"appId" mapstructure:"appId"`
 	ReRecord              string       `json:"rerecord" yaml:"rerecord" mapstructure:"rerecord"`
 	Command               string       `json:"command" yaml:"command" mapstructure:"command"`
-	CoverageCommand       string       `json:- yaml:- mapstructure:-`
+	CoverageCommand       string       `json:"-" yaml:"-" mapstructure:"-"`
 	Port                  uint32       `json:"port" yaml:"port" mapstructure:"port"`
 	DNSPort               uint32       `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
 	ProxyPort             uint32       `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
