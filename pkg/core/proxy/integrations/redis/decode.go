@@ -1,4 +1,4 @@
-// Package redos is the decode point for the redis application.
+// Package redis is the decode point for the redis application.
 package redis
 
 import (
