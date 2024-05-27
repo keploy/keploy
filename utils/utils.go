@@ -1,7 +1,9 @@
 package utils
 
 import (
+	"archive/zip"
 	"bufio"
+	"bytes"
 	"context"
 	"debug/elf"
 	"encoding/json"
@@ -764,7 +766,7 @@ func RunCommand(cmdString ...string) error {
 	return err
 }
 
-// TODO: use native approach once https://github.com/golang/go/issues/67366 gets resolved
+// TODO: use native approach till https://github.com/golang/go/issues/67366 gets resolved
 func CheckGoBinaryForCoverFlag(logger *zap.Logger, cmd string) bool {
 	file, err := elf.Open(cmd)
 	if err != nil {
@@ -849,4 +851,60 @@ func getHomeDir() (string, error) {
 	}
 	// Fallback if neither method works
 	return "", errors.New("failed to retrieve current user info")
+}
+
+func DownloadAndExtractJaCoCoCli(version, dir string) error {
+	cliPath := filepath.Join(dir, "jacococli.jar")
+
+	downloadURL := fmt.Sprintf("https://github.com/jacoco/jacoco/releases/download/v%s/jacoco-%s.zip", version, version)
+
+	_, err := os.Stat(cliPath)
+	if err == nil {
+		return nil
+	}
+
+	resp, err := http.Get(downloadURL)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	zipReader, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		return err
+	}
+
+	for _, file := range zipReader.File {
+		if strings.HasSuffix(file.Name, "jacococli.jar") {
+			cliFile, err := file.Open()
+			if err != nil {
+				return err
+			}
+			defer cliFile.Close()
+
+			outFile, err := os.Create(cliPath)
+			if err != nil {
+				return err
+			}
+			defer outFile.Close()
+
+			_, err = io.Copy(outFile, cliFile)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	cliStat, err := os.Stat(cliPath)
+
+	if os.IsNotExist(err) || cliStat != nil {
+		return fmt.Errorf("failed to find JaCoCo binaries in the distribution")
+	}
+
+	return nil
 }

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -121,22 +120,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		err = os.Setenv("CLEAN", "true")
 		if err != nil {
 			r.config.Test.SkipCoverage = true
-			utils.LogError(r.logger, err, "failed to set CLEAN env variable, coverage won't be calculated.")
-		}
-	}
-
-	jacocoPath := ""
-	if r.config.Test.Language == models.Java && !r.config.Test.SkipCoverage {
-		jacocoPath = filepath.Join(os.TempDir(), "jacoco")
-		err = os.MkdirAll(jacocoPath, 0777)
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to create jacoco directory")
-		} else {
-			err := downloadAndExtractJaCoCoBinaries("0.8.12", jacocoPath)
-			if err != nil {
-				r.config.Test.SkipCoverage = true
-				utils.LogError(r.logger, err, "failed to download and extract jacoco binaries")
-			}
+			r.logger.Debug("failed to set CLEAN env variable, coverage won't be calculated.", zap.Error(err))
 		}
 	}
 
@@ -154,7 +138,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			err = os.Setenv("TESTSETID", testSetID)
 			if err != nil {
 				r.config.Test.SkipCoverage = true
-				utils.LogError(r.logger, err, "failed to set TESTSETID env variable")
+				r.logger.Debug("failed to set TESTSETID env variable", zap.Error(err))
 			}
 		}
 
@@ -193,27 +177,28 @@ func (r *Replayer) Start(ctx context.Context) error {
 			err = os.Setenv("CLEAN", "false")
 			if err != nil {
 				r.config.Test.SkipCoverage = true
-				utils.LogError(r.logger, err, "failed to set CLEAN env variable, coverage won't be calculated.")
+				r.logger.Debug("failed to set CLEAN env variable, coverage won't be calculated.", zap.Error(err))
 			}
 			err = os.Setenv("APPEND", " --append")
 			if err != nil {
 				r.config.Test.SkipCoverage = true
-				utils.LogError(r.logger, err, "failed to set APPEND env variable, coverage won't be calculated.")
+				r.logger.Debug("failed to set APPEND env variable, coverage won't be calculated.", zap.Error(err))
 			}
 		}
 	}
 	if !r.config.Test.SkipCoverage && r.config.Test.Language == models.Java {
+		jacocoPath := filepath.Join(os.TempDir(), "jacoco")
 		jacocoCliPath := filepath.Join(jacocoPath, "jacococli.jar")
 		err = mergeJacocoCoverageFiles(ctx, jacocoCliPath)
 		if err == nil {
 			err = generateJacocoReport(ctx, jacocoCliPath)
 			if err != nil {
 				r.config.Test.SkipCoverage = true
-				utils.LogError(r.logger, err, "failed to generate jacoco report")
+				r.logger.Debug("failed to generate jacoco report", zap.Error(err))
 			}
 		} else {
 			r.config.Test.SkipCoverage = true
-			utils.LogError(r.logger, err, "failed to merge jacoco coverage data")
+			r.logger.Debug("failed to merge jacoco coverage data", zap.Error(err))
 		}
 	}
 
@@ -246,7 +231,12 @@ func (r *Replayer) BootReplay(ctx context.Context) (string, uint64, context.Canc
 
 	newTestRunID := pkg.NewID(testRunIDs, models.TestRunTemplateName)
 
-	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
+	var appID uint64
+	if r.config.Test.SkipCoverage {
+		appID, err = r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
+	} else {
+		appID, err = r.instrumentation.Setup(ctx, r.config.CoverageCommand, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
+	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return "", 0, nil, err
@@ -391,7 +381,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusUserAbort, context.Canceled
 	}
 
-	cmdType := utils.FindDockerCmd(r.config.Command)
+	cmdType := utils.FindDockerCmd(r.config.CoverageCommand)
 	var userIP string
 	if cmdType == utils.Docker || cmdType == utils.DockerCompose {
 		userIP, err = r.instrumentation.GetContainerIP(ctx, appID)
@@ -686,30 +676,6 @@ func (r *Replayer) printSummary(ctx context.Context, testRunResult bool) {
 			if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed); err != nil {
 				utils.LogError(r.logger, err, "failed to print test suite details")
 				return
-			}
-		}
-		if _, err := pp.Printf("\n<=========================================> \n\n"); err != nil {
-			utils.LogError(r.logger, err, "failed to print separator")
-			return
-		}
-		r.logger.Info("test run completed", zap.Bool("passed overall", testRunResult))
-
-		if utils.CmdType(r.config.CommandType) == utils.Native && !r.config.Test.SkipCoverage && r.config.Test.Language == models.Go {
-			r.logger.Info("there is an opportunity to get the coverage here")
-
-			coverCmd := exec.CommandContext(ctx, "go", "tool", "covdata", "percent", "-i="+os.Getenv("GOCOVERDIR"))
-			output, err := coverCmd.Output()
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to get the coverage of the go binary", zap.Any("cmd", coverCmd.String()))
-			}
-			r.logger.Sugar().Infoln("\n", models.HighlightPassingString(string(output)))
-			generateCovTxtCmd := exec.CommandContext(ctx, "go", "tool", "covdata", "textfmt", "-i="+os.Getenv("GOCOVERDIR"), "-o="+os.Getenv("GOCOVERDIR")+"/total-coverage.txt")
-			output, err = generateCovTxtCmd.Output()
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to get the coverage of the go binary", zap.Any("cmd", coverCmd.String()))
-			}
-			if len(output) > 0 {
-				r.logger.Sugar().Infoln("\n", models.HighlightFailingString(string(output)))
 			}
 		}
 	}

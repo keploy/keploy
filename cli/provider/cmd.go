@@ -491,8 +491,11 @@ func PreProcessCoverage(logger *zap.Logger, conf *config.Config) {
 		}
 		logger.Warn(fmt.Sprintf("%s language detected. please use --language to manually set the language if needed", language))
 		conf.Test.Language = language
+	} else if language != conf.Test.Language {
+		utils.LogError(logger, nil, "language detected is different from the language provided")
+		conf.Test.SkipCoverage = true
+		return
 	}
-	conf.Test.Language = language
 	var err error
 	switch conf.Test.Language {
 	case models.Python:
@@ -502,7 +505,7 @@ func PreProcessCoverage(logger *zap.Logger, conf *config.Config) {
 			logger.Warn("coverage tool not found. please install coverage tool using 'pip install coverage'")
 		} else {
 			utils.CreatePyCoverageConfig(logger)
-			conf.Command = strings.Replace(conf.Command, executable, "coverage run $APPEND --data-file=.coverage.keploy", 1)
+			conf.CoverageCommand = strings.Replace(conf.Command, executable, "coverage run $APPEND --data-file=.coverage.keploy", 1)
 		}
 	case models.Node:
 		err = utils.RunCommand("nyc", "--version")
@@ -510,20 +513,25 @@ func PreProcessCoverage(logger *zap.Logger, conf *config.Config) {
 			conf.Test.SkipCoverage = true
 			logger.Warn("coverage tool not found. please install coverage tool using 'npm install -g nyc'")
 		} else {
-			conf.Command = "nyc --clean=$CLEAN " + conf.Command
+			conf.CoverageCommand = "nyc --clean=$CLEAN " + conf.Command
 		}
 	case models.Go:
 		if !utils.CheckGoBinaryForCoverFlag(logger, conf.Command) {
 			conf.Test.SkipCoverage = true
-			utils.LogError(logger, nil, "go binary was not built with -cover flag")
+			logger.Warn("go binary was not built with -cover flag")
 		}
 		if utils.CmdType(conf.CommandType) == utils.Native {
 			goCovPath, err := utils.SetCoveragePath(logger, conf.Test.CoverageReportPath)
 			if err != nil {
 				conf.Test.SkipCoverage = true
-				utils.LogError(logger, err, "failed to set go coverage path")
+				logger.Warn("failed to set go coverage path", zap.Error(err))
 			}
 			conf.Test.CoverageReportPath = goCovPath
+			err = os.Setenv("GOCOVERDIR", goCovPath)
+			if err != nil {
+				logger.Warn("failed to set GOCOVERDIR", zap.Error(err))
+			}
+
 		}
 	case models.Java:
 		// default location for jar of java agent
@@ -535,12 +543,24 @@ func PreProcessCoverage(logger *zap.Logger, conf *config.Config) {
 		if err == nil {
 			isFileExist, err := utils.FileExists(javaAgentPath)
 			if err == nil && isFileExist {
-				conf.Command = strings.Replace(conf.Command, executable, fmt.Sprintf("%s -javaagent:%s=destfile=target/${TESTSETID}.exec", executable, javaAgentPath), 1)
+				conf.CoverageCommand = strings.Replace(conf.Command, executable, fmt.Sprintf("%s -javaagent:%s=destfile=target/${TESTSETID}.exec", executable, javaAgentPath), 1)
 			}
 		}
 		if err != nil {
 			conf.Test.SkipCoverage = true
 			logger.Warn("failed to find jacoco agent. If jacoco agent is present in a different path, please set it using --jacocoAgentPath")
+		}
+		// downlaod jacoco cli
+		jacocoPath := filepath.Join(os.TempDir(), "jacoco")
+		err = os.MkdirAll(jacocoPath, 0777)
+		if err != nil {
+			logger.Debug("failed to create jacoco directory", zap.Error(err))
+		} else {
+			err := utils.DownloadAndExtractJaCoCoCli("0.8.12", jacocoPath)
+			if err != nil {
+				conf.Test.SkipCoverage = true
+				logger.Debug("failed to download and extract jacoco binaries", zap.Error(err))
+			}
 		}
 	}
 }
