@@ -1,4 +1,4 @@
-// This file contains the decode function for the redis dependency.
+// Package redos is the decode point for the redis application.
 package redis
 
 import (

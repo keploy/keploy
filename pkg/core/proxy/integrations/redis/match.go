@@ -132,9 +132,6 @@ func findExactMatch(tcsMocks []*models.Mock, reqBuffs [][]byte) int {
 			for requestIndex, reqBuff := range reqBuffs {
 
 				bufStr := string(reqBuff)
-				if !util.IsASCII(string(reqBuff)) {
-					bufStr = util.EncodeBase64(reqBuff)
-				}
 
 				// Compare the encoded data
 				if mock.Spec.RedisRequests[requestIndex].Message[0].Data != bufStr {
