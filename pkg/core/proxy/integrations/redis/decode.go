@@ -1,3 +1,4 @@
+// This file contains the decode function for the redis dependency.
 package redis
 
 import (
@@ -29,7 +30,11 @@ func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				if len(redisRequests) > 0 {
 					break
 				}
-				clientConn.SetReadDeadline(time.Now().Add(10 * time.Second))
+				err := clientConn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+				if err != nil {
+					utils.LogError(logger, err, "failed to set the read deadline for the client conn")
+					return
+				}
 				buffer, err := pUtil.ReadBytes(ctx, logger, clientConn)
 				if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil && err.Error() != "EOF" {
 					logger.Debug("failed to read the request message in proxy for redis dependency")
