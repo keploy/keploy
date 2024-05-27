@@ -32,7 +32,7 @@ func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				clientConn.SetReadDeadline(time.Now().Add(10 * time.Second))
 				buffer, err := pUtil.ReadBytes(ctx, logger, clientConn)
 				if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil && err.Error() != "EOF" {
-					utils.LogError(logger, err, "failed to read the request message in proxy for redis dependency")
+					logger.Debug("failed to read the request message in proxy for redis dependency")
 					return
 				}
 				if netErr, ok := err.(net.Error); (ok && netErr.Timeout()) || (err != nil && err.Error() == "EOF") {
