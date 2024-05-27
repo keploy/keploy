@@ -23,6 +23,7 @@ const (
 	POSTGRES_V1 integrationType = "postgres_v1"
 	POSTGRES_V2 integrationType = "postgres_v2"
 	MONGO       integrationType = "mongo"
+	REDIS       integrationType = "redis"
 )
 
 var Registered = make(map[string]Initializer)
