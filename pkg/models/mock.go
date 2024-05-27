@@ -23,8 +23,10 @@ func (m *Mock) GetKind() string {
 
 type MockSpec struct {
 	Metadata          map[string]string `json:"Metadata,omitempty" bson:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
-	GenericRequests   []GenericPayload  `json:"RequestBin,omitempty" bson:"generic_requests,omitempty"`
-	GenericResponses  []GenericPayload  `json:"ResponseBin,omitempty" bson:"generic_responses,omitempty"`
+	GenericRequests   []Payload         `json:"RequestBin,omitempty" bson:"generic_requests,omitempty"`
+	GenericResponses  []Payload         `json:"ResponseBin,omitempty" bson:"generic_responses,omitempty"`
+	RedisRequests     []Payload         `json:"redisRequests,omitempty" bson:"redis_requests,omitempty"`
+	RedisResponses    []Payload         `json:"redisResponses,omitempty" bson:"redis_responses,omitempty"`
 	HTTPReq           *HTTPReq          `json:"Req,omitempty" bson:"http_req,omitempty"`
 	HTTPResp          *HTTPResp         `json:"Res,omitempty" bson:"http_resp,omitempty"`
 	Created           int64             `json:"Created,omitempty" bson:"created,omitempty"`
@@ -54,7 +56,7 @@ const (
 	FromClient OriginType = "client"
 )
 
-type GenericPayload struct {
+type Payload struct {
 	Origin  OriginType     `json:"Origin,omitempty" yaml:"origin" bson:"origin,omitempty"`
 	Message []OutputBinary `json:"Message,omitempty" yaml:"message" bson:"message,omitempty"`
 }
