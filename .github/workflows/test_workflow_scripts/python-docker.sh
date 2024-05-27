@@ -22,7 +22,7 @@ sleep 5
 docker build -t flask-app:1.0 .
 
 for i in {1..2}; do
-sudo -E env PATH=$PATH ./../../keployv2 record -c "docker compose up" --containerName flask-app --buildDelay 40s --generateGithubActions=false  &
+sudo -E env PATH=$PATH ./../../keployv2 record -c "docker compose up" --containerName flask-app --buildDelay 40 --generateGithubActions=false  &
 
 # Wait for the application to start.
 app_started=false
@@ -50,7 +50,7 @@ docker rm -f flask-app
 done
 
 # Start the app in test mode.
-sudo -E env PATH=$PATH ./../../keployv2 test -c "docker compose up" --containerName flask-app --buildDelay 40s --apiTimeout 60 --delay 20 --generateGithubActions=false                                     
+sudo -E env PATH=$PATH ./../../keployv2 test -c "docker compose up" --containerName flask-app --buildDelay 40 --apiTimeout 60 --delay 20 --generateGithubActions=false                                     
 
 # Get the test results from the testReport file.
 report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"
