@@ -11,33 +11,36 @@ import (
 
 	"go.keploy.io/server/v2/pkg/core/app"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/platform/docker"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
 type Core struct {
-	Proxy        // embedding the Proxy interface to transfer the proxy methods to the core object
-	Hooks        // embedding the Hooks interface to transfer the hooks methods to the core object
-	Tester       // embedding the Tester interface to transfer the tester methods to the core object
+	Proxy                      // embedding the Proxy interface to transfer the proxy methods to the core object
+	Hooks                      // embedding the Hooks interface to transfer the hooks methods to the core object
+	Tester                     // embedding the Tester interface to transfer the tester methods to the core object
+	dockerClient docker.Client //embedding the docker client to transfer the docker client methods to the core object
 	logger       *zap.Logger
 	id           utils.AutoInc
 	apps         sync.Map
 	proxyStarted bool
 }
 
-func New(logger *zap.Logger, hook Hooks, proxy Proxy, tester Tester) *Core {
+func New(logger *zap.Logger, hook Hooks, proxy Proxy, tester Tester, client docker.Client) *Core {
 	return &Core{
-		logger: logger,
-		Hooks:  hook,
-		Proxy:  proxy,
-		Tester: tester,
+		logger:       logger,
+		Hooks:        hook,
+		Proxy:        proxy,
+		Tester:       tester,
+		dockerClient: client,
 	}
 }
 
 func (c *Core) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
 	// create a new app and store it in the map
 	id := uint64(c.id.Next())
-	a := app.NewApp(c.logger, id, cmd, app.Options{
+	a := app.NewApp(c.logger, id, cmd, c.dockerClient, app.Options{
 		DockerNetwork: opts.DockerNetwork,
 		Container:     opts.Container,
 		DockerDelay:   opts.DockerDelay,
