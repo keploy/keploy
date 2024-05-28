@@ -189,7 +189,6 @@ func (r *Replayer) BootReplay(ctx context.Context) (string, uint64, context.Canc
 	}
 
 	newTestRunID := pkg.NewID(testRunIDs, models.TestRunTemplateName)
-	r.logger.Info("Getting container and network from config", zap.String("container", r.config.ContainerName), zap.String("network", r.config.NetworkName))
 
 	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
 	if err != nil {

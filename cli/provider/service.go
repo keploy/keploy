@@ -116,7 +116,6 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 	// TODO: add case for mock
 	case "record", "test", "mock", "normalize":
 		commonServices := n.GetCommonServices(n.cfg)
-		n.logger.Info("Container and network name in service provider", zap.String("container", n.cfg.ContainerName), zap.String("network", n.cfg.NetworkName))
 		if cmd == "record" {
 			return record.New(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, n.cfg), nil
 		}
