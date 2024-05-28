@@ -22,6 +22,7 @@ func GetVersion() (V1 Version) {
 const (
 	HTTP           Kind     = "Http"
 	GENERIC        Kind     = "Generic"
+	REDIS          Kind     = "Redis"
 	SQL            Kind     = "SQL"
 	Postgres       Kind     = "Postgres"
 	GRPC_EXPORT    Kind     = "gRPC"
