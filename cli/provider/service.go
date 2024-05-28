@@ -45,7 +45,7 @@ func NewServiceProvider(logger *zap.Logger, configDb *configdb.ConfigDb, cfg *co
 	}
 }
 
-func (n *ServiceProvider) GetTelemetryService(ctx context.Context, config config.Config) (*telemetry.Telemetry, error) {
+func (n *ServiceProvider) GetTelemetryService(ctx context.Context, config *config.Config) (*telemetry.Telemetry, error) {
 	installationID, err := n.configDb.GetInstallationID(ctx)
 	if err != nil {
 		return nil, errors.New("failed to get installation id")
@@ -59,7 +59,8 @@ func (n *ServiceProvider) GetTelemetryService(ctx context.Context, config config
 	), nil
 }
 
-func (n *ServiceProvider) GetCommonServices(c config.Config) *CommonInternalService {
+func (n *ServiceProvider) GetCommonServices(c *config.Config) *CommonInternalService {
+
 	h := hooks.NewHooks(n.logger, c)
 	p := proxy.New(n.logger, h, c)
 	//for keploy test bench
@@ -74,20 +75,21 @@ func (n *ServiceProvider) GetCommonServices(c config.Config) *CommonInternalServ
 		}
 
 		cont, net, err := docker.ParseDockerCmd(c.Command, utils.CmdType(c.CommandType), client)
-
+		n.logger.Debug("container and network parsed from command", zap.String("container", cont), zap.String("network", net), zap.String("command", c.Command))
 		if err != nil {
 			utils.LogError(n.logger, err, "failed to parse container name from given docker command", zap.String("cmd", c.Command))
 		}
-		if c.ContainerName == "" {
-			c.ContainerName = cont
-		} else if c.ContainerName != cont {
-			n.logger.Warn(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v)", c.ContainerName, cont))
+		if c.ContainerName != "" && c.ContainerName != cont {
+			n.logger.Warn(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v), taking parsed value", c.ContainerName, cont))
 		}
-		if c.NetworkName == "" {
-			c.NetworkName = net
-		} else if c.ContainerName != cont {
-			n.logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v)", c.NetworkName, net))
+		c.ContainerName = cont
+
+		if c.NetworkName != "" && c.NetworkName != net {
+			n.logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v), taking parsed value", c.NetworkName, net))
 		}
+		c.NetworkName = net
+
+		n.logger.Debug("Using container and network", zap.String("container", c.ContainerName), zap.String("network", c.NetworkName))
 	}
 
 	instrumentation := core.New(n.logger, h, p, t, client)
@@ -103,7 +105,7 @@ func (n *ServiceProvider) GetCommonServices(c config.Config) *CommonInternalServ
 }
 
 func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface{}, error) {
-	tel, err := n.GetTelemetryService(ctx, *n.cfg)
+	tel, err := n.GetTelemetryService(ctx, n.cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -113,12 +115,13 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 		return tools.NewTools(n.logger, tel), nil
 	// TODO: add case for mock
 	case "record", "test", "mock", "normalize":
-		commonServices := n.GetCommonServices(*n.cfg)
+		commonServices := n.GetCommonServices(n.cfg)
+		n.logger.Info("Container and network name in service provider", zap.String("container", n.cfg.ContainerName), zap.String("network", n.cfg.NetworkName))
 		if cmd == "record" {
-			return record.New(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, *n.cfg), nil
+			return record.New(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, n.cfg), nil
 		}
 		if cmd == "test" || cmd == "normalize" {
-			return replay.NewReplayer(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, tel, commonServices.Instrumentation, *n.cfg), nil
+			return replay.NewReplayer(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, tel, commonServices.Instrumentation, n.cfg), nil
 		}
 		return nil, errors.New("invalid command")
 	default:

@@ -64,11 +64,6 @@ type Options struct {
 }
 
 func (a *App) Setup(_ context.Context) error {
-	d, err := docker.New(a.logger)
-	if err != nil {
-		return err
-	}
-	a.docker = d
 
 	if utils.IsDockerKind(a.kind) && isDetachMode(a.logger, a.cmd, a.kind) {
 		return fmt.Errorf("application could not be started in detached mode")
@@ -81,7 +76,7 @@ func (a *App) Setup(_ context.Context) error {
 			return err
 		}
 	case utils.DockerCompose:
-		err = a.SetupCompose()
+		err := a.SetupCompose()
 		if err != nil {
 			return err
 		}
