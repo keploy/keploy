@@ -192,18 +192,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 	}
 	if !r.config.Test.SkipCoverage && r.config.Test.Language == models.Java {
-		jacocoPath := filepath.Join(os.TempDir(), "jacoco")
-		jacocoCliPath := filepath.Join(jacocoPath, "jacococli.jar")
-		err = mergeJacocoCoverageFiles(ctx, jacocoCliPath)
-		if err == nil {
-			err = generateJacocoReport(ctx, jacocoCliPath)
-			if err != nil {
-				r.config.Test.SkipCoverage = true
-				r.logger.Debug("failed to generate jacoco report", zap.Error(err))
-			}
-		} else {
+		err = mergeAndGenerateJacocoReport(ctx, r.logger)
+		if err != nil {
 			r.config.Test.SkipCoverage = true
-			r.logger.Debug("failed to merge jacoco coverage data", zap.Error(err))
 		}
 	}
 

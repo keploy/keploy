@@ -102,6 +102,24 @@ func CalculateAndInsertTestCoverage(ctx context.Context, logger *zap.Logger, rep
 	}
 }
 
+func mergeAndGenerateJacocoReport(ctx context.Context, logger *zap.Logger) error {
+	jacocoPath := filepath.Join(os.TempDir(), "jacoco")
+	jacocoCliPath := filepath.Join(jacocoPath, "jacococli.jar")
+	err := mergeJacocoCoverageFiles(ctx, jacocoCliPath)
+	if err == nil {
+		err = generateJacocoReport(ctx, jacocoCliPath)
+		if err != nil {
+			logger.Debug("failed to generate jacoco report", zap.Error(err))
+		}
+	} else {
+		logger.Debug("failed to merge jacoco coverage data", zap.Error(err))
+	}
+	if err != nil {
+		return err
+	} 
+	return nil
+}
+
 func mergeJacocoCoverageFiles(ctx context.Context, jacocoCliPath string) error {
 	// Find all .exec files starting with "test-set" in the target directory
 	sourceFiles, err := filepath.Glob("target/test-set*.exec")
@@ -143,7 +161,7 @@ func generateJacocoReport(ctx context.Context, jacocoCliPath string) error {
 	reportDir := "target/site/keployE2E"
 
 	// Ensure the report directory exists
-	if err := os.MkdirAll(reportDir+"/html", 0755); err != nil {
+	if err := os.MkdirAll(reportDir, 0777); err != nil {
 		return fmt.Errorf("failed to create report directory: %w", err)
 	}
 
@@ -158,7 +176,7 @@ func generateJacocoReport(ctx context.Context, jacocoCliPath string) error {
 		"--csv",
 		reportDir + "/e2e.csv",
 		"--html",
-		reportDir + "/html",
+		reportDir,
 	}
 
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
