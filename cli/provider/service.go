@@ -73,27 +73,27 @@ func (n *ServiceProvider) GetCommonServices(c *config.Config) *CommonInternalSer
 		if err != nil {
 			utils.LogError(n.logger, err, "failed to create docker client")
 		}
-	}
 
-	//parse docker command only in case of docker start or docker run commands
-	if utils.CmdType(c.CommandType) != utils.DockerCompose {
+		//parse docker command only in case of docker start or docker run commands
+		if utils.CmdType(c.CommandType) != utils.DockerCompose {
 
-		cont, net, err := docker.ParseDockerCmd(c.Command, utils.CmdType(c.CommandType), client)
-		n.logger.Debug("container and network parsed from command", zap.String("container", cont), zap.String("network", net), zap.String("command", c.Command))
-		if err != nil {
-			utils.LogError(n.logger, err, "failed to parse container name from given docker command", zap.String("cmd", c.Command))
+			cont, net, err := docker.ParseDockerCmd(c.Command, utils.CmdType(c.CommandType), client)
+			n.logger.Debug("container and network parsed from command", zap.String("container", cont), zap.String("network", net), zap.String("command", c.Command))
+			if err != nil {
+				utils.LogError(n.logger, err, "failed to parse container name from given docker command", zap.String("cmd", c.Command))
+			}
+			if c.ContainerName != "" && c.ContainerName != cont {
+				n.logger.Warn(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v), taking parsed value", c.ContainerName, cont))
+			}
+			c.ContainerName = cont
+
+			if c.NetworkName != "" && c.NetworkName != net {
+				n.logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v), taking parsed value", c.NetworkName, net))
+			}
+			c.NetworkName = net
+
+			n.logger.Debug("Using container and network", zap.String("container", c.ContainerName), zap.String("network", c.NetworkName))
 		}
-		if c.ContainerName != "" && c.ContainerName != cont {
-			n.logger.Warn(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v), taking parsed value", c.ContainerName, cont))
-		}
-		c.ContainerName = cont
-
-		if c.NetworkName != "" && c.NetworkName != net {
-			n.logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v), taking parsed value", c.NetworkName, net))
-		}
-		c.NetworkName = net
-
-		n.logger.Debug("Using container and network", zap.String("container", c.ContainerName), zap.String("network", c.NetworkName))
 	}
 
 	instrumentation := core.New(n.logger, h, p, t, client)
