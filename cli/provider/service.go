@@ -75,7 +75,6 @@ func (n *ServiceProvider) GetCommonServices(c *config.Config) *CommonInternalSer
 		}
 	}
 
-
 	//parse docker command only in case of docker start or docker run commands
 	if utils.CmdType(c.CommandType) != utils.DockerCompose {
 
