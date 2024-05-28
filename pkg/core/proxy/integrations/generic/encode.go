@@ -20,7 +20,7 @@ import (
 
 func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
 
-	var genericRequests []models.GenericPayload
+	var genericRequests []models.Payload
 
 	bufStr := string(reqBuf)
 	dataType := models.String
@@ -30,7 +30,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	}
 
 	if bufStr != "" {
-		genericRequests = append(genericRequests, models.GenericPayload{
+		genericRequests = append(genericRequests, models.Payload{
 			Origin: models.FromClient,
 			Message: []models.OutputBinary{
 				{
@@ -45,7 +45,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 		utils.LogError(logger, err, "failed to write request message to the destination server")
 		return err
 	}
-	var genericResponses []models.GenericPayload
+	var genericResponses []models.Payload
 
 	clientBuffChan := make(chan []byte)
 	destBuffChan := make(chan []byte)
@@ -84,8 +84,8 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 		select {
 		case <-ctx.Done():
 			if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {
-				genericRequestsCopy := make([]models.GenericPayload, len(genericRequests))
-				genericResponsesCopy := make([]models.GenericPayload, len(genericResponses))
+				genericRequestsCopy := make([]models.Payload, len(genericRequests))
+				genericResponsesCopy := make([]models.Payload, len(genericResponses))
 				copy(genericResponsesCopy, genericResponses)
 				copy(genericRequestsCopy, genericRequests)
 
@@ -116,11 +116,11 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 
 			logger.Debug("the iteration for the generic request ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
 			if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {
-				genericRequestsCopy := make([]models.GenericPayload, len(genericRequests))
-				genericResponseCopy := make([]models.GenericPayload, len(genericResponses))
+				genericRequestsCopy := make([]models.Payload, len(genericRequests))
+				genericResponseCopy := make([]models.Payload, len(genericResponses))
 				copy(genericResponseCopy, genericResponses)
 				copy(genericRequestsCopy, genericRequests)
-				go func(reqs []models.GenericPayload, resps []models.GenericPayload) {
+				go func(reqs []models.Payload, resps []models.Payload) {
 					metadata := make(map[string]string)
 					metadata["type"] = "config"
 					// Save the mock
@@ -138,8 +138,8 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					}
 
 				}(genericRequestsCopy, genericResponseCopy)
-				genericRequests = []models.GenericPayload{}
-				genericResponses = []models.GenericPayload{}
+				genericRequests = []models.Payload{}
+				genericResponses = []models.Payload{}
 			}
 
 			bufStr := string(buffer)
@@ -150,7 +150,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			}
 
 			if bufStr != "" {
-				genericRequests = append(genericRequests, models.GenericPayload{
+				genericRequests = append(genericRequests, models.Payload{
 					Origin: models.FromClient,
 					Message: []models.OutputBinary{
 						{
@@ -182,7 +182,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			}
 
 			if bufStr != "" {
-				genericResponses = append(genericResponses, models.GenericPayload{
+				genericResponses = append(genericResponses, models.Payload{
 					Origin: models.FromServer,
 					Message: []models.OutputBinary{
 						{
