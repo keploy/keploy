@@ -17,16 +17,17 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
-	"go.keploy.io/server/v2/pkg/core/app/docker"
+	"go.keploy.io/server/v2/pkg/platform/docker"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
-func NewApp(logger *zap.Logger, id uint64, cmd string, opts Options) *App {
+func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opts Options) *App {
 	app := &App{
 		logger:           logger,
 		id:               id,
 		cmd:              cmd,
+		docker:           client,
 		kind:             utils.FindDockerCmd(cmd),
 		keployContainer:  "keploy-v2",
 		container:        opts.Container,
@@ -99,28 +100,9 @@ func (a *App) ContainerIPv4Addr() string {
 }
 
 func (a *App) SetupDocker() error {
-	var err error
-
-	cont, net, err := ParseDockerCmd(a.cmd, a.kind, a.docker)
-
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to parse container name from given docker command", zap.String("cmd", a.cmd))
-		return err
-	}
-	if a.container == "" {
-		a.container = cont
-	} else if a.container != cont {
-		a.logger.Warn(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v)", a.container, cont))
-	}
-
-	if a.containerNetwork == "" {
-		a.containerNetwork = net
-	} else if a.containerNetwork != net {
-		a.logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v)", a.containerNetwork, net))
-	}
 
 	if a.kind == utils.DockerStart {
-		running, err := a.docker.IsContainerRunning(cont)
+		running, err := a.docker.IsContainerRunning(a.container)
 		if err != nil {
 			return err
 		}
@@ -130,7 +112,7 @@ func (a *App) SetupDocker() error {
 	}
 
 	//injecting appNetwork to keploy.
-	err = a.injectNetwork(a.containerNetwork)
+	err := a.injectNetwork(a.containerNetwork)
 	if err != nil {
 		utils.LogError(a.logger, err, fmt.Sprintf("failed to inject network:%v to the keploy container", a.containerNetwork))
 		return err

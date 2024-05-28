@@ -3,12 +3,14 @@ package provider
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/core/proxy"
 	"go.keploy.io/server/v2/pkg/core/tester"
+	"go.keploy.io/server/v2/pkg/platform/docker"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb"
 	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
@@ -57,14 +59,41 @@ func (n *ServiceProvider) GetTelemetryService(ctx context.Context, config config
 	), nil
 }
 
-func (n *ServiceProvider) GetCommonServices(config config.Config) *CommonInternalService {
-	h := hooks.NewHooks(n.logger, config)
-	p := proxy.New(n.logger, h, config)
-	t := tester.New(n.logger, h) //for keploy test bench
-	instrumentation := core.New(n.logger, h, p, t)
-	testDB := testdb.New(n.logger, config.Path)
-	mockDB := mockdb.New(n.logger, config.Path, "")
-	reportDB := reportdb.New(n.logger, config.Path+"/reports")
+func (n *ServiceProvider) GetCommonServices(c config.Config) *CommonInternalService {
+	h := hooks.NewHooks(n.logger, c)
+	p := proxy.New(n.logger, h, c)
+	//for keploy test bench
+	t := tester.New(n.logger, h)
+
+	var client docker.Client
+	var err error
+	if utils.IsDockerKind(utils.CmdType(c.CommandType)) {
+		client, err = docker.New(n.logger)
+		if err != nil {
+			utils.LogError(n.logger, err, "failed to create docker client")
+		}
+
+		cont, net, err := docker.ParseDockerCmd(c.Command, utils.CmdType(c.CommandType), client)
+
+		if err != nil {
+			utils.LogError(n.logger, err, "failed to parse container name from given docker command", zap.String("cmd", c.Command))
+		}
+		if c.ContainerName == "" {
+			c.ContainerName = cont
+		} else if c.ContainerName != cont {
+			n.logger.Warn(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v)", c.ContainerName, cont))
+		}
+		if c.NetworkName == "" {
+			c.NetworkName = net
+		} else if c.ContainerName != cont {
+			n.logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v)", c.NetworkName, net))
+		}
+	}
+
+	instrumentation := core.New(n.logger, h, p, t, client)
+	testDB := testdb.New(n.logger, c.Path)
+	mockDB := mockdb.New(n.logger, c.Path, "")
+	reportDB := reportdb.New(n.logger, c.Path+"/reports")
 	return &CommonInternalService{
 		Instrumentation: instrumentation,
 		YamlTestDB:      testDB,
