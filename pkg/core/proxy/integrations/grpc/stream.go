@@ -83,9 +83,13 @@ func (sic *StreamInfoCollection) AddPayloadForRequest(streamID uint32, payload [
 	defer sic.mutex.Unlock()
 
 	// We cannot modify non pointer values in nested entries in map.
-	// Create a copy and overwrite it.
+	// Use a left pointing linked list
 	info := sic.StreamInfo[streamID]
-	info.GrpcReq.Body = createLengthPrefixedMessageFromPayload(payload)
+	prefMessage := models.PrefMessagePointer{
+		Body: createLengthPrefixedMessageFromPayload(payload),
+		Left: info.GrpcReq.BodyPref,
+	}
+	info.GrpcReq.BodyPref = &prefMessage
 	sic.StreamInfo[streamID] = info
 }
 
@@ -97,17 +101,38 @@ func (sic *StreamInfoCollection) AddPayloadForResponse(streamID uint32, payload 
 	defer sic.mutex.Unlock()
 
 	// We cannot modify non pointer values in nested entries in map.
-	// Create a copy and overwrite it.
+	// use a left pointing linked list
 	info := sic.StreamInfo[streamID]
-	info.GrpcResp.Body = createLengthPrefixedMessageFromPayload(payload)
+	prefMessage := models.PrefMessagePointer{
+		Body: createLengthPrefixedMessageFromPayload(payload),
+		Left: info.GrpcResp.BodyPref,
+	}
+	info.GrpcResp.BodyPref = &prefMessage
 	sic.StreamInfo[streamID] = info
 }
 
 func (sic *StreamInfoCollection) PersistMockForStream(_ context.Context, streamID uint32, mocks chan<- *models.Mock) {
 	sic.mutex.Lock()
 	defer sic.mutex.Unlock()
-	grpcReq := sic.StreamInfo[streamID].GrpcReq
-	grpcResp := sic.StreamInfo[streamID].GrpcResp
+	// create final request and response from the chunks
+	grpcReq := models.GrpcFinalReq{
+		Headers: models.GrpcHeaders{
+			PseudoHeaders:   sic.StreamInfo[streamID].GrpcReq.Headers.PseudoHeaders,
+			OrdinaryHeaders: sic.StreamInfo[streamID].GrpcReq.Headers.OrdinaryHeaders,
+		},
+		Body: createFinalMessageFromStream(sic.StreamInfo[streamID].GrpcReq.BodyPref),
+	}
+	grpcResp := models.GrpcFinalResp{
+		Headers: models.GrpcHeaders{
+			PseudoHeaders:   sic.StreamInfo[streamID].GrpcResp.Headers.PseudoHeaders,
+			OrdinaryHeaders: sic.StreamInfo[streamID].GrpcResp.Headers.OrdinaryHeaders,
+		},
+		Body: createFinalMessageFromStream(sic.StreamInfo[streamID].GrpcResp.BodyPref),
+		Trailers: models.GrpcHeaders{
+			PseudoHeaders:   sic.StreamInfo[streamID].GrpcResp.Trailers.PseudoHeaders,
+			OrdinaryHeaders: sic.StreamInfo[streamID].GrpcResp.Trailers.OrdinaryHeaders,
+		},
+	}
 	// save the mock
 	mocks <- &models.Mock{
 		Version: models.GetVersion(),
@@ -122,7 +147,7 @@ func (sic *StreamInfoCollection) PersistMockForStream(_ context.Context, streamI
 	}
 }
 
-func (sic *StreamInfoCollection) FetchRequestForStream(streamID uint32) models.GrpcReq {
+func (sic *StreamInfoCollection) FetchRequestForStream(streamID uint32) models.GrpcReqStream {
 	sic.mutex.Lock()
 	defer sic.mutex.Unlock()
 
@@ -152,7 +177,7 @@ func createLengthPrefixedMessageFromPayload(data []byte) models.GrpcLengthPrefix
 
 	// The payload could be empty. We only parse it if it is present.
 	if len(data) >= 5 {
-		// Use protoscope to decode the message.
+		// Use proto scope to decode the message.
 		msg.DecodedData = protoscope.Write(data[5:], protoscope.WriterOptions{})
 	}
 
@@ -176,4 +201,23 @@ func createPayloadFromLengthPrefixedMessage(msg models.GrpcLengthPrefixedMessage
 	payload = append(payload, encodedData...)
 
 	return payload, nil
+}
+func createFinalMessageFromStream(streamMessage *models.PrefMessagePointer) []models.GrpcLengthPrefixedMessage {
+	var Body []models.GrpcLengthPrefixedMessage
+	// since the first pointer had a nil - left value , so back track until you reach it
+	curr := streamMessage
+	if curr.Left == nil {
+		Body = append(Body, streamMessage.Body)
+	} else {
+		for curr.Left != nil {
+			Body = append(Body, curr.Body)
+			curr = curr.Left
+		}
+		// since we were backtracking , so reverse the array to get to original DATA stream
+		for i := 0; i < len(Body)/2; i++ {
+			j := len(Body) - i - 1
+			Body[i], Body[j] = Body[j], Body[i]
+		}
+	}
+	return Body
 }

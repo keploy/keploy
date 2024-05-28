@@ -5,10 +5,10 @@ import (
 )
 
 type GrpcSpec struct {
-	GrpcReq          GrpcReq   `json:"grpcReq" yaml:"grpcReq"`
-	GrpcResp         GrpcResp  `json:"grpcResp" yaml:"grpcResp"`
-	ReqTimestampMock time.Time `json:"reqTimestampMock" yaml:"reqTimestampMock,omitempty"`
-	ResTimestampMock time.Time `json:"resTimestampMock" yaml:"resTimestampMock,omitempty"`
+	GrpcReq          GrpcFinalReq  `json:"grpcReq" yaml:"grpcReq"`
+	GrpcResp         GrpcFinalResp `json:"grpcResp" yaml:"grpcResp"`
+	ReqTimestampMock time.Time     `json:"reqTimestampMock" yaml:"reqTimestampMock,omitempty"`
+	ResTimestampMock time.Time     `json:"resTimestampMock" yaml:"resTimestampMock,omitempty"`
 }
 
 type GrpcHeaders struct {
@@ -21,36 +21,53 @@ type GrpcLengthPrefixedMessage struct {
 	MessageLength   uint32 `json:"message_length" yaml:"message_length"`
 	DecodedData     string `json:"decoded_data" yaml:"decoded_data"`
 }
-
-type GrpcReq struct {
-	Headers GrpcHeaders               `json:"headers" yaml:"headers"`
-	Body    GrpcLengthPrefixedMessage `json:"body" yaml:"body"`
+type PrefMessagePointer struct {
+	Body GrpcLengthPrefixedMessage
+	Left *PrefMessagePointer
 }
 
-type GrpcResp struct {
-	Headers  GrpcHeaders               `json:"headers" yaml:"headers"`
-	Body     GrpcLengthPrefixedMessage `json:"body" yaml:"body"`
-	Trailers GrpcHeaders               `json:"trailers" yaml:"trailers"`
+type GrpcReqStream struct {
+	Headers  GrpcHeaders
+	BodyPref *PrefMessagePointer
+}
+
+type GrpcRespStream struct {
+	Headers  GrpcHeaders
+	BodyPref *PrefMessagePointer
+	Trailers GrpcHeaders
+}
+type GrpcFinalReq struct {
+	Headers GrpcHeaders                 `json:"headers" yaml:"headers"`
+	Body    []GrpcLengthPrefixedMessage `json:"body" yaml:"body"`
+}
+type GrpcFinalResp struct {
+	Headers  GrpcHeaders                 `json:"headers" yaml:"headers"`
+	Body     []GrpcLengthPrefixedMessage `json:"body" yaml:"body"`
+	Trailers GrpcHeaders
 }
 
 // GrpcStream is a helper function to combine the request-response model in a single struct.
 type GrpcStream struct {
 	StreamID uint32
-	GrpcReq  GrpcReq
-	GrpcResp GrpcResp
+	GrpcReq  GrpcReqStream
+	GrpcResp GrpcRespStream
 }
 
 // NewGrpcStream returns a GrpcStream with all the nested maps initialised.
 func NewGrpcStream(streamID uint32) GrpcStream {
 	return GrpcStream{
 		StreamID: streamID,
-		GrpcReq: GrpcReq{
+		GrpcReq: GrpcReqStream{
 			Headers: GrpcHeaders{
 				PseudoHeaders:   make(map[string]string),
 				OrdinaryHeaders: make(map[string]string),
 			},
+			BodyPref: &PrefMessagePointer{
+				Body: GrpcLengthPrefixedMessage{},
+				Left: nil,
+			},
 		},
-		GrpcResp: GrpcResp{
+		GrpcResp: GrpcRespStream{
 			Headers: GrpcHeaders{
 				PseudoHeaders:   make(map[string]string),
 				OrdinaryHeaders: make(map[string]string),
