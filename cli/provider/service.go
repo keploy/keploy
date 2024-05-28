@@ -73,6 +73,10 @@ func (n *ServiceProvider) GetCommonServices(c *config.Config) *CommonInternalSer
 		if err != nil {
 			utils.LogError(n.logger, err, "failed to create docker client")
 		}
+	}
+
+	//parse docker command only in case of docker start or docker run commands
+	if utils.CmdType(c.CommandType) != utils.DockerCompose {
 
 		cont, net, err := docker.ParseDockerCmd(c.Command, utils.CmdType(c.CommandType), client)
 		n.logger.Debug("container and network parsed from command", zap.String("container", cont), zap.String("network", net), zap.String("command", c.Command))
