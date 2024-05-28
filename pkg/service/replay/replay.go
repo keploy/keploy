@@ -229,7 +229,7 @@ func (r *Replayer) BootReplay(ctx context.Context) (string, uint64, context.Canc
 	newTestRunID := pkg.NewID(testRunIDs, models.TestRunTemplateName)
 
 	var appID uint64
-	if r.config.Test.SkipCoverage {
+	if r.config.Test.SkipCoverage && r.config.CoverageCommand == "" {
 		appID, err = r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
 	} else {
 		appID, err = r.instrumentation.Setup(ctx, r.config.CoverageCommand, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
