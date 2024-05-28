@@ -119,7 +119,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		err = os.Setenv("CLEAN", "true")
 		if err != nil {
 			r.config.Test.SkipCoverage = true
-			r.logger.Debug("failed to set CLEAN env variable, coverage won't be calculated.", zap.Error(err))
+			r.logger.Warn("failed to set CLEAN env variable, coverage won't be calculated.", zap.Error(err))
 		}
 	}
 
@@ -138,7 +138,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			err = os.Setenv("TESTSETID", testSetID)
 			if err != nil {
 				r.config.Test.SkipCoverage = true
-				r.logger.Debug("failed to set TESTSETID env variable", zap.Error(err))
+				r.logger.Warn("failed to set TESTSETID env variable", zap.Error(err))
 			}
 		}
 
@@ -182,12 +182,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 			err = os.Setenv("CLEAN", "false")
 			if err != nil {
 				r.config.Test.SkipCoverage = true
-				r.logger.Debug("failed to set CLEAN env variable, coverage won't be calculated.", zap.Error(err))
+				r.logger.Warn("failed to set CLEAN env variable, coverage won't be calculated.", zap.Error(err))
 			}
 			err = os.Setenv("APPEND", " --append")
 			if err != nil {
 				r.config.Test.SkipCoverage = true
-				r.logger.Debug("failed to set APPEND env variable, coverage won't be calculated.", zap.Error(err))
+				r.logger.Warn("failed to set APPEND env variable, coverage won't be calculated.", zap.Error(err))
 			}
 		}
 	}
