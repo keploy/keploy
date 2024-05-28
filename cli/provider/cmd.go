@@ -435,6 +435,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 			config.SetSelectedTests(c.cfg, testSets)
 
+			c.cfg.CoverageCommand = c.cfg.Command
 			if !c.cfg.Test.SkipCoverage {
 				PreProcessCoverage(c.logger, c.cfg)
 			}
