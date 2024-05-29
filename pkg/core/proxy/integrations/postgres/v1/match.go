@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/agnivade/levenshtein"
 	"github.com/jackc/pgproto3/v2"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
@@ -80,7 +81,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 			reqGoingOn := decodePgRequest(requestBuffers[0], logger)
 			if reqGoingOn != nil {
 				logger.Debug("PacketTypes", zap.Any("PacketTypes", reqGoingOn.PacketTypes))
-				// fmt.Println("REQUEST GOING ON - ", reqGoingOn)
+				fmt.Println("REQUEST GOING ON - ", reqGoingOn)
 				logger.Debug("ConnectionId-", zap.String("ConnectionId", ConnectionID))
 				logger.Debug("TestMap*****", zap.Any("TestMap", testmap))
 			}
@@ -205,8 +206,12 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 				getTestPS(requestBuffers, logger, ConnectionID)
 			}
 
-			logger.Debug("Sorted Mocks: ", zap.Any("Len of sortedTcsMocks", len(sortedTcsMocks)))
-
+			logger.Info("Sorted Mocks: ", zap.Any("Len of sortedTcsMocks", len(sortedTcsMocks)))
+			fmt.Print("Sorted Mocks: ")
+			for _, v := range sortedTcsMocks {
+				fmt.Print(v.Name, ", ")
+			}
+			fmt.Println("\n\n\n\n\ntatata")
 			var matched, sorted bool
 			var idx int
 			//use findBinaryMatch twice one for sorted and another for unsorted
@@ -220,12 +225,26 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 					if newMock != nil {
 						matchedMock = newMock
 					}
+					fmt.Println("Matched In PG MAtchIng Sorted Stream", matchedMock.Name)
 				}
-				idx = findBinaryStreamMatch(logger, sortedTcsMocks, requestBuffers, sorted)
-				if idx != -1 && !matched {
-					matched = true
-					matchedMock = tcsMocks[idx]
-				}
+				// Do Exact match on Unsorted
+				// sorted = false
+				// idx2, newMock := findPGStreamMatch(tcsMocks, requestBuffers, logger, sorted, ConnectionID, recordedPrep)
+				// if idx2 != -1 && !matched {
+				// 	matched = true
+				// 	matchedMock = tcsMocks[idx1]
+				// 	if newMock != nil {
+				// 		matchedMock = newMock
+				// 	}
+				// 	fmt.Println("Matched In Unsorted PG MAtchIng Stream", matchedMock.Name)
+				// }
+
+				// idx = findBinaryStreamMatch(logger, sortedTcsMocks, requestBuffers, sorted)
+				// if idx != -1 && !matched {
+				// 	matched = true
+				// 	matchedMock = tcsMocks[idx]
+				// 	fmt.Println("Matched In Binary Matching for Sorted", matchedMock.Name)
+				// }
 			}
 
 			if !matched {
@@ -237,6 +256,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 					if newMock != nil {
 						matchedMock = newMock
 					}
+					fmt.Println("Matched In Unsorted PG MAtchIng Stream", matchedMock.Name)
 				}
 				idx = findBinaryStreamMatch(logger, tcsMocks, requestBuffers, sorted)
 				// check if the validate the query with the matched mock
@@ -252,12 +272,12 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 					if newMock != nil && !isValid {
 						matchedMock = newMock
 					}
-					// fmt.Println("Matched In Binary Matching for Unsorted", matchedMock.Name)
+					fmt.Println("Matched In Binary Matching for Unsorted", matchedMock.Name)
 				}
 			}
 
 			if matched {
-				logger.Debug("Matched mock", zap.String("mock", matchedMock.Name))
+				logger.Info("Matched mock", zap.String("mock", matchedMock.Name))
 				if matchedMock.TestModeInfo.IsFiltered {
 					originalMatchedMock := *matchedMock
 					matchedMock.TestModeInfo.IsFiltered = false
@@ -707,7 +727,12 @@ func compareExactMatch(mock *models.Mock, actualPgReq *models.Backend, logger *z
 				return false, nil
 			}
 		case "Q":
-			if actualPgReq.Query != mock.Spec.PostgresRequests[0].Query {
+			if actualPgReq.Query.String != mock.Spec.PostgresRequests[0].Query.String {
+				if LaevensteinDistance(actualPgReq.Query.String, mock.Spec.PostgresRequests[0].Query.String) {
+					fmt.Println("Actual Query", actualPgReq.Query, "Mock Query", mock.Spec.PostgresRequests[0].Query)
+					fmt.Println("THIS IS THE MOCK REJECTED", mock.Name)
+				}
+
 				return false, nil
 			}
 		default:
@@ -715,6 +740,22 @@ func compareExactMatch(mock *models.Mock, actualPgReq *models.Backend, logger *z
 		}
 	}
 	return true, nil
+}
+
+func LaevensteinDistance(str1, str2 string) bool {
+	// Compute the Levenshtein distance
+	distance := levenshtein.ComputeDistance(str1, str2)
+	maxLength := max(len(str1), len(str2))
+	similarity := (1 - float64(distance)/float64(maxLength)) * 100
+
+	// Check if similarity is greater than 90%
+	if similarity > 90 {
+		fmt.Printf("The strings are more than 90%% similar.\n")
+		return true
+	} else {
+		// fmt.Printf("The strings are not more than 90%% similar.\n")
+		return false
+	}
 }
 
 // make this in such a way if it returns -1 then we will continue with the original mock
