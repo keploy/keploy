@@ -40,10 +40,10 @@ type Replayer struct {
 	reportDB        ReportDB
 	telemetry       Telemetry
 	instrumentation Instrumentation
-	config          config.Config
+	config          *config.Config
 }
 
-func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, telemetry Telemetry, instrumentation Instrumentation, config config.Config) Service {
+func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
 	// set the request emulator for simulating test case requests, if not set
 	if requestMockemulator == nil {
 		SetTestUtilInstance(NewRequestMockUtil(logger, config.Path, "mocks", config.Test.APITimeout))
@@ -478,7 +478,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		testPass, testResult = r.compareResp(testCase, resp, testSetID)
 		if !testPass {
 			// log the consumed mocks during the test run of the test case for test set
-			r.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(testCase.Name)), zap.Any("testset id", models.HighlightFailingString(testSetID)), zap.Any("passed", models.HighlightFailingString(testPass)), zap.Any("consumed mocks", consumedMocks))
+			r.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(testCase.Name)), zap.Any("testset id", models.HighlightFailingString(testSetID)), zap.Any("passed", models.HighlightFailingString(testPass)))
+			r.logger.Debug("Consumed Mocks", zap.Any("mocks", consumedMocks))
 		} else {
 			r.logger.Info("result", zap.Any("testcase id", models.HighlightPassingString(testCase.Name)), zap.Any("testset id", models.HighlightPassingString(testSetID)), zap.Any("passed", models.HighlightPassingString(testPass)))
 		}

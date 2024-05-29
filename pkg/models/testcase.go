@@ -18,6 +18,8 @@ func GetVersion() (V1 Version) {
 	return currentVersion
 }
 
+//TODO: Why are we declaring mock types in testcase.go file?
+
 // mocks types
 const (
 	HTTP           Kind     = "Http"
