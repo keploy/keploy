@@ -559,7 +559,7 @@ func PreProcessCoverage(logger *zap.Logger, conf *config.Config) {
 		if err != nil {
 			logger.Debug("failed to create jacoco directory", zap.Error(err))
 		} else {
-			err := utils.DownloadAndExtractJaCoCoCli("0.8.12", jacocoPath)
+			err := utils.DownloadAndExtractJaCoCoCli(logger, "0.8.12", jacocoPath)
 			if err != nil {
 				conf.Test.SkipCoverage = true
 				logger.Debug("failed to download and extract jacoco binaries", zap.Error(err))

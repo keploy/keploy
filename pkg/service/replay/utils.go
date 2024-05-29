@@ -88,9 +88,9 @@ func CalculateAndInsertTestCoverage(ctx context.Context, logger *zap.Logger, rep
 	case models.Python:
 		coverageData, err = CalPythonCoverage(ctx)
 	case models.Node:
-		coverageData, err = CalTypescriptCoverage(ctx)
+		coverageData, err = CalTypescriptCoverage()
 	case models.Java:
-		coverageData, err = CalJavaCoverage(ctx)
+		coverageData, err = CalJavaCoverage()
 	}
 	if err != nil {
 		utils.LogError(logger, err, "failed to calculate coverage for the test run")
@@ -116,7 +116,7 @@ func mergeAndGenerateJacocoReport(ctx context.Context, logger *zap.Logger) error
 	}
 	if err != nil {
 		return err
-	} 
+	}
 	return nil
 }
 
@@ -138,10 +138,7 @@ func mergeJacocoCoverageFiles(ctx context.Context, jacocoCliPath string) error {
 		"merge",
 	}
 
-	// Append each source file to the command
-	for _, file := range sourceFiles {
-		args = append(args, file)
-	}
+	args = append(args, sourceFiles...)
 
 	// Specify the output file
 	args = append(args, "--destfile", "target/keploy-e2e.exec")
@@ -359,7 +356,7 @@ type TypescriptCoverage map[string]struct {
 	ContentHash    string                 `json:"contentHash"`
 }
 
-func CalTypescriptCoverage(ctx context.Context) (models.TestCoverage, error) {
+func CalTypescriptCoverage() (models.TestCoverage, error) {
 	testCov := models.TestCoverage{
 		FileCov:  make(map[string]string),
 		TotalCov: "",
@@ -466,7 +463,7 @@ func getCoverageFilePathsTypescript(path string) ([]string, error) {
 	return filePaths, nil
 }
 
-func CalJavaCoverage(ctx context.Context) (models.TestCoverage, error) {
+func CalJavaCoverage() (models.TestCoverage, error) {
 	testCov := models.TestCoverage{
 		FileCov:  make(map[string]string),
 		TotalCov: "",

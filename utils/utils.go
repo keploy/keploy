@@ -749,7 +749,9 @@ func isGoBinary(logger *zap.Logger, filePath string) bool {
 		logger.Debug(fmt.Sprintf("failed to open file %s", filePath), zap.Error(err))
 		return false
 	}
-	defer f.Close()
+	if err := f.Close(); err != nil {
+		LogError(logger, err, "failed to close file", zap.String("file", filePath))
+	}
 
 	// Check for section names typical to Go binaries
 	sections := []string{".go.buildinfo", ".gopclntab"}
@@ -762,7 +764,7 @@ func isGoBinary(logger *zap.Logger, filePath string) bool {
 	return false
 }
 
-// detectLanguage detects the language of the test command and returns the executable
+// DetectLanguage detects the language of the test command and returns the executable
 func DetectLanguage(logger *zap.Logger, cmd string) (config.Language, string) {
 	fields := strings.Fields(cmd)
 	executable := fields[0]
@@ -791,6 +793,7 @@ func RunCommand(cmdString ...string) error {
 }
 
 // TODO: use native approach till https://github.com/golang/go/issues/67366 gets resolved
+// CheckGoBinaryForCoverFlag checks if the given Go binary has the coverage flag enabled
 func CheckGoBinaryForCoverFlag(logger *zap.Logger, cmd string) bool {
 	file, err := elf.Open(cmd)
 	if err != nil {
@@ -798,7 +801,11 @@ func CheckGoBinaryForCoverFlag(logger *zap.Logger, cmd string) bool {
 		fmt.Fprintf(os.Stderr, "Failed to open file: %v\n", err)
 		return false
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			LogError(logger, err, "failed to close binary file", zap.String("file", cmd))
+		}
+	}()
 
 	symbols, err := file.Symbols()
 	if err != nil {
@@ -828,7 +835,11 @@ sigterm = true
 	if err != nil {
 		LogError(logger, err, "failed to create .coveragerc file")
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			LogError(logger, err, "failed to close coveragerc file", zap.String("file", file.Name()))
+		}
+	}()
 
 	_, err = file.WriteString(configContent)
 	if err != nil {
@@ -877,7 +888,7 @@ func getHomeDir() (string, error) {
 	return "", errors.New("failed to retrieve current user info")
 }
 
-func DownloadAndExtractJaCoCoCli(version, dir string) error {
+func DownloadAndExtractJaCoCoCli(logger *zap.Logger, version, dir string) error {
 	cliPath := filepath.Join(dir, "jacococli.jar")
 
 	downloadURL := fmt.Sprintf("https://github.com/jacoco/jacoco/releases/download/v%s/jacoco-%s.zip", version, version)
@@ -891,7 +902,11 @@ func DownloadAndExtractJaCoCoCli(version, dir string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			LogError(logger, err, "failed to close response body")
+		}
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -909,14 +924,22 @@ func DownloadAndExtractJaCoCoCli(version, dir string) error {
 			if err != nil {
 				return err
 			}
-			defer cliFile.Close()
-
+			defer func() {
+				if err := cliFile.Close(); err != nil {
+					LogError(logger, err, "failed to close jacoco cli jar file")
+				}
+			}()
+		
 			outFile, err := os.Create(cliPath)
 			if err != nil {
 				return err
 			}
-			defer outFile.Close()
-
+			defer func() {
+				if err := outFile.Close(); err != nil {
+					LogError(logger, err, "failed to close the output file for jacoco cli jar")
+				}
+			}()
+		
 			_, err = io.Copy(outFile, cliFile)
 			if err != nil {
 				return err

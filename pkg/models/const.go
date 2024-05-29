@@ -20,7 +20,7 @@ const (
 )
 
 const (
-	Unknown config.Language = "Unknown"
+	Unknown config.Language = "Unknown" // Unknown language
 	Go      config.Language = "Go"
 	Java    config.Language = "Java"
 	Python  config.Language = "Python"
