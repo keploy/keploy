@@ -32,6 +32,7 @@ type Service interface {
 	RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError
 	ProvideMocks(ctx context.Context) error
 	Normalize(ctx context.Context) error
+	NormalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIds []string,testResult []models.TestResult) error
 }
 
 type TestDB interface {

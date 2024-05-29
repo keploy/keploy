@@ -753,7 +753,7 @@ func (r *Replayer) Normalize(ctx context.Context) error {
 	for _, testSet := range r.config.Normalize.SelectedTests {
 		testSetID := testSet.TestSet
 		testCases := testSet.Tests
-		err := r.normalizeTestCases(ctx, testRun, testSetID, testCases)
+		err := r.NormalizeTestCases(ctx, testRun, testSetID, testCases, nil)
 		if err != nil {
 			return err
 		}
@@ -762,13 +762,19 @@ func (r *Replayer) Normalize(ctx context.Context) error {
 	return nil
 }
 
-func (r *Replayer) normalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIds []string) error {
+func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIds []string, testCaseResults []models.TestResult) error {
 
-	testReport, err := r.reportDB.GetReport(ctx, testRun, testSetID)
-	if err != nil {
-		return fmt.Errorf("failed to get test report: %w", err)
+	// if we are getting from parameter then we need to get the testReport
+	if testCaseResults == nil || len(testCaseResults) == 0 {
+		testReport, err := r.reportDB.GetReport(ctx, testRun, testSetID)
+		// TODO: if it has applied testReport for 
+		if err != nil { 
+			return fmt.Errorf("failed to get test report: %w", err)
+		}
+
+		testCaseResults = testReport.Tests
 	}
-	testCaseResults := testReport.Tests
+
 	testCaseResultMap := make(map[string]models.TestResult)
 
 	testCases, err := r.testDB.GetTestCases(ctx, testSetID)
@@ -787,6 +793,7 @@ func (r *Replayer) normalizeTestCases(ctx context.Context, testRun string, testS
 		}
 	}
 
+	// you will directly get this from the graphql
 	for _, testCaseResult := range testCaseResults {
 		testCaseResultMap[testCaseResult.TestCaseID] = testCaseResult
 	}

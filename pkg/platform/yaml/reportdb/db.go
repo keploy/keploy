@@ -64,6 +64,7 @@ func (fe *TestReport) GetTestCaseResults(_ context.Context, testRunID string, te
 }
 
 func (fe *TestReport) GetReport(ctx context.Context, testRunID string, testSetID string) (*models.TestReport, error) {
+	fmt.Println("PAth is ", fe.Path)
 	path := filepath.Join(fe.Path, testRunID)
 	reportName := testSetID + "-report"
 	_, err := yaml.ValidatePath(filepath.Join(path, reportName+".yaml"))
@@ -72,7 +73,7 @@ func (fe *TestReport) GetReport(ctx context.Context, testRunID string, testSetID
 	}
 	data, err := yaml.ReadFile(ctx, fe.Logger, path, reportName)
 	if err != nil {
-		utils.LogError(fe.Logger, err, "failed to read the mocks from config yaml", zap.Any("session", filepath.Base(path)))
+		utils.LogError(fe.Logger, err, "failed to read the testset report ", zap.Any("session", filepath.Base(path)))
 		return nil, err
 	}
 

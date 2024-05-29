@@ -177,6 +177,71 @@ func (r *mutationResolver) StopHooks(context.Context) (bool, error) {
 	return true, nil
 }
 
+// NormaliseTc
+func (r *mutationResolver) NormaliseTc(ctx context.Context, normalizeInput model.NormalizeInput) (*model.NormaliseOutput, error) {
+	// have to write conversions from gql to normal models
+	var testResult []models.TestResult
+	// convert the body Result to models.BodyResult
+	// var bodyResult []models.BodyResult
+	// for _, v := range normalizeInput.TcReport {
+
+	// }
+
+	for _, v := range normalizeInput.TcReport {
+		var headerResult []models.HeaderResult
+		bodyResult := make([]models.BodyResult, 1)
+		for _, header := range v.TestResults.HeadersResult {
+
+			headerResult = append(headerResult, models.HeaderResult{
+				Normal: header.Normal,
+				Expected: models.Header{
+					Key:   header.Expected,
+					Value: []string{"blah-blah"}, // need to add the value
+				},
+				Actual: models.Header{
+					Key:   header.Actual,
+					Value: []string{"blah-blah"}, // need to add the value
+				},
+			})
+		}
+
+		bodyResult[0] = models.BodyResult{
+			Normal:   v.TestResults.BodyResult.Normal,
+			Type:     models.BodyType(v.TestResults.BodyResult.Type),
+			Expected: v.TestResults.BodyResult.Expected,
+			Actual:   v.TestResults.BodyResult.Actual,
+		}
+
+		testResult = append(testResult, models.TestResult{
+			Kind:   models.Kind(*v.Testcase.Kind),
+			Name:   *v.Testcase.Name,
+			Status: models.TestStatus(v.Status),
+			Result: models.Result{
+				StatusCode:    models.IntResult(*v.TestResults.StatusResult),
+				BodyResult:    bodyResult,
+				HeadersResult: headerResult,
+			},
+		},
+		)
+
+	}
+	err := r.replay.NormalizeTestCases(ctx, normalizeInput.TestRunID, normalizeInput.TestSetID, normalizeInput.TestCaseIDs, testResult)
+	// after that change the status to success for that particular testcase, and if it was the only failed testcase then change the status of the testSet to success
+	// send the updated report to api server
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to normalize test cases")
+		err := err.Error()
+		return &model.NormaliseOutput{
+			Status:   false,
+			ErrorMsg: &err,
+		}, errors.New("failed to normalize test cases")
+	}
+	return &model.NormaliseOutput{
+		Status:   true,
+		ErrorMsg: nil,
+	}, nil
+}
+
 // Mutation returns MutationResolver implementation.
 func (r *Resolver) Mutation() MutationResolver { return &mutationResolver{r} }
 

@@ -335,6 +335,7 @@ func (r *Recorder) StartMock(ctx context.Context) error {
 	return fmt.Errorf(stopReason)
 }
 
+//
 func (r *Recorder) ReRecord(ctx context.Context, appID uint64) error {
 
 	tcs, err := r.testDB.GetTestCases(ctx, r.config.ReRecord)

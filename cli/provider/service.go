@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
@@ -64,6 +65,8 @@ func (n *ServiceProvider) GetCommonServices(config config.Config) *CommonInterna
 	instrumentation := core.New(n.logger, h, p, t)
 	testDB := testdb.New(n.logger, config.Path)
 	mockDB := mockdb.New(n.logger, config.Path, "")
+
+	fmt.Println("config.Path", config.Path)
 	reportDB := reportdb.New(n.logger, config.Path+"/reports")
 	return &CommonInternalService{
 		Instrumentation: instrumentation,
@@ -84,6 +87,7 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 		return tools.NewTools(n.logger, tel), nil
 	// TODO: add case for mock
 	case "record", "test", "mock", "normalize":
+		fmt.Println("Getting common services", cmd)
 		commonServices := n.GetCommonServices(*n.cfg)
 		if cmd == "record" {
 			return record.New(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, *n.cfg), nil

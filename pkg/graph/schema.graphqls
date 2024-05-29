@@ -17,10 +17,358 @@ type Query {
   testSetStatus(testRunId: String!, testSetId: String!): TestSetStatus!
 }
 
+type User {
+  id: ID!
+  name: String!
+  email: String!
+  role: UserRole!
+  apiKey: String!
+  createdBy: String! # email of admin whose sso used to create this user
+  createdAt: String!
+  status: UserStatus!
+  cid: String!
+}
+
+input UserInput {
+  name: String!
+  email: String!
+  role: UserRole!
+}
+
+enum UserRole {
+  ADMIN
+  USER
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+}
+
+type App {
+  id: ID!
+  name: String!
+  initScript: String!
+  keployConfig: String!
+  createdBy: User!
+  testsetCount: Int!
+}
+
+input AppInput {
+  name: String!
+  initScripts: String!
+  keployConfig: String!
+}
+
+type TestSet {
+  id: ID!
+  name: String!
+  testcaseCount: Int!
+  createdBy: User!
+  createdAt: Time!
+  appId: String!
+}
+
+input TestSetInput {
+  id: ID!
+  name: String
+  appId: String
+}
+
+type TestCase {
+  id: ID!
+  createdAt: Time!
+  updatedAt: Time
+  capturedAt: Time
+  createdBy: User!
+  version: String!
+  testSetId: String!
+  name: String!
+  assertions: String! # type will be json {"noise":}
+  httpReq: HttpReq!
+  httpResp: HttpResp!
+  kind: String
+}
+
+input TestCaseInput {
+  id: String!
+  version: String
+  name: String
+  assertions: String # type will be json {"noise":}
+  httpReq: HttpReqInput
+  httpResp: HttpRespInput
+  testSetId: String
+  Kind: String
+  Captured: Int
+}
+
+input MockInput{
+  id: ID!
+  name: String
+  version: String
+  kind: String
+  testSetId: String
+  Spec: String! # json for the spec
+}
+
+input HttpReqInput {
+  protoMajor: Int
+  protoMinor: Int
+  url: String
+  urlParam: String # json object
+  header: String # json object
+  method: Method
+  body: String
+  bodyType: BodyType
+  binary: String
+  timestamp: Time
+  host: String
+}
+
+type HttpReq {
+  protoMajor: Int!
+  protoMinor: Int!
+  url: String!
+  urlParam: String! # json object
+  header: String! # json object
+  method: Method!
+  body: String!
+  bodyType: BodyType!
+  timestamp: Time
+}
+
+input HttpRespInput {
+  statusCode: Int
+  header: String # json object
+  body: String
+  bodyType: BodyType
+  protoMajor: Int
+  protoMinor: Int
+  StatusMessage: String
+  Binary: String
+  Timestamp: Time
+}
+
+type HttpResp {
+  statusCode: Int!
+  header: String! # json object
+  body: String!
+  bodyType: BodyType
+  protoMajor: Int!
+  protoMinor: Int!
+  timestamp: Time
+}
+
+enum Method {
+  GET
+  PUT
+  HEAD
+  POST
+  PATCH
+  DELETE
+  OPTIONS
+  TRACE
+}
+
+enum BodyType {
+  PLAIN
+  JSON
+}
+
+type MutationResult {
+  id: String!
+  status: Boolean!
+  errorMsg: String
+}
+
+type Mocks {
+  id: ID!
+  name: String!
+  createdBy: User!
+  version: String!
+  kind: String!
+  testSetId: String!
+  testcaseId: String
+  Spec: String! # json for the spec
+}
+
+input DeleteMockInput {
+ testSetId: String!
+ kind: String!
+}
+
+input CmdInput {
+  appId: String! # user app for which keploy cli has to be executed
+  jwtToken: String! # jwt token of the user
+  jobId: String # job id for stopping the running cmd
+  cmd: Cmd!
+}
+
+type CmdOutput {
+  status: Boolean!
+  cmdId: String
+  logs: String
+  errorMsg: String
+}
+
+enum Cmd {
+  RecordStart
+  RecordStop
+  TestStart
+  TestStop
+}
+
+type TestReport {
+ id: ID!
+ name: String!
+ testSetsPassed: Int!
+ testSetsFailed: Int!
+ totalTestSets: Int!
+ status: TestRunStatus!
+ app: App! # user application
+ ranBy: User!
+}
+
+input TestReportInput {
+ id: ID!
+ name: String
+ totalTestSets: Int
+ status: TestRunStatus!
+ appId: ID! # user application
+}
+
+type TestSetReport {
+ id: ID!
+ name: String!
+ numberOfTcsPassed: Int!
+ numberOfTcsFailed: Int!
+ totalTcs: Int!
+ status: TestRunStatus!
+ testSet: TestSet!
+ testRunId: String! # should i need the reference of the parent document in frontend?
+}
+
+input TestSetReportInput {
+ id: ID!
+ numberOfTcsPassed: Int!
+ numberOfTcsFailed: Int!
+ totalTcs: Int!
+ status: TestRunStatus!
+ Version: String!
+ testSetId: ID! 
+ testRunId: ID! # should i need the reference of the parent document in frontend?
+}
+
+
+type TestCaseReport {
+ id: ID!
+ name: String!
+ status: TestRunStatus!
+ testcase: TestCase!
+ testResults: Result
+ testSetReportId: String!
+}
+
+input TestCaseReportInput {
+  id: ID!
+  # name: String!
+  status: TestRunStatus!
+  testcase: TestCaseInput!
+  testResults: ResultInput!
+  testSetReportId: String!
+  startedAt: Time!
+  completedAt: Time!
+}
+
+type Result {
+  statusResult: IntResult!
+  headersResult: [HeaderResult]
+  bodyResult: BodyResult!
+}
+
+input ResultInput {
+  statusResult: IntResultInput!
+  headersResult: [HeaderResultInput]
+  bodyResult: BodyResultInput!
+}
+
+type IntResult {
+  normal: Boolean!
+  expected: Int!
+  actual: Int!
+}
+
+input IntResultInput {
+  normal: Boolean!
+  expected: Int!
+  actual: Int!
+}
+
+input GuestInput {
+  # first_name,lastname, string, company ,email
+  fullName: String
+  message: String!
+  company: String
+  email: String!
+}
+
+
+type HeaderResult {
+  normal: Boolean!
+  key: String!
+  expected: String!
+  actual: String!
+}
+
+input HeaderResultInput {
+  normal: Boolean!
+  key: String!
+  expected: String!
+  actual: String!
+}
+
+type BodyResult {
+  normal: Boolean!
+  type: BodyType!
+  expected: String!
+  actual: String!
+}
+
+input BodyResultInput {
+  normal: Boolean!
+  type: BodyType!
+  expected: String!
+  actual: String!
+}
+
+enum TestRunStatus {
+ RUNNING
+ FAILED
+ PASSED
+}
+
+input NormalizeInput {
+  testRunId: String!
+  testSetId: String!
+  TestCaseIDs: [String!]!
+  appId: String!
+  tcReport: [TestCaseReportInput!]
+}
+
+type NormaliseOutput {
+  status: Boolean!
+  errorMsg: String
+}
+
 type Mutation {
   runTestSet(testSetId: String!, testRunId: String!, appId: Int!): Boolean!
   startHooks: TestRunInfo!
   startApp(appId: Int!): Boolean!
   stopHooks: Boolean!
   stopApp(appId: Int!): Boolean!
+  normaliseTc(normalize: NormalizeInput!): NormaliseOutput!
+  # noiseTestCase(testRunId: String!, appId: Int!): Boolean!
 }
+
+
+scalar Time
