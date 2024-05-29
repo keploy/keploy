@@ -90,7 +90,7 @@ func CalculateAndInsertTestCoverage(ctx context.Context, logger *zap.Logger, rep
 	case models.Node:
 		coverageData, err = CalTypescriptCoverage()
 	case models.Java:
-		coverageData, err = CalJavaCoverage()
+		coverageData, err = CalJavaCoverage(logger)
 	}
 	if err != nil {
 		utils.LogError(logger, err, "failed to calculate coverage for the test run")
@@ -463,7 +463,7 @@ func getCoverageFilePathsTypescript(path string) ([]string, error) {
 	return filePaths, nil
 }
 
-func CalJavaCoverage() (models.TestCoverage, error) {
+func CalJavaCoverage(logger *zap.Logger) (models.TestCoverage, error) {
 	testCov := models.TestCoverage{
 		FileCov:  make(map[string]string),
 		TotalCov: "",
@@ -476,7 +476,11 @@ func CalJavaCoverage() (models.TestCoverage, error) {
 	if err != nil {
 		return testCov, fmt.Errorf("failed to open CSV file: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			utils.LogError(logger, err, "Error closing coverage csv file")
+		}
+	}()
 
 	reader := csv.NewReader(file)
 	records, err := reader.ReadAll()

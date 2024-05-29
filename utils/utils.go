@@ -792,8 +792,8 @@ func RunCommand(cmdString ...string) error {
 	return err
 }
 
-// TODO: use native approach till https://github.com/golang/go/issues/67366 gets resolved
 // CheckGoBinaryForCoverFlag checks if the given Go binary has the coverage flag enabled
+// TODO: use native approach till https://github.com/golang/go/issues/67366 gets resolved
 func CheckGoBinaryForCoverFlag(logger *zap.Logger, cmd string) bool {
 	file, err := elf.Open(cmd)
 	if err != nil {
@@ -929,7 +929,7 @@ func DownloadAndExtractJaCoCoCli(logger *zap.Logger, version, dir string) error 
 					LogError(logger, err, "failed to close jacoco cli jar file")
 				}
 			}()
-		
+
 			outFile, err := os.Create(cliPath)
 			if err != nil {
 				return err
@@ -939,7 +939,7 @@ func DownloadAndExtractJaCoCoCli(logger *zap.Logger, version, dir string) error 
 					LogError(logger, err, "failed to close the output file for jacoco cli jar")
 				}
 			}()
-		
+
 			_, err = io.Copy(outFile, cliFile)
 			if err != nil {
 				return err
