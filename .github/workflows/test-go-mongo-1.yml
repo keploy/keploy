@@ -40,7 +40,7 @@ jobs:
       - name: Build the gin-mongo application
         run: |
           cd samples-go/gin-mongo
-          go build -o ginApp .
+          go build  -tags=viper_bind_struct -o ginApp .
           
       # add the noisy fields in the config file if any.
       - name: Add noisy fields in the config file
