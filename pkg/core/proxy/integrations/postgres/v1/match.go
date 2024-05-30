@@ -738,10 +738,9 @@ func LaevensteinDistance(str1, str2 string) bool {
 	// Check if similarity is greater than 90%
 	if similarity > 90 {
 		return true
-	} else {
-		// fmt.Printf("The strings are not more than 90%% similar.\n")
-		return false
 	}
+	return false
+
 }
 
 // make this in such a way if it returns -1 then we will continue with the original mock
