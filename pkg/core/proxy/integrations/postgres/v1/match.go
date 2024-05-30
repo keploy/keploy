@@ -736,10 +736,7 @@ func LaevensteinDistance(str1, str2 string) bool {
 	similarity := (1 - float64(distance)/float64(maxLength)) * 100
 
 	// Check if similarity is greater than 90%
-	if similarity > 90 {
-		return true
-	}
-	return false
+	return similarity > 90
 
 }
 
