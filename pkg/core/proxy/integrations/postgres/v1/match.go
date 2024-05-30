@@ -7,7 +7,9 @@ import (
 	"math"
 	"reflect"
 	"strings"
+	"sync"
 
+	"github.com/agnivade/levenshtein"
 	"github.com/jackc/pgproto3/v2"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
@@ -62,7 +64,7 @@ func IsValuePresent(connectionid string, value string) bool {
 	return false
 }
 
-func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers [][]byte, mockDb integrations.MockMemDb) (bool, []models.Frontend, error) {
+func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mutex, requestBuffers [][]byte, mockDb integrations.MockMemDb) (bool, []models.Frontend, error) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -103,6 +105,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 					continue
 				}
 
+				mutex.Lock()
 				if sortFlag {
 					if !mock.TestModeInfo.IsFiltered {
 						sortFlag = false
@@ -110,6 +113,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 						sortedTcsMocks = append(sortedTcsMocks, mock)
 					}
 				}
+				mutex.Unlock()
 
 				initMock := *mock
 				if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
@@ -205,7 +209,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 				getTestPS(requestBuffers, logger, ConnectionID)
 			}
 
-			logger.Debug("Sorted Mocks: ", zap.Any("Len of sortedTcsMocks", len(sortedTcsMocks)))
+			logger.Debug("Sorted Mocks inside pg parser: ", zap.Any("Len of sortedTcsMocks", len(sortedTcsMocks)))
 
 			var matched, sorted bool
 			var idx int
@@ -220,12 +224,15 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 					if newMock != nil {
 						matchedMock = newMock
 					}
+					logger.Debug("Matched In Sorted PG Matching Stream", zap.String("mock", matchedMock.Name))
 				}
-				idx = findBinaryStreamMatch(logger, sortedTcsMocks, requestBuffers, sorted)
-				if idx != -1 && !matched {
-					matched = true
-					matchedMock = tcsMocks[idx]
-				}
+
+				// idx = findBinaryStreamMatch(logger, sortedTcsMocks, requestBuffers, sorted)
+				// if idx != -1 && !matched {
+				// 	matched = true
+				// 	matchedMock = tcsMocks[idx]
+				// 	fmt.Println("Matched In Binary Matching for Sorted", matchedMock.Name)
+				// }
 			}
 
 			if !matched {
@@ -237,6 +244,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 					if newMock != nil {
 						matchedMock = newMock
 					}
+					logger.Debug("Matched In Unsorted PG Matching Stream", zap.String("mock", matchedMock.Name))
 				}
 				idx = findBinaryStreamMatch(logger, tcsMocks, requestBuffers, sorted)
 				// check if the validate the query with the matched mock
@@ -252,7 +260,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 					if newMock != nil && !isValid {
 						matchedMock = newMock
 					}
-					// fmt.Println("Matched In Binary Matching for Unsorted", matchedMock.Name)
+					logger.Debug("Matched In Binary Matching for Unsorted", zap.String("mock", matchedMock.Name))
 				}
 			}
 
@@ -707,7 +715,11 @@ func compareExactMatch(mock *models.Mock, actualPgReq *models.Backend, logger *z
 				return false, nil
 			}
 		case "Q":
-			if actualPgReq.Query != mock.Spec.PostgresRequests[0].Query {
+			if actualPgReq.Query.String != mock.Spec.PostgresRequests[0].Query.String {
+				if LaevensteinDistance(actualPgReq.Query.String, mock.Spec.PostgresRequests[0].Query.String) {
+					logger.Debug("The strings are more than 90%% similar.")
+				}
+
 				return false, nil
 			}
 		default:
@@ -715,6 +727,17 @@ func compareExactMatch(mock *models.Mock, actualPgReq *models.Backend, logger *z
 		}
 	}
 	return true, nil
+}
+
+func LaevensteinDistance(str1, str2 string) bool {
+	// Compute the Levenshtein distance
+	distance := levenshtein.ComputeDistance(str1, str2)
+	maxLength := max(len(str1), len(str2))
+	similarity := (1 - float64(distance)/float64(maxLength)) * 100
+
+	// Check if similarity is greater than 90%
+	return similarity > 90
+
 }
 
 // make this in such a way if it returns -1 then we will continue with the original mock
