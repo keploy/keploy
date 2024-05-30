@@ -4,6 +4,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -74,7 +75,6 @@ func (cp *CoverageProcessor) VerifyReportUpdate(timeOfTestCommand int64) error {
 
 // ParseCoverageReport parses the coverage report based on its type
 func (cp *CoverageProcessor) ParseCoverageReport() ([]int, []int, float64, error) {
-	fmt.Println(cp.CoverageType)
 	switch cp.CoverageType {
 	case "cobertura":
 		return cp.ParseCoverageReportCobertura()
@@ -85,45 +85,63 @@ func (cp *CoverageProcessor) ParseCoverageReport() ([]int, []int, float64, error
 	}
 }
 
-// ParseCoverageReportCobertura parses a Cobertura XML code coverage report
+type Coverage struct {
+	XMLName  xml.Name  `xml:"coverage"`
+	Sources  []string  `xml:"sources>source"`
+	Packages []Package `xml:"packages>package"`
+}
+
+type Package struct {
+	Name    string  `xml:"name,attr"`
+	Classes []Class `xml:"classes>class"`
+}
+
+type Class struct {
+	Name     string `xml:"name,attr"`
+	FileName string `xml:"filename,attr"`
+	Lines    []Line `xml:"lines>line"`
+}
+
+type Line struct {
+	Number int `xml:"number,attr"`
+	Hits   int `xml:"hits,attr"`
+}
+
 func (cp *CoverageProcessor) ParseCoverageReportCobertura() ([]int, []int, float64, error) {
+	// Open the XML file
 	xmlFile, err := os.Open(cp.FilePath)
 	if err != nil {
 		return nil, nil, 0, err
 	}
 	defer xmlFile.Close()
 
-	var root struct {
-		Classes []struct {
-			Filename string `xml:"filename,attr"`
-			Lines    []struct {
-				Number int `xml:"number,attr"`
-				Hits   int `xml:"hits,attr"`
-			} `xml:"line"`
-		} `xml:"class"`
-	}
-	if err := xml.NewDecoder(xmlFile).Decode(&root); err != nil {
+	// Decode the XML file into a Coverage struct
+	var cov Coverage
+	if err := xml.NewDecoder(xmlFile).Decode(&cov); err != nil {
 		return nil, nil, 0, err
 	}
 
-	linesCovered := []int{}
-	linesMissed := []int{}
-
-	for _, class := range root.Classes {
-		if class.Filename == cp.Filename {
-			for _, line := range class.Lines {
-				if line.Hits > 0 {
-					linesCovered = append(linesCovered, line.Number)
-				} else {
-					linesMissed = append(linesMissed, line.Number)
+	// Find coverage for the specified file
+	var linesCovered, linesMissed []int
+	var totalLines, coveredLines int
+	for _, pkg := range cov.Packages {
+		for _, cls := range pkg.Classes {
+			if strings.HasSuffix(cls.FileName, cp.Filename) {
+				for _, line := range cls.Lines {
+					totalLines++
+					if line.Hits > 0 {
+						coveredLines++
+						linesCovered = append(linesCovered, line.Number)
+					} else {
+						linesMissed = append(linesMissed, line.Number)
+					}
 				}
+				break
 			}
-			break
 		}
 	}
 
-	totalLines := len(linesCovered) + len(linesMissed)
-	coveragePercentage := 0.0
+	var coveragePercentage float64
 	if totalLines > 0 {
 		coveragePercentage = float64(len(linesCovered)) / float64(totalLines)
 	}

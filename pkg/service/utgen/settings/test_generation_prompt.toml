@@ -4,7 +4,7 @@ system="""\
 
 user="""\
 ## Overview
-You are a code assistant that accepts a {{ language }} source file, and a {{ language }} test file.
+You are a code assistant that accepts a {{ .language }} source file, and a {{ .language }} test file.
 Your goal is to generate additional unit tests to complement the existing test suite, in order to increase the code coverage against the source file.
 
 Additional guidelines:
@@ -15,40 +15,40 @@ Additional guidelines:
 
 
 ## Source File
-Here is the source file that you will be writing tests against, called `{{ source_file_name }}`.
+Here is the source file that you will be writing tests against, called `{{ .source_file_name }}`.
 Note that we have manually added line numbers for each line of code, to help you understand the code coverage report.
 Those numbers are not a part of the original code.
 =========
-{{ source_file_numbered|trim }}
+{{ .source_file_numbered | trim }}
 =========
 
 
 ## Test File
-Here is the file that contains the existing tests, called `{{ test_file_name }}`.
+Here is the file that contains the existing tests, called `{{ .test_file_name }}`.
 =========
-{{ test_file| trim }}
+{{ .test_file | trim }}
 =========
 
 
-{%- if additional_includes_section|trim %}
-{{ additional_includes_section|trim }}
+{%- if additional_includes_section | trim %}
+{{ .additional_includes_section | trim }}
 {% endif %}
 
-{%- if failed_tests_section|trim  %}
+{%- if failed_tests_section | trim  %}
 
-{{ failed_tests_section|trim }}
+{{ .failed_tests_section | trim }}
 {% endif %}
 
-{%- if additional_instructions_text|trim  %}
+{%- if additional_instructions_text | trim  %}
 
-{{ additional_instructions_text|trim }}
+{{ .additional_instructions_text | trim }}
 {% endif %}
 
 
 ## Code Coverage
 The following is the existing code coverage report. Use this to determine what tests to write, as you should only write tests that increase the overall coverage:
 =========
-{{ code_coverage_report|trim }}
+{{ .code_coverage_report| trim }}
 =========
 
 
@@ -69,12 +69,12 @@ class SingleTest(BaseModel):
 class NewTests(BaseModel):
     language: str = Field(description="The programming language of the source code")
     existing_test_function_signature: str = Field(description="A single line repeating a signature header of one of the existing test functions")
-    new_tests: List[SingleTest] = Field(min_items=1, max_items={{ max_tests }}, description="A list of new test functions to append to the existing test suite, aiming to increase the code coverage. Each test should run as-is, without requiring any additional inputs or setup code. Don't introduce new dependencies")
+    new_tests: List[SingleTest] = Field(min_items=1, max_items={{ .max_tests }}, description="A list of new test functions to append to the existing test suite, aiming to increase the code coverage. Each test should run as-is, without requiring any additional inputs or setup code. Don't introduce new dependencies")
 =====
 
 Example output:
 ```yaml
-language: {{ language }}
+language: {{ .language }}
 existing_test_function_signature: |
   ...
 new_tests:
@@ -102,9 +102,9 @@ new_tests:
 Use block scalar('|') to format each YAML output.
 
 
-{%- if additional_instructions_text|trim  %}
+{%- if additional_instructions_text| trim  %}
 
-{{ additional_instructions_text|trim }}
+{{ .additional_instructions_text| trim }}
 {% endif %}
 
 

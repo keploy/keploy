@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/spf13/viper"
+	"go.keploy.io/server/v2/pkg/service/utgen/settings"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v2"
 )
@@ -25,13 +25,31 @@ type TestResult struct {
 }
 
 type TestsDetails struct {
-	TestTags                        []string     `yaml:"test_tags"`
-	TestCode                        string       `yaml:"test_code"`
-	TestName                        string       `yaml:"test_name"`
-	TestBehavior                    string       `yaml:"test_behavior"`
-	NewTests                        []TestResult `yaml:"new_tests"`
-	TestHeadersIndentation          int          `yaml:"test_headers_indentation"`
-	RelevantLineNumberToInsertAfter int          `yaml:"relevant_line_number_to_insert_after"`
+	Language                       string  `yaml:"language"`
+	ExistingTestsFunctionSignature string  `yaml:"existing_test_function_signature"`
+	NewTests                       []Tests `yaml:"new_tests"`
+}
+
+type Tests struct {
+	TestBehavior   string `yaml:"test_behavior"`
+	TestName       string `yaml:"test_name"`
+	TestCode       string `yaml:"test_code"`
+	NewImportsCode string `yaml:"new_imports_code"`
+	TestsTags      string `yaml:"tests_tags"`
+}
+
+type TestHeader struct {
+	Language               string `yaml:"language"`
+	TestingFramework       string `yaml:"testing_framework"`
+	NumberOfTests          int    `yaml:"number_of_tests"`
+	TestHeadersIndentation int    `yaml:"test_headers_indentation"`
+}
+
+type TestLine struct {
+	Language                        string `yaml:"language"`
+	TestingFramework                string `yaml:"testing_framework"`
+	NumberOfTests                   int    `yaml:"number_of_tests"`
+	RelevantLineNumberToInsertAfter int    `yaml:"relevant_line_number_to_insert_after"`
 }
 
 type UnitTestGenerator struct {
@@ -55,9 +73,7 @@ type UnitTestGenerator struct {
 	maxIterations          int
 }
 
-func NewUnitTestGenerator(sourceFilePath, testFilePath, codeCoverageReportPath, testCommand, llmModel, apiBase, testCommandDir, coverageType string, desiredCoverage float64, maxIterations int, logger *zap.Logger) (*UnitTestGenerator, error) {
-	fmt.Println(testCommand)
-	fmt.Println(codeCoverageReportPath)
+func NewUnitTestGenerator(sourceFilePath, testFilePath, codeCoverageReportPath, testCommand, testCommandDir, coverageType string, desiredCoverage float64, maxIterations int, logger *zap.Logger) (*UnitTestGenerator, error) {
 	generator := &UnitTestGenerator{
 		sourceFilePath:         sourceFilePath,
 		testFilePath:           testFilePath,
@@ -68,7 +84,7 @@ func NewUnitTestGenerator(sourceFilePath, testFilePath, codeCoverageReportPath, 
 		desiredCoverage:        desiredCoverage,
 		maxIterations:          maxIterations,
 		language:               GetCodeLanguage(sourceFilePath),
-		aiCaller:               NewAICaller(llmModel, apiBase),
+		aiCaller:               NewAICaller("gpt-4o", "http://localhost:11434"),
 		logger:                 logger,
 		failedTestRuns:         []map[string]interface{}{},
 	}
@@ -86,15 +102,14 @@ func NewUnitTestGenerator(sourceFilePath, testFilePath, codeCoverageReportPath, 
 	return generator, nil
 }
 
-func (g *UnitTestGenerator) Start() {
+func (g *UnitTestGenerator) Start() error {
 	iterationCount := 0
 	var testResultsList []TestResult
-	g.currentCoverage = 0.0
 
 	// Initial analysis of the test suite
 	if err := g.InitialTestSuiteAnalysis(); err != nil {
 		g.logger.Error(fmt.Sprintf("Error during initial test suite analysis: %s", err))
-		return
+		return err
 	}
 
 	// Run continuously until desired coverage has been met or we've reached the maximum iteration count
@@ -106,7 +121,7 @@ func (g *UnitTestGenerator) Start() {
 		testsDetails, err := g.GenerateTests()
 		if err != nil {
 			g.logger.Error(fmt.Sprintf("Error generating tests: %s", err))
-			return
+			return err
 		}
 
 		// Validate each test and append the results to the test results list
@@ -114,7 +129,7 @@ func (g *UnitTestGenerator) Start() {
 			testResult, err := g.ValidateTest(generatedTest, testsDetails)
 			if err != nil {
 				g.logger.Error(fmt.Sprintf("Error validating test: %s", err))
-				return
+				return err
 			}
 			testResultsList = append(testResultsList, testResult)
 		}
@@ -126,7 +141,7 @@ func (g *UnitTestGenerator) Start() {
 		if g.currentCoverage < (g.desiredCoverage / 100) {
 			if err := g.runCoverage(); err != nil {
 				g.logger.Error(fmt.Sprintf("Error running coverage: %s", err))
-				return
+				return err
 			}
 		}
 	}
@@ -138,6 +153,7 @@ func (g *UnitTestGenerator) Start() {
 	}
 
 	GenerateReport(testResultsList, "test_results.html")
+	return nil
 }
 
 func GetCodeLanguage(sourceFilePath string) string {
@@ -145,8 +161,10 @@ func GetCodeLanguage(sourceFilePath string) string {
 	// Create a map to hold the language extensions
 	languageExtensionMapOrg := make(map[string][]string)
 
+	setting := settings.GetSettings()
+
 	// Unmarshal the language_extension_map_org section into the map
-	if err := viper.UnmarshalKey("language_extension_map_org", &languageExtensionMapOrg); err != nil {
+	if err := setting.UnmarshalKey("language_extension_map_org", &languageExtensionMapOrg); err != nil {
 		log.Fatalf("Error unmarshaling language extension map, %s", err)
 	}
 
@@ -170,6 +188,7 @@ func GetCodeLanguage(sourceFilePath string) string {
 	if val, ok := extensionToLanguage[extensionS]; ok {
 		languageName = val
 	}
+
 	// Return the language name in lowercase
 	return strings.ToLower(languageName)
 }
@@ -247,7 +266,7 @@ func analyzeTestHeadersIndentation(promptBuilder *PromptBuilder, aiCaller *AICal
 		if err != nil {
 			return 0, fmt.Errorf("error calling AI model: %w", err)
 		}
-		testsDetails := unmarshalYaml(response)
+		testsDetails := unmarshalYamlTestHeaders(response)
 		if testsDetails.TestHeadersIndentation != 0 {
 			testHeadersIndentation, err = convertToInt(testsDetails.TestHeadersIndentation)
 			if err != nil {
@@ -274,7 +293,7 @@ func analyzeRelevantLineNumberToInsertAfter(promptBuilder *PromptBuilder, aiCall
 		if err != nil {
 			return 0, fmt.Errorf("error calling AI model: %w", err)
 		}
-		testsDetails := unmarshalYaml(response)
+		testsDetails := unmarshalYamlTestLine(response)
 		if testsDetails.RelevantLineNumberToInsertAfter != 0 {
 			relevantLineNumberToInsertAfter, err = convertToInt(testsDetails.RelevantLineNumberToInsertAfter)
 			if err != nil {
@@ -295,12 +314,12 @@ func (g *UnitTestGenerator) GenerateTests() (*TestsDetails, error) {
 		return &TestsDetails{}, fmt.Errorf("error calling AI model: %w", err)
 	}
 	g.logger.Info(fmt.Sprintf("Total token used count for LLM model %s: %d", g.aiCaller.Model, promptTokenCount+responseTokenCount))
-	testsDetails := unmarshalYaml(response)
+	testsDetails := unmarshalYamlTestDetails(response)
 	return testsDetails, nil
 }
 
-func (g *UnitTestGenerator) ValidateTest(generatedTest TestResult, testsDetails *TestsDetails) (TestResult, error) {
-	testCode := strings.TrimSpace(generatedTest.Test)
+func (g *UnitTestGenerator) ValidateTest(generatedTest Tests, testsDetails *TestsDetails) (TestResult, error) {
+	testCode := strings.TrimSpace(generatedTest.TestCode)
 	relevantLineNumberToInsertAfter := g.relevantLineNumber
 	neededIndent := g.testHeadersIndentation
 	testCodeIndented := testCode
@@ -330,10 +349,7 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest TestResult, testsDetails 
 
 		// Run the test using the Runner class
 		g.logger.Info(fmt.Sprintf("Running test with the following command: '%s'", g.testCommand))
-		stdout, stderr, exitCode, timeOfTestCommand, err := RunCommand(g.testCommand, g.testCommandDir)
-		if err != nil {
-			return TestResult{}, fmt.Errorf("error running command '%s': %w", g.testCommand, err)
-		}
+		stdout, stderr, exitCode, timeOfTestCommand, _ := RunCommand(g.testCommand, g.testCommandDir)
 
 		if exitCode != 0 {
 			// Test failed, roll back the test file to its original content
@@ -347,10 +363,10 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest TestResult, testsDetails 
 				ExitCode: exitCode,
 				Stderr:   stderr,
 				Stdout:   stdout,
-				Test:     generatedTest.Test,
+				Test:     generatedTest.TestCode,
 			}
 			g.failedTestRuns = append(g.failedTestRuns, map[string]interface{}{
-				"test_code":     generatedTest.Test,
+				"test_code":     generatedTest.TestCode,
 				"error_message": extractErrorMessagePython(stdout),
 			})
 			return failDetails, nil
@@ -374,10 +390,10 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest TestResult, testsDetails 
 				ExitCode: exitCode,
 				Stderr:   stderr,
 				Stdout:   stdout,
-				Test:     generatedTest.Test,
+				Test:     generatedTest.TestCode,
 			}
 			g.failedTestRuns = append(g.failedTestRuns, map[string]interface{}{
-				"test_code":     generatedTest.Test,
+				"test_code":     generatedTest.TestCode,
 				"error_message": extractErrorMessagePython(stdout),
 			})
 			return failDetails, nil
@@ -389,21 +405,51 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest TestResult, testsDetails 
 			ExitCode: exitCode,
 			Stderr:   stderr,
 			Stdout:   stdout,
-			Test:     generatedTest.Test,
+			Test:     generatedTest.TestCode,
 		}, nil
 	}
 	return TestResult{}, nil
 }
 
-func unmarshalYaml(yamlStr string) *TestsDetails {
+func unmarshalYamlTestDetails(yamlStr string) *TestsDetails {
 	yamlStr = strings.TrimSpace(yamlStr)
-	yamlStr = strings.TrimPrefix(yamlStr, "yaml")
+	yamlStr = strings.TrimPrefix(yamlStr, "```yaml")
+	yamlStr = strings.TrimSuffix(yamlStr, "```")
 	var data *TestsDetails
 	err := yaml.Unmarshal([]byte(yamlStr), &data)
 	if err != nil {
+		fmt.Println(err)
 		return nil
 	}
 	return data
+}
+
+func unmarshalYamlTestHeaders(yamlStr string) *TestHeader {
+	yamlStr = strings.TrimSpace(yamlStr)
+	yamlStr = strings.TrimPrefix(yamlStr, "```yaml")
+	yamlStr = strings.TrimSuffix(yamlStr, "```")
+
+	var data *TestHeader
+	err := yaml.Unmarshal([]byte(yamlStr), &data)
+	if err != nil {
+		fmt.Println(err)
+		return nil
+	}
+	return data
+}
+
+func unmarshalYamlTestLine(yamlStr string) *TestLine {
+	yamlStr = strings.TrimSpace(yamlStr)
+	yamlStr = strings.TrimPrefix(yamlStr, "```yaml")
+	yamlStr = strings.TrimSuffix(yamlStr, "```")
+	var data *TestLine
+	err := yaml.Unmarshal([]byte(yamlStr), &data)
+	if err != nil {
+		fmt.Println(err)
+		return nil
+	}
+	return data
+
 }
 
 func convertToInt(value interface{}) (int, error) {

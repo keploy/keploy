@@ -1,12 +1,15 @@
 package utgen
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -35,26 +38,32 @@ type Message struct {
 	Content string `json:"content"`
 }
 
+type ModelResponse struct {
+	ID                string   `json:"id"`
+	Choices           []Choice `json:"choices"`
+	Created           int      `json:"created"`
+	Model             string   `json:"model,omitempty"`
+	Object            string   `json:"object"`
+	SystemFingerprint string   `json:"system_fingerprint,omitempty"`
+	Usage             *Usage   `json:"usage,omitempty"`
+}
+
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
 type ResponseChunk struct {
 	Choices []Choice `json:"choices"`
 }
 
 type Choice struct {
-	Delta struct {
-		Content string `json:"content"`
-	} `json:"delta"`
+	Delta Delta `json:"delta"`
 }
 
-type ModelResponse struct {
-	Choices []struct {
-		Message struct {
-			Content string `json:"content"`
-		} `json:"message"`
-	} `json:"choices"`
-	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-	} `json:"usage"`
+type Delta struct {
+	Content string `json:"content"`
 }
 
 func NewAICaller(model, apiBase string) *AICaller {
@@ -95,69 +104,106 @@ func (ai *AICaller) CallModel(prompt *Prompt, maxTokens int) (string, int, int, 
 
 	requestBody, err := json.Marshal(completionParams)
 	if err != nil {
-		return "", 0, 0, err
+		return "", 0, 0, fmt.Errorf("error marshalling request body: %v", err)
 	}
 
-	response, err := http.Post(completionParams.APIBase+"/v1/engines/"+ai.Model+"/completions", "application/json", bytes.NewBuffer(requestBody))
+	req, err := http.NewRequest("POST", "https://api.openai.com//v1/chat/completions", bytes.NewBuffer(requestBody))
 	if err != nil {
-		return "", 0, 0, err
+		return "", 0, 0, fmt.Errorf("error creating request: %v", err)
 	}
-	defer response.Body.Close()
 
-	var chunks []ResponseChunk
-	decoder := json.NewDecoder(response.Body)
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", 0, 0, fmt.Errorf("error making request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := ioutil.ReadAll(resp.Body)
+		bodyString := string(bodyBytes)
+		return "", 0, 0, fmt.Errorf("unexpected status code: %v, response body: %s", resp.StatusCode, bodyString)
+	}
+
+	var contentBuilder strings.Builder
+	reader := bufio.NewReader(resp.Body)
 	fmt.Println("Streaming results from LLM model...")
 
 	for {
-		var chunk ResponseChunk
-		if err := decoder.Decode(&chunk); err == io.EOF {
-			break
-		} else if err != nil {
-			fmt.Printf("Error during streaming: %v\n", err)
+		line, err := reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			fmt.Printf("Error reading stream: %v\n", err)
 			break
 		}
-		fmt.Print(chunk.Choices[0].Delta.Content)
-		chunks = append(chunks, chunk)
+		line = strings.TrimSpace(strings.TrimPrefix(line, "data: "))
+		if line == "[DONE]" {
+			break
+		}
+
+		if line == "" {
+			continue
+		}
+
+		var chunk ModelResponse
+		err = json.Unmarshal([]byte(line), &chunk)
+		if err != nil {
+			fmt.Printf("Error unmarshalling chunk: %v\nLine: %s\n", err, line)
+			continue
+		}
+
+		if len(chunk.Choices) > 0 {
+			if chunk.Choices[0].Delta != (Delta{}) {
+				contentBuilder.WriteString(chunk.Choices[0].Delta.Content)
+				fmt.Print(chunk.Choices[0].Delta.Content)
+			}
+		}
+
+		if err == io.EOF {
+			break
+		}
 		time.Sleep(10 * time.Millisecond) // Optional: Delay to simulate more 'natural' response pacing
 	}
 	fmt.Println()
 
-	modelResponse, err := ai.streamChunkBuilder(chunks, messages)
-	if err != nil {
-		return "", 0, 0, err
-	}
+	finalContent := contentBuilder.String()
+	promptTokens := len(strings.Fields(prompt.System)) + len(strings.Fields(prompt.User))
+	completionTokens := len(strings.Fields(finalContent))
 
-	return modelResponse.Choices[0].Message.Content, modelResponse.Usage.PromptTokens, modelResponse.Usage.CompletionTokens, nil
+	return finalContent, promptTokens, completionTokens, nil
 }
 
-func (ai *AICaller) streamChunkBuilder(chunks []ResponseChunk, messages []Message) (*ModelResponse, error) {
-	var content strings.Builder
-	for _, chunk := range chunks {
-		content.WriteString(chunk.Choices[0].Delta.Content)
-	}
+// func (ai *AICaller) streamChunkBuilder(chunks []ResponseChunk, messages []Message) (*ModelResponse, error) {
+// 	var content strings.Builder
+// 	for _, chunk := range chunks {
+// 		content.WriteString(chunk.Choices[0].Delta.Content)
+// 	}
 
-	modelResponse := ModelResponse{
-		Choices: []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		}{
-			{
-				Message: struct {
-					Content string `json:"content"`
-				}{
-					Content: content.String(),
-				},
-			},
-		},
-		Usage: struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-		}{
-			PromptTokens:     len(messages[0].Content) + len(messages[1].Content),
-			CompletionTokens: content.Len(),
-		},
-	}
+// 	modelResponse := ModelResponse{
+// 		Choices: []struct {
+// 			Message struct {
+// 				Content string `json:"content"`
+// 			} `json:"message"`
+// 		}{
+// 			{
+// 				Message: struct {
+// 					Content string `json:"content"`
+// 				}{
+// 					Content: content.String(),
+// 				},
+// 			},
+// 		},
+// 		Usage: struct {
+// 			PromptTokens     int `json:"prompt_tokens"`
+// 			CompletionTokens int `json:"completion_tokens"`
+// 		}{
+// 			PromptTokens:     len(messages[0].Content) + len(messages[1].Content),
+// 			CompletionTokens: content.Len(),
+// 		},
+// 	}
 
-	return &modelResponse, nil
-}
+// 	return &modelResponse, nil
+// }

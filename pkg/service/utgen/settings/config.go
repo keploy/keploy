@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"bytes"
 	"embed"
 	"log"
 	"os"
@@ -18,8 +19,8 @@ type SingletonSettings struct {
 var instance *SingletonSettings
 var once sync.Once
 
-//go:embed settings/*.toml
-var settingsFiles embed.FS
+//go:embed *.toml
+var settings embed.FS
 
 // NewSingletonSettings initializes the singleton settings instance
 func NewSingletonSettings() *SingletonSettings {
@@ -35,16 +36,13 @@ func NewSingletonSettings() *SingletonSettings {
 		v := viper.New()
 		v.SetConfigType("toml")
 		for _, file := range settingsFiles {
-			fileContent, err := settingsFiles.ReadFile("settings/" + file)
+			fileContent, err := settings.ReadFile(file)
 			if err != nil {
-				log.Fatalf("Failed to read embedded settings file %s: %v", file, err)
+				log.Fatalf("Failed to read settings file %s: %v", file, err)
 			}
-			if _, err := os.Stat(configPath); os.IsNotExist(err) {
-				log.Fatalf("Settings file not found: %s", configPath)
-			}
-			v.SetConfigFile(configPath)
-			if err := v.MergeConfig(); err != nil {
-				log.Fatalf("Error loading config file %s: %v", configPath, err)
+			v.SetConfigFile(file)
+			if err := v.MergeConfig(bytes.NewBuffer(fileContent)); err != nil {
+				log.Fatalf("Error loading config file : %v", err)
 			}
 		}
 

@@ -185,7 +185,10 @@ func (pb *PromptBuilder) BuildPromptCustom(file string) *Prompt {
 }
 
 func renderTemplate(templateText string, variables map[string]interface{}) (string, error) {
-	tmpl, err := template.New("prompt").Parse(templateText)
+	funcMap := template.FuncMap{
+		"trim": strings.TrimSpace,
+	}
+	tmpl, err := template.New("prompt").Funcs(funcMap).Parse(templateText)
 	if err != nil {
 		return "", err
 	}
