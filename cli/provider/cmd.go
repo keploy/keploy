@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/fatih/color"
-	"github.com/moby/moby/pkg/parsers/kernel"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
@@ -188,6 +187,16 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+	case "utGen":
+		cmd.Flags().String("sourceFilePath", "", "Path to the source file.")
+		cmd.Flags().String("testFilePath", "", "Path to the input test file.")
+		cmd.Flags().String("codeCoverageReportPath", "", "Path to the code coverage report file.")
+		cmd.Flags().String("testCommand", " ", "The command to run tests and generate coverage report.")
+		cmd.Flags().String("coverageType", "cobertura", "Type of coverage report.")
+		cmd.Flags().Int("desiredCoverage", 90, "The desired coverage percentage.")
+		cmd.Flags().Int("maxIterations", 10, "The maximum number of iterations.")
+		cmd.Flags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
+
 	case "record", "test":
 		cmd.Flags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
 		cmd.Flags().StringP("rerecord", "r", c.cfg.ReRecord, "Rerecord the testcases/mocks for the given testset(s)")
@@ -249,12 +258,12 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 
 func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) error {
 	//check if the version of the kernel is above 5.15 for eBPF support
-	isValid := kernel.CheckKernelVersion(5, 15, 0)
-	if !isValid {
-		errMsg := "Kernel version is below 5.15. Keploy requires kernel version 5.15 or above"
-		utils.LogError(c.logger, nil, errMsg)
-		return errors.New(errMsg)
-	}
+	// isValid := kernel.CheckKernelVersion(5, 15, 0)
+	// if !isValid {
+	// 	errMsg := "Kernel version is below 5.15. Keploy requires kernel version 5.15 or above"
+	// 	utils.LogError(c.logger, nil, errMsg)
+	// 	return errors.New(errMsg)
+	// }
 
 	return c.ValidateFlags(ctx, cmd)
 }
@@ -279,7 +288,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
-	if cmd.Name() == "test" || cmd.Name() == "record" {
+	if cmd.Name() == "test" || cmd.Name() == "record" || cmd.Name() == "utGen" {
 		configPath, err := cmd.Flags().GetString("configPath")
 		if err != nil {
 			utils.LogError(c.logger, nil, "failed to read the config path")
@@ -303,6 +312,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
+	fmt.Println(c.cfg.UtGen.TestCommand)
+	fmt.Println(c.cfg.UtGen.SourceFilePath)
 	if c.cfg.Debug {
 		logger, err := log.ChangeLogLevel(zap.DebugLevel)
 		*c.logger = *logger

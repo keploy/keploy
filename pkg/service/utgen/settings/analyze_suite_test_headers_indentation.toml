@@ -1,0 +1,41 @@
+[analyze_suite_test_headers_indentation]
+system="""\
+"""
+
+user="""\
+## Overview
+You are a code assistant that accepts a {{ language }} test file as input.
+Your goal is to analyze this file, and provide several feedbacks: the programming language of the test file, the testing framework needed to run the tests in the test file, the number of tests in the test file, and the indentation of the test headers in the test file.
+Here is the file that contains the existing tests, called `{{ test_file_name }}`. Note that we have manually added line numbers for each line of code, to help you understand the structure of the file.
+Those numbers are not a part of the original code.
+=========
+{{ test_file|trim }}
+=========
+
+
+Now, you need to analyze the test file and provide a YAML object equivalent to type $TestsAnalysis, according to the following Pydantic definitions:
+=====
+
+class TestsAnalysis(BaseModel):
+    language: str = Field(description="The programming language used by the test file")
+    testing_framework: str = Field(description="The testing framework needed to run the tests in the test file")
+    number_of_tests: int = Field(description="The number of tests in the test file")
+    test_headers_indentation: int = Field(description="The indentation of the test headers in the test file.\
+ For example, "def test_..." has an indentation of 0, "  def test_..." has an indentation of 2, "    def test_..." has an indentation of 4, and so on.")
+
+=====
+
+
+Example output:
+```yaml
+language: {{ language }}
+testing_framework: ...
+number_of_tests: ...
+test_headers_indentation: ...
+```
+
+The Response should be only a valid YAML object, without any introduction text or follow-up text.
+
+Answer:
+```yaml
+"""

@@ -1,0 +1,37 @@
+[analyze_suite_test_insert_line]
+system="""\
+"""
+
+user="""\
+## Overview
+You are a code assistant that accepts a {{ language }} test file as input.
+Your goal is to analyze this file, and provide several feedbacks: the programming language of the test file, the testing framework needed to run the tests in the test file, the number of tests in the test file, and the line number in the test file, after which the new tests should be inserted, so they will be a part of the existing test suite.
+Here is the file that contains the existing tests, called `{{ test_file_name }}`.
+=========
+{{ test_file_numbered|trim }}
+=========
+
+
+Now, you need to analyze the test file and provide a YAML object equivalent to type $TestsAnalysis, according to the following Pydantic definitions:
+=====
+class TestsAnalysis(BaseModel):
+    language: str = Field(description="The programming language used by the test file")
+    testing_framework: str = Field(description="The testing framework needed to run the tests in the test file")
+    number_of_tests: int = Field(description="The number of tests in the test file")
+    relevant_line_number_to_insert_after: int = Field(description="The line number in the test file, **after which** the new tests should be inserted, so they will be a part of the existing test suite. Place the new tests after the last test in the suite.")
+=====
+
+
+Example output:
+```yaml
+language: {{ language }}
+testing_framework: ...
+number_of_tests: ...
+relevant_line_number_to_insert_after: ...
+```
+
+The Response should be only a valid YAML object, without any introduction text or follow-up text.
+
+Answer:
+```yaml
+"""

@@ -129,6 +129,7 @@ require (
 	github.com/yudai/gojsondiff v1.0.0
 	golang.org/x/sync v0.7.0
 	golang.org/x/term v0.19.0
+	gopkg.in/yaml.v2 v2.4.0
 	sigs.k8s.io/kustomize/kyaml v0.16.0
 )
 
@@ -141,7 +142,7 @@ require (
 	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
 	github.com/microcosm-cc/bluemonday v1.0.21 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
-	github.com/moby/moby v26.0.2+incompatible
+	github.com/moby/moby v26.1.3+incompatible
 	github.com/muesli/reflow v0.3.0 // indirect
 	github.com/muesli/termenv v0.13.0 // indirect
 	github.com/yuin/goldmark v1.5.2 // indirect

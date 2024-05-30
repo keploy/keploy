@@ -20,6 +20,7 @@ import (
 	"go.keploy.io/server/v2/pkg/service/record"
 	"go.keploy.io/server/v2/pkg/service/replay"
 	"go.keploy.io/server/v2/pkg/service/tools"
+	"go.keploy.io/server/v2/pkg/service/utgen"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -117,7 +118,9 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 	switch cmd {
 	case "config", "update":
 		return tools.NewTools(n.logger, tel), nil
-	// TODO: add case for mock
+	case "utGen":
+		fmt.Println(n.cfg.UtGen.TestCommand)
+		return utgen.NewUnitTestGenerator(n.cfg.UtGen.SourceFilePath, n.cfg.UtGen.TestFilePath, n.cfg.UtGen.CodeCoverageReportPath, n.cfg.UtGen.TestCommand, "", "", "", n.cfg.UtGen.CoverageType, 90, 10, n.logger)
 	case "record", "test", "mock", "normalize":
 		commonServices := n.GetCommonServices(n.cfg)
 		if cmd == "record" {

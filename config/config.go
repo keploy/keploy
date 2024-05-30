@@ -24,6 +24,7 @@ type Config struct {
 	BuildDelay            uint64       `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
 	Test                  Test         `json:"test" yaml:"test" mapstructure:"test"`
 	Record                Record       `json:"record" yaml:"record" mapstructure:"record"`
+	UtGen                 UtGen        `json:"utGen" yaml:"utGen" mapstructure:"utGen"`
 	Normalize             Normalize    `json:"normalize" yaml:"normalize" mapstructure:"normalize"`
 	ConfigPath            string       `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
 	BypassRules           []BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
@@ -32,6 +33,16 @@ type Config struct {
 	KeployContainer       string       `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
 	KeployNetwork         string       `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
 	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
+}
+
+type UtGen struct {
+	SourceFilePath         string  `json:"sourceFilePath" yaml:"sourceFilePath" mapstructure:"sourceFilePath"`
+	TestFilePath           string  `json:"testFilePath" yaml:"testFilePath" mapstructure:"testFilePath"`
+	CodeCoverageReportPath string  `json:"codeCoverageReportPath" yaml:"codeCoverageReportPath" mapstructure:"codeCoverageReportPath"`
+	TestCommand            string  `json:"testCommand" yaml:"testCommand" mapstructure:"testCommand"`
+	CoverageType           string  `json:"coverageType" yaml:"coverageType" mapstructure:"coverageType"`
+	DesiredCoverage        float64 `json:"desiredCoverage" yaml:"desiredCoverage" mapstructure:"desiredCoverage"`
+	MaxIterations          int     `json:"maxIterations" yaml:"maxIterations" mapstructure:"maxIterations"`
 }
 
 type Record struct {
