@@ -64,7 +64,7 @@ func IsValuePresent(connectionid string, value string) bool {
 	return false
 }
 
-func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex sync.Mutex, requestBuffers [][]byte, mockDb integrations.MockMemDb) (bool, []models.Frontend, error) {
+func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mutex, requestBuffers [][]byte, mockDb integrations.MockMemDb) (bool, []models.Frontend, error) {
 	for {
 		select {
 		case <-ctx.Done():

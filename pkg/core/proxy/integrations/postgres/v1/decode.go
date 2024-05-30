@@ -60,7 +60,7 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 				continue
 			}
 			var mutex sync.Mutex
-			matched, pgResponses, err := matchingReadablePG(ctx, logger, mutex, pgRequests, mockDb)
+			matched, pgResponses, err := matchingReadablePG(ctx, logger, &mutex, pgRequests, mockDb)
 			if err != nil {
 				errCh <- fmt.Errorf("error while matching tcs mocks %v", err)
 				return
