@@ -265,7 +265,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 			}
 
 			if matched {
-				logger.Info("Matched mock", zap.String("mock", matchedMock.Name))
+				logger.Debug("Matched mock", zap.String("mock", matchedMock.Name))
 				if matchedMock.TestModeInfo.IsFiltered {
 					originalMatchedMock := *matchedMock
 					matchedMock.TestModeInfo.IsFiltered = false
