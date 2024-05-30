@@ -88,11 +88,11 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex sync.Mute
 			}
 
 			// merge all the streaming requests into 1 for matching
-			// newRq := mergePgRequests(requestBuffers, logger)
-			// if len(newRq) > 0 {
-			// 	requestBuffers = newRq
-			// }
-			// time.Sleep(300 * time.Millisecond)
+			newRq := mergePgRequests(requestBuffers, logger)
+			if len(newRq) > 0 {
+				requestBuffers = newRq
+			}
+
 			var sortFlag = true
 			var sortedTcsMocks []*models.Mock
 			var matchedMock *models.Mock
@@ -209,7 +209,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex sync.Mute
 				getTestPS(requestBuffers, logger, ConnectionID)
 			}
 
-			logger.Info("Sorted Mocks inside pg parser: ", zap.Any("Len of sortedTcsMocks", len(sortedTcsMocks)))
+			logger.Debug("Sorted Mocks inside pg parser: ", zap.Any("Len of sortedTcsMocks", len(sortedTcsMocks)))
 
 			var matched, sorted bool
 			var idx int
