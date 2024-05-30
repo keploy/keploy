@@ -193,8 +193,10 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 							errCh <- err
 							return
 						}
+						continue
 					}
-					continue
+					utils.LogError(logger, err, "Absence of mocks and PassThrough is disabled")
+					return
 				}
 
 				responseBinary, err := encodeToBinary(&matchedResponse.Message, matchedResponse.Header, matchedResponse.Header.PacketType, 1)

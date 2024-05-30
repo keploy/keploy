@@ -253,8 +253,10 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 							errCh <- err
 							return
 						}
+						continue
 					}
-					continue
+					utils.LogError(logger, err, "Absence of mocks and PassThrough is disabled")
+					return
 				}
 
 				responseTo := mongoRequests[0].Header.RequestID

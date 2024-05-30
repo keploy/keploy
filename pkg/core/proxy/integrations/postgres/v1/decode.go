@@ -72,8 +72,10 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 						utils.LogError(logger, err, "failed to pass the request", zap.Any("request packets", len(pgRequests)))
 						errCh <- err
 					}
+					continue
 				}
-				continue
+				utils.LogError(logger, err, "Absence of mocks and PassThrough is disabled")
+				return
 			}
 			for _, pgResponse := range pgResponses {
 				encoded, err := util.DecodeBase64(pgResponse.Payload)

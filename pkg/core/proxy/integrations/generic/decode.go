@@ -81,8 +81,10 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 						genericRequests = [][]byte{reqBuffer}
 					}
 					logger.Debug("the length of genericRequests after passThrough ", zap.Any("length", len(genericRequests)))
+					continue
 				}
-				continue
+				utils.LogError(logger, err, "Absence of mocks and PassThrough is disabled")
+				return
 			}
 			for _, genericResponse := range genericResponses {
 				encoded := []byte(genericResponse.Message[0].Data)
