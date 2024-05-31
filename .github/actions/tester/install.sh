@@ -52,8 +52,9 @@ pre_rec="${KEPLOY_PATH}"
 # Delete the reports directory if it exists
 delete_if_exists "$pre_rec/keploy/reports"
 
-# Get all directories except the 'reports' directory
-test_sets=$(find "$pre_rec/keploy/" -mindepth 1 -maxdepth 1 -type d ! -name "reports" -exec basename {} \;)
+# Get all directories except the 'reports' directory and maintain order
+test_sets=$(find "$pre_rec/keploy/" -mindepth 1 -maxdepth 1 -type d ! -name "reports" | sort | xargs -n 1 basename)
+
 
 # Check the exit status of the find command
 if [ $? -ne 0 ]; then

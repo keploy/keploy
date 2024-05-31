@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
+	"net"
 )
 
 type PacketHeader struct {
@@ -16,14 +16,14 @@ type PacketHeader struct {
 	PacketSequenceID uint8 `yaml:"packet_sequence_id"`
 }
 
-type CustomPacketHeader struct {
+type SQLPacketHeader struct {
 	PayloadLength uint32 `yaml:"payload_length"` // MySQL packet payload length
 	SequenceID    uint8  `yaml:"sequence_id"`    // MySQL packet sequence ID
 }
 
-type CustomPacket struct {
-	Header  CustomPacketHeader `yaml:"header"`
-	Payload []byte             `yaml:"payload"`
+type Packet struct {
+	Header  SQLPacketHeader `yaml:"header"`
+	Payload []byte          `yaml:"payload"`
 }
 
 type ColumnDefinition struct {
@@ -44,7 +44,7 @@ type ColumnDefinition struct {
 }
 
 type RowDataPacket struct {
-	Data []byte `yaml:"data"`
+	Data []byte `yaml:"data,omitempty,flow"`
 }
 
 type PluginDetails struct {
@@ -125,10 +125,11 @@ func encodeToBinary(packet interface{}, header *models.MySQLPacketHeader, operat
 		header[3] = byte(sequence)
 		return append(header, data...), nil
 	}
+
 	return data, nil
 }
 
-func DecodeMySQLPacket(logger *zap.Logger, packet CustomPacket) (string, CustomPacketHeader, interface{}, error) {
+func DecodeMySQLPacket(logger *zap.Logger, packet Packet, clientConn net.Conn, mode models.Mode) (string, SQLPacketHeader, interface{}, error) {
 	data := packet.Payload
 	header := packet.Header
 	var packetData interface{}
@@ -136,27 +137,29 @@ func DecodeMySQLPacket(logger *zap.Logger, packet CustomPacket) (string, CustomP
 	var err error
 
 	if len(data) < 1 {
-		return "", CustomPacketHeader{}, nil, fmt.Errorf("Invalid packet: Payload is empty")
+		return "", SQLPacketHeader{}, nil, fmt.Errorf("Invalid packet: Payload is empty")
 	}
 
 	switch {
-	case lastCommand == 0x03:
+	case lastCommand[clientConn] == 0x03 && mode == models.MODE_RECORD:
 		switch {
 		case data[0] == 0x00: // OK Packet
 			packetType = "MySQLOK"
 			packetData, err = decodeMySQLOK(data)
-			lastCommand = 0x00 // Reset the last command
+			lastCommand[clientConn] = 0x00 // Reset the last command
 
 		case data[0] == 0xFF: // Error Packet
 			packetType = "MySQLErr"
 			packetData, err = decodeMySQLErr(data)
-			lastCommand = 0x00 // Reset the last command
+			lastCommand[clientConn] = 0x00 // Reset the last command
 
 		case isLengthEncodedInteger(data[0]): // ResultSet Packet
 			packetType = "RESULT_SET_PACKET"
 			packetData, err = parseResultSet(data)
-			lastCommand = 0x00 // Reset the last command
-
+			if err != nil {
+				fmt.Println("Error parsing result set: ", err)
+			}
+			lastCommand[clientConn] = 0x00 // Reset the last command
 		default:
 			packetType = "Unknown"
 			packetData = data
@@ -165,66 +168,66 @@ func DecodeMySQLPacket(logger *zap.Logger, packet CustomPacket) (string, CustomP
 	case data[0] == 0x0e: // COM_PING
 		packetType = "COM_PING"
 		packetData, err = decodeComPing(data)
-		lastCommand = 0x0e
+		lastCommand[clientConn] = 0x0e
 	case data[0] == 0x17: // COM_STMT_EXECUTE
 		packetType = "COM_STMT_EXECUTE"
 		packetData, err = decodeComStmtExecute(data)
-		lastCommand = 0x17
+		lastCommand[clientConn] = 0x17
 	case data[0] == 0x1c: // COM_STMT_FETCH
 		packetType = "COM_STMT_FETCH"
 		packetData, err = decodeComStmtFetch(data)
-		lastCommand = 0x1c
+		lastCommand[clientConn] = 0x1c
 	case data[0] == 0x16: // COM_STMT_PREPARE
 		packetType = "COM_STMT_PREPARE"
 		packetData, err = decodeComStmtPrepare(data)
-		lastCommand = 0x16
+		lastCommand[clientConn] = 0x16
 	case data[0] == 0x19: // COM_STMT_CLOSE
 		if len(data) > 11 {
 
 			packetType = "COM_STMT_CLOSE_WITH_PREPARE"
 			packetData, err = decodeComStmtCloseMoreData(data)
-			lastCommand = 0x16
+			lastCommand[clientConn] = 0x16
 		} else {
 			packetType = "COM_STMT_CLOSE"
 			packetData, err = decodeComStmtClose(data)
-			lastCommand = 0x19
+			lastCommand[clientConn] = 0x19
 		}
 	case data[0] == 0x11: // COM_CHANGE_USER
 		packetType = "COM_CHANGE_USER"
 		packetData, err = decodeComChangeUser(data)
-		lastCommand = 0x11
+		lastCommand[clientConn] = 0x11
 
 	case data[0] == 0x04: // Result Set Packet
 		packetType = "RESULT_SET_PACKET"
 		packetData, err = parseResultSet(data)
-		lastCommand = 0x04
+		lastCommand[clientConn] = 0x04
 	case data[0] == 0x0A: // MySQLHandshakeV10
 		packetType = "MySQLHandshakeV10"
 		packetData, err = decodeMySQLHandshakeV10(data)
 		handshakePacket, _ := packetData.(*HandshakeV10Packet)
 		handshakePluginName = handshakePacket.AuthPluginName
-		lastCommand = 0x0A
+		lastCommand[clientConn] = 0x0A
 	case data[0] == 0x03: // MySQLQuery
 		packetType = "MySQLQuery"
 		packetData, err = decodeMySQLQuery(data)
-		lastCommand = 0x03
+		lastCommand[clientConn] = 0x03
 	case data[0] == 0x00: // MySQLOK or COM_STMT_PREPARE_OK
-		if lastCommand == 0x16 {
+		if lastCommand[clientConn] == 0x16 {
 			packetType = "COM_STMT_PREPARE_OK"
 			packetData, err = decodeComStmtPrepareOk(data)
 		} else {
 			packetType = "MySQLOK"
 			packetData, err = decodeMySQLOK(data)
 		}
-		lastCommand = 0x00
+		lastCommand[clientConn] = 0x00
 	case data[0] == 0xFF: // MySQLErr
 		packetType = "MySQLErr"
 		packetData, err = decodeMySQLErr(data)
-		lastCommand = 0xFF
+		lastCommand[clientConn] = 0xFF
 	case data[0] == 0xFE && len(data) > 1: // Auth Switch Packet
 		packetType = "AUTH_SWITCH_REQUEST"
 		packetData, err = decodeAuthSwitchRequest(data)
-		lastCommand = 0xFE
+		lastCommand[clientConn] = 0xFE
 	case data[0] == 0xFE || expectingAuthSwitchResponse:
 		packetType = "AUTH_SWITCH_RESPONSE"
 		packetData, err = decodeAuthSwitchResponse(data)
@@ -232,23 +235,23 @@ func DecodeMySQLPacket(logger *zap.Logger, packet CustomPacket) (string, CustomP
 	case data[0] == 0xFE: // EOF packet
 		packetType = "MySQLEOF"
 		packetData, err = decodeMYSQLEOF(data)
-		lastCommand = 0xFE
+		lastCommand[clientConn] = 0xFE
 	case data[0] == 0x02: // New packet type
 		packetType = "AUTH_MORE_DATA"
 		packetData, err = decodeAuthMoreData(data)
-		lastCommand = 0x02
+		lastCommand[clientConn] = 0x02
 	case data[0] == 0x18: // SEND_LONG_DATA Packet
 		packetType = "COM_STMT_SEND_LONG_DATA"
 		packetData, err = decodeComStmtSendLongData(data)
-		lastCommand = 0x18
+		lastCommand[clientConn] = 0x18
 	case data[0] == 0x1a: // STMT_RESET Packet
 		packetType = "COM_STMT_RESET"
 		packetData, err = decodeComStmtReset(data)
-		lastCommand = 0x1a
+		lastCommand[clientConn] = 0x1a
 	case data[0] == 0x8d || expectingHandshakeResponse || expectingHandshakeResponseTest: // Handshake Response packet
 		packetType = "HANDSHAKE_RESPONSE"
 		packetData, err = decodeHandshakeResponse(data)
-		lastCommand = 0x8d // This value may differ depending on the handshake response protocol version
+		lastCommand[clientConn] = 0x8d // This value may differ depending on the handshake response protocol version
 	case data[0] == 0x01: // Handshake Response packet
 		if len(data) == 1 {
 			packetType = "COM_QUIT"
@@ -264,7 +267,7 @@ func DecodeMySQLPacket(logger *zap.Logger, packet CustomPacket) (string, CustomP
 	}
 
 	if err != nil {
-		return "", CustomPacketHeader{}, nil, err
+		return "", SQLPacketHeader{}, nil, err
 	}
 	if models.GetMode() != "test" {
 		logger.Debug("Packet Info",
@@ -272,7 +275,7 @@ func DecodeMySQLPacket(logger *zap.Logger, packet CustomPacket) (string, CustomP
 			zap.ByteString("Data", data))
 	}
 	if (models.GetMode()) == "test" {
-		lastCommand = 0x00
+		lastCommand[clientConn] = 0x00
 	}
 	return packetType, header, packetData, nil
 }
@@ -281,7 +284,7 @@ func isLengthEncodedInteger(b byte) bool {
 	return b != 0x00 && b != 0xFF
 }
 
-func (p *CustomPacket) Encode() ([]byte, error) {
+func (p *Packet) Encode() ([]byte, error) {
 	packet := make([]byte, 4)
 
 	binary.LittleEndian.PutUint32(packet[:3], p.Header.PayloadLength)
@@ -301,7 +304,7 @@ func (p *CustomPacket) Encode() ([]byte, error) {
 	return packet, nil
 }
 
-var lastCommand byte // This is global and will remember the last command
+var lastCommand = make(map[net.Conn]byte)
 
 func encodeLengthEncodedInteger(n uint64) []byte {
 	var buf []byte
@@ -319,36 +322,38 @@ func encodeLengthEncodedInteger(n uint64) []byte {
 	return buf
 }
 
-func writeLengthEncodedString(buf *bytes.Buffer, s string) error {
+func writeLengthEncodedString(buf *bytes.Buffer, s string) {
 	length := len(s)
 	switch {
 	case length <= 250:
 		buf.WriteByte(byte(length))
 	case length <= 0xFFFF:
 		buf.WriteByte(0xFC)
-		if err := binary.Write(buf, binary.LittleEndian, uint16(length)); err != nil {
-			return err
+		err := binary.Write(buf, binary.LittleEndian, uint16(length))
+		if err != nil {
+			return
 		}
 	case length <= 0xFFFFFF:
 		buf.WriteByte(0xFD)
-		if err := binary.Write(buf, binary.LittleEndian, uint32(length)&0xFFFFFF); err != nil {
-			return err
+		err := binary.Write(buf, binary.LittleEndian, uint32(length)&0xFFFFFF)
+		if err != nil {
+			return
 		}
 	default:
 		buf.WriteByte(0xFE)
-		if err := binary.Write(buf, binary.LittleEndian, uint64(length)); err != nil {
-			return err
+		err := binary.Write(buf, binary.LittleEndian, uint64(length))
+		if err != nil {
+			return
 		}
 	}
 	buf.WriteString(s)
-	return nil
 }
 
-func writeLengthEncodedInteger(buf *bytes.Buffer, val *uint64) error {
+func writeLengthEncodedInteger(buf *bytes.Buffer, val *uint64) {
 	if val == nil {
 		// Write 0xFB to represent NULL
 		buf.WriteByte(0xFB)
-		return nil
+		return
 	}
 
 	switch {
@@ -356,22 +361,55 @@ func writeLengthEncodedInteger(buf *bytes.Buffer, val *uint64) error {
 		buf.WriteByte(byte(*val))
 	case *val <= 0xFFFF:
 		buf.WriteByte(0xFC)
-		if err := binary.Write(buf, binary.LittleEndian, uint16(*val)); err != nil {
-			return err
+		err := binary.Write(buf, binary.LittleEndian, uint16(*val))
+		if err != nil {
+			return
 		}
 	case *val <= 0xFFFFFF:
 		buf.WriteByte(0xFD)
-		if err := binary.Write(buf, binary.LittleEndian, uint32(*val)&0xFFFFFF); err != nil {
-			return err
+		err := binary.Write(buf, binary.LittleEndian, uint32(*val)&0xFFFFFF)
+		if err != nil {
+			return
 		}
 	default:
 		buf.WriteByte(0xFE)
-		if err := binary.Write(buf, binary.LittleEndian, *val); err != nil {
-			return err
+		err := binary.Write(buf, binary.LittleEndian, *val)
+		if err != nil {
+			return
 		}
 	}
-	return nil
 }
+
+//func writeLengthEncodedIntegers(buf *bytes.Buffer, value *uint64) {
+//	if value == nil {
+//		// Write 0xFB to represent NULL
+//		buf.WriteByte(0xFB)
+//		return
+//	}
+//
+//	if *value <= 250 {
+//		buf.WriteByte(byte(*value))
+//	} else if *value <= 0xffff {
+//		buf.WriteByte(0xfc)
+//		buf.WriteByte(byte(*value))
+//		buf.WriteByte(byte(*value >> 8))
+//	} else if *value <= 0xffffff {
+//		buf.WriteByte(0xfd)
+//		buf.WriteByte(byte(*value))
+//		buf.WriteByte(byte(*value >> 8))
+//		buf.WriteByte(byte(*value >> 16))
+//	} else {
+//		buf.WriteByte(0xfe)
+//		binary.Write(buf, binary.LittleEndian, *value)
+//	}
+//}
+
+//func writeLengthEncodedStrings(buf *bytes.Buffer, value string) {
+//	data := []byte(value)
+//	length := uint64(len(data))
+//	writeLengthEncodedIntegers(buf, &length)
+//	buf.Write(data)
+//}
 
 func readLengthEncodedString(data []byte, offset *int) (string, error) {
 	if *offset >= len(data) {
@@ -410,16 +448,25 @@ func readLengthEncodedString(data []byte, offset *int) (string, error) {
 	return result, nil
 }
 
-func ReadLengthEncodedIntegers(data []byte, offset int) (uint64, int) {
-	if data[offset] < 0xfb {
-		return uint64(data[offset]), offset + 1
-	} else if data[offset] == 0xfc {
-		return uint64(binary.LittleEndian.Uint16(data[offset+1 : offset+3])), offset + 3
-	} else if data[offset] == 0xfd {
-		return uint64(data[offset+1]) | uint64(data[offset+2])<<8 | uint64(data[offset+3])<<16, offset + 4
-	}
-	return binary.LittleEndian.Uint64(data[offset+1 : offset+9]), offset + 9
-}
+//func ReadLengthEncodedIntegers(data []byte, offset int) (uint64, int) {
+//	if data[offset] < 0xfb {
+//		return uint64(data[offset]), offset + 1
+//	} else if data[offset] == 0xfc {
+//		return uint64(binary.LittleEndian.Uint16(data[offset+1 : offset+3])), offset + 3
+//	} else if data[offset] == 0xfd {
+//		return uint64(data[offset+1]) | uint64(data[offset+2])<<8 | uint64(data[offset+3])<<16, offset + 4
+//	}
+//
+//	return binary.LittleEndian.Uint64(data[offset+1 : offset+9]), offset + 9
+//}
+//
+//func nullTerminatedString(data []byte) (string, int, error) {
+//	pos := bytes.IndexByte(data, 0)
+//	if pos == -1 {
+//		return "", 0, errors.New("null-terminated string not found")
+//	}
+//	return string(data[:pos]), pos, nil
+//}
 
 func readLengthEncodedInteger(b []byte) (uint64, bool, int) {
 	if len(b) == 0 {
@@ -441,6 +488,31 @@ func readLengthEncodedInteger(b []byte) (uint64, bool, int) {
 		return uint64(b[0]), false, 1
 	}
 }
+
+//func readLengthEncodedStringUpdated(data []byte) (string, []byte, error) {
+//	// First, determine the length of the string
+//	strLength, isNull, bytesRead := readLengthEncodedInteger(data)
+//	if isNull {
+//		return "", nil, errors.New("NULL value encountered")
+//	}
+//
+//	// Adjust data to point to the next bytes after the integer
+//	data = data[bytesRead:]
+//
+//	// Check if we have enough data left to read the string
+//	if len(data) < int(strLength) {
+//		return "", nil, errors.New("not enough data to read string")
+//	}
+//
+//	// Read the string
+//	strData := data[:strLength]
+//	remainingData := data[strLength:]
+//
+//	// Convert the byte array to a string
+//	str := string(strData)
+//
+//	return str, remainingData, nil
+//}
 
 func readUint24(b []byte) uint32 {
 	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16
@@ -469,6 +541,10 @@ func readLengthEncodedIntegers(b []byte) (uint64, int) {
 
 func readLengthEncodedStrings(b []byte) (string, int) {
 	length, n := readLengthEncodedIntegers(b)
+	// add check for slice out of range
+	if int(length) > len(b) {
+		return "", n
+	}
 	return string(b[n : n+int(length)]), n + int(length)
 }
 
@@ -520,3 +596,40 @@ func readLengthEncodedIntegerOff(data []byte, offset *int) (uint64, error) {
 	result := uint64(length)
 	return result, nil
 }
+
+//func readLengthEncodedStringOff(data []byte, offset *int) (string, error) {
+//	if *offset >= len(data) {
+//		return "", errors.New("data length is not enough")
+//	}
+//	var length int
+//	firstByte := data[*offset]
+//	switch {
+//	case firstByte < 0xfb:
+//		length = int(firstByte)
+//		*offset++
+//	case firstByte == 0xfb:
+//		*offset++
+//		return "", nil
+//	case firstByte == 0xfc:
+//		if *offset+3 > len(data) {
+//			return "", errors.New("data length is not enough 1")
+//		}
+//		length = int(binary.LittleEndian.Uint16(data[*offset+1 : *offset+3]))
+//		*offset += 3
+//	case firstByte == 0xfd:
+//		if *offset+4 > len(data) {
+//			return "", errors.New("data length is not enough 2")
+//		}
+//		length = int(data[*offset+1]) | int(data[*offset+2])<<8 | int(data[*offset+3])<<16
+//		*offset += 4
+//	case firstByte == 0xfe:
+//		if *offset+9 > len(data) {
+//			return "", errors.New("data length is not enough 3")
+//		}
+//		length = int(binary.LittleEndian.Uint64(data[*offset+1 : *offset+9]))
+//		*offset += 9
+//	}
+//	result := string(data[*offset : *offset+length])
+//	*offset += length
+//	return result, nil
+//}

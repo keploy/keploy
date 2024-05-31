@@ -3,8 +3,6 @@ package replay
 import (
 	"context"
 	"fmt"
-	"net/url"
-	"strings"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
@@ -43,38 +41,22 @@ func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) c
 	return noise
 }
 
-func replaceHostToIP(currentURL string, ipAddress string) (string, error) {
-	// Parse the current URL
-	parsedURL, err := url.Parse(currentURL)
-
-	if err != nil {
-		// Return the original URL if parsing fails
-		return currentURL, err
-	}
-
-	if ipAddress == "" {
-		return currentURL, fmt.Errorf("failed to replace url in case of docker env")
-	}
-
-	// Replace hostname with the IP address
-	parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Hostname(), ipAddress, 1)
-	// Return the modified URL
-	return parsedURL.String(), nil
-}
-
-type testUtils struct {
+type requestMockUtil struct {
 	logger     *zap.Logger
+	path       string
+	mockName   string
 	apiTimeout uint64
 }
 
-func NewTestUtils(apiTimeout uint64, logger *zap.Logger) RequestEmulator {
-	return &testUtils{
+func NewRequestMockUtil(logger *zap.Logger, path, mockName string, apiTimeout uint64) RequestMockHandler {
+	return &requestMockUtil{
+		path:       path,
 		logger:     logger,
+		mockName:   mockName,
 		apiTimeout: apiTimeout,
 	}
 }
-
-func (t *testUtils) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error) {
+func (t *requestMockUtil) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error) {
 	switch tc.Kind {
 	case models.HTTP:
 		t.logger.Debug("Before simulating the request", zap.Any("Test case", tc))
@@ -85,4 +67,25 @@ func (t *testUtils) SimulateRequest(ctx context.Context, _ uint64, tc *models.Te
 		return resp, err
 	}
 	return nil, nil
+}
+
+func (t *requestMockUtil) AfterTestHook(_ context.Context, testRunID, testSetID string, tsCnt int) (*models.TestReport, error) {
+	t.logger.Debug("AfterTestHook", zap.Any("testRunID", testRunID), zap.Any("testSetID", testSetID), zap.Any("totTestSetCount", tsCnt))
+	return nil, nil
+}
+
+func (t *requestMockUtil) ProcessTestRunStatus(_ context.Context, status bool, testSetID string) {
+	if status {
+		t.logger.Debug("Test case passed for", zap.String("testSetID", testSetID))
+	} else {
+		t.logger.Debug("Test case failed for", zap.String("testSetID", testSetID))
+	}
+}
+
+func (t *requestMockUtil) FetchMockName() string {
+	return t.mockName
+}
+
+func (t *requestMockUtil) ProcessMockFile(_ context.Context, testSetID string) {
+	t.logger.Debug("Mock file for test set", zap.String("testSetID", testSetID))
 }

@@ -60,8 +60,14 @@ type Telemetry interface {
 	MockTestRun(utilizedMocks int)
 }
 
-// RequestEmulator is used to simulate the API requests to the user API. The requests are read from
-// the recorded test case of the user app.
-type RequestEmulator interface {
+// RequestMockHandler defines an interface for implementing hooks that extend and customize
+// the behavior of request simulations and test workflows. This interface allows for
+// detailed control over various stages of the testing process, including request simulation,
+// test status processing, and post-test actions.
+type RequestMockHandler interface {
 	SimulateRequest(ctx context.Context, appID uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error)
+	ProcessTestRunStatus(ctx context.Context, status bool, testSetID string)
+	FetchMockName() string
+	ProcessMockFile(ctx context.Context, testSetID string)
+	AfterTestHook(ctx context.Context, testRunID, testSetID string, totalTestSets int) (*models.TestReport, error)
 }
