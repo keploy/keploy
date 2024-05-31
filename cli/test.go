@@ -23,7 +23,7 @@ func Test(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 		Short:   "run the recorded testcases and execute assertions",
 		Example: `keploy test -c "/path/to/user/app" --delay 6`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
-			return cmdConfigurator.ValidateFlags(ctx, cmd)
+			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
@@ -54,6 +54,7 @@ func Test(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 					return nil
 				}
 			}
+
 			err = replay.Start(ctx)
 			if err != nil {
 				utils.LogError(logger, err, "failed to replay")

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fatih/color"
+	"github.com/moby/moby/pkg/parsers/kernel"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
@@ -46,21 +47,21 @@ Golang Application
 	sudo -E env PATH=$PATH keploy record -c "/path/to/user/app/binary"
 	
 	Test:
-	sudo -E env PATH=$PATH keploy test -c "/path/to/user/app/binary" --delay 2
+	sudo -E env PATH=$PATH keploy test -c "/path/to/user/app/binary" --delay 10
 
 Node Application
 	Record:
 	sudo -E env PATH=$PATH keploy record -c “npm start --prefix /path/to/node/app"
 	
 	Test:
-	sudo -E env PATH=$PATH keploy test -c “npm start --prefix /path/to/node/app" --delay 2
+	sudo -E env PATH=$PATH keploy test -c “npm start --prefix /path/to/node/app" --delay 10
 
 Java 
 	Record:
 	sudo -E env PATH=$PATH keploy record -c "java -jar /path/to/java-project/target/jar"
 
 	Test:
-	sudo -E env PATH=$PATH keploy test -c "java -jar /path/to/java-project/target/jar" --delay 2
+	sudo -E env PATH=$PATH keploy test -c "java -jar /path/to/java-project/target/jar" --delay 10
 
 Docker
 	Alias:
@@ -68,10 +69,10 @@ Docker
 	-v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
 
 	Record:
-	keploy record -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --buildDelay 1m
+	keploy record -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --buildDelay 60
 
 	Test:
-	keploy test -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --delay 1 --buildDelay 1m
+	keploy test -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --delay 10 --buildDelay 60
 
 `
 
@@ -81,28 +82,28 @@ Golang Application
 	keploy record -c "/path/to/user/app/binary"
 	
 	Test:
-	keploy test -c "/path/to/user/app/binary" --delay 2
+	keploy test -c "/path/to/user/app/binary" --delay 10
 
 Node Application
 	Record:
 	keploy record -c “npm start --prefix /path/to/node/app"
 	
 	Test:
-	keploy test -c “npm start --prefix /path/to/node/app" --delay 2
+	keploy test -c “npm start --prefix /path/to/node/app" --delay 10
 
 Java 
 	Record:
 	keploy record -c "java -jar /path/to/java-project/target/jar"
 
 	Test:
-	keploy test -c "java -jar /path/to/java-project/target/jar" --delay 2
+	keploy test -c "java -jar /path/to/java-project/target/jar" --delay 10
 
 Docker
 	Record:
-	keploy record -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --buildDelay 1m
+	keploy record -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --buildDelay 60
 
 	Test:
-	keploy test -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --delay 1 --buildDelay 1m
+	keploy test -c "docker run -p 8080:8080 --name <containerName> --network <networkName> <applicationImage>" --delay 1 --buildDelay 60
 `
 
 var RootCustomHelpTemplate = `{{.Short}}
@@ -131,10 +132,10 @@ Use "{{.CommandPath}} [command] --help" for more information about a command.{{e
 
 var RootExamples = `
   Record:
-	keploy record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --containerName "<containerName>" --delay 1 --buildDelay 1m
+	keploy record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --containerName "<containerName>" --buildDelay 60
 
   Test:
-	keploy test --c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --delay 1 --buildDelay 1m
+	keploy test --c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --delay 10 --buildDelay 60
 
   Config:
 	keploy config --generate -p "/path/to/localdir"
@@ -168,6 +169,10 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	switch cmd.Name() {
 	case "update":
 		return nil
+	case "normalize":
+		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks/reports are stored")
+		cmd.Flags().String("test-run", "", "Test Run to be normalized")
+		cmd.Flags().String("tests", "", "Test Sets to be normalized")
 	case "config":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated config is stored")
 		cmd.Flags().Bool("generate", false, "Generate a new keploy configuration file")
@@ -185,16 +190,18 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		}
 	case "record", "test":
 		cmd.Flags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
+		cmd.Flags().StringP("rerecord", "r", c.cfg.ReRecord, "Rerecord the testcases/mocks for the given testset(s)")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("port", c.cfg.Port, "GraphQL server port used for executing testcases in unit test library integration")
 		cmd.Flags().Uint32("proxyPort", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint32("dnsPort", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
 		cmd.Flags().String("cmdType", c.cfg.CommandType, "Type of command to start the user application (native/docker/docker-compose)")
-		cmd.Flags().DurationP("buildDelay", "b", c.cfg.BuildDelay, "User provided time to wait docker container build")
+		cmd.Flags().Uint64P("buildDelay", "b", c.cfg.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().String("containerName", c.cfg.ContainerName, "Name of the application's docker container")
 		cmd.Flags().StringP("networkName", "n", c.cfg.NetworkName, "Name of the application's docker network")
 		cmd.Flags().UintSlice("passThroughPorts", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server and ignore the traffic")
+		cmd.Flags().StringP("appId", "a", c.cfg.AppID, "A unique name for the user's application")
 		cmd.Flags().Bool("generateGithubActions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
 		err = cmd.Flags().MarkHidden("port")
 		if err != nil {
@@ -240,7 +247,20 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	return nil
 }
 
+func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) error {
+	//check if the version of the kernel is above 5.15 for eBPF support
+	isValid := kernel.CheckKernelVersion(5, 15, 0)
+	if !isValid {
+		errMsg := "Kernel version is below 5.15. Keploy requires kernel version 5.15 or above"
+		utils.LogError(c.logger, nil, errMsg)
+		return errors.New(errMsg)
+	}
+
+	return c.ValidateFlags(ctx, cmd)
+}
+
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
+
 	// used to bind common flags for commands like record, test. For eg: PATH, PORT, COMMAND etc.
 	err := viper.BindPFlags(cmd.Flags())
 	if err != nil {
@@ -248,7 +268,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
-
 	// used to bind flags with environment variables
 	viper.AutomaticEnv()
 	viper.SetEnvPrefix("KEPLOY")
@@ -374,9 +393,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					}
 				}
 			}
-			if c.cfg.BuildDelay <= 30*time.Second {
+			// check if the buildDelay is less than 30 seconds
+			if time.Duration(c.cfg.BuildDelay)*time.Second <= 30*time.Second {
 				c.logger.Warn(fmt.Sprintf("buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay", c.cfg.BuildDelay))
-				c.logger.Info(`Example usage: keploy record -c "docker-compose up --build" --buildDelay 35s`)
+				c.logger.Info(`Example usage: keploy record -c "docker-compose up --build" --buildDelay 35`)
 			}
 			if utils.CmdType(c.cfg.Command) == utils.DockerCompose {
 				if c.cfg.ContainerName == "" {
@@ -385,9 +405,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					return errors.New("missing required --containerName flag or containerName in config file")
 				}
 			}
-
 		}
-
 		err = utils.StartInDocker(ctx, c.logger, c.cfg)
 		if err != nil {
 			return err
@@ -434,6 +452,36 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					c.logger.Info("Example usage: " + cmd.Example)
 				}
 			}
+		}
+	case "normalize":
+		path := c.cfg.Path
+		//if user provides relative path
+		if len(path) > 0 && path[0] != '/' {
+			absPath, err := filepath.Abs(path)
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get the absolute path from relative path")
+			}
+			path = absPath
+		} else if len(path) == 0 { // if user doesn't provide any path
+			cdirPath, err := os.Getwd()
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get the path of current directory")
+			}
+			path = cdirPath
+		}
+		path += "/keploy"
+		c.cfg.Path = path
+		tests, err := cmd.Flags().GetString("tests")
+		if err != nil {
+			errMsg := "failed to read tests to be normalized"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		err = config.SetSelectedTestsNormalize(c.cfg, tests)
+		if err != nil {
+			errMsg := "failed to normalize the selected tests"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
 		}
 	}
 	return nil

@@ -18,6 +18,9 @@ builds:
     goarch:
       - amd64
       - arm64
+    tags:
+      - viper_bind_struct
+
   # - binary: keploy
   #   id: keploy-macos
   #   main: ./cli/server/main.go

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +30,25 @@ import (
 )
 
 var WarningSign = "\U000026A0"
+
+func ReplaceHostToIP(currentURL string, ipAddress string) (string, error) {
+	// Parse the current URL
+	parsedURL, err := url.Parse(currentURL)
+
+	if err != nil {
+		// Return the original URL if parsing fails
+		return currentURL, err
+	}
+
+	if ipAddress == "" {
+		return currentURL, fmt.Errorf("failed to replace url in case of docker env")
+	}
+
+	// Replace hostname with the IP address
+	parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Hostname(), ipAddress, 1)
+	// Return the modified URL
+	return parsedURL.String(), nil
+}
 
 func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix string) error {
 	var bindErr error
@@ -135,51 +155,7 @@ var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
 
 var Emoji = "\U0001F430" + " Keploy:"
 var ConfigGuide = `
-# Example on using tests
-#tests:
-#  filters:
-#   - path: "/user/app"
-#     urlMethods: ["GET"]
-#     headers: {
-#       "^asdf*": "^test"
-#     }
-#     host: "dc.services.visualstudio.com"
-#Example on using stubs
-#stubs:
-#  filters:
-#   - path: "/user/app"
-#     port: 8080
-#   - port: 8081
-#   - host: "dc.services.visualstudio.com"
-#   - port: 8081
-#     host: "dc.services.visualstudio.com"
-#     path: "/user/app"
-	#
-#Example on using globalNoise
-#globalNoise:
-#   global:
-#     body: {
-#        # to ignore some values for a field,
-#        # pass regex patterns to the corresponding array value
-#        "url": ["https?://\S+", "http://\S+"],
-#     }
-#     header: {
-#        # to ignore the entire field, pass an empty array
-#        "Date": [],
-#      }
-#    # to ignore fields or the corresponding values for a specific test-set,
-#    # pass the test-set-name as a key to the "test-sets" object and
-#    # populate the corresponding "body" and "header" objects
-#    test-sets:
-#      test-set-1:
-#        body: {
-#          # ignore all the values for the "url" field
-#          "url": []
-#        }
-#        header: {
-#          # we can also pass the exact value to ignore for a field
-#          "User-Agent": ["PostmanRuntime/7.34.0"]
-#        }
+# Visit [https://keploy.io/docs/running-keploy/configuration-file/] to learn about using keploy through configration file.
 `
 
 // AskForConfirmation asks the user for confirmation. A user must type in "yes" or "no" and
@@ -215,6 +191,23 @@ func CheckFileExists(path string) bool {
 }
 
 var Version string
+
+type DockerConfigStruct struct {
+	DockerImage string
+	Envs        map[string]string
+}
+
+var DockerConfig = DockerConfigStruct{
+	DockerImage: "ghcr.io/keploy/keploy",
+}
+
+func GenerateDockerEnvs(config DockerConfigStruct) string {
+	var envs []string
+	for key, value := range config.Envs {
+		envs = append(envs, fmt.Sprintf("-e %s=%s", key, value))
+	}
+	return strings.Join(envs, " ")
+}
 
 func attachLogFileToSentry(logger *zap.Logger, logFilePath string) error {
 	file, err := os.Open(logFilePath)
@@ -356,7 +349,8 @@ func FindDockerCmd(cmd string) CmdType {
 	cmdLower := strings.TrimSpace(strings.ToLower(cmd))
 
 	// Define patterns for Docker and Docker Compose
-	dockerPatterns := []string{"docker", "sudo docker"}
+	dockerRunPatterns := []string{"docker run", "sudo docker run"}
+	dockerStartPatterns := []string{"docker start", "sudo docker start"}
 	dockerComposePatterns := []string{"docker-compose", "sudo docker-compose", "docker compose", "sudo docker compose"}
 
 	// Check for Docker Compose command patterns and file extensions
@@ -365,10 +359,16 @@ func FindDockerCmd(cmd string) CmdType {
 			return DockerCompose
 		}
 	}
-	// Check for Docker command patterns
-	for _, pattern := range dockerPatterns {
+	// Check for Docker start command patterns
+	for _, pattern := range dockerStartPatterns {
 		if strings.HasPrefix(cmdLower, pattern) {
-			return Docker
+			return DockerStart
+		}
+	}
+	// Check for Docker run command patterns
+	for _, pattern := range dockerRunPatterns {
+		if strings.HasPrefix(cmdLower, pattern) {
+			return DockerRun
 		}
 	}
 	return Native
@@ -378,7 +378,8 @@ type CmdType string
 
 // CmdType constants
 const (
-	Docker        CmdType = "docker"
+	DockerRun     CmdType = "docker-run"
+	DockerStart   CmdType = "docker-start"
 	DockerCompose CmdType = "docker-compose"
 	Native        CmdType = "native"
 )
@@ -387,9 +388,9 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 	// Get the name of the operating system.
 	osName := runtime.GOOS
 	//TODO: configure the hardcoded port mapping
-	img := "ghcr.io/keploy/keploy:" + "v" + Version
+	img := DockerConfig.DockerImage + ":v" + Version
 	logger.Info("Starting keploy in docker with image", zap.String("image:", img))
-
+	envs := GenerateDockerEnvs(DockerConfig)
 	var ttyFlag string
 
 	if term.IsTerminal(int(os.Stdin.Fd())) {
@@ -400,7 +401,7 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 
 	switch osName {
 	case "linux":
-		alias := "sudo docker container run --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
+		alias := "sudo docker container run --name keploy-v2 " + envs + "  -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
 		return alias, nil
 	case "darwin":
 		cmd := exec.CommandContext(ctx, "docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
@@ -417,12 +418,12 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 		dockerContext = strings.Split(dockerContext, "\n")[0]
 		if dockerContext == "colima" {
 			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
-			alias := "docker container run --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
+			alias := "docker container run --name keploy-v2  " + envs + " -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
 			return alias, nil
 		}
 		// if default docker context is used
 		logger.Info("Starting keploy in docker with default context, as that is the current context.")
-		alias := "docker container run --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
+		alias := "docker container run --name keploy-v2  " + envs + " -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
 		return alias, nil
 	case "Windows":
 		LogError(logger, nil, "Windows is not supported. Use WSL2 instead.")
@@ -734,4 +735,8 @@ func EnsureRmBeforeName(cmd string) string {
 	}
 
 	return strings.Join(parts, " ")
+}
+
+func IsDockerKind(kind CmdType) bool {
+	return (kind == DockerRun || kind == DockerStart || kind == DockerCompose)
 }

@@ -88,6 +88,19 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			utils.LogError(logger, err, "failed to marshal the generic input-output as yaml")
 			return nil, err
 		}
+	case models.REDIS:
+		redisSpec := models.RedisSchema{
+			Metadata:         mock.Spec.Metadata,
+			RedisRequests:    mock.Spec.RedisRequests,
+			RedisResponses:   mock.Spec.RedisResponses,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+		err := yamlDoc.Spec.Encode(redisSpec)
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal the redis input-output as yaml")
+			return nil, err
+		}
 	case models.Postgres:
 		// case models.PostgresV2:
 
@@ -236,6 +249,20 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				ReqTimestampMock: genericSpec.ReqTimestampMock,
 				ResTimestampMock: genericSpec.ResTimestampMock,
 			}
+		case models.REDIS:
+			redisSpec := models.RedisSchema{}
+			err := m.Spec.Decode(&redisSpec)
+			if err != nil {
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into redis mock", zap.Any("mock name", m.Name))
+				return nil, err
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:         redisSpec.Metadata,
+				RedisRequests:    redisSpec.RedisRequests,
+				RedisResponses:   redisSpec.RedisResponses,
+				ReqTimestampMock: redisSpec.ReqTimestampMock,
+				ResTimestampMock: redisSpec.ResTimestampMock,
+			}
 
 		case models.Postgres:
 			// case models.PostgresV2:
@@ -323,7 +350,7 @@ func decodeMySQLMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 			}
 			req.Message = requestMessage
 		case "COM_STMT_SEND_LONG_DATA":
-			requestMessage := &models.MySQLComStmtSendLongData{}
+			requestMessage := &models.MySQLCOMSTMTSENDLONGDATA{}
 			err := v.Message.Decode(requestMessage)
 			if err != nil {
 				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLCOM_STMT_SEND_LONG_DATA")
@@ -331,7 +358,7 @@ func decodeMySQLMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 			}
 			req.Message = requestMessage
 		case "COM_STMT_RESET":
-			requestMessage := &models.MySQLcomStmtReset{}
+			requestMessage := &models.MySQLCOMSTMTRESET{}
 			err := v.Message.Decode(requestMessage)
 			if err != nil {
 				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLCOM_STMT_RESET")

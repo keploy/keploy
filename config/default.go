@@ -10,18 +10,19 @@ import (
 // defaultConfig is a variable to store the default configuration of the Keploy CLI. It is not a constant because enterprise need update the default configuration.
 var defaultConfig = `
 path: ""
+appId: ""
 command: ""
 port: 0
 proxyPort: 16789
 dnsPort: 26789
 debug: false
-DisableANSI: false
+disableANSI: false
 disableTele: false
 inDocker: false
 generateGithubActions: true
 containerName: ""
 networkName: ""
-buildDelay: 30s
+buildDelay: 30
 test:
   selectedTests: {}
   globalNoise:
