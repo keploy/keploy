@@ -23,10 +23,10 @@ type Recorder struct {
 	mockDB          MockDB
 	telemetry       Telemetry
 	instrumentation Instrumentation
-	config          config.Config
+	config          *config.Config
 }
 
-func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, config config.Config) Service {
+func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
 	return &Recorder{
 		logger:          logger,
 		testDB:          testDB,
@@ -133,8 +133,12 @@ func (r *Recorder) Start(ctx context.Context) error {
 		}
 	}
 
+	incomingOpts := models.IncomingOptions{
+		Filters: r.config.Record.Filters,
+	}
+
 	// fetching test cases and mocks from the application and inserting them into the database
-	incomingChan, err = r.instrumentation.GetIncoming(ctx, appID, models.IncomingOptions{})
+	incomingChan, err = r.instrumentation.GetIncoming(ctx, appID, incomingOpts)
 	if err != nil {
 		stopReason = "failed to get incoming frames"
 		utils.LogError(r.logger, err, stopReason)
@@ -161,7 +165,13 @@ func (r *Recorder) Start(ctx context.Context) error {
 		return nil
 	})
 
-	outgoingChan, err = r.instrumentation.GetOutgoing(ctx, appID, models.OutgoingOptions{})
+	outgoingOpts := models.OutgoingOptions{
+		Rules:          r.config.BypassRules,
+		MongoPassword:  r.config.Test.MongoPassword,
+		FallBackOnMiss: r.config.Test.FallBackOnMiss,
+	}
+
+	outgoingChan, err = r.instrumentation.GetOutgoing(ctx, appID, outgoingOpts)
 	if err != nil {
 		stopReason = "failed to get outgoing frames"
 		utils.LogError(r.logger, err, stopReason)
@@ -197,7 +207,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 	})
 	go func() {
 		if len(r.config.ReRecord) != 0 {
-			err = r.ReRecord(reRecordCtx)
+			err = r.ReRecord(reRecordCtx, appID)
 			reRecordCancel()
 
 		}
@@ -325,7 +335,7 @@ func (r *Recorder) StartMock(ctx context.Context) error {
 	return fmt.Errorf(stopReason)
 }
 
-func (r *Recorder) ReRecord(ctx context.Context) error {
+func (r *Recorder) ReRecord(ctx context.Context, appID uint64) error {
 
 	tcs, err := r.testDB.GetTestCases(ctx, r.config.ReRecord)
 	if err != nil {
@@ -338,6 +348,10 @@ func (r *Recorder) ReRecord(ctx context.Context) error {
 		return nil
 
 	}
+	cmdType := utils.CmdType(r.config.CommandType)
+	if utils.IsDockerKind(cmdType) {
+		host = r.config.ContainerName
+	}
 
 	if err := waitForPort(ctx, host, port); err != nil {
 		r.logger.Error("Waiting for port failed", zap.String("host", host), zap.String("port", port), zap.Error(err))
@@ -346,6 +360,21 @@ func (r *Recorder) ReRecord(ctx context.Context) error {
 
 	allTestCasesRecorded := true
 	for _, tc := range tcs {
+		if utils.IsDockerKind(cmdType) {
+
+			userIP, err := r.instrumentation.GetContainerIP(ctx, appID)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to get the app ip")
+				break
+			}
+
+			tc.HTTPReq.URL, err = utils.ReplaceHostToIP(tc.HTTPReq.URL, userIP)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to replace host to docker container's IP")
+				break
+			}
+			r.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HTTPReq.URL))
+		}
 
 		resp, err := pkg.SimulateHTTP(ctx, *tc, r.config.ReRecord, r.logger, r.config.Test.APITimeout)
 		if err != nil {

@@ -20,13 +20,13 @@ type OutgoingOptions struct {
 }
 
 type IncomingOptions struct {
-	//Filters []config.Filter
+	Filters []config.Filter
 }
 
 type SetupOptions struct {
 	Container     string
 	DockerNetwork string
-	DockerDelay   time.Duration
+	DockerDelay   uint64
 }
 
 type RunOptions struct {
