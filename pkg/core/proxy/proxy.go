@@ -54,7 +54,7 @@ type Proxy struct {
 	TCPDNSServer *dns.Server
 }
 
-func New(logger *zap.Logger, info core.DestInfo, opts config.Config) *Proxy {
+func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
 	return &Proxy{
 		logger:       logger,
 		Port:         opts.ProxyPort, // default: 16789
