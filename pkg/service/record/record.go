@@ -5,8 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
-
 	"time"
 
 	"go.keploy.io/server/v2/config"
@@ -67,23 +65,20 @@ func (r *Recorder) Start(ctx context.Context) error {
 	var appID uint64
 	var newTestSetID string
 	var testCount = 0
-	var mutex = sync.Mutex{}
 	var mockCountMap = make(map[string]int)
 
 	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
 	defer func() {
 		select {
 		case <-ctx.Done():
-			mutex.Lock()
-			r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
-			mutex.Unlock()
+			break
 		default:
 			err := utils.Stop(r.logger, stopReason)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to stop recording")
 			}
 		}
-
+		
 		runAppCtxCancel()
 		err := runAppErrGrp.Wait()
 		if err != nil {
@@ -98,6 +93,8 @@ func (r *Recorder) Start(ctx context.Context) error {
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
+
+		r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
 	}()
 
 	defer close(appErrChan)
@@ -162,9 +159,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 				}
 				insertTestErrChan <- err
 			} else {
-				mutex.Lock()
 				testCount++
-				mutex.Unlock()
 				r.telemetry.RecordedTestAndMocks()
 			}
 		}
