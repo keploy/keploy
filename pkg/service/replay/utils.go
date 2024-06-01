@@ -3,6 +3,7 @@ package replay
 import (
 	"context"
 	"fmt"
+	"net/url"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
@@ -39,6 +40,29 @@ func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) c
 	}
 
 	return noise
+}
+
+// ReplaceReqOrigin replaces the origin of the old URL with the new URL's origin.
+func ReplaceReqOrigin(newURL, oldURL string) (string, error) {
+	parsedOldURL, err := url.Parse(oldURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse the old URL: %v", err)
+	}
+
+	parsedNewURL, err := url.Parse(newURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse the new URL: %v", err)
+	}
+	// if scheme is empty, then replace the host with the new URL
+	if parsedNewURL.Scheme == "" {
+		parsedOldURL.Host = parsedNewURL.String()
+	} else {
+		parsedOldURL.Scheme = parsedNewURL.Scheme
+		parsedOldURL.Host = parsedNewURL.Host
+	}
+
+	replacedURL := parsedOldURL.String()
+	return replacedURL, nil
 }
 
 type requestMockUtil struct {

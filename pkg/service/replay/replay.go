@@ -371,6 +371,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	for _, testCase := range testCases {
 
+		// replace the request origin if provided
+		if r.config.Test.APIURL != "" {
+			newURL, err := ReplaceReqOrigin(r.config.Test.APIURL, testCase.HTTPReq.URL)
+			if err != nil {
+				r.logger.Warn("failed to replace the request origin", zap.String("testcase", testCase.Name), zap.String("newURL", r.config.Test.APIURL), zap.Error(err))
+			} else {
+				testCase.HTTPReq.URL = newURL
+			}
+			r.logger.Debug("test case request origin", zap.String("testcase", testCase.Name), zap.String("TestCaseURL", testCase.HTTPReq.URL), zap.String("newURL", r.config.Test.APIURL))
+		}
+
 		if _, ok := selectedTests[testCase.Name]; !ok && len(selectedTests) != 0 {
 			continue
 		}
