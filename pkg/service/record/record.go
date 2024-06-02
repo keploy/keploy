@@ -73,7 +73,6 @@ func (r *Recorder) Start(ctx context.Context) error {
 	defer func() {
 		select {
 		case <-ctx.Done():
-			r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
 		default:
 			err := utils.Stop(r.logger, stopReason)
 			if err != nil {
@@ -94,6 +93,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
+		r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
 	}()
 
 	defer close(appErrChan)
