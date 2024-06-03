@@ -172,7 +172,7 @@ func ReadSessionIndices(_ context.Context, path string, Logger *zap.Logger) ([]s
 	}
 
 	for _, v := range files {
-		if v.Name() != "reports" && v.Name() != "testReports" {
+		if v.Name() != "reports" && v.Name() != "testReports" && v.IsDir() {
 			indices = append(indices, v.Name())
 		}
 	}
