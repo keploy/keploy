@@ -10,7 +10,6 @@ import (
 type Config struct {
 	Path                  string       `json:"path" yaml:"path" mapstructure:"path" `
 	AppID                 string       `json:"appId" yaml:"appId" mapstructure:"appId"`
-	ReRecord              string       `json:"rerecord" yaml:"rerecord" mapstructure:"rerecord"`
 	Command               string       `json:"command" yaml:"command" mapstructure:"command"`
 	Port                  uint32       `json:"port" yaml:"port" mapstructure:"port"`
 	DNSPort               uint32       `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
@@ -37,6 +36,7 @@ type Config struct {
 type Record struct {
 	Filters     []Filter      `json:"filters" yaml:"filters" mapstructure:"filters"`
 	RecordTimer time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
+	ReRecord    string        `json:"rerecord" yaml:"rerecord" mapstructure:"rerecord"`
 }
 
 type Normalize struct {
@@ -69,6 +69,7 @@ type Test struct {
 	Language           string              `json:"language" yaml:"language" mapstructure:"language"`
 	RemoveUnusedMocks  bool                `json:"removeUnusedMocks" yaml:"removeUnusedMocks" mapstructure:"removeUnusedMocks"`
 	FallBackOnMiss     bool                `json:"fallBackOnMiss" yaml:"fallBackOnMiss" mapstructure:"fallBackOnMiss"`
+	GlobalPassthrough  bool                `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
 }
 
 type Globalnoise struct {

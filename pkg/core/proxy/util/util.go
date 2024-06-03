@@ -39,7 +39,7 @@ func GetNextID() int64 {
 
 // ReadBuffConn is used to read the buffer from the connection
 func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, bufferChannel chan []byte, errChannel chan error) {
-	//TODO: where to close the bufferChannel and errChannel
+	//TODO: where to close the errChannel
 	for {
 		select {
 		case <-ctx.Done():
