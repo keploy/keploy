@@ -41,10 +41,10 @@ type Replayer struct {
 	reportDB        ReportDB
 	telemetry       Telemetry
 	instrumentation Instrumentation
-	config          config.Config
+	config          *config.Config
 }
 
-func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, telemetry Telemetry, instrumentation Instrumentation, config config.Config) Service {
+func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
 	// set the request emulator for simulating test case requests, if not set
 	if requestMockemulator == nil {
 		SetTestUtilInstance(NewRequestMockUtil(logger, config.Path, "mocks", config.Test.APITimeout))
@@ -439,7 +439,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		testPass, testResult = r.compareResp(testCase, resp, testSetID)
 		if !testPass {
 			// log the consumed mocks during the test run of the test case for test set
-			r.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(testCase.Name)), zap.Any("testset id", models.HighlightFailingString(testSetID)), zap.Any("passed", models.HighlightFailingString(testPass)), zap.Any("consumed mocks", consumedMocks))
+			r.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(testCase.Name)), zap.Any("testset id", models.HighlightFailingString(testSetID)), zap.Any("passed", models.HighlightFailingString(testPass)))
+			r.logger.Debug("Consumed Mocks", zap.Any("mocks", consumedMocks))
 		} else {
 			r.logger.Info("result", zap.Any("testcase id", models.HighlightPassingString(testCase.Name)), zap.Any("testset id", models.HighlightPassingString(testSetID)), zap.Any("passed", models.HighlightPassingString(testPass)))
 		}
@@ -723,6 +724,70 @@ func (r *Replayer) ProvideMocks(ctx context.Context) error {
 	return nil
 }
 
+// mergeMaps takes two maps of type map[string][]string and merges them.
+// The values of common keys are concatenated.
+func mergeMaps(map1, map2 map[string][]string) map[string][]string {
+	// Iterate over the second map
+	fmt.Println("MERGING MAPS", map1, "2:::", map2)
+	for key, values := range map2 {
+		// If the key from map2 exists in map1, append the values
+		if _, exists := map1[key]; exists {
+			map1[key] = append(map1[key], values...)
+			fmt.Println("APPENDING values to the map", key, values)
+		} else {
+			// If the key doesn't exist in map1, add it
+			fmt.Println("ADDING new key to the map", key, values)
+			map1[key] = values
+		}
+	}
+	return map1
+}
+
+// removeFromMap takes two maps of type map[string][]string.
+// It removes from map1 any keys that are present in map2.
+func removeFromMap(map1, map2 map[string][]string) map[string][]string {
+	// Iterate over the keys in map2
+	for key := range map2 {
+		// Delete the key from map1 if it exists
+		fmt.Println("Deletigkrg keet", key)
+		delete(map1, key)
+	}
+	return map1
+}
+
+func (r *Replayer) DenoiseTestCases(ctx context.Context, testRunID string, testSetID string, noiseParams []models.NoiseParams) error {
+
+	testCases, err := r.testDB.GetTestCases(ctx, testSetID)
+	if err != nil {
+		return fmt.Errorf("failed to get test cases: %w", err)
+	}
+
+	for _, v := range testCases {
+		for _, noiseParam := range noiseParams {
+			if v.Name == noiseParam.TestCaseIDs {
+
+				// append the noise map
+				if noiseParam.Ops == string(models.OpsAdd) {
+					// append to the the original noise map
+					fmt.Println("THIS IS THE ORIGINAL NOISE MAP", v.Noise)
+					v.Noise = mergeMaps(v.Noise, noiseParam.Assertion)
+				} else {
+					// remove from the original noise map
+					v.Noise = removeFromMap(v.Noise, noiseParam.Assertion)
+				}
+				fmt.Println("THIS IS THE UPDATED NOISE MAP", v.Noise)
+				err = r.testDB.UpdateTestCase(ctx, v, testSetID)
+				if err != nil {
+					return fmt.Errorf("failed to update test case: %w", err)
+				}
+			}
+		}
+
+	}
+
+	return nil
+}
+
 func (r *Replayer) Normalize(ctx context.Context) error {
 
 	var testRun string
@@ -767,8 +832,8 @@ func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testS
 	// if we are getting from parameter then we need to get the testReport
 	if testCaseResults == nil || len(testCaseResults) == 0 {
 		testReport, err := r.reportDB.GetReport(ctx, testRun, testSetID)
-		// TODO: if it has applied testReport for 
-		if err != nil { 
+		// TODO: if it has applied testReport for
+		if err != nil {
 			return fmt.Errorf("failed to get test report: %w", err)
 		}
 

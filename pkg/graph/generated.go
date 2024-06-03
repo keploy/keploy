@@ -118,17 +118,23 @@ type ComplexityRoot struct {
 	}
 
 	Mutation struct {
-		NormaliseTc func(childComplexity int, normalize model.NormalizeInput) int
-		RunTestSet  func(childComplexity int, testSetID string, testRunID string, appID int) int
-		StartApp    func(childComplexity int, appID int) int
-		StartHooks  func(childComplexity int) int
-		StopApp     func(childComplexity int, appID int) int
-		StopHooks   func(childComplexity int) int
+		DenoiseTestCase func(childComplexity int, noise model.NoiseInput) int
+		NormaliseTc     func(childComplexity int, normalize model.NormalizeInput) int
+		RunTestSet      func(childComplexity int, testSetID string, testRunID string, appID int) int
+		StartApp        func(childComplexity int, appID int) int
+		StartHooks      func(childComplexity int) int
+		StopApp         func(childComplexity int, appID int) int
+		StopHooks       func(childComplexity int) int
 	}
 
 	MutationResult struct {
 		ErrorMsg func(childComplexity int) int
 		ID       func(childComplexity int) int
+		Status   func(childComplexity int) int
+	}
+
+	NoiseOutput struct {
+		ErrorMsg func(childComplexity int) int
 		Status   func(childComplexity int) int
 	}
 
@@ -232,6 +238,7 @@ type MutationResolver interface {
 	StopHooks(ctx context.Context) (bool, error)
 	StopApp(ctx context.Context, appID int) (bool, error)
 	NormaliseTc(ctx context.Context, normalize model.NormalizeInput) (*model.NormaliseOutput, error)
+	DenoiseTestCase(ctx context.Context, noise model.NoiseInput) (*model.NoiseOutput, error)
 }
 type QueryResolver interface {
 	TestSets(ctx context.Context) ([]string, error)
@@ -572,6 +579,18 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 
 		return e.complexity.Mocks.Version(childComplexity), true
 
+	case "Mutation.denoiseTestCase":
+		if e.complexity.Mutation.DenoiseTestCase == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_denoiseTestCase_args(context.TODO(), rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.complexity.Mutation.DenoiseTestCase(childComplexity, args["noise"].(model.NoiseInput)), true
+
 	case "Mutation.normaliseTc":
 		if e.complexity.Mutation.NormaliseTc == nil {
 			break
@@ -654,6 +673,20 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 		}
 
 		return e.complexity.MutationResult.Status(childComplexity), true
+
+	case "NoiseOutput.errorMsg":
+		if e.complexity.NoiseOutput.ErrorMsg == nil {
+			break
+		}
+
+		return e.complexity.NoiseOutput.ErrorMsg(childComplexity), true
+
+	case "NoiseOutput.status":
+		if e.complexity.NoiseOutput.Status == nil {
+			break
+		}
+
+		return e.complexity.NoiseOutput.Status(childComplexity), true
 
 	case "NormaliseOutput.errorMsg":
 		if e.complexity.NormaliseOutput.ErrorMsg == nil {
@@ -1091,6 +1124,8 @@ func (e *executableSchema) Exec(ctx context.Context) graphql.ResponseHandler {
 		ec.unmarshalInputHttpRespInput,
 		ec.unmarshalInputIntResultInput,
 		ec.unmarshalInputMockInput,
+		ec.unmarshalInputNoiseInput,
+		ec.unmarshalInputNoiseParams,
 		ec.unmarshalInputNormalizeInput,
 		ec.unmarshalInputResultInput,
 		ec.unmarshalInputTestCaseInput,
@@ -1214,6 +1249,21 @@ var parsedSchema = gqlparser.MustLoadSchema(sources...)
 // endregion ************************** generated!.gotpl **************************
 
 // region    ***************************** args.gotpl *****************************
+
+func (ec *executionContext) field_Mutation_denoiseTestCase_args(ctx context.Context, rawArgs map[string]interface{}) (map[string]interface{}, error) {
+	var err error
+	args := map[string]interface{}{}
+	var arg0 model.NoiseInput
+	if tmp, ok := rawArgs["noise"]; ok {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("noise"))
+		arg0, err = ec.unmarshalNNoiseInput2goᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐNoiseInput(ctx, tmp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args["noise"] = arg0
+	return args, nil
+}
 
 func (ec *executionContext) field_Mutation_normaliseTc_args(ctx context.Context, rawArgs map[string]interface{}) (map[string]interface{}, error) {
 	var err error
@@ -3689,6 +3739,67 @@ func (ec *executionContext) fieldContext_Mutation_normaliseTc(ctx context.Contex
 	return fc, nil
 }
 
+func (ec *executionContext) _Mutation_denoiseTestCase(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_Mutation_denoiseTestCase(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return ec.resolvers.Mutation().DenoiseTestCase(rctx, fc.Args["noise"].(model.NoiseInput))
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(*model.NoiseOutput)
+	fc.Result = res
+	return ec.marshalNNoiseOutput2ᚖgoᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐNoiseOutput(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_Mutation_denoiseTestCase(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "status":
+				return ec.fieldContext_NoiseOutput_status(ctx, field)
+			case "errorMsg":
+				return ec.fieldContext_NoiseOutput_errorMsg(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type NoiseOutput", field.Name)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_denoiseTestCase_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _MutationResult_id(ctx context.Context, field graphql.CollectedField, obj *model.MutationResult) (ret graphql.Marshaler) {
 	fc, err := ec.fieldContext_MutationResult_id(ctx, field)
 	if err != nil {
@@ -3808,6 +3919,91 @@ func (ec *executionContext) _MutationResult_errorMsg(ctx context.Context, field 
 func (ec *executionContext) fieldContext_MutationResult_errorMsg(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	fc = &graphql.FieldContext{
 		Object:     "MutationResult",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _NoiseOutput_status(ctx context.Context, field graphql.CollectedField, obj *model.NoiseOutput) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_NoiseOutput_status(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Status, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(bool)
+	fc.Result = res
+	return ec.marshalNBoolean2bool(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_NoiseOutput_status(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "NoiseOutput",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _NoiseOutput_errorMsg(ctx context.Context, field graphql.CollectedField, obj *model.NoiseOutput) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_NoiseOutput_errorMsg(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.ErrorMsg, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		return graphql.Null
+	}
+	res := resTmp.(*string)
+	fc.Result = res
+	return ec.marshalOString2ᚖstring(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_NoiseOutput_errorMsg(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "NoiseOutput",
 		Field:      field,
 		IsMethod:   false,
 		IsResolver: false,
@@ -9049,6 +9245,109 @@ func (ec *executionContext) unmarshalInputMockInput(ctx context.Context, obj int
 	return it, nil
 }
 
+func (ec *executionContext) unmarshalInputNoiseInput(ctx context.Context, obj interface{}) (model.NoiseInput, error) {
+	var it model.NoiseInput
+	asMap := map[string]interface{}{}
+	for k, v := range obj.(map[string]interface{}) {
+		asMap[k] = v
+	}
+
+	fieldsInOrder := [...]string{"testRunId", "testSetId", "noiseParams", "appId"}
+	for _, k := range fieldsInOrder {
+		v, ok := asMap[k]
+		if !ok {
+			continue
+		}
+		switch k {
+		case "testRunId":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("testRunId"))
+			data, err := ec.unmarshalNString2string(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.TestRunID = data
+		case "testSetId":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("testSetId"))
+			data, err := ec.unmarshalNString2string(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.TestSetID = data
+		case "noiseParams":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("noiseParams"))
+			data, err := ec.unmarshalNNoiseParams2ᚕᚖgoᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐNoiseParamsᚄ(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.NoiseParams = data
+		case "appId":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("appId"))
+			data, err := ec.unmarshalNString2string(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.AppID = data
+		}
+	}
+
+	return it, nil
+}
+
+func (ec *executionContext) unmarshalInputNoiseParams(ctx context.Context, obj interface{}) (model.NoiseParams, error) {
+	var it model.NoiseParams
+	asMap := map[string]interface{}{}
+	for k, v := range obj.(map[string]interface{}) {
+		asMap[k] = v
+	}
+
+	fieldsInOrder := [...]string{"testCaseIDs", "editedBy", "newAssertion", "noiseType", "noiseOps"}
+	for _, k := range fieldsInOrder {
+		v, ok := asMap[k]
+		if !ok {
+			continue
+		}
+		switch k {
+		case "testCaseIDs":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("testCaseIDs"))
+			data, err := ec.unmarshalNString2string(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.TestCaseIDs = data
+		case "editedBy":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("editedBy"))
+			data, err := ec.unmarshalNString2string(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.EditedBy = data
+		case "newAssertion":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("newAssertion"))
+			data, err := ec.unmarshalNString2string(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.NewAssertion = data
+		case "noiseType":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("noiseType"))
+			data, err := ec.unmarshalNNoiseType2goᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐNoiseType(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.NoiseType = data
+		case "noiseOps":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("noiseOps"))
+			data, err := ec.unmarshalNNoiseOps2goᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐNoiseOps(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.NoiseOps = data
+		}
+	}
+
+	return it, nil
+}
+
 func (ec *executionContext) unmarshalInputNormalizeInput(ctx context.Context, obj interface{}) (model.NormalizeInput, error) {
 	var it model.NormalizeInput
 	asMap := map[string]interface{}{}
@@ -9056,7 +9355,7 @@ func (ec *executionContext) unmarshalInputNormalizeInput(ctx context.Context, ob
 		asMap[k] = v
 	}
 
-	fieldsInOrder := [...]string{"testRunId", "testSetId", "TestCaseIDs", "appId", "tcReport"}
+	fieldsInOrder := [...]string{"testRunId", "testSetId", "TestCaseIDs", "appId", "tcReport", "editedBy"}
 	for _, k := range fieldsInOrder {
 		v, ok := asMap[k]
 		if !ok {
@@ -9098,6 +9397,13 @@ func (ec *executionContext) unmarshalInputNormalizeInput(ctx context.Context, ob
 				return it, err
 			}
 			it.TcReport = data
+		case "editedBy":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("editedBy"))
+			data, err := ec.unmarshalNString2string(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.EditedBy = data
 		}
 	}
 
@@ -10055,6 +10361,13 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
+		case "denoiseTestCase":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_denoiseTestCase(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -10101,6 +10414,47 @@ func (ec *executionContext) _MutationResult(ctx context.Context, sel ast.Selecti
 			}
 		case "errorMsg":
 			out.Values[i] = ec._MutationResult_errorMsg(ctx, field, obj)
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.deferred, int32(len(deferred)))
+
+	for label, dfs := range deferred {
+		ec.processDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
+var noiseOutputImplementors = []string{"NoiseOutput"}
+
+func (ec *executionContext) _NoiseOutput(ctx context.Context, sel ast.SelectionSet, obj *model.NoiseOutput) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, noiseOutputImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("NoiseOutput")
+		case "status":
+			out.Values[i] = ec._NoiseOutput_status(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "errorMsg":
+			out.Values[i] = ec._NoiseOutput_errorMsg(ctx, field, obj)
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -11283,6 +11637,67 @@ func (ec *executionContext) unmarshalNMethod2goᚗkeployᚗioᚋserverᚋv2ᚋpk
 }
 
 func (ec *executionContext) marshalNMethod2goᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐMethod(ctx context.Context, sel ast.SelectionSet, v model.Method) graphql.Marshaler {
+	return v
+}
+
+func (ec *executionContext) unmarshalNNoiseInput2goᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐNoiseInput(ctx context.Context, v interface{}) (model.NoiseInput, error) {
+	res, err := ec.unmarshalInputNoiseInput(ctx, v)
+	return res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) unmarshalNNoiseOps2goᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐNoiseOps(ctx context.Context, v interface{}) (model.NoiseOps, error) {
+	var res model.NoiseOps
+	err := res.UnmarshalGQL(v)
+	return res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) marshalNNoiseOps2goᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐNoiseOps(ctx context.Context, sel ast.SelectionSet, v model.NoiseOps) graphql.Marshaler {
+	return v
+}
+
+func (ec *executionContext) marshalNNoiseOutput2goᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐNoiseOutput(ctx context.Context, sel ast.SelectionSet, v model.NoiseOutput) graphql.Marshaler {
+	return ec._NoiseOutput(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalNNoiseOutput2ᚖgoᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐNoiseOutput(ctx context.Context, sel ast.SelectionSet, v *model.NoiseOutput) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			ec.Errorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._NoiseOutput(ctx, sel, v)
+}
+
+func (ec *executionContext) unmarshalNNoiseParams2ᚕᚖgoᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐNoiseParamsᚄ(ctx context.Context, v interface{}) ([]*model.NoiseParams, error) {
+	var vSlice []interface{}
+	if v != nil {
+		vSlice = graphql.CoerceList(v)
+	}
+	var err error
+	res := make([]*model.NoiseParams, len(vSlice))
+	for i := range vSlice {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithIndex(i))
+		res[i], err = ec.unmarshalNNoiseParams2ᚖgoᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐNoiseParams(ctx, vSlice[i])
+		if err != nil {
+			return nil, err
+		}
+	}
+	return res, nil
+}
+
+func (ec *executionContext) unmarshalNNoiseParams2ᚖgoᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐNoiseParams(ctx context.Context, v interface{}) (*model.NoiseParams, error) {
+	res, err := ec.unmarshalInputNoiseParams(ctx, v)
+	return &res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) unmarshalNNoiseType2goᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐNoiseType(ctx context.Context, v interface{}) (model.NoiseType, error) {
+	var res model.NoiseType
+	err := res.UnmarshalGQL(v)
+	return res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) marshalNNoiseType2goᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐNoiseType(ctx context.Context, sel ast.SelectionSet, v model.NoiseType) graphql.Marshaler {
 	return v
 }
 

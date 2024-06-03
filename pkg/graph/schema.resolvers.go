@@ -6,6 +6,7 @@ package graph
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -177,6 +178,44 @@ func (r *mutationResolver) StopHooks(context.Context) (bool, error) {
 	return true, nil
 }
 
+// utils to convert noise
+func convertToNoise(assertions string) (map[string][]string, error) {
+	fmt.Println("assertions", assertions)
+	if assertions != "" {
+		assertionFields := map[string]interface{}{}
+		err := json.Unmarshal([]byte(assertions), &assertionFields)
+		if err != nil {
+			return nil, errors.New("failed to unmarshal assertions. err: " + err.Error())
+		}
+		convertedNoisyFields := make(map[string][]string)
+		if noiseField, exists := assertionFields["noise"]; exists {
+			noisyFields, ok := noiseField.(map[string]interface{})
+			if !ok {
+				return nil, errors.New("noise field is not in correct format")
+			}
+
+			// Convert noisyFields to map[string][]string
+			for key, value := range noisyFields {
+				if strArray, ok := value.([]interface{}); ok {
+					convertedNoisyFields[key] = []string{}
+					for _, v := range strArray {
+						if str, ok := v.(string); ok {
+							convertedNoisyFields[key] = append(convertedNoisyFields[key], str)
+						} else {
+							return nil, errors.New("noise value is not a string")
+						}
+					}
+				} else {
+					return nil, errors.New("noise value is not an array of strings")
+				}
+			}
+			fmt.Println("convertedNoisyFields", convertedNoisyFields)
+			return convertedNoisyFields, nil
+		}
+	}
+	return nil, errors.New("noise field not found")
+}
+
 // NormaliseTc
 func (r *mutationResolver) NormaliseTc(ctx context.Context, normalizeInput model.NormalizeInput) (*model.NormaliseOutput, error) {
 	// have to write conversions from gql to normal models
@@ -240,6 +279,45 @@ func (r *mutationResolver) NormaliseTc(ctx context.Context, normalizeInput model
 		Status:   true,
 		ErrorMsg: nil,
 	}, nil
+}
+
+// denoise testcase method
+func (r *mutationResolver) DenoiseTestCase(ctx context.Context, denoiseInput model.NoiseInput) (*model.NoiseOutput, error) {
+	// have to write conversions from gql to normal models
+	var noiseParams []models.NoiseParams
+
+	for _, v := range denoiseInput.NoiseParams {
+		fmt.Println("v.NewAssertion", v.NewAssertion)
+		noise, err := convertToNoise(v.NewAssertion)
+		if err != nil {
+			return nil, err
+		}
+
+		noiseParams = append(noiseParams, models.NoiseParams{
+			TestCaseIDs: v.TestCaseIDs,
+			EditedBy:    v.EditedBy,
+			Assertion:   noise,
+			Ops:         string(v.NoiseOps),
+		})
+
+		fmt.Println("noiseParams", noiseParams)
+	}
+
+	err := r.replay.DenoiseTestCases(ctx, denoiseInput.TestRunID, denoiseInput.TestSetID, noiseParams)
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to denoise test cases")
+		err := err.Error()
+		return &model.NoiseOutput{
+			Status:   false,
+			ErrorMsg: &err,
+		}, errors.New("failed to denoise test cases")
+	}
+
+	return &model.NoiseOutput{
+		Status:   true,
+		ErrorMsg: nil,
+	}, nil
+	// return nil, nil
 }
 
 // Mutation returns MutationResolver implementation.

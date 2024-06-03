@@ -167,6 +167,26 @@ type MutationResult struct {
 	ErrorMsg *string `json:"errorMsg,omitempty"`
 }
 
+type NoiseInput struct {
+	TestRunID   string         `json:"testRunId"`
+	TestSetID   string         `json:"testSetId"`
+	NoiseParams []*NoiseParams `json:"noiseParams"`
+	AppID       string         `json:"appId"`
+}
+
+type NoiseOutput struct {
+	Status   bool    `json:"status"`
+	ErrorMsg *string `json:"errorMsg,omitempty"`
+}
+
+type NoiseParams struct {
+	TestCaseIDs  string    `json:"testCaseIDs"`
+	EditedBy     string    `json:"editedBy"`
+	NewAssertion string    `json:"newAssertion"`
+	NoiseType    NoiseType `json:"noiseType"`
+	NoiseOps     NoiseOps  `json:"noiseOps"`
+}
+
 type NormaliseOutput struct {
 	Status   bool    `json:"status"`
 	ErrorMsg *string `json:"errorMsg,omitempty"`
@@ -178,6 +198,7 @@ type NormalizeInput struct {
 	TestCaseIDs []string               `json:"TestCaseIDs"`
 	AppID       string                 `json:"appId"`
 	TcReport    []*TestCaseReportInput `json:"tcReport,omitempty"`
+	EditedBy    string                 `json:"editedBy"`
 }
 
 type Query struct {
@@ -460,6 +481,92 @@ func (e *Method) UnmarshalGQL(v interface{}) error {
 }
 
 func (e Method) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+type NoiseOps string
+
+const (
+	NoiseOpsAdd    NoiseOps = "ADD"
+	NoiseOpsRemove NoiseOps = "REMOVE"
+)
+
+var AllNoiseOps = []NoiseOps{
+	NoiseOpsAdd,
+	NoiseOpsRemove,
+}
+
+func (e NoiseOps) IsValid() bool {
+	switch e {
+	case NoiseOpsAdd, NoiseOpsRemove:
+		return true
+	}
+	return false
+}
+
+func (e NoiseOps) String() string {
+	return string(e)
+}
+
+func (e *NoiseOps) UnmarshalGQL(v interface{}) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = NoiseOps(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid NoiseOps", str)
+	}
+	return nil
+}
+
+func (e NoiseOps) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+type NoiseType string
+
+const (
+	NoiseTypeStatus  NoiseType = "STATUS"
+	NoiseTypeHeaders NoiseType = "HEADERS"
+	NoiseTypeBody    NoiseType = "BODY"
+	NoiseTypeAll     NoiseType = "ALL"
+)
+
+var AllNoiseType = []NoiseType{
+	NoiseTypeStatus,
+	NoiseTypeHeaders,
+	NoiseTypeBody,
+	NoiseTypeAll,
+}
+
+func (e NoiseType) IsValid() bool {
+	switch e {
+	case NoiseTypeStatus, NoiseTypeHeaders, NoiseTypeBody, NoiseTypeAll:
+		return true
+	}
+	return false
+}
+
+func (e NoiseType) String() string {
+	return string(e)
+}
+
+func (e *NoiseType) UnmarshalGQL(v interface{}) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = NoiseType(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid NoiseType", str)
+	}
+	return nil
+}
+
+func (e NoiseType) MarshalGQL(w io.Writer) {
 	fmt.Fprint(w, strconv.Quote(e.String()))
 }
 

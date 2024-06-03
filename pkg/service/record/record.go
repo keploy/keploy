@@ -23,10 +23,10 @@ type Recorder struct {
 	mockDB          MockDB
 	telemetry       Telemetry
 	instrumentation Instrumentation
-	config          config.Config
+	config          *config.Config
 }
 
-func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, config config.Config) Service {
+func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
 	return &Recorder{
 		logger:          logger,
 		testDB:          testDB,

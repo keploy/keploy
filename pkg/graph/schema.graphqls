@@ -271,7 +271,6 @@ type TestCaseReport {
 
 input TestCaseReportInput {
   id: ID!
-  # name: String!
   status: TestRunStatus!
   testcase: TestCaseInput!
   testResults: ResultInput!
@@ -353,9 +352,44 @@ input NormalizeInput {
   TestCaseIDs: [String!]!
   appId: String!
   tcReport: [TestCaseReportInput!]
+  editedBy: String!
 }
 
 type NormaliseOutput {
+  status: Boolean!
+  errorMsg: String
+}
+
+
+input NoiseInput {
+  testRunId: String!
+  testSetId: String!
+  noiseParams: [NoiseParams!]!
+  appId: String!
+}
+
+input NoiseParams {
+  testCaseIDs: String!
+  editedBy: String!
+  # responsePath: [String!]!
+  newAssertion: String!
+  noiseType: NoiseType!
+  noiseOps: NoiseOps!
+}
+
+enum NoiseType {
+  STATUS
+  HEADERS
+  BODY
+  ALL
+}
+
+enum NoiseOps {
+  ADD
+  REMOVE
+}
+
+type NoiseOutput {
   status: Boolean!
   errorMsg: String
 }
@@ -367,7 +401,7 @@ type Mutation {
   stopHooks: Boolean!
   stopApp(appId: Int!): Boolean!
   normaliseTc(normalize: NormalizeInput!): NormaliseOutput!
-  # noiseTestCase(testRunId: String!, appId: Int!): Boolean!
+  denoiseTestCase(noise:NoiseInput!): NoiseOutput!
 }
 
 
