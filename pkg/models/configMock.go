@@ -3,17 +3,19 @@ package models
 import (
 	"context"
 	"os"
+	"path/filepath"
 
 	yamlLib "gopkg.in/yaml.v3"
 
 	"go.uber.org/zap"
 )
 
-type CloudMockRepository struct {
+type ConfigMockRepository struct {
 	Mocks []string `yaml:"mocks"`
 }
 
-func WriteConfigFile(ctx context.Context, logger *zap.Logger, filePath string, mocks CloudMockRepository) error {
+func WriteConfigFile(ctx context.Context, logger *zap.Logger, path, fileName string, mocks ConfigMockRepository) error {
+	filePath := filepath.Join(path, fileName+".yaml")
 	data, err := yamlLib.Marshal(mocks)
 	if err != nil {
 		logger.Error("Failed to marshal the test report", zap.Error(err))
@@ -38,8 +40,8 @@ func WriteConfigFile(ctx context.Context, logger *zap.Logger, filePath string, m
 	return nil
 }
 
-func ReadConfigFile(logger *zap.Logger, filePath string) *CloudMockRepository {
-	var config CloudMockRepository
+func ReadConfigFile(logger *zap.Logger, filePath string) *ConfigMockRepository {
+	var config ConfigMockRepository
 	fileContent, err := os.ReadFile(filePath)
 	if err != nil {
 		logger.Error("Failed to read configuration file", zap.Error(err))
