@@ -85,47 +85,52 @@ func (tel *Telemetry) RecordedTestCaseMock(mockType string) {
 }
 
 func (tel *Telemetry) SendTelemetry(eventType string, output ...map[string]interface{}) {
-	if tel.Enabled {
-		event := models.TeleEvent{
-			EventType: eventType,
-			CreatedAt: time.Now().Unix(),
-		}
-		event.Meta = make(map[string]interface{})
-		if len(output) != 0 {
-			event.Meta = output[0]
-		}
+	if !tel.Enabled {
+		return
+	}
 
-		if tel.GlobalMap != nil {
-			event.Meta["global-map"] = tel.GlobalMap
-		}
+	event := models.TeleEvent{
+		EventType:      eventType,
+		CreatedAt:      time.Now().Unix(),
+		Meta:           make(map[string]interface{}),
+		InstallationID: tel.InstallationID,
+		OS:             runtime.GOOS,
+		KeployVersion:  tel.KeployVersion,
+		Arch:           runtime.GOARCH,
+	}
 
-		event.InstallationID = tel.InstallationID
-		event.OS = runtime.GOOS
-		event.KeployVersion = tel.KeployVersion
-		event.Arch = runtime.GOARCH
-		bin, err := marshalEvent(event, tel.logger)
-		if err != nil {
-			tel.logger.Debug("failed to marshal event", zap.Error(err))
-			return
-		}
+	if len(output) != 0 {
+		event.Meta = output[0]
+	}
 
-		req, err := http.NewRequest(http.MethodPost, teleURL, bytes.NewBuffer(bin))
-		if err != nil {
-			tel.logger.Debug("failed to create request for analytics", zap.Error(err))
-			return
-		}
+	if tel.GlobalMap != nil {
+		event.Meta["global-map"] = tel.GlobalMap
+	}
 
-		req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	bin, err := marshalEvent(event, tel.logger)
+	if err != nil {
+		tel.logger.Debug("failed to marshal event", zap.Error(err))
+		return
+	}
 
-		resp, err := tel.client.Do(req)
-		if err != nil {
-			tel.logger.Debug("failed to send request for analytics", zap.Error(err))
-			return
-		}
-		_, err = unmarshalResp(resp, tel.logger)
-		if err != nil {
-			tel.logger.Debug("failed to unmarshal response", zap.Error(err))
-			return
-		}
+	req, err := http.NewRequest(http.MethodPost, teleURL, bytes.NewBuffer(bin))
+	if err != nil {
+		tel.logger.Debug("failed to create request for analytics", zap.Error(err))
+		return
+	}
+
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+
+	resp, err := tel.client.Do(req)
+	if err != nil {
+		tel.logger.Debug("failed to send request for analytics", zap.Error(err))
+		return
+	}
+	defer resp.Body.Close()
+
+	_, err = unmarshalResp(resp, tel.logger)
+	if err != nil {
+		tel.logger.Debug("failed to unmarshal response", zap.Error(err))
+		return
 	}
 }

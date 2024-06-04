@@ -3,7 +3,6 @@ package cli
 
 import (
 	"context"
-
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
 	"go.uber.org/zap"
