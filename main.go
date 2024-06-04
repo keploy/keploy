@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"syscall"
 
 	"go.keploy.io/server/v2/cli"
@@ -89,6 +90,10 @@ func start(ctx context.Context) {
 	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
 	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
+		if strings.HasPrefix(err.Error(), "unknown command") || strings.HasPrefix(err.Error(), "unknown shorthand") {
+			fmt.Println("Error: ", err.Error())
+			fmt.Println("Run 'keploy --help' for usage.")
+			os.Exit(1)
+		}
 	}
 }
