@@ -40,7 +40,8 @@ func WriteConfigFile(ctx context.Context, logger *zap.Logger, path, fileName str
 	return nil
 }
 
-func ReadConfigFile(logger *zap.Logger, filePath string) *ConfigMockRepository {
+func ReadConfigFile(logger *zap.Logger, path, fileName string) *ConfigMockRepository {
+	filePath := filepath.Join(path, fileName+".yaml")
 	var config ConfigMockRepository
 	fileContent, err := os.ReadFile(filePath)
 	if err != nil {
