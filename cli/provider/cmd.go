@@ -489,7 +489,7 @@ func PreProcessCoverage(logger *zap.Logger, conf *config.Config) {
 	// then set the language to detected language
 	if conf.Test.Language == "" {
 		if language == models.Unknown {
-			logger.Warn("failed to detect language. please use --language to manually set the language")
+			logger.Warn("failed to detect language, skipping coverage caluclation. please use --language to manually set the language")
 			return
 		}
 		logger.Warn(fmt.Sprintf("%s language detected. please use --language to manually set the language if needed", language))
@@ -505,7 +505,7 @@ func PreProcessCoverage(logger *zap.Logger, conf *config.Config) {
 		err = utils.RunCommand("coverage")
 		if err != nil {
 			conf.Test.SkipCoverage = true
-			logger.Warn("coverage tool not found. please install coverage tool using 'pip install coverage'")
+			logger.Warn("coverage tool not found, skipping coverage caluclation. Please install coverage tool using 'pip install coverage'")
 		} else {
 			utils.CreatePyCoverageConfig(logger)
 			conf.CoverageCommand = strings.Replace(conf.Command, executable, "coverage run $APPEND --data-file=.coverage.keploy", 1)
@@ -514,7 +514,7 @@ func PreProcessCoverage(logger *zap.Logger, conf *config.Config) {
 		err = utils.RunCommand("nyc", "--version")
 		if err != nil {
 			conf.Test.SkipCoverage = true
-			logger.Warn("coverage tool not found. please install coverage tool using 'npm install -g nyc'")
+			logger.Warn("coverage tool not found, skipping coverage caluclation. please install coverage tool using 'npm install -g nyc'")
 		} else {
 			conf.CoverageCommand = "nyc --clean=$CLEAN " + conf.Command
 		}
