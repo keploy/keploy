@@ -23,7 +23,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func NewHooks(logger *zap.Logger, cfg config.Config) *Hooks {
+func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 	return &Hooks{
 		logger:    logger,
 		sess:      core.NewSessions(),
