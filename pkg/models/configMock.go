@@ -26,8 +26,6 @@ func WriteConfigFile(ctx context.Context, logger *zap.Logger, path, fileName str
 		logger.Error("Failed to open config file", zap.Error(err))
 		return err
 	}
-	defer file.Close()
-
 	if ctx.Err() != nil {
 		logger.Info("Operation cancelled by context before writing", zap.Error(ctx.Err()))
 		return ctx.Err()
@@ -37,6 +35,13 @@ func WriteConfigFile(ctx context.Context, logger *zap.Logger, path, fileName str
 		logger.Error("Failed to write to the report file", zap.Error(err))
 		return err
 	}
+
+	err = file.Close()
+	if err != nil {
+		logger.Error("failed to close the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
+		return err
+	}
+
 	return nil
 }
 
