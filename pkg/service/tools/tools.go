@@ -95,7 +95,8 @@ func (t *Tools) downloadAndUpdate(_ context.Context, _ *zap.Logger) error {
 		return errors.New("curl command not found on the system")
 	}
 
-	cmd := exec.Command(curlPath, "--silent", "-L", "-o", "install.sh", "https://keploy.io/install.sh")
+	cmd := exec.Command(curlPath, "--silent", "-O", "-L", "https://keploy.io/install.sh")
+
 	err = cmd.Run()
 	if err != nil {
 		return errors.New("failed to download the latest version of keploy")
