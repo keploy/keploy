@@ -175,8 +175,9 @@ type NoiseInput struct {
 }
 
 type NoiseOutput struct {
-	Status   bool    `json:"status"`
-	ErrorMsg *string `json:"errorMsg,omitempty"`
+	Status   bool                   `json:"status"`
+	ErrorMsg *string                `json:"errorMsg,omitempty"`
+	Extra    map[string]interface{} `json:"Extra"`
 }
 
 type NoiseParams struct {
@@ -188,17 +189,18 @@ type NoiseParams struct {
 }
 
 type NormaliseOutput struct {
-	Status   bool    `json:"status"`
-	ErrorMsg *string `json:"errorMsg,omitempty"`
+	Status   bool       `json:"status"`
+	ErrorMsg *string    `json:"errorMsg,omitempty"`
+	EditedBy *string    `json:"editedBy,omitempty"`
+	EditedAt *time.Time `json:"editedAt,omitempty"`
 }
 
 type NormalizeInput struct {
-	TestRunID   string                 `json:"testRunId"`
-	TestSetID   string                 `json:"testSetId"`
-	TestCaseIDs []string               `json:"TestCaseIDs"`
-	AppID       string                 `json:"appId"`
-	TcReport    []*TestCaseReportInput `json:"tcReport,omitempty"`
-	EditedBy    string                 `json:"editedBy"`
+	TestRunID   string    `json:"testRunId"`
+	TestSetID   *string   `json:"testSetId,omitempty"`
+	TestCaseIDs []*string `json:"testCaseIDs,omitempty"`
+	AppID       string    `json:"appId"`
+	EditedBy    string    `json:"editedBy"`
 }
 
 type Query struct {

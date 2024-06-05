@@ -227,6 +227,7 @@ type TestReport {
  status: TestRunStatus!
  app: App! # user application
  ranBy: User!
+ normalizeData: NormalizeData
 }
 
 input TestReportInput {
@@ -246,6 +247,7 @@ type TestSetReport {
  status: TestRunStatus!
  testSet: TestSet!
  testRunId: String! # should i need the reference of the parent document in frontend?
+normalizeData: NormalizeData
 }
 
 input TestSetReportInput {
@@ -257,6 +259,7 @@ input TestSetReportInput {
  Version: String!
  testSetId: ID! 
  testRunId: ID! # should i need the reference of the parent document in frontend?
+ 
 }
 
 
@@ -267,6 +270,12 @@ type TestCaseReport {
  testcase: TestCase!
  testResults: Result
  testSetReportId: String!
+ normalizeData: NormalizeData
+}
+
+type NormalizeData {
+  editedBy: String!
+  editedAt: Time!
 }
 
 input TestCaseReportInput {
@@ -348,16 +357,18 @@ enum TestRunStatus {
 
 input NormalizeInput {
   testRunId: String!
-  testSetId: String!
-  TestCaseIDs: [String!]!
+  testSetId: String
+  testCaseIDs: [String]
   appId: String!
-  tcReport: [TestCaseReportInput!]
+  # tcReport: [TestCaseReportInput!]
   editedBy: String!
 }
 
 type NormaliseOutput {
   status: Boolean!
   errorMsg: String
+  editedBy: String
+  editedAt: Time
 }
 
 
@@ -406,3 +417,4 @@ type Mutation {
 
 
 scalar Time
+scalar Map

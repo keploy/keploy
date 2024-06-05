@@ -388,7 +388,6 @@ func decodePgRequest(buffer []byte, logger *zap.Logger) *models.Backend {
 	if !isStartupPacket(buffer) && len(buffer) > 5 {
 		bufferCopy := buffer
 		for i := 0; i < len(bufferCopy)-5; {
-			logger.Debug("Inside the if condition")
 			pg.BackendWrapper.MsgType = buffer[i]
 			pg.BackendWrapper.BodyLen = int(binary.BigEndian.Uint32(buffer[i+1:])) - 4
 			if len(buffer) < (i + pg.BackendWrapper.BodyLen + 5) {

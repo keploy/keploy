@@ -219,52 +219,63 @@ func convertToNoise(assertions string) (map[string][]string, error) {
 // NormaliseTc
 func (r *mutationResolver) NormaliseTc(ctx context.Context, normalizeInput model.NormalizeInput) (*model.NormaliseOutput, error) {
 	// have to write conversions from gql to normal models
-	var testResult []models.TestResult
-	// convert the body Result to models.BodyResult
-	// var bodyResult []models.BodyResult
+	// var testResult []models.TestResult
+	// // convert the body Result to models.BodyResult
+	// // var bodyResult []models.BodyResult
+	// // for _, v := range normalizeInput.TcReport {
+
+	// // }
+
 	// for _, v := range normalizeInput.TcReport {
+	// 	var headerResult []models.HeaderResult
+	// 	bodyResult := make([]models.BodyResult, 1)
+	// 	for _, header := range v.TestResults.HeadersResult {
+
+	// 		headerResult = append(headerResult, models.HeaderResult{
+	// 			Normal: header.Normal,
+	// 			Expected: models.Header{
+	// 				Key:   header.Expected,
+	// 				Value: []string{"blah-blah"}, // need to add the value
+	// 			},
+	// 			Actual: models.Header{
+	// 				Key:   header.Actual,
+	// 				Value: []string{"blah-blah"}, // need to add the value
+	// 			},
+	// 		})
+	// 	}
+
+	// 	bodyResult[0] = models.BodyResult{
+	// 		Normal:   v.TestResults.BodyResult.Normal,
+	// 		Type:     models.BodyType(v.TestResults.BodyResult.Type),
+	// 		Expected: v.TestResults.BodyResult.Expected,
+	// 		Actual:   v.TestResults.BodyResult.Actual,
+	// 	}
+
+	// 	testResult = append(testResult, models.TestResult{
+	// 		Kind:   models.Kind(*v.Testcase.Kind),
+	// 		Name:   *v.Testcase.Name,
+	// 		Status: models.TestStatus(v.Status),
+	// 		Result: models.Result{
+	// 			StatusCode:    models.IntResult(*v.TestResults.StatusResult),
+	// 			BodyResult:    bodyResult,
+	// 			HeadersResult: headerResult,
+	// 		},
+	// 	},
+	// 	)
 
 	// }
+	// get the testResults from the api server now
+	// if only testRunId is provided then get all the testResults for that testRunId
+	// if testSetId is also provided then get the testResults for that testSetId
+	if len(normalizeInput.TestCaseIDs) != 0 {
 
-	for _, v := range normalizeInput.TcReport {
-		var headerResult []models.HeaderResult
-		bodyResult := make([]models.BodyResult, 1)
-		for _, header := range v.TestResults.HeadersResult {
+	} else if *normalizeInput.TestSetID != "" {
 
-			headerResult = append(headerResult, models.HeaderResult{
-				Normal: header.Normal,
-				Expected: models.Header{
-					Key:   header.Expected,
-					Value: []string{"blah-blah"}, // need to add the value
-				},
-				Actual: models.Header{
-					Key:   header.Actual,
-					Value: []string{"blah-blah"}, // need to add the value
-				},
-			})
-		}
-
-		bodyResult[0] = models.BodyResult{
-			Normal:   v.TestResults.BodyResult.Normal,
-			Type:     models.BodyType(v.TestResults.BodyResult.Type),
-			Expected: v.TestResults.BodyResult.Expected,
-			Actual:   v.TestResults.BodyResult.Actual,
-		}
-
-		testResult = append(testResult, models.TestResult{
-			Kind:   models.Kind(*v.Testcase.Kind),
-			Name:   *v.Testcase.Name,
-			Status: models.TestStatus(v.Status),
-			Result: models.Result{
-				StatusCode:    models.IntResult(*v.TestResults.StatusResult),
-				BodyResult:    bodyResult,
-				HeadersResult: headerResult,
-			},
-		},
-		)
+	} else if normalizeInput.TestRunID != "" {
 
 	}
-	err := r.replay.NormalizeTestCases(ctx, normalizeInput.TestRunID, normalizeInput.TestSetID, normalizeInput.TestCaseIDs, testResult)
+
+	err := r.replay.NormalizeTestCases(ctx, normalizeInput.TestRunID, *normalizeInput.TestSetID, nil, nil)
 	// after that change the status to success for that particular testcase, and if it was the only failed testcase then change the status of the testSet to success
 	// send the updated report to api server
 	if err != nil {
@@ -312,10 +323,52 @@ func (r *mutationResolver) DenoiseTestCase(ctx context.Context, denoiseInput mod
 			ErrorMsg: &err,
 		}, errors.New("failed to denoise test cases")
 	}
-
+	// create a dummy json use json.unmarshal to convert it to map[string]interface{}
+	jsonData := `{
+"problems": [{
+    "Diabetes":[{
+        "medications":[{
+            "medicationsClasses":[{
+                "className":[{
+                    "associatedDrug":[{
+                        "name":"asprin",
+                        "dose":"",
+                        "strength":"500 mg"
+                    }],
+                    "associatedDrug#2":[{
+                        "name":"somethingElse",
+                        "dose":"",
+                        "strength":"500 mg"
+                    }]
+                }],
+                "className2":[{
+                    "associatedDrug":[{
+                        "name":"asprin",
+                        "dose":"",
+                        "strength":"500 mg"
+                    }],
+                    "associatedDrug#2":[{
+                        "name":"somethingElse",
+                        "dose":"",
+                        "strength":"500 mg"
+                    }]
+                }]
+            }]
+        }],
+        "labs":[{
+            "missing_field": "missing_value"
+        }]
+    }],
+    "Asthma":[{}]
+}]}`
+	var data map[string]interface{}
+	err = json.Unmarshal([]byte(jsonData), &data)
+	fmt.Println("data", data)
+	// call the api server to insert noise data
 	return &model.NoiseOutput{
 		Status:   true,
 		ErrorMsg: nil,
+		Extra:    data,
 	}, nil
 	// return nil, nil
 }

@@ -135,10 +135,13 @@ type ComplexityRoot struct {
 
 	NoiseOutput struct {
 		ErrorMsg func(childComplexity int) int
+		Extra    func(childComplexity int) int
 		Status   func(childComplexity int) int
 	}
 
 	NormaliseOutput struct {
+		EditedAt func(childComplexity int) int
+		EditedBy func(childComplexity int) int
 		ErrorMsg func(childComplexity int) int
 		Status   func(childComplexity int) int
 	}
@@ -681,12 +684,33 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 
 		return e.complexity.NoiseOutput.ErrorMsg(childComplexity), true
 
+	case "NoiseOutput.Extra":
+		if e.complexity.NoiseOutput.Extra == nil {
+			break
+		}
+
+		return e.complexity.NoiseOutput.Extra(childComplexity), true
+
 	case "NoiseOutput.status":
 		if e.complexity.NoiseOutput.Status == nil {
 			break
 		}
 
 		return e.complexity.NoiseOutput.Status(childComplexity), true
+
+	case "NormaliseOutput.editedAt":
+		if e.complexity.NormaliseOutput.EditedAt == nil {
+			break
+		}
+
+		return e.complexity.NormaliseOutput.EditedAt(childComplexity), true
+
+	case "NormaliseOutput.editedBy":
+		if e.complexity.NormaliseOutput.EditedBy == nil {
+			break
+		}
+
+		return e.complexity.NormaliseOutput.EditedBy(childComplexity), true
 
 	case "NormaliseOutput.errorMsg":
 		if e.complexity.NormaliseOutput.ErrorMsg == nil {
@@ -3721,6 +3745,10 @@ func (ec *executionContext) fieldContext_Mutation_normaliseTc(ctx context.Contex
 				return ec.fieldContext_NormaliseOutput_status(ctx, field)
 			case "errorMsg":
 				return ec.fieldContext_NormaliseOutput_errorMsg(ctx, field)
+			case "editedBy":
+				return ec.fieldContext_NormaliseOutput_editedBy(ctx, field)
+			case "editedAt":
+				return ec.fieldContext_NormaliseOutput_editedAt(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type NormaliseOutput", field.Name)
 		},
@@ -3753,7 +3781,10 @@ func (ec *executionContext) _Mutation_denoiseTestCase(ctx context.Context, field
 	}()
 	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
 		ctx = rctx // use context from middleware stack in children
-		return ec.resolvers.Mutation().DenoiseTestCase(rctx, fc.Args["noise"].(model.NoiseInput))
+		x,y:=ec.resolvers.Mutation().DenoiseTestCase(rctx, fc.Args["noise"].(model.NoiseInput))
+		fmt.Println("x::",x)
+		fmt.Println("y::",y)
+		return x,y
 	})
 	if err != nil {
 		ec.Error(ctx, err)
@@ -3782,6 +3813,8 @@ func (ec *executionContext) fieldContext_Mutation_denoiseTestCase(ctx context.Co
 				return ec.fieldContext_NoiseOutput_status(ctx, field)
 			case "errorMsg":
 				return ec.fieldContext_NoiseOutput_errorMsg(ctx, field)
+			case "Extra":
+				return ec.fieldContext_NoiseOutput_Extra(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type NoiseOutput", field.Name)
 		},
@@ -4014,6 +4047,50 @@ func (ec *executionContext) fieldContext_NoiseOutput_errorMsg(ctx context.Contex
 	return fc, nil
 }
 
+func (ec *executionContext) _NoiseOutput_Extra(ctx context.Context, field graphql.CollectedField, obj *model.NoiseOutput) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_NoiseOutput_Extra(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Extra, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(map[string]interface{})
+	fc.Result = res
+	return ec.marshalNMap2map(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_NoiseOutput_Extra(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "NoiseOutput",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Map does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _NormaliseOutput_status(ctx context.Context, field graphql.CollectedField, obj *model.NormaliseOutput) (ret graphql.Marshaler) {
 	fc, err := ec.fieldContext_NormaliseOutput_status(ctx, field)
 	if err != nil {
@@ -4094,6 +4171,88 @@ func (ec *executionContext) fieldContext_NormaliseOutput_errorMsg(ctx context.Co
 		IsResolver: false,
 		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
 			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _NormaliseOutput_editedBy(ctx context.Context, field graphql.CollectedField, obj *model.NormaliseOutput) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_NormaliseOutput_editedBy(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.EditedBy, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		return graphql.Null
+	}
+	res := resTmp.(*string)
+	fc.Result = res
+	return ec.marshalOString2ᚖstring(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_NormaliseOutput_editedBy(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "NormaliseOutput",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _NormaliseOutput_editedAt(ctx context.Context, field graphql.CollectedField, obj *model.NormaliseOutput) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_NormaliseOutput_editedAt(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.EditedAt, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		return graphql.Null
+	}
+	res := resTmp.(*time.Time)
+	fc.Result = res
+	return ec.marshalOTime2ᚖtimeᚐTime(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_NormaliseOutput_editedAt(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "NormaliseOutput",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Time does not have child fields")
 		},
 	}
 	return fc, nil
@@ -9355,7 +9514,7 @@ func (ec *executionContext) unmarshalInputNormalizeInput(ctx context.Context, ob
 		asMap[k] = v
 	}
 
-	fieldsInOrder := [...]string{"testRunId", "testSetId", "TestCaseIDs", "appId", "tcReport", "editedBy"}
+	fieldsInOrder := [...]string{"testRunId", "testSetId", "testCaseIDs", "appId", "editedBy"}
 	for _, k := range fieldsInOrder {
 		v, ok := asMap[k]
 		if !ok {
@@ -9371,14 +9530,14 @@ func (ec *executionContext) unmarshalInputNormalizeInput(ctx context.Context, ob
 			it.TestRunID = data
 		case "testSetId":
 			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("testSetId"))
-			data, err := ec.unmarshalNString2string(ctx, v)
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
 			if err != nil {
 				return it, err
 			}
 			it.TestSetID = data
-		case "TestCaseIDs":
-			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("TestCaseIDs"))
-			data, err := ec.unmarshalNString2ᚕstringᚄ(ctx, v)
+		case "testCaseIDs":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("testCaseIDs"))
+			data, err := ec.unmarshalOString2ᚕᚖstring(ctx, v)
 			if err != nil {
 				return it, err
 			}
@@ -9390,13 +9549,6 @@ func (ec *executionContext) unmarshalInputNormalizeInput(ctx context.Context, ob
 				return it, err
 			}
 			it.AppID = data
-		case "tcReport":
-			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("tcReport"))
-			data, err := ec.unmarshalOTestCaseReportInput2ᚕᚖgoᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐTestCaseReportInputᚄ(ctx, v)
-			if err != nil {
-				return it, err
-			}
-			it.TcReport = data
 		case "editedBy":
 			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("editedBy"))
 			data, err := ec.unmarshalNString2string(ctx, v)
@@ -10455,6 +10607,11 @@ func (ec *executionContext) _NoiseOutput(ctx context.Context, sel ast.SelectionS
 			}
 		case "errorMsg":
 			out.Values[i] = ec._NoiseOutput_errorMsg(ctx, field, obj)
+		case "Extra":
+			out.Values[i] = ec._NoiseOutput_Extra(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -10496,6 +10653,10 @@ func (ec *executionContext) _NormaliseOutput(ctx context.Context, sel ast.Select
 			}
 		case "errorMsg":
 			out.Values[i] = ec._NormaliseOutput_errorMsg(ctx, field, obj)
+		case "editedBy":
+			out.Values[i] = ec._NormaliseOutput_editedBy(ctx, field, obj)
+		case "editedAt":
+			out.Values[i] = ec._NormaliseOutput_editedAt(ctx, field, obj)
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -11630,6 +11791,27 @@ func (ec *executionContext) unmarshalNIntResultInput2ᚖgoᚗkeployᚗioᚋserve
 	return &res, graphql.ErrorOnPath(ctx, err)
 }
 
+func (ec *executionContext) unmarshalNMap2map(ctx context.Context, v interface{}) (map[string]interface{}, error) {
+	res, err := graphql.UnmarshalMap(v)
+	return res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) marshalNMap2map(ctx context.Context, sel ast.SelectionSet, v map[string]interface{}) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			ec.Errorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	res := graphql.MarshalMap(v)
+	if res == graphql.Null {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			ec.Errorf(ctx, "the requested element is null which the schema does not allow")
+		}
+	}
+	return res
+}
+
 func (ec *executionContext) unmarshalNMethod2goᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐMethod(ctx context.Context, v interface{}) (model.Method, error) {
 	var res model.Method
 	err := res.UnmarshalGQL(v)
@@ -11784,11 +11966,6 @@ func (ec *executionContext) marshalNTestCase2ᚖgoᚗkeployᚗioᚋserverᚋv2�
 
 func (ec *executionContext) unmarshalNTestCaseInput2ᚖgoᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐTestCaseInput(ctx context.Context, v interface{}) (*model.TestCaseInput, error) {
 	res, err := ec.unmarshalInputTestCaseInput(ctx, v)
-	return &res, graphql.ErrorOnPath(ctx, err)
-}
-
-func (ec *executionContext) unmarshalNTestCaseReportInput2ᚖgoᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐTestCaseReportInput(ctx context.Context, v interface{}) (*model.TestCaseReportInput, error) {
-	res, err := ec.unmarshalInputTestCaseReportInput(ctx, v)
 	return &res, graphql.ErrorOnPath(ctx, err)
 }
 
@@ -12311,6 +12488,38 @@ func (ec *executionContext) marshalOResult2ᚖgoᚗkeployᚗioᚋserverᚋv2ᚋp
 	return ec._Result(ctx, sel, v)
 }
 
+func (ec *executionContext) unmarshalOString2ᚕᚖstring(ctx context.Context, v interface{}) ([]*string, error) {
+	if v == nil {
+		return nil, nil
+	}
+	var vSlice []interface{}
+	if v != nil {
+		vSlice = graphql.CoerceList(v)
+	}
+	var err error
+	res := make([]*string, len(vSlice))
+	for i := range vSlice {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithIndex(i))
+		res[i], err = ec.unmarshalOString2ᚖstring(ctx, vSlice[i])
+		if err != nil {
+			return nil, err
+		}
+	}
+	return res, nil
+}
+
+func (ec *executionContext) marshalOString2ᚕᚖstring(ctx context.Context, sel ast.SelectionSet, v []*string) graphql.Marshaler {
+	if v == nil {
+		return graphql.Null
+	}
+	ret := make(graphql.Array, len(v))
+	for i := range v {
+		ret[i] = ec.marshalOString2ᚖstring(ctx, sel, v[i])
+	}
+
+	return ret
+}
+
 func (ec *executionContext) unmarshalOString2ᚖstring(ctx context.Context, v interface{}) (*string, error) {
 	if v == nil {
 		return nil, nil
@@ -12325,26 +12534,6 @@ func (ec *executionContext) marshalOString2ᚖstring(ctx context.Context, sel as
 	}
 	res := graphql.MarshalString(*v)
 	return res
-}
-
-func (ec *executionContext) unmarshalOTestCaseReportInput2ᚕᚖgoᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐTestCaseReportInputᚄ(ctx context.Context, v interface{}) ([]*model.TestCaseReportInput, error) {
-	if v == nil {
-		return nil, nil
-	}
-	var vSlice []interface{}
-	if v != nil {
-		vSlice = graphql.CoerceList(v)
-	}
-	var err error
-	res := make([]*model.TestCaseReportInput, len(vSlice))
-	for i := range vSlice {
-		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithIndex(i))
-		res[i], err = ec.unmarshalNTestCaseReportInput2ᚖgoᚗkeployᚗioᚋserverᚋv2ᚋpkgᚋgraphᚋmodelᚐTestCaseReportInput(ctx, vSlice[i])
-		if err != nil {
-			return nil, err
-		}
-	}
-	return res, nil
 }
 
 func (ec *executionContext) unmarshalOTime2ᚖtimeᚐTime(ctx context.Context, v interface{}) (*time.Time, error) {
