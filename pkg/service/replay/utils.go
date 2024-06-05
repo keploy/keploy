@@ -53,13 +53,22 @@ func ReplaceReqOrigin(newURL, oldURL string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to parse the new URL: %v", err)
 	}
-	// if scheme is empty, then replace the host with the new URL
+	// if scheme is empty, then add the scheme from the old URL in order to parse it correctly
 	if parsedNewURL.Scheme == "" {
-		parsedOldURL.Host = parsedNewURL.String()
-	} else {
-		parsedOldURL.Scheme = parsedNewURL.Scheme
-		parsedOldURL.Host = parsedNewURL.Host
+		parsedNewURL.Scheme = parsedOldURL.Scheme
+		parsedNewURL, err = url.Parse(parsedNewURL.String())
+		if err != nil {
+			return "", fmt.Errorf("failed to parse the scheme added new URL: %v", err)
+		}
 	}
+
+	parsedOldURL.Scheme = parsedNewURL.Scheme
+	parsedOldURL.Host = parsedNewURL.Host
+	path, err := url.JoinPath(parsedNewURL.Path, parsedOldURL.Path)
+	if err != nil {
+		return "", fmt.Errorf("failed to join '%v' and '%v' paths: %v", parsedNewURL.Path, parsedOldURL.Path, err)
+	}
+	parsedOldURL.Path = path
 
 	replacedURL := parsedOldURL.String()
 	return replacedURL, nil

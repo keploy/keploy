@@ -37,7 +37,7 @@ test:
   mongoPassword: "default@123"
   language: ""
   removeUnusedMocks: false
-  apiUrl: ""
+  basePath: ""
 record:
   recordTimer: 0s
   filters: []

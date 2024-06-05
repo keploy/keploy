@@ -221,7 +221,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().Bool("removeUnusedMocks", c.cfg.Test.RemoveUnusedMocks, "Clear the unused mocks for the passed test-sets")
 			cmd.Flags().Bool("goCoverage", c.cfg.Test.GoCoverage, "Enable go coverage reporting for the testcases")
 			cmd.Flags().Bool("fallBackOnMiss", c.cfg.Test.FallBackOnMiss, "Enable connecting to actual service if mock not found during test mode")
-			cmd.Flags().StringP("apiUrl", "u", "", "Custom api URL to replace the actual URL in the testcases")
+			cmd.Flags().String("basePath", c.cfg.Test.BasePath, "Custom api basePath/origin to replace the actual basePath/origin in the testcases")
 		} else {
 			cmd.Flags().Uint64("recordTimer", 0, "User provided time to record its application")
 		}
@@ -349,20 +349,16 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		config.SetByPassPorts(c.cfg, bypassPorts)
 
-		if c.cfg.Command == "" {
-			utils.LogError(c.logger, nil, "missing required -c flag or appCmd in config file")
-			if c.cfg.InDocker {
-				c.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
-			} else {
-				c.logger.Info(LogExample(RootExamples))
-			}
-			return errors.New("missing required -c flag or appCmd in config file")
+		// handle the running command
+		err = c.handleRunCmd(cmd)
+		if err != nil {
+			return err
 		}
 
 		// set the command type
 		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
 
-		if c.cfg.GenerateGithubActions {
+		if c.cfg.GenerateGithubActions && utils.CmdType(c.cfg.CommandType) != utils.Empty {
 			defer utils.GenerateGithubActions(c.logger, c.cfg.Command)
 		}
 		if c.cfg.InDocker {

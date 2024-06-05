@@ -345,6 +345,9 @@ func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRele
 
 // FindDockerCmd checks if the cli is related to docker or not, it also returns if it is a docker compose file
 func FindDockerCmd(cmd string) CmdType {
+	if cmd == "" {
+		return Empty
+	}
 	// Convert command to lowercase for case-insensitive comparison
 	cmdLower := strings.TrimSpace(strings.ToLower(cmd))
 
@@ -382,6 +385,7 @@ const (
 	DockerStart   CmdType = "docker-start"
 	DockerCompose CmdType = "docker-compose"
 	Native        CmdType = "native"
+	Empty         CmdType = ""
 )
 
 func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {

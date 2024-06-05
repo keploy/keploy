@@ -69,7 +69,7 @@ type Test struct {
 	Language           string              `json:"language" yaml:"language" mapstructure:"language"`
 	RemoveUnusedMocks  bool                `json:"removeUnusedMocks" yaml:"removeUnusedMocks" mapstructure:"removeUnusedMocks"`
 	FallBackOnMiss     bool                `json:"fallBackOnMiss" yaml:"fallBackOnMiss" mapstructure:"fallBackOnMiss"`
-	APIURL             string              `json:"apiURL" yaml:"apiURL" mapstructure:"apiURL"`
+	BasePath           string              `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
 }
 
 type Globalnoise struct {
