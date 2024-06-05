@@ -91,23 +91,28 @@ func getCaPaths() ([]string, error) {
 
 // to extract ca certificate to temp
 func extractCertToTemp() (string, error) {
+
 	tempFile, err := os.CreateTemp("", "ca.crt")
 
 	if err != nil {
 		return "", err
 	}
+
+	beforeUmask, err := utils.SetUmask(0)
+
+	if err != nil {
+		return "", err
+	}
+	if _, err := utils.SetUmask(beforeUmask); err != nil {
+		return "", err
+	}
+
 	defer func(tempFile *os.File) {
 		err := tempFile.Close()
 		if err != nil {
 			return
 		}
 	}(tempFile)
-
-	// Change the file permissions to allow read access for all users
-	err = os.Chmod(tempFile.Name(), 0666)
-	if err != nil {
-		return "", err
-	}
 
 	// Write to the file
 	_, err = tempFile.Write(caCrt)

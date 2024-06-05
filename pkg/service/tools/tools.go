@@ -268,15 +268,20 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 
 	finalOutput := append(results, []byte(utils.ConfigGuide)...)
 
+	beforeUmask, err := utils.SetUmask(0)
+	if err != nil {
+		utils.LogError(t.logger, err, "failed to set the permission of keploy directory")
+		return nil
+	}
+
 	err = os.WriteFile(filePath, finalOutput, fs.ModePerm)
 	if err != nil {
 		utils.LogError(t.logger, err, "failed to write config file")
 		return nil
 	}
 
-	err = os.Chmod(filePath, 0777) // Set permissions to 777
-	if err != nil {
-		utils.LogError(t.logger, err, "failed to set the permission of config file")
+	if _, err = utils.SetUmask(beforeUmask); err != nil {
+		utils.LogError(t.logger, err, "failed to reset the permission")
 		return nil
 	}
 
