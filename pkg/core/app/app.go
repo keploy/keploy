@@ -414,6 +414,46 @@ func (a *App) Run(ctx context.Context, inodeChan chan uint64) models.AppError {
 	}
 	return a.run(ctx)
 }
+func (a *App) getDockerMetaSync() error {
+	timeout := time.NewTimer(30 * time.Second)
+	logTicker := time.NewTicker(1 * time.Second)
+	defer logTicker.Stop()
+	defer timeout.Stop()
+
+	containerID := a.container
+	for {
+		select {
+		case <-logTicker.C:
+			// Inspect the container status
+			containerJSON, err := a.docker.ContainerInspect(context.Background(), containerID)
+			if err != nil {
+				a.logger.Error("failed to inspect container", zap.String("containerID", containerID), zap.Error(err))
+				continue
+			}
+
+			a.logger.Debug("container status", zap.String("status", containerJSON.State.Status), zap.String("containerName", a.container))
+			// Check if container is stopped or dead
+			if containerJSON.State.Status == "exited" || containerJSON.State.Status == "dead" {
+				return nil
+			}
+		case <-timeout.C:
+			err := a.InterruptContainer()
+			return err
+		}
+	}
+}
+
+func (a *App) InterruptContainer() error {
+	signal := "SIGKILL"
+	err := a.docker.ContainerKill(context.Background(), a.container, signal)
+	if err != nil {
+		a.logger.Error("failed to send signal to container", zap.String("containerID", a.container), zap.Error(err))
+		return err
+	}
+	a.logger.Info("signal sent to container", zap.String("containerID", a.container), zap.String("signal", signal))
+	return nil
+
+}
 
 func (a *App) run(ctx context.Context) models.AppError {
 	// Run the app as the user who invoked sudo
@@ -435,10 +475,22 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// Set the cancel function for the command
 	cmd.Cancel = func() error {
 
-		return utils.InterruptProcessTree(a.logger, cmd.Process.Pid, syscall.SIGINT)
+		if utils.IsDockerKind(a.kind) {
+
+			err := syscall.Kill(cmd.Process.Pid, syscall.SIGINT)
+			// ignore the ESRCH error as it means the process is already dead
+			if errno, ok := err.(syscall.Errno); ok && err != nil && errno != syscall.ESRCH {
+				a.logger.Error("failed to send signal to process", zap.Int("pid", cmd.Process.Pid), zap.Error(err))
+				return err
+			}
+
+			return nil
+		} else {
+			return utils.InterruptProcessTree(a.logger, cmd.Process.Pid, syscall.SIGINT)
+		}
 	}
 	// wait after sending the interrupt signal, before sending the kill signal
-	cmd.WaitDelay = 10 * time.Second
+	cmd.WaitDelay = 25 * time.Second
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
@@ -456,6 +508,11 @@ func (a *App) run(ctx context.Context) models.AppError {
 	}
 
 	err = cmd.Wait()
+
+	if utils.IsDockerKind(a.kind) {
+		a.getDockerMetaSync()
+	}
+
 	select {
 	case <-ctx.Done():
 		a.logger.Debug("context cancelled, error while waiting for the app to exit", zap.Error(ctx.Err()))
