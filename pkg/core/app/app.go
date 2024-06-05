@@ -414,7 +414,7 @@ func (a *App) Run(ctx context.Context, inodeChan chan uint64) models.AppError {
 	}
 	return a.run(ctx)
 }
-func (a *App) getDockerMetaSync() {
+func (a *App) waitTillExit() {
 	timeout := time.NewTimer(30 * time.Second)
 	logTicker := time.NewTicker(1 * time.Second)
 	defer logTicker.Stop()
@@ -428,7 +428,7 @@ func (a *App) getDockerMetaSync() {
 			containerJSON, err := a.docker.ContainerInspect(context.Background(), containerID)
 			if err != nil {
 				a.logger.Error("failed to inspect container", zap.String("containerID", containerID), zap.Error(err))
-				continue
+				return
 			}
 
 			a.logger.Debug("container status", zap.String("status", containerJSON.State.Status), zap.String("containerName", a.container))
@@ -437,7 +437,7 @@ func (a *App) getDockerMetaSync() {
 				return
 			}
 		case <-timeout.C:
-			a.logger.Info("timeout waiting for the container to stop", zap.String("containerID", containerID))
+			a.logger.Warn("timeout waiting for the container to stop", zap.String("containerID", containerID))
 			return
 		}
 	}
@@ -464,14 +464,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	cmd.Cancel = func() error {
 
 		if utils.IsDockerKind(a.kind) {
-
-			err := syscall.Kill(cmd.Process.Pid, syscall.SIGINT)
-			// ignore the ESRCH error as it means the process is already dead
-			if errno, ok := err.(syscall.Errno); ok && err != nil && errno != syscall.ESRCH {
-				a.logger.Error("failed to send signal to process", zap.Int("pid", cmd.Process.Pid), zap.Error(err))
-				return err
-			}
-
+			utils.SendSignal(a.logger, cmd.Process.Pid, syscall.SIGINT)
 			return nil
 		}
 		return utils.InterruptProcessTree(a.logger, cmd.Process.Pid, syscall.SIGINT)
@@ -498,7 +491,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	err = cmd.Wait()
 
 	if utils.IsDockerKind(a.kind) {
-		a.getDockerMetaSync()
+		a.waitTillExit()
 	}
 
 	select {

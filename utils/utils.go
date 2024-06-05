@@ -586,13 +586,17 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 	}
 
 	for _, pid := range uniqueProcess {
-		err := syscall.Kill(-pid, sig)
-		// ignore the ESRCH error as it means the process is already dead
-		if errno, ok := err.(syscall.Errno); ok && err != nil && errno != syscall.ESRCH {
-			logger.Error("failed to send signal to process", zap.Int("pid", pid), zap.Error(err))
-		}
+		SendSignal(logger, -pid, sig)
 	}
 	return nil
+}
+
+func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) {
+	err := syscall.Kill(pid, sig)
+	// ignore the ESRCH error as it means the process is already dead
+	if errno, ok := err.(syscall.Errno); ok && err != nil && errno != syscall.ESRCH {
+		logger.Error("failed to send signal to process", zap.Int("pid", pid), zap.Error(err))
+	}
 }
 
 func uniqueProcessGroups(pids []int) ([]int, error) {
