@@ -473,9 +473,9 @@ func (a *App) run(ctx context.Context) models.AppError {
 			}
 
 			return nil
-		} else {
-			return utils.InterruptProcessTree(a.logger, cmd.Process.Pid, syscall.SIGINT)
 		}
+		return utils.InterruptProcessTree(a.logger, cmd.Process.Pid, syscall.SIGINT)
+
 	}
 	// wait after sending the interrupt signal, before sending the kill signal
 	cmd.WaitDelay = 25 * time.Second
