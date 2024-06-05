@@ -6,9 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
-	"net"
 )
 
 type PacketHeader struct {
@@ -24,23 +25,6 @@ type SQLPacketHeader struct {
 type Packet struct {
 	Header  SQLPacketHeader `yaml:"header"`
 	Payload []byte          `yaml:"payload"`
-}
-
-type ColumnDefinition struct {
-	PacketHeader PacketHeader `yaml:"packet_header"`
-	Catalog      string       `yaml:"catalog"`
-	Schema       string       `yaml:"schema"`
-	Table        string       `yaml:"table"`
-	OrgTable     string       `yaml:"org_table"`
-	Name         string       `yaml:"name"`
-	OrgName      string       `yaml:"org_name"`
-	NextLength   uint64       `yaml:"next_length"`
-	CharacterSet uint16       `yaml:"character_set"`
-	ColumnLength uint32       `yaml:"column_length"`
-	ColumnType   byte         `yaml:"column_type"`
-	Flags        uint16       `yaml:"flags"`
-	Decimals     byte         `yaml:"decimals"`
-	DefaultValue string       `yaml:"string"`
 }
 
 type RowDataPacket struct {
@@ -156,6 +140,7 @@ func DecodeMySQLPacket(logger *zap.Logger, packet Packet, clientConn net.Conn, m
 		case isLengthEncodedInteger(data[0]): // ResultSet Packet
 			packetType = "RESULT_SET_PACKET"
 			packetData, err = parseResultSet(data)
+			fmt.Println("Packet Data: ", packetData)
 			if err != nil {
 				fmt.Println("Error parsing result set: ", err)
 			}

@@ -7,24 +7,10 @@ import (
 	"fmt"
 	"time"
 
+	// "github.com/zmap/zlint/v3/formattedoutput"
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-type ResultSet struct {
-	Columns             []*ColumnDefinition `yaml:"columns,omitempty,flow"`
-	Rows                []*Row              `yaml:"rows,omitempty,flow"`
-	EOFPresent          bool                `yaml:"eofPresent,omitempty,flow"`
-	PaddingPresent      bool                `yaml:"paddingPresent,omitempty,flow"`
-	EOFPresentFinal     bool                `yaml:"eofPresentFinal,omitempty,flow"`
-	PaddingPresentFinal bool                `yaml:"paddingPresentFinal,omitempty,flow"`
-	OptionalPadding     bool                `yaml:"optionalPadding,omitempty,flow"`
-	OptionalEOFBytes    []byte              `yaml:"optionalEOFBytes,omitempty,flow"`
-	EOFAfterColumns     []byte              `yaml:"eofAfterColumns,omitempty,flow"`
-}
-type Row struct {
-	Header  RowHeader             `yaml:"header"`
-	Columns []RowColumnDefinition `yaml:"row_column_definition"`
-}
 type RowColumnDefinition struct {
 	Type  models.FieldType `yaml:"type"`
 	Name  string           `yaml:"name"`
@@ -35,9 +21,9 @@ type RowHeader struct {
 	SequenceID   uint8 `yaml:"sequence_id"`
 }
 
-func parseResultSet(b []byte) (*ResultSet, error) {
-	columns := make([]*ColumnDefinition, 0)
-	rows := make([]*Row, 0)
+func parseResultSet(b []byte) (*models.MySQLResultSet, error) {
+	columns := make([]*models.ColumnDefinition, 0)
+	rows := make([]*models.Row, 0)
 	var err error
 	var eofPresent, paddingPresent, eofFinal, paddingFinal, optionalPadding bool
 	var optionalEOFBytes []byte
@@ -51,7 +37,7 @@ func parseResultSet(b []byte) (*ResultSet, error) {
 
 	// Parse the columns
 	for i := uint64(0); i < columnCount; i++ {
-		var columnPacket *ColumnDefinition
+		var columnPacket *models.ColumnDefinition
 		columnPacket, b, err = parseColumnDefinitionPacket(b)
 		if err != nil {
 			return nil, err
@@ -74,7 +60,7 @@ func parseResultSet(b []byte) (*ResultSet, error) {
 	// fmt.Println(!bytes.Equal(b[:4], []byte{0xfe, 0x00, 0x00, 0x02, 0x00}))
 	for len(b) > 5 {
 		// fmt.Println(b)
-		var row *Row
+		var row *models.Row
 		row, b, eofFinal, paddingFinal, optionalPadding, optionalEOFBytes, err = parseRow(b, columns)
 		if err != nil {
 			return nil, err
@@ -87,7 +73,7 @@ func parseResultSet(b []byte) (*ResultSet, error) {
 	// Remove EOF packet of the rows
 	// b = b[9:]
 
-	resultSet := &ResultSet{
+	resultSet := &models.MySQLResultSet{
 		Columns:             columns,
 		Rows:                rows,
 		EOFPresent:          eofPresent,
@@ -102,8 +88,8 @@ func parseResultSet(b []byte) (*ResultSet, error) {
 	return resultSet, err
 }
 
-func parseColumnDefinitionPacket(b []byte) (*ColumnDefinition, []byte, error) {
-	packet := &ColumnDefinition{}
+func parseColumnDefinitionPacket(b []byte) (*models.ColumnDefinition, []byte, error) {
+	packet := &models.ColumnDefinition{}
 	var n int
 	var m int
 	if len(b) < 4 {
@@ -175,11 +161,11 @@ func parseColumnDefinitionPacket(b []byte) (*ColumnDefinition, []byte, error) {
 
 var optionalPadding bool
 
-func parseRow(b []byte, columnDefinitions []*ColumnDefinition) (*Row, []byte, bool, bool, bool, []byte, error) {
+func parseRow(b []byte, columnDefinitions []*models.ColumnDefinition) (*models.Row, []byte, bool, bool, bool, []byte, error) {
 	var eofFinal, paddingFinal bool
 	var optionalEOFBytes []byte
 
-	row := &Row{}
+	row := &models.Row{}
 	if b[4] == 0xfe {
 		eofFinal = true
 		optionalEOFBytes = b[:9]
@@ -193,11 +179,11 @@ func parseRow(b []byte, columnDefinitions []*ColumnDefinition) (*Row, []byte, bo
 
 		}
 	}
-	packetLength := int(b[0])
+	packetLength := uint8(b[0])
 	sequenceID := b[3]
-	rowHeader := RowHeader{
-		PacketLength: packetLength,
-		SequenceID:   sequenceID,
+	rowHeader := models.RowHeader{
+		PacketLength:     packetLength,
+		PacketSequenceID: sequenceID,
 	}
 	b = b[4:]
 	if len(b) >= 2 && b[0] == 0x00 && b[1] == 0x00 {
@@ -206,33 +192,34 @@ func parseRow(b []byte, columnDefinitions []*ColumnDefinition) (*Row, []byte, bo
 	}
 	// b = b[2:]
 	for _, columnDef := range columnDefinitions {
-		var colValue RowColumnDefinition
+		var colValue models.RowColumnDefinition
 		var length int
-		// if b[0] == 0x00 {
-		// 	b = b[1:]
-		// }
 		dataLength := int(b[0])
-
 		// Check the column type
 		switch models.FieldType(columnDef.ColumnType) {
 		case models.FieldTypeTimestamp:
-			b = b[1:] // Advance the buffer to the start of the encoded timestamp data
-
-			if dataLength < 4 || len(b) < dataLength {
-				return nil, nil, eofFinal, paddingFinal, optionalPadding, optionalEOFBytes, fmt.Errorf("invalid timestamp data length")
+			if b[0] == byte(0xfb) {
+				colValue.Type = models.FieldTypeTimestamp
+				colValue.Value = ""
+				length = 1
+			} else {
+				b = b[1:] // Advance the buffer to the start of the encoded timestamp data
+				// Check if the timestamp is null
+				if dataLength < 4 || len(b) < dataLength {
+					return nil, nil, eofFinal, paddingFinal, optionalPadding, optionalEOFBytes, fmt.Errorf("invalid timestamp data length")
+				}
+				dateStr := string(b[:dataLength])
+				layout := "2006-01-02 15:04:05"
+				t, err := time.Parse(layout, dateStr)
+				if err != nil {
+					return nil, nil, eofFinal, paddingFinal, optionalPadding, optionalEOFBytes, fmt.Errorf("failed to parse the time string")
+				}
+				year, month, day := t.Date()
+				hour, minute, second := t.Clock()
+				colValue.Type = models.FieldTypeTimestamp
+				colValue.Value = fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d", year, int(month), day, hour, minute, second)
+				length = dataLength // Including the initial byte for dataLength
 			}
-
-			// Decode the year, month, day, hour, minute, second
-			year := binary.LittleEndian.Uint16(b[:2])
-			month := uint8(b[2])
-			day := uint8(b[3])
-			hour := uint8(b[4])
-			minute := uint8(b[5])
-			second := uint8(b[6])
-
-			colValue.Type = models.FieldTypeTimestamp
-			colValue.Value = fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d", year, month, day, hour, minute, second)
-			length = dataLength // Including the initial byte for dataLength
 
 		// case models.FieldTypeInt24, models.FieldTypeLong:
 		// 	colValue.Type = models.FieldType(columnDef.ColumnType)
@@ -269,6 +256,7 @@ func parseRow(b []byte, columnDefinitions []*ColumnDefinition) (*Row, []byte, bo
 		}
 
 		colValue.Name = columnDef.Name
+		// Check if the converted value is actually correct.
 		row.Columns = append(row.Columns, colValue)
 		b = b[length:]
 	}
@@ -362,6 +350,7 @@ func encodeRow(_ *models.Row, columnValues []models.RowColumnDefinition) ([]byte
 		switch models.FieldType(column.Type) {
 		case models.FieldTypeTimestamp:
 			timestamp, ok := value.(string)
+			// Check if the timestamp is base64 encoded.
 			if !ok {
 				return nil, errors.New("could not convert value to string")
 			}
@@ -370,15 +359,12 @@ func encodeRow(_ *models.Row, columnValues []models.RowColumnDefinition) ([]byte
 				return nil, errors.New("could not parse timestamp value")
 			}
 
-			buf.WriteByte(7) // Length of the following encoded data
+			buf.WriteByte(0x13) // Length of the following encoded data
 			yearBytes := make([]byte, 2)
 			binary.LittleEndian.PutUint16(yearBytes, uint16(t.Year()))
-			buf.Write(yearBytes)            // Year
-			buf.WriteByte(byte(t.Month()))  // Month
-			buf.WriteByte(byte(t.Day()))    // Day
-			buf.WriteByte(byte(t.Hour()))   // Hour
-			buf.WriteByte(byte(t.Minute())) // Minute
-			buf.WriteByte(byte(t.Second())) // Second
+			// buf.Write(fmt.Sprintf("%04d",yearBytes))
+			formattedTime := t.Format("2006-01-02 15:04:05")
+			buf.WriteString(formattedTime)
 			// case models.FieldTypeLongLong:
 			// 	longLongSlice, ok := column.Value.([]interface{})
 			// 	numElements := len(longLongSlice)

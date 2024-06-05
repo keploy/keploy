@@ -14,8 +14,8 @@ type StmtPrepareOk struct {
 	NumColumns   uint16             `yaml:"num_columns"`
 	NumParams    uint16             `yaml:"num_params"`
 	WarningCount uint16             `yaml:"warning_count"`
-	ColumnDefs   []ColumnDefinition `yaml:"column_definitions,omitempty,flow"`
-	ParamDefs    []ColumnDefinition `yaml:"param_definitions,omitempty,flow"`
+	ColumnDefs   []models.ColumnDefinition `yaml:"column_definitions,omitempty,flow"`
+	ParamDefs    []models.ColumnDefinition `yaml:"param_definitions,omitempty,flow"`
 }
 
 func decodeComStmtPrepareOk(data []byte) (*StmtPrepareOk, error) {
@@ -35,8 +35,8 @@ func decodeComStmtPrepareOk(data []byte) (*StmtPrepareOk, error) {
 
 	if response.NumParams > 0 {
 		for i := uint16(0); i < response.NumParams; i++ {
-			columnDef := ColumnDefinition{}
-			columnHeader := PacketHeader{
+			columnDef := models.ColumnDefinition{}
+			columnHeader := models.PacketHeader{
 				PacketLength:     data[offset],
 				PacketSequenceID: data[offset+3],
 			}
@@ -82,8 +82,8 @@ func decodeComStmtPrepareOk(data []byte) (*StmtPrepareOk, error) {
 
 	if response.NumColumns > 0 {
 		for i := uint16(0); i < response.NumColumns; i++ {
-			columnDef := ColumnDefinition{}
-			columnHeader := PacketHeader{
+			columnDef := models.ColumnDefinition{}
+			columnHeader := models.PacketHeader{
 				PacketLength:     data[offset],
 				PacketSequenceID: data[offset+3],
 			}

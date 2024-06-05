@@ -8,20 +8,13 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-type OKPacket struct {
-	AffectedRows uint64 `json:"affected_rows,omitempty" yaml:"affected_rows"`
-	LastInsertID uint64 `json:"last_insert_id,omitempty" yaml:"last_insert_id"`
-	StatusFlags  uint16 `json:"status_flags,omitempty" yaml:"status_flags"`
-	Warnings     uint16 `json:"warnings,omitempty" yaml:"warnings"`
-	Info         string `json:"info,omitempty" yaml:"info"`
-}
 
-func decodeMySQLOK(data []byte) (*OKPacket, error) {
+func decodeMySQLOK(data []byte) (*models.MySQLOKPacket, error) {
 	if len(data) < 7 {
 		return nil, fmt.Errorf("OK packet too short")
 	}
 
-	packet := &OKPacket{}
+	packet := &models.MySQLOKPacket{}
 	var err error
 	//identifier of ok packet
 	offset := 1
