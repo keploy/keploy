@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"syscall"
 
 	"go.keploy.io/server/v2/cli"
@@ -40,7 +41,11 @@ func main() {
 	// Uncomment the following code to enable pprof for debugging
 	// go func() {
 	// 	fmt.Println("Starting pprof server for debugging...")
-	// 	http.ListenAndServe("localhost:6060", nil)
+	// 	err := http.ListenAndServe("localhost:6060", nil)
+	// 	if err != nil {
+	// 		fmt.Println("Failed to start the pprof server for debugging", err)
+	// 		return
+	// 	}
 	// }()
 	printLogo()
 	ctx := utils.NewCtx()
@@ -87,6 +92,10 @@ func start(ctx context.Context) {
 	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
 	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
+		if strings.HasPrefix(err.Error(), "unknown command") || strings.HasPrefix(err.Error(), "unknown shorthand") {
+			fmt.Println("Error: ", err.Error())
+			fmt.Println("Run 'keploy --help' for usage.")
+			os.Exit(1)
+		}
 	}
 }
