@@ -427,7 +427,7 @@ func (a *App) waitTillExit() {
 			// Inspect the container status
 			containerJSON, err := a.docker.ContainerInspect(context.Background(), containerID)
 			if err != nil {
-				a.logger.Debug("failed to inspect container", zap.String("containerID", containerID), zap.Error(err))
+				a.logger.Info("failed to inspect container", zap.String("containerID", containerID), zap.Error(err))
 				return
 			}
 
