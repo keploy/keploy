@@ -3,13 +3,11 @@ package generic
 import (
 	"context"
 	"encoding/base64"
-	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strconv"
 	"time"
-
-	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
@@ -53,26 +51,17 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	//TODO: where to close the error channel since it is used in both the go routines
 	//close(errChan)
 
-	//get the error group from the context
-	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
-	if !ok {
-		return errors.New("failed to get the error group from the context")
+	// read requests from client
+	err = pUtil.ReadFromPeer(ctx, logger, clientConn, clientBuffChan, errChan, pUtil.Client)
+	if err != nil {
+		return fmt.Errorf("error reading from client:%v", err)
 	}
 
-	// read requests from client
-	g.Go(func() error {
-		defer pUtil.Recover(logger, clientConn, nil)
-		defer close(clientBuffChan)
-		pUtil.ReadBuffConn(ctx, logger, clientConn, clientBuffChan, errChan)
-		return nil
-	})
 	// read responses from destination
-	g.Go(func() error {
-		defer pUtil.Recover(logger, nil, destConn)
-		defer close(destBuffChan)
-		pUtil.ReadBuffConn(ctx, logger, destConn, destBuffChan, errChan)
-		return nil
-	})
+	err = pUtil.ReadFromPeer(ctx, logger, destConn, destBuffChan, errChan, pUtil.Destination)
+	if err != nil {
+		return fmt.Errorf("error reading from destination:%v", err)
+	}
 
 	prevChunkWasReq := false
 	var reqTimestampMock = time.Now()
