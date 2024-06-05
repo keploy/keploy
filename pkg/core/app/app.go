@@ -490,11 +490,12 @@ func (a *App) run(ctx context.Context) models.AppError {
 
 	err = cmd.Wait()
 
+	if utils.IsDockerKind(a.kind) {
+		a.waitTillExit()
+	}
+
 	select {
 	case <-ctx.Done():
-		if utils.IsDockerKind(a.kind) {
-			a.waitTillExit()
-		}
 		a.logger.Debug("context cancelled, error while waiting for the app to exit", zap.Error(ctx.Err()))
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 	default:
