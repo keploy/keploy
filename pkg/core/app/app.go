@@ -414,7 +414,7 @@ func (a *App) Run(ctx context.Context, inodeChan chan uint64) models.AppError {
 	}
 	return a.run(ctx)
 }
-func (a *App) getDockerMetaSync() error {
+func (a *App) getDockerMetaSync() {
 	timeout := time.NewTimer(30 * time.Second)
 	logTicker := time.NewTicker(1 * time.Second)
 	defer logTicker.Stop()
@@ -434,25 +434,13 @@ func (a *App) getDockerMetaSync() error {
 			a.logger.Debug("container status", zap.String("status", containerJSON.State.Status), zap.String("containerName", a.container))
 			// Check if container is stopped or dead
 			if containerJSON.State.Status == "exited" || containerJSON.State.Status == "dead" {
-				return nil
+				return
 			}
 		case <-timeout.C:
-			err := a.InterruptContainer()
-			return err
+			a.logger.Info("timeout waiting for the container to stop", zap.String("containerID", containerID))
+			return
 		}
 	}
-}
-
-func (a *App) InterruptContainer() error {
-	signal := "SIGKILL"
-	err := a.docker.ContainerKill(context.Background(), a.container, signal)
-	if err != nil {
-		a.logger.Error("failed to send signal to container", zap.String("containerID", a.container), zap.Error(err))
-		return err
-	}
-	a.logger.Info("signal sent to container", zap.String("containerID", a.container), zap.String("signal", signal))
-	return nil
-
 }
 
 func (a *App) run(ctx context.Context) models.AppError {
