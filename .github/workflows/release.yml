@@ -88,7 +88,7 @@ jobs:
         uses: goreleaser/goreleaser-action@v2
         with:
           distribution: goreleaser
-          version: v1.26.2  # Specify the desired version of GoReleaser
+          version: v1.26.2
           args: release --rm-dist
         env:
           # APPLE_ACCOUNT_PASSWORD: ${{ secrets.APPLE_ACCOUNT_PASSWORD }}
