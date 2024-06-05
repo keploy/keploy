@@ -8,32 +8,11 @@ import (
 	"time"
 )
 
-// CustomLogger simulates a logger for the purpose of this example
-type CustomLogger struct{}
-
-func (c *CustomLogger) Info(msg string) {
-	fmt.Println("[INFO]", msg)
-}
-
-func (c *CustomLogger) Error(msg string) {
-	fmt.Println("[ERROR]", msg)
-}
-
-func (c *CustomLogger) Warning(msg string) {
-	fmt.Println("[WARNING]", msg)
-}
-
-func GetLogger(name string) *CustomLogger {
-	// Placeholder for actual logger initialization
-	return &CustomLogger{}
-}
-
 // CoverageProcessor handles the processing of coverage reports
 type CoverageProcessor struct {
 	FilePath     string
 	Filename     string
 	CoverageType string
-	Logger       *CustomLogger
 }
 
 // NewCoverageProcessor initializes a CoverageProcessor object
@@ -42,15 +21,14 @@ func NewCoverageProcessor(filePath, filename, coverageType string) *CoverageProc
 		FilePath:     filePath,
 		Filename:     filename,
 		CoverageType: coverageType,
-		Logger:       GetLogger("CoverageProcessor"),
 	}
 }
 
 // ProcessCoverageReport verifies the report and parses it based on its type
-func (cp *CoverageProcessor) ProcessCoverageReport(timeOfTestCommand int64) ([]int, []int, float64, error) {
+func (cp *CoverageProcessor) ProcessCoverageReport(timeOfTestCommand int64) ([]int, []int, float64, []string, error) {
 	err := cp.VerifyReportUpdate(timeOfTestCommand)
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, nil, err
 	}
 	return cp.ParseCoverageReport()
 }
@@ -74,14 +52,14 @@ func (cp *CoverageProcessor) VerifyReportUpdate(timeOfTestCommand int64) error {
 }
 
 // ParseCoverageReport parses the coverage report based on its type
-func (cp *CoverageProcessor) ParseCoverageReport() ([]int, []int, float64, error) {
+func (cp *CoverageProcessor) ParseCoverageReport() ([]int, []int, float64, []string, error) {
 	switch cp.CoverageType {
 	case "cobertura":
 		return cp.ParseCoverageReportCobertura()
 	case "lcov":
-		return nil, nil, 0, fmt.Errorf("parsing for %s coverage reports is not implemented yet", cp.CoverageType)
+		return nil, nil, 0, nil, fmt.Errorf("parsing for %s coverage reports is not implemented yet", cp.CoverageType)
 	default:
-		return nil, nil, 0, fmt.Errorf("unsupported coverage report type: %s", cp.CoverageType)
+		return nil, nil, 0, nil, fmt.Errorf("unsupported coverage report type: %s", cp.CoverageType)
 	}
 }
 
@@ -107,18 +85,20 @@ type Line struct {
 	Hits   int `xml:"hits,attr"`
 }
 
-func (cp *CoverageProcessor) ParseCoverageReportCobertura() ([]int, []int, float64, error) {
+func (cp *CoverageProcessor) ParseCoverageReportCobertura() ([]int, []int, float64, []string, error) {
+
+	filesToCover := make([]string, 0)
 	// Open the XML file
 	xmlFile, err := os.Open(cp.FilePath)
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, filesToCover, err
 	}
 	defer xmlFile.Close()
 
 	// Decode the XML file into a Coverage struct
 	var cov Coverage
 	if err := xml.NewDecoder(xmlFile).Decode(&cov); err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, filesToCover, err
 	}
 
 	// Find coverage for the specified file
@@ -126,6 +106,9 @@ func (cp *CoverageProcessor) ParseCoverageReportCobertura() ([]int, []int, float
 	var totalLines, coveredLines int
 	for _, pkg := range cov.Packages {
 		for _, cls := range pkg.Classes {
+			if cp.Filename == "." {
+				filesToCover = append(filesToCover, cls.FileName)
+			}
 			if strings.HasSuffix(cls.FileName, cp.Filename) {
 				for _, line := range cls.Lines {
 					totalLines++
@@ -146,5 +129,5 @@ func (cp *CoverageProcessor) ParseCoverageReportCobertura() ([]int, []int, float
 		coveragePercentage = float64(len(linesCovered)) / float64(totalLines)
 	}
 
-	return linesCovered, linesMissed, coveragePercentage, nil
+	return linesCovered, linesMissed, coveragePercentage, filesToCover, nil
 }

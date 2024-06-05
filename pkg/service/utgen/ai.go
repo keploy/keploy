@@ -3,11 +3,11 @@ package utgen
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"strings"
@@ -15,8 +15,9 @@ import (
 )
 
 type AICaller struct {
-	Model   string
-	APIBase string
+	Model     string
+	APIBase   string
+	IsLitellm bool
 }
 
 type Prompt struct {
@@ -66,14 +67,15 @@ type Delta struct {
 	Content string `json:"content"`
 }
 
-func NewAICaller(model, apiBase string) *AICaller {
+func NewAICaller(model, apiBase string, isLitellm bool) *AICaller {
 	return &AICaller{
-		Model:   model,
-		APIBase: apiBase,
+		Model:     model,
+		APIBase:   apiBase,
+		IsLitellm: isLitellm,
 	}
 }
 
-func (ai *AICaller) CallModel(prompt *Prompt, maxTokens int) (string, int, int, error) {
+func (ai *AICaller) CallModel(ctx context.Context, prompt *Prompt, maxTokens int) (string, int, int, error) {
 	if prompt.System == "" && prompt.User == "" {
 		return "", 0, 0, errors.New("the prompt must contain 'system' and 'user' keys")
 	}
@@ -98,8 +100,10 @@ func (ai *AICaller) CallModel(prompt *Prompt, maxTokens int) (string, int, int, 
 		Temperature: 0.2,
 	}
 
-	if strings.Contains(ai.Model, "ollama") || strings.Contains(ai.Model, "huggingface") || strings.HasPrefix(ai.Model, "openai/") {
+	if ai.IsLitellm {
 		completionParams.APIBase = ai.APIBase
+	} else {
+		ai.APIBase = "https://api.openai.com/"
 	}
 
 	requestBody, err := json.Marshal(completionParams)
@@ -107,12 +111,12 @@ func (ai *AICaller) CallModel(prompt *Prompt, maxTokens int) (string, int, int, 
 		return "", 0, 0, fmt.Errorf("error marshalling request body: %v", err)
 	}
 
-	req, err := http.NewRequest("POST", "https://api.openai.com//v1/chat/completions", bytes.NewBuffer(requestBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", ai.APIBase+"/v1/chat/completions", bytes.NewBuffer(requestBody))
 	if err != nil {
 		return "", 0, 0, fmt.Errorf("error creating request: %v", err)
 	}
 
-	apiKey := os.Getenv("OPENAI_API_KEY")
+	apiKey := os.Getenv("API_KEY")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
@@ -124,7 +128,7 @@ func (ai *AICaller) CallModel(prompt *Prompt, maxTokens int) (string, int, int, 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := ioutil.ReadAll(resp.Body)
+		bodyBytes, _ := io.ReadAll(resp.Body)
 		bodyString := string(bodyBytes)
 		return "", 0, 0, fmt.Errorf("unexpected status code: %v, response body: %s", resp.StatusCode, bodyString)
 	}
@@ -137,7 +141,7 @@ func (ai *AICaller) CallModel(prompt *Prompt, maxTokens int) (string, int, int, 
 		line, err := reader.ReadString('\n')
 		if err != nil && err != io.EOF {
 			fmt.Printf("Error reading stream: %v\n", err)
-			break
+			return "", 0, 0, err
 		}
 		line = strings.TrimSpace(strings.TrimPrefix(line, "data: "))
 		if line == "[DONE]" {
@@ -175,35 +179,3 @@ func (ai *AICaller) CallModel(prompt *Prompt, maxTokens int) (string, int, int, 
 
 	return finalContent, promptTokens, completionTokens, nil
 }
-
-// func (ai *AICaller) streamChunkBuilder(chunks []ResponseChunk, messages []Message) (*ModelResponse, error) {
-// 	var content strings.Builder
-// 	for _, chunk := range chunks {
-// 		content.WriteString(chunk.Choices[0].Delta.Content)
-// 	}
-
-// 	modelResponse := ModelResponse{
-// 		Choices: []struct {
-// 			Message struct {
-// 				Content string `json:"content"`
-// 			} `json:"message"`
-// 		}{
-// 			{
-// 				Message: struct {
-// 					Content string `json:"content"`
-// 				}{
-// 					Content: content.String(),
-// 				},
-// 			},
-// 		},
-// 		Usage: struct {
-// 			PromptTokens     int `json:"prompt_tokens"`
-// 			CompletionTokens int `json:"completion_tokens"`
-// 		}{
-// 			PromptTokens:     len(messages[0].Content) + len(messages[1].Content),
-// 			CompletionTokens: content.Len(),
-// 		},
-// 	}
-
-// 	return &modelResponse, nil
-// }

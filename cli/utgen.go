@@ -36,7 +36,7 @@ func GenerateUT(ctx context.Context, logger *zap.Logger, _ *config.Config, servi
 				return nil
 			}
 
-			err = utg.Start()
+			err = utg.Start(ctx)
 			if err != nil {
 				utils.LogError(logger, err, "failed to generate unit tests")
 				return nil

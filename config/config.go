@@ -43,6 +43,10 @@ type UtGen struct {
 	CoverageType           string  `json:"coverageType" yaml:"coverageType" mapstructure:"coverageType"`
 	DesiredCoverage        float64 `json:"desiredCoverage" yaml:"desiredCoverage" mapstructure:"desiredCoverage"`
 	MaxIterations          int     `json:"maxIterations" yaml:"maxIterations" mapstructure:"maxIterations"`
+	TestDirectory          string  `json:"testDirectory" yaml:"testDirectory" mapstructure:"testDirectory"`
+	Litellm                bool    `json:"litellm" yaml:"litellm" mapstructure:"litellm"`
+	APIBaseURL             string  `json:"apiBaseUrl" yaml:"apiBaseUrl" mapstructure:"apiBaseUrl"`
+	Model                  string  `json:"model" yaml:"model" mapstructure:"model"`
 }
 
 type Record struct {

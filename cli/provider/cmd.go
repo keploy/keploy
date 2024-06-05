@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fatih/color"
+	"github.com/moby/moby/pkg/parsers/kernel"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
@@ -191,12 +192,20 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("sourceFilePath", "", "Path to the source file.")
 		cmd.Flags().String("testFilePath", "", "Path to the input test file.")
 		cmd.Flags().String("codeCoverageReportPath", "", "Path to the code coverage report file.")
-		cmd.Flags().String("testCommand", " ", "The command to run tests and generate coverage report.")
+		cmd.Flags().String("testCommand", "", "The command to run tests and generate coverage report.")
 		cmd.Flags().String("coverageType", "cobertura", "Type of coverage report.")
-		cmd.Flags().Int("desiredCoverage", 90, "The desired coverage percentage.")
-		cmd.Flags().Int("maxIterations", 10, "The maximum number of iterations.")
-		cmd.Flags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
-
+		cmd.Flags().Int("desiredCoverage", 100, "The desired coverage percentage.")
+		cmd.Flags().Int("maxIterations", 5, "The maximum number of iterations.")
+		cmd.Flags().String("testDirectory", "", "Path to the test directory.")
+		cmd.Flags().Bool("litellm", false, "Use LITELLML for AI.")
+		cmd.Flags().String("apiBaseUrl", "http://localhost:4000", "Base URL for the AI model.")
+		cmd.Flags().String("model", "gpt-4o", "Model to use for the AI.")
+		err := cmd.MarkFlagRequired("testCommand")
+		if err != nil {
+			errMsg := "failed to mark testCommand as required flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
 	case "record", "test":
 		cmd.Flags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
 		cmd.Flags().StringP("rerecord", "r", c.cfg.ReRecord, "Rerecord the testcases/mocks for the given testset(s)")
@@ -257,13 +266,13 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 }
 
 func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) error {
-	//check if the version of the kernel is above 5.15 for eBPF support
-	// isValid := kernel.CheckKernelVersion(5, 15, 0)
-	// if !isValid {
-	// 	errMsg := "Kernel version is below 5.15. Keploy requires kernel version 5.15 or above"
-	// 	utils.LogError(c.logger, nil, errMsg)
-	// 	return errors.New(errMsg)
-	// }
+	// check if the version of the kernel is above 5.15 for eBPF support
+	isValid := kernel.CheckKernelVersion(5, 15, 0)
+	if !isValid {
+		errMsg := "Kernel version is below 5.15. Keploy requires kernel version 5.15 or above"
+		utils.LogError(c.logger, nil, errMsg)
+		return errors.New(errMsg)
+	}
 
 	return c.ValidateFlags(ctx, cmd)
 }
@@ -288,7 +297,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
-	if cmd.Name() == "test" || cmd.Name() == "record" || cmd.Name() == "utGen" {
+	if cmd.Name() == "test" || cmd.Name() == "record" {
 		configPath, err := cmd.Flags().GetString("configPath")
 		if err != nil {
 			utils.LogError(c.logger, nil, "failed to read the config path")
@@ -491,6 +500,20 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			errMsg := "failed to normalize the selected tests"
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
+		}
+	case "utGen":
+		if os.Getenv("API_KEY") == "" {
+			utils.LogError(c.logger, nil, "API_KEY is not set nor litellm is enbaled")
+			return errors.New("API_KEY is not set")
+		}
+		if (c.cfg.UtGen.SourceFilePath == "" && c.cfg.UtGen.TestFilePath != "") || c.cfg.UtGen.SourceFilePath != "" && c.cfg.UtGen.TestFilePath == "" {
+			utils.LogError(c.logger, nil, "One of the SourceFilePath and TestFilePath is mentioned. Either provide both or neither")
+			return errors.New("sourceFilePath and testFilePath misconfigured")
+		} else if c.cfg.UtGen.SourceFilePath == "" && c.cfg.UtGen.TestFilePath == "" {
+			if c.cfg.UtGen.TestDirectory == "" {
+				utils.LogError(c.logger, nil, "TestDirectory is not set, Please specify the test directory")
+				return errors.New("TestDirectory is not set")
+			}
 		}
 	}
 	return nil

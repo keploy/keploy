@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"html/template"
-	"io/ioutil"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -69,7 +69,7 @@ func NewPromptBuilder(
 }
 
 func readFile(filePath string) string {
-	content, err := ioutil.ReadFile(filePath)
+	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return fmt.Sprintf("Error reading %s: %v", filePath, err)
 	}
@@ -98,7 +98,7 @@ func formatSection(content, templateText string) string {
 	return buffer.String()
 }
 
-func (pb *PromptBuilder) BuildPrompt() *Prompt {
+func (pb *PromptBuilder) BuildPrompt(failedTestRuns string) *Prompt {
 	pb.SourceFileNumbered = numberLines(pb.SourceFile)
 	pb.TestFileNumbered = numberLines(pb.TestFile)
 
@@ -111,7 +111,7 @@ func (pb *PromptBuilder) BuildPrompt() *Prompt {
 		"test_file":                    pb.TestFile,
 		"code_coverage_report":         pb.CodeCoverageReport,
 		"additional_includes_section":  pb.IncludedFiles,
-		"failed_tests_section":         pb.FailedTestRuns,
+		"failed_tests_section":         failedTestRuns,
 		"additional_instructions_text": pb.AdditionalInstructions,
 		"language":                     pb.Language,
 		"max_tests":                    MAX_TESTS_PER_RUN,
