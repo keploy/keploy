@@ -169,7 +169,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				utils.LogError(g.logger, err, "failed to print coverage")
 			}
 		} else if iterationCount == g.maxIterations {
-			if _, err := pp.Printf("Reached maximum iteration limit without achieving desired coverage. Current Coverage: %s", g.sourceFilePath, math.Round(g.currentCoverage*100)); err != nil {
+			if _, err := pp.Printf("\nFor File %s Reached maximum iteration limit without achieving desired coverage. Current Coverage: %s%%", g.sourceFilePath, math.Round(g.currentCoverage*100)); err != nil {
 				utils.LogError(g.logger, err, "failed to print coverage")
 			}
 		}
