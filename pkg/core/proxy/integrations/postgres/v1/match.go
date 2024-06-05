@@ -292,7 +292,6 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 }
 
 func findBinaryStreamMatch(logger *zap.Logger, tcsMocks []*models.Mock, requestBuffers [][]byte, sorted bool) int {
-	logger.Debug("INSIDE BINARY MATCH!!")
 	mxSim := -1.0
 	mxIdx := -1
 
