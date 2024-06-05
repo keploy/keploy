@@ -29,8 +29,8 @@ func NewSingletonSettings() *SingletonSettings {
 		settingsFiles := []string{
 			"test_generation_prompt.toml",
 			"language_extensions.toml",
-			"analyze_suite_test_headers_indentation.toml",
-			"analyze_suite_test_insert_line.toml",
+			"indentation.toml",
+			"insert_line.toml",
 		}
 
 		v := viper.New()
