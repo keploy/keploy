@@ -206,7 +206,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 		return nil
 	})
 	go func() {
-		if len(r.config.ReRecord) != 0 {
+		if len(r.config.Record.ReRecord) != 0 {
 			err = r.ReRecord(reRecordCtx, appID)
 			reRecordCancel()
 
@@ -337,7 +337,7 @@ func (r *Recorder) StartMock(ctx context.Context) error {
 
 func (r *Recorder) ReRecord(ctx context.Context, appID uint64) error {
 
-	tcs, err := r.testDB.GetTestCases(ctx, r.config.ReRecord)
+	tcs, err := r.testDB.GetTestCases(ctx, r.config.Record.ReRecord)
 	if err != nil {
 		r.logger.Error("Failed to get testcases", zap.Error(err))
 		return nil
@@ -376,7 +376,7 @@ func (r *Recorder) ReRecord(ctx context.Context, appID uint64) error {
 			r.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HTTPReq.URL))
 		}
 
-		resp, err := pkg.SimulateHTTP(ctx, *tc, r.config.ReRecord, r.logger, r.config.Test.APITimeout)
+		resp, err := pkg.SimulateHTTP(ctx, *tc, r.config.Record.ReRecord, r.logger, r.config.Test.APITimeout)
 		if err != nil {
 			r.logger.Error("Failed to simulate HTTP request", zap.Error(err))
 			allTestCasesRecorded = false
