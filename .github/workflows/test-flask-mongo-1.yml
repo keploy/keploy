@@ -44,7 +44,7 @@ jobs:
       - name: Install dependencies
         run: |
           cd samples-python/flask-mongo
-          python -m venv venv
+          python3 -m venv venv
           . venv/bin/activate
           pip install -r requirements.txt
 
@@ -58,7 +58,7 @@ jobs:
           working-directory: samples-python/flask-mongo
           command: |
             . venv/bin/activate
-            python app.py
+            python3 app.py
           delay: 7
           keploy-record-bin: /usr/local/bin/keployR
           keploy-test-bin: /usr/local/bin/keployB
