@@ -84,7 +84,7 @@ func CalculateAndInsertTestCoverage(ctx context.Context, logger *zap.Logger, rep
 	var err error
 	switch language {
 	case models.Go:
-		coverageData, err = CalGoCoverage()
+		coverageData, err = CalGoCoverage(ctx)
 	case models.Python:
 		coverageData, err = CalPythonCoverage(ctx)
 	case models.Node:
@@ -187,10 +187,16 @@ func generateJacocoReport(ctx context.Context, jacocoCliPath string) error {
 	return nil
 }
 
-func CalGoCoverage() (models.TestCoverage, error) {
+func CalGoCoverage(ctx context.Context) (models.TestCoverage, error) {
 	testCov := models.TestCoverage{
 		FileCov:  make(map[string]string),
 		TotalCov: "",
+	}
+
+	generateCovTxtCmd := exec.CommandContext(ctx, "go", "tool", "covdata", "textfmt", "-i="+os.Getenv("GOCOVERDIR"), "-o="+os.Getenv("GOCOVERDIR")+"/total-coverage.txt")
+	_, err := generateCovTxtCmd.Output()
+	if err != nil {
+		return testCov, err
 	}
 
 	coveragePerFileTmp := make(map[string][]int) // filename -> [noOfLines, coveredLines]
