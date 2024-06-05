@@ -344,7 +344,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}()
 
 	//check for global passthrough in test mode
-	if rule.OutgoingOptions.GlobalPassthrough && rule.Mode == models.MODE_TEST {
+	if !rule.OutgoingOptions.Mocking && rule.Mode == models.MODE_TEST {
 
 		dstConn, err = net.Dial("tcp", dstAddr)
 		if err != nil {
@@ -579,8 +579,8 @@ func (p *Proxy) Mock(_ context.Context, id uint64, opts models.OutgoingOptions) 
 	})
 	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 
-	if opts.GlobalPassthrough {
-		p.logger.Info("🔀 Global pass through is enabled, the response will not be mocked")
+	if !opts.Mocking {
+		p.logger.Info("🔀 Mocking is disabled, the response will be fetched from the actual service")
 	}
 
 	if string(p.nsswitchData) == "" {

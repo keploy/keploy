@@ -220,7 +220,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().Bool("removeUnusedMocks", c.cfg.Test.RemoveUnusedMocks, "Clear the unused mocks for the passed test-sets")
 			cmd.Flags().Bool("goCoverage", c.cfg.Test.GoCoverage, "Enable go coverage reporting for the testcases")
 			cmd.Flags().Bool("fallBackOnMiss", c.cfg.Test.FallBackOnMiss, "Enable connecting to actual service if mock not found during test mode")
-			cmd.Flags().Bool("globalPassthrough", c.cfg.Test.GlobalPassthrough, "Enable global passthrough for all the outgoing calls")
+			cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
 		} else {
 			cmd.Flags().Uint64("recordTimer", 0, "User provided time to record its application")
 			cmd.Flags().StringP("rerecord", "r", c.cfg.Record.ReRecord, "Rerecord the testcases/mocks for the given testset(s)")
