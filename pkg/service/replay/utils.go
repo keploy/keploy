@@ -494,7 +494,7 @@ func CalJavaCoverage(logger *zap.Logger) (models.TestCoverage, error) {
 		return testCov, fmt.Errorf("failed to read CSV file: %w", err)
 	}
 
-	var totalLines, coveredLines int
+	var totalInstructions, coveredInstructions int
 
 	// Skip header row and process each record
 	for i, record := range records {
@@ -502,29 +502,29 @@ func CalJavaCoverage(logger *zap.Logger) (models.TestCoverage, error) {
 			continue // Skip header
 		}
 
-		// Parse line coverage data
-		lineMissed, err := strconv.Atoi(record[7])
+		// Parse instructions coverage data
+		instructionsMissed, err := strconv.Atoi(record[3])
 		if err != nil {
 			return testCov, err
 		}
-		lineCovered, err := strconv.Atoi(record[8])
+		instructionsCovered, err := strconv.Atoi(record[4])
 		if err != nil {
 			return testCov, err
 		}
 
-		// Calculate total lines and covered lines
-		totalLines += lineMissed + lineCovered
-		coveredLines += lineCovered
+		// Calculate total instructions and covered instructions
+		totalInstructions += instructionsMissed + instructionsCovered
+		coveredInstructions += instructionsCovered
 
 		// Calculate coverage percentage for each class
-		if total := lineMissed + lineCovered; total > 0 {
-			coverage := float64(lineCovered) / float64(total) * 100
+		if instructionsCovered > 0 {
+			coverage := float64(instructionsCovered) / float64(instructionsCovered + instructionsMissed) * 100
 			classPath := strings.ReplaceAll(record[1], ".", string(os.PathSeparator))              // Replace dots with path separator
 			testCov.FileCov[filepath.Join(classPath, record[2])] = fmt.Sprintf("%.2f%%", coverage) // Use class path as key
 		}
 	}
-	if totalLines > 0 {
-		totalCoverage := float64(coveredLines) / float64(totalLines) * 100
+	if totalInstructions > 0 {
+		totalCoverage := float64(coveredInstructions) / float64(totalInstructions) * 100
 		testCov.TotalCov = fmt.Sprintf("%.2f%%", totalCoverage)
 	}
 
