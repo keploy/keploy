@@ -41,7 +41,11 @@ func main() {
 	// Uncomment the following code to enable pprof for debugging
 	// go func() {
 	// 	fmt.Println("Starting pprof server for debugging...")
-	// 	http.ListenAndServe("localhost:6060", nil)
+	// 	err := http.ListenAndServe("localhost:6060", nil)
+	// 	if err != nil {
+	// 		fmt.Println("Failed to start the pprof server for debugging", err)
+	// 		return
+	// 	}
 	// }()
 	printLogo()
 	ctx := utils.NewCtx()
