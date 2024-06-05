@@ -49,14 +49,12 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 					}
 				}
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					logger.Debug("the timeout for the client read in pg")
 					break
 				}
 				pgRequests = append(pgRequests, buffer)
 			}
 
 			if len(pgRequests) == 0 {
-				logger.Debug("the postgres request buffer is empty")
 				continue
 			}
 			var mutex sync.Mutex
