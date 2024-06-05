@@ -11,7 +11,6 @@ import (
 type Config struct {
 	Path                  string       `json:"path" yaml:"path" mapstructure:"path" `
 	AppID                 string       `json:"appId" yaml:"appId" mapstructure:"appId"`
-	ReRecord              string       `json:"rerecord" yaml:"rerecord" mapstructure:"rerecord"`
 	Command               string       `json:"command" yaml:"command" mapstructure:"command"`
 	CoverageCommand       string       `json:"-" yaml:"-" mapstructure:"-"`
 	Port                  uint32       `json:"port" yaml:"port" mapstructure:"port"`
@@ -39,6 +38,7 @@ type Config struct {
 type Record struct {
 	Filters     []Filter      `json:"filters" yaml:"filters" mapstructure:"filters"`
 	RecordTimer time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
+	ReRecord    string        `json:"rerecord" yaml:"rerecord" mapstructure:"rerecord"`
 }
 
 type Normalize struct {
@@ -71,6 +71,7 @@ type Test struct {
 	RemoveUnusedMocks  bool                `json:"removeUnusedMocks" yaml:"removeUnusedMocks" mapstructure:"removeUnusedMocks"`
 	FallBackOnMiss     bool                `json:"fallBackOnMiss" yaml:"fallBackOnMiss" mapstructure:"fallBackOnMiss"`
 	JacocoAgentPath    string              `json:"jacocoAgentPath" yaml:"jacocoAgentPath" mapstructure:"jacocoAgentPath"`
+  Mocking            bool                `json:"mocking" yaml:"mocking" mapstructure:"mocking"`
 }
 
 type Language string
