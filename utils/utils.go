@@ -349,8 +349,8 @@ func FindDockerCmd(cmd string) CmdType {
 	cmdLower := strings.TrimSpace(strings.ToLower(cmd))
 
 	// Define patterns for Docker and Docker Compose
-	dockerRunPatterns := []string{"docker run", "sudo docker run"}
-	dockerStartPatterns := []string{"docker start", "sudo docker start"}
+	dockerRunPatterns := []string{"docker run", "sudo docker run", "docker container run", "sudo docker container run"}
+	dockerStartPatterns := []string{"docker start", "sudo docker start", "docker container start", "sudo docker container start"}
 	dockerComposePatterns := []string{"docker-compose", "sudo docker-compose", "docker compose", "sudo docker compose"}
 
 	// Check for Docker Compose command patterns and file extensions
