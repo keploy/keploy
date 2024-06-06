@@ -191,7 +191,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "utGen":
 		cmd.Flags().String("sourceFilePath", "", "Path to the source file.")
 		cmd.Flags().String("testFilePath", "", "Path to the input test file.")
-		cmd.Flags().String("codeCoverageReportPath", "", "Path to the code coverage report file.")
+		cmd.Flags().String("codeCoverageReportPath", "coverage.xml", "Path to the code coverage report file.")
 		cmd.Flags().String("testCommand", "", "The command to run tests and generate coverage report.")
 		cmd.Flags().String("coverageType", "cobertura", "Type of coverage report.")
 		cmd.Flags().Int("desiredCoverage", 100, "The desired coverage percentage.")
