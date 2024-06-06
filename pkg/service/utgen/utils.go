@@ -329,7 +329,12 @@ func createTestFile(testFilePath string, sourceFilePath string) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		defer file.Close()
+		defer func() {
+			if err := file.Close(); err != nil {
+				// Handle the error returned by Close()
+				// You can log the error or take appropriate action
+			}
+		}()
 
 		// Write initial content to the test file
 		_, err = file.WriteString(fmt.Sprintf("// Unit test for %s\n", filepath.Base(sourceFilePath)))

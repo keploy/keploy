@@ -1,11 +1,10 @@
+// Package settings provides prompt settings for the test generation
 package settings
 
 import (
 	"bytes"
 	"embed"
 	"log"
-	"os"
-	"path/filepath"
 	"sync"
 
 	"github.com/spf13/viper"
@@ -56,12 +55,4 @@ func NewSingletonSettings() *SingletonSettings {
 // GetSettings returns the singleton settings instance
 func GetSettings() *viper.Viper {
 	return NewSingletonSettings().viper
-}
-
-// getBaseDir determines the base directory for bundled app or normal environment
-func getBaseDir() (string, error) {
-	if baseDir, exists := os.LookupEnv("_MEIPASS"); exists {
-		return baseDir, nil
-	}
-	return filepath.Abs(filepath.Dir(os.Args[0]))
 }

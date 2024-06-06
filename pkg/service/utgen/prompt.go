@@ -14,7 +14,6 @@ import (
 
 const MAX_TESTS_PER_RUN = 4
 
-// Constants for additional includes, instructions, and failed tests
 const ADDITIONAL_INCLUDES_TEXT = `
 ## Additional Includes
 The following is a set of included files used as context for the source code above. This is usually included libraries needed as context to write better tests:

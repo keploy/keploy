@@ -125,7 +125,11 @@ func (ai *AICaller) CallModel(ctx context.Context, prompt *Prompt, maxTokens int
 	if err != nil {
 		return "", 0, 0, fmt.Errorf("error making request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			fmt.Printf("Error closing response body: %v\n", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
