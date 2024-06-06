@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-type AICaller struct {
+type AIClient struct {
 	Model     string
 	APIBase   string
 	IsLitellm bool
@@ -67,15 +67,15 @@ type Delta struct {
 	Content string `json:"content"`
 }
 
-func NewAICaller(model, apiBase string, isLitellm bool) *AICaller {
-	return &AICaller{
+func NewAIClient(model, apiBase string, isLitellm bool) *AIClient {
+	return &AIClient{
 		Model:     model,
 		APIBase:   apiBase,
 		IsLitellm: isLitellm,
 	}
 }
 
-func (ai *AICaller) CallModel(ctx context.Context, prompt *Prompt, maxTokens int) (string, int, int, error) {
+func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (string, int, int, error) {
 	if prompt.System == "" && prompt.User == "" {
 		return "", 0, 0, errors.New("the prompt must contain 'system' and 'user' keys")
 	}

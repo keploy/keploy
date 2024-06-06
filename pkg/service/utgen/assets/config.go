@@ -26,8 +26,8 @@ func NewSingletonSettings() *SingletonSettings {
 	once.Do(func() {
 
 		settingsFiles := []string{
-			"test_generation_prompt.toml",
-			"language_extensions.toml",
+			"test_generation.toml",
+			"language.toml",
 			"indentation.toml",
 			"insert_line.toml",
 		}

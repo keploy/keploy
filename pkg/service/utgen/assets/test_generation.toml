@@ -1,4 +1,4 @@
-[test_generation_prompt]
+[test_generation]
 system="""\
 """
 

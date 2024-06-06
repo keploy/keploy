@@ -15,47 +15,59 @@ import (
 	"go.uber.org/zap"
 )
 
-type UnitTestGenerator struct {
-	sourceFilePath         string
-	testFilePath           string
-	codeCoverageReportPath string
-	testCommand            string
-	testCommandDir         string
-	coverageType           string
-	desiredCoverage        float64
-	language               string
-	currentCoverage        float64
-	codeCoverageReport     string
-	relevantLineNumber     int
-	testHeadersIndentation int
-	failedTestRuns         []*models.FailedUnitTest
-	prompt                 *Prompt
-	aiCaller               *AICaller
-	logger                 *zap.Logger
-	promptBuilder          *PromptBuilder
-	maxIterations          int
-	Files                  []string
+type Coverage struct {
+	Path    string
+	Format  string
+	Desired float64
+	Current float64
+	Content string
 }
 
-func NewUnitTestGenerator(sourceFilePath, testFilePath, codeCoverageReportPath, testCommand, testCommandDir, coverageType string, desiredCoverage float64, maxIterations int, model string, apiBaseURL string, config *config.Config, logger *zap.Logger) (*UnitTestGenerator, error) {
+type Cursor struct {
+	Line        int
+	Indentation int
+}
+
+type UnitTestGenerator struct {
+	srcPath       string
+	testPath      string
+	cmd           string
+	dir           string
+	cov           *Coverage
+	lang          string
+	cur           *Cursor
+	failedTests   []*models.FailedUT
+	prompt        *Prompt
+	ai            *AIClient
+	logger        *zap.Logger
+	promptBuilder *PromptBuilder
+	maxIterations int
+	Files         []string
+}
+
+func NewUnitTestGenerator(srcPath, testPath, reportPath, cmd, dir, coverageFormat string, desiredCoverage float64, maxIterations int, model string, apiBaseURL string, config *config.Config, logger *zap.Logger) (*UnitTestGenerator, error) {
 	generator := &UnitTestGenerator{
-		sourceFilePath:         sourceFilePath,
-		testFilePath:           testFilePath,
-		codeCoverageReportPath: codeCoverageReportPath,
-		testCommand:            testCommand,
-		testCommandDir:         testCommandDir,
-		coverageType:           coverageType,
-		desiredCoverage:        desiredCoverage,
-		maxIterations:          maxIterations,
-		aiCaller:               NewAICaller(model, apiBaseURL, config.UtGen.Litellm),
-		logger:                 logger,
+		srcPath:       srcPath,
+		testPath:      testPath,
+		cmd:           cmd,
+		dir:           dir,
+		maxIterations: maxIterations,
+		logger:        logger,
+		ai:            NewAIClient(model, apiBaseURL, config.UtGen.Litellm),
+		cov: &Coverage{
+			Path:    reportPath,
+			Format:  coverageFormat,
+			Desired: desiredCoverage,
+		},
+		cur: &Cursor{},
 	}
 	return generator, nil
 }
 
 func (g *UnitTestGenerator) Start(ctx context.Context) error {
 
-	if g.sourceFilePath == "" {
+	// To find the source files if the source path is not provided
+	if g.srcPath == "" {
 		if err := g.runCoverage(); err != nil {
 			return err
 		}
@@ -65,61 +77,56 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 	}
 
 	for i := 0; i < len(g.Files)+1; i++ {
-
 		newTestFile := false
-
 		var err error
-
+		// If the source file path is not provided, then iterate over all the source files and test files
 		if i < len(g.Files) {
-			g.sourceFilePath = g.Files[i]
-			g.testFilePath, err = getTestFilePath(g.sourceFilePath, g.testCommandDir, GetCodeLanguage(g.sourceFilePath))
-			if err != nil || g.testFilePath == "" {
+			g.srcPath = g.Files[i]
+			g.testPath, err = getTestFilePath(g.srcPath, g.dir)
+			if err != nil || g.testPath == "" {
 				g.logger.Error("Error getting test file path", zap.Error(err))
 				continue
 			}
-
-			isCreated, err := createTestFile(g.testFilePath, g.sourceFilePath)
+			isCreated, err := createTestFile(g.testPath, g.srcPath)
 			if err != nil {
 				g.logger.Error("Error creating test file", zap.Error(err))
 				continue
 			}
 			newTestFile = isCreated
 		}
-
-		g.logger.Info(fmt.Sprintf("Generating tests for file: %s", g.sourceFilePath))
-
+		g.logger.Info(fmt.Sprintf("Generating tests for file: %s", g.srcPath))
 		if !newTestFile {
 			if err = g.runCoverage(); err != nil {
 				return err
 			}
 		} else {
-			g.currentCoverage = 0
+			g.cov.Current = 0
 		}
-
 		// Run the initial coverage to get the base line
 		iterationCount := 0
-		g.language = GetCodeLanguage(g.sourceFilePath)
-		g.promptBuilder = NewPromptBuilder(g.sourceFilePath, g.testFilePath, g.codeCoverageReport, "", "", "", g.language)
-
-		if err := g.InitialUnitTestAnalysis(ctx); err != nil {
+		g.lang = GetCodeLanguage(g.srcPath)
+		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.logger)
+		if err != nil {
+			utils.LogError(g.logger, err, "Error creating prompt builder")
+			return err
+		}
+		if err := g.setCursor(ctx); err != nil {
 			utils.LogError(g.logger, err, "Error during initial test suite analysis")
 			return err
 		}
 
-		for g.currentCoverage < (g.desiredCoverage/100) && iterationCount < g.maxIterations {
-
+		for g.cov.Current < (g.cov.Desired/100) && iterationCount < g.maxIterations {
 			pp.SetColorScheme(models.PassingColorScheme)
-			if _, err := pp.Printf("\nCurrent Coverage: %s%% for file %s\n", math.Round(g.currentCoverage*100), g.sourceFilePath); err != nil {
+			if _, err := pp.Printf("\nCurrent Coverage: %s%% for file %s\n", math.Round(g.cov.Current*100), g.srcPath); err != nil {
 				utils.LogError(g.logger, err, "failed to print coverage")
 			}
-			if _, err := pp.Printf("Desired Coverage: %s%% for file %s\n", g.desiredCoverage, g.sourceFilePath); err != nil {
+			if _, err := pp.Printf("Desired Coverage: %s%% for file %s\n", g.cov.Desired, g.srcPath); err != nil {
 				utils.LogError(g.logger, err, "failed to print coverage")
 			}
-
 			// Check for existence of failed tests:
 			failedTestRunsValue := ""
-			if g.failedTestRuns != nil && len(g.failedTestRuns) > 0 {
-				for _, failedTest := range g.failedTestRuns {
+			if g.failedTests != nil && len(g.failedTests) > 0 {
+				for _, failedTest := range g.failedTests {
 					code := failedTest.TestCode
 					errorMessage := failedTest.ErrorMsg
 					failedTestRunsValue += fmt.Sprintf("Failed Test:\n\n%s\n\n", code)
@@ -130,18 +137,18 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 					}
 				}
 			}
-
-			g.prompt = g.promptBuilder.BuildPrompt(failedTestRunsValue)
-			g.failedTestRuns = []*models.FailedUnitTest{}
-
+			g.prompt, err = g.promptBuilder.BuildPrompt("test_generation", failedTestRunsValue)
+			if err != nil {
+				utils.LogError(g.logger, err, "Error building prompt")
+				return err
+			}
+			g.failedTests = []*models.FailedUT{}
 			testsDetails, err := g.GenerateTests(ctx)
 			if err != nil {
 				utils.LogError(g.logger, err, "Error generating tests")
 				return err
 			}
-
 			g.logger.Info("Validating new generated tests one by one")
-
 			for _, generatedTest := range testsDetails.NewTests {
 				err := g.ValidateTest(generatedTest)
 				if err != nil {
@@ -150,8 +157,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				}
 			}
 			iterationCount++
-
-			if g.currentCoverage < (g.desiredCoverage/100) && g.currentCoverage > 0 {
+			if g.cov.Current < (g.cov.Desired/100) && g.cov.Current > 0 {
 				if err := g.runCoverage(); err != nil {
 					utils.LogError(g.logger, err, "Error running coverage")
 					return err
@@ -159,20 +165,20 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			}
 		}
 
-		if g.currentCoverage == 0 && newTestFile {
-			err := os.Remove(g.testFilePath)
+		if g.cov.Current == 0 && newTestFile {
+			err := os.Remove(g.testPath)
 			if err != nil {
 				g.logger.Error("Error removing test file", zap.Error(err))
 			}
 		}
 
 		pp.SetColorScheme(models.PassingColorScheme)
-		if g.currentCoverage >= (g.desiredCoverage / 100) {
-			if _, err := pp.Printf("\nFor File %s Reached above target coverage of %s%% (Current Coverage: %s%%) in %s%% iterations.", g.sourceFilePath, g.desiredCoverage, math.Round(g.currentCoverage*100), iterationCount); err != nil {
+		if g.cov.Current >= (g.cov.Desired / 100) {
+			if _, err := pp.Printf("\nFor File %s Reached above target coverage of %s%% (Current Coverage: %s%%) in %s%% iterations.", g.srcPath, g.cov.Desired, math.Round(g.cov.Current*100), iterationCount); err != nil {
 				utils.LogError(g.logger, err, "failed to print coverage")
 			}
 		} else if iterationCount == g.maxIterations {
-			if _, err := pp.Printf("\nFor File %s Reached maximum iteration limit without achieving desired coverage. Current Coverage: %s%%", g.sourceFilePath, math.Round(g.currentCoverage*100)); err != nil {
+			if _, err := pp.Printf("\nFor File %s Reached maximum iteration limit without achieving desired coverage. Current Coverage: %s%%", g.srcPath, math.Round(g.cov.Current*100)); err != nil {
 				utils.LogError(g.logger, err, "failed to print coverage")
 			}
 		}
@@ -182,112 +188,129 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 
 func (g *UnitTestGenerator) runCoverage() error {
 	// Perform an initial build/test command to generate coverage report and get a baseline
-	if g.sourceFilePath != "" {
-		g.logger.Info(fmt.Sprintf("Running test command to generate coverage report: '%s'", g.testCommand))
+	if g.srcPath != "" {
+		g.logger.Info(fmt.Sprintf("Running test command to generate coverage report: '%s'", g.cmd))
 	}
-	_, _, exitCode, timeOfTestCommand, err := RunCommand(g.testCommand, g.testCommandDir)
+	_, _, exitCode, lastUpdatedTime, err := RunCommand(g.cmd, g.dir)
 	if err != nil {
 		utils.LogError(g.logger, err, "Error running test command")
 	}
 	if exitCode != 0 {
 		utils.LogError(g.logger, err, "Error running test command")
 	}
-	coverageProcessor := NewCoverageProcessor(g.codeCoverageReportPath, getFilename(g.sourceFilePath), g.coverageType)
-	_, _, percentageCovered, files, err := coverageProcessor.ProcessCoverageReport(timeOfTestCommand)
+	coverageProcessor := NewCoverageProcessor(g.cov.Path, getFilename(g.srcPath), g.cov.Format)
+	coverageResult, err := coverageProcessor.ProcessCoverageReport(lastUpdatedTime)
 	if err != nil {
 		utils.LogError(g.logger, err, "Error in coverage processing")
 		return fmt.Errorf("error in coverage processing: %w", err)
 	}
-	g.currentCoverage = percentageCovered
-	if g.sourceFilePath == "" {
-		g.Files = files
+	g.cov.Current = coverageResult.Coverage
+	g.cov.Content = coverageResult.ReportContent
+	if g.srcPath == "" {
+		g.Files = coverageResult.Files
 	}
 	return nil
 }
 
-func (g *UnitTestGenerator) GenerateTests(ctx context.Context) (*models.UnitTestsDetails, error) {
-	response, promptTokenCount, responseTokenCount, err := g.aiCaller.CallModel(ctx, g.prompt, 4096)
+func (g *UnitTestGenerator) GenerateTests(ctx context.Context) (*models.UTDetails, error) {
+	response, promptTokenCount, responseTokenCount, err := g.ai.Call(ctx, g.prompt, 4096)
 	if err != nil {
 		utils.LogError(g.logger, err, "Error calling AI model")
-		return &models.UnitTestsDetails{}, err
+		return &models.UTDetails{}, err
 	}
-	g.logger.Info(fmt.Sprintf("Total token used count for LLM model %s: %d", g.aiCaller.Model, promptTokenCount+responseTokenCount))
-	testsDetails := unmarshalYamlTestDetails(response)
+	g.logger.Info(fmt.Sprintf("Total token used count for LLM model %s: %d", g.ai.Model, promptTokenCount+responseTokenCount))
+	testsDetails, err := unmarshalYamlTestDetails(response)
+	if err != nil {
+		utils.LogError(g.logger, err, "Error unmarshalling test details")
+		return &models.UTDetails{}, err
+	}
 	return testsDetails, nil
 }
 
-func (g *UnitTestGenerator) InitialUnitTestAnalysis(ctx context.Context) error {
-	testHeadersIndentation, err := g.analyzeTestHeadersIndentation(ctx)
+func (g *UnitTestGenerator) setCursor(ctx context.Context) error {
+	indentation, err := g.getIndentation(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to analyze test headers indentation: %w", err)
 	}
-	relevantLineNumberToInsertAfter, err := g.analyzeRelevantLineNumberToInsertAfter(ctx)
+	line, err := g.getLine(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to analyze relevant line number to insert new tests: %w", err)
 	}
-	g.testHeadersIndentation = testHeadersIndentation
-	g.relevantLineNumber = relevantLineNumberToInsertAfter
+	g.cur.Indentation = indentation
+	g.cur.Line = line
 	return nil
 }
 
-func (g *UnitTestGenerator) analyzeTestHeadersIndentation(ctx context.Context) (int, error) {
-	testHeadersIndentation := -1
+func (g *UnitTestGenerator) getIndentation(ctx context.Context) (int, error) {
+	indentation := -1
 	allowedAttempts := 3
 	counterAttempts := 0
-	for testHeadersIndentation == -1 && counterAttempts < allowedAttempts {
-		prompt := g.promptBuilder.BuildPromptCustom("indentation")
-		response, _, _, err := g.aiCaller.CallModel(ctx, prompt, 4096)
+	for indentation == -1 && counterAttempts < allowedAttempts {
+		prompt, err := g.promptBuilder.BuildPrompt("indentation", "")
+		if err != nil {
+			return 0, fmt.Errorf("error building prompt: %w", err)
+		}
+		response, _, _, err := g.ai.Call(ctx, prompt, 4096)
 		if err != nil {
 			utils.LogError(g.logger, err, "Error calling AI model")
 			return 0, err
 		}
-		testsDetails := unmarshalYamlTestHeaders(response)
-		testHeadersIndentation, err = convertToInt(testsDetails.TestHeadersIndentation)
+		testsDetails, err := unmarshalYamlTestHeaders(response)
+		if err != nil {
+			utils.LogError(g.logger, err, "Error unmarshalling test headers")
+			return 0, err
+		}
+		indentation, err = convertToInt(testsDetails.Indentation)
 		if err != nil {
 			return 0, fmt.Errorf("error converting test_headers_indentation to int: %w", err)
 		}
 		counterAttempts++
 	}
-	if testHeadersIndentation == -1 {
+	if indentation == -1 {
 		return 0, fmt.Errorf("failed to analyze the test headers indentation")
 	}
-	return testHeadersIndentation, nil
+	return indentation, nil
 }
 
-func (g *UnitTestGenerator) analyzeRelevantLineNumberToInsertAfter(ctx context.Context) (int, error) {
-	relevantLineNumberToInsertAfter := -1
+func (g *UnitTestGenerator) getLine(ctx context.Context) (int, error) {
+	line := -1
 	allowedAttempts := 3
 	counterAttempts := 0
-	for relevantLineNumberToInsertAfter == -1 && counterAttempts < allowedAttempts {
-		prompt := g.promptBuilder.BuildPromptCustom("insert_line")
-		response, _, _, err := g.aiCaller.CallModel(ctx, prompt, 4096)
+	for line == -1 && counterAttempts < allowedAttempts {
+		prompt, err := g.promptBuilder.BuildPrompt("insert_line", "")
+		if err != nil {
+			return 0, fmt.Errorf("error building prompt: %w", err)
+		}
+		response, _, _, err := g.ai.Call(ctx, prompt, 4096)
 		if err != nil {
 			utils.LogError(g.logger, err, "Error calling AI model")
 			return 0, err
 		}
-		testsDetails := unmarshalYamlTestLine(response)
-		if testsDetails.RelevantLineNumberToInsertAfter != 0 {
-			relevantLineNumberToInsertAfter, err = convertToInt(testsDetails.RelevantLineNumberToInsertAfter)
-			if err != nil {
-				return 0, fmt.Errorf("error converting relevant_line_number_to_insert_after to int: %w", err)
-			}
+		testsDetails, err := unmarshalYamlTestLine(response)
+		if err != nil {
+			utils.LogError(g.logger, err, "Error unmarshalling test line")
+			return 0, err
+		}
+		line, err = convertToInt(testsDetails.Line)
+		if err != nil {
+			return 0, fmt.Errorf("error converting relevant_line_number_to_insert_after to int: %w", err)
 		}
 		counterAttempts++
 	}
-	if relevantLineNumberToInsertAfter == -1 {
+	if line == -1 {
 		return 0, fmt.Errorf("failed to analyze the relevant line number to insert new tests")
 	}
-	return relevantLineNumberToInsertAfter, nil
+	return line, nil
 }
 
-func (g *UnitTestGenerator) ValidateTest(generatedTest models.UnitTest) error {
+func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT) error {
 	testCode := strings.TrimSpace(generatedTest.TestCode)
-	relevantLineNumberToInsertAfter := g.relevantLineNumber
-	neededIndent := g.testHeadersIndentation
+	InsertAfter := g.cur.Line
+	Indent := g.cur.Indentation
 	testCodeIndented := testCode
-	if neededIndent != 0 {
+	if Indent != 0 {
 		initialIndent := len(testCode) - len(strings.TrimLeft(testCode, " "))
-		deltaIndent := neededIndent - initialIndent
+		deltaIndent := Indent - initialIndent
 		if deltaIndent > 0 {
 			lines := strings.Split(testCode, "\n")
 			for i, line := range lines {
@@ -298,18 +321,21 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UnitTest) error {
 	}
 	testCodeIndented = "\n" + strings.TrimSpace(testCodeIndented) + "\n"
 	// Append the generated test to the relevant line in the test file
-	originalContent := readFile(g.testFilePath)
+	originalContent, err := readFile(g.testPath)
+	if err != nil {
+		return fmt.Errorf("failed to read test file: %w", err)
+	}
 	originalContentLines := strings.Split(originalContent, "\n")
 	testCodeLines := strings.Split(testCodeIndented, "\n")
-	processedTestLines := append(originalContentLines[:relevantLineNumberToInsertAfter], testCodeLines...)
-	processedTestLines = append(processedTestLines, originalContentLines[relevantLineNumberToInsertAfter:]...)
+	processedTestLines := append(originalContentLines[:InsertAfter], testCodeLines...)
+	processedTestLines = append(processedTestLines, originalContentLines[InsertAfter:]...)
 	processedTest := strings.Join(processedTestLines, "\n")
-	if err := os.WriteFile(g.testFilePath, []byte(processedTest), 0644); err != nil {
+	if err := os.WriteFile(g.testPath, []byte(processedTest), 0644); err != nil {
 		return fmt.Errorf("failed to write test file: %w", err)
 	}
 
 	// Run the test using the Runner class
-	g.logger.Info(fmt.Sprintf("Running test 5 times for proper validation with the following command: '%s'", g.testCommand))
+	g.logger.Info(fmt.Sprintf("Running test 5 times for proper validation with the following command: '%s'", g.cmd))
 
 	var testCommandStartTime int64
 
@@ -317,20 +343,20 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UnitTest) error {
 
 		g.logger.Info(fmt.Sprintf("Iteration no: %d", i+1))
 
-		stdout, _, exitCode, timeOfTestCommand, _ := RunCommand(g.testCommand, g.testCommandDir)
+		stdout, _, exitCode, timeOfTestCommand, _ := RunCommand(g.cmd, g.dir)
 		if exitCode != 0 {
 			g.logger.Info(fmt.Sprintf("Test failed in %d iteration", i+1))
 			// Test failed, roll back the test file to its original content
 
-			if err := os.Truncate(g.testFilePath, 0); err != nil {
+			if err := os.Truncate(g.testPath, 0); err != nil {
 				return fmt.Errorf("failed to truncate test file: %w", err)
 			}
 
-			if err := os.WriteFile(g.testFilePath, []byte(originalContent), 0644); err != nil {
+			if err := os.WriteFile(g.testPath, []byte(originalContent), 0644); err != nil {
 				return fmt.Errorf("failed to write test file: %w", err)
 			}
 			g.logger.Info("Skipping a generated test that failed")
-			g.failedTestRuns = append(g.failedTestRuns, &models.FailedUnitTest{
+			g.failedTests = append(g.failedTests, &models.FailedUT{
 				TestCode: generatedTest.TestCode,
 				ErrorMsg: extractErrorMessage(stdout),
 			})
@@ -340,26 +366,26 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UnitTest) error {
 	}
 
 	// Check for coverage increase
-	newCoverageProcessor := NewCoverageProcessor(g.codeCoverageReportPath, getFilename(g.sourceFilePath), g.coverageType)
-	_, _, newPercentageCovered, _, err := newCoverageProcessor.ProcessCoverageReport(testCommandStartTime)
+	newCoverageProcessor := NewCoverageProcessor(g.cov.Path, getFilename(g.srcPath), g.cov.Format)
+	covResult, err := newCoverageProcessor.ProcessCoverageReport(testCommandStartTime)
 	if err != nil {
 		return fmt.Errorf("error processing coverage report: %w", err)
 	}
-	if newPercentageCovered <= g.currentCoverage {
+	if covResult.Coverage <= g.cov.Current {
 		// Test failed to increase coverage, roll back the test file to its original content
 
-		if err := os.Truncate(g.testFilePath, 0); err != nil {
+		if err := os.Truncate(g.testPath, 0); err != nil {
 			return fmt.Errorf("failed to truncate test file: %w", err)
 		}
 
-		if err := os.WriteFile(g.testFilePath, []byte(originalContent), 0644); err != nil {
+		if err := os.WriteFile(g.testPath, []byte(originalContent), 0644); err != nil {
 			return fmt.Errorf("failed to write test file: %w", err)
 		}
 		g.logger.Info("Skipping a generated test that failed to increase coverage")
 		return nil
 	}
-	g.currentCoverage = newPercentageCovered
-	g.relevantLineNumber = g.relevantLineNumber + len(testCodeLines)
+	g.cov.Current = covResult.Coverage
+	g.cur.Line = g.cur.Line + len(testCodeLines)
 	g.logger.Info("Generated test passed and increased coverage")
 	return nil
 }

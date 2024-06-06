@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"fmt"
 	"html/template"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"go.keploy.io/server/v2/pkg/service/utgen/settings"
+	settings "go.keploy.io/server/v2/pkg/service/utgen/assets"
+	"go.uber.org/zap"
 )
 
 const MAX_TESTS_PER_RUN = 4
@@ -37,52 +37,77 @@ Below is a list of failed tests that you generated in previous iterations. Do no
 ======
 `
 
+type Source struct {
+	Name         string
+	Code         string
+	CodeNumbered string
+}
+
+type Test struct {
+	Name         string
+	Code         string
+	CodeNumbered string
+}
+
 type PromptBuilder struct {
-	SourceFileName         string
-	TestFileName           string
-	SourceFile             string
-	TestFile               string
-	CodeCoverageReport     string
+	Src                    *Source
+	Test                   *Test
+	CovReportContent       string
 	IncludedFiles          string
 	AdditionalInstructions string
-	FailedTestRuns         string
 	Language               string
-	SourceFileNumbered     string
-	TestFileNumbered       string
+	Logger                 *zap.Logger
 }
 
-func NewPromptBuilder(
-	sourceFilePath, testFilePath, codeCoverageReport, includedFiles, additionalInstructions, failedTestRuns, language string,
-) *PromptBuilder {
-	return &PromptBuilder{
-		SourceFileName:         filepath.Base(sourceFilePath),
-		TestFileName:           filepath.Base(testFilePath),
-		SourceFile:             readFile(sourceFilePath),
-		TestFile:               readFile(testFilePath),
-		CodeCoverageReport:     codeCoverageReport,
-		IncludedFiles:          formatSection(includedFiles, ADDITIONAL_INCLUDES_TEXT),
-		AdditionalInstructions: formatSection(additionalInstructions, ADDITIONAL_INSTRUCTIONS_TEXT),
-		FailedTestRuns:         formatSection(failedTestRuns, FAILED_TESTS_TEXT),
-		Language:               language,
+func NewPromptBuilder(srcPath, testPath, covReportContent, includedFiles, additionalInstructions, language string, logger *zap.Logger) (*PromptBuilder, error) {
+	var err error
+	src := &Source{
+		Name: filepath.Base(srcPath),
 	}
+	test := &Test{
+		Name: filepath.Base(testPath),
+	}
+	promptBuilder := &PromptBuilder{
+		Src:              src,
+		Test:             test,
+		Language:         language,
+		CovReportContent: covReportContent,
+		Logger:           logger,
+	}
+	promptBuilder.Src.Code, err = readFile(srcPath)
+	if err != nil {
+		return nil, err
+	}
+	promptBuilder.Test.Code, err = readFile(testPath)
+	if err != nil {
+		return nil, err
+	}
+	promptBuilder.IncludedFiles, err = formatSection(includedFiles, ADDITIONAL_INCLUDES_TEXT)
+	if err != nil {
+		return nil, err
+	}
+	promptBuilder.AdditionalInstructions, err = formatSection(additionalInstructions, ADDITIONAL_INSTRUCTIONS_TEXT)
+	if err != nil {
+		return nil, err
+	}
+	return promptBuilder, nil
 }
 
-func readFile(filePath string) string {
+func readFile(filePath string) (string, error) {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
-		return fmt.Sprintf("Error reading %s: %v", filePath, err)
+		return "", fmt.Errorf("Error reading %s: %v", filePath, err)
 	}
-	return string(content)
+	return string(content), nil
 }
 
-func formatSection(content, templateText string) string {
+func formatSection(content, templateText string) (string, error) {
 	if content == "" {
-		return ""
+		return "", nil
 	}
 	tmpl, err := template.New("section").Parse(templateText)
 	if err != nil {
-		log.Printf("Error parsing section template: %v", err)
-		return ""
+		return "", fmt.Errorf("Error parsing section template: %v", err)
 	}
 	var buffer bytes.Buffer
 	err = tmpl.Execute(&buffer, map[string]string{
@@ -91,69 +116,25 @@ func formatSection(content, templateText string) string {
 		"FailedTestRuns":         content,
 	})
 	if err != nil {
-		log.Printf("Error executing section template: %v", err)
-		return ""
+		return "", fmt.Errorf("Error executing section template: %v", err)
 	}
-	return buffer.String()
+	return buffer.String(), nil
 }
 
-func (pb *PromptBuilder) BuildPrompt(failedTestRuns string) *Prompt {
-	pb.SourceFileNumbered = numberLines(pb.SourceFile)
-	pb.TestFileNumbered = numberLines(pb.TestFile)
+func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, error) {
+	pb.Src.CodeNumbered = numberLines(pb.Src.Code)
+	pb.Test.CodeNumbered = numberLines(pb.Test.Code)
 
 	variables := map[string]interface{}{
-		"source_file_name":             pb.SourceFileName,
-		"test_file_name":               pb.TestFileName,
-		"source_file_numbered":         pb.SourceFileNumbered,
-		"test_file_numbered":           pb.TestFileNumbered,
-		"source_file":                  pb.SourceFile,
-		"test_file":                    pb.TestFile,
-		"code_coverage_report":         pb.CodeCoverageReport,
+		"source_file_name":             pb.Src.Name,
+		"test_file_name":               pb.Test.Name,
+		"source_file_numbered":         pb.Src.CodeNumbered,
+		"test_file_numbered":           pb.Test.CodeNumbered,
+		"source_file":                  pb.Src.Code,
+		"test_file":                    pb.Test.Code,
+		"code_coverage_report":         pb.CovReportContent,
 		"additional_includes_section":  pb.IncludedFiles,
 		"failed_tests_section":         failedTestRuns,
-		"additional_instructions_text": pb.AdditionalInstructions,
-		"language":                     pb.Language,
-		"max_tests":                    MAX_TESTS_PER_RUN,
-	}
-
-	settings := settings.GetSettings()
-	prompt := &Prompt{}
-
-	systemPrompt, err := renderTemplate(settings.GetString("test_generation_prompt.system"), variables)
-	if err != nil {
-		log.Printf("Error rendering system prompt: %v", err)
-		prompt.System = ""
-		prompt.User = ""
-		return prompt
-	}
-
-	userPrompt, err := renderTemplate(settings.GetString("test_generation_prompt.user"), variables)
-	if err != nil {
-		log.Printf("Error rendering user prompt: %v", err)
-		prompt.System = ""
-		prompt.User = ""
-		return prompt
-	}
-
-	prompt.System = systemPrompt
-	prompt.User = userPrompt
-	return prompt
-}
-
-func (pb *PromptBuilder) BuildPromptCustom(file string) *Prompt {
-	pb.SourceFileNumbered = numberLines(pb.SourceFile)
-	pb.TestFileNumbered = numberLines(pb.TestFile)
-
-	variables := map[string]interface{}{
-		"source_file_name":             pb.SourceFileName,
-		"test_file_name":               pb.TestFileName,
-		"source_file_numbered":         pb.SourceFileNumbered,
-		"test_file_numbered":           pb.TestFileNumbered,
-		"source_file":                  pb.SourceFile,
-		"test_file":                    pb.TestFile,
-		"code_coverage_report":         pb.CodeCoverageReport,
-		"additional_includes_section":  pb.IncludedFiles,
-		"failed_tests_section":         pb.FailedTestRuns,
 		"additional_instructions_text": pb.AdditionalInstructions,
 		"language":                     pb.Language,
 		"max_tests":                    MAX_TESTS_PER_RUN,
@@ -165,22 +146,20 @@ func (pb *PromptBuilder) BuildPromptCustom(file string) *Prompt {
 
 	systemPrompt, err := renderTemplate(settings.GetString(file+".system"), variables)
 	if err != nil {
-		log.Printf("Error rendering system prompt: %v", err)
 		prompt.System = ""
 		prompt.User = ""
-		return prompt
+		return prompt, fmt.Errorf("Error rendering system prompt: %v", err)
 	}
 
 	userPrompt, err := renderTemplate(settings.GetString(file+".user"), variables)
 	if err != nil {
-		log.Printf("Error rendering user prompt: %v", err)
 		prompt.System = ""
 		prompt.User = ""
-		return prompt
+		return prompt, fmt.Errorf("Error rendering user prompt: %v", err)
 	}
 	prompt.System = systemPrompt
 	prompt.User = userPrompt
-	return prompt
+	return prompt, nil
 }
 
 func renderTemplate(templateText string, variables map[string]interface{}) (string, error) {
