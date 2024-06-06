@@ -464,8 +464,10 @@ func (a *App) run(ctx context.Context) models.AppError {
 	cmd.Cancel = func() error {
 
 		if utils.IsDockerKind(a.kind) {
-			utils.SendSignal(a.logger, cmd.Process.Pid, syscall.SIGINT)
-			return nil
+			a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
+			err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
+
+			return err
 		}
 		return utils.InterruptProcessTree(a.logger, cmd.Process.Pid, syscall.SIGINT)
 
