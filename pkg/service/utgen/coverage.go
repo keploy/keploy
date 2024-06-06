@@ -93,9 +93,12 @@ func (cp *CoverageProcessor) ParseCoverageReportCobertura() ([]int, []int, float
 	if err != nil {
 		return nil, nil, 0, filesToCover, err
 	}
-	if err := xmlFile.Close(); err != nil {
-		return nil, nil, 0, filesToCover, err
-	}
+
+	defer func() {
+		if err := xmlFile.Close(); err != nil {
+			return
+		}
+	}()
 
 	// Decode the XML file into a Coverage struct
 	var cov Coverage
