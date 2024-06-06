@@ -594,6 +594,7 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 	err := syscall.Kill(pid, sig)
 	if err != nil {
+		// ignore the ESRCH error as it means the process is already dead
 		if errno, ok := err.(syscall.Errno); ok && errno == syscall.ESRCH {
 			return nil
 		}
