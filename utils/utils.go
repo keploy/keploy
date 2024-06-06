@@ -586,7 +586,10 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 	}
 
 	for _, pid := range uniqueProcess {
-		SendSignal(logger, -pid, sig)
+		err := SendSignal(logger, -pid, sig)
+		if err != nil {
+			logger.Error("error sending signal to the process group id", zap.Int("pgid", pid), zap.Error(err))
+		}
 	}
 	return nil
 }
