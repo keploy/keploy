@@ -140,6 +140,8 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				return err
 			}
 
+			g.logger.Info("Validating new generated tests one by one")
+
 			for _, generatedTest := range testsDetails.NewTests {
 				err := g.ValidateTest(generatedTest)
 				if err != nil {
@@ -181,7 +183,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 func (g *UnitTestGenerator) runCoverage() error {
 	// Perform an initial build/test command to generate coverage report and get a baseline
 	if g.sourceFilePath != "" {
-		g.logger.Info(fmt.Sprintf("Running build/test command to generate coverage report: '%s'", g.testCommand))
+		g.logger.Info(fmt.Sprintf("Running test command to generate coverage report: '%s'", g.testCommand))
 	}
 	_, _, exitCode, timeOfTestCommand, err := RunCommand(g.testCommand, g.testCommandDir)
 	if err != nil {
@@ -233,7 +235,7 @@ func (g *UnitTestGenerator) analyzeTestHeadersIndentation(ctx context.Context) (
 	allowedAttempts := 3
 	counterAttempts := 0
 	for testHeadersIndentation == -1 && counterAttempts < allowedAttempts {
-		prompt := g.promptBuilder.BuildPromptCustom("analyze_suite_test_headers_indentation")
+		prompt := g.promptBuilder.BuildPromptCustom("indentation")
 		response, _, _, err := g.aiCaller.CallModel(ctx, prompt, 4096)
 		if err != nil {
 			utils.LogError(g.logger, err, "Error calling AI model")
@@ -257,7 +259,7 @@ func (g *UnitTestGenerator) analyzeRelevantLineNumberToInsertAfter(ctx context.C
 	allowedAttempts := 3
 	counterAttempts := 0
 	for relevantLineNumberToInsertAfter == -1 && counterAttempts < allowedAttempts {
-		prompt := g.promptBuilder.BuildPromptCustom("analyze_suite_test_insert_line")
+		prompt := g.promptBuilder.BuildPromptCustom("insert_line")
 		response, _, _, err := g.aiCaller.CallModel(ctx, prompt, 4096)
 		if err != nil {
 			utils.LogError(g.logger, err, "Error calling AI model")
@@ -307,13 +309,17 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UnitTest) error {
 	}
 
 	// Run the test using the Runner class
-	g.logger.Info(fmt.Sprintf("Running test with the following command: '%s'", g.testCommand))
+	g.logger.Info(fmt.Sprintf("Running test 5 times for proper validation with the following command: '%s'", g.testCommand))
 
 	var testCommandStartTime int64
 
-	for i := 5; i > 0; i-- {
+	for i := 0; i < 5; i++ {
+
+		g.logger.Info(fmt.Sprintf("Iteration no: %d", i+1))
+
 		stdout, _, exitCode, timeOfTestCommand, _ := RunCommand(g.testCommand, g.testCommandDir)
 		if exitCode != 0 {
+			g.logger.Info(fmt.Sprintf("Test failed in %d iteration", i+1))
 			// Test failed, roll back the test file to its original content
 
 			if err := os.Truncate(g.testFilePath, 0); err != nil {

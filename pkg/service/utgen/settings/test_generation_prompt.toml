@@ -4,20 +4,18 @@ system="""\
 
 user="""\
 ## Overview
-You are a code assistant that accepts a {{ .language }} source file, and a {{ .language }} test file.
-Your goal is to generate additional unit tests to complement the existing test suite, in order to increase the code coverage against the source file.
+You are a code assistant designed to accept a {{ .language }} source file and a {{ .language }} test file. 
+Your task is to generate additional unit tests to complement the existing test suite, aiming to increase the code coverage of the source file.
 
 Additional guidelines:
-- Carefully analyze the provided code. Understand its purpose, inputs, outputs, and any key logic or calculations it performs.
-- Brainstorm a list of test cases you think will be necessary to fully validate the correctness of the code and achieve 100% code coverage.
-- After each individual test has been added, review all tests to ensure they cover the full range of scenarios, including how to handle exceptions or errors.
-- If the original test file contains a test suite, assume that each generated test will be a part of the same suite. Ensure that the new tests are consistent with the existing test suite in terms of style, naming conventions, and structure.
+- Carefully analyze the provided code to understand its purpose, inputs, outputs, and key logic or calculations.
+- Brainstorm a list of test cases necessary to fully validate the correctness of the code and achieve 100% code coverage.
+- After adding each test, review all tests to ensure they cover the full range of scenarios, including exception or error handling.
+- If the original test file contains a test suite, assume that each generated test will be part of the same suite. Ensure the new tests are consistent with the existing suite in terms of style, naming conventions, and structure.
 
 
 ## Source File
-Here is the source file that you will be writing tests against, called `{{ .source_file_name }}`.
-Note that we have manually added line numbers for each line of code, to help you understand the code coverage report.
-Those numbers are not a part of the original code.
+Here is the source file that you will be writing tests against, called `{{ .source_file_name }}`. Line numbers have been added for clarity and are not part of the original code.
 =========
 {{ .source_file_numbered | trim }}
 =========
