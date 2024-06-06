@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/fatih/color"
-	"github.com/moby/moby/pkg/parsers/kernel"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
@@ -167,6 +166,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	//add flags
 	var err error
 	switch cmd.Name() {
+
 	case "update":
 		return nil
 	case "normalize":
@@ -190,7 +190,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		}
 	case "record", "test":
 		cmd.Flags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
-		cmd.Flags().StringP("rerecord", "r", c.cfg.ReRecord, "Rerecord the testcases/mocks for the given testset(s)")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("port", c.cfg.Port, "GraphQL server port used for executing testcases in unit test library integration")
 		cmd.Flags().Uint32("proxyPort", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
@@ -221,8 +220,10 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().Bool("removeUnusedMocks", c.cfg.Test.RemoveUnusedMocks, "Clear the unused mocks for the passed test-sets")
 			cmd.Flags().Bool("goCoverage", c.cfg.Test.GoCoverage, "Enable go coverage reporting for the testcases")
 			cmd.Flags().Bool("fallBackOnMiss", c.cfg.Test.FallBackOnMiss, "Enable connecting to actual service if mock not found during test mode")
+			cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
 		} else {
 			cmd.Flags().Uint64("recordTimer", 0, "User provided time to record its application")
+			cmd.Flags().StringP("rerecord", "r", c.cfg.Record.ReRecord, "Rerecord the testcases/mocks for the given testset(s)")
 		}
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
@@ -248,14 +249,19 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 }
 
 func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) error {
-	//check if the version of the kernel is above 5.15 for eBPF support
-	isValid := kernel.CheckKernelVersion(5, 15, 0)
-	if !isValid {
-		errMsg := "Kernel version is below 5.15. Keploy requires kernel version 5.15 or above"
-		utils.LogError(c.logger, nil, errMsg)
-		return errors.New(errMsg)
+	err := isCompatible(c.logger)
+	if err != nil {
+		return err
 	}
-
+	//if runtime.GOOS == "linux" {
+	//	//check if the version of the kernel is above 5.15 for eBPF support
+	//	isValid := kernel.CheckKernelVersion(5, 15, 0)
+	//	if !isValid {
+	//		errMsg := "Kernel version is below 5.15. Keploy requires kernel version 5.15 or above"
+	//		utils.LogError(c.logger, nil, errMsg)
+	//		return errors.New(errMsg)
+	//	}
+	//}
 	return c.ValidateFlags(ctx, cmd)
 }
 
