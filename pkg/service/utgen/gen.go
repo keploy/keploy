@@ -1,4 +1,4 @@
-// utGen is a service that generates unit tests for a given source code file.
+// Package utgen is a service that generates unit tests for a given source code file.
 package utgen
 
 import (

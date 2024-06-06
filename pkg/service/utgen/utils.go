@@ -331,8 +331,7 @@ func createTestFile(testFilePath string, sourceFilePath string) (bool, error) {
 		}
 		defer func() {
 			if err := file.Close(); err != nil {
-				// Handle the error returned by Close()
-				// You can log the error or take appropriate action
+				return
 			}
 		}()
 
