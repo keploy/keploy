@@ -49,8 +49,8 @@ jobs:
 #          rm -rf $GITHUB_WORKSPACE/ui
 
   build-go:
-    # runs-on: macos-latest
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
+    # runs-on: ubuntu-latest
 #    needs: build-ui
     steps:
       - uses: actions/checkout@v2
