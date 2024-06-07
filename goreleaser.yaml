@@ -44,7 +44,7 @@ universal_binaries:
   # Defaults to the `id` field.
   # Since: v1.3.
   ids:
-    - keploy-macos
+    - keploy
   replace: true
 
   # Whether to remove the previous single-arch binaries from the artifact list.
