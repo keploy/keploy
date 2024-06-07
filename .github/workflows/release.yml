@@ -93,7 +93,7 @@ jobs:
           version: v1.26.2
           args: release --rm-dist
         env:
-          APPLE_ACCOUNT_TEAM_ID: ${{ secrets.APPLE_ACCOUNT_TEAM_ID }}
-          APPLE_ACCOUNT_PASSWORD: ${{ secrets.APPLE_ACCOUNT_PASSWORD }}
+          AC_PROVIDER: ${{ secrets.APPLE_ACCOUNT_TEAM_ID }}
+          AC_PASSWORD: ${{ secrets.APPLE_ACCOUNT_PASSWORD }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SENTRY_DSN_BINARY: ${{ secrets.SENTRY_DSN_BINARY }}
