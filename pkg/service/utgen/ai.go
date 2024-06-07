@@ -75,7 +75,7 @@ func NewAIClient(model, apiBase string) *AIClient {
 
 func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (string, int, int, error) {
 
-	var apiBaseUrl string
+	var apiBaseURL string
 
 	if prompt.System == "" && prompt.User == "" {
 		return "", 0, 0, errors.New("the prompt must contain 'system' and 'user' keys")
@@ -103,9 +103,9 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 
 	if ai.APIBase != "" {
 		completionParams.APIBase = ai.APIBase
-		apiBaseUrl = ai.APIBase
+		apiBaseURL = ai.APIBase
 	} else {
-		apiBaseUrl = "https://api.openai.com/"
+		apiBaseURL = "https://api.openai.com/"
 	}
 
 	requestBody, err := json.Marshal(completionParams)
@@ -113,7 +113,7 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 		return "", 0, 0, fmt.Errorf("error marshalling request body: %v", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", apiBaseUrl+"/v1/chat/completions", bytes.NewBuffer(requestBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", apiBaseURL+"/v1/chat/completions", bytes.NewBuffer(requestBody))
 	if err != nil {
 		return "", 0, 0, fmt.Errorf("error creating request: %v", err)
 	}
