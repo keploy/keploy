@@ -72,13 +72,21 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 		default:
 
 			tcsMocks, err := mockDb.GetUnFilteredMocks()
+			var pgMocks []*models.Mock
+
+			for _, mock := range tcsMocks {
+				if mock.Kind != "Postgres" {
+					continue
+				}
+				pgMocks = append(pgMocks, mock)
+			}
 			if err != nil {
 				return false, nil, fmt.Errorf("error while getting tcs mocks %v", err)
 			}
 
 			ConnectionID := ctx.Value(models.ClientConnectionIDKey).(string)
 
-			recordedPrep := getRecordPrepStatement(tcsMocks)
+			recordedPrep := getRecordPrepStatement(pgMocks)
 			reqGoingOn := decodePgRequest(requestBuffers[0], logger)
 			if reqGoingOn != nil {
 				logger.Debug("PacketTypes", zap.Any("PacketTypes", reqGoingOn.PacketTypes))
@@ -97,7 +105,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 			var sortedTcsMocks []*models.Mock
 			var matchedMock *models.Mock
 
-			for _, mock := range tcsMocks {
+			for _, mock := range pgMocks {
 				if ctx.Err() != nil {
 					return false, nil, ctx.Err()
 				}
@@ -116,10 +124,10 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 				mutex.Unlock()
 
 				initMock := *mock
-				if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
+				if len(initMock.Spec.PostgresRequests) == len(requestBuffers) {
 					for requestIndex, reqBuff := range requestBuffers {
 						bufStr := base64.StdEncoding.EncodeToString(reqBuff)
-						encodedMock, err := postgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
+						encodedMock, err := postgresDecoderBackend(initMock.Spec.PostgresRequests[requestIndex])
 						if err != nil {
 							logger.Debug("Error while decoding postgres request", zap.Error(err))
 						}
@@ -130,16 +138,16 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 								Payload: "Tg==",
 							}
 							return true, []models.Frontend{ssl}, nil
-						case mock.Spec.PostgresRequests[requestIndex].Identfier == "StartupRequest" && isStartupPacket(reqBuff) && mock.Spec.PostgresRequests[requestIndex].Payload != "AAAACATSFi8=" && mock.Spec.PostgresResponses[requestIndex].AuthType == 10:
-							logger.Debug("CHANGING TO MD5 for Response", zap.String("mock", mock.Name), zap.String("Req", bufStr))
+						case initMock.Spec.PostgresRequests[requestIndex].Identfier == "StartupRequest" && isStartupPacket(reqBuff) && initMock.Spec.PostgresRequests[requestIndex].Payload != "AAAACATSFi8=" && initMock.Spec.PostgresResponses[requestIndex].AuthType == 10:
+							logger.Debug("CHANGING TO MD5 for Response", zap.String("mock", initMock.Name), zap.String("Req", bufStr))
 							initMock.Spec.PostgresResponses[requestIndex].AuthType = 5
 							err := mockDb.FlagMockAsUsed(&initMock)
 							if err != nil {
 								logger.Error("failed to flag mock as used", zap.Error(err))
 							}
 							return true, initMock.Spec.PostgresResponses, nil
-						case len(encodedMock) > 0 && encodedMock[0] == 'p' && mock.Spec.PostgresRequests[requestIndex].PacketTypes[0] == "p" && reqBuff[0] == 'p':
-							logger.Debug("CHANGING TO MD5 for Request and Response", zap.String("mock", mock.Name), zap.String("Req", bufStr))
+						case len(encodedMock) > 0 && encodedMock[0] == 'p' && initMock.Spec.PostgresRequests[requestIndex].PacketTypes[0] == "p" && reqBuff[0] == 'p':
+							logger.Debug("CHANGING TO MD5 for Request and Response", zap.String("mock", initMock.Name), zap.String("Req", bufStr))
 
 							initMock.Spec.PostgresRequests[requestIndex].PasswordMessage.Password = "md5fe4f2f657f01fa1dd9d111d5391e7c07"
 
@@ -205,6 +213,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 
 					}
 				}
+
 				// maintain test prepare statement map for each connection id
 				getTestPS(requestBuffers, logger, ConnectionID)
 			}
@@ -220,43 +229,43 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 				idx1, newMock := findPGStreamMatch(sortedTcsMocks, requestBuffers, logger, sorted, ConnectionID, recordedPrep)
 				if idx1 != -1 {
 					matched = true
-					matchedMock = tcsMocks[idx1]
+					matchedMock = pgMocks[idx1]
 					if newMock != nil {
 						matchedMock = newMock
 					}
 					logger.Debug("Matched In Sorted PG Matching Stream", zap.String("mock", matchedMock.Name))
 				}
 
-				// idx = findBinaryStreamMatch(logger, sortedTcsMocks, requestBuffers, sorted)
-				// if idx != -1 && !matched {
-				// 	matched = true
-				// 	matchedMock = tcsMocks[idx]
-				// 	fmt.Println("Matched In Binary Matching for Sorted", matchedMock.Name)
-				// }
+				idx = findBinaryStreamMatch(logger, sortedTcsMocks, requestBuffers, sorted)
+				if idx != -1 && !matched {
+					matched = true
+					matchedMock = tcsMocks[idx]
+					fmt.Println("Matched In Binary Matching for Sorted", matchedMock.Name)
+				}
 			}
 
 			if !matched {
 				sorted = false
-				idx1, newMock := findPGStreamMatch(tcsMocks, requestBuffers, logger, sorted, ConnectionID, recordedPrep)
+				idx1, newMock := findPGStreamMatch(pgMocks, requestBuffers, logger, sorted, ConnectionID, recordedPrep)
 				if idx1 != -1 {
 					matched = true
-					matchedMock = tcsMocks[idx1]
+					matchedMock = pgMocks[idx1]
 					if newMock != nil {
 						matchedMock = newMock
 					}
 					logger.Debug("Matched In Unsorted PG Matching Stream", zap.String("mock", matchedMock.Name))
 				}
-				idx = findBinaryStreamMatch(logger, tcsMocks, requestBuffers, sorted)
+				idx = findBinaryStreamMatch(logger, pgMocks, requestBuffers, sorted)
 				// check if the validate the query with the matched mock
 				// if the query is same then return the response of that mock
 				var isValid = true
 				if idx != -1 && len(sortedTcsMocks) != 0 {
-					isValid, newMock = validateMock(tcsMocks, idx, requestBuffers, logger)
+					isValid, newMock = validateMock(pgMocks, idx, requestBuffers, logger)
 					logger.Debug("Is Valid", zap.Bool("Is Valid", isValid))
 				}
 				if idx != -1 && !matched {
 					matched = true
-					matchedMock = tcsMocks[idx]
+					matchedMock = pgMocks[idx]
 					if newMock != nil && !isValid {
 						matchedMock = newMock
 					}

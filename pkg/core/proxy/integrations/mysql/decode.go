@@ -23,27 +23,40 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 		utils.LogError(logger, err, "Failed to get unfiltered mocks")
 		return err
 	}
-
+	var mysqlConfigMocks []*models.Mock
+	for _, mock := range configMocks {
+		if mock.Kind != "SQL" {
+			continue
+		}
+		mysqlConfigMocks = append(mysqlConfigMocks, mock)
+	}
 	tcsMocks, err := mockDb.GetFilteredMocks()
 	if err != nil {
 		utils.LogError(logger, err, "Failed to get filtered mocks")
 		return err
 	}
+	var mysqlTcsMocks []*models.Mock
+	for _, mock := range tcsMocks {
+		if mock.Kind != "SQL" {
+			continue
+		}
+		mysqlTcsMocks = append(mysqlTcsMocks, mock)
+	}
 
 	errCh := make(chan error, 1)
 
-	go func(errCh chan error, configMocks []*models.Mock, tcsMocks []*models.Mock, prevRequest string, requestBuffers [][]byte) {
+	go func(errCh chan error, mysqlConfigMocks []*models.Mock, mysqlTcsMocks []*models.Mock, prevRequest string, requestBuffers [][]byte) {
 		defer pUtil.Recover(logger, clientConn, nil)
 		defer close(errCh)
 		for {
 			//log.Debug("Config and TCS Mocks", zap.Any("configMocks", configMocks), zap.Any("tcsMocks", tcsMocks))
 			if firstLoop || doHandshakeAgain {
-				if len(configMocks) == 0 {
+				if len(mysqlConfigMocks) == 0 {
 					logger.Debug("No more config mocks available")
 					errCh <- err
 					return
 				}
-				sqlMock, matchedIndex, found := getFirstSQLMock(configMocks)
+				sqlMock, matchedIndex, found := getFirstSQLMock(mysqlConfigMocks)
 				if !found {
 					logger.Debug("No SQL mock found")
 					errCh <- err
@@ -69,8 +82,8 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 					return
 				}
 				matchedReqIndex := 0
-				configMocks[matchedIndex].Spec.MySQLResponses = append(configMocks[matchedIndex].Spec.MySQLResponses[:matchedReqIndex], configMocks[matchedIndex].Spec.MySQLResponses[matchedReqIndex+1:]...)
-				if len(configMocks[matchedIndex].Spec.MySQLResponses) == 0 {
+				mysqlConfigMocks[matchedIndex].Spec.MySQLResponses = append(mysqlConfigMocks[matchedIndex].Spec.MySQLResponses[:matchedReqIndex], mysqlConfigMocks[matchedIndex].Spec.MySQLResponses[matchedReqIndex+1:]...)
+				if len(mysqlConfigMocks[matchedIndex].Spec.MySQLResponses) == 0 {
 					//configMocks = append(configMocks[:matchedIndex], configMocks[matchedIndex+1:]...)
 					//err = mockDb.FlagMockAsUsed(configMocks[matchedIndex])
 					//if err != nil {
@@ -78,7 +91,7 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 					//	errCh <- err
 					//	return
 					//}
-					mockDb.DeleteUnFilteredMock(configMocks[matchedIndex])
+					mockDb.DeleteUnFilteredMock(mysqlConfigMocks[matchedIndex])
 				}
 				//h.SetConfigMocks(configMocks)
 				firstLoop = false
@@ -167,7 +180,7 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 				}
 				//TODO: both in case of no match or some other error, we are receiving the error.
 				// Due to this, there will be no passthrough in case of no match.
-				matchedResponse, matchedIndex, _, err := matchRequestWithMock(ctx, mysqlRequest, configMocks, tcsMocks, mockDb)
+				matchedResponse, matchedIndex, _, err := matchRequestWithMock(ctx, mysqlRequest, mysqlConfigMocks, mysqlTcsMocks, mockDb)
 				if err != nil {
 					utils.LogError(logger, err, "Failed to match request with mock")
 					errCh <- err
@@ -216,7 +229,7 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 				}
 			}
 		}
-	}(errCh, configMocks, tcsMocks, prevRequest, requestBuffers)
+	}(errCh, mysqlConfigMocks, mysqlTcsMocks, prevRequest, requestBuffers)
 
 	select {
 	case <-ctx.Done():
