@@ -34,23 +34,23 @@ func match(ctx context.Context, logger *zap.Logger, input *req, mockDb integrati
 		}
 
 		mocks, err := mockDb.GetUnFilteredMocks()
-		var httpMocks []*models.Mock
+		var unfilteredMocks []*models.Mock
 		for _, mock := range mocks {
 			if mock.Kind != "Http" {
 				continue
 			}
-			httpMocks = append(httpMocks, mock)
+			unfilteredMocks = append(unfilteredMocks, mock)
 		}
 		if err != nil {
 			utils.LogError(logger, err, "failed to get unfilteredMocks mocks")
 			return false, nil, errors.New("error while matching the request with the mocks")
 		}
 
-		logger.Debug(fmt.Sprintf("Length of unfilteredMocks:%v", len(httpMocks)))
+		logger.Debug(fmt.Sprintf("Length of unfilteredMocks:%v", len(unfilteredMocks)))
 
 		var schemaMatched []*models.Mock
 
-		for _, mock := range httpMocks {
+		for _, mock := range unfilteredMocks {
 			if ctx.Err() != nil {
 				return false, nil, ctx.Err()
 			}
