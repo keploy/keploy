@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 
+	"github.com/mitchellh/copystructure"
 	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
@@ -74,12 +75,20 @@ func (p *Proxy) globalPassThrough(ctx context.Context, client, dest net.Conn) er
 
 func localMock(copyMock []interface{}) ([]models.Mock, error) {
 	var copiedMocks []models.Mock
+
 	for _, m := range copyMock {
-		if mock, ok := m.(*models.Mock); ok {
-			copiedMocks = append(copiedMocks, *mock)
-		} else {
-			return nil, fmt.Errorf("expected mock instance, got %v", m)
+		deepCopiedMock, err := copystructure.Copy(m)
+		if err != nil {
+			return nil, fmt.Errorf("error deep copying mock: %v", err)
 		}
+		// Assert the copied value back to models.Mock type
+		if copiedMock, ok := deepCopiedMock.(models.Mock); ok {
+			copiedMocks = append(copiedMocks, copiedMock)
+		} else {
+			return nil, fmt.Errorf("unexpected type after deep copy: %T", deepCopiedMock)
+		}
+
 	}
+
 	return copiedMocks, nil
 }
