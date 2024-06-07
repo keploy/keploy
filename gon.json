@@ -3,7 +3,8 @@
     "bundle_id" : "io.keploy.server",
     "apple_id": {
         "username" : "shubhamkjain@outlook.com",
-        "password":  "@env:APPLE_ACCOUNT_PASSWORD"
+        "password":  "@env:APPLE_ACCOUNT_PASSWORD",
+        "provider": "@env:APPLE_ACCOUNT_TEAM_ID"
     },
     "sign" :{
         "application_identity" : "Developer ID Application: Shubham Jain"
