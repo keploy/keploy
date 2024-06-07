@@ -116,8 +116,23 @@ Take a journey to **[How Keploy Works?](https://keploy.io/docs/keploy-explained/
 
 Here are Keploy's core features: 🛠
 
-- ♻️ **Combined Test Coverage:** Merge your Keploy Tests with your fave testing libraries(JUnit, go-test, py-test, jest) to see a combined test coverage.
+To install the latest version:
 
+```shell
+curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh
+```
+To install a specific version:
+
+```shell
+curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh installKeploy -version=$version
+```
+#### Example:
+```shell
+curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh installKeploy -version=v2.0.0-alpha69
+```
+## Capturing Testcases
+
+- ♻️ **Combined Test Coverage:** Merge your Keploy Tests with your fave testing libraries(JUnit, go-test, py-test, jest) to see a combined test coverage.
 
 - 🤖 **EBPF Instrumentation:** Keploy uses EBPF like a secret sauce to make integration code-less, language-agnostic, and oh-so-lightweight.
 
