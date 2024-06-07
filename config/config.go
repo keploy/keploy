@@ -23,6 +23,7 @@ type Config struct {
 	BuildDelay            uint64       `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
 	Test                  Test         `json:"test" yaml:"test" mapstructure:"test"`
 	Record                Record       `json:"record" yaml:"record" mapstructure:"record"`
+	Gen                   UtGen        `json:"gen" yaml:"gen" mapstructure:"gen"`
 	Normalize             Normalize    `json:"normalize" yaml:"normalize" mapstructure:"normalize"`
 	ConfigPath            string       `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
 	BypassRules           []BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
@@ -31,6 +32,19 @@ type Config struct {
 	KeployContainer       string       `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
 	KeployNetwork         string       `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
 	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
+}
+
+type UtGen struct {
+	SourceFilePath     string  `json:"sourceFilePath" yaml:"sourceFilePath" mapstructure:"sourceFilePath"`
+	TestFilePath       string  `json:"testFilePath" yaml:"testFilePath" mapstructure:"testFilePath"`
+	CoverageReportPath string  `json:"coverageReportPath" yaml:"coverageReportPath" mapstructure:"coverageReportPath"`
+	TestCommand        string  `json:"testCommand" yaml:"testCommand" mapstructure:"testCommand"`
+	CoverageFormat     string  `json:"coverageFormat" yaml:"coverageFormat" mapstructure:"coverageFormat"`
+	DesiredCoverage    float64 `json:"expectedCoverage" yaml:"expectedCoverage" mapstructure:"expectedCoverage"`
+	MaxIterations      int     `json:"maxIterations" yaml:"maxIterations" mapstructure:"maxIterations"`
+	TestDir            string  `json:"testDir" yaml:"testDir" mapstructure:"testDir"`
+	APIBaseURL         string  `json:"litellmUrl" yaml:"litellmUrl" mapstructure:"litellmUrl"`
+	Model              string  `json:"model" yaml:"model" mapstructure:"model"`
 }
 
 type Record struct {
