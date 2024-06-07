@@ -26,12 +26,9 @@
   </a>
 
 
-
-[![Slack](https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white)](https://join.slack.com/t/keploy/shared_invite/zt-2dno1yetd-Ec3el~tTwHYIHgGI0jPe7A)
-[![LinkedIn](https://img.shields.io/badge/linkedin-%230077B5.svg?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/keploy/)
-[![Twitter](https://img.shields.io/badge/Twitter-%231DA1F2.svg?style=for-the-badge&logo=Twitter&logoColor=white)](https://twitter.com/Keployio)
-
-
+  [![Slack](https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white)](https://join.slack.com/t/keploy/shared_invite/zt-2dno1yetd-Ec3el~tTwHYIHgGI0jPe7A)
+  [![LinkedIn](https://img.shields.io/badge/linkedin-%230077B5.svg?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/keploy/)
+  [![Twitter](https://img.shields.io/badge/Twitter-%231DA1F2.svg?style=for-the-badge&logo=Twitter&logoColor=white)](https://twitter.com/Keployio)
 </h4>
 
 ___
@@ -46,7 +43,7 @@ Keploy-gen uses LLMs to understand code semantics and generates meaningful unit 
 - **Improve existing tests**: Extend and improve the scope of existing tests to cover more complex scenarios that are often missed manually.
 
 
-- **Boost test covergae**: As codebase grows, ensuring exhaustive coverage should become feasible. 
+- **Boost test coverage**: As codebase grows, ensuring exhaustive coverage should become feasible. 
 
 
 ## Core Components
@@ -95,10 +92,11 @@ Install Keploy-gen locally by running the following command:
 - Generate tests using Keploy:
    ```bash
    keploy gen 
-          --testComamnd="npm test" 
-          --testDirectory="test" 
-          --codeCoverageReportPath="<path to coverage.xml>"
+          --testCommand="npm test" 
+          --testDir="test" 
+          --coverageReportPath="<path to coverage.xml>"
    ```
+
 
 ### → Setup for Golang 
 - Set the API key:
@@ -114,9 +112,9 @@ Install Keploy-gen locally by running the following command:
 - Generate tests using Keploy:
     ```bash
     keploy gen  
-          --testDirectory="." 
+          --testDir="." 
           --testCommand="go test -v ./... -coverprofile=coverage.out && gocov convert coverage.out | gocov-xml > coverage.xml" 
-          --codeCoverageReportPath="<path to coverage.xml>"
+          --coverageReportPath="<path to coverage.xml>"
     ```
 ### → Setup for Other Languages
 - Set the API key:
@@ -131,7 +129,7 @@ Install Keploy-gen locally by running the following command:
           --sourceFilePath="<path to source code file>" 
           --testFilePath="<path to existing unit test file>" 
           --testCommand="<cmd to execute unit tests>"
-          --codeCoverageReportPath="<path to cobertura-coverage.xml>"
+          --coverageReportPath="<path to cobertura-coverage.xml>"
     ```
 
 ## Configuration
@@ -141,7 +139,7 @@ Configure Keploy using command-line flags:
 keploy gen 
            --sourceFilePath "" 
            --testFilePath "" 
-           --coverageReportPath "<path to coverage.xml>" 
+           --coverageReportPath "coverage.xml" 
            --testCommand "" 
            --coverageFormat "cobertura" 
            --expectedCoverage 100 
@@ -153,7 +151,7 @@ keploy gen
 
 - `sourceFilePath`: Path to the source file for which tests are to be generated.
 - `testFilePath`: Path where the generated tests will be saved.
-- `codeCoverageReportPath`: Path to generate the coverage report.
+- `coverageReportPath`: Path to generate the coverage report.
 - `testCommand`: Command to execute tests and generate the coverage report.
 - `coverageFormat`: Type of the coverage report (default "cobertura").
 - `expectedCoverage`: Desired coverage percentage (default 100%).
