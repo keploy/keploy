@@ -19,16 +19,29 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 	prevRequest := ""
 	var requestBuffers [][]byte
 
-	configMocks, err := mockDb.GetUnFilteredMocks()
+	mocks, err := mockDb.GetUnFilteredMocks()
 	if err != nil {
 		utils.LogError(logger, err, "Failed to get unfiltered mocks")
 		return err
 	}
-
-	tcsMocks, err := mockDb.GetFilteredMocks()
+	var configMocks []*models.Mock
+	for _, mock := range mocks {
+		if mock.Kind != "SQL" {
+			continue
+		}
+		configMocks = append(configMocks, mock)
+	}
+	mocks, err = mockDb.GetFilteredMocks()
 	if err != nil {
 		utils.LogError(logger, err, "Failed to get filtered mocks")
 		return err
+	}
+	var tcsMocks []*models.Mock
+	for _, mock := range mocks {
+		if mock.Kind != "SQL" {
+			continue
+		}
+		tcsMocks = append(tcsMocks, mock)
 	}
 
 	errCh := make(chan error, 1)

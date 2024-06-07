@@ -71,3 +71,15 @@ func (p *Proxy) globalPassThrough(ctx context.Context, client, dest net.Conn) er
 		}
 	}
 }
+
+func localMock(copyMock []interface{}) ([]models.Mock, error) {
+	var copiedMocks []models.Mock
+	for _, m := range copyMock {
+		if mock, ok := m.(*models.Mock); ok {
+			copiedMocks = append(copiedMocks, *mock)
+		} else {
+			return nil, fmt.Errorf("expected mock instance, got %v", m)
+		}
+	}
+	return copiedMocks, nil
+}
