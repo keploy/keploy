@@ -64,7 +64,6 @@ func (fe *TestReport) GetTestCaseResults(_ context.Context, testRunID string, te
 }
 
 func (fe *TestReport) GetReport(ctx context.Context, testRunID string, testSetID string) (*models.TestReport, error) {
-	fmt.Println("PAth is ", fe.Path)
 	path := filepath.Join(fe.Path, testRunID)
 	reportName := testSetID + "-report"
 	_, err := yaml.ValidatePath(filepath.Join(path, reportName+".yaml"))

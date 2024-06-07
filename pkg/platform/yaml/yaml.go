@@ -102,14 +102,11 @@ func WriteFile(ctx context.Context, logger *zap.Logger, path, fileName string, d
 
 func ReadFile(ctx context.Context, logger *zap.Logger, path, name string) ([]byte, error) {
 	filePath := filepath.Join(path, name+".yaml")
-	fmt.Println("PATH: ", path)
-	fmt.Println("FILe PATH: ", filePath)
 	file, err := os.Open(filePath)
 	if err != nil {
 		fmt.Println("Failed to read the file: ", err)
 		return nil, fmt.Errorf("failed to read the file: %v", err)
 	}
-	fmt.Println("Reading file: ", filePath)
 	defer func() {
 		if err := file.Close(); err != nil {
 			utils.LogError(logger, err, "failed to close file", zap.String("file", filePath))

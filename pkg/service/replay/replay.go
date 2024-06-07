@@ -841,7 +841,8 @@ func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testS
 	}
 
 	testCaseResultMap := make(map[string]models.TestResult)
-
+	fmt.Println("TEST CASE RESULTS", testCaseResults)
+	fmt.Println("testSetId", testSetID)
 	testCases, err := r.testDB.GetTestCases(ctx, testSetID)
 	if err != nil {
 		return fmt.Errorf("failed to get test cases: %w", err)
@@ -850,6 +851,7 @@ func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testS
 
 	if len(selectedTestCaseIds) == 0 {
 		selectedTestCases = testCases
+		fmt.Println("SELECTED TEST CASES", selectedTestCases)
 	} else {
 		for _, testCase := range testCases {
 			if _, ok := ArrayToMap(selectedTestCaseIds)[testCase.Name]; ok {
@@ -869,9 +871,12 @@ func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testS
 			continue
 		}
 		if testCaseResultMap[testCase.Name].Status == models.TestStatusPassed {
+			fmt.Println("ALL ARE PASSED")
 			continue
 		}
 		testCase.HTTPResp = testCaseResultMap[testCase.Name].Res
+		fmt.Println("TEST CASE Before", testCase.HTTPResp)
+		fmt.Println("TEST CASE After", testCaseResultMap[testCase.Name].Res)
 		err = r.testDB.UpdateTestCase(ctx, testCase, testSetID)
 		if err != nil {
 			return fmt.Errorf("failed to update test case: %w", err)
