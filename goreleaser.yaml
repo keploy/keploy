@@ -14,7 +14,8 @@ builds:
       - CGO_ENABLED=0
     goos:
       - linux
-      # - windows
+      - windows
+      - darwin
     goarch:
       - amd64
       - arm64
@@ -32,19 +33,20 @@ builds:
   #     - amd64
   #     - arm64
 
-# universal_binaries:
-# -
-#   # ID of resulting universal binary.
-#   #
-#   # Defaults to the project name.
-#   id: keploy-mac-universal
+universal_binaries:
+-
+  # ID of resulting universal binary.
+  #
+  # Defaults to the project name.
+  id: keploy-mac-universal
 
-#   # IDs to use to filter the built binaries.
-#   #
-#   # Defaults to the `id` field.
-#   # Since: v1.3.
-#   ids:
-#   - keploy-macos
+  # IDs to use to filter the built binaries.
+  #
+  # Defaults to the `id` field.
+  # Since: v1.3.
+  ids:
+    - keploy-macos
+  replace: true
 
   # Whether to remove the previous single-arch binaries from the artifact list.
   # If left as false, your end release might have both several macOS archives:
