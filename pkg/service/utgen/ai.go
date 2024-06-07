@@ -15,9 +15,8 @@ import (
 )
 
 type AIClient struct {
-	Model     string
-	APIBase   string
-	IsLitellm bool
+	Model   string
+	APIBase string
 }
 
 type Prompt struct {
@@ -67,15 +66,17 @@ type Delta struct {
 	Content string `json:"content"`
 }
 
-func NewAIClient(model, apiBase string, isLitellm bool) *AIClient {
+func NewAIClient(model, apiBase string) *AIClient {
 	return &AIClient{
-		Model:     model,
-		APIBase:   apiBase,
-		IsLitellm: isLitellm,
+		Model:   model,
+		APIBase: apiBase,
 	}
 }
 
 func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (string, int, int, error) {
+
+	var apiBaseUrl string
+
 	if prompt.System == "" && prompt.User == "" {
 		return "", 0, 0, errors.New("the prompt must contain 'system' and 'user' keys")
 	}
@@ -100,10 +101,11 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 		Temperature: 0.2,
 	}
 
-	if ai.IsLitellm {
+	if ai.APIBase != "" {
 		completionParams.APIBase = ai.APIBase
+		apiBaseUrl = ai.APIBase
 	} else {
-		ai.APIBase = "https://api.openai.com/"
+		apiBaseUrl = "https://api.openai.com/"
 	}
 
 	requestBody, err := json.Marshal(completionParams)
@@ -111,7 +113,7 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 		return "", 0, 0, fmt.Errorf("error marshalling request body: %v", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", ai.APIBase+"/v1/chat/completions", bytes.NewBuffer(requestBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", apiBaseUrl+"/v1/chat/completions", bytes.NewBuffer(requestBody))
 	if err != nil {
 		return "", 0, 0, fmt.Errorf("error creating request: %v", err)
 	}

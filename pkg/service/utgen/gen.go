@@ -43,9 +43,10 @@ type UnitTestGenerator struct {
 	promptBuilder *PromptBuilder
 	maxIterations int
 	Files         []string
+	tel           Telemetry
 }
 
-func NewUnitTestGenerator(srcPath, testPath, reportPath, cmd, dir, coverageFormat string, desiredCoverage float64, maxIterations int, model string, apiBaseURL string, config *config.Config, logger *zap.Logger) (*UnitTestGenerator, error) {
+func NewUnitTestGenerator(srcPath, testPath, reportPath, cmd, dir, coverageFormat string, desiredCoverage float64, maxIterations int, model string, apiBaseURL string, _ *config.Config, tel Telemetry, logger *zap.Logger) (*UnitTestGenerator, error) {
 	generator := &UnitTestGenerator{
 		srcPath:       srcPath,
 		testPath:      testPath,
@@ -53,7 +54,8 @@ func NewUnitTestGenerator(srcPath, testPath, reportPath, cmd, dir, coverageForma
 		dir:           dir,
 		maxIterations: maxIterations,
 		logger:        logger,
-		ai:            NewAIClient(model, apiBaseURL, config.UtGen.Litellm),
+		tel:           tel,
+		ai:            NewAIClient(model, apiBaseURL),
 		cov: &Coverage{
 			Path:    reportPath,
 			Format:  coverageFormat,
@@ -65,6 +67,8 @@ func NewUnitTestGenerator(srcPath, testPath, reportPath, cmd, dir, coverageForma
 }
 
 func (g *UnitTestGenerator) Start(ctx context.Context) error {
+
+	g.tel.GenerateUT()
 
 	// To find the source files if the source path is not provided
 	if g.srcPath == "" {

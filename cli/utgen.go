@@ -12,14 +12,14 @@ import (
 )
 
 func init() {
-	Register("utGen", GenerateUT)
+	Register("gen", GenerateUT)
 }
 
 func GenerateUT(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
-		Use:     "utGen",
+		Use:     "gen",
 		Short:   "generate unit tests using AI",
-		Example: `keploy utGen"`,
+		Example: `keploy gen"`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},

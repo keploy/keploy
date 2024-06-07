@@ -118,8 +118,8 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 	switch cmd {
 	case "config", "update":
 		return tools.NewTools(n.logger, tel), nil
-	case "utGen":
-		return utgen.NewUnitTestGenerator(n.cfg.UtGen.SourceFilePath, n.cfg.UtGen.TestFilePath, n.cfg.UtGen.CodeCoverageReportPath, n.cfg.UtGen.TestCommand, n.cfg.UtGen.TestDirectory, n.cfg.UtGen.CoverageType, n.cfg.UtGen.DesiredCoverage, n.cfg.UtGen.MaxIterations, n.cfg.UtGen.Model, n.cfg.UtGen.APIBaseURL, n.cfg, n.logger)
+	case "gen":
+		return utgen.NewUnitTestGenerator(n.cfg.Gen.SourceFilePath, n.cfg.Gen.TestFilePath, n.cfg.Gen.CoverageReportPath, n.cfg.Gen.TestCommand, n.cfg.Gen.TestDir, n.cfg.Gen.CoverageFormat, n.cfg.Gen.DesiredCoverage, n.cfg.Gen.MaxIterations, n.cfg.Gen.Model, n.cfg.Gen.APIBaseURL, n.cfg, tel, n.logger)
 	case "record", "test", "mock", "normalize":
 		commonServices := n.GetCommonServices(n.cfg)
 		if cmd == "record" {

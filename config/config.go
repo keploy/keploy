@@ -23,7 +23,7 @@ type Config struct {
 	BuildDelay            uint64       `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
 	Test                  Test         `json:"test" yaml:"test" mapstructure:"test"`
 	Record                Record       `json:"record" yaml:"record" mapstructure:"record"`
-	UtGen                 UtGen        `json:"utGen" yaml:"utGen" mapstructure:"utGen"`
+	Gen                   UtGen        `json:"gen" yaml:"gen" mapstructure:"gen"`
 	Normalize             Normalize    `json:"normalize" yaml:"normalize" mapstructure:"normalize"`
 	ConfigPath            string       `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
 	BypassRules           []BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
@@ -35,17 +35,16 @@ type Config struct {
 }
 
 type UtGen struct {
-	SourceFilePath         string  `json:"sourceFilePath" yaml:"sourceFilePath" mapstructure:"sourceFilePath"`
-	TestFilePath           string  `json:"testFilePath" yaml:"testFilePath" mapstructure:"testFilePath"`
-	CodeCoverageReportPath string  `json:"codeCoverageReportPath" yaml:"codeCoverageReportPath" mapstructure:"codeCoverageReportPath"`
-	TestCommand            string  `json:"testCommand" yaml:"testCommand" mapstructure:"testCommand"`
-	CoverageType           string  `json:"coverageType" yaml:"coverageType" mapstructure:"coverageType"`
-	DesiredCoverage        float64 `json:"desiredCoverage" yaml:"desiredCoverage" mapstructure:"desiredCoverage"`
-	MaxIterations          int     `json:"maxIterations" yaml:"maxIterations" mapstructure:"maxIterations"`
-	TestDirectory          string  `json:"testDirectory" yaml:"testDirectory" mapstructure:"testDirectory"`
-	Litellm                bool    `json:"litellm" yaml:"litellm" mapstructure:"litellm"`
-	APIBaseURL             string  `json:"apiBaseUrl" yaml:"apiBaseUrl" mapstructure:"apiBaseUrl"`
-	Model                  string  `json:"model" yaml:"model" mapstructure:"model"`
+	SourceFilePath     string  `json:"sourceFilePath" yaml:"sourceFilePath" mapstructure:"sourceFilePath"`
+	TestFilePath       string  `json:"testFilePath" yaml:"testFilePath" mapstructure:"testFilePath"`
+	CoverageReportPath string  `json:"coverageReportPath" yaml:"coverageReportPath" mapstructure:"coverageReportPath"`
+	TestCommand        string  `json:"testCommand" yaml:"testCommand" mapstructure:"testCommand"`
+	CoverageFormat     string  `json:"coverageFormat" yaml:"coverageFormat" mapstructure:"coverageFormat"`
+	DesiredCoverage    float64 `json:"expectedCoverage" yaml:"expectedCoverage" mapstructure:"expectedCoverage"`
+	MaxIterations      int     `json:"maxIterations" yaml:"maxIterations" mapstructure:"maxIterations"`
+	TestDir            string  `json:"testDir" yaml:"testDir" mapstructure:"testDir"`
+	APIBaseURL         string  `json:"litellmUrl" yaml:"litellmUrl" mapstructure:"litellmUrl"`
+	Model              string  `json:"model" yaml:"model" mapstructure:"model"`
 }
 
 type Record struct {

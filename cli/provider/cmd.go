@@ -188,17 +188,16 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-	case "utGen":
+	case "gen":
 		cmd.Flags().String("sourceFilePath", "", "Path to the source file.")
 		cmd.Flags().String("testFilePath", "", "Path to the input test file.")
-		cmd.Flags().String("codeCoverageReportPath", "coverage.xml", "Path to the code coverage report file.")
+		cmd.Flags().String("coverageReportPath", "coverage.xml", "Path to the code coverage report file.")
 		cmd.Flags().String("testCommand", "", "The command to run tests and generate coverage report.")
-		cmd.Flags().String("coverageType", "cobertura", "Type of coverage report.")
-		cmd.Flags().Int("desiredCoverage", 100, "The desired coverage percentage.")
+		cmd.Flags().String("coverageFormat", "cobertura", "Type of coverage report.")
+		cmd.Flags().Int("expectedCoverage", 100, "The desired coverage percentage.")
 		cmd.Flags().Int("maxIterations", 5, "The maximum number of iterations.")
-		cmd.Flags().String("testDirectory", "", "Path to the test directory.")
-		cmd.Flags().Bool("litellm", false, "Use LITELLML for AI.")
-		cmd.Flags().String("apiBaseUrl", "http://localhost:4000", "Base URL for the AI model.")
+		cmd.Flags().String("testDir", "", "Path to the test directory.")
+		cmd.Flags().String("litellmUrl", "", "Base URL for the AI model.")
 		cmd.Flags().String("model", "gpt-4o", "Model to use for the AI.")
 		err := cmd.MarkFlagRequired("testCommand")
 		if err != nil {
@@ -507,18 +506,18 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-	case "utGen":
+	case "gen":
 		if os.Getenv("API_KEY") == "" {
-			utils.LogError(c.logger, nil, "API_KEY is not set nor litellm is enbaled")
+			utils.LogError(c.logger, nil, "API_KEY is not set")
 			return errors.New("API_KEY is not set")
 		}
-		if (c.cfg.UtGen.SourceFilePath == "" && c.cfg.UtGen.TestFilePath != "") || c.cfg.UtGen.SourceFilePath != "" && c.cfg.UtGen.TestFilePath == "" {
+		if (c.cfg.Gen.SourceFilePath == "" && c.cfg.Gen.TestFilePath != "") || c.cfg.Gen.SourceFilePath != "" && c.cfg.Gen.TestFilePath == "" {
 			utils.LogError(c.logger, nil, "One of the SourceFilePath and TestFilePath is mentioned. Either provide both or neither")
 			return errors.New("sourceFilePath and testFilePath misconfigured")
-		} else if c.cfg.UtGen.SourceFilePath == "" && c.cfg.UtGen.TestFilePath == "" {
-			if c.cfg.UtGen.TestDirectory == "" {
-				utils.LogError(c.logger, nil, "TestDirectory is not set, Please specify the test directory")
-				return errors.New("TestDirectory is not set")
+		} else if c.cfg.Gen.SourceFilePath == "" && c.cfg.Gen.TestFilePath == "" {
+			if c.cfg.Gen.TestDir == "" {
+				utils.LogError(c.logger, nil, "TestDir is not set, Please specify the test directory")
+				return errors.New("TestDir is not set")
 			}
 		}
 	}
