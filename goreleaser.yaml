@@ -45,14 +45,13 @@ universal_binaries:
   # Since: v1.3.
   ids:
     - keploy
-  replace: true
 
   # Whether to remove the previous single-arch binaries from the artifact list.
   # If left as false, your end release might have both several macOS archives:
   # amd64, arm64 and all.
   #
   # Defaults to false.
-  # replace: true
-  # hooks:
-  #   post: gon -log-level=info -log-json ./gon.json
+  replace: true
+  hooks:
+    post: gon -log-level=info -log-json ./gon.json
 
