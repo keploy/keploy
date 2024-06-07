@@ -75,6 +75,10 @@ func (tel *Telemetry) RecordedTestAndMocks() {
 	go tel.SendTelemetry("RecordedTestAndMocks", map[string]interface{}{"mocks": make(map[string]int)})
 }
 
+func (tel *Telemetry) GenerateUT() {
+	go tel.SendTelemetry("GenerateUT")
+}
+
 // RecordedMocks is Telemetry event for the mocks that are recorded in the mocking feature
 func (tel *Telemetry) RecordedMocks(mockTotal map[string]int) {
 	go tel.SendTelemetry("RecordedMocks", map[string]interface{}{"mocks": mockTotal})
