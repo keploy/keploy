@@ -71,14 +71,14 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 			return false, nil, ctx.Err()
 		default:
 
-			tcsMocks, err := mockDb.GetUnFilteredMocks()
-			var pgMocks []*models.Mock
+			mocks, err := mockDb.GetUnFilteredMocks()
+			var tcsMocks []*models.Mock
 
-			for _, mock := range tcsMocks {
+			for _, mock := range mocks {
 				if mock.Kind != "Postgres" {
 					continue
 				}
-				pgMocks = append(pgMocks, mock)
+				tcsMocks = append(tcsMocks, mock)
 			}
 			if err != nil {
 				return false, nil, fmt.Errorf("error while getting tcs mocks %v", err)
@@ -86,7 +86,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 
 			ConnectionID := ctx.Value(models.ClientConnectionIDKey).(string)
 
-			recordedPrep := getRecordPrepStatement(pgMocks)
+			recordedPrep := getRecordPrepStatement(tcsMocks)
 			reqGoingOn := decodePgRequest(requestBuffers[0], logger)
 			if reqGoingOn != nil {
 				logger.Debug("PacketTypes", zap.Any("PacketTypes", reqGoingOn.PacketTypes))
@@ -105,7 +105,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 			var sortedTcsMocks []*models.Mock
 			var matchedMock *models.Mock
 
-			for _, mock := range pgMocks {
+			for _, mock := range tcsMocks {
 				if ctx.Err() != nil {
 					return false, nil, ctx.Err()
 				}
@@ -229,7 +229,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 				idx1, newMock := findPGStreamMatch(sortedTcsMocks, requestBuffers, logger, sorted, ConnectionID, recordedPrep)
 				if idx1 != -1 {
 					matched = true
-					matchedMock = pgMocks[idx1]
+					matchedMock = tcsMocks[idx1]
 					if newMock != nil {
 						matchedMock = newMock
 					}
@@ -246,26 +246,26 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 
 			if !matched {
 				sorted = false
-				idx1, newMock := findPGStreamMatch(pgMocks, requestBuffers, logger, sorted, ConnectionID, recordedPrep)
+				idx1, newMock := findPGStreamMatch(tcsMocks, requestBuffers, logger, sorted, ConnectionID, recordedPrep)
 				if idx1 != -1 {
 					matched = true
-					matchedMock = pgMocks[idx1]
+					matchedMock = tcsMocks[idx1]
 					if newMock != nil {
 						matchedMock = newMock
 					}
 					logger.Debug("Matched In Unsorted PG Matching Stream", zap.String("mock", matchedMock.Name))
 				}
-				idx = findBinaryStreamMatch(logger, pgMocks, requestBuffers, sorted)
+				idx = findBinaryStreamMatch(logger, tcsMocks, requestBuffers, sorted)
 				// check if the validate the query with the matched mock
 				// if the query is same then return the response of that mock
 				var isValid = true
 				if idx != -1 && len(sortedTcsMocks) != 0 {
-					isValid, newMock = validateMock(pgMocks, idx, requestBuffers, logger)
+					isValid, newMock = validateMock(tcsMocks, idx, requestBuffers, logger)
 					logger.Debug("Is Valid", zap.Bool("Is Valid", isValid))
 				}
 				if idx != -1 && !matched {
 					matched = true
-					matchedMock = pgMocks[idx]
+					matchedMock = tcsMocks[idx]
 					if newMock != nil && !isValid {
 						matchedMock = newMock
 					}

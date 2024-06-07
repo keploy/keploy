@@ -21,20 +21,20 @@ func match(ctx context.Context, logger *zap.Logger, mongoRequests []models.Mongo
 		case <-ctx.Done():
 			return false, nil, ctx.Err()
 		default:
-			tcsMocks, err := mockDb.GetFilteredMocks()
+			mocks, err := mockDb.GetFilteredMocks()
 			if err != nil {
 				return false, nil, fmt.Errorf("error while getting tcs mock: %v", err)
 			}
-			var mongoTcsMocks []*models.Mock
-			for _, mock := range tcsMocks {
+			var tcsMocks []*models.Mock
+			for _, mock := range mocks {
 				if mock.Kind != "Mongo" {
 					continue
 				}
-				mongoTcsMocks = append(mongoTcsMocks, mock)
+				tcsMocks = append(tcsMocks, mock)
 			}
 			maxMatchScore := 0.0
 			bestMatchIndex := -1
-			for tcsIndx, tcsMock := range mongoTcsMocks {
+			for tcsIndx, tcsMock := range tcsMocks {
 				if ctx.Err() != nil {
 					return false, nil, ctx.Err()
 				}
@@ -74,7 +74,7 @@ func match(ctx context.Context, logger *zap.Logger, mongoRequests []models.Mongo
 			if bestMatchIndex == -1 {
 				return false, nil, nil
 			}
-			mock := mongoTcsMocks[bestMatchIndex]
+			mock := tcsMocks[bestMatchIndex]
 			isDeleted := mockDb.DeleteFilteredMock(mock)
 			if !isDeleted {
 				continue
