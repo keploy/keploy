@@ -3,6 +3,7 @@ package replay
 import (
 	"context"
 	"fmt"
+	"net/url"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
@@ -41,36 +42,68 @@ func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) c
 	return noise
 }
 
+// ReplaceBaseURL replaces the baseUrl of the old URL with the new URL's.
+func ReplaceBaseURL(newURL, oldURL string) (string, error) {
+	parsedOldURL, err := url.Parse(oldURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse the old URL: %v", err)
+	}
+
+	parsedNewURL, err := url.Parse(newURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse the new URL: %v", err)
+	}
+	// if scheme is empty, then add the scheme from the old URL in order to parse it correctly
+	if parsedNewURL.Scheme == "" {
+		parsedNewURL.Scheme = parsedOldURL.Scheme
+		parsedNewURL, err = url.Parse(parsedNewURL.String())
+		if err != nil {
+			return "", fmt.Errorf("failed to parse the scheme added new URL: %v", err)
+		}
+	}
+
+	parsedOldURL.Scheme = parsedNewURL.Scheme
+	parsedOldURL.Host = parsedNewURL.Host
+	path, err := url.JoinPath(parsedNewURL.Path, parsedOldURL.Path)
+	if err != nil {
+		return "", fmt.Errorf("failed to join '%v' and '%v' paths: %v", parsedNewURL.Path, parsedOldURL.Path, err)
+	}
+	parsedOldURL.Path = path
+
+	replacedURL := parsedOldURL.String()
+	return replacedURL, nil
+}
+
 type requestMockUtil struct {
 	logger     *zap.Logger
 	path       string
 	mockName   string
 	apiTimeout uint64
+	basePath   string
 }
 
-func NewRequestMockUtil(logger *zap.Logger, path, mockName string, apiTimeout uint64) RequestMockHandler {
+func NewRequestMockUtil(logger *zap.Logger, path, mockName string, apiTimeout uint64, basePath string) RequestMockHandler {
 	return &requestMockUtil{
 		path:       path,
 		logger:     logger,
 		mockName:   mockName,
 		apiTimeout: apiTimeout,
+		basePath:   basePath,
 	}
 }
 func (t *requestMockUtil) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error) {
 	switch tc.Kind {
 	case models.HTTP:
 		t.logger.Debug("Before simulating the request", zap.Any("Test case", tc))
-		t.logger.Debug(fmt.Sprintf("the url of the testcase: %v", tc.HTTPReq.URL))
 		resp, err := pkg.SimulateHTTP(ctx, *tc, testSetID, t.logger, t.apiTimeout)
 		t.logger.Debug("After simulating the request", zap.Any("test case id", tc.Name))
-		t.logger.Debug("After GetResp of the request", zap.Any("test case id", tc.Name))
 		return resp, err
 	}
 	return nil, nil
 }
 
 func (t *requestMockUtil) AfterTestHook(_ context.Context, testRunID, testSetID string, tsCnt int) (*models.TestReport, error) {
-	t.logger.Debug("AfterTestHook", zap.Any("testRunID", testRunID), zap.Any("testSetID", testSetID), zap.Any("totTestSetCount", tsCnt))
+	t.logger.Debug("AfterTestHook", zap.Any("testRunID", testRunID), zap.Any("testSetID", testSetID), zap.Any("totalTestSetCount", tsCnt))
 	return nil, nil
 }
 
@@ -87,5 +120,9 @@ func (t *requestMockUtil) FetchMockName() string {
 }
 
 func (t *requestMockUtil) ProcessMockFile(_ context.Context, testSetID string) {
+	if t.basePath != "" {
+		t.logger.Debug("Mocking is disabled when basePath is given", zap.String("testSetID", testSetID), zap.String("basePath", t.basePath))
+		return
+	}
 	t.logger.Debug("Mock file for test set", zap.String("testSetID", testSetID))
 }

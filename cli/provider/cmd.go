@@ -237,6 +237,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().Bool("removeUnusedMocks", c.cfg.Test.RemoveUnusedMocks, "Clear the unused mocks for the passed test-sets")
 			cmd.Flags().Bool("goCoverage", c.cfg.Test.GoCoverage, "Enable go coverage reporting for the testcases")
 			cmd.Flags().Bool("fallBackOnMiss", c.cfg.Test.FallBackOnMiss, "Enable connecting to actual service if mock not found during test mode")
+			cmd.Flags().String("basePath", c.cfg.Test.BasePath, "Custom api basePath/origin to replace the actual basePath/origin in the testcases; App flag is ignored and app will not be started & instrumented when this is set since the application running on a different machine")
 			cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
 		} else {
 			cmd.Flags().Uint64("recordTimer", 0, "User provided time to record its application")
@@ -363,28 +364,18 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 	switch cmd.Name() {
 	case "record", "test":
-		bypassPorts, err := cmd.Flags().GetUintSlice("passThroughPorts")
-		if err != nil {
-			errMsg := "failed to read the ports of outgoing calls to be ignored"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		config.SetByPassPorts(c.cfg, bypassPorts)
 
+		// handle the app command
 		if c.cfg.Command == "" {
-			utils.LogError(c.logger, nil, "missing required -c flag or appCmd in config file")
-			if c.cfg.InDocker {
-				c.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
-			} else {
-				c.logger.Info(LogExample(RootExamples))
+			if !alreadyRunning(cmd.Name(), c.cfg.Test.BasePath) {
+				return c.noCommandError()
 			}
-			return errors.New("missing required -c flag or appCmd in config file")
 		}
 
 		// set the command type
 		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
 
-		if c.cfg.GenerateGithubActions {
+		if c.cfg.GenerateGithubActions && utils.CmdType(c.cfg.CommandType) != utils.Empty {
 			defer utils.GenerateGithubActions(c.logger, c.cfg.Command)
 		}
 		if c.cfg.InDocker {
@@ -439,8 +430,16 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, "error while getting absolute path")
 			return errors.New("failed to get the absolute path")
 		}
-
 		c.cfg.Path = absPath + "/keploy"
+
+		bypassPorts, err := cmd.Flags().GetUintSlice("passThroughPorts")
+		if err != nil {
+			errMsg := "failed to read the ports of outgoing calls to be ignored"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		config.SetByPassPorts(c.cfg, bypassPorts)
+
 		if cmd.Name() == "test" {
 			//check if the keploy folder exists
 			if _, err := os.Stat(c.cfg.Path); os.IsNotExist(err) {
