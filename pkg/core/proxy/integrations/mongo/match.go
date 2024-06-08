@@ -21,9 +21,16 @@ func match(ctx context.Context, logger *zap.Logger, mongoRequests []models.Mongo
 		case <-ctx.Done():
 			return false, nil, ctx.Err()
 		default:
-			tcsMocks, err := mockDb.GetFilteredMocks()
+			mocks, err := mockDb.GetFilteredMocks()
 			if err != nil {
 				return false, nil, fmt.Errorf("error while getting tcs mock: %v", err)
+			}
+			var tcsMocks []*models.Mock
+			for _, mock := range mocks {
+				if mock.Kind != "Mongo" {
+					continue
+				}
+				tcsMocks = append(tcsMocks, mock)
 			}
 			maxMatchScore := 0.0
 			bestMatchIndex := -1

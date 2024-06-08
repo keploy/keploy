@@ -38,6 +38,7 @@ test:
   language: ""
   removeUnusedMocks: false
   basePath: ""
+  mocking: true
 record:
   recordTimer: 0s
   filters: []

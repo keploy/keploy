@@ -414,6 +414,34 @@ func (a *App) Run(ctx context.Context, inodeChan chan uint64) models.AppError {
 	}
 	return a.run(ctx)
 }
+func (a *App) waitTillExit() {
+	timeout := time.NewTimer(30 * time.Second)
+	logTicker := time.NewTicker(1 * time.Second)
+	defer logTicker.Stop()
+	defer timeout.Stop()
+
+	containerID := a.container
+	for {
+		select {
+		case <-logTicker.C:
+			// Inspect the container status
+			containerJSON, err := a.docker.ContainerInspect(context.Background(), containerID)
+			if err != nil {
+				a.logger.Debug("failed to inspect container", zap.String("containerID", containerID), zap.Error(err))
+				return
+			}
+
+			a.logger.Debug("container status", zap.String("status", containerJSON.State.Status), zap.String("containerName", a.container))
+			// Check if container is stopped or dead
+			if containerJSON.State.Status == "exited" || containerJSON.State.Status == "dead" {
+				return
+			}
+		case <-timeout.C:
+			a.logger.Warn("timeout waiting for the container to stop", zap.String("containerID", containerID))
+			return
+		}
+	}
+}
 
 func (a *App) run(ctx context.Context) models.AppError {
 	// Run the app as the user who invoked sudo
@@ -435,10 +463,17 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// Set the cancel function for the command
 	cmd.Cancel = func() error {
 
+		if utils.IsDockerKind(a.kind) {
+			a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
+			err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
+
+			return err
+		}
 		return utils.InterruptProcessTree(a.logger, cmd.Process.Pid, syscall.SIGINT)
+
 	}
 	// wait after sending the interrupt signal, before sending the kill signal
-	cmd.WaitDelay = 10 * time.Second
+	cmd.WaitDelay = 25 * time.Second
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
@@ -456,6 +491,11 @@ func (a *App) run(ctx context.Context) models.AppError {
 	}
 
 	err = cmd.Wait()
+
+	if utils.IsDockerKind(a.kind) {
+		a.waitTillExit()
+	}
+
 	select {
 	case <-ctx.Done():
 		a.logger.Debug("context cancelled, error while waiting for the app to exit", zap.Error(ctx.Err()))

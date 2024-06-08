@@ -352,8 +352,8 @@ func FindDockerCmd(cmd string) CmdType {
 	cmdLower := strings.TrimSpace(strings.ToLower(cmd))
 
 	// Define patterns for Docker and Docker Compose
-	dockerRunPatterns := []string{"docker run", "sudo docker run"}
-	dockerStartPatterns := []string{"docker start", "sudo docker start"}
+	dockerRunPatterns := []string{"docker run", "sudo docker run", "docker container run", "sudo docker container run"}
+	dockerStartPatterns := []string{"docker start", "sudo docker start", "docker container start", "sudo docker container start"}
 	dockerComposePatterns := []string{"docker-compose", "sudo docker-compose", "docker compose", "sudo docker compose"}
 
 	// Check for Docker Compose command patterns and file extensions
@@ -590,12 +590,26 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 	}
 
 	for _, pid := range uniqueProcess {
-		err := syscall.Kill(-pid, sig)
-		// ignore the ESRCH error as it means the process is already dead
-		if errno, ok := err.(syscall.Errno); ok && err != nil && errno != syscall.ESRCH {
-			logger.Error("failed to send signal to process", zap.Int("pid", pid), zap.Error(err))
+		err := SendSignal(logger, -pid, sig)
+		if err != nil {
+			logger.Error("error sending signal to the process group id", zap.Int("pgid", pid), zap.Error(err))
 		}
 	}
+	return nil
+}
+
+func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
+	err := syscall.Kill(pid, sig)
+	if err != nil {
+		// ignore the ESRCH error as it means the process is already dead
+		if errno, ok := err.(syscall.Errno); ok && errno == syscall.ESRCH {
+			return nil
+		}
+		logger.Error("failed to send signal to process", zap.Int("pid", pid), zap.Error(err))
+		return err
+	}
+	logger.Debug("signal sent to process successfully", zap.Int("pid", pid), zap.String("signal", sig.String()))
+
 	return nil
 }
 

@@ -48,12 +48,13 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
 	var tcsMocks []*models.Mock
 	mocks := m.filtered.getAll()
-	for _, m := range mocks {
-		if mock, ok := m.(*models.Mock); ok {
-			tcsMocks = append(tcsMocks, mock)
-		} else {
-			return nil, fmt.Errorf("expected mock instance, got %v", m)
-		}
+	//sending copy of mocks instead of actual mocks
+	mockCopy, err := localMock(mocks)
+	if err != nil {
+		return nil, fmt.Errorf("expected mock instance, got %v", m)
+	}
+	for _, m := range mockCopy {
+		tcsMocks = append(tcsMocks, &m)
 	}
 	return tcsMocks, nil
 }
@@ -61,12 +62,13 @@ func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
 func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 	var configMocks []*models.Mock
 	mocks := m.unfiltered.getAll()
-	for _, m := range mocks {
-		if mock, ok := m.(*models.Mock); ok {
-			configMocks = append(configMocks, mock)
-		} else {
-			return nil, fmt.Errorf("expected mock instance, got %v", m)
-		}
+	//sending copy of mocks instead of actual mocks
+	mockCopy, err := localMock(mocks)
+	if err != nil {
+		return nil, fmt.Errorf("expected mock instance, got %v", m)
+	}
+	for _, m := range mockCopy {
+		configMocks = append(configMocks, &m)
 	}
 	return configMocks, nil
 }
