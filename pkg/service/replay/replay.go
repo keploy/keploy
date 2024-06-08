@@ -127,6 +127,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 
+	hookCancel = inst.HookCancel
+
 	testSetResult := false
 	testRunResult := true
 	abortTestRun := false
@@ -364,6 +366,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	for _, testCase := range testCases {
 
+		if _, ok := selectedTests[testCase.Name]; !ok && len(selectedTests) != 0 {
+			continue
+		}
+
 		// replace the request URL's BasePath/origin if provided
 		if r.config.Test.BasePath != "" {
 			newURL, err := ReplaceReqOrigin(r.config.Test.BasePath, testCase.HTTPReq.URL)
@@ -373,10 +379,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				testCase.HTTPReq.URL = newURL
 			}
 			r.logger.Debug("test case request origin", zap.String("testcase", testCase.Name), zap.String("TestCaseURL", testCase.HTTPReq.URL), zap.String("basePath", r.config.Test.BasePath))
-		}
-
-		if _, ok := selectedTests[testCase.Name]; !ok && len(selectedTests) != 0 {
-			continue
 		}
 
 		// Checking for errors in the mocking and application
@@ -608,7 +610,7 @@ func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, testSet
 			MongoPassword:  r.config.Test.MongoPassword,
 			SQLDelay:       time.Duration(r.config.Test.Delay),
 			FallBackOnMiss: r.config.Test.FallBackOnMiss,
-      Mocking:        r.config.Test.Mocking,
+			Mocking:        r.config.Test.Mocking,
 		})
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to mock outgoing")
