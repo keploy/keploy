@@ -42,8 +42,8 @@ func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) c
 	return noise
 }
 
-// ReplaceReqOrigin replaces the origin of the old URL with the new URL's origin.
-func ReplaceReqOrigin(newURL, oldURL string) (string, error) {
+// ReplaceBaseURL replaces the baseUrl of the old URL with the new URL's.
+func ReplaceBaseURL(newURL, oldURL string) (string, error) {
 	parsedOldURL, err := url.Parse(oldURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse the old URL: %v", err)
