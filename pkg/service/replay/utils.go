@@ -79,31 +79,31 @@ type requestMockUtil struct {
 	path       string
 	mockName   string
 	apiTimeout uint64
+	basePath   string
 }
 
-func NewRequestMockUtil(logger *zap.Logger, path, mockName string, apiTimeout uint64) RequestMockHandler {
+func NewRequestMockUtil(logger *zap.Logger, path, mockName string, apiTimeout uint64, basePath string) RequestMockHandler {
 	return &requestMockUtil{
 		path:       path,
 		logger:     logger,
 		mockName:   mockName,
 		apiTimeout: apiTimeout,
+		basePath:   basePath,
 	}
 }
 func (t *requestMockUtil) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error) {
 	switch tc.Kind {
 	case models.HTTP:
 		t.logger.Debug("Before simulating the request", zap.Any("Test case", tc))
-		t.logger.Debug(fmt.Sprintf("the url of the testcase: %v", tc.HTTPReq.URL))
 		resp, err := pkg.SimulateHTTP(ctx, *tc, testSetID, t.logger, t.apiTimeout)
 		t.logger.Debug("After simulating the request", zap.Any("test case id", tc.Name))
-		t.logger.Debug("After GetResp of the request", zap.Any("test case id", tc.Name))
 		return resp, err
 	}
 	return nil, nil
 }
 
 func (t *requestMockUtil) AfterTestHook(_ context.Context, testRunID, testSetID string, tsCnt int) (*models.TestReport, error) {
-	t.logger.Debug("AfterTestHook", zap.Any("testRunID", testRunID), zap.Any("testSetID", testSetID), zap.Any("totTestSetCount", tsCnt))
+	t.logger.Debug("AfterTestHook", zap.Any("testRunID", testRunID), zap.Any("testSetID", testSetID), zap.Any("totalTestSetCount", tsCnt))
 	return nil, nil
 }
 
@@ -120,5 +120,9 @@ func (t *requestMockUtil) FetchMockName() string {
 }
 
 func (t *requestMockUtil) ProcessMockFile(_ context.Context, testSetID string) {
+	if t.basePath != "" {
+		t.logger.Debug("Mocking is disabled when basePath is given", zap.String("testSetID", testSetID), zap.String("basePath", t.basePath))
+		return
+	}
 	t.logger.Debug("Mock file for test set", zap.String("testSetID", testSetID))
 }

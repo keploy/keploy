@@ -341,18 +341,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 	switch cmd.Name() {
 	case "record", "test":
-		bypassPorts, err := cmd.Flags().GetUintSlice("passThroughPorts")
-		if err != nil {
-			errMsg := "failed to read the ports of outgoing calls to be ignored"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		config.SetByPassPorts(c.cfg, bypassPorts)
 
-		// handle the running command
-		err = c.handleRunCmd(cmd)
-		if err != nil {
-			return err
+		// handle the app command
+		if c.cfg.Command == "" {
+			if !alreadyRunning(cmd.Name(), c.cfg.Test.BasePath) {
+				return c.noCommandError()
+			}
 		}
 
 		// set the command type
@@ -413,8 +407,16 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, "error while getting absolute path")
 			return errors.New("failed to get the absolute path")
 		}
-
 		c.cfg.Path = absPath + "/keploy"
+
+		bypassPorts, err := cmd.Flags().GetUintSlice("passThroughPorts")
+		if err != nil {
+			errMsg := "failed to read the ports of outgoing calls to be ignored"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		config.SetByPassPorts(c.cfg, bypassPorts)
+
 		if cmd.Name() == "test" {
 			//check if the keploy folder exists
 			if _, err := os.Stat(c.cfg.Path); os.IsNotExist(err) {
