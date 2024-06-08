@@ -25,12 +25,12 @@ type Instrumentation interface {
 
 type Service interface {
 	Start(ctx context.Context) error
-	BootReplay(ctx context.Context) (string, uint64, context.CancelFunc, error)
+	Instrument(ctx context.Context) (*InstrumentState, error)
+	GetNextTestRunID(ctx context.Context) (string, error)
 	GetAllTestSetIDs(ctx context.Context) ([]string, error)
 	RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error)
 	GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error)
 	RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError
-	ProvideMocks(ctx context.Context) error
 	Normalize(ctx context.Context) error
 }
 
@@ -71,3 +71,16 @@ type RequestMockHandler interface {
 	ProcessMockFile(ctx context.Context, testSetID string)
 	AfterTestHook(ctx context.Context, testRunID, testSetID string, totalTestSets int) (*models.TestReport, error)
 }
+
+type InstrumentState struct {
+	AppID      uint64
+	HookCancel context.CancelFunc
+}
+
+type MockAction string
+
+// MockAction constants define the possible actions that can be taken on a mocking.
+const (
+	Start  MockAction = "start"
+	Update MockAction = "update"
+)
