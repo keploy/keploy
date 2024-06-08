@@ -437,7 +437,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				totalConsumedMocks[mockName] = true
 			}
 		}
-		testPass, testResult = r.compareResp(testCase, resp, testSetID)
+		noiseConfig := r.config.Test.GlobalNoise.Global
+		if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
+			noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
+		}
+
+		testPass, testResult = CompareResp(testCase, resp, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
 		if !testPass {
 			// log the consumed mocks during the test run of the test case for test set
 			r.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(testCase.Name)), zap.Any("testset id", models.HighlightFailingString(testSetID)), zap.Any("passed", models.HighlightFailingString(testPass)))
@@ -586,13 +591,9 @@ func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testS
 	return status, nil
 }
 
-func (r *Replayer) compareResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string) (bool, *models.Result) {
+func CompareResp(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig config.GlobalNoise, ignoreOrdering bool, logger *zap.Logger) (bool, *models.Result) {
 
-	noiseConfig := r.config.Test.GlobalNoise.Global
-	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
-		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
-	}
-	return match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
+	return Match(tc, actualResponse, noiseConfig, ignoreOrdering, logger)
 }
 
 func (r *Replayer) printSummary(ctx context.Context, testRunResult bool) {

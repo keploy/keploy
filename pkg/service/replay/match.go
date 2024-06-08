@@ -39,7 +39,7 @@ type JSONComparisonResult struct {
 	differences []string // Lists the keys or indices of values that are not the same
 }
 
-func match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger) (bool, *models.Result) {
+func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger) (bool, *models.Result) {
 	bodyType := models.BodyTypePlain
 	if json.Valid([]byte(actualResponse.Body)) {
 		bodyType = models.BodyTypeJSON
