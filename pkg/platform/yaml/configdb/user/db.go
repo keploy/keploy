@@ -1,5 +1,5 @@
-// Package configdb provides functionality for working with keploy configuration databases.
-package configdb
+// Package user provides functionality for working with keploy user configs like installation id.
+package user
 
 import (
 	"context"
@@ -18,11 +18,11 @@ import (
 	yamlLib "gopkg.in/yaml.v3"
 )
 
-type ConfigDb struct {
+type Db struct {
 	logger *zap.Logger
 }
 
-func UserHomeDir() string {
+func HomeDir() string {
 
 	configFolder := "/.keploy"
 	if runtime.GOOS == "windows" {
@@ -35,18 +35,18 @@ func UserHomeDir() string {
 	return os.Getenv("HOME") + configFolder
 }
 
-func NewConfigDb(logger *zap.Logger) *ConfigDb {
-	return &ConfigDb{
+func New(logger *zap.Logger) *Db {
+	return &Db{
 		logger: logger,
 	}
 }
 
-func (cdb *ConfigDb) GetInstallationID(ctx context.Context) (string, error) {
+func (db *Db) GetInstallationID(ctx context.Context) (string, error) {
 	var id string
-	id = getInstallationFromFile(cdb.logger)
+	id = getInstallationFromFile(db.logger)
 	if id == "" {
 		id = primitive.NewObjectID().String()
-		err := cdb.setInstallationID(ctx, id)
+		err := db.setInstallationID(ctx, id)
 		if err != nil {
 			return "", fmt.Errorf("failed to set installation id in file. error: %s", err.Error())
 		}
@@ -56,7 +56,7 @@ func (cdb *ConfigDb) GetInstallationID(ctx context.Context) (string, error) {
 
 func getInstallationFromFile(logger *zap.Logger) string {
 	var (
-		path = UserHomeDir()
+		path = HomeDir()
 		id   = ""
 	)
 
@@ -80,8 +80,8 @@ func getInstallationFromFile(logger *zap.Logger) string {
 	return id
 }
 
-func (cdb *ConfigDb) setInstallationID(ctx context.Context, id string) error {
-	path := UserHomeDir()
+func (db *Db) setInstallationID(ctx context.Context, id string) error {
+	path := HomeDir()
 	data := []byte{}
 
 	d, err := yamlLib.Marshal(&id)
@@ -89,9 +89,9 @@ func (cdb *ConfigDb) setInstallationID(ctx context.Context, id string) error {
 		return fmt.Errorf("failed to marshal document to yaml. error: %s", err.Error())
 	}
 	data = append(data, d...)
-	err = yaml.WriteFile(ctx, cdb.logger, path, "installation-id", data, false)
+	err = yaml.WriteFile(ctx, db.logger, path, "installation-id", data, false)
 	if err != nil {
-		utils.LogError(cdb.logger, err, "failed to write installation id in yaml file")
+		utils.LogError(db.logger, err, "failed to write installation id in yaml file")
 		return err
 	}
 
