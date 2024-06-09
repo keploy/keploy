@@ -684,9 +684,8 @@ func compareByteSlices(a, b []byte) (bool, string) {
 
 	if same {
 		return true, "Slices are equal"
-	} else {
-		return false, differences
 	}
+	return false, differences
 }
 func printableChar(b byte) string {
 	if unicode.IsPrint(rune(b)) {
