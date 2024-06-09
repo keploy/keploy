@@ -83,7 +83,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 			if err != nil {
 				return false, nil, fmt.Errorf("error while getting tcs mocks %v", err)
 			}
-	
+
 			ConnectionID := ctx.Value(models.ClientConnectionIDKey).(string)
 
 			recordedPrep := getRecordPrepStatement(tcsMocks)
@@ -119,7 +119,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 						sortedTcsMocks = append(sortedTcsMocks, mock)
 					}
 				}
-				
+
 				initMock := *mock
 				if len(initMock.Spec.PostgresRequests) == len(requestBuffers) {
 					for requestIndex, reqBuff := range requestBuffers {
@@ -137,25 +137,29 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 							return true, []models.Frontend{ssl}, nil
 						case initMock.Spec.PostgresRequests[requestIndex].Identfier == "StartupRequest" && isStartupPacket(reqBuff) && initMock.Spec.PostgresRequests[requestIndex].Payload != "AAAACATSFi8=" && initMock.Spec.PostgresResponses[requestIndex].AuthType == 10:
 							logger.Debug("CHANGING TO MD5 for Response", zap.String("mock", initMock.Name), zap.String("Req", bufStr))
-							initMock.Spec.PostgresResponses[requestIndex].AuthType = 5
-							err := mockDb.FlagMockAsUsed(&initMock)
-							if err != nil {
-								logger.Error("failed to flag mock as used", zap.Error(err))
-							}
-							return true, initMock.Spec.PostgresResponses, nil
+							res := make([]models.Frontend, len(initMock.Spec.PostgresResponses))
+							copy(res, initMock.Spec.PostgresResponses)
+							res[requestIndex].AuthType = 5
+
+							// err := mockDb.FlagMockAsUsed(&initMock)
+							// if err != nil {
+							// 	logger.Error("failed to flag mock as used", zap.Error(err))
+							// }
+							return true, res, nil
 						case len(encodedMock) > 0 && encodedMock[0] == 'p' && initMock.Spec.PostgresRequests[requestIndex].PacketTypes[0] == "p" && reqBuff[0] == 'p':
 							logger.Debug("CHANGING TO MD5 for Request and Response", zap.String("mock", initMock.Name), zap.String("Req", bufStr))
 
 							// initMock.Spec.PostgresRequests[requestIndex].PasswordMessage.Password = "md5fe4f2f657f01fa1dd9d111d5391e7c07"
-
-							initMock.Spec.PostgresResponses[requestIndex].PacketTypes = []string{"R", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "K", "Z"}
-							initMock.Spec.PostgresResponses[requestIndex].AuthType = 0
-							initMock.Spec.PostgresResponses[requestIndex].BackendKeyData = pgproto3.BackendKeyData{
+							res := make([]models.Frontend, len(initMock.Spec.PostgresResponses))
+							copy(res, initMock.Spec.PostgresResponses)
+							res[requestIndex].PacketTypes = []string{"R", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "K", "Z"}
+							res[requestIndex].AuthType = 0
+							res[requestIndex].BackendKeyData = pgproto3.BackendKeyData{
 								ProcessID: 2613,
 								SecretKey: 824670820,
 							}
-							initMock.Spec.PostgresResponses[requestIndex].ReadyForQuery.TxStatus = 73
-							initMock.Spec.PostgresResponses[requestIndex].ParameterStatusCombined = []pgproto3.ParameterStatus{
+							res[requestIndex].ReadyForQuery.TxStatus = 73
+							res[requestIndex].ParameterStatusCombined = []pgproto3.ParameterStatus{
 								{
 									Name:  "application_name",
 									Value: "",
@@ -201,11 +205,11 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 									Value: "Etc/UTC",
 								},
 							}
-							err := mockDb.FlagMockAsUsed(&initMock)
-							if err != nil {
-								logger.Error("failed to flag mock as used", zap.Error(err))
-							}
-							return true, initMock.Spec.PostgresResponses, nil
+							// err := mockDb.FlagMockAsUsed(&initMock)
+							// if err != nil {
+							// 	logger.Error("failed to flag mock as used", zap.Error(err))
+							// }
+							return true, res, nil
 						}
 
 					}
