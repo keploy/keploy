@@ -51,5 +51,5 @@ type MockMemDb interface {
 	DeleteFilteredMock(mock *models.Mock) bool
 	DeleteUnFilteredMock(mock *models.Mock) bool
 	// Flag the mock as used which matches the external request from application in test mode
-	FlagMockAsUsed(mock *models.Mock) error
+	FlagMockAsUsed(mock string) error
 }

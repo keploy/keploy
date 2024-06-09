@@ -78,7 +78,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	if updated {
 		// mark the unfiltered mock as used for the current simulated test-case
 		go func() {
-			if err := m.FlagMockAsUsed(old); err != nil {
+			if err := m.FlagMockAsUsed(old.Name); err != nil {
 				m.logger.Error("failed to flag mock as used", zap.Error(err))
 			}
 		}()
@@ -86,11 +86,11 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	return updated
 }
 
-func (m *MockManager) FlagMockAsUsed(mock *models.Mock) error {
-	if mock == nil {
+func (m *MockManager) FlagMockAsUsed(mockName string) error {
+	if mockName == "" {
 		return fmt.Errorf("mock is empty")
 	}
-	m.consumedMocks.Store(mock.Name, true)
+	m.consumedMocks.Store(mockName, true)
 	return nil
 }
 
@@ -98,7 +98,7 @@ func (m *MockManager) DeleteFilteredMock(mock *models.Mock) bool {
 	isDeleted := m.filtered.delete(mock.TestModeInfo)
 	if isDeleted {
 		go func() {
-			if err := m.FlagMockAsUsed(mock); err != nil {
+			if err := m.FlagMockAsUsed(mock.Name); err != nil {
 				m.logger.Error("failed to flag mock as used", zap.Error(err))
 			}
 		}()
@@ -110,7 +110,7 @@ func (m *MockManager) DeleteUnFilteredMock(mock *models.Mock) bool {
 	isDeleted := m.unfiltered.delete(mock.TestModeInfo)
 	if isDeleted {
 		go func() {
-			if err := m.FlagMockAsUsed(mock); err != nil {
+			if err := m.FlagMockAsUsed(mock.Name); err != nil {
 				m.logger.Error("failed to flag mock as used", zap.Error(err))
 			}
 		}()

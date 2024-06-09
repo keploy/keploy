@@ -141,7 +141,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 							copy(res, initMock.Spec.PostgresResponses)
 							res[requestIndex].AuthType = 5
 
-							err := mockDb.FlagMockAsUsed(&initMock)
+							err := mockDb.FlagMockAsUsed(initMock.Name)
 							if err != nil {
 								logger.Error("failed to flag mock as used", zap.Error(err))
 							}
@@ -205,7 +205,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 									Value: "Etc/UTC",
 								},
 							}
-							err := mockDb.FlagMockAsUsed(&initMock)
+							err := mockDb.FlagMockAsUsed(initMock.Name)
 							if err != nil {
 								logger.Error("failed to flag mock as used", zap.Error(err))
 							}
@@ -227,6 +227,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 			// give more priority to sorted like if you find more than 0.5 in sorted then return that
 			if len(sortedTcsMocks) > 0 {
 				sorted = true
+				fmt.Println("Sorted Mocks Before PG Match", sortedTcsMocks)
 				idx1, newMock := findPGStreamMatch(sortedTcsMocks, requestBuffers, logger, sorted, ConnectionID, recordedPrep)
 				if idx1 != -1 {
 					matched = true
@@ -234,13 +235,14 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 					if newMock != nil {
 						matchedMock = newMock
 					}
-					logger.Debug("Matched In Sorted PG Matching Stream", zap.String("mock", matchedMock.Name))
+					logger.Info("Matched In Sorted PG Matching Stream", zap.String("mock", matchedMock.Name))
 				}
 
 				idx = findBinaryStreamMatch(logger, sortedTcsMocks, requestBuffers, sorted)
 				if idx != -1 && !matched {
 					matched = true
 					matchedMock = tcsMocks[idx]
+					logger.Info("Matched In Binary Matching for Sorted", zap.String("mock", matchedMock.Name))
 				}
 			}
 
@@ -253,23 +255,23 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 					if newMock != nil {
 						matchedMock = newMock
 					}
-					logger.Debug("Matched In Unsorted PG Matching Stream", zap.String("mock", matchedMock.Name))
+					logger.Info("Matched In Unsorted PG Matching Stream", zap.String("mock", matchedMock.Name))
 				}
 				idx = findBinaryStreamMatch(logger, tcsMocks, requestBuffers, sorted)
 				// check if the validate the query with the matched mock
 				// if the query is same then return the response of that mock
-				var isValid = true
-				if idx != -1 && len(sortedTcsMocks) != 0 {
-					isValid, newMock = validateMock(tcsMocks, idx, requestBuffers, logger)
-					logger.Debug("Is Valid", zap.Bool("Is Valid", isValid))
-				}
+				// var isValid = true
+				// if idx != -1 && len(sortedTcsMocks) != 0 {
+				// 	isValid, newMock = validateMock(tcsMocks, idx, requestBuffers, logger)
+				// 	logger.Debug("Is Valid", zap.Bool("Is Valid", isValid))
+				// }
 				if idx != -1 && !matched {
 					matched = true
 					matchedMock = tcsMocks[idx]
-					if newMock != nil && !isValid {
-						matchedMock = newMock
-					}
-					logger.Debug("Matched In Binary Matching for Unsorted", zap.String("mock", matchedMock.Name))
+					// if newMock != nil && !isValid {
+					// 	matchedMock = newMock
+					// }
+					logger.Info("Matched In Binary Matching for Unsorted", zap.String("mock", matchedMock.Name))
 				}
 			}
 
@@ -285,7 +287,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 						continue
 					}
 				} else {
-					err := mockDb.FlagMockAsUsed(matchedMock)
+					err := mockDb.FlagMockAsUsed(matchedMock.Name)
 					if err != nil {
 						logger.Error("failed to flag mock as used", zap.Error(err))
 					}
