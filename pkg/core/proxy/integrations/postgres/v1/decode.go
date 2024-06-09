@@ -19,10 +19,11 @@ import (
 )
 
 func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
-	pgRequests := [][]byte{reqBuf}
+
 	errCh := make(chan error, 1)
 
-	go func(errCh chan error, pgRequests [][]byte) {
+	go func(errCh chan error, reqBuf2 [][]byte) {
+		pgRequests := reqBuf2
 		defer pUtil.Recover(logger, clientConn, nil)
 		// close should be called from the producer of the channel
 		defer close(errCh)
@@ -91,7 +92,7 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 			// Clear the buffer for the next dependency call
 			pgRequests = [][]byte{}
 		}
-	}(errCh, pgRequests)
+	}(errCh, [][]byte{reqBuf})
 
 	select {
 	case <-ctx.Done():

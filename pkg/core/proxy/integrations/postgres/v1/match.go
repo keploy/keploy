@@ -83,17 +83,17 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 			if err != nil {
 				return false, nil, fmt.Errorf("error while getting tcs mocks %v", err)
 			}
-
+	
 			ConnectionID := ctx.Value(models.ClientConnectionIDKey).(string)
 
 			recordedPrep := getRecordPrepStatement(tcsMocks)
-			reqGoingOn := decodePgRequest(requestBuffers[0], logger)
-			if reqGoingOn != nil {
-				logger.Debug("PacketTypes", zap.Any("PacketTypes", reqGoingOn.PacketTypes))
-				// fmt.Println("REQUEST GOING ON - ", reqGoingOn)
-				logger.Debug("ConnectionId-", zap.String("ConnectionId", ConnectionID))
-				logger.Debug("TestMap*****", zap.Any("TestMap", testmap))
-			}
+			// reqGoingOn := decodePgRequest(requestBuffers[0], logger)
+			// if reqGoingOn != nil {
+			// 	logger.Debug("PacketTypes", zap.Any("PacketTypes", reqGoingOn.PacketTypes))
+			// 	// fmt.Println("REQUEST GOING ON - ", reqGoingOn)
+			// 	logger.Debug("ConnectionId-", zap.String("ConnectionId", ConnectionID))
+			// 	logger.Debug("TestMap*****", zap.Any("TestMap", testmap))
+			// }
 
 			// merge all the streaming requests into 1 for matching
 			newRq := mergePgRequests(requestBuffers, logger)
@@ -104,7 +104,6 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 			var sortFlag = true
 			var sortedTcsMocks []*models.Mock
 			var matchedMock *models.Mock
-
 			for _, mock := range tcsMocks {
 				if ctx.Err() != nil {
 					return false, nil, ctx.Err()
@@ -113,7 +112,6 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 					continue
 				}
 
-				mutex.Lock()
 				if sortFlag {
 					if !mock.TestModeInfo.IsFiltered {
 						sortFlag = false
@@ -121,8 +119,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 						sortedTcsMocks = append(sortedTcsMocks, mock)
 					}
 				}
-				mutex.Unlock()
-
+				
 				initMock := *mock
 				if len(initMock.Spec.PostgresRequests) == len(requestBuffers) {
 					for requestIndex, reqBuff := range requestBuffers {
@@ -149,7 +146,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 						case len(encodedMock) > 0 && encodedMock[0] == 'p' && initMock.Spec.PostgresRequests[requestIndex].PacketTypes[0] == "p" && reqBuff[0] == 'p':
 							logger.Debug("CHANGING TO MD5 for Request and Response", zap.String("mock", initMock.Name), zap.String("Req", bufStr))
 
-							initMock.Spec.PostgresRequests[requestIndex].PasswordMessage.Password = "md5fe4f2f657f01fa1dd9d111d5391e7c07"
+							// initMock.Spec.PostgresRequests[requestIndex].PasswordMessage.Password = "md5fe4f2f657f01fa1dd9d111d5391e7c07"
 
 							initMock.Spec.PostgresResponses[requestIndex].PacketTypes = []string{"R", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "K", "Z"}
 							initMock.Spec.PostgresResponses[requestIndex].AuthType = 0
@@ -215,7 +212,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 				}
 
 				// maintain test prepare statement map for each connection id
-				getTestPS(requestBuffers, logger, ConnectionID)
+				// getTestPS(requestBuffers, logger, ConnectionID)
 			}
 
 			logger.Debug("Sorted Mocks inside pg parser: ", zap.Any("Len of sortedTcsMocks", len(sortedTcsMocks)))
