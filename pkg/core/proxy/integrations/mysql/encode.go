@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net"
-	"fmt"
 	"time"
 	"unicode"
 
@@ -642,7 +642,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, initialBuffer 
 				PacketType:   responseOperation,
 			}
 			responseBin, err := encodeToBinary(mysqlResp, mysqlPacketHeader, mysqlPacketHeader.PacketType, 1)
-			fmt.Println("This is the original response and the mock response", string(queryResponse),"\n\n\n", string(responseBin))
+			fmt.Println("This is the original response and the mock response", string(queryResponse), "\n\n\n", string(responseBin))
 			if err != nil {
 				utils.LogError(logger, err, "failed to encode the MySQL packet.")
 			}

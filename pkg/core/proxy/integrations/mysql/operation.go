@@ -140,7 +140,6 @@ func DecodeMySQLPacket(logger *zap.Logger, packet Packet, clientConn net.Conn, m
 		case isLengthEncodedInteger(data[0]): // ResultSet Packet
 			packetType = "RESULT_SET_PACKET"
 			packetData, err = parseResultSet(data)
-			fmt.Println("Packet Data: ", packetData)
 			if err != nil {
 				fmt.Println("Error parsing result set: ", err)
 			}
