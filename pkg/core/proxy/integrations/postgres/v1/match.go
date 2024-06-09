@@ -141,10 +141,10 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 							copy(res, initMock.Spec.PostgresResponses)
 							res[requestIndex].AuthType = 5
 
-							// err := mockDb.FlagMockAsUsed(&initMock)
-							// if err != nil {
-							// 	logger.Error("failed to flag mock as used", zap.Error(err))
-							// }
+							err := mockDb.FlagMockAsUsed(&initMock)
+							if err != nil {
+								logger.Error("failed to flag mock as used", zap.Error(err))
+							}
 							return true, res, nil
 						case len(encodedMock) > 0 && encodedMock[0] == 'p' && initMock.Spec.PostgresRequests[requestIndex].PacketTypes[0] == "p" && reqBuff[0] == 'p':
 							logger.Debug("CHANGING TO MD5 for Request and Response", zap.String("mock", initMock.Name), zap.String("Req", bufStr))
@@ -205,10 +205,10 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 									Value: "Etc/UTC",
 								},
 							}
-							// err := mockDb.FlagMockAsUsed(&initMock)
-							// if err != nil {
-							// 	logger.Error("failed to flag mock as used", zap.Error(err))
-							// }
+							err := mockDb.FlagMockAsUsed(&initMock)
+							if err != nil {
+								logger.Error("failed to flag mock as used", zap.Error(err))
+							}
 							return true, res, nil
 						}
 
