@@ -18,6 +18,12 @@ type TestReportVerdict struct {
 	status bool
 }
 
+// Range defines a span within a text, indicated by a starting and ending index, used for applying color or other text styling for differentiation.
+type Range struct {
+	Start int
+	End   int
+}
+
 func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) config.GlobalNoise {
 	noise := globalNoise
 
