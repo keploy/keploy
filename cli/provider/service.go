@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/core/proxy"
 	"go.keploy.io/server/v2/pkg/core/tester"
+
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/docker"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
@@ -104,9 +105,7 @@ func (n *ServiceProvider) GetCommonServices(c *config.Config) *CommonInternalSer
 	testDB := testdb.New(n.logger, c.Path)
 	mockDB := mockdb.New(n.logger, c.Path, "")
 	reportDB := reportdb.New(n.logger, c.Path+"/reports")
-	// testSetDb := testset.New(n.logger, c.Path)
 	testSetDb := testset.New[*models.TestSet](n.logger, c.Path)
-
 	return &CommonInternalService{
 		Instrumentation: instrumentation,
 		YamlTestDB:      testDB,
