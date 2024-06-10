@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Define the Dockerfile path
-DOCKERFILE_PATH="./../../Dockerfile"
+DOCKERFILE_PATH="./Dockerfile"
 
 # Function to add the -race flag to the go build command in the Dockerfile
 update_dockerfile() {
