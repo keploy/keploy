@@ -17,7 +17,9 @@ installKeploy (){
     install_keploy_darwin_all() {
         curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz" | tar xz -C /tmp
 
-        mkdir -p /usr/local/bin && mv /tmp/keploy /usr/local/bin/keploy
+        sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploy
+
+        delete_keploy_alias
 
         check_docker_status_for_Darwin 
         dockerStatus=$?
@@ -123,6 +125,37 @@ installKeploy (){
         fi
     }
 
+    delete_keploy_alias() {
+        current_shell="$(basename "$SHELL")"
+        shell_rc_file=""
+
+        # Determine the shell configuration file based on the current shell
+        if [[ "$current_shell" = "zsh" || "$current_shell" = "-zsh" ]]; then
+            shell_rc_file="$HOME/.zshrc"
+        elif [[ "$current_shell" = "bash" || "$current_shell" = "-bash" ]]; then
+            shell_rc_file="$HOME/.bashrc"
+        else
+            echo "Unsupported shell: $current_shell"
+            return
+        fi
+
+        # Delete alias from the shell configuration file if it exists
+        if [ -f "$shell_rc_file" ]; then
+            if grep -q "alias keploy=" "$shell_rc_file"; then
+                if [[ "$(uname)" = "Darwin" ]]; then
+                    sed -i '' '/alias keploy/d' "$shell_rc_file"
+                else
+                    sed -i '/alias keploy/d' "$shell_rc_file"
+                fi
+            fi
+        fi
+
+        # Unset the alias in the current shell session if it exists
+        if alias keploy &>/dev/null; then
+            unalias keploy
+        fi
+    }
+
     check_docker_status_for_linux() {
         check_sudo
         sudoCheck=$?
@@ -132,11 +165,9 @@ installKeploy (){
             network_alias="sudo"
         fi
         if ! $network_alias which docker &> /dev/null; then
-            echo -n "Docker not found on device, please install docker and reinstall keploy if you have applications running on docker"
             return 0
         fi
         if ! $network_alias docker info &> /dev/null; then
-            echo "Please start Docker and reinstall keploy if you have applications running on docker"
             return 0
         fi
         return 1
@@ -151,12 +182,10 @@ installKeploy (){
             network_alias="sudo"
         fi
         if ! $network_alias which docker &> /dev/null; then
-            echo -n "Docker not found on device, please install docker to use Keploy"
             return 0
         fi
         # Check if docker is running
         if ! $network_alias docker info &> /dev/null; then
-            echo "Keploy only supports intercepting and replaying docker containers on macOS, and requires Docker to be installed and running. Please start Docker and try again."
             return 0
         fi
         return 1
