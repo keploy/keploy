@@ -9,7 +9,7 @@ jobs:
 
     - name: Run build script
       run: |
-        source ./../../.github/workflows/test_workflow_scripts/update-docker.sh
+         source ./.github/workflows/test_workflow_scripts/update-docker.sh
 
     - name: Build binary
       run: |
