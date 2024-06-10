@@ -54,9 +54,9 @@ type ReportDB interface {
 	InsertReport(ctx context.Context, testRunID string, testSetID string, testReport *models.TestReport) error
 }
 
-type TestSetDB interface {
-	ReadConfig(ctx context.Context, testSetID string) (*models.TestSet, error)
-	WriteConfig(ctx context.Context, testSetID string, testSet *models.TestSet) error
+type Config interface {
+	Read(ctx context.Context, testSetID string) (*models.TestSet, error)
+	Write(ctx context.Context, testSetID string, testSet *models.TestSet) error
 }
 
 type Telemetry interface {

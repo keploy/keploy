@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/core/proxy"
 	"go.keploy.io/server/v2/pkg/core/tester"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/docker"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb/testset"
@@ -36,7 +37,7 @@ type CommonInternalService struct {
 	YamlTestDB      *testdb.TestYaml
 	YamlMockDb      *mockdb.MockYaml
 	YamlReportDb    *reportdb.TestReport
-	YamlTestSetDB   *testset.Db
+	YamlTestSetDB   *testset.Db[*models.TestSet]
 	Instrumentation *core.Core
 }
 
@@ -103,7 +104,9 @@ func (n *ServiceProvider) GetCommonServices(c *config.Config) *CommonInternalSer
 	testDB := testdb.New(n.logger, c.Path)
 	mockDB := mockdb.New(n.logger, c.Path, "")
 	reportDB := reportdb.New(n.logger, c.Path+"/reports")
-	testSetDb := testset.New(n.logger, c.Path)
+	// testSetDb := testset.New(n.logger, c.Path)
+	testSetDb := testset.New[*models.TestSet](n.logger, c.Path)
+
 	return &CommonInternalService{
 		Instrumentation: instrumentation,
 		YamlTestDB:      testDB,
