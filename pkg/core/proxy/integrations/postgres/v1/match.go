@@ -227,6 +227,9 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 			// give more priority to sorted like if you find more than 0.5 in sorted then return that
 			if len(sortedTcsMocks) > 0 {
 				sorted = true
+				for _, mock := range sortedTcsMocks {
+					fmt.Println("Sorted Mocks", mock.Name)
+				}
 				fmt.Println("Sorted Mocks Before PG Match", sortedTcsMocks)
 				idx1, newMock := findPGStreamMatch(sortedTcsMocks, requestBuffers, logger, sorted, ConnectionID, recordedPrep)
 				if idx1 != -1 {
