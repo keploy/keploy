@@ -39,12 +39,13 @@ type Replayer struct {
 	testDB          TestDB
 	mockDB          MockDB
 	reportDB        ReportDB
+	testSetConf     Config
 	telemetry       Telemetry
 	instrumentation Instrumentation
 	config          *config.Config
 }
 
-func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
+func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf Config, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
 	// set the request emulator for simulating test case requests, if not set
 	if requestMockemulator == nil {
 		SetTestUtilInstance(NewRequestMockUtil(logger, config.Path, "mocks", config.Test.APITimeout, config.Test.BasePath))
@@ -54,6 +55,7 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 		testDB:          testDB,
 		mockDB:          mockDB,
 		reportDB:        reportDB,
+		testSetConf:     testSetConf,
 		telemetry:       telemetry,
 		instrumentation: instrumentation,
 		config:          config,
