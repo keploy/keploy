@@ -1,106 +1,58 @@
-#! /bin/bash
+#!/bin/bash
 
+# Load test scripts and start MongoDB container
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
-
-# Start the docker container.
 docker run --name mongoDb --rm -p 27017:27017 -d mongo
 
-# Install the required node dependencies.
+# Prepare environment
 npm install
-
-# Edit the conn.js file to connect to local mongodb.
-file_path="src/db/connection.js"
-sed -i "s/mongoDb:27017/localhost:27017/" "$file_path"
-
-# Remove any preexisting keploy tests.
+sed -i "s/mongoDb:27017/localhost:27017/" "src/db/connection.js"
 rm -rf keploy/
 
+# Function to check app started
+check_app_started() {
+    while ! curl -X GET http://localhost:8000/students; do
+        sleep 3
+    done
+}
+
+# Function to perform API calls
+perform_api_calls() {
+    curl --request POST --url http://localhost:8000/students --header 'content-type: application/json' --data '{"name":"John Doe","email":"john@xyiz.com","phone":"0123456799"}'
+    curl --request POST --url http://localhost:8000/students --header 'content-type: application/json' --data '{"name":"Alice Green","email":"green@alice.com","phone":"3939201584"}'
+    curl -X GET http://localhost:8000/students
+}
+
+# Record and test sessions in a loop
 for i in {1..2}; do
-# Start keploy in record mode.
-sudo -E env PATH=$PATH ./../../keployv2 record -c 'npm start' --generateGithubActions=false &
-
-# Wait for the application to start.
-app_started=false
-while [ "$app_started" = false ]; do
-    if curl -X GET http://localhost:8000/students; then
-        app_started=true
-    fi
-    sleep 3 # wait for 3 seconds before checking again.
+    sudo -E env PATH=$PATH ./../../keployv2 record -c 'npm start' --generateGithubActions=false &
+    check_app_started
+    perform_api_calls
+    sleep 5
+    sudo kill $(pgrep keploy)
+    sleep 5
 done
 
-# Get the pid of the application.
-pid=$(pgrep keploy)
+# Test modes and result checking
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --generateGithubActions=false
+sudo -E env PATH=$PATH ./../../keployv2 config --generate
+sed -i 's/selectedTests: {}/selectedTests: {"test-set-0": ["test-1", "test-2"]}/' "./keploy.yml"
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --apiTimeout 30 --delay 10 --generateGithubActions=false
 
-# Start making curl calls to record the testcases and mocks.
-curl --request POST \
---url http://localhost:8000/students \
-   --header 'content-type: application/json' \
-   --data '{
-    "name":"John Do",
-    "email":"john@xyiz.com",
-    "phone":"0123456799"
-    }'
-
-curl --request POST \
---url http://localhost:8000/students \
-   --header 'content-type: application/json' \
-   --data '{
-    "name":"Alice Green",
-    "email":"green@alice.com",
-    "phone":"3939201584"
-    }'
-
-curl -X GET http://localhost:8000/students
-
-# Wait for 5 seconds for keploy to record the tcs and mocks.
-sleep 5
-
-# Stop keploy.
-sudo kill $pid
-
-# Wait for 5 seconds for keploy to stop.
-sleep 5
-done
-
-# Start keploy in test mode.
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --generateGithubActions=false 
-
-# sudo -E env PATH=$PATH ./../../keployv2 test -c "npm test" --delay 5 --coverage
-
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testsets test-set-0 --generateGithubActions=false 
-
-# Generate the keploy-config file.
-sudo ./../../keployv2 config --generate
-
-# Update the global noise to ts.
-config_file="./keploy.yml"
-sed -i 's/selectedTests: {}/selectedTests: {"test-set-0": ["test-1", "test-2"]}/' "$config_file"
-
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --apiTimeout 30 --delay 10 --generateGithubActions=false 
-
-# Get the test results from the testReport file.
+# Consolidate test results
 report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"
-test_status1=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+test_status1=$(awk '/status:/ {print $2}' $report_file)
 report_file2="./keploy/reports/test-run-0/test-set-1-report.yaml"
-test_status2=$(grep 'status:' "$report_file2" | head -n 1 | awk '{print $2}')
-# report_file3="./keploy/reports/test-run-1/report-1.yaml"
-# test_status3=$(grep 'status:' "$report_file3" | head -n 1 | awk '{print $2}')
-# report_file4="./keploy/reports/test-run-1/report-2.yaml"
-# test_status4=$(grep 'status:' "$report_file4" | head -n 1 | awk '{print $2}')
+test_status2=$(awk '/status:/ {print $2}' $report_file2)
 report_file5="./keploy/reports/test-run-1/test-set-0-report.yaml"
-test_status5=$(grep 'status:' "$report_file5" | head -n 1 | awk '{print $2}')
+test_status5=$(awk '/status:/ {print $2}' $report_file5)
 report_file6="./keploy/reports/test-run-2/test-set-0-report.yaml"
-test_status6=$(grep 'status:' "$report_file6" | head -n 1 | awk '{print $2}')
-test_total6=$(grep 'total:' "$report_file6" | head -n 1 | awk '{print $2}')
-test_failure=$(grep 'failure:' "$report_file6" | head -n 1 | awk '{print $2}')
+test_status6=$(awk '/status:/ {print $2}' $report_file6)
+test_total6=$(awk '/total:/ {print $2}' $report_file6)
+test_failure=$(awk '/failure:/ {print $2}' $report_file6)
 
-# Return the exit code according to the status.
-# if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ] && [ "$test_status3" = "PASSED" ] && [ "$test_status4" = "PASSED" ] && [ "$test_status5" = "PASSED" ] && [ "$test_status6" = "PASSED" ] && [ "$test_total6" = "2" ] && [ "$test_failure" = "0" ]; then
-#     exit 0
-# else
-#     exit 1
-# fi
-if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ]  && [ "$test_status5" = "PASSED" ] && [ "$test_status6" = "PASSED" ] && [ "$test_total6" = "2" ] && [ "$test_failure" = "0" ]; then
+# Exit based on test results
+if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ] && [ "$test_status5" = "PASSED" ] && [ "$test_status6" = "PASSED" ] && [ "$test_total6" = "2" ] && [ "$test_failure" = "0" ]; then
     exit 0
 else
     exit 1

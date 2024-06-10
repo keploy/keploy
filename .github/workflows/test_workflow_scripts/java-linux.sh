@@ -80,9 +80,13 @@ test_status1=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
 report_file2="./keploy/reports/test-run-0/test-set-1-report.yaml"
 test_status2=$(grep 'status:' "$report_file2" | head -n 1 | awk '{print $2}')
 
+echo "test_status1: $test_status1"
+echo "test_status2: $test_status2"
 # Return the exit code according to the status.
 if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ]; then
+    echo "sucessfule echo"
     exit 0
 else
+    echo "sucessful not exit"
     exit 1
 fi

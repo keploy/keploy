@@ -1,4 +1,3 @@
-
 #!/bin/bash
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
@@ -27,6 +26,9 @@ for i in {1..2}; do
     sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p8080:8080 --net keploy-network --rm --name ${container_name} gin-mongo" --containerName "${container_name}" --generateGithubActions=false  &
 
     sleep 5
+
+    # Monitor Docker logs in the background and check for race conditions.
+    docker logs ${container_name} 2>&1 | grep -q "race condition detected" && echo "Race condition detected in recording, stopping tests..." && exit 1 &
 
     # Wait for the application to start.
     app_started=false
@@ -63,9 +65,13 @@ for i in {1..2}; do
 done
 
 # Start the keploy in test mode.
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "ginApp_test" --apiTimeout 60 --delay 20 --generateGithubActions=false 
+test_container="ginApp_test"
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generateGithubActions=false &
+docker logs $test_container 2>&1 | grep -q "race condition detected" && echo "Race condition detected in testing, stopping tests..." && exit 1 &
+
 docker rm -f ginApp_test
 
+echo $(ls -a)
 # Get the test results from the testReport file.
 report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"
 test_status1=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
