@@ -52,7 +52,7 @@ perform_api_calls() {
 
 # Record and Test cycles
 for i in {1..2}; do
-    sudo -E env PATH="$PATH" ./../../../keployv2 record -c "python3 manage.py runserver" --generateGithubActions=false &
+    sudo -E env PATH="$PATH" ./../../../keployv2 record -c "python3 manage.py runserver" --generateGithubActions=false &> record_logs.txt &
     wait_for_app
     perform_api_calls
     sleep 5  # Wait for recording to complete
@@ -61,7 +61,9 @@ for i in {1..2}; do
 done
 
 # Testing phase
-sudo -E env PATH="$PATH" ./../../../keployv2 test -c "python3 manage.py runserver" --delay 10 --generateGithubActions=false
+sudo -E env PATH="$PATH" ./../../../keployv2 test -c "python3 manage.py runserver" --delay 10 --generateGithubActions=false &> test_logs.txt
+
+grep -q "race condition detected" test_logs.txt && echo "Race condition detected in testing, stopping tests..." && exit 1
 
 # Collect and evaluate test results
 report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"

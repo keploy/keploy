@@ -2,58 +2,43 @@
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
-# Checkout a different branch
-git fetch origin
-git checkout native-linux
-
 # Start mongo before starting keploy.
-docker run --rm -d -p27017:27017 --name mongoDb mongo
-
-# Check if there is a keploy-config file, if there is, delete it.
-if [ -f "./keploy.yml" ]; then
-    rm ./keploy.yml
-fi
+docker network create keploy-network
+docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
 
 # Generate the keploy-config file.
-sudo ./../../keployv2 config --generate
+sudo -E env PATH=$PATH ./../../keployv2 config --generate
 
 # Update the global noise to ts.
 config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
-sed -i 's/ports: 0/ports: 27017/' "$config_file"
 
 # Remove any preexisting keploy tests and mocks.
-rm -rf keploy/
+sudo rm -rf keploy/
+docker logs mongoDb &> mongo_logs.txt &
 
-# Build the binary.
-go build -o ginApp
+# Start keploy in record mode.
+docker build -t gin-mongo .
+docker rm -f ginApp 2>/dev/null || true
 
 for i in {1..2}; do
-    # Start the gin-mongo app in record mode and record testcases and mocks.
-    sudo -E env PATH="$PATH" ./../../keployv2 record -c "./ginApp" --generateGithubActions=false &
-
-    # Monitor Docker logs in the background and check for race conditions.
-    docker logs mongoDb 2>&1 | grep -q "race condition detected" && echo "Race condition detected in recording, stopping tests..." && exit 1 &
-
-    # Wait for the application to start.
-    app_started=false
+    container_name="ginApp_${i}"
+    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p8080:8080 --net keploy-network --rm --name ${container_name} gin-mongo" --containerName "${container_name}" --generateGithubActions=false &
 
     sleep 5
 
+    # Monitor Docker logs in the background and check for race conditions.
+    docker logs ${container_name} &> ${container_name}_logs.txt &
+    grep -q "race condition detected" ${container_name}_logs.txt && echo "Race condition detected in recording, stopping tests..." && exit 1
+
+    # Wait for the application to start.
+    app_started=false
     while [ "$app_started" = false ]; do
-        if curl --request POST \
-  --url http://localhost:8080/url \
-  --header 'content-type: application/json' \
-  --data '{
-  "url": "https://facebook.com"
-}'; then
+        if curl -X GET http://localhost:8080/CJBKJd92; then
             app_started=true
         fi
         sleep 3 # wait for 3 seconds before checking again.
     done
-
-    # Get the pid of the application.
-    pid=$(pgrep keploy)
 
     # Start making curl calls to record the testcases and mocks.
     curl --request POST \
@@ -75,19 +60,20 @@ for i in {1..2}; do
     # Wait for 5 seconds for keploy to record the tcs and mocks.
     sleep 5
 
-    # Stop the gin-mongo app.
-    sudo kill $pid
-
-    # Wait for 5 seconds for keploy to stop.
-    sleep 5
+    # Stop keploy.
+    docker rm -f keploy-v2
+    docker rm -f "${container_name}"
 done
 
-# Start the gin-mongo app in test mode.
-sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7 --generateGithubActions=false &
+# Start the keploy in test mode.
+test_container="ginApp_test"
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generateGithubActions=false &> test_logs.txt
 
-# Monitor Docker logs in test mode for race conditions.
-docker logs mongoDb 2>&1 | grep -q "race condition detected" && echo "Race condition detected in testing, stopping tests..." && exit 1 &
+grep -q "race condition detected" test_logs.txt && echo "Race condition detected in testing, stopping tests..." && exit 1
 
+docker rm -f ginApp_test
+
+echo $(ls -a)
 # Get the test results from the testReport file.
 report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"
 test_status1=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')

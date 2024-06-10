@@ -36,7 +36,7 @@ perform_api_calls() {
 
 # Record sessions
 for i in {1..2}; do
-    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker compose up" --containerName flask-app --buildDelay 40 --generateGithubActions=false &
+    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker compose up" --containerName flask-app --buildDelay 40 --generateGithubActions=false &> record_logs.txt &
     wait_for_app_to_start
     perform_api_calls
     sleep 5  # Wait for keploy to record
@@ -44,7 +44,9 @@ for i in {1..2}; do
 done
 
 # Testing phase
-sudo -E env PATH=$PATH ./../../keployv2 test -c "docker compose up" --containerName flask-app --buildDelay 40 --apiTimeout 60 --delay 20 --generateGithubActions=false
+sudo -E env PATH=$PATH ./../../keployv2 test -c "docker compose up" --containerName flask-app --buildDelay 40 --apiTimeout 60 --delay 20 --generateGithubActions=false &> test_logs.txt
+
+grep -q "race condition detected" test_logs.txt && echo "Race condition detected in testing, stopping tests..." && exit 1
 
 # Collect and evaluate test results
 report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"

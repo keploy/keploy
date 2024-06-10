@@ -1,4 +1,4 @@
-#! /bin/bash
+#!/bin/bash
 
 source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
 
@@ -22,7 +22,7 @@ docker exec mypostgres psql -U petclinic -d petclinic -f /initDB.sql
 for i in {1..2}; do
 # Start keploy in record mode.
 mvn clean install -Dmaven.test.skip=true
-sudo -E env PATH=$PATH ./../../../keployv2 record -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --generateGithubActions=false &
+sudo -E env PATH=$PATH ./../../../keployv2 record -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --generateGithubActions=false &> record_logs.txt &
 
 # Wait for the application to start.
 app_started=false
@@ -72,7 +72,9 @@ sleep 5
 done
 
 # Start keploy in test mode.
-sudo -E env PATH=$PATH ./../../../keployv2 test -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --delay 20 --generateGithubActions=false 
+sudo -E env PATH=$PATH ./../../../keployv2 test -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --delay 20 --generateGithubActions=false &> test_logs.txt
+
+grep -q "race condition detected" test_logs.txt && echo "Race condition detected in testing, stopping tests..." && exit 1
 
 # Get the test results from the testReport file.
 report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"
@@ -84,9 +86,9 @@ echo "test_status1: $test_status1"
 echo "test_status2: $test_status2"
 # Return the exit code according to the status.
 if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ]; then
-    echo "sucessfule echo"
+    echo "success"
     exit 0
 else
-    echo "sucessful not exit"
+    echo "failure"
     exit 1
 fi

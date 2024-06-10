@@ -66,7 +66,8 @@ done
 
 # Start the keploy in test mode.
 test_container="ginApp_test"
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generateGithubActions=false &
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generateGithubActions=false
+
 docker logs $test_container 2>&1 | grep -q "race condition detected" && echo "Race condition detected in testing, stopping tests..." && exit 1 &
 
 docker rm -f ginApp_test

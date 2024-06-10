@@ -1,4 +1,4 @@
-#! /bin/bash
+#!/bin/bash
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
@@ -14,10 +14,10 @@ docker build -t node-app:1.0 .
 
 for i in {1..2}; do
     # Start keploy in record mode.
-    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p 8000:8000 --name nodeMongoApp --network keploy-network node-app:1.0" --containerName nodeMongoApp --generateGithubActions=false &
+    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p 8000:8000 --name nodeMongoApp --network keploy-network node-app:1.0" --containerName nodeMongoApp --generateGithubActions=false &> record_logs.txt &
 
     # Monitor Docker logs for race conditions.
-    docker logs mongoDb 2>&1 | grep -q "race condition detected" && echo "Race condition detected in recording, stopping tests..." && exit 1 &
+    docker logs mongoDb 2>&1 | grep -q "race condition detected" && echo "Race condition detected in recording, stopping tests..." && exit 1
 
     # Wait for the application to start.
     app_started=false
@@ -58,10 +58,10 @@ for i in {1..2}; do
 done
 
 # Start keploy in test mode.
-sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p 8000:8000 --name nodeMongoApp --network keploy-network node-app:1.0" --containerName nodeMongoApp --apiTimeout 30 --delay 30 --generateGithubActions=false &
+sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p 8000:8000 --name nodeMongoApp --network keploy-network node-app:1.0" --containerName nodeMongoApp --apiTimeout 30 --delay 30 --generateGithubActions=false &> test_logs.txt &
 
 # Monitor Docker logs for race conditions during testing.
-docker logs mongoDb 2>&1 | grep -q "race condition detected" && echo "Race condition detected in testing, stopping tests..." && exit 1 &
+docker logs mongoDb 2>&1 | grep -q "race condition detected" && echo "Race condition detected in testing, stopping tests..." && exit 1
 
 # Get the test results from the testReport file.
 report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"
