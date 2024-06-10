@@ -125,3 +125,9 @@ const (
 	TestStatusFailed  TestStatus = "FAILED"
 	TestStatusPassed  TestStatus = "PASSED"
 )
+
+type (
+	Noise        map[string][]string
+	GlobalNoise  map[string]map[string][]string
+	TestsetNoise map[string]map[string]map[string][]string
+)
