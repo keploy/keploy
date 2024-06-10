@@ -49,6 +49,7 @@ const (
 	TestSetStatusUserAbort    TestSetStatus = "USER_ABORT"
 	TestSetStatusFaultUserApp TestSetStatus = "APP_FAULT"
 	TestSetStatusInternalErr  TestSetStatus = "INTERNAL_ERR"
+	TestSetStatusFaultScript  TestSetStatus = "SCRIPT_FAULT"
 )
 
 func StringToTestSetStatus(s string) (TestSetStatus, error) {

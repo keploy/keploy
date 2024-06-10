@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/k0kubun/pp/v3"
@@ -256,6 +257,29 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		close(exitLoopChan)
 	}()
 
+	var conf *models.TestSet
+	var err error
+	var postscript string
+
+	// Pre/Post script will be executed only if the base path is provided
+	if r.config.Test.BasePath != "" {
+		//Execute the Pre-script before each test-set if provided
+		conf, err = r.testSetConf.Read(runTestSetCtx, testSetID)
+		if err != nil {
+			return models.TestSetStatusFailed, fmt.Errorf("failed to read test set config: %w", err)
+		}
+		if conf == nil {
+			return models.TestSetStatusFailed, fmt.Errorf("test set config not found")
+		}
+		postscript = conf.PostScript
+
+		r.logger.Info("Running Pre-script", zap.String("script", conf.PreScript), zap.String("test-set", testSetID))
+		err = r.executeScript(runTestSetCtx, conf.PreScript)
+		if err != nil {
+			return models.TestSetStatusFaultScript, fmt.Errorf("failed to execute pre-script: %w", err)
+		}
+	}
+
 	var appErrChan = make(chan models.AppError, 1)
 	var appErr models.AppError
 	var success int
@@ -498,6 +522,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
+	//Execute the Post-script after each test-set if provided
+	if r.config.Test.BasePath != "" {
+		r.logger.Info("Running Post-script", zap.String("script", postscript), zap.String("test-set", testSetID))
+		err = r.executeScript(runTestSetCtx, postscript)
+		if err != nil {
+			return models.TestSetStatusFaultScript, fmt.Errorf("failed to execute post-script: %w", err)
+		}
+	}
 	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
 	if err != nil {
 		if runTestSetCtx.Err() != context.Canceled {
@@ -799,6 +831,26 @@ func (r *Replayer) normalizeTestCases(ctx context.Context, testRun string, testS
 		if err != nil {
 			return fmt.Errorf("failed to update test case: %w", err)
 		}
+	}
+	return nil
+}
+
+func (r *Replayer) executeScript(ctx context.Context, script string) error {
+
+	if script == "" {
+		return nil
+	}
+
+	// Define the function to cancel the command
+	cmdCancel := func(cmd *exec.Cmd) func() error {
+		return func() error {
+			return utils.InterruptProcessTree(r.logger, cmd.Process.Pid, syscall.SIGINT)
+		}
+	}
+
+	cmdErr := utils.ExecuteCommand(ctx, r.logger, script, cmdCancel, 25*time.Second)
+	if cmdErr.Err != nil {
+		return fmt.Errorf("failed to execute script: %w", cmdErr.Err)
 	}
 	return nil
 }
