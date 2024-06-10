@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"syscall"
 	"time"
@@ -444,53 +443,35 @@ func (a *App) waitTillExit() {
 }
 
 func (a *App) run(ctx context.Context) models.AppError {
-	// Run the app as the user who invoked sudo
+
 	userCmd := a.cmd
-	username := os.Getenv("SUDO_USER")
 
 	if utils.FindDockerCmd(a.cmd) == utils.DockerRun {
 		userCmd = utils.EnsureRmBeforeName(userCmd)
 	}
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", userCmd)
-	if username != "" {
-		// print all environment variables
-		a.logger.Debug("env inherited from the cmd", zap.Any("env", os.Environ()))
-		// Run the command as the user who invoked sudo to preserve the user environment variables and PATH
-		cmd = exec.CommandContext(ctx, "sudo", "-E", "-u", os.Getenv("SUDO_USER"), "env", "PATH="+os.Getenv("PATH"), "sh", "-c", userCmd)
-	}
-
-	// Set the cancel function for the command
-	cmd.Cancel = func() error {
-
-		if utils.IsDockerKind(a.kind) {
-			a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
-			err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
-
-			return err
+	// Define the function to cancel the command
+	cmdCancel := func(cmd *exec.Cmd) func() error {
+		return func() error {
+			if utils.IsDockerKind(a.kind) {
+				a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
+				err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
+				return err
+			}
+			return utils.InterruptProcessTree(a.logger, cmd.Process.Pid, syscall.SIGINT)
 		}
-		return utils.InterruptProcessTree(a.logger, cmd.Process.Pid, syscall.SIGINT)
-
-	}
-	// wait after sending the interrupt signal, before sending the kill signal
-	cmd.WaitDelay = 25 * time.Second
-
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
 	}
 
-	// Set the output of the command
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	a.logger.Debug("", zap.Any("executing cli", cmd.String()))
-
-	err := cmd.Start()
-	if err != nil {
-		return models.AppError{AppErrorType: models.ErrCommandError, Err: err}
+	var err error
+	cmdErr := utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second)
+	if cmdErr.Err != nil {
+		switch cmdErr.Type {
+		case utils.Init:
+			return models.AppError{AppErrorType: models.ErrCommandError, Err: cmdErr.Err}
+		case utils.Runtime:
+			err = cmdErr.Err
+		}
 	}
-
-	err = cmd.Wait()
 
 	if utils.IsDockerKind(a.kind) {
 		a.waitTillExit()

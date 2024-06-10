@@ -572,6 +572,60 @@ func SetCoveragePath(logger *zap.Logger, goCovPath string) (string, error) {
 	return goCovPath, nil
 }
 
+type ErrType string
+
+// ErrType constants to get the type of error, during init or runtime
+const (
+	Init    ErrType = "init"
+	Runtime ErrType = "runtime"
+)
+
+type CmdError struct {
+	Type ErrType
+	Err  error
+}
+
+func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration) CmdError {
+	// Run the app as the user who invoked sudo
+	username := os.Getenv("SUDO_USER")
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", userCmd)
+	if username != "" {
+		// print all environment variables
+		logger.Debug("env inherited from the cmd", zap.Any("env", os.Environ()))
+		// Run the command as the user who invoked sudo to preserve the user environment variables and PATH
+		cmd = exec.CommandContext(ctx, "sudo", "-E", "-u", os.Getenv("SUDO_USER"), "env", "PATH="+os.Getenv("PATH"), "sh", "-c", userCmd)
+	}
+
+	// Set the cancel function for the command
+	cmd.Cancel = cancel(cmd)
+
+	// wait after sending the interrupt signal, before sending the kill signal
+	cmd.WaitDelay = waitDelay
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+
+	// Set the output of the command
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	logger.Debug("", zap.Any("executing cli", cmd.String()))
+
+	err := cmd.Start()
+	if err != nil {
+		return CmdError{Type: Init, Err: err}
+	}
+
+	err = cmd.Wait()
+	if err != nil {
+		return CmdError{Type: Runtime, Err: err}
+	}
+
+	return CmdError{}
+}
+
 // InterruptProcessTree interrupts an entire process tree using the given signal
 func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) error {
 	// Find all descendant PIDs of the given PID & then signal them.
