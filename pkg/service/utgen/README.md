@@ -33,7 +33,7 @@
 
 ___
 
-Keploy-gen uses LLMs to understand code semantics and generates meaningful unit tests. It's inspired by the [Automated Unit Test Improvement using LLM at Meta](https://arxiv.org/pdf/2402.09171).
+Keploy-gen uses LLMs to understand code semantics and generates meaningful **unit tests**. It's inspired by the [Automated Unit Test Improvement using LLM at Meta](https://arxiv.org/pdf/2402.09171).
 
 ### Objectives
 
@@ -55,15 +55,13 @@ Keploy-gen uses LLMs to understand code semantics and generates meaningful unit 
 | **Iterative Test Refinement** | Cyclic process of refining tests by running them, analyzing coverage, and incorporating feedback. | Testing frameworks (e.g., JUnit, pytest) |
 
 ### Process Overview
+Referred from [Meta's research](https://arxiv.org/pdf/2402.09171), TestGen-LLM top level architecture.
 
-![Test Refinement](https://s3.us-west-2.amazonaws.com/keploy.io/meta-llm-process-overview.png)
-
-#### Prompt Generation
-![Prompt Generation](https://s3.us-west-2.amazonaws.com/keploy.io/meta-llm-prompt-eng.png)
+<img src="https://s3.us-west-2.amazonaws.com/keploy.io/meta-llm-process-overview.png" width="90%" alt="Test refinement process of unit test generator"/>
 
 ## Prerequisites
 **AI model Setup** - Set the environment variable **export API_KEY=xxxx** to use:
-  - **OpenAI's GPT-4.0** directly **[preferred]**.
+  - **OpenAI's GPT-4o** directly **[preferred]**.
   
 
   - Alternative LLMs via [litellm](https://github.com/BerriAI/litellm?tab=readme-ov-file#quick-start-proxy---cli).
@@ -75,8 +73,8 @@ Install Keploy-gen locally by running the following command:
   curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh
   ```
 
-### →  Setup for Node.js/TypeScript 
-- Set the API key: 
+### ![NodeJS](https://img.shields.io/badge/node.js-6DA55F?style=for-the-badge&logo=node.js&logoColor=white) → Running with Node.js/TypeScript applications
+- Set the API key, as mentioned in pre-requisites above: 
 
   ```shell
   export API_KEY=xxxx
@@ -89,17 +87,31 @@ Install Keploy-gen locally by running the following command:
          "coverageDirectory": "./coverage"
        } 
    ```
-- Generate tests using Keploy:
-   ```bash
-   keploy gen 
-          --testCommand="npm test" 
-          --testDir="test" 
+  ### Usage
+- **Generate tests using Keploy:** 
+  - **For Entire Application** use the following command to generate tests across:
+    
+     ⚠️ **Warning:** Executing this command will generate unit tests for all files in the application. Depending on the size of the codebase, this process may take between 20 minutes to an hour and will incur costs related to LLM usage.
+    ```bash
+    keploy gen \
+          --testCommand="npm test" \
+          --testDir="test" \
           --coverageReportPath="<path to coverage.xml>"
-   ```
+     ```
+    <br/>
 
+  -  **For Smaller Scope Testing:** If you prefer to test a smaller section of your application or to control costs, consider generating tests for a single source and its corresponding test file:
+     ```shell
+      keploy gen \                                                                                                                                     
+                --sourceFilePath="<path to source file>" \
+                --testFilePath="<path to test file for above source file>" \
+                --testCommand="npm test" \
+                --coverageReportPath="<path to coverage.xml>"
+     ```
+    🎉 You should see improved test cases and code-coverage. ✅ Enjoy coding with enhanced unit test coverage! 🫰
 
-### → Setup for Golang 
-- Set the API key:
+### ![Go](https://img.shields.io/badge/go-%2300ADD8.svg?style=for-the-badge&logo=go&logoColor=white) → Running with Golang applications
+- Set the API key, as mentioned in pre-requisites above:
 
   ```shell
   export API_KEY=xxxx
@@ -109,15 +121,32 @@ Install Keploy-gen locally by running the following command:
      go install github.com/axw/gocov/gocov@v1.1.0
      go install github.com/AlekSi/gocov-xml@v1.1.0 
   ```
-- Generate tests using Keploy:
+  ### Usage  
+- **Generate tests using Keploy:**
+  - **For Entire Application** use the following command to generate tests across:
+  
+    ⚠️ **Warning:** Executing this command will generate unit tests for all files in the application. Depending on the size of the codebase, this process may take between 20 minutes to an hour and will incur costs related to LLM usage.
     ```bash
-    keploy gen  
-          --testDir="." 
-          --testCommand="go test -v ./... -coverprofile=coverage.out && gocov convert coverage.out | gocov-xml > coverage.xml" 
-          --coverageReportPath="<path to coverage.xml>"
+    keploy gen \
+              --testDir="." \
+              --testCommand="go test -v ./... -coverprofile=coverage.out && gocov convert coverage.out | gocov-xml > coverage.xml" \
+              --coverageReportPath="<path to coverage.xml>"
     ```
+
+  -  **For Smaller Scope Testing:** If you prefer to test a smaller section of your application or to control costs, consider generating tests for a single source and its corresponding test file:
+     <br/>
+
+     ```shell
+     keploy gen \                                                                                                                                     
+                --sourceFilePath="<path to source file>" \
+                --testFilePath="<path to test file for above source file>" \
+                --testCommand="go test -v ./... -coverprofile=coverage.out && gocov convert coverage.out | gocov-xml > coverage.xml" \
+                --coverageReportPath="<path to coverage.xml>"
+      ```
+    🎉 You should see improved test cases and code-coverage. ✅ Enjoy coding with enhanced unit test coverage! 🫰
+
 ### → Setup for Other Languages
-- Set the API key:
+- Set the API key, as mentioned in pre-requisites above:
 
   ```shell
   export API_KEY=xxxx
@@ -125,10 +154,10 @@ Install Keploy-gen locally by running the following command:
 - Ensure that your unit test report format is Cobertura(it's very common).
 - Generate tests using Keploy:
     ```bash
-    keploy gen 
-          --sourceFilePath="<path to source code file>" 
-          --testFilePath="<path to existing unit test file>" 
-          --testCommand="<cmd to execute unit tests>"
+    keploy gen \
+          --sourceFilePath="<path to source code file>" \
+          --testFilePath="<path to existing unit test file>"  \
+          --testCommand="<cmd to execute unit tests>" \
           --coverageReportPath="<path to cobertura-coverage.xml>"
     ```
 
@@ -136,28 +165,28 @@ Install Keploy-gen locally by running the following command:
 Configure Keploy using command-line flags:
 
 ```bash
-keploy gen 
-           --sourceFilePath "" 
-           --testFilePath "" 
-           --coverageReportPath "coverage.xml" 
-           --testCommand "" 
-           --coverageFormat "cobertura" 
-           --expectedCoverage 100 
-           --maxIterations 5 
-           --testDir "" 
-           --litellmUrl "" 
+keploy gen \
+           --sourceFilePath "" \
+           --testFilePath "" \
+           --coverageReportPath "coverage.xml" \
+           --testCommand "" \
+           --coverageFormat "cobertura" \
+           --expectedCoverage 100 \
+           --maxIterations 5 \
+           --testDir "" \
+           --litellmUrl "" \
            --model "gpt-4o"
 ```
 
 - `sourceFilePath`: Path to the source file for which tests are to be generated.
 - `testFilePath`: Path where the generated tests will be saved.
 - `coverageReportPath`: Path to generate the coverage report.
-- `testCommand`: Command to execute tests and generate the coverage report.
+- `testCommand` (required): Command to execute tests and generate the coverage report.
 - `coverageFormat`: Type of the coverage report (default "cobertura").
 - `expectedCoverage`: Desired coverage percentage (default 100%).
 - `maxIterations`: Maximum number of iterations for refining tests (default 5).
-- `testFolder`: Directory where tests will be written.
-- `litellm`: Set to true if using litellm for model integration.
+- `testDir`: Directory where tests will be written.
+- `litellmUrl`: Set to true if using litellm for model integration.
 - `apiBaseUrl`: Base URL for the litellm proxy.
 - `model`: Specifies the AI model to use (default "gpt-4o").
 
@@ -176,10 +205,20 @@ Reach out to us. We're here to answer!
 
 Other language may be supported, we've not tested them yet. If your **coverage reports** are of **Cobertura format** then you should be able to use keploy-gen in any language.
 
-## Support
+## Dev Support
 
 Keploy-gen is not just a project but an attempt to make developers life easier testing applications.
 It aims to simplify the creation and maintenance of tests, ensuring high coverage, and adapts to the complexity of modern software development.
+
+#### Prompt Generation
+Referred from [Meta's research](https://arxiv.org/pdf/2402.09171), the four primary prompts used in the deployment for the December 2023 Instagram and Facebook app test-a-thons
+
+| Prompt Name            | Template                                                                                                                                                                        |
+|------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| extend_test            | Here is a Kotlin unit test class: {`existing_test_class`}. Write an extended version of the test class that includes additional tests to cover some extra corner cases.           |
+| extend_coverage        | Here is a Kotlin unit test class and the class that it tests: {`existing_test_class`} {`class_under_test`}. Write an extended version of the test class that includes additional unit tests that will increase the test coverage of the class under test. |
+| corner_cases           | Here is a Kotlin unit test class and the class that it tests: {`existing_test_class`} {`class_under_test`}. Write an extended version of the test class that includes additional unit tests that will cover corner cases missed by the original and will increase the test coverage of the class under test. |
+| statement_to_complete  | Here is a Kotlin class under test {`class_under_test`} This class under test can be tested with this Kotlin unit test class {`existing_test_class`}. Here is an extended version of the unit test class that includes additional unit test cases that will cover methods, edge cases, corner cases, and other features of the class under test that were missed by the original unit test class: |
 
 Limitation: This project currently doesn't generate quality fresh tests if there are no existing tests to learn from.  
 
