@@ -279,6 +279,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 						logger.Info("PacketTypes", zap.Any("PacketTypes", reqGoingOn.PacketTypes))
 						fmt.Println("REQUEST GOING ON - ", reqGoingOn)
 						logger.Info("ConnectionId-", zap.String("ConnectionId", ConnectionID))
+						logger.Info("BASE_64", zap.String("BASE_64", base64.StdEncoding.EncodeToString(requestBuffers[0])))
 
 					}
 					logger.Info("Matched In Binary Matching for Unsorted", zap.String("mock", matchedMock.Name), zap.Any("PacketTypes", reqGoingOn.PacketTypes))
