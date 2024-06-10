@@ -16,7 +16,7 @@ RUN go mod download
 COPY . /app
 
 # Build the keploy binary
-RUN go build -tags=viper_bind_struct -ldflags="-X main.dsn=$SENTRY_DSN_DOCKER -X main.version=$VERSION" -o keploy .
+RUN go build -race -tags=viper_bind_struct -ldflags="-X main.dsn=$SENTRY_DSN_DOCKER -X main.version=$VERSION" -o keploy .
 
 # === Runtime Stage ===
 FROM debian:bookworm-slim
