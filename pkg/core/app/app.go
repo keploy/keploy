@@ -465,10 +465,10 @@ func (a *App) run(ctx context.Context) models.AppError {
 	var err error
 	cmdErr := utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second)
 	if cmdErr.Err != nil {
-		switch cmdErr.Source {
-		case utils.Start:
+		switch cmdErr.Type {
+		case utils.Init:
 			return models.AppError{AppErrorType: models.ErrCommandError, Err: cmdErr.Err}
-		case utils.Wait:
+		case utils.Runtime:
 			err = cmdErr.Err
 		}
 	}

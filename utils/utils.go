@@ -572,17 +572,17 @@ func SetCoveragePath(logger *zap.Logger, goCovPath string) (string, error) {
 	return goCovPath, nil
 }
 
-type CmdErrorSource string
+type ErrType string
 
-// CmdErrorSource constants to get the source from which the error occurred, i.e., start or wait
+// ErrType constants to get the type of error, during init or runtime
 const (
-	Start CmdErrorSource = "start"
-	Wait  CmdErrorSource = "wait"
+	Init    ErrType = "init"
+	Runtime ErrType = "runtime"
 )
 
 type CmdError struct {
-	Source CmdErrorSource
-	Err    error
+	Type ErrType
+	Err  error
 }
 
 func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration) CmdError {
@@ -615,12 +615,12 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 
 	err := cmd.Start()
 	if err != nil {
-		return CmdError{Source: Start, Err: err}
+		return CmdError{Type: Init, Err: err}
 	}
 
 	err = cmd.Wait()
 	if err != nil {
-		return CmdError{Source: Wait, Err: err}
+		return CmdError{Type: Runtime, Err: err}
 	}
 
 	return CmdError{}
