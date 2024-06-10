@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/cli/provider"
@@ -32,6 +33,7 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 		return nil
 	}
 
+	fmt.Println("This is the value of registered", Registered)
 	for _, cmd := range Registered {
 		c := cmd(ctx, logger, conf, svcFactory, cmdConfigurator)
 		rootCmd.AddCommand(c)

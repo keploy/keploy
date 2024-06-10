@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -30,6 +31,19 @@ import (
 )
 
 var WarningSign = "\U000026A0"
+
+var TemplatizedValues = map[string]interface{}{}
+
+func ReadTempValues(testSet string) {
+	data, err := os.ReadFile("keploy/" + testSet + "/templatized.json")
+	if err != nil {
+		return
+	}
+	err = json.Unmarshal(data, &TemplatizedValues)
+	if err != nil {
+		log.Fatal("Error unmarshaling templatized values into the map", err)
+	}
+}
 
 func ReplaceHostToIP(currentURL string, ipAddress string) (string, error) {
 	// Parse the current URL

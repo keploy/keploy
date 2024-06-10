@@ -11,6 +11,7 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/service/replay"
 
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -359,6 +360,7 @@ func (r *Recorder) ReRecord(ctx context.Context, appID uint64) error {
 	}
 
 	allTestCasesRecorded := true
+	utils.ReadTempValues(r.config.ReRecord)
 	for _, tc := range tcs {
 		if utils.IsDockerKind(cmdType) {
 
@@ -376,12 +378,13 @@ func (r *Recorder) ReRecord(ctx context.Context, appID uint64) error {
 			r.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HTTPReq.URL))
 		}
 
-		resp, err := pkg.SimulateHTTP(ctx, *tc, r.config.Record.ReRecord, r.logger, r.config.Test.APITimeout)
+		resp, err := pkg.SimulateHTTP(ctx, tc, r.config.Record.ReRecord, r.logger, r.config.Test.APITimeout)
 		if err != nil {
 			r.logger.Error("Failed to simulate HTTP request", zap.Error(err))
 			allTestCasesRecorded = false
 			continue // Proceed with the next command
 		}
+		replay.Match(tc, resp, nil, false, r.logger)
 
 		r.logger.Debug("Re-recorded testcases successfully", zap.String("curl", tc.Curl), zap.Any("response", (resp)))
 

@@ -126,12 +126,12 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 		return tools.NewTools(n.logger, tel), nil
 	case "gen":
 		return utgen.NewUnitTestGenerator(n.cfg.Gen.SourceFilePath, n.cfg.Gen.TestFilePath, n.cfg.Gen.CoverageReportPath, n.cfg.Gen.TestCommand, n.cfg.Gen.TestDir, n.cfg.Gen.CoverageFormat, n.cfg.Gen.DesiredCoverage, n.cfg.Gen.MaxIterations, n.cfg.Gen.Model, n.cfg.Gen.APIBaseURL, n.cfg, tel, n.logger)
-	case "record", "test", "mock", "normalize":
+	case "record", "test", "mock", "normalize", "templatize":
 		commonServices := n.GetCommonServices(n.cfg)
 		if cmd == "record" {
 			return record.New(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, n.cfg), nil
 		}
-		if cmd == "test" || cmd == "normalize" {
+		if cmd == "test" || cmd == "normalize" || cmd == "templatize"{
 			return replay.NewReplayer(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, n.cfg), nil
 		}
 		return nil, errors.New("invalid command")

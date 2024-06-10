@@ -13,8 +13,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"encoding/json"
 
 	"go.keploy.io/server/v2/pkg/models"
+	"github.com/hoisie/mustache"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -77,9 +79,18 @@ func IsTime(stringDate string) bool {
 	return false
 }
 
-func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HTTPResp, error) {
+func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HTTPResp, error) {
 	var resp *models.HTTPResp
-
+	// convert testcase to string and render the template values.
+	testCaseStr, err := json.Marshal(tc)
+	if err != nil {
+		logger.Error("failed to marshal the testcase")
+	}
+	testCaseStr = []byte(mustache.Render(string(testCaseStr), utils.TemplatizedValues))
+	err = json.Unmarshal([]byte(testCaseStr), &tc)
+	if err != nil {
+		logger.Error("failed to unmarshal the testcase")
+	}
 	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, bytes.NewBufferString(tc.HTTPReq.Body))
 	if err != nil {

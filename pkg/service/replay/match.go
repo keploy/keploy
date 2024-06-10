@@ -25,7 +25,9 @@ import (
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
+	// "github.com/hoisie/mustache"
 )
+
 
 type ValidatedJSON struct {
 	expected    interface{} // The expected JSON
@@ -39,14 +41,13 @@ type JSONComparisonResult struct {
 	differences []string // Lists the keys or indices of values that are not the same
 }
 
-func match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger) (bool, *models.Result) {
+func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger) (bool, *models.Result) {
 	bodyType := models.BodyTypePlain
 	if json.Valid([]byte(actualResponse.Body)) {
 		bodyType = models.BodyTypeJSON
 	}
 	pass := true
 	hRes := &[]models.HeaderResult{}
-
 	res := &models.Result{
 		StatusCode: models.IntResult{
 			Normal:   false,
@@ -161,12 +162,56 @@ func match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				logDiffs.PushHeaderDiff(fmt.Sprint(j), fmt.Sprint(actualHeader[i]), i, headerNoise)
 			}
 		}
-
+		utils.ReadTempValues("test-set-0")
 		if !res.BodyResult[0].Normal {
 			if json.Valid([]byte(actualResponse.Body)) {
 				patch, err := jsondiff.Compare(tc.HTTPResp.Body, actualResponse.Body)
 				if err != nil {
 					logger.Warn("failed to compute json diff", zap.Error(err))
+				}
+				// Checking for templatized values.
+				for _, val := range patch {
+					// Parse the value in map.
+					stringVal, ok := val.OldValue.(string)
+					if ok {
+						// Convert it to a map.
+						var resultMap map[string]interface{}
+						err := json.Unmarshal([]byte(stringVal), &resultMap)
+						if err != nil {
+							fmt.Println("failed to unmarshal it to a map")
+							break
+						}
+						for resKey, val1 := range resultMap {
+							// Check if this val is in the templatized values.
+							for tempKey, tempVal := range utils.TemplatizedValues {
+								fmt.Println("This is the new val1", val1)
+								if val1 == tempVal {
+									// Get the new value for this and update it in the templatized values.
+									newValStr := val.Value.(string)
+									var newResultMap map[string]interface{}
+									err := json.Unmarshal([]byte(newValStr), &newResultMap)
+									if err != nil {
+										fmt.Println("failed to unmarshal new values to a map")
+										break
+									}
+									utils.TemplatizedValues[tempKey] = newResultMap[resKey]
+									fmt.Println("This is the new result match", newResultMap[resKey])
+								}
+							}
+							stringVal, ok := val1.(map[string]interface{})
+							fmt.Println("ok when converting to string", ok)
+							if ok {
+								for _, val2 := range stringVal {
+									for _, tempVal := range utils.TemplatizedValues {
+										if val2 == tempVal {
+											fmt.Println("This is the value of the templatized value:", val2)
+										}
+									}
+								}
+							}
+
+						}
+					}
 				}
 				for _, op := range patch {
 					if jsonComparisonResult.matches {
@@ -174,7 +219,6 @@ func match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 						logDiffs.PushFooterDiff(strings.Join(jsonComparisonResult.differences, ", "))
 					}
 					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
-
 				}
 			} else {
 				logDiffs.PushBodyDiff(fmt.Sprint(tc.HTTPResp.Body), fmt.Sprint(actualResponse.Body), bodyNoise)

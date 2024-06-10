@@ -10,6 +10,8 @@ import (
 type Config struct {
 	Path                  string       `json:"path" yaml:"path" mapstructure:"path" `
 	AppID                 string       `json:"appId" yaml:"appId" mapstructure:"appId"`
+	ReRecord              string       `json:"rerecord" yaml:"rerecord" mapstructure:"rerecord"`
+	Templatize            Templatize   `json:"templatize" yaml:"templatize" mapstructure:"templatize"`
 	Command               string       `json:"command" yaml:"command" mapstructure:"command"`
 	Port                  uint32       `json:"port" yaml:"port" mapstructure:"port"`
 	DNSPort               uint32       `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
@@ -45,6 +47,9 @@ type UtGen struct {
 	TestDir            string  `json:"testDir" yaml:"testDir" mapstructure:"testDir"`
 	APIBaseURL         string  `json:"litellmUrl" yaml:"litellmUrl" mapstructure:"litellmUrl"`
 	Model              string  `json:"model" yaml:"model" mapstructure:"model"`
+}
+type Templatize struct {
+	TestSets []string `json:"testSets" yaml:"testSets" mapstructure:"testSets"`
 }
 
 type Record struct {

@@ -32,6 +32,7 @@ type Service interface {
 	GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error)
 	RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError
 	Normalize(ctx context.Context) error
+	// Templatize(ctx context.Context, testSet string) error
 }
 
 type TestDB interface {
