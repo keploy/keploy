@@ -4,7 +4,7 @@ source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Start mongo before starting keploy.
 docker network create keploy-network
-docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
+docker run --name mongo --rm --net keploy-network -p 27017:27017 -d mongo
 
 # Set up environment
 rm -rf keploy/  # Clean up old test data
@@ -65,7 +65,7 @@ done
 
 # Testing phase
 test_container="flashApp_test"
-sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p8080:8080 --net keploy-network --name {$test_container} flask-app:1.0" --containerName "$test_container" --apiTimeout 60 --delay 20 --generateGithubActions=false &> "${test_container}.txt"
+sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p8080:8080 --net keploy-network --name $test_container flask-app:1.0" --containerName "{$test_container}" --apiTimeout 60 --delay 20 --generateGithubActions=false &> "${test_container}.txt"
 
 if grep "WARNING: DATA RACE" "${test_container}.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
