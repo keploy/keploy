@@ -137,8 +137,13 @@ func RunCommand(command string, cwd string) (stdout string, stderr string, exitC
 
 	// Capture the stdout and stderr
 	var outBuf, errBuf bytes.Buffer
+
+	// Set the output of the command
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
+
+	// cmd.Stdout = os.Stdout
+	// cmd.Stderr = os.Stderr
 
 	// Run the command
 	err = cmd.Run()

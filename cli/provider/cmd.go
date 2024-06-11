@@ -197,8 +197,9 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Int("expectedCoverage", 100, "The desired coverage percentage.")
 		cmd.Flags().Int("maxIterations", 5, "The maximum number of iterations.")
 		cmd.Flags().String("testDir", "", "Path to the test directory.")
-		cmd.Flags().String("litellmUrl", "", "Base URL for the AI model.")
+		cmd.Flags().String("llmBaseUrl", "", "Base URL for the AI model.")
 		cmd.Flags().String("model", "gpt-4o", "Model to use for the AI.")
+		cmd.Flags().String("llmApiVersion", "", "API version of the llm")
 		err := cmd.MarkFlagRequired("testCommand")
 		if err != nil {
 			errMsg := "failed to mark testCommand as required flag"

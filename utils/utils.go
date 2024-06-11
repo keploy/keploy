@@ -520,8 +520,6 @@ func GetAbsPath(path string) (string, error) {
 
 // makeDirectory creates a directory if not exists with all user access
 func makeDirectory(path string) error {
-	oldUmask := syscall.Umask(0)
-	defer syscall.Umask(oldUmask)
 	err := os.MkdirAll(path, 0777)
 	if err != nil {
 		return err
@@ -653,16 +651,16 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 }
 
 func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
-	err := syscall.Kill(pid, sig)
-	if err != nil {
-		// ignore the ESRCH error as it means the process is already dead
-		if errno, ok := err.(syscall.Errno); ok && errno == syscall.ESRCH {
-			return nil
-		}
-		logger.Error("failed to send signal to process", zap.Int("pid", pid), zap.Error(err))
-		return err
-	}
-	logger.Debug("signal sent to process successfully", zap.Int("pid", pid), zap.String("signal", sig.String()))
+	// err := syscall.Kill(pid, sig)
+	// if err != nil {
+	// 	// ignore the ESRCH error as it means the process is already dead
+	// 	if errno, ok := err.(syscall.Errno); ok && errno == syscall.ESRCH {
+	// 		return nil
+	// 	}
+	// 	logger.Error("failed to send signal to process", zap.Int("pid", pid), zap.Error(err))
+	// 	return err
+	// }
+	// logger.Debug("signal sent to process successfully", zap.Int("pid", pid), zap.String("signal", sig.String()))
 
 	return nil
 }

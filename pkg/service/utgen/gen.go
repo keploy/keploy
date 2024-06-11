@@ -46,7 +46,7 @@ type UnitTestGenerator struct {
 	tel           Telemetry
 }
 
-func NewUnitTestGenerator(srcPath, testPath, reportPath, cmd, dir, coverageFormat string, desiredCoverage float64, maxIterations int, model string, apiBaseURL string, _ *config.Config, tel Telemetry, logger *zap.Logger) (*UnitTestGenerator, error) {
+func NewUnitTestGenerator(srcPath, testPath, reportPath, cmd, dir, coverageFormat string, desiredCoverage float64, maxIterations int, model string, apiBaseURL string, apiVersion string, _ *config.Config, tel Telemetry, logger *zap.Logger) (*UnitTestGenerator, error) {
 	generator := &UnitTestGenerator{
 		srcPath:       srcPath,
 		testPath:      testPath,
@@ -55,7 +55,7 @@ func NewUnitTestGenerator(srcPath, testPath, reportPath, cmd, dir, coverageForma
 		maxIterations: maxIterations,
 		logger:        logger,
 		tel:           tel,
-		ai:            NewAIClient(model, apiBaseURL),
+		ai:            NewAIClient(model, apiBaseURL, apiVersion),
 		cov: &Coverage{
 			Path:    reportPath,
 			Format:  coverageFormat,

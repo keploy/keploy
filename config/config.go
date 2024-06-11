@@ -43,8 +43,9 @@ type UtGen struct {
 	DesiredCoverage    float64 `json:"expectedCoverage" yaml:"expectedCoverage" mapstructure:"expectedCoverage"`
 	MaxIterations      int     `json:"maxIterations" yaml:"maxIterations" mapstructure:"maxIterations"`
 	TestDir            string  `json:"testDir" yaml:"testDir" mapstructure:"testDir"`
-	APIBaseURL         string  `json:"litellmUrl" yaml:"litellmUrl" mapstructure:"litellmUrl"`
+	APIBaseURL         string  `json:"llmBaseUrl" yaml:"llmBaseUrl" mapstructure:"llmBaseUrl"`
 	Model              string  `json:"model" yaml:"model" mapstructure:"model"`
+	APIVersion         string  `json:"llmApiVersion" yaml:"llmApiVersion" mapstructure:"llmApiVersion"`
 }
 
 type Record struct {

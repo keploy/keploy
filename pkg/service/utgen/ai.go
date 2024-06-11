@@ -15,8 +15,9 @@ import (
 )
 
 type AIClient struct {
-	Model   string
-	APIBase string
+	Model      string
+	APIBase    string
+	APIVersion string
 }
 
 type Prompt struct {
@@ -30,7 +31,6 @@ type CompletionParams struct {
 	MaxTokens   int       `json:"max_tokens"`
 	Stream      bool      `json:"stream"`
 	Temperature float32   `json:"temperature"`
-	APIBase     string    `json:"api_base,omitempty"`
 }
 
 type Message struct {
@@ -66,10 +66,11 @@ type Delta struct {
 	Content string `json:"content"`
 }
 
-func NewAIClient(model, apiBase string) *AIClient {
+func NewAIClient(model, apiBase, apiVersion string) *AIClient {
 	return &AIClient{
-		Model:   model,
-		APIBase: apiBase,
+		Model:      model,
+		APIBase:    apiBase,
+		APIVersion: apiVersion,
 	}
 }
 
@@ -102,10 +103,9 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 	}
 
 	if ai.APIBase != "" {
-		completionParams.APIBase = ai.APIBase
 		apiBaseURL = ai.APIBase
 	} else {
-		apiBaseURL = "https://api.openai.com/"
+		apiBaseURL = "https://api.openai.com/v1"
 	}
 
 	requestBody, err := json.Marshal(completionParams)
@@ -113,7 +113,12 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 		return "", 0, 0, fmt.Errorf("error marshalling request body: %v", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", apiBaseURL+"/v1/chat/completions", bytes.NewBuffer(requestBody))
+	queryParams := ""
+	if ai.APIVersion != "" {
+		queryParams = "?api-version=" + ai.APIVersion
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", apiBaseURL+"/chat/completions"+queryParams, bytes.NewBuffer(requestBody))
 	if err != nil {
 		return "", 0, 0, fmt.Errorf("error creating request: %v", err)
 	}
@@ -121,6 +126,7 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 	apiKey := os.Getenv("API_KEY")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("api-key", apiKey)
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
