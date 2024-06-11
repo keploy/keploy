@@ -58,9 +58,9 @@ send_request(){
 
 for i in {1..2}; do
     # Start keploy in record mode.
-    container_name="ginApp_${i}"
+    container_name="nodeApp_${i}"
     send_request $container_name &
-    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p 8000:8000 --name nodeMongoApp --network keploy-network node-app:1.0" --containerName nodeMongoApp --generateGithubActions=false &> "${container_name}.txt"
+    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p 8000:8000 --name "${container_name}" --network keploy-network node-app:1.0" --containerName "${container_name}" --generateGithubActions=false &> "${container_name}.txt"
 
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
@@ -74,7 +74,7 @@ done
 
 # Start keploy in test mode.
 test_container="nodeApp_test"
-sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p 8000:8000 --name nodeMongoApp --network keploy-network node-app:1.0" --containerName nodeMongoApp --apiTimeout 30 --delay 30 --generateGithubActions=false &> "${test_container}.txt"
+sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p 8000:8000 --name {$test_container} --network keploy-network node-app:1.0" --containerName "$test_container" --apiTimeout 30 --delay 30 --generateGithubActions=false &> "${test_container}.txt"
 
 # Monitor Docker logs for race conditions during testing.
 if grep "WARNING: DATA RACE" "${test_container}.txt"; then

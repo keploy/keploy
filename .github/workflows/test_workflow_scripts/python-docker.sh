@@ -2,8 +2,11 @@
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
+# Start mongo before starting keploy.
+docker network create keploy-network
+docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
+
 # Set up environment
-docker network create backend
 rm -rf keploy/  # Clean up old test data
 docker build -t flask-app:1.0 .  # Build the Docker image
 
@@ -46,9 +49,10 @@ send_request(){
 
 # Record sessions
 for i in {1..2}; do
-    container_name="ginApp_${i}"
+    container_name="flaskApp_${i}"
     send_request $container_name &
-    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker compose up" --containerName flask-app --buildDelay 40 --generateGithubActions=false  &> "${container_name}.txt"
+    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p6000:6000 --net keploy-network --rm --name ${container_name} flask-app:1.0" --containerName "${container_name}" --generateGithubActions=false &> "${container_name}.txt"
+
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
         cat "${container_name}.txt"
@@ -60,8 +64,8 @@ for i in {1..2}; do
 done
 
 # Testing phase
-test_container="pythonApp_test"
-sudo -E env PATH=$PATH ./../../keployv2 test -c "docker compose up" --containerName flask-app --buildDelay 40 --apiTimeout 60 --delay 20 --generateGithubActions=false &> "${test_container}.txt"
+test_container="flashApp_test"
+sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p8080:8080 --net keploy-network --name {$test_container} flask-app:1.0" --containerName "$test_container" --apiTimeout 60 --delay 20 --generateGithubActions=false &> "${test_container}.txt"
 
 if grep "WARNING: DATA RACE" "${test_container}.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
