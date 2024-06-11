@@ -2,9 +2,9 @@ package mysql
 
 import (
 	"context"
+	"io"
 	"net"
 	"time"
-	"io"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/utils"
@@ -70,10 +70,10 @@ func recordMySQLMessage(_ context.Context, mysqlRequests []models.MySQLRequest, 
 		Kind:    models.SQL,
 		Name:    name,
 		Spec: models.MockSpec{
-			Metadata:       meta,
-			MySQLRequests:  mysqlRequests,
-			MySQLResponses: mysqlResponses,
-			Created:        time.Now().Unix(),
+			Metadata:         meta,
+			MySQLRequests:    mysqlRequests,
+			MySQLResponses:   mysqlResponses,
+			Created:          time.Now().Unix(),
 			ReqTimestampMock: reqTimestampMock,
 			ResTimestampMock: resTimestampMock,
 		},
