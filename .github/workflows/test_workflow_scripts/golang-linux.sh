@@ -31,7 +31,6 @@ go build -o ginApp
 
 
 send_request(){
-    pid=$(pgrep keploy)
     sleep 10
     app_started=false
     while [ "$app_started" = false ]; do
@@ -65,6 +64,9 @@ send_request(){
 
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
+    pid=$(pgrep keploy)
+    echo "$pid Keploy PID" 
+    echo "Killing keploy"
     sudo kill $pid
 }
 
@@ -79,6 +81,7 @@ for i in {1..2}; do
       exit 1
     fi
     sleep 5
+    wait
     echo "Recorded test case and mocks for iteration ${i}"
 done
 

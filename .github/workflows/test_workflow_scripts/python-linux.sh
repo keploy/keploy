@@ -28,7 +28,6 @@ sleep 5  # Allow time for configuration changes
 
 
 send_request(){
-    pid=$(pgrep keploy)
     sleep 10
     app_started=false
     while [ "$app_started" = false ]; do
@@ -54,6 +53,9 @@ send_request(){
     curl --location 'http://127.0.0.1:8000/user/'
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
+    pid=$(pgrep keploy)
+    echo "$pid Keploy PID" 
+    echo "Killing keploy"
     sudo kill $pid
 }
 
@@ -68,6 +70,7 @@ for i in {1..2}; do
         exit 1
     fi
     sleep 5
+    wait
     echo "Recorded test case and mocks for iteration ${i}"
 done
 

@@ -10,7 +10,6 @@ sed -i "s/mongoDb:27017/localhost:27017/" "src/db/connection.js"
 rm -rf keploy/
 
 send_request(){
-    pid=$(pgrep keploy)
     sleep 10
     app_started=false
     while [ "$app_started" = false ]; do
@@ -26,6 +25,9 @@ send_request(){
     curl -X GET http://localhost:8000/students
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
+    pid=$(pgrep keploy)
+    echo "$pid Keploy PID" 
+    echo "Killing keploy"
     sudo kill $pid
 }
 
@@ -40,6 +42,7 @@ for i in {1..2}; do
         exit 1
     fi
     sleep 5
+    wait
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
