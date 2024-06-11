@@ -394,9 +394,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var loopErr error
 	testSet, err := r.TestSetConf.Read(ctx, testSetID)
 	if err != nil {
-		utils.LogError(r.logger, err, "failed to read test set config")
+		utils.TemplatizedValues = map[string]interface{}{}
+	} else {
+		utils.TemplatizedValues = testSet.Template
 	}
-	utils.TemplatizedValues = testSet.Template
 	for _, testCase := range testCases {
 
 		if _, ok := selectedTests[testCase.Name]; !ok && len(selectedTests) != 0 {
