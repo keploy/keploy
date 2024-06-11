@@ -26,15 +26,19 @@ config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"header": {"Allow":[]}}/' "$config_file"
 sleep 5  # Allow time for configuration changes
 
-# Function to wait for the application to become responsive
-wait_for_app() {
-    while ! curl --silent --location 'http://127.0.0.1:8000/'; do
-        sleep 3  # Check every 3 seconds
-    done
-}
 
-# Function to perform API calls
-perform_api_calls() {
+send_request(){
+    pid=$(pgrep keploy)
+    sleep 10
+    app_started=false
+    while [ "$app_started" = false ]; do
+        if curl -X GET http://127.0.0.1:8000/; then
+            app_started=true
+        fi
+        sleep 3 # wait for 3 seconds before checking again.
+    done
+    echo "App started"
+    # Start making curl calls to record the testcases and mocks.
     curl --location 'http://127.0.0.1:8000/user/' --header 'Content-Type: application/json' --data-raw '{
         "name": "Jane Smith",
         "email": "jane.smith@example.com",
@@ -48,22 +52,34 @@ perform_api_calls() {
         "website": "www.johndoe.com"
     }'
     curl --location 'http://127.0.0.1:8000/user/'
+    # Wait for 10 seconds for keploy to record the tcs and mocks.
+    sleep 10
+    sudo kill $pid
 }
 
 # Record and Test cycles
 for i in {1..2}; do
-    sudo -E env PATH="$PATH" ./../../../keployv2 record -c "python3 manage.py runserver" --generateGithubActions=false &> record_logs.txt &
-    wait_for_app
-    perform_api_calls
-    sleep 5  # Wait for recording to complete
-    sudo kill $(pgrep keploy)
-    sleep 5  # Allow keploy to terminate gracefully
+    app_name="flaskApp_${i}"
+    send_request &
+    sudo -E env PATH="$PATH" ./../../../keployv2 record -c "python3 manage.py runserver" --generateGithubActions=false&> "${app_name}.txt"
+    if grep "WARNING: DATA RACE" "${app_name}.txt"; then
+        echo "Race condition detected in recording, stopping pipeline..."
+        cat "${app_name}.txt"
+        exit 1
+    fi
+    sleep 5
+    echo "Recorded test case and mocks for iteration ${i}"
 done
 
 # Testing phase
 sudo -E env PATH="$PATH" ./../../../keployv2 test -c "python3 manage.py runserver" --delay 10 --generateGithubActions=false &> test_logs.txt
 
-grep -q "race condition detected" test_logs.txt && echo "Race condition detected in testing, stopping tests..." && exit 1
+if grep "WARNING: DATA RACE" "test_logs.txt"; then
+    echo "Race condition detected in test, stopping pipeline..."
+    cat "test_logs.txt"
+    exit 1
+fi
+
 all_passed=true
 
 for i in {0..1}
