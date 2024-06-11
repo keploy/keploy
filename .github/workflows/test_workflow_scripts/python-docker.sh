@@ -12,8 +12,16 @@ sudo -E env PATH=$PATH ./../../keployv2 config --generate
 sed -i 's/global: {}/global: {"header": {"Allow":[]}}/' "./keploy.yml"
 sleep 5  # Allow time for configuration to apply
 
-# Function to wait for the app to start
-wait_for_app_to_start() {
+
+container_kill() {
+    local container_name=$1
+    docker rm -f keploy-v2
+    docker rm -f "${container_name}"
+}
+
+send_request(){
+    local container_name=$1
+    sleep 10
     app_started=false
     while [ "$app_started" = false ]; do
         if curl --silent http://localhost:6000/students; then
@@ -22,31 +30,44 @@ wait_for_app_to_start() {
             sleep 3  # Check every 3 seconds
         fi
     done
-}
-
-# Function to perform API calls
-perform_api_calls() {
+    # Start making curl calls to record the testcases and mocks.
     curl -X POST -H "Content-Type: application/json" -d '{"student_id": "12345", "name": "John Doe", "age": 20}' http://localhost:6000/students
     curl -X POST -H "Content-Type: application/json" -d '{"student_id": "12346", "name": "Alice Green", "age": 22}' http://localhost:6000/students
     curl http://localhost:6000/students
     curl -X PUT -H "Content-Type: application/json" -d '{"name": "Jane Smith", "age": 21}' http://localhost:6000/students/12345
     curl http://localhost:6000/students
     curl -X DELETE http://localhost:6000/students/12345
+
+    # Wait for 5 seconds for keploy to record the tcs and mocks.
+    sleep 5
+    container_kill $container_name
+    wait
 }
 
 # Record sessions
 for i in {1..2}; do
-    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker compose up" --containerName flask-app --buildDelay 40 --generateGithubActions=false &> record_logs.txt &
-    wait_for_app_to_start
-    perform_api_calls
-    sleep 5  # Wait for keploy to record
-    docker rm -f keploy-v2 flask-app
+    container_name="ginApp_${i}"
+    send_request $container_name &
+    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker compose up" --containerName flask-app --buildDelay 40 --generateGithubActions=false  &> "${container_name}.txt"
+    if grep "WARNING: DATA RACE" "${container_name}.txt"; then
+        echo "Race condition detected in recording, stopping pipeline..."
+        cat "${container_name}.txt"
+        exit 1
+    fi
+    sleep 5
+
+    echo "Recorded test case and mocks for iteration ${i}"
 done
 
 # Testing phase
-sudo -E env PATH=$PATH ./../../keployv2 test -c "docker compose up" --containerName flask-app --buildDelay 40 --apiTimeout 60 --delay 20 --generateGithubActions=false &> test_logs.txt
+test_container="pythonApp_test"
+sudo -E env PATH=$PATH ./../../keployv2 test -c "docker compose up" --containerName flask-app --buildDelay 40 --apiTimeout 60 --delay 20 --generateGithubActions=false &> "${test_container}.txt"
 
-grep -q "race condition detected" test_logs.txt && echo "Race condition detected in testing, stopping tests..." && exit 1
+if grep "WARNING: DATA RACE" "${test_container}.txt"; then
+    echo "Race condition detected in test, stopping pipeline..."
+    cat "${test_container}.txt"
+    exit 1
+fi
 
 # Collect and evaluate test results
 report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"

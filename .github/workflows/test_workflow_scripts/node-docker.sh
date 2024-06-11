@@ -73,6 +73,7 @@ for i in {1..2}; do
 done
 
 # Start keploy in test mode.
+test_container="nodeApp_test"
 sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p 8000:8000 --name nodeMongoApp --network keploy-network node-app:1.0" --containerName nodeMongoApp --apiTimeout 30 --delay 30 --generateGithubActions=false &> "${test_container}.txt"
 
 # Monitor Docker logs for race conditions during testing.
