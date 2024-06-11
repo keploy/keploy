@@ -28,7 +28,10 @@ for i in {1..2}; do
     sleep 5
 
     # Monitor Docker logs in the background and check for race conditions.
-    grep -q "WARNING: DATA RACE" "${container_name}.txt" && echo "Race condition detected in recording, stopping tests..." && exit 1 &
+    if grep "WARNING: DATA RACE" "${container_name}.txt"; then
+    echo "Race condition detected in recording, stopping pipeline..."
+    exit 1
+    fi &
 
     # Wait for the application to start.
     app_started=false
