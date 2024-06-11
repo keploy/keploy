@@ -141,7 +141,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 						case initMock.Spec.PostgresRequests[requestIndex].Identfier == "StartupRequest" && isStartupPacket(reqBuff) && initMock.Spec.PostgresRequests[requestIndex].Payload != "AAAACATSFi8=" && initMock.Spec.PostgresResponses[requestIndex].AuthType == 10:
 							logger.Debug("CHANGING TO MD5 for Response", zap.String("mock", initMock.Name), zap.String("Req", bufStr))
 							initMock.Spec.PostgresResponses[requestIndex].AuthType = 5
-							err := mockDb.FlagMockAsUsed(&initMock)
+							err := mockDb.FlagMockAsUsed(initMock)
 							if err != nil {
 								logger.Error("failed to flag mock as used", zap.Error(err))
 							}
@@ -204,7 +204,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 									Value: "Etc/UTC",
 								},
 							}
-							err := mockDb.FlagMockAsUsed(&initMock)
+							err := mockDb.FlagMockAsUsed(initMock)
 							if err != nil {
 								logger.Error("failed to flag mock as used", zap.Error(err))
 							}
@@ -284,7 +284,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 						continue
 					}
 				} else {
-					err := mockDb.FlagMockAsUsed(matchedMock)
+					err := mockDb.FlagMockAsUsed(*matchedMock)
 					if err != nil {
 						logger.Error("failed to flag mock as used", zap.Error(err))
 					}
