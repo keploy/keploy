@@ -19,62 +19,70 @@ sudo rm -rf keploy/
 docker cp ./src/main/resources/db/postgresql/initDB.sql mypostgres:/initDB.sql
 docker exec mypostgres psql -U petclinic -d petclinic -f /initDB.sql
 
+send_request(){
+    pid=$(pgrep keploy)
+    sleep 10
+    app_started=false
+    while [ "$app_started" = false ]; do
+        if curl -X GET http://localhost:9966/petclinic/api/pettypes; then
+            app_started=true
+        fi
+        sleep 3 # wait for 3 seconds before checking again.
+    done
+    echo "App started"
+    # Start making curl calls to record the testcases and mocks.
+    curl -X GET http://localhost:9966/petclinic/api/pettypes
+
+    curl --request POST \
+    --url http://localhost:9966/petclinic/api/pettypes \
+    --header 'content-type: application/json' \
+    --data '{
+        "name":"John Doe"}'
+
+    curl -X GET http://localhost:9966/petclinic/api/pettypes
+
+    curl --request POST \
+    --url http://localhost:9966/petclinic/api/pettypes \
+    --header 'content-type: application/json' \
+    --data '{
+        "name":"Alice Green"}'
+
+    curl -X GET http://localhost:9966/petclinic/api/pettypes
+
+    curl --request DELETE \
+    --url http://localhost:9966/petclinic/api/pettypes/1
+
+    curl -X GET http://localhost:9966/petclinic/api/pettypes
+
+    # Wait for 10 seconds for keploy to record the tcs and mocks.
+    sleep 10
+    sudo kill $pid
+}
+
 for i in {1..2}; do
 # Start keploy in record mode.
-mvn clean install -Dmaven.test.skip=true
-sudo -E env PATH=$PATH ./../../../keployv2 record -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --generateGithubActions=false &> record_logs.txt &
-
-# Wait for the application to start.
-app_started=false
-while [ "$app_started" = false ]; do
-    if curl -X GET http://localhost:9966/petclinic/api/pettypes; then
-        app_started=true
+    mvn clean install -Dmaven.test.skip=true
+    app_name="javaApp_${i}"
+    send_request &
+    sudo -E env PATH=$PATH ./../../../keployv2 record -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --generateGithubActions=false &> "${app_name}.txt"
+    if grep "WARNING: DATA RACE" "${app_name}.txt"; then
+        echo "Race condition detected in recording, stopping pipeline..."
+        cat "${app_name}.txt"
+        exit 1
     fi
-    sleep 3 # wait for 3 seconds before checking again.
-done
-
-# Get the pid of the application.
-pid=$(pgrep keploy)
-
-# Start making curl calls to record the testcases and mocks.
-curl -X GET http://localhost:9966/petclinic/api/pettypes
-
-curl --request POST \
---url http://localhost:9966/petclinic/api/pettypes \
-   --header 'content-type: application/json' \
-   --data '{
-    "name":"John Doe"}'
-
-curl -X GET http://localhost:9966/petclinic/api/pettypes
-
-curl --request POST \
---url http://localhost:9966/petclinic/api/pettypes \
-   --header 'content-type: application/json' \
-   --data '{
-    "name":"Alice Green"}'
-
-curl -X GET http://localhost:9966/petclinic/api/pettypes
-
- curl --request DELETE \
---url http://localhost:9966/petclinic/api/pettypes/1
-
-curl -X GET http://localhost:9966/petclinic/api/pettypes
-
-# Wait for 5 seconds for keploy to record the tcs and mocks.
-sleep 5
-
-# Stop keploy.
-sudo kill $pid
-
-# Wait for 5 seconds for keploy to stop.
-sleep 5
-
+    sleep 5
+    echo "Recorded test case and mocks for iteration ${i}"
 done
 
 # Start keploy in test mode.
 sudo -E env PATH=$PATH ./../../../keployv2 test -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --delay 20 --generateGithubActions=false &> test_logs.txt
 
-grep -q "race condition detected" test_logs.txt && echo "Race condition detected in testing, stopping tests..." && exit 1
+if grep "WARNING: DATA RACE" "test_logs.txt"; then
+    echo "Race condition detected in test, stopping pipeline..."
+    cat "test_logs.txt"
+    exit 1
+fi
+
 all_passed=true
 
 # Get the test results from the testReport file.
