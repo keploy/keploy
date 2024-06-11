@@ -73,13 +73,29 @@ if grep "WARNING: DATA RACE" "${test_container}.txt"; then
     exit 1
 fi
 
-# Collect and evaluate test results
-report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"
-test_status1=$(awk '/status:/ {print $2}' "$report_file")
-report_file2="./keploy/reports/test-run-0/test-set-1-report.yaml"
-test_status2=$(awk '/status:/ {print $2}' "$report_file2")
 
-if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ]; then
+for i in {1..2}
+do
+    # Define the report file for each test set
+    report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
+
+    # Extract the test status
+    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+
+    # Print the status for debugging
+    echo "Test status for test-set-$i: $test_status"
+
+    # Check if any test set did not pass
+    if [ "$test_status" != "PASSED" ]; then
+        all_passed=false
+        echo "Test-set-$i did not pass."
+        break # Exit the loop early as all tests need to pass
+    fi
+done
+
+# Check the overall test status and exit accordingly
+if [ "$all_passed" = true ]; then
+    echo "All tests passed"
     exit 0
 else
     exit 1
