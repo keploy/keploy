@@ -26,7 +26,7 @@ for i in {1..2}; do
     sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p8080:8080 --net keploy-network --rm --name ${container_name} gin-mongo" --containerName "${container_name}" --generateGithubActions=false &> "${container_name}.txt" &
 
     sleep 5
-
+    echo "wokeup after sleep"
     # Monitor Docker logs in the background and check for race conditions.
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
     echo "Race condition detected in recording, stopping pipeline..."
@@ -35,13 +35,14 @@ for i in {1..2}; do
 
     # Wait for the application to start.
     app_started=false
+    cat "${container_name}.txt"  # This command prints the content of the log file
     while [ "$app_started" = false ]; do
         if curl -X GET http://localhost:8080/CJBKJd92; then
             app_started=true
         fi
         sleep 3 # wait for 3 seconds before checking again.
     done
-
+    echo "App started"
     # Start making curl calls to record the testcases and mocks.
     curl --request POST \
       --url http://localhost:8080/url \
