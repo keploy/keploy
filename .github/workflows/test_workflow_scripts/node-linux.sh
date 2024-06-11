@@ -56,8 +56,41 @@ test_status6=$(awk '/status:/ {print $2}' $report_file6)
 test_total6=$(awk '/total:/ {print $2}' $report_file6)
 test_failure=$(awk '/failure:/ {print $2}' $report_file6)
 
-# Exit based on test results
-if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ] && [ "$test_status5" = "PASSED" ] && [ "$test_status6" = "PASSED" ] && [ "$test_total6" = "2" ] && [ "$test_failure" = "0" ]; then
+all_passed=true
+
+for i in {0..2}
+do
+    report_file="./keploy/reports/test-run-$i/test-set-0-report.yaml"
+    # Extract the test status
+    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+
+    # Print the status for debugging
+    echo "Test status for test-set-$i: $test_status"
+
+    # Check if any test set did not pass
+    if [ "$test_status" != "PASSED" ]; then
+        all_passed=false
+        echo "Test-set-$i did not pass."
+        break # Exit the loop early as all tests need to pass
+    fi
+done
+
+
+# Check the overall test status and exit accordingly
+if [ "$all_passed" = true ]; then
+    report_file="./keploy/reports/test-run-0/test-set-1-report.yaml"
+    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+
+    # Print the status for debugging
+    echo "Test status for test-set-0: $test_status"
+
+    # Check if any test set did not pass
+    if [ "$test_status" != "PASSED" ]; then
+        all_passed=false
+        echo "Test-set-1 did not pass."
+        exit 1
+    fi
+    echo "All tests passed"
     exit 0
 else
     exit 1

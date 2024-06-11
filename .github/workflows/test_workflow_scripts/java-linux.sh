@@ -75,20 +75,32 @@ done
 sudo -E env PATH=$PATH ./../../../keployv2 test -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --delay 20 --generateGithubActions=false &> test_logs.txt
 
 grep -q "race condition detected" test_logs.txt && echo "Race condition detected in testing, stopping tests..." && exit 1
+all_passed=true
 
 # Get the test results from the testReport file.
-report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"
-test_status1=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-report_file2="./keploy/reports/test-run-0/test-set-1-report.yaml"
-test_status2=$(grep 'status:' "$report_file2" | head -n 1 | awk '{print $2}')
+for i in {0..1}
+do
+    # Define the report file for each test set
+    report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
 
-echo "test_status1: $test_status1"
-echo "test_status2: $test_status2"
-# Return the exit code according to the status.
-if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ]; then
-    echo "success"
+    # Extract the test status
+    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+
+    # Print the status for debugging
+    echo "Test status for test-set-$i: $test_status"
+
+    # Check if any test set did not pass
+    if [ "$test_status" != "PASSED" ]; then
+        all_passed=false
+        echo "Test-set-$i did not pass."
+        break # Exit the loop early as all tests need to pass
+    fi
+done
+
+# Check the overall test status and exit accordingly
+if [ "$all_passed" = true ]; then
+    echo "All tests passed"
     exit 0
 else
-    echo "failure"
     exit 1
 fi

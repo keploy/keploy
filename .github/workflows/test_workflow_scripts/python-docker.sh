@@ -73,6 +73,7 @@ if grep "WARNING: DATA RACE" "${test_container}.txt"; then
     exit 1
 fi
 
+all_passed=true
 
 for i in {0..1}
 do
