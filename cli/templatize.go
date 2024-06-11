@@ -4,15 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/url"
-	"os"
 	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/platform/yaml/testdb"
+	replaySvc "go.keploy.io/server/v2/pkg/service/replay"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -32,155 +29,170 @@ func Templatize(ctx context.Context, logger *zap.Logger, conf *config.Config, se
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Read the testcases from the path provided.
 			for _, testSet := range conf.Templatize.TestSets {
-				path := conf.Path + "/keploy/" + testSet
-				utils.ReadTempValues(testSet)
+				println("This is the value of the testSet:", testSet)
+				// utils.ReadTempValues(testSet)
+				// Get the replay service.
+				svc, err := serviceFactory.GetService(ctx, cmd.Name())
+				if err != nil {
+					utils.LogError(logger, err, "failed to get service")
+					return nil
+				}
+				var replay replaySvc.Service
+				var ok bool
+				if replay, ok = svc.(replaySvc.Service); !ok {
+					utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
+					return nil
+				}
+				if err := replay.Templatize(ctx, testSet); err != nil {
+					utils.LogError(logger, err, "failed to templatize test cases")
+					return nil
+				}
 				// Read the utils.TemplatizedValues from the templatized.json file.
-				testYaml := testdb.New(logger, conf.Path)
-				tcs, err := testYaml.GetTestCases(ctx, path)
-				if err != nil {
-					logger.Error("failed to get testcases", zap.Error(err))
-					return err
-				}
-				// logger.Info("These are the testcases that we got:", zap.Any("testcases", tcs))
-				// Just get the request information from the testcases.
-				var requests []models.HTTPReq
+				// tcs, err := testYaml.GetTestCases(ctx, path)
+				// if err != nil {
+				// 	logger.Error("failed to get testcases", zap.Error(err))
+				// 	return err
+				// }
+				// // logger.Info("These are the testcases that we got:", zap.Any("testcases", tcs))
+				// // Just get the request information from the testcases.
+				// var requests []models.HTTPReq
 
-				for _, tc := range tcs {
-					// logger.Info("Request Information", zap.Any("Request", tc.HTTPReq))
-					requests = append(requests, tc.HTTPReq)
-				}
-				// Initialize a map to store counts of each field-value pair
-				// commonFields := make(map[string]int)
-				// // Find out the commmon fields in the request.
-				// for _, req := range requests {
-				// 	for key, val := range req {
-				// 		if _, ok := commonFields[key]; ok {
-				// 			commonFields[key]++
-				// 		} else {
-				// 			commonFields[key] = 1
-				// 		}
-				// 	}
+				// for _, tc := range tcs {
+				// 	// logger.Info("Request Information", zap.Any("Request", tc.HTTPReq))
+				// 	requests = append(requests, tc.HTTPReq)
 				// }
-				// Get the body of the response.
-				for i := 0; i < len(tcs)-1; i++ {
-					jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
-					if err != nil {
-						logger.Error("failed to parse response into json", zap.Error(err))
-						return err
-					}
-					// Compare the keys to the headers.
-					for j := i + 1; j < len(tcs); j++ {
-						compareVals(tcs[j].HTTPReq.Header, jsonResponse)
-						// Write the new headers to the file.
-						err = testYaml.InsertTestCase(ctx, tcs[j], path)
-						if err != nil {
-							logger.Error("Error inserting the new testcase to the file", zap.Error(err))
-						}
-					}
-					// Add the jsonResponse back to tcs.
-					jsonData, err := json.Marshal(jsonResponse)
-					if err != nil {
-						logger.Error("failed to marshal json data", zap.Error(err))
-						return err
-					}
-					tcs[i].HTTPResp.Body = string(jsonData)
-					// Write the new response to the file.
-					err = testYaml.InsertTestCase(ctx, tcs[i], path)
-					if err != nil {
-						logger.Error("Error inserting the new testcase to the file", zap.Error(err))
-					}
-				}
-				// Compare the requests for the common fields.
-				for i := 0; i < len(tcs)-1; i++ {
-					// Check for headers first.
-					for j := i + 1; j < len(tcs); j++ {
-						compareReqHeaders(tcs[i].HTTPReq.Header, tcs[i+1].HTTPReq.Header)
-						err = testYaml.InsertTestCase(ctx, tcs[j], path)
-						if err != nil {
-							logger.Error("Error inserting the new testcase to the file", zap.Error(err))
-						}
-					}
-					// Record the new testcases.
-					err = testYaml.InsertTestCase(ctx, tcs[i], path)
-					if err != nil {
-						logger.Error("Error inserting the new testcase to the file", zap.Error(err))
-					}
-				}
-				// Parse the URL and check if the value is in the body.
-				for i := 0; i < len(tcs)-1; i++ {
-					jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
-					if err != nil {
-						logger.Error("failed to parse response into json", zap.Error(err))
-						return err
-					}
-					for j := i + 1; j < len(tcs); j++ {
-						url1, err := url.Parse(tcs[j].HTTPReq.URL)
-						url := strings.Split(url1.Path, "/")
-						if err != nil {
-							logger.Error("failed to parse the url", zap.Error(err))
-							break
-						}
-						compareVals(url[len(url)-1], jsonResponse)
-						err = testYaml.InsertTestCase(ctx, tcs[j], path)
-						if err != nil {
-							logger.Error("Error inserting the new testcase to the file", zap.Error(err))
-						}
-					}
-					// Record the new testcase.
-					jsonData, err := json.Marshal(jsonResponse)
-					if err != nil {
-						logger.Error("failed to marshal json data", zap.Error(err))
-						return err
-					}
-					tcs[i].HTTPResp.Body = string(jsonData)
-					err = testYaml.InsertTestCase(ctx, tcs[i], path)
-					if err != nil {
-						logger.Error("Error inserting the new testcase to the file", zap.Error(err))
-					}
-				}
-				// for i, req := range requests {
-				// 	for key, val := range req.Header {
-				// 		// Check if value matches any value in the response.
-				// 		if key == "Authorization" {
-				// 			val = strings.Replace(val, "Bearer ", "", -1)
-				// 		}
-				// 		index := contains(responses, val)
-				// 		if index != -1 && key != "Content-Length" {
-				// 			logger.Info("We found a match", zap.Any("value", val))
-				// 			if index < i {
-				// 				requests =
-				// 			}
-				// 		}
-				// 	}
-				// }
-				// Write the resultMap to a file called templatized.yaml
-				// logger.Debug("This is the map that we have at the end", zap.Any("resultMap", resultMap))
-				//Write the values of the templatizedValues map to it.
-				jsonTemp, err := json.MarshalIndent(utils.TemplatizedValues, "", " ")
-				if err != nil {
-					logger.Error("failed to marshal the temp data into yaml", zap.Error(err))
-				}
-				err = os.WriteFile(path+"/templatized.json", jsonTemp, 0644)
-				if err != nil {
-					logger.Error("Error writing to templatized.json", zap.Error(err))
-				}
-				// for key, val := range resultMap {
-				// 	_, err := file.WriteString(fmt.Sprintf("test-%d: test-%d\n", key, val))
-				// 	if err != nil {
-				// 		logger.Error("failed to write to file", zap.Error(err))
-				// 		return err
-				// 	}
-				// }
-				// Compare the json responses and find out the common fields between the testcases.
-				// for i := range len(tcs) - 2 {
-				// 	if tcs[i].HTTPResp.Body == "" || tcs[i+1].HTTPReq.Body == "" {
-				// 		continue
-				// 	}
+				// // Initialize a map to store counts of each field-value pair
+				// // commonFields := make(map[string]int)
+				// // // Find out the commmon fields in the request.
+				// // for _, req := range requests {
+				// // 	for key, val := range req {
+				// // 		if _, ok := commonFields[key]; ok {
+				// // 			commonFields[key]++
+				// // 		} else {
+				// // 			commonFields[key] = 1
+				// // 		}
+				// // 	}
+				// // }
+				// // Get the body of the response.
+				// for i := 0; i < len(tcs)-1; i++ {
 				// 	jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
 				// 	if err != nil {
 				// 		logger.Error("failed to parse response into json", zap.Error(err))
-				// 		fmt.Println("This is the value of the jsonResponse:", jsonResponse)
 				// 		return err
+				// 	}
+				// 	// Compare the keys to the headers.
+				// 	for j := i + 1; j < len(tcs); j++ {
+				// 		compareVals(tcs[j].HTTPReq.Header, jsonResponse)
+				// 		// Write the new headers to the file.
+				// 		err = testYaml.InsertTestCase(ctx, tcs[j], path)
+				// 		if err != nil {
+				// 			logger.Error("Error inserting the new testcase to the file", zap.Error(err))
+				// 		}
+				// 	}
+				// 	// Add the jsonResponse back to tcs.
+				// 	jsonData, err := json.Marshal(jsonResponse)
+				// 	if err != nil {
+				// 		logger.Error("failed to marshal json data", zap.Error(err))
+				// 		return err
+				// 	}
+				// 	tcs[i].HTTPResp.Body = string(jsonData)
+				// 	// Write the new response to the file.
+				// 	err = testYaml.InsertTestCase(ctx, tcs[i], path)
+				// 	if err != nil {
+				// 		logger.Error("Error inserting the new testcase to the file", zap.Error(err))
+				// 	}
+				// }
+				// // Compare the requests for the common fields.
+				// for i := 0; i < len(tcs)-1; i++ {
+				// 	// Check for headers first.
+				// 	for j := i + 1; j < len(tcs); j++ {
+				// 		compareReqHeaders(tcs[i].HTTPReq.Header, tcs[i+1].HTTPReq.Header)
+				// 		err = testYaml.InsertTestCase(ctx, tcs[j], path)
+				// 		if err != nil {
+				// 			logger.Error("Error inserting the new testcase to the file", zap.Error(err))
+				// 		}
+				// 	}
+				// 	// Record the new testcases.
+				// 	err = testYaml.InsertTestCase(ctx, tcs[i], path)
+				// 	if err != nil {
+				// 		logger.Error("Error inserting the new testcase to the file", zap.Error(err))
+				// 	}
+				// }
+				// // Parse the URL and check if the value is in the body.
+				// for i := 0; i < len(tcs)-1; i++ {
+				// 	jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
+				// 	if err != nil {
+				// 		logger.Error("failed to parse response into json", zap.Error(err))
+				// 		return err
+				// 	}
+				// 	for j := i + 1; j < len(tcs); j++ {
+				// 		url1, err := url.Parse(tcs[j].HTTPReq.URL)
+				// 		url := strings.Split(url1.Path, "/")
+				// 		if err != nil {
+				// 			logger.Error("failed to parse the url", zap.Error(err))
+				// 			break
+				// 		}
+				// 		compareVals(url[len(url)-1], jsonResponse)
+				// 		err = testYaml.InsertTestCase(ctx, tcs[j], path)
+				// 		if err != nil {
+				// 			logger.Error("Error inserting the new testcase to the file", zap.Error(err))
+				// 		}
+				// 	}
+				// 	// Record the new testcase.
+				// 	jsonData, err := json.Marshal(jsonResponse)
+				// 	if err != nil {
+				// 		logger.Error("failed to marshal json data", zap.Error(err))
+				// 		return err
+				// 	}
+				// 	tcs[i].HTTPResp.Body = string(jsonData)
+				// 	err = testYaml.InsertTestCase(ctx, tcs[i], path)
+				// 	if err != nil {
+				// 		logger.Error("Error inserting the new testcase to the file", zap.Error(err))
+				// 	}
+				// }
+				// // for i, req := range requests {
+				// // 	for key, val := range req.Header {
+				// // 		// Check if value matches any value in the response.
+				// // 		if key == "Authorization" {
+				// // 			val = strings.Replace(val, "Bearer ", "", -1)
+				// // 		}
+				// // 		index := contains(responses, val)
+				// // 		if index != -1 && key != "Content-Length" {
+				// // 			logger.Info("We found a match", zap.Any("value", val))
+				// // 			if index < i {
+				// // 				requests =
+				// // 			}
+				// // 		}
+				// // 	}
+				// // }
+				// // Write the resultMap to a file called templatized.yaml
+				// // logger.Debug("This is the map that we have at the end", zap.Any("resultMap", resultMap))
+				// //Write the values of the templatizedValues map to it.
+				// jsonTemp, err := json.MarshalIndent(utils.TemplatizedValues, "", " ")
+				// if err != nil {
+				// 	logger.Error("failed to marshal the temp data into yaml", zap.Error(err))
+				// }
+				// err = os.WriteFile(path+"/templatized.json", jsonTemp, 0644)
+				// if err != nil {
+				// 	logger.Error("Error writing to templatized.json", zap.Error(err))
+				// }
+				// // for key, val := range resultMap {
+				// // 	_, err := file.WriteString(fmt.Sprintf("test-%d: test-%d\n", key, val))
+				// // 	if err != nil {
+				// // 		logger.Error("failed to write to file", zap.Error(err))
+				// // 		return err
+				// // 	}
+				// // }
+				// // Compare the json responses and find out the common fields between the testcases.
+				// // for i := range len(tcs) - 2 {
+				// // 	if tcs[i].HTTPResp.Body == "" || tcs[i+1].HTTPReq.Body == "" {
+				// // 		continue
+				// // 	}
+				// // 	jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
+				// // 	if err != nil {
+				// // 		logger.Error("failed to parse response into json", zap.Error(err))
+				// // 		fmt.Println("This is the value of the jsonResponse:", jsonResponse)
+				// // 		return err
 				// 	}
 				// 	jsonRequest, err := parseIntoJson(tcs[i+1].HTTPReq.Body)
 				// 	if err != nil {
@@ -381,14 +393,14 @@ func insertUnique(baseKey, value string, myMap map[string]interface{}) string {
 	return key
 }
 
-	func parseIntoJson(response string) (map[string]interface{}, error) {
-		// Parse the response into a json object.
-		var jsonResponse map[string]interface{}
-		if err := json.Unmarshal([]byte(response), &jsonResponse); err != nil {
-			return nil, err
-		}
-		return jsonResponse, nil
+func parseIntoJson(response string) (map[string]interface{}, error) {
+	// Parse the response into a json object.
+	var jsonResponse map[string]interface{}
+	if err := json.Unmarshal([]byte(response), &jsonResponse); err != nil {
+		return nil, err
 	}
+	return jsonResponse, nil
+}
 
 // func contains(responses []string, val string) int {
 // 	for i, response := range responses {

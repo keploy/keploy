@@ -129,9 +129,9 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 	case "record", "test", "mock", "normalize", "templatize":
 		commonServices := n.GetCommonServices(n.cfg)
 		if cmd == "record" {
-			return record.New(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, n.cfg), nil
+			return record.New(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, n.cfg), nil
 		}
-		if cmd == "test" || cmd == "normalize" || cmd == "templatize"{
+		if cmd == "test" || cmd == "normalize" || cmd == "templatize" {
 			return replay.NewReplayer(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, n.cfg), nil
 		}
 		return nil, errors.New("invalid command")

@@ -22,16 +22,18 @@ type Recorder struct {
 	logger          *zap.Logger
 	testDB          TestDB
 	mockDB          MockDB
+	testSetConf     Config
 	telemetry       Telemetry
 	instrumentation Instrumentation
 	config          *config.Config
 }
 
-func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
+func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, testSetConf Config, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
 	return &Recorder{
 		logger:          logger,
 		testDB:          testDB,
 		mockDB:          mockDB,
+		testSetConf:     testSetConf,
 		telemetry:       telemetry,
 		instrumentation: instrumentation,
 		config:          config,
@@ -360,7 +362,11 @@ func (r *Recorder) ReRecord(ctx context.Context, appID uint64) error {
 	}
 
 	allTestCasesRecorded := true
-	utils.ReadTempValues(r.config.ReRecord)
+	testSet, err := r.testSetConf.Read(ctx, r.config.Record.ReRecord)
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to read test set config")
+	}
+	utils.TemplatizedValues = testSet.Template
 	for _, tc := range tcs {
 		if utils.IsDockerKind(cmdType) {
 

@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-
+	"encoding/json"
+	"strconv"
+	"strings"
 
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/utils"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
@@ -128,127 +131,127 @@ func (t *requestMockUtil) ProcessMockFile(_ context.Context, testSetID string) {
 	t.logger.Debug("Mock file for test set", zap.String("testSetID", testSetID))
 }
 
-// func parseIntoJson(response string) (map[string]interface{}, error) {
-// 	// Parse the response into a json object.
-// 	var jsonResponse map[string]interface{}
-// 	if err := json.Unmarshal([]byte(response), &jsonResponse); err != nil {
-// 		return nil, err
-// 	}
-// 	return jsonResponse, nil
-// }
+func parseIntoJson(response string) (map[string]interface{}, error) {
+	// Parse the response into a json object.
+	var jsonResponse map[string]interface{}
+	if err := json.Unmarshal([]byte(response), &jsonResponse); err != nil {
+		return nil, err
+	}
+	return jsonResponse, nil
+}
 
-// func compareVals(map1 interface{}, map2 map[string]interface{}) {
-// 	switch v := map1.(type) {
-// 	case map[string]string:
-// 		for key, val1 := range v {
-// 			authType := ""
-// 			if key == "Authorization" && len(strings.Split(val1, " ")) > 1 {
-// 				authType = strings.Split(val1, " ")[0]
-// 				val1 = strings.Split(val1, " ")[1]
-// 			}
-// 			if strings.HasPrefix(val1, "{{") && strings.HasSuffix(val1, "}}") {
-// 				continue
-// 			}
-// 			newKey, ok := parseBody(val1, map2)
-// 			if !ok {
-// 				continue
-// 			}
-// 			// Add the template.
-// 			val1 = strings.Replace(val1, val1, fmt.Sprintf("%s {{ %s }}", authType, newKey), -1)
-// 			v[key] = val1
-// 		}
-// 	case string:
-// 		if strings.HasPrefix(v, "{{") && strings.HasSuffix(v, "}}") {
-// 			return
-// 		}
-// 		newKey, ok := parseBody(v, map2)
-// 		if !ok {
-// 			return
-// 		}
-// 		// Add the template
-// 		v = strings.Replace(v, v, fmt.Sprintf("{{ %s }}", newKey), -1)
-// 		map1 = v
-// 	}
+func compareVals(map1 interface{}, map2 map[string]interface{}) {
+	switch v := map1.(type) {
+	case map[string]string:
+		for key, val1 := range v {
+			authType := ""
+			if key == "Authorization" && len(strings.Split(val1, " ")) > 1 {
+				authType = strings.Split(val1, " ")[0]
+				val1 = strings.Split(val1, " ")[1]
+			}
+			if strings.HasPrefix(val1, "{{") && strings.HasSuffix(val1, "}}") {
+				continue
+			}
+			newKey, ok := parseBody(val1, map2)
+			if !ok {
+				continue
+			}
+			// Add the template.
+			val1 = strings.Replace(val1, val1, fmt.Sprintf("%s {{ %s }}", authType, newKey), -1)
+			v[key] = val1
+		}
+	case string:
+		if strings.HasPrefix(v, "{{") && strings.HasSuffix(v, "}}") {
+			return
+		}
+		newKey, ok := parseBody(v, map2)
+		if !ok {
+			return
+		}
+		// Add the template
+		v = strings.Replace(v, v, fmt.Sprintf("{{ %s }}", newKey), -1)
+		map1 = v
+	}
 
-// }
+}
 
-// func parseBody(val1 string, map2 map[string]interface{}) (string, bool) {
-// 	for key1, val2 := range map2 {
-// 		valType := checkType(val2)
-// 		if valType == "map" {
-// 			map3, _ := val2.(map[string]interface{})
-// 			for key2, v := range map3 {
-// 				if _, ok := utils.TemplatizedValues[val1]; ok {
-// 					continue
-// 				}
-// 				v := checkType(v)
-// 				if val1 == v {
-// 					newKey := insertUnique(key2, v, utils.TemplatizedValues)
-// 					if newKey == "" {
-// 						newKey = key2
-// 					}
-// 					map3[newKey] = fmt.Sprintf("{{ %s }}", newKey)
-// 					return newKey, true
-// 				}
-// 			}
-// 		} else if val1 == checkType(val2) {
-// 			newKey := insertUnique(key1, checkType(val2), utils.TemplatizedValues)
-// 			if newKey == "" {
-// 				newKey = key1
-// 			}
-// 			map2[key1] = fmt.Sprintf("{{ %s }}", newKey)
-// 			return newKey, true
-// 		}
-// 	}
-// 	return "", false
-// }
+func parseBody(val1 string, map2 map[string]interface{}) (string, bool) {
+	for key1, val2 := range map2 {
+		valType := checkType(val2)
+		if valType == "map" {
+			map3, _ := val2.(map[string]interface{})
+			for key2, v := range map3 {
+				if _, ok := utils.TemplatizedValues[val1]; ok {
+					continue
+				}
+				v := checkType(v)
+				if val1 == v {
+					newKey := insertUnique(key2, v, utils.TemplatizedValues)
+					if newKey == "" {
+						newKey = key2
+					}
+					map3[newKey] = fmt.Sprintf("{{ %s }}", newKey)
+					return newKey, true
+				}
+			}
+		} else if val1 == checkType(val2) {
+			newKey := insertUnique(key1, checkType(val2), utils.TemplatizedValues)
+			if newKey == "" {
+				newKey = key1
+			}
+			map2[key1] = fmt.Sprintf("{{ %s }}", newKey)
+			return newKey, true
+		}
+	}
+	return "", false
+}
 
-// func insertUnique(baseKey, value string, myMap map[string]string) string {
-// 	if myMap[baseKey] == value {
-// 		return ""
-// 	}
-// 	key := baseKey
-// 	i := 0
-// 	for {
-// 		if _, exists := myMap[key]; !exists {
-// 			myMap[key] = value
-// 			break
-// 		}
-// 		i++
-// 		key = baseKey + strconv.Itoa(i)
-// 	}
-// 	return key
-// }
+func insertUnique(baseKey, value string, myMap map[string]interface{}) string {
+	if myMap[baseKey] == value {
+		return ""
+	}
+	key := baseKey
+	i := 0
+	for {
+		if _, exists := myMap[key]; !exists {
+			myMap[key] = value
+			break
+		}
+		i++
+		key = baseKey + strconv.Itoa(i)
+	}
+	return key
+}
 
-// func checkType(val interface{}) string {
-// 	switch v := val.(type) {
-// 	case map[string]interface{}:
-// 		return "map"
-// 	case int:
-// 		return strconv.Itoa(v)
-// 	case float64:
-// 		return strconv.FormatFloat(v, 'f', -1, 64)
-// 	case string:
-// 		return v
-// 	}
-// 	return ""
-// }
+func checkType(val interface{}) string {
+	switch v := val.(type) {
+	case map[string]interface{}:
+		return "map"
+	case int:
+		return strconv.Itoa(v)
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case string:
+		return v
+	}
+	return ""
+}
 
-// func compareReqHeaders(req1 map[string]string, req2 map[string]string) {
-// 	for key, val1 := range req1 {
-// 		// Check if the value is already present in the templatized values.
-// 		if strings.HasPrefix(val1, "{{") && strings.HasSuffix(val1, "}}") {
-// 			continue
-// 		}
-// 		if val2, ok := req2[key]; ok {
-// 			if val1 == val2 {
-// 				newKey := insertUnique(key, val1, utils.TemplatizedValues)
-// 				if newKey == "" {
-// 					newKey = key
-// 				}
-// 				req2[key] = fmt.Sprintf("{{ %s }}", newKey)
-// 				req1[key] = fmt.Sprintf("{{ %s }}", newKey)
-// 			}
-// 		}
-// 	}
-// }
+func compareReqHeaders(req1 map[string]string, req2 map[string]string) {
+	for key, val1 := range req1 {
+		// Check if the value is already present in the templatized values.
+		if strings.HasPrefix(val1, "{{") && strings.HasSuffix(val1, "}}") {
+			continue
+		}
+		if val2, ok := req2[key]; ok {
+			if val1 == val2 {
+				newKey := insertUnique(key, val1, utils.TemplatizedValues)
+				if newKey == "" {
+					newKey = key
+				}
+				req2[key] = fmt.Sprintf("{{ %s }}", newKey)
+				req1[key] = fmt.Sprintf("{{ %s }}", newKey)
+			}
+		}
+	}
+}

@@ -28,7 +28,6 @@ import (
 	// "github.com/hoisie/mustache"
 )
 
-
 type ValidatedJSON struct {
 	expected    interface{} // The expected JSON
 	actual      interface{} // The actual JSON
@@ -162,7 +161,11 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				logDiffs.PushHeaderDiff(fmt.Sprint(j), fmt.Sprint(actualHeader[i]), i, headerNoise)
 			}
 		}
-		utils.ReadTempValues("test-set-0")
+		// testSet, err := r.TestSetConf.Read(ctx, testSetID)
+		// if err != nil {
+		// 	utils.LogError(r.logger, err, "failed to read test set config")
+		// }
+		// utils.TemplatizedValues = testSet.Template
 		if !res.BodyResult[0].Normal {
 			if json.Valid([]byte(actualResponse.Body)) {
 				patch, err := jsondiff.Compare(tc.HTTPResp.Body, actualResponse.Body)
