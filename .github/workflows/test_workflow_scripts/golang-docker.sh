@@ -21,26 +21,21 @@ docker logs mongoDb &
 docker build -t gin-mongo .
 docker rm -f ginApp 2>/dev/null || true
 
-for i in {1..2}; do
-    container_name="ginApp_${i}"
-    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p8080:8080 --net keploy-network --rm --name ${container_name} gin-mongo" --containerName "${container_name}" --generateGithubActions=false &> "${container_name}.txt" &
+container_kill() {
+    local container_name=$1
+    docker rm -f keploy-v2
+    docker rm -f "${container_name}"
+}
 
-    sleep 5
-    echo "wokeup after sleep"
-    # Monitor Docker logs in the background and check for race conditions.
-    if grep "WARNING: DATA RACE" "${container_name}.txt"; then
-    echo "Race condition detected in recording, stopping pipeline..."
-    exit 1
-    fi &
-
-    # Wait for the application to start.
+send_request(){
+    local container_name=$1
+    sleep 10
     app_started=false
-    cat "${container_name}.txt"  # This command prints the content of the log file
     while [ "$app_started" = false ]; do
         if curl -X GET http://localhost:8080/CJBKJd92; then
             app_started=true
         fi
-        sleep 3 # wait for 3 seconds before checking again.
+        sleep 3
     done
     echo "App started"
     # Start making curl calls to record the testcases and mocks.
@@ -62,21 +57,35 @@ for i in {1..2}; do
 
     # Wait for 5 seconds for keploy to record the tcs and mocks.
     sleep 5
+    container_kill $container_name
+    wait
+}
 
-    # Stop keploy.
-    docker rm -f keploy-v2
-    docker rm -f "${container_name}"
+for i in {1..2}; do
+    container_name="ginApp_${i}"
+    send_request $container_name &
+    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p8080:8080 --net keploy-network --rm --name ${container_name} gin-mongo" --containerName "${container_name}" --generateGithubActions=false &> "${container_name}.txt"
+
+    if grep "WARNING: DATA RACE" "${container_name}.txt"; then
+        echo "Race condition detected in recording, stopping pipeline..."
+        exit 1
+    fi
+    sleep 5
+
+    echo "Recorded test case and mocks for iteration ${i}"
 done
 
 # Start the keploy in test mode.
 test_container="ginApp_test"
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generateGithubActions=false &> "${test_container}.txt"
 
-grep -q "WARNING: DATA RACE" "${test_container}.txt" && echo "Race condition detected in testing, stopping tests..." && exit 1
+if grep "WARNING: DATA RACE" "${test_container}.txt"; then
+    echo "Race condition detected in test, stopping pipeline..."
+    exit 1
+fi
 
 docker rm -f ginApp_test
 
-echo $(ls -a)
 # Get the test results from the testReport file.
 report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"
 test_status1=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
