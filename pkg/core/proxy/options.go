@@ -1,3 +1,5 @@
+//go:build linux 
+
 package proxy
 
 // TODO: what is the need of this? currently it is not being used anywhere.

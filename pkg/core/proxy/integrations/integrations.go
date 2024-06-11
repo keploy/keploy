@@ -1,3 +1,5 @@
+//go:build linux 
+
 // Package integrations provides functionality for integrating different types of services.
 package integrations
 

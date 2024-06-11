@@ -1,3 +1,5 @@
+//go:build linux 
+
 // Package app provides functionality for managing applications.
 package app
 

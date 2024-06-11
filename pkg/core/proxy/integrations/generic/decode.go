@@ -1,3 +1,5 @@
+//go:build linux 
+
 // Package generic provides functionality for decoding generic dependencies.
 package generic
 

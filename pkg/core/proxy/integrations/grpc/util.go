@@ -1,3 +1,5 @@
+//go:build linux 
+
 package grpc
 
 import "golang.org/x/net/http2/hpack"

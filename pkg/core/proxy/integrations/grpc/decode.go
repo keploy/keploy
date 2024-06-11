@@ -1,3 +1,5 @@
+//go:build linux 
+
 // Package grpc provides functionality for integrating with gRPC outgoing calls.
 package grpc
 

@@ -1,3 +1,5 @@
+//go:build linux 
+
 package mysql
 
 type PacketType2 struct {

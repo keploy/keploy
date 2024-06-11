@@ -1,6 +1,9 @@
+//go:build linux 
+
 package mysql
 
 import (
+	
 	"context"
 	"encoding/binary"
 	"go.uber.org/zap"

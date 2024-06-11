@@ -1,3 +1,5 @@
+//go:build linux 
+
 // Package mongo provides functionality for working with MongoDB outgoing calls.
 package mongo
 

@@ -1,3 +1,5 @@
+//go:build linux 
+
 // Package docker provides functionality for working with Docker containers.
 package docker
 

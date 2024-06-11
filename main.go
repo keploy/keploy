@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"syscall"
 
 	"go.keploy.io/server/v2/cli"
 	"go.keploy.io/server/v2/cli/provider"
@@ -81,8 +80,8 @@ func start(ctx context.Context) {
 	// Setting 'umask' to '0' ensures that 'keploy' can precisely control the permissions of the files it creates.
 	// However, it's important to note that this approach may not work in scenarios involving mounted volumes,
 	// as the 'umask' is set by the host system, and cannot be overridden by 'keploy' or individual processes.
-	oldMask := syscall.Umask(0)
-	defer syscall.Umask(oldMask)
+	// oldMask := syscall.Umask(0)
+	// defer syscall.Umask(oldMask)
 
 	userDb := userDb.New(logger)
 	if dsn != "" {
