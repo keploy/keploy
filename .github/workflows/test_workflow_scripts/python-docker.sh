@@ -99,5 +99,6 @@ if [ "$all_passed" = true ]; then
     echo "All tests passed"
     exit 0
 else
+    cat "${test_container}.txt"
     exit 1
 fi

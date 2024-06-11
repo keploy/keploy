@@ -47,10 +47,18 @@ for i in {1..2}; do
 done
 
 # Test modes and result checking
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --generateGithubActions=false &> test_logs.txt
-if grep "WARNING: DATA RACE" "test_logs.txt"; then
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --generateGithubActions=false &> test_logs1.txt
+if grep "WARNING: DATA RACE" "test_logs1.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
-    cat "test_logs.txt"
+    cat "test_logs1.txt"
+    exit 1
+fi
+
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testsets test-set-0 --generateGithubActions=false &> test_logs2.txt
+
+if grep "WARNING: DATA RACE" "test_logs2.txt"; then
+    echo "Race condition detected in test, stopping pipeline..."
+    cat "test_logs2.txt"
     exit 1
 fi
 
@@ -58,10 +66,10 @@ sudo -E env PATH=$PATH ./../../keployv2 config --generate
 
 sed -i 's/selectedTests: {}/selectedTests: {"test-set-0": ["test-1", "test-2"]}/' "./keploy.yml"
 
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --apiTimeout 30 --delay 10 --generateGithubActions=false &> test_logs2.txt
-if grep "WARNING: DATA RACE" "test_logs2.txt"; then
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --apiTimeout 30 --delay 10 --generateGithubActions=false &> test_logs3.txt
+if grep "WARNING: DATA RACE" "test_logs3.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
-    cat "test_logs.txt"
+    cat "test_logs3.txt"
     exit 1
 fi
 
@@ -80,6 +88,7 @@ do
     if [ "$test_status" != "PASSED" ]; then
         all_passed=false
         echo "Test-set-$i did not pass."
+        cat "test_logs${i+1}.txt"
         break # Exit the loop early as all tests need to pass
     fi
 done
@@ -97,6 +106,7 @@ if [ "$all_passed" = true ]; then
     if [ "$test_status" != "PASSED" ]; then
         all_passed=false
         echo "Test-set-1 did not pass."
+        cat "test_logs1.txt"
         exit 1
     fi
     echo "All tests passed"
