@@ -12,14 +12,16 @@ sudo rm -rf keploy/
 # Build the image of the application.
 docker build -t node-app:1.0 .
 
-for i in {1..2}; do
-    # Start keploy in record mode.
-    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p 8000:8000 --name nodeMongoApp --network keploy-network node-app:1.0" --containerName nodeMongoApp --generateGithubActions=false &> record_logs.txt &
+container_kill() {
+    local container_name=$1
+    docker rm -f keploy-v2
+    docker rm -f "${container_name}"
+}
 
-    # Monitor Docker logs for race conditions.
-    docker logs mongoDb 2>&1 | grep -q "race condition detected" && echo "Race condition detected in recording, stopping tests..." && exit 1
-
-    # Wait for the application to start.
+send_request(){
+    local container_name=$1
+    sleep 10
+   # Wait for the application to start.
     app_started=false
     while [ "$app_started" = false ]; do
         if curl -X GET http://localhost:8000/students; then
@@ -48,21 +50,37 @@ for i in {1..2}; do
         }'
 
     curl -X GET http://localhost:8000/students
-
     # Wait for 5 seconds for keploy to record the tcs and mocks.
     sleep 5
+    container_kill $container_name
+    wait
+}
 
-    # Stop keploy.
-    docker rm -f keploy-v2
-    docker rm -f nodeMongoApp
+for i in {1..2}; do
+    # Start keploy in record mode.
+    container_name="ginApp_${i}"
+    send_request $container_name &
+    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p 8000:8000 --name nodeMongoApp --network keploy-network node-app:1.0" --containerName nodeMongoApp --generateGithubActions=false &> "${container_name}.txt"
+
+    if grep "WARNING: DATA RACE" "${container_name}.txt"; then
+        echo "Race condition detected in recording, stopping pipeline..."
+        cat "${container_name}.txt"
+        exit 1
+    fi
+    sleep 5
+
+    echo "Recorded test case and mocks for iteration ${i}"
 done
 
 # Start keploy in test mode.
-sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p 8000:8000 --name nodeMongoApp --network keploy-network node-app:1.0" --containerName nodeMongoApp --apiTimeout 30 --delay 30 --generateGithubActions=false &> test_logs.txt &
+sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p 8000:8000 --name nodeMongoApp --network keploy-network node-app:1.0" --containerName nodeMongoApp --apiTimeout 30 --delay 30 --generateGithubActions=false &> "${test_container}.txt"
 
 # Monitor Docker logs for race conditions during testing.
-docker logs mongoDb 2>&1 | grep -q "race condition detected" && echo "Race condition detected in testing, stopping tests..." && exit 1
-
+if grep "WARNING: DATA RACE" "${test_container}.txt"; then
+    echo "Race condition detected in test, stopping pipeline..."
+    cat "${test_container}.txt"
+    exit 1
+fi
 # Get the test results from the testReport file.
 report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"
 test_status1=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
