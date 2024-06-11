@@ -74,7 +74,7 @@ if grep "WARNING: DATA RACE" "${test_container}.txt"; then
 fi
 
 
-for i in {1..2}
+for i in {0..1}
 do
     # Define the report file for each test set
     report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
