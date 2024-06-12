@@ -195,8 +195,12 @@ func (g *UnitTestGenerator) runCoverage() error {
 	if g.srcPath != "" {
 		g.logger.Info(fmt.Sprintf("Running test command to generate coverage report: '%s'", g.cmd))
 	}
-	_, _, exitCode, lastUpdatedTime, err := RunCommand(g.cmd, g.dir)
+	stout, stderr, exitCode, lastUpdatedTime, err := RunCommand(g.cmd, g.dir, g.logger)
 	if err != nil {
+		if g.logger.Level() == zap.DebugLevel {
+			fmt.Println(stout)
+			fmt.Println(stderr)
+		}
 		utils.LogError(g.logger, err, "Error running test command")
 	}
 	if exitCode != 0 {
@@ -347,7 +351,7 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT) error {
 
 		g.logger.Info(fmt.Sprintf("Iteration no: %d", i+1))
 
-		stdout, _, exitCode, timeOfTestCommand, _ := RunCommand(g.cmd, g.dir)
+		stdout, _, exitCode, timeOfTestCommand, _ := RunCommand(g.cmd, g.dir, g.logger)
 		if exitCode != 0 {
 			g.logger.Info(fmt.Sprintf("Test failed in %d iteration", i+1))
 			// Test failed, roll back the test file to its original content

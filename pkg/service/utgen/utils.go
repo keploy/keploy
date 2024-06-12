@@ -14,6 +14,7 @@ import (
 
 	"go.keploy.io/server/v2/pkg/models"
 	settings "go.keploy.io/server/v2/pkg/service/utgen/assets"
+	"go.uber.org/zap"
 
 	"gopkg.in/yaml.v2"
 )
@@ -125,7 +126,7 @@ func getFilename(filePath string) string {
 	return filepath.Base(filePath)
 }
 
-func RunCommand(command string, cwd string) (stdout string, stderr string, exitCode int, commandStartTime int64, err error) {
+func RunCommand(command string, cwd string, logger *zap.Logger) (stdout string, stderr string, exitCode int, commandStartTime int64, err error) {
 	// Get the current time before running the test command, in milliseconds
 	commandStartTime = time.Now().UnixNano() / int64(time.Millisecond)
 
@@ -142,8 +143,10 @@ func RunCommand(command string, cwd string) (stdout string, stderr string, exitC
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
 
-	// cmd.Stdout = os.Stdout
-	// cmd.Stderr = os.Stderr
+	if logger.Level() == zap.DebugLevel {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
 
 	// Run the command
 	err = cmd.Run()

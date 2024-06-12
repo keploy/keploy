@@ -134,8 +134,6 @@ func (cp *CoverageProcessor) ParseCoverageReportCobertura() (*models.CoverageRes
 		return nil, err
 	}
 
-	fmt.Println(filteredBuf.String())
-
 	coverageResult := &models.CoverageResult{
 		LinesCovered:  linesCovered,
 		LinesMissed:   linesMissed,
