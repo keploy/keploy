@@ -29,23 +29,6 @@ type Packet struct {
 	Payload []byte          `yaml:"payload"`
 }
 
-type ColumnDefinition struct {
-	PacketHeader PacketHeader `yaml:"packet_header"`
-	Catalog      string       `yaml:"catalog"`
-	Schema       string       `yaml:"schema"`
-	Table        string       `yaml:"table"`
-	OrgTable     string       `yaml:"org_table"`
-	Name         string       `yaml:"name"`
-	OrgName      string       `yaml:"org_name"`
-	NextLength   uint64       `yaml:"next_length"`
-	CharacterSet uint16       `yaml:"character_set"`
-	ColumnLength uint32       `yaml:"column_length"`
-	ColumnType   byte         `yaml:"column_type"`
-	Flags        uint16       `yaml:"flags"`
-	Decimals     byte         `yaml:"decimals"`
-	DefaultValue string       `yaml:"string"`
-}
-
 type RowDataPacket struct {
 	Data []byte `yaml:"data,omitempty,flow"`
 }

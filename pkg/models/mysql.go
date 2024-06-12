@@ -24,6 +24,7 @@ type MysqlRequestYaml struct {
 type MysqlResponseYaml struct {
 	Header    *MySQLPacketHeader `json:"header,omitempty" yaml:"header"`
 	Message   yaml.Node          `json:"message,omitempty" yaml:"message"`
+	Payload   string             `json:"payload,omitempty" yaml:"payload,omitempty"`
 	ReadDelay int64              `json:"read_delay,omitempty" yaml:"read_delay,omitempty"`
 }
 
@@ -46,6 +47,7 @@ type RowColumnDefinition struct {
 type MySQLResponse struct {
 	Header    *MySQLPacketHeader `json:"header" yaml:"header"`
 	Message   interface{}        `json:"message" yaml:"message"`
+	Payload   string             `json:"payload,omitempty" yaml:"payload,omitempty"`
 	ReadDelay int64              `json:"read_delay,omitempty"`
 }
 
@@ -142,6 +144,7 @@ type ColumnDefinition struct {
 	Flags        uint16       `yaml:"flags"`
 	Decimals     byte         `yaml:"decimals"`
 	PacketHeader PacketHeader `yaml:"packet_header"`
+	DefaultValue string       `yaml:"string"`
 }
 
 type Row struct {
