@@ -458,6 +458,8 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 		quotedArgs = append(quotedArgs, strconv.Quote(arg))
 	}
 
+	var cmd *exec.Cmd
+
 	// Detect the operating system
 	if runtime.GOOS == "windows" {
 		// Use cmd.exe /C for Windows
