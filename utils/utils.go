@@ -25,6 +25,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
+	l "go.keploy.io/server/v2/utils/log"
 	"go.uber.org/zap"
 	"golang.org/x/term"
 )
@@ -134,9 +135,20 @@ func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
 }
 
 func DeleteLogs(logger *zap.Logger) {
+
+	l.LogCfg.OutputPaths = []string{
+		"stdout",
+	}
+
 	//Check if keploy-log.txt exists
 	_, err := os.Stat("keploy-logs.txt")
 	if os.IsNotExist(err) {
+		return
+	}
+
+	logger, err = l.LogCfg.Build()
+	if err != nil {
+		LogError(logger, err, "failed to build config for logger")
 		return
 	}
 	//If it does, remove it.
@@ -408,7 +420,7 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 	case "linux":
 		alias := "sudo docker container run --name keploy-v2 " + envs + "  -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
 		return alias, nil
-	case "darwin":
+	case "darwin", "windows":
 		cmd := exec.CommandContext(ctx, "docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
 		out, err := cmd.Output()
 		if err != nil {
@@ -430,9 +442,6 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 		logger.Info("Starting keploy in docker with default context, as that is the current context.")
 		alias := "docker container run --name keploy-v2  " + envs + " -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
 		return alias, nil
-	case "Windows":
-		LogError(logger, nil, "Windows is not supported. Use WSL2 instead.")
-		return "", errors.New("failed to get alias")
 	}
 	return "", errors.New("failed to get alias")
 }
