@@ -20,4 +20,3 @@ func (c *CmdConfigurator) noCommandError() error {
 func alreadyRunning(cmd, basePath string) bool {
 	return (cmd == "test" && basePath != "")
 }
-
