@@ -32,6 +32,7 @@ func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opt
 		container:        opts.Container,
 		containerDelay:   opts.DockerDelay,
 		containerNetwork: opts.DockerNetwork,
+		containerIPv4:    make(chan string, 1),
 	}
 	return app
 }
