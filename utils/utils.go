@@ -458,12 +458,24 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 		quotedArgs = append(quotedArgs, strconv.Quote(arg))
 	}
 
-	cmd := exec.CommandContext(
-		ctx,
-		"sh",
-		"-c",
-		keployAlias+" "+strings.Join(quotedArgs, " "),
-	)
+	// Detect the operating system
+	if runtime.GOOS == "windows" {
+		// Use cmd.exe /C for Windows
+		cmd = exec.CommandContext(
+			ctx,
+			"cmd.exe",
+			"/C",
+			keployAlias+" "+strings.Join(quotedArgs, " "),
+		)
+	} else {
+		// Use sh -c for Unix-like systems
+		cmd = exec.CommandContext(
+			ctx,
+			"sh",
+			"-c",
+			keployAlias+" "+strings.Join(quotedArgs, " "),
+		)
+	}
 
 	cmd.Cancel = func() error {
 		return InterruptProcessTree(logger, cmd.Process.Pid, syscall.SIGINT)
