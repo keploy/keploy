@@ -1,19 +1,20 @@
-//go:build linux 
+//go:build linux
 
 package conn
 
 import (
 	"fmt"
-	"go.keploy.io/server/v2/config"
-	proxyHttp "go.keploy.io/server/v2/pkg/core/proxy/integrations/http"
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/utils"
-	"go.uber.org/zap"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"go.keploy.io/server/v2/config"
+	proxyHttp "go.keploy.io/server/v2/pkg/core/proxy/integrations/http"
+	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
+	"go.uber.org/zap"
 
 	"golang.org/x/sys/unix"
 )

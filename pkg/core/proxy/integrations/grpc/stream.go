@@ -1,4 +1,4 @@
-//go:build linux 
+//go:build linux
 
 package grpc
 
@@ -6,9 +6,10 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"github.com/protocolbuffers/protoscope"
 	"sync"
 	"time"
+
+	"github.com/protocolbuffers/protoscope"
 
 	"go.keploy.io/server/v2/pkg/models"
 )

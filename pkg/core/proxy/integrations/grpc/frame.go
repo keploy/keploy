@@ -1,16 +1,17 @@
-//go:build linux 
+//go:build linux
 
 package grpc
 
 import (
 	"context"
 	"fmt"
-	"go.keploy.io/server/v2/pkg/models"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/hpack"
 	"io"
 	"net"
 	"time"
+
+	"go.keploy.io/server/v2/pkg/models"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/hpack"
 )
 
 // transferFrame reads one frame from rhs and writes it to lhs.
