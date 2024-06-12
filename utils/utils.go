@@ -405,13 +405,13 @@ const (
 )
 
 func convertPathToUnixStyle(path string) string {
-    // Replace backslashes with forward slashes
-    unixPath := strings.Replace(path, "\\", "/", -1)
-    // Remove 'C:'
-    if len(unixPath) > 1 && unixPath[1] == ':' {
-        unixPath = unixPath[2:]
-    }
-    return unixPath
+	// Replace backslashes with forward slashes
+	unixPath := strings.Replace(path, "\\", "/", -1)
+	// Remove 'C:'
+	if len(unixPath) > 1 && unixPath[1] == ':' {
+		unixPath = unixPath[2:]
+	}
+	return unixPath
 }
 
 func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
@@ -510,7 +510,7 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 			ctx,
 			"cmd.exe",
 			"/C",
-			keployAlias+" "+strings.Join(quotedArgs, " "),
+			keployAlias+" "+strings.Join(os.Args, " "),
 		)
 	} else {
 		// Use sh -c for Unix-like systems
