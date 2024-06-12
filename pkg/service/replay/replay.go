@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -777,6 +776,8 @@ func (r *Replayer) Templatize(ctx context.Context, testSetId string) error {
 		if err != nil {
 			r.logger.Error("failed to parse response into json", zap.Error(err))
 			return err
+		} else if jsonResponse == nil {
+			continue
 		}
 		// Compare the keys to the headers.
 		for j := i + 1; j < len(tcs); j++ {
@@ -805,7 +806,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSetId string) error {
 	for i := 0; i < len(tcs)-1; i++ {
 		// Check for headers first.
 		for j := i + 1; j < len(tcs); j++ {
-			compareReqHeaders(tcs[i].HTTPReq.Header, tcs[i+1].HTTPReq.Header)
+			compareReqHeaders(tcs[i].HTTPReq.Header, tcs[j].HTTPReq.Header)
 			err = r.testDB.UpdateTestCase(ctx, tcs[j], testSetId)
 			if err != nil {
 				r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
@@ -817,20 +818,18 @@ func (r *Replayer) Templatize(ctx context.Context, testSetId string) error {
 			r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
 		}
 	}
+
+	// Check the url for any common fields.
 	for i := 0; i < len(tcs)-1; i++ {
 		jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
 		if err != nil {
 			r.logger.Error("failed to parse response into json", zap.Error(err))
 			return err
+		} else if jsonResponse == nil {
+			continue
 		}
 		for j := i + 1; j < len(tcs); j++ {
-			url1, err := url.Parse(tcs[i].HTTPReq.URL)
-			url := strings.Split(url1.Path, "/")
-			if err != nil {
-				r.logger.Error("failed to parse the url", zap.Error(err))
-				break
-			}
-			compareVals(url[len(url)-1], jsonResponse)
+			compareVals(&tcs[j].HTTPReq.URL, jsonResponse)
 			err = r.testDB.UpdateTestCase(ctx, tcs[j], testSetId)
 			if err != nil {
 				r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
@@ -848,6 +847,79 @@ func (r *Replayer) Templatize(ctx context.Context, testSetId string) error {
 			r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
 		}
 	}
+
+	// Check the urls params for any common fields.
+	for i := 0; i < len(tcs)-1; i++ {
+		jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
+		if err != nil {
+			r.logger.Error("failed to parse response into json", zap.Error(err))
+			return err
+		} else if jsonResponse == nil {
+			continue
+		}
+		for j := i + 1; j < len(tcs); j++ {
+			compareVals(tcs[j].HTTPReq.URLParams, jsonResponse)
+			err = r.testDB.UpdateTestCase(ctx, tcs[j], testSetId)
+			if err != nil {
+				r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
+			}
+		}
+		// Record the new testcase.
+		jsonData, err := json.Marshal(jsonResponse)
+		if err != nil {
+			r.logger.Error("failed to marshal json data", zap.Error(err))
+			return err
+		}
+		tcs[i].HTTPResp.Body = string(jsonData)
+		err = r.testDB.UpdateTestCase(ctx, tcs[i], testSetId)
+		if err != nil {
+			r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
+		}
+
+	}
+
+	// Compare the req and resp body for any common fields.
+	// for i := 0; i < len(tcs)-1; i++ {
+	// 	jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
+	// 	if err != nil {
+	// 		r.logger.Error("failed to parse response into json", zap.Error(err))
+	// 		return err
+	// 	} else if jsonResponse == nil {
+	// 		continue
+	// 	}
+	// 	for j := i + 1; j < len(tcs); j++ {
+	// 		jsonRequest, err := parseIntoJson(tcs[j].HTTPReq.Body)
+	// 		if err != nil {
+	// 			r.logger.Error("failed to parse request into json", zap.Error(err))
+	// 			return err
+	// 		} else if jsonResponse == nil {
+	// 			continue
+	// 		}
+	// 		compareVals(jsonRequest, jsonResponse)
+	// 		jsonData, err := json.Marshal(jsonRequest)
+	// 		if err != nil {
+	// 			r.logger.Error("failed to marshal json data", zap.Error(err))
+	// 			continue
+	// 		}
+	// 		tcs[j].HTTPReq.Body = string(jsonData)
+	// 		err = r.testDB.UpdateTestCase(ctx, tcs[j], testSetId)
+	// 		if err != nil {
+	// 			r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
+	// 		}
+	// 	}
+	// 	// Record the new testcase.
+	// 	jsonData, err := json.Marshal(jsonResponse)
+	// 	if err != nil {
+	// 		r.logger.Error("failed to marshal json data", zap.Error(err))
+	// 		return err
+	// 	}
+	// 	tcs[i].HTTPResp.Body = string(jsonData)
+	// 	err = r.testDB.UpdateTestCase(ctx, tcs[i], testSetId)
+	// 	if err != nil {
+	// 		r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
+	// 	}
+	// }
+
 	err = r.TestSetConf.Write(ctx, testSetId, &models.TestSet{
 		PreScript:  "",
 		PostScript: "",

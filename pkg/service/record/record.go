@@ -364,9 +364,10 @@ func (r *Recorder) ReRecord(ctx context.Context, appID uint64) error {
 	allTestCasesRecorded := true
 	testSet, err := r.testSetConf.Read(ctx, r.config.Record.ReRecord)
 	if err != nil {
-		utils.LogError(r.logger, err, "failed to read test set config")
+		utils.TemplatizedValues = map[string]interface{}{}
+	}else {
+		utils.TemplatizedValues = testSet.Template
 	}
-	utils.TemplatizedValues = testSet.Template
 	for _, tc := range tcs {
 		if utils.IsDockerKind(cmdType) {
 
