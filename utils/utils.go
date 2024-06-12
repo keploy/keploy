@@ -375,18 +375,21 @@ func FindDockerCmd(cmd string) CmdType {
 			return DockerCompose
 		}
 	}
+
 	// Check for Docker start command patterns
 	for _, pattern := range dockerStartPatterns {
 		if strings.HasPrefix(cmdLower, pattern) {
 			return DockerStart
 		}
 	}
+
 	// Check for Docker run command patterns
 	for _, pattern := range dockerRunPatterns {
 		if strings.HasPrefix(cmdLower, pattern) {
 			return DockerRun
 		}
 	}
+
 	return Native
 }
 
@@ -449,6 +452,7 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	//Get the correct keploy alias.
 	keployAlias, err := getAlias(ctx, logger)
+	fmt.Println(keployAlias)
 	if err != nil {
 		return err
 	}
