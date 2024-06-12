@@ -13,8 +13,10 @@ import (
 	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/core/proxy"
 	"go.keploy.io/server/v2/pkg/core/tester"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/docker"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
+	"go.keploy.io/server/v2/pkg/platform/yaml/configdb/testset"
 	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
 	reportdb "go.keploy.io/server/v2/pkg/platform/yaml/reportdb"
 	testdb "go.keploy.io/server/v2/pkg/platform/yaml/testdb"
@@ -28,6 +30,7 @@ type CommonInternalService struct {
 	YamlTestDB      *testdb.TestYaml
 	YamlMockDb      *mockdb.MockYaml
 	YamlReportDb    *reportdb.TestReport
+	YamlTestSetDB   *testset.Db[*models.TestSet]
 	Instrumentation *core.Core
 }
 
@@ -37,7 +40,7 @@ func GetCoreService(ctx context.Context, cmd string, cfg *config.Config, logger 
 		return record.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, cfg), nil
 	}
 	if cmd == "test" || cmd == "normalize" {
-		return replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, tel, commonServices.Instrumentation, cfg), nil
+		return replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, cfg), nil
 	}
 	return nil, errors.New("invalid command")
 }
@@ -84,11 +87,13 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 	testDB := testdb.New(logger, c.Path)
 	mockDB := mockdb.New(logger, c.Path, "")
 	reportDB := reportdb.New(logger, c.Path+"/reports")
+	testSetDb := testset.New[*models.TestSet](logger, c.Path)
 	return &CommonInternalService{
 		Instrumentation: instrumentation,
 		YamlTestDB:      testDB,
 		YamlMockDb:      mockDB,
 		YamlReportDb:    reportDB,
+		YamlTestSetDB:   testSetDb,
 	}
 }
 
