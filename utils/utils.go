@@ -510,7 +510,7 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 			ctx,
 			"cmd.exe",
 			"/C",
-			keployAlias+" "+strings.Join(os.Args, " "),
+			keployAlias+" "+strings.Join(os.Args[1:], " "),
 		)
 	} else {
 		// Use sh -c for Unix-like systems
