@@ -404,6 +404,16 @@ const (
 	Empty         CmdType = ""
 )
 
+func convertPathToUnixStyle(path string) string {
+    // Replace backslashes with forward slashes
+    unixPath := strings.Replace(path, "\\", "/", -1)
+    // Remove 'C:'
+    if len(unixPath) > 1 && unixPath[1] == ':' {
+        unixPath = unixPath[2:]
+    }
+    return unixPath
+}
+
 func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 	// Get the name of the operating system.
 	osName := runtime.GOOS
@@ -423,12 +433,13 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 	case "linux":
 		alias := "sudo docker container run --name keploy-v2 " + envs + "  -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
 		return alias, nil
-	case "darwin", "windows":
+	case "windows":
 		// Get the current working directory
 		pwd, err := os.Getwd()
 		if err != nil {
 			LogError(logger, err, "failed to get the current working directory")
 		}
+		dpwd := convertPathToUnixStyle(pwd)
 		cmd := exec.CommandContext(ctx, "docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
 		out, err := cmd.Output()
 		if err != nil {
@@ -443,13 +454,36 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 		dockerContext = strings.Split(dockerContext, "\n")[0]
 		if dockerContext == "colima" {
 			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
-			alias := "docker container run --name keploy-v2  " + envs + " -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + pwd + ":" + pwd + " -w " + pwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "/.keploy:/root/.keploy --rm " + img
+			alias := "docker container run --name keploy-v2  " + envs + " -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + pwd + ":" + dpwd + " -w " + dpwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "/.keploy:/root/.keploy --rm " + img
 			return alias, nil
 		}
 		// if default docker context is used
 		logger.Info("Starting keploy in docker with default context, as that is the current context.")
-		alias := "docker container run --name keploy-v2  " + envs + " -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + pwd + ":" + pwd + " -w " + pwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "/.keploy:/root/.keploy --rm " + img
+		alias := "docker container run --name keploy-v2  " + envs + " -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + pwd + ":" + dpwd + " -w " + dpwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "/.keploy:/root/.keploy --rm " + img
 		return alias, nil
+	case "darwin":
+		cmd := exec.CommandContext(ctx, "docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
+		out, err := cmd.Output()
+		if err != nil {
+			LogError(logger, err, "failed to get the current docker context")
+			return "", errors.New("failed to get alias")
+		}
+		dockerContext := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
+		if len(dockerContext) == 0 {
+			LogError(logger, nil, "failed to get the current docker context")
+			return "", errors.New("failed to get alias")
+		}
+		dockerContext = strings.Split(dockerContext, "\n")[0]
+		if dockerContext == "colima" {
+			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
+			alias := "docker container run --name keploy-v2  " + envs + " -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
+			return alias, nil
+		}
+		// if default docker context is used
+		logger.Info("Starting keploy in docker with default context, as that is the current context.")
+		alias := "docker container run --name keploy-v2  " + envs + " -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
+		return alias, nil
+
 	}
 	return "", errors.New("failed to get alias")
 }
