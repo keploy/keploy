@@ -2,10 +2,6 @@
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
-# Checkout a different branch
-git fetch origin
-git checkout native-linux
-
 # Start mongo before starting keploy.
 docker run -p 3306:3306 --rm --name mysql -e MYSQL_ROOT_PASSWORD=my-secret-pw -d mysql:latest
 
@@ -14,9 +10,6 @@ if [ -f "./keploy.yml" ]; then
     rm ./keploy.yml
 fi
 export ConnectionString="root:my-secret-pw@tcp(localhost:3306)/mysql"
-
-# Generate the keploy-config file.
-sudo ./../../keployv2 config --generate
 
 # Update the global noise to ts.
 go build -o urlShort
