@@ -489,7 +489,7 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	if runtime.GOOS == "windows" {
 		for i, arg := range os.Args[1:] {
 			// Manually quote each argument for Windows
-			if strings.ContainsAny(arg, " &()^@=!%:\"')") {
+			if strings.ContainsAny(arg, "\"')") {
 				fmt.Println("number", i)
 				quotedArgs = append(quotedArgs, `"`+arg+`"`)
 			} else {
@@ -506,13 +506,12 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 
 	// Detect the operating system
 	if runtime.GOOS == "windows" {
-		cmdString := `"` + keployAlias + ` ` + strings.Join(quotedArgs, " ") + `"`
 		// Use cmd.exe /C for Windows
 		cmd = exec.CommandContext(
 			ctx,
 			"cmd.exe",
 			"/C",
-			cmdString,
+			keployAlias+" "+strings.Join(quotedArgs, " "),
 		)
 	} else {
 		// Use sh -c for Unix-like systems
