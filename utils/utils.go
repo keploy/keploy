@@ -506,12 +506,13 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 
 	// Detect the operating system
 	if runtime.GOOS == "windows" {
+		cmdString := `"` + keployAlias + ` ` + strings.Join(quotedArgs, " ") + `"`
 		// Use cmd.exe /C for Windows
 		cmd = exec.CommandContext(
 			ctx,
 			"cmd.exe",
 			"/C",
-			keployAlias+" "+strings.Join(quotedArgs, " "),
+			cmdString,
 		)
 	} else {
 		// Use sh -c for Unix-like systems
