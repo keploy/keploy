@@ -25,7 +25,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
-	l "go.keploy.io/server/v2/utils/log"
 	"go.uber.org/zap"
 	"golang.org/x/term"
 )
@@ -136,21 +135,12 @@ func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
 
 func DeleteLogs(logger *zap.Logger) {
 
-	l.LogCfg.OutputPaths = []string{
-		"stdout",
-	}
-
 	//Check if keploy-log.txt exists
 	_, err := os.Stat("keploy-logs.txt")
 	if os.IsNotExist(err) {
 		return
 	}
 
-	logger, err = l.LogCfg.Build()
-	if err != nil {
-		LogError(logger, err, "failed to build config for logger")
-		return
-	}
 	//If it does, remove it.
 	err = os.Remove("keploy-logs.txt")
 	if err != nil {
