@@ -481,16 +481,16 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	//Get the correct keploy alias.
 	keployAlias, err := getAlias(ctx, logger)
-	fmt.Println(keployAlias)
 	if err != nil {
 		return err
 	}
 	var quotedArgs []string
 
 	if runtime.GOOS == "windows" {
-		for _, arg := range os.Args[1:] {
+		for i, arg := range os.Args[1:] {
 			// Manually quote each argument for Windows
 			if strings.ContainsAny(arg, " &()^@=!%:\"')") {
+				fmt.Println("number", i)
 				quotedArgs = append(quotedArgs, `"`+arg+`"`)
 			} else {
 				quotedArgs = append(quotedArgs, arg)
@@ -523,7 +523,6 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 		)
 	}
 
-	fmt.Println(keployAlias + " " + strings.Join(quotedArgs, " "))
 	fmt.Println(cmd.String())
 
 	cmd.Cancel = func() error {
