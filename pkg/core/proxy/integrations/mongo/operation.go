@@ -89,7 +89,8 @@ func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, inter
 			ReturnFieldsSelector: op.(*opQuery).returnFieldsSelector.String(),
 		}
 	case wiremessage.OpMsg:
-		op, err = decodeMsg(reqID, wmBody)
+
+		op, err = decodeMsg(reqID, wmBody, logger)
 		if err != nil {
 			return nil, messageHeader, mongoMsg, err
 		}
@@ -469,7 +470,7 @@ func extractSectionSingle(data string) (string, error) {
 	return content, nil
 }
 
-func encodeOpMsg(responseOpMsg *models.MongoOpMessage, actualRequestMsgSections []string, expectedRequestMsgSections []string, logger *zap.Logger) (*opMsg, error) {
+func encodeOpMsg(responseOpMsg *models.MongoOpMessage, actualRequestMsgSections []string, expectedRequestMsgSections []string, mongoPassword string, logger *zap.Logger) (*opMsg, error) {
 	message := &opMsg{
 		flags:    wiremessage.MsgFlag(responseOpMsg.FlagBits),
 		checksum: uint32(responseOpMsg.Checksum),
@@ -506,7 +507,7 @@ func encodeOpMsg(responseOpMsg *models.MongoOpMessage, actualRequestMsgSections 
 				return nil, err
 			}
 
-			resultStr, ok, err := handleScramAuth(actualRequestMsgSections, expectedRequestMsgSections, sectionStr, logger)
+			resultStr, ok, err := handleScramAuth(actualRequestMsgSections, expectedRequestMsgSections, sectionStr, mongoPassword, logger)
 			if err != nil {
 				return nil, err
 			}
@@ -526,7 +527,7 @@ func encodeOpMsg(responseOpMsg *models.MongoOpMessage, actualRequestMsgSections 
 				msg: unmarshaledDoc,
 			})
 		default:
-			logger.Error("failed to encode the OpMsg section into mongo wiremessage because of invalid format", zap.Any("section", messageValue))
+			utils.LogError(logger, nil, "failed to encode the OpMsg section into mongo wiremessage because of invalid format", zap.Any("section", messageValue))
 		}
 	}
 	return message, nil
@@ -592,9 +593,9 @@ func (m *opMsg) OpCode() wiremessage.OpCode {
 // see https://github.com/mongodb/mongo-go-driver/blob/v1.7.2/x/mongo/driver/operation.go#L898-L904
 func (m *opMsg) Encode(responseTo, requestID int32) []byte {
 	var buffer []byte
-	lOgger.Debug(fmt.Sprintf("the responseTo for the OpMsg: %v, for requestId: %v", responseTo, wiremessage.NextRequestID()))
+	m.logger.Debug(fmt.Sprintf("the responseTo for the OpMsg: %v, for requestId: %v", responseTo, wiremessage.NextRequestID()))
 
-	idx, buffer := wiremessage.AppendHeaderStart(buffer, requestId, responseTo, wiremessage.OpMsg)
+	idx, buffer := wiremessage.AppendHeaderStart(buffer, requestID, responseTo, wiremessage.OpMsg)
 	buffer = wiremessage.AppendMsgFlags(buffer, m.flags)
 	for _, section := range m.sections {
 		buffer = section.append(buffer)

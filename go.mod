@@ -119,10 +119,18 @@ require (
 	github.com/emirpasic/gods v1.18.1
 	github.com/getsentry/sentry-go v0.17.0
 	github.com/jackc/pgproto3/v2 v2.3.2
-	github.com/vektah/gqlparser/v2 v2.5.8
+	github.com/shirou/gopsutil/v3 v3.24.3
+	github.com/spf13/viper v1.18.2
+	github.com/vektah/gqlparser/v2 v2.5.11
+	github.com/wI2L/jsondiff v0.5.0
 	github.com/xdg-go/pbkdf2 v1.0.0
 	github.com/xdg-go/scram v1.1.1
 	github.com/xdg-go/stringprep v1.0.4
+	github.com/yudai/gojsondiff v1.0.0
+	golang.org/x/sync v0.7.0
+	golang.org/x/term v0.19.0
+	gopkg.in/yaml.v2 v2.4.0
+	sigs.k8s.io/kustomize/kyaml v0.16.0
 )
 
 require (
