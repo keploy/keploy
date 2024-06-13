@@ -273,7 +273,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if conf == nil {
 			return models.TestSetStatusFailed, fmt.Errorf("test set config not found")
 		}
-		postscript = conf.PostScript
+			postscript = conf.PostScript
 
 		r.logger.Info("Running Pre-script", zap.String("script", conf.PreScript), zap.String("test-set", testSetID))
 		err = r.executeScript(runTestSetCtx, conf.PreScript)
@@ -392,7 +392,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// var to store the error in the loop
 	var loopErr error
 	testSet, err := r.TestSetConf.Read(ctx, testSetID)
-	if err != nil {
+	if err != nil || testSet == nil {
 		utils.TemplatizedValues = map[string]interface{}{}
 	} else {
 		utils.TemplatizedValues = testSet.Template
@@ -760,7 +760,7 @@ func (r *Replayer) RunApplication(ctx context.Context, appID uint64, opts models
 func (r *Replayer) Templatize(ctx context.Context, testSetId string) error {
 	// path:=filepath.Join(r.config.Path, testSetId)
 	testSet, err := r.TestSetConf.Read(ctx, testSetId)
-	if err != nil {
+	if err != nil || testSet == nil {
 		utils.TemplatizedValues = map[string]interface{}{}
 	} else {
 		utils.TemplatizedValues = testSet.Template

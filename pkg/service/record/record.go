@@ -363,7 +363,7 @@ func (r *Recorder) ReRecord(ctx context.Context, appID uint64) error {
 
 	allTestCasesRecorded := true
 	testSet, err := r.testSetConf.Read(ctx, r.config.Record.ReRecord)
-	if err != nil {
+	if err != nil || testSet == nil{
 		utils.TemplatizedValues = map[string]interface{}{}
 	}else {
 		utils.TemplatizedValues = testSet.Template
