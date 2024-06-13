@@ -1,7 +1,7 @@
-name: Golang On Docker
+name: Mux-Golang On Docker
 on: [pull_request]
 jobs:
-  golang_docker:
+  mux_golang_docker:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
@@ -23,5 +23,4 @@ jobs:
     - name: Run mux-mysql application
       run: |
         cd samples-go/mux-mysql
-        source ./../../.github/workflows/test_workflow_scripts/golang-docker.sh
-
+        source ./../../.github/workflows/test_workflow_scripts/golang-mux-docker.sh
