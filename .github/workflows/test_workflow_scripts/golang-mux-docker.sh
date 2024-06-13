@@ -4,7 +4,7 @@ source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Start mongo before starting keploy.
 docker network create keploy-network
-docker run -p 3306:3306 --rm --name mysql -e MYSQL_ROOT_PASSWORD=my-secret-pw -d mysql:latest
+docker run -p 3306:3306 --rm --name mysql --net keploy-network -e MYSQL_ROOT_PASSWORD=my-secret-pw -d mysql:latest
 
 # Remove any preexisting keploy tests and mocks.
 sudo rm -rf keploy/
