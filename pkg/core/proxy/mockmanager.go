@@ -94,11 +94,11 @@ func (m *MockManager) FlagMockAsUsed(mock models.Mock) error {
 	return nil
 }
 
-func (m *MockManager) DeleteFilteredMock(mock *models.Mock) bool {
+func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	isDeleted := m.filtered.delete(mock.TestModeInfo)
 	if isDeleted {
 		go func() {
-			if err := m.FlagMockAsUsed(*mock); err != nil {
+			if err := m.FlagMockAsUsed(mock); err != nil {
 				m.logger.Error("failed to flag mock as used", zap.Error(err))
 			}
 		}()
@@ -106,11 +106,11 @@ func (m *MockManager) DeleteFilteredMock(mock *models.Mock) bool {
 	return isDeleted
 }
 
-func (m *MockManager) DeleteUnFilteredMock(mock *models.Mock) bool {
+func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 	isDeleted := m.unfiltered.delete(mock.TestModeInfo)
 	if isDeleted {
 		go func() {
-			if err := m.FlagMockAsUsed(*mock); err != nil {
+			if err := m.FlagMockAsUsed(mock); err != nil {
 				m.logger.Error("failed to flag mock as used", zap.Error(err))
 			}
 		}()

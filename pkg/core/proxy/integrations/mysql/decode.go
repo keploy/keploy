@@ -91,7 +91,7 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 					//	errCh <- err
 					//	return
 					//}
-					mockDb.DeleteUnFilteredMock(configMocks[matchedIndex])
+					mockDb.DeleteUnFilteredMock(*configMocks[matchedIndex])
 				}
 				//h.SetConfigMocks(configMocks)
 				firstLoop = false

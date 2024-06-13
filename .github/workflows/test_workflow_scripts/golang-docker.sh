@@ -64,7 +64,7 @@ send_request(){
 for i in {1..2}; do
     container_name="ginApp_${i}"
     send_request $container_name &
-    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p8080:8080 --net keploy-network --rm --name ${container_name} gin-mongo" --containerName "${container_name}" --generateGithubActions=false &> "${container_name}.txt"
+    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p8080:8080 --net keploy-network --rm --name $container_name gin-mongo" --containerName "$container_name" --generateGithubActions=false &> "${container_name}.txt"
 
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
