@@ -36,6 +36,11 @@ for i in {1..2}; do
     app_name="nodeApp_${i}"
     send_request &
     sudo -E env PATH=$PATH ./../../keployv2 record -c 'npm start' --generateGithubActions=false &> "${app_name}.txt"
+    if grep "ERROR" "${app_name}.txt"; then
+        echo "Error found in pipeline..."
+        cat "${app_name}.txt"
+        exit 1
+    fi
     if grep "WARNING: DATA RACE" "${app_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
         cat "${app_name}.txt"
@@ -48,6 +53,12 @@ done
 
 # Test modes and result checking
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --generateGithubActions=false &> test_logs1.txt
+
+if grep "ERROR" "test_logs1.txt"; then
+    echo "Error found in pipeline..."
+    cat "test_logs1.txt"
+    exit 1
+fi
 if grep "WARNING: DATA RACE" "test_logs1.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
     cat "test_logs1.txt"
@@ -55,7 +66,11 @@ if grep "WARNING: DATA RACE" "test_logs1.txt"; then
 fi
 
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testsets test-set-0 --generateGithubActions=false &> test_logs2.txt
-
+if grep "ERROR" "test_logs2.txt"; then
+    echo "Error found in pipeline..."
+    cat "test_logs2.txt"
+    exit 1
+fi
 if grep "WARNING: DATA RACE" "test_logs2.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
     cat "test_logs2.txt"
@@ -67,6 +82,11 @@ sudo -E env PATH=$PATH ./../../keployv2 config --generate
 sed -i 's/selectedTests: {}/selectedTests: {"test-set-0": ["test-1", "test-2"]}/' "./keploy.yml"
 
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --apiTimeout 30 --delay 10 --generateGithubActions=false &> test_logs3.txt
+if grep "ERROR" "test_logs3.txt"; then
+    echo "Error found in pipeline..."
+    cat "test_logs3.txt"
+    exit 1
+fi
 if grep "WARNING: DATA RACE" "test_logs3.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
     cat "test_logs3.txt"
