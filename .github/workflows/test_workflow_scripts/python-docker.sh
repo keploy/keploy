@@ -17,9 +17,10 @@ sleep 5  # Allow time for configuration to apply
 
 
 container_kill() {
-    local container_name=$1
-    docker rm -f keploy-v2
-    docker rm -f "${container_name}"
+    pid=$(pgrep keploy)
+    echo "$pid Keploy PID" 
+    echo "Killing keploy"
+    sudo kill $pid
 }
 
 send_request(){
@@ -43,14 +44,14 @@ send_request(){
 
     # Wait for 5 seconds for keploy to record the tcs and mocks.
     sleep 5
-    container_kill $container_name
+    container_kill
     wait
 }
 
 # Record sessions
 for i in {1..2}; do
     container_name="flaskApp_${i}"
-    send_request $container_name &
+    send_request &
     sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p6000:6000 --net keploy-network --rm --name $container_name flask-app:1.0" --containerName "$container_name" --generateGithubActions=false &> "${container_name}.txt"
     if grep "ERROR" "${container_name}.txt"; then
         echo "Error found in pipeline..."

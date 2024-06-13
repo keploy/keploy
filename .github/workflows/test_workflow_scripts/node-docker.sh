@@ -13,13 +13,13 @@ sudo rm -rf keploy/
 docker build -t node-app:1.0 .
 
 container_kill() {
-    local container_name=$1
-    docker rm -f keploy-v2
-    docker rm -f "${container_name}"
+    pid=$(pgrep keploy)
+    echo "$pid Keploy PID" 
+    echo "Killing keploy"
+    sudo kill $pid
 }
 
 send_request(){
-    local container_name=$1
     sleep 10
    # Wait for the application to start.
     app_started=false
@@ -52,14 +52,14 @@ send_request(){
     curl -X GET http://localhost:8000/students
     # Wait for 5 seconds for keploy to record the tcs and mocks.
     sleep 5
-    container_kill $container_name
+    container_kill
     wait
 }
 
 for i in {1..2}; do
     # Start keploy in record mode.
     container_name="nodeApp_${i}"
-    send_request $container_name &
+    send_request &
     sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p 8000:8000 --name "${container_name}" --network keploy-network node-app:1.0" --containerName "${container_name}" --generateGithubActions=false &> "${container_name}.txt"
     if grep "ERROR" "${container_name}.txt"; then
         echo "Error found in pipeline..."
