@@ -490,7 +490,11 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	if runtime.GOOS == "windows" {
 		for _, arg := range os.Args[1:] {
 			// Manually quote each argument for Windows
-			quotedArgs = append(quotedArgs, `"`+strings.ReplaceAll(arg, `"`, `\"`)+`"`)
+			if strings.ContainsAny(arg, " &()^@=!%:\"')") {
+				quotedArgs = append(quotedArgs, `"`+arg+`"`)
+			} else {
+				quotedArgs = append(quotedArgs, arg)
+			}
 		}
 	} else {
 		for _, arg := range os.Args[1:] {
