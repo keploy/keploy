@@ -41,6 +41,8 @@ RUN apt install docker-compose -y
 COPY --from=build /app/keploy /app/keploy
 COPY --from=build /app/entrypoint.sh /app/entrypoint.sh
 
+RUN sed -i 's/\r$//' /app/entrypoint.sh
+
 # Make the entrypoint.sh file executable
 RUN chmod +x /app/entrypoint.sh
 
