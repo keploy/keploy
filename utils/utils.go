@@ -487,8 +487,15 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	}
 	var quotedArgs []string
 
-	for _, arg := range os.Args[1:] {
-		quotedArgs = append(quotedArgs, strconv.Quote(arg))
+	if runtime.GOOS == "windows" {
+		for _, arg := range os.Args[1:] {
+			// Manually quote each argument for Windows
+			quotedArgs = append(quotedArgs, `"`+strings.ReplaceAll(arg, `"`, `\"`)+`"`)
+		}
+	} else {
+		for _, arg := range os.Args[1:] {
+			quotedArgs = append(quotedArgs, strconv.Quote(arg))
+		}
 	}
 
 	var cmd *exec.Cmd
@@ -500,7 +507,7 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 			ctx,
 			"cmd.exe",
 			"/C",
-			keployAlias+" "+strings.Join(os.Args[1:], " "),
+			keployAlias+" "+strings.Join(quotedArgs, " "),
 		)
 	} else {
 		// Use sh -c for Unix-like systems
