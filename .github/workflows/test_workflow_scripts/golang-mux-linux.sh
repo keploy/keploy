@@ -7,7 +7,7 @@ git fetch origin
 git checkout native-linux
 
 # Start mongo before starting keploy.
-docker run --rm -d -p27017:27017 --name mongoDb mongo
+docker run -p 3306:3306 --rm --name mysql -e MYSQL_ROOT_PASSWORD=my-secret-pw -d mysql:latest
 
 # Check if there is a keploy-config file, if there is, delete it.
 if [ -f "./keploy.yml" ]; then
@@ -19,15 +19,6 @@ export ConnectionString="root:my-secret-pw@tcp(localhost:3306)/mysql"
 sudo ./../../keployv2 config --generate
 
 # Update the global noise to ts.
-config_file="./keploy.yml"
-sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
-
-sed -i 's/ports: 0/ports: 27017/' "$config_file"
-
-# Remove any preexisting keploy tests and mocks.
-rm -rf keploy/
-
-# Build the binary.
 go build -o urlShort
 
 
