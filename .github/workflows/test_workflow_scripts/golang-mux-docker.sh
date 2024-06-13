@@ -8,7 +8,6 @@ docker run -p 3306:3306 --rm --name mysql -e MYSQL_ROOT_PASSWORD=my-secret-pw -d
 
 # Remove any preexisting keploy tests and mocks.
 sudo rm -rf keploy/
-watch -n 1 docker logs mysql
 # Start keploy in record mode.
 docker build -t url-short .
 
