@@ -123,6 +123,7 @@ func (m *MockManager) GetConsumedMocks() []string {
 	m.consumedMocks.Range(func(key, _ interface{}) bool {
 		if _, ok := key.(string); ok {
 			keys = append(keys, key.(string))
+			m.consumedMocks.Delete(key)
 		}
 		return true
 	})
@@ -131,6 +132,8 @@ func (m *MockManager) GetConsumedMocks() []string {
 		numJ, _ := strconv.Atoi(strings.Split(keys[j], "-")[1])
 		return numI < numJ
 	})
-	m.consumedMocks = sync.Map{}
+	for key := range keys {
+		m.consumedMocks.Delete(key)
+	}
 	return keys
 }
