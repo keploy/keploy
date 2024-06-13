@@ -491,7 +491,7 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 		for _, arg := range os.Args[1:] {
 			// Manually quote each argument for Windows
 			if strings.ContainsAny(arg, " &()^@=!%:\"')") {
-				quotedArgs = append(quotedArgs, `\\"`+arg+`\\"`)
+				quotedArgs = append(quotedArgs, `"`+arg+`"`)
 			} else {
 				quotedArgs = append(quotedArgs, arg)
 			}
