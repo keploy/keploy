@@ -22,7 +22,7 @@ docker build -t gin-mongo .
 docker rm -f ginApp 2>/dev/null || true
 
 container_kill() {
-    pid=$(pgrep keploy)
+    pid=$(pgrep -n keploy)
     echo "$pid Keploy PID" 
     echo "Killing keploy"
     sudo kill $pid
