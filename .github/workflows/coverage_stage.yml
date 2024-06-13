@@ -25,11 +25,18 @@ jobs:
         with:
           name: coverage-reports-samples-go-gin-mongo-1
           path: ./temp-coverage-dir
+      
+      - name: Download coverage data of express-mongodb application
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-reports-samples-express-mongodb
+          path: ./temp-coverage-dir
 
       - name: Unzip all coverage data zip files
         run: |
           unzip temp-coverage-dir/coverage-reports-samples-go-gin-mongo-0.zip -d unzipped-cov
           unzip temp-coverage-dir/coverage-reports-samples-go-gin-mongo-1.zip -d unzipped-cov
+          unzip temp-coverage-dir/coverage-reports-samples-express-mongodb.zip -d unzipped-cov
 
       - name: Combine all coverage data
         run: |
