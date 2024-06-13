@@ -5,19 +5,12 @@ source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 # Start mongo before starting keploy.
 docker network create keploy-network
 docker run -p 3306:3306 --rm --name mysql -e MYSQL_ROOT_PASSWORD=my-secret-pw -d mysql:latest
-# Generate the keploy-config file.
-sudo -E env PATH=$PATH ./../../keployv2 config --generate
-
-# Update the global noise to ts.
-config_file="./keploy.yml"
-sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
 
 # Remove any preexisting keploy tests and mocks.
 sudo rm -rf keploy/
 watch -n 1 docker logs mysql
 # Start keploy in record mode.
 docker build -t url-short .
-docker rm -f ginApp 2>/dev/null || true
 
 container_kill() {
     pid=$(pgrep -n keploy)
@@ -52,7 +45,7 @@ send_request(){
 for i in {1..2}; do
     container_name="urlShort_${i}"
     send_request &
-    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p8080:8080 --net keploy-network --rm --name $container_name gin-mongo" --containerName "$container_name" --generateGithubActions=false &> "${container_name}.txt"
+    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p8080:8080 --net keploy-network --rm --name $container_name url-short" --containerName "$container_name" --generateGithubActions=false &> "${container_name}.txt"
 
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
@@ -71,7 +64,7 @@ done
 
 # Start the keploy in test mode.
 test_container="urlShort_test"
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generateGithubActions=false &> "${test_container}.txt"
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test url-short' --containerName "$test_container" --apiTimeout 60 --delay 20 --generateGithubActions=false &> "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
