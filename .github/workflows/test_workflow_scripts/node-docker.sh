@@ -78,7 +78,7 @@ done
 
 # Start keploy in test mode.
 test_container="nodeApp_test"
-sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p8000:8000 --rm --name $test_container --network keploy-network node-app:1.0" --containerName "$test_container" --apiTimeout 30 --delay 30 --generateGithubActions=false
+sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p8000:8000 --rm --name $test_container --network keploy-network node-app:1.0" --containerName "$test_container" --apiTimeout 30 --delay 30 --generateGithubActions=false &> "${test_container}.txt"
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
     cat "${test_container}.txt"

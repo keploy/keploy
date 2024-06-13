@@ -97,7 +97,6 @@ if grep "WARNING: DATA RACE" "${test_container}.txt"; then
     exit 1
 fi
 
-docker rm -f ginApp_test
 all_passed=true
 
 for i in {0..1}
