@@ -564,7 +564,7 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string) error {
 		Name:   volumeName,
 		Driver: "local",
 		DriverOpts: map[string]string{
-			"type":   "none", // Use "none" for local driver
+			"type":   volumeName, // Use "none" for local driver
 			"device": volumeName,
 		},
 	})
