@@ -502,6 +502,8 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 		}
 	}
 
+
+
 	var cmd *exec.Cmd
 
 	// Detect the operating system
@@ -522,6 +524,8 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 			keployAlias+" "+strings.Join(quotedArgs, " "),
 		)
 	}
+
+	fmt.Println(cmd.String())
 
 	cmd.Cancel = func() error {
 		return InterruptProcessTree(logger, cmd.Process.Pid, syscall.SIGINT)
