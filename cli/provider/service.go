@@ -51,7 +51,7 @@ func NewServiceProvider(logger *zap.Logger, userDb *user.Db, cfg *config.Config)
 }
 
 func (n *ServiceProvider) GetTelemetryService(ctx context.Context, config config.Config, globalMap map[string]interface{}) (*telemetry.Telemetry, error) {
-	installationID, err := n.configDb.GetInstallationID(ctx)
+	installationID, err := n.userDb.GetInstallationID(ctx)
 	if err != nil {
 		return nil, errors.New("failed to get installation id")
 	}
