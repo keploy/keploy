@@ -30,6 +30,9 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 	var config T
 	data, err := yaml.ReadFile(ctx, db.logger, filePath, "config")
 	if err != nil {
+		if err.Error() == "no such file or directory" {
+			return config, nil
+		}
 		utils.LogError(db.logger, err, "failed to read the config from yaml")
 		return config, err
 	}

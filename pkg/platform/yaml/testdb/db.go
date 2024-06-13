@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
+	// "github.com/hoisie/mustache"
 	yamlLib "gopkg.in/yaml.v3"
 )
 
@@ -82,7 +83,8 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 			utils.LogError(ts.logger, err, "failed to read the testcase from yaml")
 			return nil, err
 		}
-
+		// utils.ReadTempValues()
+		// data = []byte(mustache.Render(string(data), utils.TemplatizedValues))
 		var testCase *yaml.NetworkTrafficDoc
 		err = yamlLib.Unmarshal(data, &testCase)
 		if err != nil {

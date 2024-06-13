@@ -44,18 +44,18 @@ var Examples = `
 Golang Application
 	Record:
 	sudo -E env PATH=$PATH keploy record -c "/path/to/user/app/binary"
-	
+
 	Test:
 	sudo -E env PATH=$PATH keploy test -c "/path/to/user/app/binary" --delay 10
 
 Node Application
 	Record:
 	sudo -E env PATH=$PATH keploy record -c “npm start --prefix /path/to/node/app"
-	
+
 	Test:
 	sudo -E env PATH=$PATH keploy test -c “npm start --prefix /path/to/node/app" --delay 10
 
-Java 
+Java
 	Record:
 	sudo -E env PATH=$PATH keploy record -c "java -jar /path/to/java-project/target/jar"
 
@@ -79,18 +79,18 @@ var ExampleOneClickInstall = `
 Golang Application
 	Record:
 	keploy record -c "/path/to/user/app/binary"
-	
+
 	Test:
 	keploy test -c "/path/to/user/app/binary" --delay 10
 
 Node Application
 	Record:
 	keploy record -c “npm start --prefix /path/to/node/app"
-	
+
 	Test:
 	keploy test -c “npm start --prefix /path/to/node/app" --delay 10
 
-Java 
+Java
 	Record:
 	keploy record -c "java -jar /path/to/java-project/target/jar"
 
@@ -176,6 +176,9 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "config":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated config is stored")
 		cmd.Flags().Bool("generate", false, "Generate a new keploy configuration file")
+	case "templatize":
+		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
+		cmd.Flags().StringSliceP("testsets", "t", c.cfg.Templatize.TestSets, "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
 	case "mock":
 		cmd.Flags().StringP("path", "p", c.cfg.Path, "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Bool("record", false, "Record all outgoing network traffic")
@@ -505,6 +508,25 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+
+	case "templatize":
+		path := c.cfg.Path
+		//if user provides relative path
+		if len(path) > 0 && path[0] != '/' {
+			absPath, err := filepath.Abs(path)
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get the absolute path from relative path")
+			}
+			path = absPath
+		} else if len(path) == 0 { // if user doesn't provide any path
+			cdirPath, err := os.Getwd()
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to get the path of current directory")
+			}
+			path = cdirPath
+		}
+		path += "/keploy"
+		c.cfg.Path = path
 	case "gen":
 		if os.Getenv("API_KEY") == "" {
 			utils.LogError(c.logger, nil, "API_KEY is not set")
