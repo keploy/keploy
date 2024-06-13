@@ -1,7 +1,7 @@
-name: Golang On Linux
+name: Mux-Golang On Linux
 on: [pull_request]
 jobs:
-  golang_linux:
+  mux_golang_linux:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
@@ -18,5 +18,5 @@ jobs:
     - name: Run mux-mysql application
       run: |
         cd samples-go/mux-mysql
-        source ./../../.github/workflows/test_workflow_scripts/golang-linux.sh
+        source ./../../.github/workflows/test_workflow_scripts/golang-mux-linux.sh
 
