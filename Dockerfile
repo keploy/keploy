@@ -41,6 +41,7 @@ RUN apt install docker-compose -y
 COPY --from=build /app/keploy /app/keploy
 COPY --from=build /app/entrypoint.sh /app/entrypoint.sh
 
+# windows comapatibility
 RUN sed -i 's/\r$//' /app/entrypoint.sh
 
 # Make the entrypoint.sh file executable
