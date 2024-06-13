@@ -35,7 +35,10 @@ type CommonInternalService struct {
 }
 
 func GetCoreService(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger, tel *telemetry.Telemetry) (interface{}, error) {
-	commonServices := GetCommonServices(ctx, cfg, logger)
+	commonServices, err := GetCommonServices(ctx, cfg, logger)
+	if err != nil {
+		return nil, err
+	}
 	if cmd == "record" {
 		return record.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, cfg), nil
 	}
@@ -45,7 +48,7 @@ func GetCoreService(ctx context.Context, cmd string, cfg *config.Config, logger 
 	return nil, errors.New("invalid command")
 }
 
-func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger) *CommonInternalService {
+func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger) (*CommonInternalService, error) {
 
 	h := hooks.NewHooks(logger, c)
 	p := proxy.New(logger, h, c)
@@ -61,6 +64,10 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 		}
 
 		addKeployNetwork(ctx, logger, client)
+		err := client.CreateVolume(ctx, "debugfs")
+		if err != nil {
+			utils.LogError(logger, err, "failed to debugfs volume")
+		}
 
 		//parse docker command only in case of docker start or docker run commands
 		if utils.CmdType(c.CommandType) != utils.DockerCompose {
@@ -94,7 +101,7 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 		YamlMockDb:      mockDB,
 		YamlReportDb:    reportDB,
 		YamlTestSetDB:   testSetDb,
-	}
+	}, nil
 }
 
 func addKeployNetwork(ctx context.Context, logger *zap.Logger, client docker.Client) {

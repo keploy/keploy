@@ -19,6 +19,8 @@ import (
 
 	"github.com/docker/docker/api/types"
 	dockerContainerPkg "github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/volume"
 )
 
 const (
@@ -536,4 +538,41 @@ func (idc *Impl) IsContainerRunning(containerName string) (bool, error) {
 		return true, nil
 	}
 	return false, nil
+}
+
+func (idc *Impl) CreateVolume(ctx context.Context, volumeName string) error {
+	// Set a timeout for the context
+	ctx, cancel := context.WithTimeout(ctx, idc.timeoutForDockerQuery)
+	defer cancel()
+
+	// Check if the 'debugfs' volume exists
+	filter := filters.NewArgs()
+	filter.Add("name", volumeName)
+	volumeList, err := idc.VolumeList(ctx, volume.ListOptions{Filters: filter})
+	if err != nil {
+		idc.logger.Error("failed to list docker volumes", zap.Error(err))
+		return err
+	}
+
+	if len(volumeList.Volumes) > 0 {
+		idc.logger.Info("volume already exists", zap.Any("volume", volumeName))
+		return err
+	}
+
+	// Create the 'debugfs' volume if it doesn't exist
+	_, err = idc.VolumeCreate(ctx, volume.CreateOptions{
+		Name:   volumeName,
+		Driver: "local",
+		DriverOpts: map[string]string{
+			"type":   "none", // Use "none" for local driver
+			"device": volumeName,
+		},
+	})
+	if err != nil {
+		idc.logger.Error("failed to create volume", zap.Any("volume", volumeName), zap.Error(err))
+		return err
+	}
+
+	idc.logger.Debug("volume created", zap.Any("volume", volumeName))
+	return nil
 }
