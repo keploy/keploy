@@ -7,7 +7,7 @@ import (
 )
 
 type ServiceFactory interface {
-	GetService(ctx context.Context, cmd string) (interface{}, error)
+	GetService(ctx context.Context, cmd string, teleGlobalMap map[string]interface{}) (interface{}, error)
 }
 
 type CmdConfigurator interface {
