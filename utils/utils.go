@@ -491,7 +491,7 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 		for _, arg := range os.Args[1:] {
 			// Manually quote each argument for Windows
 			if strings.ContainsAny(arg, " &()^@=!%:\"')") {
-				quotedArgs = append(quotedArgs, `"`+arg+`"`)
+				quotedArgs = append(quotedArgs, `\\"`+arg+`\\"`)
 			} else {
 				quotedArgs = append(quotedArgs, arg)
 			}
@@ -509,8 +509,9 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 		// Use cmd.exe /C for Windows
 		cmd = exec.CommandContext(
 			ctx,
-			keployAlias,
-			quotedArgs...,
+			"cmd.exe",
+			"/C",
+			keployAlias+" "+strings.Join(quotedArgs, " "),
 		)
 	} else {
 		// Use sh -c for Unix-like systems
@@ -522,6 +523,7 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 		)
 	}
 
+	fmt.Println(keployAlias + " " + strings.Join(quotedArgs, " "))
 	fmt.Println(cmd.String())
 
 	cmd.Cancel = func() error {
