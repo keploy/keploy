@@ -178,7 +178,7 @@ func compareVals(map1 interface{}, map2 interface{}) {
 			urlParts := strings.Split(url.Path, "/")
 			ok = parseBody(&urlParts[len(urlParts)-1], map2)
 			url.Path = strings.Join(urlParts, "/")
-			*v = fmt.Sprintf("%s://%s%s", url.Scheme, url.Host, url.Path)
+			*v = fmt.Sprintf("%s://%s%s?%s", url.Scheme, url.Host, url.Path, url.RawQuery)
 		} else {
 			ok = parseBody(v, map2)
 		}
