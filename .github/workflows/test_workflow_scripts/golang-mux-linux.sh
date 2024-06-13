@@ -14,8 +14,7 @@ export ConnectionString="root:my-secret-pw@tcp(localhost:3306)/mysql"
 # Update the global noise to ts.
 go build -o urlShort
 
-
-send_request(){
+send_request() {
     sleep 10
     app_started=false
     while [ "$app_started" = false ]; do
@@ -25,20 +24,20 @@ send_request(){
         sleep 3
     done
     echo "App started"
-    curl -X POST localhost:8080/create \ 
+    curl -X POST http://localhost:8080/create \
+    -H "Content-Type: application/json" \
     -d '{"link":"https://google.com"}'
 
-    curl localhost:8080/links/1
+    curl http://localhost:8080/links/1
 
-    curl localhost:8080/all
+    curl http://localhost:8080/all
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
     pid=$(pgrep keploy)
-    echo "$pid Keploy PID" 
+    echo "$pid Keploy PID"
     echo "Killing keploy"
     sudo kill $pid
 }
-
 
 for i in {1..2}; do
     app_name="urlShort_${i}"
@@ -75,7 +74,6 @@ if grep "WARNING: DATA RACE" "test_logs.txt"; then
 fi
 
 all_passed=true
-
 
 # Get the test results from the testReport file.
 for i in {0..1}
