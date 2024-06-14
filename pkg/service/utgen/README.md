@@ -60,7 +60,7 @@ Referred from [Meta's research](https://arxiv.org/pdf/2402.09171), TestGen-LLM t
 
 ## Prerequisites
 
-**AI model Setup** - Set the environment variable **export API_KEY=xxxx**, apiKey can be either of one these:
+**AI model Setup** - Set the environment variable **export API_KEY=xxxx**, apiKey can be from either of one these:
 
 - **OpenAI's GPT-4o** directly **[preferred]**.
 
@@ -110,7 +110,8 @@ curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source
     ```shell
      keploy gen --sourceFilePath="<path to source file>" --testFilePath="<path to test file for above source file>" --testCommand="npm test" --coverageReportPath="<path to coverage.xml>"
     ```
-    <br/>
+  <br/>
+
   - **For Entire Application** use the following command to generate tests across:
 
     ⚠️ **Warning:** Executing this command will generate unit tests for all files in the application. Depending on the size of the codebase, this process may take between 20 minutes to an hour and will incur costs related to LLM usage.
@@ -143,8 +144,7 @@ curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source
     ```shell
     keploy gen --sourceFilePath="<path to source file>" --testFilePath="<path to test file for above source file>" --testCommand="go test -v ./... -coverprofile=coverage.out && gocov convert coverage.out | gocov-xml > coverage.xml" --coverageReportPath="<path to coverage.xml>"
     ```
-
-      <br/>
+  <br/>
 
   - **For Entire Application** use the following command to generate tests across:
 
