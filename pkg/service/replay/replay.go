@@ -750,6 +750,36 @@ func (r *Replayer) RunApplication(ctx context.Context, appID uint64, opts models
 	return r.instrumentation.Run(ctx, appID, opts)
 }
 
+func (r *Replayer) DenoiseTestCases(ctx context.Context, testRunID string, testSetID string, noiseParams []models.NoiseParams) error {
+
+	testCases, err := r.testDB.GetTestCases(ctx, testSetID)
+	if err != nil {
+		return fmt.Errorf("failed to get test cases: %w", err)
+	}
+
+	for _, v := range testCases {
+		for _, noiseParam := range noiseParams {
+			if v.Name == noiseParam.TestCaseIDs {
+
+				// append the noise map
+				if noiseParam.Ops == string(models.OpsAdd) {
+					v.Noise = mergeMaps(v.Noise, noiseParam.Assertion)
+				} else {
+					// remove from the original noise map
+					v.Noise = removeFromMap(v.Noise, noiseParam.Assertion)
+				}
+				err = r.testDB.UpdateTestCase(ctx, v, testSetID)
+				if err != nil {
+					return fmt.Errorf("failed to update test case: %w", err)
+				}
+			}
+		}
+
+	}
+
+	return nil
+}
+
 func (r *Replayer) Normalize(ctx context.Context) error {
 
 	var testRun string
@@ -780,7 +810,7 @@ func (r *Replayer) Normalize(ctx context.Context) error {
 	for _, testSet := range r.config.Normalize.SelectedTests {
 		testSetID := testSet.TestSet
 		testCases := testSet.Tests
-		err := r.normalizeTestCases(ctx, testRun, testSetID, testCases)
+		err := r.NormalizeTestCases(ctx, testRun, testSetID, testCases, nil)
 		if err != nil {
 			return err
 		}
@@ -789,26 +819,30 @@ func (r *Replayer) Normalize(ctx context.Context) error {
 	return nil
 }
 
-func (r *Replayer) normalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIDs []string) error {
+func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIds []string, testCaseResults []models.TestResult) error {
 
-	testReport, err := r.reportDB.GetReport(ctx, testRun, testSetID)
-	if err != nil {
-		return fmt.Errorf("failed to get test report: %w", err)
+	// if we are getting from parameter then we need to get the testReport
+	if testCaseResults == nil || len(testCaseResults) == 0 {
+		testReport, err := r.reportDB.GetReport(ctx, testRun, testSetID)
+		if err != nil {
+			return fmt.Errorf("failed to get test report: %w", err)
+		}
+
+		testCaseResults = testReport.Tests
 	}
-	testCaseResults := testReport.Tests
-	testCaseResultMap := make(map[string]models.TestResult)
 
+	testCaseResultMap := make(map[string]models.TestResult)
 	testCases, err := r.testDB.GetTestCases(ctx, testSetID)
 	if err != nil {
 		return fmt.Errorf("failed to get test cases: %w", err)
 	}
-	selectedTestCases := make([]*models.TestCase, 0, len(selectedTestCaseIDs))
+	selectedTestCases := make([]*models.TestCase, 0, len(selectedTestCaseIds))
 
-	if len(selectedTestCaseIDs) == 0 {
+	if len(selectedTestCaseIds) == 0 {
 		selectedTestCases = testCases
 	} else {
 		for _, testCase := range testCases {
-			if _, ok := ArrayToMap(selectedTestCaseIDs)[testCase.Name]; ok {
+			if _, ok := ArrayToMap(selectedTestCaseIds)[testCase.Name]; ok {
 				selectedTestCases = append(selectedTestCases, testCase)
 			}
 		}

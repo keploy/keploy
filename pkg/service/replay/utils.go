@@ -126,3 +126,33 @@ func (t *requestMockUtil) ProcessMockFile(_ context.Context, testSetID string) {
 	}
 	t.logger.Debug("Mock file for test set", zap.String("testSetID", testSetID))
 }
+
+
+// mergeMaps takes two maps of type map[string][]string and merges them.
+// The values of common keys are concatenated.
+func mergeMaps(map1, map2 map[string][]string) map[string][]string {
+	// Iterate over the second map
+	
+	for key, values := range map2 {
+		// If the key from map2 exists in map1, append the values
+		if _, exists := map1[key]; exists {
+			map1[key] = append(map1[key], values...)
+		
+		} else {
+			// If the key doesn't exist in map1, add it
+		
+			map1[key] = values
+		}
+	}
+	return map1
+}
+
+// removeFromMap takes two maps of type map[string][]string.
+// It removes from map1 any keys that are present in map2.
+func removeFromMap(map1, map2 map[string][]string) map[string][]string {
+	// Iterate over the keys in map2
+	for key := range map2 {
+		delete(map1, key)
+	}
+	return map1
+}
