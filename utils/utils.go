@@ -500,7 +500,7 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 		var args []string
 		args = append(args, "/C")
 		args = append(args, strings.Split(keployAlias, " ")...)
-		args = append(args, os.Args...)
+		args = append(args, os.Args[1:]...)
 		// Use cmd.exe /C for Windows
 		cmd = exec.CommandContext(
 			ctx,
