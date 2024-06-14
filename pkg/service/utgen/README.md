@@ -72,9 +72,15 @@ Referred from [Meta's research](https://arxiv.org/pdf/2402.09171), TestGen-LLM t
 
 Install Keploy-gen locally by running the following command:
 
+#### Linux/Mac
+
 ```shell
 curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh
 ```
+
+#### Windows
+
+- [Download](https://github.com/keploy/keploy/releases/latest/download/keploy_windows_amd64.tar.gz) and move the keploy.exe file to C:\Windows\System32
 
 ### ![NodeJS](https://img.shields.io/badge/node.js-6DA55F?style=for-the-badge&logo=node.js&logoColor=white) → Running with Node.js/TypeScript applications
 
@@ -107,10 +113,12 @@ curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source
   <br/>
 
   - **For Single Test File:** If you prefer to test a smaller section of your application or to control costs, consider generating tests for a single source and its corresponding test file:
+
     ```shell
      keploy gen --sourceFilePath="<path to source file>" --testFilePath="<path to test file for above source file>" --testCommand="npm test" --coverageReportPath="<path to coverage.xml>"
     ```
-  <br/>
+
+    <br/>
 
   - **For Entire Application** use the following command to generate tests across:
 
@@ -144,7 +152,8 @@ curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source
     ```shell
     keploy gen --sourceFilePath="<path to source file>" --testFilePath="<path to test file for above source file>" --testCommand="go test -v ./... -coverprofile=coverage.out && gocov convert coverage.out | gocov-xml > coverage.xml" --coverageReportPath="<path to coverage.xml>"
     ```
-  <br/>
+
+    <br/>
 
   - **For Entire Application** use the following command to generate tests across:
 
