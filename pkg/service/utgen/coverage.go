@@ -48,8 +48,16 @@ func (cp *CoverageProcessor) VerifyReportUpdate(latestTime int64) error {
 	}
 	fileModTimeMs := fileInfo.ModTime().UnixNano() / int64(time.Millisecond)
 
-	if fileModTimeMs >= latestTime {
-		return fmt.Errorf("fatal: the coverage report file was not updated after the test command. file_mod_time_ms: %d, time_of_test_command: %d", fileModTimeMs, latestTime)
+	if fileModTimeMs < latestTime {
+		time.Sleep(2 * time.Second)
+		fileInfo, err = os.Stat(cp.ReportPath)
+		if err != nil {
+			return err
+		}
+		fileModTimeMs = fileInfo.ModTime().UnixNano() / int64(time.Millisecond)
+		if fileModTimeMs < latestTime {
+			return fmt.Errorf("fatal: the coverage report file was not updated after the test command. file_mod_time_ms: %d, time_of_test_command: %d", fileModTimeMs, latestTime)
+		}
 	}
 	return nil
 }

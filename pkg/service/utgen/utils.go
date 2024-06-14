@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -130,10 +131,17 @@ func RunCommand(command string, cwd string, logger *zap.Logger) (stdout string, 
 	// Get the current time before running the test command, in milliseconds
 	commandStartTime = time.Now().UnixNano() / int64(time.Millisecond)
 
-	// Create the command with the specified working directory
-	cmd := exec.Command("sh", "-c", command)
-	if cwd != "" {
-		cmd.Dir = cwd
+	var cmd *exec.Cmd
+
+	if runtime.GOOS == "windows" {
+		cmdArgs := strings.Fields(command)
+		cmd = exec.Command(cmdArgs[0], cmdArgs[1:]...)
+	} else {
+		// Create the command with the specified working directory
+		cmd = exec.Command("sh", "-c", command)
+		if cwd != "" {
+			cmd.Dir = cwd
+		}
 	}
 
 	// Capture the stdout and stderr
