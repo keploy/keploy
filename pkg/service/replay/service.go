@@ -32,8 +32,8 @@ type Service interface {
 	GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error)
 	RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError
 	Normalize(ctx context.Context) error
-		DenoiseTestCases(ctx context.Context, testRun string, testSetID string, noiseParams []models.NoiseParams) error
-	NormalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIds []string,testResult []models.TestResult) error
+	DenoiseTestCases(ctx context.Context, testRun string, testSetID string, noiseParams []models.NoiseParams) error
+	NormalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIds []string, testResult []models.TestResult) error
 }
 
 type TestDB interface {
