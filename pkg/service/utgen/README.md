@@ -72,9 +72,14 @@ Referred from [Meta's research](https://arxiv.org/pdf/2402.09171), TestGen-LLM t
 
 Install Keploy-gen locally by running the following command:
 
+#### Linux/Mac
+
 ```shell
 curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh
 ```
+
+#### Windows
+- [Download]("https://github.com/keploy/keploy/releases/latest/download/keploy_windows_amd64.tar.gz") and move the keploy.exe file to C:\Windows\System32
 
 ### ![NodeJS](https://img.shields.io/badge/node.js-6DA55F?style=for-the-badge&logo=node.js&logoColor=white) → Running with Node.js/TypeScript applications
 
