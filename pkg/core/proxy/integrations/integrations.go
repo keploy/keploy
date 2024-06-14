@@ -50,8 +50,8 @@ type MockMemDb interface {
 	GetFilteredMocks() ([]*models.Mock, error)
 	GetUnFilteredMocks() ([]*models.Mock, error)
 	UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool
-	DeleteFilteredMock(mock *models.Mock) bool
-	DeleteUnFilteredMock(mock *models.Mock) bool
+	DeleteFilteredMock(mock models.Mock) bool
+	DeleteUnFilteredMock(mock models.Mock) bool
 	// Flag the mock as used which matches the external request from application in test mode
-	FlagMockAsUsed(mock *models.Mock) error
+	FlagMockAsUsed(mock models.Mock) error
 }
