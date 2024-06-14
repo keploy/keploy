@@ -60,37 +60,41 @@ Referred from [Meta's research](https://arxiv.org/pdf/2402.09171), TestGen-LLM t
 
 ## Prerequisites
 
-**AI model Setup** - Set the environment variable **export API_KEY=xxxx**, apiKey can be from either of one these:
+**AI model Setup** - Set the environment variable **API_KEY**.
+```
+export API_KEY=xxxx
+```
 
+**API_KEY** can be from either of one these:
 - **OpenAI's GPT-4o** directly **[preferred]**.
 
 - Alternative LLMs via [litellm](https://github.com/BerriAI/litellm?tab=readme-ov-file#quick-start-proxy---cli).
 
-- Azure OpenAI.
+- Azure OpenAI
 
 ## Installation
 
-Install Keploy-gen locally by running the following command:
+Install Keploy locally by running the following command:
 
-#### Linux/Mac
+#### ➡ Linux/Mac
 
 ```shell
-curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh
+ curl --silent -O -L https://keploy.io/install.sh && source install.sh
 ```
 
-#### Windows
+#### ➡  Windows
 
-- [Download](https://github.com/keploy/keploy/releases/latest/download/keploy_windows_amd64.tar.gz) and move the keploy.exe file to C:\Windows\System32
+- [Download](https://github.com/keploy/keploy/releases/latest/download/keploy_windows_amd64.tar.gz) and **move the keploy.exe file** to `C:\Windows\System32`
 
-### ![NodeJS](https://img.shields.io/badge/node.js-6DA55F?style=for-the-badge&logo=node.js&logoColor=white) → Running with Node.js/TypeScript applications
+### ![NodeJS](https://img.shields.io/badge/node.js-6DA55F?style=for-the-badge&logo=node.js&logoColor=white)   ➡     Running with Node.js/TypeScript applications
 
-- Set the API key, as mentioned in pre-requisites above:
+- Ensure you've set the API key, as mentioned in pre-requisites above:
 
   ```shell
   export API_KEY=xxxx
   ```
 
-- Ensure Cobertura formatted coverage reports, edit `jest.config.js` or `package.json`:
+- Ensure **Cobertura** formatted coverage reports, edit `jest.config.js` or `package.json`:
   <br/>
 
   ```json
@@ -99,17 +103,18 @@ curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source
         "coverageReporters": ["text", "cobertura"],
       }
   ```
+  or  
 
-  ```js
-  // jest.config.js
-  module.exports = {
-    coverageReporters: ["text", "cobertura"],
-  };
+  ```javascript
+    // jest.config.js
+    module.exports = {
+      coverageReporters: ["text", "cobertura"],
+    };
   ```
 
-### Usage
+#### Generating Unit Tests
 
-- **Generate tests using Keploy:**
+- Run the following command in the root of your application. 
   <br/>
 
   - **For Single Test File:** If you prefer to test a smaller section of your application or to control costs, consider generating tests for a single source and its corresponding test file:
@@ -128,23 +133,23 @@ curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source
     keploy gen --testCommand="npm test" --testDir="test" --coverageReportPath="<path to coverage.xml>"
     ```
 
-    🎉 You should see improved test cases and code-coverage. ✅ Enjoy coding with enhanced unit test coverage! 🫰
+  🎉 You should see improved test cases and code-coverage. ✅ Enjoy coding with enhanced unit test coverage! 🫰
 
 ### ![Go](https://img.shields.io/badge/go-%2300ADD8.svg?style=for-the-badge&logo=go&logoColor=white) → Running with Golang applications
 
-- Set the API key, as mentioned in pre-requisites above:
+- Ensure you've set the API key, as mentioned in pre-requisites above:
 
   ```shell
   export API_KEY=xxxx
   ```
 
-- Ensure Cobertura formatted coverage reports.
+- To ensure **Cobertura** formatted coverage reports, add:
   ```bash
    go install github.com/axw/gocov/gocov@v1.1.0
    go install github.com/AlekSi/gocov-xml@v1.1.0
   ```
-  ### Usage
-- **Generate tests using Keploy:**
+#### Generating Unit Tests
+- Run the following command in the root of your application.
   <br/>
 
   - **For Single Test File:** If you prefer to test a smaller section of your application or to control costs, consider generating tests for a single source and its corresponding test file:
@@ -167,14 +172,14 @@ curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source
 
 ### → Setup for Other Languages
 
-- Set the API key, as mentioned in pre-requisites above:
+- Ensure you've set the API key, as mentioned in pre-requisites above:
 
   ```shell
   export API_KEY=xxxx
   ```
 
-- Ensure that your unit test report format is Cobertura(it's very common).
-- Generate tests using Keploy:
+- Ensure that your unit test report format is **Cobertura**(it's very common).
+- Generate tests using keploy-gen:
   ```bash
   keploy gen --sourceFilePath="<path to source code file>" --testFilePath="<path to existing unit test file>" --testCommand="<cmd to execute unit tests>" --coverageReportPath="<path to cobertura-coverage.xml>"
   ```
@@ -218,6 +223,11 @@ Reach out to us. We're here to answer!
 [![LinkedIn](https://img.shields.io/badge/linkedin-%230077B5.svg?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/keploy/)
 [![YouTube](https://img.shields.io/badge/YouTube-%23FF0000.svg?style=for-the-badge&logo=YouTube&logoColor=white)](https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg)
 [![Twitter](https://img.shields.io/badge/Twitter-%231DA1F2.svg?style=for-the-badge&logo=Twitter&logoColor=white)](https://twitter.com/Keployio)
+
+
+# 📝 Sample QuickStarts
+- ![Go](https://img.shields.io/badge/go-%2300ADD8.svg?style=for-the-badge&logo=go&logoColor=white) : Try a unit-gen on [Mux-SQL](https://github.com/keploy/samples-go/tree/main/mux-sql#create-unit-testcase-with-keploy) app
+
 
 ## 🌐 Language Support
 
