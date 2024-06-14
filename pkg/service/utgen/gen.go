@@ -195,12 +195,8 @@ func (g *UnitTestGenerator) runCoverage() error {
 	if g.srcPath != "" {
 		g.logger.Info(fmt.Sprintf("Running test command to generate coverage report: '%s'", g.cmd))
 	}
-	stout, stderr, exitCode, lastUpdatedTime, err := RunCommand(g.cmd, g.dir, g.logger)
+	_, _, exitCode, lastUpdatedTime, err := RunCommand(g.cmd, g.dir, g.logger)
 	if err != nil {
-		if g.logger.Level() == zap.DebugLevel {
-			fmt.Println(stout)
-			fmt.Println(stderr)
-		}
 		utils.LogError(g.logger, err, "Error running test command")
 	}
 	if exitCode != 0 {
