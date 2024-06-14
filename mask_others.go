@@ -1,13 +1,13 @@
-//go:build !linux
+//go:build !windows
 
 package main
 
-// SetUmask is a no-op for non-Linux systems
+import "syscall"
+
 func SetUmask() int {
-	return 0
+	return syscall.Umask(0)
 }
 
-// RestoreUmask is a no-op for non-Linux systems
 func RestoreUmask(oldMask int) {
-	// Do nothing
+	syscall.Umask(oldMask)
 }
