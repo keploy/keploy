@@ -11,6 +11,7 @@
 </p>
 
 ---
+
 <h4 align="center">
 
    <a href="https://twitter.com/Keploy_io">
@@ -25,13 +26,13 @@
     <img src="https://img.shields.io/badge/CNCF%20Landscape-5699C6?logo=cncf&style=social" alt="Keploy CNCF Landscape" />
   </a>
 
+[![Slack](https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white)](https://join.slack.com/t/keploy/shared_invite/zt-2dno1yetd-Ec3el~tTwHYIHgGI0jPe7A)
+[![LinkedIn](https://img.shields.io/badge/linkedin-%230077B5.svg?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/keploy/)
+[![Twitter](https://img.shields.io/badge/Twitter-%231DA1F2.svg?style=for-the-badge&logo=Twitter&logoColor=white)](https://twitter.com/Keployio)
 
-  [![Slack](https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white)](https://join.slack.com/t/keploy/shared_invite/zt-2dno1yetd-Ec3el~tTwHYIHgGI0jPe7A)
-  [![LinkedIn](https://img.shields.io/badge/linkedin-%230077B5.svg?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/keploy/)
-  [![Twitter](https://img.shields.io/badge/Twitter-%231DA1F2.svg?style=for-the-badge&logo=Twitter&logoColor=white)](https://twitter.com/Keployio)
 </h4>
 
-___
+---
 
 Keploy-gen uses LLMs to understand code semantics and generates meaningful **unit tests**. It's inspired by the [Automated Unit Test Improvement using LLM at Meta](https://arxiv.org/pdf/2402.09171).
 
@@ -39,143 +40,153 @@ Keploy-gen uses LLMs to understand code semantics and generates meaningful **uni
 
 - **Automate unit test generation (UTG)**: Quickly generate comprehensive unit tests and reduce the redundant manual effort.
 
+- **Improve edge cases**: Extend and improve the scope of tests to cover more complex scenarios that are often missed manually.
 
-- **Improve existing tests**: Extend and improve the scope of existing tests to cover more complex scenarios that are often missed manually.
-
-
-- **Boost test coverage**: As codebase grows, ensuring exhaustive coverage should become feasible. 
-
+- **Boost test coverage**: As codebase grows, ensuring exhaustive coverage should become feasible.
 
 ## Core Components
 
-| **Phase**                     | **Activities**                                                                                    | **Tools/Technologies**        |
-|-------------------------------|---------------------------------------------------------------------------------------------------|-------------------------------|
-| **Code Analysis**             | Analyze the code structure and dependencies.                                                      | Static analysis tools, LLMs   |
-| **Prompt Engineering**        | Generation of targeted prompts to guide the LLM in producing relevant tests.                      | LLMs, Custom scripts          |
+| **Phase**                     | **Activities**                                                                                    | **Tools/Technologies**                   |
+| ----------------------------- | ------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| **Code Analysis**             | Analyze the code structure and dependencies.                                                      | Static analysis tools, LLMs              |
+| **Prompt Engineering**        | Generation of targeted prompts to guide the LLM in producing relevant tests.                      | LLMs, Custom scripts                     |
 | **Iterative Test Refinement** | Cyclic process of refining tests by running them, analyzing coverage, and incorporating feedback. | Testing frameworks (e.g., JUnit, pytest) |
 
 ### Process Overview
+
 Referred from [Meta's research](https://arxiv.org/pdf/2402.09171), TestGen-LLM top level architecture.
 
 <img src="https://s3.us-west-2.amazonaws.com/keploy.io/meta-llm-process-overview.png" width="90%" alt="Test refinement process of unit test generator"/>
 
 ## Prerequisites
-**AI model Setup** - Set the environment variable **export API_KEY=xxxx** to use:
-  - **OpenAI's GPT-4o** directly **[preferred]**.
-  
 
-  - Alternative LLMs via [litellm](https://github.com/BerriAI/litellm?tab=readme-ov-file#quick-start-proxy---cli).
+**AI model Setup** - Set the environment variable **export API_KEY=xxxx**, apiKey can be from either of one these:
 
-##  Installation
+- **OpenAI's GPT-4o** directly **[preferred]**.
+
+- Alternative LLMs via [litellm](https://github.com/BerriAI/litellm?tab=readme-ov-file#quick-start-proxy---cli).
+
+- Azure OpenAI.
+
+## Installation
+
 Install Keploy-gen locally by running the following command:
 
-  ```shell
-  curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh
-  ```
+```shell
+curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh
+```
 
 ### ![NodeJS](https://img.shields.io/badge/node.js-6DA55F?style=for-the-badge&logo=node.js&logoColor=white) → Running with Node.js/TypeScript applications
-- Set the API key, as mentioned in pre-requisites above: 
+
+- Set the API key, as mentioned in pre-requisites above:
 
   ```shell
   export API_KEY=xxxx
   ```
-- Ensure Cobertura formatted coverage reports, edit `package.json`:
-   ```json
-   "jest": {
-         "collectCoverage": true,
-         "coverageReporters": ["text", "cobertura"],
-         "coverageDirectory": "./coverage"
-       } 
-   ```
-  ### Usage
-- **Generate tests using Keploy:** 
-  - **For Entire Application** use the following command to generate tests across:
-    
-     ⚠️ **Warning:** Executing this command will generate unit tests for all files in the application. Depending on the size of the codebase, this process may take between 20 minutes to an hour and will incur costs related to LLM usage.
-    ```bash
-    keploy gen \
-          --testCommand="npm test" \
-          --testDir="test" \
-          --coverageReportPath="<path to coverage.xml>"
-     ```
-    <br/>
 
-  -  **For Smaller Scope Testing:** If you prefer to test a smaller section of your application or to control costs, consider generating tests for a single source and its corresponding test file:
-     ```shell
-      keploy gen \                                                                                                                                     
-                --sourceFilePath="<path to source file>" \
-                --testFilePath="<path to test file for above source file>" \
-                --testCommand="npm test" \
-                --coverageReportPath="<path to coverage.xml>"
-     ```
+- Ensure Cobertura formatted coverage reports, edit `jest.config.js` or `package.json`:
+  <br/>
+
+  ```json
+  // package.json
+  "jest": {
+        "coverageReporters": ["text", "cobertura"],
+      }
+  ```
+
+  ```js
+  // jest.config.js
+  module.exports = {
+    coverageReporters: ["text", "cobertura"],
+  };
+  ```
+
+### Usage
+
+- **Generate tests using Keploy:**
+  <br/>
+
+  - **For Single Test File:** If you prefer to test a smaller section of your application or to control costs, consider generating tests for a single source and its corresponding test file:
+    ```shell
+     keploy gen --sourceFilePath="<path to source file>" --testFilePath="<path to test file for above source file>" --testCommand="npm test" --coverageReportPath="<path to coverage.xml>"
+    ```
+  <br/>
+
+  - **For Entire Application** use the following command to generate tests across:
+
+    ⚠️ **Warning:** Executing this command will generate unit tests for all files in the application. Depending on the size of the codebase, this process may take between 20 minutes to an hour and will incur costs related to LLM usage.
+
+    ```bash
+    keploy gen --testCommand="npm test" --testDir="test" --coverageReportPath="<path to coverage.xml>"
+    ```
+
     🎉 You should see improved test cases and code-coverage. ✅ Enjoy coding with enhanced unit test coverage! 🫰
 
 ### ![Go](https://img.shields.io/badge/go-%2300ADD8.svg?style=for-the-badge&logo=go&logoColor=white) → Running with Golang applications
+
 - Set the API key, as mentioned in pre-requisites above:
 
   ```shell
   export API_KEY=xxxx
   ```
+
 - Ensure Cobertura formatted coverage reports.
-    ```bash
-     go install github.com/axw/gocov/gocov@v1.1.0
-     go install github.com/AlekSi/gocov-xml@v1.1.0 
+  ```bash
+   go install github.com/axw/gocov/gocov@v1.1.0
+   go install github.com/AlekSi/gocov-xml@v1.1.0
   ```
-  ### Usage  
+  ### Usage
 - **Generate tests using Keploy:**
+  <br/>
+
+  - **For Single Test File:** If you prefer to test a smaller section of your application or to control costs, consider generating tests for a single source and its corresponding test file:
+
+    ```shell
+    keploy gen --sourceFilePath="<path to source file>" --testFilePath="<path to test file for above source file>" --testCommand="go test -v ./... -coverprofile=coverage.out && gocov convert coverage.out | gocov-xml > coverage.xml" --coverageReportPath="<path to coverage.xml>"
+    ```
+  <br/>
+
   - **For Entire Application** use the following command to generate tests across:
-  
+
     ⚠️ **Warning:** Executing this command will generate unit tests for all files in the application. Depending on the size of the codebase, this process may take between 20 minutes to an hour and will incur costs related to LLM usage.
+
     ```bash
-    keploy gen \
-              --testDir="." \
-              --testCommand="go test -v ./... -coverprofile=coverage.out && gocov convert coverage.out | gocov-xml > coverage.xml" \
-              --coverageReportPath="<path to coverage.xml>"
+    keploy gen --testDir="." --testCommand="go test -v ./... -coverprofile=coverage.out && gocov convert coverage.out | gocov-xml > coverage.xml" --coverageReportPath="<path to coverage.xml>"
     ```
 
-  -  **For Smaller Scope Testing:** If you prefer to test a smaller section of your application or to control costs, consider generating tests for a single source and its corresponding test file:
-     <br/>
-
-     ```shell
-     keploy gen \                                                                                                                                     
-                --sourceFilePath="<path to source file>" \
-                --testFilePath="<path to test file for above source file>" \
-                --testCommand="go test -v ./... -coverprofile=coverage.out && gocov convert coverage.out | gocov-xml > coverage.xml" \
-                --coverageReportPath="<path to coverage.xml>"
-      ```
     🎉 You should see improved test cases and code-coverage. ✅ Enjoy coding with enhanced unit test coverage! 🫰
 
 ### → Setup for Other Languages
+
 - Set the API key, as mentioned in pre-requisites above:
 
   ```shell
   export API_KEY=xxxx
   ```
+
 - Ensure that your unit test report format is Cobertura(it's very common).
 - Generate tests using Keploy:
-    ```bash
-    keploy gen \
-          --sourceFilePath="<path to source code file>" \
-          --testFilePath="<path to existing unit test file>"  \
-          --testCommand="<cmd to execute unit tests>" \
-          --coverageReportPath="<path to cobertura-coverage.xml>"
-    ```
+  ```bash
+  keploy gen --sourceFilePath="<path to source code file>" --testFilePath="<path to existing unit test file>" --testCommand="<cmd to execute unit tests>" --coverageReportPath="<path to cobertura-coverage.xml>"
+  ```
 
 ## Configuration
+
 Configure Keploy using command-line flags:
 
 ```bash
-keploy gen \
-           --sourceFilePath "" \
-           --testFilePath "" \
-           --coverageReportPath "coverage.xml" \
-           --testCommand "" \
-           --coverageFormat "cobertura" \
-           --expectedCoverage 100 \
-           --maxIterations 5 \
-           --testDir "" \
-           --litellmUrl "" \
-           --model "gpt-4o"
+
+  --sourceFilePath ""
+  --testFilePath ""
+  --coverageReportPath "coverage.xml"
+  --testCommand ""
+  --coverageFormat "cobertura"
+  --expectedCoverage 100
+  --maxIterations 5
+  --testDir ""
+  --llmBaseUrl "https://api.openai.com/v1"
+  --model "gpt-4o"
+  --llmApiVersion "
 ```
 
 - `sourceFilePath`: Path to the source file for which tests are to be generated.
@@ -186,11 +197,12 @@ keploy gen \
 - `expectedCoverage`: Desired coverage percentage (default 100%).
 - `maxIterations`: Maximum number of iterations for refining tests (default 5).
 - `testDir`: Directory where tests will be written.
-- `litellmUrl`: Set to true if using litellm for model integration.
-- `apiBaseUrl`: Base URL for the litellm proxy.
+- `llmBaseUrl`: Base url of the llm.
 - `model`: Specifies the AI model to use (default "gpt-4o").
+- `llmApiVersion`: API version of the llm if any (default "")
 
 # 🙋🏻‍♀️ Questions? 🙋🏻‍♂️
+
 Reach out to us. We're here to answer!
 
 [![Slack](https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white)](https://join.slack.com/t/keploy/shared_invite/zt-2dno1yetd-Ec3el~tTwHYIHgGI0jPe7A)
@@ -198,8 +210,8 @@ Reach out to us. We're here to answer!
 [![YouTube](https://img.shields.io/badge/YouTube-%23FF0000.svg?style=for-the-badge&logo=YouTube&logoColor=white)](https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg)
 [![Twitter](https://img.shields.io/badge/Twitter-%231DA1F2.svg?style=for-the-badge&logo=Twitter&logoColor=white)](https://twitter.com/Keployio)
 
-
 ## 🌐 Language Support
+
 ![Go](https://img.shields.io/badge/go-%2300ADD8.svg?style=for-the-badge&logo=go&logoColor=white)
 ![NodeJS](https://img.shields.io/badge/node.js-6DA55F?style=for-the-badge&logo=node.js&logoColor=white)
 
@@ -211,15 +223,16 @@ Keploy-gen is not just a project but an attempt to make developers life easier t
 It aims to simplify the creation and maintenance of tests, ensuring high coverage, and adapts to the complexity of modern software development.
 
 #### Prompt Generation
+
 Referred from [Meta's research](https://arxiv.org/pdf/2402.09171), the four primary prompts used in the deployment for the December 2023 Instagram and Facebook app test-a-thons
 
-| Prompt Name            | Template                                                                                                                                                                        |
-|------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| extend_test            | Here is a Kotlin unit test class: {`existing_test_class`}. Write an extended version of the test class that includes additional tests to cover some extra corner cases.           |
-| extend_coverage        | Here is a Kotlin unit test class and the class that it tests: {`existing_test_class`} {`class_under_test`}. Write an extended version of the test class that includes additional unit tests that will increase the test coverage of the class under test. |
-| corner_cases           | Here is a Kotlin unit test class and the class that it tests: {`existing_test_class`} {`class_under_test`}. Write an extended version of the test class that includes additional unit tests that will cover corner cases missed by the original and will increase the test coverage of the class under test. |
-| statement_to_complete  | Here is a Kotlin class under test {`class_under_test`} This class under test can be tested with this Kotlin unit test class {`existing_test_class`}. Here is an extended version of the unit test class that includes additional unit test cases that will cover methods, edge cases, corner cases, and other features of the class under test that were missed by the original unit test class: |
+| Prompt Name           | Template                                                                                                                                                                                                                                                                                                                                                                                         |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| extend_test           | Here is a Kotlin unit test class: {`existing_test_class`}. Write an extended version of the test class that includes additional tests to cover some extra corner cases.                                                                                                                                                                                                                          |
+| extend_coverage       | Here is a Kotlin unit test class and the class that it tests: {`existing_test_class`} {`class_under_test`}. Write an extended version of the test class that includes additional unit tests that will increase the test coverage of the class under test.                                                                                                                                        |
+| corner_cases          | Here is a Kotlin unit test class and the class that it tests: {`existing_test_class`} {`class_under_test`}. Write an extended version of the test class that includes additional unit tests that will cover corner cases missed by the original and will increase the test coverage of the class under test.                                                                                     |
+| statement_to_complete | Here is a Kotlin class under test {`class_under_test`} This class under test can be tested with this Kotlin unit test class {`existing_test_class`}. Here is an extended version of the unit test class that includes additional unit test cases that will cover methods, edge cases, corner cases, and other features of the class under test that were missed by the original unit test class: |
 
-Limitation: This project currently doesn't generate quality fresh tests if there are no existing tests to learn from.  
+Limitation: This project currently doesn't generate quality fresh tests if there are no existing tests to learn from.
 
 Enjoy coding with enhanced unit test coverage! 🫰

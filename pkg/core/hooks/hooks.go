@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package hooks provides functionality for managing hooks.
 package hooks
 
