@@ -11,6 +11,6 @@ import (
 	"go.uber.org/zap"
 )
 
-func GetCoreService(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger, tel *telemetry.Telemetry) (interface{}, error) {
+func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger, tel *telemetry.Telemetry) (interface{}, error) {
 	return nil, errors.New("command not supported in non linux os")
 }

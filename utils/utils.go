@@ -517,8 +517,6 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 		)
 	}
 
-	fmt.Println(cmd.String())
-
 	cmd.Cancel = func() error {
 		return InterruptProcessTree(logger, cmd.Process.Pid, syscall.SIGINT)
 	}

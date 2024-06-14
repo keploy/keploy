@@ -34,7 +34,7 @@ type CommonInternalService struct {
 	Instrumentation *core.Core
 }
 
-func GetCoreService(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger, tel *telemetry.Telemetry) (interface{}, error) {
+func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger, tel *telemetry.Telemetry) (interface{}, error) {
 	commonServices, err := GetCommonServices(ctx, cfg, logger)
 	if err != nil {
 		return nil, err
