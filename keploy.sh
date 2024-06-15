@@ -1,10 +1,13 @@
 #!/bin/bash
 
 installKeploy (){
+    VERSION="latest"
     IS_CI=false
     for arg in "$@"
     do
         case $arg in
+            -v|--version)
+                VERSION="tag/$2"
             -isCI)
                 IS_CI=true
                 shift
@@ -15,19 +18,19 @@ installKeploy (){
     done
 
     install_keploy_darwin_all() {
-        curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz" | tar xz -C /tmp
+        curl --silent --location "https://github.com/keploy/keploy/releases/$VERSION/download/keploy_darwin_all.tar.gz" | tar xz -C /tmp
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploy
         delete_keploy_alias
     }
 
     install_keploy_arm() {
-        curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
+        curl --silent --location "https://github.com/keploy/keploy/releases/$VERSION/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploy
         set_alias 'sudo -E env PATH="$PATH" keploy'
     }
 
     install_keploy_amd() {
-        curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
+        curl --silent --location "https://github.com/keploy/keploy/releases/$VERSION/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
         set_alias 'sudo -E env PATH="$PATH" keploybin'
     }
