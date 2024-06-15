@@ -1,6 +1,10 @@
+//go:build linux
+
 package docker
 
 import (
+	"context"
+
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 )
@@ -27,6 +31,7 @@ type Client interface {
 	WriteComposeFile(compose *Compose, path string) error
 
 	IsContainerRunning(containerName string) (bool, error)
+	CreateVolume(ctx context.Context, volumeName string) error
 }
 
 type NetworkInfo struct {

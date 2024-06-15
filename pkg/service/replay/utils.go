@@ -1,3 +1,5 @@
+//go:build linux
+
 package replay
 
 import (
@@ -14,7 +16,7 @@ import (
 type TestReportVerdict struct {
 	total  int
 	passed int
-	failed int
+	failed int ``
 	status bool
 }
 
