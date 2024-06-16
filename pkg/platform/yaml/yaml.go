@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
@@ -252,12 +254,12 @@ func GenerateHeader(header map[string]string) []models.Parameter {
 	return parameters
 }
 
-func GenerateParams(params map[string]string) []models.Parameter {
+func GenerateInPathParams(params map[string]string) []models.Parameter {
 	var parameters []models.Parameter
 	for key, value := range params {
 		parameters = append(parameters, models.Parameter{
 			Name:     key,
-			In:       "query",
+			In:       "path",
 			Required: true,
 			Schema:   models.ParamSchema{Type: "string"},
 			Example:  value,
@@ -266,9 +268,112 @@ func GenerateParams(params map[string]string) []models.Parameter {
 	return parameters
 }
 
+// isNumeric checks if a string is a valid numeric value (integer or float).
+func isNumeric(s string) bool {
+	if _, err := strconv.Atoi(s); err == nil {
+		return true
+	}
+	if _, err := strconv.ParseFloat(s, 64); err == nil {
+		return true
+	}
+	return false
+}
+
+// ExtractIdentifiersAndCount extracts numeric identifiers (integers or floats) from the path.
+func ExtractIdentifiersAndCount(path string) ([]string, int) {
+	segments := strings.Split(path, "/")
+	segments2 := strings.Split(segments[len(segments)-1], "?")
+	segments = append(segments[:len(segments)-1], segments2[0])
+	var identifiers []string
+	for _, segment := range segments {
+		if segment != "" {
+			// Check if the segment is numeric (integer or float)
+			if isNumeric(segment) {
+				identifiers = append(identifiers, segment)
+			}
+		}
+	}
+
+	return identifiers, len(identifiers)
+}
+
+// ExtractQueryParams extracts the query parameters and their names from the URL.
+func ExtractQueryParams(rawURL string) (map[string]string, error) {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	queryParams := parsedURL.Query()
+	params := make(map[string]string)
+	for key, values := range queryParams {
+		if len(values) > 0 {
+			// Take the first value if multiple are present
+			params[key] = values[0]
+		}
+	}
+	return params, nil
+}
+
+// GenerateDummyNamesForIdentifiers generates dummy names for the path identifiers.
+func GenerateDummyNamesForIdentifiers(identifiers []string) map[string]string {
+	dummyNames := make(map[string]string)
+	for i, id := range identifiers {
+		dummyName := fmt.Sprintf("param%d", i+1)
+		dummyNames[dummyName] = id
+	}
+	return dummyNames
+}
+func AppendInParameters(parameters []models.Parameter, inParameters map[string]string, count int, paramType string) []models.Parameter {
+	if count == 0 {
+		return parameters
+	}
+	for key, value := range inParameters {
+		parameters = append(parameters, models.Parameter{
+			Name:     key,
+			In:       paramType,
+			Required: true,
+			Schema:   models.ParamSchema{Type: "string"},
+			Example:  value,
+		})
+	}
+
+	return parameters
+}
+
+// ReplacePathIdentifiers replaces numeric identifiers in the path with their corresponding dummy names.
+func ReplacePathIdentifiers(path string, dummyNames map[string]string) string {
+	segments := strings.Split(path, "/")
+	var replacedPath []string
+	for _, segment := range segments {
+		if segment != "" {
+			// Check if the segment is numeric (integer or float)
+			if isNumeric(segment) {
+				dummyName := ""
+				for key, value := range dummyNames {
+					if value == segment {
+						// i want to put '{' and '}' around the key
+						dummyName = "{" + key + "}"
+						break
+					}
+				}
+				if dummyName != "" {
+					replacedPath = append(replacedPath, dummyName)
+				} else {
+					replacedPath = append(replacedPath, segment)
+				}
+			} else {
+				replacedPath = append(replacedPath, segment)
+			}
+		}
+	}
+	finalPath := strings.Join(replacedPath, "/")
+	// Add slash at the beginning of the path
+	finalPath = "/" + finalPath
+	return finalPath
+}
 func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath string, name string) bool {
 	// Read the custom format YAML file
-	file, err := os.Open("/home/ahmed/Desktop/GSOC/Keploy/Issues/keploy/keploy/test-set-1/tests/test-10.yaml")
+	file, err := os.Open("/home/ahmed/Desktop/GSOC/Keploy/Issues/keploy/keploy/test-set-1/tests/test-49.yaml")
 	if err != nil {
 		logger.Fatal("Error opening file", zap.Error(err))
 		return false
@@ -323,6 +428,16 @@ func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath stri
 	// Add parameters to the request
 	parameters := GenerateHeader(custom.Spec.Request.Header)
 
+	// Extract In Path parameters
+	identifiers, count := ExtractIdentifiersAndCount(custom.Spec.Request.URL)
+	// Generate Dummy Names for the identifiers
+	dummyNames := GenerateDummyNamesForIdentifiers(identifiers)
+	// Add In Path parameters to the parameters
+	parameters = AppendInParameters(parameters, dummyNames, count, "path")
+	// Extract Query parameters
+	queryParams, err := ExtractQueryParams(custom.Spec.Request.URL)
+	// Add Query parameters to the parameters
+	parameters = AppendInParameters(parameters, queryParams, len(queryParams), "query")
 	// Determine if the request method is GET or POST
 	var pathItem models.PathItem
 	switch custom.Spec.Request.Method {
@@ -355,6 +470,31 @@ func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath stri
 				Responses: byCode,
 			},
 		}
+	case "PUT":
+		pathItem.Put = &models.Operation{
+			Summary:     "Update an employee by ID",
+			Description: "Update an employee by ID",
+			Parameters:  parameters,
+			RequestBody: &models.RequestBody{
+				Content: map[string]models.MediaType{
+					"application/json": {
+						Schema: models.Schema{
+							Type:       "object",
+							Properties: requestTypes,
+						},
+						Example: string(requestBodyJSON),
+					},
+				},
+			},
+			Responses: byCode,
+		}
+	case "DELETE":
+		pathItem.Delete = &models.Operation{
+			Summary:     "Delete an employee by ID",
+			Description: "Delete an employee by ID",
+			Parameters:  parameters,
+			Responses:   byCode,
+		}
 	default:
 		logger.Fatal("Unsupported method")
 		return false
@@ -366,13 +506,15 @@ func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath stri
 		logger.Error("Error extracting URL path")
 		return false
 	}
+	// Replace numeric identifiers in the path with dummy names (if exists)
+	parsedURL = ReplacePathIdentifiers(parsedURL, dummyNames)
 
 	// Convert to OpenAPI format
 	openapi := models.OpenAPI{
 		OpenAPI: "3.0.0",
 		Info: models.Info{
-			Title:   "Generated API",
-			Version: custom.Name,
+			Title:   custom.Name,
+			Version: custom.Version,
 		},
 		Paths: map[string]models.PathItem{
 			parsedURL: pathItem,
@@ -387,7 +529,7 @@ func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath stri
 	}
 
 	// Save OpenAPI YAML to a file
-	outputFile, err := os.Create("openapi_output.yaml")
+	outputFile, err := os.Create("openapi_output2.yaml")
 	if err != nil {
 		return false
 	}
