@@ -131,6 +131,7 @@ func (m *Mongo) recordMessage(_ context.Context, logger *zap.Logger, mongoReques
 				ResTimestampMock: time.Now(),
 			},
 		}
+		println("mocks channel is nil", mocks == nil)
 		// Save the mock
 		mocks <- mongoMock
 	}

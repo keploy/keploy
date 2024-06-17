@@ -126,9 +126,15 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 			utils.LogError(c.logger, err, "failed to unload the hooks")
 		}
 
+		//deleting in order to free the memory in case of rerecord.
+		println("deleting the app from the map: ", id)
+		c.apps.Delete(id)
+		c.id = utils.AutoInc{}
+
 		return nil
 	})
 
+	println("Loading with app id: ", id)
 	//load hooks
 	err = c.Hooks.Load(hookCtx, id, HookCfg{
 		AppID:      id,
@@ -144,7 +150,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 
 	if c.proxyStarted {
 		c.logger.Debug("Proxy already started")
-		return nil
+		// return nil
 	}
 
 	select {
