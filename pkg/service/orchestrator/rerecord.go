@@ -21,15 +21,12 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 	defer func() {
 		select {
 		case <-ctx.Done():
-			println("How is the global context done?")
 		default:
-			println("Who has called the global context to cancel")
 			err := utils.Stop(o.logger, stopReason)
 			if err != nil {
 				utils.LogError(o.logger, err, "failed to stop recording")
 			}
 		}
-		println("I'm done with the defer")
 	}()
 
 	// Get all the testsets
@@ -45,12 +42,12 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		return testSets[i] < testSets[j]
 	})
 
-	go func() {
-		<-ctx.Done()
-		println("i've cancelled the global context")
-	}()
-
 	for _, testSet := range testSets {
+
+		if ctx.Err() != nil {
+			break
+		}
+
 		if _, ok := o.config.Test.SelectedTests[testSet]; !ok && len(o.config.Test.SelectedTests) != 0 {
 			continue
 		}
@@ -67,14 +64,13 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		errGrp.Go(func() error {
 			defer utils.Recover(o.logger)
 			err := o.record.Start(recordCtx, true)
-			fmt.Printf("Error from app(0): %v\n", err)
 			errCh <- err
 			return nil
 		})
 
 		errGrp.Go(func() error {
 			defer utils.Recover(o.logger)
-			allRecorded, err := o.Replay(recordCtx, testSet)
+			allRecorded, err := o.replayTests(recordCtx, testSet)
 
 			if allRecorded {
 				o.logger.Info("Re-recorded testcases successfully for the given testset", zap.String("testset", testSet))
@@ -86,27 +82,25 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 			return nil
 		})
 
+		var err error
 		select {
 		case err = <-errCh:
 			if err != nil {
 				stopReason = "error while starting the recording"
 				utils.LogError(o.logger, err, stopReason, zap.String("testset", testSet))
 			}
-			fmt.Printf("Error from app: %v\n", err)
 		case err = <-replayErrCh:
-			fmt.Printf("Error from replay: %v\n", err)
 			if err != nil {
 				stopReason = "error while replaying the testcases"
 				utils.LogError(o.logger, err, stopReason, zap.String("testset", testSet))
 			}
-		case <-ctx.Done():
-			println("Global context done")
-			recordCtxCancel()
-			return nil
 		}
 
-		// Sleep for 3 seconds to ensure that the recording has completed
-		time.Sleep(3 * time.Second)
+		if err == nil {
+			// Sleep for 3 seconds to ensure that the recording has completed
+			time.Sleep(3 * time.Second)
+		}
+
 		recordCtxCancel()
 
 		// Wait for the recording to stop
@@ -114,7 +108,11 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		if err != nil {
 			utils.LogError(o.logger, err, "failed to stop re-recording")
 		}
-		println("after errGrp.Wait() for testset:", testSet)
+
+		// Check if the global context is done after each iteration
+		if ctx.Err() != nil {
+			break
+		}
 	}
 
 	if stopReason == "" {
@@ -126,7 +124,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 	return fmt.Errorf(stopReason)
 }
 
-func (o *Orchestrator) Replay(ctx context.Context, testSet string) (bool, error) {
+func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, error) {
 	var err error
 	var errMsg string
 
@@ -134,7 +132,6 @@ func (o *Orchestrator) Replay(ctx context.Context, testSet string) (bool, error)
 
 	tcs, err := o.replay.GetTestCases(ctx, testSet)
 	if err != nil {
-		println("failed to get all testcases")
 		errMsg = "Failed to get all testcases"
 		utils.LogError(o.logger, err, errMsg, zap.String("testset", testSet))
 		return false, fmt.Errorf(errMsg)
@@ -147,7 +144,6 @@ func (o *Orchestrator) Replay(ctx context.Context, testSet string) (bool, error)
 
 	host, port, err := pkg.ExtractHostAndPort(tcs[0].Curl)
 	if err != nil {
-		println("failed to extract host and port")
 		errMsg = "failed to extract host and port"
 		utils.LogError(o.logger, err, "")
 		o.logger.Debug("", zap.String("curl", tcs[0].Curl))
@@ -163,7 +159,6 @@ func (o *Orchestrator) Replay(ctx context.Context, testSet string) (bool, error)
 	o.logger.Debug("", zap.String("host", host), zap.String("port", port), zap.Any("WaitTimeout", timeout), zap.Any("CommandType", cmdType))
 
 	if err := pkg.WaitForPort(ctx, host, port, timeout); err != nil {
-		println("Waiting for port failed")
 		utils.LogError(o.logger, err, "Waiting for port failed", zap.String("host", host), zap.String("port", port))
 		return false, err
 	}
@@ -173,19 +168,16 @@ func (o *Orchestrator) Replay(ctx context.Context, testSet string) (bool, error)
 		if ctx.Err() != nil {
 			return false, ctx.Err()
 		}
-		println("AppId:", o.config.AppID)
 		if utils.IsDockerKind(cmdType) {
 
 			userIP, err := o.record.GetContainerIP(ctx, o.config.AppID)
 			if err != nil {
-				println("failed to get the app ip")
 				utils.LogError(o.logger, err, "failed to get the app ip")
 				break
 			}
 
 			tc.HTTPReq.URL, err = utils.ReplaceHostToIP(tc.HTTPReq.URL, userIP)
 			if err != nil {
-				println("failed to replace host to docker container's IP")
 				utils.LogError(o.logger, err, "failed to replace host to docker container's IP")
 				break
 			}
@@ -194,7 +186,6 @@ func (o *Orchestrator) Replay(ctx context.Context, testSet string) (bool, error)
 
 		resp, err := pkg.SimulateHTTP(ctx, *tc, testSet, o.logger, o.config.Test.APITimeout)
 		if err != nil {
-			println("failed to simulate HTTP request")
 			utils.LogError(o.logger, err, "failed to simulate HTTP request")
 			allTcRecorded = false
 			continue // Proceed with the next command
@@ -202,7 +193,6 @@ func (o *Orchestrator) Replay(ctx context.Context, testSet string) (bool, error)
 
 		o.logger.Info("Re-recorded the testcase successfully", zap.String("curl", tc.Curl), zap.Any("response", (resp)))
 	}
-	println("successful rerecorded with all testcases:", allTcRecorded)
 
 	return allTcRecorded, nil
 }
