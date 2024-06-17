@@ -217,6 +217,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 
 					}
 				}
+
 				// maintain test prepare statement map for each connection id
 				getTestPS(requestBuffers, logger, ConnectionID)
 			}

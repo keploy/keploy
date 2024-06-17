@@ -8,13 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"fmt"
-	"net/url"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
@@ -351,32 +350,32 @@ func CalPythonCoverage(ctx context.Context) (models.TestCoverage, error) {
 	return testCov, nil
 }
 
-type Start struct {
+type StartTy struct {
 	Line   int `json:"line"`
 	Column int `json:"column"`
 }
 
-type End struct {
+type EndTy struct {
 	Line   int `json:"line"`
 	Column int `json:"column"`
 }
 
 type Loc struct {
-	Start `json:"start"`
-	End   `json:"end"`
+	StartTy `json:"start"`
+	EndTy  `json:"end"`
 }
 
 type TypescriptCoverage map[string]struct {
 	Path         string `json:"path"`
 	StatementMap map[string]struct {
-		Start `json:"start"`
-		End   `json:"end"`
+		StartTy `json:"start"`
+		EndTy   `json:"end"`
 	} `json:"statementMap"`
 	FnMap map[string]struct {
 		Name string `json:"name"`
 		Decl struct {
-			Start `json:"start"`
-			End   `json:"end"`
+			StartTy `json:"start"`
+			EndTy   `json:"end"`
 		} `json:"decl"`
 		Loc  `json:"loc"`
 		Line int `json:"line"`
@@ -385,8 +384,8 @@ type TypescriptCoverage map[string]struct {
 		Loc       `json:"loc"`
 		Type      string `json:"type"`
 		Locations []struct {
-			Start `json:"start"`
-			End   `json:"end"`
+			StartTy `json:"start"`
+			EndTy   `json:"end"`
 		} `json:"locations"`
 		Line int `json:"line"`
 	} `json:"branchMap"`
@@ -554,7 +553,7 @@ func CalJavaCoverage(logger *zap.Logger) (models.TestCoverage, error) {
 
 		// Calculate coverage percentage for each class
 		if instructionsCovered > 0 {
-			coverage := float64(instructionsCovered) / float64(instructionsCovered + instructionsMissed) * 100
+			coverage := float64(instructionsCovered) / float64(instructionsCovered+instructionsMissed) * 100
 			classPath := strings.ReplaceAll(record[1], ".", string(os.PathSeparator))              // Replace dots with path separator
 			testCov.FileCov[filepath.Join(classPath, record[2])] = fmt.Sprintf("%.2f%%", coverage) // Use class path as key
 		}

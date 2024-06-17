@@ -1,5 +1,6 @@
 name: Node on Docker
 on: [pull_request]
+
 jobs:
   node_docker:
     runs-on: ubuntu-latest

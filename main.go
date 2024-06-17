@@ -47,6 +47,7 @@ func main() {
 	// 		return
 	// 	}
 	// }()
+
 	printLogo()
 	ctx := utils.NewCtx()
 	start(ctx)

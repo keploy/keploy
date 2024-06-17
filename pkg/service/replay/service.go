@@ -55,6 +55,11 @@ type ReportDB interface {
 	InsertCoverageReport(ctx context.Context, testRunID string, testCoverage *models.TestCoverage) error
 }
 
+type Config interface {
+	Read(ctx context.Context, testSetID string) (*models.TestSet, error)
+	Write(ctx context.Context, testSetID string, testSet *models.TestSet) error
+}
+
 type Telemetry interface {
 	TestSetRun(success int, failure int, testSet string, runStatus string)
 	TestRun(success int, failure int, testSets int, runStatus string)

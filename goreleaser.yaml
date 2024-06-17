@@ -33,16 +33,12 @@ builds:
   #     - amd64
   #     - arm64
 
-  # - binary: keploy
-  #   id: keploy-macos
-  #   main: ./cli/server/main.go
-  #   env:
-  #     - CGO_ENABLED=0
-  #   goos:
-  #     - darwin
-  #   goarch:
-  #     - amd64
-  #     - arm64
+universal_binaries:
+-
+  # ID of resulting universal binary.
+  #
+  # Defaults to the project name.
+  id: keploy-mac-universal
 
   # IDs to use to filter the built binaries.
   #
@@ -56,7 +52,7 @@ builds:
   # amd64, arm64 and all.
   #
   # Defaults to false.
-  # replace: true
-  # hooks:
-  #   post: gon -log-level=info -log-json ./gon.json
+  replace: true
+  hooks:
+    post: gon -log-level=info -log-json ./gon.json
 

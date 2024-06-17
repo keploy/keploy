@@ -6,8 +6,6 @@ import (
 	"bytes"
 	"context"
 	"debug/elf"
-	"bufio"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
