@@ -1,3 +1,5 @@
+//go:build linux
+
 package mysql
 
 import (
@@ -54,7 +56,7 @@ func matchRequestWithMock(ctx context.Context, mysqlRequest models.MySQLRequest,
 		configMocks[matchedIndex].Spec.MySQLRequests = append(configMocks[matchedIndex].Spec.MySQLRequests[:matchedReqIndex], configMocks[matchedIndex].Spec.MySQLRequests[matchedReqIndex+1:]...)
 		configMocks[matchedIndex].Spec.MySQLResponses = append(configMocks[matchedIndex].Spec.MySQLResponses[:matchedReqIndex], configMocks[matchedIndex].Spec.MySQLResponses[matchedReqIndex+1:]...)
 		if len(configMocks[matchedIndex].Spec.MySQLResponses) == 0 {
-			mockDb.DeleteUnFilteredMock(configMocks[matchedIndex])
+			mockDb.DeleteUnFilteredMock(*configMocks[matchedIndex])
 		}
 	} else {
 		realIndex := matchedIndex - len(configMocks)
@@ -64,7 +66,7 @@ func matchRequestWithMock(ctx context.Context, mysqlRequest models.MySQLRequest,
 		tcsMocks[realIndex].Spec.MySQLRequests = append(tcsMocks[realIndex].Spec.MySQLRequests[:matchedReqIndex], tcsMocks[realIndex].Spec.MySQLRequests[matchedReqIndex+1:]...)
 		tcsMocks[realIndex].Spec.MySQLResponses = append(tcsMocks[realIndex].Spec.MySQLResponses[:matchedReqIndex], tcsMocks[realIndex].Spec.MySQLResponses[matchedReqIndex+1:]...)
 		if len(tcsMocks[realIndex].Spec.MySQLResponses) == 0 {
-			mockDb.DeleteFilteredMock(tcsMocks[realIndex])
+			mockDb.DeleteFilteredMock(*tcsMocks[realIndex])
 		}
 	}
 

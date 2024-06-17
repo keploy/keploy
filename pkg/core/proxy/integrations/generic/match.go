@@ -1,3 +1,5 @@
+//go:build linux
+
 package generic
 
 import (
@@ -33,6 +35,9 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 			var unfilteredMocks []*models.Mock
 
 			for _, mock := range mocks {
+				if mock.Kind != "Generic" {
+					continue
+				}
 				if mock.TestModeInfo.IsFiltered {
 					filteredMocks = append(filteredMocks, mock)
 				} else {

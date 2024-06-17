@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package record provides functionality for recording and managing test cases and mocks.
 package record
 
@@ -106,7 +108,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 
-	newTestSetID = pkg.NewID(testSetIDs, models.TestSetPattern)
+	newTestSetID = pkg.NextID(testSetIDs, models.TestSetPattern)
 
 	// setting up the environment for recording
 	appID, err = r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})

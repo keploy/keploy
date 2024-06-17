@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package replay provides functions for replaying requests and comparing responses.
 package replay
 

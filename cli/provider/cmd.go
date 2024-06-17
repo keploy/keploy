@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/fatih/color"
-	"github.com/moby/moby/pkg/parsers/kernel"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
@@ -188,6 +187,24 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+	case "gen":
+		cmd.Flags().String("sourceFilePath", "", "Path to the source file.")
+		cmd.Flags().String("testFilePath", "", "Path to the input test file.")
+		cmd.Flags().String("coverageReportPath", "coverage.xml", "Path to the code coverage report file.")
+		cmd.Flags().String("testCommand", "", "The command to run tests and generate coverage report.")
+		cmd.Flags().String("coverageFormat", "cobertura", "Type of coverage report.")
+		cmd.Flags().Int("expectedCoverage", 100, "The desired coverage percentage.")
+		cmd.Flags().Int("maxIterations", 5, "The maximum number of iterations.")
+		cmd.Flags().String("testDir", "", "Path to the test directory.")
+		cmd.Flags().String("llmBaseUrl", "", "Base URL for the AI model.")
+		cmd.Flags().String("model", "gpt-4o", "Model to use for the AI.")
+		cmd.Flags().String("llmApiVersion", "", "API version of the llm")
+		err := cmd.MarkFlagRequired("testCommand")
+		if err != nil {
+			errMsg := "failed to mark testCommand as required flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
 	case "record", "test":
 		cmd.Flags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
@@ -220,6 +237,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().Bool("removeUnusedMocks", c.cfg.Test.RemoveUnusedMocks, "Clear the unused mocks for the passed test-sets")
 			cmd.Flags().Bool("fallBackOnMiss", c.cfg.Test.FallBackOnMiss, "Enable connecting to actual service if mock not found during test mode")
 			cmd.Flags().String("jacocoAgentPath", c.cfg.Test.JacocoAgentPath, "Path to jacoco agent jar file")
+			cmd.Flags().String("basePath", c.cfg.Test.BasePath, "Custom api basePath/origin to replace the actual basePath/origin in the testcases; App flag is ignored and app will not be started & instrumented when this is set since the application running on a different machine")
 			cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
 		} else {
 			cmd.Flags().Uint64("recordTimer", 0, "User provided time to record its application")
@@ -249,14 +267,19 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 }
 
 func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) error {
-	//check if the version of the kernel is above 5.15 for eBPF support
-	isValid := kernel.CheckKernelVersion(5, 15, 0)
-	if !isValid {
-		errMsg := "Kernel version is below 5.15. Keploy requires kernel version 5.15 or above"
-		utils.LogError(c.logger, nil, errMsg)
-		return errors.New(errMsg)
+	err := isCompatible(c.logger)
+	if err != nil {
+		return err
 	}
-
+	//if runtime.GOOS == "linux" {
+	//	//check if the version of the kernel is above 5.15 for eBPF support
+	//	isValid := kernel.CheckKernelVersion(5, 15, 0)
+	//	if !isValid {
+	//		errMsg := "Kernel version is below 5.15. Keploy requires kernel version 5.15 or above"
+	//		utils.LogError(c.logger, nil, errMsg)
+	//		return errors.New(errMsg)
+	//	}
+	//}
 	return c.ValidateFlags(ctx, cmd)
 }
 
@@ -341,28 +364,18 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 	switch cmd.Name() {
 	case "record", "test":
-		bypassPorts, err := cmd.Flags().GetUintSlice("passThroughPorts")
-		if err != nil {
-			errMsg := "failed to read the ports of outgoing calls to be ignored"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		config.SetByPassPorts(c.cfg, bypassPorts)
 
+		// handle the app command
 		if c.cfg.Command == "" {
-			utils.LogError(c.logger, nil, "missing required -c flag or appCmd in config file")
-			if c.cfg.InDocker {
-				c.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
-			} else {
-				c.logger.Info(LogExample(RootExamples))
+			if !alreadyRunning(cmd.Name(), c.cfg.Test.BasePath) {
+				return c.noCommandError()
 			}
-			return errors.New("missing required -c flag or appCmd in config file")
 		}
 
 		// set the command type
 		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
 
-		if c.cfg.GenerateGithubActions {
+		if c.cfg.GenerateGithubActions && utils.CmdType(c.cfg.CommandType) != utils.Empty {
 			defer utils.GenerateGithubActions(c.logger, c.cfg.Command)
 		}
 		if c.cfg.InDocker {
@@ -417,8 +430,16 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, "error while getting absolute path")
 			return errors.New("failed to get the absolute path")
 		}
-
 		c.cfg.Path = absPath + "/keploy"
+
+		bypassPorts, err := cmd.Flags().GetUintSlice("passThroughPorts")
+		if err != nil {
+			errMsg := "failed to read the ports of outgoing calls to be ignored"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		config.SetByPassPorts(c.cfg, bypassPorts)
+
 		if cmd.Name() == "test" {
 			//check if the keploy folder exists
 			if _, err := os.Stat(c.cfg.Path); os.IsNotExist(err) {
@@ -479,6 +500,20 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			errMsg := "failed to normalize the selected tests"
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
+		}
+	case "gen":
+		if os.Getenv("API_KEY") == "" {
+			utils.LogError(c.logger, nil, "API_KEY is not set")
+			return errors.New("API_KEY is not set")
+		}
+		if (c.cfg.Gen.SourceFilePath == "" && c.cfg.Gen.TestFilePath != "") || c.cfg.Gen.SourceFilePath != "" && c.cfg.Gen.TestFilePath == "" {
+			utils.LogError(c.logger, nil, "One of the SourceFilePath and TestFilePath is mentioned. Either provide both or neither")
+			return errors.New("sourceFilePath and testFilePath misconfigured")
+		} else if c.cfg.Gen.SourceFilePath == "" && c.cfg.Gen.TestFilePath == "" {
+			if c.cfg.Gen.TestDir == "" {
+				utils.LogError(c.logger, nil, "TestDir is not set, Please specify the test directory")
+				return errors.New("TestDir is not set")
+			}
 		}
 	}
 	return nil

@@ -6,16 +6,16 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"syscall"
 
 	"go.keploy.io/server/v2/cli"
 	"go.keploy.io/server/v2/cli/provider"
 	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/platform/yaml/configdb"
+	userDb "go.keploy.io/server/v2/pkg/platform/yaml/configdb/user"
+
 	"go.keploy.io/server/v2/utils"
 	"go.keploy.io/server/v2/utils/log"
 	//pprof for debugging
-	// _ "net/http/pprof"
+	//_ "net/http/pprof"
 )
 
 // version is the version of the server and will be injected during build by ldflags, same with dsn
@@ -79,16 +79,17 @@ func start(ctx context.Context) {
 	// Setting 'umask' to '0' ensures that 'keploy' can precisely control the permissions of the files it creates.
 	// However, it's important to note that this approach may not work in scenarios involving mounted volumes,
 	// as the 'umask' is set by the host system, and cannot be overridden by 'keploy' or individual processes.
-	oldMask := syscall.Umask(0)
-	defer syscall.Umask(oldMask)
+	oldMask := utils.SetUmask()
+	defer utils.RestoreUmask(oldMask)
 
-	configDb := configdb.NewConfigDb(logger)
+	userDb := userDb.New(logger)
 	if dsn != "" {
 		utils.SentryInit(logger, dsn)
 		//logger = utils.ModifyToSentryLogger(ctx, logger, sentry.CurrentHub().Client(), configDb)
 	}
 	conf := config.New()
-	svcProvider := provider.NewServiceProvider(logger, configDb, conf)
+
+	svcProvider := provider.NewServiceProvider(logger, userDb, conf)
 	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
 	if err := rootCmd.Execute(); err != nil {

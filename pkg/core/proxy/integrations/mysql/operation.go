@@ -1,3 +1,5 @@
+//go:build linux
+
 package mysql
 
 import (
@@ -6,9 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
-	"net"
 )
 
 type PacketHeader struct {

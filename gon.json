@@ -2,8 +2,7 @@
     "source" : ["./dist/keploy-mac-universal_darwin_all/keploy"],
     "bundle_id" : "io.keploy.server",
     "apple_id": {
-        "username" : "shubhamkjain@outlook.com",
-        "password":  "@env:APPLE_ACCOUNT_PASSWORD"
+        "username" : "shubhamkjain@outlook.com"
     },
     "sign" :{
         "application_identity" : "Developer ID Application: Shubham Jain"

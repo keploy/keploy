@@ -1,0 +1,111 @@
+[test_generation]
+system="""\
+"""
+
+user="""\
+## Overview
+You are a code assistant designed to accept a {{ .language }} source file and a {{ .language }} test file. 
+Your task is to generate additional unit tests to complement the existing test suite, aiming to increase the code coverage of the source file.
+
+Additional guidelines:
+- Carefully analyze the provided code to understand its purpose, inputs, outputs, and key logic or calculations.
+- Brainstorm a list of test cases necessary to fully validate the correctness of the code and achieve 100% code coverage.
+- After adding each test, review all tests to ensure they cover the full range of scenarios, including exception or error handling.
+- If the original test file contains a test suite, assume that each generated test will be part of the same suite. Ensure the new tests are consistent with the existing suite in terms of style, naming conventions, and structure.
+
+
+## Source File
+Here is the source file that you will be writing tests against, called `{{ .source_file_name }}`. Line numbers have been added for clarity and are not part of the original code.
+=========
+{{ .source_file_numbered | trim }}
+=========
+
+
+## Test File
+Here is the file that contains the existing tests, called `{{ .test_file_name }}`.
+=========
+{{ .test_file | trim }}
+=========
+
+
+{%- if additional_includes_section | trim %}
+{{ .additional_includes_section | trim }}
+{% endif %}
+
+{%- if failed_tests_section | trim  %}
+
+{{ .failed_tests_section | trim }}
+{% endif %}
+
+{%- if additional_instructions_text | trim  %}
+
+{{ .additional_instructions_text | trim }}
+{% endif %}
+
+
+## Code Coverage
+The following is the existing code coverage report. Use this to determine what tests to write, as you should only write tests that increase the overall coverage:
+=========
+{{ .code_coverage_report| trim }}
+=========
+
+
+## Response
+The output must be a YAML object equivalent to type $NewTests, according to the following Pydantic definitions:
+=====
+class SingleTest(BaseModel):
+    test_behavior: str = Field(description="Short description of the behavior the test covers")
+{%- if language in ["python","java"] %}
+    test_name: str = Field(description=" A short test name, in snake case, that reflects the behaviour to test")
+{%- else %}
+    test_name: str = Field(description=" A short unique test name, that should reflect the test objective")
+{%- endif %}
+    test_code: str = Field(description="A single test function, that tests the behavior described in 'test_behavior'. The test should be a written like its a part of the existing test suite, if there is one, and it can use existing helper functions, setup, or teardown code.")
+    new_imports_code: str = Field(description="Code for new imports that are required for the new test function, and are not already present in the test file. Give an empty string if no new imports are required.")
+    test_tags: str = Field(description="A single label that best describes the test, out of: ['happy path', 'edge case','other']")
+
+class NewTests(BaseModel):
+    language: str = Field(description="The programming language of the source code")
+    existing_test_function_signature: str = Field(description="A single line repeating a signature header of one of the existing test functions")
+    new_tests: List[SingleTest] = Field(min_items=1, max_items={{ .max_tests }}, description="A list of new test functions to append to the existing test suite, aiming to increase the code coverage. Each test should run as-is, without requiring any additional inputs or setup code. Don't introduce new dependencies")
+=====
+
+Example output:
+```yaml
+language: {{ .language }}
+existing_test_function_signature: |
+  ...
+new_tests:
+- test_behavior: |
+    Test that the function returns the correct output for a single element list
+{%- if language in ["python","java"] %}
+  test_name: |
+    test_single_element_list
+{%- else %}
+  test_name: |
+    ...
+{%- endif %}
+  test_code: |
+{%- if language in ["python"] %}
+    def ...
+{%- else %}
+    ...
+{%- endif %}
+  new_imports_code: |
+    ""
+  test_tags: happy path
+    ...
+```
+
+Use block scalar('|') to format each YAML output.
+
+
+{%- if additional_instructions_text| trim  %}
+
+{{ .additional_instructions_text| trim }}
+{% endif %}
+
+
+Response (should be a valid YAML, and nothing else):
+```yaml
+"""

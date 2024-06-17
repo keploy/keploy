@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package app provides functionality for managing applications.
 package app
 
@@ -5,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"syscall"
 	"time"
@@ -33,6 +34,7 @@ func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opt
 		container:        opts.Container,
 		containerDelay:   opts.DockerDelay,
 		containerNetwork: opts.DockerNetwork,
+		containerIPv4:    make(chan string, 1),
 	}
 	return app
 }
@@ -46,7 +48,7 @@ type App struct {
 	containerDelay   uint64
 	container        string
 	containerNetwork string
-	containerIPv4    string
+	containerIPv4    chan string
 	keployNetwork    string
 	keployContainer  string
 	keployIPv4       string
@@ -91,7 +93,10 @@ func (a *App) KeployIPv4Addr() string {
 }
 
 func (a *App) ContainerIPv4Addr() string {
-	return a.containerIPv4
+	return <-a.containerIPv4
+}
+func (a *App) SetContainerIPv4Addr(ipAddr string) {
+	a.containerIPv4 <- ipAddr
 }
 
 func (a *App) SetupDocker() error {
@@ -293,7 +298,7 @@ func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
 		a.logger.Debug("container network not found", zap.Any("containerDetails.NetworkSettings.Networks", info.NetworkSettings.Networks))
 		return false, fmt.Errorf("container network not found: %s", fmt.Sprintf("%+v", info.NetworkSettings.Networks))
 	}
-	a.containerIPv4 = n.IPAddress
+	a.SetContainerIPv4Addr(n.IPAddress)
 	return inode != 0 && n.IPAddress != "", nil
 }
 
@@ -414,48 +419,70 @@ func (a *App) Run(ctx context.Context, inodeChan chan uint64) models.AppError {
 	}
 	return a.run(ctx)
 }
+func (a *App) waitTillExit() {
+	timeout := time.NewTimer(30 * time.Second)
+	logTicker := time.NewTicker(1 * time.Second)
+	defer logTicker.Stop()
+	defer timeout.Stop()
+
+	containerID := a.container
+	for {
+		select {
+		case <-logTicker.C:
+			// Inspect the container status
+			containerJSON, err := a.docker.ContainerInspect(context.Background(), containerID)
+			if err != nil {
+				a.logger.Debug("failed to inspect container", zap.String("containerID", containerID), zap.Error(err))
+				return
+			}
+
+			a.logger.Debug("container status", zap.String("status", containerJSON.State.Status), zap.String("containerName", a.container))
+			// Check if container is stopped or dead
+			if containerJSON.State.Status == "exited" || containerJSON.State.Status == "dead" {
+				return
+			}
+		case <-timeout.C:
+			a.logger.Warn("timeout waiting for the container to stop", zap.String("containerID", containerID))
+			return
+		}
+	}
+}
 
 func (a *App) run(ctx context.Context) models.AppError {
-	// Run the app as the user who invoked sudo
+
 	userCmd := a.cmd
-	username := os.Getenv("SUDO_USER")
 
 	if utils.FindDockerCmd(a.cmd) == utils.DockerRun {
 		userCmd = utils.EnsureRmBeforeName(userCmd)
 	}
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", userCmd)
-	if username != "" {
-		// print all environment variables
-		a.logger.Debug("env inherited from the cmd", zap.Any("env", os.Environ()))
-		// Run the command as the user who invoked sudo to preserve the user environment variables and PATH
-		cmd = exec.CommandContext(ctx, "sudo", "-E", "-u", os.Getenv("SUDO_USER"), "env", "PATH="+os.Getenv("PATH"), "sh", "-c", userCmd)
+	// Define the function to cancel the command
+	cmdCancel := func(cmd *exec.Cmd) func() error {
+		return func() error {
+			if utils.IsDockerKind(a.kind) {
+				a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
+				err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
+				return err
+			}
+			return utils.InterruptProcessTree(a.logger, cmd.Process.Pid, syscall.SIGINT)
+		}
 	}
 
-	// Set the cancel function for the command
-	cmd.Cancel = func() error {
-
-		return utils.InterruptProcessTree(a.logger, cmd.Process.Pid, syscall.SIGINT)
-	}
-	// wait after sending the interrupt signal, before sending the kill signal
-	cmd.WaitDelay = 10 * time.Second
-
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-	}
-
-	// Set the output of the command
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	a.logger.Debug("", zap.Any("executing cli", cmd.String()))
-
-	err := cmd.Start()
-	if err != nil {
-		return models.AppError{AppErrorType: models.ErrCommandError, Err: err}
+	var err error
+	cmdErr := utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second)
+	if cmdErr.Err != nil {
+		switch cmdErr.Type {
+		case utils.Init:
+			return models.AppError{AppErrorType: models.ErrCommandError, Err: cmdErr.Err}
+		case utils.Runtime:
+			err = cmdErr.Err
+		}
 	}
 
-	err = cmd.Wait()
+	if utils.IsDockerKind(a.kind) {
+		a.waitTillExit()
+	}
+
 	select {
 	case <-ctx.Done():
 		a.logger.Debug("context cancelled, error while waiting for the app to exit", zap.Error(ctx.Err()))

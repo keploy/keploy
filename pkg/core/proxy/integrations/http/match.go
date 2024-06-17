@@ -1,3 +1,5 @@
+//go:build linux
+
 package http
 
 import (
@@ -34,17 +36,23 @@ func match(ctx context.Context, logger *zap.Logger, input *req, mockDb integrati
 		}
 
 		mocks, err := mockDb.GetUnFilteredMocks()
-
+		var unfilteredMocks []*models.Mock
+		for _, mock := range mocks {
+			if mock.Kind != "Http" {
+				continue
+			}
+			unfilteredMocks = append(unfilteredMocks, mock)
+		}
 		if err != nil {
 			utils.LogError(logger, err, "failed to get unfilteredMocks mocks")
 			return false, nil, errors.New("error while matching the request with the mocks")
 		}
 
-		logger.Debug(fmt.Sprintf("Length of unfilteredMocks:%v", len(mocks)))
+		logger.Debug(fmt.Sprintf("Length of unfilteredMocks:%v", len(unfilteredMocks)))
 
 		var schemaMatched []*models.Mock
 
-		for _, mock := range mocks {
+		for _, mock := range unfilteredMocks {
 			if ctx.Err() != nil {
 				return false, nil, ctx.Err()
 			}
@@ -380,7 +388,7 @@ func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock,
 	}
 
 	// we don't update the mock if the IsFiltered is false
-	err := mockDb.FlagMockAsUsed(matchedMock)
+	err := mockDb.FlagMockAsUsed(*matchedMock)
 	if err != nil {
 		logger.Error("failed to flag mock as used", zap.Error(err))
 	}

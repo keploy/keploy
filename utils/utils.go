@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"debug/elf"
+	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -138,7 +140,9 @@ func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
 		logger.Error(msg, append(fields, zap.Error(err))...)
 	}
 }
+
 func DeleteLogs(logger *zap.Logger) {
+
 	//Check if keploy-log.txt exists
 	_, err := os.Stat("keploy-logs.txt")
 	if os.IsNotExist(err) {
@@ -351,6 +355,9 @@ func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRele
 
 // FindDockerCmd checks if the cli is related to docker or not, it also returns if it is a docker compose file
 func FindDockerCmd(cmd string) CmdType {
+	if cmd == "" {
+		return Empty
+	}
 	// Convert command to lowercase for case-insensitive comparison
 	cmdLower := strings.TrimSpace(strings.ToLower(cmd))
 
@@ -388,7 +395,18 @@ const (
 	DockerStart   CmdType = "docker-start"
 	DockerCompose CmdType = "docker-compose"
 	Native        CmdType = "native"
+	Empty         CmdType = ""
 )
+
+func convertPathToUnixStyle(path string) string {
+	// Replace backslashes with forward slashes
+	unixPath := strings.Replace(path, "\\", "/", -1)
+	// Remove 'C:'
+	if len(unixPath) > 1 && unixPath[1] == ':' {
+		unixPath = unixPath[2:]
+	}
+	return unixPath
+}
 
 func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 	// Get the name of the operating system.
@@ -397,6 +415,9 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 	img := DockerConfig.DockerImage + ":v" + Version
 	logger.Info("Starting keploy in docker with image", zap.String("image:", img))
 	envs := GenerateDockerEnvs(DockerConfig)
+	if envs != "" {
+		envs = envs + " "
+	}
 	var ttyFlag string
 
 	if term.IsTerminal(int(os.Stdin.Fd())) {
@@ -407,7 +428,35 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 
 	switch osName {
 	case "linux":
-		alias := "sudo docker container run --name keploy-v2 " + envs + "  -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
+		alias := "sudo docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
+		return alias, nil
+	case "windows":
+		// Get the current working directory
+		pwd, err := os.Getwd()
+		if err != nil {
+			LogError(logger, err, "failed to get the current working directory")
+		}
+		dpwd := convertPathToUnixStyle(pwd)
+		cmd := exec.CommandContext(ctx, "docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
+		out, err := cmd.Output()
+		if err != nil {
+			LogError(logger, err, "failed to get the current docker context")
+			return "", errors.New("failed to get alias")
+		}
+		dockerContext := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
+		if len(dockerContext) == 0 {
+			LogError(logger, nil, "failed to get the current docker context")
+			return "", errors.New("failed to get alias")
+		}
+		dockerContext = strings.Split(dockerContext, "\n")[0]
+		if dockerContext == "colima" {
+			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
+			alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + pwd + ":" + dpwd + " -w " + dpwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img
+			return alias, nil
+		}
+		// if default docker context is used
+		logger.Info("Starting keploy in docker with default context, as that is the current context.")
+		alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + pwd + ":" + dpwd + " -w " + dpwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img
 		return alias, nil
 	case "darwin":
 		cmd := exec.CommandContext(ctx, "docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
@@ -424,16 +473,14 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 		dockerContext = strings.Split(dockerContext, "\n")[0]
 		if dockerContext == "colima" {
 			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
-			alias := "docker container run --name keploy-v2  " + envs + " -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
+			alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
 			return alias, nil
 		}
 		// if default docker context is used
 		logger.Info("Starting keploy in docker with default context, as that is the current context.")
-		alias := "docker container run --name keploy-v2  " + envs + " -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
+		alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
 		return alias, nil
-	case "Windows":
-		LogError(logger, nil, "Windows is not supported. Use WSL2 instead.")
-		return "", errors.New("failed to get alias")
+
 	}
 	return "", errors.New("failed to get alias")
 }
@@ -450,12 +497,29 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 		quotedArgs = append(quotedArgs, strconv.Quote(arg))
 	}
 
-	cmd := exec.CommandContext(
-		ctx,
-		"sh",
-		"-c",
-		keployAlias+" "+strings.Join(quotedArgs, " "),
-	)
+	var cmd *exec.Cmd
+
+	// Detect the operating system
+	if runtime.GOOS == "windows" {
+		var args []string
+		args = append(args, "/C")
+		args = append(args, strings.Split(keployAlias, " ")...)
+		args = append(args, os.Args[1:]...)
+		// Use cmd.exe /C for Windows
+		cmd = exec.CommandContext(
+			ctx,
+			"cmd.exe",
+			args...,
+		)
+	} else {
+		// Use sh -c for Unix-like systems
+		cmd = exec.CommandContext(
+			ctx,
+			"sh",
+			"-c",
+			keployAlias+" "+strings.Join(quotedArgs, " "),
+		)
+	}
 
 	cmd.Cancel = func() error {
 		return InterruptProcessTree(logger, cmd.Process.Pid, syscall.SIGINT)
@@ -522,8 +586,6 @@ func GetAbsPath(path string) (string, error) {
 
 // makeDirectory creates a directory if not exists with all user access
 func makeDirectory(path string) error {
-	oldUmask := syscall.Umask(0)
-	defer syscall.Umask(oldUmask)
 	err := os.MkdirAll(path, 0777)
 	if err != nil {
 		return err
@@ -574,6 +636,19 @@ func SetCoveragePath(logger *zap.Logger, goCovPath string) (string, error) {
 	return goCovPath, nil
 }
 
+type ErrType string
+
+// ErrType constants to get the type of error, during init or runtime
+const (
+	Init    ErrType = "init"
+	Runtime ErrType = "runtime"
+)
+
+type CmdError struct {
+	Type ErrType
+	Err  error
+}
+
 // InterruptProcessTree interrupts an entire process tree using the given signal
 func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) error {
 	// Find all descendant PIDs of the given PID & then signal them.
@@ -592,10 +667,9 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 	}
 
 	for _, pid := range uniqueProcess {
-		err := syscall.Kill(-pid, sig)
-		// ignore the ESRCH error as it means the process is already dead
-		if errno, ok := err.(syscall.Errno); ok && err != nil && errno != syscall.ESRCH {
-			logger.Error("failed to send signal to process", zap.Int("pid", pid), zap.Error(err))
+		err := SendSignal(logger, -pid, sig)
+		if err != nil {
+			logger.Error("error sending signal to the process group id", zap.Int("pgid", pid), zap.Error(err))
 		}
 	}
 	return nil
