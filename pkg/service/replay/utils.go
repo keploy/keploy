@@ -130,6 +130,7 @@ func CalculateAndInsertTestCoverage(ctx context.Context, logger *zap.Logger, rep
 	if err != nil {
 		utils.LogError(logger, err, "failed to calculate coverage for the test run")
 	} else {
+		logger.Sugar().Infoln(models.HighlightPassingString("Total Coverage Percentage: ", coverageData.TotalCov))
 		err = reportDB.InsertCoverageReport(ctx, testRunID, &coverageData)
 		if err != nil {
 			utils.LogError(logger, err, "failed to update report with the coverage data")
@@ -362,7 +363,7 @@ type EndTy struct {
 
 type Loc struct {
 	StartTy `json:"start"`
-	EndTy  `json:"end"`
+	EndTy   `json:"end"`
 }
 
 type TypescriptCoverage map[string]struct {

@@ -761,6 +761,10 @@ func (r *Replayer) printSummary(ctx context.Context, testRunResult bool) {
 				return
 			}
 		}
+		if _, err := pp.Printf("\n<=========================================> \n\n"); err != nil {
+			utils.LogError(r.logger, err, "failed to print separator")
+			return
+		}
 	}
 }
 
