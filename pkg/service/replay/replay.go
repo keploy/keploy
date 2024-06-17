@@ -752,6 +752,36 @@ func (r *Replayer) RunApplication(ctx context.Context, appID uint64, opts models
 	return r.instrumentation.Run(ctx, appID, opts)
 }
 
+func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []models.NoiseParams) error {
+
+	testCases, err := r.testDB.GetTestCases(ctx, testSetID)
+	if err != nil {
+		return fmt.Errorf("failed to get test cases: %w", err)
+	}
+
+	for _, v := range testCases {
+		for _, noiseParam := range noiseParams {
+			if v.Name == noiseParam.TestCaseIDs {
+
+				// append the noise map
+				if noiseParam.Ops == string(models.OpsAdd) {
+					v.Noise = mergeMaps(v.Noise, noiseParam.Assertion)
+				} else {
+					// remove from the original noise map
+					v.Noise = removeFromMap(v.Noise, noiseParam.Assertion)
+				}
+				err = r.testDB.UpdateTestCase(ctx, v, testSetID)
+				if err != nil {
+					return fmt.Errorf("failed to update test case: %w", err)
+				}
+			}
+		}
+
+	}
+
+	return nil
+}
+
 func (r *Replayer) Normalize(ctx context.Context) error {
 
 	var testRun string
@@ -782,7 +812,7 @@ func (r *Replayer) Normalize(ctx context.Context) error {
 	for _, testSet := range r.config.Normalize.SelectedTests {
 		testSetID := testSet.TestSet
 		testCases := testSet.Tests
-		err := r.normalizeTestCases(ctx, testRun, testSetID, testCases)
+		err := r.NormalizeTestCases(ctx, testRun, testSetID, testCases, nil)
 		if err != nil {
 			return err
 		}
@@ -791,15 +821,18 @@ func (r *Replayer) Normalize(ctx context.Context) error {
 	return nil
 }
 
-func (r *Replayer) normalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIDs []string) error {
+func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIDs []string, testCaseResults []models.TestResult) error {
 
-	testReport, err := r.reportDB.GetReport(ctx, testRun, testSetID)
-	if err != nil {
-		return fmt.Errorf("failed to get test report: %w", err)
+	if len(testCaseResults) == 0 {
+		testReport, err := r.reportDB.GetReport(ctx, testRun, testSetID)
+		if err != nil {
+			return fmt.Errorf("failed to get test report: %w", err)
+		}
+
+		testCaseResults = testReport.Tests
 	}
-	testCaseResults := testReport.Tests
-	testCaseResultMap := make(map[string]models.TestResult)
 
+	testCaseResultMap := make(map[string]models.TestResult)
 	testCases, err := r.testDB.GetTestCases(ctx, testSetID)
 	if err != nil {
 		return fmt.Errorf("failed to get test cases: %w", err)
