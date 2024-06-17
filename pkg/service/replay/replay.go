@@ -752,7 +752,7 @@ func (r *Replayer) RunApplication(ctx context.Context, appID uint64, opts models
 	return r.instrumentation.Run(ctx, appID, opts)
 }
 
-func (r *Replayer) DenoiseTestCases(ctx context.Context, testRunID string, testSetID string, noiseParams []models.NoiseParams) error {
+func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []models.NoiseParams) error {
 
 	testCases, err := r.testDB.GetTestCases(ctx, testSetID)
 	if err != nil {
@@ -821,10 +821,9 @@ func (r *Replayer) Normalize(ctx context.Context) error {
 	return nil
 }
 
-func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIds []string, testCaseResults []models.TestResult) error {
+func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIDs []string, testCaseResults []models.TestResult) error {
 
-	// if we are getting from parameter then we need to get the testReport
-	if testCaseResults == nil || len(testCaseResults) == 0 {
+	if len(testCaseResults) == 0 {
 		testReport, err := r.reportDB.GetReport(ctx, testRun, testSetID)
 		if err != nil {
 			return fmt.Errorf("failed to get test report: %w", err)
@@ -838,13 +837,13 @@ func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testS
 	if err != nil {
 		return fmt.Errorf("failed to get test cases: %w", err)
 	}
-	selectedTestCases := make([]*models.TestCase, 0, len(selectedTestCaseIds))
+	selectedTestCases := make([]*models.TestCase, 0, len(selectedTestCaseIDs))
 
-	if len(selectedTestCaseIds) == 0 {
+	if len(selectedTestCaseIDs) == 0 {
 		selectedTestCases = testCases
 	} else {
 		for _, testCase := range testCases {
-			if _, ok := ArrayToMap(selectedTestCaseIds)[testCase.Name]; ok {
+			if _, ok := ArrayToMap(selectedTestCaseIDs)[testCase.Name]; ok {
 				selectedTestCases = append(selectedTestCases, testCase)
 			}
 		}
