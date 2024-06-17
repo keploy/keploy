@@ -372,14 +372,21 @@ func ReplacePathIdentifiers(path string, dummyNames map[string]string) string {
 	finalPath = "/" + finalPath
 	return finalPath
 }
-func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath string, name string) bool {
+func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath string, name string) (success bool) {
+	//This should be added after integration
+	//data=ReadFIle(ctx,logger,filePath,name)
 	// Read the custom format YAML file
 	file, err := os.Open("/home/ahmed/Desktop/GSOC/Keploy/Issues/keploy/keploy/test-set-1/tests/test-49.yaml")
 	if err != nil {
 		logger.Fatal("Error opening file", zap.Error(err))
 		return false
 	}
-	defer file.Close()
+	defer func() {
+		if cerr := file.Close(); cerr != nil {
+			logger.Error("Error closing file", zap.Error(cerr))
+			success = false
+		}
+	}()
 
 	data, err := io.ReadAll(file)
 	if err != nil {
@@ -544,8 +551,12 @@ func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath stri
 	if err != nil {
 		return false
 	}
-	defer outputFile.Close()
-
+	defer func() {
+		if cerr := outputFile.Close(); cerr != nil {
+			logger.Error("Error closing output file", zap.Error(cerr))
+			success = false
+		}
+	}()
 	_, err = outputFile.Write(openapiYAML)
 	if err != nil {
 		return false
