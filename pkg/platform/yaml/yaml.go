@@ -232,12 +232,13 @@ func GenerateRepsonse(responseCode int, responseMessage string, responseTypes ma
 	return byCode
 }
 
-func ExtractURLPath(fullURL string) string {
+func ExtractURLPath(fullURL string) (string, string) {
 	parsedURL, err := url.Parse(fullURL)
+
 	if err != nil {
-		return ""
+		return "", ""
 	}
-	return parsedURL.Path
+	return parsedURL.Path, parsedURL.Host
 }
 
 func GenerateHeader(header map[string]string) []models.Parameter {
@@ -436,6 +437,10 @@ func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath stri
 	parameters = AppendInParameters(parameters, dummyNames, count, "path")
 	// Extract Query parameters
 	queryParams, err := ExtractQueryParams(custom.Spec.Request.URL)
+	if err != nil {
+		logger.Error("Error extracting query parameters", zap.Error(err))
+		return false
+	}
 	// Add Query parameters to the parameters
 	parameters = AppendInParameters(parameters, queryParams, len(queryParams), "query")
 	// Determine if the request method is GET or POST
@@ -501,7 +506,7 @@ func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath stri
 	}
 
 	// Extract the URL path
-	parsedURL := ExtractURLPath(custom.Spec.Request.URL)
+	parsedURL, hostName := ExtractURLPath(custom.Spec.Request.URL)
 	if parsedURL == "" {
 		logger.Error("Error extracting URL path")
 		return false
@@ -516,6 +521,12 @@ func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath stri
 			Title:   custom.Name,
 			Version: custom.Version,
 		},
+		Servers: []map[string]string{
+			{
+				"url": hostName,
+			},
+		},
+
 		Paths: map[string]models.PathItem{
 			parsedURL: pathItem,
 		},

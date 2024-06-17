@@ -10,6 +10,7 @@ type HTTPSchema2 struct {
 type OpenAPI struct {
 	OpenAPI    string                 `json:"openapi" yaml:"openapi"`
 	Info       Info                   `json:"info" yaml:"info"`
+	Servers    []map[string]string    `json:"servers" yaml:"servers"`
 	Paths      map[string]PathItem    `json:"paths" yaml:"paths"`
 	Components map[string]interface{} `json:"components" yaml:"components"`
 }
