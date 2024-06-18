@@ -38,6 +38,8 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 	go func(errCh chan error, configMocks []*models.Mock, tcsMocks []*models.Mock, prevRequest string, requestBuffers [][]byte) {
 		defer pUtil.Recover(logger, clientConn, nil)
 		defer close(errCh)
+		lastCommand := newlastCommandMap()
+
 		for {
 			//log.Debug("Config and TCS Mocks", zap.Any("configMocks", configMocks), zap.Any("tcsMocks", tcsMocks))
 			if firstLoop || doHandshakeAgain {
@@ -138,7 +140,7 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 					expectingHandshakeResponseTest = true
 				}
 
-				oprRequest, requestHeader, decodedRequest, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(requestBuffer), clientConn, models.MODE_TEST)
+				oprRequest, requestHeader, decodedRequest, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(requestBuffer), clientConn, models.MODE_TEST, lastCommand)
 				if err != nil {
 					utils.LogError(logger, err, "Failed to decode MySQL packet")
 					errCh <- err
