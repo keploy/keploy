@@ -132,7 +132,7 @@ Use "{{.CommandPath}} [command] --help" for more information about a command.{{e
 
 var RootExamples = `
   Record:
-	keploy record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --containerName "<containerName>" --buildDelay 60
+	keploy record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --container-name "<containerName>" --buildDelay 60
 
   Test:
 	keploy test --c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --delay 10 --buildDelay 60
@@ -479,7 +479,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				if c.cfg.ContainerName == "" {
 					utils.LogError(c.logger, nil, "Couldn't find containerName")
 					c.logger.Info(`Example usage: keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
-					return errors.New("missing required --containerName flag or containerName in config file")
+					return errors.New("missing required --container-name flag or containerName in config file")
 				}
 			}
 		}

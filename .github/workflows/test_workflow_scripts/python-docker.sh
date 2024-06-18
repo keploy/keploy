@@ -52,7 +52,7 @@ send_request(){
 for i in {1..2}; do
     container_name="flaskApp_${i}"
     send_request &
-    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p6000:6000 --net keploy-network --rm --name $container_name flask-app:1.0" --containerName "$container_name" --generateGithubActions=false &> "${container_name}.txt"
+    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p6000:6000 --net keploy-network --rm --name $container_name flask-app:1.0" --container-name "$container_name" --generate-github-actions=false &> "${container_name}.txt"
     if grep "ERROR" "${container_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${container_name}.txt"
@@ -70,7 +70,7 @@ done
 
 # Testing phase
 test_container="flashApp_test"
-sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p8080:8080 --net keploy-network --name $test_container flask-app:1.0" --containerName "$test_container" --apiTimeout 60 --delay 20 --generateGithubActions=false &> "${test_container}.txt"
+sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p8080:8080 --net keploy-network --name $test_container flask-app:1.0" --container-name "$test_container" --api-timeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
     cat "${test_container}.txt"
