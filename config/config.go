@@ -67,7 +67,7 @@ type BypassRule struct {
 
 type Filter struct {
 	BypassRule `mapstructure:",squash"`
-	URLMethods []string          `json:"urlMethods" yaml:"urlMethods" mapstructure:"urlMethods"`
+	URLMethods []string          `json:"urlMethods" yaml:"urlMethods" mapstructure:"url-methods"`
 	Headers    map[string]string `json:"headers" yaml:"headers" mapstructure:"headers"`
 }
 

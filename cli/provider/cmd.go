@@ -311,6 +311,13 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"disableANSI":           "disable-ansi",
 		"selectedTests":         "selected-tests",
 		"testReport":            "test-report",
+		"enableTesting":         "enable-testing",
+		"inDocker":              "in-docker",
+		"keployContainer":       "keploy-container",
+		"keployNetwork":         "keploy-network",
+		"recordTimer":           "record-timer",
+		"urlMethods":            "url-methods",
+		"globalNoise":           "global-noise",
 	}
 
 	if newName, ok := flagNameMapping[name]; ok {
