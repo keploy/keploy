@@ -229,7 +229,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			return errors.New(errMsg)
 		}
 		if cmd.Name() == "test" {
-			cmd.Flags().StringSliceP("testsets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
+			cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
 			cmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 			cmd.Flags().Uint64("api-timeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
 			cmd.Flags().String("mongo-password", c.cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")
@@ -271,7 +271,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 
 func aliasNormalizeFunc(f *pflag.FlagSet, name string) pflag.NormalizedName {
 	var flagNameMapping = map[string]string{
-		"testsets":              "testsets",
+		"testsets":              "test-sets",
 		"delay":                 "delay",
 		"apiTimeout":            "api-timeout",
 		"mongoPassword":         "mongo-password",
@@ -382,7 +382,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		return errors.New(errMsg)
 	}
 
-	fmt.Println("check here", c.cfg.Path)
 	if c.cfg.Debug {
 		logger, err := log.ChangeLogLevel(zap.DebugLevel)
 		*c.logger = *logger

@@ -72,7 +72,7 @@ type Filter struct {
 }
 
 type Test struct {
-	SelectedTests      map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
+	SelectedTests      map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selected-tests"`
 	GlobalNoise        Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"global-noise"`
 	Delay              uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
 	APITimeout         uint64              `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"api-timeout"`
@@ -90,7 +90,7 @@ type Test struct {
 
 type Globalnoise struct {
 	Global   GlobalNoise  `json:"global" yaml:"global" mapstructure:"global"`
-	Testsets TestsetNoise `json:"test-sets" yaml:"test-sets" mapstructure:"testsets"`
+	Testsets TestsetNoise `json:"test-sets" yaml:"test-sets" mapstructure:"test-sets"`
 }
 
 type SelectedTests struct {
