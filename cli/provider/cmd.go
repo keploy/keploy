@@ -269,7 +269,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	return nil
 }
 
-func aliasNormalizeFunc(f *pflag.FlagSet, name string) pflag.NormalizedName {
+func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 	var flagNameMapping = map[string]string{
 		"testsets":              "test-sets",
 		"delay":                 "delay",
