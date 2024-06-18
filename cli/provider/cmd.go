@@ -388,6 +388,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
+	fmt.Println(c.cfg.Test.Delay)
 
 	if c.cfg.Debug {
 		logger, err := log.ChangeLogLevel(zap.DebugLevel)
