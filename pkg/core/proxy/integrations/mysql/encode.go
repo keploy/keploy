@@ -575,12 +575,9 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, initialBuffer 
 				queryBuffer, err = pUtil.ReadBytes(ctx, logger, clientConn)
 				reqTimestampMock = time.Now()
 				if err != nil {
-					if err == io.EOF {
-						logger.Debug("Received request buffer is empty in record mode for mysql call")
-						errChan <- err
-						return nil
+					if err != io.EOF {
+						utils.LogError(logger, err, "failed to read query from the mysql client")
 					}
-					utils.LogError(logger, err, "failed to read query from the mysql client")
 					return err
 				}
 			}
@@ -614,12 +611,9 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, initialBuffer 
 			}
 			queryResponse, err := pUtil.ReadBytes(ctx, logger, destConn)
 			if err != nil {
-				if err == io.EOF {
-					logger.Debug("received request buffer is empty in record mode for mysql call on line 593")
-					errChan <- err
-					return nil
+				if err != io.EOF {
+					utils.LogError(logger, err, "failed to read query response from mysql server")
 				}
-				utils.LogError(logger, err, "failed to read query response from mysql server")
 				return err
 			}
 			_, err = clientConn.Write(queryResponse)
