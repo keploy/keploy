@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/platform/coverage"
 	"go.keploy.io/server/v2/utils"
 	"go.keploy.io/server/v2/utils/log"
 	"go.uber.org/zap"
@@ -233,10 +234,10 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().String("coverageReportPath", c.cfg.Test.CoverageReportPath, "Write a go coverage profile to the file in the given directory.")
 			cmd.Flags().VarP(&c.cfg.Test.Language, "language", "l", "Application programming language")
 			cmd.Flags().Bool("ignoreOrdering", c.cfg.Test.IgnoreOrdering, "Ignore ordering of array in response")
-			cmd.Flags().Bool("skipCoverage", c.cfg.Test.SkipCoverage, "skip coverage computation")
+			cmd.Flags().Bool("skipCoverage", c.cfg.Test.SkipCoverage, "skip code coverage computation while running the test cases")
 			cmd.Flags().Bool("removeUnusedMocks", c.cfg.Test.RemoveUnusedMocks, "Clear the unused mocks for the passed test-sets")
 			cmd.Flags().Bool("fallBackOnMiss", c.cfg.Test.FallBackOnMiss, "Enable connecting to actual service if mock not found during test mode")
-			cmd.Flags().String("jacocoAgentPath", c.cfg.Test.JacocoAgentPath, "Path to jacoco agent jar file")
+			cmd.Flags().String("jacocoAgentPath", c.cfg.Test.JacocoAgentPath, "Only applicable for test coverage for Java projects. You can override the jacoco agent jar by proving its path")
 			cmd.Flags().String("basePath", c.cfg.Test.BasePath, "Custom api basePath/origin to replace the actual basePath/origin in the testcases; App flag is ignored and app will not be started & instrumented when this is set since the application running on a different machine")
 			cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
 		} else {
@@ -535,71 +536,5 @@ func PreProcessCoverage(logger *zap.Logger, conf *config.Config) {
 		conf.Test.SkipCoverage = true
 		return
 	}
-	var err error
-	switch conf.Test.Language {
-	case models.Python:
-		err = utils.RunCommand("coverage")
-		if err != nil {
-			conf.Test.SkipCoverage = true
-			logger.Warn("coverage tool not found, skipping coverage caluclation. Please install coverage tool using 'pip install coverage'")
-		} else {
-			utils.CreatePyCoverageConfig(logger)
-			conf.CoverageCommand = strings.Replace(conf.Command, executable, "coverage run $APPEND --data-file=.coverage.keploy", 1)
-		}
-	case models.Node:
-		err = utils.RunCommand("nyc", "--version")
-		if err != nil {
-			conf.Test.SkipCoverage = true
-			logger.Warn("coverage tool not found, skipping coverage caluclation. please install coverage tool using 'npm install -g nyc'")
-		} else {
-			conf.CoverageCommand = "nyc --clean=$CLEAN " + conf.Command
-		}
-	case models.Go:
-		if !utils.CheckGoBinaryForCoverFlag(logger, conf.Command) {
-			conf.Test.SkipCoverage = true
-			logger.Warn("go binary was not built with -cover flag")
-		}
-		if utils.CmdType(conf.CommandType) == utils.Native {
-			goCovPath, err := utils.SetCoveragePath(logger, conf.Test.CoverageReportPath)
-			if err != nil {
-				conf.Test.SkipCoverage = true
-				logger.Warn("failed to set go coverage path", zap.Error(err))
-			}
-			conf.Test.CoverageReportPath = goCovPath
-			err = os.Setenv("GOCOVERDIR", goCovPath)
-			if err != nil {
-				logger.Warn("failed to set GOCOVERDIR", zap.Error(err))
-			}
-
-		}
-	case models.Java:
-		// default location for jar of java agent
-		javaAgentPath := "~/.m2/repository/org/jacoco/org.jacoco.agent/0.8.8/org.jacoco.agent-0.8.8-runtime.jar"
-		if conf.Test.JacocoAgentPath != "" {
-			javaAgentPath = conf.Test.JacocoAgentPath
-		}
-		javaAgentPath, err = utils.ExpandPath(javaAgentPath)
-		if err == nil {
-			isFileExist, err := utils.FileExists(javaAgentPath)
-			if err == nil && isFileExist {
-				conf.CoverageCommand = strings.Replace(conf.Command, executable, fmt.Sprintf("%s -javaagent:%s=destfile=target/${TESTSETID}.exec", executable, javaAgentPath), 1)
-			}
-		}
-		if err != nil {
-			conf.Test.SkipCoverage = true
-			logger.Warn("failed to find jacoco agent. If jacoco agent is present in a different path, please set it using --jacocoAgentPath")
-		}
-		// downlaod jacoco cli
-		jacocoPath := filepath.Join(os.TempDir(), "jacoco")
-		err = os.MkdirAll(jacocoPath, 0777)
-		if err != nil {
-			logger.Debug("failed to create jacoco directory", zap.Error(err))
-		} else {
-			err := utils.DownloadAndExtractJaCoCoCli(logger, "0.8.12", jacocoPath)
-			if err != nil {
-				conf.Test.SkipCoverage = true
-				logger.Debug("failed to download and extract jacoco binaries", zap.Error(err))
-			}
-		}
-	}
+	coverage.SetupCoverageCommands(logger, conf, executable)
 }

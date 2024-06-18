@@ -19,6 +19,7 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/platform/coverage"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -211,7 +212,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 	}
 	if !r.config.Test.SkipCoverage && r.config.Test.Language == models.Java {
-		err = mergeAndGenerateJacocoReport(ctx, r.logger)
+		err = coverage.MergeAndGenerateJacocoReport(ctx, r.logger)
 		if err != nil {
 			r.config.Test.SkipCoverage = true
 		}
@@ -227,7 +228,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
 		if !r.config.Test.SkipCoverage {
-			CalculateAndInsertTestCoverage(ctx, r.logger, r.reportDB, testRunID, r.config.Test.Language)
+			coverageData, err := coverage.CalculateCodeCoverage(ctx, r.logger, r.config.Test.Language)
+			if err == nil {
+				err = r.reportDB.InsertCoverageReport(ctx, testRunID, &coverageData)
+				if err != nil {
+					utils.LogError(r.logger, err, "failed to update report with the coverage data")
+				}
+			}
 		}
 	}
 	return nil
