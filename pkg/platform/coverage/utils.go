@@ -107,8 +107,8 @@ func MergeAndGenerateJacocoReport(ctx context.Context, logger *zap.Logger) error
 }
 
 func MergeJacocoCoverageFiles(ctx context.Context, jacocoCliPath string) error {
-	// Find all .exec files starting with "test-set" in the target directory
-	sourceFiles, err := filepath.Glob("target/test-set*.exec")
+	// Find all .exec files in the target directory
+	sourceFiles, err := filepath.Glob("target/*.exec")
 	if err != nil {
 		return fmt.Errorf("error finding coverage files: %w", err)
 	}
