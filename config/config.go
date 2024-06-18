@@ -87,7 +87,7 @@ type Test struct {
 	FallBackOnMiss     bool                `json:"fallBackOnMiss" yaml:"fallBackOnMiss" mapstructure:"fallBackOnMiss"`
 	JacocoAgentPath    string              `json:"jacocoAgentPath" yaml:"jacocoAgentPath" mapstructure:"jacocoAgentPath"`
 	BasePath           string              `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
-  	Mocking            bool                `json:"mocking" yaml:"mocking" mapstructure:"mocking"`
+	Mocking            bool                `json:"mocking" yaml:"mocking" mapstructure:"mocking"`
 }
 
 type Language string
