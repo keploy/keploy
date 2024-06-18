@@ -16,8 +16,9 @@ type OpenAPI struct {
 }
 
 type Info struct {
-	Title   string `json:"title" yaml:"title"`
-	Version string `json:"version" yaml:"version"`
+	Title       string `json:"title" yaml:"title"`
+	Version     string `json:"version" yaml:"version"`
+	Description string `json:"description" yaml:"description"`
 }
 
 type PathItem struct {
@@ -31,6 +32,7 @@ type Operation struct {
 	Summary     string                  `json:"summary" yaml:"summary"`
 	Description string                  `json:"description" yaml:"description"`
 	Parameters  []Parameter             `json:"parameters" yaml:"parameters"`
+	OperationID string                  `json:"operationId" yaml:"operationId"`
 	RequestBody *RequestBody            `json:"requestBody,omitempty" yaml:"requestBody,omitempty"`
 	Responses   map[string]ResponseItem `json:"responses" yaml:"responses"`
 }

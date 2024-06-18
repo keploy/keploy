@@ -2,6 +2,8 @@ package yaml
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
@@ -372,11 +375,22 @@ func ReplacePathIdentifiers(path string, dummyNames map[string]string) string {
 	finalPath = "/" + finalPath
 	return finalPath
 }
+
+func generateUniqueID() string {
+	b := make([]byte, 16)
+	_, err := rand.Read(b)
+	if err != nil {
+		// handle error
+		return ""
+	}
+	return hex.EncodeToString(b) + "-" + time.Now().Format("20060102150405")
+}
+
 func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath string, name string) (success bool) {
 	//This should be added after integration
 	//data=ReadFIle(ctx,logger,filePath,name)
 	// Read the custom format YAML file
-	file, err := os.Open("/home/ahmed/Desktop/GSOC/Keploy/Issues/keploy/keploy/test-set-1/tests/test-49.yaml")
+	file, err := os.Open("/home/ahmed/Desktop/GSOC/Keploy/Issues/keploy/keploy/test-set-1/tests/test-50.yaml")
 	if err != nil {
 		logger.Fatal("Error opening file", zap.Error(err))
 		return false
@@ -450,6 +464,8 @@ func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath stri
 	}
 	// Add Query parameters to the parameters
 	parameters = AppendInParameters(parameters, queryParams, len(queryParams), "query")
+	// Generate Operation ID
+	operationID := generateUniqueID()
 	// Determine if the request method is GET or POST
 	var pathItem models.PathItem
 	switch custom.Spec.Request.Method {
@@ -458,6 +474,7 @@ func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath stri
 			Get: &models.Operation{
 				Summary:     "Auto-generated operation",
 				Description: "Auto-generated from custom format",
+				OperationID: operationID,
 				Parameters:  parameters,
 				Responses:   byCode,
 			},
@@ -468,6 +485,7 @@ func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath stri
 				Summary:     "Auto-generated operation",
 				Description: "Auto-generated from custom format",
 				Parameters:  parameters,
+				OperationID: operationID,
 				RequestBody: &models.RequestBody{
 					Content: map[string]models.MediaType{
 						"application/json": {
@@ -487,6 +505,7 @@ func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath stri
 			Summary:     "Update an employee by ID",
 			Description: "Update an employee by ID",
 			Parameters:  parameters,
+			OperationID: operationID,
 			RequestBody: &models.RequestBody{
 				Content: map[string]models.MediaType{
 					"application/json": {
@@ -504,6 +523,7 @@ func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath stri
 		pathItem.Delete = &models.Operation{
 			Summary:     "Delete an employee by ID",
 			Description: "Delete an employee by ID",
+			OperationID: operationID,
 			Parameters:  parameters,
 			Responses:   byCode,
 		}
@@ -525,8 +545,9 @@ func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath stri
 	openapi := models.OpenAPI{
 		OpenAPI: "3.0.0",
 		Info: models.Info{
-			Title:   custom.Name,
-			Version: custom.Version,
+			Title:       custom.Name,
+			Version:     custom.Version,
+			Description: custom.Kind,
 		},
 		Servers: []map[string]string{
 			{
