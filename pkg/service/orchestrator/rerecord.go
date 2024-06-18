@@ -104,7 +104,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		case <-ctx.Done():
 		}
 
-		if err == nil {
+		if err == nil || ctx.Err() == nil {
 			// Sleep for 3 seconds to ensure that the recording has completed
 			time.Sleep(3 * time.Second)
 		}
@@ -162,7 +162,8 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 		host = o.config.ContainerName
 	}
 
-	timeout := time.Duration(30) * time.Second
+	delay := o.config.Test.Delay
+	timeout := time.Duration(120+delay) * time.Second
 
 	o.logger.Debug("", zap.String("host", host), zap.String("port", port), zap.Any("WaitTimeout", timeout), zap.Any("CommandType", cmdType))
 

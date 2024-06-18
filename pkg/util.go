@@ -319,7 +319,8 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 				return nil
 			}
 		case <-timer.C:
-			return fmt.Errorf("timeout after %v waiting for port %s:%s", timeout, host, port)
+			msg := "Please add delay if your application takes more time to start"
+			return fmt.Errorf("timeout after %v waiting for port %s:%s, %s", timeout, host, port, msg)
 		}
 	}
 }
