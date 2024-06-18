@@ -356,6 +356,12 @@ func encodeRow(_ *models.Row, columnValues []models.RowColumnDefinition) ([]byte
 			if !ok {
 				return nil, errors.New("could not convert value to string")
 			}
+
+			if timestamp == "" {
+				buf.WriteByte(0)
+				continue
+			}
+
 			t, err := time.Parse("2006-01-02 15:04:05", timestamp)
 			if err != nil {
 				return nil, errors.New("could not parse timestamp value")
