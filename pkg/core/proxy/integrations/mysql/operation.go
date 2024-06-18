@@ -141,7 +141,7 @@ func DecodeMySQLPacket(logger *zap.Logger, packet Packet, clientConn net.Conn, m
 			packetType = "RESULT_SET_PACKET"
 			packetData, err = parseResultSet(data)
 			if err != nil {
-				fmt.Println("Error parsing result set: ", err)
+				logger.Error("Error parsing result set", zap.Error(err))
 			}
 			lastCommand[clientConn] = 0x00 // Reset the last command
 		default:
