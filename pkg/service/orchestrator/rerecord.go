@@ -43,7 +43,6 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 	})
 
 	for _, testSet := range testSets {
-
 		if ctx.Err() != nil {
 			break
 		}
@@ -61,26 +60,34 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		var errCh = make(chan error, 1)
 		var replayErrCh = make(chan error, 1)
 
-		errGrp.Go(func() error {
-			defer utils.Recover(o.logger)
-			err := o.record.Start(recordCtx, true)
-			errCh <- err
-			return nil
-		})
+		select {
+		case <-ctx.Done():
+		default:
+			errGrp.Go(func() error {
+				defer utils.Recover(o.logger)
+				err := o.record.Start(recordCtx, true)
+				errCh <- err
+				return nil
+			})
+		}
 
-		errGrp.Go(func() error {
-			defer utils.Recover(o.logger)
-			allRecorded, err := o.replayTests(recordCtx, testSet)
+		select {
+		case <-ctx.Done():
+		default:
+			errGrp.Go(func() error {
+				defer utils.Recover(o.logger)
+				allRecorded, err := o.replayTests(recordCtx, testSet)
 
-			if allRecorded {
-				o.logger.Info("Re-recorded testcases successfully for the given testset", zap.String("testset", testSet))
-			} else {
-				o.logger.Warn("Failed to re-record some testcases", zap.String("testset", testSet))
-			}
+				if allRecorded {
+					o.logger.Info("Re-recorded testcases successfully for the given testset", zap.String("testset", testSet))
+				} else {
+					o.logger.Warn("Failed to re-record some testcases", zap.String("testset", testSet))
+				}
 
-			replayErrCh <- err
-			return nil
-		})
+				replayErrCh <- err
+				return nil
+			})
+		}
 
 		var err error
 		select {
@@ -94,6 +101,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 				stopReason = "error while replaying the testcases"
 				utils.LogError(o.logger, err, stopReason, zap.String("testset", testSet))
 			}
+		case <-ctx.Done():
 		}
 
 		if err == nil {
