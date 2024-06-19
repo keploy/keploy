@@ -36,6 +36,10 @@ type Tools struct {
 
 var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
 
+func (t *Tools) SendTelemetry(event string, output ...map[string]interface{}) {
+	t.telemetry.SendTelemetry(event, output...)
+}
+
 // Update initiates the tools process for the Keploy binary file.
 func (t *Tools) Update(ctx context.Context) error {
 	currentVersion := "v" + utils.Version

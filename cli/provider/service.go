@@ -28,7 +28,7 @@ import (
 	"go.uber.org/zap"
 )
 
-var TeleGlobalMap map[string]interface{}
+var TeleGlobalMap = make(map[string]interface{})
 
 type ServiceProvider struct {
 	logger *zap.Logger
