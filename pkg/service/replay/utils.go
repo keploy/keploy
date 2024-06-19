@@ -1,3 +1,5 @@
+//go:build linux
+
 package replay
 
 import (
@@ -14,7 +16,7 @@ import (
 type TestReportVerdict struct {
 	total  int
 	passed int
-	failed int
+	failed int ``
 	status bool
 }
 
@@ -125,4 +127,22 @@ func (t *requestMockUtil) ProcessMockFile(_ context.Context, testSetID string) {
 		return
 	}
 	t.logger.Debug("Mock file for test set", zap.String("testSetID", testSetID))
+}
+
+func mergeMaps(map1, map2 map[string][]string) map[string][]string {
+	for key, values := range map2 {
+		if _, exists := map1[key]; exists {
+			map1[key] = append(map1[key], values...)
+		} else {
+			map1[key] = values
+		}
+	}
+	return map1
+}
+
+func removeFromMap(map1, map2 map[string][]string) map[string][]string {
+	for key := range map2 {
+		delete(map1, key)
+	}
+	return map1
 }

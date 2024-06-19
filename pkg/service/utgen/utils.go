@@ -8,12 +8,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
 	"go.keploy.io/server/v2/pkg/models"
 	settings "go.keploy.io/server/v2/pkg/service/utgen/assets"
+	"go.uber.org/zap"
 
 	"gopkg.in/yaml.v2"
 )
@@ -125,20 +127,34 @@ func getFilename(filePath string) string {
 	return filepath.Base(filePath)
 }
 
-func RunCommand(command string, cwd string) (stdout string, stderr string, exitCode int, commandStartTime int64, err error) {
+func RunCommand(command string, cwd string, logger *zap.Logger) (stdout string, stderr string, exitCode int, commandStartTime int64, err error) {
 	// Get the current time before running the test command, in milliseconds
 	commandStartTime = time.Now().UnixNano() / int64(time.Millisecond)
 
-	// Create the command with the specified working directory
-	cmd := exec.Command("sh", "-c", command)
-	if cwd != "" {
-		cmd.Dir = cwd
+	var cmd *exec.Cmd
+
+	if runtime.GOOS == "windows" {
+		cmdArgs := strings.Fields(command)
+		cmd = exec.Command(cmdArgs[0], cmdArgs[1:]...)
+	} else {
+		// Create the command with the specified working directory
+		cmd = exec.Command("sh", "-c", command)
+		if cwd != "" {
+			cmd.Dir = cwd
+		}
 	}
 
 	// Capture the stdout and stderr
 	var outBuf, errBuf bytes.Buffer
+
+	// Set the output of the command
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
+
+	if logger.Level() == zap.DebugLevel {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
 
 	// Run the command
 	err = cmd.Run()

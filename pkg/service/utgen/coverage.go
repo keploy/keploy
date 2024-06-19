@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"time"
@@ -49,8 +48,16 @@ func (cp *CoverageProcessor) VerifyReportUpdate(latestTime int64) error {
 	}
 	fileModTimeMs := fileInfo.ModTime().UnixNano() / int64(time.Millisecond)
 
-	if fileModTimeMs <= latestTime {
-		return fmt.Errorf("fatal: the coverage report file was not updated after the test command. file_mod_time_ms: %d, time_of_test_command: %d", fileModTimeMs, latestTime)
+	if fileModTimeMs < latestTime {
+		time.Sleep(2 * time.Second)
+		fileInfo, err = os.Stat(cp.ReportPath)
+		if err != nil {
+			return err
+		}
+		fileModTimeMs = fileInfo.ModTime().UnixNano() / int64(time.Millisecond)
+		if fileModTimeMs < latestTime {
+			return fmt.Errorf("fatal: the coverage report file was not updated after the test command. file_mod_time_ms: %d, time_of_test_command: %d", fileModTimeMs, latestTime)
+		}
 	}
 	return nil
 }
@@ -82,24 +89,16 @@ func (cp *CoverageProcessor) ParseCoverageReportCobertura() (*models.CoverageRes
 		}
 	}()
 
-	// Read the contents of the file
-	var buf bytes.Buffer
-	tee := io.TeeReader(xmlFile, &buf)
-	if err != nil {
-		return nil, err
-	}
-
 	// Decode the XML file into a Coverage struct
 	var cov models.Cobertura
-	if err := xml.NewDecoder(tee).Decode(&cov); err != nil {
+	if err := xml.NewDecoder(xmlFile).Decode(&cov); err != nil {
 		return nil, err
 	}
-
-	content := buf.Bytes()
 
 	// Find coverage for the specified file
 	var linesCovered, linesMissed []int
 	var totalLines, coveredLines int
+	var filteredClasses []models.Class
 	for _, pkg := range cov.Packages {
 		for _, cls := range pkg.Classes {
 			if cp.SrcPath == "." {
@@ -115,6 +114,7 @@ func (cp *CoverageProcessor) ParseCoverageReportCobertura() (*models.CoverageRes
 						linesMissed = append(linesMissed, line.Number)
 					}
 				}
+				filteredClasses = append(filteredClasses, cls)
 				break
 			}
 		}
@@ -125,12 +125,29 @@ func (cp *CoverageProcessor) ParseCoverageReportCobertura() (*models.CoverageRes
 		coveragePercentage = float64(len(linesCovered)) / float64(totalLines)
 	}
 
+	// Reconstruct the coverage report with only the filtered class
+	filteredCov := models.Cobertura{
+		Packages: []models.Package{
+			{
+				Classes: filteredClasses,
+			},
+		},
+	}
+
+	// Encode the filtered coverage report to XML
+	var filteredBuf bytes.Buffer
+	xmlEncoder := xml.NewEncoder(&filteredBuf)
+	xmlEncoder.Indent("", "  ")
+	if err := xmlEncoder.Encode(filteredCov); err != nil {
+		return nil, err
+	}
+
 	coverageResult := &models.CoverageResult{
 		LinesCovered:  linesCovered,
 		LinesMissed:   linesMissed,
 		Coverage:      coveragePercentage,
 		Files:         filesToCover,
-		ReportContent: string(content),
+		ReportContent: filteredBuf.String(),
 	}
 
 	return coverageResult, nil

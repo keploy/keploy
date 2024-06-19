@@ -1,10 +1,13 @@
+//go:build linux
+
 package proxy
 
 import (
-	"go.uber.org/zap"
 	"io"
 	"net"
 	"sync"
+
+	"go.uber.org/zap"
 )
 
 type Conn struct {

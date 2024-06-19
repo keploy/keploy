@@ -58,3 +58,16 @@ type TestCase struct {
 func (tc *TestCase) GetKind() string {
 	return string(tc.Kind)
 }
+
+type NoiseParams struct {
+	TestCaseIDs string              `json:"testCaseIDs"`
+	EditedBy    string              `json:"editedBy"`
+	Assertion   map[string][]string `json:"assertion"`
+	Ops         string              `json:"ops"`
+}
+
+// enum for ops
+const (
+	OpsAdd    = "ADD"
+	OpsRemove = "REMOVE"
+)

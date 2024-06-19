@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package util provides utility functions for the proxy package.
 package util
 
