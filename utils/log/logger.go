@@ -13,6 +13,7 @@ import (
 var Emoji = "\U0001F430" + " Keploy:"
 
 // TODO find better way than global variable
+
 var LogCfg zap.Config
 
 func New() (*zap.Logger, error) {
