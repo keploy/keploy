@@ -17,7 +17,7 @@ type Config struct {
 	Debug                 bool         `json:"debug" yaml:"debug" mapstructure:"debug"`
 	DisableTele           bool         `json:"disableTele" yaml:"disableTele" mapstructure:"disable-tele"`
 	DisableANSI           bool         `json:"disableANSI" yaml:"disableANSI" mapstructure:"disable-ansi"`
-	InDocker              bool         `json:"inDocker" yaml:"inDocker" mapstructure:"in-docker"`
+	InDocker              bool         `json:"inDocker" yaml:"inDocker" mapstructure:"in_docker"`
 	ContainerName         string       `json:"containerName" yaml:"containerName" mapstructure:"container-name"`
 	NetworkName           string       `json:"networkName" yaml:"networkName" mapstructure:"network-name"`
 	BuildDelay            uint64       `json:"buildDelay" yaml:"buildDelay" mapstructure:"build-delay"`
