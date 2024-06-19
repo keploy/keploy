@@ -228,6 +228,7 @@ Reach out to us. We're here to answer!
 # 📝 Sample QuickStarts
 - ![Go](https://img.shields.io/badge/go-%2300ADD8.svg?style=for-the-badge&logo=go&logoColor=white) : Try a unit-gen on [Mux-SQL](https://github.com/keploy/samples-go/tree/main/mux-sql#create-unit-testcase-with-keploy) app
 
+- ![Node](https://img.shields.io/badge/node.js-6DA55F?style=for-the-badge&logo=node&logoColor=white) : Try a unit-gen on [Express-Mongoose](https://github.com/keploy/samples-typescript/tree/main/express-mongoose#create-unit-testcase-with-keploy) app
 
 ## 🌐 Language Support
 
