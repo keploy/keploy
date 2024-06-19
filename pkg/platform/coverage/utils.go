@@ -15,7 +15,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// SetupCoverageCommands first checks whether language specific coverage tool is installed in the system 
+// SetupCoverageCommands first checks whether language specific coverage tool is installed in the system
 // for python, javascript and java, and checks whether the go binary was built with -cover flag in case of go
 // It then appends the coverage executable to the command and sets the coverage command in the config
 func SetupCoverageCommands(logger *zap.Logger, conf *config.Config, executable string) {

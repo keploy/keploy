@@ -1,5 +1,6 @@
 //go:build linux
 
+// Package coverage provides functionality for calculating code coverage.
 package coverage
 
 import (
@@ -36,9 +37,8 @@ func CalculateCodeCoverage(ctx context.Context, logger *zap.Logger, language con
 	if err != nil {
 		utils.LogError(logger, err, "failed to calculate coverage for the test run")
 		return coverageData, err
-	} else {
-		logger.Sugar().Infoln(models.HighlightPassingString("Total Coverage Percentage: ", coverageData.TotalCov))
 	}
+	logger.Sugar().Infoln(models.HighlightPassingString("Total Coverage Percentage: ", coverageData.TotalCov))
 	return coverageData, nil
 }
 
@@ -300,7 +300,7 @@ type ProcessInfo struct {
 
 func getCoverageFilePathsTypescript(path string) ([]string, error) {
 	filePaths := []string{}
-	walkfn := func(path string, info os.FileInfo, err error) error {
+	walkfn := func(path string, info os.FileInfo, _ error) error {
 		if !info.IsDir() && !strings.HasSuffix(path, "index.json") {
 			fileData, err := os.ReadFile(path)
 			if err != nil {
