@@ -24,9 +24,7 @@ sudo ./../../../keployv2 config --generate
 sudo rm -rf keploy/  # Clean old test data
 config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"header": {"Allow":[],}}/' "$config_file"
-cat $config_file
 sleep 5  # Allow time for configuration changes
-#
 
 send_request(){
     sleep 10
