@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package testdb provides functionality for working with test databases.
 package testdb
 

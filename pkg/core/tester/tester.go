@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package tester provides functionality for testing keploy with itself
 package tester
 

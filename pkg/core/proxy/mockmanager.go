@@ -1,3 +1,5 @@
+//go:build linux
+
 package proxy
 
 import (
@@ -78,7 +80,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	if updated {
 		// mark the unfiltered mock as used for the current simulated test-case
 		go func() {
-			if err := m.FlagMockAsUsed(old); err != nil {
+			if err := m.FlagMockAsUsed(*old); err != nil {
 				m.logger.Error("failed to flag mock as used", zap.Error(err))
 			}
 		}()
@@ -86,15 +88,15 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	return updated
 }
 
-func (m *MockManager) FlagMockAsUsed(mock *models.Mock) error {
-	if mock == nil {
+func (m *MockManager) FlagMockAsUsed(mock models.Mock) error {
+	if mock.Name == "" {
 		return fmt.Errorf("mock is empty")
 	}
 	m.consumedMocks.Store(mock.Name, true)
 	return nil
 }
 
-func (m *MockManager) DeleteFilteredMock(mock *models.Mock) bool {
+func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	isDeleted := m.filtered.delete(mock.TestModeInfo)
 	if isDeleted {
 		go func() {
@@ -106,7 +108,7 @@ func (m *MockManager) DeleteFilteredMock(mock *models.Mock) bool {
 	return isDeleted
 }
 
-func (m *MockManager) DeleteUnFilteredMock(mock *models.Mock) bool {
+func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 	isDeleted := m.unfiltered.delete(mock.TestModeInfo)
 	if isDeleted {
 		go func() {
@@ -123,6 +125,7 @@ func (m *MockManager) GetConsumedMocks() []string {
 	m.consumedMocks.Range(func(key, _ interface{}) bool {
 		if _, ok := key.(string); ok {
 			keys = append(keys, key.(string))
+			m.consumedMocks.Delete(key)
 		}
 		return true
 	})
@@ -131,6 +134,8 @@ func (m *MockManager) GetConsumedMocks() []string {
 		numJ, _ := strconv.Atoi(strings.Split(keys[j], "-")[1])
 		return numI < numJ
 	})
-	m.consumedMocks = sync.Map{}
+	for key := range keys {
+		m.consumedMocks.Delete(key)
+	}
 	return keys
 }
