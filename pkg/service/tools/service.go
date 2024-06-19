@@ -8,7 +8,9 @@ import (
 type Service interface {
 	Update(ctx context.Context) error
 	CreateConfig(ctx context.Context, filePath string, config string) error
+	SendTelemetry(event string, output ...map[string]interface{})
 }
 
 type teleDB interface {
+	SendTelemetry(event string, output ...map[string]interface{})
 }
