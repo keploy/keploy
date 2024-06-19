@@ -28,6 +28,8 @@ import (
 	"go.uber.org/zap"
 )
 
+var TeleGlobalMap map[string]interface{}
+
 type ServiceProvider struct {
 	logger *zap.Logger
 	userDb *user.Db
@@ -50,7 +52,7 @@ func NewServiceProvider(logger *zap.Logger, userDb *user.Db, cfg *config.Config)
 	}
 }
 
-func (n *ServiceProvider) GetTelemetryService(ctx context.Context, config config.Config, globalMap map[string]interface{}) (*telemetry.Telemetry, error) {
+func (n *ServiceProvider) GetTelemetryService(ctx context.Context, config *config.Config) (*telemetry.Telemetry, error) {
 	installationID, err := n.userDb.GetInstallationID(ctx)
 	if err != nil {
 		return nil, errors.New("failed to get installation id")
@@ -58,7 +60,7 @@ func (n *ServiceProvider) GetTelemetryService(ctx context.Context, config config
 	return telemetry.NewTelemetry(n.logger, telemetry.Options{
 		Enabled:        !config.DisableTele,
 		Version:        utils.Version,
-		GlobalMap:      globalMap,
+		GlobalMap:      TeleGlobalMap,
 		InstallationID: installationID,
 	},
 	), nil
@@ -115,8 +117,8 @@ func (n *ServiceProvider) GetCommonServices(c *config.Config) *CommonInternalSer
 	}
 }
 
-func (n *ServiceProvider) GetService(ctx context.Context, cmd string, teleGlobalMap map[string]interface{}) (interface{}, error) {
-	tel, err := n.GetTelemetryService(ctx, *n.cfg, teleGlobalMap)
+func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface{}, error) {
+	tel, err := n.GetTelemetryService(ctx, n.cfg)
 	if err != nil {
 		return nil, err
 	}

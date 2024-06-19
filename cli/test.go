@@ -26,7 +26,7 @@ func Test(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			svc, err := serviceFactory.GetService(ctx, cmd.Name(), map[string]interface{}{})
+			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service")
 				return nil
