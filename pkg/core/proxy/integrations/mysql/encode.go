@@ -20,8 +20,6 @@ import (
 	"go.uber.org/zap"
 )
 
-var reqTimestampMock, responseTimestampMock time.Time
-
 func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
 
 	var (
@@ -54,6 +52,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 				errCh <- err
 				return nil
 			}
+			reqTimestamp := time.Now()
 			if source == "destination" {
 				handshakeResponseBuffer := data
 				_, err = clientConn.Write(handshakeResponseBuffer)
@@ -517,10 +516,10 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 					})
 				}
 
-				recordMySQLMessage(ctx, mysqlRequests, mysqlResponses, "config", oprRequest, oprResponse2, mocks, reqTimestampMock, responseTimestampMock)
+				recordMySQLMessage(ctx, mysqlRequests, mysqlResponses, "config", oprRequest, oprResponse2, mocks, reqTimestamp)
 				mysqlRequests = []models.MySQLRequest{}
 				mysqlResponses = []models.MySQLResponse{}
-				err = handleClientQueries(ctx, logger, nil, clientConn, destConn, mocks, lastCommand)
+				err = handleClientQueries(ctx, logger, nil, clientConn, destConn, mocks, lastCommand, reqTimestamp)
 				logger.Debug("we got the error here at line 517", zap.Any("err", err))
 				if err != nil {
 					if err == io.EOF {
@@ -533,7 +532,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 					return nil
 				}
 			} else if source == "client" {
-				err := handleClientQueries(ctx, logger, nil, clientConn, destConn, mocks, lastCommand)
+				err := handleClientQueries(ctx, logger, nil, clientConn, destConn, mocks, lastCommand, reqTimestamp)
 				logger.Debug("we got the error here at line 529", zap.Any("err", err))
 				if err != nil {
 					utils.LogError(logger, err, "failed to handle client queries")
@@ -557,7 +556,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 
 }
 
-func handleClientQueries(ctx context.Context, logger *zap.Logger, initialBuffer []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, lastCommand *lastCommandMap) error {
+func handleClientQueries(ctx context.Context, logger *zap.Logger, initialBuffer []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, lastCommand *lastCommandMap, reqTimestamp time.Time) error {
 	firstIteration := true
 	var (
 		mysqlRequests  []models.MySQLRequest
@@ -575,7 +574,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, initialBuffer 
 				firstIteration = false
 			} else {
 				queryBuffer, err = pUtil.ReadBytes(ctx, logger, clientConn)
-				reqTimestampMock = time.Now()
+				reqTimestamp = time.Now()
 				if err != nil {
 					if err != io.EOF {
 						utils.LogError(logger, err, "failed to read query from the mysql client")
@@ -607,7 +606,6 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, initialBuffer 
 				utils.LogError(logger, err, "failed to write query to mysql server")
 				return err
 			}
-			responseTimestampMock = time.Now()
 			if res == 9 {
 				return nil
 			}
@@ -660,7 +658,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, initialBuffer 
 				Payload: payload,
 				Message: mysqlResp,
 			})
-			recordMySQLMessage(ctx, mysqlRequests, mysqlResponses, "mocks", operation, responseOperation, mocks, reqTimestampMock, responseTimestampMock)
+			recordMySQLMessage(ctx, mysqlRequests, mysqlResponses, "mocks", operation, responseOperation, mocks, reqTimestamp)
 		}
 	}
 }

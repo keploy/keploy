@@ -60,7 +60,7 @@ func (m *MySQL) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrat
 	return nil
 }
 
-func recordMySQLMessage(_ context.Context, mysqlRequests []models.MySQLRequest, mysqlResponses []models.MySQLResponse, name, operation, responseOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time, resTimestampMock time.Time) {
+func recordMySQLMessage(_ context.Context, mysqlRequests []models.MySQLRequest, mysqlResponses []models.MySQLResponse, name, operation, responseOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time) {
 
 	meta := map[string]string{
 		"type":              name,
@@ -77,7 +77,7 @@ func recordMySQLMessage(_ context.Context, mysqlRequests []models.MySQLRequest, 
 			MySQLResponses:   mysqlResponses,
 			Created:          time.Now().Unix(),
 			ReqTimestampMock: reqTimestampMock,
-			ResTimestampMock: resTimestampMock,
+			ResTimestampMock: time.Now(),
 		},
 	}
 	mocks <- mysqlMock
