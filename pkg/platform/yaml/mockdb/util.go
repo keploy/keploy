@@ -5,6 +5,7 @@ package mockdb
 import (
 	"errors"
 	"strings"
+	"fmt"
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
@@ -152,7 +153,9 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 				Header:    v.Header,
 				ReadDelay: v.ReadDelay,
 			}
+			fmt.Println("This is the response message before encoding", v.Message)
 			err := resp.Message.Encode(v.Message)
+			fmt.Println("This is the response message", resp.Message)
 			if err != nil {
 				utils.LogError(logger, err, "failed to encode mongo response wiremessage into yaml")
 				return nil, err
