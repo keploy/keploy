@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"time"
+	"fmt"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/utils"
@@ -61,7 +62,7 @@ func (m *MySQL) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrat
 }
 
 func recordMySQLMessage(_ context.Context, mysqlRequests []models.MySQLRequest, mysqlResponses []models.MySQLResponse, name, operation, responseOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time) {
-
+	fmt.Println("This is the req and the resp timestamp", reqTimestampMock, )
 	meta := map[string]string{
 		"type":              name,
 		"operation":         operation,
@@ -80,5 +81,6 @@ func recordMySQLMessage(_ context.Context, mysqlRequests []models.MySQLRequest, 
 			ResTimestampMock: time.Now(),
 		},
 	}
+	fmt.Println("This is the mysql mock", mysqlMock)
 	mocks <- mysqlMock
 }
