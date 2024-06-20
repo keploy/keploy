@@ -316,7 +316,9 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"keployContainer":       "keploy-container",
 		"keployNetwork":         "keploy-network",
 		"recordTimer":           "record-timer",
-		"urlMethods":            "url-methods"}
+		"urlMethods":            "url-methods",
+		"globalNoise":           "global-noise",
+	}
 
 	if newName, ok := flagNameMapping[name]; ok {
 		name = newName
@@ -344,19 +346,12 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
 
-	// used to bind common flags for commands like record, test. For eg: PATH, PORT, COMMAND etc.
-	err := viper.BindPFlags(cmd.Flags())
-	if err != nil {
-		errMsg := "failed to bind flags to config"
-		utils.LogError(c.logger, err, errMsg)
-		return errors.New(errMsg)
-	}
 	// used to bind flags with environment variables
 	viper.AutomaticEnv()
 	viper.SetEnvPrefix("KEPLOY")
 
 	//used to bind flags specific to the command for eg: testsets, delay, recordTimer etc. (nested flags)
-	err = utils.BindFlagsToViper(c.logger, cmd, "")
+	err := utils.BindFlagsToViper(c.logger, cmd, "")
 	if err != nil {
 		errMsg := "failed to bind cmd specific flags to viper"
 		utils.LogError(c.logger, err, errMsg)
