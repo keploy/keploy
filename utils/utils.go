@@ -63,8 +63,8 @@ func kebabToCamel(s string) string {
 func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix string) error {
 	var bindErr error
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
-		flag.Name = kebabToCamel(flag.Name)
-		err := viper.BindPFlag(flag.Name, flag)
+		camelCasedFlagName := kebabToCamel(flag.Name)
+		err := viper.BindPFlag(camelCasedFlagName, flag)
 		if err != nil {
 			LogError(logger, err, "failed to bind flag")
 			bindErr = err
