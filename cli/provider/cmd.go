@@ -316,9 +316,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"keployContainer":       "keploy-container",
 		"keployNetwork":         "keploy-network",
 		"recordTimer":           "record-timer",
-		"urlMethods":            "url-methods",
-		"globalNoise":           "global-noise",
-	}
+		"urlMethods":            "url-methods"}
 
 	if newName, ok := flagNameMapping[name]; ok {
 		name = newName

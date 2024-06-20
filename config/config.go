@@ -9,7 +9,7 @@ import (
 
 type Config struct {
 	Path                  string       `json:"path" yaml:"path" mapstructure:"path"`
-	AppID                 string       `json:"appId" yaml:"appId" mapstructure:"appId"`
+	AppID                 string       `json:"appId" yaml:"appId" mapstructure:"app-id"`
 	Command               string       `json:"command" yaml:"command" mapstructure:"command"`
 	Port                  uint32       `json:"port" yaml:"port" mapstructure:"port"`
 	DNSPort               uint32       `json:"dnsPort" yaml:"dnsPort" mapstructure:"dns-port"`
@@ -26,7 +26,7 @@ type Config struct {
 	Gen                   UtGen        `json:"gen" yaml:"gen" mapstructure:"gen"`
 	Normalize             Normalize    `json:"normalize" yaml:"normalize" mapstructure:"normalize"`
 	ConfigPath            string       `json:"configPath" yaml:"configPath" mapstructure:"config-path"`
-	BypassRules           []BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypass-rules"`
+	BypassRules           []BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassrules"`
 	EnableTesting         bool         `json:"enableTesting" yaml:"enableTesting" mapstructure:"enable-testing"`
 	GenerateGithubActions bool         `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generate-github-actions"`
 	KeployContainer       string       `json:"keployContainer" yaml:"keployContainer" mapstructure:"keploy-container"`
@@ -73,12 +73,12 @@ type Filter struct {
 
 type Test struct {
 	SelectedTests      map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selected-tests"`
-	GlobalNoise        Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"global-noise"`
+	GlobalNoise        Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
 	Delay              uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
 	APITimeout         uint64              `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"api-timeout"`
-	Coverage           bool                `json:"coverage" yaml:"coverage" mapstructure:"coverage"`                                  // boolean to capture the coverage in test
-	CoverageReportPath string              `json:"coverageReportPath" yaml:"coverageReportPath " mapstructure:"coverage-report-path"` // directory path to store the coverage files
-	GoCoverage         bool                `json:"goCoverage" yaml:"goCoverage" mapstructure:"go-coverage"`                           // boolean to capture the coverage in test
+	Coverage           bool                `json:"coverage" yaml:"coverage" mapstructure:"coverage"`                                 // boolean to capture the coverage in test
+	CoverageReportPath string              `json:"coverageReportPath" yaml:"coverageReportPath" mapstructure:"coverage-report-path"` // directory path to store the coverage files
+	GoCoverage         bool                `json:"goCoverage" yaml:"goCoverage" mapstructure:"go-coverage"`                          // boolean to capture the coverage in test
 	IgnoreOrdering     bool                `json:"ignoreOrdering" yaml:"ignoreOrdering" mapstructure:"ignore-ordering"`
 	MongoPassword      string              `json:"mongoPassword" yaml:"mongoPassword" mapstructure:"mongo-password"`
 	Language           string              `json:"language" yaml:"language" mapstructure:"language"`
