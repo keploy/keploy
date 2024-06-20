@@ -122,6 +122,7 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {
 	mock.Name = fmt.Sprint("mock-", ys.getNextID())
+	fmt.Println("This is the mock before encoding", mock.Spec.ReqTimestampMock, mock.Spec.ResTimestampMock)
 	mockYaml, err := EncodeMock(mock, ys.Logger)
 	if err != nil {
 		return err
@@ -135,7 +136,6 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	if err != nil {
 		return err
 	}
-	fmt.Println("This is the data that we get here", string(data))
 	err = yaml.WriteFile(ctx, ys.Logger, mockPath, mockFileName, data, true)
 	if err != nil {
 		return err
