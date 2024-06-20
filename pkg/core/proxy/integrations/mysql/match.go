@@ -21,6 +21,9 @@ func matchRequestWithMock(ctx context.Context, mysqlRequest models.MySQLRequest,
 	maxMatchCount := 0
 
 	for i, mock := range allMocks {
+		fmt.Println("This is the mock that has been filtered", mock.Spec.MySQLRequests)
+		fmt.Println("This is the req timestamp of the mock", mock.Spec.ReqTimestampMock)
+		fmt.Println("This is the resp timestamp mock", mock.Spec.ResTimestampMock)
 		if ctx.Err() != nil {
 			return nil, -1, "", ctx.Err()
 		}
