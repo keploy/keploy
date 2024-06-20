@@ -4,7 +4,7 @@ source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Start mongo before starting keploy.
 docker network create keploy-network
-docker run -p 3306:3306 --rm --name mysql --net keploy-network -e MYSQL_ROOT_PASSWORD=my-secret-pw -d postgres:latest
+docker run -p 5432:5432 --rm --name postgres --net keploy-network -e POSTGRES_PASSWORD=my-secret-pw -d postgres:latest
 
 # Remove any preexisting keploy tests and mocks.
 sudo rm -rf keploy/
@@ -75,7 +75,7 @@ for i in {1..2}; do
 done
 
 # Start the keploy in test mode.
-test_container="fasthttp_postgres__test"
+test_container="fasthttp_postgres_test"
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test fasthttp-postgres' --containerName "$test_container" --apiTimeout 60 --delay 20 --generateGithubActions=false &> "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
