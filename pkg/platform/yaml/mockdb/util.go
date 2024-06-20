@@ -168,6 +168,8 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			Requests:  requests,
 			Response:  responses,
 			CreatedAt: mock.Spec.Created,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
 		err := yamlDoc.Spec.Encode(sqlSpec)
 		if err != nil {
