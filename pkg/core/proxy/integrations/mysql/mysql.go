@@ -81,6 +81,6 @@ func recordMySQLMessage(_ context.Context, mysqlRequests []models.MySQLRequest, 
 			ResTimestampMock: time.Now(),
 		},
 	}
-	fmt.Println("This is the mysql mock", mysqlMock)
+	fmt.Println("This is the mysql mock", mysqlMock.Spec.ReqTimestampMock, mysqlMock.Spec.ResTimestampMock)
 	mocks <- mysqlMock
 }

@@ -135,6 +135,7 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	if err != nil {
 		return err
 	}
+	fmt.Println("This is the data that we get here", data)
 	err = yaml.WriteFile(ctx, ys.Logger, mockPath, mockFileName, data, true)
 	if err != nil {
 		return err
