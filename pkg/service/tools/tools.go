@@ -287,3 +287,11 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 	t.logger.Info("Config file generated successfully")
 	return nil
 }
+
+func (t *Tools) IgnoreTests(_ context.Context, _ string, _ []string) error {
+	return nil
+}
+
+func (t *Tools) IgnoreTestSet(_ context.Context, _ string) error {
+	return nil
+}
