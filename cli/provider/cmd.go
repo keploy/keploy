@@ -244,7 +244,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().StringP("rerecord", "r", c.cfg.Record.ReRecord, "Rerecord the testcases/mocks for the given testset(s)")
 		}
 	case "keploy":
-		cmd.PersistentFlags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
 		cmd.PersistentFlags().Bool("disableTele", c.cfg.DisableTele, "Run in telemetry mode")
 		cmd.PersistentFlags().Bool("disableANSI", c.cfg.DisableANSI, "Disable ANSI color in logs")
@@ -264,6 +263,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	default:
 		return errors.New("unknown command name")
 	}
+	cmd.Flags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
+
 	return nil
 }
 
