@@ -183,10 +183,10 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 					errCh <- err
 					return
 				}
-				
-				logger.Warn("This is the request that it was matched to", zap.Any("matched request:", mysqlRequest.Message))
+
+				logger.Debug("This is the request that it was matched to", zap.Any("matched request:", mysqlRequest.Message))
 				// fmt.Println("This is the matched mock", zap.Any("matched response:",matchedResponse.Message, matchedResponse.Header, ))
-				logger.Warn("This is the matched mocks", zap.Any("matched response:", matchedResponse.Message), zap.Any("matched response header:", matchedResponse.Header))
+				logger.Debug("This is the matched mocks", zap.Any("matched response:", matchedResponse.Message), zap.Any("matched response header:", matchedResponse.Header))
 
 				if matchedIndex == -1 {
 					logger.Debug("No matching mock found")
