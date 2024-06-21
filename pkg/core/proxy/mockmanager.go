@@ -56,6 +56,7 @@ func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
 		return nil, fmt.Errorf("expected mock instance, got %v", m)
 	}
 	for _, m := range mockCopy {
+		fmt.Println("This is the mock that we have got", m.Spec.ResTimestampMock)
 		tcsMocks = append(tcsMocks, &m)
 	}
 	return tcsMocks, nil

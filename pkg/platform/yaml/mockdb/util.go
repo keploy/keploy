@@ -188,6 +188,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 	mocks := []*models.Mock{}
 
 	for _, m := range yamlMocks {
+		fmt.Println("This is the mock before decoding", m)
 		mock := models.Mock{
 			Version:      m.Version,
 			Name:         m.Name,
