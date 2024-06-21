@@ -161,10 +161,10 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		}
 
 		sqlSpec := models.MySQLSpec{
-			Metadata:  mock.Spec.Metadata,
-			Requests:  requests,
-			Response:  responses,
-			CreatedAt: mock.Spec.Created,
+			Metadata:         mock.Spec.Metadata,
+			Requests:         requests,
+			Response:         responses,
+			CreatedAt:        mock.Spec.Created,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
 			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
@@ -311,8 +311,8 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 
 func decodeMySQLMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models.MockSpec, error) {
 	mockSpec := models.MockSpec{
-		Metadata: yamlSpec.Metadata,
-		Created:  yamlSpec.CreatedAt,
+		Metadata:         yamlSpec.Metadata,
+		Created:          yamlSpec.CreatedAt,
 		ReqTimestampMock: yamlSpec.ReqTimestampMock,
 		ResTimestampMock: yamlSpec.ResTimestampMock,
 	}
