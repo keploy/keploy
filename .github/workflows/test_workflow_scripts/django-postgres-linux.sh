@@ -1,6 +1,6 @@
 #!/bin/bash
 
-source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
+source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Start mongo before starting keploy.
 docker run -p 6000:5432 --rm --name postgres -e POSTGRES_PASSWORD=my-secret-pw -d postgres:latest
