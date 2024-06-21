@@ -151,6 +151,7 @@ func (ts *TestYaml) DeleteTests(ctx context.Context, testSetID string, testCaseI
 	for _, testCaseID := range testCaseIDs {
 		err := yaml.DeleteFile(ctx, ts.logger, path, testCaseID)
 		if err != nil {
+			ts.logger.Error("failed to delete the testcase", zap.String("testcase id", testCaseID), zap.String("testset id", testSetID))
 			return err
 		}
 	}
@@ -158,10 +159,10 @@ func (ts *TestYaml) DeleteTests(ctx context.Context, testSetID string, testCaseI
 }
 
 func (ts *TestYaml) DeleteTestSet(ctx context.Context, testSetID string) error {
-	fmt.Println("Deleting test set", testSetID, "from", ts.TcsPath)
 	path := filepath.Join(ts.TcsPath, testSetID)
 	err := yaml.DeleteDir(ctx, ts.logger, path)
 	if err != nil {
+		ts.logger.Error("failed to delete the testset", zap.String("testset id", testSetID))
 		return err
 	}
 	return nil
