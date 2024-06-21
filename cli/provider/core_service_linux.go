@@ -20,6 +20,7 @@ import (
 	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
 	reportdb "go.keploy.io/server/v2/pkg/platform/yaml/reportdb"
 	testdb "go.keploy.io/server/v2/pkg/platform/yaml/testdb"
+	"go.keploy.io/server/v2/pkg/service/orchestrator"
 	"go.keploy.io/server/v2/pkg/service/record"
 	"go.keploy.io/server/v2/pkg/service/replay"
 	"go.keploy.io/server/v2/utils"
@@ -39,11 +40,18 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	if err != nil {
 		return nil, err
 	}
+
+	recordSvc := record.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, cfg)
+	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, cfg)
+	if cmd == "rerecord" {
+		return orchestrator.New(logger, recordSvc, replaySvc, cfg), nil
+	}
+
 	if cmd == "record" {
-		return record.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, cfg), nil
+		return recordSvc, nil
 	}
 	if cmd == "test" || cmd == "normalize" {
-		return replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, cfg), nil
+		return replaySvc, nil
 	}
 	return nil, errors.New("invalid command")
 }
