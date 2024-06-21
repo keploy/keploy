@@ -288,10 +288,10 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 	return nil
 }
 
-func (t *Tools) IgnoreTests(_ context.Context, testSetID string, testCaseIDs []string) error {
+func (t *Tools) IgnoreTests(_ context.Context, _ string, _ []string) error {
 	return nil
 }
 
-func (t *Tools) IgnoreTestSet(_ context.Context, testSetID string) error {
+func (t *Tools) IgnoreTestSet(_ context.Context, _ string) error {
 	return nil
 }
