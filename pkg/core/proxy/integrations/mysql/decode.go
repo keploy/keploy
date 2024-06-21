@@ -242,7 +242,7 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 
 func getFirstSQLMock(configMocks []*models.Mock) (*models.Mock, int, bool) {
 	for index, mock := range configMocks {
-		if len(mock.Spec.MySQLResponses) > 0 && mock.Kind == "SQL" && mock.Spec.MySQLResponses[0].Header.PacketType == "MySQLHandshakeV10" {
+		if len(mock.Spec.MySQLResponses) > 0 && mock.Kind == "MySQL" && mock.Spec.MySQLResponses[0].Header.PacketType == "MySQLHandshakeV10" {
 			return mock, index, true
 		}
 	}
