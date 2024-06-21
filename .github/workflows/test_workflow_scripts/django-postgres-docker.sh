@@ -4,12 +4,12 @@ source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Start mongo before starting keploy.
 docker network create keploy-network
-docker run -p 5432:5432 --rm --name postgres --net keploy-network -e POSTGRES_PASSWORD=my-secret-pw -d postgres:latest
+docker run -p 6000:5432 --rm --name postgres --net keploy-network -e POSTGRES_PASSWORD=my-secret-pw -d postgres:latest
 
 # Remove any preexisting keploy tests and mocks.
 sudo rm -rf keploy/
 # Start keploy in record mode.
-docker build -t fasthttp-postgres .
+docker build -t django-postgres .
 
 container_kill() {
     pid=$(pgrep -n keploy)
@@ -22,30 +22,23 @@ send_request() {
     sleep 10
     app_started=false
     while [ "$app_started" = false ]; do
-        if curl -X GET http://localhost:8080/authors; then
+        if curl -X GET http://localhost:8000/user; then
             app_started=true
-        fi
-        if curl -X GET http://localhost:8080/books; then
-                    app_started=true
         fi
         sleep 3
     done
     echo "App started"
-    curl -X POST http://localhost:8080/books \
+    curl -X POST http://localhost:8000/user \
         -H "Content-Type: application/json" \
         -d '{
-            "id": 1,
-            "title": "Sample Book",
-            "year": 2023,
-            "author": {
-                "id": 1,
-                "first_name": "John",
-                "last_name": "Doe"
-            }
+            "name": "Jane Smith",
+            "email": "jane.smith@example.com",
+            "password": "smith567",
+            "website": "www.janesmith.com"
         }'
 
+    curl --location 'http://127.0.0.1:8000/user/'
 
-    curl http://localhost:8080/books/1
 
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
@@ -55,9 +48,9 @@ send_request() {
 
 
 for i in {1..2}; do
-    container_name="fasthttp_postgres_${i}"
+    container_name="django_postgres_${i}"
     send_request &
-    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p8080:8080 --net keploy-network --rm --name $container_name fasthttp-postgres" --containerName "$container_name" --generateGithubActions=false &> "${container_name}.txt"
+    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p8000:8000 --net keploy-network --rm --name $container_name django-postgres" --containerName "$container_name" --generateGithubActions=false &> "${container_name}.txt"
 
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
@@ -75,8 +68,8 @@ for i in {1..2}; do
 done
 
 # Start the keploy in test mode.
-test_container="fasthttp_postgres_test"
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test fasthttp-postgres' --containerName "$test_container" --apiTimeout 60 --delay 20 --generateGithubActions=false &> "${test_container}.txt"
+test_container="django_postgres_test"
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8000:8000 --net keploy-network --name django_postgres_test django-postgres' --containerName "$test_container" --apiTimeout 60 --delay 20 --generateGithubActions=false &> "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."

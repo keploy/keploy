@@ -1,7 +1,7 @@
-name: FastHttp-Postgres On Linux
+name: Django-Postgres On Linux
 on: [pull_request]
 jobs:
-  fasthttp_postgres_linux:
+  django_postgres_linux:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -13,9 +13,9 @@ jobs:
       - name: Checkout the samples-go repository
         uses: actions/checkout@v2
         with:
-          repository: keploy/samples-go
-          path: samples-go
-      - name: Run fasthttp-postgres application
+          repository: keploy/samples-python
+          path: samples-python
+      - name: Run django-postgres application
         run: |
-          cd samples-go/fasthttp-postgres
-          source ./../../.github/workflows/test_workflow_scripts/golang-fasthttp-postgres-linux.sh
+          cd samples-python/django-postgres
+          source ./../../.github/workflows/test_workflow_scripts/django-postgres-linux.sh

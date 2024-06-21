@@ -3,7 +3,7 @@
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Start mongo before starting keploy.
-docker run -p 5432:5432 --rm --name postgres -e POSTGRES_PASSWORD=my-secret-pw -d postgres:latest
+docker run -p 6000:5432 --rm --name postgres -e POSTGRES_PASSWORD=my-secret-pw -d postgres:latest
 
 # Check if there is a keploy-config file, if there is, delete it.
 if [ -f "./keploy.yml" ]; then
@@ -12,36 +12,28 @@ fi
 export ConnectionString="root:my-secret-pw@tcp(localhost:5432)/postgres"
 
 # Update the global noise to ts.
-go build -o fasthttp-postgres 
+go build -o django-postgres
 
 send_request() {
     sleep 10
     app_started=false
-    while [ "$app_started" = false ]; do
-            if curl -X GET http://localhost:8080/authors; then
+     while [ "$app_started" = false ]; do
+            if curl -X GET http://localhost:8000/user; then
                 app_started=true
-            fi
-            if curl -X GET http://localhost:8080/books; then
-                        app_started=true
             fi
             sleep 3
         done
         echo "App started"
-        curl -X POST http://localhost:8080/books \
+        curl -X POST http://localhost:8000/user \
             -H "Content-Type: application/json" \
             -d '{
-                "id": 1,
-                "title": "Sample Book",
-                "year": 2023,
-                "author": {
-                    "id": 1,
-                    "first_name": "John",
-                    "last_name": "Doe"
-                }
+                "name": "Jane Smith",
+                "email": "jane.smith@example.com",
+                "password": "smith567",
+                "website": "www.janesmith.com"
             }'
 
-
-    curl http://localhost:8080/books/1
+        curl --location 'http://127.0.0.1:8000/user/'
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
     pid=$(pgrep keploy)
@@ -51,9 +43,9 @@ send_request() {
 }
 
 for i in {1..2}; do
-    app_name="fasthttp_postgres_${i}"
+    app_name="django_postgres_${i}"
     send_request &
-    sudo -E env PATH="$PATH" ./../../keployv2 record -c "./fasthttp_postgres" --generateGithubActions=false &> "${app_name}.txt"
+    sudo -E env PATH="$PATH" ./../../keployv2 record -c "./django_postgres" --generateGithubActions=false &> "${app_name}.txt"
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
@@ -69,8 +61,8 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
-# Start the gin-mongo app in test mode.
-sudo -E env PATH="$PATH" ./../../keployv2 test -c "./fasthttp_postgres" --delay 7 --generateGithubActions=false &> test_logs.txt
+# Start the django_postgres app in test mode.
+sudo -E env PATH="$PATH" ./../../keployv2 test -c "./django_postgres" --delay 7 --generateGithubActions=false &> test_logs.txt
 
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."
