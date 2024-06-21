@@ -14,11 +14,6 @@ func matchRequestWithMock(ctx context.Context, mysqlRequest models.MySQLRequest,
 	//TODO: any reason to write the similar code twice?
 	allMocks := append([]*models.Mock(nil), configMocks...)
 	allMocks = append(allMocks, tcsMocks...)
-	for _, mock := range tcsMocks {
-		fmt.Println("This is the tcs mock", mock.Spec)
-		fmt.Println("This is the req timestamp of the mock", mock.Spec.ReqTimestampMock)
-		fmt.Println("This is the res timestamp of the mock", mock.Spec.ResTimestampMock)
-	}
 	var bestMatch *models.MySQLResponse
 	var matchedIndex int
 	var matchedReqIndex int
