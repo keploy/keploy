@@ -207,7 +207,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			return errors.New(errMsg)
 		}
 	case "record", "test":
-		cmd.Flags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("port", c.cfg.Port, "GraphQL server port used for executing testcases in unit test library integration")
 		cmd.Flags().Uint32("proxyPort", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
@@ -246,6 +245,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		}
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
+		cmd.PersistentFlags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
 		cmd.PersistentFlags().Bool("disableTele", c.cfg.DisableTele, "Run in telemetry mode")
 		cmd.PersistentFlags().Bool("disableANSI", c.cfg.DisableANSI, "Disable ANSI color in logs")
 		err = cmd.PersistentFlags().MarkHidden("disableTele")
@@ -304,25 +304,25 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
-	if cmd.Name() == "test" || cmd.Name() == "record" {
-		configPath, err := cmd.Flags().GetString("configPath")
-		if err != nil {
-			utils.LogError(c.logger, nil, "failed to read the config path")
-			return err
-		}
-		viper.SetConfigName("keploy")
-		viper.SetConfigType("yml")
-		viper.AddConfigPath(configPath)
-		if err := viper.ReadInConfig(); err != nil {
-			var configFileNotFoundError viper.ConfigFileNotFoundError
-			if !errors.As(err, &configFileNotFoundError) {
-				errMsg := "failed to read config file"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
-			}
-			c.logger.Info("config file not found; proceeding with flags only")
-		}
+
+	configPath, err := cmd.Flags().GetString("configPath")
+	if err != nil {
+		utils.LogError(c.logger, nil, "failed to read the config path")
+		return err
 	}
+	viper.SetConfigName("keploy")
+	viper.SetConfigType("yml")
+	viper.AddConfigPath(configPath)
+	if err := viper.ReadInConfig(); err != nil {
+		var configFileNotFoundError viper.ConfigFileNotFoundError
+		if !errors.As(err, &configFileNotFoundError) {
+			errMsg := "failed to read config file"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.logger.Info("config file not found; proceeding with flags only")
+	}
+
 	if err := viper.Unmarshal(c.cfg); err != nil {
 		errMsg := "failed to unmarshal the config"
 		utils.LogError(c.logger, err, errMsg)
