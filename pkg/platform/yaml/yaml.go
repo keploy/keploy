@@ -179,7 +179,7 @@ func ReadSessionIndices(_ context.Context, path string, Logger *zap.Logger) ([]s
 	return indices, nil
 }
 
-func DeleteFile(ctx context.Context, logger *zap.Logger, path, name string) error {
+func DeleteFile(_ context.Context, logger *zap.Logger, path, name string) error {
 	filePath := filepath.Join(path, name+".yaml")
 	err := os.Remove(filePath)
 	if err != nil {
@@ -188,7 +188,7 @@ func DeleteFile(ctx context.Context, logger *zap.Logger, path, name string) erro
 	return nil
 }
 
-func DeleteDir(ctx context.Context, logger *zap.Logger, path string) error {
+func DeleteDir(_ context.Context, logger *zap.Logger, path string) error {
 	err := os.RemoveAll(path)
 	if err != nil {
 		return fmt.Errorf("failed to delete the directory: %v", err)
