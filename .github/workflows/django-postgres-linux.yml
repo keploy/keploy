@@ -10,12 +10,12 @@ jobs:
       - name: Build binary
         run: |
           go build -race -tags=viper_bind_struct -o keployv2
-      - name: Checkout the samples-go repository
+      - name: Checkout the samples-python repository
         uses: actions/checkout@v2
         with:
           repository: keploy/samples-python
           path: samples-python
       - name: Run django-postgres application
         run: |
-          cd samples-python/django-postgres
-          source ./../../.github/workflows/test_workflow_scripts/django-postgres-linux.sh
+          cd samples-python/django-postgres/django_postgres
+          source ./../../../.github/workflows/test_workflow_scripts/django-postgres-linux.sh
