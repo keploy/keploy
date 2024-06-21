@@ -165,7 +165,6 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 			utils.LogError(ys.Logger, err, "failed to read the mocks from config yaml", zap.Any("session", filepath.Base(path)))
 			return nil, err
 		}
-		fmt.Println("This is the data that we read from the mock file", string(data))
 		dec := yamlLib.NewDecoder(bytes.NewReader(data))
 		for {
 			var doc *yaml.NetworkTrafficDoc

@@ -317,6 +317,8 @@ func decodeMySQLMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 	mockSpec := models.MockSpec{
 		Metadata: yamlSpec.Metadata,
 		Created:  yamlSpec.CreatedAt,
+		ReqTimestampMock: yamlSpec.ReqTimestampMock,
+		ResTimestampMock: yamlSpec.ResTimestampMock,
 	}
 	requests := []models.MySQLRequest{}
 	for _, v := range yamlSpec.Requests {
