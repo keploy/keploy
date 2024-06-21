@@ -60,10 +60,11 @@ func (tc *TestCase) GetKind() string {
 }
 
 type NoiseParams struct {
-	TestCaseIDs string              `json:"testCaseIDs"`
-	EditedBy    string              `json:"editedBy"`
-	Assertion   map[string][]string `json:"assertion"`
-	Ops         string              `json:"ops"`
+	TestCaseID string              `json:"testCaseID"`
+	EditedBy   string              `json:"editedBy"`
+	Assertion  map[string][]string `json:"assertion"`
+	Ops        string              `json:"ops"`
+	AfterNoise map[string][]string `json:"afterNoise"`
 }
 
 // enum for ops

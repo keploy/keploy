@@ -145,3 +145,24 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 
 	return tcsInfo{name: tcsName, path: tcsPath}, nil
 }
+
+func (ts *TestYaml) DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error {
+	path := filepath.Join(ts.TcsPath, testSetID, "tests")
+	for _, testCaseID := range testCaseIDs {
+		err := yaml.DeleteFile(ctx, ts.logger, path, testCaseID)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (ts *TestYaml) DeleteTestSet(ctx context.Context, testSetID string) error {
+	fmt.Println("Deleting test set", testSetID, "from", ts.TcsPath)
+	path := filepath.Join(ts.TcsPath, testSetID)
+	err := yaml.DeleteDir(ctx, ts.logger, path)
+	if err != nil {
+		return err
+	}
+	return nil
+}
