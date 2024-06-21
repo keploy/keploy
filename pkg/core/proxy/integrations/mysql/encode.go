@@ -574,7 +574,6 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, initialBuffer 
 				firstIteration = false
 			} else {
 				queryBuffer, err = pUtil.ReadBytes(ctx, logger, clientConn)
-				reqTimestamp = time.Now()
 				if err != nil {
 					if err != io.EOF {
 						utils.LogError(logger, err, "failed to read query from the mysql client")
