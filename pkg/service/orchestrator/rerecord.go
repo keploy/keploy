@@ -3,8 +3,10 @@
 package orchestrator
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"time"
 
@@ -44,6 +46,8 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		return testSets[i] < testSets[j]
 	})
 
+	var SelectedTests []string
+
 	for _, testSet := range testSets {
 		if ctx.Err() != nil {
 			break
@@ -52,6 +56,8 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		if _, ok := o.config.Test.SelectedTests[testSet]; !ok && len(o.config.Test.SelectedTests) != 0 {
 			continue
 		}
+
+		SelectedTests = append(SelectedTests, testSet)
 
 		o.logger.Info("Re-recording testcases for the given testset", zap.String("testset", testSet))
 
@@ -80,10 +86,12 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 				defer utils.Recover(o.logger)
 				allRecorded, err := o.replayTests(recordCtx, testSet)
 
-				if allRecorded {
+				if allRecorded && err == nil {
 					o.logger.Info("Re-recorded testcases successfully for the given testset", zap.String("testset", testSet))
-				} else {
+				}
+				if !allRecorded {
 					o.logger.Warn("Failed to re-record some testcases", zap.String("testset", testSet))
+					stopReason = "failed to re-record some testcases"
 				}
 
 				replayErrCh <- err
@@ -127,6 +135,27 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 
 	if stopReason == "" {
 		stopReason = "Re-recorded all the selected testsets successfully"
+		o.logger.Info("Re-record was successfull. Do you want to remove the older testsets?", zap.Any("testsets", SelectedTests))
+		reader := bufio.NewReader(os.Stdin)
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			o.logger.Warn("Failed to read input. The older testsets will be kept.")
+			return nil
+		}
+
+		if input == "y\n" || input == "Y\n" {
+			for _, testSet := range SelectedTests {
+				err := o.replay.DeleteTestSet(ctx, testSet)
+				if err != nil {
+					o.logger.Warn("Failed to delete the testset", zap.String("testset", testSet))
+				}
+			}
+			o.logger.Info("Deleted the older testsets successfully")
+		} else if input == "n\n" || input == "N\n" {
+			o.logger.Info("skipping the deletion of older testsets")
+		} else {
+			o.logger.Warn("Invalid input. The older testsets will be kept.")
+		}
 		return nil
 	}
 
@@ -175,6 +204,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 	}
 
 	allTcRecorded := true
+	var simErr bool
 	for _, tc := range tcs {
 		if ctx.Err() != nil {
 			return false, ctx.Err()
@@ -198,11 +228,18 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 		resp, err := pkg.SimulateHTTP(ctx, *tc, testSet, o.logger, o.config.Test.APITimeout)
 		if err != nil {
 			utils.LogError(o.logger, err, "failed to simulate HTTP request")
-			allTcRecorded = false
+			if resp == nil {
+				allTcRecorded = false
+			}
+			simErr = true
 			continue // Proceed with the next command
 		}
 
 		o.logger.Info("Re-recorded the testcase successfully", zap.String("curl", tc.Curl), zap.Any("response", (resp)))
+	}
+
+	if simErr {
+		return allTcRecorded, fmt.Errorf("got error while simulating HTTP request. Please make sure the related services are up and running")
 	}
 
 	return allTcRecorded, nil

@@ -123,6 +123,8 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		return fmt.Errorf(stopReason)
 	}
 
+	r.config.AppID = appID
+
 	// fetching test cases and mocks from the application and inserting them into the database
 	frames, err := r.GetTestAndMockChans(ctx, appID)
 	if err != nil {
