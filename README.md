@@ -65,7 +65,7 @@ Become a Keploy pro with **[Keploy Documentation](https://keploy.io/docs/)**.
 Integrate Keploy by installing the agent locally. No code-changes required.
 
 ```shell
-curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh
+curl --silent -O -L https://keploy.io/install.sh && source install.sh
 ```
 
 ##  🎬 Recording Testcases

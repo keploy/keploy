@@ -752,17 +752,16 @@ func (r *Replayer) RunApplication(ctx context.Context, appID uint64, opts models
 	return r.instrumentation.Run(ctx, appID, opts)
 }
 
-func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []models.NoiseParams) error {
+func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error) {
 
 	testCases, err := r.testDB.GetTestCases(ctx, testSetID)
 	if err != nil {
-		return fmt.Errorf("failed to get test cases: %w", err)
+		return nil, fmt.Errorf("failed to get test cases: %w", err)
 	}
 
 	for _, v := range testCases {
 		for _, noiseParam := range noiseParams {
-			if v.Name == noiseParam.TestCaseIDs {
-
+			if v.Name == noiseParam.TestCaseID {
 				// append the noise map
 				if noiseParam.Ops == string(models.OpsAdd) {
 					v.Noise = mergeMaps(v.Noise, noiseParam.Assertion)
@@ -772,14 +771,14 @@ func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noise
 				}
 				err = r.testDB.UpdateTestCase(ctx, v, testSetID)
 				if err != nil {
-					return fmt.Errorf("failed to update test case: %w", err)
+					return nil, fmt.Errorf("failed to update test case: %w", err)
 				}
+				noiseParam.AfterNoise = v.Noise
 			}
 		}
-
 	}
 
-	return nil
+	return noiseParams, nil
 }
 
 func (r *Replayer) Normalize(ctx context.Context) error {
@@ -828,7 +827,6 @@ func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testS
 		if err != nil {
 			return fmt.Errorf("failed to get test report: %w", err)
 		}
-
 		testCaseResults = testReport.Tests
 	}
 
@@ -888,4 +886,12 @@ func (r *Replayer) executeScript(ctx context.Context, script string) error {
 		return fmt.Errorf("failed to execute script: %w", cmdErr.Err)
 	}
 	return nil
+}
+
+func (r *Replayer) DeleteTestSet(ctx context.Context, testSetID string) error {
+	return r.testDB.DeleteTestSet(ctx, testSetID)
+}
+
+func (r *Replayer) DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error {
+	return r.testDB.DeleteTests(ctx, testSetID, testCaseIDs)
 }
