@@ -3,7 +3,7 @@ on:
   workflow_call:
 
 jobs:
-  test-fasthtpp-postgres:
+  test-fasthttp-postgres:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

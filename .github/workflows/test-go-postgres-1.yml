@@ -1,6 +1,6 @@
 name: Test FastHttp-Postgres 1
 on:
-  pull_request:
+  workflow_call:
 
 jobs:
   test-fasthttp-postgres:
