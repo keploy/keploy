@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package record provides functionality for recording and managing test cases and mocks.
 package record
 
@@ -23,10 +25,10 @@ type Recorder struct {
 	mockDB          MockDB
 	telemetry       Telemetry
 	instrumentation Instrumentation
-	config          config.Config
+	config          *config.Config
 }
 
-func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, config config.Config) Service {
+func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
 	return &Recorder{
 		logger:          logger,
 		testDB:          testDB,
@@ -72,7 +74,6 @@ func (r *Recorder) Start(ctx context.Context) error {
 	defer func() {
 		select {
 		case <-ctx.Done():
-			r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
 		default:
 			err := utils.Stop(r.logger, stopReason)
 			if err != nil {
@@ -93,6 +94,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
+		r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
 	}()
 
 	defer close(appErrChan)
@@ -106,7 +108,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 
-	newTestSetID = pkg.NewID(testSetIDs, models.TestSetPattern)
+	newTestSetID = pkg.NextID(testSetIDs, models.TestSetPattern)
 
 	// setting up the environment for recording
 	appID, err = r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
@@ -206,7 +208,7 @@ func (r *Recorder) Start(ctx context.Context) error {
 		return nil
 	})
 	go func() {
-		if len(r.config.ReRecord) != 0 {
+		if len(r.config.Record.ReRecord) != 0 {
 			err = r.ReRecord(reRecordCtx, appID)
 			reRecordCancel()
 
@@ -337,7 +339,7 @@ func (r *Recorder) StartMock(ctx context.Context) error {
 
 func (r *Recorder) ReRecord(ctx context.Context, appID uint64) error {
 
-	tcs, err := r.testDB.GetTestCases(ctx, r.config.ReRecord)
+	tcs, err := r.testDB.GetTestCases(ctx, r.config.Record.ReRecord)
 	if err != nil {
 		r.logger.Error("Failed to get testcases", zap.Error(err))
 		return nil
@@ -376,7 +378,7 @@ func (r *Recorder) ReRecord(ctx context.Context, appID uint64) error {
 			r.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HTTPReq.URL))
 		}
 
-		resp, err := pkg.SimulateHTTP(ctx, *tc, r.config.ReRecord, r.logger, r.config.Test.APITimeout)
+		resp, err := pkg.SimulateHTTP(ctx, *tc, r.config.Record.ReRecord, r.logger, r.config.Test.APITimeout)
 		if err != nil {
 			r.logger.Error("Failed to simulate HTTP request", zap.Error(err))
 			allTestCasesRecorded = false

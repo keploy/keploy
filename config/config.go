@@ -10,7 +10,6 @@ import (
 type Config struct {
 	Path                  string       `json:"path" yaml:"path" mapstructure:"path" `
 	AppID                 string       `json:"appId" yaml:"appId" mapstructure:"appId"`
-	ReRecord              string       `json:"rerecord" yaml:"rerecord" mapstructure:"rerecord"`
 	Command               string       `json:"command" yaml:"command" mapstructure:"command"`
 	Port                  uint32       `json:"port" yaml:"port" mapstructure:"port"`
 	DNSPort               uint32       `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
@@ -24,6 +23,7 @@ type Config struct {
 	BuildDelay            uint64       `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
 	Test                  Test         `json:"test" yaml:"test" mapstructure:"test"`
 	Record                Record       `json:"record" yaml:"record" mapstructure:"record"`
+	Gen                   UtGen        `json:"gen" yaml:"gen" mapstructure:"gen"`
 	Normalize             Normalize    `json:"normalize" yaml:"normalize" mapstructure:"normalize"`
 	ConfigPath            string       `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
 	BypassRules           []BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
@@ -34,9 +34,24 @@ type Config struct {
 	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
 }
 
+type UtGen struct {
+	SourceFilePath     string  `json:"sourceFilePath" yaml:"sourceFilePath" mapstructure:"sourceFilePath"`
+	TestFilePath       string  `json:"testFilePath" yaml:"testFilePath" mapstructure:"testFilePath"`
+	CoverageReportPath string  `json:"coverageReportPath" yaml:"coverageReportPath" mapstructure:"coverageReportPath"`
+	TestCommand        string  `json:"testCommand" yaml:"testCommand" mapstructure:"testCommand"`
+	CoverageFormat     string  `json:"coverageFormat" yaml:"coverageFormat" mapstructure:"coverageFormat"`
+	DesiredCoverage    float64 `json:"expectedCoverage" yaml:"expectedCoverage" mapstructure:"expectedCoverage"`
+	MaxIterations      int     `json:"maxIterations" yaml:"maxIterations" mapstructure:"maxIterations"`
+	TestDir            string  `json:"testDir" yaml:"testDir" mapstructure:"testDir"`
+	APIBaseURL         string  `json:"llmBaseUrl" yaml:"llmBaseUrl" mapstructure:"llmBaseUrl"`
+	Model              string  `json:"model" yaml:"model" mapstructure:"model"`
+	APIVersion         string  `json:"llmApiVersion" yaml:"llmApiVersion" mapstructure:"llmApiVersion"`
+}
+
 type Record struct {
 	Filters     []Filter      `json:"filters" yaml:"filters" mapstructure:"filters"`
 	RecordTimer time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
+	ReRecord    string        `json:"rerecord" yaml:"rerecord" mapstructure:"rerecord"`
 }
 
 type Normalize struct {
@@ -69,6 +84,8 @@ type Test struct {
 	Language           string              `json:"language" yaml:"language" mapstructure:"language"`
 	RemoveUnusedMocks  bool                `json:"removeUnusedMocks" yaml:"removeUnusedMocks" mapstructure:"removeUnusedMocks"`
 	FallBackOnMiss     bool                `json:"fallBackOnMiss" yaml:"fallBackOnMiss" mapstructure:"fallBackOnMiss"`
+	BasePath           string              `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
+	Mocking            bool                `json:"mocking" yaml:"mocking" mapstructure:"mocking"`
 }
 
 type Globalnoise struct {

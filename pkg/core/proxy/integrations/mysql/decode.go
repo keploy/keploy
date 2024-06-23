@@ -1,7 +1,10 @@
+//go:build linux
+
 package mysql
 
 import (
 	"context"
+	"io"
 	"net"
 	"time"
 
@@ -35,6 +38,8 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 	go func(errCh chan error, configMocks []*models.Mock, tcsMocks []*models.Mock, prevRequest string, requestBuffers [][]byte) {
 		defer pUtil.Recover(logger, clientConn, nil)
 		defer close(errCh)
+		lastCommand := newlastCommandMap()
+
 		for {
 			//log.Debug("Config and TCS Mocks", zap.Any("configMocks", configMocks), zap.Any("tcsMocks", tcsMocks))
 			if firstLoop || doHandshakeAgain {
@@ -78,7 +83,7 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 					//	errCh <- err
 					//	return
 					//}
-					mockDb.DeleteUnFilteredMock(configMocks[matchedIndex])
+					mockDb.DeleteUnFilteredMock(*configMocks[matchedIndex])
 				}
 				//h.SetConfigMocks(configMocks)
 				firstLoop = false
@@ -100,6 +105,11 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 				requestBuffer, err := pUtil.ReadBytes(ctx, logger, clientConn)
 				if err != nil {
 					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+						if err == io.EOF {
+							logger.Debug("EOF received from clientConn")
+							errCh <- err
+							return
+						}
 						// Timeout occurred, no data received from client
 						// Re-initiate handshake without logging an error
 						doHandshakeAgain = true
@@ -130,7 +140,7 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 					expectingHandshakeResponseTest = true
 				}
 
-				oprRequest, requestHeader, decodedRequest, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(requestBuffer), clientConn, models.MODE_TEST)
+				oprRequest, requestHeader, decodedRequest, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(requestBuffer), clientConn, models.MODE_TEST, lastCommand)
 				if err != nil {
 					utils.LogError(logger, err, "Failed to decode MySQL packet")
 					errCh <- err
@@ -173,6 +183,10 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 					errCh <- err
 					return
 				}
+
+				logger.Debug("This is the request that it was matched to", zap.Any("matched request:", mysqlRequest.Message))
+				// fmt.Println("This is the matched mock", zap.Any("matched response:",matchedResponse.Message, matchedResponse.Header, ))
+				logger.Debug("This is the matched mocks", zap.Any("matched response:", matchedResponse.Message), zap.Any("matched response header:", matchedResponse.Header))
 
 				if matchedIndex == -1 {
 					logger.Debug("No matching mock found")
@@ -228,7 +242,7 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 
 func getFirstSQLMock(configMocks []*models.Mock) (*models.Mock, int, bool) {
 	for index, mock := range configMocks {
-		if len(mock.Spec.MySQLResponses) > 0 && mock.Kind == "SQL" && mock.Spec.MySQLResponses[0].Header.PacketType == "MySQLHandshakeV10" {
+		if len(mock.Spec.MySQLResponses) > 0 && mock.Kind == "MySQL" && mock.Spec.MySQLResponses[0].Header.PacketType == "MySQLHandshakeV10" {
 			return mock, index, true
 		}
 	}

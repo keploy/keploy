@@ -18,11 +18,14 @@ func GetVersion() (V1 Version) {
 	return currentVersion
 }
 
+//TODO: Why are we declaring mock types in testcase.go file?
+
 // mocks types
 const (
 	HTTP           Kind     = "Http"
 	GENERIC        Kind     = "Generic"
-	SQL            Kind     = "SQL"
+	REDIS          Kind     = "Redis"
+	SQL            Kind     = "MySQL"
 	Postgres       Kind     = "Postgres"
 	GRPC_EXPORT    Kind     = "gRPC"
 	Mongo          Kind     = "Mongo"
@@ -55,3 +58,17 @@ type TestCase struct {
 func (tc *TestCase) GetKind() string {
 	return string(tc.Kind)
 }
+
+type NoiseParams struct {
+	TestCaseID string              `json:"testCaseID"`
+	EditedBy   string              `json:"editedBy"`
+	Assertion  map[string][]string `json:"assertion"`
+	Ops        string              `json:"ops"`
+	AfterNoise map[string][]string `json:"afterNoise"`
+}
+
+// enum for ops
+const (
+	OpsAdd    = "ADD"
+	OpsRemove = "REMOVE"
+)

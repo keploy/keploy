@@ -1,3 +1,5 @@
+//go:build linux
+
 package proxy
 
 import (
@@ -48,12 +50,13 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
 	var tcsMocks []*models.Mock
 	mocks := m.filtered.getAll()
-	for _, m := range mocks {
-		if mock, ok := m.(*models.Mock); ok {
-			tcsMocks = append(tcsMocks, mock)
-		} else {
-			return nil, fmt.Errorf("expected mock instance, got %v", m)
-		}
+	//sending copy of mocks instead of actual mocks
+	mockCopy, err := localMock(mocks)
+	if err != nil {
+		return nil, fmt.Errorf("expected mock instance, got %v", m)
+	}
+	for _, m := range mockCopy {
+		tcsMocks = append(tcsMocks, &m)
 	}
 	return tcsMocks, nil
 }
@@ -61,12 +64,13 @@ func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
 func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 	var configMocks []*models.Mock
 	mocks := m.unfiltered.getAll()
-	for _, m := range mocks {
-		if mock, ok := m.(*models.Mock); ok {
-			configMocks = append(configMocks, mock)
-		} else {
-			return nil, fmt.Errorf("expected mock instance, got %v", m)
-		}
+	//sending copy of mocks instead of actual mocks
+	mockCopy, err := localMock(mocks)
+	if err != nil {
+		return nil, fmt.Errorf("expected mock instance, got %v", m)
+	}
+	for _, m := range mockCopy {
+		configMocks = append(configMocks, &m)
 	}
 	return configMocks, nil
 }
@@ -76,7 +80,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	if updated {
 		// mark the unfiltered mock as used for the current simulated test-case
 		go func() {
-			if err := m.FlagMockAsUsed(old); err != nil {
+			if err := m.FlagMockAsUsed(*old); err != nil {
 				m.logger.Error("failed to flag mock as used", zap.Error(err))
 			}
 		}()
@@ -84,15 +88,15 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	return updated
 }
 
-func (m *MockManager) FlagMockAsUsed(mock *models.Mock) error {
-	if mock == nil {
+func (m *MockManager) FlagMockAsUsed(mock models.Mock) error {
+	if mock.Name == "" {
 		return fmt.Errorf("mock is empty")
 	}
 	m.consumedMocks.Store(mock.Name, true)
 	return nil
 }
 
-func (m *MockManager) DeleteFilteredMock(mock *models.Mock) bool {
+func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	isDeleted := m.filtered.delete(mock.TestModeInfo)
 	if isDeleted {
 		go func() {
@@ -104,7 +108,7 @@ func (m *MockManager) DeleteFilteredMock(mock *models.Mock) bool {
 	return isDeleted
 }
 
-func (m *MockManager) DeleteUnFilteredMock(mock *models.Mock) bool {
+func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 	isDeleted := m.unfiltered.delete(mock.TestModeInfo)
 	if isDeleted {
 		go func() {
@@ -121,6 +125,7 @@ func (m *MockManager) GetConsumedMocks() []string {
 	m.consumedMocks.Range(func(key, _ interface{}) bool {
 		if _, ok := key.(string); ok {
 			keys = append(keys, key.(string))
+			m.consumedMocks.Delete(key)
 		}
 		return true
 	})
@@ -129,6 +134,8 @@ func (m *MockManager) GetConsumedMocks() []string {
 		numJ, _ := strconv.Atoi(strings.Split(keys[j], "-")[1])
 		return numI < numJ
 	})
-	m.consumedMocks = sync.Map{}
+	for key := range keys {
+		m.consumedMocks.Delete(key)
+	}
 	return keys
 }

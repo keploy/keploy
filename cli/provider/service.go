@@ -6,77 +6,48 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/core"
-	"go.keploy.io/server/v2/pkg/core/hooks"
-	"go.keploy.io/server/v2/pkg/core/proxy"
-	"go.keploy.io/server/v2/pkg/core/tester"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
-	"go.keploy.io/server/v2/pkg/platform/yaml/configdb"
-	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
-	reportdb "go.keploy.io/server/v2/pkg/platform/yaml/reportdb"
-	testdb "go.keploy.io/server/v2/pkg/platform/yaml/testdb"
+	"go.keploy.io/server/v2/pkg/platform/yaml/configdb/user"
 
-	"go.keploy.io/server/v2/pkg/service/record"
-	"go.keploy.io/server/v2/pkg/service/replay"
 	"go.keploy.io/server/v2/pkg/service/tools"
+	"go.keploy.io/server/v2/pkg/service/utgen"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
 
+var TeleGlobalMap = make(map[string]interface{})
+
 type ServiceProvider struct {
-	logger   *zap.Logger
-	configDb *configdb.ConfigDb
-	cfg      *config.Config
+	logger *zap.Logger
+	userDb *user.Db
+	cfg    *config.Config
 }
 
-type CommonInternalService struct {
-	YamlTestDB      *testdb.TestYaml
-	YamlMockDb      *mockdb.MockYaml
-	YamlReportDb    *reportdb.TestReport
-	Instrumentation *core.Core
-}
-
-func NewServiceProvider(logger *zap.Logger, configDb *configdb.ConfigDb, cfg *config.Config) *ServiceProvider {
+func NewServiceProvider(logger *zap.Logger, userDb *user.Db, cfg *config.Config) *ServiceProvider {
 	return &ServiceProvider{
-		logger:   logger,
-		configDb: configDb,
-		cfg:      cfg,
+		logger: logger,
+		userDb: userDb,
+		cfg:    cfg,
 	}
 }
 
-func (n *ServiceProvider) GetTelemetryService(ctx context.Context, config config.Config) (*telemetry.Telemetry, error) {
-	installationID, err := n.configDb.GetInstallationID(ctx)
+func (n *ServiceProvider) GetTelemetryService(ctx context.Context, config *config.Config) (*telemetry.Telemetry, error) {
+	installationID, err := n.userDb.GetInstallationID(ctx)
 	if err != nil {
 		return nil, errors.New("failed to get installation id")
 	}
 	return telemetry.NewTelemetry(n.logger, telemetry.Options{
 		Enabled:        !config.DisableTele,
 		Version:        utils.Version,
-		GlobalMap:      map[string]interface{}{},
+		GlobalMap:      TeleGlobalMap,
 		InstallationID: installationID,
 	},
 	), nil
 }
 
-func (n *ServiceProvider) GetCommonServices(config config.Config) *CommonInternalService {
-	h := hooks.NewHooks(n.logger, config)
-	p := proxy.New(n.logger, h, config)
-	t := tester.New(n.logger, h) //for keploy test bench
-	instrumentation := core.New(n.logger, h, p, t)
-	testDB := testdb.New(n.logger, config.Path)
-	mockDB := mockdb.New(n.logger, config.Path, "")
-	reportDB := reportdb.New(n.logger, config.Path+"/reports")
-	return &CommonInternalService{
-		Instrumentation: instrumentation,
-		YamlTestDB:      testDB,
-		YamlMockDb:      mockDB,
-		YamlReportDb:    reportDB,
-	}
-}
-
 func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface{}, error) {
-	tel, err := n.GetTelemetryService(ctx, *n.cfg)
+	tel, err := n.GetTelemetryService(ctx, n.cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -84,55 +55,10 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 	switch cmd {
 	case "config", "update":
 		return tools.NewTools(n.logger, tel), nil
-	// TODO: add case for mock
+	case "gen":
+		return utgen.NewUnitTestGenerator(n.cfg.Gen.SourceFilePath, n.cfg.Gen.TestFilePath, n.cfg.Gen.CoverageReportPath, n.cfg.Gen.TestCommand, n.cfg.Gen.TestDir, n.cfg.Gen.CoverageFormat, n.cfg.Gen.DesiredCoverage, n.cfg.Gen.MaxIterations, n.cfg.Gen.Model, n.cfg.Gen.APIBaseURL, n.cfg.Gen.APIVersion, n.cfg, tel, n.logger)
 	case "record", "test", "mock", "normalize":
-		// Check if the config file exists on the path or not and if it does not, we create it.
-		if !utils.CheckFileExists("keploy.yml") {
-			toolsService := tools.NewTools(n.logger, tel)
-			config := &config.Config{
-				Path:                  n.cfg.Path,
-				AppID:                 n.cfg.AppID,
-				ReRecord:              n.cfg.ReRecord,
-				Command:               n.cfg.Command,
-				Port:                  n.cfg.Port,
-				DNSPort:               n.cfg.DNSPort,
-				ProxyPort:             n.cfg.ProxyPort,
-				Debug:                 n.cfg.Debug,
-				DisableTele:           n.cfg.DisableTele,
-				DisableANSI:           n.cfg.DisableANSI,
-				InDocker:              n.cfg.InDocker,
-				ContainerName:         n.cfg.ContainerName,
-				NetworkName:           n.cfg.NetworkName,
-				BuildDelay:            n.cfg.BuildDelay,
-				Test:                  n.cfg.Test,
-				Record:                n.cfg.Record,
-				Normalize:             n.cfg.Normalize,
-				ConfigPath:            n.cfg.ConfigPath,
-				BypassRules:           n.cfg.BypassRules,
-				EnableTesting:         n.cfg.EnableTesting,
-				GenerateGithubActions: n.cfg.GenerateGithubActions,
-				KeployContainer:       n.cfg.KeployContainer,
-				KeployNetwork:         n.cfg.KeployNetwork,
-				CommandType:           n.cfg.CommandType,
-			}
-			config.Path = strings.TrimSuffix(config.Path, "/keploy")
-			yamlData, err := yaml.Marshal(config)
-			if err != nil {
-				n.logger.Debug("failed to marshal the config")
-			}
-			err = toolsService.CreateConfig(ctx, "keploy.yml", string(yamlData))
-			if err != nil {
-				n.logger.Debug("failed to create the config file", zap.Error(err))
-			}
-		}
-		commonServices := n.GetCommonServices(*n.cfg)
-		if cmd == "record" {
-			return record.New(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, *n.cfg), nil
-		}
-		if cmd == "test" || cmd == "normalize" {
-			return replay.NewReplayer(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, tel, commonServices.Instrumentation, *n.cfg), nil
-		}
-		return nil, errors.New("invalid command")
+		return Get(ctx, cmd, n.cfg, n.logger, tel)
 	default:
 		return nil, errors.New("invalid command")
 	}

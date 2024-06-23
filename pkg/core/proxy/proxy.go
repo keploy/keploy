@@ -1,3 +1,5 @@
+//go:build linux
+
 package proxy
 
 import (
@@ -54,7 +56,7 @@ type Proxy struct {
 	TCPDNSServer *dns.Server
 }
 
-func New(logger *zap.Logger, info core.DestInfo, opts config.Config) *Proxy {
+func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
 	return &Proxy{
 		logger:       logger,
 		Port:         opts.ProxyPort, // default: 16789
@@ -343,6 +345,23 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}()
 
+	//check for global passthrough in test mode
+	if !rule.OutgoingOptions.Mocking && rule.Mode == models.MODE_TEST {
+
+		dstConn, err = net.Dial("tcp", dstAddr)
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
+			return err
+		}
+
+		err = p.globalPassThrough(parserCtx, srcConn, dstConn)
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to handle the global pass through")
+			return err
+		}
+		return nil
+	}
+
 	//checking for the destination port of "mysql"
 	if destInfo.Port == 3306 {
 		var dstConn net.Conn
@@ -561,6 +580,10 @@ func (p *Proxy) Mock(_ context.Context, id uint64, opts models.OutgoingOptions) 
 		OutgoingOptions: opts,
 	})
 	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
+
+	if !opts.Mocking {
+		p.logger.Info("🔀 Mocking is disabled, the response will be fetched from the actual service")
+	}
 
 	if string(p.nsswitchData) == "" {
 		// setup the nsswitch config to redirect the DNS queries to the proxy
