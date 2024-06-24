@@ -55,7 +55,7 @@ func ReplaceHostToIP(currentURL string, ipAddress string) (string, error) {
 func kebabToCamel(s string) string {
 	parts := strings.Split(s, "-")
 	for i := 1; i < len(parts); i++ {
-		parts[i] = cases.Title(language.Und).String(parts[i])
+		parts[i] = cases.Title(language.English).String(parts[i])
 	}
 	return strings.Join(parts, "")
 }
