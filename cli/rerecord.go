@@ -18,7 +18,7 @@ func ReRecord(ctx context.Context, logger *zap.Logger, _ *config.Config, service
 	var cmd = &cobra.Command{
 		Use:     "rerecord",
 		Short:   "ReRecord new keploy testcases/mocks from the existing test cases for the given testset(s)",
-		Example: `keploy rerecord -c "user app cmd" -t "test-set-1,teset-set-3`,
+		Example: `keploy rerecord -c "user app cmd" -t "test-set-1,teset-set-3"`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
