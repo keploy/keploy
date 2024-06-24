@@ -90,7 +90,7 @@ type Test struct {
 
 type Globalnoise struct {
 	Global   GlobalNoise  `json:"global" yaml:"global" mapstructure:"global"`
-	Testsets TestsetNoise `json:"testSets" yaml:"testSets" mapstructure:"test-sets"`
+	Testsets TestsetNoise `json:"test-sets" yaml:"test-sets" mapstructure:"test-sets"`
 }
 
 type SelectedTests struct {
