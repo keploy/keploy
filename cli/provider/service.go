@@ -14,6 +14,8 @@ import (
 	"go.uber.org/zap"
 )
 
+var TeleGlobalMap = make(map[string]interface{})
+
 type ServiceProvider struct {
 	logger *zap.Logger
 	userDb *user.Db
@@ -36,7 +38,7 @@ func (n *ServiceProvider) GetTelemetryService(ctx context.Context, config *confi
 	return telemetry.NewTelemetry(n.logger, telemetry.Options{
 		Enabled:        !config.DisableTele,
 		Version:        utils.Version,
-		GlobalMap:      map[string]interface{}{},
+		GlobalMap:      TeleGlobalMap,
 		InstallationID: installationID,
 	},
 	), nil
