@@ -80,18 +80,6 @@ func (a *App) Setup(_ context.Context) error {
 	if utils.IsDockerKind(a.kind) && isDetachMode(a.logger, a.cmd, a.kind) {
 		return fmt.Errorf("application could not be started in detached mode")
 	}
-	var composeFilePath string
-	var cmdArgs []string
-
-	cmdArgs = strings.Fields(a.cmd)
-
-	composeFilePath = findComposeFilePathFromCmdArgs(cmdArgs)
-	if composeFilePath == "" {
-		composeFilePath = findComposeFile()
-		if composeFilePath == "" {
-			return errors.New("can't find the docker compose file of user. Are you in the right directory? ")
-		}
-	}
 
 	switch a.kind {
 	case utils.DockerRun, utils.DockerStart:
@@ -100,7 +88,7 @@ func (a *App) Setup(_ context.Context) error {
 			return err
 		}
 	case utils.DockerCompose:
-		err := a.SetupCompose(composeFilePath)
+		err := a.SetupCompose()
 		if err != nil {
 			return err
 		}
@@ -142,7 +130,7 @@ func (a *App) SetupDocker() error {
 	return nil
 }
 
-func (a *App) SetupCompose(path string) error {
+func (a *App) SetupCompose() error {
 	if a.container == "" {
 		utils.LogError(a.logger, nil, "container name not found", zap.String("AppCmd", a.cmd))
 		return errors.New("container name not found")
@@ -153,6 +141,16 @@ func (a *App) SetupCompose(path string) error {
 	// we should add support for multiple docker-compose files by either parsing cmd for path
 	// or by asking the user to provide the path
 	// kdocker-compose.yaml file will be run instead of the user docker-compose.yaml file acc to below cases
+
+	var cmdArgs []string
+	cmdArgs = strings.Fields(a.cmd)
+
+	var path string
+	path = findComposeFile(cmdArgs)
+	if path == "" {
+		return errors.New("can't find the docker compose file of user. Are you in the right directory? ")
+	}
+
 	newPath := "docker-compose-tmp.yaml"
 
 	compose, err := a.docker.ReadComposeFile(path)
