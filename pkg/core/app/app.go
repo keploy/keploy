@@ -6,9 +6,9 @@ package app
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 
@@ -66,15 +66,26 @@ type Options struct {
 	DockerNetwork string
 }
 
+func findComposeFilePathFromCmdArgs(args []string) string {
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-f" && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
 func (a *App) Setup(_ context.Context) error {
 
 	if utils.IsDockerKind(a.kind) && isDetachMode(a.logger, a.cmd, a.kind) {
 		return fmt.Errorf("application could not be started in detached mode")
 	}
 	var composeFilePath string
-	flag.StringVar(&composeFilePath, "f", "", "Path to Docker Compose file")
-	flag.Parse()
+	var cmdArgs []string
 
+	cmdArgs = strings.Fields(a.cmd)
+
+	composeFilePath = findComposeFilePathFromCmdArgs(cmdArgs)
 	if composeFilePath == "" {
 		composeFilePath = findComposeFile()
 		if composeFilePath == "" {
