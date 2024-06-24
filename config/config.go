@@ -16,7 +16,7 @@ type Config struct {
 	ProxyPort             uint32       `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
 	Debug                 bool         `json:"debug" yaml:"debug" mapstructure:"debug"`
 	DisableTele           bool         `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
-	DisableANSI           bool         `json:"disableANSI" yaml:"disableANSI" mapstructure:"disableAnsi"`
+	DisableANSI           bool         `json:"disableANSI" yaml:"disableANSI" mapstructure:"disableANSI"`
 	InDocker              bool         `json:"inDocker" yaml:"inDocker" mapstructure:"inDocker"`
 	ContainerName         string       `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
 	NetworkName           string       `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
@@ -90,7 +90,7 @@ type Test struct {
 
 type Globalnoise struct {
 	Global   GlobalNoise  `json:"global" yaml:"global" mapstructure:"global"`
-	Testsets TestsetNoise `json:"testSets" yaml:"testSets" mapstructure:"testSets"`
+	Testsets TestsetNoise `json:"testSets" yaml:"testSets" mapstructure:"test-sets"`
 }
 
 type SelectedTests struct {

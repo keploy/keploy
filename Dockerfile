@@ -21,7 +21,7 @@ RUN go build -tags=viper_bind_struct -ldflags="-X main.dsn=$SENTRY_DSN_DOCKER -X
 # === Runtime Stage ===
 FROM debian:bookworm-slim
 
-ENV KEPLOY_IN_DOCKER=true
+ENV KEPLOY_INDOCKER=true
 
 # Update the package lists and install required packages
 RUN apt-get update
