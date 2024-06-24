@@ -1,3 +1,5 @@
+//go:build linux
+
 package proxy
 
 // treeDb is a simple wrapper around redblacktree to provide thread safety

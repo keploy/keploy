@@ -1,3 +1,5 @@
+//go:build linux
+
 package mysql
 
 import (
@@ -19,6 +21,11 @@ func matchRequestWithMock(ctx context.Context, mysqlRequest models.MySQLRequest,
 	maxMatchCount := 0
 
 	for i, mock := range allMocks {
+
+		if mock.Kind != "MySQL" {
+			continue
+		}
+
 		if ctx.Err() != nil {
 			return nil, -1, "", ctx.Err()
 		}
