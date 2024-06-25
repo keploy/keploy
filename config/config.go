@@ -9,7 +9,7 @@ import (
 )
 
 type Config struct {
-	Path                  string       `json:"path" yaml:"path" mapstructure:"path" `
+	Path                  string       `json:"path" yaml:"path" mapstructure:"path"`
 	AppID                 string       `json:"appId" yaml:"appId" mapstructure:"appId"`
 	Command               string       `json:"command" yaml:"command" mapstructure:"command"`
 	CoverageCommand       string       `json:"-" yaml:"-" mapstructure:"-"`
@@ -79,7 +79,7 @@ type Test struct {
 	Delay              uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
 	APITimeout         uint64              `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
 	SkipCoverage       bool                `json:"skipCoverage" yaml:"skipCoverage" mapstructure:"skipCoverage"`                    // boolean to capture the coverage in test
-	CoverageReportPath string              `json:"coverageReportPath" yaml:"coverageReportPath " mapstructure:"coverageReportPath"` // directory path to store the coverage files
+	CoverageReportPath string              `json:"coverageReportPath" yaml:"coverageReportPath" mapstructure:"coverageReportPath"` // directory path to store the coverage files
 	IgnoreOrdering     bool                `json:"ignoreOrdering" yaml:"ignoreOrdering" mapstructure:"ignoreOrdering"`
 	MongoPassword      string              `json:"mongoPassword" yaml:"mongoPassword" mapstructure:"mongoPassword"`
 	Language           Language            `json:"language" yaml:"language" mapstructure:"language"`

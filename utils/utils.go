@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 	"io"
 	"net"
 	"net/http"
@@ -54,9 +56,22 @@ func ReplaceHostToIP(currentURL string, ipAddress string) (string, error) {
 	return parsedURL.String(), nil
 }
 
+func kebabToCamel(s string) string {
+	parts := strings.Split(s, "-")
+	for i := 1; i < len(parts); i++ {
+		parts[i] = cases.Title(language.English).String(parts[i])
+	}
+	return strings.Join(parts, "")
+}
+
 func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix string) error {
 	var bindErr error
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
+		err := viper.BindPFlag(kebabToCamel(flag.Name), flag)
+		if err != nil {
+			LogError(logger, err, "failed to bind flag Name to flag")
+			bindErr = err
+		}
 		// Construct the Viper key and the env variable name
 		if viperKeyPrefix == "" {
 			viperKeyPrefix = cmd.Name()
@@ -66,7 +81,7 @@ func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix str
 		envVarName = strings.ReplaceAll(envVarName, ".", "_") // Why do we need this?
 
 		// Bind the flag to Viper with the constructed key
-		err := viper.BindPFlag(viperKey, flag)
+		err = viper.BindPFlag(viperKey, flag)
 		if err != nil {
 			LogError(logger, err, "failed to bind flag to config")
 			bindErr = err
