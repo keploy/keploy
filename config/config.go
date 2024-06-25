@@ -8,7 +8,7 @@ import (
 )
 
 type Config struct {
-	Path                  string       `json:"path" yaml:"path" mapstructure:"path" `
+	Path                  string       `json:"path" yaml:"path" mapstructure:"path"`
 	AppID                 string       `json:"appId" yaml:"appId" mapstructure:"appId"`
 	Command               string       `json:"command" yaml:"command" mapstructure:"command"`
 	Port                  uint32       `json:"port" yaml:"port" mapstructure:"port"`
@@ -76,9 +76,9 @@ type Test struct {
 	GlobalNoise        Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
 	Delay              uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
 	APITimeout         uint64              `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
-	Coverage           bool                `json:"coverage" yaml:"coverage" mapstructure:"coverage"`                                // boolean to capture the coverage in test
-	CoverageReportPath string              `json:"coverageReportPath" yaml:"coverageReportPath " mapstructure:"coverageReportPath"` // directory path to store the coverage files
-	GoCoverage         bool                `json:"goCoverage" yaml:"goCoverage" mapstructure:"goCoverage"`                          // boolean to capture the coverage in test
+	Coverage           bool                `json:"coverage" yaml:"coverage" mapstructure:"coverage"`                               // boolean to capture the coverage in test
+	CoverageReportPath string              `json:"coverageReportPath" yaml:"coverageReportPath" mapstructure:"coverageReportPath"` // directory path to store the coverage files
+	GoCoverage         bool                `json:"goCoverage" yaml:"goCoverage" mapstructure:"goCoverage"`                         // boolean to capture the coverage in test
 	IgnoreOrdering     bool                `json:"ignoreOrdering" yaml:"ignoreOrdering" mapstructure:"ignoreOrdering"`
 	MongoPassword      string              `json:"mongoPassword" yaml:"mongoPassword" mapstructure:"mongoPassword"`
 	Language           string              `json:"language" yaml:"language" mapstructure:"language"`
