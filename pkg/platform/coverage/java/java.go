@@ -46,11 +46,11 @@ func (j *Java) PreProcess() (string, error) {
 	if err == nil {
 		isFileExist, err := utils.FileExists(jacocoAgentPath)
 		if err == nil && isFileExist {
-			return strings.Replace(
+			j.cmd = strings.Replace(
 				j.cmd, 
 				j.executable, 
-				fmt.Sprintf("%s -javaagent:%s=destfile=target/${TESTSETID}.exec", j.executable, j.jacocoAgentPath), 1,
-			), nil
+				fmt.Sprintf("%s -javaagent:%s=destfile=target/${TESTSETID}.exec", j.executable, jacocoAgentPath), 1,
+			)
 		}
 	}
 	if err != nil {

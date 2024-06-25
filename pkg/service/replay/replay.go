@@ -143,7 +143,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	var cov coverage.Service
 	switch r.config.Test.Language {
 	case models.Go:
-		cov = golang.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.CoverageReportPath)
+		cov = golang.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.CoverageReportPath, r.config.CommandType)
 	case models.Python:
 		cov = python.New(ctx, r.logger, r.reportDB, r.config.Command, executable)
 	case models.Node:

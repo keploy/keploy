@@ -21,15 +21,17 @@ type Golang struct {
 	reportDB           coverage.ReportDB
 	cmd                string
 	coverageReportPath string
+	commandType        string
 }
 
-func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cmd, coverageReportPath string) *Golang {
+func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cmd, coverageReportPath, commandType string) *Golang {
 	return &Golang{
 		ctx:                ctx,
 		logger:             logger,
 		reportDB:           reportDB,
 		cmd:                cmd,
 		coverageReportPath: coverageReportPath,
+		commandType:        commandType,
 	}
 }
 
@@ -38,7 +40,7 @@ func (g *Golang) PreProcess() (string, error) {
 		g.logger.Warn("go binary was not built with -cover flag")
 		return g.cmd, errors.New("binary not coverable")
 	}
-	if utils.CmdType(g.cmd) == utils.Native {
+	if utils.CmdType(g.commandType) == utils.Native {
 		goCovPath, err := utils.SetCoveragePath(g.logger, g.coverageReportPath)
 		if err != nil {
 			g.logger.Warn("failed to set go coverage path", zap.Error(err))
