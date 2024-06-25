@@ -25,7 +25,7 @@ const (
 	HTTP           Kind     = "Http"
 	GENERIC        Kind     = "Generic"
 	REDIS          Kind     = "Redis"
-	SQL            Kind     = "SQL"
+	SQL            Kind     = "MySQL"
 	Postgres       Kind     = "Postgres"
 	GRPC_EXPORT    Kind     = "gRPC"
 	Mongo          Kind     = "Mongo"
@@ -60,10 +60,11 @@ func (tc *TestCase) GetKind() string {
 }
 
 type NoiseParams struct {
-	TestCaseIDs string              `json:"testCaseIDs"`
-	EditedBy    string              `json:"editedBy"`
-	Assertion   map[string][]string `json:"assertion"`
-	Ops         string              `json:"ops"`
+	TestCaseID string              `json:"testCaseID"`
+	EditedBy   string              `json:"editedBy"`
+	Assertion  map[string][]string `json:"assertion"`
+	Ops        string              `json:"ops"`
+	AfterNoise map[string][]string `json:"afterNoise"`
 }
 
 // enum for ops
