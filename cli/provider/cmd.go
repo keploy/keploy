@@ -15,7 +15,6 @@ import (
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/platform/coverage"
 	"go.keploy.io/server/v2/utils"
 	"go.keploy.io/server/v2/utils/log"
 	"go.uber.org/zap"
@@ -459,9 +458,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			config.SetSelectedTests(c.cfg, testSets)
 
 			c.cfg.CoverageCommand = c.cfg.Command
-			if !c.cfg.Test.SkipCoverage {
-				PreProcessCoverage(c.logger, c.cfg)
-			}
 
 			if c.cfg.Test.Delay <= 5 {
 				c.logger.Warn(fmt.Sprintf("Delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay", c.cfg.Test.Delay))
@@ -518,23 +514,4 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 	}
 	return nil
-}
-
-func PreProcessCoverage(logger *zap.Logger, conf *config.Config) {
-	language, executable := utils.DetectLanguage(logger, conf.Command)
-	// if language is not provided through flag/config and language detected is not unknown
-	// then set the language to detected language
-	if conf.Test.Language == "" {
-		if language == models.Unknown {
-			logger.Warn("failed to detect language, skipping coverage caluclation. please use --language to manually set the language")
-			return
-		}
-		logger.Warn(fmt.Sprintf("%s language detected. please use --language to manually set the language if needed", language))
-		conf.Test.Language = language
-	} else if language != conf.Test.Language {
-		utils.LogError(logger, nil, "language detected is different from the language provided")
-		conf.Test.SkipCoverage = true
-		return
-	}
-	coverage.SetupCoverageCommands(logger, conf, executable)
 }

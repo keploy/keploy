@@ -58,7 +58,7 @@ type ReportDB interface {
 	GetReport(ctx context.Context, testRunID string, testSetID string) (*models.TestReport, error)
 	InsertTestCaseResult(ctx context.Context, testRunID string, testSetID string, result *models.TestResult) error
 	InsertReport(ctx context.Context, testRunID string, testSetID string, testReport *models.TestReport) error
-	InsertCoverageReport(ctx context.Context, testRunID string, testCoverage *models.TestCoverage) error
+	UpdateReport(ctx context.Context, testRunID string, testCoverage any) error
 }
 
 type Config interface {

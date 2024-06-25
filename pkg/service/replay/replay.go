@@ -20,6 +20,10 @@ import (
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/coverage"
+	"go.keploy.io/server/v2/pkg/platform/coverage/golang"
+	"go.keploy.io/server/v2/pkg/platform/coverage/java"
+	"go.keploy.io/server/v2/pkg/platform/coverage/javascript"
+	"go.keploy.io/server/v2/pkg/platform/coverage/python"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -122,6 +126,37 @@ func (r *Replayer) Start(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 
+	language, executable := utils.DetectLanguage(r.logger, r.config.Command)
+	// if language is not provided through flag/config and language detected is not unknown
+	// then set the language to detected language
+	if r.config.Test.Language == "" {
+		if language == models.Unknown {
+			r.logger.Warn("failed to detect language, skipping coverage caluclation. please use --language to manually set the language")
+		}
+		r.logger.Warn(fmt.Sprintf("%s language detected. please use --language to manually set the language if needed", language))
+		r.config.Test.Language = language
+	} else if language != r.config.Test.Language {
+		utils.LogError(r.logger, nil, "language detected is different from the language provided")
+		r.config.Test.SkipCoverage = true
+	}
+
+	var cov coverage.Service
+	switch r.config.Test.Language {
+	case models.Go:
+		cov = golang.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.CoverageReportPath)
+	case models.Python:
+		cov = python.New(ctx, r.logger, r.reportDB, r.config.Command, executable)
+	case models.Node:
+		cov = javascript.New(ctx, r.logger, r.reportDB, r.config.Command)
+	case models.Java:
+		cov = java.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.JacocoAgentPath, executable)
+	}
+
+	r.config.CoverageCommand, err = cov.PreProcess()
+	if err != nil {
+		r.config.Test.SkipCoverage = true
+	}
+
 	if !r.config.Test.SkipCoverage {
 		err = os.Setenv("CLEAN", "true")
 		if err != nil {
@@ -212,7 +247,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 	}
 	if !r.config.Test.SkipCoverage && r.config.Test.Language == models.Java {
-		err = coverage.MergeAndGenerateJacocoReport(ctx, r.logger)
+		err = java.MergeAndGenerateJacocoReport(ctx, r.logger)
 		if err != nil {
 			r.config.Test.SkipCoverage = true
 		}
@@ -228,12 +263,16 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
 		if !r.config.Test.SkipCoverage {
-			coverageData, err := coverage.CalculateCodeCoverage(ctx, r.logger, r.config.Test.Language)
+			r.logger.Info("calculating coverage for the test run and inserting it into the report")
+			coverageData, err := cov.GetCoverage()
 			if err == nil {
-				err = r.reportDB.InsertCoverageReport(ctx, testRunID, &coverageData)
+				r.logger.Sugar().Infoln(models.HighlightPassingString("Total Coverage Percentage: ", coverageData.TotalCov))
+				err = cov.AppendCoverage(&coverageData, testRunID)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to update report with the coverage data")
 				}
+			} else {
+				utils.LogError(r.logger, err, "failed to calculate coverage for the test run")
 			}
 		}
 	}

@@ -1,9 +1,7 @@
 package utils
 
 import (
-	"archive/zip"
 	"bufio"
-	"bytes"
 	"context"
 	"debug/elf"
 	"encoding/json"
@@ -858,69 +856,6 @@ func DetectLanguage(logger *zap.Logger, cmd string) (config.Language, string) {
 	return models.Unknown, executable
 }
 
-func RunCommand(cmdString ...string) error {
-	cmd := exec.Command(cmdString[0], cmdString[1:]...)
-	err := cmd.Run()
-	return err
-}
-
-// CheckGoBinaryForCoverFlag checks if the given Go binary has the coverage flag enabled
-// TODO: use native approach till https://github.com/golang/go/issues/67366 gets resolved
-func CheckGoBinaryForCoverFlag(logger *zap.Logger, cmd string) bool {
-	file, err := elf.Open(cmd)
-	if err != nil {
-		LogError(logger, err, "failed to open file")
-		fmt.Fprintf(os.Stderr, "Failed to open file: %v\n", err)
-		return false
-	}
-	defer func() {
-		if err := file.Close(); err != nil {
-			LogError(logger, err, "failed to close binary file", zap.String("file", cmd))
-		}
-	}()
-
-	symbols, err := file.Symbols()
-	if err != nil {
-		LogError(logger, err, "failed to read symbols")
-		return false
-	}
-
-	for _, symbol := range symbols {
-		// Check for symbols that related to Go coverage instrumentation
-		if strings.Contains(symbol.Name, "internal/coverage") {
-			return true
-		}
-	}
-	return false
-}
-
-func CreatePyCoverageConfig(logger *zap.Logger) {
-	// Define the content of the .coveragerc file
-	configContent := `[run]
-omit =
-    /usr/*
-sigterm = true
-`
-
-	// Create or overwrite the .coveragerc file
-	file, err := os.Create(".coveragerc")
-	if err != nil {
-		LogError(logger, err, "failed to create .coveragerc file")
-	}
-	defer func() {
-		if err := file.Close(); err != nil {
-			LogError(logger, err, "failed to close coveragerc file", zap.String("file", file.Name()))
-		}
-	}()
-
-	_, err = file.WriteString(configContent)
-	if err != nil {
-		LogError(logger, err, "failed to write to .coveragerc file")
-	}
-
-	logger.Debug("Configuration written to .coveragerc")
-}
-
 // FileExists checks if a file exists and is not a directory at the given path.
 func FileExists(path string) (bool, error) {
 	fileInfo, err := os.Stat(path)
@@ -958,74 +893,6 @@ func getHomeDir() (string, error) {
 	}
 	// Fallback if neither method works
 	return "", errors.New("failed to retrieve current user info")
-}
-
-func DownloadAndExtractJaCoCoCli(logger *zap.Logger, version, dir string) error {
-	cliPath := filepath.Join(dir, "jacococli.jar")
-
-	downloadURL := fmt.Sprintf("https://github.com/jacoco/jacoco/releases/download/v%s/jacoco-%s.zip", version, version)
-
-	_, err := os.Stat(cliPath)
-	if err == nil {
-		return nil
-	}
-
-	resp, err := http.Get(downloadURL)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			LogError(logger, err, "failed to close response body")
-		}
-	}()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-
-	zipReader, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
-	if err != nil {
-		return err
-	}
-
-	for _, file := range zipReader.File {
-		if strings.HasSuffix(file.Name, "jacococli.jar") {
-			cliFile, err := file.Open()
-			if err != nil {
-				return err
-			}
-			defer func() {
-				if err := cliFile.Close(); err != nil {
-					LogError(logger, err, "failed to close jacoco cli jar file")
-				}
-			}()
-
-			outFile, err := os.Create(cliPath)
-			if err != nil {
-				return err
-			}
-			defer func() {
-				if err := outFile.Close(); err != nil {
-					LogError(logger, err, "failed to close the output file for jacoco cli jar")
-				}
-			}()
-
-			_, err = io.Copy(outFile, cliFile)
-			if err != nil {
-				return err
-			}
-		}
-	}
-
-	cliStat, err := os.Stat(cliPath)
-
-	if os.IsNotExist(err) || cliStat != nil {
-		return fmt.Errorf("failed to find JaCoCo binaries in the distribution")
-	}
-
-	return nil
 }
 
 func IsDockerKind(kind CmdType) bool {

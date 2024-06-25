@@ -110,7 +110,7 @@ func (fe *TestReport) InsertReport(ctx context.Context, testRunID string, testSe
 	return nil
 }
 
-func (fe *TestReport) InsertCoverageReport(ctx context.Context, testRunID string, coverageReport *models.TestCoverage) error {
+func (fe *TestReport) UpdateReport(ctx context.Context, testRunID string, coverageReport any) error {
 	reportPath := filepath.Join(fe.Path, testRunID)
 
 	data := []byte{}
