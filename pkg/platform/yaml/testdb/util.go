@@ -248,10 +248,9 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		switch reflect.ValueOf(httpSpec.Assertions["noise"]).Kind() {
 		case reflect.Map:
 			for k, v := range httpSpec.Assertions["noise"].(map[string]interface{}) {
-				l := strings.ToLower(k)
-				tc.Noise[l] = []string{}
+				tc.Noise[k] = []string{}
 				for _, val := range v.([]interface{}) {
-					tc.Noise[l] = append(tc.Noise[l], val.(string))
+					tc.Noise[k] = append(tc.Noise[k], val.(string))
 				}
 			}
 		case reflect.Slice:
