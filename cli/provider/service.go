@@ -3,7 +3,6 @@ package provider
 import (
 	"context"
 	"errors"
-	"strings"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
@@ -13,7 +12,6 @@ import (
 	"go.keploy.io/server/v2/pkg/service/utgen"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
-	"gopkg.in/yaml.v3"
 )
 
 var TeleGlobalMap = make(map[string]interface{})
