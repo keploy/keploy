@@ -189,8 +189,16 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 		return false, fmt.Errorf(errMsg)
 	}
 	cmdType := utils.CmdType(o.config.CommandType)
+
+	var userIP string
 	if utils.IsDockerKind(cmdType) {
 		host = o.config.ContainerName
+
+		userIP, err = o.record.GetContainerIP(ctx, o.config.AppID)
+		if err != nil {
+			utils.LogError(o.logger, err, "failed to get the app ip")
+			return false, err
+		}
 	}
 
 	delay := o.config.Test.Delay
@@ -210,13 +218,6 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 			return false, ctx.Err()
 		}
 		if utils.IsDockerKind(cmdType) {
-
-			userIP, err := o.record.GetContainerIP(ctx, o.config.AppID)
-			if err != nil {
-				utils.LogError(o.logger, err, "failed to get the app ip")
-				break
-			}
-
 			tc.HTTPReq.URL, err = utils.ReplaceHostToIP(tc.HTTPReq.URL, userIP)
 			if err != nil {
 				utils.LogError(o.logger, err, "failed to replace host to docker container's IP")
