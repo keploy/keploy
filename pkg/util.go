@@ -90,6 +90,7 @@ func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logge
 	req.ProtoMajor = tc.HTTPReq.ProtoMajor
 	req.ProtoMinor = tc.HTTPReq.ProtoMinor
 	req.Header.Set("KEPLOY-TEST-ID", tc.Name)
+	req.Header.Set("KEPLOY-TEST-SET-ID", testSet)
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", req))
 
 	// Creating the client and disabling redirects
