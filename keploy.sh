@@ -157,8 +157,8 @@ installKeploy (){
 
 installKeploy "$@"
 
-# if command -v keploy &> /dev/null; then
-#     keploy example
-#     rm -rf keploy.sh
-#     rm -rf install.sh
-# fi
+if command -v keploy &> /dev/null; then
+    keploy example
+    rm -rf keploy.sh
+    rm -rf install.sh
+fi
