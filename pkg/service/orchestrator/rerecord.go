@@ -134,6 +134,11 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 	}
 
 	if stopReason == "" {
+		if ctx.Err() != nil {
+			stopReason = "context cancelled"
+			o.logger.Warn("Re-record was cancelled, keploy might have not recorded few test cases")
+			return nil
+		}
 		stopReason = "Re-recorded all the selected testsets successfully"
 		o.logger.Info("Re-record was successfull. Do you want to remove the older testsets?", zap.Any("testsets", SelectedTests))
 		reader := bufio.NewReader(os.Stdin)

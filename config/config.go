@@ -8,7 +8,6 @@ import (
 )
 
 type Config struct {
-
 	Path                  string       `json:"path" yaml:"path" mapstructure:"path"`
 	AppID                 uint64       `json:"appId" yaml:"appId" mapstructure:"appId"`
 	Command               string       `json:"command" yaml:"command" mapstructure:"command"`
