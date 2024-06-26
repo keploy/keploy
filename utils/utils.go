@@ -148,31 +148,17 @@ func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
 	}
 }
 
-func DeleteKeployMetaData(logger *zap.Logger) (err error) {
-
-	//Check if keploy-log.txt exists
-	_, err = os.Stat("keploy-logs.txt")
+func DeleteFileIfNotExists(logger *zap.Logger,name string) ( err error) {
+	//Check if file exists
+	_, err = os.Stat(name)
 	if os.IsNotExist(err) {
 		return err
 	}
 
 	//If it does, remove it.
-	err = os.Remove("keploy-logs.txt")
+	err = os.Remove(name)
 	if err != nil {
-		LogError(logger, err, "Error removing log file")
-		return err
-	}
-
-	//Check if docker-compose-tmp.yaml exists
-	_, err = os.Stat("docker-compose-tmp.yaml")
-	if os.IsNotExist(err) {
-		return err
-	}
-
-	//If it does, remove it.
-	err = os.Remove("docker-compose-tmp.yaml")
-	if err != nil {
-		LogError(logger, err, "Error removing user docker-compose file")
+		LogError(logger, err, "Error removing file")
 		return err
 	}
 
