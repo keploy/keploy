@@ -102,6 +102,8 @@ func (fe *TestReport) InsertReport(ctx context.Context, testRunID string, testSe
 	}
 	data = append(data, d...)
 
+	// Append in each test case and mock the Keploy version as a comment to facilitate the debugging
+	data = append([]byte(utils.GenerateKeployVersionComment()), data...)
 	err = yaml.WriteFile(ctx, fe.Logger, reportPath, testReport.Name, data, false)
 	if err != nil {
 		utils.LogError(fe.Logger, err, "failed to write the report to yaml", zap.Any("session", filepath.Base(reportPath)))
