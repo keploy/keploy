@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"strings"
 	"syscall"
 	"time"
 
@@ -142,14 +141,12 @@ func (a *App) SetupCompose() error {
 	// or by asking the user to provide the path
 	// kdocker-compose.yaml file will be run instead of the user docker-compose.yaml file acc to below cases
 
-	var cmdArgs []string
-	cmdArgs = strings.Fields(a.cmd)
-
-	var path string
-	path = findComposeFile(cmdArgs)
+	path := findComposeFile(a.cmd)
 	if path == "" {
 		return errors.New("can't find the docker compose file of user. Are you in the right directory? ")
 	}
+
+	a.logger.Info(fmt.Sprintf("Obtained docker compose file path: %s", path))
 
 	newPath := "docker-compose-tmp.yaml"
 
