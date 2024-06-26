@@ -72,7 +72,6 @@ for i in {1..2}; do
         exit 1
     fi
     sleep 5
-
     echo "Recorded test case and mocks for iteration ${i}"
 done
 

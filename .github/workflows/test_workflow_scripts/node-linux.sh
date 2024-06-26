@@ -113,7 +113,6 @@ do
     fi
 done
 
-
 # Check the overall test status and exit accordingly
 if [ "$all_passed" = true ]; then
     report_file="./keploy/reports/test-run-0/test-set-1-report.yaml"

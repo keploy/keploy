@@ -45,18 +45,18 @@ var Examples = `
 Golang Application
 	Record:
 	sudo -E env PATH=$PATH keploy record -c "/path/to/user/app/binary"
-	
+
 	Test:
 	sudo -E env PATH=$PATH keploy test -c "/path/to/user/app/binary" --delay 10
 
 Node Application
 	Record:
 	sudo -E env PATH=$PATH keploy record -c “npm start --prefix /path/to/node/app"
-	
+
 	Test:
 	sudo -E env PATH=$PATH keploy test -c “npm start --prefix /path/to/node/app" --delay 10
 
-Java 
+Java
 	Record:
 	sudo -E env PATH=$PATH keploy record -c "java -jar /path/to/java-project/target/jar"
 
@@ -80,18 +80,18 @@ var ExampleOneClickInstall = `
 Golang Application
 	Record:
 	keploy record -c "/path/to/user/app/binary"
-	
+
 	Test:
 	keploy test -c "/path/to/user/app/binary" --delay 10
 
 Node Application
 	Record:
 	keploy record -c “npm start --prefix /path/to/node/app"
-	
+
 	Test:
 	keploy test -c “npm start --prefix /path/to/node/app" --delay 10
 
-Java 
+Java
 	Record:
 	keploy record -c "java -jar /path/to/java-project/target/jar"
 
@@ -364,20 +364,23 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
-	configPath, err := cmd.Flags().GetString("configPath")
-	if err != nil {
-		utils.LogError(c.logger, nil, "failed to read the config path")
-		return err
-	}
-	viper.SetConfigName("keploy")
-	viper.SetConfigType("yml")
-	viper.AddConfigPath(configPath)
-	if err := viper.ReadInConfig(); err != nil {
-		var configFileNotFoundError viper.ConfigFileNotFoundError
-		if !errors.As(err, &configFileNotFoundError) {
-			errMsg := "failed to read config file"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
+	if cmd.Name() == "test" || cmd.Name() == "record" {
+		configPath, err := cmd.Flags().GetString("configPath")
+		if err != nil {
+			utils.LogError(c.logger, nil, "failed to read the config path")
+			return err
+		}
+		viper.SetConfigName("keploy")
+		viper.SetConfigType("yml")
+		viper.AddConfigPath(configPath)
+		if err := viper.ReadInConfig(); err != nil {
+			var configFileNotFoundError viper.ConfigFileNotFoundError
+			if !errors.As(err, &configFileNotFoundError) {
+				errMsg := "failed to read config file"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.logger.Info("config file not found; creating one and proceeding with flags.")
 		}
 		c.logger.Info("config file not found; proceeding with flags only")
 	}
