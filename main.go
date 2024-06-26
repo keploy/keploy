@@ -70,9 +70,13 @@ func start(ctx context.Context) {
 		fmt.Println("Failed to start the logger for the CLI", err)
 		return
 	}
-	defer utils.DeleteLogs(logger)
+	defer func() {
+		if err := utils.DeleteKeployMetaData(logger); err != nil {
+			fmt.Println("Failed to delete Keploy meta data", err)
+			return
+		}
+	}()
 	defer utils.Recover(logger)
-	defer utils.DeleteComposeFile(logger)
 
 	// The 'umask' command is commonly used in various operating systems to regulate the permissions of newly created files.
 	// These 'umask' values subtract from the permissions assigned by the process, effectively lowering the permissions.

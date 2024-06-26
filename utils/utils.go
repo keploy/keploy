@@ -148,36 +148,35 @@ func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
 	}
 }
 
-func DeleteLogs(logger *zap.Logger) {
+func DeleteKeployMetaData(logger *zap.Logger) (err error) {
 
 	//Check if keploy-log.txt exists
-	_, err := os.Stat("keploy-logs.txt")
+	_, err = os.Stat("keploy-logs.txt")
 	if os.IsNotExist(err) {
-		return
+		return err
 	}
 
 	//If it does, remove it.
 	err = os.Remove("keploy-logs.txt")
 	if err != nil {
 		LogError(logger, err, "Error removing log file")
-		return
+		return err
 	}
-}
-
-func DeleteComposeFile(logger *zap.Logger) {
 
 	//Check if docker-compose-tmp.yaml exists
-	_, err := os.Stat("docker-compose-tmp.yaml")
+	_, err = os.Stat("docker-compose-tmp.yaml")
 	if os.IsNotExist(err) {
-		return
+		return err
 	}
 
 	//If it does, remove it.
 	err = os.Remove("docker-compose-tmp.yaml")
 	if err != nil {
 		LogError(logger, err, "Error removing user docker-compose file")
-		return
+		return err
 	}
+
+	return nil
 }
 
 type GitHubRelease struct {
