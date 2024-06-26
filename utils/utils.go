@@ -164,6 +164,22 @@ func DeleteLogs(logger *zap.Logger) {
 	}
 }
 
+func DeleteComposeFile(logger *zap.Logger){
+
+	//Check if docker-compose-tmp.yaml exists
+	_,err:= os.Stat("docker-compose-tmp.yaml")
+	if os.IsNotExist(err) {
+		return
+	}
+
+	//If it does, remove it.
+	err = os.Remove("docker-compose-tmp.yaml")
+	if err != nil {
+		LogError(logger, err, "Error removing user docker-compose file")
+		return
+	}
+}
+
 type GitHubRelease struct {
 	TagName string `json:"tag_name"`
 	Body    string `json:"body"`
