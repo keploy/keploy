@@ -65,15 +65,6 @@ type Options struct {
 	DockerNetwork string
 }
 
-func findComposeFilePathFromCmdArgs(args []string) string {
-	for i := 0; i < len(args); i++ {
-		if args[i] == "-f" && i+1 < len(args) {
-			return args[i+1]
-		}
-	}
-	return ""
-}
-
 func (a *App) Setup(_ context.Context) error {
 
 	if utils.IsDockerKind(a.kind) && isDetachMode(a.logger, a.cmd, a.kind) {
