@@ -71,12 +71,12 @@ func start(ctx context.Context) {
 		return
 	}
 	defer func() {
-		if err := utils.DeleteFileIfNotExists(logger, "keploy_logs.txt"); err != nil {
-			fmt.Println("Failed to delete Keploy Logs", err)
+		if err := utils.DeleteFileIfNotExists(logger, "keploy-logs.txt"); err != nil {
+			utils.LogError(logger, err, "Failed to delete Keploy Logs")
 			return
 		}
 		if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {
-			fmt.Println("Failed to delete User Docker Compose", err)
+			utils.LogError(logger, err, "Failed to delete Temporary Docker Compose")
 			return
 		}
 

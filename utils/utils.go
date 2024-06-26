@@ -152,7 +152,7 @@ func DeleteFileIfNotExists(logger *zap.Logger, name string) (err error) {
 	//Check if file exists
 	_, err = os.Stat(name)
 	if os.IsNotExist(err) {
-		return err
+		return nil
 	}
 
 	//If it does, remove it.
