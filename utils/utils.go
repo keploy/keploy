@@ -148,20 +148,21 @@ func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
 	}
 }
 
-func DeleteLogs(logger *zap.Logger) {
-
-	//Check if keploy-log.txt exists
-	_, err := os.Stat("keploy-logs.txt")
+func DeleteFileIfNotExists(logger *zap.Logger, name string) (err error) {
+	//Check if file exists
+	_, err = os.Stat(name)
 	if os.IsNotExist(err) {
-		return
+		return nil
 	}
 
 	//If it does, remove it.
-	err = os.Remove("keploy-logs.txt")
+	err = os.Remove(name)
 	if err != nil {
-		LogError(logger, err, "Error removing log file")
-		return
+		LogError(logger, err, "Error removing file")
+		return err
 	}
+
+	return nil
 }
 
 type GitHubRelease struct {
