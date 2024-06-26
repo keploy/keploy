@@ -148,7 +148,7 @@ func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
 	}
 }
 
-func DeleteFileIfNotExists(logger *zap.Logger,name string) ( err error) {
+func DeleteFileIfNotExists(logger *zap.Logger, name string) (err error) {
 	//Check if file exists
 	_, err = os.Stat(name)
 	if os.IsNotExist(err) {
