@@ -164,10 +164,10 @@ func DeleteLogs(logger *zap.Logger) {
 	}
 }
 
-func DeleteComposeFile(logger *zap.Logger){
+func DeleteComposeFile(logger *zap.Logger) {
 
 	//Check if docker-compose-tmp.yaml exists
-	_,err:= os.Stat("docker-compose-tmp.yaml")
+	_, err := os.Stat("docker-compose-tmp.yaml")
 	if os.IsNotExist(err) {
 		return
 	}
