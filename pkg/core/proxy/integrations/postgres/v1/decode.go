@@ -128,7 +128,7 @@ func getRecordPrepStatement(allMocks []*models.Mock) PrepMap {
 				p := 0
 				for _, header := range req.PacketTypes {
 					if header == "P" {
-						if strings.Contains(req.Parses[p].Name, "S_") {
+						if strings.Contains(req.Parses[p].Name, "S_") || strings.Contains(req.Parses[p].Name, "s") {
 							psMap[req.Parses[p].Query] = req.Parses[p].Name
 							querydata = append(querydata, QueryData{PrepIdentifier: req.Parses[p].Name,
 								Query: req.Parses[p].Query,
