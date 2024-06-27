@@ -1,6 +1,7 @@
 #!/bin/bash
 
 installKeploy (){
+    version="latest"
     IS_CI=false
     for arg in "$@"
     do
@@ -9,25 +10,55 @@ installKeploy (){
                 IS_CI=true
                 shift
             ;;
+            -v)
+                if [[ "$2" =~ ^v[0-9]+.* ]]; then
+                    version="$2"
+                    shift 2 
+                else
+                    echo "Invalid version format. Please use '-v v<semver>'."
+                    return 1 
+                fi
+            ;;
             *)
             ;;
         esac
     done
 
+    if [ "$version" != "latest" ]; then
+        echo "Installing Keploy version: $version......"
+    fi
+
     install_keploy_darwin_all() {
-        curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz" | tar xz -C /tmp
+        if [ "$version" != "latest" ]; then
+            download_url="https://github.com/keploy/keploy/releases/download/$version/keploy_darwin_all.tar.gz"
+        else
+            download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz"
+        fi
+
+        curl --silent --location "$download_url" | tar xz -C /tmp
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploy
         delete_keploy_alias
     }
 
     install_keploy_arm() {
-        curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
+        if [ "$version" != "latest" ]; then
+            download_url="https://github.com/keploy/keploy/releases/download/$version/keploy_linux_arm64.tar.gz"
+        else
+            download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
+        fi
+        curl --silent --location "$download_url" | tar xz -C /tmp
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploy
         set_alias 'sudo -E env PATH="$PATH" keploy'
     }
 
-    install_keploy_amd() {
-        curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
+
+    install_keploy_amd() {        
+        if [ "$version" != "latest" ]; then
+            download_url="https://github.com/keploy/keploy/releases/download/$version/keploy_linux_amd64.tar.gz"
+        else
+            download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
+        fi
+        curl --silent --location "$download_url" | tar xz -C /tmp
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
         set_alias 'sudo -E env PATH="$PATH" keploybin'
     }
@@ -143,7 +174,7 @@ installKeploy (){
     fi
 }
 
-installKeploy
+installKeploy "$@"
 
 if command -v keploy &> /dev/null; then
     keploy example

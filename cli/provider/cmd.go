@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/spf13/pflag"
 	"os"
 	"path/filepath"
 	"strings"
@@ -131,7 +132,7 @@ Use "{{.CommandPath}} [command] --help" for more information about a command.{{e
 
 var RootExamples = `
   Record:
-	keploy record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --containerName "<containerName>" --buildDelay 60
+	keploy record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --container-name "<containerName>" --buildDelay 60
 
   Test:
 	keploy test --c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --delay 10 --buildDelay 60
@@ -165,6 +166,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 
 	//add flags
 	var err error
+	cmd.Flags().SetNormalizeFunc(aliasNormalizeFunc)
 	switch cmd.Name() {
 
 	case "update":
@@ -189,18 +191,18 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			return errors.New(errMsg)
 		}
 	case "gen":
-		cmd.Flags().String("sourceFilePath", "", "Path to the source file.")
-		cmd.Flags().String("testFilePath", "", "Path to the input test file.")
-		cmd.Flags().String("coverageReportPath", "coverage.xml", "Path to the code coverage report file.")
-		cmd.Flags().String("testCommand", "", "The command to run tests and generate coverage report.")
-		cmd.Flags().String("coverageFormat", "cobertura", "Type of coverage report.")
-		cmd.Flags().Int("expectedCoverage", 100, "The desired coverage percentage.")
-		cmd.Flags().Int("maxIterations", 5, "The maximum number of iterations.")
-		cmd.Flags().String("testDir", "", "Path to the test directory.")
-		cmd.Flags().String("llmBaseUrl", "", "Base URL for the AI model.")
+		cmd.Flags().String("source-file-path", "", "Path to the source file.")
+		cmd.Flags().String("test-file-path", "", "Path to the input test file.")
+		cmd.Flags().String("coverage-report-path", "coverage.xml", "Path to the code coverage report file.")
+		cmd.Flags().String("test-command", "", "The command to run tests and generate coverage report.")
+		cmd.Flags().String("coverage-format", "cobertura", "Type of coverage report.")
+		cmd.Flags().Int("expected-coverage", 100, "The desired coverage percentage.")
+		cmd.Flags().Int("max-iterations", 5, "The maximum number of iterations.")
+		cmd.Flags().String("test-dir", "", "Path to the test directory.")
+		cmd.Flags().String("llm-base-url", "", "Base URL for the AI model.")
 		cmd.Flags().String("model", "gpt-4o", "Model to use for the AI.")
-		cmd.Flags().String("llmApiVersion", "", "API version of the llm")
-		err := cmd.MarkFlagRequired("testCommand")
+		cmd.Flags().String("llm-api-version", "", "API version of the llm")
+		err := cmd.MarkFlagRequired("test-command")
 		if err != nil {
 			errMsg := "failed to mark testCommand as required flag"
 			utils.LogError(c.logger, err, errMsg)
@@ -209,16 +211,16 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "record", "test":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("port", c.cfg.Port, "GraphQL server port used for executing testcases in unit test library integration")
-		cmd.Flags().Uint32("proxyPort", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
-		cmd.Flags().Uint32("dnsPort", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
+		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
+		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
-		cmd.Flags().String("cmdType", c.cfg.CommandType, "Type of command to start the user application (native/docker/docker-compose)")
-		cmd.Flags().Uint64P("buildDelay", "b", c.cfg.BuildDelay, "User provided time to wait docker container build")
-		cmd.Flags().String("containerName", c.cfg.ContainerName, "Name of the application's docker container")
-		cmd.Flags().StringP("networkName", "n", c.cfg.NetworkName, "Name of the application's docker network")
-		cmd.Flags().UintSlice("passThroughPorts", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server and ignore the traffic")
-		cmd.Flags().StringP("appId", "a", c.cfg.AppID, "A unique name for the user's application")
-		cmd.Flags().Bool("generateGithubActions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
+		cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command to start the user application (native/docker/docker-compose)")
+		cmd.Flags().Uint64P("build-delay", "b", c.cfg.BuildDelay, "User provided time to wait docker container build")
+		cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
+		cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the application's docker network")
+		cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server and ignore the traffic")
+		cmd.Flags().StringP("app-id", "a", c.cfg.AppID, "A unique name for the user's application")
+		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
 		err = cmd.Flags().MarkHidden("port")
 		if err != nil {
 			errMsg := "failed to mark port as hidden flag"
@@ -226,35 +228,35 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			return errors.New(errMsg)
 		}
 		if cmd.Name() == "test" {
-			cmd.Flags().StringSliceP("testsets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
+			cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
 			cmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
-			cmd.Flags().Uint64("apiTimeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
-			cmd.Flags().String("mongoPassword", c.cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")
-			cmd.Flags().String("coverageReportPath", c.cfg.Test.CoverageReportPath, "Write a go coverage profile to the file in the given directory.")
+			cmd.Flags().Uint64("api-timeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
+			cmd.Flags().String("mongo-password", c.cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")
+			cmd.Flags().String("coverage-report-path", c.cfg.Test.CoverageReportPath, "Write a go coverage profile to the file in the given directory.")
 			cmd.Flags().StringP("language", "l", c.cfg.Test.Language, "application programming language")
-			cmd.Flags().Bool("ignoreOrdering", c.cfg.Test.IgnoreOrdering, "Ignore ordering of array in response")
+			cmd.Flags().Bool("ignore-ordering", c.cfg.Test.IgnoreOrdering, "Ignore ordering of array in response")
 			cmd.Flags().Bool("coverage", c.cfg.Test.Coverage, "Enable coverage reporting for the testcases. for golang please set language flag to golang, ref https://keploy.io/docs/server/sdk-installation/go/")
-			cmd.Flags().Bool("removeUnusedMocks", c.cfg.Test.RemoveUnusedMocks, "Clear the unused mocks for the passed test-sets")
-			cmd.Flags().Bool("goCoverage", c.cfg.Test.GoCoverage, "Enable go coverage reporting for the testcases")
-			cmd.Flags().Bool("fallBackOnMiss", c.cfg.Test.FallBackOnMiss, "Enable connecting to actual service if mock not found during test mode")
-			cmd.Flags().String("basePath", c.cfg.Test.BasePath, "Custom api basePath/origin to replace the actual basePath/origin in the testcases; App flag is ignored and app will not be started & instrumented when this is set since the application running on a different machine")
+			cmd.Flags().Bool("remove-unused-mocks", c.cfg.Test.RemoveUnusedMocks, "Clear the unused mocks for the passed test-sets")
+			cmd.Flags().Bool("go-coverage", c.cfg.Test.GoCoverage, "Enable go coverage reporting for the testcases")
+			cmd.Flags().Bool("fallBack-on-miss", c.cfg.Test.FallBackOnMiss, "Enable connecting to actual service if mock not found during test mode")
+			cmd.Flags().String("base-path", c.cfg.Test.BasePath, "Custom api basePath/origin to replace the actual basePath/origin in the testcases; App flag is ignored and app will not be started & instrumented when this is set since the application running on a different machine")
 			cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
 		} else {
-			cmd.Flags().Uint64("recordTimer", 0, "User provided time to record its application")
+			cmd.Flags().Uint64("record-timer", 0, "User provided time to record its application")
 			cmd.Flags().StringP("rerecord", "r", c.cfg.Record.ReRecord, "Rerecord the testcases/mocks for the given testset(s)")
 		}
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
-		cmd.PersistentFlags().Bool("disableTele", c.cfg.DisableTele, "Run in telemetry mode")
-		cmd.PersistentFlags().Bool("disableANSI", c.cfg.DisableANSI, "Disable ANSI color in logs")
-		err = cmd.PersistentFlags().MarkHidden("disableTele")
+		cmd.PersistentFlags().Bool("disable-tele", c.cfg.DisableTele, "Run in telemetry mode")
+		cmd.PersistentFlags().Bool("disable-ansi", c.cfg.DisableANSI, "Disable ANSI color in logs")
+		err = cmd.PersistentFlags().MarkHidden("disable-tele")
 		if err != nil {
 			errMsg := "failed to mark telemetry as hidden flag"
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		cmd.PersistentFlags().Bool("enableTesting", c.cfg.EnableTesting, "Enable testing keploy with keploy")
-		err = cmd.PersistentFlags().MarkHidden("enableTesting")
+		cmd.PersistentFlags().Bool("enable-testing", c.cfg.EnableTesting, "Enable testing keploy with keploy")
+		err = cmd.PersistentFlags().MarkHidden("enable-testing")
 		if err != nil {
 			errMsg := "failed to mark enableTesting as hidden flag"
 			utils.LogError(c.logger, err, errMsg)
@@ -266,6 +268,63 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	cmd.Flags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
 
 	return nil
+}
+
+func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
+	var flagNameMapping = map[string]string{
+		"testsets":              "test-sets",
+		"delay":                 "delay",
+		"apiTimeout":            "api-timeout",
+		"mongoPassword":         "mongo-password",
+		"coverageReportPath":    "coverage-report-path",
+		"language":              "language",
+		"ignoreOrdering":        "ignore-ordering",
+		"coverage":              "coverage",
+		"removeUnusedMocks":     "remove-unused-mocks",
+		"goCoverage":            "go-coverage",
+		"fallBackOnMiss":        "fallBack-on-miss",
+		"basePath":              "base-path",
+		"mocking":               "mocking",
+		"sourceFilePath":        "source-file-path",
+		"testFilePath":          "test-file-path",
+		"testCommand":           "test-command",
+		"coverageFormat":        "coverage-format",
+		"expectedCoverage":      "expected-coverage",
+		"maxIterations":         "max-iterations",
+		"testDir":               "test-dir",
+		"llmBaseUrl":            "llm-base-url",
+		"model":                 "model",
+		"llmApiVersion":         "llm-api-version",
+		"configPath":            "config-path",
+		"path":                  "path",
+		"port":                  "port",
+		"proxyPort":             "proxy-port",
+		"dnsPort":               "dns-port",
+		"command":               "command",
+		"cmdType":               "cmd-type",
+		"buildDelay":            "build-delay",
+		"containerName":         "container-name",
+		"networkName":           "network-name",
+		"passThroughPorts":      "pass-through-ports",
+		"appId":                 "app-id",
+		"generateGithubActions": "generate-github-actions",
+		"disableTele":           "disable-tele",
+		"disableANSI":           "disable-ansi",
+		"selectedTests":         "selected-tests",
+		"testReport":            "test-report",
+		"enableTesting":         "enable-testing",
+		"inDocker":              "in-docker",
+		"keployContainer":       "keploy-container",
+		"keployNetwork":         "keploy-network",
+		"recordTimer":           "record-timer",
+		"urlMethods":            "url-methods",
+	}
+
+	if newName, ok := flagNameMapping[name]; ok {
+		name = newName
+	}
+
+	return pflag.NormalizedName(name)
 }
 
 func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) error {
@@ -286,7 +345,6 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 }
 
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
-
 	// used to bind common flags for commands like record, test. For eg: PATH, PORT, COMMAND etc.
 	err := viper.BindPFlags(cmd.Flags())
 	if err != nil {
@@ -294,6 +352,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
+
 	// used to bind flags with environment variables
 	viper.AutomaticEnv()
 	viper.SetEnvPrefix("KEPLOY")
@@ -328,6 +387,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
+
 	if c.cfg.Debug {
 		logger, err := log.ChangeLogLevel(zap.DebugLevel)
 		*c.logger = *logger
@@ -417,7 +477,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				if c.cfg.ContainerName == "" {
 					utils.LogError(c.logger, nil, "Couldn't find containerName")
 					c.logger.Info(`Example usage: keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
-					return errors.New("missing required --containerName flag or containerName in config file")
+					return errors.New("missing required --container-name flag or containerName in config file")
 				}
 			}
 		}

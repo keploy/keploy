@@ -38,20 +38,22 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 	}
 	noise := tc.Noise
 
-	noiseFieldsFound := FindNoisyFields(m, func(_ string, vals []string) bool {
-		// check if k is date
-		for _, v := range vals {
-			if pkg.IsTime(v) {
-				return true
+	if tc.Name == "" {
+		noiseFieldsFound := FindNoisyFields(m, func(_ string, vals []string) bool {
+			// check if k is date
+			for _, v := range vals {
+				if pkg.IsTime(v) {
+					return true
+				}
 			}
+
+			// maybe we need to concatenate the values
+			return pkg.IsTime(strings.Join(vals, ", "))
+		})
+
+		for _, v := range noiseFieldsFound {
+			noise[v] = []string{}
 		}
-
-		// maybe we need to concatenate the values
-		return pkg.IsTime(strings.Join(vals, ", "))
-	})
-
-	for _, v := range noiseFieldsFound {
-		noise[v] = []string{}
 	}
 
 	switch tc.Kind {
@@ -248,10 +250,9 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		switch reflect.ValueOf(httpSpec.Assertions["noise"]).Kind() {
 		case reflect.Map:
 			for k, v := range httpSpec.Assertions["noise"].(map[string]interface{}) {
-				l := strings.ToLower(k)
-				tc.Noise[l] = []string{}
+				tc.Noise[k] = []string{}
 				for _, val := range v.([]interface{}) {
-					tc.Noise[l] = append(tc.Noise[l], val.(string))
+					tc.Noise[k] = append(tc.Noise[k], val.(string))
 				}
 			}
 		case reflect.Slice:

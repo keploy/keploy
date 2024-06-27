@@ -38,7 +38,7 @@ func getTestPS(reqBuff [][]byte, logger *zap.Logger, ConnectionID string) {
 		p := 0
 		for _, header := range actualPgReq.PacketTypes {
 			if header == "P" {
-				if strings.Contains(actualPgReq.Parses[p].Name, "S_") && !IsValuePresent(ConnectionID, actualPgReq.Parses[p].Name) {
+				if (strings.Contains(actualPgReq.Parses[p].Name, "S_") || strings.Contains(actualPgReq.Parses[p].Name, "s")) && !IsValuePresent(ConnectionID, actualPgReq.Parses[p].Name) {
 					querydata = append(querydata, QueryData{PrepIdentifier: actualPgReq.Parses[p].Name, Query: actualPgReq.Parses[p].Query})
 				}
 				p++
