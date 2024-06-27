@@ -834,6 +834,6 @@ func EnsureRmBeforeName(cmd string) string {
 	return strings.Join(parts, " ")
 }
 
-func IsDockerKind(kind CmdType) bool {
+func IsDockerCmd(kind CmdType) bool {
 	return (kind == DockerRun || kind == DockerStart || kind == DockerCompose)
 }
