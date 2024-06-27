@@ -1,4 +1,4 @@
-name: Go
+name: Go on macOS
 
 on:
   pull_request:

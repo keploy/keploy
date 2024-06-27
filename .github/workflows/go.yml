@@ -1,4 +1,4 @@
-name: Go
+name: Go on Linux
 
 on:
   pull_request:
@@ -20,9 +20,9 @@ jobs:
       - name: Build
         run: go build -v ./...
 
-      - name: Build arm 
+      - name: Build arm
         run: GOOS=linux GOARCH=arm64 go build -v ./...
-      
+
       - uses: codfish/semantic-release-action@v1
         with:
           dry_run: true
