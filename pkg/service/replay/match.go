@@ -80,9 +80,9 @@ func match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		a := strings.Split(field, ".")
 		if len(a) > 1 && a[0] == "body" {
 			x := strings.Join(a[1:], ".")
-			bodyNoise[x] = regexArr
+			bodyNoise[strings.ToLower(x)] = regexArr
 		} else if a[0] == "header" {
-			headerNoise[a[len(a)-1]] = regexArr
+			headerNoise[strings.ToLower(a[len(a)-1])] = regexArr
 		}
 	}
 
