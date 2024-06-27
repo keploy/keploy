@@ -115,6 +115,9 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 		defer utils.Recover(h.logger)
 		<-ctx.Done()
 		h.unLoad(ctx)
+
+		//deleting in order to free the memory in case of rerecord.
+		h.sess.Delete(id)
 		return nil
 	})
 

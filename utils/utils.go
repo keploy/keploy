@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"golang.org/x/text/cases"
-	"golang.org/x/text/language"
 	"io"
 	"net"
 	"net/http"
@@ -21,6 +19,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 
 	"github.com/getsentry/sentry-go"
 	netLib "github.com/shirou/gopsutil/v3/net"
@@ -829,6 +830,6 @@ func EnsureRmBeforeName(cmd string) string {
 	return strings.Join(parts, " ")
 }
 
-func IsDockerKind(kind CmdType) bool {
+func IsDockerCmd(kind CmdType) bool {
 	return (kind == DockerRun || kind == DockerStart || kind == DockerCompose)
 }
