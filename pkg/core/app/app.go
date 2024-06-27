@@ -67,7 +67,7 @@ type Options struct {
 
 func (a *App) Setup(_ context.Context) error {
 
-	if utils.IsDockerKind(a.kind) && isDetachMode(a.logger, a.cmd, a.kind) {
+	if utils.IsDockerCmd(a.kind) && isDetachMode(a.logger, a.cmd, a.kind) {
 		return fmt.Errorf("application could not be started in detached mode")
 	}
 
@@ -418,7 +418,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 func (a *App) Run(ctx context.Context, inodeChan chan uint64) models.AppError {
 	a.inodeChan = inodeChan
 
-	if utils.IsDockerKind(a.kind) {
+	if utils.IsDockerCmd(a.kind) {
 		return a.runDocker(ctx)
 	}
 	return a.run(ctx)
@@ -463,7 +463,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// Define the function to cancel the command
 	cmdCancel := func(cmd *exec.Cmd) func() error {
 		return func() error {
-			if utils.IsDockerKind(a.kind) {
+			if utils.IsDockerCmd(a.kind) {
 				a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
 				err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
 				return err
@@ -483,7 +483,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 		}
 	}
 
-	if utils.IsDockerKind(a.kind) {
+	if utils.IsDockerCmd(a.kind) {
 		a.waitTillExit()
 	}
 
