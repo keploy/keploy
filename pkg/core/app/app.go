@@ -130,11 +130,15 @@ func (a *App) SetupCompose() error {
 	// TODO currently we just return the first default docker-compose file found in the current directory
 	// we should add support for multiple docker-compose files by either parsing cmd for path
 	// or by asking the user to provide the path
-	path := findComposeFile()
+	// kdocker-compose.yaml file will be run instead of the user docker-compose.yaml file acc to below cases
+
+	path := findComposeFile(a.cmd)
 	if path == "" {
 		return errors.New("can't find the docker compose file of user. Are you in the right directory? ")
 	}
-	// kdocker-compose.yaml file will be run instead of the user docker-compose.yaml file acc to below cases
+
+	a.logger.Info(fmt.Sprintf("Found docker compose file path: %s", path))
+
 	newPath := "docker-compose-tmp.yaml"
 
 	compose, err := a.docker.ReadComposeFile(path)
