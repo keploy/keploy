@@ -137,7 +137,7 @@ func (a *App) SetupCompose() error {
 		return errors.New("can't find the docker compose file of user. Are you in the right directory? ")
 	}
 
-	a.logger.Info(fmt.Sprintf("Obtained docker compose file path: %s", path))
+	a.logger.Info(fmt.Sprintf("Found docker compose file path: %s", path))
 
 	newPath := "docker-compose-tmp.yaml"
 

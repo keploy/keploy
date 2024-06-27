@@ -18,8 +18,7 @@ import (
 
 func findComposeFile(cmd string) string {
 
-	var cmdArgs []string
-	cmdArgs = strings.Fields(cmd)
+	cmdArgs := strings.Fields(cmd)
 
 	for i := 0; i < len(cmdArgs); i++ {
 		if cmdArgs[i] == "-f" && i+1 < len(cmdArgs) {
