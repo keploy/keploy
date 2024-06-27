@@ -66,7 +66,7 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 
 	var client docker.Client
 	var err error
-	if utils.IsDockerKind(utils.CmdType(c.CommandType)) {
+	if utils.IsDockerCmd(utils.CmdType(c.CommandType)) {
 		client, err = docker.New(logger)
 		if err != nil {
 			utils.LogError(logger, err, "failed to create docker client")

@@ -60,13 +60,17 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		SelectedTests = append(SelectedTests, testSet)
 
 		o.logger.Info("Re-recording testcases for the given testset", zap.String("testset", testSet))
-
+		// Note: Here we've used child context without cancel to avoid the cancellation of the parent context.
+		// When we use errgroup and get an error from any of the go routines spawned by errgroup, it cancels the parent context.
+		// We don't want to stop the execution if there is an error in any of the test-set recording sessions, it should just skip that test-set and continue with the next one.
 		errGrp, _ := errgroup.WithContext(ctx)
 		recordCtx := context.WithoutCancel(ctx)
 		recordCtx, recordCtxCancel := context.WithCancel(recordCtx)
 
 		var errCh = make(chan error, 1)
 		var replayErrCh = make(chan error, 1)
+
+		//Keeping two back-to-back selects is used to not do blocking operation if parent ctx is done
 
 		select {
 		case <-ctx.Done():
@@ -133,50 +137,49 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		}
 	}
 
-	if stopReason == "" {
-		if ctx.Err() != nil {
-			stopReason = "context cancelled"
-			o.logger.Warn("Re-record was cancelled, keploy might have not recorded few test cases")
-			return nil
-		}
-		stopReason = "Re-recorded all the selected testsets successfully"
-		o.logger.Info("Re-record was successfull. Do you want to remove the older testsets?", zap.Any("testsets", SelectedTests))
-		reader := bufio.NewReader(os.Stdin)
-		input, err := reader.ReadString('\n')
-		if err != nil {
-			o.logger.Warn("Failed to read input. The older testsets will be kept.")
-			return nil
-		}
+	if stopReason != "" {
+		utils.LogError(o.logger, err, stopReason)
+		return fmt.Errorf(stopReason)
+	}
 
-		if input == "y\n" || input == "Y\n" {
-			for _, testSet := range SelectedTests {
-				err := o.replay.DeleteTestSet(ctx, testSet)
-				if err != nil {
-					o.logger.Warn("Failed to delete the testset", zap.String("testset", testSet))
-				}
-			}
-			o.logger.Info("Deleted the older testsets successfully")
-		} else if input == "n\n" || input == "N\n" {
-			o.logger.Info("skipping the deletion of older testsets")
-		} else {
-			o.logger.Warn("Invalid input. The older testsets will be kept.")
-		}
+	if ctx.Err() != nil {
+		stopReason = "context cancelled"
+		o.logger.Warn("Re-record was cancelled, keploy might have not recorded few test cases")
 		return nil
 	}
 
-	utils.LogError(o.logger, err, stopReason)
-	return fmt.Errorf(stopReason)
+	stopReason = "Re-recorded all the selected testsets successfully"
+	o.logger.Info("Re-record was successfull. Do you want to remove the older testsets?", zap.Any("testsets", SelectedTests))
+	reader := bufio.NewReader(os.Stdin)
+	input, err := reader.ReadString('\n')
+	if err != nil {
+		o.logger.Warn("Failed to read input. The older testsets will be kept.")
+		return nil
+	}
+
+	if input == "y\n" || input == "Y\n" {
+		for _, testSet := range SelectedTests {
+			err := o.replay.DeleteTestSet(ctx, testSet)
+			if err != nil {
+				o.logger.Warn("Failed to delete the testset", zap.String("testset", testSet))
+			}
+		}
+		o.logger.Info("Deleted the older testsets successfully")
+	} else if input == "n\n" || input == "N\n" {
+		o.logger.Info("skipping the deletion of older testsets")
+	} else {
+		o.logger.Warn("Invalid input. The older testsets will be kept.")
+	}
+	return nil
 }
 
 func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, error) {
-	var err error
-	var errMsg string
 
 	//replay the recorded testcases
 
 	tcs, err := o.replay.GetTestCases(ctx, testSet)
 	if err != nil {
-		errMsg = "Failed to get all testcases"
+		errMsg := "Failed to get all testcases"
 		utils.LogError(o.logger, err, errMsg, zap.String("testset", testSet))
 		return false, fmt.Errorf(errMsg)
 	}
@@ -188,7 +191,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 
 	host, port, err := pkg.ExtractHostAndPort(tcs[0].Curl)
 	if err != nil {
-		errMsg = "failed to extract host and port"
+		errMsg := "failed to extract host and port"
 		utils.LogError(o.logger, err, "")
 		o.logger.Debug("", zap.String("curl", tcs[0].Curl))
 		return false, fmt.Errorf(errMsg)
@@ -196,7 +199,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 	cmdType := utils.CmdType(o.config.CommandType)
 
 	var userIP string
-	if utils.IsDockerKind(cmdType) {
+	if utils.IsDockerCmd(cmdType) {
 		host = o.config.ContainerName
 
 		userIP, err = o.record.GetContainerIP(ctx, o.config.AppID)
@@ -222,7 +225,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 		if ctx.Err() != nil {
 			return false, ctx.Err()
 		}
-		if utils.IsDockerKind(cmdType) {
+		if utils.IsDockerCmd(cmdType) {
 			tc.HTTPReq.URL, err = utils.ReplaceHostToIP(tc.HTTPReq.URL, userIP)
 			if err != nil {
 				utils.LogError(o.logger, err, "failed to replace host to docker container's IP")

@@ -5,11 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/spf13/pflag"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/spf13/pflag"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -217,27 +218,9 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+		//add rest of the uncommon flags for record, test, rerecord commands
+		c.AddUncommonFlags(cmd)
 
-		switch cmd.Name() {
-		case "record":
-			cmd.Flags().Uint64("record-timer", 0, "User provided time to record its application")
-		case "test", "rerecord":
-			cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
-			if cmd.Name() == "test" {
-				cmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
-				cmd.Flags().Uint64("api-timeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
-				cmd.Flags().String("mongo-password", c.cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")
-				cmd.Flags().String("coverage-report-path", c.cfg.Test.CoverageReportPath, "Write a go coverage profile to the file in the given directory.")
-				cmd.Flags().StringP("language", "l", c.cfg.Test.Language, "application programming language")
-				cmd.Flags().Bool("ignore-ordering", c.cfg.Test.IgnoreOrdering, "Ignore ordering of array in response")
-				cmd.Flags().Bool("coverage", c.cfg.Test.Coverage, "Enable coverage reporting for the testcases. for golang please set language flag to golang, ref https://keploy.io/docs/server/sdk-installation/go/")
-				cmd.Flags().Bool("remove-unused-mocks", c.cfg.Test.RemoveUnusedMocks, "Clear the unused mocks for the passed test-sets")
-				cmd.Flags().Bool("go-coverage", c.cfg.Test.GoCoverage, "Enable go coverage reporting for the testcases")
-				cmd.Flags().Bool("fallBack-on-miss", c.cfg.Test.FallBackOnMiss, "Enable connecting to actual service if mock not found during test mode")
-				cmd.Flags().String("base-path", c.cfg.Test.BasePath, "Custom api basePath/origin to replace the actual basePath/origin in the testcases; App flag is ignored and app will not be started & instrumented when this is set since the application running on a different machine")
-				cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
-			}
-		}
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
 		cmd.PersistentFlags().Bool("disable-tele", c.cfg.DisableTele, "Run in telemetry mode")
@@ -261,6 +244,29 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	cmd.Flags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
 
 	return nil
+}
+
+func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
+	switch cmd.Name() {
+	case "record":
+		cmd.Flags().Uint64("record-timer", 0, "User provided time to record its application")
+	case "test", "rerecord":
+		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
+		if cmd.Name() == "test" {
+			cmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
+			cmd.Flags().Uint64("api-timeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
+			cmd.Flags().String("mongo-password", c.cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")
+			cmd.Flags().String("coverage-report-path", c.cfg.Test.CoverageReportPath, "Write a go coverage profile to the file in the given directory.")
+			cmd.Flags().StringP("language", "l", c.cfg.Test.Language, "application programming language")
+			cmd.Flags().Bool("ignore-ordering", c.cfg.Test.IgnoreOrdering, "Ignore ordering of array in response")
+			cmd.Flags().Bool("coverage", c.cfg.Test.Coverage, "Enable coverage reporting for the testcases. for golang please set language flag to golang, ref https://keploy.io/docs/server/sdk-installation/go/")
+			cmd.Flags().Bool("remove-unused-mocks", c.cfg.Test.RemoveUnusedMocks, "Clear the unused mocks for the passed test-sets")
+			cmd.Flags().Bool("go-coverage", c.cfg.Test.GoCoverage, "Enable go coverage reporting for the testcases")
+			cmd.Flags().Bool("fallBack-on-miss", c.cfg.Test.FallBackOnMiss, "Enable connecting to actual service if mock not found during test mode")
+			cmd.Flags().String("base-path", c.cfg.Test.BasePath, "Custom api basePath/origin to replace the actual basePath/origin in the testcases; App flag is ignored and app will not be started & instrumented when this is set since the application running on a different machine")
+			cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
+		}
+	}
 }
 
 func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {

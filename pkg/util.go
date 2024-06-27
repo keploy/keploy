@@ -310,7 +310,7 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 1*time.Second)
+			conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 800*time.Millisecond)
 			if err == nil {
 				err := conn.Close()
 				if err != nil {

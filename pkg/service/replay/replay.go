@@ -368,7 +368,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
 
-		if utils.IsDockerKind(cmdType) {
+		if utils.IsDockerCmd(cmdType) {
 			userIP, err = r.instrumentation.GetContainerIP(ctx, appID)
 			if err != nil {
 				return models.TestSetStatusFailed, err
@@ -443,7 +443,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			break
 		}
 
-		if utils.IsDockerKind(cmdType) && r.config.Test.BasePath == "" {
+		if utils.IsDockerCmd(cmdType) && r.config.Test.BasePath == "" {
 
 			testCase.HTTPReq.URL, err = utils.ReplaceHostToIP(testCase.HTTPReq.URL, userIP)
 			if err != nil {
