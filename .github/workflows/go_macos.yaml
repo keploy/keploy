@@ -7,7 +7,7 @@ on:
 jobs:
 
   build:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v2
         with:
@@ -17,12 +17,12 @@ jobs:
         with:
           go-version: "1.22"
 
-      - name: Build
-        run: go build -v ./...
+      - name: Build amd64
+        run: GOARCH=amd64 go build -v ./...
 
-      - name: Build arm 
-        run: GOOS=linux GOARCH=arm64 go build -v ./...
-      
+      - name: Build arm64
+        run: GOARCH=arm64 go build -v ./...
+
       - uses: codfish/semantic-release-action@v1
         with:
           dry_run: true
