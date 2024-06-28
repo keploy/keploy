@@ -191,8 +191,8 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 				if matchedIndex == -1 {
 					logger.Debug("No matching mock found")
 
-					if !opts.FallBackOnMiss{
-						_,err:= clientConn.Write(([]byte{}))
+					if !opts.FallBackOnMiss {
+						_, err := clientConn.Write(([]byte{}))
 						if err != nil {
 							utils.LogError(logger, err, "failed to write empty response to the client")
 							errCh <- err

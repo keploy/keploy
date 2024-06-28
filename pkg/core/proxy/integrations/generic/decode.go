@@ -71,14 +71,14 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					logger.Debug("the genericRequests are:", zap.Any("h", string(genReq)))
 				}
 
-				if !opts.FallBackOnMiss{
-					_,err:= clientConn.Write(([]byte{}))
+				if !opts.FallBackOnMiss {
+					_, err := clientConn.Write(([]byte{}))
 					if err != nil {
-                        utils.LogError(logger, err, "failed to write empty response to the client")
-                        errCh <- err
-                        return
-                    }
-                    errCh <- nil
+						utils.LogError(logger, err, "failed to write empty response to the client")
+						errCh <- err
+						return
+					}
+					errCh <- nil
 					return
 				}
 

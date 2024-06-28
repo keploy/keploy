@@ -75,14 +75,14 @@ func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					logger.Debug("redisRequests:", zap.Any("h", string(redReq)))
 				}
 
-				if !opts.FallBackOnMiss{
-					_,err:= clientConn.Write(([]byte{}))
+				if !opts.FallBackOnMiss {
+					_, err := clientConn.Write(([]byte{}))
 					if err != nil {
-                        utils.LogError(logger, err, "failed to write empty response to the client")
-                        errCh <- err
-                        return
-                    }
-                    errCh <- nil
+						utils.LogError(logger, err, "failed to write empty response to the client")
+						errCh <- err
+						return
+					}
+					errCh <- nil
 					return
 				}
 
