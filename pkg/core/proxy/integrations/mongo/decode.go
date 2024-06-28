@@ -248,8 +248,8 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				}
 				if !matched {
 					logger.Debug("mongo request not matched with any tcsMocks", zap.Any("request", mongoRequests))
-					if !opts.FallBackOnMiss{
-						_,err:= clientConn.Write(([]byte{}))
+					if !opts.FallBackOnMiss {
+						_, err := clientConn.Write(([]byte{}))
 						if err != nil {
 							utils.LogError(logger, err, "failed to write empty response to the client")
 							errCh <- err
