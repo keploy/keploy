@@ -64,7 +64,8 @@ func kebabToCamel(s string) string {
 func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix string) error {
 	var bindErr error
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
-		err := viper.BindPFlag(kebabToCamel(flag.Name), flag)
+		camelCaseName := kebabToCamel(flag.Name)
+		err := viper.BindPFlag(camelCaseName, flag)
 		if err != nil {
 			LogError(logger, err, "failed to bind flag Name to flag")
 			bindErr = err
@@ -73,8 +74,8 @@ func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix str
 		if viperKeyPrefix == "" {
 			viperKeyPrefix = cmd.Name()
 		}
-		viperKey := viperKeyPrefix + "." + flag.Name
-		envVarName := strings.ToUpper(viperKeyPrefix + "_" + flag.Name)
+		viperKey := viperKeyPrefix + "." + camelCaseName
+		envVarName := strings.ToUpper(viperKeyPrefix + "_" + camelCaseName)
 		envVarName = strings.ReplaceAll(envVarName, ".", "_") // Why do we need this?
 
 		// Bind the flag to Viper with the constructed key
