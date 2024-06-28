@@ -17,7 +17,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
+func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	redisRequests := [][]byte{reqBuf}
 	logger.Debug("Into the redis parser in test mode")
 	errCh := make(chan error, 1)
@@ -73,6 +73,17 @@ func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				logger.Debug("redisRequests before pass through:", zap.Any("length", len(redisRequests)))
 				for _, redReq := range redisRequests {
 					logger.Debug("redisRequests:", zap.Any("h", string(redReq)))
+				}
+
+				if !opts.FallBackOnMiss{
+					_,err:= clientConn.Write(([]byte{}))
+					if err != nil {
+                        utils.LogError(logger, err, "failed to write empty response to the client")
+                        errCh <- err
+                        return
+                    }
+                    errCh <- nil
+					return
 				}
 
 				reqBuffer, err := pUtil.PassThrough(ctx, logger, clientConn, dstCfg, redisRequests)

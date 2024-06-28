@@ -17,7 +17,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
+func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	genericRequests := [][]byte{reqBuf}
 	logger.Debug("Into the generic parser in test mode")
 	errCh := make(chan error, 1)
@@ -69,6 +69,17 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				logger.Debug("the genericRequests before pass through are", zap.Any("length", len(genericRequests)))
 				for _, genReq := range genericRequests {
 					logger.Debug("the genericRequests are:", zap.Any("h", string(genReq)))
+				}
+
+				if !opts.FallBackOnMiss{
+					_,err:= clientConn.Write(([]byte{}))
+					if err != nil {
+                        utils.LogError(logger, err, "failed to write empty response to the client")
+                        errCh <- err
+                        return
+                    }
+                    errCh <- nil
+					return
 				}
 
 				reqBuffer, err := pUtil.PassThrough(ctx, logger, clientConn, dstCfg, genericRequests)
