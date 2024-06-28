@@ -90,7 +90,7 @@ func (cdb *ConfigDb) setInstallationID(ctx context.Context, id string) error {
 	}
 	data = append(data, d...)
 	// Append the Keploy version as a comment in YAML file to facilitate the debugging
-	data = append([]byte(utils.GenerateKeployVersionComment()), data...)
+	data = append([]byte(utils.GetVersionComment()), data...)
 	err = yaml.WriteFile(ctx, cdb.logger, path, "installation-id", data, false)
 	if err != nil {
 		utils.LogError(cdb.logger, err, "failed to write installation id in yaml file")

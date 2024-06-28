@@ -138,7 +138,7 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 		return tcsInfo{name: tcsName, path: tcsPath}, err
 	}
 	// Append the Keploy version as a comment in YAML file to facilitate the debugging
-	data = append([]byte(utils.GenerateKeployVersionComment()), data...)
+	data = append([]byte(utils.GetVersionComment()), data...)
 	err = yaml.WriteFile(ctx, ts.logger, tcsPath, tcsName, data, false)
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to write testcase yaml file")

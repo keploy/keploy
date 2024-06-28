@@ -50,7 +50,7 @@ func (db *Db[T]) Write(ctx context.Context, testSetID string, config T) error {
 		return err
 	}
 	// Append the Keploy version as a comment in YAML file to facilitate the debugging
-	data = append([]byte(utils.GenerateKeployVersionComment()), data...)
+	data = append([]byte(utils.GetVersionComment()), data...)
 	err = yaml.WriteFile(ctx, db.logger, filePath, "config", data, false)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to write test-set configuration in yaml file", zap.String("testSet", testSetID))

@@ -272,7 +272,7 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 
 	finalOutput := append(results, []byte(utils.ConfigGuide)...)
 	// Append the Keploy version as a comment in YAML file to facilitate the debugging
-	finalOutput = append([]byte(utils.GenerateKeployVersionComment()), finalOutput...)
+	finalOutput = append([]byte(utils.GetVersionComment()), finalOutput...)
 
 	err = os.WriteFile(filePath, finalOutput, fs.ModePerm)
 	if err != nil {

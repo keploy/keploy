@@ -117,7 +117,7 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 			utils.LogError(ys.Logger, err, "failed to find yaml file")
 			return err
 		} else if !exists {
-			data = append([]byte(utils.GenerateKeployVersionComment()), data...)
+			data = append([]byte(utils.GetVersionComment()), data...)
 		}
 		err = yaml.WriteFile(ctx, ys.Logger, path, mockFileName, data, true)
 		if err != nil {
@@ -149,7 +149,7 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 		utils.LogError(ys.Logger, err, "failed to find yaml file")
 		return err
 	} else if !exists {
-		data = append([]byte(utils.GenerateKeployVersionComment()), data...)
+		data = append([]byte(utils.GetVersionComment()), data...)
 	}
 	err = yaml.WriteFile(ctx, ys.Logger, mockPath, mockFileName, data, true)
 	if err != nil {
