@@ -111,8 +111,14 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 			utils.LogError(ys.Logger, err, "failed to marshal the mock to yaml", zap.Any("mock", newMock.Name), zap.Any("for testset", testSetID))
 			return err
 		}
-		// Append in each test case and mock the Keploy version as a comment to facilitate the debugging
-		data = append([]byte(utils.GenerateKeployVersionComment()), data...)
+		// Append the Keploy version as a comment in YAML file to facilitate the debugging only
+		// if is a new file, otherwise avoid the comment for appended mocks
+		if exists, err := yaml.FileExists(ctx, ys.Logger, path, mockFileName); err != nil {
+			utils.LogError(ys.Logger, err, "failed to find yaml file")
+			return err
+		} else if !exists {
+			data = append([]byte(utils.GenerateKeployVersionComment()), data...)
+		}
 		err = yaml.WriteFile(ctx, ys.Logger, path, mockFileName, data, true)
 		if err != nil {
 			utils.LogError(ys.Logger, err, "failed to write the mock to yaml", zap.Any("mock", newMock.Name), zap.Any("for testset", testSetID))
@@ -137,8 +143,14 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	if err != nil {
 		return err
 	}
-	// Append in each test case and mock the Keploy version as a comment to facilitate the debugging
-	data = append([]byte(utils.GenerateKeployVersionComment()), data...)
+	// Append the Keploy version as a comment in YAML file to facilitate the debugging only
+	// if is a new file, otherwise avoid the comment for appended mocks
+	if exists, err := yaml.FileExists(ctx, ys.Logger, mockPath, mockFileName); err != nil {
+		utils.LogError(ys.Logger, err, "failed to find yaml file")
+		return err
+	} else if !exists {
+		data = append([]byte(utils.GenerateKeployVersionComment()), data...)
+	}
 	err = yaml.WriteFile(ctx, ys.Logger, mockPath, mockFileName, data, true)
 	if err != nil {
 		return err

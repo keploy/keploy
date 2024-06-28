@@ -89,7 +89,7 @@ func (db *Db) setInstallationID(ctx context.Context, id string) error {
 		return fmt.Errorf("failed to marshal document to yaml. error: %s", err.Error())
 	}
 	data = append(data, d...)
-	// Append in each test case and mock the Keploy version as a comment to facilitate the debugging
+	// Append the Keploy version as a comment in YAML file to facilitate the debugging
 	data = append([]byte(utils.GenerateKeployVersionComment()), data...)
 	err = yaml.WriteFile(ctx, db.logger, path, "installation-id", data, false)
 	if err != nil {

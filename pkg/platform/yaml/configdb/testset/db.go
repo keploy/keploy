@@ -49,7 +49,7 @@ func (db *Db[T]) Write(ctx context.Context, testSetID string, config T) error {
 		utils.LogError(db.logger, err, "failed to marshal test-set config file", zap.String("testSet", testSetID))
 		return err
 	}
-	// Append in each test case and mock the Keploy version as a comment to facilitate the debugging
+	// Append the Keploy version as a comment in YAML file to facilitate the debugging
 	data = append([]byte(utils.GenerateKeployVersionComment()), data...)
 	err = yaml.WriteFile(ctx, db.logger, filePath, "config", data, false)
 	if err != nil {

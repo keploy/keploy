@@ -102,7 +102,7 @@ func (fe *TestReport) InsertReport(ctx context.Context, testRunID string, testSe
 	}
 	data = append(data, d...)
 
-	// Append in each test case and mock the Keploy version as a comment to facilitate the debugging
+	// Append the Keploy version as a comment in YAML file to facilitate the debugging
 	data = append([]byte(utils.GenerateKeployVersionComment()), data...)
 	err = yaml.WriteFile(ctx, fe.Logger, reportPath, testReport.Name, data, false)
 	if err != nil {

@@ -2,6 +2,7 @@ package yaml
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -56,6 +57,21 @@ func (cw *ctxWriter) Write(p []byte) (n int, err error) {
 		p = p[written:]
 	}
 	return n, nil
+}
+
+func FileExists(ctx context.Context, logger *zap.Logger, path, fileName string) (bool, error) {
+	yamlPath, err := ValidatePath(filepath.Join(path, fileName+".yaml"))
+	if err != nil {
+		utils.LogError(logger, err, "failed to validate the yaml file path", zap.String("path directory", path), zap.String("yaml", fileName))
+		return false, err
+	}
+	if _, err := os.Stat(yamlPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func WriteFile(ctx context.Context, logger *zap.Logger, path, fileName string, docData []byte, isAppend bool) error {
