@@ -10,6 +10,7 @@ import (
 type Config struct {
 	Path                  string       `json:"path" yaml:"path" mapstructure:"path"`
 	AppID                 uint64       `json:"appId" yaml:"appId" mapstructure:"appId"`
+	AppName               string       `json:"appName" yaml:"appName" mapstructure:"appName"`
 	Command               string       `json:"command" yaml:"command" mapstructure:"command"`
 	Port                  uint32       `json:"port" yaml:"port" mapstructure:"port"`
 	DNSPort               uint32       `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`

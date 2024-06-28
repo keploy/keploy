@@ -11,6 +11,7 @@ import (
 var defaultConfig = `
 path: ""
 appId: 0
+appName: ""
 command: ""
 port: 0
 proxyPort: 16789
