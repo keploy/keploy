@@ -71,10 +71,15 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 		quotedArgs = append(quotedArgs, strconv.Quote(arg))
 	}
 	client, err := docker.New(logger)
+	if err != nil {
+		utils.LogError(logger, err, "failed to initalise docker")
+		return err
+	}
 	addKeployNetwork(ctx, logger, client)
 	err = client.CreateVolume(ctx, "debugfs", true)
 	if err != nil {
 		utils.LogError(logger, err, "failed to debugfs volume")
+		return err
 	}
 
 	var cmd *exec.Cmd
