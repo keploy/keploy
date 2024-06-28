@@ -5,18 +5,23 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"net/http"
 	"os"
+
+	// "reflect"
 	"strconv"
 	"strings"
 	"time"
-	"encoding/json"
 
 	"go.keploy.io/server/v2/pkg/models"
-	"github.com/hoisie/mustache"
+	// "github.com/hoisie/mustache"
+	"text/template"
+
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -79,6 +84,53 @@ func IsTime(stringDate string) bool {
 	return false
 }
 
+func toInt(value interface{}) int {
+	switch v := value.(type) {
+	case int:
+		return v
+	case string:
+		i, err := strconv.Atoi(v)
+		if err != nil {
+			log.Fatal("failed to convert string to int", zap.Error(err))
+			return 0
+		}
+		return i
+	case float64:
+		return int(v)
+
+	}
+	return 0
+}
+
+func toString(value interface{}) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case int:
+		return strconv.Itoa(v)
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	}
+	return ""
+}
+
+func toFloat(value interface{}) float64 {
+	switch v := value.(type) {
+	case float64:
+		return v
+	case string:
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			log.Fatal("failed to convert string to float", zap.Error(err))
+			return 0
+		}
+		return f
+	case int:
+		return float64(v)
+	}
+	return 0
+}
+
 func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HTTPResp, error) {
 	var resp *models.HTTPResp
 	// convert testcase to string and render the template values.
@@ -86,10 +138,24 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	if err != nil {
 		logger.Error("failed to marshal the testcase")
 	}
-	testCaseStr = []byte(mustache.Render(string(testCaseStr), utils.TemplatizedValues))
+	funcMap := template.FuncMap{
+		"int": toInt,
+		"string": toString,
+		"float": toFloat,
+	}
+	tmpl, err := template.New("template").Funcs(funcMap).Parse(string(testCaseStr))
+	if err != nil {
+		logger.Error("failed to parse the testcase using template", zap.Error(err))
+	}
+	var output bytes.Buffer
+	err = tmpl.Execute(&output, utils.TemplatizedValues)
+	if err != nil {
+		logger.Error("failed to execute the template")
+	}
+	testCaseStr = output.Bytes()
 	err = json.Unmarshal([]byte(testCaseStr), &tc)
 	if err != nil {
-		logger.Error("failed to unmarshal the testcase")
+		logger.Error("failed to unmarshal the testcase", zap.Error(err))
 	}
 	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, bytes.NewBufferString(tc.HTTPReq.Body))

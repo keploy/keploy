@@ -28,15 +28,10 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 	filePath := filepath.Join(db.path, testSetID)
 
 	var config T
-	data, err := yaml.ReadFile(ctx, db.logger, filePath, "config")
-	if err != nil {
-		if err.Error() == "no such file or directory" {
-			return config, nil
-		}
-		utils.LogError(db.logger, err, "failed to read the config from yaml")
-		return config, err
+	data, _ := yaml.ReadFile(ctx, db.logger, filePath, "config")
+	if data == nil {
+		return config, nil
 	}
-
 	if err := yamlLib.Unmarshal(data, &config); err != nil {
 		db.logger.Info("failed to decode the configuration file", zap.Error(err))
 		return config, err

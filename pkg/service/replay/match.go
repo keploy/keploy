@@ -181,40 +181,58 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 						var resultMap map[string]interface{}
 						err := json.Unmarshal([]byte(stringVal), &resultMap)
 						if err != nil {
-							fmt.Println("failed to unmarshal it to a map")
+							logger.Error("failed to unmarshal it to a map", zap.Error(err))
 							break
 						}
 						for resKey, val1 := range resultMap {
 							// Check if this val is in the templatized values.
 							for tempKey, tempVal := range utils.TemplatizedValues {
-								fmt.Println("This is the new val1", val1)
 								if val1 == tempVal {
 									// Get the new value for this and update it in the templatized values.
 									newValStr := val.Value.(string)
 									var newResultMap map[string]interface{}
 									err := json.Unmarshal([]byte(newValStr), &newResultMap)
 									if err != nil {
-										fmt.Println("failed to unmarshal new values to a map")
+										logger.Error("failed to unmarshal new values to a map", zap.Error(err))
 										break
 									}
+									resultMap[resKey] = newResultMap[resKey]
 									utils.TemplatizedValues[tempKey] = newResultMap[resKey]
-									fmt.Println("This is the new result match", newResultMap[resKey])
 								}
 							}
 							stringVal, ok := val1.(map[string]interface{})
-							fmt.Println("ok when converting to string", ok)
 							if ok {
 								for _, val2 := range stringVal {
 									for _, tempVal := range utils.TemplatizedValues {
 										if val2 == tempVal {
-											fmt.Println("This is the value of the templatized value:", val2)
+											// Get the new value for this and update it in the templatized values.
+											newValStr := val.Value.(string)
+											var newResultMap map[string]interface{}
+											err := json.Unmarshal([]byte(newValStr), &newResultMap)
+											if err != nil {
+												logger.Error("failed to unmarshal new values to a map", zap.Error(err))
+												break
+											}
+											stringVal[resKey] = newResultMap[resKey]
+											utils.TemplatizedValues[resKey] = newResultMap[resKey]
 										}
 									}
 								}
 							}
 
 						}
+						// Convert it back to a string.
+						jsonBody, err := json.Marshal(resultMap)
+						if err != nil {
+							logger.Error("failed to marshal the response back")
+							break
+						}
+						tc.HTTPResp.Body = string(jsonBody)
 					}
+				}
+				patch, err = jsondiff.Compare(tc.HTTPResp.Body, actualResponse.Body)
+				if err != nil {
+					logger.Warn("failed to compute json diff", zap.Error(err))
 				}
 				for _, op := range patch {
 					if jsonComparisonResult.matches {

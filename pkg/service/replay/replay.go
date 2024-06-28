@@ -143,6 +143,14 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 		requestMockemulator.ProcessMockFile(ctx, testSetID)
 		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, inst.AppID, false)
+		if r.config.Test.UpdateTemp || r.config.Test.BasePath != "" {
+			noQuotes(utils.TemplatizedValues)
+			// Write the templatized values to the yaml.
+			err = r.TestSetConf.Write(ctx, testSetID, &models.TestSet{Template: utils.TemplatizedValues})
+			if err != nil {
+				r.logger.Error("failed to write the config file", zap.Error(err))
+			}
+		}
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)
 			utils.LogError(r.logger, err, stopReason)
@@ -267,13 +275,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if r.config.Test.BasePath != "" {
 		//Execute the Pre-script before each test-set if provided
 		conf, err = r.TestSetConf.Read(runTestSetCtx, testSetID)
-		if err != nil {
-			return models.TestSetStatusFailed, fmt.Errorf("failed to read test set config: %w", err)
+		if err != nil || conf == nil {
+			conf = &models.TestSet{}
+			conf.PreScript = ""
+			conf.PostScript = ""
 		}
-		if conf == nil {
-			return models.TestSetStatusFailed, fmt.Errorf("test set config not found")
-		}
-			postscript = conf.PostScript
+		postscript = conf.PostScript
 
 		r.logger.Info("Running Pre-script", zap.String("script", conf.PreScript), zap.String("test-set", testSetID))
 		err = r.executeScript(runTestSetCtx, conf.PreScript)
@@ -528,7 +535,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			time.Sleep(time.Second)
 		}
 	}
-
 	//Execute the Post-script after each test-set if provided
 	if r.config.Test.BasePath != "" {
 		r.logger.Info("Running Post-script", zap.String("script", postscript), zap.String("test-set", testSetID))
@@ -757,177 +763,191 @@ func (r *Replayer) RunApplication(ctx context.Context, appID uint64, opts models
 	return r.instrumentation.Run(ctx, appID, opts)
 }
 
-func (r *Replayer) Templatize(ctx context.Context, testSetId string) error {
+func (r *Replayer) Templatize(ctx context.Context) error {
 	// path:=filepath.Join(r.config.Path, testSetId)
-	testSet, err := r.TestSetConf.Read(ctx, testSetId)
-	if err != nil || testSet == nil {
-		utils.TemplatizedValues = map[string]interface{}{}
-	} else {
-		utils.TemplatizedValues = testSet.Template
-	}
-
-	tcs, err := r.testDB.GetTestCases(ctx, testSetId)
-	if err != nil {
-		utils.LogError(r.logger, err, "failed to get test cases")
-		return err
-	}
-	for i := 0; i < len(tcs)-1; i++ {
-		jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
-		if err != nil {
-			r.logger.Error("failed to parse response into json", zap.Error(err))
-			return err
-		} else if jsonResponse == nil {
-			continue
+	for _, testSetId := range r.config.Templatize.TestSets {
+		testSet, err := r.TestSetConf.Read(ctx, testSetId)
+		if err != nil || testSet == nil {
+			utils.TemplatizedValues = map[string]interface{}{}
+		} else {
+			utils.TemplatizedValues = testSet.Template
 		}
-		// Compare the keys to the headers.
-		for j := i + 1; j < len(tcs); j++ {
-			compareVals(tcs[j].HTTPReq.Header, jsonResponse)
-			// Write the new headers to the file.
-			err = r.testDB.UpdateTestCase(ctx, tcs[j], testSetId)
+		tcs, err := r.testDB.GetTestCases(ctx, testSetId)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to get test cases")
+			return err
+		}
+		if len(tcs) == 0 {
+			r.logger.Warn("The test set is empty. Please record some testcases to templatize.", zap.String("testSet:", testSetId))
+		}
+		for i := 0; i < len(tcs)-1; i++ {
+			// if tcs[i].HTTPResp.Header["Content-Type"] != "application/json" {
+			// 	continue
+			// }
+			jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
+			if err != nil {
+				r.logger.Error("failed to parse response into json", zap.Error(err))
+				return err
+			} else if jsonResponse == nil {
+				continue
+			}
+			// Compare the keys to the headers.
+			for j := i + 1; j < len(tcs); j++ {
+				compareVals(tcs[j].HTTPReq.Header, &jsonResponse)
+				// Write the new headers to the file.
+				err = r.testDB.UpdateTestCase(ctx, tcs[j], testSetId)
+				if err != nil {
+					r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
+				}
+			}
+			// Add the jsonResponse back to tcs.
+			jsonData, err := json.Marshal(jsonResponse)
+			if err != nil {
+				r.logger.Error("failed to marshal json data", zap.Error(err))
+				return err
+			}
+			tcs[i].HTTPResp.Body = string(jsonData)
+			// Write the new response to the file.
+			err = r.testDB.UpdateTestCase(ctx, tcs[i], testSetId)
 			if err != nil {
 				r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
 			}
 		}
-		// Add the jsonResponse back to tcs.
-		jsonData, err := json.Marshal(jsonResponse)
-		if err != nil {
-			r.logger.Error("failed to marshal json data", zap.Error(err))
-			return err
-		}
-		tcs[i].HTTPResp.Body = string(jsonData)
-		// Write the new response to the file.
-		err = r.testDB.UpdateTestCase(ctx, tcs[i], testSetId)
-		if err != nil {
-			r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
-		}
-	}
 
-	// Compare the requests for the common fields.
-	for i := 0; i < len(tcs)-1; i++ {
-		// Check for headers first.
-		for j := i + 1; j < len(tcs); j++ {
-			compareReqHeaders(tcs[i].HTTPReq.Header, tcs[j].HTTPReq.Header)
-			err = r.testDB.UpdateTestCase(ctx, tcs[j], testSetId)
+		// Compare the requests for the common fields.
+		for i := 0; i < len(tcs)-1; i++ {
+			// Check for headers first.
+			for j := i + 1; j < len(tcs); j++ {
+				compareReqHeaders(tcs[i].HTTPReq.Header, tcs[j].HTTPReq.Header)
+				err = r.testDB.UpdateTestCase(ctx, tcs[j], testSetId)
+				if err != nil {
+					r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
+				}
+			}
+			// Record the new testcases.
+			err = r.testDB.UpdateTestCase(ctx, tcs[i], testSetId)
 			if err != nil {
 				r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
 			}
 		}
-		// Record the new testcases.
-		err = r.testDB.UpdateTestCase(ctx, tcs[i], testSetId)
-		if err != nil {
-			r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
-		}
-	}
 
-	// Check the url for any common fields.
-	for i := 0; i < len(tcs)-1; i++ {
-		jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
-		if err != nil {
-			r.logger.Error("failed to parse response into json", zap.Error(err))
-			return err
-		} else if jsonResponse == nil {
-			continue
-		}
-		for j := i + 1; j < len(tcs); j++ {
-			compareVals(&tcs[j].HTTPReq.URL, jsonResponse)
-			err = r.testDB.UpdateTestCase(ctx, tcs[j], testSetId)
+		// Check the url for any common fields.
+		for i := 0; i < len(tcs)-1; i++ {
+			// if tcs[i].HTTPResp.Header["Content-Type"] != "application/json" {
+			// 	continue
+			// }
+			jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
+			if err != nil {
+				r.logger.Error("failed to parse response into json", zap.Error(err))
+				return err
+			} else if jsonResponse == nil {
+				continue
+			}
+			for j := i + 1; j < len(tcs); j++ {
+				compareVals(&tcs[j].HTTPReq.URL, &jsonResponse)
+				err = r.testDB.UpdateTestCase(ctx, tcs[j], testSetId)
+				if err != nil {
+					r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
+				}
+			}
+			// Record the new testcase.
+			jsonData, err := json.Marshal(jsonResponse)
+			if err != nil {
+				r.logger.Error("failed to marshal json data", zap.Error(err))
+				return err
+			}
+			tcs[i].HTTPResp.Body = string(jsonData)
+			err = r.testDB.UpdateTestCase(ctx, tcs[i], testSetId)
 			if err != nil {
 				r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
 			}
 		}
-		// Record the new testcase.
-		jsonData, err := json.Marshal(jsonResponse)
-		if err != nil {
-			r.logger.Error("failed to marshal json data", zap.Error(err))
-			return err
-		}
-		tcs[i].HTTPResp.Body = string(jsonData)
-		err = r.testDB.UpdateTestCase(ctx, tcs[i], testSetId)
-		if err != nil {
-			r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
-		}
-	}
 
-	// Check the urls params for any common fields.
-	for i := 0; i < len(tcs)-1; i++ {
-		jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
-		if err != nil {
-			r.logger.Error("failed to parse response into json", zap.Error(err))
-			return err
-		} else if jsonResponse == nil {
-			continue
-		}
-		for j := i + 1; j < len(tcs); j++ {
-			compareVals(tcs[j].HTTPReq.URLParams, jsonResponse)
-			err = r.testDB.UpdateTestCase(ctx, tcs[j], testSetId)
+		// Check the urls params for any common fields.
+		for i := 0; i < len(tcs)-1; i++ {
+			// if tcs[i].HTTPResp.Header["Content-Type"] != "application/json" {
+			// 	continue
+			// }
+			jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
+			if err != nil {
+				r.logger.Error("failed to parse response into json", zap.Error(err))
+				return err
+			} else if jsonResponse == nil {
+				continue
+			}
+			for j := i + 1; j < len(tcs); j++ {
+				compareVals(tcs[j].HTTPReq.URLParams, &jsonResponse)
+				err = r.testDB.UpdateTestCase(ctx, tcs[j], testSetId)
+				if err != nil {
+					r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
+				}
+			}
+			// Record the new testcase.
+			jsonData, err := json.Marshal(jsonResponse)
+			if err != nil {
+				r.logger.Error("failed to marshal json data", zap.Error(err))
+				return err
+			}
+			tcs[i].HTTPResp.Body = string(jsonData)
+			err = r.testDB.UpdateTestCase(ctx, tcs[i], testSetId)
 			if err != nil {
 				r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
 			}
+
 		}
-		// Record the new testcase.
-		jsonData, err := json.Marshal(jsonResponse)
+
+		// Compare the req and resp body for any common fields.
+		// for i := 0; i < len(tcs)-1; i++ {
+		// 	jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
+		// 	if err != nil {
+		// 		r.logger.Error("failed to parse response into json", zap.Error(err))
+		// 		return err
+		// 	} else if jsonResponse == nil {
+		// 		continue
+		// 	}
+		// 	for j := i + 1; j < len(tcs); j++ {
+		// 		jsonRequest, err := parseIntoJson(tcs[j].HTTPReq.Body)
+		// 		if err != nil {
+		// 			r.logger.Error("failed to parse request into json", zap.Error(err))
+		// 			return err
+		// 		} else if jsonResponse == nil {
+		// 			continue
+		// 		}
+		// 		compareVals(jsonRequest, jsonResponse)
+		// 		jsonData, err := json.Marshal(jsonRequest)
+		// 		if err != nil {
+		// 			r.logger.Error("failed to marshal json data", zap.Error(err))
+		// 			continue
+		// 		}
+		// 		tcs[j].HTTPReq.Body = string(jsonData)
+		// 		err = r.testDB.UpdateTestCase(ctx, tcs[j], testSetId)
+		// 		if err != nil {
+		// 			r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
+		// 		}
+		// 	}
+		// 	// Record the new testcase.
+		// 	jsonData, err := json.Marshal(jsonResponse)
+		// 	if err != nil {
+		// 		r.logger.Error("failed to marshal json data", zap.Error(err))
+		// 		return err
+		// 	}
+		// 	tcs[i].HTTPResp.Body = string(jsonData)
+		// 	err = r.testDB.UpdateTestCase(ctx, tcs[i], testSetId)
+		// 	if err != nil {
+		// 		r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
+		// 	}
+		// }
+
+		noQuotes(utils.TemplatizedValues)
+		err = r.TestSetConf.Write(ctx, testSetId, &models.TestSet{
+			PreScript:  "",
+			PostScript: "",
+			Template:   utils.TemplatizedValues,
+		})
 		if err != nil {
-			r.logger.Error("failed to marshal json data", zap.Error(err))
+			r.logger.Error("failed to write the testset", zap.Error(err))
 			return err
 		}
-		tcs[i].HTTPResp.Body = string(jsonData)
-		err = r.testDB.UpdateTestCase(ctx, tcs[i], testSetId)
-		if err != nil {
-			r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
-		}
-
-	}
-
-	// Compare the req and resp body for any common fields.
-	// for i := 0; i < len(tcs)-1; i++ {
-	// 	jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
-	// 	if err != nil {
-	// 		r.logger.Error("failed to parse response into json", zap.Error(err))
-	// 		return err
-	// 	} else if jsonResponse == nil {
-	// 		continue
-	// 	}
-	// 	for j := i + 1; j < len(tcs); j++ {
-	// 		jsonRequest, err := parseIntoJson(tcs[j].HTTPReq.Body)
-	// 		if err != nil {
-	// 			r.logger.Error("failed to parse request into json", zap.Error(err))
-	// 			return err
-	// 		} else if jsonResponse == nil {
-	// 			continue
-	// 		}
-	// 		compareVals(jsonRequest, jsonResponse)
-	// 		jsonData, err := json.Marshal(jsonRequest)
-	// 		if err != nil {
-	// 			r.logger.Error("failed to marshal json data", zap.Error(err))
-	// 			continue
-	// 		}
-	// 		tcs[j].HTTPReq.Body = string(jsonData)
-	// 		err = r.testDB.UpdateTestCase(ctx, tcs[j], testSetId)
-	// 		if err != nil {
-	// 			r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
-	// 		}
-	// 	}
-	// 	// Record the new testcase.
-	// 	jsonData, err := json.Marshal(jsonResponse)
-	// 	if err != nil {
-	// 		r.logger.Error("failed to marshal json data", zap.Error(err))
-	// 		return err
-	// 	}
-	// 	tcs[i].HTTPResp.Body = string(jsonData)
-	// 	err = r.testDB.UpdateTestCase(ctx, tcs[i], testSetId)
-	// 	if err != nil {
-	// 		r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
-	// 	}
-	// }
-
-	err = r.TestSetConf.Write(ctx, testSetId, &models.TestSet{
-		PreScript:  "",
-		PostScript: "",
-		Template:   utils.TemplatizedValues,
-	})
-	if err != nil {
-		r.logger.Error("failed to write the testset", zap.Error(err))
-		return err
 	}
 	return nil
 }

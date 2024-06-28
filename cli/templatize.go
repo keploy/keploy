@@ -28,8 +28,6 @@ func Templatize(ctx context.Context, logger *zap.Logger, conf *config.Config, se
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Read the testcases from the path provided.
-			for _, testSet := range conf.Templatize.TestSets {
-				println("This is the value of the testSet:", testSet)
 				// utils.ReadTempValues(testSet)
 				// Get the replay service.
 				svc, err := serviceFactory.GetService(ctx, cmd.Name())
@@ -43,7 +41,7 @@ func Templatize(ctx context.Context, logger *zap.Logger, conf *config.Config, se
 					utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
 					return nil
 				}
-				if err := replay.Templatize(ctx, testSet); err != nil {
+				if err := replay.Templatize(ctx); err != nil {
 					utils.LogError(logger, err, "failed to templatize test cases")
 					return nil
 				}
@@ -203,7 +201,6 @@ func Templatize(ctx context.Context, logger *zap.Logger, conf *config.Config, se
 				// 	// Compare the key and value of both the request and response
 				// 	compareReqandResp(jsonRequest, jsonResponse)
 				// }
-			}
 			return nil
 		},
 	}
@@ -243,8 +240,8 @@ func compareReqHeaders(req1 map[string]string, req2 map[string]string) {
 				if newKey == "" {
 					newKey = key
 				}
-				req2[key] = fmt.Sprintf("{{ %s }}", newKey)
-				req1[key] = fmt.Sprintf("{{ %s }}", newKey)
+				req2[key] = fmt.Sprintf("{{.%s}}", newKey)
+				req1[key] = fmt.Sprintf("{{.%s}}", newKey)
 			}
 		}
 	}

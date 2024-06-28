@@ -90,6 +90,7 @@ type Test struct {
 	FallBackOnMiss     bool                `json:"fallBackOnMiss" yaml:"fallBackOnMiss" mapstructure:"fallBackOnMiss"`
 	BasePath           string              `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
 	Mocking            bool                `json:"mocking" yaml:"mocking" mapstructure:"mocking"`
+	UpdateTemp         bool                `json:"updateTemp" yaml:"updateTemp" mapstructure:"updateTemp"`
 }
 
 type Globalnoise struct {
