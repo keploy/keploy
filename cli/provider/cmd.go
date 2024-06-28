@@ -210,6 +210,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the application's docker network")
 		cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server and ignore the traffic")
 		cmd.Flags().Uint64P("app-id", "a", c.cfg.AppID, "A unique name for the user's application")
+		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
 		err = cmd.Flags().MarkHidden("port")
 		if err != nil {
@@ -305,6 +306,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"networkName":           "network-name",
 		"passThroughPorts":      "pass-through-ports",
 		"appId":                 "app-id",
+		"appName":               "app-name",
 		"generateGithubActions": "generate-github-actions",
 		"disableTele":           "disable-tele",
 		"disableANSI":           "disable-ansi",
