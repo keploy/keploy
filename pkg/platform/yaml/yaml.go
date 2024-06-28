@@ -59,7 +59,7 @@ func (cw *ctxWriter) Write(p []byte) (n int, err error) {
 	return n, nil
 }
 
-func FileExists(ctx context.Context, logger *zap.Logger, path, fileName string) (bool, error) {
+func FileExists(_ context.Context, logger *zap.Logger, path, fileName string) (bool, error) {
 	yamlPath, err := ValidatePath(filepath.Join(path, fileName+".yaml"))
 	if err != nil {
 		utils.LogError(logger, err, "failed to validate the yaml file path", zap.String("path directory", path), zap.String("yaml", fileName))
