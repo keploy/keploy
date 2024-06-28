@@ -911,10 +911,7 @@ func CheckStringExist(s string, mp map[string][]string) ([]string, bool) {
 	if val, ok := mp[s]; ok {
 		return val, ok
 	}
-	ok, val := MatchesAnyRegex(s, MapToArray(mp))
-	if ok {
-		return mp[val], ok
-	}
+
 	return []string{}, false
 }
 
