@@ -21,7 +21,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 	var notTemplatized []string
 	for testSet := range o.config.Test.SelectedTests {
 		conf, err := o.TestSetConf.Read(ctx, testSet)
-		if err != nil || conf.Template == nil {
+		if err != nil || conf == nil || conf.Template == nil {
 			notTemplatized = append(notTemplatized, testSet)
 		}
 	}
@@ -261,10 +261,14 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 		// Read the template values.
 		templateValues, err := o.TestSetConf.Read(ctx, testSet)
 		if err != nil {
-			utils.LogError(o.logger, err, "failed to read the template values")
-			break
+			o.logger.Debug("failed to read template values")
 		}
-		utils.TemplatizedValues	= templateValues.Template
+		if templateValues == nil {
+			utils.TemplatizedValues = map[string]interface{}{}
+		} else {
+			utils.TemplatizedValues = templateValues.Template
+		}
+
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSet, o.logger, o.config.Test.APITimeout)
 		if err != nil {
 			utils.LogError(o.logger, err, "failed to simulate HTTP request")

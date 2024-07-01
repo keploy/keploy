@@ -3,6 +3,7 @@
 package replay
 
 import (
+	// "bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,10 +11,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	// "reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"syscall"
+	// "text/template"
 	"time"
 
 	"github.com/k0kubun/pp/v3"
@@ -906,48 +909,63 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 		}
 
 		// Compare the req and resp body for any common fields.
-		for i := 0; i < len(tcs)-1; i++ {
-			// Render the template on the response body.
-
-			jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
-			if err != nil {
-				r.logger.Error("failed to parse response into json", zap.Error(err))
-				return err
-			} else if jsonResponse == nil {
-				continue
-			}
-			for j := i + 1; j < len(tcs); j++ {
-				jsonRequest, err := parseIntoJson(tcs[j].HTTPReq.Body)
-				if err != nil {
-					r.logger.Error("failed to parse request into json", zap.Error(err))
-					return err
-				} else if jsonResponse == nil {
-					continue
-				}
-				compareVals(jsonRequest, &jsonResponse)
-				jsonData, err := json.Marshal(jsonRequest)
-				if err != nil {
-					r.logger.Error("failed to marshal json data", zap.Error(err))
-					continue
-				}
-				tcs[j].HTTPReq.Body = string(jsonData)
-				err = r.testDB.UpdateTestCase(ctx, tcs[j], testSetId)
-				if err != nil {
-					r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
-				}
-			}
-			// Record the new testcase.
-			jsonData, err := json.Marshal(jsonResponse)
-			if err != nil {
-				r.logger.Error("failed to marshal json data", zap.Error(err))
-				return err
-			}
-			tcs[i].HTTPResp.Body = string(jsonData)
-			err = r.testDB.UpdateTestCase(ctx, tcs[i], testSetId)
-			if err != nil {
-				r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
-			}
-		}
+		// for i := 0; i < len(tcs)-1; i++ {
+		// 	jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
+		// 	if err != nil {
+		// 		r.logger.Error("failed to parse response into json", zap.Error(err))
+		// 		return err
+		// 	} else if jsonResponse == nil {
+		// 		continue
+		// 	}
+		// 	// Render the template on the response body.
+		// 	funcMap := template.FuncMap{
+		// 		"int":    utils.ToInt,
+		// 		"string": utils.ToString,
+		// 		"float":  utils.ToFloat,
+		// 	}
+		// 	fmt.Println("This is the json response", reflect.TypeOf(jsonResponse))
+		// 	tmpl, err := template.New("template").Funcs(funcMap).Parse(jsonResponse.(string))
+		// 	if err != nil {
+		// 		r.logger.Error("failed to parse the testcase using template", zap.Error(err))
+		// 	}
+		// 	var output bytes.Buffer
+		// 	err = tmpl.Execute(&output, utils.TemplatizedValues)
+		// 	if err != nil {
+		// 		r.logger.Error("failed to execute the template")
+		// 	}
+		// 	jsonResponse = output.String()
+		// 	for j := i + 1; j < len(tcs); j++ {
+		// 		jsonRequest, err := parseIntoJson(tcs[j].HTTPReq.Body)
+		// 		if err != nil {
+		// 			r.logger.Error("failed to parse request into json", zap.Error(err))
+		// 			return err
+		// 		} else if jsonResponse == nil {
+		// 			continue
+		// 		}
+		// 		compareVals(jsonRequest, &jsonResponse)
+		// 		jsonData, err := json.Marshal(jsonRequest)
+		// 		if err != nil {
+		// 			r.logger.Error("failed to marshal json data", zap.Error(err))
+		// 			continue
+		// 		}
+		// 		tcs[j].HTTPReq.Body = string(jsonData)
+		// 		err = r.testDB.UpdateTestCase(ctx, tcs[j], testSetId)
+		// 		if err != nil {
+		// 			r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
+		// 		}
+		// 	}
+		// 	// Record the new testcase.
+		// 	jsonData, err := json.Marshal(jsonResponse)
+		// 	if err != nil {
+		// 		r.logger.Error("failed to marshal json data", zap.Error(err))
+		// 		return err
+		// 	}
+		// 	tcs[i].HTTPResp.Body = string(jsonData)
+		// 	err = r.testDB.UpdateTestCase(ctx, tcs[i], testSetId)
+		// 	if err != nil {
+		// 		r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
+		// 	}
+		// }
 
 		noQuotes(utils.TemplatizedValues)
 		err = r.TestSetConf.Write(ctx, testSetId, &models.TestSet{

@@ -426,6 +426,54 @@ const (
 	Empty         CmdType = ""
 )
 
+func ToInt(value interface{}) int {
+	switch v := value.(type) {
+	case int:
+		return v
+	case string:
+		i, err := strconv.Atoi(v)
+		if err != nil {
+			log.Fatal("failed to convert string to int", zap.Error(err))
+			return 0
+		}
+		return i
+	case float64:
+		return int(v)
+
+	}
+	return 0
+}
+
+func ToString(value interface{}) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case int:
+		return strconv.Itoa(v)
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	}
+	return ""
+}
+
+func ToFloat(value interface{}) float64 {
+	switch v := value.(type) {
+	case float64:
+		return v
+	case string:
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			log.Fatal("failed to convert string to float", zap.Error(err))
+			return 0
+		}
+		return f
+	case int:
+		return float64(v)
+	}
+	return 0
+}
+
+
 func convertPathToUnixStyle(path string) string {
 	// Replace backslashes with forward slashes
 	unixPath := strings.Replace(path, "\\", "/", -1)

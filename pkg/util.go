@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
+	// "log"
 	"net"
 	"net/http"
 	"net/url"
@@ -86,53 +86,6 @@ func IsTime(stringDate string) bool {
 	return false
 }
 
-func toInt(value interface{}) int {
-	switch v := value.(type) {
-	case int:
-		return v
-	case string:
-		i, err := strconv.Atoi(v)
-		if err != nil {
-			log.Fatal("failed to convert string to int", zap.Error(err))
-			return 0
-		}
-		return i
-	case float64:
-		return int(v)
-
-	}
-	return 0
-}
-
-func toString(value interface{}) string {
-	switch v := value.(type) {
-	case string:
-		return v
-	case int:
-		return strconv.Itoa(v)
-	case float64:
-		return strconv.FormatFloat(v, 'f', -1, 64)
-	}
-	return ""
-}
-
-func toFloat(value interface{}) float64 {
-	switch v := value.(type) {
-	case float64:
-		return v
-	case string:
-		f, err := strconv.ParseFloat(v, 64)
-		if err != nil {
-			log.Fatal("failed to convert string to float", zap.Error(err))
-			return 0
-		}
-		return f
-	case int:
-		return float64(v)
-	}
-	return 0
-}
-
 func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HTTPResp, error) {
 	var resp *models.HTTPResp
 	// convert testcase to string and render the template values.
@@ -141,9 +94,9 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		logger.Error("failed to marshal the testcase")
 	}
 	funcMap := template.FuncMap{
-		"int": toInt,
-		"string": toString,
-		"float": toFloat,
+		"int": utils.ToInt,
+		"string": utils.ToString,
+		"float": utils.ToFloat,
 	}
 	tmpl, err := template.New("template").Funcs(funcMap).Parse(string(testCaseStr))
 	if err != nil {
