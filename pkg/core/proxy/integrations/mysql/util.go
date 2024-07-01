@@ -1,11 +1,14 @@
+//go:build linux
+
 package mysql
 
 import (
 	"context"
 	"encoding/binary"
-	"go.uber.org/zap"
 	"log"
 	"net"
+
+	"go.uber.org/zap"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 )

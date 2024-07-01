@@ -1,3 +1,5 @@
+//go:build linux
+
 package replay
 
 import (
@@ -204,6 +206,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		}
 		return &InstrumentState{}, fmt.Errorf("failed to setup instrumentation: %w", err)
 	}
+	r.config.AppID = appID
 
 	var cancel context.CancelFunc
 	// starting the hooks and proxy
@@ -240,6 +243,10 @@ func (r *Replayer) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
 	return r.testDB.GetAllTestSetIDs(ctx)
 }
 
+func (r *Replayer) GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error) {
+	return r.testDB.GetTestCases(ctx, testID)
+}
+
 func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error) {
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
@@ -266,10 +273,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		//Execute the Pre-script before each test-set if provided
 		conf, err = r.testSetConf.Read(runTestSetCtx, testSetID)
 		if err != nil {
-			return models.TestSetStatusFailed, fmt.Errorf("failed to read test set config: %w", err)
+			if strings.Contains(err.Error(), "no such file or directory") {
+				r.logger.Info("config file not found, continuing execution...", zap.String("test-set", testSetID))
+			} else {
+				return models.TestSetStatusFailed, fmt.Errorf("failed to read test set config: %w", err)
+			}
 		}
+
 		if conf == nil {
-			return models.TestSetStatusFailed, fmt.Errorf("test set config not found")
+			conf = &models.TestSet{}
 		}
 		postscript = conf.PostScript
 
@@ -356,7 +368,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
 
-		if utils.IsDockerKind(cmdType) {
+		if utils.IsDockerCmd(cmdType) {
 			userIP, err = r.instrumentation.GetContainerIP(ctx, appID)
 			if err != nil {
 				return models.TestSetStatusFailed, err
@@ -431,7 +443,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			break
 		}
 
-		if utils.IsDockerKind(cmdType) && r.config.Test.BasePath == "" {
+		if utils.IsDockerCmd(cmdType) && r.config.Test.BasePath == "" {
 
 			testCase.HTTPReq.URL, err = utils.ReplaceHostToIP(testCase.HTTPReq.URL, userIP)
 			if err != nil {
@@ -750,6 +762,35 @@ func (r *Replayer) RunApplication(ctx context.Context, appID uint64, opts models
 	return r.instrumentation.Run(ctx, appID, opts)
 }
 
+func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error) {
+
+	testCases, err := r.testDB.GetTestCases(ctx, testSetID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get test cases: %w", err)
+	}
+
+	for _, v := range testCases {
+		for _, noiseParam := range noiseParams {
+			if v.Name == noiseParam.TestCaseID {
+				// append the noise map
+				if noiseParam.Ops == string(models.OpsAdd) {
+					v.Noise = mergeMaps(v.Noise, noiseParam.Assertion)
+				} else {
+					// remove from the original noise map
+					v.Noise = removeFromMap(v.Noise, noiseParam.Assertion)
+				}
+				err = r.testDB.UpdateTestCase(ctx, v, testSetID)
+				if err != nil {
+					return nil, fmt.Errorf("failed to update test case: %w", err)
+				}
+				noiseParam.AfterNoise = v.Noise
+			}
+		}
+	}
+
+	return noiseParams, nil
+}
+
 func (r *Replayer) Normalize(ctx context.Context) error {
 
 	var testRun string
@@ -780,7 +821,7 @@ func (r *Replayer) Normalize(ctx context.Context) error {
 	for _, testSet := range r.config.Normalize.SelectedTests {
 		testSetID := testSet.TestSet
 		testCases := testSet.Tests
-		err := r.normalizeTestCases(ctx, testRun, testSetID, testCases)
+		err := r.NormalizeTestCases(ctx, testRun, testSetID, testCases, nil)
 		if err != nil {
 			return err
 		}
@@ -789,15 +830,17 @@ func (r *Replayer) Normalize(ctx context.Context) error {
 	return nil
 }
 
-func (r *Replayer) normalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIDs []string) error {
+func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIDs []string, testCaseResults []models.TestResult) error {
 
-	testReport, err := r.reportDB.GetReport(ctx, testRun, testSetID)
-	if err != nil {
-		return fmt.Errorf("failed to get test report: %w", err)
+	if len(testCaseResults) == 0 {
+		testReport, err := r.reportDB.GetReport(ctx, testRun, testSetID)
+		if err != nil {
+			return fmt.Errorf("failed to get test report: %w", err)
+		}
+		testCaseResults = testReport.Tests
 	}
-	testCaseResults := testReport.Tests
-	testCaseResultMap := make(map[string]models.TestResult)
 
+	testCaseResultMap := make(map[string]models.TestResult)
 	testCases, err := r.testDB.GetTestCases(ctx, testSetID)
 	if err != nil {
 		return fmt.Errorf("failed to get test cases: %w", err)
@@ -853,4 +896,12 @@ func (r *Replayer) executeScript(ctx context.Context, script string) error {
 		return fmt.Errorf("failed to execute script: %w", cmdErr.Err)
 	}
 	return nil
+}
+
+func (r *Replayer) DeleteTestSet(ctx context.Context, testSetID string) error {
+	return r.testDB.DeleteTestSet(ctx, testSetID)
+}
+
+func (r *Replayer) DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error {
+	return r.testDB.DeleteTests(ctx, testSetID, testCaseIDs)
 }

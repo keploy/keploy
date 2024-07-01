@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package core provides functionality for managing core functionalities in Keploy.
 package core
 
@@ -82,7 +84,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 	isDocker := false
 	appKind := a.Kind(ctx)
 	//check if the app is docker/docker-compose or native
-	if utils.IsDockerKind(appKind) {
+	if utils.IsDockerCmd(appKind) {
 		isDocker = true
 	}
 
@@ -124,6 +126,10 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 			utils.LogError(c.logger, err, "failed to unload the hooks")
 		}
 
+		//deleting in order to free the memory in case of rerecord. otherwise different app id will be created for the same app.
+		c.apps.Delete(id)
+		c.id = utils.AutoInc{}
+
 		return nil
 	})
 
@@ -142,7 +148,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 
 	if c.proxyStarted {
 		c.logger.Debug("Proxy already started")
-		return nil
+		// return nil
 	}
 
 	select {
@@ -255,6 +261,7 @@ func (c *Core) GetContainerIP(_ context.Context, id uint64) (string, error) {
 	}
 
 	ip := a.ContainerIPv4Addr()
+	c.logger.Debug("ip address of the target app container", zap.Any("ip", ip))
 	if ip == "" {
 		return "", fmt.Errorf("failed to get the IP address of the app container. Try increasing --delay (in seconds)")
 	}

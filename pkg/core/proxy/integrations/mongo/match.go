@@ -1,3 +1,5 @@
+//go:build linux
+
 package mongo
 
 import (
@@ -75,7 +77,7 @@ func match(ctx context.Context, logger *zap.Logger, mongoRequests []models.Mongo
 				return false, nil, nil
 			}
 			mock := tcsMocks[bestMatchIndex]
-			isDeleted := mockDb.DeleteFilteredMock(mock)
+			isDeleted := mockDb.DeleteFilteredMock(*mock)
 			if !isDeleted {
 				continue
 			}

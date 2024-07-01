@@ -186,6 +186,7 @@ func ReadSessionIndices(_ context.Context, path string, Logger *zap.Logger) ([]s
 	return indices, nil
 }
 
+
 func GetVariablesType(obj map[string]interface{}) map[string]map[string]string {
 	types := make(map[string]map[string]string, 0)
 	// Loop over body object and get the type of each value
@@ -585,4 +586,22 @@ func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath stri
 
 	fmt.Println("OpenAPI YAML has been saved to openapi_output.yaml")
 	return true
+}
+func DeleteFile(_ context.Context, logger *zap.Logger, path, name string) error {
+	filePath := filepath.Join(path, name+".yaml")
+	err := os.Remove(filePath)
+	if err != nil {
+		utils.LogError(logger, err, "failed to delete the file", zap.String("file", filePath))
+		return fmt.Errorf("failed to delete the file: %v", err)
+	}
+	return nil
+}
+
+func DeleteDir(_ context.Context, logger *zap.Logger, path string) error {
+	err := os.RemoveAll(path)
+	if err != nil {
+		utils.LogError(logger, err, "failed to delete the directory", zap.String("path", path))
+		return fmt.Errorf("failed to delete the directory: %v", err)
+	}
+	return nil
 }

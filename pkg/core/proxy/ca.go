@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package proxy provides functionality for handling proxies.
 package proxy
 
