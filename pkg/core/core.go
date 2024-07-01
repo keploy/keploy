@@ -261,6 +261,7 @@ func (c *Core) GetContainerIP(_ context.Context, id uint64) (string, error) {
 	}
 
 	ip := a.ContainerIPv4Addr()
+	c.logger.Debug("ip address of the target app container", zap.Any("ip", ip))
 	if ip == "" {
 		return "", fmt.Errorf("failed to get the IP address of the app container. Try increasing --delay (in seconds)")
 	}
