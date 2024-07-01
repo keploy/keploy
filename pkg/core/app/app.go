@@ -249,7 +249,7 @@ func (a *App) injectNetwork(network string) error {
 	for n, settings := range keployNetworks {
 		if n == network {
 			a.keployIPv4 = settings.IPAddress
-			a.logger.Info("Successfully injected network to the keploy container", zap.Any("Keploy container", a.keployContainer), zap.Any("appNetwork", network))
+			a.logger.Info("Successfully injected network to the keploy container", zap.Any("Keploy container", a.keployContainer), zap.Any("appNetwork", network), zap.String("keploy container ip", a.keployIPv4))
 			return nil
 		}
 		//if networkName != "bridge" {
