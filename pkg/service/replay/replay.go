@@ -292,6 +292,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		}
 		return &InstrumentState{}, fmt.Errorf("failed to setup instrumentation: %w", err)
 	}
+	r.config.AppID = appID
 
 	var cancel context.CancelFunc
 	// starting the hooks and proxy
@@ -328,6 +329,10 @@ func (r *Replayer) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
 	return r.testDB.GetAllTestSetIDs(ctx)
 }
 
+func (r *Replayer) GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error) {
+	return r.testDB.GetTestCases(ctx, testID)
+}
+
 func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error) {
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
@@ -354,10 +359,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		//Execute the Pre-script before each test-set if provided
 		conf, err = r.testSetConf.Read(runTestSetCtx, testSetID)
 		if err != nil {
-			return models.TestSetStatusFailed, fmt.Errorf("failed to read test set config: %w", err)
+			if strings.Contains(err.Error(), "no such file or directory") {
+				r.logger.Info("config file not found, continuing execution...", zap.String("test-set", testSetID))
+			} else {
+				return models.TestSetStatusFailed, fmt.Errorf("failed to read test set config: %w", err)
+			}
 		}
+
 		if conf == nil {
-			return models.TestSetStatusFailed, fmt.Errorf("test set config not found")
+			conf = &models.TestSet{}
 		}
 		postscript = conf.PostScript
 
@@ -444,7 +454,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
 
-		if utils.IsDockerKind(cmdType) {
+		if utils.IsDockerCmd(cmdType) {
 			userIP, err = r.instrumentation.GetContainerIP(ctx, appID)
 			if err != nil {
 				return models.TestSetStatusFailed, err
@@ -519,7 +529,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			break
 		}
 
-		if utils.IsDockerKind(cmdType) && r.config.Test.BasePath == "" {
+		if utils.IsDockerCmd(cmdType) && r.config.Test.BasePath == "" {
 
 			testCase.HTTPReq.URL, err = utils.ReplaceHostToIP(testCase.HTTPReq.URL, userIP)
 			if err != nil {

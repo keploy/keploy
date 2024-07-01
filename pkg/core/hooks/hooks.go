@@ -30,7 +30,8 @@ func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 		logger:    logger,
 		sess:      core.NewSessions(),
 		m:         sync.Mutex{},
-		proxyIP:   "127.0.0.1",
+		proxyIP4:  "127.0.0.1",
+		proxyIP6:  [4]uint32{0000, 0000, 0000, 0001},
 		proxyPort: cfg.ProxyPort,
 		dnsPort:   cfg.DNSPort,
 	}
@@ -39,7 +40,8 @@ func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 type Hooks struct {
 	logger    *zap.Logger
 	sess      *core.Sessions
-	proxyIP   string
+	proxyIP4  string
+	proxyIP6  [4]uint32
 	proxyPort uint32
 	dnsPort   uint32
 
@@ -115,19 +117,30 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 		defer utils.Recover(h.logger)
 		<-ctx.Done()
 		h.unLoad(ctx)
+
+		//deleting in order to free the memory in case of rerecord.
+		h.sess.Delete(id)
 		return nil
 	})
 
 	if opts.IsDocker {
-		h.proxyIP = opts.KeployIPV4
+		h.proxyIP4 = opts.KeployIPV4
+		ipv6, err := ToIPv4MappedIPv6(opts.KeployIPV4)
+		if err != nil {
+			return fmt.Errorf("failed to convert ipv4:%v to ipv4 mapped ipv6 in docker env:%v", opts.KeployIPV4, err)
+		}
+		h.logger.Debug(fmt.Sprintf("IPv4-mapped IPv6 for %s is: %08x:%08x:%08x:%08x\n", h.proxyIP4, ipv6[0], ipv6[1], ipv6[2], ipv6[3]))
+		h.proxyIP6 = ipv6
 	}
 
-	proxyIP, err := IPv4ToUint32(h.proxyIP)
+	h.logger.Debug("proxy ips", zap.String("ipv4", h.proxyIP4), zap.Any("ipv6", h.proxyIP6))
+
+	proxyIP, err := IPv4ToUint32(h.proxyIP4)
 	if err != nil {
 		return fmt.Errorf("failed to convert ip string:[%v] to 32-bit integer", opts.KeployIPV4)
 	}
 
-	err = h.SendProxyInfo(proxyIP, h.proxyPort, [4]uint32{0000, 0000, 0000, 0001})
+	err = h.SendProxyInfo(proxyIP, h.proxyPort, h.proxyIP6)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send proxy info to kernel", zap.Any("NewProxyIp", proxyIP))
 		return err

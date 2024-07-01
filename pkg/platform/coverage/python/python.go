@@ -22,10 +22,11 @@ type Python struct {
 
 func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cmd, executable string) *Python {
 	return &Python{
-		ctx:      ctx,
-		logger:   logger,
-		reportDB: reportDB,
-		cmd:      cmd,
+		ctx:        ctx,
+		logger:     logger,
+		reportDB:   reportDB,
+		cmd:        cmd,
+		executable: executable,
 	}
 }
 

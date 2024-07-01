@@ -67,7 +67,7 @@ type Options struct {
 
 func (a *App) Setup(_ context.Context) error {
 
-	if utils.IsDockerKind(a.kind) && isDetachMode(a.logger, a.cmd, a.kind) {
+	if utils.IsDockerCmd(a.kind) && isDetachMode(a.logger, a.cmd, a.kind) {
 		return fmt.Errorf("application could not be started in detached mode")
 	}
 
@@ -130,11 +130,15 @@ func (a *App) SetupCompose() error {
 	// TODO currently we just return the first default docker-compose file found in the current directory
 	// we should add support for multiple docker-compose files by either parsing cmd for path
 	// or by asking the user to provide the path
-	path := findComposeFile()
+	// kdocker-compose.yaml file will be run instead of the user docker-compose.yaml file acc to below cases
+
+	path := findComposeFile(a.cmd)
 	if path == "" {
 		return errors.New("can't find the docker compose file of user. Are you in the right directory? ")
 	}
-	// kdocker-compose.yaml file will be run instead of the user docker-compose.yaml file acc to below cases
+
+	a.logger.Info(fmt.Sprintf("Found docker compose file path: %s", path))
+
 	newPath := "docker-compose-tmp.yaml"
 
 	compose, err := a.docker.ReadComposeFile(path)
@@ -245,7 +249,7 @@ func (a *App) injectNetwork(network string) error {
 	for n, settings := range keployNetworks {
 		if n == network {
 			a.keployIPv4 = settings.IPAddress
-			a.logger.Info("Successfully injected network to the keploy container", zap.Any("Keploy container", a.keployContainer), zap.Any("appNetwork", network))
+			a.logger.Info("Successfully injected network to the keploy container", zap.Any("Keploy container", a.keployContainer), zap.Any("appNetwork", network), zap.String("keploy container ip", a.keployIPv4))
 			return nil
 		}
 		//if networkName != "bridge" {
@@ -414,7 +418,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 func (a *App) Run(ctx context.Context, inodeChan chan uint64) models.AppError {
 	a.inodeChan = inodeChan
 
-	if utils.IsDockerKind(a.kind) {
+	if utils.IsDockerCmd(a.kind) {
 		return a.runDocker(ctx)
 	}
 	return a.run(ctx)
@@ -459,7 +463,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// Define the function to cancel the command
 	cmdCancel := func(cmd *exec.Cmd) func() error {
 		return func() error {
-			if utils.IsDockerKind(a.kind) {
+			if utils.IsDockerCmd(a.kind) {
 				a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
 				err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
 				return err
@@ -479,7 +483,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 		}
 	}
 
-	if utils.IsDockerKind(a.kind) {
+	if utils.IsDockerCmd(a.kind) {
 		a.waitTillExit()
 	}
 

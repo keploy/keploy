@@ -46,6 +46,9 @@ test-reports
 **/.DS_Store
 **/._.DS_Store
 
+#Ignore the zip files
+*.zip
+
 #Ignore the test reports
 test-reports
 

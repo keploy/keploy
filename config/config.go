@@ -10,7 +10,8 @@ import (
 
 type Config struct {
 	Path                  string       `json:"path" yaml:"path" mapstructure:"path"`
-	AppID                 string       `json:"appId" yaml:"appId" mapstructure:"appId"`
+	AppID                 uint64       `json:"appId" yaml:"appId" mapstructure:"appId"`
+	AppName               string       `json:"appName" yaml:"appName" mapstructure:"appName"`
 	Command               string       `json:"command" yaml:"command" mapstructure:"command"`
 	CoverageCommand       string       `json:"-" yaml:"-" mapstructure:"-"`
 	Port                  uint32       `json:"port" yaml:"port" mapstructure:"port"`
@@ -27,6 +28,7 @@ type Config struct {
 	Record                Record       `json:"record" yaml:"record" mapstructure:"record"`
 	Gen                   UtGen        `json:"gen" yaml:"gen" mapstructure:"gen"`
 	Normalize             Normalize    `json:"normalize" yaml:"normalize" mapstructure:"normalize"`
+	ReRecord              ReRecord     `json:"rerecord" yaml:"rerecord" mapstructure:"rerecord"`
 	ConfigPath            string       `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
 	BypassRules           []BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
 	EnableTesting         bool         `json:"enableTesting" yaml:"enableTesting" mapstructure:"enableTesting"`
@@ -53,7 +55,11 @@ type UtGen struct {
 type Record struct {
 	Filters     []Filter      `json:"filters" yaml:"filters" mapstructure:"filters"`
 	RecordTimer time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
-	ReRecord    string        `json:"rerecord" yaml:"rerecord" mapstructure:"rerecord"`
+}
+
+type ReRecord struct {
+	SelectedTests []string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
+	Filters       []Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
 }
 
 type Normalize struct {
