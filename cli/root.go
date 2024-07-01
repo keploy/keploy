@@ -45,7 +45,7 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 func PrintKeployLogo(useColor bool, logo string) {
 	// ANSI escape code to reset color
 	const reset = "\033[0m"
-	if useColor {
+	if !useColor {
 		// Print each line of the logo
 		lines := strings.Split(logo, "\n")
 		for i, line := range lines {
