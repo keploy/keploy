@@ -185,8 +185,6 @@ func ReadSessionIndices(_ context.Context, path string, Logger *zap.Logger) ([]s
 	}
 	return indices, nil
 }
-
-
 func GetVariablesType(obj map[string]interface{}) map[string]map[string]string {
 	types := make(map[string]map[string]string, 0)
 	// Loop over body object and get the type of each value
