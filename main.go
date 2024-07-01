@@ -48,18 +48,17 @@ func main() {
 	// 	}
 	// }()
 
-	printLogo()
 	ctx := utils.NewCtx()
 	start(ctx)
 }
 
-func printLogo() {
+func printLogo(disableANSI bool) {
 	if version == "" {
 		version = "2-dev"
 	}
 	utils.Version = version
 	if binaryToDocker := os.Getenv("BINARY_TO_DOCKER"); binaryToDocker != "true" {
-		fmt.Println(logo, " ")
+		cli.PrintKeployLogo(disableANSI, logo)
 		fmt.Printf("version: %v\n\n", version)
 	}
 }
@@ -103,6 +102,7 @@ func start(ctx context.Context) {
 	svcProvider := provider.NewServiceProvider(logger, userDb, conf)
 	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
+	printLogo(conf.DisableANSI)
 	if err := rootCmd.Execute(); err != nil {
 		if strings.HasPrefix(err.Error(), "unknown command") || strings.HasPrefix(err.Error(), "unknown shorthand") {
 			fmt.Println("Error: ", err.Error())
