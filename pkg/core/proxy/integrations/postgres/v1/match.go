@@ -102,12 +102,13 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 			if len(newRq) > 0 {
 				requestBuffers = newRq
 			}
-
+			logger.Warn("merged pg requests",zap.Any("newrq",newRq))
 			var sortFlag = true
 			var sortedTcsMocks []*models.Mock
 			var matchedMock *models.Mock
 
 			for _, mock := range tcsMocks {
+				logger.Warn("mock here",zap.Any("mock here",mock))
 				if ctx.Err() != nil {
 					return false, nil, ctx.Err()
 				}
@@ -222,7 +223,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 				getTestPS(requestBuffers, logger, ConnectionID)
 			}
 
-			logger.Debug("Sorted Mocks inside pg parser: ", zap.Any("Len of sortedTcsMocks", len(sortedTcsMocks)))
+			logger.Warn("Sorted Mocks inside pg parser: ", zap.Any("Len of sortedTcsMocks", len(sortedTcsMocks)))
 
 			var matched, sorted bool
 			var idx int
@@ -237,7 +238,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 					if newMock != nil {
 						matchedMock = newMock
 					}
-					logger.Debug("Matched In Sorted PG Matching Stream", zap.String("mock", matchedMock.Name))
+					logger.Warn("Matched In Sorted PG Matching Stream", zap.String("mock", matchedMock.Name))
 				}
 
 				idx = findBinaryStreamMatch(logger, sortedTcsMocks, requestBuffers, sorted)
