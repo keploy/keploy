@@ -61,6 +61,9 @@ func (cw *ctxWriter) Write(p []byte) (n int, err error) {
 func WriteFile(ctx context.Context, logger *zap.Logger, path, fileName string, docData []byte, isAppend bool) error {
 	isFileEmpty, err := CreateYamlFile(ctx, logger, path, fileName)
 	if err != nil {
+		if ctx.Err() == context.Canceled {
+			return nil
+		}
 		return err
 	}
 	flag := os.O_WRONLY | os.O_TRUNC
