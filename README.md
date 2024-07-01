@@ -92,6 +92,10 @@ To integrate with your unit-testing library and see combine test coverage, follo
 
 > ####  **If You Had Fun:** Please leave a 🌟 star on this repo!  It's free, and you'll bring a smile. 😄 👏
 
+## One-Click Setup 🚀
+This allows you to get up and running quickly with Keploy without any installation on your local machine: -
+
+[![GitHub Codescape](https://img.shields.io/badge/GH%20codespace-3670A0?style=for-the-badge&logo=github&logoColor=fff)](https://github.dev/Sonichigo/devpod-keploy)
 
 ## 🤔 Questions?
 Reach out to us. We're here to help!
