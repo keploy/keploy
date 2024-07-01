@@ -178,11 +178,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		if cmd.Name() == "validate" {
-			cmd.Flags().Bool("download", c.cfg.Contract.Download, "Specify whether to download contracts or not")
-			cmd.Flags().Bool("generate", c.cfg.Contract.Generate, "Specify")
-			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the path to generate contracts")
-		}
+		// if cmd.Name() == "validate" {
+		// 	cmd.Flags().Bool("download", c.cfg.Contract.Download, "Specify whether to download contracts or not")
+		// 	cmd.Flags().Bool("generate", c.cfg.Contract.Generate, "Specify")
+		// 	cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the path to generate contracts")
+		// }
 		if cmd.Name() == "generate" {
 			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the path to generate contracts")
 
@@ -216,28 +216,43 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		}
 
 	case "record", "test", "rerecord":
-		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
-		cmd.Flags().Uint32("port", c.cfg.Port, "GraphQL server port used for executing testcases in unit test library integration")
-		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
-		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
-		cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
+		if cmd.HasAlias("validate") {
+			cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate contracts")
+			cmd.Flags().StringP("path", "p", c.cfg.Contract.Path, "Specify the path to generate contracts")
+			err := cmd.MarkFlagRequired("path")
+			if err != nil {
+				errMsg := "failed to mark path as required flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			cmd.Flags().Bool("download", c.cfg.Contract.Download, "Specify whether to download contracts or not")
+			cmd.Flags().Bool("generate", c.cfg.Contract.Generate, "Specify")
+			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the path to generate contracts")
 
-		cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command to start the user application (native/docker/docker-compose)")
-		cmd.Flags().Uint64P("build-delay", "b", c.cfg.BuildDelay, "User provided time to wait docker container build")
-		cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
-		cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the application's docker network")
-		cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server and ignore the traffic")
-		cmd.Flags().Uint64P("app-id", "a", c.cfg.AppID, "A unique name for the user's application")
-		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
-		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
-		err = cmd.Flags().MarkHidden("port")
-		if err != nil {
-			errMsg := "failed to mark port as hidden flag"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
+		} else {
+			cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
+			cmd.Flags().Uint32("port", c.cfg.Port, "GraphQL server port used for executing testcases in unit test library integration")
+			cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
+			cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
+			cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
+
+			cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command to start the user application (native/docker/docker-compose)")
+			cmd.Flags().Uint64P("build-delay", "b", c.cfg.BuildDelay, "User provided time to wait docker container build")
+			cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
+			cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the application's docker network")
+			cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server and ignore the traffic")
+			cmd.Flags().Uint64P("app-id", "a", c.cfg.AppID, "A unique name for the user's application")
+			cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
+			cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
+			err = cmd.Flags().MarkHidden("port")
+			if err != nil {
+				errMsg := "failed to mark port as hidden flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			//add rest of the uncommon flags for record, test, rerecord commands
+			c.AddUncommonFlags(cmd)
 		}
-		//add rest of the uncommon flags for record, test, rerecord commands
-		c.AddUncommonFlags(cmd)
 
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
@@ -463,117 +478,155 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 	case "record", "test", "rerecord":
 
-		// handle the app command
-		if c.cfg.Command == "" {
-			if !alreadyRunning(cmd.Name(), c.cfg.Test.BasePath) {
-				return c.noCommandError()
-			}
-		}
-
-		// set the command type
-		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
-
-		if c.cfg.GenerateGithubActions && utils.CmdType(c.cfg.CommandType) != utils.Empty {
-			defer utils.GenerateGithubActions(c.logger, c.cfg.Command)
-		}
-		if c.cfg.InDocker {
-			c.logger.Info("detected that Keploy is running in a docker container")
-			if len(c.cfg.Path) > 0 {
-				curDir, err := os.Getwd()
-				if err != nil {
-					errMsg := "failed to get current working directory"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-				if strings.Contains(c.cfg.Path, "..") {
-
-					c.cfg.Path, err = utils.GetAbsPath(filepath.Clean(c.cfg.Path))
-					if err != nil {
-						return fmt.Errorf("failed to get the absolute path from relative path: %w", err)
-					}
-
-					relativePath, err := filepath.Rel(curDir, c.cfg.Path)
-					if err != nil {
-						errMsg := "failed to get the relative path from absolute path"
-						utils.LogError(c.logger, err, errMsg)
-						return errors.New(errMsg)
-					}
-					if relativePath == ".." || strings.HasPrefix(relativePath, "../") {
-						errMsg := "path provided is not a subdirectory of current directory. Keploy only supports recording testcases in the current directory or its subdirectories"
-						utils.LogError(c.logger, err, errMsg, zap.String("path:", c.cfg.Path))
-						return errors.New(errMsg)
-					}
-				}
-			}
-			// check if the buildDelay is less than 30 seconds
-			if time.Duration(c.cfg.BuildDelay)*time.Second <= 30*time.Second {
-				c.logger.Warn(fmt.Sprintf("buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay", c.cfg.BuildDelay))
-				c.logger.Info(`Example usage: keploy record -c "docker-compose up --build" --buildDelay 35`)
-			}
-			if utils.CmdType(c.cfg.Command) == utils.DockerCompose {
-				if c.cfg.ContainerName == "" {
-					utils.LogError(c.logger, nil, "Couldn't find containerName")
-					c.logger.Info(`Example usage: keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
-					return errors.New("missing required --container-name flag or containerName in config file")
-				}
-			}
-		}
-		err = StartInDocker(ctx, c.logger, c.cfg)
-		if err != nil {
-			return err
-		}
-
-		absPath, err := utils.GetAbsPath(c.cfg.Path)
-		if err != nil {
-			utils.LogError(c.logger, err, "error while getting absolute path")
-			return errors.New("failed to get the absolute path")
-		}
-		c.cfg.Path = absPath + "/keploy"
-
-		bypassPorts, err := cmd.Flags().GetUintSlice("passThroughPorts")
-		if err != nil {
-			errMsg := "failed to read the ports of outgoing calls to be ignored"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		config.SetByPassPorts(c.cfg, bypassPorts)
-
-		if cmd.Name() == "test" || cmd.Name() == "rerecord" {
-			//check if the keploy folder exists
-			if _, err := os.Stat(c.cfg.Path); os.IsNotExist(err) {
-				recordCmd := models.HighlightGrayString("keploy record")
-				errMsg := fmt.Sprintf("No test-sets found. Please record testcases using %s command", recordCmd)
-				utils.LogError(c.logger, nil, errMsg)
-				return errors.New(errMsg)
-			}
-
-			testSets, err := cmd.Flags().GetStringSlice("testsets")
+		if cmd.HasAlias("validate") {
+			path, err := cmd.Flags().GetString("path")
 			if err != nil {
-				errMsg := "failed to get the testsets"
+				errMsg := "failed to get the path"
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}
-			config.SetSelectedTests(c.cfg, testSets)
+			c.cfg.Contract.Path = path
 
-			if cmd.Name() == "rerecord" {
-				return nil
-			}
-
-			if utils.CmdType(c.cfg.CommandType) == utils.Native && c.cfg.Test.GoCoverage {
-				goCovPath, err := utils.SetCoveragePath(c.logger, c.cfg.Test.CoverageReportPath)
+			services, err := cmd.Flags().GetStringSlice("services")
+			if services != nil {
 				if err != nil {
-					utils.LogError(c.logger, err, "failed to set go coverage path")
-					return errors.New("failed to set go coverage path")
+					errMsg := "failed to get the services"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
 				}
-				c.cfg.Test.CoverageReportPath = goCovPath
+				config.SetSelectedServices(c.cfg, services)
+			}
+			c.cfg.Contract.Download, err = cmd.Flags().GetBool("download")
+			if err != nil {
+				errMsg := "failed to get the download flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.Contract.Generate, err = cmd.Flags().GetBool("generate")
+			if err != nil {
+				errMsg := "failed to get the generate flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.Contract.Driven, err = cmd.Flags().GetString("driven")
+			if err != nil {
+				errMsg := "failed to get the driven flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
 			}
 
-			if c.cfg.Test.Delay <= 5 {
-				c.logger.Warn(fmt.Sprintf("Delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay", c.cfg.Test.Delay))
-				if c.cfg.InDocker {
-					c.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
-				} else {
-					c.logger.Info("Example usage: " + cmd.Example)
+		} else {
+			// handle the app command
+			if c.cfg.Command == "" {
+				if !alreadyRunning(cmd.Name(), c.cfg.Test.BasePath) {
+					return c.noCommandError()
+				}
+			}
+			// set the command type
+			c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
+
+			if c.cfg.GenerateGithubActions && utils.CmdType(c.cfg.CommandType) != utils.Empty {
+				defer utils.GenerateGithubActions(c.logger, c.cfg.Command)
+			}
+			if c.cfg.InDocker {
+				c.logger.Info("detected that Keploy is running in a docker container")
+				if len(c.cfg.Path) > 0 {
+					curDir, err := os.Getwd()
+					if err != nil {
+						errMsg := "failed to get current working directory"
+						utils.LogError(c.logger, err, errMsg)
+						return errors.New(errMsg)
+					}
+					if strings.Contains(c.cfg.Path, "..") {
+
+						c.cfg.Path, err = utils.GetAbsPath(filepath.Clean(c.cfg.Path))
+						if err != nil {
+							return fmt.Errorf("failed to get the absolute path from relative path: %w", err)
+						}
+
+						relativePath, err := filepath.Rel(curDir, c.cfg.Path)
+						if err != nil {
+							errMsg := "failed to get the relative path from absolute path"
+							utils.LogError(c.logger, err, errMsg)
+							return errors.New(errMsg)
+						}
+						if relativePath == ".." || strings.HasPrefix(relativePath, "../") {
+							errMsg := "path provided is not a subdirectory of current directory. Keploy only supports recording testcases in the current directory or its subdirectories"
+							utils.LogError(c.logger, err, errMsg, zap.String("path:", c.cfg.Path))
+							return errors.New(errMsg)
+						}
+					}
+				}
+				// check if the buildDelay is less than 30 seconds
+				if time.Duration(c.cfg.BuildDelay)*time.Second <= 30*time.Second {
+					c.logger.Warn(fmt.Sprintf("buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay", c.cfg.BuildDelay))
+					c.logger.Info(`Example usage: keploy record -c "docker-compose up --build" --buildDelay 35`)
+				}
+				if utils.CmdType(c.cfg.Command) == utils.DockerCompose {
+					if c.cfg.ContainerName == "" {
+						utils.LogError(c.logger, nil, "Couldn't find containerName")
+						c.logger.Info(`Example usage: keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
+						return errors.New("missing required --container-name flag or containerName in config file")
+					}
+				}
+			}
+			err = StartInDocker(ctx, c.logger, c.cfg)
+			if err != nil {
+				return err
+			}
+
+			absPath, err := utils.GetAbsPath(c.cfg.Path)
+			if err != nil {
+				utils.LogError(c.logger, err, "error while getting absolute path")
+				return errors.New("failed to get the absolute path")
+			}
+			c.cfg.Path = absPath + "/keploy"
+
+			bypassPorts, err := cmd.Flags().GetUintSlice("passThroughPorts")
+			if err != nil {
+				errMsg := "failed to read the ports of outgoing calls to be ignored"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			config.SetByPassPorts(c.cfg, bypassPorts)
+
+			if cmd.Name() == "test" || cmd.Name() == "rerecord" {
+				//check if the keploy folder exists
+				if _, err := os.Stat(c.cfg.Path); os.IsNotExist(err) {
+					recordCmd := models.HighlightGrayString("keploy record")
+					errMsg := fmt.Sprintf("No test-sets found. Please record testcases using %s command", recordCmd)
+					utils.LogError(c.logger, nil, errMsg)
+					return errors.New(errMsg)
+				}
+
+				testSets, err := cmd.Flags().GetStringSlice("testsets")
+				if err != nil {
+					errMsg := "failed to get the testsets"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				config.SetSelectedTests(c.cfg, testSets)
+
+				if cmd.Name() == "rerecord" {
+					return nil
+				}
+
+				if utils.CmdType(c.cfg.CommandType) == utils.Native && c.cfg.Test.GoCoverage {
+					goCovPath, err := utils.SetCoveragePath(c.logger, c.cfg.Test.CoverageReportPath)
+					if err != nil {
+						utils.LogError(c.logger, err, "failed to set go coverage path")
+						return errors.New("failed to set go coverage path")
+					}
+					c.cfg.Test.CoverageReportPath = goCovPath
+				}
+
+				if c.cfg.Test.Delay <= 5 {
+					c.logger.Warn(fmt.Sprintf("Delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay", c.cfg.Test.Delay))
+					if c.cfg.InDocker {
+						c.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
+					} else {
+						c.logger.Info("Example usage: " + cmd.Example)
+					}
 				}
 			}
 		}

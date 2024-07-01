@@ -112,14 +112,15 @@ func Download(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 
 func Validate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
-		Use:     "validate",
-		Short:   "Download contract for specified services",
-		Example: `keploy contract download --service="email,notify" --path /local/path`,
+		Use:     "test",
+		Short:   "Validate contract for specified services",
+		Example: `keploy contract test --service="email,notify" --path /local/path`,
+		Aliases: []string{"validate"},
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			svc, err := serviceFactory.GetService(ctx, cmd.Name())
+			svc, err := serviceFactory.GetService(ctx, cmd.Aliases[0])
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service")
 				return nil
@@ -137,7 +138,6 @@ func Validate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 			return nil
 		},
 	}
-
 	err := cmdConfigurator.AddFlags(cmd)
 	if err != nil {
 		utils.LogError(logger, err, "failed to add download flags")
