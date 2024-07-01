@@ -309,6 +309,8 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 	switch x.Kind() {
 	case reflect.Float64, reflect.String, reflect.Bool:
 		regexArr, isNoisy := CheckStringExist(key, noiseMap)
+		fmt.Println("regexArr", regexArr)
+		fmt.Println("isNoisy", isNoisy)
 		if isNoisy && len(regexArr) != 0 {
 			isNoisy, _ = MatchesAnyRegex(InterfaceToString(expected), regexArr)
 		}
@@ -572,6 +574,7 @@ func sprintJSONDiff(json1 []byte, json2 []byte, field string, noise map[string][
 	if err != nil {
 		return "", err
 	}
+	fmt.Println("Diff String:", diffString)
 	expect, actual := separateAndColorize(diffString, noise)
 	result := expectActualTable(expect, actual, field, false)
 	return result, nil
@@ -629,27 +632,41 @@ func calculateJSONDiffs(json1 []byte, json2 []byte) (string, error) {
 
 // Will receive a string that has the differences represented
 // by a plus or a minus sign and separate it. Just works with json
+// Modified separateAndColorize function to handle nested JSON paths for noise keys
+// Updated separateAndColorize function
 func separateAndColorize(diffStr string, noise map[string][]string) (string, string) {
 	expect, actual := "", ""
-
 	diffLines := strings.Split(diffStr, "\n")
+	jsonPath := []string{} // Stack to keep track of nested paths
 
 	for i, line := range diffLines {
 		if len(line) > 0 {
 			noised := false
+			lineContent := line[1:] // Remove the diff indicator (+/-)
+			trimmedLine := strings.TrimSpace(lineContent)
 
-			for e := range noise {
-				// If contains noise remove diff flag
-				if strings.Contains(line, e) {
+			// Update the JSON path stack based on the line content
+			if strings.HasSuffix(trimmedLine, "{") {
+				key := strings.TrimSpace(trimmedLine[:len(trimmedLine)-1]) // Remove '{'
+				jsonPath = append(jsonPath, key) // Push to stack
+			} else if trimmedLine == "}," || trimmedLine == "}" {
+				jsonPath = jsonPath[:len(jsonPath)-1] // Pop from stack
+			}
 
+			currentPath := strings.Join(jsonPath, ".")
+			fmt.Println("Current JSON Path:", currentPath)
+
+			// Check for noise based on the current JSON path
+			for noisePath := range noise {
+				if strings.HasPrefix(currentPath, noisePath) {
+					line = " " + lineContent
 					if line[0] == '-' {
-						line = " " + line[1:]
 						expect += breakWithColor(line, nil, 0)
 					} else if line[0] == '+' {
-						line = " " + line[1:]
 						actual += breakWithColor(line, nil, 0)
 					}
 					noised = true
+					break
 				}
 			}
 
@@ -657,30 +674,19 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 				continue
 			}
 
+			// Process lines without noise
 			if line[0] == '-' {
 				c := color.FgRed
-
-				// Workaround to get the exact index where the diff begins
-				if diffLines[i+1][0] == '+' {
-
-					/* As we want to get the exact difference where the line's
-					 * diff begin we must to, first, get the expect (this) and
-					 * the actual (next) line. Then we must to espace the first
-					 * char that is an "+" or "-" symbol so we end up having
-					 * just the contents of the line we want to compare */
-					offset, _ := diffIndex(line[1:], diffLines[i+1][1:])
+				if i+1 < len(diffLines) && diffLines[i+1][0] == '+' {
+					offset, _ := diffIndex(lineContent, diffLines[i+1][1:])
 					expect += breakWithColor(line, &c, offset+1)
 				} else {
-					// In the case where there isn't in fact an actual
-					// version to compare, it was just expect to have this
 					expect += breakWithColor(line, &c, 0)
 				}
 			} else if line[0] == '+' {
 				c := color.FgGreen
-
-				// Here we do the same thing as above, just inverted
-				if diffLines[i-1][0] == '-' {
-					offset, _ := diffIndex(line[1:], diffLines[i-1][1:])
+				if i > 0 && diffLines[i-1][0] == '-' {
+					offset, _ := diffIndex(lineContent, diffLines[i-1][1:])
 					actual += breakWithColor(line, &c, offset+1)
 				} else {
 					actual += breakWithColor(line, &c, 0)
@@ -691,7 +697,6 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 			}
 		}
 	}
-
 	return expect, actual
 }
 
@@ -911,7 +916,6 @@ func CheckStringExist(s string, mp map[string][]string) ([]string, bool) {
 	if val, ok := mp[s]; ok {
 		return val, ok
 	}
-
 	return []string{}, false
 }
 
