@@ -98,9 +98,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get all test set ids: %v", err)
 		utils.LogError(r.logger, err, stopReason)
-		if err == context.Canceled {
-			return err
-		}
 		return fmt.Errorf(stopReason)
 	}
 
@@ -115,9 +112,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get next test run id: %v", err)
 		utils.LogError(r.logger, err, stopReason)
-		if err == context.Canceled {
-			return err
-		}
 		return fmt.Errorf(stopReason)
 	}
 
@@ -126,7 +120,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to instrument: %v", err)
 		utils.LogError(r.logger, err, stopReason)
-		if err == context.Canceled {
+		if ctx.Err() == context.Canceled {
 			return err
 		}
 		return fmt.Errorf(stopReason)
@@ -146,7 +140,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)
 			utils.LogError(r.logger, err, stopReason)
-			if err == context.Canceled {
+			if ctx.Err() == context.Canceled {
 				return err
 			}
 			return fmt.Errorf(stopReason)
