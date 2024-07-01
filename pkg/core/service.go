@@ -107,6 +107,10 @@ func (s *Sessions) Set(id uint64, session *Session) {
 	s.sessions.Store(id, session)
 }
 
+func (s *Sessions) Delete(id uint64) {
+	s.sessions.Delete(id)
+}
+
 func (s *Sessions) getAll() map[uint64]*Session {
 	sessions := map[uint64]*Session{}
 	s.sessions.Range(func(k, v interface{}) bool {

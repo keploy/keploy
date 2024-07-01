@@ -1,5 +1,3 @@
-//go:build linux
-
 // Package docker provides functionality for working with Docker containers.
 package docker
 
@@ -540,7 +538,7 @@ func (idc *Impl) IsContainerRunning(containerName string) (bool, error) {
 	return false, nil
 }
 
-func (idc *Impl) CreateVolume(ctx context.Context, volumeName string) error {
+func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate bool) error {
 	// Set a timeout for the context
 	ctx, cancel := context.WithTimeout(ctx, idc.timeoutForDockerQuery)
 	defer cancel()
@@ -555,8 +553,16 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string) error {
 	}
 
 	if len(volumeList.Volumes) > 0 {
-		idc.logger.Info("volume already exists", zap.Any("volume", volumeName))
-		return err
+		if !recreate {
+			idc.logger.Info("volume already exists", zap.Any("volume", volumeName))
+			return err
+		}
+
+		err := idc.VolumeRemove(ctx, volumeName, false)
+		if err != nil {
+			idc.logger.Error("failed to delete volume "+volumeName, zap.Error(err))
+			return err
+		}
 	}
 
 	// Create the 'debugfs' volume if it doesn't exist

@@ -30,6 +30,7 @@ type Service interface {
 	GetAllTestSetIDs(ctx context.Context) ([]string, error)
 	RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error)
 	GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error)
+	GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error)
 	RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError
 	Normalize(ctx context.Context) error
 	DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error)
