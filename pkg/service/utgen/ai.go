@@ -12,11 +12,16 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"go.keploy.io/server/v2/utils"
+	"go.uber.org/zap"
 )
 
 type AIClient struct {
-	Model   string
-	APIBase string
+	Model      string
+	APIBase    string
+	APIVersion string
+	Logger     *zap.Logger
 }
 
 type Prompt struct {
@@ -30,7 +35,6 @@ type CompletionParams struct {
 	MaxTokens   int       `json:"max_tokens"`
 	Stream      bool      `json:"stream"`
 	Temperature float32   `json:"temperature"`
-	APIBase     string    `json:"api_base,omitempty"`
 }
 
 type Message struct {
@@ -66,10 +70,12 @@ type Delta struct {
 	Content string `json:"content"`
 }
 
-func NewAIClient(model, apiBase string) *AIClient {
+func NewAIClient(model, apiBase, apiVersion string, logger *zap.Logger) *AIClient {
 	return &AIClient{
-		Model:   model,
-		APIBase: apiBase,
+		Model:      model,
+		APIBase:    apiBase,
+		APIVersion: apiVersion,
+		Logger:     logger,
 	}
 }
 
@@ -102,10 +108,9 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 	}
 
 	if ai.APIBase != "" {
-		completionParams.APIBase = ai.APIBase
 		apiBaseURL = ai.APIBase
 	} else {
-		apiBaseURL = "https://api.openai.com/"
+		apiBaseURL = "https://api.openai.com/v1"
 	}
 
 	requestBody, err := json.Marshal(completionParams)
@@ -113,7 +118,12 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 		return "", 0, 0, fmt.Errorf("error marshalling request body: %v", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", apiBaseURL+"/v1/chat/completions", bytes.NewBuffer(requestBody))
+	queryParams := ""
+	if ai.APIVersion != "" {
+		queryParams = "?api-version=" + ai.APIVersion
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", apiBaseURL+"/chat/completions"+queryParams, bytes.NewBuffer(requestBody))
 	if err != nil {
 		return "", 0, 0, fmt.Errorf("error creating request: %v", err)
 	}
@@ -121,6 +131,7 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 	apiKey := os.Getenv("API_KEY")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("api-key", apiKey)
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -129,7 +140,7 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
-			fmt.Printf("Error closing response body: %v\n", err)
+			utils.LogError(ai.Logger, err, "Error closing response body")
 		}
 	}()
 
@@ -141,12 +152,15 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 
 	var contentBuilder strings.Builder
 	reader := bufio.NewReader(resp.Body)
-	fmt.Println("Streaming results from LLM model...")
+
+	if ai.Logger.Level() == zap.DebugLevel {
+		fmt.Println("Streaming results from LLM model...")
+	}
 
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil && err != io.EOF {
-			fmt.Printf("Error reading stream: %v\n", err)
+			utils.LogError(ai.Logger, err, "Error reading stream")
 			return "", 0, 0, err
 		}
 		line = strings.TrimSpace(strings.TrimPrefix(line, "data: "))
@@ -161,14 +175,16 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 		var chunk ModelResponse
 		err = json.Unmarshal([]byte(line), &chunk)
 		if err != nil {
-			fmt.Printf("Error unmarshalling chunk: %v\nLine: %s\n", err, line)
+			utils.LogError(ai.Logger, err, "Error unmarshalling chunk")
 			continue
 		}
 
 		if len(chunk.Choices) > 0 {
 			if chunk.Choices[0].Delta != (Delta{}) {
 				contentBuilder.WriteString(chunk.Choices[0].Delta.Content)
-				fmt.Print(chunk.Choices[0].Delta.Content)
+				if ai.Logger.Level() == zap.DebugLevel {
+					fmt.Print(chunk.Choices[0].Delta.Content)
+				}
 			}
 		}
 
@@ -177,7 +193,9 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 		}
 		time.Sleep(10 * time.Millisecond) // Optional: Delay to simulate more 'natural' response pacing
 	}
-	fmt.Println()
+	if ai.Logger.Level() == zap.DebugLevel {
+		fmt.Println()
+	}
 
 	finalContent := contentBuilder.String()
 	promptTokens := len(strings.Fields(prompt.System)) + len(strings.Fields(prompt.User))

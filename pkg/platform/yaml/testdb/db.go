@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package testdb provides functionality for working with test databases.
 package testdb
 
@@ -144,4 +146,26 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	}
 
 	return tcsInfo{name: tcsName, path: tcsPath}, nil
+}
+
+func (ts *TestYaml) DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error {
+	path := filepath.Join(ts.TcsPath, testSetID, "tests")
+	for _, testCaseID := range testCaseIDs {
+		err := yaml.DeleteFile(ctx, ts.logger, path, testCaseID)
+		if err != nil {
+			ts.logger.Error("failed to delete the testcase", zap.String("testcase id", testCaseID), zap.String("testset id", testSetID))
+			return err
+		}
+	}
+	return nil
+}
+
+func (ts *TestYaml) DeleteTestSet(ctx context.Context, testSetID string) error {
+	path := filepath.Join(ts.TcsPath, testSetID)
+	err := yaml.DeleteDir(ctx, ts.logger, path)
+	if err != nil {
+		ts.logger.Error("failed to delete the testset", zap.String("testset id", testSetID))
+		return err
+	}
+	return nil
 }

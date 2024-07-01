@@ -1,3 +1,5 @@
+//go:build linux
+
 package replay
 
 import (
@@ -214,6 +216,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		}
 		return &InstrumentState{}, fmt.Errorf("failed to setup instrumentation: %w", err)
 	}
+	r.config.AppID = appID
 
 	var cancel context.CancelFunc
 	// starting the hooks and proxy
@@ -248,6 +251,10 @@ func (r *Replayer) GetNextTestRunID(ctx context.Context) (string, error) {
 
 func (r *Replayer) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
 	return r.testDB.GetAllTestSetIDs(ctx)
+}
+
+func (r *Replayer) GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error) {
+	return r.testDB.GetTestCases(ctx, testID)
 }
 
 func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error) {
@@ -365,7 +372,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
 
-		if utils.IsDockerKind(cmdType) {
+		if utils.IsDockerCmd(cmdType) {
 			userIP, err = r.instrumentation.GetContainerIP(ctx, appID)
 			if err != nil {
 				return models.TestSetStatusFailed, err
@@ -445,7 +452,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			break
 		}
 
-		if utils.IsDockerKind(cmdType) && r.config.Test.BasePath == "" {
+		if utils.IsDockerCmd(cmdType) && r.config.Test.BasePath == "" {
 
 			testCase.HTTPReq.URL, err = utils.ReplaceHostToIP(testCase.HTTPReq.URL, userIP)
 			if err != nil {
@@ -763,9 +770,11 @@ func (r *Replayer) RunApplication(ctx context.Context, appID uint64, opts models
 	return r.instrumentation.Run(ctx, appID, opts)
 }
 
-func (r *Replayer) Templatize(ctx context.Context) error {
-	// path:=filepath.Join(r.config.Path, testSetId)
-	for _, testSetId := range r.config.Templatize.TestSets {
+func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
+	if len(testSets) == 0 {
+		testSets = r.config.Templatize.TestSets
+	}
+	for _, testSetId := range testSets {
 		testSet, err := r.TestSetConf.Read(ctx, testSetId)
 		if err != nil || testSet == nil {
 			utils.TemplatizedValues = map[string]interface{}{}
@@ -786,8 +795,8 @@ func (r *Replayer) Templatize(ctx context.Context) error {
 			// }
 			jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
 			if err != nil {
-				r.logger.Error("failed to parse response into json", zap.Error(err))
-				return err
+				r.logger.Error("failed to parse response into json. Not templatizing this test.", zap.Error(err))
+				continue
 			} else if jsonResponse == nil {
 				continue
 			}
@@ -838,7 +847,7 @@ func (r *Replayer) Templatize(ctx context.Context) error {
 			// }
 			jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
 			if err != nil {
-				r.logger.Error("failed to parse response into json", zap.Error(err))
+				r.logger.Error("failed to parse response into json. Not templatizing this test", zap.Error(err))
 				return err
 			} else if jsonResponse == nil {
 				continue
@@ -870,7 +879,7 @@ func (r *Replayer) Templatize(ctx context.Context) error {
 			// }
 			jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
 			if err != nil {
-				r.logger.Error("failed to parse response into json", zap.Error(err))
+				r.logger.Error("failed to parse response into json. Not templatizing this test.", zap.Error(err))
 				return err
 			} else if jsonResponse == nil {
 				continue
@@ -897,46 +906,48 @@ func (r *Replayer) Templatize(ctx context.Context) error {
 		}
 
 		// Compare the req and resp body for any common fields.
-		// for i := 0; i < len(tcs)-1; i++ {
-		// 	jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
-		// 	if err != nil {
-		// 		r.logger.Error("failed to parse response into json", zap.Error(err))
-		// 		return err
-		// 	} else if jsonResponse == nil {
-		// 		continue
-		// 	}
-		// 	for j := i + 1; j < len(tcs); j++ {
-		// 		jsonRequest, err := parseIntoJson(tcs[j].HTTPReq.Body)
-		// 		if err != nil {
-		// 			r.logger.Error("failed to parse request into json", zap.Error(err))
-		// 			return err
-		// 		} else if jsonResponse == nil {
-		// 			continue
-		// 		}
-		// 		compareVals(jsonRequest, jsonResponse)
-		// 		jsonData, err := json.Marshal(jsonRequest)
-		// 		if err != nil {
-		// 			r.logger.Error("failed to marshal json data", zap.Error(err))
-		// 			continue
-		// 		}
-		// 		tcs[j].HTTPReq.Body = string(jsonData)
-		// 		err = r.testDB.UpdateTestCase(ctx, tcs[j], testSetId)
-		// 		if err != nil {
-		// 			r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
-		// 		}
-		// 	}
-		// 	// Record the new testcase.
-		// 	jsonData, err := json.Marshal(jsonResponse)
-		// 	if err != nil {
-		// 		r.logger.Error("failed to marshal json data", zap.Error(err))
-		// 		return err
-		// 	}
-		// 	tcs[i].HTTPResp.Body = string(jsonData)
-		// 	err = r.testDB.UpdateTestCase(ctx, tcs[i], testSetId)
-		// 	if err != nil {
-		// 		r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
-		// 	}
-		// }
+		for i := 0; i < len(tcs)-1; i++ {
+			// Render the template on the response body.
+
+			jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
+			if err != nil {
+				r.logger.Error("failed to parse response into json", zap.Error(err))
+				return err
+			} else if jsonResponse == nil {
+				continue
+			}
+			for j := i + 1; j < len(tcs); j++ {
+				jsonRequest, err := parseIntoJson(tcs[j].HTTPReq.Body)
+				if err != nil {
+					r.logger.Error("failed to parse request into json", zap.Error(err))
+					return err
+				} else if jsonResponse == nil {
+					continue
+				}
+				compareVals(jsonRequest, &jsonResponse)
+				jsonData, err := json.Marshal(jsonRequest)
+				if err != nil {
+					r.logger.Error("failed to marshal json data", zap.Error(err))
+					continue
+				}
+				tcs[j].HTTPReq.Body = string(jsonData)
+				err = r.testDB.UpdateTestCase(ctx, tcs[j], testSetId)
+				if err != nil {
+					r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
+				}
+			}
+			// Record the new testcase.
+			jsonData, err := json.Marshal(jsonResponse)
+			if err != nil {
+				r.logger.Error("failed to marshal json data", zap.Error(err))
+				return err
+			}
+			tcs[i].HTTPResp.Body = string(jsonData)
+			err = r.testDB.UpdateTestCase(ctx, tcs[i], testSetId)
+			if err != nil {
+				r.logger.Error("Error inserting the new testcase to the file", zap.Error(err))
+			}
+		}
 
 		noQuotes(utils.TemplatizedValues)
 		err = r.TestSetConf.Write(ctx, testSetId, &models.TestSet{
@@ -950,6 +961,34 @@ func (r *Replayer) Templatize(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error) {
+
+	testCases, err := r.testDB.GetTestCases(ctx, testSetID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get test cases: %w", err)
+	}
+
+	for _, v := range testCases {
+		for _, noiseParam := range noiseParams {
+			if v.Name == noiseParam.TestCaseID {
+				// append the noise map
+				if noiseParam.Ops == string(models.OpsAdd) {
+					v.Noise = mergeMaps(v.Noise, noiseParam.Assertion)
+				} else {
+					// remove from the original noise map
+					v.Noise = removeFromMap(v.Noise, noiseParam.Assertion)
+				}
+				err = r.testDB.UpdateTestCase(ctx, v, testSetID)
+				if err != nil {
+					return nil, fmt.Errorf("failed to update test case: %w", err)
+				}
+				noiseParam.AfterNoise = v.Noise
+			}
+		}
+	}
+
+	return noiseParams, nil
 }
 
 func (r *Replayer) Normalize(ctx context.Context) error {
@@ -982,7 +1021,7 @@ func (r *Replayer) Normalize(ctx context.Context) error {
 	for _, testSet := range r.config.Normalize.SelectedTests {
 		testSetID := testSet.TestSet
 		testCases := testSet.Tests
-		err := r.normalizeTestCases(ctx, testRun, testSetID, testCases)
+		err := r.NormalizeTestCases(ctx, testRun, testSetID, testCases, nil)
 		if err != nil {
 			return err
 		}
@@ -991,15 +1030,17 @@ func (r *Replayer) Normalize(ctx context.Context) error {
 	return nil
 }
 
-func (r *Replayer) normalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIDs []string) error {
+func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIDs []string, testCaseResults []models.TestResult) error {
 
-	testReport, err := r.reportDB.GetReport(ctx, testRun, testSetID)
-	if err != nil {
-		return fmt.Errorf("failed to get test report: %w", err)
+	if len(testCaseResults) == 0 {
+		testReport, err := r.reportDB.GetReport(ctx, testRun, testSetID)
+		if err != nil {
+			return fmt.Errorf("failed to get test report: %w", err)
+		}
+		testCaseResults = testReport.Tests
 	}
-	testCaseResults := testReport.Tests
-	testCaseResultMap := make(map[string]models.TestResult)
 
+	testCaseResultMap := make(map[string]models.TestResult)
 	testCases, err := r.testDB.GetTestCases(ctx, testSetID)
 	if err != nil {
 		return fmt.Errorf("failed to get test cases: %w", err)
@@ -1055,4 +1096,12 @@ func (r *Replayer) executeScript(ctx context.Context, script string) error {
 		return fmt.Errorf("failed to execute script: %w", cmdErr.Err)
 	}
 	return nil
+}
+
+func (r *Replayer) DeleteTestSet(ctx context.Context, testSetID string) error {
+	return r.testDB.DeleteTestSet(ctx, testSetID)
+}
+
+func (r *Replayer) DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error {
+	return r.testDB.DeleteTests(ctx, testSetID, testCaseIDs)
 }

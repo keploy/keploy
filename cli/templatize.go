@@ -30,7 +30,7 @@ func Templatize(ctx context.Context, logger *zap.Logger, conf *config.Config, se
 			// Read the testcases from the path provided.
 				// utils.ReadTempValues(testSet)
 				// Get the replay service.
-				svc, err := serviceFactory.GetService(ctx, cmd.Name())
+				svc, err := serviceFactory.GetService(ctx, "normalize")
 				if err != nil {
 					utils.LogError(logger, err, "failed to get service")
 					return nil
@@ -41,7 +41,7 @@ func Templatize(ctx context.Context, logger *zap.Logger, conf *config.Config, se
 					utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
 					return nil
 				}
-				if err := replay.Templatize(ctx); err != nil {
+				if err := replay.Templatize(ctx, []string{}); err != nil {
 					utils.LogError(logger, err, "failed to templatize test cases")
 					return nil
 				}

@@ -28,12 +28,12 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 	filePath := filepath.Join(db.path, testSetID)
 
 	var config T
-	data, _ := yaml.ReadFile(ctx, db.logger, filePath, "config")
-	if data == nil {
-		return config, nil
+	data, err := yaml.ReadFile(ctx, db.logger, filePath, "config")
+	if err != nil {
+		return config, err
 	}
 	if err := yamlLib.Unmarshal(data, &config); err != nil {
-		db.logger.Info("failed to decode the configuration file", zap.Error(err))
+		utils.LogError(db.logger, err, "failed to unmarshal test-set config file", zap.String("testSet", testSetID))
 		return config, err
 	}
 
@@ -45,7 +45,7 @@ func (db *Db[T]) Write(ctx context.Context, testSetID string, config T) error {
 
 	data, err := yamlLib.Marshal(config)
 	if err != nil {
-		db.logger.Error("failed to marshal test-set config file", zap.String("testSet", testSetID), zap.Error(err))
+		utils.LogError(db.logger, err, "failed to marshal test-set config file", zap.String("testSet", testSetID))
 		return err
 	}
 	err = yaml.WriteFile(ctx, db.logger, filePath, "config", data, false)

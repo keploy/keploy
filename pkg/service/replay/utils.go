@@ -1,3 +1,5 @@
+//go:build linux
+
 package replay
 
 import (
@@ -21,7 +23,7 @@ import (
 type TestReportVerdict struct {
 	total  int
 	passed int
-	failed int
+	failed int ``
 	status bool
 }
 
@@ -268,10 +270,10 @@ func getType(val interface{}) string {
 func parseBody(val1 *string, body *interface{}) bool {
 	// Check if the value is already present in the templatized values.
 	// Reverse the templatized value map.
-	revMap := reverseMap(utils.TemplatizedValues)
-	if _, ok := revMap[*val1]; ok {
-		return false
-	}
+	// revMap := reverseMap(utils.TemplatizedValues)
+	// if _, ok := revMap[*val1]; ok {
+	// 	return false
+	// }
 	switch b := (*body).(type) {
 	case geko.ObjectItems:
 		keys := b.Keys()
@@ -353,7 +355,10 @@ func insertUnique(baseKey, value string, myMap map[string]interface{}) string {
 	key := baseKey
 	i := 0
 	for {
-		if _, exists := myMap[key]; !exists {
+		if myMap[key] == value {
+			break
+		}
+		if _, exists := myMap[key]; !exists{
 			myMap[key] = value
 			break
 		}
@@ -407,4 +412,21 @@ func noQuotes(tempMap map[string]interface{}) {
 			tempMap[key] = strings.ReplaceAll(str, `"`, "")
 		}
 	}
+}
+func mergeMaps(map1, map2 map[string][]string) map[string][]string {
+	for key, values := range map2 {
+		if _, exists := map1[key]; exists {
+			map1[key] = append(map1[key], values...)
+		} else {
+			map1[key] = values
+		}
+	}
+	return map1
+}
+
+func removeFromMap(map1, map2 map[string][]string) map[string][]string {
+	for key := range map2 {
+		delete(map1, key)
+	}
+	return map1
 }
