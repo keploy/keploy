@@ -56,6 +56,9 @@ type Record struct {
 type Contract struct {
 	Services []string `json:"services" yaml:"services" mapstructure:"services"`
 	Path     string   `json:"path" yaml:"path" mapstructure:"path"`
+	Download bool     `json:"download" yaml:"download" mapstructure:"download"`
+	Generate bool     `json:"generate" yaml:"generate" mapstructure:"generate"`
+	Driven   string   `json:"driven" yaml:"driven" mapstructure:"driven"`
 }
 
 type Normalize struct {

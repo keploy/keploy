@@ -169,9 +169,21 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "generate", "download":
 		cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate contracts")
 		cmd.Flags().StringP("path", "p", c.cfg.Contract.Path, "Specify the path to generate contracts")
-		cmd.MarkFlagRequired("path")
-		// Only one of the flags is required
-		// cmd.MarkFlagsMutuallyExclusive("services", "path")
+		err := cmd.MarkFlagRequired("path")
+		if err != nil {
+			errMsg := "failed to mark path as required flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		if cmd.Name() == "validate" {
+			cmd.Flags().Bool("download", c.cfg.Contract.Download, "Specify whether to download contracts or not")
+			cmd.Flags().Bool("generate", c.cfg.Contract.Generate, "Specify")
+			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the path to generate contracts")
+		}
+		if cmd.Name() == "generate" {
+			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the path to generate contracts")
+
+		}
 	case "update":
 		return nil
 	case "normalize":

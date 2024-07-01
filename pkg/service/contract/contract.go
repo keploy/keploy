@@ -41,6 +41,10 @@ func (s *contractService) Download(ctx context.Context) error {
 	fmt.Printf("Download contract for services: %v\n", s.config.Contract.Services)
 	return nil
 }
+func (s *contractService) Validate(ctx context.Context) error {
+	fmt.Printf("Validate contract for services: %v\n", s.config.Contract.Services)
+	return nil
+}
 
 // New creates a new contractService
 func New(logger *zap.Logger, config *config.Config) Service {

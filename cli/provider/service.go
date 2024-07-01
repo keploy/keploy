@@ -137,7 +137,7 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 			return replay.NewReplayer(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, n.cfg), nil
 		}
 		return nil, errors.New("invalid command")
-	case "generate", "download":
+	case "generate", "download", "validate":
 		return contract.New(n.logger, n.cfg), nil
 	default:
 		return nil, errors.New("invalid command")

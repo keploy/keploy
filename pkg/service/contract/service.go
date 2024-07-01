@@ -8,4 +8,5 @@ import (
 type Service interface {
 	Generate(ctx context.Context, flag bool) error
 	Download(ctx context.Context) error
+	Validate(ctx context.Context) error
 }

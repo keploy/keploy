@@ -388,25 +388,25 @@ func generateUniqueID() string {
 
 func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath string, name string) (success bool) {
 	//This should be added after integration
-	//data=ReadFIle(ctx,logger,filePath,name)
-	// Read the custom format YAML file
-	file, err := os.Open("/home/ahmed/Desktop/GSOC/Keploy/Issues/keploy/keploy/test-set-1/tests/test-10.yaml")
-	if err != nil {
-		logger.Fatal("Error opening file", zap.Error(err))
-		return false
-	}
-	defer func() {
-		if cerr := file.Close(); cerr != nil {
-			logger.Error("Error closing file", zap.Error(cerr))
-			success = false
-		}
-	}()
-
-	data, err := io.ReadAll(file)
+	data, err := ReadFile(ctx, logger, filePath, name)
 	if err != nil {
 		logger.Fatal("Error reading file", zap.Error(err))
 		return false
 	}
+	// Read the custom format YAML file
+	// file, err := os.Open("/home/ahmed/Desktop/GSOC/Keploy/Issues/keploy/keploy/test-set-1/tests/test-10.yaml")
+	// if err != nil {
+	// 	logger.Fatal("Error opening file", zap.Error(err))
+	// 	return false
+	// }
+	// defer func() {
+	// 	if cerr := file.Close(); cerr != nil {
+	// 		logger.Error("Error closing file", zap.Error(cerr))
+	// 		success = false
+	// 	}
+	// }()
+
+	// data, err := io.ReadAll(file)
 
 	// Parse the custom format YAML into the HTTPSchema struct
 	var custom models.HTTPSchema2
