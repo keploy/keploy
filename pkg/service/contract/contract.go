@@ -1,3 +1,4 @@
+// Package contract provides the implementation of the contract service
 package contract
 
 import (
@@ -31,7 +32,6 @@ func (s *contractService) Generate(ctx context.Context, flag bool) error {
 	} else {
 		fmt.Println("generate OPENAPI for testcases")
 	}
-
 	// Implement the logic to call ConvertYamlToOpenAPI
 	// ConvertYamlToOpenAPI(ctx, s.logger, filePath, name)
 	// For now, just return nil
@@ -39,10 +39,13 @@ func (s *contractService) Generate(ctx context.Context, flag bool) error {
 }
 func (s *contractService) Download(ctx context.Context) error {
 	fmt.Printf("Download contract for services: %v\n", s.config.Contract.Services)
+	fmt.Printf("ctx: %v\n", ctx)
 	return nil
 }
 func (s *contractService) Validate(ctx context.Context) error {
 	fmt.Printf("Validate contract for services: %v\n", s.config.Contract.Services)
+	fmt.Printf("ctx: %v\n", ctx)
+
 	return nil
 }
 
