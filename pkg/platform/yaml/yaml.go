@@ -390,7 +390,7 @@ func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath stri
 	//This should be added after integration
 	//data=ReadFIle(ctx,logger,filePath,name)
 	// Read the custom format YAML file
-	file, err := os.Open("/home/ahmed/Desktop/GSOC/Keploy/Issues/keploy/keploy/test-set-1/tests/test-50.yaml")
+	file, err := os.Open("/home/ahmed/Desktop/GSOC/Keploy/Issues/keploy/keploy/test-set-1/tests/test-10.yaml")
 	if err != nil {
 		logger.Fatal("Error opening file", zap.Error(err))
 		return false
@@ -568,7 +568,7 @@ func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath stri
 	}
 
 	// Save OpenAPI YAML to a file
-	outputFile, err := os.Create("openapi_output2.yaml")
+	outputFile, err := os.Create("openapi_output3.yaml")
 	if err != nil {
 		return false
 	}

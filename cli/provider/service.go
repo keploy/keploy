@@ -20,8 +20,10 @@ import (
 	reportdb "go.keploy.io/server/v2/pkg/platform/yaml/reportdb"
 	testdb "go.keploy.io/server/v2/pkg/platform/yaml/testdb"
 
+	"go.keploy.io/server/v2/pkg/service/contract"
 	"go.keploy.io/server/v2/pkg/service/record"
 	"go.keploy.io/server/v2/pkg/service/replay"
+
 	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/pkg/service/utgen"
 	"go.keploy.io/server/v2/utils"
@@ -135,6 +137,8 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 			return replay.NewReplayer(n.logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, n.cfg), nil
 		}
 		return nil, errors.New("invalid command")
+	case "generate", "download":
+		return contract.New(n.logger, n.cfg), nil
 	default:
 		return nil, errors.New("invalid command")
 	}

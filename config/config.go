@@ -32,6 +32,7 @@ type Config struct {
 	KeployContainer       string       `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
 	KeployNetwork         string       `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
 	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
+	Contract              Contract     `json:"contract" yaml:"contract" mapstructure:"contract"`
 }
 
 type UtGen struct {
@@ -51,6 +52,10 @@ type Record struct {
 	Filters     []Filter      `json:"filters" yaml:"filters" mapstructure:"filters"`
 	RecordTimer time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
 	ReRecord    string        `json:"rerecord" yaml:"rerecord" mapstructure:"rerecord"`
+}
+type Contract struct {
+	Services []string `json:"services" yaml:"services" mapstructure:"services"`
+	Path     string   `json:"path" yaml:"path" mapstructure:"path"`
 }
 
 type Normalize struct {
@@ -129,6 +134,10 @@ func SetSelectedTests(conf *Config, testSets []string) {
 	for _, testSet := range testSets {
 		conf.Test.SelectedTests[testSet] = []string{}
 	}
+}
+func SetSelectedServices(conf *Config, services []string) {
+	// string is "s1,s2" so i want to get s1,s2
+	conf.Contract.Services = services
 }
 
 func SetSelectedTestsNormalize(conf *Config, value string) error {

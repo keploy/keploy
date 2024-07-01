@@ -166,7 +166,12 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	//add flags
 	var err error
 	switch cmd.Name() {
-
+	case "generate", "download":
+		cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate contracts")
+		cmd.Flags().StringP("path", "p", c.cfg.Contract.Path, "Specify the path to generate contracts")
+		cmd.MarkFlagRequired("path")
+		// Only one of the flags is required
+		// cmd.MarkFlagsMutuallyExclusive("services", "path")
 	case "update":
 		return nil
 	case "normalize":
@@ -363,6 +368,24 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", c.cfg))
 
 	switch cmd.Name() {
+	case "generate", "download":
+		path, err := cmd.Flags().GetString("path")
+		if err != nil {
+			errMsg := "failed to get the path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Contract.Path = path
+
+		services, err := cmd.Flags().GetStringSlice("services")
+		if services != nil {
+			if err != nil {
+				errMsg := "failed to get the services"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			config.SetSelectedServices(c.cfg, services)
+		}
 	case "record", "test":
 
 		// handle the app command
