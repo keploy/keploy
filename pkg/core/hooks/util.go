@@ -1,3 +1,5 @@
+//go:build linux
+
 package hooks
 
 import (
@@ -25,6 +27,46 @@ func IPv4ToUint32(ipStr string) (uint32, error) {
 		return 0, errors.New("not a valid IPv4 address")
 	}
 	return 0, errors.New("failed to parse IP address")
+}
+
+// ToIPv4MappedIPv6 converts an IPv4 address to an IPv4-mapped IPv6 address.
+func ToIPv4MappedIPv6(ipv4 string) ([4]uint32, error) {
+	var result [4]uint32
+
+	// Parse the input IPv4 address
+	ip := net.ParseIP(ipv4)
+	if ip == nil {
+		return result, errors.New("invalid IPv4 address")
+	}
+
+	// Check if the input is an IPv4 address
+	ip = ip.To4()
+	if ip == nil {
+		return result, errors.New("not a valid IPv4 address")
+	}
+
+	// Convert IPv4 address to IPv4-mapped IPv6 address
+	// IPv4-mapped IPv6 address is ::ffff:a.b.c.d
+	ipv6 := "::ffff:" + ipv4
+
+	// Parse the resulting IPv6 address
+	ip6 := net.ParseIP(ipv6)
+	if ip6 == nil {
+		return result, errors.New("failed to parse IPv4-mapped IPv6 address")
+	}
+
+	// Convert the IPv6 address to a 16-byte representation
+	ip6Bytes := ip6.To16()
+	if ip6Bytes == nil {
+		return result, errors.New("failed to convert IPv6 address to bytes")
+	}
+
+	// Populate the result array
+	for i := 0; i < 4; i++ {
+		result[i] = uint32(ip6Bytes[i*4])<<24 | uint32(ip6Bytes[i*4+1])<<16 | uint32(ip6Bytes[i*4+2])<<8 | uint32(ip6Bytes[i*4+3])
+	}
+
+	return result, nil
 }
 
 // detectCgroupPath returns the first-found mount point of type cgroup2

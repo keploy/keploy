@@ -44,17 +44,28 @@ Keploy not only records API calls, but also records database calls and replays t
 
 > 🐰 **Fun fact:** Keploy uses itself for testing! Check out our swanky coverage badge: [![Coverage Status](https://coveralls.io/repos/github/keploy/keploy/badge.svg?branch=main&kill_cache=1)](https://coveralls.io/github/keploy/keploy?branch=main&kill_cache=1) &nbsp;
 
+## 🚨 Here for  [Unit Test Generator](README-UnitGen.md) (ut-gen)? 
+Keploy's new launched world's first unit test generator(ut-gen) implementation of [Meta LLM research paper](https://arxiv.org/pdf/2402.09171), it understands code semantics and generates meaningful unit tests, aiming to:
+
+- **Automate unit test generation (UTG)**: Quickly generate comprehensive unit tests and reduce the redundant manual effort.
+
+- **Improve edge cases**: Extend and improve the scope of tests to cover more complex scenarios that are often missed manually.
+
+- **Boost test coverage**: As codebase grows, ensuring exhaustive coverage should become feasible.
+
+### 📜 Follow [Unit Test Generator README](README-UnitGen.md)! ✅
+
 ## 📘 Documentation!
 Become a Keploy pro with **[Keploy Documentation](https://keploy.io/docs/)**.
 
 <img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-replay.gif" width="100%" alt="Record Replay Testing"/>
 
-# 🚀 Quick Installation
+# 🚀 Quick Installation (API test generator)
 
 Integrate Keploy by installing the agent locally. No code-changes required.
 
 ```shell
-curl -O https://raw.githubusercontent.com/keploy/keploy/main/keploy.sh && source keploy.sh
+curl --silent -O -L https://keploy.io/install.sh && source install.sh
 ```
 
 ##  🎬 Recording Testcases

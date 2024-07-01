@@ -29,81 +29,110 @@ rm -rf keploy/
 # Build the binary.
 go build -o ginApp
 
+
+send_request(){
+    sleep 10
+    app_started=false
+    while [ "$app_started" = false ]; do
+        if curl --request POST \
+      --url http://localhost:8080/url \
+      --header 'content-type: application/json' \
+      --data '{
+      "url": "https://facebook.com"
+    }'; then
+            app_started=true
+        fi
+        sleep 3 # wait for 3 seconds before checking again.
+    done
+    echo "App started"      
+    # Start making curl calls to record the testcases and mocks.
+    curl --request POST \
+      --url http://localhost:8080/url \
+      --header 'content-type: application/json' \
+      --data '{
+      "url": "https://google.com"
+    }'
+
+    curl --request POST \
+      --url http://localhost:8080/url \
+      --header 'content-type: application/json' \
+      --data '{
+      "url": "https://facebook.com"
+    }'
+
+    curl -X GET http://localhost:8080/CJBKJd92
+
+    # Wait for 10 seconds for keploy to record the tcs and mocks.
+    sleep 10
+    pid=$(pgrep keploy)
+    echo "$pid Keploy PID" 
+    echo "Killing keploy"
+    sudo kill $pid
+}
+
+
 for i in {1..2}; do
-# Start the gin-mongo app in record mode and record testcases and mocks.
-sudo -E env PATH="$PATH" ./../../keployv2 record -c "./ginApp" --generateGithubActions=false &
-
-# Wait for the application to start.
-app_started=false
-
-sleep 5
-
-while [ "$app_started" = false ]; do
-    if curl --request POST \
-  --url http://localhost:8080/url \
-  --header 'content-type: application/json' \
-  --data '{
-  "url": "https://facebook.com"
-}'; then
-        app_started=true
+    app_name="javaApp_${i}"
+    send_request &
+    sudo -E env PATH="$PATH" ./../../keployv2 record -c "./ginApp" --generateGithubActions=false &> "${app_name}.txt"
+    if grep "ERROR" "${app_name}.txt"; then
+        echo "Error found in pipeline..."
+        cat "${app_name}.txt"
+        exit 1
     fi
-    sleep 3 # wait for 3 seconds before checking again.
-done
-
-# Get the pid of the application.
-pid=$(pgrep keploy)
-
-# Start making curl calls to record the testcases and mocks.
-curl --request POST \
-  --url http://localhost:8080/url \
-  --header 'content-type: application/json' \
-  --data '{
-  "url": "https://google.com"
-}'
-
-curl --request POST \
-  --url http://localhost:8080/url \
-  --header 'content-type: application/json' \
-  --data '{
-  "url": "https://facebook.com"
-}'
-
-curl -X GET http://localhost:8080/CJBKJd92
-
-# Wait for 5 seconds for keploy to record the tcs and mocks.
-sleep 5
-
-# Stop the gin-mongo app.
-sudo kill $pid
-
-# Wait for 5 seconds for keploy to stop.
-sleep 5
+    if grep "WARNING: DATA RACE" "${app_name}.txt"; then
+      echo "Race condition detected in recording, stopping pipeline..."
+      cat "${app_name}.txt"
+      exit 1
+    fi
+    sleep 5
+    wait
+    echo "Recorded test case and mocks for iteration ${i}"
 done
 
 # Start the gin-mongo app in test mode.
-sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7 --generateGithubActions=false 
+sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7 --generateGithubActions=false &> test_logs.txt
 
-# # move keployv2 to /usr/local/bin/keploy
-# mv ./../../keployv2 /usr/local/bin/keploy
+if grep "ERROR" "test_logs.txt"; then
+    echo "Error found in pipeline..."
+    cat "test_logs.txt"
+    exit 1
+fi
 
-# sed -i 's/<path for storing stubs>/\/home\/runner\/work\/keploy\/keploy\/samples-go\/gin-mongo/' main_test.go
+if grep "WARNING: DATA RACE" "test_logs.txt"; then
+    echo "Race condition detected in test, stopping pipeline..."
+    cat "test_logs.txt"
+    exit 1
+fi
 
-# # run in mockrecord mode
-# go test
+all_passed=true
 
-# sed -i 's/MOCK_RECORD/MOCK_TEST/' main_test.go
-# # run in mocktest mode
-# go test
 
 # Get the test results from the testReport file.
-report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"
-test_status1=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-report_file2="./keploy/reports/test-run-0/test-set-1-report.yaml"
-test_status2=$(grep 'status:' "$report_file2" | head -n 1 | awk '{print $2}')
+for i in {0..1}
+do
+    # Define the report file for each test set
+    report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
 
-# Return the exit code according to the status.
-if [ "$test_status1" = "PASSED" ] && [ "$test_status2" = "PASSED" ]; then
+    # Extract the test status
+    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+
+    # Print the status for debugging
+    echo "Test status for test-set-$i: $test_status"
+
+    # Check if any test set did not pass
+    if [ "$test_status" != "PASSED" ]; then
+        all_passed=false
+        echo "Test-set-$i did not pass."
+        break # Exit the loop early as all tests need to pass
+    fi
+done
+
+# Check the overall test status and exit accordingly
+if [ "$all_passed" = true ]; then
+    echo "All tests passed"
     exit 0
 else
+    cat "test_logs.txt"
     exit 1
 fi

@@ -1,15 +1,15 @@
 # MySQL Package Documentation
 
-The `mysqlparser` package encompasses the parser and mapping logic required 
-to read MySql binary messages and capture and test the outputs. 
-Utilized by the `hooks` package, it assists in redirecting outgoing 
+The `mysqlparser` package encompasses the parser and mapping logic required
+to read MySql binary messages and capture and test the outputs.
+Utilized by the `hooks` package, it assists in redirecting outgoing
 calls for the purpose of recording or testing the outputs.
 
 ## SSL Support
 
 Please note that SSL is currently not supported in the MySQL package. To use the package without SSL, you can include the following parameters in your database URL like the following example:
 
-``` jdbc:mysql://localhost:3306/db_name?useSSL=false&allowPublicKeyRetrieval=true ```
+`jdbc:mysql://localhost:3306/db_name?useSSL=false&allowPublicKeyRetrieval=true`
 
 ## The following MySQL packet types are handled in the parser:
 
@@ -50,4 +50,3 @@ Please note that SSL is currently not supported in the MySQL package. To use the
 **COM_STMT_RESET**: Resets the data of a prepared statement which was accumulated with COM_STMT_SEND_LONG_DATA commands.
 
 **COM_QUIT**: Sent by the client to close the connection to the server gracefully.
-

@@ -9,7 +9,7 @@ jobs:
 
     - name: Build binary
       run: |
-        go build  -tags=viper_bind_struct -o keployv2
+        go build -race -tags=viper_bind_struct -o keployv2
     - name: Checkout the samples-python repository
       uses: actions/checkout@v2
       with:

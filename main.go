@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"syscall"
 
 	"go.keploy.io/server/v2/cli"
 	"go.keploy.io/server/v2/cli/provider"
@@ -71,7 +70,17 @@ func start(ctx context.Context) {
 		fmt.Println("Failed to start the logger for the CLI", err)
 		return
 	}
-	defer utils.DeleteLogs(logger)
+	defer func() {
+		if err := utils.DeleteFileIfNotExists(logger, "keploy-logs.txt"); err != nil {
+			utils.LogError(logger, err, "Failed to delete Keploy Logs")
+			return
+		}
+		if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {
+			utils.LogError(logger, err, "Failed to delete Temporary Docker Compose")
+			return
+		}
+
+	}()
 	defer utils.Recover(logger)
 
 	// The 'umask' command is commonly used in various operating systems to regulate the permissions of newly created files.
@@ -81,8 +90,8 @@ func start(ctx context.Context) {
 	// Setting 'umask' to '0' ensures that 'keploy' can precisely control the permissions of the files it creates.
 	// However, it's important to note that this approach may not work in scenarios involving mounted volumes,
 	// as the 'umask' is set by the host system, and cannot be overridden by 'keploy' or individual processes.
-	oldMask := syscall.Umask(0)
-	defer syscall.Umask(oldMask)
+	oldMask := utils.SetUmask()
+	defer utils.RestoreUmask(oldMask)
 
 	userDb := userDb.New(logger)
 	if dsn != "" {

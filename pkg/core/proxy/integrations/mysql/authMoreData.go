@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package mysql provides integration with MySQL outgoing.
 package mysql
 

@@ -1,3 +1,5 @@
+//go:build linux
+
 package core
 
 import (
@@ -103,6 +105,10 @@ func (s *Sessions) Get(id uint64) (*Session, bool) {
 
 func (s *Sessions) Set(id uint64, session *Session) {
 	s.sessions.Store(id, session)
+}
+
+func (s *Sessions) Delete(id uint64) {
+	s.sessions.Delete(id)
 }
 
 func (s *Sessions) getAll() map[uint64]*Session {

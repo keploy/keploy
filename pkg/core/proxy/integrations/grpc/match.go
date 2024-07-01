@@ -1,3 +1,5 @@
+//go:build linux
+
 package grpc
 
 import (
@@ -85,7 +87,7 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, _ *zap.Logger, grpcReq m
 			}
 
 			if isMatched {
-				isDeleted := mockDb.DeleteFilteredMock(matchedMock)
+				isDeleted := mockDb.DeleteFilteredMock(*matchedMock)
 				if !isDeleted {
 					continue
 				}
