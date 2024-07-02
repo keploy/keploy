@@ -28,14 +28,18 @@ jobs:
     needs: build
     uses: ./.github/workflows/test-go-mongo-2.yml
 
-  test-express-mongodb:
+  test-express-mongodb-1:
     needs: build
-    uses: ./.github/workflows/test-express-mongodb.yml    
+    uses: ./.github/workflows/test-express-mongodb-1.yml  
+
+  test-express-mongodb-2:
+    needs: build
+    uses: ./.github/workflows/test-express-mongodb-2.yml    
 
 
 # Wait for all the test workflows before getting the coverage
   get-coverage:
-    needs: [test-go-mongo-1, test-go-mongo-2, test-express-mongodb]
+    needs: [test-go-mongo-1, test-go-mongo-2, test-express-mongodb-1, test-express-mongodb-1]
     uses: ./.github/workflows/coverage_stage.yml     
 
 #https://github.com/marketplace/actions/delete-artifact
