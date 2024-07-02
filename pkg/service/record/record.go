@@ -130,7 +130,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	if err != nil {
 		stopReason = "failed to get data frames"
 		utils.LogError(r.logger, err, stopReason)
-		if err == context.Canceled {
+		if ctx.Err() == context.Canceled {
 			return err
 		}
 		return fmt.Errorf(stopReason)
@@ -140,7 +140,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		for testCase := range frames.Incoming {
 			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID)
 			if err != nil {
-				if err == context.Canceled {
+				if ctx.Err() == context.Canceled {
 					continue
 				}
 				insertTestErrChan <- err
@@ -157,7 +157,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		for mock := range frames.Outgoing {
 			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
 			if err != nil {
-				if err == context.Canceled {
+				if ctx.Err() == context.Canceled {
 					continue
 				}
 				insertMockErrChan <- err
@@ -255,7 +255,7 @@ func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
 		if err != nil {
 			stopReason = "failed to start the hooks and proxy"
 			utils.LogError(r.logger, err, stopReason)
-			if err == context.Canceled {
+			if ctx.Err() == context.Canceled {
 				return appID, err
 			}
 			return appID, fmt.Errorf(stopReason)
