@@ -141,6 +141,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
 		}
+		if _, ok := r.config.Test.IgnoredTests[testSetID]; ok {
+			continue
+		}
 		requestMockemulator.ProcessMockFile(ctx, testSetID)
 		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, inst.AppID, false)
 		if err != nil {
@@ -377,6 +380,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	selectedTests := ArrayToMap(r.config.Test.SelectedTests[testSetID])
+	ignoredTests := ArrayToMap(r.config.Test.IgnoredTests[testSetID])
 
 	testCasesCount := len(testCases)
 
@@ -405,6 +409,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	for _, testCase := range testCases {
 
 		if _, ok := selectedTests[testCase.Name]; !ok && len(selectedTests) != 0 {
+			continue
+		}
+
+		if _, ok := ignoredTests[testCase.Name]; ok {
 			continue
 		}
 

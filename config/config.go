@@ -24,9 +24,9 @@ type Config struct {
 	BuildDelay            uint64       `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
 	Test                  Test         `json:"test" yaml:"test" mapstructure:"test"`
 	Record                Record       `json:"record" yaml:"record" mapstructure:"record"`
-	Gen                   UtGen        `json:"gen" yaml:"gen" mapstructure:"gen"`
-	Normalize             Normalize    `json:"normalize" yaml:"normalize" mapstructure:"normalize"`
-	ReRecord              ReRecord     `json:"rerecord" yaml:"rerecord" mapstructure:"rerecord"`
+	Gen                   UtGen        `json:"gen" yaml:"-" mapstructure:"gen"`
+	Normalize             Normalize    `json:"normalize" yaml:"-" mapstructure:"normalize"`
+	ReRecord              ReRecord     `json:"rerecord" yaml:"-" mapstructure:"rerecord"`
 	ConfigPath            string       `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
 	BypassRules           []BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
 	EnableTesting         bool         `json:"enableTesting" yaml:"enableTesting" mapstructure:"enableTesting"`
@@ -92,6 +92,7 @@ type Test struct {
 	FallBackOnMiss     bool                `json:"fallBackOnMiss" yaml:"fallBackOnMiss" mapstructure:"fallBackOnMiss"`
 	BasePath           string              `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
 	Mocking            bool                `json:"mocking" yaml:"mocking" mapstructure:"mocking"`
+	IgnoredTests       map[string][]string `json:"ignoredTests" yaml:"ignoredTests" mapstructure:"ignoredTests"`
 }
 
 type Globalnoise struct {
