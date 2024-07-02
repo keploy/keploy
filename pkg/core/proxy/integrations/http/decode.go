@@ -100,12 +100,22 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 					utils.LogError(logger, nil, "Didn't match any preExisting http mock", zap.Any("metadata", getReqMeta(request)))
 				}
 				if opts.FallBackOnMiss {
+					logger.Info("No mock matched with the current request, hence connecting to the real service")
 					_, err = pUtil.PassThrough(ctx, logger, clientConn, dstCfg, [][]byte{reqBuf})
 					if err != nil {
 						utils.LogError(logger, err, "failed to passThrough http request", zap.Any("metadata", getReqMeta(request)))
 						errCh <- err
 						return
 					}
+				}
+				_, err = clientConn.Write([]byte("no mocks found for this request"))
+				if err != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					utils.LogError(logger, err, "failed to write the no mocks found to the user application")
+					errCh <- err
+					return
 				}
 				errCh <- nil
 				return
