@@ -135,7 +135,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 		r.logger.Warn(fmt.Sprintf("%s language detected. please use --language to manually set the language if needed", language))
 		r.config.Test.Language = language
-	} else if language != r.config.Test.Language {
+	} else if language != r.config.Test.Language && language != models.Unknown {
 		utils.LogError(r.logger, nil, "language detected is different from the language provided")
 		r.config.Test.SkipCoverage = true
 	}
@@ -152,12 +152,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 		cov = java.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.JacocoAgentPath, executable)
 	}
 
-	r.config.CoverageCommand, err = cov.PreProcess()
-	if err != nil {
-		r.config.Test.SkipCoverage = true
-	}
-
 	if !r.config.Test.SkipCoverage {
+		if utils.CmdType(r.config.CommandType) == utils.Native {
+			r.config.CoverageCommand, err = cov.PreProcess()
+			if err != nil {
+				r.config.Test.SkipCoverage = true
+			}
+		}
 		err = os.Setenv("CLEAN", "true")
 		if err != nil {
 			r.config.Test.SkipCoverage = true
@@ -239,7 +240,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 				r.config.Test.SkipCoverage = true
 				r.logger.Warn("failed to set CLEAN env variable, skipping coverage caluclation.", zap.Error(err))
 			}
-			err = os.Setenv("APPEND", " --append")
+			err = os.Setenv("APPEND", "--append")
 			if err != nil {
 				r.config.Test.SkipCoverage = true
 				r.logger.Warn("failed to set APPEND env variable, skipping coverage caluclation.", zap.Error(err))
