@@ -16,6 +16,11 @@ type TestReport struct {
 	TestSet string       `json:"testSet" yaml:"test_set"`
 }
 
+type TestCoverage struct {
+	FileCov  map[string]string `json:"fileCoverage" yaml:"file_coverage"`
+	TotalCov string            `json:"totalCoverage" yaml:"total_coverage"`
+}
+
 func (tr *TestReport) GetKind() string {
 	return "TestReport"
 }

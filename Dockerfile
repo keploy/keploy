@@ -37,6 +37,9 @@ RUN curl -fsSL https://get.docker.com -o get-docker.sh && \
 # Install docker-compose to PATH
 RUN apt install docker-compose -y
 
+# install python's coverage tool
+RUN apt-get install -y python3-coverage
+
 # Copy the keploy binary and the entrypoint script from the build container
 COPY --from=build /app/keploy /app/keploy
 COPY --from=build /app/entrypoint.sh /app/entrypoint.sh
