@@ -248,6 +248,18 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				}
 				if !matched {
 					logger.Debug("mongo request not matched with any tcsMocks", zap.Any("request", mongoRequests))
+					logger.Info("fallbackonmiss",zap.Any("here",opts.FallBackOnMiss))
+					if !opts.FallBackOnMiss {
+						_, err := clientConn.Write(([]byte{}))
+						if err != nil {
+							utils.LogError(logger, err, "failed to write empty response to the client")
+							errCh <- err
+							return
+						}
+						errCh <- nil
+						return
+					}
+					logger.Info("No mock matched with the current request, hence connecting to the real service",zap.Any(" with destionation address",dstCfg.Addr))
 					reqBuf, err = util.PassThrough(ctx, logger, clientConn, dstCfg, requestBuffers)
 					if err != nil {
 						utils.LogError(logger, err, "failed to passthrough the mongo request to the actual database server")
