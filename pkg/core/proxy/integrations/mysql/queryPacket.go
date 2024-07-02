@@ -2,19 +2,18 @@
 
 package mysql
 
-import "fmt"
+import (
+	"fmt"
 
-type QueryPacket struct {
-	Command byte   `yaml:"command"`
-	Query   string `yaml:"query"`
-}
+	"go.keploy.io/server/v2/pkg/models"
+)
 
-func decodeMySQLQuery(data []byte) (*QueryPacket, error) {
+func decodeMySQLQuery(data []byte) (*models.MySQLQueryPacket, error) {
 	if len(data) < 1 {
 		return nil, fmt.Errorf("query packet too short")
 	}
 
-	packet := &QueryPacket{}
+	packet := &models.MySQLQueryPacket{}
 	packet.Command = data[0]
 	packet.Query = string(data[1:])
 

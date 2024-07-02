@@ -5,24 +5,18 @@ package mysql
 import (
 	"errors"
 	"strings"
+
+	"go.keploy.io/server/v2/pkg/models"
 )
 
-type ComChangeUserPacket struct {
-	User         string `yaml:"user"`
-	Auth         []byte `yaml:"auth,omitempty,flow"`
-	Db           string `yaml:"db"`
-	CharacterSet uint8  `yaml:"character_set"`
-	AuthPlugin   string `yaml:"auth_plugin"`
-}
-
-func decodeComChangeUser(data []byte) (ComChangeUserPacket, error) {
+func decodeComChangeUser(data []byte) (models.MySQLComChangeUserPacket, error) {
 	if len(data) < 2 {
-		return ComChangeUserPacket{}, errors.New("Data too short for COM_CHANGE_USER")
+		return models.MySQLComChangeUserPacket{}, errors.New("Data too short for COM_CHANGE_USER")
 	}
 
 	nullTerminatedStrings := strings.Split(string(data[1:]), "\x00")
 	if len(nullTerminatedStrings) < 5 {
-		return ComChangeUserPacket{}, errors.New("Data malformed for COM_CHANGE_USER")
+		return models.MySQLComChangeUserPacket{}, errors.New("Data malformed for COM_CHANGE_USER")
 	}
 
 	user := nullTerminatedStrings[0]
@@ -32,7 +26,7 @@ func decodeComChangeUser(data []byte) (ComChangeUserPacket, error) {
 	characterSet := data[len(user)+4+int(authLength)]
 	authPlugin := nullTerminatedStrings[3]
 
-	return ComChangeUserPacket{
+	return models.MySQLComChangeUserPacket{
 		User:         user,
 		Auth:         auth,
 		Db:           db,

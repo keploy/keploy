@@ -220,7 +220,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 					})
 					var pluginType string
 
-					if handshakeResp, ok := mysqlResp.(*HandshakeResponseOk); ok {
+					if handshakeResp, ok := mysqlResp.(*models.MySQLHandshakeResponseOk); ok {
 						pluginType = handshakeResp.PluginDetails.Type
 					}
 					if pluginType == "cachingSha2PasswordPerformFullAuthentication" {
@@ -386,7 +386,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 
 				var pluginType string
 
-				if handshakeResp, ok := mysqlResp2.(*HandshakeResponseOk); ok {
+				if handshakeResp, ok := mysqlResp2.(*models.MySQLHandshakeResponseOk); ok {
 					pluginType = handshakeResp.PluginDetails.Type
 				}
 				if pluginType == "cachingSha2PasswordPerformFullAuthentication" {

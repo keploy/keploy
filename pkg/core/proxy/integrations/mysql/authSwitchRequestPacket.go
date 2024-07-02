@@ -9,18 +9,12 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-type AuthSwitchRequestPacket struct {
-	StatusTag      byte   `yaml:"status_tag"`
-	PluginName     string `yaml:"plugin_name"`
-	PluginAuthData string `yaml:"plugin_authdata"`
-}
-
-func decodeAuthSwitchRequest(data []byte) (*AuthSwitchRequestPacket, error) {
+func decodeAuthSwitchRequest(data []byte) (*models.AuthSwitchRequestPacket, error) {
 	if len(data) < 1 || data[0] != 0xFE {
 		return nil, fmt.Errorf("invalid AuthSwitchRequest packet")
 	}
 
-	packet := &AuthSwitchRequestPacket{
+	packet := &models.AuthSwitchRequestPacket{
 		StatusTag: data[0],
 	}
 

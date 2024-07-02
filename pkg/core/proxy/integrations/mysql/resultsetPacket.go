@@ -13,16 +13,6 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-type RowColumnDefinition struct {
-	Type  models.FieldType `yaml:"type"`
-	Name  string           `yaml:"name"`
-	Value interface{}      `yaml:"value"`
-}
-type RowHeader struct {
-	PacketLength int   `yaml:"packet_length"`
-	SequenceID   uint8 `yaml:"sequence_id"`
-}
-
 func parseResultSet(b []byte) (*models.MySQLResultSet, error) {
 	columns := make([]*models.ColumnDefinition, 0)
 	rows := make([]*models.Row, 0)
