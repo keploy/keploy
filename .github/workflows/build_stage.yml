@@ -27,6 +27,14 @@ jobs:
   test-go-mongo-2:
     needs: build
     uses: ./.github/workflows/test-go-mongo-2.yml    
+  
+  test-go-postgres-1:
+    needs: build
+    uses: ./.github/workflows/test-go-postgres-1.yml 
+
+  test-go-postgres-2:
+    needs: build
+    uses: ./.github/workflows/test-go-postgres-2.yml 
 
 
 # Wait for all the test workflows before getting the coverage
