@@ -201,7 +201,7 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 						errCh <- nil
 						return
 					}
-					logger.Info("No mock matched with the current request, hence connecting to the real service")
+					logger.Info("No mock matched with the current request, hence connecting to the real service",zap.Any(" with destionation address",dstCfg.Addr))
 					responseBuffer, err := pUtil.PassThrough(ctx, logger, clientConn, dstCfg, requestBuffers)
 					if err != nil {
 						utils.LogError(logger, err, "Failed to passthrough the mysql request to the actual database server")
