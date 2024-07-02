@@ -91,9 +91,9 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 			recordedPrep := getRecordPrepStatement(tcsMocks)
 			reqGoingOn := decodePgRequest(requestBuffers[0], logger)
 			if reqGoingOn != nil {
-				logger.Debug("PacketTypes", zap.Any("PacketTypes", reqGoingOn.PacketTypes))
-				// fmt.Println("REQUEST GOING ON - ", reqGoingOn)
-				logger.Debug("ConnectionId-", zap.String("ConnectionId", ConnectionID))
+				logger.Info("PacketTypes", zap.Any("PacketTypes", reqGoingOn.PacketTypes))
+				fmt.Println("REQUEST GOING ON - ", reqGoingOn)
+				logger.Info("ConnectionId-", zap.String("ConnectionId", ConnectionID))
 				logger.Debug("TestMap*****", zap.Any("TestMap", testmap))
 			}
 
@@ -102,13 +102,12 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 			if len(newRq) > 0 {
 				requestBuffers = newRq
 			}
-			logger.Warn("merged pg requests",zap.Any("newrq",newRq))
+
 			var sortFlag = true
 			var sortedTcsMocks []*models.Mock
 			var matchedMock *models.Mock
 
 			for _, mock := range tcsMocks {
-				logger.Warn("mock here",zap.Any("mock here",mock))
 				if ctx.Err() != nil {
 					return false, nil, ctx.Err()
 				}
@@ -223,7 +222,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 				getTestPS(requestBuffers, logger, ConnectionID)
 			}
 
-			logger.Warn("Sorted Mocks inside pg parser: ", zap.Any("Len of sortedTcsMocks", len(sortedTcsMocks)))
+			logger.Info("Sorted Mocks inside pg parser: ", zap.Any("Len of sortedTcsMocks", len(sortedTcsMocks)))
 
 			var matched, sorted bool
 			var idx int
@@ -238,7 +237,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 					if newMock != nil {
 						matchedMock = newMock
 					}
-					logger.Warn("Matched In Sorted PG Matching Stream", zap.String("mock", matchedMock.Name))
+					logger.Info("Matched In Sorted PG Matching Stream", zap.String("mock", matchedMock.Name))
 				}
 
 				idx = findBinaryStreamMatch(logger, sortedTcsMocks, requestBuffers, sorted)
@@ -257,7 +256,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 					if newMock != nil {
 						matchedMock = newMock
 					}
-					logger.Debug("Matched In Unsorted PG Matching Stream", zap.String("mock", matchedMock.Name))
+					logger.Info("Matched In Unsorted PG Matching Stream", zap.String("mock", matchedMock.Name))
 				}
 				idx = findBinaryStreamMatch(logger, tcsMocks, requestBuffers, sorted)
 				// check if the validate the query with the matched mock
@@ -273,12 +272,12 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 					if newMock != nil && !isValid {
 						matchedMock = newMock
 					}
-					logger.Debug("Matched In Binary Matching for Unsorted", zap.String("mock", matchedMock.Name))
+					logger.Info("Matched In Binary Matching for Unsorted", zap.String("mock", matchedMock.Name))
 				}
 			}
 
 			if matched {
-				logger.Debug("Matched mock", zap.String("mock", matchedMock.Name))
+				logger.Info("Matched mock", zap.String("mock", matchedMock.Name))
 				if matchedMock.TestModeInfo.IsFiltered {
 					originalMatchedMock := *matchedMock
 					matchedMock.TestModeInfo.IsFiltered = false

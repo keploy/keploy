@@ -280,6 +280,10 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 	// 	unfilteredMocks = unfilteredMocks[:10]
 	// }
 
+	for _, v := range filteredMocks {
+		ys.Logger.Info("filtered mocks", zap.Any("mock", v.Name), zap.Any("request timestamp", v.Spec.ReqTimestampMock), zap.Any("response timestamp", v.Spec.ResTimestampMock))
+	}
+
 	mocks := append(filteredMocks, unfilteredMocks...)
 
 	return mocks, nil
