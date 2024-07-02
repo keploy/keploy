@@ -31,47 +31,47 @@ func encodeToBinary(packet interface{}, header *models.MySQLPacketHeader, operat
 	case "MySQLHandshakeV10":
 		p, ok := packet.(*models.MySQLHandshakeV10Packet)
 		if !ok {
-			return nil, fmt.Errorf("invalid packet type for HandshakeV10Packet: expected *HandshakeV10Packet, got %T", packet)
+			return nil, fmt.Errorf("invalid packet type for MySQLHandshakeV10: expected *MySQLHandshakeV10Packet, got %T", packet)
 		}
 		data, err = encodeHandshakePacket(p)
 	case "HANDSHAKE_RESPONSE_OK":
 		bypassHeader = true
 		p, ok := packet.(*models.MySQLHandshakeResponseOk)
 		if !ok {
-			return nil, fmt.Errorf("invalid packet type for HandshakeResponse: expected *HandshakeResponse, got %T", packet)
+			return nil, fmt.Errorf("invalid packet type for HANDSHAKE_RESPONSE_OK: expected *MySQLHandshakeResponseOk, got %T", packet)
 		}
 		data, err = encodeHandshakeResponseOk(p)
 	case "AUTH_SWITCH_REQUEST":
 		p, ok := packet.(*models.AuthSwitchRequestPacket)
 		if !ok {
-			return nil, fmt.Errorf("invalid packet type for HandshakeV10Packet: expected *HandshakeV10Packet, got %T", packet)
+			return nil, fmt.Errorf("invalid packet type for AUTH_SWITCH_REQUEST: expected *AuthSwitchRequestPacket, got %T", packet)
 		}
 		data, err = encodeAuthSwitchRequest(p)
 	case "AUTH_SWITCH_RESPONSE":
 		p, ok := packet.(*models.AuthSwitchResponsePacket)
 		if !ok {
-			return nil, fmt.Errorf("invalid packet type for HandshakeV10Packet: expected *HandshakeV10Packet, got %T", packet)
+			return nil, fmt.Errorf("invalid packet type for AUTH_SWITCH_RESPONSE: expected *AuthSwitchResponsePacket, got %T", packet)
 		}
 		data, err = encodeAuthSwitchResponse(p)
 
 	case "MySQLOK":
 		p, ok := packet.(*models.MySQLOKPacket)
 		if !ok {
-			return nil, fmt.Errorf("invalid packet type for HandshakeResponse: expected *HandshakeResponse, got %T", packet)
+			return nil, fmt.Errorf("invalid packet type for MySQLOK: expected *MySQLOK, got %T", packet)
 		}
 		data, err = encodeMySQLOK(p, header)
 		bypassHeader = true
 	case "COM_STMT_PREPARE_OK":
 		p, ok := packet.(*models.MySQLStmtPrepareOk)
 		if !ok {
-			return nil, fmt.Errorf("invalid packet type for HandshakeResponse: expected *HandshakeResponse, got %T", packet)
+			return nil, fmt.Errorf("invalid packet type for COM_STMT_PREPARE_OK: expected *MySQLStmtPrepareOk, got %T", packet)
 		}
 		data, err = encodeStmtPrepareOk(p)
 		bypassHeader = true
 	case "RESULT_SET_PACKET":
 		p, ok := packet.(*models.MySQLResultSet)
 		if !ok {
-			return nil, fmt.Errorf("invalid packet for result set")
+			return nil, fmt.Errorf("invalid packet for RESULT_SET_PACKET: expected *MySQLResultSet, got %T", packet)
 		}
 		data, err = encodeMySQLResultSet(p)
 		bypassHeader = true
