@@ -43,6 +43,9 @@ test:
 record:
   recordTimer: 0s
   filters: []
+contract:
+  servicesMapping: {"s4":["localhost:9000","localhost:9222"],"s5":["localhost:3000","localhost:2112"]}
+  self: "s4"
 configPath: ""
 bypassRules: []
 `
