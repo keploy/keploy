@@ -245,7 +245,9 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 					matched = true
 					matchedMock = tcsMocks[idx]
 				}
+				logger.Info("sorted binary match",zap.Any("mock name here",matchedMock.Name))
 			}
+
 
 			if !matched {
 				sorted = false
