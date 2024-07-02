@@ -45,13 +45,12 @@ type Operation interface {
 	TransactionDetails() *TransactionDetails
 }
 
-// var lOgger *zap.Logger
-
+// Decode decodes the wire message binary into the operation and the mongo message.
+//
 // see https://github.com/mongodb/mongo-go-driver/blob/v1.7.2/x/mongo/driver/operation.go#L1361-L1426
-
-// Decode (wm []byte) (Operation, int32, int32, int32, int32, error) {
 func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, interface{}, error) {
 	wmLength := len(wm)
+	// the wiremessage is at least 16 bytes long
 	length, reqID, responseTo, opCode, wmBody, ok := wiremessage.ReadHeader(wm)
 	messageHeader := models.MongoHeader{
 		Length:     length,
@@ -69,13 +68,15 @@ func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, inter
 		err      error
 		mongoMsg interface{}
 	)
-	// var err error
+
 	switch opCode {
 	case wiremessage.OpQuery:
+		// decodeQuery is a helper function to decode the OpQuery operation
 		op, err = decodeQuery(reqID, wmBody)
 		if err != nil {
 			return nil, messageHeader, mongoMsg, err
 		}
+		// marshal the query document to json
 		jsonBytes, err := bson.MarshalExtJSON(op.(*opQuery).query, true, false)
 		if err != nil {
 			return nil, messageHeader, &models.MongoOpMessage{}, fmt.Errorf("malformed bson document: %v", err.Error())
@@ -91,7 +92,7 @@ func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, inter
 			ReturnFieldsSelector: op.(*opQuery).returnFieldsSelector.String(),
 		}
 	case wiremessage.OpMsg:
-
+		// decodeMsg is a helper function to decode the OpMsg operation
 		op, err = decodeMsg(reqID, wmBody, logger)
 		if err != nil {
 			return nil, messageHeader, mongoMsg, err
@@ -106,12 +107,14 @@ func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, inter
 			Checksum: int(op.(*opMsg).checksum),
 		}
 	case wiremessage.OpReply:
+		// decodeReply is a helper function to decode the OpReply operation
 		op, err = decodeReply(reqID, wmBody)
 		if err != nil {
 			return nil, messageHeader, mongoMsg, err
 		}
 		var replyDocs []string
 		for _, v := range op.(*opReply).documents {
+			// marshal the reply document to json
 			jsonBytes, err := bson.MarshalExtJSON(v, true, false)
 			if err != nil {
 				return nil, messageHeader, &models.MongoOpMessage{}, fmt.Errorf("malformed bson document: %v", err.Error())
@@ -472,6 +475,7 @@ func extractSectionSingle(data string) (string, error) {
 	return content, nil
 }
 
+// encodeOpMsg encodes the OpMsg value into a mongo wire message.
 func encodeOpMsg(responseOpMsg *models.MongoOpMessage, actualRequestMsgSections []string, expectedRequestMsgSections []string, mongoPassword string, logger *zap.Logger) (*opMsg, error) {
 	message := &opMsg{
 		flags:    wiremessage.MsgFlag(responseOpMsg.FlagBits),
