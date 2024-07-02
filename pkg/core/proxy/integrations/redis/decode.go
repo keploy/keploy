@@ -85,7 +85,7 @@ func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					errCh <- nil
 					return
 				}
-				logger.Info("No mock matched with the current request, hence connecting to the real service")
+				logger.Info("No mock matched with the current request, hence connecting to the real service",zap.Any(" with destionation address",dstCfg.Addr))
 				reqBuffer, err := pUtil.PassThrough(ctx, logger, clientConn, dstCfg, redisRequests)
 				if err != nil {
 					utils.LogError(logger, err, "failed to passthrough the redis request")
