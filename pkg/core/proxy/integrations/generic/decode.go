@@ -81,7 +81,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					errCh <- nil
 					return
 				}
-
+				logger.Info("No mock matched with the current request, hence connecting to the real service")
 				reqBuffer, err := pUtil.PassThrough(ctx, logger, clientConn, dstCfg, genericRequests)
 				if err != nil {
 					utils.LogError(logger, err, "failed to passthrough the generic request")

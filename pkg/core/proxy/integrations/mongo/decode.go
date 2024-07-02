@@ -258,6 +258,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 						errCh <- nil
 						return
 					}
+					logger.Info("No mock matched with the current request, hence connecting to the real service")
 					reqBuf, err = util.PassThrough(ctx, logger, clientConn, dstCfg, requestBuffers)
 					if err != nil {
 						utils.LogError(logger, err, "failed to passthrough the mongo request to the actual database server")
