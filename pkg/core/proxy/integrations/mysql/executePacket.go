@@ -1,31 +1,27 @@
+//go:build linux
+
 package mysql
 
 import (
 	"encoding/binary"
 	"fmt"
+
+	"go.keploy.io/server/v2/pkg/models"
 )
 
-type ComStmtExecute struct {
-	StatementID    uint32           `yaml:"statement_id"`
-	Flags          byte             `yaml:"flags"`
-	IterationCount uint32           `yaml:"iteration_count"`
-	NullBitmap     []byte           `yaml:"null_bitmap,omitempty,flow"`
-	ParamCount     uint16           `yaml:"param_count"`
-	Parameters     []BoundParameter `yaml:"parameters,omitempty,flow"`
-}
 type BoundParameter struct {
 	Type     byte   `yaml:"type"`
 	Unsigned byte   `yaml:"unsigned"`
 	Value    []byte `yaml:"value,omitempty,flow"`
 }
 
-func decodeComStmtExecute(packet []byte) (ComStmtExecute, error) {
+func decodeComStmtExecute(packet []byte) (models.MySQLComStmtExecute, error) {
 	// removed the print statement for cleanliness
 	if len(packet) < 14 { // the minimal size of the packet without parameters should be 14, not 13
-		return ComStmtExecute{}, fmt.Errorf("packet length less than 14 bytes")
+		return models.MySQLComStmtExecute{}, fmt.Errorf("packet length less than 14 bytes")
 	}
 
-	stmtExecute := ComStmtExecute{}
+	stmtExecute := models.MySQLComStmtExecute{}
 	stmtExecute.StatementID = binary.LittleEndian.Uint32(packet[1:5])
 	stmtExecute.Flags = packet[5]
 	stmtExecute.IterationCount = binary.LittleEndian.Uint32(packet[6:10])
@@ -41,11 +37,11 @@ func decodeComStmtExecute(packet []byte) (ComStmtExecute, error) {
 		// in case new parameters are bound, the new types and values are sent
 		if packet[10+nullBitmapLength] == 1 {
 			// read the types and values of the new parameters
-			stmtExecute.Parameters = make([]BoundParameter, stmtExecute.ParamCount)
+			stmtExecute.Parameters = make([]models.BoundParameter, stmtExecute.ParamCount)
 			for i := 0; i < int(stmtExecute.ParamCount); i++ {
 				index := 10 + nullBitmapLength + 1 + 2*i
 				if index+1 >= len(packet) {
-					return ComStmtExecute{}, fmt.Errorf("packet length less than expected while reading parameters")
+					return models.MySQLComStmtExecute{}, fmt.Errorf("packet length less than expected while reading parameters")
 				}
 				stmtExecute.Parameters[i].Type = packet[index]
 				stmtExecute.Parameters[i].Unsigned = packet[index+1]

@@ -46,16 +46,23 @@ func (r *mutationResolver) StartHooks(ctx context.Context) (*model.TestRunInfo, 
 	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
 	r.hookCtx = ctx
 
-	testRunId, appId, hookCancel, err := r.replay.BootReplay(ctx)
+	testRunID, err := r.replay.GetNextTestRunID(ctx)
 	if err != nil {
-		utils.LogError(r.logger, err, "failed to boot replay")
+		utils.LogError(r.logger, err, "failed to get next test run id")
+		return nil, errors.New("failed to get next test run id, hence not able to start the hooks")
+	}
+
+	inst, err := r.replay.Instrument(ctx)
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to instrument")
 		return nil, errors.New("failed to hook the application")
 	}
-	r.hookCancel = hookCancel
-	r.logger.Debug("test run info", zap.String("testRunId", testRunId), zap.Int("appId", int(appId)))
+
+	r.hookCancel = inst.HookCancel
+	r.logger.Debug("test run info", zap.String("testRunId", testRunID), zap.Int("appId", int(inst.AppID)))
 	return &model.TestRunInfo{
-		TestRunID: testRunId,
-		AppID:     int(appId),
+		TestRunID: testRunID,
+		AppID:     int(inst.AppID),
 	}, nil
 }
 

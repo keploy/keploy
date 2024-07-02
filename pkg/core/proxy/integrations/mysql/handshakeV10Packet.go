@@ -1,3 +1,5 @@
+//go:build linux
+
 package mysql
 
 import (
@@ -9,23 +11,12 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-type HandshakeV10Packet struct {
-	ProtocolVersion uint8  `yaml:"protocol_version"`
-	ServerVersion   string `yaml:"server_version"`
-	ConnectionID    uint32 `yaml:"connection_id"`
-	AuthPluginData  []byte `yaml:"auth_plugin_data,omitempty,flow"`
-	CapabilityFlags uint32 `yaml:"capability_flags"`
-	CharacterSet    uint8  `yaml:"character_set"`
-	StatusFlags     uint16 `yaml:"status_flags"`
-	AuthPluginName  string `yaml:"auth_plugin_name"`
-}
-
-func decodeMySQLHandshakeV10(data []byte) (*HandshakeV10Packet, error) {
+func decodeMySQLHandshakeV10(data []byte) (*models.MySQLHandshakeV10Packet, error) {
 	if len(data) < 4 {
 		return nil, fmt.Errorf("handshake packet too short")
 	}
 
-	packet := &HandshakeV10Packet{}
+	packet := &models.MySQLHandshakeV10Packet{}
 	packet.ProtocolVersion = data[0]
 
 	idx := bytes.IndexByte(data[1:], 0x00)

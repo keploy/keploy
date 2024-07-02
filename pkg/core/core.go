@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package core provides functionality for managing core functionalities in Keploy.
 package core
 
@@ -11,33 +13,36 @@ import (
 
 	"go.keploy.io/server/v2/pkg/core/app"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/platform/docker"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
 type Core struct {
-	Proxy        // embedding the Proxy interface to transfer the proxy methods to the core object
-	Hooks        // embedding the Hooks interface to transfer the hooks methods to the core object
-	Tester       // embedding the Tester interface to transfer the tester methods to the core object
+	Proxy                      // embedding the Proxy interface to transfer the proxy methods to the core object
+	Hooks                      // embedding the Hooks interface to transfer the hooks methods to the core object
+	Tester                     // embedding the Tester interface to transfer the tester methods to the core object
+	dockerClient docker.Client //embedding the docker client to transfer the docker client methods to the core object
 	logger       *zap.Logger
 	id           utils.AutoInc
 	apps         sync.Map
 	proxyStarted bool
 }
 
-func New(logger *zap.Logger, hook Hooks, proxy Proxy, tester Tester) *Core {
+func New(logger *zap.Logger, hook Hooks, proxy Proxy, tester Tester, client docker.Client) *Core {
 	return &Core{
-		logger: logger,
-		Hooks:  hook,
-		Proxy:  proxy,
-		Tester: tester,
+		logger:       logger,
+		Hooks:        hook,
+		Proxy:        proxy,
+		Tester:       tester,
+		dockerClient: client,
 	}
 }
 
 func (c *Core) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
 	// create a new app and store it in the map
 	id := uint64(c.id.Next())
-	a := app.NewApp(c.logger, id, cmd, app.Options{
+	a := app.NewApp(c.logger, id, cmd, c.dockerClient, app.Options{
 		DockerNetwork: opts.DockerNetwork,
 		Container:     opts.Container,
 		DockerDelay:   opts.DockerDelay,
@@ -79,7 +84,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 	isDocker := false
 	appKind := a.Kind(ctx)
 	//check if the app is docker/docker-compose or native
-	if utils.IsDockerKind(appKind) {
+	if utils.IsDockerCmd(appKind) {
 		isDocker = true
 	}
 
@@ -121,6 +126,10 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 			utils.LogError(c.logger, err, "failed to unload the hooks")
 		}
 
+		//deleting in order to free the memory in case of rerecord. otherwise different app id will be created for the same app.
+		c.apps.Delete(id)
+		c.id = utils.AutoInc{}
+
 		return nil
 	})
 
@@ -139,7 +148,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 
 	if c.proxyStarted {
 		c.logger.Debug("Proxy already started")
-		return nil
+		// return nil
 	}
 
 	select {
@@ -252,6 +261,7 @@ func (c *Core) GetContainerIP(_ context.Context, id uint64) (string, error) {
 	}
 
 	ip := a.ContainerIPv4Addr()
+	c.logger.Debug("ip address of the target app container", zap.Any("ip", ip))
 	if ip == "" {
 		return "", fmt.Errorf("failed to get the IP address of the app container. Try increasing --delay (in seconds)")
 	}

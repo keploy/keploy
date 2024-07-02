@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package v1 provides functionality for decoding Postgres requests and responses.
 package v1
 
@@ -7,6 +9,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
@@ -48,17 +51,16 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 					}
 				}
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					logger.Debug("the timeout for the client read in pg")
 					break
 				}
 				pgRequests = append(pgRequests, buffer)
 			}
 
 			if len(pgRequests) == 0 {
-				logger.Debug("the postgres request buffer is empty")
 				continue
 			}
-			matched, pgResponses, err := matchingReadablePG(ctx, logger, pgRequests, mockDb)
+			var mutex sync.Mutex
+			matched, pgResponses, err := matchingReadablePG(ctx, logger, &mutex, pgRequests, mockDb)
 			if err != nil {
 				errCh <- fmt.Errorf("error while matching tcs mocks %v", err)
 				return
@@ -126,7 +128,7 @@ func getRecordPrepStatement(allMocks []*models.Mock) PrepMap {
 				p := 0
 				for _, header := range req.PacketTypes {
 					if header == "P" {
-						if strings.Contains(req.Parses[p].Name, "S_") {
+						if strings.Contains(req.Parses[p].Name, "S_") || strings.Contains(req.Parses[p].Name, "s") {
 							psMap[req.Parses[p].Query] = req.Parses[p].Name
 							querydata = append(querydata, QueryData{PrepIdentifier: req.Parses[p].Name,
 								Query: req.Parses[p].Query,

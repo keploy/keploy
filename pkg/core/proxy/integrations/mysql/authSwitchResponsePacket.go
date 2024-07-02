@@ -1,15 +1,13 @@
+//go:build linux
+
 package mysql
 
 import (
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-type AuthSwitchResponsePacket struct {
-	AuthResponseData string `yaml:"auth_response_data"`
-}
-
-func decodeAuthSwitchResponse(data []byte) (*AuthSwitchResponsePacket, error) {
-	return &AuthSwitchResponsePacket{
+func decodeAuthSwitchResponse(data []byte) (*models.AuthSwitchResponsePacket, error) {
+	return &models.AuthSwitchResponsePacket{
 		AuthResponseData: string(data),
 	}, nil
 }

@@ -1,19 +1,15 @@
+//go:build linux
+
 package mysql
 
 import (
 	"encoding/binary"
 	"fmt"
+
+	"go.keploy.io/server/v2/pkg/models"
 )
 
-type ERRPacket struct {
-	Header         byte   `yaml:"header"`
-	ErrorCode      uint16 `yaml:"error_code"`
-	SQLStateMarker string `yaml:"sql_state_marker"`
-	SQLState       string `yaml:"sql_state"`
-	ErrorMessage   string `yaml:"error_message"`
-}
-
-func decodeMySQLErr(data []byte) (*ERRPacket, error) {
+func decodeMySQLErr(data []byte) (*models.MySQLERRPacket, error) {
 	if len(data) < 9 {
 		return nil, fmt.Errorf("ERR packet too short")
 	}
@@ -21,7 +17,7 @@ func decodeMySQLErr(data []byte) (*ERRPacket, error) {
 		return nil, fmt.Errorf("invalid ERR packet header: %x", data[0])
 	}
 
-	packet := &ERRPacket{}
+	packet := &models.MySQLERRPacket{}
 	packet.ErrorCode = binary.LittleEndian.Uint16(data[1:3])
 
 	if data[3] != '#' {

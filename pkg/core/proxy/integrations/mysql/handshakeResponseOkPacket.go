@@ -1,3 +1,5 @@
+//go:build linux
+
 package mysql
 
 import (
@@ -7,13 +9,7 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-type HandshakeResponseOk struct {
-	PacketIndicator string        `yaml:"packet_indicator"`
-	PluginDetails   PluginDetails `yaml:"plugin_details"`
-	RemainingBytes  []byte        `yaml:"remaining_bytes,omitempty,flow"`
-}
-
-func decodeHandshakeResponseOk(data []byte) (*HandshakeResponseOk, error) {
+func decodeHandshakeResponseOk(data []byte) (*models.MySQLHandshakeResponseOk, error) {
 	var (
 		packetIndicator string
 		authType        string
@@ -59,9 +55,9 @@ func decodeHandshakeResponseOk(data []byte) (*HandshakeResponseOk, error) {
 		}
 	}
 
-	return &HandshakeResponseOk{
+	return &models.MySQLHandshakeResponseOk{
 		PacketIndicator: packetIndicator,
-		PluginDetails: PluginDetails{
+		PluginDetails: models.PluginDetails{
 			Type:    authType,
 			Message: message,
 		},

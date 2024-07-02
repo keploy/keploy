@@ -25,19 +25,26 @@ type Instrumentation interface {
 
 type Service interface {
 	Start(ctx context.Context) error
-	BootReplay(ctx context.Context) (string, uint64, context.CancelFunc, error)
+	Instrument(ctx context.Context) (*InstrumentState, error)
+	GetNextTestRunID(ctx context.Context) (string, error)
 	GetAllTestSetIDs(ctx context.Context) ([]string, error)
 	RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error)
 	GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error)
+	GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error)
 	RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError
-	ProvideMocks(ctx context.Context) error
 	Normalize(ctx context.Context) error
+	DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error)
+	NormalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIDs []string, testResult []models.TestResult) error
+	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
+	DeleteTestSet(ctx context.Context, testSetID string) error
 }
 
 type TestDB interface {
 	GetAllTestSetIDs(ctx context.Context) ([]string, error)
 	GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error)
 	UpdateTestCase(ctx context.Context, testCase *models.TestCase, testSetID string) error
+	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
+	DeleteTestSet(ctx context.Context, testSetID string) error
 }
 
 type MockDB interface {
@@ -52,6 +59,11 @@ type ReportDB interface {
 	GetReport(ctx context.Context, testRunID string, testSetID string) (*models.TestReport, error)
 	InsertTestCaseResult(ctx context.Context, testRunID string, testSetID string, result *models.TestResult) error
 	InsertReport(ctx context.Context, testRunID string, testSetID string, testReport *models.TestReport) error
+}
+
+type Config interface {
+	Read(ctx context.Context, testSetID string) (*models.TestSet, error)
+	Write(ctx context.Context, testSetID string, testSet *models.TestSet) error
 }
 
 type Telemetry interface {
@@ -71,3 +83,16 @@ type RequestMockHandler interface {
 	ProcessMockFile(ctx context.Context, testSetID string)
 	AfterTestHook(ctx context.Context, testRunID, testSetID string, totalTestSets int) (*models.TestReport, error)
 }
+
+type InstrumentState struct {
+	AppID      uint64
+	HookCancel context.CancelFunc
+}
+
+type MockAction string
+
+// MockAction constants define the possible actions that can be taken on a mocking.
+const (
+	Start  MockAction = "start"
+	Update MockAction = "update"
+)

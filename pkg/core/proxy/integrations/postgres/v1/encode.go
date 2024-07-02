@@ -1,3 +1,5 @@
+//go:build linux
+
 package v1
 
 import (
@@ -24,8 +26,6 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 	var pgRequests []models.Backend
 
 	bufStr := util.EncodeBase64(reqBuf)
-	logger.Debug("bufStr is ", zap.String("bufStr", bufStr))
-
 	pg := NewBackend()
 	_, err := pg.decodeStartupMessage(reqBuf)
 	if err != nil {

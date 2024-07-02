@@ -172,9 +172,28 @@ func ReadSessionIndices(_ context.Context, path string, Logger *zap.Logger) ([]s
 	}
 
 	for _, v := range files {
-		if v.Name() != "reports" && v.Name() != "testReports" {
+		if v.Name() != "reports" && v.Name() != "testReports" && v.IsDir() {
 			indices = append(indices, v.Name())
 		}
 	}
 	return indices, nil
+}
+
+func DeleteFile(_ context.Context, logger *zap.Logger, path, name string) error {
+	filePath := filepath.Join(path, name+".yaml")
+	err := os.Remove(filePath)
+	if err != nil {
+		utils.LogError(logger, err, "failed to delete the file", zap.String("file", filePath))
+		return fmt.Errorf("failed to delete the file: %v", err)
+	}
+	return nil
+}
+
+func DeleteDir(_ context.Context, logger *zap.Logger, path string) error {
+	err := os.RemoveAll(path)
+	if err != nil {
+		utils.LogError(logger, err, "failed to delete the directory", zap.String("path", path))
+		return fmt.Errorf("failed to delete the directory: %v", err)
+	}
+	return nil
 }

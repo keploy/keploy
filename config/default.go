@@ -10,7 +10,8 @@ import (
 // defaultConfig is a variable to store the default configuration of the Keploy CLI. It is not a constant because enterprise need update the default configuration.
 var defaultConfig = `
 path: ""
-appId: ""
+appId: 0
+appName: ""
 command: ""
 port: 0
 proxyPort: 16789
@@ -37,6 +38,8 @@ test:
   mongoPassword: "default@123"
   language: ""
   removeUnusedMocks: false
+  basePath: ""
+  mocking: true
 record:
   recordTimer: 0s
   filters: []

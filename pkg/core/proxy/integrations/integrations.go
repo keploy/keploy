@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package integrations provides functionality for integrating different types of services.
 package integrations
 
@@ -23,6 +25,7 @@ const (
 	POSTGRES_V1 integrationType = "postgres_v1"
 	POSTGRES_V2 integrationType = "postgres_v2"
 	MONGO       integrationType = "mongo"
+	REDIS       integrationType = "redis"
 )
 
 var Registered = make(map[string]Initializer)
@@ -47,8 +50,8 @@ type MockMemDb interface {
 	GetFilteredMocks() ([]*models.Mock, error)
 	GetUnFilteredMocks() ([]*models.Mock, error)
 	UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool
-	DeleteFilteredMock(mock *models.Mock) bool
-	DeleteUnFilteredMock(mock *models.Mock) bool
+	DeleteFilteredMock(mock models.Mock) bool
+	DeleteUnFilteredMock(mock models.Mock) bool
 	// Flag the mock as used which matches the external request from application in test mode
-	FlagMockAsUsed(mock *models.Mock) error
+	FlagMockAsUsed(mock models.Mock) error
 }

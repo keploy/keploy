@@ -1,9 +1,13 @@
+//go:build linux
+
 package mysql
 
 import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+
+	"go.keploy.io/server/v2/pkg/models"
 )
 
 const (
@@ -17,25 +21,12 @@ const (
 	CLIENT_ZSTD_COMPRESSION_ALGORITHM = 0x00010000
 )
 
-type HandshakeResponse struct {
-	CapabilityFlags      uint32            `yaml:"capability_flags"`
-	MaxPacketSize        uint32            `yaml:"max_packet_size"`
-	CharacterSet         uint8             `yaml:"character_set"`
-	Reserved             [23]byte          `yaml:"reserved,omitempty,flow"`
-	Username             string            `yaml:"username"`
-	AuthData             []byte            `yaml:"auth_data,omitempty,flow"`
-	Database             string            `yaml:"database"`
-	AuthPluginName       string            `yaml:"auth_plugin_name"`
-	ConnectAttributes    map[string]string `yaml:"connect_attributes"`
-	ZstdCompressionLevel byte              `yaml:"zstdcompressionlevel"`
-}
-
-func decodeHandshakeResponse(data []byte) (*HandshakeResponse, error) {
+func decodeHandshakeResponse(data []byte) (*models.MySQLHandshakeResponse, error) {
 	if len(data) < 32 {
 		return nil, errors.New("handshake response packet too short")
 	}
 
-	packet := &HandshakeResponse{}
+	packet := &models.MySQLHandshakeResponse{}
 
 	packet.CapabilityFlags = binary.LittleEndian.Uint32(data[:4])
 	data = data[4:]

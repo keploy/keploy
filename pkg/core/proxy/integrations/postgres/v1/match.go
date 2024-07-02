@@ -1,3 +1,5 @@
+//go:build linux
+
 package v1
 
 import (
@@ -7,7 +9,9 @@ import (
 	"math"
 	"reflect"
 	"strings"
+	"sync"
 
+	"github.com/agnivade/levenshtein"
 	"github.com/jackc/pgproto3/v2"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
@@ -34,7 +38,7 @@ func getTestPS(reqBuff [][]byte, logger *zap.Logger, ConnectionID string) {
 		p := 0
 		for _, header := range actualPgReq.PacketTypes {
 			if header == "P" {
-				if strings.Contains(actualPgReq.Parses[p].Name, "S_") && !IsValuePresent(ConnectionID, actualPgReq.Parses[p].Name) {
+				if (strings.Contains(actualPgReq.Parses[p].Name, "S_") || strings.Contains(actualPgReq.Parses[p].Name, "s")) && !IsValuePresent(ConnectionID, actualPgReq.Parses[p].Name) {
 					querydata = append(querydata, QueryData{PrepIdentifier: actualPgReq.Parses[p].Name, Query: actualPgReq.Parses[p].Query})
 				}
 				p++
@@ -62,14 +66,22 @@ func IsValuePresent(connectionid string, value string) bool {
 	return false
 }
 
-func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers [][]byte, mockDb integrations.MockMemDb) (bool, []models.Frontend, error) {
+func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mutex, requestBuffers [][]byte, mockDb integrations.MockMemDb) (bool, []models.Frontend, error) {
 	for {
 		select {
 		case <-ctx.Done():
 			return false, nil, ctx.Err()
 		default:
 
-			tcsMocks, err := mockDb.GetUnFilteredMocks()
+			mocks, err := mockDb.GetUnFilteredMocks()
+			var tcsMocks []*models.Mock
+
+			for _, mock := range mocks {
+				if mock.Kind != "Postgres" {
+					continue
+				}
+				tcsMocks = append(tcsMocks, mock)
+			}
 			if err != nil {
 				return false, nil, fmt.Errorf("error while getting tcs mocks %v", err)
 			}
@@ -103,6 +115,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 					continue
 				}
 
+				mutex.Lock()
 				if sortFlag {
 					if !mock.TestModeInfo.IsFiltered {
 						sortFlag = false
@@ -110,12 +123,13 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 						sortedTcsMocks = append(sortedTcsMocks, mock)
 					}
 				}
+				mutex.Unlock()
 
 				initMock := *mock
-				if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
+				if len(initMock.Spec.PostgresRequests) == len(requestBuffers) {
 					for requestIndex, reqBuff := range requestBuffers {
 						bufStr := base64.StdEncoding.EncodeToString(reqBuff)
-						encodedMock, err := postgresDecoderBackend(mock.Spec.PostgresRequests[requestIndex])
+						encodedMock, err := postgresDecoderBackend(initMock.Spec.PostgresRequests[requestIndex])
 						if err != nil {
 							logger.Debug("Error while decoding postgres request", zap.Error(err))
 						}
@@ -126,27 +140,29 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 								Payload: "Tg==",
 							}
 							return true, []models.Frontend{ssl}, nil
-						case mock.Spec.PostgresRequests[requestIndex].Identfier == "StartupRequest" && isStartupPacket(reqBuff) && mock.Spec.PostgresRequests[requestIndex].Payload != "AAAACATSFi8=" && mock.Spec.PostgresResponses[requestIndex].AuthType == 10:
-							logger.Debug("CHANGING TO MD5 for Response", zap.String("mock", mock.Name), zap.String("Req", bufStr))
-							initMock.Spec.PostgresResponses[requestIndex].AuthType = 5
-							err := mockDb.FlagMockAsUsed(&initMock)
+						case initMock.Spec.PostgresRequests[requestIndex].Identfier == "StartupRequest" && isStartupPacket(reqBuff) && initMock.Spec.PostgresRequests[requestIndex].Payload != "AAAACATSFi8=" && initMock.Spec.PostgresResponses[requestIndex].AuthType == 10:
+							logger.Debug("CHANGING TO MD5 for Response", zap.String("mock", initMock.Name), zap.String("Req", bufStr))
+							res := make([]models.Frontend, len(initMock.Spec.PostgresResponses))
+							copy(res, initMock.Spec.PostgresResponses)
+							res[requestIndex].AuthType = 5
+							err := mockDb.FlagMockAsUsed(initMock)
 							if err != nil {
 								logger.Error("failed to flag mock as used", zap.Error(err))
 							}
-							return true, initMock.Spec.PostgresResponses, nil
-						case len(encodedMock) > 0 && encodedMock[0] == 'p' && mock.Spec.PostgresRequests[requestIndex].PacketTypes[0] == "p" && reqBuff[0] == 'p':
-							logger.Debug("CHANGING TO MD5 for Request and Response", zap.String("mock", mock.Name), zap.String("Req", bufStr))
+							return true, res, nil
+						case len(encodedMock) > 0 && encodedMock[0] == 'p' && initMock.Spec.PostgresRequests[requestIndex].PacketTypes[0] == "p" && reqBuff[0] == 'p':
+							logger.Debug("CHANGING TO MD5 for Request and Response", zap.String("mock", initMock.Name), zap.String("Req", bufStr))
 
-							initMock.Spec.PostgresRequests[requestIndex].PasswordMessage.Password = "md5fe4f2f657f01fa1dd9d111d5391e7c07"
-
-							initMock.Spec.PostgresResponses[requestIndex].PacketTypes = []string{"R", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "K", "Z"}
-							initMock.Spec.PostgresResponses[requestIndex].AuthType = 0
-							initMock.Spec.PostgresResponses[requestIndex].BackendKeyData = pgproto3.BackendKeyData{
+							res := make([]models.Frontend, len(initMock.Spec.PostgresResponses))
+							copy(res, initMock.Spec.PostgresResponses)
+							res[requestIndex].PacketTypes = []string{"R", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "S", "K", "Z"}
+							res[requestIndex].AuthType = 0
+							res[requestIndex].BackendKeyData = pgproto3.BackendKeyData{
 								ProcessID: 2613,
 								SecretKey: 824670820,
 							}
-							initMock.Spec.PostgresResponses[requestIndex].ReadyForQuery.TxStatus = 73
-							initMock.Spec.PostgresResponses[requestIndex].ParameterStatusCombined = []pgproto3.ParameterStatus{
+							res[requestIndex].ReadyForQuery.TxStatus = 73
+							res[requestIndex].ParameterStatusCombined = []pgproto3.ParameterStatus{
 								{
 									Name:  "application_name",
 									Value: "",
@@ -192,20 +208,21 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 									Value: "Etc/UTC",
 								},
 							}
-							err := mockDb.FlagMockAsUsed(&initMock)
+							err := mockDb.FlagMockAsUsed(initMock)
 							if err != nil {
 								logger.Error("failed to flag mock as used", zap.Error(err))
 							}
-							return true, initMock.Spec.PostgresResponses, nil
+							return true, res, nil
 						}
 
 					}
 				}
+
 				// maintain test prepare statement map for each connection id
 				getTestPS(requestBuffers, logger, ConnectionID)
 			}
 
-			logger.Debug("Sorted Mocks: ", zap.Any("Len of sortedTcsMocks", len(sortedTcsMocks)))
+			logger.Debug("Sorted Mocks inside pg parser: ", zap.Any("Len of sortedTcsMocks", len(sortedTcsMocks)))
 
 			var matched, sorted bool
 			var idx int
@@ -220,7 +237,9 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 					if newMock != nil {
 						matchedMock = newMock
 					}
+					logger.Debug("Matched In Sorted PG Matching Stream", zap.String("mock", matchedMock.Name))
 				}
+
 				idx = findBinaryStreamMatch(logger, sortedTcsMocks, requestBuffers, sorted)
 				if idx != -1 && !matched {
 					matched = true
@@ -237,6 +256,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 					if newMock != nil {
 						matchedMock = newMock
 					}
+					logger.Debug("Matched In Unsorted PG Matching Stream", zap.String("mock", matchedMock.Name))
 				}
 				idx = findBinaryStreamMatch(logger, tcsMocks, requestBuffers, sorted)
 				// check if the validate the query with the matched mock
@@ -252,7 +272,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 					if newMock != nil && !isValid {
 						matchedMock = newMock
 					}
-					// fmt.Println("Matched In Binary Matching for Unsorted", matchedMock.Name)
+					logger.Debug("Matched In Binary Matching for Unsorted", zap.String("mock", matchedMock.Name))
 				}
 			}
 
@@ -268,7 +288,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 						continue
 					}
 				} else {
-					err := mockDb.FlagMockAsUsed(matchedMock)
+					err := mockDb.FlagMockAsUsed(*matchedMock)
 					if err != nil {
 						logger.Error("failed to flag mock as used", zap.Error(err))
 					}
@@ -284,7 +304,6 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers 
 }
 
 func findBinaryStreamMatch(logger *zap.Logger, tcsMocks []*models.Mock, requestBuffers [][]byte, sorted bool) int {
-	logger.Debug("INSIDE BINARY MATCH!!")
 	mxSim := -1.0
 	mxIdx := -1
 
@@ -707,7 +726,11 @@ func compareExactMatch(mock *models.Mock, actualPgReq *models.Backend, logger *z
 				return false, nil
 			}
 		case "Q":
-			if actualPgReq.Query != mock.Spec.PostgresRequests[0].Query {
+			if actualPgReq.Query.String != mock.Spec.PostgresRequests[0].Query.String {
+				if LaevensteinDistance(actualPgReq.Query.String, mock.Spec.PostgresRequests[0].Query.String) {
+					logger.Debug("The strings are more than 90%% similar.")
+				}
+
 				return false, nil
 			}
 		default:
@@ -715,6 +738,17 @@ func compareExactMatch(mock *models.Mock, actualPgReq *models.Backend, logger *z
 		}
 	}
 	return true, nil
+}
+
+func LaevensteinDistance(str1, str2 string) bool {
+	// Compute the Levenshtein distance
+	distance := levenshtein.ComputeDistance(str1, str2)
+	maxLength := max(len(str1), len(str2))
+	similarity := (1 - float64(distance)/float64(maxLength)) * 100
+
+	// Check if similarity is greater than 90%
+	return similarity > 90
+
 }
 
 // make this in such a way if it returns -1 then we will continue with the original mock

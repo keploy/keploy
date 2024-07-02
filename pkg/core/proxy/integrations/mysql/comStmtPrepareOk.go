@@ -1,3 +1,5 @@
+//go:build linux
+
 package mysql
 
 import (
@@ -8,22 +10,12 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-type StmtPrepareOk struct {
-	Status       byte               `yaml:"status"`
-	StatementID  uint32             `yaml:"statement_id"`
-	NumColumns   uint16             `yaml:"num_columns"`
-	NumParams    uint16             `yaml:"num_params"`
-	WarningCount uint16             `yaml:"warning_count"`
-	ColumnDefs   []ColumnDefinition `yaml:"column_definitions,omitempty,flow"`
-	ParamDefs    []ColumnDefinition `yaml:"param_definitions,omitempty,flow"`
-}
-
-func decodeComStmtPrepareOk(data []byte) (*StmtPrepareOk, error) {
+func decodeComStmtPrepareOk(data []byte) (*models.MySQLStmtPrepareOk, error) {
 	if len(data) < 12 {
 		return nil, errors.New("data length is not enough for COM_STMT_PREPARE_OK")
 	}
 
-	response := &StmtPrepareOk{
+	response := &models.MySQLStmtPrepareOk{
 		Status:       data[0],
 		StatementID:  binary.LittleEndian.Uint32(data[1:5]),
 		NumColumns:   binary.LittleEndian.Uint16(data[5:7]),
@@ -35,8 +27,8 @@ func decodeComStmtPrepareOk(data []byte) (*StmtPrepareOk, error) {
 
 	if response.NumParams > 0 {
 		for i := uint16(0); i < response.NumParams; i++ {
-			columnDef := ColumnDefinition{}
-			columnHeader := PacketHeader{
+			columnDef := models.ColumnDefinition{}
+			columnHeader := models.PacketHeader{
 				PacketLength:     data[offset],
 				PacketSequenceID: data[offset+3],
 			}
@@ -82,8 +74,8 @@ func decodeComStmtPrepareOk(data []byte) (*StmtPrepareOk, error) {
 
 	if response.NumColumns > 0 {
 		for i := uint16(0); i < response.NumColumns; i++ {
-			columnDef := ColumnDefinition{}
-			columnHeader := PacketHeader{
+			columnDef := models.ColumnDefinition{}
+			columnHeader := models.PacketHeader{
 				PacketLength:     data[offset],
 				PacketSequenceID: data[offset+3],
 			}

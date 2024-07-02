@@ -5,16 +5,17 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"syscall"
+	"strings"
 
 	"go.keploy.io/server/v2/cli"
 	"go.keploy.io/server/v2/cli/provider"
 	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/platform/yaml/configdb"
+	userDb "go.keploy.io/server/v2/pkg/platform/yaml/configdb/user"
+
 	"go.keploy.io/server/v2/utils"
 	"go.keploy.io/server/v2/utils/log"
 	//pprof for debugging
-	// _ "net/http/pprof"
+	//_ "net/http/pprof"
 )
 
 // version is the version of the server and will be injected during build by ldflags, same with dsn
@@ -40,8 +41,13 @@ func main() {
 	// Uncomment the following code to enable pprof for debugging
 	// go func() {
 	// 	fmt.Println("Starting pprof server for debugging...")
-	// 	http.ListenAndServe("localhost:6060", nil)
+	// 	err := http.ListenAndServe("localhost:6060", nil)
+	// 	if err != nil {
+	// 		fmt.Println("Failed to start the pprof server for debugging", err)
+	// 		return
+	// 	}
 	// }()
+
 	printLogo()
 	ctx := utils.NewCtx()
 	start(ctx)
@@ -64,7 +70,17 @@ func start(ctx context.Context) {
 		fmt.Println("Failed to start the logger for the CLI", err)
 		return
 	}
-	defer utils.DeleteLogs(logger)
+	defer func() {
+		if err := utils.DeleteFileIfNotExists(logger, "keploy-logs.txt"); err != nil {
+			utils.LogError(logger, err, "Failed to delete Keploy Logs")
+			return
+		}
+		if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {
+			utils.LogError(logger, err, "Failed to delete Temporary Docker Compose")
+			return
+		}
+
+	}()
 	defer utils.Recover(logger)
 
 	// The 'umask' command is commonly used in various operating systems to regulate the permissions of newly created files.
@@ -74,19 +90,24 @@ func start(ctx context.Context) {
 	// Setting 'umask' to '0' ensures that 'keploy' can precisely control the permissions of the files it creates.
 	// However, it's important to note that this approach may not work in scenarios involving mounted volumes,
 	// as the 'umask' is set by the host system, and cannot be overridden by 'keploy' or individual processes.
-	oldMask := syscall.Umask(0)
-	defer syscall.Umask(oldMask)
+	oldMask := utils.SetUmask()
+	defer utils.RestoreUmask(oldMask)
 
-	configDb := configdb.NewConfigDb(logger)
+	userDb := userDb.New(logger)
 	if dsn != "" {
 		utils.SentryInit(logger, dsn)
 		//logger = utils.ModifyToSentryLogger(ctx, logger, sentry.CurrentHub().Client(), configDb)
 	}
 	conf := config.New()
-	svcProvider := provider.NewServiceProvider(logger, configDb, conf)
+
+	svcProvider := provider.NewServiceProvider(logger, userDb, conf)
 	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
 	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
+		if strings.HasPrefix(err.Error(), "unknown command") || strings.HasPrefix(err.Error(), "unknown shorthand") {
+			fmt.Println("Error: ", err.Error())
+			fmt.Println("Run 'keploy --help' for usage.")
+			os.Exit(1)
+		}
 	}
 }

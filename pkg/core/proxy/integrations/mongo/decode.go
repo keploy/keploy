@@ -1,3 +1,5 @@
+//go:build linux
+
 package mongo
 
 import (
@@ -184,7 +186,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					continue
 				}
 				// set the config as used in the mockManager
-				err = mockDb.FlagMockAsUsed(configMocks[bestMatchIndex])
+				err = mockDb.FlagMockAsUsed(*configMocks[bestMatchIndex])
 				if err != nil {
 					utils.LogError(logger, err, "failed to flag mock as used in mongo parser", zap.Any("for mock", configMocks[bestMatchIndex].Name))
 					errCh <- err

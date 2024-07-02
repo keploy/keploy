@@ -1,3 +1,5 @@
+//go:build linux
+
 package mockdb
 
 import (
@@ -88,6 +90,19 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			utils.LogError(logger, err, "failed to marshal the generic input-output as yaml")
 			return nil, err
 		}
+	case models.REDIS:
+		redisSpec := models.RedisSchema{
+			Metadata:         mock.Spec.Metadata,
+			RedisRequests:    mock.Spec.RedisRequests,
+			RedisResponses:   mock.Spec.RedisResponses,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+		err := yamlDoc.Spec.Encode(redisSpec)
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal the redis input-output as yaml")
+			return nil, err
+		}
 	case models.Postgres:
 		// case models.PostgresV2:
 
@@ -146,10 +161,12 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		}
 
 		sqlSpec := models.MySQLSpec{
-			Metadata:  mock.Spec.Metadata,
-			Requests:  requests,
-			Response:  responses,
-			CreatedAt: mock.Spec.Created,
+			Metadata:         mock.Spec.Metadata,
+			Requests:         requests,
+			Response:         responses,
+			CreatedAt:        mock.Spec.Created,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
 		err := yamlDoc.Spec.Encode(sqlSpec)
 		if err != nil {
@@ -236,6 +253,20 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				ReqTimestampMock: genericSpec.ReqTimestampMock,
 				ResTimestampMock: genericSpec.ResTimestampMock,
 			}
+		case models.REDIS:
+			redisSpec := models.RedisSchema{}
+			err := m.Spec.Decode(&redisSpec)
+			if err != nil {
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into redis mock", zap.Any("mock name", m.Name))
+				return nil, err
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:         redisSpec.Metadata,
+				RedisRequests:    redisSpec.RedisRequests,
+				RedisResponses:   redisSpec.RedisResponses,
+				ReqTimestampMock: redisSpec.ReqTimestampMock,
+				ResTimestampMock: redisSpec.ResTimestampMock,
+			}
 
 		case models.Postgres:
 			// case models.PostgresV2:
@@ -280,8 +311,10 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 
 func decodeMySQLMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models.MockSpec, error) {
 	mockSpec := models.MockSpec{
-		Metadata: yamlSpec.Metadata,
-		Created:  yamlSpec.CreatedAt,
+		Metadata:         yamlSpec.Metadata,
+		Created:          yamlSpec.CreatedAt,
+		ReqTimestampMock: yamlSpec.ReqTimestampMock,
+		ResTimestampMock: yamlSpec.ResTimestampMock,
 	}
 	requests := []models.MySQLRequest{}
 	for _, v := range yamlSpec.Requests {

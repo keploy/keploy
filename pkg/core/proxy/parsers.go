@@ -1,3 +1,5 @@
+//go:build linux
+
 package proxy
 
 import (
@@ -8,4 +10,5 @@ import (
 	_ "go.keploy.io/server/v2/pkg/core/proxy/integrations/mongo"
 	_ "go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql"
 	_ "go.keploy.io/server/v2/pkg/core/proxy/integrations/postgres/v1"
+	_ "go.keploy.io/server/v2/pkg/core/proxy/integrations/redis"
 )

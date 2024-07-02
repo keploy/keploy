@@ -1,19 +1,17 @@
+//go:build linux
+
 package mysql
 
 import (
 	"encoding/binary"
 	"errors"
+
+	"go.keploy.io/server/v2/pkg/models"
 )
 
-type ComStmtFetchPacket struct {
-	StatementID uint32 `yaml:"statement_id"`
-	RowCount    uint32 `yaml:"row_count"`
-	Info        string `yaml:"info"`
-}
-
-func decodeComStmtFetch(data []byte) (ComStmtFetchPacket, error) {
+func decodeComStmtFetch(data []byte) (models.MySQLComStmtFetchPacket, error) {
 	if len(data) < 9 {
-		return ComStmtFetchPacket{}, errors.New("Data too short for COM_STMT_FETCH")
+		return models.MySQLComStmtFetchPacket{}, errors.New("Data too short for COM_STMT_FETCH")
 	}
 
 	statementID := binary.LittleEndian.Uint32(data[1:5])
@@ -23,7 +21,7 @@ func decodeComStmtFetch(data []byte) (ComStmtFetchPacket, error) {
 	infoData := data[9:]
 	info := string(infoData)
 
-	return ComStmtFetchPacket{
+	return models.MySQLComStmtFetchPacket{
 		StatementID: statementID,
 		RowCount:    rowCount,
 		Info:        info,

@@ -1,3 +1,5 @@
+//go:build linux
+
 package app
 
 import (
@@ -10,12 +12,20 @@ import (
 	"strings"
 	"syscall"
 
-	"go.keploy.io/server/v2/pkg/core/app/docker"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
-func findComposeFile() string {
+func findComposeFile(cmd string) string {
+
+	cmdArgs := strings.Fields(cmd)
+
+	for i := 0; i < len(cmdArgs); i++ {
+		if cmdArgs[i] == "-f" && i+1 < len(cmdArgs) {
+			return cmdArgs[i+1]
+		}
+	}
+
 	filenames := []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}
 
 	for _, filename := range filenames {
@@ -50,49 +60,6 @@ func modifyDockerComposeCommand(appCmd, newComposeFile string) string {
 	}
 
 	return fmt.Sprintf("%s -f %s", appCmd, newComposeFile)
-}
-
-func ParseDockerCmd(cmd string, kind utils.CmdType, idc docker.Client) (string, string, error) {
-
-	// Regular expression patterns
-	var containerNamePattern string
-	switch kind {
-	case utils.DockerStart:
-		containerNamePattern = `start\s+(?:-[^\s]+\s+)*([^\s]*)`
-	default:
-		containerNamePattern = `--name\s+([^\s]+)`
-	}
-
-	networkNamePattern := `(--network|--net)\s+([^\s]+)`
-
-	// Extract container name
-	containerNameRegex := regexp.MustCompile(containerNamePattern)
-	containerNameMatches := containerNameRegex.FindStringSubmatch(cmd)
-	if len(containerNameMatches) < 2 {
-		return "", "", fmt.Errorf("failed to parse container name")
-	}
-	containerName := containerNameMatches[1]
-
-	if kind == utils.DockerStart {
-		networks, err := idc.ExtractNetworksForContainer(containerName)
-		if err != nil {
-			return containerName, "", err
-		}
-		for i := range networks {
-			return containerName, i, nil
-		}
-		return containerName, "", fmt.Errorf("failed to parse network name")
-	}
-
-	// Extract network name
-	networkNameRegex := regexp.MustCompile(networkNamePattern)
-	networkNameMatches := networkNameRegex.FindStringSubmatch(cmd)
-	if len(networkNameMatches) < 3 {
-		return containerName, "", fmt.Errorf("failed to parse network name")
-	}
-	networkName := networkNameMatches[2]
-
-	return containerName, networkName, nil
 }
 
 func getInode(pid int) (uint64, error) {

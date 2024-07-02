@@ -1,17 +1,15 @@
+//go:build linux
+
 package mysql
 
 import (
 	"encoding/binary"
 	"fmt"
+
+	"go.keploy.io/server/v2/pkg/models"
 )
 
-type EOFPacket struct {
-	Header      byte   `yaml:"header"`
-	Warnings    uint16 `yaml:"warnings"`
-	StatusFlags uint16 `yaml:"status_flags"`
-}
-
-func decodeMYSQLEOF(data []byte) (*EOFPacket, error) {
+func decodeMYSQLEOF(data []byte) (*models.EOFPacket, error) {
 	if len(data) < 1 {
 		return nil, fmt.Errorf("EOF packet too short")
 	}
@@ -20,7 +18,7 @@ func decodeMYSQLEOF(data []byte) (*EOFPacket, error) {
 		return nil, fmt.Errorf("invalid EOF packet header")
 	}
 
-	packet := &EOFPacket{}
+	packet := &models.EOFPacket{}
 	packet.Header = data[0]
 
 	if len(data) >= 5 {

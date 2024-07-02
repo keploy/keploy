@@ -24,6 +24,7 @@ type MysqlRequestYaml struct {
 type MysqlResponseYaml struct {
 	Header    *MySQLPacketHeader `json:"header,omitempty" yaml:"header"`
 	Message   yaml.Node          `json:"message,omitempty" yaml:"message"`
+	Payload   string             `json:"payload,omitempty" yaml:"payload,omitempty"`
 	ReadDelay int64              `json:"read_delay,omitempty" yaml:"read_delay,omitempty"`
 }
 
@@ -46,6 +47,7 @@ type RowColumnDefinition struct {
 type MySQLResponse struct {
 	Header    *MySQLPacketHeader `json:"header" yaml:"header"`
 	Message   interface{}        `json:"message" yaml:"message"`
+	Payload   string             `json:"payload,omitempty" yaml:"payload,omitempty"`
 	ReadDelay int64              `json:"read_delay,omitempty"`
 }
 
@@ -70,14 +72,16 @@ type MySQLHandshakeResponseOk struct {
 	RemainingBytes  []byte        `yaml:"remaining_bytes"`
 }
 type MySQLHandshakeResponse struct {
-	CapabilityFlags uint32   `yaml:"capability_flags"`
-	MaxPacketSize   uint32   `yaml:"max_packet_size"`
-	CharacterSet    uint8    `yaml:"character_set"`
-	Reserved        [23]byte `yaml:"reserved,omitempty,flow"`
-	Username        string   `yaml:"username"`
-	AuthData        []byte   `yaml:"auth_data,omitempty,flow"`
-	Database        string   `yaml:"database"`
-	AuthPluginName  string   `yaml:"auth_plugin_name"`
+	CapabilityFlags      uint32            `yaml:"capability_flags"`
+	MaxPacketSize        uint32            `yaml:"max_packet_size"`
+	CharacterSet         uint8             `yaml:"character_set"`
+	Reserved             [23]byte          `yaml:"reserved,omitempty,flow"`
+	Username             string            `yaml:"username"`
+	AuthData             []byte            `yaml:"auth_data,omitempty,flow"`
+	Database             string            `yaml:"database"`
+	AuthPluginName       string            `yaml:"auth_plugin_name"`
+	ConnectAttributes    map[string]string `yaml:"connect_attributes"`
+	ZstdCompressionLevel byte              `yaml:"zstdcompressionlevel"`
 }
 
 type MySQLQueryPacket struct {
@@ -142,6 +146,7 @@ type ColumnDefinition struct {
 	Flags        uint16       `yaml:"flags"`
 	Decimals     byte         `yaml:"decimals"`
 	PacketHeader PacketHeader `yaml:"packet_header"`
+	DefaultValue string       `yaml:"string"`
 }
 
 type Row struct {
@@ -196,11 +201,55 @@ type MySQLComChangeUserPacket struct {
 type MySQLComStmtClosePacket struct {
 	StatementID uint32
 }
+
+type EOFPacket struct {
+	Header      byte   `yaml:"header"`
+	Warnings    uint16 `yaml:"warnings"`
+	StatusFlags uint16 `yaml:"status_flags"`
+}
+
 type AuthSwitchResponsePacket struct {
 	AuthResponseData string `yaml:"auth_response_data"`
 }
+
 type AuthSwitchRequestPacket struct {
 	StatusTag      byte   `yaml:"status_tag"`
 	PluginName     string `yaml:"plugin_name"`
 	PluginAuthData string `yaml:"plugin_authdata"`
+}
+
+type ComPingPacket struct {
+}
+
+type ComStmtClosePacket struct {
+	Status      byte
+	StatementID uint32
+}
+
+type ComStmtPreparePacket1 struct {
+	Header []byte
+	Query  string
+}
+
+type ComStmtCloseAndPrepare struct {
+	StmtClose   ComStmtClosePacket
+	StmtPrepare ComStmtPreparePacket1
+}
+
+type NextAuthPacket struct {
+	PluginData byte `yaml:"plugin_data"`
+}
+
+type RowDataPacket struct {
+	Data []byte `yaml:"data,omitempty,flow"`
+}
+
+type SQLPacketHeaderInfo struct {
+	PayloadLength uint32 `yaml:"payload_length"` // MySQL packet payload length
+	SequenceID    uint8  `yaml:"sequence_id"`    // MySQL packet sequence ID
+}
+
+type Packet struct {
+	Header  SQLPacketHeaderInfo `yaml:"header"`
+	Payload []byte              `yaml:"payload"`
 }

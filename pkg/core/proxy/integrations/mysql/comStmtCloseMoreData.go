@@ -1,22 +1,16 @@
+//go:build linux
+
 package mysql
 
 import (
 	"encoding/binary"
 	"errors"
 	"strings"
+
+	"go.keploy.io/server/v2/pkg/models"
 )
 
-type ComStmtPreparePacket1 struct {
-	Header []byte
-	Query  string
-}
-
-type ComStmtCloseAndPrepare struct {
-	StmtClose   ComStmtClosePacket
-	StmtPrepare ComStmtPreparePacket1
-}
-
-func decodeComStmtCloseMoreData(data []byte) (*ComStmtCloseAndPrepare, error) {
+func decodeComStmtCloseMoreData(data []byte) (*models.ComStmtCloseAndPrepare, error) {
 	if len(data) < 10 {
 		return nil, errors.New("data too short for COM_STMT_CLOSE and COM_STMT_PREPARE with header")
 	}
@@ -32,12 +26,12 @@ func decodeComStmtCloseMoreData(data []byte) (*ComStmtCloseAndPrepare, error) {
 	query := string(data[10:])
 	query = strings.ReplaceAll(query, "\t", "")
 
-	return &ComStmtCloseAndPrepare{
-		StmtClose: ComStmtClosePacket{
+	return &models.ComStmtCloseAndPrepare{
+		StmtClose: models.ComStmtClosePacket{
 			Status:      status,
 			StatementID: statementID,
 		},
-		StmtPrepare: ComStmtPreparePacket1{
+		StmtPrepare: models.ComStmtPreparePacket1{
 			Header: prepareHeader,
 			Query:  query,
 		},

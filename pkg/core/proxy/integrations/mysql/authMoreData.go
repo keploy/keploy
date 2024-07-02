@@ -1,19 +1,19 @@
+//go:build linux
+
 // Package mysql provides integration with MySQL outgoing.
 package mysql
 
 import (
 	"errors"
+
+	"go.keploy.io/server/v2/pkg/models"
 )
 
-type NextAuthPacket struct {
-	PluginData byte `yaml:"plugin_data"`
-}
-
-func decodeAuthMoreData(data []byte) (*NextAuthPacket, error) {
+func decodeAuthMoreData(data []byte) (*models.NextAuthPacket, error) {
 	if data[0] != 0x02 {
 		return nil, errors.New("invalid packet type for NextAuthPacket")
 	}
-	return &NextAuthPacket{
+	return &models.NextAuthPacket{
 		PluginData: data[0],
 	}, nil
 }
