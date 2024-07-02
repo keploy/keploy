@@ -61,11 +61,13 @@ type ReRecord struct {
 	Filters       []Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
 }
 type Contract struct {
-	Services []string `json:"services" yaml:"services" mapstructure:"services"`
-	Path     string   `json:"path" yaml:"path" mapstructure:"path"`
-	Download bool     `json:"download" yaml:"download" mapstructure:"download"`
-	Generate bool     `json:"generate" yaml:"generate" mapstructure:"generate"`
-	Driven   string   `json:"driven" yaml:"driven" mapstructure:"driven"`
+	Services        []string            `json:"services" yaml:"services" mapstructure:"services"`
+	Path            string              `json:"path" yaml:"path" mapstructure:"path"`
+	Download        bool                `json:"download" yaml:"download" mapstructure:"download"`
+	Generate        bool                `json:"generate" yaml:"generate" mapstructure:"generate"`
+	Driven          string              `json:"driven" yaml:"driven" mapstructure:"driven"`
+	ServicesMapping map[string][]string `json:"servicesMapping" yaml:"servicesMapping" mapstructure:"servicesMapping"`
+	Self            string              `json:"self" yaml:"self" mapstructure:"self"`
 }
 
 type Normalize struct {
