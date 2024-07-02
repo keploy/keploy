@@ -85,7 +85,7 @@ func compareMySQLRequests(req1, req2 models.MySQLRequest) int {
 	// Compare Header fields
 	if req1.Header.PacketType == "MySQLQuery" && req2.Header.PacketType == "MySQLQuery" {
 		packet1 := req1.Message
-		packet, ok := packet1.(*QueryPacket)
+		packet, ok := packet1.(*models.MySQLQueryPacket)
 		if !ok {
 			return 0
 		}
