@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -148,40 +149,30 @@ func parseIntoJson(response string) (interface{}, error) {
 	return result, nil
 }
 
-// func assignValues(jsonResponse map[string]interface{}, result interface{}) interface{} {
-// 	switch v := result.(type) {
-// 	case map[string]interface{}:
-// 		for key, val := range v {
-// 			jsonResponse[key] = val
-// 		}
-// 	case string:
-// 		return v
-// 	case float64, int64, int, float32:
-// 		return v
-// 	case geko.ObjectItems:
-// 		keys := v.Keys()
-// 		vals := v.Values()
-// 		for i, key := range keys {
-// 			jsonResponse[key] = assignValues(jsonResponse, vals[i])
-// 			fmt.Println("This is the value that we are sending, ", vals[i])
-// 		}
-// 	case geko.Array:
-// 		for _, v := range v.List {
-// 			assignValues(jsonResponse, v)
-// 			// fmt.Println("This is the value that we are sending, ", v)
-// 			// fmt.Println("This is the value of the jsonResponse map", jsonResponse)
-// 		}
-// 		return v
-// 	default:
-// 		return nil
-// 	}
-// 	return jsonResponse
-// }
-
 func compareVals(map1 interface{}, map2 *interface{}) {
 	switch v := map1.(type) {
+	case geko.ObjectItems:
+		keys := v.Keys()
+		vals := v.Values()
+		for i := range keys {
+			vString, ok := vals[i].(string)
+			if ok {
+				if strings.HasPrefix(vString, "{{") && strings.HasSuffix(vString, "}}") {
+					// Get the value from the template.
+					vals[i] = utils.TemplatizedValues[keys[i]]
+				}
+			}
+			compareVals(vals[i], map2)
+		}
 	case map[string]interface{}:
 		for key, val1 := range v {
+			vString, ok := val1.(string)
+			if ok {
+				if strings.HasPrefix(vString, "{{") && strings.HasSuffix(vString, "}}") {
+					// Get the value from the template.
+					val1 = utils.TemplatizedValues[key]
+				}
+			}
 			compareVals(val1, map2)
 			v[key] = val1
 		}
@@ -193,7 +184,8 @@ func compareVals(map1 interface{}, map2 *interface{}) {
 				val1 = strings.Split(val1, " ")[1]
 			}
 			if strings.HasPrefix(val1, "{{") && strings.HasSuffix(val1, "}}") {
-				continue
+				// Get the value from the template.
+				val1 = utils.TemplatizedValues[key].(string)
 			}
 			ok := parseBody(&val1, map2)
 			if !ok {
@@ -244,51 +236,33 @@ func compareVals(map1 interface{}, map2 *interface{}) {
 			return
 		}
 	}
-
-}
-
-func reverseMap(m map[string]interface{}) map[interface{}]string {
-	var reverseMap = make(map[interface{}]string)
-	for key, val := range m {
-		reverseMap[val] = key
-	}
-	return reverseMap
-}
-
-func getType(val interface{}) string {
-	switch val.(type) {
-	case string:
-		return "string"
-	case int64, int, int32:
-		return "int"
-	case float64, float32:
-		return "float"
-	}
-	return ""
 }
 
 func parseBody(val1 *string, body *interface{}) bool {
-	// Check if the value is already present in the templatized values.
-	// Reverse the templatized value map.
-	// revMap := reverseMap(utils.TemplatizedValues)
-	// if _, ok := revMap[*val1]; ok {
-	// 	return false
-	// }
 	switch b := (*body).(type) {
 	case geko.ObjectItems:
 		keys := b.Keys()
 		vals := b.Values()
 		for i, key := range keys {
-			ok := parseBody(val1, &vals[i])
+			stringVal, ok := vals[i].(string)
+			if ok {
+				if strings.HasPrefix(stringVal, "{{") && strings.HasSuffix(stringVal, "}}") {
+					// Get the value from the template.
+					vals[i] = utils.TemplatizedValues[key]
+				}
+			}
+			ok = parseBody(val1, &vals[i])
 			if ok {
 				newKey := insertUnique(key, *val1, utils.TemplatizedValues)
 				if newKey == "" {
 					newKey = key
 				}
-				vals[i] = fmt.Sprintf("{{%s .%s }}", getType(vals[i]), newKey)
+				vals[i] = fmt.Sprintf("{{%s .%v }}", getType(vals[i]), newKey)
 				b.SetValueByIndex(i, vals[i])
 				// fmt.Println("This is the value at index i in the map", b.GetByIndex(i))
-				*val1 = fmt.Sprintf("{{%s .%s }}", getType(vals[i]), newKey)
+				// fmt.Println("This is the val1 before", reflect.TypeOf(*val1))
+				*val1 = fmt.Sprintf("{{%s .%v }}", getType(*val1), newKey)
+				// fmt.Println("This is the val1 after", *val1)
 				return true
 			}
 		}
@@ -326,8 +300,8 @@ func parseBody(val1 *string, body *interface{}) bool {
 				if newKey == "" {
 					newKey = key
 				}
-				b[key] = fmt.Sprintf("{{.%s}}", newKey)
-				*val1 = fmt.Sprintf("{{render .%s %d}}", newKey, reflect.TypeOf(val2).Kind())
+				b[key] = fmt.Sprintf("{{ %s .%s}}", getType(b[key]), newKey)
+				*val1 = fmt.Sprintf("{{ %s .%s }}", getType(*val1), newKey)
 			}
 		}
 	case float64, int64, int, float32:
@@ -344,6 +318,90 @@ func parseBody(val1 *string, body *interface{}) bool {
 	return false
 }
 
+func reverseMap(m map[string]interface{}) map[interface{}]string {
+	var reverseMap = make(map[interface{}]string)
+	for key, val := range m {
+		reverseMap[val] = key
+	}
+	return reverseMap
+}
+
+func getType(val interface{}) string {
+	switch val.(type) {
+	case string:
+		return "string"
+	case int64, int, int32:
+		return "int"
+	case float64, float32:
+		return "float"
+	}
+	return ""
+}
+
+func compareResponses(response1, response2 *interface{}, key string) {
+	switch v1 := (*response1).(type) {
+	case geko.Array:
+		for _, val1 := range v1.List {
+			compareResponses(&val1, response2, "")
+		}
+	case geko.ObjectItems:
+		keys := v1.Keys()
+		vals := v1.Values()
+		for i, _ := range keys {
+			compareResponses(&vals[i], response2, keys[i])
+		}
+	case map[string]interface{}:
+		for key, val := range v1 {
+			compareResponses(&val, response2, key)
+			v1[key] = val
+		}
+	case string:
+		compareSecondResponse(&v1, response2, key, "")
+	case float64, int64, int, float32:
+		v1String := toString(v1)
+		compareSecondResponse(&(v1String), response2, key, "")
+	}
+}
+
+func compareSecondResponse(val1 *string, response2 *interface{}, key1 string, key2 string) {
+	switch v2 := (*response2).(type) {
+	case geko.Array:
+		for _, val2 := range v2.List {
+			compareSecondResponse(val1, &val2, key1, "")
+		}
+
+	case geko.ObjectItems:
+		keys := v2.Keys()
+		vals := v2.Values()
+		for i, _ := range keys {
+			compareSecondResponse(val1, &vals[i], key1, keys[i])
+		}
+	case map[string]interface{}:
+		for key, val := range v2 {
+			compareSecondResponse(val1, &val, key1, key)
+		}
+	case string:
+		if *val1 != v2 {
+			// Reverse the templatized values map.
+			revMap := reverseMap(utils.TemplatizedValues)
+			if _, ok := revMap[*val1]; ok && key1 == key2 {
+				key := revMap[*val1]
+				utils.TemplatizedValues[key] = v2
+				*val1 = v2
+			}
+		}
+	case float64, int64, int, float32:
+		if *val1 != toString(v2) && key1 == key2 {
+			revMap := reverseMap(utils.TemplatizedValues)
+			if _, ok := revMap[*val1]; ok {
+				key := revMap[*val1]
+				utils.TemplatizedValues[key] = v2
+				*val1 = toString(v2)
+			}
+		}
+	}
+}
+
 func insertUnique(baseKey, value string, myMap map[string]interface{}) string {
 	// If the key has more than one word seperated by a delimiter, remove the delimiter and add the key to the map.
 	if strings.Contains(baseKey, "-") {
@@ -358,7 +416,7 @@ func insertUnique(baseKey, value string, myMap map[string]interface{}) string {
 		if myMap[key] == value {
 			break
 		}
-		if _, exists := myMap[key]; !exists{
+		if _, exists := myMap[key]; !exists {
 			myMap[key] = value
 			break
 		}
@@ -388,13 +446,17 @@ func toString(val interface{}) string {
 
 func compareReqHeaders(req1 map[string]string, req2 map[string]string) {
 	for key, val1 := range req1 {
+		var val interface{}
 		// Check if the value is already present in the templatized values.
 		if strings.HasPrefix(val1, "{{") && strings.HasSuffix(val1, "}}") {
-			continue
+			// Get the value from the template.
+			val = utils.TemplatizedValues[key]
+		}else {
+			val = val1
 		}
 		if val2, ok := req2[key]; ok {
-			if val1 == val2 {
-				newKey := insertUnique(key, val1, utils.TemplatizedValues)
+			if val == val2 {
+				newKey := insertUnique(key, val2, utils.TemplatizedValues)
 				if newKey == "" {
 					newKey = key
 				}
@@ -404,6 +466,23 @@ func compareReqHeaders(req1 map[string]string, req2 map[string]string) {
 		}
 	}
 }
+
+func removeQuotesInTemplates(jsonStr string) string {
+	// Regular expression to find patterns with {{ and }}
+	re := regexp.MustCompile(`"\{\{[^{}]*\}\}"`)
+
+	// Function to replace matches by removing surrounding quotes
+	result := re.ReplaceAllStringFunc(jsonStr, func(match string) string {
+		if strings.Contains(match, "{{string") {
+			return match
+		}
+		// Remove the surrounding quotes
+		return strings.Trim(match, `"`)
+	})
+
+	return result
+}
+
 
 func noQuotes(tempMap map[string]interface{}) {
 	// Remove double quotes

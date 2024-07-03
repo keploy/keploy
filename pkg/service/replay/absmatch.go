@@ -363,7 +363,6 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 	if !bodyRes {
 		respCompare.BodyResult.Normal = false
 	}
-
 	return pass, respCompare
 }
 
