@@ -106,11 +106,11 @@ func (e *Language) String() string {
 // Set must have pointer receiver so it doesn't change the value of a copy
 func (e *Language) Set(v string) error {
 	switch v {
-	case "go", "java", "python", "node":
+	case "go", "java", "python", "javascript":
 		*e = Language(v)
 		return nil
 	default:
-		return errors.New(`must be one of "go", "java", "python" or "node"`)
+		return errors.New(`must be one of "go", "java", "python" or "javascript"`)
 	}
 }
 

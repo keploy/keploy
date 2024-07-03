@@ -699,7 +699,7 @@ func DetectLanguage(logger *zap.Logger, cmd string) (config.Language, string) {
 	}
 
 	if executable == "node" || executable == "npm" {
-		return models.Node, executable
+		return models.Javascript, executable
 	}
 
 	if executable == "java" {

@@ -20,11 +20,11 @@ const (
 )
 
 const (
-	Unknown config.Language = "Unknown" // Unknown language
-	Go      config.Language = "go"      // Go language
-	Java    config.Language = "java"    // Java language
-	Python  config.Language = "python"  // Python language
-	Node    config.Language = "node"    // Node language
+	Unknown    config.Language = "Unknown"    // Unknown language
+	Go         config.Language = "go"         // Go language
+	Java       config.Language = "java"       // Java language
+	Python     config.Language = "python"     // Python language
+	Javascript config.Language = "javascript" // javascript language
 )
 
 var (

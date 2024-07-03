@@ -521,6 +521,11 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 			c.cfg.CoverageCommand = c.cfg.Command
 
+			// skip coverage by default if command is of type docker
+			if utils.CmdType(c.cfg.CommandType) != "native" && !cmd.Flags().Changed("skip-coverage") {
+				c.cfg.Test.SkipCoverage = true
+			}
+
 			if cmd.Name() == "rerecord" {
 				return nil
 			}

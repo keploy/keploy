@@ -127,7 +127,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 
 	language, executable := utils.DetectLanguage(r.logger, r.config.Command)
-	// if language is not provided through flag/config and language detected is not unknown
+	// if language is not provided and language detected is known
 	// then set the language to detected language
 	if r.config.Test.Language == "" {
 		if language == models.Unknown {
@@ -146,18 +146,16 @@ func (r *Replayer) Start(ctx context.Context) error {
 		cov = golang.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.CoverageReportPath, r.config.CommandType)
 	case models.Python:
 		cov = python.New(ctx, r.logger, r.reportDB, r.config.Command, executable)
-	case models.Node:
+	case models.Javascript:
 		cov = javascript.New(ctx, r.logger, r.reportDB, r.config.Command)
 	case models.Java:
 		cov = java.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.JacocoAgentPath, executable)
 	}
 
 	if !r.config.Test.SkipCoverage {
-		if utils.CmdType(r.config.CommandType) == utils.Native {
-			r.config.CoverageCommand, err = cov.PreProcess()
-			if err != nil {
-				r.config.Test.SkipCoverage = true
-			}
+		r.config.CoverageCommand, err = cov.PreProcess()
+		if err != nil {
+			r.config.Test.SkipCoverage = true
 		}
 		err = os.Setenv("CLEAN", "true")
 		if err != nil {
