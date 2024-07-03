@@ -29,7 +29,7 @@ type Config struct {
 	ReRecord              ReRecord     `json:"rerecord" yaml:"-" mapstructure:"rerecord"`
 	ConfigPath            string       `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
 	BypassRules           []BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
-	EnableTesting         bool         `json:"enableTesting" yaml:"enableTesting" mapstructure:"enableTesting"`
+	EnableTesting         bool         `json:"enableTesting" yaml:"-" mapstructure:"enableTesting"`
 	GenerateGithubActions bool         `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`
 	KeployContainer       string       `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
 	KeployNetwork         string       `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
