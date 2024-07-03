@@ -153,11 +153,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 
 	if !r.config.Test.SkipCoverage {
-		r.config.CoverageCommand, err = cov.PreProcess()
-		if err != nil {
-			r.config.Test.SkipCoverage = true
+		if utils.CmdType(r.config.CommandType) == utils.Native {
+			r.config.CoverageCommand, err = cov.PreProcess()
+			if err != nil {
+				r.config.Test.SkipCoverage = true
+			}
 		}
-		err = os.Setenv("CLEAN", "true")
+		err = os.Setenv("CLEAN", "true") // related to javascript coverage calculation
 		if err != nil {
 			r.config.Test.SkipCoverage = true
 			r.logger.Warn("failed to set CLEAN env variable, skipping coverage caluclation", zap.Error(err))
@@ -188,7 +190,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		requestMockemulator.ProcessMockFile(ctx, testSetID)
 
 		if !r.config.Test.SkipCoverage {
-			err = os.Setenv("TESTSETID", testSetID)
+			err = os.Setenv("TESTSETID", testSetID) // related to java coverage calculation
 			if err != nil {
 				r.config.Test.SkipCoverage = true
 				r.logger.Warn("failed to set TESTSETID env variable, skipping coverage caluclation", zap.Error(err))
@@ -233,12 +235,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 
 		if i == 0 && !r.config.Test.SkipCoverage {
-			err = os.Setenv("CLEAN", "false")
+			err = os.Setenv("CLEAN", "false") // related to javascript coverage calculation
 			if err != nil {
 				r.config.Test.SkipCoverage = true
 				r.logger.Warn("failed to set CLEAN env variable, skipping coverage caluclation.", zap.Error(err))
 			}
-			err = os.Setenv("APPEND", "--append")
+			err = os.Setenv("APPEND", "--append") // related to python coverage calculation
 			if err != nil {
 				r.config.Test.SkipCoverage = true
 				r.logger.Warn("failed to set APPEND env variable, skipping coverage caluclation.", zap.Error(err))
