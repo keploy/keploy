@@ -261,12 +261,12 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 			cmd.Flags().Uint64("api-timeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
 			cmd.Flags().String("mongo-password", c.cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")
 			cmd.Flags().String("coverage-report-path", c.cfg.Test.CoverageReportPath, "Write a go coverage profile to the file in the given directory.")
-			cmd.Flags().StringP("language", "l", c.cfg.Test.Language, "application programming language")
+			cmd.Flags().VarP(&c.cfg.Test.Language, "language", "l", "Application programming language")
 			cmd.Flags().Bool("ignore-ordering", c.cfg.Test.IgnoreOrdering, "Ignore ordering of array in response")
-			cmd.Flags().Bool("coverage", c.cfg.Test.Coverage, "Enable coverage reporting for the testcases. for golang please set language flag to golang, ref https://keploy.io/docs/server/sdk-installation/go/")
+			cmd.Flags().Bool("skip-coverage", c.cfg.Test.SkipCoverage, "skip code coverage computation while running the test cases")
 			cmd.Flags().Bool("remove-unused-mocks", c.cfg.Test.RemoveUnusedMocks, "Clear the unused mocks for the passed test-sets")
-			cmd.Flags().Bool("go-coverage", c.cfg.Test.GoCoverage, "Enable go coverage reporting for the testcases")
 			cmd.Flags().Bool("fallBack-on-miss", c.cfg.Test.FallBackOnMiss, "Enable connecting to actual service if mock not found during test mode")
+			cmd.Flags().String("jacoco-agent-path", c.cfg.Test.JacocoAgentPath, "Only applicable for test coverage for Java projects. You can override the jacoco agent jar by proving its path")
 			cmd.Flags().String("base-path", c.cfg.Test.BasePath, "Custom api basePath/origin to replace the actual basePath/origin in the testcases; App flag is ignored and app will not be started & instrumented when this is set since the application running on a different machine")
 			cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
 		}
@@ -536,17 +536,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 			config.SetSelectedTests(c.cfg, testSets)
 
-			if cmd.Name() == "rerecord" {
-				return nil
+			c.cfg.CoverageCommand = c.cfg.Command
+
+			// skip coverage by default if command is of type docker
+			if utils.CmdType(c.cfg.CommandType) != "native" && !cmd.Flags().Changed("skip-coverage") {
+				c.cfg.Test.SkipCoverage = true
 			}
 
-			if utils.CmdType(c.cfg.CommandType) == utils.Native && c.cfg.Test.GoCoverage {
-				goCovPath, err := utils.SetCoveragePath(c.logger, c.cfg.Test.CoverageReportPath)
-				if err != nil {
-					utils.LogError(c.logger, err, "failed to set go coverage path")
-					return errors.New("failed to set go coverage path")
-				}
-				c.cfg.Test.CoverageReportPath = goCovPath
+			if cmd.Name() == "rerecord" {
+				return nil
 			}
 
 			if c.cfg.Test.Delay <= 5 {

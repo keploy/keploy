@@ -2,6 +2,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ type Config struct {
 	AppID                 uint64       `json:"appId" yaml:"appId" mapstructure:"appId"`
 	AppName               string       `json:"appName" yaml:"appName" mapstructure:"appName"`
 	Command               string       `json:"command" yaml:"command" mapstructure:"command"`
+	CoverageCommand       string       `json:"-" yaml:"-" mapstructure:"-"`
 	Port                  uint32       `json:"port" yaml:"port" mapstructure:"port"`
 	DNSPort               uint32       `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
 	ProxyPort             uint32       `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
@@ -82,17 +84,40 @@ type Test struct {
 	GlobalNoise        Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
 	Delay              uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
 	APITimeout         uint64              `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
-	Coverage           bool                `json:"coverage" yaml:"coverage" mapstructure:"coverage"`                               // boolean to capture the coverage in test
+	SkipCoverage       bool                `json:"skipCoverage" yaml:"skipCoverage" mapstructure:"skipCoverage"`                   // boolean to capture the coverage in test
 	CoverageReportPath string              `json:"coverageReportPath" yaml:"coverageReportPath" mapstructure:"coverageReportPath"` // directory path to store the coverage files
-	GoCoverage         bool                `json:"goCoverage" yaml:"goCoverage" mapstructure:"goCoverage"`                         // boolean to capture the coverage in test
 	IgnoreOrdering     bool                `json:"ignoreOrdering" yaml:"ignoreOrdering" mapstructure:"ignoreOrdering"`
 	MongoPassword      string              `json:"mongoPassword" yaml:"mongoPassword" mapstructure:"mongoPassword"`
-	Language           string              `json:"language" yaml:"language" mapstructure:"language"`
+	Language           Language            `json:"language" yaml:"language" mapstructure:"language"`
 	RemoveUnusedMocks  bool                `json:"removeUnusedMocks" yaml:"removeUnusedMocks" mapstructure:"removeUnusedMocks"`
 	FallBackOnMiss     bool                `json:"fallBackOnMiss" yaml:"fallBackOnMiss" mapstructure:"fallBackOnMiss"`
+	JacocoAgentPath    string              `json:"jacocoAgentPath" yaml:"jacocoAgentPath" mapstructure:"jacocoAgentPath"`
 	BasePath           string              `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
 	Mocking            bool                `json:"mocking" yaml:"mocking" mapstructure:"mocking"`
 	IgnoredTests       map[string][]string `json:"ignoredTests" yaml:"ignoredTests" mapstructure:"ignoredTests"`
+}
+
+type Language string
+
+// String is used both by fmt.Print and by Cobra in help text
+func (e *Language) String() string {
+	return string(*e)
+}
+
+// Set must have pointer receiver so it doesn't change the value of a copy
+func (e *Language) Set(v string) error {
+	switch v {
+	case "go", "java", "python", "javascript":
+		*e = Language(v)
+		return nil
+	default:
+		return errors.New(`must be one of "go", "java", "python" or "javascript"`)
+	}
+}
+
+// Type is only used in help text
+func (e *Language) Type() string {
+	return "myEnum"
 }
 
 type Globalnoise struct {

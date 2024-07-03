@@ -19,11 +19,17 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/platform/coverage"
+	"go.keploy.io/server/v2/pkg/platform/coverage/golang"
+	"go.keploy.io/server/v2/pkg/platform/coverage/java"
+	"go.keploy.io/server/v2/pkg/platform/coverage/javascript"
+	"go.keploy.io/server/v2/pkg/platform/coverage/python"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
 
+// TODO we should remove this global variable and use the return value of the function
 var completeTestReport = make(map[string]TestReportVerdict)
 var totalTests int
 var totalTestPassed int
@@ -121,6 +127,50 @@ func (r *Replayer) Start(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 
+	language, executable := utils.DetectLanguage(r.logger, r.config.Command)
+	// if language is not provided and language detected is known
+	// then set the language to detected language
+	if r.config.Test.Language == "" {
+		if language == models.Unknown {
+			r.logger.Warn("failed to detect language, skipping coverage caluclation. please use --language to manually set the language")
+			r.config.Test.SkipCoverage = true
+		} else {
+			r.logger.Warn(fmt.Sprintf("%s language detected. please use --language to manually set the language if needed", language))
+		}
+		r.config.Test.Language = language
+	} else if language != r.config.Test.Language && language != models.Unknown {
+		utils.LogError(r.logger, nil, "language detected is different from the language provided")
+		r.config.Test.SkipCoverage = true
+	}
+
+	var cov coverage.Service
+	switch r.config.Test.Language {
+	case models.Go:
+		cov = golang.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.CoverageReportPath, r.config.CommandType)
+	case models.Python:
+		cov = python.New(ctx, r.logger, r.reportDB, r.config.Command, executable)
+	case models.Javascript:
+		cov = javascript.New(ctx, r.logger, r.reportDB, r.config.Command)
+	case models.Java:
+		cov = java.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.JacocoAgentPath, executable)
+	default:
+		r.config.Test.SkipCoverage = true
+	}
+
+	if !r.config.Test.SkipCoverage {
+		if utils.CmdType(r.config.CommandType) == utils.Native {
+			r.config.CoverageCommand, err = cov.PreProcess()
+			if err != nil {
+				r.config.Test.SkipCoverage = true
+			}
+		}
+		err = os.Setenv("CLEAN", "true") // related to javascript coverage calculation
+		if err != nil {
+			r.config.Test.SkipCoverage = true
+			r.logger.Warn("failed to set CLEAN env variable, skipping coverage caluclation", zap.Error(err))
+		}
+	}
+
 	// Instrument will load the hooks and start the proxy
 	inst, err := r.Instrument(ctx)
 	if err != nil {
@@ -137,7 +187,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 	testSetResult := false
 	testRunResult := true
 	abortTestRun := false
-	for _, testSetID := range testSetIDs {
+
+	for i, testSetID := range testSetIDs {
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
 		}
@@ -145,6 +196,15 @@ func (r *Replayer) Start(ctx context.Context) error {
 			continue
 		}
 		requestMockemulator.ProcessMockFile(ctx, testSetID)
+
+		if !r.config.Test.SkipCoverage {
+			err = os.Setenv("TESTSETID", testSetID) // related to java coverage calculation
+			if err != nil {
+				r.config.Test.SkipCoverage = true
+				r.logger.Warn("failed to set TESTSETID env variable, skipping coverage caluclation", zap.Error(err))
+			}
+		}
+
 		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, inst.AppID, false)
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)
@@ -181,6 +241,25 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to get after test hook")
 		}
+
+		if i == 0 && !r.config.Test.SkipCoverage {
+			err = os.Setenv("CLEAN", "false") // related to javascript coverage calculation
+			if err != nil {
+				r.config.Test.SkipCoverage = true
+				r.logger.Warn("failed to set CLEAN env variable, skipping coverage caluclation.", zap.Error(err))
+			}
+			err = os.Setenv("APPEND", "--append") // related to python coverage calculation
+			if err != nil {
+				r.config.Test.SkipCoverage = true
+				r.logger.Warn("failed to set APPEND env variable, skipping coverage caluclation.", zap.Error(err))
+			}
+		}
+	}
+	if !r.config.Test.SkipCoverage && r.config.Test.Language == models.Java {
+		err = java.MergeAndGenerateJacocoReport(ctx, r.logger)
+		if err != nil {
+			r.config.Test.SkipCoverage = true
+		}
 	}
 
 	testRunStatus := "fail"
@@ -192,6 +271,19 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
+		if !r.config.Test.SkipCoverage {
+			r.logger.Info("calculating coverage for the test run and inserting it into the report")
+			coverageData, err := cov.GetCoverage()
+			if err == nil {
+				r.logger.Sugar().Infoln(models.HighlightPassingString("Total Coverage Percentage: ", coverageData.TotalCov))
+				err = cov.AppendCoverage(&coverageData, testRunID)
+				if err != nil {
+					utils.LogError(r.logger, err, "failed to update report with the coverage data")
+				}
+			} else {
+				utils.LogError(r.logger, err, "failed to calculate coverage for the test run")
+			}
+		}
 	}
 	return nil
 }
@@ -202,7 +294,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		return &InstrumentState{}, nil
 	}
 
-	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
+	appID, err := r.instrumentation.Setup(ctx, r.config.CoverageCommand, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return &InstrumentState{}, err
@@ -701,7 +793,7 @@ func (r *Replayer) compareResp(tc *models.TestCase, actualResponse *models.HTTPR
 	return match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
 }
 
-func (r *Replayer) printSummary(ctx context.Context, testRunResult bool) {
+func (r *Replayer) printSummary(_ context.Context, _ bool) {
 	if totalTests > 0 {
 		testSuiteNames := make([]string, 0, len(completeTestReport))
 		for testSuiteName := range completeTestReport {
@@ -742,26 +834,6 @@ func (r *Replayer) printSummary(ctx context.Context, testRunResult bool) {
 		if _, err := pp.Printf("\n<=========================================> \n\n"); err != nil {
 			utils.LogError(r.logger, err, "failed to print separator")
 			return
-		}
-		r.logger.Info("test run completed", zap.Bool("passed overall", testRunResult))
-
-		if utils.CmdType(r.config.CommandType) == utils.Native && r.config.Test.GoCoverage {
-			r.logger.Info("there is an opportunity to get the coverage here")
-
-			coverCmd := exec.CommandContext(ctx, "go", "tool", "covdata", "percent", "-i="+os.Getenv("GOCOVERDIR"))
-			output, err := coverCmd.Output()
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to get the coverage of the go binary", zap.Any("cmd", coverCmd.String()))
-			}
-			r.logger.Sugar().Infoln("\n", models.HighlightPassingString(string(output)))
-			generateCovTxtCmd := exec.CommandContext(ctx, "go", "tool", "covdata", "textfmt", "-i="+os.Getenv("GOCOVERDIR"), "-o="+os.Getenv("GOCOVERDIR")+"/total-coverage.txt")
-			output, err = generateCovTxtCmd.Output()
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to get the coverage of the go binary", zap.Any("cmd", coverCmd.String()))
-			}
-			if len(output) > 0 {
-				r.logger.Sugar().Infoln("\n", models.HighlightFailingString(string(output)))
-			}
 		}
 	}
 }
