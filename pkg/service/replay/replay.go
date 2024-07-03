@@ -76,13 +76,14 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 	}
 }
 
+var StopReason = "replay completed successfully"
+
 func (r *Replayer) Start(ctx context.Context) error {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	g, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
 
-	var stopReason = "replay completed successfully"
 	var hookCancel context.CancelFunc
 
 	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
@@ -91,10 +92,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 		case <-ctx.Done():
 			break
 		default:
-			err := utils.Stop(r.logger, stopReason)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to stop replaying")
-			}
 		}
 		if hookCancel != nil {
 			hookCancel()
@@ -107,9 +104,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
-		stopReason = fmt.Sprintf("failed to get all test set ids: %v", err)
-		utils.LogError(r.logger, err, stopReason)
-		return fmt.Errorf(stopReason)
+		StopReason = fmt.Sprintf("failed to get all test set ids: %v", err)
+		utils.LogError(r.logger, err, StopReason)
+		return fmt.Errorf(StopReason)
 	}
 
 	if len(testSetIDs) == 0 {
@@ -121,9 +118,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	testRunID, err := r.GetNextTestRunID(ctx)
 	if err != nil {
-		stopReason = fmt.Sprintf("failed to get next test run id: %v", err)
-		utils.LogError(r.logger, err, stopReason)
-		return fmt.Errorf(stopReason)
+		StopReason = fmt.Sprintf("failed to get next test run id: %v", err)
+		utils.LogError(r.logger, err, StopReason)
+		return fmt.Errorf(StopReason)
 	}
 
 	var language config.Language
@@ -178,12 +175,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 	// Instrument will load the hooks and start the proxy
 	inst, err := r.Instrument(ctx)
 	if err != nil {
-		stopReason = fmt.Sprintf("failed to instrument: %v", err)
-		utils.LogError(r.logger, err, stopReason)
+		StopReason = fmt.Sprintf("failed to instrument: %v", err)
+		utils.LogError(r.logger, err, StopReason)
 		if ctx.Err() == context.Canceled {
 			return err
 		}
-		return fmt.Errorf(stopReason)
+		return fmt.Errorf(StopReason)
 	}
 
 	hookCancel = inst.HookCancel
@@ -209,12 +206,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, inst.AppID, false)
 		if err != nil {
-			stopReason = fmt.Sprintf("failed to run test set: %v", err)
-			utils.LogError(r.logger, err, stopReason)
+			StopReason = fmt.Sprintf("failed to run test set: %v", err)
+			utils.LogError(r.logger, err, StopReason)
 			if ctx.Err() == context.Canceled {
 				return err
 			}
-			return fmt.Errorf(stopReason)
+			return fmt.Errorf(StopReason)
 		}
 		switch testSetStatus {
 		case models.TestSetStatusAppHalted:
