@@ -15,30 +15,6 @@ import (
 	"go.uber.org/zap"
 )
 
-type PacketHeader struct {
-	PacketLength     uint8 `yaml:"packet_length"`
-	PacketSequenceID uint8 `yaml:"packet_sequence_id"`
-}
-
-type SQLPacketHeader struct {
-	PayloadLength uint32 `yaml:"payload_length"` // MySQL packet payload length
-	SequenceID    uint8  `yaml:"sequence_id"`    // MySQL packet sequence ID
-}
-
-type Packet struct {
-	Header  SQLPacketHeader `yaml:"header"`
-	Payload []byte          `yaml:"payload"`
-}
-
-type RowDataPacket struct {
-	Data []byte `yaml:"data,omitempty,flow"`
-}
-
-type PluginDetails struct {
-	Type    string `yaml:"type"`
-	Message string `yaml:"message"`
-}
-
 type CapabilityFlags uint32
 
 var handshakePluginName string
@@ -55,47 +31,47 @@ func encodeToBinary(packet interface{}, header *models.MySQLPacketHeader, operat
 	case "MySQLHandshakeV10":
 		p, ok := packet.(*models.MySQLHandshakeV10Packet)
 		if !ok {
-			return nil, fmt.Errorf("invalid packet type for HandshakeV10Packet: expected *HandshakeV10Packet, got %T", packet)
+			return nil, fmt.Errorf("invalid packet type for MySQLHandshakeV10: expected *MySQLHandshakeV10Packet, got %T", packet)
 		}
 		data, err = encodeHandshakePacket(p)
 	case "HANDSHAKE_RESPONSE_OK":
 		bypassHeader = true
 		p, ok := packet.(*models.MySQLHandshakeResponseOk)
 		if !ok {
-			return nil, fmt.Errorf("invalid packet type for HandshakeResponse: expected *HandshakeResponse, got %T", packet)
+			return nil, fmt.Errorf("invalid packet type for HANDSHAKE_RESPONSE_OK: expected *MySQLHandshakeResponseOk, got %T", packet)
 		}
 		data, err = encodeHandshakeResponseOk(p)
 	case "AUTH_SWITCH_REQUEST":
 		p, ok := packet.(*models.AuthSwitchRequestPacket)
 		if !ok {
-			return nil, fmt.Errorf("invalid packet type for HandshakeV10Packet: expected *HandshakeV10Packet, got %T", packet)
+			return nil, fmt.Errorf("invalid packet type for AUTH_SWITCH_REQUEST: expected *AuthSwitchRequestPacket, got %T", packet)
 		}
 		data, err = encodeAuthSwitchRequest(p)
 	case "AUTH_SWITCH_RESPONSE":
 		p, ok := packet.(*models.AuthSwitchResponsePacket)
 		if !ok {
-			return nil, fmt.Errorf("invalid packet type for HandshakeV10Packet: expected *HandshakeV10Packet, got %T", packet)
+			return nil, fmt.Errorf("invalid packet type for AUTH_SWITCH_RESPONSE: expected *AuthSwitchResponsePacket, got %T", packet)
 		}
 		data, err = encodeAuthSwitchResponse(p)
 
 	case "MySQLOK":
 		p, ok := packet.(*models.MySQLOKPacket)
 		if !ok {
-			return nil, fmt.Errorf("invalid packet type for HandshakeResponse: expected *HandshakeResponse, got %T", packet)
+			return nil, fmt.Errorf("invalid packet type for MySQLOK: expected *MySQLOK, got %T", packet)
 		}
 		data, err = encodeMySQLOK(p, header)
 		bypassHeader = true
 	case "COM_STMT_PREPARE_OK":
 		p, ok := packet.(*models.MySQLStmtPrepareOk)
 		if !ok {
-			return nil, fmt.Errorf("invalid packet type for HandshakeResponse: expected *HandshakeResponse, got %T", packet)
+			return nil, fmt.Errorf("invalid packet type for COM_STMT_PREPARE_OK: expected *MySQLStmtPrepareOk, got %T", packet)
 		}
 		data, err = encodeStmtPrepareOk(p)
 		bypassHeader = true
 	case "RESULT_SET_PACKET":
 		p, ok := packet.(*models.MySQLResultSet)
 		if !ok {
-			return nil, fmt.Errorf("invalid packet for result set")
+			return nil, fmt.Errorf("invalid packet for RESULT_SET_PACKET: expected *MySQLResultSet, got %T", packet)
 		}
 		data, err = encodeMySQLResultSet(p)
 		bypassHeader = true
@@ -116,7 +92,7 @@ func encodeToBinary(packet interface{}, header *models.MySQLPacketHeader, operat
 	return data, nil
 }
 
-func DecodeMySQLPacket(logger *zap.Logger, packet Packet, clientConn net.Conn, mode models.Mode, lastCommand *lastCommandMap) (string, SQLPacketHeader, interface{}, error) {
+func DecodeMySQLPacket(logger *zap.Logger, packet models.Packet, clientConn net.Conn, mode models.Mode, lastCommand *lastCommandMap) (string, models.SQLPacketHeaderInfo, interface{}, error) {
 	data := packet.Payload
 	header := packet.Header
 	var packetData interface{}
@@ -124,7 +100,7 @@ func DecodeMySQLPacket(logger *zap.Logger, packet Packet, clientConn net.Conn, m
 	var err error
 
 	if len(data) < 1 {
-		return "", SQLPacketHeader{}, nil, fmt.Errorf("Invalid packet: Payload is empty")
+		return "", models.SQLPacketHeaderInfo{}, nil, fmt.Errorf("Invalid packet: Payload is empty")
 	}
 
 	lastCmd, ok := lastCommand.Load(clientConn)
@@ -196,7 +172,7 @@ func DecodeMySQLPacket(logger *zap.Logger, packet Packet, clientConn net.Conn, m
 	case data[0] == 0x0A: // MySQLHandshakeV10
 		packetType = "MySQLHandshakeV10"
 		packetData, err = decodeMySQLHandshakeV10(data)
-		handshakePacket, _ := packetData.(*HandshakeV10Packet)
+		handshakePacket, _ := packetData.(*models.MySQLHandshakeV10Packet)
 		handshakePluginName = handshakePacket.AuthPluginName
 		lastCommand.Store(clientConn, 0x0A)
 	case data[0] == 0x03: // MySQLQuery
@@ -260,7 +236,7 @@ func DecodeMySQLPacket(logger *zap.Logger, packet Packet, clientConn net.Conn, m
 	}
 
 	if err != nil {
-		return "", SQLPacketHeader{}, nil, err
+		return "", models.SQLPacketHeaderInfo{}, nil, err
 	}
 	if models.GetMode() != "test" {
 		logger.Debug("Packet Info",
@@ -277,7 +253,7 @@ func isLengthEncodedInteger(b byte) bool {
 	return b != 0x00 && b != 0xFF
 }
 
-func (p *Packet) Encode() ([]byte, error) {
+func Encode(p *models.Packet) ([]byte, error) {
 	packet := make([]byte, 4)
 
 	binary.LittleEndian.PutUint32(packet[:3], p.Header.PayloadLength)
@@ -569,11 +545,11 @@ func readLengthEncodedStrings(b []byte) (string, int) {
 	return string(b[n : n+int(length)]), n + int(length)
 }
 
-func (packet *HandshakeV10Packet) ShouldUseSSL() bool {
+func ShouldUseSSL(packet *models.MySQLHandshakeV10Packet) bool {
 	return (packet.CapabilityFlags & models.CLIENT_SSL) != 0
 }
 
-func (packet *HandshakeV10Packet) GetAuthMethod() string {
+func GetAuthMethod(packet *models.MySQLHandshakeV10Packet) string {
 	// It will return the auth method
 	return packet.AuthPluginName
 }
