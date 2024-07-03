@@ -2,13 +2,11 @@ package cli
 
 import (
 	"context"
-	"os"
 
 	"go.keploy.io/server/v2/utils"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/graph"
 	replaySvc "go.keploy.io/server/v2/pkg/service/replay"
 	"go.uber.org/zap"
 )
@@ -36,23 +34,6 @@ func Test(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 			if replay, ok = svc.(replaySvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
 				return nil
-			}
-			if cfg.Test.Coverage {
-				g := graph.NewGraph(logger, replay, *cfg)
-				err := g.Serve(ctx)
-				if err != nil {
-					utils.LogError(logger, err, "failed to start graph service")
-					return nil
-				}
-			}
-
-			cmdType := utils.FindDockerCmd(cfg.Command)
-			if cmdType == utils.Native && cfg.Test.GoCoverage {
-				err := os.Setenv("GOCOVERDIR", cfg.Test.CoverageReportPath)
-				if err != nil {
-					utils.LogError(logger, err, "failed to set GOCOVERDIR")
-					return nil
-				}
 			}
 
 			err = replay.Start(ctx)
