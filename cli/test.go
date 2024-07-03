@@ -41,10 +41,7 @@ func Test(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFact
 				case <-ctx.Done():
 					break
 				default:
-					err = utils.Stop(logger, replaySvc.StopReason)
-					if err != nil {
-						utils.LogError(logger, err, "failed to stop replaying")
-					}
+					utils.ExecCancel()
 				}
 			}()
 			err = replay.Start(ctx)
