@@ -133,8 +133,10 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if r.config.Test.Language == "" {
 		if language == models.Unknown {
 			r.logger.Warn("failed to detect language, skipping coverage caluclation. please use --language to manually set the language")
+			r.config.Test.SkipCoverage = true
+		} else {
+			r.logger.Warn(fmt.Sprintf("%s language detected. please use --language to manually set the language if needed", language))
 		}
-		r.logger.Warn(fmt.Sprintf("%s language detected. please use --language to manually set the language if needed", language))
 		r.config.Test.Language = language
 	} else if language != r.config.Test.Language && language != models.Unknown {
 		utils.LogError(r.logger, nil, "language detected is different from the language provided")
@@ -151,6 +153,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 		cov = javascript.New(ctx, r.logger, r.reportDB, r.config.Command)
 	case models.Java:
 		cov = java.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.JacocoAgentPath, executable)
+	default:
+		r.config.Test.SkipCoverage = true
 	}
 
 	if !r.config.Test.SkipCoverage {
