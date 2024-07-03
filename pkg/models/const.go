@@ -24,7 +24,7 @@ const (
 	Go         config.Language = "go"         // Go language
 	Java       config.Language = "java"       // Java language
 	Python     config.Language = "python"     // Python language
-	Javascript config.Language = "javascript" // javascript language
+	Javascript config.Language = "javascript" // Javascript language
 )
 
 var (

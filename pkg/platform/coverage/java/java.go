@@ -1,3 +1,4 @@
+// Package java implements the methods for java coverage services.
 package java
 
 import (
@@ -47,8 +48,8 @@ func (j *Java) PreProcess() (string, error) {
 		isFileExist, err := utils.FileExists(jacocoAgentPath)
 		if err == nil && isFileExist {
 			j.cmd = strings.Replace(
-				j.cmd, 
-				j.executable, 
+				j.cmd,
+				j.executable,
 				fmt.Sprintf("%s -javaagent:%s=destfile=target/${TESTSETID}.exec", j.executable, jacocoAgentPath), 1,
 			)
 		}
@@ -63,12 +64,11 @@ func (j *Java) PreProcess() (string, error) {
 	if err != nil {
 		j.logger.Debug("failed to create jacoco directory", zap.Error(err))
 		return j.cmd, err
-	} else {
-		err := downloadAndExtractJaCoCoCli(j.logger, "0.8.12", jacocoPath)
-		if err != nil {
-			j.logger.Debug("failed to download and extract jacoco binaries", zap.Error(err))
-			return j.cmd, err
-		}
+	}
+	err = downloadAndExtractJaCoCoCli(j.logger, "0.8.12", jacocoPath)
+	if err != nil {
+		j.logger.Debug("failed to download and extract jacoco binaries", zap.Error(err))
+		return j.cmd, err
 	}
 	return j.cmd, nil
 }

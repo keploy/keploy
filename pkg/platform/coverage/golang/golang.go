@@ -1,3 +1,4 @@
+// Package golang implements the methods for golang coverage services.
 package golang
 
 import (

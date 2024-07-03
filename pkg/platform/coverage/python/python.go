@@ -1,3 +1,4 @@
+// Package python implements the methods for python coverage services.
 package python
 
 import (
@@ -36,10 +37,9 @@ func (p *Python) PreProcess() (string, error) {
 	if err != nil {
 		p.logger.Warn("coverage tool not found, skipping coverage caluclation. Please install coverage tool using 'pip install coverage'")
 		return p.cmd, err
-	} else {
-		createPyCoverageConfig(p.logger)
-		return strings.Replace(p.cmd, p.executable, "coverage run $APPEND --data-file=.coverage.keploy", 1), nil
 	}
+	createPyCoverageConfig(p.logger)
+	return strings.Replace(p.cmd, p.executable, "coverage run $APPEND --data-file=.coverage.keploy", 1), nil
 }
 
 type pyCoverageFile struct {
@@ -82,8 +82,10 @@ func (p *Python) GetCoverage() (models.TestCoverage, error) {
 	if covFileName == "" {
 		covFileName = ".coverage.keploy"
 	}
-	generateCovJSONCmd := exec.CommandContext(p.ctx, "coverage", "json", "--data-file="+covFileName)
-	_, err := generateCovJSONCmd.Output()
+	generateCovJSONCmd := exec.CommandContext(p.ctx, "python3", "-m", "coverage", "json", "--data-file="+covFileName)
+	generateCovJSONCmd.Stdout = os.Stdout
+	generateCovJSONCmd.Stderr = os.Stderr
+	err := generateCovJSONCmd.Run()
 	if err != nil {
 		return testCov, err
 	}

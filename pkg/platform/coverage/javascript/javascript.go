@@ -1,3 +1,4 @@
+// Package javascript implements the methods for javascript coverage services.
 package javascript
 
 import (
@@ -36,9 +37,8 @@ func (j *Javascript) PreProcess() (string, error) {
 	if err != nil {
 		j.logger.Warn("coverage tool not found, skipping coverage caluclation. please install coverage tool using 'npm install -g nyc'")
 		return j.cmd, err
-	} else {
-		return "nyc --clean=$CLEAN " + j.cmd, nil
 	}
+	return "nyc --clean=$CLEAN " + j.cmd, nil
 }
 
 type StartTy struct {
@@ -56,7 +56,7 @@ type Loc struct {
 	EndTy   `json:"end"`
 }
 
-type JavascriptCoverage map[string]struct {
+type Coverage map[string]struct {
 	Path         string `json:"path"`
 	StatementMap map[string]struct {
 		StartTy `json:"start"`
@@ -114,7 +114,7 @@ func (j *Javascript) GetCoverage() (models.TestCoverage, error) {
 		if err != nil {
 			return testCov, err
 		}
-		var cov JavascriptCoverage
+		var cov Coverage
 		err = json.Unmarshal(coverageData, &cov)
 		if err != nil {
 			return testCov, err

@@ -1,3 +1,4 @@
+// Package coverage defines the interface for coverage services.
 package coverage
 
 import (
