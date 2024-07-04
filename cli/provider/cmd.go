@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -591,6 +592,20 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		path += "/keploy"
 		c.cfg.Path = path
+
+		if runtime.GOOS == "darwin" {
+			err := os.Setenv("RUN_IN_DOCKER", "true")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to set RUN_IN_DOCKER env variable in darwin")
+				return err
+			}
+			c.logger.Info("Running in docker env")
+			err = StartInDocker(ctx, c.logger, c.cfg)
+			if err != nil {
+				return err
+			}
+		}
+
 	case "gen":
 		if os.Getenv("API_KEY") == "" {
 			utils.LogError(c.logger, nil, "API_KEY is not set")
