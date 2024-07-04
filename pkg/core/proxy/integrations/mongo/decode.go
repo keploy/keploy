@@ -20,6 +20,8 @@ import (
 	"go.uber.org/zap"
 )
 
+// decodeMongo decodes the mongo wire message from the client connection
+// and sends the response back to the client.
 func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	startedDecoding := time.Now()
 	requestBuffers := [][]byte{reqBuf}
@@ -31,6 +33,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 		defer close(errCh)
 		var readRequestDelay time.Duration
 		for {
+			// get the config mocks from the mockDb for responding to heartbeat calls
 			configMocks, err := mockDb.GetUnFilteredMocks()
 			if err != nil {
 				utils.LogError(logger, err, "error while getting config mock")
@@ -38,10 +41,12 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			logger.Debug(fmt.Sprintf("the config mocks are: %v", configMocks))
 
 			var (
-				mongoRequests []models.MongoRequest
+				mongoRequests []models.MongoRequest // stores the request packet
 			)
+			// check to read the request buffer from the client connection after the initial packeyt
 			if string(reqBuf) == "read form client conn" {
 				started := time.Now()
+				// reads the first chunk of the mongo request
 				reqBuf, err = util.ReadBytes(ctx, logger, clientConn)
 				if err != nil {
 					if err == io.EOF {
@@ -62,6 +67,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				return
 			}
 			logger.Debug(fmt.Sprintf("the loop starts with the time delay: %v", time.Since(startedDecoding)))
+			// convert the request buffer to the mongo wire message in the go struct
 			opReq, requestHeader, mongoRequest, err := Decode(reqBuf, logger)
 			if err != nil {
 				utils.LogError(logger, err, "failed to decode the mongo wire message from the client")
@@ -73,10 +79,13 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				Message:   mongoRequest,
 				ReadDelay: int64(readRequestDelay),
 			})
+			// check for the more_to_come flag bit in the mongo request
+			// header to read the next chunks of the request
 			if val, ok := mongoRequest.(*models.MongoOpMessage); ok && hasSecondSetBit(val.FlagBits) {
 				for {
 					started := time.Now()
 					logger.Debug("into the for loop for request stream")
+					// reads the next chunk of the mongo request
 					requestBuffer1, err := util.ReadBytes(ctx, logger, clientConn)
 					if err != nil {
 						if err == io.EOF {
@@ -95,6 +104,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 						logger.Debug("the response from the server is complete")
 						break
 					}
+					// convert the request buffer to the mongo response wire message in the go struct
 					_, reqHeader, mongoReq, err := Decode(requestBuffer1, logger)
 					if err != nil {
 						utils.LogError(logger, err, "failed to decode the mongo wire message from the mongo client")
@@ -112,19 +122,24 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					})
 				}
 			}
+			// check for the heartbeat request from client and use the config mocks to respond
 			if isHeartBeat(logger, opReq, *mongoRequests[0].Header, mongoRequests[0].Message) {
 				logger.Debug("recieved a heartbeat request for mongo", zap.Any("config mocks", len(configMocks)))
 				maxMatchScore := 0.0
 				bestMatchIndex := -1
+				// loop over the recorded config mocks to match with the incoming request
 				for configIndex, configMock := range configMocks {
 					logger.Debug("the config mock is: ", zap.Any("config mock", configMock), zap.Any("actual request", mongoRequests))
+					// checking the number of chunks for recorded config mocks and the incoming request
 					if len(configMock.Spec.MongoRequests) == len(mongoRequests) {
 						for i, req := range configMock.Spec.MongoRequests {
+							// check the opcode of the incoming request and the recorded config mocks
 							if len(configMock.Spec.MongoRequests) != len(mongoRequests) || req.Header.Opcode != mongoRequests[i].Header.Opcode {
 								continue
 							}
 							switch req.Header.Opcode {
 							case wiremessage.OpQuery:
+								// check the query fields of the incoming request and the recorded config mocks
 								expectedQuery := req.Message.(*models.MongoOpQuery)
 								actualQuery := mongoRequests[i].Message.(*models.MongoOpQuery)
 								if actualQuery.FullCollectionName != expectedQuery.FullCollectionName ||
@@ -135,6 +150,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 									continue
 								}
 
+								// calculate the matching score for query bson dcouments of the incoming request and the recorded config mocks
 								expected := map[string]interface{}{}
 								actual := map[string]interface{}{}
 								err = bson.UnmarshalExtJSON([]byte(expectedQuery.Query), true, &expected)
@@ -155,6 +171,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 								}
 
 							case wiremessage.OpMsg:
+								// check the OpMsg sections of the incoming request and the recorded config mocks
 								if req.Message.(*models.MongoOpMessage).FlagBits != mongoRequests[i].Message.(*models.MongoOpMessage).FlagBits {
 									continue
 								}
@@ -162,6 +179,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 								if len(req.Message.(*models.MongoOpMessage).Sections) != len(mongoRequests[i].Message.(*models.MongoOpMessage).Sections) {
 									continue
 								}
+								// calculate the matching score for each section of the incoming request and the recorded config mocks
 								for sectionIndx, section := range req.Message.(*models.MongoOpMessage).Sections {
 									if len(req.Message.(*models.MongoOpMessage).Sections) == len(mongoRequests[i].Message.(*models.MongoOpMessage).Sections) {
 										score := compareOpMsgSection(logger, section, mongoRequests[i].Message.(*models.MongoOpMessage).Sections[sectionIndx])
@@ -192,6 +210,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					errCh <- err
 					return
 				}
+				// write the mongo response to the client connection from the recorded config mocks that most matches the incoming request
 				for _, mongoResponse := range configMocks[bestMatchIndex].Spec.MongoResponses {
 					switch mongoResponse.Header.Opcode {
 					case wiremessage.OpReply:
@@ -240,6 +259,9 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					}
 				}
 			} else {
+				// handle for the non-heartbeat request from the client
+
+				// match the incoming request with the recorded tcsMocks and return a mocked response which matches most with incoming request
 				matched, matchedMock, err := match(ctx, logger, mongoRequests, mockDb)
 				if err != nil {
 					errCh <- err
@@ -271,6 +293,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				responseTo := mongoRequests[0].Header.RequestID
 				logger.Debug("the mock matched with the current request", zap.Any("mock", matchedMock), zap.Any("responseTo", responseTo))
 
+				// write the mongo response to the client connection from the recorded tcsMocks that most matches the incoming request
 				for _, resp := range matchedMock.Spec.MongoResponses {
 					respMessage := resp.Message.(*models.MongoOpMessage)
 					var expectedRequestSections []string
