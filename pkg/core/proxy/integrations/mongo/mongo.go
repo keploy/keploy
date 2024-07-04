@@ -75,7 +75,7 @@ func (m *Mongo) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrat
 	// read the initial buffer from the client connection. Initially the
 	// reqBuf contains the first network packet from the client connection
 	// which is used to determine the packet type in MatchType.
-	logger := m.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
+	logger := m.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)))
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial mongo message")
