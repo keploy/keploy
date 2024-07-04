@@ -132,7 +132,7 @@ func match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 		newLogger := pp.New()
 		newLogger.WithLineInfo = false
-		newLogger.SetColorScheme(models.FailingColorScheme)
+		newLogger.SetColorScheme(models.GetFailingColorScheme())
 		var logs = ""
 
 		logs = logs + newLogger.Sprintf("Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
@@ -192,7 +192,7 @@ func match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	} else {
 		newLogger := pp.New()
 		newLogger.WithLineInfo = false
-		newLogger.SetColorScheme(models.PassingColorScheme)
+		newLogger.SetColorScheme(models.GetPassingColorScheme())
 		var log2 = ""
 		log2 += newLogger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
 		_, err := newLogger.Printf(log2)

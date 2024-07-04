@@ -704,9 +704,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	if testSetStatus == models.TestSetStatusFailed || testSetStatus == models.TestSetStatusPassed {
 		if testSetStatus == models.TestSetStatusFailed {
-			pp.SetColorScheme(models.FailingColorScheme)
+			pp.SetColorScheme(models.GetFailingColorScheme())
 		} else {
-			pp.SetColorScheme(models.PassingColorScheme)
+			pp.SetColorScheme(models.GetPassingColorScheme())
 		}
 		if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure); err != nil {
 			utils.LogError(r.logger, err, "failed to print testrun summary")
@@ -815,9 +815,9 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 		}
 		for _, testSuiteName := range testSuiteNames {
 			if completeTestReport[testSuiteName].status {
-				pp.SetColorScheme(models.PassingColorScheme)
+				pp.SetColorScheme(models.GetPassingColorScheme())
 			} else {
-				pp.SetColorScheme(models.FailingColorScheme)
+				pp.SetColorScheme(models.GetFailingColorScheme())
 			}
 			if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed); err != nil {
 				utils.LogError(r.logger, err, "failed to print test suite details")
