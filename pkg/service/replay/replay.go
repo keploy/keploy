@@ -874,7 +874,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 			// }
 			jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
 			if err != nil {
-				r.logger.Error("failed to parse response into json. Not templatizing this test.", zap.Error(err))
+				r.logger.Error("failed to parse response into json. Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
 				continue
 			} else if jsonResponse == nil {
 				continue
@@ -908,7 +908,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 			// }
 			jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
 			if err != nil {
-				r.logger.Error("failed to parse response into json. Not templatizing this test", zap.Error(err))
+				r.logger.Error("failed to parse response into json.  Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
 				return err
 			} else if jsonResponse == nil {
 				continue
@@ -929,7 +929,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 		for i := 0; i < len(tcs)-1; i++ {
 			jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
 			if err != nil {
-				r.logger.Error("failed to parse response into json", zap.Error(err))
+				r.logger.Error("failed to parse response into json. Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
 				return err
 			} else if jsonResponse == nil {
 				continue
@@ -937,7 +937,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 			for j := i + 1; j < len(tcs); j++ {
 				jsonRequest, err := parseIntoJson(tcs[j].HTTPReq.Body)
 				if err != nil {
-					r.logger.Error("failed to parse request into json", zap.Error(err))
+					r.logger.Error("failed to parse request into json. Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[j].Name))
 					return err
 				} else if jsonResponse == nil {
 					continue
