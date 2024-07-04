@@ -1,3 +1,5 @@
+//go:build linux
+
 package core
 
 import (
@@ -16,7 +18,7 @@ type Hooks interface {
 	OutgoingInfo
 	TestBenchInfo
 	Load(ctx context.Context, id uint64, cfg HookCfg) error
-	Record(ctx context.Context, id uint64) (<-chan *models.TestCase, error)
+	Record(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error)
 }
 
 type HookCfg struct {
@@ -24,6 +26,7 @@ type HookCfg struct {
 	Pid        uint32
 	IsDocker   bool
 	KeployIPV4 string
+	Mode       models.Mode
 }
 
 type App interface {
@@ -102,6 +105,10 @@ func (s *Sessions) Get(id uint64) (*Session, bool) {
 
 func (s *Sessions) Set(id uint64, session *Session) {
 	s.sessions.Store(id, session)
+}
+
+func (s *Sessions) Delete(id uint64) {
+	s.sessions.Delete(id)
 }
 
 func (s *Sessions) getAll() map[uint64]*Session {

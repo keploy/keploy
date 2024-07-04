@@ -1,5 +1,6 @@
 name: Node on Docker
 on: [pull_request]
+
 jobs:
   node_docker:
     runs-on: ubuntu-latest
@@ -7,12 +8,14 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v2
 
-    - name: Build docker image
+    - name: Run build script
       run: |
-        docker image build -t ghcr.io/keploy/keploy:v2-dev .
+        source ./.github/workflows/test_workflow_scripts/update-docker.sh
+
     - name: Build binary
       run: |
-        go build -o keployv2
+        go build  -tags=viper_bind_struct -o keployv2
+
     - name: Checkout samples-typescript repository
       uses: actions/checkout@v2
       with:

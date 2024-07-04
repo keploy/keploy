@@ -1,3 +1,5 @@
+//go:build linux
+
 package mysql
 
 import (
@@ -8,22 +10,12 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-type StmtPrepareOk struct {
-	Status       byte               `json:"status,omitempty" yaml:"status,omitempty,flow"`
-	StatementID  uint32             `json:"statement_id,omitempty" yaml:"statement_id,omitempty,flow"`
-	NumColumns   uint16             `json:"num_columns,omitempty" yaml:"num_columns,omitempty,flow"`
-	NumParams    uint16             `json:"num_params,omitempty" yaml:"num_params,omitempty,flow"`
-	WarningCount uint16             `json:"warning_count,omitempty" yaml:"warning_count,omitempty,flow"`
-	ColumnDefs   []ColumnDefinition `json:"column_definitions,omitempty" yaml:"column_definitions,omitempty,flow"`
-	ParamDefs    []ColumnDefinition `json:"param_definitions,omitempty" yaml:"param_definitions,omitempty,flow"`
-}
-
-func decodeComStmtPrepareOk(data []byte) (*StmtPrepareOk, error) {
+func decodeComStmtPrepareOk(data []byte) (*models.MySQLStmtPrepareOk, error) {
 	if len(data) < 12 {
 		return nil, errors.New("data length is not enough for COM_STMT_PREPARE_OK")
 	}
 
-	response := &StmtPrepareOk{
+	response := &models.MySQLStmtPrepareOk{
 		Status:       data[0],
 		StatementID:  binary.LittleEndian.Uint32(data[1:5]),
 		NumColumns:   binary.LittleEndian.Uint16(data[5:7]),
@@ -35,8 +27,8 @@ func decodeComStmtPrepareOk(data []byte) (*StmtPrepareOk, error) {
 
 	if response.NumParams > 0 {
 		for i := uint16(0); i < response.NumParams; i++ {
-			columnDef := ColumnDefinition{}
-			columnHeader := PacketHeader{
+			columnDef := models.ColumnDefinition{}
+			columnHeader := models.PacketHeader{
 				PacketLength:     data[offset],
 				PacketSequenceID: data[offset+3],
 			}
@@ -82,8 +74,8 @@ func decodeComStmtPrepareOk(data []byte) (*StmtPrepareOk, error) {
 
 	if response.NumColumns > 0 {
 		for i := uint16(0); i < response.NumColumns; i++ {
-			columnDef := ColumnDefinition{}
-			columnHeader := PacketHeader{
+			columnDef := models.ColumnDefinition{}
+			columnHeader := models.PacketHeader{
 				PacketLength:     data[offset],
 				PacketSequenceID: data[offset+3],
 			}
@@ -191,24 +183,12 @@ func encodeStmtPrepareOk(packet *models.MySQLStmtPrepareOk) ([]byte, error) {
 
 func encodeColumnDefinition(buf *bytes.Buffer, column *models.ColumnDefinition, seqNum *byte) error {
 	tmpBuf := &bytes.Buffer{}
-	if err := writeLengthEncodedString(tmpBuf, column.Catalog); err != nil {
-		return err
-	}
-	if err := writeLengthEncodedString(tmpBuf, column.Schema); err != nil {
-		return err
-	}
-	if err := writeLengthEncodedString(tmpBuf, column.Table); err != nil {
-		return err
-	}
-	if err := writeLengthEncodedString(tmpBuf, column.OrgTable); err != nil {
-		return err
-	}
-	if err := writeLengthEncodedString(tmpBuf, column.Name); err != nil {
-		return err
-	}
-	if err := writeLengthEncodedString(tmpBuf, column.OrgName); err != nil {
-		return err
-	}
+	writeLengthEncodedString(tmpBuf, column.Catalog)
+	writeLengthEncodedString(tmpBuf, column.Schema)
+	writeLengthEncodedString(tmpBuf, column.Table)
+	writeLengthEncodedString(tmpBuf, column.OrgTable)
+	writeLengthEncodedString(tmpBuf, column.Name)
+	writeLengthEncodedString(tmpBuf, column.OrgName)
 	tmpBuf.WriteByte(0x0C)
 	if err := binary.Write(tmpBuf, binary.LittleEndian, column.CharacterSet); err != nil {
 		return err

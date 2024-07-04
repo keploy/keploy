@@ -1,3 +1,5 @@
+//go:build linux
+
 package http
 
 import (
@@ -401,7 +403,7 @@ func isJSON(body []byte) bool {
 	return json.Unmarshal(body, &js) == nil
 }
 
-func isPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts models.OutgoingOptions) bool {
+func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts models.OutgoingOptions) bool {
 	passThrough := false
 
 	for _, bypass := range opts.Rules {

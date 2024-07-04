@@ -2,9 +2,7 @@ package cli
 
 import (
 	"context"
-	"os"
 
-	"go.keploy.io/server/v2/pkg/graph"
 	"go.keploy.io/server/v2/utils"
 
 	"github.com/spf13/cobra"
@@ -17,13 +15,13 @@ func init() {
 	Register("test", Test)
 }
 
-func Test(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
+func Test(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var testCmd = &cobra.Command{
 		Use:     "test",
 		Short:   "run the recorded testcases and execute assertions",
 		Example: `keploy test -c "/path/to/user/app" --delay 6`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
-			return cmdConfigurator.ValidateFlags(ctx, cmd)
+			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
@@ -37,23 +35,7 @@ func Test(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFa
 				utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
 				return nil
 			}
-			if cfg.Test.Coverage {
-				g := graph.NewGraph(logger, replay, *cfg)
-				err := g.Serve(ctx)
-				if err != nil {
-					utils.LogError(logger, err, "failed to start graph service")
-					return nil
-				}
-			}
 
-			cmdType := utils.FindDockerCmd(cfg.Command)
-			if cmdType == utils.Native && cfg.Test.GoCoverage {
-				err := os.Setenv("GOCOVERDIR", cfg.Test.CoverageReportPath)
-				if err != nil {
-					utils.LogError(logger, err, "failed to set GOCOVERDIR")
-					return nil
-				}
-			}
 			err = replay.Start(ctx)
 			if err != nil {
 				utils.LogError(logger, err, "failed to replay")

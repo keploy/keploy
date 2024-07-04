@@ -1,3 +1,5 @@
+//go:build linux
+
 package mysql
 
 import (
@@ -7,18 +9,12 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-type AuthSwitchRequestPacket struct {
-	StatusTag      byte   `json:"status_tag,omitempty" yaml:"status_tag,omitempty"`
-	PluginName     string `json:"plugin_name,omitempty" yaml:"plugin_name,omitempty"`
-	PluginAuthData string `json:"plugin_authdata,omitempty" yaml:"plugin_authdata,omitempty"`
-}
-
-func decodeAuthSwitchRequest(data []byte) (*AuthSwitchRequestPacket, error) {
+func decodeAuthSwitchRequest(data []byte) (*models.AuthSwitchRequestPacket, error) {
 	if len(data) < 1 || data[0] != 0xFE {
 		return nil, fmt.Errorf("invalid AuthSwitchRequest packet")
 	}
 
-	packet := &AuthSwitchRequestPacket{
+	packet := &models.AuthSwitchRequestPacket{
 		StatusTag: data[0],
 	}
 

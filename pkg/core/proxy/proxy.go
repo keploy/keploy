@@ -1,3 +1,5 @@
+//go:build linux
+
 package proxy
 
 import (
@@ -54,7 +56,7 @@ type Proxy struct {
 	TCPDNSServer *dns.Server
 }
 
-func New(logger *zap.Logger, info core.DestInfo, opts config.Config) *Proxy {
+func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
 	return &Proxy{
 		logger:       logger,
 		Port:         opts.ProxyPort, // default: 16789
@@ -91,8 +93,8 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 	// set up the CA for tls connections
 	err = SetupCA(ctx, p.logger)
 	if err != nil {
-		utils.LogError(p.logger, err, "failed to setup CA")
-		return err
+		// log the error and continue
+		p.logger.Warn("failed to setup CA", zap.Error(err))
 	}
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
@@ -343,6 +345,23 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}()
 
+	//check for global passthrough in test mode
+	if !rule.OutgoingOptions.Mocking && rule.Mode == models.MODE_TEST {
+
+		dstConn, err = net.Dial("tcp", dstAddr)
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
+			return err
+		}
+
+		err = p.globalPassThrough(parserCtx, srcConn, dstConn)
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to handle the global pass through")
+			return err
+		}
+		return nil
+	}
+
 	//checking for the destination port of "mysql"
 	if destInfo.Port == 3306 {
 		var dstConn net.Conn
@@ -419,8 +438,18 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		logger: p.logger,
 	}
 
-	logger := p.logger.With(zap.Any("Client IP Address", srcConn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientConnID), zap.Any("Destination IP Address", dstAddr), zap.Any("Destination ConnectionID", destConnID))
+	clientID, ok := parserCtx.Value(models.ClientConnectionIDKey).(string)
+	if !ok {
+		utils.LogError(p.logger, err, "failed to fetch the client connection id")
+		return err
+	}
+	destID, ok := parserCtx.Value(models.DestConnectionIDKey).(string)
+	if !ok {
+		utils.LogError(p.logger, err, "failed to fetch the destination connection id")
+		return err
+	}
 
+	logger := p.logger.With(zap.Any("Client IP Address", srcConn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientID), zap.Any("Destination IP Address", dstAddr), zap.Any("Destination ConnectionID", destID))
 	dstCfg := &integrations.ConditionalDstCfg{
 		Port: uint(destInfo.Port),
 	}
@@ -435,10 +464,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
 		if rule.Mode != models.MODE_TEST {
-			dialer := &net.Dialer{
-				Timeout: 4 * time.Second,
-			}
-			dstConn, err = tls.DialWithDialer(dialer, "tcp", addr, cfg)
+			dstConn, err = tls.Dial("tcp", addr, cfg)
 			if err != nil {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
 				return err
@@ -564,6 +590,10 @@ func (p *Proxy) Mock(_ context.Context, id uint64, opts models.OutgoingOptions) 
 		OutgoingOptions: opts,
 	})
 	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
+
+	if !opts.Mocking {
+		p.logger.Info("🔀 Mocking is disabled, the response will be fetched from the actual service")
+	}
 
 	if string(p.nsswitchData) == "" {
 		// setup the nsswitch config to redirect the DNS queries to the proxy

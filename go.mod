@@ -29,6 +29,7 @@ require (
 )
 
 require (
+	github.com/containerd/log v0.1.0 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.2 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
@@ -55,6 +56,7 @@ require (
 	github.com/sagikazarmark/locafero v0.4.0 // indirect
 	github.com/sagikazarmark/slog-shim v0.1.0 // indirect
 	github.com/sergi/go-diff v1.3.1 // indirect
+	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/sosodev/duration v1.2.0 // indirect
 	github.com/sourcegraph/conc v0.3.0 // indirect
 	github.com/spf13/afero v1.11.0 // indirect
@@ -127,12 +129,12 @@ require (
 	github.com/yudai/gojsondiff v1.0.0
 	golang.org/x/sync v0.7.0
 	golang.org/x/term v0.19.0
+	gopkg.in/yaml.v2 v2.4.0
 	sigs.k8s.io/kustomize/kyaml v0.16.0
 )
 
 require (
 	github.com/alecthomas/chroma v0.10.0 // indirect
-	github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de
 	github.com/aymanbagabas/go-osc52 v1.0.3 // indirect
 	github.com/aymerick/douceur v0.2.0 // indirect
 	github.com/dlclark/regexp2 v1.4.0 // indirect
@@ -140,6 +142,7 @@ require (
 	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
 	github.com/microcosm-cc/bluemonday v1.0.21 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
+	github.com/moby/moby v26.0.2+incompatible
 	github.com/muesli/reflow v0.3.0 // indirect
 	github.com/muesli/termenv v0.13.0 // indirect
 	github.com/yuin/goldmark v1.5.2 // indirect

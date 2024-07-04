@@ -1,6 +1,7 @@
 #!/bin/bash
 
 installKeploy (){
+    version="latest"
     IS_CI=false
     for arg in "$@"
     do
@@ -9,47 +10,57 @@ installKeploy (){
                 IS_CI=true
                 shift
             ;;
+            -v)
+                if [[ "$2" =~ ^v[0-9]+.* ]]; then
+                    version="$2"
+                    shift 2 
+                else
+                    echo "Invalid version format. Please use '-v v<semver>'."
+                    return 1 
+                fi
+            ;;
             *)
             ;;
         esac
     done
 
-    install_keploy_arm() {
-        curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz" | tar xz -C /tmp
+    if [ "$version" != "latest" ]; then
+        echo "Installing Keploy version: $version......"
+    fi
 
-        sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
-
-        set_alias 'sudo -E env PATH="$PATH" keploybin'
-
-        check_docker_status_for_linux
-        dockerStatus=$?
-        if [ "$dockerStatus" -eq 0 ]; then
-            return
-        fi
-        add_network
-    }
-
-    check_sudo(){
-        if groups | grep -q '\bdocker\b'; then
-            return 1
+    install_keploy_darwin_all() {
+        if [ "$version" != "latest" ]; then
+            download_url="https://github.com/keploy/keploy/releases/download/$version/keploy_darwin_all.tar.gz"
         else
-            return 0
+            download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz"
         fi
+
+        curl --silent --location "$download_url" | tar xz -C /tmp
+        sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploy
+        delete_keploy_alias
     }
 
-    install_keploy_amd() {
-        curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
-
-        sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
-
-        set_alias 'sudo -E env PATH="$PATH" keploybin'
-
-        check_docker_status_for_linux
-        dockerStatus=$?
-        if [ "$dockerStatus" -eq 0 ]; then
-            return
+    install_keploy_arm() {
+        if [ "$version" != "latest" ]; then
+            download_url="https://github.com/keploy/keploy/releases/download/$version/keploy_linux_arm64.tar.gz"
+        else
+            download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
         fi
-        add_network
+        curl --silent --location "$download_url" | tar xz -C /tmp
+        sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploy
+        set_alias 'sudo -E env PATH="$PATH" keploy'
+    }
+
+
+    install_keploy_amd() {        
+        if [ "$version" != "latest" ]; then
+            download_url="https://github.com/keploy/keploy/releases/download/$version/keploy_linux_amd64.tar.gz"
+        else
+            download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
+        fi
+        curl --silent --location "$download_url" | tar xz -C /tmp
+        sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
+        set_alias 'sudo -E env PATH="$PATH" keploybin'
     }
 
     append_to_rc() {
@@ -64,20 +75,7 @@ installKeploy (){
 
     # Get the alias to set and set it
     set_alias() {
-        # Check if the command is for docker or not
-        if [[ "$1" == *"docker"* ]]; then
-            # Check if the user is a member of the docker group
-            check_sudo
-            sudoCheck=$?
-            if [ "$sudoCheck" -eq 0 ] && [ $OS_NAME = "Linux" ]; then
-                # Add sudo to the alias.
-                ALIAS_CMD="alias keploy='sudo $1'"
-            else
-                ALIAS_CMD="alias keploy='$1'"
-            fi
-        else
-            ALIAS_CMD="alias keploy='$1'"
-        fi
+        ALIAS_CMD="alias keploy='$1'"
         current_shell="$(basename "$SHELL")"
         if [[ "$current_shell" = "zsh" || "$current_shell" = "-zsh" ]]; then
             if [ -f ~/.zshrc ]; then
@@ -110,75 +108,40 @@ installKeploy (){
         fi
     }
 
-    check_docker_status_for_linux() {
-        check_sudo
-        sudoCheck=$?
-        network_alias=""
-        if [ "$sudoCheck" -eq 0 ]; then
-            # Add sudo to docker
-            network_alias="sudo"
-        fi
-        if ! $network_alias which docker &> /dev/null; then
-            echo -n "Docker not found on device, please install docker and reinstall keploy if you have applications running on docker"
-            return 0
-        fi
-        if ! $network_alias docker info &> /dev/null; then
-            echo "Please start Docker and reinstall keploy if you have applications running on docker"
-            return 0
-        fi
-        return 1
-    }
-
-     check_docker_status_for_Darwin() {
-        check_sudo
-        sudoCheck=$?
-        network_alias=""
-        if [ "$sudoCheck" -eq 0 ]; then
-            # Add sudo to docker
-            network_alias="sudo"
-        fi
-        if ! $network_alias which docker &> /dev/null; then
-            echo -n "Docker not found on device, please install docker to use Keploy"
-            return 0
-        fi
-        # Check if docker is running
-        if ! $network_alias docker info &> /dev/null; then
-            echo "Keploy only supports intercepting and replaying docker containers on macOS, and requires Docker to be installed and running. Please start Docker and try again."
-            return 0
-        fi
-        return 1
-    }
-
-    add_network() {
-        if ! $network_alias docker network ls | grep -q 'keploy-network'; then
-            $network_alias docker network create keploy-network
-        fi
-    }
-
-    install_docker() {
-        if [ "$OS_NAME" = "Darwin" ]; then
-            check_docker_status_for_Darwin
-            dockerStatus=$?
-            if [ "$dockerStatus" -eq 0 ]; then
-                return
-            fi
-            add_network
-            if ! docker volume inspect debugfs &>/dev/null; then
-                docker volume create --driver local --opt type=debugfs --opt device=debugfs debugfs
-            fi
-            set_alias 'docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v '"$HOME"'/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy'
+    delete_keploy_alias() {
+        current_shell="$(basename "$SHELL")"
+        shell_rc_file=""
+        # Determine the shell configuration file based on the current shell
+        if [[ "$current_shell" = "zsh" || "$current_shell" = "-zsh" ]]; then
+            shell_rc_file="$HOME/.zshrc"
+        elif [[ "$current_shell" = "bash" || "$current_shell" = "-bash" ]]; then
+            shell_rc_file="$HOME/.bashrc"
         else
-            set_alias 'docker run --pull always --name keploy-v2 -p 16789:16789 --privileged --pid=host -it -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v '"$HOME"'/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy'
+            echo "Unsupported shell: $current_shell"
+            return
         fi
-}
-
+        # Delete alias from the shell configuration file if it exists
+        if [ -f "$shell_rc_file" ]; then
+            if grep -q "alias keploy=" "$shell_rc_file"; then
+                if [[ "$(uname)" = "Darwin" ]]; then
+                    sed -i '' '/alias keploy/d' "$shell_rc_file"
+                else
+                    sed -i '/alias keploy/d' "$shell_rc_file"
+                fi
+            fi
+        fi
+        # Unset the alias in the current shell session if it exists
+        if alias keploy &>/dev/null; then
+            unalias keploy
+        fi
+    }
 
     ARCH=$(uname -m)
 
     if [ "$IS_CI" = false ]; then
         OS_NAME="$(uname -s)"
         if [ "$OS_NAME" = "Darwin" ]; then
-            install_docker
+            install_keploy_darwin_all
             return
         elif [ "$OS_NAME" = "Linux" ]; then
             if ! sudo mountpoint -q /sys/kernel/debug; then
@@ -211,9 +174,10 @@ installKeploy (){
     fi
 }
 
-installKeploy
+installKeploy "$@"
 
 if command -v keploy &> /dev/null; then
     keploy example
-    rm keploy.sh
+    rm -rf keploy.sh
+    rm -rf install.sh
 fi

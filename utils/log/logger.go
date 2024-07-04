@@ -13,22 +13,26 @@ import (
 var Emoji = "\U0001F430" + " Keploy:"
 
 // TODO find better way than global variable
-var logCfg zap.Config
+
+var LogCfg zap.Config
 
 func New() (*zap.Logger, error) {
 	_ = zap.RegisterEncoder("colorConsole", func(config zapcore.EncoderConfig) (zapcore.Encoder, error) {
-		return NewColor(config), nil
+		return NewColor(config, true), nil
+	})
+	_ = zap.RegisterEncoder("nonColorConsole", func(config zapcore.EncoderConfig) (zapcore.Encoder, error) {
+		return NewColor(config, false), nil
 	})
 
-	logCfg = zap.NewDevelopmentConfig()
+	LogCfg = zap.NewDevelopmentConfig()
 
-	logCfg.Encoding = "colorConsole"
+	LogCfg.Encoding = "colorConsole"
 
 	// Customize the encoder config to put the emoji at the beginning.
-	logCfg.EncoderConfig.EncodeTime = customTimeEncoder
-	logCfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	LogCfg.EncoderConfig.EncodeTime = customTimeEncoder
+	LogCfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 
-	logCfg.OutputPaths = []string{
+	LogCfg.OutputPaths = []string{
 		"stdout",
 		"./keploy-logs.txt",
 	}
@@ -57,11 +61,11 @@ func New() (*zap.Logger, error) {
 		}
 	}
 
-	logCfg.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
-	logCfg.DisableStacktrace = true
-	logCfg.EncoderConfig.EncodeCaller = nil
+	LogCfg.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
+	LogCfg.DisableStacktrace = true
+	LogCfg.EncoderConfig.EncodeCaller = nil
 
-	logger, err := logCfg.Build()
+	logger, err := LogCfg.Build()
 	if err != nil {
 		return nil, fmt.Errorf("failed to build config for logger: %v", err)
 	}
@@ -69,13 +73,13 @@ func New() (*zap.Logger, error) {
 }
 
 func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
-	logCfg.Level = zap.NewAtomicLevelAt(level)
+	LogCfg.Level = zap.NewAtomicLevelAt(level)
 	if level == zap.DebugLevel {
-		logCfg.DisableStacktrace = false
-		logCfg.EncoderConfig.EncodeCaller = zapcore.ShortCallerEncoder
+		LogCfg.DisableStacktrace = false
+		LogCfg.EncoderConfig.EncodeCaller = zapcore.ShortCallerEncoder
 	}
 
-	logger, err := logCfg.Build()
+	logger, err := LogCfg.Build()
 	if err != nil {
 		return nil, fmt.Errorf("failed to build config for logger: %v", err)
 	}
@@ -84,7 +88,7 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 
 func AddMode(mode string) (*zap.Logger, error) {
 	// Get the current logger configuration
-	cfg := logCfg
+	cfg := LogCfg
 	// Update the time encoder with the new values
 	cfg.EncoderConfig.EncodeTime = func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
 		emoji := "\U0001F430"
@@ -97,4 +101,13 @@ func AddMode(mode string) (*zap.Logger, error) {
 		return nil, fmt.Errorf("failed to add mode to logger: %v", err)
 	}
 	return newLogger, nil
+}
+
+func ChangeColorEncoding() (*zap.Logger, error) {
+	LogCfg.Encoding = "nonColorConsole"
+	logger, err := LogCfg.Build()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build config for logger: %v", err)
+	}
+	return logger, nil
 }

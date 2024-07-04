@@ -1,3 +1,5 @@
+//go:build linux
+
 package http
 
 import (
@@ -77,8 +79,7 @@ func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, m
 }
 
 func (h *HTTP) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
-	logger := h.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", util.GetNextID()), zap.Any("Destination ConnectionID", util.GetNextID()))
-
+	logger := h.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)))
 	h.logger.Debug("Mocking the outgoing http call in test mode")
 
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
@@ -159,7 +160,7 @@ func ParseFinalHTTP(_ context.Context, logger *zap.Logger, mock *finalHTTP, dest
 	}
 
 	// Check if the request is a passThrough request
-	if isPassThrough(logger, req, destPort, opts) {
+	if IsPassThrough(logger, req, destPort, opts) {
 		logger.Debug("The request is a passThrough request", zap.Any("metadata", getReqMeta(req)))
 		return nil
 	}

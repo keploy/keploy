@@ -1,6 +1,8 @@
 package docker
 
 import (
+	"context"
+
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 )
@@ -25,6 +27,9 @@ type Client interface {
 	SetKeployNetwork(c *Compose) (*NetworkInfo, error)
 	ReadComposeFile(filePath string) (*Compose, error)
 	WriteComposeFile(compose *Compose, path string) error
+
+	IsContainerRunning(containerName string) (bool, error)
+	CreateVolume(ctx context.Context, volumeName string, recreate bool) error
 }
 
 type NetworkInfo struct {

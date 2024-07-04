@@ -20,22 +20,31 @@ type Instrumentation interface {
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
 
-	GetAppIP(ctx context.Context, id uint64) (string, error)
+	GetContainerIP(ctx context.Context, id uint64) (string, error)
 }
 
 type Service interface {
 	Start(ctx context.Context) error
-	BootReplay(ctx context.Context) (string, uint64, context.CancelFunc, error)
+	Instrument(ctx context.Context) (*InstrumentState, error)
+	GetNextTestRunID(ctx context.Context) (string, error)
 	GetAllTestSetIDs(ctx context.Context) ([]string, error)
 	RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error)
 	GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error)
+	GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error)
 	RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError
-	ProvideMocks(ctx context.Context) error
+	Normalize(ctx context.Context) error
+	DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error)
+	NormalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIDs []string, testResult []models.TestResult) error
+	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
+	DeleteTestSet(ctx context.Context, testSetID string) error
 }
 
 type TestDB interface {
 	GetAllTestSetIDs(ctx context.Context) ([]string, error)
 	GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error)
+	UpdateTestCase(ctx context.Context, testCase *models.TestCase, testSetID string) error
+	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
+	DeleteTestSet(ctx context.Context, testSetID string) error
 }
 
 type MockDB interface {
@@ -50,6 +59,12 @@ type ReportDB interface {
 	GetReport(ctx context.Context, testRunID string, testSetID string) (*models.TestReport, error)
 	InsertTestCaseResult(ctx context.Context, testRunID string, testSetID string, result *models.TestResult) error
 	InsertReport(ctx context.Context, testRunID string, testSetID string, testReport *models.TestReport) error
+	UpdateReport(ctx context.Context, testRunID string, testCoverage any) error
+}
+
+type Config interface {
+	Read(ctx context.Context, testSetID string) (*models.TestSet, error)
+	Write(ctx context.Context, testSetID string, testSet *models.TestSet) error
 }
 
 type Telemetry interface {
@@ -58,8 +73,27 @@ type Telemetry interface {
 	MockTestRun(utilizedMocks int)
 }
 
-// RequestEmulator is used to simulate the API requests to the user API. The requests are read from
-// the recorded test case of the user app.
-type RequestEmulator interface {
+// RequestMockHandler defines an interface for implementing hooks that extend and customize
+// the behavior of request simulations and test workflows. This interface allows for
+// detailed control over various stages of the testing process, including request simulation,
+// test status processing, and post-test actions.
+type RequestMockHandler interface {
 	SimulateRequest(ctx context.Context, appID uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error)
+	ProcessTestRunStatus(ctx context.Context, status bool, testSetID string)
+	FetchMockName() string
+	ProcessMockFile(ctx context.Context, testSetID string)
+	AfterTestHook(ctx context.Context, testRunID, testSetID string, totalTestSets int) (*models.TestReport, error)
 }
+
+type InstrumentState struct {
+	AppID      uint64
+	HookCancel context.CancelFunc
+}
+
+type MockAction string
+
+// MockAction constants define the possible actions that can be taken on a mocking.
+const (
+	Start  MockAction = "start"
+	Update MockAction = "update"
+)

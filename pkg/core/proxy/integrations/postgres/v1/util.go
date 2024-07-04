@@ -1,3 +1,5 @@
+//go:build linux
+
 package v1
 
 import (
@@ -388,7 +390,6 @@ func decodePgRequest(buffer []byte, logger *zap.Logger) *models.Backend {
 	if !isStartupPacket(buffer) && len(buffer) > 5 {
 		bufferCopy := buffer
 		for i := 0; i < len(bufferCopy)-5; {
-			logger.Debug("Inside the if condition")
 			pg.BackendWrapper.MsgType = buffer[i]
 			pg.BackendWrapper.BodyLen = int(binary.BigEndian.Uint32(buffer[i+1:])) - 4
 			if len(buffer) < (i + pg.BackendWrapper.BodyLen + 5) {
@@ -461,7 +462,6 @@ func decodePgRequest(buffer []byte, logger *zap.Logger) *models.Backend {
 }
 
 func mergePgRequests(requestBuffers [][]byte, logger *zap.Logger) [][]byte {
-	logger.Debug("MERGING REQUESTS")
 	// Check for PBDE first
 	var mergeBuff []byte
 	for _, v := range requestBuffers {
@@ -482,7 +482,6 @@ func mergePgRequests(requestBuffers [][]byte, logger *zap.Logger) [][]byte {
 }
 
 func mergeMocks(pgmocks []models.Backend, logger *zap.Logger) []models.Backend {
-	logger.Debug("MERGING Mocks")
 	if len(pgmocks) == 0 {
 		return pgmocks
 	}

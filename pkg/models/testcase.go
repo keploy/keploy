@@ -18,11 +18,14 @@ func GetVersion() (V1 Version) {
 	return currentVersion
 }
 
+//TODO: Why are we declaring mock types in testcase.go file?
+
 // mocks types
 const (
 	HTTP           Kind     = "Http"
 	GENERIC        Kind     = "Generic"
-	SQL            Kind     = "SQL"
+	REDIS          Kind     = "Redis"
+	SQL            Kind     = "MySQL"
 	Postgres       Kind     = "Postgres"
 	GRPC_EXPORT    Kind     = "gRPC"
 	Mongo          Kind     = "Mongo"
@@ -34,24 +37,39 @@ const (
 )
 
 type TestCase struct {
-	Version  Version             `json:"version" bson:"version"`
-	Kind     Kind                `json:"kind" bson:"kind"`
-	Name     string              `json:"name" bson:"name"`
-	Created  int64               `json:"created" bson:"created"`
-	Updated  int64               `json:"updated" bson:"updated"`
-	Captured int64               `json:"captured" bson:"captured"`
-	HTTPReq  HTTPReq             `json:"http_req" bson:"http_req"`
-	HTTPResp HTTPResp            `json:"http_resp" bson:"http_resp"`
-	AllKeys  map[string][]string `json:"all_keys" bson:"all_keys"`
-	GrpcResp GrpcResp            `json:"grpcResp" bson:"grpcResp"`
-	GrpcReq  GrpcReq             `json:"grpcReq" bson:"grpcReq"`
-	Anchors  map[string][]string `json:"anchors" bson:"anchors"`
-	Noise    map[string][]string `json:"noise" bson:"noise"`
-	Mocks    []*Mock             `json:"mocks" bson:"mocks"`
-	Type     string              `json:"type" bson:"type"`
-	Curl     string              `json:"curl" bson:"curl"`
+	Version    Version             `json:"version" bson:"version"`
+	Kind       Kind                `json:"kind" bson:"kind"`
+	Name       string              `json:"name" bson:"name"`
+	Created    int64               `json:"created" bson:"created"`
+	Updated    int64               `json:"updated" bson:"updated"`
+	Captured   int64               `json:"captured" bson:"captured"`
+	HTTPReq    HTTPReq             `json:"http_req" bson:"http_req"`
+	HTTPResp   HTTPResp            `json:"http_resp" bson:"http_resp"`
+	AllKeys    map[string][]string `json:"all_keys" bson:"all_keys"`
+	GrpcResp   GrpcResp            `json:"grpcResp" bson:"grpcResp"`
+	GrpcReq    GrpcReq             `json:"grpcReq" bson:"grpcReq"`
+	Anchors    map[string][]string `json:"anchors" bson:"anchors"`
+	Noise      map[string][]string `json:"noise" bson:"noise"`
+	AfterNoise map[string][]string `json:"afterNoise" bson:"afterNoise"`
+	Mocks      []*Mock             `json:"mocks" bson:"mocks"`
+	Type       string              `json:"type" bson:"type"`
+	Curl       string              `json:"curl" bson:"curl"`
 }
 
 func (tc *TestCase) GetKind() string {
 	return string(tc.Kind)
 }
+
+type NoiseParams struct {
+	TestCaseID string              `json:"testCaseID"`
+	EditedBy   string              `json:"editedBy"`
+	Assertion  map[string][]string `json:"assertion"`
+	Ops        string              `json:"ops"`
+	AfterNoise map[string][]string `json:"afterNoise"`
+}
+
+// enum for ops
+const (
+	OpsAdd    = "ADD"
+	OpsRemove = "REMOVE"
+)

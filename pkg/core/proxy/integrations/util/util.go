@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package util provides utility functions for the integration package.
 package util
 
@@ -6,9 +8,9 @@ import (
 	"unicode"
 )
 
-func IsASCIIPrintable(s string) bool {
+func IsASCII(s string) bool {
 	for _, r := range s {
-		if r > unicode.MaxASCII || !unicode.IsPrint(r) {
+		if r > unicode.MaxASCII {
 			return false
 		}
 	}

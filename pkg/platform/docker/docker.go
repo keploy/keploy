@@ -17,6 +17,8 @@ import (
 
 	"github.com/docker/docker/api/types"
 	dockerContainerPkg "github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/volume"
 )
 
 const (
@@ -517,4 +519,66 @@ func (idc *Impl) SetKeployNetwork(c *Compose) (*NetworkInfo, error) {
 		}
 	}
 	return networkInfo, nil
+}
+
+// IsContainerRunning check if the container is already running or not, required for docker start command.
+func (idc *Impl) IsContainerRunning(containerName string) (bool, error) {
+
+	ctx, cancel := context.WithTimeout(context.Background(), idc.timeoutForDockerQuery)
+	defer cancel()
+
+	containerJSON, err := idc.ContainerInspect(ctx, containerName)
+	if err != nil {
+		return false, err
+	}
+
+	if containerJSON.State.Running {
+		return true, nil
+	}
+	return false, nil
+}
+
+func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate bool) error {
+	// Set a timeout for the context
+	ctx, cancel := context.WithTimeout(ctx, idc.timeoutForDockerQuery)
+	defer cancel()
+
+	// Check if the 'debugfs' volume exists
+	filter := filters.NewArgs()
+	filter.Add("name", volumeName)
+	volumeList, err := idc.VolumeList(ctx, volume.ListOptions{Filters: filter})
+	if err != nil {
+		idc.logger.Error("failed to list docker volumes", zap.Error(err))
+		return err
+	}
+
+	if len(volumeList.Volumes) > 0 {
+		if !recreate {
+			idc.logger.Info("volume already exists", zap.Any("volume", volumeName))
+			return err
+		}
+
+		err := idc.VolumeRemove(ctx, volumeName, false)
+		if err != nil {
+			idc.logger.Error("failed to delete volume "+volumeName, zap.Error(err))
+			return err
+		}
+	}
+
+	// Create the 'debugfs' volume if it doesn't exist
+	_, err = idc.VolumeCreate(ctx, volume.CreateOptions{
+		Name:   volumeName,
+		Driver: "local",
+		DriverOpts: map[string]string{
+			"type":   volumeName, // Use "none" for local driver
+			"device": volumeName,
+		},
+	})
+	if err != nil {
+		idc.logger.Error("failed to create volume", zap.Any("volume", volumeName), zap.Error(err))
+		return err
+	}
+
+	idc.logger.Debug("volume created", zap.Any("volume", volumeName))
+	return nil
 }

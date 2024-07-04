@@ -1,9 +1,12 @@
+//go:build linux
+
 // Package util provides utility functions for the proxy package.
 package util
 
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -15,6 +18,7 @@ import (
 
 	"github.com/getsentry/sentry-go"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
+	"go.keploy.io/server/v2/pkg/models"
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v2/utils"
@@ -36,9 +40,17 @@ func GetNextID() int64 {
 	return atomic.AddInt64(&idCounter, 1)
 }
 
+type Peer string
+
+// Peer constants
+const (
+	Client      Peer = "client"
+	Destination Peer = "destination"
+)
+
 // ReadBuffConn is used to read the buffer from the connection
 func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, bufferChannel chan []byte, errChannel chan error) {
-	//TODO: where to close the bufferChannel and errChannel
+	//TODO: where to close the errChannel
 	for {
 		select {
 		case <-ctx.Done():
@@ -231,14 +243,56 @@ func ReadRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader
 	return buffer, nil
 }
 
+// ReadFromPeer function is used to read the buffer from the peer connection. The peer can be either the client or the destination.
+func ReadFromPeer(ctx context.Context, logger *zap.Logger, conn net.Conn, buffChan chan []byte, errChan chan error, peer Peer) error {
+	//get the error group from the context
+	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	if !ok {
+		return errors.New("failed to get the error group from the context while reading from peer")
+	}
+
+	var client, dest net.Conn
+
+	if peer == Client {
+		client = conn
+	} else {
+		dest = conn
+	}
+
+	g.Go(func() error {
+		defer Recover(logger, client, dest)
+		defer close(buffChan)
+		ReadBuffConn(ctx, logger, conn, buffChan, errChan)
+		return nil
+	})
+
+	return nil
+}
+
 // PassThrough function is used to pass the network traffic to the destination connection.
 // It also closes the destination connection if the function returns an error.
 func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, requestBuffer [][]byte) ([]byte, error) {
+	logger.Debug("passing through the network traffic to the destination server", zap.Any("Destination Addr", dstCfg.Addr))
 	// making destConn
-	destConn, err := net.Dial("tcp", dstCfg.Addr)
-	if err != nil {
-		utils.LogError(logger, err, "failed to dial the destination server")
-		return nil, err
+	var destConn net.Conn
+	var err error
+	if dstCfg.TLSCfg != nil {
+		logger.Debug("trying to establish a TLS connection with the destination server", zap.Any("Destination Addr", dstCfg.Addr))
+
+		destConn, err = tls.Dial("tcp", dstCfg.Addr, dstCfg.TLSCfg)
+		if err != nil {
+			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("server address", dstCfg.Addr))
+			return nil, err
+		}
+		logger.Debug("TLS connection established with the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
+	} else {
+		logger.Debug("trying to establish a connection with the destination server", zap.Any("Destination Addr", dstCfg.Addr))
+		destConn, err = net.Dial("tcp", dstCfg.Addr)
+		if err != nil {
+			utils.LogError(logger, err, "failed to dial the destination server")
+			return nil, err
+		}
+		logger.Debug("connection established with the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
 	}
 
 	logger.Debug("trying to forward requests to target", zap.Any("Destination Addr", destConn.RemoteAddr().String()))

@@ -3,46 +3,84 @@ package utils
 import (
 	"bufio"
 	"context"
+	"debug/elf"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
-	"os/exec"
+	"os/user"
 	"path/filepath"
-	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
+
 	"github.com/getsentry/sentry-go"
 	netLib "github.com/shirou/gopsutil/v3/net"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
+	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
-	"golang.org/x/term"
 )
 
 var WarningSign = "\U000026A0"
 
+func ReplaceHostToIP(currentURL string, ipAddress string) (string, error) {
+	// Parse the current URL
+	parsedURL, err := url.Parse(currentURL)
+
+	if err != nil {
+		// Return the original URL if parsing fails
+		return currentURL, err
+	}
+
+	if ipAddress == "" {
+		return currentURL, fmt.Errorf("failed to replace url in case of docker env")
+	}
+
+	// Replace hostname with the IP address
+	parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Hostname(), ipAddress, 1)
+	// Return the modified URL
+	return parsedURL.String(), nil
+}
+
+func kebabToCamel(s string) string {
+	parts := strings.Split(s, "-")
+	for i := 1; i < len(parts); i++ {
+		parts[i] = cases.Title(language.English).String(parts[i])
+	}
+	return strings.Join(parts, "")
+}
+
 func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix string) error {
 	var bindErr error
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
+		camelCaseName := kebabToCamel(flag.Name)
+		err := viper.BindPFlag(camelCaseName, flag)
+		if err != nil {
+			LogError(logger, err, "failed to bind flag Name to flag")
+			bindErr = err
+		}
 		// Construct the Viper key and the env variable name
 		if viperKeyPrefix == "" {
 			viperKeyPrefix = cmd.Name()
 		}
-		viperKey := viperKeyPrefix + "." + flag.Name
-		envVarName := strings.ToUpper(viperKeyPrefix + "_" + flag.Name)
+		viperKey := viperKeyPrefix + "." + camelCaseName
+		envVarName := strings.ToUpper(viperKeyPrefix + "_" + camelCaseName)
 		envVarName = strings.ReplaceAll(envVarName, ".", "_") // Why do we need this?
 
 		// Bind the flag to Viper with the constructed key
-		err := viper.BindPFlag(viperKey, flag)
+		err = viper.BindPFlag(viperKey, flag)
 		if err != nil {
 			LogError(logger, err, "failed to bind flag to config")
 			bindErr = err
@@ -112,18 +150,21 @@ func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
 		logger.Error(msg, append(fields, zap.Error(err))...)
 	}
 }
-func DeleteLogs(logger *zap.Logger) {
-	//Check if keploy-log.txt exists
-	_, err := os.Stat("keploy-logs.txt")
+
+func DeleteFileIfNotExists(logger *zap.Logger, name string) (err error) {
+	//Check if file exists
+	_, err = os.Stat(name)
 	if os.IsNotExist(err) {
-		return
+		return nil
 	}
 	//If it does, remove it.
-	err = os.Remove("keploy-logs.txt")
+	err = os.Remove(name)
 	if err != nil {
-		LogError(logger, err, "Error removing log file")
-		return
+		LogError(logger, err, "Error removing file")
+		return err
 	}
+
+	return nil
 }
 
 type GitHubRelease struct {
@@ -135,51 +176,7 @@ var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
 
 var Emoji = "\U0001F430" + " Keploy:"
 var ConfigGuide = `
-# Example on using tests
-#tests:
-#  filters:
-#   - path: "/user/app"
-#     urlMethods: ["GET"]
-#     headers: {
-#       "^asdf*": "^test"
-#     }
-#     host: "dc.services.visualstudio.com"
-#Example on using stubs
-#stubs:
-#  filters:
-#   - path: "/user/app"
-#     port: 8080
-#   - port: 8081
-#   - host: "dc.services.visualstudio.com"
-#   - port: 8081
-#     host: "dc.services.visualstudio.com"
-#     path: "/user/app"
-	#
-#Example on using globalNoise
-#globalNoise:
-#   global:
-#     body: {
-#        # to ignore some values for a field,
-#        # pass regex patterns to the corresponding array value
-#        "url": ["https?://\S+", "http://\S+"],
-#     }
-#     header: {
-#        # to ignore the entire field, pass an empty array
-#        "Date": [],
-#      }
-#    # to ignore fields or the corresponding values for a specific test-set,
-#    # pass the test-set-name as a key to the "test-sets" object and
-#    # populate the corresponding "body" and "header" objects
-#    test-sets:
-#      test-set-1:
-#        body: {
-#          # ignore all the values for the "url" field
-#          "url": []
-#        }
-#        header: {
-#          # we can also pass the exact value to ignore for a field
-#          "User-Agent": ["PostmanRuntime/7.34.0"]
-#        }
+# Visit [https://keploy.io/docs/running-keploy/configuration-file/] to learn about using keploy through configration file.
 `
 
 // AskForConfirmation asks the user for confirmation. A user must type in "yes" or "no" and
@@ -352,11 +349,15 @@ func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRele
 
 // FindDockerCmd checks if the cli is related to docker or not, it also returns if it is a docker compose file
 func FindDockerCmd(cmd string) CmdType {
+	if cmd == "" {
+		return Empty
+	}
 	// Convert command to lowercase for case-insensitive comparison
 	cmdLower := strings.TrimSpace(strings.ToLower(cmd))
 
 	// Define patterns for Docker and Docker Compose
-	dockerPatterns := []string{"docker", "sudo docker"}
+	dockerRunPatterns := []string{"docker run", "sudo docker run", "docker container run", "sudo docker container run"}
+	dockerStartPatterns := []string{"docker start", "sudo docker start", "docker container start", "sudo docker container start"}
 	dockerComposePatterns := []string{"docker-compose", "sudo docker-compose", "docker compose", "sudo docker compose"}
 
 	// Check for Docker Compose command patterns and file extensions
@@ -365,10 +366,16 @@ func FindDockerCmd(cmd string) CmdType {
 			return DockerCompose
 		}
 	}
-	// Check for Docker command patterns
-	for _, pattern := range dockerPatterns {
+	// Check for Docker start command patterns
+	for _, pattern := range dockerStartPatterns {
 		if strings.HasPrefix(cmdLower, pattern) {
-			return Docker
+			return DockerStart
+		}
+	}
+	// Check for Docker run command patterns
+	for _, pattern := range dockerRunPatterns {
+		if strings.HasPrefix(cmdLower, pattern) {
+			return DockerRun
 		}
 	}
 	return Native
@@ -378,96 +385,12 @@ type CmdType string
 
 // CmdType constants
 const (
-	Docker        CmdType = "docker"
+	DockerRun     CmdType = "docker-run"
+	DockerStart   CmdType = "docker-start"
 	DockerCompose CmdType = "docker-compose"
 	Native        CmdType = "native"
+	Empty         CmdType = ""
 )
-
-func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
-	// Get the name of the operating system.
-	osName := runtime.GOOS
-	//TODO: configure the hardcoded port mapping
-	img := "ghcr.io/keploy/keploy:" + "v" + Version
-	logger.Info("Starting keploy in docker with image", zap.String("image:", img))
-
-	var ttyFlag string
-
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		ttyFlag = " -it "
-	} else {
-		ttyFlag = ""
-	}
-
-	switch osName {
-	case "linux":
-		alias := "sudo docker container run --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
-		return alias, nil
-	case "darwin":
-		cmd := exec.CommandContext(ctx, "docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
-		out, err := cmd.Output()
-		if err != nil {
-			LogError(logger, err, "failed to get the current docker context")
-			return "", errors.New("failed to get alias")
-		}
-		dockerContext := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
-		if len(dockerContext) == 0 {
-			LogError(logger, nil, "failed to get the current docker context")
-			return "", errors.New("failed to get alias")
-		}
-		dockerContext = strings.Split(dockerContext, "\n")[0]
-		if dockerContext == "colima" {
-			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
-			alias := "docker container run --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
-			return alias, nil
-		}
-		// if default docker context is used
-		logger.Info("Starting keploy in docker with default context, as that is the current context.")
-		alias := "docker container run --name keploy-v2 -e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
-		return alias, nil
-	case "Windows":
-		LogError(logger, nil, "Windows is not supported. Use WSL2 instead.")
-		return "", errors.New("failed to get alias")
-	}
-	return "", errors.New("failed to get alias")
-}
-
-func RunInDocker(ctx context.Context, logger *zap.Logger) error {
-	//Get the correct keploy alias.
-	keployAlias, err := getAlias(ctx, logger)
-	if err != nil {
-		return err
-	}
-	var quotedArgs []string
-
-	for _, arg := range os.Args[1:] {
-		quotedArgs = append(quotedArgs, strconv.Quote(arg))
-	}
-
-	cmd := exec.CommandContext(
-		ctx,
-		"sh",
-		"-c",
-		keployAlias+" "+strings.Join(quotedArgs, " "),
-	)
-
-	cmd.Cancel = func() error {
-		return InterruptProcessTree(logger, cmd.Process.Pid, syscall.SIGINT)
-	}
-
-	cmd.Stdout = os.Stdout
-	cmd.Stdin = os.Stdin
-	cmd.Stderr = os.Stderr
-	logger.Debug("running the following command in docker", zap.String("command", cmd.String()))
-	err = cmd.Run()
-	if err != nil {
-		if ctx.Err() == context.Canceled {
-			return ctx.Err()
-		}
-		LogError(logger, err, "failed to start keploy in docker")
-		return err
-	}
-	return nil
-}
 
 // Keys returns an array containing the keys of the given map.
 func Keys(m map[string][]string) []string {
@@ -515,8 +438,6 @@ func GetAbsPath(path string) (string, error) {
 
 // makeDirectory creates a directory if not exists with all user access
 func makeDirectory(path string) error {
-	oldUmask := syscall.Umask(0)
-	defer syscall.Umask(oldUmask)
 	err := os.MkdirAll(path, 0777)
 	if err != nil {
 		return err
@@ -567,6 +488,19 @@ func SetCoveragePath(logger *zap.Logger, goCovPath string) (string, error) {
 	return goCovPath, nil
 }
 
+type ErrType string
+
+// ErrType constants to get the type of error, during init or runtime
+const (
+	Init    ErrType = "init"
+	Runtime ErrType = "runtime"
+)
+
+type CmdError struct {
+	Type ErrType
+	Err  error
+}
+
 // InterruptProcessTree interrupts an entire process tree using the given signal
 func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) error {
 	// Find all descendant PIDs of the given PID & then signal them.
@@ -585,10 +519,9 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 	}
 
 	for _, pid := range uniqueProcess {
-		err := syscall.Kill(-pid, sig)
-		// ignore the ESRCH error as it means the process is already dead
-		if errno, ok := err.(syscall.Errno); ok && err != nil && errno != syscall.ESRCH {
-			logger.Error("failed to send signal to process", zap.Int("pid", pid), zap.Error(err))
+		err := SendSignal(logger, -pid, sig)
+		if err != nil {
+			logger.Error("error sending signal to the process group id", zap.Int("pgid", pid), zap.Error(err))
 		}
 	}
 	return nil
@@ -734,4 +667,90 @@ func EnsureRmBeforeName(cmd string) string {
 	}
 
 	return strings.Join(parts, " ")
+}
+
+func isGoBinary(logger *zap.Logger, filePath string) bool {
+	f, err := elf.Open(filePath)
+	if err != nil {
+		logger.Debug(fmt.Sprintf("failed to open file %s", filePath), zap.Error(err))
+		return false
+	}
+	if err := f.Close(); err != nil {
+		LogError(logger, err, "failed to close file", zap.String("file", filePath))
+	}
+
+	// Check for section names typical to Go binaries
+	sections := []string{".go.buildinfo", ".gopclntab"}
+	for _, section := range sections {
+		if sect := f.Section(section); sect != nil {
+			fmt.Println(section)
+			return true
+		}
+	}
+	return false
+}
+
+// DetectLanguage detects the language of the test command and returns the executable
+func DetectLanguage(logger *zap.Logger, cmd string) (config.Language, string) {
+	fields := strings.Fields(cmd)
+	executable := fields[0]
+	if strings.HasPrefix(cmd, "python") {
+		return models.Python, executable
+	}
+
+	if executable == "node" || executable == "npm" || executable == "yarn" {
+		return models.Javascript, executable
+	}
+
+	if executable == "java" {
+		return models.Java, executable
+	}
+
+	if executable == "go" || (len(fields) == 1 && isGoBinary(logger, executable)) {
+		return models.Go, executable
+	}
+	return models.Unknown, executable
+}
+
+// FileExists checks if a file exists and is not a directory at the given path.
+func FileExists(path string) (bool, error) {
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return fileInfo.Mode().IsRegular(), nil
+}
+
+// ExpandPath expands a given path, replacing the tilde with the user's home directory
+func ExpandPath(path string) (string, error) {
+	if strings.HasPrefix(path, "~/") {
+		homeDir, err := getHomeDir()
+		if err != nil {
+			return "", err
+		}
+		return strings.Replace(path, "~", homeDir, 1), nil
+	}
+	return path, nil
+}
+
+// getHomeDir retrieves the appropriate home directory based on the execution context
+func getHomeDir() (string, error) {
+	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
+		if usr, err := user.Lookup(sudoUser); err == nil {
+			return usr.HomeDir, nil
+		}
+	}
+	// Fallback to the current user's home directory
+	if usr, err := user.Current(); err == nil {
+		return usr.HomeDir, nil
+	}
+	// Fallback if neither method works
+	return "", errors.New("failed to retrieve current user info")
+}
+
+func IsDockerCmd(kind CmdType) bool {
+	return (kind == DockerRun || kind == DockerStart || kind == DockerCompose)
 }

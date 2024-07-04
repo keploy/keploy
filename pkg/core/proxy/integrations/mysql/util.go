@@ -1,13 +1,17 @@
+//go:build linux
+
 package mysql
 
 import (
 	"context"
 	"encoding/binary"
-	"go.uber.org/zap"
 	"log"
 	"net"
 
+	"go.uber.org/zap"
+
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
+	"go.keploy.io/server/v2/pkg/models"
 )
 
 // TODO:Remove these global variables, and find a better way to handle this if possible
@@ -18,18 +22,18 @@ var (
 	expectingHandshakeResponseTest = false
 )
 
-func bytesToMySQLPacket(buffer []byte) CustomPacket {
+func bytesToMySQLPacket(buffer []byte) models.Packet {
 	if buffer == nil || len(buffer) < 4 {
 		log.Fatalf("Error: buffer is nil or too short to be a valid MySQL packet")
-		return CustomPacket{}
+		return models.Packet{}
 	}
 	tempBuffer := make([]byte, 4)
 	copy(tempBuffer, buffer[:3])
 	length := binary.LittleEndian.Uint32(tempBuffer)
 	sequenceID := buffer[3]
 	payload := buffer[4:]
-	return CustomPacket{
-		Header: CustomPacketHeader{
+	return models.Packet{
+		Header: models.SQLPacketHeaderInfo{
 			PayloadLength: length,
 			SequenceID:    sequenceID,
 		},

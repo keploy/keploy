@@ -8,13 +8,14 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/araddon/dateparse"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -59,9 +60,23 @@ func ToHTTPHeader(mockHeader map[string]string) http.Header {
 
 // IsTime verifies whether a given string represents a valid date or not.
 func IsTime(stringDate string) bool {
-	s := strings.TrimSpace(stringDate)
-	_, err := dateparse.ParseAny(s)
-	return err == nil
+	date := strings.TrimSpace(stringDate)
+	if secondsFloat, err := strconv.ParseFloat(date, 64); err == nil {
+		seconds := int64(secondsFloat / 1e9)
+		nanoseconds := int64(secondsFloat) % 1e9
+		expectedTime := time.Unix(seconds, nanoseconds)
+		currentTime := time.Now()
+		if currentTime.Sub(expectedTime) < 24*time.Hour && currentTime.Sub(expectedTime) > -24*time.Hour {
+			return true
+		}
+	}
+	for _, dateFormat := range dateFormats {
+		_, err := time.Parse(dateFormat, date)
+		if err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HTTPResp, error) {
@@ -76,7 +91,7 @@ func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logge
 	req.Header = ToHTTPHeader(tc.HTTPReq.Header)
 	req.ProtoMajor = tc.HTTPReq.ProtoMajor
 	req.ProtoMinor = tc.HTTPReq.ProtoMinor
-
+	req.Header.Set("KEPLOY-TEST-ID", tc.Name)
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", req))
 
 	// Creating the client and disabling redirects
@@ -201,7 +216,7 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 	return indices, nil
 }
 
-func NewID(IDs []string, identifier string) string {
+func NextID(IDs []string, identifier string) string {
 	latestIndx := 0
 	for _, ID := range IDs {
 		namePackets := strings.Split(ID, "-")
@@ -216,4 +231,96 @@ func NewID(IDs []string, identifier string) string {
 		}
 	}
 	return fmt.Sprintf("%s%v", identifier, latestIndx)
+}
+
+func LastID(IDs []string, identifier string) string {
+	latestIndx := 0
+	for _, ID := range IDs {
+		namePackets := strings.Split(ID, "-")
+		if len(namePackets) == 3 {
+			Indx, err := strconv.Atoi(namePackets[2])
+			if err != nil {
+				continue
+			}
+			if latestIndx < Indx {
+				latestIndx = Indx
+			}
+		}
+	}
+	return fmt.Sprintf("%s%v", identifier, latestIndx)
+}
+
+var (
+	dateFormats = []string{
+		time.Layout,
+		time.ANSIC,
+		time.UnixDate,
+		time.RubyDate,
+		time.RFC822,
+		time.RFC822Z,
+		time.RFC850,
+		time.RFC1123,
+		time.RFC1123Z,
+		time.RFC3339,
+		time.RFC3339Nano,
+		time.Kitchen,
+		time.Stamp,
+		time.StampMilli,
+		time.StampMicro,
+		time.StampNano,
+		time.DateTime,
+		time.DateOnly,
+		time.TimeOnly,
+	}
+)
+
+func ExtractHostAndPort(curlCmd string) (string, string, error) {
+	// Split the command string to find the URL
+	parts := strings.Split(curlCmd, " ")
+	for _, part := range parts {
+		if strings.HasPrefix(part, "http") {
+			u, err := url.Parse(part)
+			if err != nil {
+				return "", "", err
+			}
+			host := u.Hostname()
+			port := u.Port()
+			if port == "" {
+				if u.Scheme == "https" {
+					port = "443"
+				} else {
+					port = "80"
+				}
+			}
+			return host, port, nil
+		}
+	}
+	return "", "", fmt.Errorf("no URL found in CURL command")
+}
+
+func WaitForPort(ctx context.Context, host string, port string, timeout time.Duration) error {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 800*time.Millisecond)
+			if err == nil {
+				err := conn.Close()
+				if err != nil {
+					return err
+				}
+				return nil
+			}
+		case <-timer.C:
+			msg := "Please add delay if your application takes more time to start"
+			return fmt.Errorf("timeout after %v waiting for port %s:%s, %s", timeout, host, port, msg)
+		}
+	}
 }

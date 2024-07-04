@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package mockdb provides a mock database implementation.
 package mockdb
 
@@ -144,7 +146,6 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 
 	var tcsMocks = make([]*models.Mock, 0)
 	var filteredTcsMocks = make([]*models.Mock, 0)
-
 	mockFileName := "mocks"
 	if ys.MockName != "" {
 		mockFileName = ys.MockName
@@ -182,12 +183,22 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 		}
 
 		for _, mock := range mocks {
-			if mock.Spec.Metadata["type"] != "config" && mock.Kind != "Generic" && mock.Kind != "Postgres" {
+			isFilteredMock := true
+			switch mock.Kind {
+			case "Generic":
+				isFilteredMock = false
+			case "Postgres":
+				isFilteredMock = false
+			case "Http":
+				isFilteredMock = false
+			case "Redis":
+				isFilteredMock = false
+			}
+			if mock.Spec.Metadata["type"] != "config" && isFilteredMock {
 				tcsMocks = append(tcsMocks, mock)
 			}
 		}
 	}
-
 	filteredTcsMocks, _ = ys.filterByTimeStamp(ctx, tcsMocks, afterTime, beforeTime, ys.Logger)
 
 	sort.SliceStable(filteredTcsMocks, func(i, j int) bool {
@@ -238,7 +249,18 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 			return nil, err
 		}
 		for _, mock := range mocks {
-			if mock.Spec.Metadata["type"] == "config" || mock.Kind == "Postgres" || mock.Kind == "Generic" {
+			isUnFilteredMock := false
+			switch mock.Kind {
+			case "Generic":
+				isUnFilteredMock = true
+			case "Postgres":
+				isUnFilteredMock = true
+			case "Http":
+				isUnFilteredMock = true
+			case "Redis":
+				isUnFilteredMock = true
+			}
+			if mock.Spec.Metadata["type"] == "config" || isUnFilteredMock {
 				configMocks = append(configMocks, mock)
 			}
 		}

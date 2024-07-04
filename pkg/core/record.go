@@ -1,3 +1,5 @@
+//go:build linux
+
 package core
 
 import (
@@ -6,8 +8,8 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-func (c *Core) GetIncoming(ctx context.Context, id uint64, _ models.IncomingOptions) (<-chan *models.TestCase, error) {
-	return c.Hooks.Record(ctx, id)
+func (c *Core) GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
+	return c.Hooks.Record(ctx, id, opts)
 }
 
 func (c *Core) GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) (<-chan *models.Mock, error) {

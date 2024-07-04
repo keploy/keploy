@@ -1,58 +1,35 @@
+//go:build linux
+
 package mysql
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"time"
 
+	// "github.com/zmap/zlint/v3/formattedoutput"
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-type ResultSet struct {
-	Columns             []*ColumnDefinition `json:"columns,omitempty" yaml:"columns,omitempty,flow"`
-	Rows                []*Row              `json:"rows,omitempty" yaml:"rows,omitempty,flow"`
-	EOFPresent          bool                `json:"eofPresent,omitempty" yaml:"eofPresent,omitempty,flow"`
-	PaddingPresent      bool                `json:"paddingPresent,omitempty" yaml:"paddingPresent,omitempty,flow"`
-	EOFPresentFinal     bool                `json:"eofPresentFinal,omitempty" yaml:"eofPresentFinal,omitempty,flow"`
-	PaddingPresentFinal bool                `json:"paddingPresentFinal,omitempty" yaml:"paddingPresentFinal,omitempty,flow"`
-	OptionalPadding     bool                `json:"optionalPadding,omitempty" yaml:"optionalPadding,omitempty,flow"`
-	OptionalEOFBytes    string              `json:"optionalEOFBytes,omitempty" yaml:"optionalEOFBytes,omitempty,flow"`
-	EOFAfterColumns     string              `json:"eofAfterColumns,omitempty" yaml:"eofAfterColumns,omitempty,flow"`
-}
-
-type Row struct {
-	Header  RowHeader             `json:"header,omitempty" yaml:"header,omitempty,flow"`
-	Columns []RowColumnDefinition `json:"columns,omitempty" yaml:"row_column_definition,omitempty,flow"`
-}
-
-type RowColumnDefinition struct {
-	Type  models.FieldType `json:"type,omitempty" yaml:"type,omitempty,flow"`
-	Name  string           `json:"name,omitempty" yaml:"name,omitempty,flow"`
-	Value interface{}      `json:"value,omitempty" yaml:"value,omitempty,flow"`
-}
-
-type RowHeader struct {
-	PacketLength int   `json:"packet_length,omitempty" yaml:"packet_length,omitempty,flow"`
-	SequenceID   uint8 `json:"sequence_id,omitempty" yaml:"sequence_id,omitempty,flow"`
-}
-
-func parseResultSet(b []byte) (*ResultSet, error) {
-	columns := make([]*ColumnDefinition, 0)
-	rows := make([]*Row, 0)
+func parseResultSet(b []byte) (*models.MySQLResultSet, error) {
+	columns := make([]*models.ColumnDefinition, 0)
+	rows := make([]*models.Row, 0)
 	var err error
 	var eofPresent, paddingPresent, eofFinal, paddingFinal, optionalPadding bool
 	var optionalEOFBytes []byte
 	var eofAfterColumns []byte
 	// Parse the column count packet
 	columnCount, _, n := readLengthEncodedInteger(b)
+	if n == 0 {
+		return nil, errors.New("invalid column count")
+	}
 	b = b[n:]
 
 	// Parse the columns
 	for i := uint64(0); i < columnCount; i++ {
-		var columnPacket *ColumnDefinition
+		var columnPacket *models.ColumnDefinition
 		columnPacket, b, err = parseColumnDefinitionPacket(b)
 		if err != nil {
 			return nil, err
@@ -75,7 +52,7 @@ func parseResultSet(b []byte) (*ResultSet, error) {
 	// fmt.Println(!bytes.Equal(b[:4], []byte{0xfe, 0x00, 0x00, 0x02, 0x00}))
 	for len(b) > 5 {
 		// fmt.Println(b)
-		var row *Row
+		var row *models.Row
 		row, b, eofFinal, paddingFinal, optionalPadding, optionalEOFBytes, err = parseRow(b, columns)
 		if err != nil {
 			return nil, err
@@ -88,7 +65,7 @@ func parseResultSet(b []byte) (*ResultSet, error) {
 	// Remove EOF packet of the rows
 	// b = b[9:]
 
-	resultSet := &ResultSet{
+	resultSet := &models.MySQLResultSet{
 		Columns:             columns,
 		Rows:                rows,
 		EOFPresent:          eofPresent,
@@ -96,46 +73,76 @@ func parseResultSet(b []byte) (*ResultSet, error) {
 		EOFPresentFinal:     eofFinal,
 		PaddingPresentFinal: paddingFinal,
 		OptionalPadding:     optionalPadding,
-		OptionalEOFBytes:    base64.StdEncoding.EncodeToString(optionalEOFBytes),
-		EOFAfterColumns:     base64.StdEncoding.EncodeToString(eofAfterColumns),
+		OptionalEOFBytes:    optionalEOFBytes,
+		EOFAfterColumns:     eofAfterColumns,
 	}
 
 	return resultSet, err
 }
 
-func parseColumnDefinitionPacket(b []byte) (*ColumnDefinition, []byte, error) {
-	packet := &ColumnDefinition{}
+func parseColumnDefinitionPacket(b []byte) (*models.ColumnDefinition, []byte, error) {
+	packet := &models.ColumnDefinition{}
 	var n int
 	var m int
-
+	if len(b) < 4 {
+		return nil, nil, fmt.Errorf("invalid column definition packet")
+	}
 	// Read packet header
 	packet.PacketHeader.PacketLength = uint8(readUint24(b[:3]))
 	packet.PacketHeader.PacketSequenceID = uint8(b[3])
 	b = b[4:]
 
 	packet.Catalog, n = readLengthEncodedStrings(b)
-	b = b[n:]
+	if len(b) > n {
+		b = b[n:]
+	}
 	packet.Schema, n = readLengthEncodedStrings(b)
-	b = b[n:]
+	if len(b) > n {
+		b = b[n:]
+	}
 	packet.Table, n = readLengthEncodedStrings(b)
-	b = b[n:]
+	if len(b) > n {
+		b = b[n:]
+	}
 	packet.OrgTable, n = readLengthEncodedStrings(b)
-	b = b[n:]
+	if len(b) > n {
+		b = b[n:]
+	}
 	packet.Name, n = readLengthEncodedStrings(b)
-	b = b[n:]
+	if len(b) > n {
+		b = b[n:]
+	}
 	packet.OrgName, n = readLengthEncodedStrings(b)
-	b = b[n:]
-	b = b[1:] // Skip the next byte (length of the fixed-length fields)
+	if len(b) > n {
+		b = b[n:]
+	}
+
+	if len(b) > 1 {
+		b = b[1:] // Skip the next byte (length of the fixed-length fields)
+	}
 	packet.CharacterSet = binary.LittleEndian.Uint16(b)
-	b = b[2:]
+	if len(b) > 2 {
+		b = b[2:]
+	}
 	packet.ColumnLength = binary.LittleEndian.Uint32(b)
-	b = b[4:]
+	if len(b) > 4 {
+		b = b[4:]
+	}
 	packet.ColumnType = b[0]
-	b = b[1:]
+	if len(b) > 1 {
+		b = b[1:]
+	}
 	packet.Flags = binary.LittleEndian.Uint16(b)
-	b = b[2:]
-	packet.Decimals = b[0]
-	b = b[2:] // Skip filler
+	if len(b) > 2 {
+		b = b[2:]
+	}
+	if len(b) > 0 {
+		packet.Decimals = b[0]
+	}
+	if len(b) > 2 {
+		b = b[2:] // Skip filler
+	}
+
 	if len(b) > 0 {
 		packet.DefaultValue, m = readLengthEncodedStrings(b)
 		b = b[m:]
@@ -146,11 +153,11 @@ func parseColumnDefinitionPacket(b []byte) (*ColumnDefinition, []byte, error) {
 
 var optionalPadding bool
 
-func parseRow(b []byte, columnDefinitions []*ColumnDefinition) (*Row, []byte, bool, bool, bool, []byte, error) {
+func parseRow(b []byte, columnDefinitions []*models.ColumnDefinition) (*models.Row, []byte, bool, bool, bool, []byte, error) {
 	var eofFinal, paddingFinal bool
 	var optionalEOFBytes []byte
 
-	row := &Row{}
+	row := &models.Row{}
 	if b[4] == 0xfe {
 		eofFinal = true
 		optionalEOFBytes = b[:9]
@@ -164,11 +171,11 @@ func parseRow(b []byte, columnDefinitions []*ColumnDefinition) (*Row, []byte, bo
 
 		}
 	}
-	packetLength := int(b[0])
+	packetLength := uint8(b[0])
 	sequenceID := b[3]
-	rowHeader := RowHeader{
-		PacketLength: packetLength,
-		SequenceID:   sequenceID,
+	rowHeader := models.RowHeader{
+		PacketLength:     packetLength,
+		PacketSequenceID: sequenceID,
 	}
 	b = b[4:]
 	if len(b) >= 2 && b[0] == 0x00 && b[1] == 0x00 {
@@ -177,33 +184,34 @@ func parseRow(b []byte, columnDefinitions []*ColumnDefinition) (*Row, []byte, bo
 	}
 	// b = b[2:]
 	for _, columnDef := range columnDefinitions {
-		var colValue RowColumnDefinition
+		var colValue models.RowColumnDefinition
 		var length int
-		// if b[0] == 0x00 {
-		// 	b = b[1:]
-		// }
 		dataLength := int(b[0])
-
 		// Check the column type
 		switch models.FieldType(columnDef.ColumnType) {
 		case models.FieldTypeTimestamp:
-			b = b[1:] // Advance the buffer to the start of the encoded timestamp data
-
-			if dataLength < 4 || len(b) < dataLength {
-				return nil, nil, eofFinal, paddingFinal, optionalPadding, optionalEOFBytes, fmt.Errorf("invalid timestamp data length")
+			if b[0] == byte(0xfb) {
+				colValue.Type = models.FieldTypeTimestamp
+				colValue.Value = ""
+				length = 1
+			} else {
+				b = b[1:] // Advance the buffer to the start of the encoded timestamp data
+				// Check if the timestamp is null
+				if dataLength < 4 || len(b) < dataLength {
+					return nil, nil, eofFinal, paddingFinal, optionalPadding, optionalEOFBytes, fmt.Errorf("invalid timestamp data length")
+				}
+				dateStr := string(b[:dataLength])
+				layout := "2006-01-02 15:04:05"
+				t, err := time.Parse(layout, dateStr)
+				if err != nil {
+					return nil, nil, eofFinal, paddingFinal, optionalPadding, optionalEOFBytes, fmt.Errorf("failed to parse the time string")
+				}
+				year, month, day := t.Date()
+				hour, minute, second := t.Clock()
+				colValue.Type = models.FieldTypeTimestamp
+				colValue.Value = fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d", year, int(month), day, hour, minute, second)
+				length = dataLength // Including the initial byte for dataLength
 			}
-
-			// Decode the year, month, day, hour, minute, second
-			year := binary.LittleEndian.Uint16(b[:2])
-			month := uint8(b[2])
-			day := uint8(b[3])
-			hour := uint8(b[4])
-			minute := uint8(b[5])
-			second := uint8(b[6])
-
-			colValue.Type = models.FieldTypeTimestamp
-			colValue.Value = fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d", year, month, day, hour, minute, second)
-			length = dataLength // Including the initial byte for dataLength
 
 		// case models.FieldTypeInt24, models.FieldTypeLong:
 		// 	colValue.Type = models.FieldType(columnDef.ColumnType)
@@ -240,6 +248,7 @@ func parseRow(b []byte, columnDefinitions []*ColumnDefinition) (*Row, []byte, bo
 		}
 
 		colValue.Name = columnDef.Name
+		// Check if the converted value is actually correct.
 		row.Columns = append(row.Columns, colValue)
 		b = b[length:]
 	}
@@ -253,52 +262,35 @@ func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
 	buf.Write([]byte{0x01, 0x00, 0x00, 0x01})
 	// Write column count
 	lengthColumns := uint64(len(resultSet.Columns))
-	if err := writeLengthEncodedInteger(buf, &lengthColumns); err != nil {
-		return nil, err
-	}
+	writeLengthEncodedInteger(buf, &lengthColumns)
 
 	if len(resultSet.Columns) > 0 {
 		for _, column := range resultSet.Columns {
 			sequenceID++
-			buf.WriteByte(byte(column.PacketHeader.PacketLength))
-			buf.WriteByte(byte(column.PacketHeader.PacketLength >> 8))
-			buf.WriteByte(byte(column.PacketHeader.PacketLength >> 16))
+			buf.WriteByte(column.PacketHeader.PacketLength)
+			// TODO: Find out an appropriate type for Packet Length (since the packet structure has three bytes for packet length
+			buf.WriteByte(0x00)
+			buf.WriteByte(0x00)
 			buf.WriteByte(sequenceID)
 
-			var err error
-			err = writeLengthEncodedString(buf, column.Catalog)
-			if err != nil {
-				return nil, err
-			}
-			err = writeLengthEncodedString(buf, column.Schema)
-			if err != nil {
-				return nil, err
-			}
-			err = writeLengthEncodedString(buf, column.Table)
-			if err != nil {
-				return nil, err
-			}
-			err = writeLengthEncodedString(buf, column.OrgTable)
-			if err != nil {
-				return nil, err
-			}
-			err = writeLengthEncodedString(buf, column.Name)
-			if err != nil {
-				return nil, err
-			}
-			err = writeLengthEncodedString(buf, column.OrgName)
-			if err != nil {
-				return nil, err
-			}
+			writeLengthEncodedString(buf, column.Catalog)
+			writeLengthEncodedString(buf, column.Schema)
+			writeLengthEncodedString(buf, column.Table)
+			writeLengthEncodedString(buf, column.OrgTable)
+			writeLengthEncodedString(buf, column.Name)
+			writeLengthEncodedString(buf, column.OrgName)
 			buf.WriteByte(0x0c) // Length of the fixed-length fields (12 bytes)
-			if err := binary.Write(buf, binary.LittleEndian, column.CharacterSet); err != nil {
+			err := binary.Write(buf, binary.LittleEndian, column.CharacterSet)
+			if err != nil {
 				return nil, err
 			}
-			if err := binary.Write(buf, binary.LittleEndian, column.ColumnLength); err != nil {
+			err = binary.Write(buf, binary.LittleEndian, column.ColumnLength)
+			if err != nil {
 				return nil, err
 			}
 			buf.WriteByte(column.ColumnType)
-			if err := binary.Write(buf, binary.LittleEndian, column.Flags); err != nil {
+			err = binary.Write(buf, binary.LittleEndian, column.Flags)
+			if err != nil {
 				return nil, err
 			}
 			buf.WriteByte(column.Decimals)
@@ -309,8 +301,7 @@ func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
 	// Write EOF packet header
 	if resultSet.EOFPresent {
 		sequenceID++
-		EOFAfterColumnsValue, _ := base64.StdEncoding.DecodeString(resultSet.EOFAfterColumns)
-		buf.Write(EOFAfterColumnsValue)
+		buf.Write(resultSet.EOFAfterColumns)
 		if resultSet.PaddingPresent {
 			buf.Write([]byte{0x00, 0x00}) // Add padding bytes
 		}
@@ -329,10 +320,10 @@ func encodeMySQLResultSet(resultSet *models.MySQLResultSet) ([]byte, error) {
 		b, _ := encodeRow(row, row.Columns)
 		buf.Write(b)
 	}
+	//sequenceID++
 	// Write EOF packet header again
 	// buf.Write([]byte{5, 0, 0, sequenceID})
-	OptionalEOFBytesValue, _ := base64.StdEncoding.DecodeString(resultSet.OptionalEOFBytes)
-	buf.Write(OptionalEOFBytesValue)
+	buf.Write(resultSet.OptionalEOFBytes)
 	if resultSet.PaddingPresentFinal {
 		buf.Write([]byte{0x00, 0x00}) // Add padding bytes
 	}
@@ -344,30 +335,34 @@ func encodeRow(_ *models.Row, columnValues []models.RowColumnDefinition) ([]byte
 
 	// Write the header
 	//binary.Write(&buf, binary.LittleEndian, uint32(row.Header.PacketLength))
-	//buf.WriteByte(row.Header.PacketSequenceId)
+	//buf.WriteByte(row.Header.PacketSequenceID)
 
 	for _, column := range columnValues {
 		value := column.Value
 		switch models.FieldType(column.Type) {
 		case models.FieldTypeTimestamp:
 			timestamp, ok := value.(string)
+			// Check if the timestamp is base64 encoded.
 			if !ok {
 				return nil, errors.New("could not convert value to string")
 			}
+
+			if timestamp == "" {
+				buf.WriteByte(0)
+				continue
+			}
+
 			t, err := time.Parse("2006-01-02 15:04:05", timestamp)
 			if err != nil {
 				return nil, errors.New("could not parse timestamp value")
 			}
 
-			buf.WriteByte(7) // Length of the following encoded data
+			buf.WriteByte(0x13) // Length of the following encoded data
 			yearBytes := make([]byte, 2)
 			binary.LittleEndian.PutUint16(yearBytes, uint16(t.Year()))
-			buf.Write(yearBytes)            // Year
-			buf.WriteByte(byte(t.Month()))  // Month
-			buf.WriteByte(byte(t.Day()))    // Day
-			buf.WriteByte(byte(t.Hour()))   // Hour
-			buf.WriteByte(byte(t.Minute())) // Minute
-			buf.WriteByte(byte(t.Second())) // Second
+			// buf.Write(fmt.Sprintf("%04d",yearBytes))
+			formattedTime := t.Format("2006-01-02 15:04:05")
+			buf.WriteString(formattedTime)
 			// case models.FieldTypeLongLong:
 			// 	longLongSlice, ok := column.Value.([]interface{})
 			// 	numElements := len(longLongSlice)
@@ -402,9 +397,7 @@ func encodeRow(_ *models.Row, columnValues []models.RowColumnDefinition) ([]byte
 			} else {
 				length := uint64(len(strValue))
 				// Now pass a pointer to length
-				if err := writeLengthEncodedInteger(&buf, &length); err != nil {
-					return nil, err
-				}
+				writeLengthEncodedInteger(&buf, &length)
 				// Write the string value
 				buf.WriteString(strValue)
 			}
@@ -414,3 +407,21 @@ func encodeRow(_ *models.Row, columnValues []models.RowColumnDefinition) ([]byte
 
 	return buf.Bytes(), nil
 }
+
+//func encodeInt32(val int32) []byte {
+//	buf := make([]byte, 4)
+//	binary.LittleEndian.PutUint32(buf, uint32(val))
+//	return buf
+//}
+//
+//func encodeFloat32(val float32) []byte {
+//	buf := make([]byte, 4)
+//	binary.LittleEndian.PutUint32(buf, math.Float32bits(val))
+//	return buf
+//}
+//
+//func encodeFloat64(val float64) []byte {
+//	buf := make([]byte, 8)
+//	binary.LittleEndian.PutUint64(buf, math.Float64bits(val))
+//	return buf
+//}
