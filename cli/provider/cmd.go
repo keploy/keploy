@@ -485,7 +485,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 		}
-		err = utils.StartInDocker(ctx, c.logger, c.cfg)
+		err = StartInDocker(ctx, c.logger, c.cfg)
 		if err != nil {
 			return err
 		}
