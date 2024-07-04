@@ -16,7 +16,16 @@ import (
 	"go.uber.org/zap"
 )
 
-func findComposeFile() string {
+func findComposeFile(cmd string) string {
+
+	cmdArgs := strings.Fields(cmd)
+
+	for i := 0; i < len(cmdArgs); i++ {
+		if cmdArgs[i] == "-f" && i+1 < len(cmdArgs) {
+			return cmdArgs[i+1]
+		}
+	}
+
 	filenames := []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}
 
 	for _, filename := range filenames {

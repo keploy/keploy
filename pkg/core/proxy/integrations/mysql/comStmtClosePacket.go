@@ -5,14 +5,11 @@ package mysql
 import (
 	"encoding/binary"
 	"errors"
+
+	"go.keploy.io/server/v2/pkg/models"
 )
 
-type ComStmtClosePacket struct {
-	Status      byte
-	StatementID uint32
-}
-
-func decodeComStmtClose(data []byte) (*ComStmtClosePacket, error) {
+func decodeComStmtClose(data []byte) (*models.ComStmtClosePacket, error) {
 	if len(data) < 5 {
 		return nil, errors.New("data too short for COM_STMT_CLOSE")
 	}
@@ -20,7 +17,7 @@ func decodeComStmtClose(data []byte) (*ComStmtClosePacket, error) {
 
 	// Statement ID is 4-byte, little-endian integer after command byte
 	statementID := binary.LittleEndian.Uint32(data[1:])
-	return &ComStmtClosePacket{
+	return &models.ComStmtClosePacket{
 		Status:      status,
 		StatementID: statementID,
 	}, nil

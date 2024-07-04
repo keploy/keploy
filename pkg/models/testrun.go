@@ -2,6 +2,7 @@ package models
 
 import (
 	"errors"
+	"time"
 )
 
 type TestReport struct {
@@ -15,23 +16,57 @@ type TestReport struct {
 	TestSet string       `json:"testSet" yaml:"test_set"`
 }
 
+type TestCoverage struct {
+	FileCov  map[string]string `json:"fileCoverage" yaml:"file_coverage"`
+	TotalCov string            `json:"totalCoverage" yaml:"total_coverage"`
+}
+
 func (tr *TestReport) GetKind() string {
 	return "TestReport"
 }
 
 type TestResult struct {
-	Kind         Kind       `json:"kind" yaml:"kind"`
-	Name         string     `json:"name" yaml:"name"`
-	Status       TestStatus `json:"status" yaml:"status"`
-	Started      int64      `json:"started" yaml:"started"`
-	Completed    int64      `json:"completed" yaml:"completed"`
-	TestCasePath string     `json:"testCasePath" yaml:"test_case_path"`
-	MockPath     string     `json:"mockPath" yaml:"mock_path"`
-	TestCaseID   string     `json:"testCaseID" yaml:"test_case_id"`
-	Req          HTTPReq    `json:"req" yaml:"req,omitempty"`
-	Res          HTTPResp   `json:"resp" yaml:"resp,omitempty"`
-	Noise        Noise      `json:"noise" yaml:"noise,omitempty"`
-	Result       Result     `json:"result" yaml:"result"`
+	Kind           Kind           `json:"kind" yaml:"kind"`
+	Name           string         `json:"name" yaml:"name"`
+	Status         TestStatus     `json:"status" yaml:"status"`
+	Started        int64          `json:"started" yaml:"started"`
+	Completed      int64          `json:"completed" yaml:"completed"`
+	TestCasePath   string         `json:"testCasePath" yaml:"test_case_path"`
+	MockPath       string         `json:"mockPath" yaml:"mock_path"`
+	TestCaseID     string         `json:"testCaseID" yaml:"test_case_id"`
+	Req            HTTPReq        `json:"req" yaml:"req,omitempty"`
+	Res            HTTPResp       `json:"resp" yaml:"resp,omitempty"`
+	Noise          Noise          `json:"noise" yaml:"noise,omitempty"`
+	AfterNoise     Noise          `json:"after_noise" yaml:"after_noise,omitempty"`
+	NormalizedData NormalizedData `json:"normalizedData" yaml:"normalized_data"`
+	DeleteData     DeleteData     `json:"deleteData" yaml:"delete_data"`
+	IgnoredData    IgnoredData    `json:"ignoredData" yaml:"ignored_data"`
+	NoisedData     NoisedData     `json:"noisedData" yaml:"noised_data"`
+	Result         Result         `json:"result" yaml:"result"`
+}
+
+type NoisedData struct {
+	EditedBy   string    `json:"editedBy" bson:"edited_by"`
+	EditedAt   time.Time `json:"editedAt" bson:"edited_at"`
+	IsDeNoised bool      `json:"isDeNoised" bson:"is_de_noised"`
+}
+
+type IgnoredData struct {
+	EditedBy  string    `json:"editedBy" bson:"edited_by"`
+	EditedAt  time.Time `json:"editedAt" bson:"edited_at"`
+	IsIgnored bool      `json:"isIgnored" bson:"is_ignored"`
+}
+
+type DeleteData struct {
+	EditedBy  string    `json:"editedBy" bson:"edited_by"`
+	EditedAt  time.Time `json:"editedAt" bson:"edited_at"`
+	IsDeleted bool      `json:"isDeleted" bson:"is_deleted"`
+}
+
+type NormalizedData struct {
+	EditedBy     string    `json:"editedBy" bson:"edited_by"`
+	EditedAt     time.Time `json:"editedAt" bson:"edited_at"`
+	IsNormalized bool      `json:"isNormalized" bson:"is_normalized"`
 }
 
 func (tr *TestResult) GetKind() string {
