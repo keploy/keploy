@@ -2,15 +2,16 @@
 
 package mysql
 
-import "errors"
+import (
+	"errors"
 
-type ComPingPacket struct {
-}
+	"go.keploy.io/server/v2/pkg/models"
+)
 
-func decodeComPing(data []byte) (ComPingPacket, error) {
+func decodeComPing(data []byte) (models.ComPingPacket, error) {
 	if len(data) < 1 || data[0] != 0x0e {
-		return ComPingPacket{}, errors.New("Data malformed for COM_PING")
+		return models.ComPingPacket{}, errors.New("Data malformed for COM_PING")
 	}
 
-	return ComPingPacket{}, nil
+	return models.ComPingPacket{}, nil
 }

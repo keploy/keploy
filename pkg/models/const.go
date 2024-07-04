@@ -6,6 +6,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/k0kubun/pp/v3"
+	"go.keploy.io/server/v2/config"
 )
 
 // Patterns for different usecases in keploy
@@ -17,6 +18,14 @@ const (
 	TestSetPattern      string = "test-set-"
 	String              string = "string"
 	TestRunTemplateName string = "test-run-"
+)
+
+const (
+	Unknown    config.Language = "Unknown"    // Unknown language
+	Go         config.Language = "go"         // Go language
+	Java       config.Language = "java"       // Java language
+	Python     config.Language = "python"     // Python language
+	Javascript config.Language = "javascript" // Javascript language
 )
 
 var (
