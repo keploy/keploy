@@ -6,7 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"reflect"
+	// "reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -185,7 +185,12 @@ func compareVals(map1 interface{}, map2 *interface{}) {
 			}
 			if strings.HasPrefix(val1, "{{") && strings.HasSuffix(val1, "}}") {
 				// Get the value from the template.
-				val1 = utils.TemplatizedValues[key].(string)
+				newVal, ok := utils.TemplatizedValues[key].(string)
+				if ok {
+					val1 = newVal
+				} else {
+					val1 =  utils.ToString(utils.TemplatizedValues[key])
+				}
 			}
 			ok := parseBody(&val1, map2)
 			if !ok {
