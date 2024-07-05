@@ -1,5 +1,3 @@
-//go:build linux
-
 package replay
 
 import (
@@ -52,12 +50,17 @@ type Replayer struct {
 	telemetry       Telemetry
 	instrumentation Instrumentation
 	config          *config.Config
+	instrument      bool
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf Config, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
 	// set the request emulator for simulating test case requests, if not set
 	if requestMockemulator == nil {
 		SetTestUtilInstance(NewRequestMockUtil(logger, config.Path, "mocks", config.Test.APITimeout, config.Test.BasePath))
+	}
+	instrument := false
+	if config.Command != "" {
+		instrument = true
 	}
 	return &Replayer{
 		logger:          logger,
@@ -68,6 +71,7 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 		telemetry:       telemetry,
 		instrumentation: instrumentation,
 		config:          config,
+		instrument:      instrument,
 	}
 }
 
@@ -127,20 +131,25 @@ func (r *Replayer) Start(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 
-	language, executable := utils.DetectLanguage(r.logger, r.config.Command)
-	// if language is not provided and language detected is known
-	// then set the language to detected language
-	if r.config.Test.Language == "" {
-		if language == models.Unknown {
-			r.logger.Warn("failed to detect language, skipping coverage caluclation. please use --language to manually set the language")
+	var language config.Language
+	var executable string
+	// only find language to calculate coverage if instrument is true
+	if r.instrument {
+		language, executable = utils.DetectLanguage(r.logger, r.config.Command)
+		// if language is not provided and language detected is known
+		// then set the language to detected language
+		if r.config.Test.Language == "" {
+			if language == models.Unknown {
+				r.logger.Warn("failed to detect language, skipping coverage caluclation. please use --language to manually set the language")
+				r.config.Test.SkipCoverage = true
+			} else {
+				r.logger.Warn(fmt.Sprintf("%s language detected. please use --language to manually set the language if needed", language))
+			}
+			r.config.Test.Language = language
+		} else if language != r.config.Test.Language && language != models.Unknown {
+			utils.LogError(r.logger, nil, "language detected is different from the language provided")
 			r.config.Test.SkipCoverage = true
-		} else {
-			r.logger.Warn(fmt.Sprintf("%s language detected. please use --language to manually set the language if needed", language))
 		}
-		r.config.Test.Language = language
-	} else if language != r.config.Test.Language && language != models.Unknown {
-		utils.LogError(r.logger, nil, "language detected is different from the language provided")
-		r.config.Test.SkipCoverage = true
 	}
 
 	var cov coverage.Service
@@ -286,7 +295,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 }
 
 func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
-	if r.config.Test.BasePath != "" {
+	if !r.instrument {
 		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.Any("base path", r.config.Test.BasePath))
 		return &InstrumentState{}, nil
 	}
@@ -357,26 +366,22 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}()
 
 	var conf *models.TestSet
-	var err error
-	var postscript string
 
-	// Pre/Post script will be executed only if the base path is provided
-	if r.config.Test.BasePath != "" {
-		//Execute the Pre-script before each test-set if provided
-		conf, err = r.testSetConf.Read(runTestSetCtx, testSetID)
-		if err != nil {
-			if strings.Contains(err.Error(), "no such file or directory") {
-				r.logger.Info("config file not found, continuing execution...", zap.String("test-set", testSetID))
-			} else {
-				return models.TestSetStatusFailed, fmt.Errorf("failed to read test set config: %w", err)
-			}
+	//Execute the Pre-script before each test-set if provided
+	conf, err := r.testSetConf.Read(runTestSetCtx, testSetID)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such file or directory") {
+			r.logger.Info("config file not found, continuing execution...", zap.String("test-set", testSetID))
+		} else {
+			return models.TestSetStatusFailed, fmt.Errorf("failed to read test set config: %w", err)
 		}
+	}
 
-		if conf == nil {
-			conf = &models.TestSet{}
-		}
-		postscript = conf.PostScript
+	if conf == nil {
+		conf = &models.TestSet{}
+	}
 
+	if conf.PreScript != "" {
 		r.logger.Info("Running Pre-script", zap.String("script", conf.PreScript), zap.String("test-set", testSetID))
 		err = r.executeScript(runTestSetCtx, conf.PreScript)
 		if err != nil {
@@ -412,7 +417,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusFailed, err
 	}
 
-	if r.config.Test.BasePath == "" {
+	if r.instrument {
 		if !serveTest {
 			runTestSetErrGrp.Go(func() error {
 				defer utils.Recover(r.logger)
@@ -535,7 +540,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			break
 		}
 
-		if utils.IsDockerCmd(cmdType) && r.config.Test.BasePath == "" {
+		if utils.IsDockerCmd(cmdType) {
 
 			testCase.HTTPReq.URL, err = utils.ReplaceHostToIP(testCase.HTTPReq.URL, userIP)
 			if err != nil {
@@ -554,7 +559,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		var consumedMocks []string
-		if r.config.Test.BasePath == "" {
+		if r.instrument {
 			consumedMocks, err = r.instrumentation.GetConsumedMocks(runTestSetCtx, appID)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
@@ -626,14 +631,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	//Execute the Post-script after each test-set if provided
-	if r.config.Test.BasePath != "" {
-		r.logger.Info("Running Post-script", zap.String("script", postscript), zap.String("test-set", testSetID))
-		err = r.executeScript(runTestSetCtx, postscript)
+	if conf.PostScript != "" {
+		//Execute the Post-script after each test-set if provided
+		r.logger.Info("Running Post-script", zap.String("script", conf.PostScript), zap.String("test-set", testSetID))
+		err = r.executeScript(runTestSetCtx, conf.PostScript)
 		if err != nil {
 			return models.TestSetStatusFaultScript, fmt.Errorf("failed to execute post-script: %w", err)
 		}
 	}
+
 	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
 	if err != nil {
 		if runTestSetCtx.Err() != context.Canceled {
@@ -674,7 +680,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	// remove the unused mocks by the test cases of a testset (if the base path is not provided )
-	if r.config.Test.RemoveUnusedMocks && testSetStatus == models.TestSetStatusPassed && r.config.Test.BasePath == "" {
+	if r.config.Test.RemoveUnusedMocks && testSetStatus == models.TestSetStatusPassed && r.instrument {
 		r.logger.Debug("consumed mocks from the completed testset", zap.Any("for test-set", testSetID), zap.Any("consumed mocks", totalConsumedMocks))
 		// delete the unused mocks from the data store
 		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, totalConsumedMocks)
@@ -712,11 +718,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 }
 
 func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) (filtered, unfiltered []*models.Mock, err error) {
-	if r.config.Test.BasePath != "" {
-		r.logger.Debug("Keploy will not fetch the mocks when base path is provided", zap.Any("base path", r.config.Test.BasePath))
-		return nil, nil, nil
-	}
-
 	filtered, err = r.mockDB.GetFilteredMocks(ctx, testSetID, afterTime, beforeTime)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to get filtered mocks")
@@ -732,7 +733,7 @@ func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime tim
 
 func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, testSetID string, afterTime, beforeTime time.Time, action MockAction) error {
 
-	if r.config.Test.BasePath != "" {
+	if !r.instrument {
 		r.logger.Debug("Keploy will not setup or update the mocks when base path is provided", zap.Any("base path", r.config.Test.BasePath))
 		return nil
 	}
