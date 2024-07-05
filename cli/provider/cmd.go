@@ -455,6 +455,11 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		// set the command type
 		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
 
+		// empty the command if base path is provided, because no need of command even if provided
+		if c.cfg.Test.BasePath != "" {
+			c.cfg.CommandType = string(utils.Empty)
+		}
+
 		if c.cfg.GenerateGithubActions && utils.CmdType(c.cfg.CommandType) != utils.Empty {
 			defer utils.GenerateGithubActions(c.logger, c.cfg.Command)
 		}
@@ -537,15 +542,16 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 			config.SetSelectedTests(c.cfg, testSets)
 
+			if cmd.Name() == "rerecord" {
+				c.cfg.Test.SkipCoverage = true
+				return nil
+			}
+
 			c.cfg.CoverageCommand = c.cfg.Command
 
 			// skip coverage by default if command is of type docker
 			if utils.CmdType(c.cfg.CommandType) != "native" && !cmd.Flags().Changed("skip-coverage") {
 				c.cfg.Test.SkipCoverage = true
-			}
-
-			if cmd.Name() == "rerecord" {
-				return nil
 			}
 
 			if c.cfg.Test.Delay <= 5 {
