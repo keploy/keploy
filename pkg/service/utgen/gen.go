@@ -120,7 +120,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 		}
 
 		for g.cov.Current < (g.cov.Desired/100) && iterationCount < g.maxIterations {
-			pp.SetColorScheme(models.PassingColorScheme)
+			pp.SetColorScheme(models.GetPassingColorScheme())
 			if _, err := pp.Printf("Current Coverage: %s%% for file %s\n", math.Round(g.cov.Current*100), g.srcPath); err != nil {
 				utils.LogError(g.logger, err, "failed to print coverage")
 			}
@@ -176,7 +176,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			}
 		}
 
-		pp.SetColorScheme(models.PassingColorScheme)
+		pp.SetColorScheme(models.GetPassingColorScheme())
 		if g.cov.Current >= (g.cov.Desired / 100) {
 			if _, err := pp.Printf("For File %s Reached above target coverage of %s%% (Current Coverage: %s%%) in %s%% iterations.\n", g.srcPath, g.cov.Desired, math.Round(g.cov.Current*100), iterationCount); err != nil {
 				utils.LogError(g.logger, err, "failed to print coverage")

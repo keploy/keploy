@@ -15,6 +15,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
@@ -430,6 +431,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 	if c.cfg.DisableANSI {
 		logger, err := log.ChangeColorEncoding()
+		models.IsAnsiDisabled = true
 		*c.logger = *logger
 		if err != nil {
 			errMsg := "failed to change color encoding"
