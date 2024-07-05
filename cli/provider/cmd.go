@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/spf13/pflag"
 	"gopkg.in/yaml.v3"
 
 	"github.com/fatih/color"
