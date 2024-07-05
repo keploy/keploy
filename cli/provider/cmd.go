@@ -145,7 +145,7 @@ var RootExamples = `
 `
 
 var VersionTemplate = `{{with .Version}}{{printf "Keploy %s" .}}{{end}}{{"\n"}}`
-var IsConfigFileNotFound bool
+var IsConfigFileFound = true
 
 type CmdConfigurator struct {
 	logger *zap.Logger
@@ -345,7 +345,7 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 		c.logger.Error("failed to validate flags", zap.Error(err))
 		return err
 	}
-	if IsConfigFileNotFound {
+	if !IsConfigFileFound {
 		err := c.CreateConfigFile(ctx)
 		if err != nil {
 			c.logger.Error("failed to create config file", zap.Error(err))
@@ -390,7 +390,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		IsConfigFileNotFound = true
+		IsConfigFileFound = false
 		c.logger.Info("config file not found; proceeding with flags only")
 	}
 

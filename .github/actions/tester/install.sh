@@ -17,6 +17,7 @@ check_test_status() {
     local fixed_index=$2 # Boolean to determine if index should be fixed to 0
     local overallStatus=1 # true
     local idx=0 # Initialize index
+    ls -d $path/keploy/reports
     for dir in $test_sets; do
         if [ "$fixed_index" -eq 1 ]; then
             local report_file="$path/keploy/reports/test-run-0/$dir-report.yaml"
