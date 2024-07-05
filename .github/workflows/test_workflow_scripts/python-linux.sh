@@ -1,6 +1,6 @@
 #!/bin/bash
 
-source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
+source ./.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Checkout to the specified branch
 git fetch origin
@@ -20,7 +20,7 @@ python3 manage.py makemigrations
 python3 manage.py migrate
 
 # Configuration and cleanup
-sudo ./../../../keployv2 config --generate
+sudo ./../../../keployE config --generate
 sudo rm -rf keploy/  # Clean old test data
 config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"header": {"Allow":[],}}/' "$config_file"
@@ -62,7 +62,7 @@ send_request(){
 for i in {1..2}; do
     app_name="flaskApp_${i}"
     send_request &
-    sudo -E env PATH="$PATH" ./../../../keployv2 record -c "python3 manage.py runserver" --generateGithubActions=false&> "${app_name}.txt"
+    sudo -E env PATH="$PATH" ./../../../keployE record -c "python3 manage.py runserver" --generateGithubActions=false&> "${app_name}.txt"
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
@@ -79,7 +79,7 @@ for i in {1..2}; do
 done
 
 # Testing phase
-sudo -E env PATH="$PATH" ./../../../keployv2 test -c "python3 manage.py runserver" --delay 10 --generateGithubActions=false &> test_logs.txt
+sudo -E env PATH="$PATH" ./../../../keployE test -c "python3 manage.py runserver" --delay 10 --generateGithubActions=false &> test_logs.txt
 
 if grep "ERROR" "test_logs.txt"; then
         echo "Error found in pipeline..."
