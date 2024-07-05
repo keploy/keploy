@@ -10,10 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/spf13/pflag"
-
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
@@ -258,12 +257,12 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 			cmd.Flags().Uint64("api-timeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
 			cmd.Flags().String("mongo-password", c.cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")
 			cmd.Flags().String("coverage-report-path", c.cfg.Test.CoverageReportPath, "Write a go coverage profile to the file in the given directory.")
-			cmd.Flags().StringP("language", "l", c.cfg.Test.Language, "application programming language")
+			cmd.Flags().VarP(&c.cfg.Test.Language, "language", "l", "Application programming language")
 			cmd.Flags().Bool("ignore-ordering", c.cfg.Test.IgnoreOrdering, "Ignore ordering of array in response")
-			cmd.Flags().Bool("coverage", c.cfg.Test.Coverage, "Enable coverage reporting for the testcases. for golang please set language flag to golang, ref https://keploy.io/docs/server/sdk-installation/go/")
+			cmd.Flags().Bool("skip-coverage", c.cfg.Test.SkipCoverage, "skip code coverage computation while running the test cases")
 			cmd.Flags().Bool("remove-unused-mocks", c.cfg.Test.RemoveUnusedMocks, "Clear the unused mocks for the passed test-sets")
-			cmd.Flags().Bool("go-coverage", c.cfg.Test.GoCoverage, "Enable go coverage reporting for the testcases")
 			cmd.Flags().Bool("fallBack-on-miss", c.cfg.Test.FallBackOnMiss, "Enable connecting to actual service if mock not found during test mode")
+			cmd.Flags().String("jacoco-agent-path", c.cfg.Test.JacocoAgentPath, "Only applicable for test coverage for Java projects. You can override the jacoco agent jar by proving its path")
 			cmd.Flags().String("base-path", c.cfg.Test.BasePath, "Custom api basePath/origin to replace the actual basePath/origin in the testcases; App flag is ignored and app will not be started & instrumented when this is set since the application running on a different machine")
 			cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
 		}
@@ -413,6 +412,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 	if c.cfg.DisableANSI {
 		logger, err := log.ChangeColorEncoding()
+		models.IsAnsiDisabled = true
 		*c.logger = *logger
 		if err != nil {
 			errMsg := "failed to change color encoding"
@@ -436,6 +436,11 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		// set the command type
 		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
+
+		// empty the command if base path is provided, because no need of command even if provided
+		if c.cfg.Test.BasePath != "" {
+			c.cfg.CommandType = string(utils.Empty)
+		}
 
 		if c.cfg.GenerateGithubActions && utils.CmdType(c.cfg.CommandType) != utils.Empty {
 			defer utils.GenerateGithubActions(c.logger, c.cfg.Command)
@@ -520,16 +525,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			config.SetSelectedTests(c.cfg, testSets)
 
 			if cmd.Name() == "rerecord" {
+				c.cfg.Test.SkipCoverage = true
 				return nil
 			}
 
-			if utils.CmdType(c.cfg.CommandType) == utils.Native && c.cfg.Test.GoCoverage {
-				goCovPath, err := utils.SetCoveragePath(c.logger, c.cfg.Test.CoverageReportPath)
-				if err != nil {
-					utils.LogError(c.logger, err, "failed to set go coverage path")
-					return errors.New("failed to set go coverage path")
-				}
-				c.cfg.Test.CoverageReportPath = goCovPath
+			c.cfg.CoverageCommand = c.cfg.Command
+
+			// skip coverage by default if command is of type docker
+			if utils.CmdType(c.cfg.CommandType) != "native" && !cmd.Flags().Changed("skip-coverage") {
+				c.cfg.Test.SkipCoverage = true
 			}
 
 			if c.cfg.Test.Delay <= 5 {

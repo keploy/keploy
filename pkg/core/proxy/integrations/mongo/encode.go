@@ -18,6 +18,9 @@ import (
 	"go.uber.org/zap"
 )
 
+// encodeMongo records the outgoing mongo messages of the client connection,
+// decodes the wiremessage binary and writes readable string
+// to the yaml file.
 func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
 
 	errCh := make(chan error, 1)
@@ -34,11 +37,10 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 		for {
 			var err error
 			var readRequestDelay time.Duration
-			// var logStr string = fmt.Sprintln("the conn id: ", clientConnId, " the destination conn id: ", destConnId)
 
-			// logStr += fmt.Sprintln("started reading from the client: ", started)
+			// reads the request packets from the client connection after the first request packet.
+			// Since, that is already read in the RecordOutgoing function.
 			if string(reqBuf) == "read form client conn" {
-				// lstr := ""
 				started := time.Now()
 				reqBuf, err = pUtil.ReadBytes(ctx, logger, clientConn)
 				logger.Debug("reading from the mongo conn", zap.Any("", string(reqBuf)))
@@ -58,9 +60,10 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 			}
 
 			var (
-				mongoRequests  []models.MongoRequest
-				mongoResponses []models.MongoResponse
+				mongoRequests  []models.MongoRequest  // stores the decoded binary packets for a request
+				mongoResponses []models.MongoResponse // stores the decoded binary packets for a response
 			)
+			// decode the binary packet and store the values in the corresponding struct
 			opReq, requestHeader, mongoRequest, err := Decode(reqBuf, logger)
 			if err != nil {
 				utils.LogError(logger, err, "failed to decode the mongo wire message from the client")
@@ -73,6 +76,7 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 				Message:   mongoRequest,
 				ReadDelay: int64(readRequestDelay),
 			})
+			// forwards the request packet to the destination server
 			_, err = destConn.Write(reqBuf)
 			if err != nil {
 				if ctx.Err() != nil {
@@ -84,12 +88,11 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 			}
 			logger.Debug(fmt.Sprintf("the request in the mongo parser after passing to dest: %v", len(reqBuf)))
 
-			// logStr += fmt.Sprintln("after writing the request to the destination: ", time.Since(started))
+			// check for the request packet streaming for the mongo wire message
 			if val, ok := mongoRequest.(*models.MongoOpMessage); ok && hasSecondSetBit(val.FlagBits) {
 				for {
+					// read the streaming request packets
 					requestBuffer1, err := pUtil.ReadBytes(ctx, logger, clientConn)
-
-					// logStr += tmpStr
 					if err != nil {
 						if err == io.EOF {
 							logger.Debug("recieved request buffer is empty in record mode for mongo request")
@@ -101,7 +104,7 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 						return nil
 					}
 
-					// write the reply to mongo client
+					// forward the request packet to the destination server
 					_, err = destConn.Write(requestBuffer1)
 					if err != nil {
 						if ctx.Err() != nil {
@@ -112,12 +115,12 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 						return nil
 					}
 
-					// logStr += fmt.Sprintln("after writting response to the client: ", time.Since(started), "current time is: ", time.Now())
-
 					if len(requestBuffer1) == 0 {
 						logger.Debug("the response from the server is complete")
 						break
 					}
+					// decode the binary packet and return the values in the corresponding structs
+					// for header and message.
 					_, reqHeader, mongoReq, err := Decode(requestBuffer1, logger)
 					if err != nil {
 						utils.LogError(logger, err, "failed to decode the mongo wire message from the destination server")
@@ -136,10 +139,10 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 				}
 			}
 
-			// read reply message from the mongo server
-			// tmpStr := ""
 			reqTimestampMock := time.Now()
 			started := time.Now()
+
+			// read reply message length from the destination mongo server
 			responsePckLengthBuffer, err := pUtil.ReadRequiredBytes(ctx, logger, destConn, 4)
 			if err != nil {
 				if err == io.EOF {
@@ -154,16 +157,17 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 
 			logger.Debug("recieved these pck length packets", zap.Any("packets", responsePckLengthBuffer))
 
+			// convert packet length to LittleEndian integer.
 			pckLength := getPacketLength(responsePckLengthBuffer)
 			logger.Debug("received pck length ", zap.Any("packet length", pckLength))
 
+			// read the entire response packet
 			responsePckDataBuffer, err := pUtil.ReadRequiredBytes(ctx, logger, destConn, int(pckLength)-4)
 
 			logger.Debug("recieved these packets", zap.Any("packets", responsePckDataBuffer))
 
 			responseBuffer := append(responsePckLengthBuffer, responsePckDataBuffer...)
 			logger.Debug("reading from the destination mongo server", zap.Any("", string(responseBuffer)))
-			// logStr += tmpStr
 			if err != nil {
 				if err == io.EOF {
 					logger.Debug("recieved response buffer is empty in record mode for mongo call")
@@ -176,7 +180,7 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 			}
 			readResponseDelay := time.Since(started)
 
-			// write the reply to mongo client
+			// write the response packet to mongo client
 			_, err = clientConn.Write(responseBuffer)
 			if err != nil {
 				if ctx.Err() != nil {
@@ -187,8 +191,7 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 				return nil
 			}
 
-			// logStr += fmt.Sprintln("after writting response to the client: ", time.Since(started), "current time is: ", time.Now())
-
+			// decode the binary packet of response and return the values in the corresponding structs
 			_, responseHeader, mongoResponse, err := Decode(responseBuffer, logger)
 			if err != nil {
 				utils.LogError(logger, err, "failed to decode the mongo wire message from the destination server")
@@ -200,14 +203,17 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 				Message:   mongoResponse,
 				ReadDelay: int64(readResponseDelay),
 			})
+			// check for the response packet streaming for the mongo wire message
 			if val, ok := mongoResponse.(*models.MongoOpMessage); ok && hasSecondSetBit(val.FlagBits) {
 				for i := 0; ; i++ {
+					// handle the streaming response packets for heartbeat calls
 					if i == 0 && isHeartBeat(logger, opReq, *mongoRequests[0].Header, mongoRequests[0].Message) {
 						m.recordMessage(ctx, logger, mongoRequests, mongoResponses, opReq, reqTimestampMock, mocks)
 					}
 					started = time.Now()
+
+					// read the response packets from the destination server
 					responseBuffer, err = pUtil.ReadBytes(ctx, logger, destConn)
-					// logStr += tmpStr
 					if err != nil {
 						if err == io.EOF {
 							logger.Debug("recieved response buffer is empty in record mode for mongo call")
@@ -234,12 +240,11 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 					}
 					logger.Debug(fmt.Sprintf("the response in the mongo parser after passing to client: %v", len(responseBuffer)))
 
-					// logStr += fmt.Sprintln("after writting response to the client: ", time.Since(started), "current time is: ", time.Now())
-
 					if len(responseBuffer) == 0 {
 						logger.Debug("the response from the server is complete")
 						break
 					}
+					// decode the binary packet for response and return the values in the corresponding structs
 					_, respHeader, mongoResp, err := Decode(responseBuffer, logger)
 					if err != nil {
 						utils.LogError(logger, err, "failed to decode the mongo wire message from the destination server")
@@ -258,7 +263,9 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 				}
 			}
 
+			// write the response packet to the yaml file
 			m.recordMessage(ctx, logger, mongoRequests, mongoResponses, opReq, reqTimestampMock, mocks)
+			// assigns "read form client conn" to the reqBuf to read the next request packet from the client connection
 			reqBuf = []byte("read form client conn")
 		}
 	})
@@ -274,6 +281,7 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 	}
 }
 
+// getPacketLength returns the length of the packet from the first 4 bytes of the packet.
 func getPacketLength(src []byte) (length int32) {
 	length = int32(src[0]) | int32(src[1])<<8 | int32(src[2])<<16 | int32(src[3])<<24
 	return length

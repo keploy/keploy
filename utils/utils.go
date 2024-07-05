@@ -3,6 +3,7 @@ package utils
 import (
 	"bufio"
 	"context"
+	"debug/elf"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
@@ -26,6 +28,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
+	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -153,7 +157,6 @@ func DeleteFileIfNotExists(logger *zap.Logger, name string) (err error) {
 	if os.IsNotExist(err) {
 		return nil
 	}
-
 	//If it does, remove it.
 	err = os.Remove(name)
 	if err != nil {
@@ -367,21 +370,18 @@ func FindDockerCmd(cmd string) CmdType {
 			return DockerCompose
 		}
 	}
-
 	// Check for Docker start command patterns
 	for _, pattern := range dockerStartPatterns {
 		if strings.HasPrefix(cmdLower, pattern) {
 			return DockerStart
 		}
 	}
-
 	// Check for Docker run command patterns
 	for _, pattern := range dockerRunPatterns {
 		if strings.HasPrefix(cmdLower, pattern) {
 			return DockerRun
 		}
 	}
-
 	return Native
 }
 
@@ -671,6 +671,91 @@ func EnsureRmBeforeName(cmd string) string {
 	}
 
 	return strings.Join(parts, " ")
+}
+
+func isGoBinary(logger *zap.Logger, filePath string) bool {
+	f, err := elf.Open(filePath)
+	if err != nil {
+		logger.Debug(fmt.Sprintf("failed to open file %s", filePath), zap.Error(err))
+		return false
+	}
+	if err := f.Close(); err != nil {
+		LogError(logger, err, "failed to close file", zap.String("file", filePath))
+	}
+
+	// Check for section names typical to Go binaries
+	sections := []string{".go.buildinfo", ".gopclntab"}
+	for _, section := range sections {
+		if sect := f.Section(section); sect != nil {
+			fmt.Println(section)
+			return true
+		}
+	}
+	return false
+}
+
+// DetectLanguage detects the language of the test command and returns the executable
+func DetectLanguage(logger *zap.Logger, cmd string) (config.Language, string) {
+	if cmd == "" {
+		return models.Unknown, ""
+	}
+	fields := strings.Fields(cmd)
+	executable := fields[0]
+	if strings.HasPrefix(cmd, "python") {
+		return models.Python, executable
+	}
+
+	if executable == "node" || executable == "npm" || executable == "yarn" {
+		return models.Javascript, executable
+	}
+
+	if executable == "java" {
+		return models.Java, executable
+	}
+
+	if executable == "go" || (len(fields) == 1 && isGoBinary(logger, executable)) {
+		return models.Go, executable
+	}
+	return models.Unknown, executable
+}
+
+// FileExists checks if a file exists and is not a directory at the given path.
+func FileExists(path string) (bool, error) {
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return fileInfo.Mode().IsRegular(), nil
+}
+
+// ExpandPath expands a given path, replacing the tilde with the user's home directory
+func ExpandPath(path string) (string, error) {
+	if strings.HasPrefix(path, "~/") {
+		homeDir, err := getHomeDir()
+		if err != nil {
+			return "", err
+		}
+		return strings.Replace(path, "~", homeDir, 1), nil
+	}
+	return path, nil
+}
+
+// getHomeDir retrieves the appropriate home directory based on the execution context
+func getHomeDir() (string, error) {
+	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
+		if usr, err := user.Lookup(sudoUser); err == nil {
+			return usr.HomeDir, nil
+		}
+	}
+	// Fallback to the current user's home directory
+	if usr, err := user.Current(); err == nil {
+		return usr.HomeDir, nil
+	}
+	// Fallback if neither method works
+	return "", errors.New("failed to retrieve current user info")
 }
 
 func IsDockerCmd(kind CmdType) bool {

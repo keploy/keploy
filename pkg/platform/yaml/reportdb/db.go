@@ -1,5 +1,3 @@
-//go:build linux
-
 // Package reportdb provides functionality for managing test reports in a database.
 package reportdb
 
@@ -107,6 +105,24 @@ func (fe *TestReport) InsertReport(ctx context.Context, testRunID string, testSe
 	err = yaml.WriteFile(ctx, fe.Logger, reportPath, testReport.Name, data, false)
 	if err != nil {
 		utils.LogError(fe.Logger, err, "failed to write the report to yaml", zap.Any("session", filepath.Base(reportPath)))
+		return err
+	}
+	return nil
+}
+
+func (fe *TestReport) UpdateReport(ctx context.Context, testRunID string, coverageReport any) error {
+	reportPath := filepath.Join(fe.Path, testRunID)
+
+	data := []byte{}
+	d, err := yamlLib.Marshal(&coverageReport)
+	if err != nil {
+		return fmt.Errorf("%s failed to marshal document to yaml. error: %s", utils.Emoji, err.Error())
+	}
+	data = append(data, d...)
+
+	err = yaml.WriteFile(ctx, fe.Logger, reportPath, "coverage", data, false)
+	if err != nil {
+		utils.LogError(fe.Logger, err, "failed to write the coverage report to yaml", zap.Any("session", filepath.Base(reportPath)))
 		return err
 	}
 	return nil
