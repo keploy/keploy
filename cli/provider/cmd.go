@@ -7,14 +7,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
+
 	"strings"
 	"time"
 
-	"github.com/spf13/pflag"
-
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
@@ -417,6 +416,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 	if c.cfg.DisableANSI {
 		logger, err := log.ChangeColorEncoding()
+		models.IsAnsiDisabled = true
 		*c.logger = *logger
 		if err != nil {
 			errMsg := "failed to change color encoding"
@@ -440,6 +440,11 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		// set the command type
 		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
+
+		// empty the command if base path is provided, because no need of command even if provided
+		if c.cfg.Test.BasePath != "" {
+			c.cfg.CommandType = string(utils.Empty)
+		}
 
 		if c.cfg.GenerateGithubActions && utils.CmdType(c.cfg.CommandType) != utils.Empty {
 			defer utils.GenerateGithubActions(c.logger, c.cfg.Command)
@@ -523,15 +528,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 			config.SetSelectedTests(c.cfg, testSets)
 
-			c.cfg.CoverageCommand = c.cfg.Command
+			if cmd.Name() == "rerecord" {
+				c.cfg.Test.SkipCoverage = true
+				return nil
+			}
 
 			// skip coverage by default if command is of type docker
 			if utils.CmdType(c.cfg.CommandType) != "native" && !cmd.Flags().Changed("skip-coverage") {
 				c.cfg.Test.SkipCoverage = true
-			}
-
-			if cmd.Name() == "rerecord" {
-				return nil
 			}
 
 			if c.cfg.Test.Delay <= 5 {
@@ -593,18 +597,18 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		path += "/keploy"
 		c.cfg.Path = path
 
-		if runtime.GOOS == "darwin" {
-			err := os.Setenv("RUN_IN_DOCKER", "true")
-			if err != nil {
-				utils.LogError(c.logger, err, "failed to set RUN_IN_DOCKER env variable in darwin")
-				return err
-			}
-			c.logger.Info("Running in docker env")
-			err = StartInDocker(ctx, c.logger, c.cfg)
-			if err != nil {
-				return err
-			}
-		}
+		// if runtime.GOOS == "darwin" {
+		// 	err := os.Setenv("RUN_IN_DOCKER", "true")
+		// 	if err != nil {
+		// 		utils.LogError(c.logger, err, "failed to set RUN_IN_DOCKER env variable in darwin")
+		// 		return err
+		// 	}
+		// 	c.logger.Info("Running in docker env")
+		// 	err = StartInDocker(ctx, c.logger, c.cfg)
+		// 	if err != nil {
+		// 		return err
+		// 	}
+		// }
 
 	case "gen":
 		if os.Getenv("API_KEY") == "" {

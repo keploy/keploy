@@ -1,5 +1,3 @@
-//go:build linux
-
 package replay
 
 import (
@@ -540,6 +538,21 @@ func removeQuotesInTemplates(jsonStr string) string {
 		}
 		// Remove the surrounding quotes
 		return strings.Trim(match, `"`)
+	})
+
+	return result
+}
+
+func addQuotesInTemplates(jsonStr string) string {
+	// Regular expression to find patterns with {{ and }}
+	re := regexp.MustCompile(`\{\{[^{}]*\}\}`)
+	// Function to replace matches by removing surrounding quotes
+	result := re.ReplaceAllStringFunc(jsonStr, func(match string) string {
+		if strings.Contains(match, "{{string") {
+			return match
+		}
+		//Add the surrounding quotes.
+		return `"` + match + `"`
 	})
 
 	return result

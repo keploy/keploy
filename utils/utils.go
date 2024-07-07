@@ -766,6 +766,9 @@ func isGoBinary(logger *zap.Logger, filePath string) bool {
 
 // DetectLanguage detects the language of the test command and returns the executable
 func DetectLanguage(logger *zap.Logger, cmd string) (config.Language, string) {
+	if cmd == "" {
+		return models.Unknown, ""
+	}
 	fields := strings.Fields(cmd)
 	executable := fields[0]
 	if strings.HasPrefix(cmd, "python") {

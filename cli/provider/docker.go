@@ -44,7 +44,7 @@ func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config)
 	// If it does, then we would run the docker version of keploy and
 	// pass the command and control to it.
 	cmdType := utils.FindDockerCmd(conf.Command)
-	if os.Getenv("RUN_IN_DOCKER") != "true" && (conf.InDocker || !(utils.IsDockerCmd(cmdType))) {
+	if conf.InDocker || !(utils.IsDockerCmd(cmdType)) {
 		return nil
 	}
 	// pass the all the commands and args to the docker version of Keploy
