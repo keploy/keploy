@@ -3,13 +3,15 @@
 package replay
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/url"
-	// "reflect"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
+	"text/template"
 
 	// "encoding/json"
 	"github.com/7sDream/geko"
@@ -159,7 +161,13 @@ func compareVals(map1 interface{}, map2 *interface{}) {
 			if ok {
 				if strings.HasPrefix(vString, "{{") && strings.HasSuffix(vString, "}}") {
 					// Get the value from the template.
-					vals[i] = utils.TemplatizedValues[keys[i]]
+					stringVal, ok := vals[i].(string)
+					if ok {
+						vals[i], _ = render(stringVal)
+						if !strings.Contains(stringVal, "string") {
+							vals[i] = utils.ToInt(vals[i])
+						}
+					}
 				}
 			}
 			compareVals(vals[i], map2)
@@ -170,7 +178,13 @@ func compareVals(map1 interface{}, map2 *interface{}) {
 			if ok {
 				if strings.HasPrefix(vString, "{{") && strings.HasSuffix(vString, "}}") {
 					// Get the value from the template.
-					val1 = utils.TemplatizedValues[key]
+					stringVal, ok := val1.(string)
+					if ok {
+						val1, _ = render(stringVal)
+						if !strings.Contains(stringVal, "string") {
+							val1 = utils.ToInt(val1)
+						}
+					}
 				}
 			}
 			compareVals(val1, map2)
@@ -185,12 +199,7 @@ func compareVals(map1 interface{}, map2 *interface{}) {
 			}
 			if strings.HasPrefix(val1, "{{") && strings.HasSuffix(val1, "}}") {
 				// Get the value from the template.
-				newVal, ok := utils.TemplatizedValues[key].(string)
-				if ok {
-					val1 = newVal
-				} else {
-					val1 =  utils.ToString(utils.TemplatizedValues[key])
-				}
+				val1, _ = render(val1)
 			}
 			ok := parseBody(&val1, map2)
 			if !ok {
@@ -205,6 +214,10 @@ func compareVals(map1 interface{}, map2 *interface{}) {
 			return
 		}
 		var ok bool
+		ok = parseBody(v, map2)
+		if ok {
+			return
+		}
 		url, err := url.Parse(*v)
 		if err == nil {
 			urlParts := strings.Split(url.Path, "/")
@@ -237,6 +250,13 @@ func compareVals(map1 interface{}, map2 *interface{}) {
 		}
 		var ok bool
 		ok = parseBody(valPointer, map2)
+		parts := strings.Split(*valPointer, " ")
+		if len(parts) > 1 {
+			parts1 := strings.Split(parts[0], "{{")
+			if len(parts1) > 1 {
+				*valPointer = parts1[0] + "{{" + getType(v) + " " + parts[1] + "}}"
+			}
+		}
 		if !ok {
 			return
 		}
@@ -253,11 +273,14 @@ func parseBody(val1 *string, body *interface{}) bool {
 			if ok {
 				if strings.HasPrefix(stringVal, "{{") && strings.HasSuffix(stringVal, "}}") {
 					// Get the value from the template.
-					vals[i] = utils.TemplatizedValues[key]
+					vals[i], _ = render(stringVal)
+					if ! strings.Contains(stringVal, "string") {
+					vals[i] = utils.ToInt(vals[i])
+				}
 				}
 			}
 			ok = parseBody(val1, &vals[i])
-			if ok {
+			if ok && reflect.TypeOf(vals[i]) != reflect.TypeOf(b) {
 				newKey := insertUnique(key, *val1, utils.TemplatizedValues)
 				if newKey == "" {
 					newKey = key
@@ -449,17 +472,52 @@ func toString(val interface{}) string {
 	return ""
 }
 
+func render(testCaseStr string) (string, error) {
+	funcMap := template.FuncMap{
+		"int":    utils.ToInt,
+		"string": utils.ToString,
+		"float":  utils.ToFloat,
+	}
+	var ok bool
+	// Remove the double quotes if the template does not contain the word string.
+	if !strings.Contains(testCaseStr, "string") {
+		ok = true
+	}
+	tmpl, err := template.New("template").Funcs(funcMap).Parse(string(testCaseStr))
+	if err != nil {
+		return testCaseStr, fmt.Errorf("failed to parse the testcase using template", zap.Error(err))
+	}
+	var output bytes.Buffer
+	err = tmpl.Execute(&output, utils.TemplatizedValues)
+	if err != nil {
+		return testCaseStr, fmt.Errorf("failed to execute the template", zap.Error(err))
+	}
+	if ok {
+		outputString := strings.Trim(output.String(), `"`)
+		return outputString, nil
+	}
+	return output.String(), nil
+}
+
 func compareReqHeaders(req1 map[string]string, req2 map[string]string) {
 	for key, val1 := range req1 {
+		val1, _ = render(val1)
 		var val interface{}
 		// Check if the value is already present in the templatized values.
 		if strings.HasPrefix(val1, "{{") && strings.HasSuffix(val1, "}}") {
 			// Get the value from the template.
-			val = utils.TemplatizedValues[key]
-		}else {
+			stringVal, ok := val.(string)
+			if ok {
+				val, _ = render(stringVal)
+				if !strings.Contains(stringVal, "string") {
+					val = utils.ToInt(val)
+				}
+			}
+		} else {
 			val = val1
 		}
 		if val2, ok := req2[key]; ok {
+			val2, _ = render(val2)
 			if val == val2 {
 				newKey := insertUnique(key, val2, utils.TemplatizedValues)
 				if newKey == "" {
@@ -475,7 +533,6 @@ func compareReqHeaders(req1 map[string]string, req2 map[string]string) {
 func removeQuotesInTemplates(jsonStr string) string {
 	// Regular expression to find patterns with {{ and }}
 	re := regexp.MustCompile(`"\{\{[^{}]*\}\}"`)
-
 	// Function to replace matches by removing surrounding quotes
 	result := re.ReplaceAllStringFunc(jsonStr, func(match string) string {
 		if strings.Contains(match, "{{string") {
@@ -487,7 +544,6 @@ func removeQuotesInTemplates(jsonStr string) string {
 
 	return result
 }
-
 
 func noQuotes(tempMap map[string]interface{}) {
 	// Remove double quotes

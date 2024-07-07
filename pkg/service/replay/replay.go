@@ -12,10 +12,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	// "reflect"
+
+	// "reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"syscall"
+
 	// "text/template"
 	"time"
 
@@ -889,8 +892,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 				r.logger.Error("failed to marshal json data", zap.Error(err))
 				return err
 			}
-			tcs[i].HTTPResp.Body = removeQuotesInTemplates(string(jsonData))
-
+			tcs[i].HTTPResp.Body = string(jsonData)
 		}
 
 		// Compare the requests for the common fields.
@@ -906,10 +908,11 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 			// if tcs[i].HTTPResp.Header["Content-Type"] != "application/json" {
 			// 	continue
 			// }
+			// tcs[i].HTTPResp.Body, _ = render(tcs[i].HTTPResp.Body)
 			jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
 			if err != nil {
 				r.logger.Error("failed to parse response into json.  Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
-				return err
+				continue
 			} else if jsonResponse == nil {
 				continue
 			}
@@ -922,24 +925,26 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 				r.logger.Error("failed to marshal json data", zap.Error(err))
 				return err
 			}
-			tcs[i].HTTPResp.Body = removeQuotesInTemplates(string(jsonData))
+			tcs[i].HTTPResp.Body = string(jsonData)
 		}
 
 		// Compare the req and resp body for any common fields.
 		for i := 0; i < len(tcs)-1; i++ {
+			// tcs[i].HTTPResp.Body, _ = render(tcs[i].HTTPResp.Body)
 			jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
 			if err != nil {
 				r.logger.Error("failed to parse response into json. Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
-				return err
+				continue
 			} else if jsonResponse == nil {
 				continue
 			}
 			for j := i + 1; j < len(tcs); j++ {
+				// tcs[j].HTTPReq.Body, _ = render(tcs[j].HTTPReq.Body)
 				jsonRequest, err := parseIntoJson(tcs[j].HTTPReq.Body)
 				if err != nil {
-					r.logger.Error("failed to parse request into json. Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[j].Name))
-					return err
-				} else if jsonResponse == nil {
+					r.logger.Error("failed to parse request into json. Not templatizing the request of this test.", zap.Error(err), zap.Any("testcase:", tcs[j].Name))
+					continue
+				} else if jsonRequest == nil {
 					continue
 				}
 				compareVals(jsonResponse, &jsonRequest)
@@ -948,18 +953,20 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 					r.logger.Error("failed to marshal json data", zap.Error(err))
 					continue
 				}
-				tcs[j].HTTPReq.Body = removeQuotesInTemplates(string(jsonData))
+				tcs[j].HTTPReq.Body = string(jsonData)
 			}
 			jsonData, err := json.Marshal(jsonResponse)
 			if err != nil {
 				r.logger.Error("failed to marshal json data", zap.Error(err))
 				return err
 			}
-			tcs[i].HTTPResp.Body = removeQuotesInTemplates(string(jsonData))
+			tcs[i].HTTPResp.Body = string(jsonData)
 		}
 
 		// Updating all the testcases.
 		for _, tc := range tcs {
+			tc.HTTPReq.Body = removeQuotesInTemplates(tc.HTTPReq.Body)
+			tc.HTTPResp.Body = removeQuotesInTemplates(tc.HTTPResp.Body)
 			err = r.testDB.UpdateTestCase(ctx, tc, testSetId)
 			if err != nil {
 				r.logger.Error("failed to update the test case", zap.Error(err))
