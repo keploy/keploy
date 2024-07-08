@@ -620,7 +620,7 @@ func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg confi
 		utils.LogError(c.logger, err, "failed to marshal config data")
 		return errors.New("failed to marshal config data")
 	}
-	err = toolSvc.CreateConfig(ctx, configData.ConfigPath+"/keploy.yml", string(configDataBytes))
+	err = toolSvc.CreateConfig(ctx, c.cfg.ConfigPath+"/keploy.yml", string(configDataBytes))
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to create config file")
 		return errors.New("failed to create config file")
