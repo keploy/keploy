@@ -940,6 +940,25 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 			tcs[i].HTTPResp.Body = string(jsonData)
 		}
 
+		// Check the location header for any common fields.
+		for i := 0; i < len(tcs)-1; i++ {
+			jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
+			if err != nil {
+				r.logger.Error("failed to parse response into json.  Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
+				continue
+			} else if jsonResponse == nil {
+				continue
+			}
+			for j := i + 1; j < len(tcs); j++ {
+				// Check if there is the Location header in the headers.
+				for key, val := range tcs[j].HTTPReq.Header {
+					if key == "Location" {
+						compareVals(&val, &jsonResponse)
+					}
+				}
+			}
+		}
+
 		// Compare the req and resp body for any common fields.
 		for i := 0; i < len(tcs)-1; i++ {
 			// tcs[i].HTTPResp.Body, _ = render(tcs[i].HTTPResp.Body)

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"runtime"
 	"strings"
 	"time"
 
@@ -444,6 +445,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		// empty the command if base path is provided, because no need of command even if provided
 		if c.cfg.Test.BasePath != "" {
 			c.cfg.CommandType = string(utils.Empty)
+			c.cfg.Command = ""
 		}
 
 		if c.cfg.GenerateGithubActions && utils.CmdType(c.cfg.CommandType) != utils.Empty {
