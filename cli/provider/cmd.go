@@ -612,7 +612,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 }
 
 func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg config.Config) error {
-	defaultCfg = c.updateConfigData(defaultCfg)
+	defaultCfg = c.UpdateConfigData(defaultCfg)
 	toolSvc := tools.NewTools(c.logger, nil)
 	configData := defaultCfg
 	configDataBytes, err := yaml.Marshal(configData)
@@ -629,7 +629,7 @@ func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg confi
 	return nil
 }
 
-func (c *CmdConfigurator) updateConfigData(defaultCfg config.Config) config.Config {
+func (c *CmdConfigurator) UpdateConfigData(defaultCfg config.Config) config.Config {
 	defaultCfg.Command = c.cfg.Command
 	defaultCfg.Test.Delay = c.cfg.Test.Delay
 	defaultCfg.AppName = c.cfg.AppName
