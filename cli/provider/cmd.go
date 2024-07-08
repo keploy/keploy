@@ -449,6 +449,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if c.cfg.GenerateGithubActions && utils.CmdType(c.cfg.CommandType) != utils.Empty {
 			defer utils.GenerateGithubActions(c.logger, c.cfg.Command)
 		}
+
 		if c.cfg.InDocker {
 			c.logger.Info("detected that Keploy is running in a docker container")
 			if len(c.cfg.Path) > 0 {
@@ -491,6 +492,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 		}
+		if utils.CmdType(c.cfg.Command) == utils.Empty && runtime.GOOS == "darwin" {
+			err := os.Setenv("RUN_IN_DOCKER", "true")
+			if err != nil {
+				utils.LogError(c.logger, err, "failed to set RUN_IN_DOCKER env variable in darwin")
+				return err
+			}
+		}
+
 		err = StartInDocker(ctx, c.logger, c.cfg)
 		if err != nil {
 			return err
