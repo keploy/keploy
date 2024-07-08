@@ -57,8 +57,9 @@ type Record struct {
 }
 
 type ReRecord struct {
-	SelectedTests []string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
-	Filters       []Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
+	SelectedTests    []string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
+	Filters          []Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
+	RemoveOlderTests bool     `json:"removeOlderTests" yaml:"removeOlderTests" mapstructure:"removeOlderTests"`
 }
 
 type Normalize struct {

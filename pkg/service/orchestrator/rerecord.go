@@ -3,10 +3,8 @@
 package orchestrator
 
 import (
-	"bufio"
 	"context"
 	"fmt"
-	"os"
 	"sort"
 	"time"
 
@@ -149,15 +147,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 	}
 
 	stopReason = "Re-recorded all the selected testsets successfully"
-	o.logger.Info("Re-record was successfull. Do you want to remove the older testsets? (y/n)", zap.Any("testsets", SelectedTests))
-	reader := bufio.NewReader(os.Stdin)
-	input, err := reader.ReadString('\n')
-	if err != nil {
-		o.logger.Warn("Failed to read input. The older testsets will be kept.")
-		return nil
-	}
-
-	if input == "y\n" || input == "Y\n" {
+	if o.config.ReRecord.RemoveOlderTests {
 		for _, testSet := range SelectedTests {
 			err := o.replay.DeleteTestSet(ctx, testSet)
 			if err != nil {
@@ -165,10 +155,9 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 			}
 		}
 		o.logger.Info("Deleted the older testsets successfully")
-	} else if input == "n\n" || input == "N\n" {
+	}
+	if !o.config.ReRecord.RemoveOlderTests {
 		o.logger.Info("skipping the deletion of older testsets")
-	} else {
-		o.logger.Warn("Invalid input. The older testsets will be kept.")
 	}
 	return nil
 }

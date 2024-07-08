@@ -216,6 +216,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint64P("app-id", "a", c.cfg.AppID, "A unique name for the user's application")
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
+		cmd.Flags().Bool("remove-older-tests", false, "Remove older tests in case of rerecord")
 		err = cmd.Flags().MarkHidden("port")
 		if err != nil {
 			errMsg := "failed to mark port as hidden flag"
@@ -322,6 +323,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"keployNetwork":         "keploy-network",
 		"recordTimer":           "record-timer",
 		"urlMethods":            "url-methods",
+		"removeOlderTests":      "remove-older-tests",
 	}
 
 	if newName, ok := flagNameMapping[name]; ok {
@@ -545,6 +547,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 			if cmd.Name() == "rerecord" {
 				c.cfg.Test.SkipCoverage = true
+				c.cfg.ReRecord.RemoveOlderTests = false
+				removeOlderTests, err := cmd.Flags().GetBool("removeOlderTests")
+				if err != nil {
+					utils.LogError(c.logger, err, "Can't place remove Older Tests file")
+				}
+				c.cfg.ReRecord.RemoveOlderTests = removeOlderTests
 				return nil
 			}
 
