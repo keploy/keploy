@@ -335,6 +335,7 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 	if err != nil {
 		return err
 	}
+	defaultCfg := *c.cfg
 	err = c.PreProcessFlags(cmd)
 	if err != nil {
 		c.logger.Error("failed to preprocess flags", zap.Error(err))
@@ -346,7 +347,7 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 		return err
 	}
 	if !IsConfigFileFound {
-		err := c.CreateConfigFile(ctx)
+		err := c.CreateConfigFile(ctx, defaultCfg)
 		if err != nil {
 			c.logger.Error("failed to create config file", zap.Error(err))
 			return err
@@ -610,10 +611,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	return nil
 }
 
-func (c *CmdConfigurator) CreateConfigFile(ctx context.Context) error {
+func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg config.Config) error {
+	defaultCfg = c.updateConfigData(defaultCfg)
 	toolSvc := tools.NewTools(c.logger, nil)
-	configData := *c.cfg
-	configData.Path = strings.TrimSuffix(c.cfg.Path, "/keploy")
+	configData := defaultCfg
 	configDataBytes, err := yaml.Marshal(configData)
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to marshal config data")
@@ -626,4 +627,18 @@ func (c *CmdConfigurator) CreateConfigFile(ctx context.Context) error {
 	}
 	c.logger.Info("Generated config file based on the flags that are used")
 	return nil
+}
+
+func (c *CmdConfigurator) updateConfigData(defaultCfg config.Config) config.Config {
+	defaultCfg.Command = c.cfg.Command
+	defaultCfg.Test.Delay = c.cfg.Test.Delay
+	defaultCfg.AppName = c.cfg.AppName
+	defaultCfg.Test.APITimeout = c.cfg.Test.APITimeout
+	defaultCfg.ContainerName = c.cfg.ContainerName
+	defaultCfg.Test.IgnoreOrdering = c.cfg.Test.IgnoreOrdering
+	defaultCfg.Test.Language = c.cfg.Test.Language
+	defaultCfg.DisableANSI = c.cfg.DisableANSI
+	defaultCfg.Test.SkipCoverage = c.cfg.Test.SkipCoverage
+	defaultCfg.Test.Mocking = c.cfg.Test.Mocking
+	return defaultCfg
 }
