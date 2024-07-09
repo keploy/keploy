@@ -35,6 +35,7 @@ type Config struct {
 	KeployContainer       string       `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
 	KeployNetwork         string       `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
 	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
+	InCi                  bool         `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
 }
 
 type UtGen struct {
@@ -57,9 +58,8 @@ type Record struct {
 }
 
 type ReRecord struct {
-	SelectedTests    []string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
-	Filters          []Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
-	RemoveOlderTests bool     `json:"removeOlderTests" yaml:"removeOlderTests" mapstructure:"removeOlderTests"`
+	SelectedTests []string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
+	Filters       []Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
 }
 
 type Normalize struct {
