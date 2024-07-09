@@ -170,7 +170,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 
 	//add flags
 	var err error
-	cmd.Flags().SetNormalizeFunc(aliasNormalizeFunc)	
+	cmd.Flags().SetNormalizeFunc(aliasNormalizeFunc)
 	switch cmd.Name() {
 	case "update":
 		return nil
