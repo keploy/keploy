@@ -11,6 +11,8 @@ if [ -f "./keploy.yml" ]; then
 fi
 export ConnectionString="root:my-secret-pw@tcp(localhost:3306)/mysql"
 
+rm -rf keploy/
+
 # Update the global noise to ts.
 go build -o urlShort
 
