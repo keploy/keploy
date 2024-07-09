@@ -149,7 +149,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 	}
 
 	stopReason = "Re-recorded all the selected testsets successfully"
-	if !o.config.InCi{
+	if !o.config.InCi {
 		o.logger.Info("Re-record was successfull. Do you want to remove the older testsets? (y/n)", zap.Any("testsets", SelectedTests))
 		reader := bufio.NewReader(os.Stdin)
 		input, err := reader.ReadString('\n')

@@ -167,12 +167,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		fmt.Println()
 		return err
 	})
-	
+
 	//add flags
 	var err error
-	cmd.Flags().SetNormalizeFunc(aliasNormalizeFunc)
+	cmd.Flags().SetNormalizeFunc(aliasNormalizeFunc)	
 	switch cmd.Name() {
-		
 	case "update":
 		return nil
 	case "normalize":
@@ -200,14 +199,14 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		
+
 	case "record", "test", "rerecord":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("port", c.cfg.Port, "GraphQL server port used for executing testcases in unit test library integration")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
-		
+
 		cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command to start the user application (native/docker/docker-compose)")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
@@ -216,6 +215,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint64P("app-id", "a", c.cfg.AppID, "A unique name for the user's application")
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
+		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
 		err = cmd.Flags().MarkHidden("port")
 		if err != nil {
 			errMsg := "failed to mark port as hidden flag"
@@ -224,7 +224,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		}
 		//add rest of the uncommon flags for record, test, rerecord commands
 		c.AddUncommonFlags(cmd)
-		
+
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
 		cmd.PersistentFlags().Bool("disable-tele", c.cfg.DisableTele, "Run in telemetry mode")
@@ -245,7 +245,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	default:
 		return errors.New("unknown command name")
 	}
-	cmd.PersistentFlags().Bool("in-ci", false, "is CI Running or not")
 	cmd.Flags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
 
 	return nil
@@ -642,5 +641,6 @@ func (c *CmdConfigurator) UpdateConfigData(defaultCfg config.Config) config.Conf
 	defaultCfg.DisableANSI = c.cfg.DisableANSI
 	defaultCfg.Test.SkipCoverage = c.cfg.Test.SkipCoverage
 	defaultCfg.Test.Mocking = c.cfg.Test.Mocking
+	defaultCfg.InCi = c.cfg.InCi
 	return defaultCfg
 }

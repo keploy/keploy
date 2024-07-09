@@ -20,7 +20,7 @@ debug: false
 disableANSI: false
 disableTele: false
 inDocker: false
-inCI: false
+inCi: false
 generateGithubActions: true
 containerName: ""
 networkName: ""
