@@ -95,11 +95,8 @@ if grep "WARNING: DATA RACE" "test_logs.txt"; then
     cat "test_logs.txt"
     exit 1
 fi
-echo "Test mode successful"
 
 sleep 10
-
-echo "Start rerecord"
 sudo -E env PATH=$PATH ./../../../keployv2 rerecord -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --inCi=true &> "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
@@ -113,10 +110,7 @@ if grep "WARNING: DATA RACE" "${test_container}.txt"; then
     cat "${test_container}.txt"
     exit 1
 fi
-echo "Rerecord successful"
 sleep 10
-
-echo "Starting test again"
 sudo -E env PATH=$PATH ./../../../keployv2 test -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then

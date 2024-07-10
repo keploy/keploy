@@ -80,10 +80,11 @@ for i in {1..2}; do
 
     echo "Recorded test case and mocks for iteration ${i}"
 done
+sleep 10
 
 # Start the keploy in test mode.
 test_container="ginApp_test"
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 30 --generateGithubActions=false &> "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
@@ -98,31 +99,33 @@ if grep "WARNING: DATA RACE" "${test_container}.txt"; then
 fi
 sleep 10
 
-sudo -E env PATH=$PATH ./../../keployv2 rerecord -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --inCi=true &> "${test_container}.txt"
+rerecord_container="ginApp_rerecord"
+sudo -E env PATH=$PATH ./../../keployv2 rerecord -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$rerecord_container" --inCi=true &> "${rerecord_container}.txt"
 
-if grep "ERROR" "${test_container}.txt"; then
+if grep "ERROR" "${rerecord_container}.txt"; then
     echo "Error found in pipeline..."
-    cat "${test_container}.txt"
+    cat "${rerecord_container}.txt"
     exit 1
 fi
 
-if grep "WARNING: DATA RACE" "${test_container}.txt"; then
+if grep "WARNING: DATA RACE" "${rerecord_container}.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
-    cat "${test_container}.txt"
+    cat "${rerecord_container}.txt"
     exit 1
 fi
 
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
+rerecord_test_container="ginApp_rerecord_test"
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$rerecord_test_container" --apiTimeout 60 --delay 20 --generateGithubActions=false &> "${rerecord_test_container}.txt"
 
-if grep "ERROR" "${test_container}.txt"; then
+if grep "ERROR" "${rerecord_test_container}.txt"; then
     echo "Error found in pipeline..."
-    cat "${test_container}.txt"
+    cat "${rerecord_test_container}.txt"
     exit 1
 fi
 
-if grep "WARNING: DATA RACE" "${test_container}.txt"; then
+if grep "WARNING: DATA RACE" "${rerecord_test_container}.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
-    cat "${test_container}.txt"
+    cat "${rerecord_test_container}.txt"
     exit 1
 fi
 
