@@ -247,9 +247,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 			break
 		}
 
-		_, err = requestMockemulator.AfterTestHook(ctx, testRunID, testSetID, len(testSetIDs))
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to get after test hook")
+		if !(!r.config.Test.SkipCoverage && i == len(testSetIDs)-1) {
+			_, err = requestMockemulator.AfterTestHook(ctx, testRunID, testSetID, models.TestCoverage{}, len(testSetIDs))
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to get after test hook")
+			}
 		}
 
 		if i == 0 && !r.config.Test.SkipCoverage {
@@ -289,6 +291,10 @@ func (r *Replayer) Start(ctx context.Context) error {
 				err = cov.AppendCoverage(&coverageData, testRunID)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to update report with the coverage data")
+				}
+				_, err = requestMockemulator.AfterTestHook(ctx, testRunID, testSetIDs[len(testSetIDs)-1], coverageData, len(testSetIDs))
+				if err != nil {
+					utils.LogError(r.logger, err, "failed to get after test hook")
 				}
 			} else {
 				utils.LogError(r.logger, err, "failed to calculate coverage for the test run")
