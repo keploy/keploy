@@ -172,7 +172,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	var err error
 	cmd.Flags().SetNormalizeFunc(aliasNormalizeFunc)
 	switch cmd.Name() {
-
 	case "update":
 		return nil
 	case "normalize":
@@ -216,6 +215,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint64P("app-id", "a", c.cfg.AppID, "A unique name for the user's application")
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
+		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
 		err = cmd.Flags().MarkHidden("port")
 		if err != nil {
 			errMsg := "failed to mark port as hidden flag"
@@ -322,6 +322,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"keployNetwork":         "keploy-network",
 		"recordTimer":           "record-timer",
 		"urlMethods":            "url-methods",
+		"inCi":                  "in-ci",
 	}
 
 	if newName, ok := flagNameMapping[name]; ok {
@@ -612,7 +613,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 }
 
 func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg config.Config) error {
-	defaultCfg = c.updateConfigData(defaultCfg)
+	defaultCfg = c.UpdateConfigData(defaultCfg)
 	toolSvc := tools.NewTools(c.logger, nil)
 	configData := defaultCfg
 	configDataBytes, err := yaml.Marshal(configData)
@@ -629,7 +630,7 @@ func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg confi
 	return nil
 }
 
-func (c *CmdConfigurator) updateConfigData(defaultCfg config.Config) config.Config {
+func (c *CmdConfigurator) UpdateConfigData(defaultCfg config.Config) config.Config {
 	defaultCfg.Command = c.cfg.Command
 	defaultCfg.Test.Delay = c.cfg.Test.Delay
 	defaultCfg.AppName = c.cfg.AppName
