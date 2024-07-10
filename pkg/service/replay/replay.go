@@ -201,7 +201,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
 		}
-		if _, ok := r.config.Test.IgnoredTests[testSetID]; ok {
+		if _, ok := r.config.Test.IgnoredTests[testSetID]; ok && len(r.config.Test.IgnoredTests[testSetID]) == 0 {
 			continue
 		}
 		requestMockemulator.ProcessMockFile(ctx, testSetID)
