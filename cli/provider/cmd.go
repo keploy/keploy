@@ -641,6 +641,5 @@ func (c *CmdConfigurator) UpdateConfigData(defaultCfg config.Config) config.Conf
 	defaultCfg.DisableANSI = c.cfg.DisableANSI
 	defaultCfg.Test.SkipCoverage = c.cfg.Test.SkipCoverage
 	defaultCfg.Test.Mocking = c.cfg.Test.Mocking
-	defaultCfg.InCi = c.cfg.InCi
 	return defaultCfg
 }
