@@ -32,6 +32,7 @@ var completeTestReport = make(map[string]TestReportVerdict)
 var totalTests int
 var totalTestPassed int
 var totalTestFailed int
+var totalTestIgnored int
 
 // emulator contains the struct instance that implements RequestEmulator interface. This is done for
 // attaching the objects dynamically as plugins.
@@ -201,7 +202,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
 		}
-		if _, ok := r.config.Test.IgnoredTests[testSetID]; ok {
+		if _, ok := r.config.Test.IgnoredTests[testSetID]; ok && len(r.config.Test.IgnoredTests[testSetID]) == 0 {
 			continue
 		}
 		requestMockemulator.ProcessMockFile(ctx, testSetID)
@@ -395,6 +396,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var appErr models.AppError
 	var success int
 	var failure int
+	var ignored int
 	var totalConsumedMocks = map[string]bool{}
 
 	testSetStatus := models.TestSetStatusPassed
@@ -509,6 +511,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		if _, ok := ignoredTests[testCase.Name]; ok {
+			testCaseResult := &models.TestResult{
+				Kind:         models.HTTP,
+				Name:         testSetID,
+				Status:       models.TestStatusIgnored,
+				TestCaseID:   testCase.Name,
+				TestCasePath: filepath.Join(r.config.Path, testSetID),
+				MockPath:     filepath.Join(r.config.Path, testSetID, requestMockemulator.FetchMockName()),
+			}
+			loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+			if loopErr != nil {
+				utils.LogError(r.logger, err, "failed to insert test case result")
+				break
+			}
+			ignored++
 			continue
 		}
 
@@ -675,6 +691,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Total:   testCasesCount,
 		Success: success,
 		Failure: failure,
+		Ignored: ignored,
 		Tests:   testCaseResults,
 	}
 
@@ -698,16 +715,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	// TODO Need to decide on whether to use global variable or not
 	verdict := TestReportVerdict{
-		total:  testReport.Total,
-		failed: testReport.Failure,
-		passed: testReport.Success,
-		status: testSetStatus == models.TestSetStatusPassed,
+		total:   testReport.Total,
+		failed:  testReport.Failure,
+		passed:  testReport.Success,
+		ignored: testReport.Ignored,
+		status:  testSetStatus == models.TestSetStatusPassed,
 	}
 
 	completeTestReport[testSetID] = verdict
 	totalTests += testReport.Total
 	totalTestPassed += testReport.Success
 	totalTestFailed += testReport.Failure
+	totalTestIgnored += testReport.Ignored
 
 	if testSetStatus == models.TestSetStatusFailed || testSetStatus == models.TestSetStatusPassed {
 		if testSetStatus == models.TestSetStatusFailed {
@@ -715,8 +734,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		} else {
 			pp.SetColorScheme(models.GetPassingColorScheme())
 		}
-		if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure); err != nil {
-			utils.LogError(r.logger, err, "failed to print testrun summary")
+		if testReport.Ignored > 0 {
+			if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure, testReport.Ignored); err != nil {
+				utils.LogError(r.logger, err, "failed to print testrun summary")
+			}
+		} else {
+			if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure); err != nil {
+				utils.LogError(r.logger, err, "failed to print testrun summary")
+			}
 		}
 	}
 
@@ -812,13 +837,24 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 			}
 			return testSuiteIDNumberI < testSuiteIDNumberJ
 		})
-		if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed); err != nil {
-			utils.LogError(r.logger, err, "failed to print test run summary")
-			return
-		}
-		if _, err := pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\n"); err != nil {
-			utils.LogError(r.logger, err, "failed to print test suite summary")
-			return
+		if totalTestIgnored > 0 {
+			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n", totalTests, totalTestPassed, totalTestFailed, totalTestIgnored); err != nil {
+				utils.LogError(r.logger, err, "failed to print test run summary")
+				return
+			}
+			if _, err := pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\tIgnored\t\n"); err != nil {
+				utils.LogError(r.logger, err, "failed to print test suite summary")
+				return
+			}
+		} else {
+			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed); err != nil {
+				utils.LogError(r.logger, err, "failed to print test run summary")
+				return
+			}
+			if _, err := pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\n"); err != nil {
+				utils.LogError(r.logger, err, "failed to print test suite summary")
+				return
+			}
 		}
 		for _, testSuiteName := range testSuiteNames {
 			if completeTestReport[testSuiteName].status {
@@ -826,9 +862,16 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 			} else {
 				pp.SetColorScheme(models.GetFailingColorScheme())
 			}
-			if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed); err != nil {
-				utils.LogError(r.logger, err, "failed to print test suite details")
-				return
+			if totalTestIgnored > 0 {
+				if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed, completeTestReport[testSuiteName].ignored); err != nil {
+					utils.LogError(r.logger, err, "failed to print test suite details")
+					return
+				}
+			} else {
+				if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed); err != nil {
+					utils.LogError(r.logger, err, "failed to print test suite details")
+					return
+				}
 			}
 		}
 		if _, err := pp.Printf("\n<=========================================> \n\n"); err != nil {
