@@ -82,6 +82,32 @@ if grep "WARNING: DATA RACE" "${test_container}.txt"; then
     exit 1
 fi
 
+sleep 10
+
+rerecord_container="nodeApp_rerecord"
+sudo -E env PATH=$PATH ./../../keployv2 rerecord -c "docker run -p8000:8000 --rm --name $rerecord_container --network keploy-network flask-app:1.0" --containerName "$rerecord_container" --inCi=true &> "${rerecord_container}.txt"
+
+if grep "ERROR" "${test_container}.txt"; then
+    echo "Error found in pipeline..."
+    cat "${test_container}.txt"
+    exit 1
+fi
+
+if grep "WARNING: DATA RACE" "${test_container}.txt"; then
+    echo "Race condition detected in test, stopping pipeline..."
+    cat "${test_container}.txt"
+    exit 1
+fi
+
+rerecord_after_test_container="nodeApp_rerecord_after_test"
+sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p8000:8000 --rm --name $rerecord_after_test_container --network keploy-network flask-app:1.0" --containerName "$rerecord_after_test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${rerecord_after_test_container}.txt"
+
+if grep "ERROR" "${test_container}.txt"; then
+    echo "Error found in pipeline..."
+    cat "${test_container}.txt"
+    exit 1
+fi
+
 all_passed=true
 
 for i in {0..1}

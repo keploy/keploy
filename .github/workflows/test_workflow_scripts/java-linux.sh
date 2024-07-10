@@ -95,6 +95,30 @@ if grep "WARNING: DATA RACE" "test_logs.txt"; then
     exit 1
 fi
 
+sleep 10
+
+sudo -E env PATH=$PATH ./../../keployv2 rerecord -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --inCi=true &> "${test_container}.txt"
+
+if grep "ERROR" "${test_container}.txt"; then
+    echo "Error found in pipeline..."
+    cat "${test_container}.txt"
+    exit 1
+fi
+
+if grep "WARNING: DATA RACE" "${test_container}.txt"; then
+    echo "Race condition detected in test, stopping pipeline..."
+    cat "${test_container}.txt"
+    exit 1
+fi
+
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
+
+if grep "ERROR" "${test_container}.txt"; then
+    echo "Error found in pipeline..."
+    cat "${test_container}.txt"
+    exit 1
+fi
+
 all_passed=true
 
 # Get the test results from the testReport file.
