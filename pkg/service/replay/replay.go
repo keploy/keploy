@@ -387,7 +387,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		testReport := &models.TestReport{
 			Version: models.GetVersion(),
 			TestSet: testSetID,
-			Status:  string(models.TestStatusIgnored),
+			Status:  string(models.TestSetStatusIgnored),
 			Total:   len(testCases),
 			Ignored: len(testCases),
 		}
