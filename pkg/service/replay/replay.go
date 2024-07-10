@@ -202,9 +202,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
 		}
-		if _, ok := r.config.Test.IgnoredTests[testSetID]; ok && len(r.config.Test.IgnoredTests[testSetID]) == 0 {
-			continue
-		}
+
 		requestMockemulator.ProcessMockFile(ctx, testSetID)
 
 		if !r.config.Test.SkipCoverage {
@@ -241,6 +239,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 		case models.TestSetStatusPassed:
 			testSetResult = true
 			requestMockemulator.ProcessTestRunStatus(ctx, testSetResult, testSetID)
+		case models.TestSetStatusIgnored:
+			testSetResult = true
 		}
 		testRunResult = testRunResult && testSetResult
 		if abortTestRun {
@@ -358,10 +358,10 @@ func (r *Replayer) GetTestCases(ctx context.Context, testID string) ([]*models.T
 }
 
 func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error) {
+
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
 	runTestSetCtx = context.WithValue(runTestSetCtx, models.ErrGroupKey, runTestSetErrGrp)
-
 	runTestSetCtx, runTestSetCtxCancel := context.WithCancel(runTestSetCtx)
 
 	exitLoopChan := make(chan bool, 2)
@@ -374,10 +374,37 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		close(exitLoopChan)
 	}()
 
+	testCases, err := r.testDB.GetTestCases(runTestSetCtx, testSetID)
+	if err != nil {
+		return models.TestSetStatusFailed, fmt.Errorf("failed to get test cases: %w", err)
+	}
+
+	if len(testCases) == 0 {
+		return models.TestSetStatusPassed, nil
+	}
+
+	if _, ok := r.config.Test.IgnoredTests[testSetID]; ok && len(r.config.Test.IgnoredTests[testSetID]) == 0 {
+		testReport := &models.TestReport{
+			Version: models.GetVersion(),
+			TestSet: testSetID,
+			Status:  string(models.TestStatusIgnored),
+			Total:   len(testCases),
+			Ignored: len(testCases),
+		}
+
+		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to insert report")
+			return models.TestSetStatusFailed, err
+		}
+
+		return models.TestSetStatusIgnored, nil
+	}
+
 	var conf *models.TestSet
 
 	//Execute the Pre-script before each test-set if provided
-	conf, err := r.testSetConf.Read(runTestSetCtx, testSetID)
+	conf, err = r.testSetConf.Read(runTestSetCtx, testSetID)
 	if err != nil {
 		if strings.Contains(err.Error(), "no such file or directory") {
 			r.logger.Info("config file not found, continuing execution...", zap.String("test-set", testSetID))
@@ -409,15 +436,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	testSetStatusByErrChan := models.TestSetStatusRunning
 
 	r.logger.Info("running", zap.Any("test-set", models.HighlightString(testSetID)))
-
-	testCases, err := r.testDB.GetTestCases(runTestSetCtx, testSetID)
-	if err != nil {
-		return models.TestSetStatusFailed, fmt.Errorf("failed to get test cases: %w", err)
-	}
-
-	if len(testCases) == 0 {
-		return models.TestSetStatusPassed, nil
-	}
 
 	cmdType := utils.CmdType(r.config.CommandType)
 	var userIP string
