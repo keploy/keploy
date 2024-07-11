@@ -14,7 +14,8 @@ import (
 type TestReportVerdict struct {
 	total  int
 	passed int
-	failed int ``
+	failed int 
+	ignored int
 	status bool
 }
 
