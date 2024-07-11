@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/docker/docker/api/types"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/hooks"
@@ -28,10 +27,7 @@ import (
 )
 
 type CommonInternalService struct {
-	YamlTestDB      *testdb.TestYaml
-	YamlMockDb      *mockdb.MockYaml
-	YamlReportDb    *reportdb.TestReport
-	YamlTestSetDB   *testset.Db[*models.TestSet]
+	commonPlatformServices
 	Instrumentation *core.Core
 }
 
@@ -57,7 +53,7 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	return nil, errors.New("invalid command")
 }
 
-func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger) (*CommonInternalService, error) {
+func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) (*CommonInternalService, error) {
 
 	h := hooks.NewHooks(logger, c)
 	p := proxy.New(logger, h, c)
@@ -70,12 +66,6 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 		client, err = docker.New(logger)
 		if err != nil {
 			utils.LogError(logger, err, "failed to create docker client")
-		}
-
-		addKeployNetwork(ctx, logger, client)
-		err := client.CreateVolume(ctx, "debugfs")
-		if err != nil {
-			utils.LogError(logger, err, "failed to debugfs volume")
 		}
 
 		//parse docker command only in case of docker start or docker run commands
@@ -105,38 +95,12 @@ func GetCommonServices(ctx context.Context, c *config.Config, logger *zap.Logger
 	reportDB := reportdb.New(logger, c.Path+"/reports")
 	testSetDb := testset.New[*models.TestSet](logger, c.Path)
 	return &CommonInternalService{
-		Instrumentation: instrumentation,
-		YamlTestDB:      testDB,
-		YamlMockDb:      mockDB,
-		YamlReportDb:    reportDB,
-		YamlTestSetDB:   testSetDb,
+		commonPlatformServices{
+			YamlTestDB:    testDB,
+			YamlMockDb:    mockDB,
+			YamlReportDb:  reportDB,
+			YamlTestSetDB: testSetDb,
+		},
+		instrumentation,
 	}, nil
-}
-
-func addKeployNetwork(ctx context.Context, logger *zap.Logger, client docker.Client) {
-
-	// Check if the 'keploy-network' network exists
-	networks, err := client.NetworkList(ctx, types.NetworkListOptions{})
-	if err != nil {
-		logger.Debug("failed to list docker networks")
-		return
-	}
-
-	for _, network := range networks {
-		if network.Name == "keploy-network" {
-			logger.Debug("keploy network already exists")
-			return
-		}
-	}
-
-	// Create the 'keploy' network if it doesn't exist
-	_, err = client.NetworkCreate(ctx, "keploy-network", types.NetworkCreate{
-		CheckDuplicate: true,
-	})
-	if err != nil {
-		logger.Debug("failed to create keploy network")
-		return
-	}
-
-	logger.Debug("keploy network created")
 }
