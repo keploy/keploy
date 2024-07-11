@@ -12,11 +12,11 @@ import (
 )
 
 type TestReportVerdict struct {
-	total  int
-	passed int
-	failed int 
+	total   int
+	passed  int
+	failed  int
 	ignored int
-	status bool
+	status  bool
 }
 
 func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) config.GlobalNoise {
