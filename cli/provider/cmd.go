@@ -172,7 +172,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	var err error
 	cmd.Flags().SetNormalizeFunc(aliasNormalizeFunc)
 	switch cmd.Name() {
-
 	case "update":
 		return nil
 	case "normalize":
@@ -216,6 +215,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint64P("app-id", "a", c.cfg.AppID, "A unique name for the user's application")
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
+		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
 		err = cmd.Flags().MarkHidden("port")
 		if err != nil {
 			errMsg := "failed to mark port as hidden flag"
@@ -322,6 +322,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"keployNetwork":         "keploy-network",
 		"recordTimer":           "record-timer",
 		"urlMethods":            "url-methods",
+		"inCi":                  "in-ci",
 	}
 
 	if newName, ok := flagNameMapping[name]; ok {
