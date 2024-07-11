@@ -21,7 +21,7 @@ func checkForCoverFlag(logger *zap.Logger, cmd string) bool {
 		logger.Warn("cover flag not found in command, skipping coverage calculation")
 		return false
 	}
-	file, err := elf.Open(cmd)
+	file, err := elf.Open(cmdFields[0])
 	if err != nil {
 		utils.LogError(logger, err, "failed to open file, skipping coverage calculation")
 		return false
