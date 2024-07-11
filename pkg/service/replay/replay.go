@@ -132,7 +132,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	// then set the language to detected language
 	if r.config.Test.Language == "" {
 		if language == models.Unknown {
-			r.logger.Warn("failed to detect language, skipping coverage caluclation. please use --language to manually set the language")
+			r.logger.Warn("failed to detect language, skipping coverage calculation. please use --language to manually set the language")
 			r.config.Test.SkipCoverage = true
 		} else {
 			r.logger.Warn(fmt.Sprintf("%s language detected. please use --language to manually set the language if needed", language))
@@ -148,26 +148,19 @@ func (r *Replayer) Start(ctx context.Context) error {
 	case models.Go:
 		cov = golang.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.CoverageReportPath, r.config.CommandType)
 	case models.Python:
-		cov = python.New(ctx, r.logger, r.reportDB, r.config.Command, executable)
+		cov = python.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.CommandType, executable)
 	case models.Javascript:
-		cov = javascript.New(ctx, r.logger, r.reportDB, r.config.Command)
+		cov = javascript.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.CommandType)
 	case models.Java:
-		cov = java.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.JacocoAgentPath, executable)
+		cov = java.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.JacocoAgentPath, executable, r.config.CommandType)
 	default:
 		r.config.Test.SkipCoverage = true
 	}
 
 	if !r.config.Test.SkipCoverage {
-		if utils.CmdType(r.config.CommandType) == utils.Native {
-			r.config.CoverageCommand, err = cov.PreProcess()
-			if err != nil {
-				r.config.Test.SkipCoverage = true
-			}
-		}
-		err = os.Setenv("CLEAN", "true") // related to javascript coverage calculation
+		r.config.CoverageCommand, err = cov.PreProcess()
 		if err != nil {
 			r.config.Test.SkipCoverage = true
-			r.logger.Warn("failed to set CLEAN env variable, skipping coverage caluclation", zap.Error(err))
 		}
 	}
 

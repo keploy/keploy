@@ -9,31 +9,51 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/coverage"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
 type Javascript struct {
-	ctx      context.Context
-	logger   *zap.Logger
-	reportDB coverage.ReportDB
-	cmd      string
+	ctx         context.Context
+	logger      *zap.Logger
+	reportDB    coverage.ReportDB
+	cmd         string
+	commandType string
 }
 
-func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cmd string) *Javascript {
+func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cmd, commandType string) *Javascript {
 	return &Javascript{
-		ctx:      ctx,
-		logger:   logger,
-		reportDB: reportDB,
-		cmd:      cmd,
+		ctx:         ctx,
+		logger:      logger,
+		reportDB:    reportDB,
+		cmd:         cmd,
+		commandType: commandType,
 	}
 }
 
 func (j *Javascript) PreProcess() (string, error) {
+	err := os.Setenv("CLEAN", "true")
+	if err != nil {
+		j.logger.Warn("failed to set CLEAN env variable, skipping coverage caluclation", zap.Error(err))
+		return j.cmd, err
+	}
+	if utils.CmdType(j.commandType) == utils.DockerRun {
+		index := strings.Index(j.cmd, "docker run")
+		return j.cmd[:index+len("docker run")] +
+			" -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") +
+			" -w " + os.Getenv("PWD") +
+			" -e CLEAN=$CLEAN " +
+			j.cmd[index+len("docker run"):], nil
+	}
+	if utils.CmdType(j.commandType) != utils.Native {
+		return j.cmd, nil
+	}
 	cmd := exec.Command("nyc", "--version")
-	err := cmd.Run()
+	err = cmd.Run()
 	if err != nil {
 		j.logger.Warn("coverage tool not found, skipping coverage caluclation. please install coverage tool using 'npm install -g nyc'")
 		return j.cmd, err

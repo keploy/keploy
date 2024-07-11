@@ -25,7 +25,7 @@ ENV KEPLOY_INDOCKER=true
 
 # Update the package lists and install required packages
 RUN apt-get update
-RUN apt-get install -y ca-certificates curl sudo && \
+RUN apt-get install -y ca-certificates curl sudo default-jdk && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -36,6 +36,12 @@ RUN curl -fsSL https://get.docker.com -o get-docker.sh && \
 
 # Install docker-compose to PATH
 RUN apt install docker-compose -y
+
+RUN apt install -y python3-coverage
+
+COPY --from=golang:1.22 /usr/local/go /usr/local/go
+ENV GOROOT=/usr/local/go
+ENV PATH="$PATH:$GOROOT/bin"
 
 # Copy the keploy binary and the entrypoint script from the build container
 COPY --from=build /app/keploy /app/keploy
