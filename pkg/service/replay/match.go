@@ -309,8 +309,6 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 	switch x.Kind() {
 	case reflect.Float64, reflect.String, reflect.Bool:
 		regexArr, isNoisy := CheckStringExist(key, noiseMap)
-		fmt.Println("regexArr", regexArr)
-		fmt.Println("isNoisy", isNoisy)
 		if isNoisy && len(regexArr) != 0 {
 			isNoisy, _ = MatchesAnyRegex(InterfaceToString(expected), regexArr)
 		}
@@ -574,7 +572,6 @@ func sprintJSONDiff(json1 []byte, json2 []byte, field string, noise map[string][
 	if err != nil {
 		return "", err
 	}
-	fmt.Println("Diff String:", diffString)
 	expect, actual := separateAndColorize(diffString, noise)
 	result := expectActualTable(expect, actual, field, false)
 	return result, nil
@@ -648,13 +645,12 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 			// Update the JSON path stack based on the line content
 			if strings.HasSuffix(trimmedLine, "{") {
 				key := strings.TrimSpace(trimmedLine[:len(trimmedLine)-1]) // Remove '{'
-				jsonPath = append(jsonPath, key) // Push to stack
+				jsonPath = append(jsonPath, key)                           // Push to stack
 			} else if trimmedLine == "}," || trimmedLine == "}" {
 				jsonPath = jsonPath[:len(jsonPath)-1] // Pop from stack
 			}
 
 			currentPath := strings.Join(jsonPath, ".")
-			fmt.Println("Current JSON Path:", currentPath)
 
 			// Check for noise based on the current JSON path
 			for noisePath := range noise {
