@@ -398,6 +398,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, err
 		}
 
+		verdict := TestReportVerdict{
+			total:   testReport.Total,
+			failed:  0,
+			passed:  0,
+			ignored: testReport.Ignored,
+			status:  true,
+		}
+
+		completeTestReport[testSetID] = verdict
+		totalTests += testReport.Total
+		totalTestIgnored += testReport.Ignored
+
 		return models.TestSetStatusIgnored, nil
 	}
 
