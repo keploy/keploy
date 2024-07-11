@@ -1,5 +1,3 @@
-//go:build linux
-
 // Package reportdb provides functionality for managing test reports in a database.
 package reportdb
 
