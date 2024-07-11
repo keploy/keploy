@@ -9,7 +9,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// checkForCoverFlag checks if the given Go binary has the coverage flag enabled
+// checkForCoverFlag checks if the given Go binary has the coverage flag enabled if one argument
+// else check if -cover flag is passed or not
 // TODO: use native approach till https://github.com/golang/go/issues/67366 gets resolved
 func checkForCoverFlag(logger *zap.Logger, cmd string) bool {
 	cmdFields := strings.Fields(cmd)
