@@ -236,8 +236,13 @@ type ComStmtCloseAndPrepare struct {
 	StmtPrepare ComStmtPreparePacket1
 }
 
-type NextAuthPacket struct {
-	PluginData byte `yaml:"plugin_data"`
+type ComStmtCloseAndQuery struct {
+	StmtClose ComStmtClosePacket
+	StmtQuery MySQLQueryPacket
+}
+
+type AuthMoreDataPacket struct {
+	Data []byte `yaml:"data,omitempty,flow"`
 }
 
 type RowDataPacket struct {

@@ -108,8 +108,10 @@ func DecodeMySQLPacket(logger *zap.Logger, packet models.Packet, clientConn net.
 		lastCmd = 0x00
 	}
 
+	logger.Info("Last Cmd", zap.Any("LastCmd", lastCmd))
+	fmt.Printf("Data before decoding: %v\n", data)
 	switch {
-	case lastCmd == 0x03 && mode == models.MODE_RECORD:
+	case (lastCmd == 0x03 || lastCmd == 0x17) && mode == models.MODE_RECORD:
 		switch {
 		case data[0] == 0x00: // OK Packet
 			packetType = "MySQLOK"
@@ -122,6 +124,8 @@ func DecodeMySQLPacket(logger *zap.Logger, packet models.Packet, clientConn net.
 			lastCommand.Store(clientConn, 0x00) // Reset the last command
 
 		case isLengthEncodedInteger(data[0]): // ResultSet Packet
+			logger.Info("ResultSet Packet detected")
+			fmt.Println("Data of resultset packet: ", data)
 			packetType = "RESULT_SET_PACKET"
 			packetData, err = parseResultSet(data)
 			if err != nil {
@@ -150,12 +154,20 @@ func DecodeMySQLPacket(logger *zap.Logger, packet models.Packet, clientConn net.
 		packetData, err = decodeComStmtPrepare(data)
 		lastCommand.Store(clientConn, 0x16)
 	case data[0] == 0x19: // COM_STMT_CLOSE
-		if len(data) > 11 {
-
-			packetType = "COM_STMT_CLOSE_WITH_PREPARE"
-			packetData, err = decodeComStmtCloseMoreData(data)
-			lastCommand.Store(clientConn, 0x16)
+		if len(data) > 9 {
+			if data[9] == 0x16 {
+				println("COM_STMT_CLOSE_WITH_PREPARE packet detected")
+				packetType = "COM_STMT_CLOSE_WITH_PREPARE"
+				packetData, err = decodeComStmtCloseAndPrepare(data)
+				lastCommand.Store(clientConn, 0x16)
+			} else if data[9] == 0x03 {
+				println("COM_STMT_CLOSE_WITH_QUERY packet detected")
+				packetType = "COM_STMT_CLOSE_WITH_QUERY"
+				packetData, err = decodeComStmtCloseAndQuery(data)
+				lastCommand.Store(clientConn, 0x03)
+			}
 		} else {
+			println("COM_STMT_CLOSE packet detected")
 			packetType = "COM_STMT_CLOSE"
 			packetData, err = decodeComStmtClose(data)
 			lastCommand.Store(clientConn, 0x19)
@@ -174,6 +186,7 @@ func DecodeMySQLPacket(logger *zap.Logger, packet models.Packet, clientConn net.
 		packetData, err = decodeMySQLHandshakeV10(data)
 		handshakePacket, _ := packetData.(*models.MySQLHandshakeV10Packet)
 		handshakePluginName = handshakePacket.AuthPluginName
+		logger.Info("Detected MYSQLHanshakeV10 packet", zap.String("AuthPluginName", handshakePluginName))
 		lastCommand.Store(clientConn, 0x0A)
 	case data[0] == 0x03: // MySQLQuery
 		packetType = "MySQLQuery"
@@ -187,28 +200,42 @@ func DecodeMySQLPacket(logger *zap.Logger, packet models.Packet, clientConn net.
 		} else {
 			packetType = "MySQLOK"
 			packetData, err = decodeMySQLOK(data)
+			logger.Info("MySQLOK packet detected")
 		}
 		lastCommand.Store(clientConn, 0x00)
 	case data[0] == 0xFF: // MySQLErr
 		packetType = "MySQLErr"
+		logger.Info("MySQLErr packet detected")
 		packetData, err = decodeMySQLErr(data)
 		lastCommand.Store(clientConn, 0xFF)
 	case data[0] == 0xFE && len(data) > 1: // Auth Switch Packet
 		packetType = "AUTH_SWITCH_REQUEST"
 		packetData, err = decodeAuthSwitchRequest(data)
 		lastCommand.Store(clientConn, 0xFE)
+		logger.Info("Auth Switch Request Packet detected")
 	case data[0] == 0xFE || expectingAuthSwitchResponse:
 		packetType = "AUTH_SWITCH_RESPONSE"
 		packetData, err = decodeAuthSwitchResponse(data)
+		logger.Info("Auth Switch Response Packet detected")
 		expectingAuthSwitchResponse = false
 	case data[0] == 0xFE: // EOF packet
 		packetType = "MySQLEOF"
 		packetData, err = decodeMYSQLEOF(data)
 		lastCommand.Store(clientConn, 0xFE)
+		logger.Info("EOF packet detected", zap.Error(err))
 	case data[0] == 0x02: // New packet type
-		packetType = "AUTH_MORE_DATA"
-		packetData, err = decodeAuthMoreData(data)
-		lastCommand.Store(clientConn, 0x02)
+		if len(data) == 1 {
+			packetType = "REQUEST_PUBLIC_KEY"
+			packetData = nil
+			lastCommand.Store(clientConn, 0x02)
+			logger.Info("REQUEST_PUBLIC_KEY packet detected")
+		} else {
+			// packetType = "AuthNextFactor"
+			packetType = "AUTH_NEXT_FACTOR"
+			err = decodeAuthNextFactor(data)
+			lastCommand.Store(clientConn, 0x02)
+			logger.Info("AUTH_NEXT_FACTOR packet detected")
+		}
 	case data[0] == 0x18: // SEND_LONG_DATA Packet
 		packetType = "COM_STMT_SEND_LONG_DATA"
 		packetData, err = decodeComStmtSendLongData(data)
@@ -221,6 +248,7 @@ func DecodeMySQLPacket(logger *zap.Logger, packet models.Packet, clientConn net.
 		packetType = "HANDSHAKE_RESPONSE"
 		packetData, err = decodeHandshakeResponse(data)
 		lastCommand.Store(clientConn, 0x8d) // This value may differ depending on the handshake response protocol version
+		logger.Info("client Handshake Response packet detected")
 	case data[0] == 0x01: // Handshake Response packet
 		if len(data) == 1 {
 			packetType = "COM_QUIT"

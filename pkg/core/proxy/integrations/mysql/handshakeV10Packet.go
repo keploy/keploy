@@ -54,8 +54,7 @@ func decodeMySQLHandshakeV10(data []byte) (*models.MySQLHandshakeV10Packet, erro
 	data = data[2:]
 
 	packet.CapabilityFlags = uint32(capabilityFlagsLower) | uint32(capabilityFlagsUpper)<<16
-
-	if packet.CapabilityFlags&0x800000 != 0 {
+	if packet.CapabilityFlags&CLIENT_PLUGIN_AUTH != 0 {
 		if len(data) < 11 { // AuthPluginDataLen (1 byte) + Reserved (10 bytes)
 			return nil, fmt.Errorf("handshake packet too short for AuthPluginDataLen")
 		}

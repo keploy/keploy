@@ -10,6 +10,9 @@ import (
 )
 
 func decodeHandshakeResponseOk(data []byte) (*models.MySQLHandshakeResponseOk, error) {
+
+	//print the complete byte array
+	fmt.Println("Data: ", data)
 	var (
 		packetIndicator string
 		authType        string
@@ -26,10 +29,13 @@ func decodeHandshakeResponseOk(data []byte) (*models.MySQLHandshakeResponseOk, e
 	switch data[0] {
 	case models.OK:
 		packetIndicator = "OK"
+		fmt.Println("(decodeHandshakeResponseOk) OK packet")
 	case models.AuthMoreData:
 		packetIndicator = "AuthMoreData"
+		fmt.Println("(decodeHandshakeResponseOk) AuthMoreData packet")
 	case models.EOF:
 		packetIndicator = "EOF"
+		fmt.Println("(decodeHandshakeResponseOk) EOF packet")
 	default:
 		packetIndicator = "Unknown"
 	}
@@ -37,6 +43,10 @@ func decodeHandshakeResponseOk(data []byte) (*models.MySQLHandshakeResponseOk, e
 	if data[0] == models.AuthMoreData {
 		count := int(data[0])
 		var authData = data[1 : count+1]
+		println("count is:", count)
+		println("auth data length: ", len(authData))
+
+		println("Handshake plugin is: ", handshakePluginName)
 		switch handshakePluginName {
 		case "caching_sha2_password":
 			switch len(authData) {
@@ -51,6 +61,8 @@ func decodeHandshakeResponseOk(data []byte) (*models.MySQLHandshakeResponseOk, e
 					message = ""
 					remainingBytes = data[count+1:]
 				}
+			default:
+				println("It may be a public key authentication")
 			}
 		}
 	}

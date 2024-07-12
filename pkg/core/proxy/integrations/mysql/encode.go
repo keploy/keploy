@@ -152,7 +152,10 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 					},
 					Message: mysqlResp2,
 				})
+				logger.Info("Getting auth type from server", zap.Any("PacketType", oprResponse2))
+
 				if oprResponse2 == "AUTH_SWITCH_REQUEST" {
+					logger.Info("I know that there is no auth switch request coming, so chill")
 
 					authSwitchResponse, err := pUtil.ReadBytes(ctx, logger, clientConn)
 					if err != nil {
@@ -329,24 +332,26 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 							},
 							Message: mysqlRespfinalServerResponse,
 						})
+						//TODO: call bytesToMySQLPacket inside decodeEncryptPassword rather than duplicate code
 						oprRequestFinal1, requestHeaderFinal1, err := decodeEncryptPassword(clientResponse1)
 						if err != nil {
 							utils.LogError(logger, err, "failed to decode MySQL packet from client after full authentication")
 							errCh <- err
 							return nil
 						}
-						type DataMessage struct {
-							Data []byte
-						}
+						// type DataMessage struct {
+						// 	Data []byte
+						// }
 						mysqlRequests = append(mysqlRequests, models.MySQLRequest{
 							Header: &models.MySQLPacketHeader{
 								PacketLength: requestHeaderFinal1.PayloadLength,
 								PacketNumber: requestHeaderFinal1.SequenceID,
 								PacketType:   oprRequestFinal1,
 							},
-							Message: DataMessage{
-								Data: requestHeaderFinal1.Payload,
-							},
+							// Message: DataMessage{
+							// 	Data: requestHeaderFinal1.Payload,
+							// },
+							Message: requestHeaderFinal1.Payload,
 						})
 					} else {
 						// time.Sleep(10 * time.Millisecond)
@@ -381,7 +386,6 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 							Message: mysqlRespFinal,
 						})
 					}
-
 				}
 
 				var pluginType string
@@ -390,6 +394,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 					pluginType = handshakeResp.PluginDetails.Type
 				}
 				if pluginType == "cachingSha2PasswordPerformFullAuthentication" {
+					logger.Info("Plugin Type is cachingSha2PasswordPerformFullAuthentication")
 
 					clientResponse, err := pUtil.ReadBytes(ctx, logger, clientConn)
 					if err != nil {
@@ -481,20 +486,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 						errCh <- err
 						return nil
 					}
-					finalServerResponsetype1, finalServerResponseHeader1, mysqlRespfinalServerResponse, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(finalServerResponse1), clientConn, models.MODE_RECORD, lastCommand)
-					if err != nil {
-						utils.LogError(logger, err, "failed to decode MySQL packet from final server response")
-						errCh <- err
-						return nil
-					}
-					mysqlResponses = append(mysqlResponses, models.MySQLResponse{
-						Header: &models.MySQLPacketHeader{
-							PacketLength: finalServerResponseHeader1.PayloadLength,
-							PacketNumber: finalServerResponseHeader1.SequenceID,
-							PacketType:   finalServerResponsetype1,
-						},
-						Message: mysqlRespfinalServerResponse,
-					})
+
 					oprRequestFinal1, requestHeaderFinal1, err := decodeEncryptPassword(clientResponse1)
 					if err != nil {
 						utils.LogError(logger, err, "failed to decode MySQL packet from client after full authentication")
@@ -514,11 +506,33 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 							Data: requestHeaderFinal1.Payload,
 						},
 					})
+					println("Password type packet shared: ", oprRequestFinal1)
+
+					finalServerResponsetype1, finalServerResponseHeader1, mysqlRespfinalServerResponse, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(finalServerResponse1), clientConn, models.MODE_RECORD, lastCommand)
+					if err != nil {
+						utils.LogError(logger, err, "failed to decode MySQL packet from final server response")
+						errCh <- err
+						return nil
+					}
+					mysqlResponses = append(mysqlResponses, models.MySQLResponse{
+						Header: &models.MySQLPacketHeader{
+							PacketLength: finalServerResponseHeader1.PayloadLength,
+							PacketNumber: finalServerResponseHeader1.SequenceID,
+							PacketType:   finalServerResponsetype1,
+						},
+						Message: mysqlRespfinalServerResponse,
+					})
+					println("Final Server Response: ", finalServerResponsetype1)
+
+				} else {
+					logger.Info("Plugin type is not full auth: ", zap.String("pluginType", pluginType))
 				}
 
 				recordMySQLMessage(ctx, mysqlRequests, mysqlResponses, "config", oprRequest, oprResponse2, mocks, reqTimestamp)
 				mysqlRequests = []models.MySQLRequest{}
 				mysqlResponses = []models.MySQLResponse{}
+
+				logger.Info("I don't know why are you going to handleQueries here???")
 				err = handleClientQueries(ctx, logger, nil, clientConn, destConn, mocks, lastCommand, reqTimestamp)
 				logger.Debug("we got the error here at line 517", zap.Any("err", err))
 				if err != nil {
@@ -570,9 +584,11 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, initialBuffer 
 			var queryBuffer []byte
 			var err error
 			if firstIteration && initialBuffer != nil {
+				logger.Info("I know that you can't come here lol")
 				queryBuffer = initialBuffer
 				firstIteration = false
 			} else {
+				logger.Info("Reading the query from the client")
 				queryBuffer, err = pUtil.ReadBytes(ctx, logger, clientConn)
 				if err != nil {
 					if err != io.EOF {
@@ -597,6 +613,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, initialBuffer 
 				},
 				Message: mysqlRequest,
 			})
+			logger.Info("The query buffer", zap.Any("packet type", operation), zap.Any("packet length", requestHeader.PayloadLength), zap.Any("packet number", requestHeader.SequenceID), zap.Any("mysql request", mysqlRequest))
 			res, err := destConn.Write(queryBuffer)
 			if err != nil {
 				if ctx.Err() != nil {
@@ -623,6 +640,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, initialBuffer 
 				utils.LogError(logger, err, "failed to write query response to mysql client")
 				return err
 			}
+			println("Query Response length: ", queryResponse)
 			if len(queryResponse) == 0 {
 				break
 			}
@@ -636,6 +654,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, initialBuffer 
 				PacketNumber: responseHeader.SequenceID,
 				PacketType:   responseOperation,
 			}
+			logger.Info("Query response from the server", zap.Any("packet type", responseOperation), zap.Any("packet length", responseHeader.PayloadLength), zap.Any("packet number", responseHeader.SequenceID), zap.Any("mysql response", mysqlResp))
 			responseBin, err := encodeToBinary(mysqlResp, mysqlPacketHeader, mysqlPacketHeader.PacketType, 1)
 			if err != nil {
 				utils.LogError(logger, err, "failed to encode the MySQL packet.")
