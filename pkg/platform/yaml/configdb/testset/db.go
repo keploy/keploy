@@ -42,7 +42,6 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 
 func (db *Db[T]) Write(ctx context.Context, testSetID string, config T) error {
 	filePath := filepath.Join(db.path, testSetID)
-
 	data, err := yamlLib.Marshal(config)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to marshal test-set config file", zap.String("testSet", testSetID))
