@@ -31,7 +31,7 @@ func Get(ctx context.Context, cmd string, c *config.Config, logger *zap.Logger, 
 
 	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, c)
 
-	if cmd == "test" || cmd == "normalize" || cmd == "templatize" {
+	if cmd == "test" || cmd == "normalize" || cmd == "templatize" || cmd == "record" || cmd =="rerecord"{
 		return replaySvc, nil
 	}
 

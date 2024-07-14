@@ -1,4 +1,3 @@
-//go:build linux
 
 // Package record provides functionality for recording and managing test cases and mocks.
 package record
