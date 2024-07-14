@@ -91,33 +91,28 @@ if grep "WARNING: DATA RACE" "test_logs.txt"; then
     cat "test_logs.txt"
     exit 1
 fi
-echo "Test mode successful"
 
-sleep 10
+rerecord_container="pythonApp_rerecord"
+sudo -E env PATH=$PATH ./../../../keployv2 rerecord -c 'python3 manage.py runserver' --inCi=true &> "${rerecord_container}.txt"
 
-echo "Start rerecord"
-sudo -E env PATH=$PATH ./../../../keployv2 rerecord -c 'python3 manage.py runserver' --inCi=true &> "${test_container}.txt"
-
-if grep "ERROR" "${test_container}.txt"; then
+if grep "ERROR" "${rerecord_container}.txt"; then
     echo "Error found in pipeline..."
-    cat "${test_container}.txt"
+    cat "${rerecord_container}.txt"
     exit 1
 fi
 
-if grep "WARNING: DATA RACE" "${test_container}.txt"; then
+if grep "WARNING: DATA RACE" "${rerecord_container}.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
-    cat "${test_container}.txt"
+    cat "${rerecord_container}.txt"
     exit 1
 fi
-echo "Rerecord successful"
-sleep 10
 
-echo "Starting test again"
-sudo -E env PATH=$PATH ./../../../keployv2 test -c 'python3 manage.py runserver' --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
+rerecord_after_test_container="pythonApp_rerecord_after_test"
+sudo -E env PATH=$PATH ./../../../keployv2 test -c 'python3 manage.py runserver' --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${rerecord_after_test_container}.txt"
 
-if grep "ERROR" "${test_container}.txt"; then
+if grep "ERROR" "${rerecord_after_test_container}.txt"; then
     echo "Error found in pipeline..."
-    cat "${test_container}.txt"
+    cat "${rerecord_after_test_container}.txt"
     exit 1
 fi
 

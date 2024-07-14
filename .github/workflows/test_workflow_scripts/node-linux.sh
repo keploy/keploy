@@ -93,28 +93,27 @@ if grep "WARNING: DATA RACE" "test_logs3.txt"; then
     exit 1
 fi
 
+rerecord_container="nodeApp_rerecord"
+sudo -E env PATH=$PATH ./../../keployv2 rerecord -c 'npm start' --inCi=true &> "${rerecord_container}.txt"
 
-sleep 10
-
-sudo -E env PATH=$PATH ./../../keployv2 rerecord -c 'npm start' --inCi=true &> "${test_container}.txt"
-
-if grep "ERROR" "${test_container}.txt"; then
+if grep "ERROR" "${rerecord_container}.txt"; then
     echo "Error found in pipeline..."
-    cat "${test_container}.txt"
+    cat "${rerecord_container}.txt"
     exit 1
 fi
 
-if grep "WARNING: DATA RACE" "${test_container}.txt"; then
+if grep "WARNING: DATA RACE" "${rerecord_container}.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
-    cat "${test_container}.txt"
+    cat "${rerecord_container}.txt"
     exit 1
 fi
 
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
+rerecord_after_test_container="nodeApp_rerecord_after_test"
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${rerecord_after_test_container}.txt"
 
-if grep "ERROR" "${test_container}.txt"; then
+if grep "ERROR" "${rerecord_after_test_container}.txt"; then
     echo "Error found in pipeline..."
-    cat "${test_container}.txt"
+    cat "${rerecord_after_test_container}.txt"
     exit 1
 fi
 
