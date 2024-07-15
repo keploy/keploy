@@ -143,8 +143,8 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 		ttyFlag = " "
 	}
 
-	logger.info("TTYflag will be here",zap.Any("here",ttyFlag))
-	logger.info("os will be here",zap.Any("here",osName))
+	logger.Info("TTYflag will be here",zap.Any("here",ttyFlag))
+	logger.Info("os will be here",zap.Any("here",osName))
 
 	switch osName {
 	case "linux":
