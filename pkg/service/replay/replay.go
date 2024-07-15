@@ -897,7 +897,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 			}
 			// Compare the keys to the headers.
 			for j := i + 1; j < len(tcs); j++ {
-				compareVals(tcs[j].HTTPReq.Header, &jsonResponse)
+				addTemplates(tcs[j].HTTPReq.Header, &jsonResponse)
 			}
 			// Add the jsonResponse back to tcs.
 			jsonData, err := json.Marshal(jsonResponse)
@@ -930,7 +930,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 				continue
 			}
 			for j := i + 1; j < len(tcs); j++ {
-				compareVals(&tcs[j].HTTPReq.URL, &jsonResponse)
+				addTemplates(&tcs[j].HTTPReq.URL, &jsonResponse)
 			}
 			// Record the new testcase.
 			jsonData, err := json.Marshal(jsonResponse)
@@ -954,7 +954,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 				// Check if there is the Location header in the headers.
 				for key, val := range tcs[j].HTTPReq.Header {
 					if key == "Location" {
-						compareVals(&val, &jsonResponse)
+						addTemplates(&val, &jsonResponse)
 					}
 				}
 			}
@@ -979,7 +979,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 				} else if jsonRequest == nil {
 					continue
 				}
-				compareVals(jsonResponse, &jsonRequest)
+				addTemplates(jsonResponse, &jsonRequest)
 				jsonData, err := json.Marshal(jsonRequest)
 				if err != nil {
 					r.logger.Error("failed to marshal json data", zap.Error(err))

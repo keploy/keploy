@@ -137,6 +137,7 @@ func (t *requestMockUtil) ProcessMockFile(_ context.Context, testSetID string) {
 	t.logger.Debug("Mock file for test set", zap.String("testSetID", testSetID))
 }
 
+// Parse the json string into a geko type variable.
 func parseIntoJson(response string) (interface{}, error) {
 	// Parse the response into a json object.
 	if response == "" {
@@ -149,84 +150,83 @@ func parseIntoJson(response string) (interface{}, error) {
 	return result, nil
 }
 
-func compareVals(map1 interface{}, map2 *interface{}) {
-	switch v := map1.(type) {
+func checkForTemplate(val interface{}) interface{} {
+	stringVal, ok := val.(string)
+	if ok {
+		if strings.HasPrefix(stringVal, "{{") && strings.HasSuffix(stringVal, "}}") {
+			// Get the value from the template.
+			val, _ = render(stringVal)
+			if !strings.Contains(stringVal, "string") {
+				// Convert to its appropriate type.
+				if strings.Contains(stringVal, "int") {
+					val = utils.ToInt(val)
+				}else if strings.Contains(stringVal, "float") {
+					val = utils.ToFloat(val)
+				}
+			}
+		}
+	}
+	return val
+}
+
+// Here we simplify the first interface to a string form and then call the second function to simplify the second interface.
+func addTemplates(interface1 interface{}, interface2 *interface{}) {
+	switch v := interface1.(type) {
 	case geko.ObjectItems:
 		keys := v.Keys()
 		vals := v.Values()
 		for i := range keys {
-			vString, ok := vals[i].(string)
-			if ok {
-				if strings.HasPrefix(vString, "{{") && strings.HasSuffix(vString, "}}") {
-					// Get the value from the template.
-					stringVal, ok := vals[i].(string)
-					if ok {
-						vals[i], _ = render(stringVal)
-						if !strings.Contains(stringVal, "string") {
-							vals[i] = utils.ToInt(vals[i])
-						}
-					}
-				}
-			}
-			compareVals(vals[i], map2)
+			vals[i] = checkForTemplate(vals[i])
+			addTemplates(vals[i], interface2)
+			v.SetValueByIndex(i, vals[i])
+		}
+	case geko.Array:
+		for _, val := range v.List {
+			addTemplates(&val, interface2)
 		}
 	case map[string]interface{}:
-		for key, val1 := range v {
-			vString, ok := val1.(string)
-			if ok {
-				if strings.HasPrefix(vString, "{{") && strings.HasSuffix(vString, "}}") {
-					// Get the value from the template.
-					stringVal, ok := val1.(string)
-					if ok {
-						val1, _ = render(stringVal)
-						if !strings.Contains(stringVal, "string") {
-							val1 = utils.ToInt(val1)
-						}
-					}
-				}
-			}
-			compareVals(val1, map2)
-			v[key] = val1
+		for key, val := range v {
+			val = checkForTemplate(val)
+			addTemplates(val, interface2)
+			v[key] = val
 		}
 	case map[string]string:
-		for key, val1 := range v {
-			authType := ""
-			if key == "Authorization" && len(strings.Split(val1, " ")) > 1 {
-				authType = strings.Split(val1, " ")[0]
-				val1 = strings.Split(val1, " ")[1]
-			}
-			if strings.HasPrefix(val1, "{{") && strings.HasSuffix(val1, "}}") {
-				// Get the value from the template.
-				val1, _ = render(val1)
-			}
-			ok := parseBody(&val1, map2)
+		for key, val := range v {
+			val, ok := checkForTemplate(val).(string)
 			if !ok {
-				continue
+				return
+			}
+			// Saving the auth type to add it to the template later.
+			authType := ""
+			if key == "Authorization" && len(strings.Split(val, " ")) > 1 {
+				authType = strings.Split(val, " ")[0]
+				val = strings.Split(val, " ")[1]
+			}
+			ok = addTemplates1(&val, interface2)
+			if !ok {
+				return
 			}
 			// Add the authtype to the string.
-			val1 = authType + " " + val1
-			v[key] = val1
+			val = authType + " " + val
+			v[key] = val
 		}
 	case *string:
-		if strings.HasPrefix(*v, "{{") && strings.HasSuffix(*v, "}}") {
-			return
-		}
-		var ok bool
-		ok = parseBody(v, map2)
+		*v = checkForTemplate(*v).(string)
+		ok := addTemplates1(v, interface2)
 		if ok {
 			return
 		}
 		url, err := url.Parse(*v)
 		if err == nil {
 			urlParts := strings.Split(url.Path, "/")
-			ok = parseBody(&urlParts[len(urlParts)-1], map2)
+			addTemplates1(&urlParts[len(urlParts)-1], interface2)
 			url.Path = strings.Join(urlParts, "/")
 			if url.RawQuery != "" {
-				// Only pass the values of the query parameters to the parseBody function.
+				// Only pass the values of the query parameters to the addTemplates1 function.
 				queryParams := strings.Split(url.RawQuery, "&")
 				for i, param := range queryParams {
 					param = strings.Split(param, "=")[1]
-					parseBody(&param, map2)
+					addTemplates1(&param, interface2)
 					queryParams[i] = strings.Split(queryParams[i], "=")[0] + "=" + param
 				}
 				url.RawQuery = strings.Join(queryParams, "&")
@@ -235,49 +235,30 @@ func compareVals(map1 interface{}, map2 *interface{}) {
 				*v = fmt.Sprintf("%s://%s%s", url.Scheme, url.Host, url.Path)
 			}
 		} else {
-			ok = parseBody(v, map2)
-		}
-		if !ok {
-			return
+			addTemplates1(v, interface2)
 		}
 	case float64, int64, int, float32:
 		val := toString(v)
-		valPointer := &val
-		if strings.HasPrefix(*valPointer, "{{") && strings.HasSuffix(*valPointer, "}}") {
-			return
-		}
-		var ok bool
-		ok = parseBody(valPointer, map2)
-		parts := strings.Split(*valPointer, " ")
+		addTemplates1(&val, interface2)
+		parts := strings.Split(val, " ")
 		if len(parts) > 1 {
 			parts1 := strings.Split(parts[0], "{{")
 			if len(parts1) > 1 {
-				*valPointer = parts1[0] + "{{" + getType(v) + " " + parts[1] + "}}"
+				val = parts1[0] + "{{" + getType(v) + " " + parts[1] + "}}"
 			}
-		}
-		if !ok {
-			return
 		}
 	}
 }
 
-func parseBody(val1 *string, body *interface{}) bool {
+// Here we simplify the second interface and finally add the templates.
+func addTemplates1(val1 *string, body *interface{}) bool {
 	switch b := (*body).(type) {
 	case geko.ObjectItems:
 		keys := b.Keys()
 		vals := b.Values()
 		for i, key := range keys {
-			stringVal, ok := vals[i].(string)
-			if ok {
-				if strings.HasPrefix(stringVal, "{{") && strings.HasSuffix(stringVal, "}}") {
-					// Get the value from the template.
-					vals[i], _ = render(stringVal)
-					if ! strings.Contains(stringVal, "string") {
-					vals[i] = utils.ToInt(vals[i])
-				}
-				}
-			}
-			ok = parseBody(val1, &vals[i])
+			vals[i] = checkForTemplate(vals[i])
+			ok := addTemplates1(val1, &vals[i])
 			if ok && reflect.TypeOf(vals[i]) != reflect.TypeOf(b) {
 				newKey := insertUnique(key, *val1, utils.TemplatizedValues)
 				if newKey == "" {
@@ -285,21 +266,20 @@ func parseBody(val1 *string, body *interface{}) bool {
 				}
 				vals[i] = fmt.Sprintf("{{%s .%v }}", getType(vals[i]), newKey)
 				b.SetValueByIndex(i, vals[i])
-				// fmt.Println("This is the value at index i in the map", b.GetByIndex(i))
-				// fmt.Println("This is the val1 before", reflect.TypeOf(*val1))
 				*val1 = fmt.Sprintf("{{%s .%v }}", getType(*val1), newKey)
-				// fmt.Println("This is the val1 after", *val1)
 				return true
 			}
 		}
 	case geko.Array:
 		for _, v := range b.List {
-			parseBody(val1, &v)
-			// fmt.Println("This is the value that we are sending, ", v)
-			// fmt.Println("This is the value of the jsonResponse map", jsonResponse)
+			addTemplates1(val1, &v)
 		}
 	case map[string]string:
 		for key, val2 := range b {
+			val2, ok := checkForTemplate(val2).(string)
+			if !ok {
+				return false
+			}
 			if *val1 == val2 {
 				newKey := insertUnique(key, val2, utils.TemplatizedValues)
 				if newKey == "" {
@@ -312,7 +292,8 @@ func parseBody(val1 *string, body *interface{}) bool {
 		}
 		return false
 	case string:
-		if strings.HasPrefix(b, "{{") && strings.HasSuffix(b, "}}") {
+		b, ok := checkForTemplate(b).(string)
+		if !ok {
 			return false
 		}
 		if *val1 == b {
@@ -320,7 +301,8 @@ func parseBody(val1 *string, body *interface{}) bool {
 		}
 	case map[string]interface{}:
 		for key, val2 := range b {
-			ok := parseBody(val1, &val2)
+			val2 = checkForTemplate(val2)
+			ok := addTemplates1(val1, &val2)
 			if ok {
 				newKey := insertUnique(key, *val1, utils.TemplatizedValues)
 				if newKey == "" {
@@ -337,7 +319,7 @@ func parseBody(val1 *string, body *interface{}) bool {
 
 	case []interface{}:
 		for i, val := range b {
-			parseBody(val1, &val)
+			addTemplates1(val1, &val)
 			b[i] = val
 		}
 	}
@@ -373,7 +355,7 @@ func compareResponses(response1, response2 *interface{}, key string) {
 	case geko.ObjectItems:
 		keys := v1.Keys()
 		vals := v1.Values()
-		for i, _ := range keys {
+		for i := range keys {
 			compareResponses(&vals[i], response2, keys[i])
 		}
 	case map[string]interface{}:
@@ -399,7 +381,7 @@ func compareSecondResponse(val1 *string, response2 *interface{}, key1 string, ke
 	case geko.ObjectItems:
 		keys := v2.Keys()
 		vals := v2.Values()
-		for i, _ := range keys {
+		for i := range keys {
 			compareSecondResponse(val1, &vals[i], key1, keys[i])
 		}
 	case map[string]interface{}:
@@ -428,6 +410,7 @@ func compareSecondResponse(val1 *string, response2 *interface{}, key1 string, ke
 	}
 }
 
+// This function returns a unique key for each value, for instance if id already exists, it will return id1.
 func insertUnique(baseKey, value string, myMap map[string]interface{}) string {
 	// If the key has more than one word seperated by a delimiter, remove the delimiter and add the key to the map.
 	if strings.Contains(baseKey, "-") {
