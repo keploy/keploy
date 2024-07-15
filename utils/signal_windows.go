@@ -4,10 +4,10 @@ package utils
 
 import (
 	"syscall"
-	// "context"
-	// "os/exec"
-	// "time"
-	// "errors"
+	"context"
+	"os/exec"
+	"time"
+	"errors"
 
 	"go.uber.org/zap"
 	"golang.org/x/sys/windows"
@@ -39,6 +39,6 @@ func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 	return nil
 }
 
-// func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration) CmdError {
-// 	return CmdError{Type: Init, Err: errors.New("not implemented")}
-// }
+func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration) CmdError {
+	return CmdError{Type: Init, Err: errors.New("not implemented")}
+}
