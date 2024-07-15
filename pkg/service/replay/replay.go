@@ -1,5 +1,3 @@
-//go:build linux
-
 package replay
 
 import (
@@ -34,6 +32,7 @@ var completeTestReport = make(map[string]TestReportVerdict)
 var totalTests int
 var totalTestPassed int
 var totalTestFailed int
+var totalTestIgnored int
 
 // emulator contains the struct instance that implements RequestEmulator interface. This is done for
 // attaching the objects dynamically as plugins.
@@ -52,12 +51,17 @@ type Replayer struct {
 	telemetry       Telemetry
 	instrumentation Instrumentation
 	config          *config.Config
+	instrument      bool
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf Config, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
 	// set the request emulator for simulating test case requests, if not set
 	if requestMockemulator == nil {
 		SetTestUtilInstance(NewRequestMockUtil(logger, config.Path, "mocks", config.Test.APITimeout, config.Test.BasePath))
+	}
+	instrument := false
+	if config.Command != "" {
+		instrument = true
 	}
 	return &Replayer{
 		logger:          logger,
@@ -68,6 +72,7 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 		telemetry:       telemetry,
 		instrumentation: instrumentation,
 		config:          config,
+		instrument:      instrument,
 	}
 }
 
@@ -127,20 +132,25 @@ func (r *Replayer) Start(ctx context.Context) error {
 		return fmt.Errorf(stopReason)
 	}
 
-	language, executable := utils.DetectLanguage(r.logger, r.config.Command)
-	// if language is not provided and language detected is known
-	// then set the language to detected language
-	if r.config.Test.Language == "" {
-		if language == models.Unknown {
-			r.logger.Warn("failed to detect language, skipping coverage calculation. please use --language to manually set the language")
+	var language config.Language
+	var executable string
+	// only find language to calculate coverage if instrument is true
+	if r.instrument {
+		language, executable = utils.DetectLanguage(r.logger, r.config.Command)
+		// if language is not provided and language detected is known
+		// then set the language to detected language
+		if r.config.Test.Language == "" {
+			if language == models.Unknown {
+				r.logger.Warn("failed to detect language, skipping coverage caluclation. please use --language to manually set the language")
+				r.config.Test.SkipCoverage = true
+			} else {
+				r.logger.Warn(fmt.Sprintf("%s language detected. please use --language to manually set the language if needed", language))
+			}
+			r.config.Test.Language = language
+		} else if language != r.config.Test.Language && language != models.Unknown {
+			utils.LogError(r.logger, nil, "language detected is different from the language provided")
 			r.config.Test.SkipCoverage = true
-		} else {
-			r.logger.Warn(fmt.Sprintf("%s language detected. please use --language to manually set the language if needed", language))
 		}
-		r.config.Test.Language = language
-	} else if language != r.config.Test.Language && language != models.Unknown {
-		utils.LogError(r.logger, nil, "language detected is different from the language provided")
-		r.config.Test.SkipCoverage = true
 	}
 
 	var cov coverage.Service
@@ -156,9 +166,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 	default:
 		r.config.Test.SkipCoverage = true
 	}
-
 	if !r.config.Test.SkipCoverage {
-		r.config.CoverageCommand, err = cov.PreProcess()
+		r.config.Command, err = cov.PreProcess()
 		if err != nil {
 			r.config.Test.SkipCoverage = true
 		}
@@ -185,6 +194,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
 		}
+
 		requestMockemulator.ProcessMockFile(ctx, testSetID)
 
 		if !r.config.Test.SkipCoverage {
@@ -221,15 +231,19 @@ func (r *Replayer) Start(ctx context.Context) error {
 		case models.TestSetStatusPassed:
 			testSetResult = true
 			requestMockemulator.ProcessTestRunStatus(ctx, testSetResult, testSetID)
+		case models.TestSetStatusIgnored:
+			testSetResult = true
 		}
 		testRunResult = testRunResult && testSetResult
 		if abortTestRun {
 			break
 		}
 
-		_, err = requestMockemulator.AfterTestHook(ctx, testRunID, testSetID, len(testSetIDs))
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to get after test hook")
+		if !(!r.config.Test.SkipCoverage && i == len(testSetIDs)-1) {
+			_, err = requestMockemulator.AfterTestHook(ctx, testRunID, testSetID, models.TestCoverage{}, len(testSetIDs))
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to get after test hook")
+			}
 		}
 
 		if i == 0 && !r.config.Test.SkipCoverage {
@@ -270,6 +284,10 @@ func (r *Replayer) Start(ctx context.Context) error {
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to update report with the coverage data")
 				}
+				_, err = requestMockemulator.AfterTestHook(ctx, testRunID, testSetIDs[len(testSetIDs)-1], coverageData, len(testSetIDs))
+				if err != nil {
+					utils.LogError(r.logger, err, "failed to get after test hook")
+				}
 			} else {
 				utils.LogError(r.logger, err, "failed to calculate coverage for the test run")
 			}
@@ -279,12 +297,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 }
 
 func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
-	if r.config.Test.BasePath != "" {
+	if !r.instrument {
 		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.Any("base path", r.config.Test.BasePath))
 		return &InstrumentState{}, nil
 	}
-
-	appID, err := r.instrumentation.Setup(ctx, r.config.CoverageCommand, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
+	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return &InstrumentState{}, err
@@ -333,10 +350,10 @@ func (r *Replayer) GetTestCases(ctx context.Context, testID string) ([]*models.T
 }
 
 func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error) {
+
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
 	runTestSetCtx = context.WithValue(runTestSetCtx, models.ErrGroupKey, runTestSetErrGrp)
-
 	runTestSetCtx, runTestSetCtxCancel := context.WithCancel(runTestSetCtx)
 
 	exitLoopChan := make(chan bool, 2)
@@ -349,27 +366,62 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		close(exitLoopChan)
 	}()
 
-	var conf *models.TestSet
-	var err error
-	var postscript string
+	testCases, err := r.testDB.GetTestCases(runTestSetCtx, testSetID)
+	if err != nil {
+		return models.TestSetStatusFailed, fmt.Errorf("failed to get test cases: %w", err)
+	}
 
-	// Pre/Post script will be executed only if the base path is provided
-	if r.config.Test.BasePath != "" {
-		//Execute the Pre-script before each test-set if provided
-		conf, err = r.testSetConf.Read(runTestSetCtx, testSetID)
+	if len(testCases) == 0 {
+		return models.TestSetStatusPassed, nil
+	}
+
+	if _, ok := r.config.Test.IgnoredTests[testSetID]; ok && len(r.config.Test.IgnoredTests[testSetID]) == 0 {
+		testReport := &models.TestReport{
+			Version: models.GetVersion(),
+			TestSet: testSetID,
+			Status:  string(models.TestSetStatusIgnored),
+			Total:   len(testCases),
+			Ignored: len(testCases),
+		}
+
+		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
 		if err != nil {
-			if strings.Contains(err.Error(), "no such file or directory") {
-				r.logger.Info("config file not found, continuing execution...", zap.String("test-set", testSetID))
-			} else {
-				return models.TestSetStatusFailed, fmt.Errorf("failed to read test set config: %w", err)
-			}
+			utils.LogError(r.logger, err, "failed to insert report")
+			return models.TestSetStatusFailed, err
 		}
 
-		if conf == nil {
-			conf = &models.TestSet{}
+		verdict := TestReportVerdict{
+			total:   testReport.Total,
+			failed:  0,
+			passed:  0,
+			ignored: testReport.Ignored,
+			status:  true,
 		}
-		postscript = conf.PostScript
 
+		completeTestReport[testSetID] = verdict
+		totalTests += testReport.Total
+		totalTestIgnored += testReport.Ignored
+
+		return models.TestSetStatusIgnored, nil
+	}
+
+	var conf *models.TestSet
+
+	//Execute the Pre-script before each test-set if provided
+	conf, err = r.testSetConf.Read(runTestSetCtx, testSetID)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such file or directory") {
+			r.logger.Info("config file not found, continuing execution...", zap.String("test-set", testSetID))
+		} else {
+			return models.TestSetStatusFailed, fmt.Errorf("failed to read test set config: %w", err)
+		}
+	}
+
+	if conf == nil {
+		conf = &models.TestSet{}
+	}
+
+	if conf.PreScript != "" {
 		r.logger.Info("Running Pre-script", zap.String("script", conf.PreScript), zap.String("test-set", testSetID))
 		err = r.executeScript(runTestSetCtx, conf.PreScript)
 		if err != nil {
@@ -381,21 +433,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var appErr models.AppError
 	var success int
 	var failure int
+	var ignored int
 	var totalConsumedMocks = map[string]bool{}
 
 	testSetStatus := models.TestSetStatusPassed
 	testSetStatusByErrChan := models.TestSetStatusRunning
 
 	r.logger.Info("running", zap.Any("test-set", models.HighlightString(testSetID)))
-
-	testCases, err := r.testDB.GetTestCases(runTestSetCtx, testSetID)
-	if err != nil {
-		return models.TestSetStatusFailed, fmt.Errorf("failed to get test cases: %w", err)
-	}
-
-	if len(testCases) == 0 {
-		return models.TestSetStatusPassed, nil
-	}
 
 	cmdType := utils.CmdType(r.config.CommandType)
 	var userIP string
@@ -405,7 +449,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusFailed, err
 	}
 
-	if r.config.Test.BasePath == "" {
+	if r.instrument {
 		if !serveTest {
 			runTestSetErrGrp.Go(func() error {
 				defer utils.Recover(r.logger)
@@ -462,6 +506,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	selectedTests := ArrayToMap(r.config.Test.SelectedTests[testSetID])
+	ignoredTests := ArrayToMap(r.config.Test.IgnoredTests[testSetID])
 
 	testCasesCount := len(testCases)
 
@@ -490,6 +535,24 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	for _, testCase := range testCases {
 
 		if _, ok := selectedTests[testCase.Name]; !ok && len(selectedTests) != 0 {
+			continue
+		}
+
+		if _, ok := ignoredTests[testCase.Name]; ok {
+			testCaseResult := &models.TestResult{
+				Kind:         models.HTTP,
+				Name:         testSetID,
+				Status:       models.TestStatusIgnored,
+				TestCaseID:   testCase.Name,
+				TestCasePath: filepath.Join(r.config.Path, testSetID),
+				MockPath:     filepath.Join(r.config.Path, testSetID, requestMockemulator.FetchMockName()),
+			}
+			loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+			if loopErr != nil {
+				utils.LogError(r.logger, err, "failed to insert test case result")
+				break
+			}
+			ignored++
 			continue
 		}
 
@@ -528,7 +591,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			break
 		}
 
-		if utils.IsDockerCmd(cmdType) && r.config.Test.BasePath == "" {
+		if utils.IsDockerCmd(cmdType) {
 
 			testCase.HTTPReq.URL, err = utils.ReplaceHostToIP(testCase.HTTPReq.URL, userIP)
 			if err != nil {
@@ -547,7 +610,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		var consumedMocks []string
-		if r.config.Test.BasePath == "" {
+		if r.instrument {
 			consumedMocks, err = r.instrumentation.GetConsumedMocks(runTestSetCtx, appID)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
@@ -619,14 +682,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	//Execute the Post-script after each test-set if provided
-	if r.config.Test.BasePath != "" {
-		r.logger.Info("Running Post-script", zap.String("script", postscript), zap.String("test-set", testSetID))
-		err = r.executeScript(runTestSetCtx, postscript)
+	if conf.PostScript != "" {
+		//Execute the Post-script after each test-set if provided
+		r.logger.Info("Running Post-script", zap.String("script", conf.PostScript), zap.String("test-set", testSetID))
+		err = r.executeScript(runTestSetCtx, conf.PostScript)
 		if err != nil {
 			return models.TestSetStatusFaultScript, fmt.Errorf("failed to execute post-script: %w", err)
 		}
 	}
+
 	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
 	if err != nil {
 		if runTestSetCtx.Err() != context.Canceled {
@@ -655,6 +719,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Total:   testCasesCount,
 		Success: success,
 		Failure: failure,
+		Ignored: ignored,
 		Tests:   testCaseResults,
 	}
 
@@ -667,7 +732,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	// remove the unused mocks by the test cases of a testset (if the base path is not provided )
-	if r.config.Test.RemoveUnusedMocks && testSetStatus == models.TestSetStatusPassed && r.config.Test.BasePath == "" {
+	if r.config.Test.RemoveUnusedMocks && testSetStatus == models.TestSetStatusPassed && r.instrument {
 		r.logger.Debug("consumed mocks from the completed testset", zap.Any("for test-set", testSetID), zap.Any("consumed mocks", totalConsumedMocks))
 		// delete the unused mocks from the data store
 		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, totalConsumedMocks)
@@ -678,25 +743,33 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	// TODO Need to decide on whether to use global variable or not
 	verdict := TestReportVerdict{
-		total:  testReport.Total,
-		failed: testReport.Failure,
-		passed: testReport.Success,
-		status: testSetStatus == models.TestSetStatusPassed,
+		total:   testReport.Total,
+		failed:  testReport.Failure,
+		passed:  testReport.Success,
+		ignored: testReport.Ignored,
+		status:  testSetStatus == models.TestSetStatusPassed,
 	}
 
 	completeTestReport[testSetID] = verdict
 	totalTests += testReport.Total
 	totalTestPassed += testReport.Success
 	totalTestFailed += testReport.Failure
+	totalTestIgnored += testReport.Ignored
 
 	if testSetStatus == models.TestSetStatusFailed || testSetStatus == models.TestSetStatusPassed {
 		if testSetStatus == models.TestSetStatusFailed {
-			pp.SetColorScheme(models.FailingColorScheme)
+			pp.SetColorScheme(models.GetFailingColorScheme())
 		} else {
-			pp.SetColorScheme(models.PassingColorScheme)
+			pp.SetColorScheme(models.GetPassingColorScheme())
 		}
-		if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure); err != nil {
-			utils.LogError(r.logger, err, "failed to print testrun summary")
+		if testReport.Ignored > 0 {
+			if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure, testReport.Ignored); err != nil {
+				utils.LogError(r.logger, err, "failed to print testrun summary")
+			}
+		} else {
+			if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure); err != nil {
+				utils.LogError(r.logger, err, "failed to print testrun summary")
+			}
 		}
 	}
 
@@ -705,11 +778,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 }
 
 func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) (filtered, unfiltered []*models.Mock, err error) {
-	if r.config.Test.BasePath != "" {
-		r.logger.Debug("Keploy will not fetch the mocks when base path is provided", zap.Any("base path", r.config.Test.BasePath))
-		return nil, nil, nil
-	}
-
 	filtered, err = r.mockDB.GetFilteredMocks(ctx, testSetID, afterTime, beforeTime)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to get filtered mocks")
@@ -725,7 +793,7 @@ func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime tim
 
 func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, testSetID string, afterTime, beforeTime time.Time, action MockAction) error {
 
-	if r.config.Test.BasePath != "" {
+	if !r.instrument {
 		r.logger.Debug("Keploy will not setup or update the mocks when base path is provided", zap.Any("base path", r.config.Test.BasePath))
 		return nil
 	}
@@ -797,23 +865,41 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 			}
 			return testSuiteIDNumberI < testSuiteIDNumberJ
 		})
-		if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed); err != nil {
-			utils.LogError(r.logger, err, "failed to print test run summary")
-			return
-		}
-		if _, err := pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\n"); err != nil {
-			utils.LogError(r.logger, err, "failed to print test suite summary")
-			return
+		if totalTestIgnored > 0 {
+			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n", totalTests, totalTestPassed, totalTestFailed, totalTestIgnored); err != nil {
+				utils.LogError(r.logger, err, "failed to print test run summary")
+				return
+			}
+			if _, err := pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\tIgnored\t\n"); err != nil {
+				utils.LogError(r.logger, err, "failed to print test suite summary")
+				return
+			}
+		} else {
+			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed); err != nil {
+				utils.LogError(r.logger, err, "failed to print test run summary")
+				return
+			}
+			if _, err := pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\n"); err != nil {
+				utils.LogError(r.logger, err, "failed to print test suite summary")
+				return
+			}
 		}
 		for _, testSuiteName := range testSuiteNames {
 			if completeTestReport[testSuiteName].status {
-				pp.SetColorScheme(models.PassingColorScheme)
+				pp.SetColorScheme(models.GetPassingColorScheme())
 			} else {
-				pp.SetColorScheme(models.FailingColorScheme)
+				pp.SetColorScheme(models.GetFailingColorScheme())
 			}
-			if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed); err != nil {
-				utils.LogError(r.logger, err, "failed to print test suite details")
-				return
+			if totalTestIgnored > 0 {
+				if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed, completeTestReport[testSuiteName].ignored); err != nil {
+					utils.LogError(r.logger, err, "failed to print test suite details")
+					return
+				}
+			} else {
+				if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed); err != nil {
+					utils.LogError(r.logger, err, "failed to print test suite details")
+					return
+				}
 			}
 		}
 		if _, err := pp.Printf("\n<=========================================> \n\n"); err != nil {

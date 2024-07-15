@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -57,7 +58,7 @@ func (g *Golang) PreProcess() (string, error) {
 	if utils.CmdType(g.commandType) != utils.Native {
 		return g.cmd, nil
 	}
-	if !checkGoBinaryForCoverFlag(g.logger, g.cmd) {
+	if !checkForCoverFlag(g.logger, g.cmd) {
 		g.logger.Warn("go binary was not built with -cover flag")
 		return g.cmd, errors.New("binary not coverable")
 	}
@@ -70,19 +71,33 @@ func (g *Golang) GetCoverage() (models.TestCoverage, error) {
 		TotalCov: "",
 	}
 
-	fmt.Println("GOCOVERDIR: ", os.Getenv("GOCOVERDIR"))
-	// print $PATH
-	path := os.Getenv("PATH")
-	fmt.Println("PATH: ", path)
+	coverageDir := os.Getenv("GOCOVERDIR")
 
-	generateCovTxtCmd := exec.CommandContext(g.ctx, "/usr/local/go/bin/go", "tool", "covdata", "textfmt", "-i="+os.Getenv("GOCOVERDIR"), "-o="+os.Getenv("GOCOVERDIR")+"/total-coverage.txt")
-	_, err := generateCovTxtCmd.Output()
+	f, err := os.Open(coverageDir)
+	if err != nil {
+		utils.LogError(g.logger, err, "failed to open coverage directory, skipping coverage calculation")
+		return testCov, err
+	}
+	defer func() {
+		if err := f.Close(); err != nil {
+			utils.LogError(g.logger, err, "Error closing coverage directory, skipping coverage calculation")
+		}
+	}()
+
+	_, err = f.Readdirnames(1) // Or f.Readdir(1)
+	if err == io.EOF {
+		utils.LogError(g.logger, err, fmt.Sprintf("no coverage files found in %s, skipping coverage calculation", coverageDir))
+		return testCov, err
+	}
+
+	generateCovTxtCmd := exec.CommandContext(g.ctx, "/usr/local/go/bin/go", "tool", "covdata", "textfmt", "-i="+coverageDir, "-o="+coverageDir+"/total-coverage.txt")
+	_, err = generateCovTxtCmd.Output()
 	if err != nil {
 		return testCov, err
 	}
 
 	coveragePerFileTmp := make(map[string][]int) // filename -> [noOfLines, coveredLines]
-	covdata, err := os.ReadFile(os.Getenv("GOCOVERDIR") + "/total-coverage.txt")
+	covdata, err := os.ReadFile(coverageDir + "/total-coverage.txt")
 	if err != nil {
 		return testCov, err
 	}
