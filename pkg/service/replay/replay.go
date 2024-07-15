@@ -947,7 +947,16 @@ func (r *Replayer) RunApplication(ctx context.Context, appID uint64, opts models
 
 func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 	if len(testSets) == 0 {
-		testSets = r.config.Templatize.TestSets
+		if len(r.config.Templatize.TestSets) == 0 {
+			allTestSets, err := r.GetAllTestSetIDs(ctx)
+			if err != nil {
+				r.logger.Error("failed to get the test sets", zap.Error(err))
+			} else {
+				testSets = allTestSets
+			}
+		} else {
+			testSets = r.config.Templatize.TestSets
+		}
 	}
 	for _, testSetId := range testSets {
 		testSet, err := r.TestSetConf.Read(ctx, testSetId)
