@@ -1005,8 +1005,6 @@ func truncateToMatchWithEllipsis(expectedText, actualText string) (string, strin
 
 // Will receive a string that has the differences represented
 // by a plus or a minus sign and separate it. Just works with json
-// Modified separateAndColorize function to handle nested JSON paths for noise keys
-// Updated separateAndColorize function
 func separateAndColorize(diffStr string, noise map[string][]string) (string, string) {
 	lines := strings.Split(diffStr, "\n")
 	expectsMap := make(map[string]interface{}, 0)
@@ -1093,27 +1091,14 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 	}
 
 	diffLines := strings.Split(diffStr, "\n")
-	jsonPath := []string{} // Stack to keep track of nested paths
 	for i, line := range diffLines {
 		if len(line) > 0 {
 			noised := false
-			lineContent := line[1:] // Remove the diff indicator (+/-)
-			trimmedLine := strings.TrimSpace(lineContent)
 
-			// Update the JSON path stack based on the line content
-			if strings.HasSuffix(trimmedLine, "{") {
-				key := strings.TrimSpace(trimmedLine[:len(trimmedLine)-1]) // Remove '{'
-				jsonPath = append(jsonPath, key)                           // Push to stack
-			} else if trimmedLine == "}," || trimmedLine == "}" {
-				jsonPath = jsonPath[:len(jsonPath)-1] // Pop from stack
-			}
+			for e := range noise {
+				// If contains noise remove diff flag
+				if strings.Contains(line, e) {
 
-			currentPath := strings.Join(jsonPath, ".")
-
-			// Check for noise based on the current JSON path
-			for noisePath := range noise {
-				if strings.HasPrefix(currentPath, noisePath) {
-					line = " " + lineContent
 					if line[0] == '-' {
 						line = " " + line[1:]
 						expect += breakWithColor(line, nil, []Range{})
@@ -1122,15 +1107,12 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 						actual += breakWithColor(line, nil, []Range{})
 					}
 					noised = true
-					break
 				}
 			}
 
 			if noised {
 				continue
 			}
-
-			// Process lines without noise
 			if line[0] == '-' {
 				c := color.FgRed
 				// Workaround to get the exact index where the diff begins
@@ -1170,7 +1152,7 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 // Will colorize the strubg and do the job of break it if it pass MAX_LINE_LENGTH,
 // always respecting the reset of ascii colors before the break line to dont
 func breakWithColor(input string, c *color.Attribute, highlightRanges []Range) string {
-	paint := func(a ...interface{}) string { return "" }
+	paint := func(_ ...interface{}) string { return "" }
 	if c != nil {
 		paint = color.New(*c).SprintFunc()
 	}
