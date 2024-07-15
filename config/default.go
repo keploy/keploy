@@ -19,7 +19,6 @@ dnsPort: 26789
 debug: false
 disableANSI: false
 disableTele: false
-inDocker: false
 generateGithubActions: true
 containerName: ""
 networkName: ""
@@ -61,7 +60,6 @@ const InternalConfig = `
 enableTesting: false
 keployContainer: "keploy-v2"
 keployNetwork: "keploy-network"
-inDocker: false
 cmdType: "native"
 `
 
