@@ -21,22 +21,23 @@ type Config struct {
 	Debug                 bool         `json:"debug" yaml:"debug" mapstructure:"debug"`
 	DisableTele           bool         `json:"disableTele" yaml:"disableTele" mapstructure:"disableTele"`
 	DisableANSI           bool         `json:"disableANSI" yaml:"disableANSI" mapstructure:"disableANSI"`
-	InDocker              bool         `json:"inDocker" yaml:"inDocker" mapstructure:"inDocker"`
+	InDocker              bool         `json:"inDocker" yaml:"-" mapstructure:"inDocker"`
 	ContainerName         string       `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
 	NetworkName           string       `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
 	BuildDelay            uint64       `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
 	Test                  Test         `json:"test" yaml:"test" mapstructure:"test"`
 	Record                Record       `json:"record" yaml:"record" mapstructure:"record"`
-	Gen                   UtGen        `json:"gen" yaml:"gen" mapstructure:"gen"`
-	Normalize             Normalize    `json:"normalize" yaml:"normalize" mapstructure:"normalize"`
-	ReRecord              ReRecord     `json:"rerecord" yaml:"rerecord" mapstructure:"rerecord"`
+	Gen                   UtGen        `json:"gen" yaml:"-" mapstructure:"gen"`
+	Normalize             Normalize    `json:"normalize" yaml:"-" mapstructure:"normalize"`
+	ReRecord              ReRecord     `json:"rerecord" yaml:"-" mapstructure:"rerecord"`
 	ConfigPath            string       `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
 	BypassRules           []BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
-	EnableTesting         bool         `json:"enableTesting" yaml:"enableTesting" mapstructure:"enableTesting"`
+	EnableTesting         bool         `json:"enableTesting" yaml:"-" mapstructure:"enableTesting"`
 	GenerateGithubActions bool         `json:"generateGithubActions" yaml:"generateGithubActions" mapstructure:"generateGithubActions"`
 	KeployContainer       string       `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
 	KeployNetwork         string       `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
 	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
+	InCi                  bool         `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
 }
 
 type UtGen struct {
@@ -99,6 +100,7 @@ type Test struct {
 	BasePath           string              `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
 	Mocking            bool                `json:"mocking" yaml:"mocking" mapstructure:"mocking"`
 	UpdateTemp         bool                `json:"updateTemp" yaml:"updateTemp" mapstructure:"updateTemp"`
+	IgnoredTests       map[string][]string `json:"ignoredTests" yaml:"ignoredTests" mapstructure:"ignoredTests"`
 }
 
 type Language string
@@ -159,10 +161,7 @@ func GetByPassPorts(conf *Config) []uint {
 }
 
 func SetSelectedTests(conf *Config, testSets []string) {
-	if conf.Test.SelectedTests == nil {
-		conf.Test.SelectedTests = make(map[string][]string)
-	}
-
+	conf.Test.SelectedTests = make(map[string][]string)
 	for _, testSet := range testSets {
 		conf.Test.SelectedTests[testSet] = []string{}
 	}

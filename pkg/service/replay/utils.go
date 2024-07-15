@@ -22,10 +22,11 @@ import (
 )
 
 type TestReportVerdict struct {
-	total  int
-	passed int
-	failed int ``
-	status bool
+	total   int
+	passed  int
+	failed  int
+	ignored int
+	status  bool
 }
 
 func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) config.GlobalNoise {
@@ -112,8 +113,8 @@ func (t *requestMockUtil) SimulateRequest(ctx context.Context, _ uint64, tc *mod
 	return nil, nil
 }
 
-func (t *requestMockUtil) AfterTestHook(_ context.Context, testRunID, testSetID string, tsCnt int) (*models.TestReport, error) {
-	t.logger.Debug("AfterTestHook", zap.Any("testRunID", testRunID), zap.Any("testSetID", testSetID), zap.Any("totalTestSetCount", tsCnt))
+func (t *requestMockUtil) AfterTestHook(_ context.Context, testRunID, testSetID string, coverage models.TestCoverage, tsCnt int) (*models.TestReport, error) {
+	t.logger.Debug("AfterTestHook", zap.Any("testRunID", testRunID), zap.Any("testSetID", testSetID), zap.Any("totalTestSetCount", tsCnt), zap.Any("coverage", coverage))
 	return nil, nil
 }
 

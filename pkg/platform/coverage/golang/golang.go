@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -37,8 +38,7 @@ func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cm
 }
 
 func (g *Golang) PreProcess() (string, error) {
-	if !checkGoBinaryForCoverFlag(g.logger, g.cmd) {
-		g.logger.Warn("go binary was not built with -cover flag")
+	if !checkForCoverFlag(g.logger, g.cmd) {
 		return g.cmd, errors.New("binary not coverable")
 	}
 	if utils.CmdType(g.commandType) == utils.Native {
@@ -62,8 +62,27 @@ func (g *Golang) GetCoverage() (models.TestCoverage, error) {
 		TotalCov: "",
 	}
 
+	coverageDir := os.Getenv("GOCOVERDIR")
+
+	f, err := os.Open(coverageDir)
+	if err != nil {
+		utils.LogError(g.logger, err, "failed to open coverage directory, skipping coverage calculation")
+		return testCov, err
+	}
+	defer func() {
+		if err := f.Close(); err != nil {
+			utils.LogError(g.logger, err, "Error closing coverage directory, skipping coverage calculation")
+		}
+	}()
+
+	_, err = f.Readdirnames(1) // Or f.Readdir(1)
+	if err == io.EOF {
+		utils.LogError(g.logger, err, fmt.Sprintf("no coverage files found in %s, skipping coverage calculation", coverageDir))
+		return testCov, err
+	}
+
 	generateCovTxtCmd := exec.CommandContext(g.ctx, "go", "tool", "covdata", "textfmt", "-i="+os.Getenv("GOCOVERDIR"), "-o="+os.Getenv("GOCOVERDIR")+"/total-coverage.txt")
-	_, err := generateCovTxtCmd.Output()
+	_, err = generateCovTxtCmd.Output()
 	if err != nil {
 		return testCov, err
 	}

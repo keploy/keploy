@@ -8,9 +8,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"runtime"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -18,6 +19,7 @@ import (
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/utils"
 	"go.keploy.io/server/v2/utils/log"
 	"go.uber.org/zap"
@@ -144,6 +146,7 @@ var RootExamples = `
 `
 
 var VersionTemplate = `{{with .Version}}{{printf "Keploy %s" .}}{{end}}{{"\n"}}`
+var IsConfigFileFound = true
 
 type CmdConfigurator struct {
 	logger *zap.Logger
@@ -170,7 +173,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	var err error
 	cmd.Flags().SetNormalizeFunc(aliasNormalizeFunc)
 	switch cmd.Name() {
-
 	case "update":
 		return nil
 	case "normalize":
@@ -217,6 +219,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint64P("app-id", "a", c.cfg.AppID, "A unique name for the user's application")
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
+		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
 		err = cmd.Flags().MarkHidden("port")
 		if err != nil {
 			errMsg := "failed to mark port as hidden flag"
@@ -323,12 +326,12 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"keployNetwork":         "keploy-network",
 		"recordTimer":           "record-timer",
 		"urlMethods":            "url-methods",
+		"inCi":                  "in-ci",
 	}
 
 	if newName, ok := flagNameMapping[name]; ok {
 		name = newName
 	}
-
 	return pflag.NormalizedName(name)
 }
 
@@ -337,19 +340,28 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 	if err != nil {
 		return err
 	}
-	//if runtime.GOOS == "linux" {
-	//	//check if the version of the kernel is above 5.15 for eBPF support
-	//	isValid := kernel.CheckKernelVersion(5, 15, 0)
-	//	if !isValid {
-	//		errMsg := "Kernel version is below 5.15. Keploy requires kernel version 5.15 or above"
-	//		utils.LogError(c.logger, nil, errMsg)
-	//		return errors.New(errMsg)
-	//	}
-	//}
-	return c.ValidateFlags(ctx, cmd)
+	defaultCfg := *c.cfg
+	err = c.PreProcessFlags(cmd)
+	if err != nil {
+		c.logger.Error("failed to preprocess flags", zap.Error(err))
+		return err
+	}
+	err = c.ValidateFlags(ctx, cmd)
+	if err != nil {
+		c.logger.Error("failed to validate flags", zap.Error(err))
+		return err
+	}
+	if !IsConfigFileFound {
+		err := c.CreateConfigFile(ctx, defaultCfg)
+		if err != nil {
+			c.logger.Error("failed to create config file", zap.Error(err))
+			return err
+		}
+	}
+	return nil
 }
 
-func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
+func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	// used to bind common flags for commands like record, test. For eg: PATH, PORT, COMMAND etc.
 	err := viper.BindPFlags(cmd.Flags())
 	if err != nil {
@@ -384,6 +396,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+		IsConfigFileFound = false
 		c.logger.Info("config file not found; proceeding with flags only")
 	}
 
@@ -392,6 +405,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		utils.LogError(c.logger, err, errMsg)
 		return errors.New(errMsg)
 	}
+
+	c.cfg.ConfigPath = configPath
+	return nil
+}
+
+func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
 
 	if c.cfg.Debug {
 		logger, err := log.ChangeLogLevel(zap.DebugLevel)
@@ -494,15 +513,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 		}
-		if utils.CmdType(c.cfg.Command) == utils.Empty && runtime.GOOS == "darwin" {
-			err := os.Setenv("RUN_IN_DOCKER", "true")
-			if err != nil {
-				utils.LogError(c.logger, err, "failed to set RUN_IN_DOCKER env variable in darwin")
-				return err
-			}
-		}
-
-		err = StartInDocker(ctx, c.logger, c.cfg)
+		err := StartInDocker(ctx, c.logger, c.cfg)
 		if err != nil {
 			return err
 		}
@@ -636,5 +647,38 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 	}
+
 	return nil
+}
+
+func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg config.Config) error {
+	defaultCfg = c.UpdateConfigData(defaultCfg)
+	toolSvc := tools.NewTools(c.logger, nil)
+	configData := defaultCfg
+	configDataBytes, err := yaml.Marshal(configData)
+	if err != nil {
+		utils.LogError(c.logger, err, "failed to marshal config data")
+		return errors.New("failed to marshal config data")
+	}
+	err = toolSvc.CreateConfig(ctx, c.cfg.ConfigPath+"/keploy.yml", string(configDataBytes))
+	if err != nil {
+		utils.LogError(c.logger, err, "failed to create config file")
+		return errors.New("failed to create config file")
+	}
+	c.logger.Info("Generated config file based on the flags that are used")
+	return nil
+}
+
+func (c *CmdConfigurator) UpdateConfigData(defaultCfg config.Config) config.Config {
+	defaultCfg.Command = c.cfg.Command
+	defaultCfg.Test.Delay = c.cfg.Test.Delay
+	defaultCfg.AppName = c.cfg.AppName
+	defaultCfg.Test.APITimeout = c.cfg.Test.APITimeout
+	defaultCfg.ContainerName = c.cfg.ContainerName
+	defaultCfg.Test.IgnoreOrdering = c.cfg.Test.IgnoreOrdering
+	defaultCfg.Test.Language = c.cfg.Test.Language
+	defaultCfg.DisableANSI = c.cfg.DisableANSI
+	defaultCfg.Test.SkipCoverage = c.cfg.Test.SkipCoverage
+	defaultCfg.Test.Mocking = c.cfg.Test.Mocking
+	return defaultCfg
 }
