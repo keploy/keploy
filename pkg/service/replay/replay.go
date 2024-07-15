@@ -287,7 +287,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.logger.Info("calculating coverage for the test run and inserting it into the report")
 			coverageData, err := cov.GetCoverage()
 			if err == nil {
-				r.logger.Sugar().Infoln(models.HighlightPassingString("Total Coverage Percentage: ", coverageData.TotalCov))
+				r.logger.Sugar().Infoln(models.HighlightPassingString("Total Line Coverage Percentage: ", coverageData.TotalCov.LineCov))
 				err = cov.AppendCoverage(&coverageData, testRunID)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to update report with the coverage data")

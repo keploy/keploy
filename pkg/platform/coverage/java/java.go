@@ -75,8 +75,8 @@ func (j *Java) PreProcess() (string, error) {
 
 func (j *Java) GetCoverage() (models.TestCoverage, error) {
 	testCov := models.TestCoverage{
-		FileCov:  make(map[string]string),
-		TotalCov: "",
+		FileCov:  make(map[string]models.CoverageElement),
+		TotalCov: models.CoverageElement{},
 	}
 
 	// Define the path to the CSV file
@@ -98,7 +98,14 @@ func (j *Java) GetCoverage() (models.TestCoverage, error) {
 		return testCov, fmt.Errorf("failed to read CSV file: %w", err)
 	}
 
-	var totalInstructions, coveredInstructions int
+	var (
+		totalInstructions,
+		coveredInstructions,
+		totalBranches,
+		coveredBranches,
+		totalMethods,
+		coveredMethods int
+	)
 
 	// Skip header row and process each record
 	for i, record := range records {
@@ -116,22 +123,49 @@ func (j *Java) GetCoverage() (models.TestCoverage, error) {
 			return testCov, err
 		}
 
-		// Calculate total instructions and covered instructions
+		// Parse Branch coverage data
+		branchMissed, err := strconv.Atoi(record[5])
+		if err != nil {
+			return testCov, err
+		}
+		branchCovered, err := strconv.Atoi(record[6])
+		if err != nil {
+			return testCov, err
+		}
+
+		// Parse Method coverage data
+		methodMissed, err := strconv.Atoi(record[11])
+		if err != nil {
+			return testCov, err
+		}
+		methodCovered, err := strconv.Atoi(record[12])
+		if err != nil {
+			return testCov, err
+		}
+
 		totalInstructions += instructionsMissed + instructionsCovered
 		coveredInstructions += instructionsCovered
 
+		totalBranches += branchMissed + branchCovered
+		coveredBranches += branchCovered
+
+		totalMethods += methodMissed + methodCovered
+		coveredMethods += methodCovered
+
 		// Calculate coverage percentage for each class
-		if instructionsCovered > 0 {
-			coverage := float64(instructionsCovered) / float64(instructionsCovered+instructionsMissed) * 100
-			classPath := strings.ReplaceAll(record[1], ".", string(os.PathSeparator))              // Replace dots with path separator
-			testCov.FileCov[filepath.Join(classPath, record[2])] = fmt.Sprintf("%.2f%%", coverage) // Use class path as key
+		classPath := strings.ReplaceAll(record[1], ".", string(os.PathSeparator)) // Replace dots with path separator
+		testCov.FileCov[filepath.Join(classPath, record[2])] = models.CoverageElement{
+			LineCov:   coverage.CalCovPercentage(instructionsCovered, instructionsMissed+instructionsCovered),
+			BranchCov: coverage.CalCovPercentage(branchCovered, branchMissed+branchCovered),
+			FuncCov:   coverage.CalCovPercentage(methodCovered, methodMissed+methodCovered),
 		}
 	}
-	if totalInstructions > 0 {
-		totalCoverage := float64(coveredInstructions) / float64(totalInstructions) * 100
-		testCov.TotalCov = fmt.Sprintf("%.2f%%", totalCoverage)
-	}
 
+	testCov.TotalCov = models.CoverageElement{
+		LineCov:   coverage.CalCovPercentage(coveredInstructions, totalInstructions),
+		BranchCov: coverage.CalCovPercentage(coveredBranches, totalBranches),
+		FuncCov:   coverage.CalCovPercentage(coveredMethods, totalMethods),
+	}
 	return testCov, nil
 }
 

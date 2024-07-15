@@ -58,8 +58,8 @@ func (g *Golang) PreProcess() (string, error) {
 
 func (g *Golang) GetCoverage() (models.TestCoverage, error) {
 	testCov := models.TestCoverage{
-		FileCov:  make(map[string]string),
-		TotalCov: "",
+		FileCov:  make(map[string]models.CoverageElement),
+		TotalCov: models.CoverageElement{},
 	}
 
 	coverageDir := os.Getenv("GOCOVERDIR")
@@ -135,10 +135,13 @@ func (g *Golang) GetCoverage() (models.TestCoverage, error) {
 	for filename, lines := range coveragePerFileTmp {
 		totalLines += lines[0]
 		totalCoveredLines += lines[1]
-		covPercentage := float64(lines[1]*100) / float64(lines[0])
-		testCov.FileCov[filename] = strconv.FormatFloat(float64(covPercentage), 'f', 2, 64) + "%"
+		testCov.FileCov[filename] = models.CoverageElement{
+			LineCov: coverage.CalCovPercentage(totalCoveredLines, totalLines),
+		}
 	}
-	testCov.TotalCov = strconv.FormatFloat(float64(totalCoveredLines*100)/float64(totalLines), 'f', 2, 64) + "%"
+	testCov.TotalCov = models.CoverageElement{
+		LineCov: coverage.CalCovPercentage(totalCoveredLines, totalLines),
+	}
 	return testCov, nil
 }
 

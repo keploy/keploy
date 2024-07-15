@@ -17,8 +17,14 @@ type TestReport struct {
 }
 
 type TestCoverage struct {
-	FileCov  map[string]string `json:"fileCoverage" yaml:"file_coverage"`
-	TotalCov string            `json:"totalCoverage" yaml:"total_coverage"`
+	FileCov  map[string]CoverageElement `json:"fileCoverage" yaml:"file_coverage"`
+	TotalCov CoverageElement            `json:"totalCoverage" yaml:"total_coverage"`
+}
+
+type CoverageElement struct {
+	LineCov   string `json:"lineCoverage" yaml:"line_coverage,omitempty"`
+	BranchCov string `json:"branchCoverage" yaml:"branch_coverage,omitempty"`
+	FuncCov   string `json:"functionCoverage" yaml:"function_coverage,omitempty"`
 }
 
 func (tr *TestReport) GetKind() string {
