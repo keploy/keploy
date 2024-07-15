@@ -62,15 +62,15 @@ func AddCovInfoPerFile(execSegmentCovPerFile map[string][]int, coverageMap map[s
 		execSegmentCovPerFile[filename] = make([]int, 2)
 	}
 	for _, isExecSegmentCovered := range coverageMap {
-		switch isExecSegmentCovered.(type) {
+		switch isExecSegmentCov := isExecSegmentCovered.(type) {
 		case float64:
-			if isExecSegmentCovered.(float64) > 0 {
+			if isExecSegmentCov > 0 {
 				execSegmentCovPerFile[filename][0]++
 			} else {
 				execSegmentCovPerFile[filename][1]++
 			}
 		case []interface{}:
-			for _, covOrNot := range isExecSegmentCovered.([]interface{}) {
+			for _, covOrNot := range isExecSegmentCov {
 				if covOrNot.(float64) > 0 {
 					execSegmentCovPerFile[filename][0]++
 				} else {
