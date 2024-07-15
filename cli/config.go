@@ -60,6 +60,7 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 					utils.LogError(logger, err, "failed to create config")
 					return err
 				}
+				logger.Info("Config file generated successfully")
 				return nil
 			}
 			return errors.New("only generate flag is supported in the config command")
