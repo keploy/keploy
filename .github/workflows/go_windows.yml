@@ -18,10 +18,16 @@ jobs:
           go-version: "1.22"
 
       - name: Build amd64
-        run: GOARCH=amd64 go build -v ./...
+        run: |
+          set GOARCH=amd64
+          go build -v ./...
+        shell: cmd
 
       - name: Build arm64
-        run: GOARCH=arm64 go build -v ./...
+        run: |
+          set GOARCH=arm64
+          go build -v ./...
+        shell: cmd
 
       - uses: codfish/semantic-release-action@v1
         with:
