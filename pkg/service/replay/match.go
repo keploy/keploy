@@ -470,7 +470,7 @@ func (d *DiffsPrinter) Render() error {
 	if len(d.bodyExp) != 0 || len(d.bodyAct) != 0 {
 		bE, bA := []byte(d.bodyExp), []byte(d.bodyAct)
 		if json.Valid(bE) && json.Valid(bA) {
-			difference, err := sprintJSONDiff(bE, bA, "body", d.bodyNoise)
+			difference, err := SprintJSONDiff(bE, bA, "body", d.bodyNoise)
 			if err != nil {
 				difference = sprintDiff(d.bodyExp, d.bodyAct, "body")
 			}
@@ -516,32 +516,31 @@ func (d *DiffsPrinter) Render() error {
  * and the corresponding value.
  */
 func sprintDiffHeader(expect, actual map[string]string) string {
+	var expectAll, actualAll strings.Builder
 
-	expectAll := ""
-	actualAll := ""
+	// Initialize the outputs with an opening curly brace
 	for key, expValue := range expect {
 		actValue := key + ": " + actual[key]
 		expValue = key + ": " + expValue
 		// Offset will be where the string start to unmatch
-		offsets, _ := diffIndexRange(expValue, actValue)
+		offsetsStr1, offsetsStr2, _ := diffArrayRange(string(expValue), string(actValue))
 
 		// Color of the unmatch, can be changed
 		cE, cA := color.FgHiRed, color.FgHiGreen
-
-		expectAll += breakWithColor(expValue, &cE, offsets)
-
-		actualAll += breakWithColor(actValue, &cA, offsets)
-
+		expectDiff := breakSliceWithColor(string(expValue), &cE, offsetsStr1)
+		actualDiff := breakSliceWithColor(string(actValue), &cA, offsetsStr2)
+		expectAll.WriteString(breakLines(expectDiff) + "\n")
+		actualAll.WriteString(breakLines(actualDiff) + "\n")
 	}
 	if len(expect) > MAX_LINE_LENGTH || len(actual) > MAX_LINE_LENGTH {
-		return expectActualTable(expectAll, actualAll, "header", false) // Don't centerize
+		return expectActualTable(expectAll.String(), actualAll.String(), "header", false) // Don't centerize
 	}
-	return expectActualTable(expectAll, actualAll, "header", true)
+	return expectActualTable(expectAll.String(), actualAll.String(), "header", true)
 }
 
 /*
  * Returns a nice diff table where the left is the expect and the right
- * is the actual. For JSON-based diffs use SprintJSONDiff
+ * is the actual. For JSON-based diffs use sprintJSONDiff
  * field: body, status...
  */
 func sprintDiff(expect, actual, field string) string {
@@ -615,9 +614,9 @@ func checkKeyInMaps(jsonMap1, jsonMap2 []byte, key string) (string, bool) {
 
 }
 
-func sprintJSONDiff(json1 []byte, json2 []byte, field string, noise map[string][]string) (string, error) {
+func SprintJSONDiff(json1 []byte, json2 []byte, field string, noise map[string][]string) (string, error) {
 	diffString, err := calculateJSONDiffs(json1, json2)
-	if err != nil {
+	if err != nil || diffString == "" {
 		return "", err
 	}
 	modifiedKeys := extractKey(diffString)
@@ -631,92 +630,89 @@ func sprintJSONDiff(json1 []byte, json2 []byte, field string, noise map[string][
 	return result, nil
 }
 
-func isStructuredData(s string) bool {
-	parts := strings.Split(s, ": ")
-	if len(parts) > 1 {
-		for i := 1; i < len(parts); i++ {
-			if strings.Contains(parts[i], " ") {
-				return true
-			}
-		}
-	}
-
-	// Assume not structured data if no clear structured pattern is found
-	return false
-}
-
 // diffIndexRange dynamically compares two strings, adapting its method based on the presence of spaces.
 func diffIndexRange(s1, s2 string) ([]Range, bool) {
 	var ranges []Range
 	diff := false
 
 	// Determine whether to treat the strings as phrases (multiple words) or as a single continuous string.
-	isPhrase := isStructuredData(s1) && isStructuredData(s2)
-	if isPhrase {
-		// Phrase mode: split strings into words and compare by words considering order.
-		words1 := strings.Split(s1, " ")
-		words2 := strings.Split(s2, " ")
+	// Phrase mode: split strings into words and compare by words considering order.
+	words1 := strings.Split(s1, " ")
+	words2 := strings.Split(s2, " ")
 
-		maxLen := len(words1)
-		if len(words2) > maxLen {
-			maxLen = len(words2)
+	maxLen := len(words1)
+	if len(words2) > maxLen {
+		maxLen = len(words2)
+	}
+
+	startIndex := 0
+	for i := 0; i < maxLen; i++ {
+		word1, word2 := "", ""
+		if i < len(words1) {
+			word1 = words1[i]
+		}
+		if i < len(words2) {
+			word2 = words2[i]
 		}
 
-		startIndex := 0
-		for i := 0; i < maxLen; i++ {
-			word1, word2 := "", ""
-			if i < len(words1) {
-				word1 = words1[i]
-			}
-			if i < len(words2) {
-				word2 = words2[i]
-			}
-
-			if word1 != word2 {
-				if !diff {
-					diff = true
-				}
-				endIndex := startIndex + len(word1)
-				ranges = append(ranges, Range{Start: startIndex, End: endIndex - 1})
-			}
-			startIndex += len(word1) + 1 // +1 to account for the space
-		}
-	} else {
-		// Single continuous string mode: compare character by character.
-		maxLen := len(s1)
-		if len(s2) > maxLen {
-			maxLen = len(s2)
-		}
-
-		var startDiff = -1
-		for i := 0; i < maxLen; i++ {
-			char1, char2 := byte(0), byte(0)
-			if i < len(s1) {
-				char1 = s1[i]
-			}
-			if i < len(s2) {
-				char2 = s2[i]
-			}
-
-			if char1 != char2 {
-				if startDiff == -1 {
-					startDiff = i
-				}
+		if word1 != word2 {
+			if !diff {
 				diff = true
-			} else {
-				if startDiff != -1 {
-					ranges = append(ranges, Range{Start: startDiff, End: i - 1})
-					startDiff = -1
-				}
 			}
+			endIndex := startIndex + len(word1)
+			ranges = append(ranges, Range{Start: startIndex, End: endIndex})
 		}
-
-		if startDiff != -1 {
-			ranges = append(ranges, Range{Start: startDiff, End: maxLen - 1})
-		}
+		startIndex += len(word1) + 1 // +1 to account for the space
 	}
 
 	return ranges, diff
+}
+
+func diffArrayRange(s1, s2 string) ([]int, []int, bool) {
+	var indices1, indices2 []int
+	diff := false
+
+	// Split the strings into words
+	words1 := strings.Split(s1, " ")
+	words2 := strings.Split(s2, " ")
+
+	maxLen := len(words1)
+	if len(words2) > maxLen {
+		maxLen = len(words2)
+	}
+
+	for i := 0; i < maxLen; i++ {
+		word1, word2 := "", ""
+		if i < len(words1) {
+			word1 = words1[i]
+		}
+		if i < len(words2) {
+			word2 = words2[i]
+		}
+
+		if word1 != word2 {
+			if i < len(words1) {
+				indices1 = append(indices1, i)
+			}
+			if i < len(words2) {
+				indices2 = append(indices2, i)
+			}
+			diff = true
+		}
+	}
+
+	// Include remaining indices if arrays are of different lengths
+	if len(words1) > len(words2) {
+		for i := len(words2); i < len(words1); i++ {
+			indices1 = append(indices1, i)
+		}
+	} else if len(words2) > len(words1) {
+		for i := len(words1); i < len(words2); i++ {
+			indices2 = append(indices2, i)
+		}
+	}
+
+	return indices1, indices2, diff
 }
 
 /* Will perform the calculation of the diffs, returning a string that
@@ -764,7 +760,6 @@ func writeKeyValuePair(builder *strings.Builder, key string, value interface{}, 
 func compareAndColorizeSlices(a, b []interface{}, indent string, red, green func(a ...interface{}) string) (string, string) {
 	var expectedOutput strings.Builder
 	var actualOutput strings.Builder
-
 	maxLength := len(a)
 	if len(b) > maxLength {
 		maxLength = len(b)
@@ -870,8 +865,13 @@ func compare(key string, val1, val2 interface{}, indent string, expect, actual *
 				// Handle error
 				return
 			}
-			expect.WriteString(fmt.Sprintf("%s\"%s\": %s,\n", indent, key, red(string(val1Str))))
-			actual.WriteString(fmt.Sprintf("%s\"%s\": %s,\n", indent, key, green(string(val2Str))))
+			c := color.FgRed
+			offsetsStr1, offsetsStr2, _ := diffArrayRange(string(val1Str), string(val2Str))
+			expectDiff := breakSliceWithColor(string(val1Str), &c, offsetsStr1)
+			c = color.FgGreen
+			actualDiff := breakSliceWithColor(string(val2Str), &c, offsetsStr2)
+			expect.WriteString(breakLines(fmt.Sprintf("%s\"%s\": %s,\n", indent, key, (string(expectDiff)))))
+			actual.WriteString(breakLines(fmt.Sprintf("%s\"%s\": %s,\n", indent, key, (string(actualDiff)))))
 		} else {
 			// Serialize the value since they are the same and do not require color
 			valStr, err := json.MarshalIndent(val1, "", "  ")
@@ -883,6 +883,32 @@ func compare(key string, val1, val2 interface{}, indent string, expect, actual *
 			actual.WriteString(fmt.Sprintf("%s\"%s\": %s,\n", indent, key, string(valStr)))
 		}
 	}
+}
+
+func breakSliceWithColor(s string, c *color.Attribute, offsets []int) string {
+	var result strings.Builder
+	coloredString := color.New(*c).SprintFunc()
+	words := strings.Split(s, " ")
+
+	for i, word := range words {
+		if contains(offsets, i) {
+			result.WriteString(coloredString(word) + " ")
+		} else {
+			result.WriteString(word + " ")
+		}
+	}
+
+	return result.String()
+}
+
+// Helper function to check if a slice contains an element
+func contains(slice []int, element int) bool {
+	for _, e := range slice {
+		if e == element {
+			return true
+		}
+	}
+	return false
 }
 
 func compareAndColorizeMaps(a, b map[string]interface{}, indent string, red, green func(a ...interface{}) string) (string, string) {
@@ -900,6 +926,7 @@ func compareAndColorizeMaps(a, b map[string]interface{}, indent string, red, gre
 			writeKeyValuePair(&expectedOutput, red(key), aValue, indent+"  ", red)
 			continue
 		}
+
 		compare(key, aValue, bValue, indent+"  ", &expectedOutput, &actualOutput, red, green)
 	}
 
@@ -932,23 +959,31 @@ func truncateToMatchWithEllipsis(expectedText, actualText string) (string, strin
 	actualLines := strings.Split(actualText, "\n")
 
 	// Determine the number of lines to match based on the shorter text
-	matchLineCount := len(expectedLines)
-	if len(actualLines) < matchLineCount {
-		matchLineCount = len(actualLines)
-	}
+	matchLineCount := (len(expectedLines) + len(actualLines)) / 2
 
 	// ANSI escape code for yellow and reset
-	yellow := "\x1b[33m"
-	reset := "\x1b[0m"
-	ellipsis := yellow + ".\n.\n." + reset // Each dot on a separate line
+	const yellow = "\033[33m"
+	const green = "\033[32m"
+	const reset = "\033[0m"
+	const red = "\033[31m"
+
+	var builder strings.Builder
+	builder.WriteString(yellow)
+	builder.WriteString(".\n")
+	builder.WriteString(".\n")
+	builder.WriteString(".")
+	builder.WriteString(reset) // Set the text color back to green
+	// builder.WriteString(green) // Set the text color back to green
+
+	ellipsis := builder.String()
 
 	// Function to truncate text with yellow ellipses on separate lines in the middle
-	truncate := func(lines []string, matchLineCount int) string {
+	truncate := func(lines []string, matchLineCount int, color string) string {
 		if len(lines) <= matchLineCount {
 			return strings.Join(lines, "\n")
 		}
 
-		if matchLineCount <= 3 { // Ensure there's enough room for at least one line and the ellipsis
+		if matchLineCount <= 3 || len(lines)-matchLineCount < 3 { // Ensure there's enough room for at least one line and the ellipsis
 			return strings.Join(lines, "\n")
 		}
 		// Calculate how many lines to keep from the top and bottom halves
@@ -957,15 +992,14 @@ func truncateToMatchWithEllipsis(expectedText, actualText string) (string, strin
 		bottomHalfLineCount := matchLineCount - 3 - topHalfLineCount
 
 		// Create a slice with the top half, ellipsis on separate lines, and bottom half
-		truncated := append(lines[:topHalfLineCount], ellipsis)
+		truncated := append(lines[:topHalfLineCount], ellipsis+color)
 		truncated = append(truncated, lines[len(lines)-bottomHalfLineCount:]...)
-		return strings.Join(truncated, "\n")
+		return strings.Join(truncated, "\n") + reset
 	}
 
 	// Apply truncation to both expected and actual text if needed
-	truncatedExpected := truncate(expectedLines, matchLineCount)
-	truncatedActual := truncate(actualLines, matchLineCount)
-
+	truncatedExpected := truncate(expectedLines, matchLineCount+1, red)
+	truncatedActual := truncate(actualLines, matchLineCount+1, green)
 	return truncatedExpected, truncatedActual
 }
 
@@ -1210,7 +1244,7 @@ func breakLines(input string) string {
 				currentLine.WriteRune(char)
 			} else {
 				// Handle word wrapping
-				if char == ' ' && lineLength >= MAX_LINE_LENGTH {
+				if lineLength >= MAX_LINE_LENGTH {
 					output.WriteString(currentLine.String())
 					output.WriteRune('\n')
 					currentLine.Reset()
