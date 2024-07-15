@@ -1,4 +1,4 @@
-name: Go on Linux
+name: Go on Windows
 
 on:
   pull_request:
