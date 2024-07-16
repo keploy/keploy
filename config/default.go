@@ -60,6 +60,7 @@ const InternalConfig = `
 enableTesting: false
 keployContainer: "keploy-v2"
 keployNetwork: "keploy-network"
+inDocker: false
 cmdType: "native"
 `
 
