@@ -35,7 +35,7 @@ func Test(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFact
 				utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
 				return nil
 			}
-			// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
+			// defering the stop function to stop keploy in case of any error in test or in case of context cancellation
 			defer func() {
 				select {
 				case <-ctx.Done():
