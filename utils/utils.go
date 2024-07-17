@@ -530,6 +530,7 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 func uniqueProcessGroups(pids []int) ([]int, error) {
 	uniqueGroups := make(map[int]bool)
 	var uniqueGPIDs []int
+	fmt.Println(pids)
 
 	for _, pid := range pids {
 		pgid, err := getProcessGroupID(pid)
