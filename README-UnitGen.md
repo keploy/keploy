@@ -215,6 +215,78 @@ Configure Keploy using command-line flags:
 - `model`: Specifies the AI model to use (default "gpt-4o").
 - `llmApiVersion`: API version of the llm if any (default "")
 
+# Keploy Configuration Guide 📄🚀
+
+Keploy is a powerful tool for testing and evaluating API responses. This guide provides instructions and examples on how to configure noise parameters, including handling deeply nested JSON fields in the Keploy configuration file.
+
+## Table of Contents
+- [Global Noise](#global-noise)
+- [Handling Deeply Nested JSON Fields](#handling-deeply-nested-json-fields)
+- [Important Notes](#important-notes)
+
+## Global Noise 🌐
+
+The `globalNoise` section is used to define parameters that are globally ignored for all API calls during testing. This helps filter out consistent noise, ensuring a cleaner evaluation of responses.
+
+### Example Configuration 🛠️
+
+```yaml
+globalNoise:
+  global: 
+    body: 
+      # Example: Ignore the entire 'token' field in the nested structure
+      "data.signUp.token": []
+```
+### Explanation 📘
+Handling deeply nested JSON fields in the Keploy configuration file involves specifying the exact path to the field you want to ignore. For instance, to ignore the `token` field inside the `signUp` object within the `data` object, use the following configuration:
+
+```yaml
+globalNoise:
+  global: 
+    body: 
+      "data.signUp.token": []
+```
+This configuration ensures that the `token` field is ignored during API response evaluations, improving the accuracy of your testing results.
+
+## Handling Deeply Nested JSON Fields 🔄
+When dealing with deeply nested JSON structures, it's essential to accurately specify the path to the field you wish to ignore. Here’s how you can configure Keploy to handle such scenarios:
+
+### Example: Ignoring Nested Fields 🛠️
+Consider the following JSON response structure:
+
+```json
+{
+  "data": {
+    "signUp": {
+      "id": "100",
+      "email": "keploy@test.com",
+      "firstName": "keploy",
+      "lastName": "keploy",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+    }
+  }
+}
+```
+
+To ignore the `token` field in the `signUp` object within the `data` object, use the following configuration:
+
+```yaml
+globalNoise:
+  global: 
+    body: 
+      "data.signUp.token": []
+```
+
+This configuration effectively filters out the `token` field during API testing, ensuring that it does not interfere with your evaluation process.
+
+## Important Notes 📝
+1. Adding fields with a single level of nesting is straightforward in Keploy configuration files.
+2. For multiple levels of nesting, specify each level explicitly in the configuration to accurately target the field to be ignored.
+3. Use regular expressions or empty arrays as needed to configure noise filtering based on your testing requirements.
+
+By following these examples and guidelines, you can effectively manage nested JSON fields in the Keploy configuration file, enhancing the robustness of your API testing processes.
+
+
 # 🙋🏻‍♀️ Questions? 🙋🏻‍♂️
 
 Reach out to us. We're here to answer!
