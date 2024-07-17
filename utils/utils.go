@@ -552,6 +552,8 @@ func getProcessGroupID(pid int) (int, error) {
 		return 0, err
 	}
 
+	fmt.Println(statusBytes)
+
 	status := string(statusBytes)
 	for _, line := range strings.Split(status, "\n") {
 		if strings.HasPrefix(line, "NSpgid:") {
