@@ -23,7 +23,7 @@ func NewCtx() context.Context {
 	sigs := make(chan os.Signal, 1)
 	// os.Interrupt is more portable than syscall.SIGINT
 	// there is no equivalent for syscall.SIGTERM in os.Signal
-	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 
 	// Start a goroutine that will cancel the context when a signal is received
 	go func() {
