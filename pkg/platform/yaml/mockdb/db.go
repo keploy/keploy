@@ -1,5 +1,3 @@
-//go:build linux
-
 // Package mockdb provides a mock database implementation.
 package mockdb
 
