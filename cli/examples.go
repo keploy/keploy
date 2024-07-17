@@ -16,12 +16,14 @@ func init() {
 	Register("example", Example)
 }
 
-func Example(_ context.Context, logger *zap.Logger, _ *config.Config, _ ServiceFactory, _ CmdConfigurator) *cobra.Command {
+func Example(ctx context.Context, logger *zap.Logger, _ *config.Config, _ ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var customSetup bool
 	var cmd = &cobra.Command{
 		Use:   "example",
 		Short: "Example to record and test via keploy",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
+			provider.PrintLogo(disableAnsi)
 			customSetup, err := cmd.Flags().GetBool("customSetup")
 			if err != nil {
 				utils.LogError(logger, nil, "failed to read the customSetup flag")
