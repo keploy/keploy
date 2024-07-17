@@ -49,7 +49,7 @@ func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 			}
 			// Extract services from the flag
 			serviceStr, _ := cmd.Flags().GetString("service")
-			if serviceStr == "" {
+			if serviceStr != "" {
 				err = contract.Generate(ctx, false)
 			} else {
 				err = contract.Generate(ctx, true)

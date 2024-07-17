@@ -26,6 +26,7 @@ type PathItem struct {
 	Post   *Operation `json:"post,omitempty" yaml:"post,omitempty"`
 	Put    *Operation `json:"put,omitempty" yaml:"put,omitempty"`
 	Delete *Operation `json:"delete,omitempty" yaml:"delete,omitempty"`
+	Patch  *Operation `json:"patch,omitempty" yaml:"patch,omitempty"`
 }
 
 type Operation struct {
@@ -50,8 +51,8 @@ type RequestBody struct {
 }
 
 type MediaType struct {
-	Schema  Schema `json:"schema" yaml:"schema"`
-	Example string `json:"example" yaml:"example"`
+	Schema  Schema                 `json:"schema" yaml:"schema"`
+	Example map[string]interface{} `json:"example" yaml:"example"`
 }
 
 type ResponseItem struct {
