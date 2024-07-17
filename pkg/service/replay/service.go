@@ -59,6 +59,7 @@ type ReportDB interface {
 	GetReport(ctx context.Context, testRunID string, testSetID string) (*models.TestReport, error)
 	InsertTestCaseResult(ctx context.Context, testRunID string, testSetID string, result *models.TestResult) error
 	InsertReport(ctx context.Context, testRunID string, testSetID string, testReport *models.TestReport) error
+	UpdateReport(ctx context.Context, testRunID string, testCoverage any) error
 }
 
 type Config interface {
@@ -81,7 +82,7 @@ type RequestMockHandler interface {
 	ProcessTestRunStatus(ctx context.Context, status bool, testSetID string)
 	FetchMockName() string
 	ProcessMockFile(ctx context.Context, testSetID string)
-	AfterTestHook(ctx context.Context, testRunID, testSetID string, totalTestSets int) (*models.TestReport, error)
+	AfterTestHook(ctx context.Context, testRunID, testSetID string, coverage models.TestCoverage, totalTestSets int) (*models.TestReport, error)
 }
 
 type InstrumentState struct {

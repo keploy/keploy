@@ -17,7 +17,6 @@ check_test_status() {
     local fixed_index=$2 # Boolean to determine if index should be fixed to 0
     local overallStatus=1 # true
     local idx=0 # Initialize index
-
     for dir in $test_sets; do
         if [ "$fixed_index" -eq 1 ]; then
             local report_file="$path/keploy/reports/test-run-0/$dir-report.yaml"
@@ -88,7 +87,7 @@ for dir in $test_sets; do
     sleep 1
 done
 
-sleep 2
+sleep 5
 
 # Check whether the original tests passed or failed
 overallStatus=$(check_test_status "$pre_rec" 0)
@@ -135,7 +134,7 @@ delete_if_exists "$pre_rec/keploy/reports"
 ## Run tests for pre-recorded test cases
 sudo -E env PATH=$PATH keployR test -c "${COMMAND}" --delay ${DELAY} --path "$pre_rec" --generateGithubActions=false
 
-sleep 2
+sleep 5
 
 overallStatus=$(check_test_status "$pre_rec" 1)
 echo "Overall TestRun status for pre-recorded testscase (after mock assertion): $overallStatus"
@@ -150,7 +149,7 @@ echo "New mocks are consistent with the pre-recorded mocks 🎉"
 ## Run tests for test-bench-recorded test cases
 sudo -E env PATH=$PATH keployR test -c "${COMMAND}" --delay ${DELAY} --path "$test_bench_rec" --generateGithubActions=false
 
-sleep 2
+sleep 5
 
 overallStatus=$(check_test_status "$test_bench_rec" 1)
 echo "Overall TestRun status for test-bench-recorded testscase (after mock assertion): $overallStatus"
