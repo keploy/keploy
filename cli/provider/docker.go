@@ -120,6 +120,8 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	cmd.Stdin = os.Stdin
 	// cmd.Stderr = os.Stderr
 
+	fmt.Println("Keploy Enterprise should come here")
+
 	logger.Debug("running the following command in docker", zap.String("command", cmd.String()))
 	err = cmd.Run()
 	if err != nil {
