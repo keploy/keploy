@@ -35,7 +35,7 @@ installKeploy (){
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz"
         fi
 
-        sudo curl --silent --location "$download_url" | sudo tar xz -C /tmp
+        curl --silent --location "$download_url" | tar xz -C /tmp --overwrite
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploy
         delete_keploy_alias
     }
@@ -46,7 +46,7 @@ installKeploy (){
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
         fi
-        sudo curl --silent --location "$download_url" | sudo tar xz -C /tmp
+        curl --silent --location "$download_url" | tar xz -C /tmp --overwrite
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploy
         set_alias 'sudo -E env PATH="$PATH" keploy'
     }
@@ -58,7 +58,7 @@ installKeploy (){
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
         fi
-        sudo curl --silent --location "$download_url" | sudo tar xz -C /tmp
+        curl --silent --location "$download_url" | tar xz -C /tmp --overwrite
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
         set_alias 'sudo -E env PATH="$PATH" keploybin'
     }
@@ -178,6 +178,8 @@ installKeploy "$@"
 
 if command -v keploy &> /dev/null; then
     keploy example
-    rm -rf keploy.sh
-    rm -rf install.sh
+    resudal_files=("LICENSE" "README.md" "READMEes-Es.md" "keploy" "install.sh")
+    for file in "${resudal_files[@]}"; do
+        rm -rf $file
+    done
 fi
