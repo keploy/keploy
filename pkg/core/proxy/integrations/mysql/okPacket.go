@@ -10,38 +10,57 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-func decodeMySQLOK(data []byte) (*models.MySQLOKPacket, error) {
+func decodeMySQLOK(data []byte, serverGreeting *models.MySQLHandshakeV10Packet) (*models.MySQLOKPacket, error) {
 	if len(data) < 7 {
 		return nil, fmt.Errorf("OK packet too short")
 	}
 
 	packet := &models.MySQLOKPacket{}
-	var err error
-	//identifier of ok packet
-	offset := 1
-	// Decode affected rows
-	packet.AffectedRows, err = readLengthEncodedIntegerOff(data, &offset)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode info: %w", err)
+	// var err error
+	// //identifier of ok packet
+	// offset := 1
+	// // Decode affected rows
+	// packet.AffectedRows,_, n =  readLengthEncodedInteger(data) readLengthEncodedIntegerOff(data, &offset)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("failed to decode info: %w", err)
+	// }
+	// // Decode last insert ID
+	// packet.LastInsertID, err = readLengthEncodedIntegerOff(data, &offset)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("failed to decode info: %w", err)
+	// }
+
+	// if len(data) < offset+4 {
+	// 	return nil, fmt.Errorf("OK packet too short")
+	// }
+
+	// packet.StatusFlags = binary.LittleEndian.Uint16(data[offset:])
+	// offset += 2
+
+	// packet.Warnings = binary.LittleEndian.Uint16(data[offset:])
+	// offset += 2
+
+	var n int
+	var pos = 1
+
+	packet.AffectedRows, _, n = readLengthEncodedInteger(data[pos:])
+	pos += n
+	packet.LastInsertID, _, n = readLengthEncodedInteger(data[pos:])
+	pos += n
+
+	if serverGreeting.CapabilityFlags&uint32(models.CLIENT_PROTOCOL_41) > 0 {
+		packet.StatusFlags = binary.LittleEndian.Uint16(data[pos:])
+		pos += 2
+
+		//todo:strict_mode, check warnings as error
+		packet.Warnings = binary.LittleEndian.Uint16(data[pos:])
+	} else if serverGreeting.CapabilityFlags&uint32(models.CLIENT_TRANSACTIONS) > 0 {
+		packet.StatusFlags = binary.LittleEndian.Uint16(data[pos:])
 	}
-	// Decode last insert ID
-	packet.LastInsertID, err = readLengthEncodedIntegerOff(data, &offset)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode info: %w", err)
-	}
+	pos += 2
 
-	if len(data) < offset+4 {
-		return nil, fmt.Errorf("OK packet too short")
-	}
-
-	packet.StatusFlags = binary.LittleEndian.Uint16(data[offset:])
-	offset += 2
-
-	packet.Warnings = binary.LittleEndian.Uint16(data[offset:])
-	offset += 2
-
-	if offset < len(data) {
-		packet.Info = string(data[offset:])
+	if pos < len(data) {
+		packet.Info = string(data[pos:])
 	}
 
 	return packet, nil

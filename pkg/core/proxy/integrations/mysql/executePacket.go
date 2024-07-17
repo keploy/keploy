@@ -5,49 +5,94 @@ package mysql
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-type BoundParameter struct {
-	Type     byte   `yaml:"type"`
-	Unsigned byte   `yaml:"unsigned"`
-	Value    []byte `yaml:"value,omitempty,flow"`
-}
-
-func decodeComStmtExecute(packet []byte) (models.MySQLComStmtExecute, error) {
-	// removed the print statement for cleanliness
-	if len(packet) < 14 { // the minimal size of the packet without parameters should be 14, not 13
-		return models.MySQLComStmtExecute{}, fmt.Errorf("packet length less than 14 bytes")
+func decodeComStmtExecute(data []byte, preparedStmts map[uint32]*models.MySQLStmtPrepareOk) (*models.MySQLComStmtExecute, error) {
+	if len(data) < 10 {
+		return &models.MySQLComStmtExecute{}, fmt.Errorf("packet length too short for COM_STMT_EXECUTE")
 	}
 
-	stmtExecute := models.MySQLComStmtExecute{}
-	stmtExecute.StatementID = binary.LittleEndian.Uint32(packet[1:5])
-	stmtExecute.Flags = packet[5]
-	stmtExecute.IterationCount = binary.LittleEndian.Uint32(packet[6:10])
+	var pos int
 
-	// the next bytes are reserved for the Null-Bitmap, Parameter Bound Flag and Bound Parameters if they exist
-	// if the length of the packet is greater than 14, then there are parameters
-	if len(packet) > 14 {
-		nullBitmapLength := int((stmtExecute.ParamCount + 7) / 8)
+	packet := &models.MySQLComStmtExecute{}
 
-		stmtExecute.NullBitmap = packet[10 : 10+nullBitmapLength]
-		stmtExecute.ParamCount = binary.LittleEndian.Uint16(packet[10+nullBitmapLength:])
+	// Read Status
+	if pos+1 > len(data) {
+		return nil, io.ErrUnexpectedEOF
+	}
+	//data[0] is COM_STMT_EXECUTE (0x17)
 
-		// in case new parameters are bound, the new types and values are sent
-		if packet[10+nullBitmapLength] == 1 {
-			// read the types and values of the new parameters
-			stmtExecute.Parameters = make([]models.BoundParameter, stmtExecute.ParamCount)
-			for i := 0; i < int(stmtExecute.ParamCount); i++ {
-				index := 10 + nullBitmapLength + 1 + 2*i
-				if index+1 >= len(packet) {
-					return models.MySQLComStmtExecute{}, fmt.Errorf("packet length less than expected while reading parameters")
+	pos++
+
+	// Read StatementID
+	if pos+4 > len(data) {
+		return nil, io.ErrUnexpectedEOF
+	}
+	packet.StatementID = binary.LittleEndian.Uint32(data[pos : pos+4])
+	pos += 4
+
+	packet.ParameterCount = int(preparedStmts[packet.StatementID].NumParams)
+
+	// Read Flags
+	if pos+1 > len(data) {
+		return nil, io.ErrUnexpectedEOF
+	}
+	packet.Flags = data[pos]
+	pos++
+
+	// Read IterationCount
+	if pos+4 > len(data) {
+		return nil, io.ErrUnexpectedEOF
+	}
+	packet.IterationCount = binary.LittleEndian.Uint32(data[pos : pos+4])
+	pos += 4
+
+	if packet.ParameterCount > 0 {
+		// Read NULL bitmap
+		nullBitmapLength := (packet.ParameterCount + 7) / 8
+		if pos+nullBitmapLength > len(data) {
+			return nil, io.ErrUnexpectedEOF
+		}
+		packet.NullBitmap = data[pos : pos+int(nullBitmapLength)]
+		pos += int(nullBitmapLength)
+
+		// Read NewParamsBindFlag
+		if pos+1 > len(data) {
+			return nil, io.ErrUnexpectedEOF
+		}
+		packet.NewParamsBindFlag = data[pos]
+		pos++
+
+		// Read Parameters if NewParamsBindFlag is set
+		if packet.NewParamsBindFlag == 1 {
+			packet.Parameters = make([]models.Parameter, packet.ParameterCount)
+			for i := 0; i < packet.ParameterCount; i++ {
+				if pos+2 > len(data) {
+					return nil, io.ErrUnexpectedEOF
 				}
-				stmtExecute.Parameters[i].Type = packet[index]
-				stmtExecute.Parameters[i].Unsigned = packet[index+1]
+				packet.Parameters[i].Type = binary.LittleEndian.Uint16(data[pos : pos+2])
+				packet.Parameters[i].Unsigned = (data[pos+1] & 0x80) != 0 // Check if the highest bit is set
+				pos += 2
 			}
+		}
+
+		// Read Parameter Values
+		for i := 0; i < packet.ParameterCount; i++ {
+			if pos >= len(data) {
+				return nil, io.ErrUnexpectedEOF
+			}
+			length, _, n := readLengthEncodedInteger(data[pos:])
+			pos += n
+			if pos+int(length) > len(data) {
+				return nil, io.ErrUnexpectedEOF
+			}
+			packet.Parameters[i].Value = data[pos : pos+int(length)]
+			pos += int(length)
 		}
 	}
 
-	return stmtExecute, nil
+	return packet, nil
 }

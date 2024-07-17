@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 
@@ -92,7 +93,7 @@ func encodeToBinary(packet interface{}, header *models.MySQLPacketHeader, operat
 	return data, nil
 }
 
-func DecodeMySQLPacket(logger *zap.Logger, packet models.Packet, clientConn net.Conn, mode models.Mode, lastCommand *lastCommandMap) (string, models.SQLPacketHeaderInfo, interface{}, error) {
+func DecodeMySQLPacket(logger *zap.Logger, packet models.Packet, clientConn net.Conn, mode models.Mode, lastCommand *lastCommandMap, preparedStatements map[uint32]*models.MySQLStmtPrepareOk, serverGreetings *serverGreetings) (string, models.SQLPacketHeaderInfo, interface{}, error) {
 	data := packet.Payload
 	header := packet.Header
 	var packetData interface{}
@@ -115,17 +116,31 @@ func DecodeMySQLPacket(logger *zap.Logger, packet models.Packet, clientConn net.
 		switch {
 		case data[0] == 0x00: // OK Packet
 			packetType = "MySQLOK"
-			packetData, err = decodeMySQLOK(data)
+			sg, ok := serverGreetings.load(clientConn)
+			if !ok {
+				return "", models.SQLPacketHeaderInfo{}, nil, fmt.Errorf("Server Greetings not found")
+			}
+
+			packetData, err = decodeMySQLOK(data, sg)
 			lastCommand.Store(clientConn, 0x00) // Reset the last command
 
 		case data[0] == 0xFF: // Error Packet
 			packetType = "MySQLErr"
-			packetData, err = decodeMySQLErr(data)
+			sg, ok := serverGreetings.load(clientConn)
+			if !ok {
+				return "", models.SQLPacketHeaderInfo{}, nil, fmt.Errorf("Server Greetings not found")
+			}
+			packetData, err = decodeMySQLErr(data, sg)
 			lastCommand.Store(clientConn, 0x00) // Reset the last command
+
+		case data[0] == 0xFB: //LOCAL INFILE Data
+			// packetType = "LOCAL_INFILE_DATA"
+			// packetData, err = decodeLocalInfileData(data)
+			lastCommand.Store(clientConn, 0x00) // Reset the last command
+			return "", models.SQLPacketHeaderInfo{}, nil, fmt.Errorf("LOCAL INFILE DATA packet not supported")
 
 		case isLengthEncodedInteger(data[0]): // ResultSet Packet
 			logger.Info("ResultSet Packet detected")
-			fmt.Println("Data of resultset packet: ", data)
 			packetType = "RESULT_SET_PACKET"
 			packetData, err = parseResultSet(data)
 			if err != nil {
@@ -143,12 +158,12 @@ func DecodeMySQLPacket(logger *zap.Logger, packet models.Packet, clientConn net.
 		lastCommand.Store(clientConn, 0x0e)
 	case data[0] == 0x17: // COM_STMT_EXECUTE
 		packetType = "COM_STMT_EXECUTE"
-		packetData, err = decodeComStmtExecute(data)
+		packetData, err = decodeComStmtExecute(data, preparedStatements)
 		lastCommand.Store(clientConn, 0x17)
-	case data[0] == 0x1c: // COM_STMT_FETCH
-		packetType = "COM_STMT_FETCH"
-		packetData, err = decodeComStmtFetch(data)
-		lastCommand.Store(clientConn, 0x1c)
+	// case data[0] == 0x1c: // COM_STMT_FETCH
+	// 	packetType = "COM_STMT_FETCH"
+	// 	packetData, err = decodeComStmtFetch(data)
+	// 	lastCommand.Store(clientConn, 0x1c)
 	case data[0] == 0x16: // COM_STMT_PREPARE
 		packetType = "COM_STMT_PREPARE"
 		packetData, err = decodeComStmtPrepare(data)
@@ -179,12 +194,14 @@ func DecodeMySQLPacket(logger *zap.Logger, packet models.Packet, clientConn net.
 
 	case data[0] == 0x04: // Result Set Packet
 		packetType = "RESULT_SET_PACKET"
+		logger.Info("ResultSet Packet detected, which should not be possible in the current context")
 		packetData, err = parseResultSet(data)
 		lastCommand.Store(clientConn, 0x04)
 	case data[0] == 0x0A: // MySQLHandshakeV10
 		packetType = "MySQLHandshakeV10"
 		packetData, err = decodeMySQLHandshakeV10(data)
 		handshakePacket, _ := packetData.(*models.MySQLHandshakeV10Packet)
+		serverGreetings.store(clientConn, handshakePacket)
 		handshakePluginName = handshakePacket.AuthPluginName
 		logger.Info("Detected MYSQLHanshakeV10 packet", zap.String("AuthPluginName", handshakePluginName))
 		lastCommand.Store(clientConn, 0x0A)
@@ -197,18 +214,30 @@ func DecodeMySQLPacket(logger *zap.Logger, packet models.Packet, clientConn net.
 		if ok && lastCmd == 0x16 {
 			packetType = "COM_STMT_PREPARE_OK"
 			packetData, err = decodeComStmtPrepareOk(data)
+			if err == nil {
+				prepareOk := packetData.(*models.MySQLStmtPrepareOk)
+				preparedStatements[prepareOk.StatementID] = prepareOk
+			}
 		} else {
 			packetType = "MySQLOK"
-			packetData, err = decodeMySQLOK(data)
+			sg, ok := serverGreetings.load(clientConn)
+			if !ok {
+				return "", models.SQLPacketHeaderInfo{}, nil, fmt.Errorf("Server Greetings not found")
+			}
+			packetData, err = decodeMySQLOK(data, sg)
 			logger.Info("MySQLOK packet detected")
 		}
 		lastCommand.Store(clientConn, 0x00)
 	case data[0] == 0xFF: // MySQLErr
 		packetType = "MySQLErr"
 		logger.Info("MySQLErr packet detected")
-		packetData, err = decodeMySQLErr(data)
+		sg, ok := serverGreetings.load(clientConn)
+		if !ok {
+			return "", models.SQLPacketHeaderInfo{}, nil, fmt.Errorf("Server Greetings not found")
+		}
+		packetData, err = decodeMySQLErr(data, sg)
 		lastCommand.Store(clientConn, 0xFF)
-	case data[0] == 0xFE && len(data) > 1: // Auth Switch Packet
+	case data[0] == 0xFE && len(data) > 5: // Auth Switch Packet
 		packetType = "AUTH_SWITCH_REQUEST"
 		packetData, err = decodeAuthSwitchRequest(data)
 		lastCommand.Store(clientConn, 0xFE)
@@ -220,7 +249,11 @@ func DecodeMySQLPacket(logger *zap.Logger, packet models.Packet, clientConn net.
 		expectingAuthSwitchResponse = false
 	case data[0] == 0xFE: // EOF packet
 		packetType = "MySQLEOF"
-		packetData, err = decodeMYSQLEOF(data)
+		sg, ok := serverGreetings.load(clientConn)
+		if !ok {
+			return "", models.SQLPacketHeaderInfo{}, nil, fmt.Errorf("Server Greetings not found")
+		}
+		packetData, err = decodeMYSQLEOF(data, sg)
 		lastCommand.Store(clientConn, 0xFE)
 		logger.Info("EOF packet detected", zap.Error(err))
 	case data[0] == 0x02: // New packet type
@@ -276,9 +309,10 @@ func DecodeMySQLPacket(logger *zap.Logger, packet models.Packet, clientConn net.
 	}
 	return packetType, header, packetData, nil
 }
+
 func isLengthEncodedInteger(b byte) bool {
 	// This is a simplified check. You may need a more robust check based on MySQL protocol.
-	return b != 0x00 && b != 0xFF
+	return b != 0x00 && b != 0xFF && b != 0xFB
 }
 
 func Encode(p *models.Packet) ([]byte, error) {
@@ -299,6 +333,36 @@ func Encode(p *models.Packet) ([]byte, error) {
 	}
 
 	return packet, nil
+}
+
+type serverGreetings struct {
+	sync.RWMutex
+	internal map[net.Conn]*models.MySQLHandshakeV10Packet
+}
+
+func newServerGreetings() *serverGreetings {
+	return &serverGreetings{
+		internal: make(map[net.Conn]*models.MySQLHandshakeV10Packet),
+	}
+}
+
+func (sg *serverGreetings) load(key net.Conn) (*models.MySQLHandshakeV10Packet, bool) {
+	sg.RLock()
+	result, ok := sg.internal[key]
+	sg.RUnlock()
+	return result, ok
+}
+
+func (sg *serverGreetings) delete(key net.Conn) {
+	sg.Lock()
+	delete(sg.internal, key)
+	sg.Unlock()
+}
+
+func (sg *serverGreetings) store(key net.Conn, value *models.MySQLHandshakeV10Packet) {
+	sg.Lock()
+	sg.internal[key] = value
+	sg.Unlock()
 }
 
 type lastCommandMap struct {
@@ -436,55 +500,6 @@ func writeLengthEncodedInteger(buf *bytes.Buffer, val *uint64) {
 //	buf.Write(data)
 //}
 
-func readLengthEncodedString(data []byte, offset *int) (string, error) {
-	if *offset >= len(data) {
-		return "", errors.New("data length is not enough")
-	}
-	var length int
-	firstByte := data[*offset]
-	switch {
-	case firstByte < 0xfb:
-		length = int(firstByte)
-		*offset++
-	case firstByte == 0xfb:
-		*offset++
-		return "", nil
-	case firstByte == 0xfc:
-		if *offset+3 > len(data) {
-			return "", errors.New("data length is not enough 1")
-		}
-		length = int(binary.LittleEndian.Uint16(data[*offset+1 : *offset+3]))
-		*offset += 3
-	case firstByte == 0xfd:
-		if *offset+4 > len(data) {
-			return "", errors.New("data length is not enough 2")
-		}
-		length = int(data[*offset+1]) | int(data[*offset+2])<<8 | int(data[*offset+3])<<16
-		*offset += 4
-	case firstByte == 0xfe:
-		if *offset+9 > len(data) {
-			return "", errors.New("data length is not enough 3")
-		}
-		length = int(binary.LittleEndian.Uint64(data[*offset+1 : *offset+9]))
-		*offset += 9
-	}
-	result := string(data[*offset : *offset+length])
-	*offset += length
-	return result, nil
-}
-
-//func ReadLengthEncodedIntegers(data []byte, offset int) (uint64, int) {
-//	if data[offset] < 0xfb {
-//		return uint64(data[offset]), offset + 1
-//	} else if data[offset] == 0xfc {
-//		return uint64(binary.LittleEndian.Uint16(data[offset+1 : offset+3])), offset + 3
-//	} else if data[offset] == 0xfd {
-//		return uint64(data[offset+1]) | uint64(data[offset+2])<<8 | uint64(data[offset+3])<<16, offset + 4
-//	}
-//
-//	return binary.LittleEndian.Uint64(data[offset+1 : offset+9]), offset + 9
-//}
-//
 //func nullTerminatedString(data []byte) (string, int, error) {
 //	pos := bytes.IndexByte(data, 0)
 //	if pos == -1 {
@@ -493,25 +508,34 @@ func readLengthEncodedString(data []byte, offset *int) (string, error) {
 //	return string(data[:pos]), pos, nil
 //}
 
-func readLengthEncodedInteger(b []byte) (uint64, bool, int) {
+func readLengthEncodedInteger(b []byte) (num uint64, isNull bool, n int) {
 	if len(b) == 0 {
-		return 0, true, 1
+		return 0, true, 0
 	}
+
 	switch b[0] {
+	// 251: NULL
 	case 0xfb:
 		return 0, true, 1
+
+		// 252: value of following 2
 	case 0xfc:
 		return uint64(b[1]) | uint64(b[2])<<8, false, 3
+
+		// 253: value of following 3
 	case 0xfd:
 		return uint64(b[1]) | uint64(b[2])<<8 | uint64(b[3])<<16, false, 4
+
+		// 254: value of following 8
 	case 0xfe:
 		return uint64(b[1]) | uint64(b[2])<<8 | uint64(b[3])<<16 |
 				uint64(b[4])<<24 | uint64(b[5])<<32 | uint64(b[6])<<40 |
 				uint64(b[7])<<48 | uint64(b[8])<<56,
 			false, 9
-	default:
-		return uint64(b[0]), false, 1
 	}
+
+	// 0-250: value of first byte
+	return uint64(b[0]), false, 1
 }
 
 //func readLengthEncodedStringUpdated(data []byte) (string, []byte, error) {
@@ -543,35 +567,30 @@ func readUint24(b []byte) uint32 {
 	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16
 }
 
-func readLengthEncodedIntegers(b []byte) (uint64, int) {
-	// Check the first byte
-	switch b[0] {
-	case 0xfb:
-		// 0xfb represents NULL
-		return 0, 1
-	case 0xfc:
-		// 0xfc means the next 2 bytes are the integer
-		return uint64(binary.LittleEndian.Uint16(b[1:])), 3
-	case 0xfd:
-		// 0xfd means the next 3 bytes are the integer
-		return uint64(binary.LittleEndian.Uint32(append(b[1:4], 0))), 4
-	case 0xfe:
-		// 0xfe means the next 8 bytes are the integer
-		return binary.LittleEndian.Uint64(b[1:]), 9
-	default:
-		// If the first byte is less than 0xfb, it is the integer itself
-		return uint64(b[0]), 1
+func readLengthEncodedStrings(b []byte) ([]byte, bool, int, error) {
+	// Get length
+	num, isNull, n := readLengthEncodedInteger(b)
+	if num < 1 {
+		return b[n:n], isNull, n, nil
 	}
+
+	n += int(num)
+
+	// Check data length
+	if len(b) >= n {
+		return b[n-int(num) : n : n], false, n, nil
+	}
+	return nil, false, n, io.EOF
 }
 
-func readLengthEncodedStrings(b []byte) (string, int) {
-	length, n := readLengthEncodedIntegers(b)
-	// add check for slice out of range
-	if int(length) > len(b) {
-		return "", n
-	}
-	return string(b[n : n+int(length)]), n + int(length)
-}
+// func readLengthEncodedStrings(b []byte) (string, int) {
+// 	length, n := readLengthEncodedIntegers(b)
+// 	// add check for slice out of range
+// 	if int(length) > len(b) {
+// 		return "", n
+// 	}
+// 	return string(b[n : n+int(length)]), n + int(length)
+// }
 
 func ShouldUseSSL(packet *models.MySQLHandshakeV10Packet) bool {
 	return (packet.CapabilityFlags & models.CLIENT_SSL) != 0

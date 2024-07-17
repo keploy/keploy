@@ -369,14 +369,14 @@ func decodeMySQLMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models
 				return nil, err
 			}
 			req.Message = requestMessage
-		case "COM_STMT_FETCH":
-			requestMessage := &models.MySQLComStmtFetchPacket{}
-			err := v.Message.Decode(requestMessage)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLComStmtFetchPacket")
-				return nil, err
-			}
-			req.Message = requestMessage
+		// case "COM_STMT_FETCH":
+		// 	requestMessage := &models.MySQLComStmtFetchPacket{}
+		// 	err := v.Message.Decode(requestMessage)
+		// 	if err != nil {
+		// 		utils.LogError(logger, err, "failed to unmarshal yml document into MySQLComStmtFetchPacket")
+		// 		return nil, err
+		// 	}
+		// 	req.Message = requestMessage
 		case "COM_STMT_CLOSE":
 			requestMessage := &models.MySQLComStmtClosePacket{}
 			err := v.Message.Decode(requestMessage)

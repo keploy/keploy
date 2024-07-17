@@ -15,108 +15,46 @@ func decodeComStmtPrepareOk(data []byte) (*models.MySQLStmtPrepareOk, error) {
 		return nil, errors.New("data length is not enough for COM_STMT_PREPARE_OK")
 	}
 
+	offset := 0
+
 	response := &models.MySQLStmtPrepareOk{
-		Status:       data[0],
-		StatementID:  binary.LittleEndian.Uint32(data[1:5]),
-		NumColumns:   binary.LittleEndian.Uint16(data[5:7]),
-		NumParams:    binary.LittleEndian.Uint16(data[7:9]),
-		WarningCount: binary.LittleEndian.Uint16(data[10:12]),
+		Status:      data[offset],
+		StatementID: binary.LittleEndian.Uint32(data[offset+1 : offset+5]),
+		NumColumns:  binary.LittleEndian.Uint32(data[offset+5 : offset+7]),
+		NumParams:   binary.LittleEndian.Uint32(data[offset+7 : offset+9]),
+		//data[10] is reserved byte ([00] filler)
+		WarningCount: binary.LittleEndian.Uint16(data[offset+10 : offset+12]),
 	}
 
-	offset := 12
+	offset += 12
+	data = data[offset:]
 
 	if response.NumParams > 0 {
-		for i := uint16(0); i < response.NumParams; i++ {
-			columnDef := models.ColumnDefinition{}
-			columnHeader := models.PacketHeader{
-				PacketLength:     data[offset],
-				PacketSequenceID: data[offset+3],
-			}
-			columnDef.PacketHeader = columnHeader
-			offset += 4 //Header of packet
-			var err error
-			columnDef.Catalog, err = readLengthEncodedString(data, &offset)
+		offset = 0
+		for i := uint32(0); i < response.NumParams; i++ {
+			column, n, err := parseColumnDefinitionPacket(data)
 			if err != nil {
 				return nil, err
 			}
-			columnDef.Schema, err = readLengthEncodedString(data, &offset)
-			if err != nil {
-				return nil, err
-			}
-			columnDef.Table, err = readLengthEncodedString(data, &offset)
-			if err != nil {
-				return nil, err
-			}
-			columnDef.OrgTable, err = readLengthEncodedString(data, &offset)
-			if err != nil {
-				return nil, err
-			}
-			columnDef.Name, err = readLengthEncodedString(data, &offset)
-			if err != nil {
-				return nil, err
-			}
-			columnDef.OrgName, err = readLengthEncodedString(data, &offset)
-			if err != nil {
-				return nil, err
-			}
-			offset++ //filler
-			columnDef.CharacterSet = binary.LittleEndian.Uint16(data[offset : offset+2])
-			columnDef.ColumnLength = binary.LittleEndian.Uint32(data[offset+2 : offset+6])
-			columnDef.ColumnType = data[offset+6]
-			columnDef.Flags = binary.LittleEndian.Uint16(data[offset+7 : offset+9])
-			columnDef.Decimals = data[offset+9]
-			offset += 10
-			offset += 2 // filler
-			response.ParamDefs = append(response.ParamDefs, columnDef)
+			response.ParamDefs = append(response.ParamDefs, *column)
+			offset += n
 		}
 		offset += 9 //skip EOF packet for Parameter Definition
+		data = data[offset:]
 	}
 
 	if response.NumColumns > 0 {
-		for i := uint16(0); i < response.NumColumns; i++ {
-			columnDef := models.ColumnDefinition{}
-			columnHeader := models.PacketHeader{
-				PacketLength:     data[offset],
-				PacketSequenceID: data[offset+3],
-			}
-			columnDef.PacketHeader = columnHeader
-			offset += 4
-			var err error
-			columnDef.Catalog, err = readLengthEncodedString(data, &offset)
+		offset = 0
+		for i := uint32(0); i < response.NumColumns; i++ {
+			column, n, err := parseColumnDefinitionPacket(data)
 			if err != nil {
 				return nil, err
 			}
-			columnDef.Schema, err = readLengthEncodedString(data, &offset)
-			if err != nil {
-				return nil, err
-			}
-			columnDef.Table, err = readLengthEncodedString(data, &offset)
-			if err != nil {
-				return nil, err
-			}
-			columnDef.OrgTable, err = readLengthEncodedString(data, &offset)
-			if err != nil {
-				return nil, err
-			}
-			columnDef.Name, err = readLengthEncodedString(data, &offset)
-			if err != nil {
-				return nil, err
-			}
-			columnDef.OrgName, err = readLengthEncodedString(data, &offset)
-			if err != nil {
-				return nil, err
-			}
-			offset++ //filler
-			columnDef.CharacterSet = binary.LittleEndian.Uint16(data[offset : offset+2])
-			columnDef.ColumnLength = binary.LittleEndian.Uint32(data[offset+2 : offset+6])
-			columnDef.ColumnType = data[offset+6]
-			columnDef.Flags = binary.LittleEndian.Uint16(data[offset+7 : offset+9])
-			columnDef.Decimals = data[offset+9]
-			offset += 10
-			offset += 2 // filler
-			response.ColumnDefs = append(response.ColumnDefs, columnDef)
+			response.ColumnDefs = append(response.ColumnDefs, *column)
+			offset += n
 		}
-		offset += 9 //skip EOF packet for Column Definitions
+		// offset += 9 //skip EOF packet for Column Definitions
+		// data = data[offset:]
 	}
 
 	return response, nil
@@ -153,7 +91,7 @@ func encodeStmtPrepareOk(packet *models.MySQLStmtPrepareOk) ([]byte, error) {
 	buf.WriteByte(0x00) // Reserved byte
 
 	seqNum := byte(2)
-	for i := uint16(0); i < packet.NumParams; i++ {
+	for i := uint32(0); i < packet.NumParams; i++ {
 		param := packet.ParamDefs[i]
 		if err := encodeColumnDefinition(buf, &param, &seqNum); err != nil {
 			return nil, err

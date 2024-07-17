@@ -14,6 +14,18 @@ import (
 )
 
 func parseResultSet(b []byte) (*models.MySQLResultSet, error) {
+
+	// fmt.Print("ResultSetDataPacket:\n")
+	// var i = 1
+	// for _, byte := range b {
+	// 	fmt.Printf(" %02x", byte)
+	// 	i++
+	// 	if i%16 == 0 {
+	// 		fmt.Println()
+	// 	}
+	// }
+	// fmt.Println()
+
 	columns := make([]*models.ColumnDefinition, 0)
 	rows := make([]*models.Row, 0)
 	var err error
@@ -30,22 +42,35 @@ func parseResultSet(b []byte) (*models.MySQLResultSet, error) {
 	// Parse the columns
 	for i := uint64(0); i < columnCount; i++ {
 		var columnPacket *models.ColumnDefinition
-		columnPacket, b, err = parseColumnDefinitionPacket(b)
+		columnPacket, pos, err := parseColumnDefinitionPacket(b)
 		if err != nil {
 			return nil, err
 		}
+		b = b[pos:]
 		columns = append(columns, columnPacket)
 	}
+	fmt.Println("Found no null pointer exception")
+
+	fmt.Print("Buffer for eof packet:\n")
+	for _, byte := range b[4:9] {
+		fmt.Printf(" %02x", byte)
+	}
+	fmt.Println()
 
 	// Check for EOF packet after columns
 	if len(b) > 4 && bytes.Contains(b[4:9], []byte{0xfe, 0x00, 0x00}) {
 		eofPresent = true
 		eofAfterColumns = b[:9]
 		b = b[9:] // Skip the EOF packet
+
+		//NOTE: THIS PADDING IS NOT THE PART OF THE PROTOCOL BUT IT CAME FOR CERTAIN APPLICATION
+		// WE CAN REMOVE THIS ONCE WE ARE SURE THAT IT IS NOT REQUIRED
 		if len(b) >= 2 && b[0] == 0x00 && b[1] == 0x00 {
+			println("Padding present after columns")
 			paddingPresent = true
 			b = b[2:] // Skip padding
 		}
+
 	}
 
 	// Parse the rows
@@ -80,75 +105,12 @@ func parseResultSet(b []byte) (*models.MySQLResultSet, error) {
 	return resultSet, err
 }
 
-func parseColumnDefinitionPacket(b []byte) (*models.ColumnDefinition, []byte, error) {
-	packet := &models.ColumnDefinition{}
-	var n int
-	var m int
-	if len(b) < 4 {
-		return nil, nil, fmt.Errorf("invalid column definition packet")
+func printByteArray(name string, b []byte) {
+	fmt.Printf("%s:\n", name)
+	for _, byte := range b {
+		fmt.Printf(" %02x", byte)
 	}
-	// Read packet header
-	packet.PacketHeader.PacketLength = uint8(readUint24(b[:3]))
-	packet.PacketHeader.PacketSequenceID = uint8(b[3])
-	b = b[4:]
-
-	packet.Catalog, n = readLengthEncodedStrings(b)
-	if len(b) > n {
-		b = b[n:]
-	}
-	packet.Schema, n = readLengthEncodedStrings(b)
-	if len(b) > n {
-		b = b[n:]
-	}
-	packet.Table, n = readLengthEncodedStrings(b)
-	if len(b) > n {
-		b = b[n:]
-	}
-	packet.OrgTable, n = readLengthEncodedStrings(b)
-	if len(b) > n {
-		b = b[n:]
-	}
-	packet.Name, n = readLengthEncodedStrings(b)
-	if len(b) > n {
-		b = b[n:]
-	}
-	packet.OrgName, n = readLengthEncodedStrings(b)
-	if len(b) > n {
-		b = b[n:]
-	}
-
-	if len(b) > 1 {
-		b = b[1:] // Skip the next byte (length of the fixed-length fields)
-	}
-	packet.CharacterSet = binary.LittleEndian.Uint16(b)
-	if len(b) > 2 {
-		b = b[2:]
-	}
-	packet.ColumnLength = binary.LittleEndian.Uint32(b)
-	if len(b) > 4 {
-		b = b[4:]
-	}
-	packet.ColumnType = b[0]
-	if len(b) > 1 {
-		b = b[1:]
-	}
-	packet.Flags = binary.LittleEndian.Uint16(b)
-	if len(b) > 2 {
-		b = b[2:]
-	}
-	if len(b) > 0 {
-		packet.Decimals = b[0]
-	}
-	if len(b) > 2 {
-		b = b[2:] // Skip filler
-	}
-
-	if len(b) > 0 {
-		packet.DefaultValue, m = readLengthEncodedStrings(b)
-		b = b[m:]
-	}
-
-	return packet, b, nil
+	fmt.Println()
 }
 
 var optionalPadding bool
@@ -158,6 +120,7 @@ func parseRow(b []byte, columnDefinitions []*models.ColumnDefinition) (*models.R
 	var optionalEOFBytes []byte
 
 	row := &models.Row{}
+	//IT COULD BE A RESPONSE EOF PACKET THAT COMES JUST AFTER EACH ROW
 	if b[4] == 0xfe {
 		eofFinal = true
 		optionalEOFBytes = b[:9]
@@ -178,6 +141,8 @@ func parseRow(b []byte, columnDefinitions []*models.ColumnDefinition) (*models.R
 		PacketSequenceID: sequenceID,
 	}
 	b = b[4:]
+
+	//NOTE: THIS PADDING IS NOT THE PART OF THE PROTOCOL BUT IT CAME FOR CERTAIN APPLICATION
 	if len(b) >= 2 && b[0] == 0x00 && b[1] == 0x00 {
 		optionalPadding = true
 		b = b[2:] // Skip padding

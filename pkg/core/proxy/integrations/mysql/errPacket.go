@@ -9,21 +9,26 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-func decodeMySQLErr(data []byte) (*models.MySQLERRPacket, error) {
+func decodeMySQLErr(data []byte, serverGreeting *models.MySQLHandshakeV10Packet) (*models.MySQLERRPacket, error) {
 	if len(data) < 9 {
 		return nil, fmt.Errorf("ERR packet too short")
 	}
-	if data[0] != 0xff {
-		return nil, fmt.Errorf("invalid ERR packet header: %x", data[0])
-	}
 
 	packet := &models.MySQLERRPacket{}
-	packet.ErrorCode = binary.LittleEndian.Uint16(data[1:3])
 
-	if data[3] != '#' {
-		return nil, fmt.Errorf("invalid SQL state marker: %c", data[3])
+	pos := 1
+	packet.ErrorCode = binary.LittleEndian.Uint16(data[pos : pos+2])
+	pos += 2
+
+	if serverGreeting.CapabilityFlags&uint32(models.CLIENT_PROTOCOL_41) > 0 {
+		if data[pos] != '#' {
+			return nil, fmt.Errorf("invalid SQL state marker: %c", data[3])
+		}
+		pos++
+		packet.SQLState = string(data[pos : pos+5])
+		pos += 5
 	}
-	packet.SQLState = string(data[4:9])
-	packet.ErrorMessage = string(data[9:])
+
+	packet.ErrorMessage = string(data[pos:])
 	return packet, nil
 }

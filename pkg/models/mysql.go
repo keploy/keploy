@@ -90,24 +90,26 @@ type MySQLQueryPacket struct {
 }
 
 type MySQLComStmtExecute struct {
-	StatementID    uint32           `yaml:"statement_id"`
-	Flags          byte             `yaml:"flags"`
-	IterationCount uint32           `yaml:"iteration_count"`
-	NullBitmap     []byte           `yaml:"null_bitmap"`
-	ParamCount     uint16           `yaml:"param_count"`
-	Parameters     []BoundParameter `yaml:"parameters"`
+	StatementID       uint32      `yaml:"statement_id"`
+	Flags             byte        `yaml:"flags"`
+	IterationCount    uint32      `yaml:"iteration_count"`
+	ParameterCount    int         `yaml:"parameter_count"`
+	NullBitmap        []byte      `yaml:"null_bitmap"`
+	NewParamsBindFlag byte        `yaml:"new_params_bind_flag"`
+	Parameters        []Parameter `yaml:"parameters"`
 }
-type BoundParameter struct {
-	Type     byte   `yaml:"type"`
-	Unsigned byte   `yaml:"unsigned"`
+
+type Parameter struct {
+	Type     uint16 `yaml:"type"`
+	Unsigned bool   `yaml:"unsigned"`
 	Value    []byte `yaml:"value"`
 }
 
 type MySQLStmtPrepareOk struct {
 	Status       byte               `yaml:"status"`
 	StatementID  uint32             `yaml:"statement_id"`
-	NumColumns   uint16             `yaml:"num_columns"`
-	NumParams    uint16             `yaml:"num_params"`
+	NumColumns   uint32             `yaml:"num_columns"`
+	NumParams    uint32             `yaml:"num_params"`
 	WarningCount uint16             `yaml:"warning_count"`
 	ColumnDefs   []ColumnDefinition `yaml:"column_definitions"`
 	ParamDefs    []ColumnDefinition `yaml:"param_definitions"`
@@ -132,6 +134,7 @@ type RowHeader struct {
 	PacketLength     uint8 `yaml:"packet_length"`
 	PacketSequenceID uint8 `yaml:"packet_sequence_id"`
 }
+
 type ColumnDefinition struct {
 	Catalog      string       `yaml:"catalog"`
 	Schema       string       `yaml:"schema"`

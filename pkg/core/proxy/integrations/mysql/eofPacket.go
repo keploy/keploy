@@ -9,19 +9,15 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-func decodeMYSQLEOF(data []byte) (*models.EOFPacket, error) {
-	if len(data) < 1 {
-		return nil, fmt.Errorf("EOF packet too short")
-	}
-
-	if data[0] != 0xfe {
-		return nil, fmt.Errorf("invalid EOF packet header")
+func decodeMYSQLEOF(data []byte, serverGreetings *models.MySQLHandshakeV10Packet) (*models.EOFPacket, error) {
+	if len(data) > 5 {
+		return nil, fmt.Errorf("EOF packet too long for EOF")
 	}
 
 	packet := &models.EOFPacket{}
 	packet.Header = data[0]
 
-	if len(data) >= 5 {
+	if serverGreetings.CapabilityFlags&uint32(models.CLIENT_PROTOCOL_41) > 0 {
 		packet.Warnings = binary.LittleEndian.Uint16(data[1:3])
 		packet.StatusFlags = binary.LittleEndian.Uint16(data[3:5])
 	}
