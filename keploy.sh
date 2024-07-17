@@ -138,7 +138,7 @@ installKeploy (){
 
     cleanup_tmp() {
         # Remove extracted files /tmp directory
-        tmp_files=("LICENSE" "README.md" "READMEes-Es.md")
+        tmp_files=("LICENSE" "README.md" "READMEes-Es.md" "README-UnitGen.md")
         for file in "${tmp_files[@]}"; do
             rm -rf "/tmp/$file"
         done
