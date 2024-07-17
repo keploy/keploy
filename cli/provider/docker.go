@@ -108,7 +108,12 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 
 	cmd.Cancel = func() error {
 		fmt.Println("came here")
-		return utils.InterruptProcessTree(logger, cmd.Process.Pid, syscall.SIGINT)
+		err := utils.SendSignal(logger, -cmd.Process.Pid, syscall.SIGINT)
+		if err != nil {
+			utils.LogError(logger, err, "failed to start stop docker")
+			return err
+		}
+		return nil
 	}
 
 	cmd.Stdout = os.Stdout
