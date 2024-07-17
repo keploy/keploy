@@ -24,8 +24,6 @@ func alreadyRunning(cmd, basePath string) bool {
 	return (cmd == "test" && basePath != "")
 }
 
-var dsn string
-
 var Logo = `
        ▓██▓▄
     ▓▓▓▓██▓█▓▄
