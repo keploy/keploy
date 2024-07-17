@@ -512,6 +512,7 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 	}
 
 	children = append(children, ppid)
+	fmt.Println("came here too")
 	uniqueProcess, err := uniqueProcessGroups(children)
 	if err != nil {
 		logger.Error("failed to find unique process groups", zap.Int("pid", ppid), zap.Error(err))
