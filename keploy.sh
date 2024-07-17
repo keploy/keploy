@@ -137,11 +137,12 @@ installKeploy (){
     }
 
     cleanup_tmp() {
-        # Remove extrached files /tmp directory
-        tmp_files = ("LICENSE" "README.md" "READMEes-Es.md")
+        # Remove extracted files /tmp directory
+        tmp_files=("LICENSE" "README.md" "READMEes-Es.md")
         for file in "${tmp_files[@]}"; do
-            rm -rf /tmp/$file
+            rm -rf "/tmp/$file"
         done
+    }
 
     ARCH=$(uname -m)
 
