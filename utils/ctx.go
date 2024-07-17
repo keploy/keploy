@@ -27,10 +27,12 @@ func NewCtx() context.Context {
 
 	// Start a goroutine that will cancel the context when a signal is received
 	go func() {
+		fmt.Println("waiting for sys signals")
 		<-sigs
 		fmt.Println("printinhg log")
 		fmt.Println(os.Getenv("BINARY_TO_DOCKER"))
 		fmt.Println("Signal received, canceling context...")
+		cancel()
 	}()
 
 	return ctx
