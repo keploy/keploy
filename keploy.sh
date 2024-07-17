@@ -136,11 +136,19 @@ installKeploy (){
         fi
     }
 
+    cleanup_tmp() {
+        # Remove extrached files /tmp directory
+        tmp_files = ("LICENSE" "README.md" "READMEes-Es.md")
+        for file in "${tmp_files[@]}"; do
+            rm -rf /tmp/$file
+        done
+
     ARCH=$(uname -m)
 
     if [ "$IS_CI" = false ]; then
         OS_NAME="$(uname -s)"
         if [ "$OS_NAME" = "Darwin" ]; then
+            cleanup_tmp
             install_keploy_darwin_all
             return
         elif [ "$OS_NAME" = "Linux" ]; then
@@ -148,8 +156,10 @@ installKeploy (){
                 sudo mount -t debugfs debugfs /sys/kernel/debug
             fi
             if [ "$ARCH" = "x86_64" ]; then
+                cleanup_tmp
                 install_keploy_amd
             elif [ "$ARCH" = "aarch64" ]; then
+                cleanup_tmp
                 install_keploy_arm
             else
                 echo "Unsupported architecture: $ARCH"
@@ -164,8 +174,10 @@ installKeploy (){
         fi
     else
         if [ "$ARCH" = "x86_64" ]; then
+            cleanup_tmp
             install_keploy_amd
         elif [ "$ARCH" = "aarch64" ]; then
+            cleanup_tmp
             install_keploy_arm
         else
             echo "Unsupported architecture: $ARCH"
@@ -178,8 +190,7 @@ installKeploy "$@"
 
 if command -v keploy &> /dev/null; then
     keploy example
-    resudal_files=("LICENSE" "README.md" "READMEes-Es.md" "keploy" "install.sh")
-    for file in "${resudal_files[@]}"; do
-        rm -rf $file
-    done
+    cleanup_tmp
+    rm -rf keploy.sh
+    rm -rf install.sh
 fi
