@@ -116,9 +116,9 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 		return nil
 	}
 
-	cmd.Stdout = os.Stdout
-	cmd.Stdin = os.Stdin
-	cmd.Stderr = os.Stderr
+	// cmd.Stdout = os.Stdout
+	// cmd.Stdin = os.Stdin
+	// cmd.Stderr = os.Stderr
 
 	logger.Debug("running the following command in docker", zap.String("command", cmd.String()))
 	err = cmd.Run()
