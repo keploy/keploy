@@ -31,7 +31,6 @@ func NewCtx() context.Context {
 		fmt.Println("printinhg log")
 		fmt.Println(os.Getenv("BINARY_TO_DOCKER"))
 		fmt.Println("Signal received, canceling context...")
-		cancel()
 	}()
 
 	return ctx
