@@ -18,7 +18,7 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 		Short:   "Keploy CLI",
 		Example: provider.RootExamples,
 		Version: utils.Version,
-		PreRun: func(cmd *cobra.Command, args []string) {
+		PreRun: func(cmd *cobra.Command, _ []string) {
 			disableAnsi, _ := cmd.Flags().GetBool("disable-ansi")
 			provider.PrintLogo(disableAnsi)
 		},

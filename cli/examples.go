@@ -16,7 +16,7 @@ func init() {
 	Register("example", Example)
 }
 
-func Example(ctx context.Context, logger *zap.Logger, _ *config.Config, _ ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
+func Example(_ context.Context, logger *zap.Logger, _ *config.Config, _ ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var customSetup bool
 	var cmd = &cobra.Command{
 		Use:   "example",
