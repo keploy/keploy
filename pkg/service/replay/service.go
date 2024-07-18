@@ -30,6 +30,7 @@ type Service interface {
 	GetAllTestSetIDs(ctx context.Context) ([]string, error)
 	RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error)
 	GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error)
+	GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error)
 	RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError
 	Normalize(ctx context.Context) error
 	DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error)
@@ -58,6 +59,7 @@ type ReportDB interface {
 	GetReport(ctx context.Context, testRunID string, testSetID string) (*models.TestReport, error)
 	InsertTestCaseResult(ctx context.Context, testRunID string, testSetID string, result *models.TestResult) error
 	InsertReport(ctx context.Context, testRunID string, testSetID string, testReport *models.TestReport) error
+	UpdateReport(ctx context.Context, testRunID string, testCoverage any) error
 }
 
 type Config interface {
@@ -80,7 +82,7 @@ type RequestMockHandler interface {
 	ProcessTestRunStatus(ctx context.Context, status bool, testSetID string)
 	FetchMockName() string
 	ProcessMockFile(ctx context.Context, testSetID string)
-	AfterTestHook(ctx context.Context, testRunID, testSetID string, totalTestSets int) (*models.TestReport, error)
+	AfterTestHook(ctx context.Context, testRunID, testSetID string, coverage models.TestCoverage, totalTestSets int) (*models.TestReport, error)
 }
 
 type InstrumentState struct {

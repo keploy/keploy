@@ -10,7 +10,8 @@ import (
 // defaultConfig is a variable to store the default configuration of the Keploy CLI. It is not a constant because enterprise need update the default configuration.
 var defaultConfig = `
 path: ""
-appId: ""
+appId: 0
+appName: ""
 command: ""
 port: 0
 proxyPort: 16789
@@ -25,6 +26,7 @@ networkName: ""
 buildDelay: 30
 test:
   selectedTests: {}
+  ignoredTests: {}
   globalNoise:
     global: {}
     test-sets: {}
@@ -39,6 +41,7 @@ test:
   removeUnusedMocks: false
   basePath: ""
   mocking: true
+  fallbackOnMiss: false
 record:
   recordTimer: 0s
   filters: []
@@ -60,7 +63,6 @@ keployContainer: "keploy-v2"
 keployNetwork: "keploy-network"
 inDocker: false
 cmdType: "native"
-fallbackOnMiss: false
 `
 
 var config = &Config{}
@@ -70,7 +72,6 @@ func New() *Config {
 	mergedConfig, err := Merge(defaultConfig, InternalConfig)
 	if err != nil {
 		panic(err)
-
 	}
 	err = yaml3.Unmarshal([]byte(mergedConfig), config)
 	if err != nil {
