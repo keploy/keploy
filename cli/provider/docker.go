@@ -116,9 +116,9 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 		return nil
 	}
 
-	// cmd.Stdout = os.Stdout
-	// cmd.Stdin = os.Stdin
-	// cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
+	cmd.Stdin = os.Stdin
+	cmd.Stderr = os.Stderr
 
 	fmt.Println("Keploy Enterprise should come here")
 
