@@ -19,10 +19,10 @@ func Templatize(ctx context.Context, logger *zap.Logger, _ *config.Config, servi
 		Use:     "templatize",
 		Short:   "templatize the keploy testcases for re-record",
 		Example: `keploy templatize -c "/path/to/user/app"`,
-		PreRunE: func(_ *cobra.Command, _ []string) error {
+		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			// Read the testcases from the path provided.
 				// utils.ReadTempValues(testSet)
 				// Get the replay service.
