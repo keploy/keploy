@@ -347,6 +347,7 @@ func getType(val interface{}) string {
 	return ""
 }
 
+// Simplify the first response into type string for comparison.
 func compareResponses(response1, response2 *interface{}, key string) {
 	switch v1 := (*response1).(type) {
 	case geko.Array:
@@ -372,6 +373,7 @@ func compareResponses(response1, response2 *interface{}, key string) {
 	}
 }
 
+// Simplify the second response into type string for comparison.
 func compareSecondResponse(val1 *string, response2 *interface{}, key1 string, key2 string) {
 	switch v2 := (*response2).(type) {
 	case geko.Array:
@@ -436,6 +438,7 @@ func insertUnique(baseKey, value string, myMap map[string]interface{}) string {
 	return key
 }
 
+// Remove all types of value to strings for comparison.
 func toString(val interface{}) string {
 	switch v := val.(type) {
 	case int:
@@ -454,7 +457,9 @@ func toString(val interface{}) string {
 	return ""
 }
 
+// This function renders the template using the templatized values.
 func render(testCaseStr string) (string, error) {
+	// This maps the contents inside the
 	funcMap := template.FuncMap{
 		"int":    utils.ToInt,
 		"string": utils.ToString,
@@ -481,26 +486,22 @@ func render(testCaseStr string) (string, error) {
 	return output.String(), nil
 }
 
+// Compare the headers of 2 requests and add the templates.
 func compareReqHeaders(req1 map[string]string, req2 map[string]string) {
 	for key, val1 := range req1 {
-		val1, _ = render(val1)
-		var val interface{}
 		// Check if the value is already present in the templatized values.
-		if strings.HasPrefix(val1, "{{") && strings.HasSuffix(val1, "}}") {
-			// Get the value from the template.
-			stringVal, ok := val.(string)
-			if ok {
-				val, _ = render(stringVal)
-				if !strings.Contains(stringVal, "string") {
-					val = utils.ToInt(val)
-				}
-			}
-		} else {
-			val = val1
+		val, ok  := checkForTemplate(val1).(string)
+		if !ok {
+			return
 		}
+		val1 = val
 		if val2, ok := req2[key]; ok {
-			val2, _ = render(val2)
-			if val == val2 {
+			val, ok = checkForTemplate(val2).(string)
+			if !ok {
+				return
+			}
+			val2 = val
+			if val1 == val2 {
 				newKey := insertUnique(key, val2, utils.TemplatizedValues)
 				if newKey == "" {
 					newKey = key
@@ -512,6 +513,7 @@ func compareReqHeaders(req1 map[string]string, req2 map[string]string) {
 	}
 }
 
+// Removing quotes in templates because they interfere with the templating engine.
 func removeQuotesInTemplates(jsonStr string) string {
 	// Regular expression to find patterns with {{ and }}
 	re := regexp.MustCompile(`"\{\{[^{}]*\}\}"`)
@@ -527,6 +529,7 @@ func removeQuotesInTemplates(jsonStr string) string {
 	return result
 }
 
+// Add quotes to the template if it is of the type string. eg: "{{string .key}}"
 func addQuotesInTemplates(jsonStr string) string {
 	// Regular expression to find patterns with {{ and }}
 	re := regexp.MustCompile(`\{\{[^{}]*\}\}`)
