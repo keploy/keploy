@@ -14,7 +14,7 @@ func init() {
 	Register("rerecord", ReRecord)
 }
 
-func ReRecord(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
+func ReRecord(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:     "rerecord",
 		Short:   "ReRecord new keploy testcases/mocks from the existing test cases for the given testset(s)",

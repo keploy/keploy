@@ -453,18 +453,15 @@ func ToFloat(value interface{}) float64 {
 	return 0
 }
 
-
-func convertPathToUnixStyle(path string) string {
-	// Replace backslashes with forward slashes
-	unixPath := strings.Replace(path, "\\", "/", -1)
-	// Remove 'C:'
-	if len(unixPath) > 1 && unixPath[1] == ':' {
-		unixPath = unixPath[2:]
-	}
-	return unixPath
-}
-
-
+// func convertPathToUnixStyle(path string) string {
+// 	// Replace backslashes with forward slashes
+// 	unixPath := strings.Replace(path, "\\", "/", -1)
+// 	// Remove 'C:'
+// 	if len(unixPath) > 1 && unixPath[1] == ':' {
+// 		unixPath = unixPath[2:]
+// 	}
+// 	return unixPath
+// }
 
 // Keys returns an array containing the keys of the given map.
 func Keys(m map[string][]string) []string {

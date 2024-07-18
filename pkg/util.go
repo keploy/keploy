@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+
 	// "log"
 	"net"
 	"net/http"
@@ -94,9 +95,9 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		logger.Error("failed to marshal the testcase")
 	}
 	funcMap := template.FuncMap{
-		"int": utils.ToInt,
+		"int":    utils.ToInt,
 		"string": utils.ToString,
-		"float": utils.ToFloat,
+		"float":  utils.ToFloat,
 	}
 	tmpl, err := template.New("template").Funcs(funcMap).Parse(string(testCaseStr))
 	if err != nil {
@@ -220,7 +221,7 @@ func MakeCurlCommand(method string, url string, header map[string]string, body s
 		}
 	}
 	if body != "" {
-		curl = curl + fmt.Sprintf("  --data '%s'", body)
+		curl = curl + fmt.Sprintf("  --data %s", strconv.Quote(body))
 	}
 	return curl
 }

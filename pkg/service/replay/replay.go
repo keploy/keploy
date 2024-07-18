@@ -949,20 +949,20 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 			testSets = r.config.Templatize.TestSets
 		}
 	}
-	for _, testSetId := range testSets {
-		testSet, err := r.TestSetConf.Read(ctx, testSetId)
+	for _, testSetID := range testSets {
+		testSet, err := r.TestSetConf.Read(ctx, testSetID)
 		if err != nil || testSet == nil {
 			utils.TemplatizedValues = map[string]interface{}{}
 		} else {
 			utils.TemplatizedValues = testSet.Template
 		}
-		tcs, err := r.testDB.GetTestCases(ctx, testSetId)
+		tcs, err := r.testDB.GetTestCases(ctx, testSetID)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to get test cases")
 			return err
 		}
 		if len(tcs) == 0 {
-			r.logger.Warn("The test set is empty. Please record some testcases to templatize.", zap.String("testSet:", testSetId))
+			r.logger.Warn("The test set is empty. Please record some testcases to templatize.", zap.String("testSet:", testSetID))
 		}
 		// Add the quotes back to the templates before using it.
 		for _, tc := range tcs {
@@ -974,7 +974,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 			// if tcs[i].HTTPResp.Header["Content-Type"] != "application/json" {
 			// 	continue
 			// }
-			jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
+			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 			if err != nil {
 				r.logger.Debug("failed to parse response into json. Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
 				continue
@@ -1008,7 +1008,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 			// 	continue
 			// }
 			// tcs[i].HTTPResp.Body, _ = render(tcs[i].HTTPResp.Body)
-			jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
+			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 			if err != nil {
 				r.logger.Debug("failed to parse response into json.  Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
 				continue
@@ -1029,7 +1029,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 
 		// Check the location header for any common fields.
 		for i := 0; i < len(tcs)-1; i++ {
-			jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
+			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 			if err != nil {
 				r.logger.Debug("failed to parse response into json.  Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
 				continue
@@ -1049,7 +1049,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 		// Compare the req and resp body for any common fields.
 		for i := 0; i < len(tcs)-1; i++ {
 			// tcs[i].HTTPResp.Body, _ = render(tcs[i].HTTPResp.Body)
-			jsonResponse, err := parseIntoJson(tcs[i].HTTPResp.Body)
+			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 			if err != nil {
 				r.logger.Debug("failed to parse response into json. Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
 				continue
@@ -1058,7 +1058,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 			}
 			for j := i + 1; j < len(tcs); j++ {
 				// tcs[j].HTTPReq.Body, _ = render(tcs[j].HTTPReq.Body)
-				jsonRequest, err := parseIntoJson(tcs[j].HTTPReq.Body)
+				jsonRequest, err := parseIntoJSON(tcs[j].HTTPReq.Body)
 				if err != nil {
 					r.logger.Debug("failed to parse request into json. Not templatizing the request of this test.", zap.Error(err), zap.Any("testcase:", tcs[j].Name))
 					continue
@@ -1085,7 +1085,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 		for _, tc := range tcs {
 			tc.HTTPReq.Body = removeQuotesInTemplates(tc.HTTPReq.Body)
 			tc.HTTPResp.Body = removeQuotesInTemplates(tc.HTTPResp.Body)
-			err = r.testDB.UpdateTestCase(ctx, tc, testSetId)
+			err = r.testDB.UpdateTestCase(ctx, tc, testSetID)
 			if err != nil {
 				r.logger.Error("failed to update the test case", zap.Error(err))
 				return err
@@ -1093,7 +1093,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 		}
 
 		noQuotes(utils.TemplatizedValues)
-		err = r.TestSetConf.Write(ctx, testSetId, &models.TestSet{
+		err = r.TestSetConf.Write(ctx, testSetID, &models.TestSet{
 			PreScript:  "",
 			PostScript: "",
 			Template:   utils.TemplatizedValues,

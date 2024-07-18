@@ -139,7 +139,7 @@ func (t *requestMockUtil) ProcessMockFile(_ context.Context, testSetID string) {
 }
 
 // Parse the json string into a geko type variable.
-func parseIntoJson(response string) (interface{}, error) {
+func parseIntoJSON(response string) (interface{}, error) {
 	// Parse the response into a json object.
 	if response == "" {
 		return nil, nil
@@ -467,12 +467,12 @@ func render(testCaseStr string) (string, error) {
 	}
 	tmpl, err := template.New("template").Funcs(funcMap).Parse(string(testCaseStr))
 	if err != nil {
-		return testCaseStr, fmt.Errorf("failed to parse the testcase using template", zap.Error(err))
+		return testCaseStr, fmt.Errorf("failed to parse the testcase using template %v", zap.Error(err))
 	}
 	var output bytes.Buffer
 	err = tmpl.Execute(&output, utils.TemplatizedValues)
 	if err != nil {
-		return testCaseStr, fmt.Errorf("failed to execute the template", zap.Error(err))
+		return testCaseStr, fmt.Errorf("failed to execute the template %v", zap.Error(err))
 	}
 	if ok {
 		outputString := strings.Trim(output.String(), `"`)
