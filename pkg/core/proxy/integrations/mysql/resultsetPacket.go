@@ -152,31 +152,32 @@ func parseRow(b []byte, columnDefinitions []*models.ColumnDefinition) (*models.R
 		var colValue models.RowColumnDefinition
 		var length int
 		dataLength := int(b[0])
+		println("Data length(ResultSetPacket): ", dataLength)
 		// Check the column type
 		switch models.FieldType(columnDef.ColumnType) {
+		case models.FieldTypeNULL:
+			println("NULL value row")
+			colValue.Type = models.FieldTypeTimestamp
+			colValue.Value = ""
+			length = 1
 		case models.FieldTypeTimestamp:
-			if b[0] == byte(0xfb) {
-				colValue.Type = models.FieldTypeTimestamp
-				colValue.Value = ""
-				length = 1
-			} else {
-				b = b[1:] // Advance the buffer to the start of the encoded timestamp data
-				// Check if the timestamp is null
-				if dataLength < 4 || len(b) < dataLength {
-					return nil, nil, eofFinal, paddingFinal, optionalPadding, optionalEOFBytes, fmt.Errorf("invalid timestamp data length")
-				}
-				dateStr := string(b[:dataLength])
-				layout := "2006-01-02 15:04:05"
-				t, err := time.Parse(layout, dateStr)
-				if err != nil {
-					return nil, nil, eofFinal, paddingFinal, optionalPadding, optionalEOFBytes, fmt.Errorf("failed to parse the time string")
-				}
-				year, month, day := t.Date()
-				hour, minute, second := t.Clock()
-				colValue.Type = models.FieldTypeTimestamp
-				colValue.Value = fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d", year, int(month), day, hour, minute, second)
-				length = dataLength // Including the initial byte for dataLength
+			println("Timestamp value row")
+			b = b[1:] // Advance the buffer to the start of the encoded timestamp data
+			// Check if the timestamp is null
+			if dataLength < 4 || len(b) < dataLength {
+				return nil, nil, eofFinal, paddingFinal, optionalPadding, optionalEOFBytes, fmt.Errorf("invalid timestamp data length")
 			}
+			dateStr := string(b[:dataLength])
+			layout := "2006-01-02 15:04:05"
+			t, err := time.Parse(layout, dateStr)
+			if err != nil {
+				return nil, nil, eofFinal, paddingFinal, optionalPadding, optionalEOFBytes, fmt.Errorf("failed to parse the time string")
+			}
+			year, month, day := t.Date()
+			hour, minute, second := t.Clock()
+			colValue.Type = models.FieldTypeTimestamp
+			colValue.Value = fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d", year, int(month), day, hour, minute, second)
+			length = dataLength // Including the initial byte for dataLength
 
 		// case models.FieldTypeInt24, models.FieldTypeLong:
 		// 	colValue.Type = models.FieldType(columnDef.ColumnType)
@@ -197,24 +198,33 @@ func parseRow(b []byte, columnDefinitions []*models.ColumnDefinition) (*models.R
 		// 	colValue.Value = math.Float64frombits(binary.LittleEndian.Uint64(b[:8]))
 		// 	length = 8
 		default:
-			// Read a length-encoded integer
-			stringLength, _, n := readLengthEncodedInteger(b)
-			length = int(stringLength) + n
+			// // Read a length-encoded integer
+			// stringLength, _, n := readLengthEncodedInteger(b)
+			// length = int(stringLength) + n
 
 			// Extract the string
-			str := string(b[n : n+int(stringLength)])
+			// str := string(b[n : n+int(stringLength)])
+
+			val, _, n, err := readLengthEncodedStrings(b)
+			if err != nil {
+				return nil, nil, eofFinal, paddingFinal, optionalPadding, optionalEOFBytes, fmt.Errorf("failed to read length encoded string", err)
+			}
 
 			// Remove non-printable characters
 			// re := regexp.MustCompile(`[^[:print:]\t\r\n]`)
 			// cleanedStr := re.ReplaceAllString(str, "")
 
 			colValue.Type = models.FieldType(columnDef.ColumnType)
-			colValue.Value = str
+			colValue.Value = string(val)
+			println("Default value row")
+			length = n
 		}
 
 		colValue.Name = columnDef.Name
 		// Check if the converted value is actually correct.
 		row.Columns = append(row.Columns, colValue)
+		fmt.Printf("Length of the remaining buffer: %d\n", len(b))
+		fmt.Printf("Length of the data read: %d\n", length)
 		b = b[length:]
 	}
 	row.Header = rowHeader

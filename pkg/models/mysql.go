@@ -108,8 +108,8 @@ type Parameter struct {
 type MySQLStmtPrepareOk struct {
 	Status       byte               `yaml:"status"`
 	StatementID  uint32             `yaml:"statement_id"`
-	NumColumns   uint32             `yaml:"num_columns"`
-	NumParams    uint32             `yaml:"num_params"`
+	NumColumns   uint16             `yaml:"num_columns"`
+	NumParams    uint16             `yaml:"num_params"`
 	WarningCount uint16             `yaml:"warning_count"`
 	ColumnDefs   []ColumnDefinition `yaml:"column_definitions"`
 	ParamDefs    []ColumnDefinition `yaml:"param_definitions"`

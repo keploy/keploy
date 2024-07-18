@@ -76,8 +76,15 @@ func encodeToBinary(packet interface{}, header *models.MySQLPacketHeader, operat
 		}
 		data, err = encodeMySQLResultSet(p)
 		bypassHeader = true
+	case "MySQLErr":
+		println("ERROR PACKET DETECTED")
+		_, ok := packet.(*models.MySQLERRPacket)
+		if !ok {
+			return nil, fmt.Errorf("invalid packet type for MySQLErr: expected *MySQLErrPacket, got %T", packet)
+		}
+		println("Need to write encoding logic for err packet")
 	default:
-		return nil, errors.New("unknown operation type")
+		return nil, errors.New("unknown operation type:" + operation)
 	}
 
 	if err != nil {
