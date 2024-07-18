@@ -24,23 +24,23 @@ func Templatize(ctx context.Context, logger *zap.Logger, _ *config.Config, servi
 		},
 		RunE: func(_ *cobra.Command, _ []string) error {
 			// Read the testcases from the path provided.
-				// utils.ReadTempValues(testSet)
-				// Get the replay service.
-				svc, err := serviceFactory.GetService(ctx, "normalize")
-				if err != nil {
-					utils.LogError(logger, err, "failed to get service")
-					return nil
-				}
-				var replay replaySvc.Service
-				var ok bool
-				if replay, ok = svc.(replaySvc.Service); !ok {
-					utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
-					return nil
-				}
-				if err := replay.Templatize(ctx, []string{}); err != nil {
-					utils.LogError(logger, err, "failed to templatize test cases")
-					return nil
-				}
+			// utils.ReadTempValues(testSet)
+			// Get the replay service.
+			svc, err := serviceFactory.GetService(ctx, "normalize")
+			if err != nil {
+				utils.LogError(logger, err, "failed to get service")
+				return nil
+			}
+			var replay replaySvc.Service
+			var ok bool
+			if replay, ok = svc.(replaySvc.Service); !ok {
+				utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
+				return nil
+			}
+			if err := replay.Templatize(ctx, []string{}); err != nil {
+				utils.LogError(logger, err, "failed to templatize test cases")
+				return nil
+			}
 			return nil
 		},
 	}
