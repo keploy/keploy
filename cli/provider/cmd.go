@@ -572,7 +572,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 	case "normalize":
-		c.cfg.Path =utils.ConvertToAbs(c.cfg.Path)
+		c.cfg.Path =utils.ConvertToAbs(c.logger, c.cfg.Path)
 		tests, err := cmd.Flags().GetString("tests")
 		if err != nil {
 			errMsg := "failed to read tests to be normalized"
@@ -587,7 +587,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 
 	case "templatize":
-		c.cfg.Path = utils.ConvertToAbs(c.cfg.Path)
+		c.cfg.Path = utils.ConvertToAbs(c.logger, c.cfg.Path)
 	case "gen":
 		if os.Getenv("API_KEY") == "" {
 			utils.LogError(c.logger, nil, "API_KEY is not set")

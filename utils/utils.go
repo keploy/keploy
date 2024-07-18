@@ -507,19 +507,19 @@ func GetAbsPath(path string) (string, error) {
 	return absPath, nil
 }
 
-func ConvertToAbs(originalPath string) string {
+func ConvertToAbs(logger *zap.Logger, originalPath string) string {
 	path := originalPath
 	//if user provides relative path
 	if len(path) > 0 && path[0] != '/' {
 		absPath, err := filepath.Abs(path)
 		if err != nil {
-			LogError("failed to get the absolute path from relative path")
+			LogError(logger, err, "failed to get the absolute path from relative path")
 		}
 		path = absPath
 	} else if len(path) == 0 { // if user doesn't provide any path
 		cdirPath, err := os.Getwd()
 		if err != nil {
-			LogError(c.logger, err, "failed to get the path of current directory")
+			LogError(logger, err, "failed to get the path of current directory")
 		}
 		path = cdirPath
 	}
