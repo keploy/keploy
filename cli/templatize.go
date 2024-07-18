@@ -18,7 +18,7 @@ func Templatize(ctx context.Context, logger *zap.Logger, _ *config.Config, servi
 	var cmd = &cobra.Command{
 		Use:     "templatize",
 		Short:   "templatize the keploy testcases for re-record",
-		Example: `keploy templatize -c "/path/to/user/app"`,
+		Example: `keploy templatize -t "test-set-1,teset-set-3" for particular testsets and keploy templatize for all testsets`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},

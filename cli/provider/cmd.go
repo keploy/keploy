@@ -572,23 +572,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 	case "normalize":
-		path := c.cfg.Path
-		//if user provides relative path
-		if len(path) > 0 && path[0] != '/' {
-			absPath, err := filepath.Abs(path)
-			if err != nil {
-				utils.LogError(c.logger, err, "failed to get the absolute path from relative path")
-			}
-			path = absPath
-		} else if len(path) == 0 { // if user doesn't provide any path
-			cdirPath, err := os.Getwd()
-			if err != nil {
-				utils.LogError(c.logger, err, "failed to get the path of current directory")
-			}
-			path = cdirPath
-		}
-		path += "/keploy"
-		c.cfg.Path = path
+		c.cfg.Path =utils.ConvertToAbs(c.cfg.Path)
 		tests, err := cmd.Flags().GetString("tests")
 		if err != nil {
 			errMsg := "failed to read tests to be normalized"
@@ -603,37 +587,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 
 	case "templatize":
-		path := c.cfg.Path
-		//if user provides relative path
-		if len(path) > 0 && path[0] != '/' {
-			absPath, err := filepath.Abs(path)
-			if err != nil {
-				utils.LogError(c.logger, err, "failed to get the absolute path from relative path")
-			}
-			path = absPath
-		} else if len(path) == 0 { // if user doesn't provide any path
-			cdirPath, err := os.Getwd()
-			if err != nil {
-				utils.LogError(c.logger, err, "failed to get the path of current directory")
-			}
-			path = cdirPath
-		}
-		path += "/keploy"
-		c.cfg.Path = path
-
-		// if runtime.GOOS == "darwin" {
-		// 	err := os.Setenv("RUN_IN_DOCKER", "true")
-		// 	if err != nil {
-		// 		utils.LogError(c.logger, err, "failed to set RUN_IN_DOCKER env variable in darwin")
-		// 		return err
-		// 	}
-		// 	c.logger.Info("Running in docker env")
-		// 	err = StartInDocker(ctx, c.logger, c.cfg)
-		// 	if err != nil {
-		// 		return err
-		// 	}
-		// }
-
+		c.cfg.Path = utils.ConvertToAbs(c.cfg.Path)
 	case "gen":
 		if os.Getenv("API_KEY") == "" {
 			utils.LogError(c.logger, nil, "API_KEY is not set")

@@ -9,20 +9,16 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-
-	// "log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 
-	// "reflect"
 	"strconv"
 	"strings"
 	"time"
 
 	"go.keploy.io/server/v2/pkg/models"
-	// "github.com/hoisie/mustache"
 	"text/template"
 
 	"go.keploy.io/server/v2/utils"

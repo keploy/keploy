@@ -4,11 +4,12 @@
 package orchestrator
 
 import (
+	"context"
+
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/service/record"
 	"go.keploy.io/server/v2/pkg/service/replay"
-	"go.keploy.io/server/v2/pkg/models"
-	"context"
 
 	"go.uber.org/zap"
 )
@@ -19,19 +20,19 @@ type Config interface {
 }
 
 type Orchestrator struct {
-	logger *zap.Logger
-	record record.Service
-	replay replay.Service
-	config *config.Config
+	logger      *zap.Logger
+	record      record.Service
+	replay      replay.Service
+	config      *config.Config
 	TestSetConf Config
 }
 
 func New(logger *zap.Logger, record record.Service, replay replay.Service, config *config.Config, TestSetConf Config) *Orchestrator {
 	return &Orchestrator{
-		logger: logger,
-		record: record,
-		replay: replay,
-		config: config,
+		logger:      logger,
+		record:      record,
+		replay:      replay,
+		config:      config,
 		TestSetConf: TestSetConf,
 	}
 }

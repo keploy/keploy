@@ -9,19 +9,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	// "reflect"
-
-	// "reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 
-	// "text/template"
 	"time"
 
 	"github.com/k0kubun/pp/v3"
-	// "github.com/hoisie/mustache"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
@@ -971,9 +966,6 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 		}
 		// Compare the response to the header.
 		for i := 0; i < len(tcs)-1; i++ {
-			// if tcs[i].HTTPResp.Header["Content-Type"] != "application/json" {
-			// 	continue
-			// }
 			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 			if err != nil {
 				r.logger.Debug("failed to parse response into json. Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
@@ -1003,11 +995,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 		}
 
 		// Check the url for any common fields.
-		for i := 0; i < len(tcs)-1; i++ {
-			// if tcs[i].HTTPResp.Header["Content-Type"] != "application/json" {
-			// 	continue
-			// }
-			// tcs[i].HTTPResp.Body, _ = render(tcs[i].HTTPResp.Body)
+		for i := 0; i < len(tcs)-1; i++ {\
 			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 			if err != nil {
 				r.logger.Debug("failed to parse response into json.  Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
@@ -1048,7 +1036,6 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 
 		// Compare the req and resp body for any common fields.
 		for i := 0; i < len(tcs)-1; i++ {
-			// tcs[i].HTTPResp.Body, _ = render(tcs[i].HTTPResp.Body)
 			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 			if err != nil {
 				r.logger.Debug("failed to parse response into json. Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
@@ -1057,7 +1044,6 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 				continue
 			}
 			for j := i + 1; j < len(tcs); j++ {
-				// tcs[j].HTTPReq.Body, _ = render(tcs[j].HTTPReq.Body)
 				jsonRequest, err := parseIntoJSON(tcs[j].HTTPReq.Body)
 				if err != nil {
 					r.logger.Debug("failed to parse request into json. Not templatizing the request of this test.", zap.Error(err), zap.Any("testcase:", tcs[j].Name))

@@ -161,7 +161,7 @@ func checkForTemplate(val interface{}) interface{} {
 				// Convert to its appropriate type.
 				if strings.Contains(stringVal, "int") {
 					val = utils.ToInt(val)
-				}else if strings.Contains(stringVal, "float") {
+				} else if strings.Contains(stringVal, "float") {
 					val = utils.ToFloat(val)
 				}
 			}
