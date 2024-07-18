@@ -512,7 +512,6 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 	}
 
 	children = append(children, ppid)
-	fmt.Println("came here too")
 	uniqueProcess, err := uniqueProcessGroups(children)
 	if err != nil {
 		logger.Error("failed to find unique process groups", zap.Int("pid", ppid), zap.Error(err))
@@ -531,7 +530,6 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 func uniqueProcessGroups(pids []int) ([]int, error) {
 	uniqueGroups := make(map[int]bool)
 	var uniqueGPIDs []int
-	fmt.Println(pids)
 
 	for _, pid := range pids {
 		pgid, err := getProcessGroupID(pid)
@@ -553,8 +551,6 @@ func getProcessGroupID(pid int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-
-	fmt.Println(statusBytes)
 
 	status := string(statusBytes)
 	for _, line := range strings.Split(status, "\n") {
