@@ -107,7 +107,6 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	}
 
 	cmd.Cancel = func() error {
-		fmt.Println("came here")
 		err := utils.SendSignal(logger, -cmd.Process.Pid, syscall.SIGINT)
 		if err != nil {
 			utils.LogError(logger, err, "failed to start stop docker")
@@ -119,8 +118,6 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stdin = os.Stdin
 	cmd.Stderr = os.Stderr
-
-	fmt.Println("Keploy Enterprise should come here")
 
 	logger.Debug("running the following command in docker", zap.String("command", cmd.String()))
 	err = cmd.Run()
@@ -151,9 +148,6 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 	} else {
 		ttyFlag = " "
 	}
-
-	logger.Info("TTYflag will be here", zap.Any("here", ttyFlag))
-	logger.Info("os will be here", zap.Any("here", osName))
 
 	switch osName {
 	case "linux":
@@ -208,7 +202,6 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 		// if default docker context is used
 		logger.Info("Starting keploy in docker with default context, as that is the current context.")
 		alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
-		logger.Info("alias set here", zap.Any("here ", alias))
 		return alias, nil
 
 	}
