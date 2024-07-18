@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -34,6 +35,19 @@ import (
 )
 
 var WarningSign = "\U000026A0"
+
+var TemplatizedValues = map[string]interface{}{}
+
+func ReadTempValues(testSet string) {
+	data, err := os.ReadFile("keploy/" + testSet + "/templatized.json")
+	if err != nil {
+		return
+	}
+	err = json.Unmarshal(data, &TemplatizedValues)
+	if err != nil {
+		log.Fatal("Error unmarshaling templatized values into the map", err)
+	}
+}
 
 func ReplaceHostToIP(currentURL string, ipAddress string) (string, error) {
 	// Parse the current URL
@@ -392,6 +406,63 @@ const (
 	Empty         CmdType = ""
 )
 
+func ToInt(value interface{}) int {
+	switch v := value.(type) {
+	case int:
+		return v
+	case string:
+		i, err := strconv.Atoi(v)
+		if err != nil {
+			log.Fatal("failed to convert string to int", zap.Error(err))
+			return 0
+		}
+		return i
+	case float64:
+		return int(v)
+
+	}
+	return 0
+}
+
+func ToString(value interface{}) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case int:
+		return strconv.Itoa(v)
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	}
+	return ""
+}
+
+func ToFloat(value interface{}) float64 {
+	switch v := value.(type) {
+	case float64:
+		return v
+	case string:
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			log.Fatal("failed to convert string to float", zap.Error(err))
+			return 0
+		}
+		return f
+	case int:
+		return float64(v)
+	}
+	return 0
+}
+
+// func convertPathToUnixStyle(path string) string {
+// 	// Replace backslashes with forward slashes
+// 	unixPath := strings.Replace(path, "\\", "/", -1)
+// 	// Remove 'C:'
+// 	if len(unixPath) > 1 && unixPath[1] == ':' {
+// 		unixPath = unixPath[2:]
+// 	}
+// 	return unixPath
+// }
+
 // Keys returns an array containing the keys of the given map.
 func Keys(m map[string][]string) []string {
 	keys := make([]string, 0, len(m))
@@ -434,6 +505,26 @@ func GetAbsPath(path string) (string, error) {
 		return "", err
 	}
 	return absPath, nil
+}
+
+func ConvertToAbs(logger *zap.Logger, originalPath string) string {
+	path := originalPath
+	//if user provides relative path
+	if len(path) > 0 && path[0] != '/' {
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			LogError(logger, err, "failed to get the absolute path from relative path")
+		}
+		path = absPath
+	} else if len(path) == 0 { // if user doesn't provide any path
+		cdirPath, err := os.Getwd()
+		if err != nil {
+			LogError(logger, err, "failed to get the path of current directory")
+		}
+		path = cdirPath
+	}
+	path += "/keploy"
+	return path
 }
 
 // makeDirectory creates a directory if not exists with all user access

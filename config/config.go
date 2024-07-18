@@ -13,6 +13,8 @@ type Config struct {
 	AppID                 uint64       `json:"appId" yaml:"appId" mapstructure:"appId"`
 	AppName               string       `json:"appName" yaml:"appName" mapstructure:"appName"`
 	Command               string       `json:"command" yaml:"command" mapstructure:"command"`
+	Templatize            Templatize   `json:"templatize" yaml:"templatize" mapstructure:"templatize"`
+	CoverageCommand       string       `json:"-" yaml:"-" mapstructure:"-"`
 	Port                  uint32       `json:"port" yaml:"port" mapstructure:"port"`
 	DNSPort               uint32       `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
 	ProxyPort             uint32       `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
@@ -50,6 +52,9 @@ type UtGen struct {
 	APIBaseURL         string  `json:"llmBaseUrl" yaml:"llmBaseUrl" mapstructure:"llmBaseUrl"`
 	Model              string  `json:"model" yaml:"model" mapstructure:"model"`
 	APIVersion         string  `json:"llmApiVersion" yaml:"llmApiVersion" mapstructure:"llmApiVersion"`
+}
+type Templatize struct {
+	TestSets []string `json:"testSets" yaml:"testSets" mapstructure:"testSets"`
 }
 
 type Record struct {
@@ -94,6 +99,7 @@ type Test struct {
 	JacocoAgentPath    string              `json:"jacocoAgentPath" yaml:"jacocoAgentPath" mapstructure:"jacocoAgentPath"`
 	BasePath           string              `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
 	Mocking            bool                `json:"mocking" yaml:"mocking" mapstructure:"mocking"`
+	UpdateTemp         bool                `json:"updateTemp" yaml:"updateTemp" mapstructure:"updateTemp"`
 	IgnoredTests       map[string][]string `json:"ignoredTests" yaml:"ignoredTests" mapstructure:"ignoredTests"`
 }
 

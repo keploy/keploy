@@ -28,11 +28,12 @@ type Service interface {
 	Instrument(ctx context.Context) (*InstrumentState, error)
 	GetNextTestRunID(ctx context.Context) (string, error)
 	GetAllTestSetIDs(ctx context.Context) ([]string, error)
-	RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error)
+	RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool, conf *models.TestSet) (models.TestSetStatus, error)
 	GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error)
 	GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error)
 	RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError
 	Normalize(ctx context.Context) error
+	Templatize(ctx context.Context, testSets []string) error
 	DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error)
 	NormalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIDs []string, testResult []models.TestResult) error
 	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error

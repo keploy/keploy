@@ -17,6 +17,31 @@ import (
 )
 
 func (o *Orchestrator) ReRecord(ctx context.Context) error {
+	// Check if the testcases are already templatized.
+	var notTemplatized []string
+	for testSet := range o.config.Test.SelectedTests {
+		conf, err := o.TestSetConf.Read(ctx, testSet)
+		if err != nil || conf == nil || conf.Template == nil {
+			notTemplatized = append(notTemplatized, testSet)
+		}
+	}
+	if len(notTemplatized) > 0 {
+		o.logger.Warn("The following testSets are not templatized. Do you want to templatize them to handle noisy fields?(y/n)", zap.Any("testSets:", notTemplatized))
+		reader := bufio.NewReader(os.Stdin)
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			o.logger.Warn("Failed to read input. Skipping templatization")
+		}
+		if input == "n\n" || input == "N\n" {
+			o.logger.Info("Skipping templatization")
+		} else if input == "y\n" || input == "Y\n" {
+			if err := o.replay.Templatize(ctx, notTemplatized); err != nil {
+				utils.LogError(o.logger, err, "failed to templatize test cases")
+				return nil
+			}
+		}
+	}
+
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 
 	var stopReason string
@@ -234,8 +259,18 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 			}
 			o.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HTTPReq.URL))
 		}
+		// Read the template values.
+		templateValues, err := o.TestSetConf.Read(ctx, testSet)
+		if err != nil {
+			o.logger.Debug("failed to read template values")
+		}
+		if templateValues == nil {
+			utils.TemplatizedValues = map[string]interface{}{}
+		} else {
+			utils.TemplatizedValues = templateValues.Template
+		}
 
-		resp, err := pkg.SimulateHTTP(ctx, *tc, testSet, o.logger, o.config.Test.APITimeout)
+		resp, err := pkg.SimulateHTTP(ctx, tc, testSet, o.logger, o.config.Test.APITimeout)
 		if err != nil {
 			utils.LogError(o.logger, err, "failed to simulate HTTP request")
 			if resp == nil {

@@ -108,6 +108,11 @@ func DecodeMySQLPacket(logger *zap.Logger, packet models.Packet, clientConn net.
 		lastCmd = 0x00
 	}
 
+	lastCmd, ok = lastCommand.Load(clientConn)
+	if !ok {
+		lastCmd = 0x00
+	}
+
 	switch {
 	case lastCmd == 0x03 && mode == models.MODE_RECORD:
 		switch {

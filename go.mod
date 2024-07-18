@@ -113,6 +113,7 @@ require (
 )
 
 require (
+	github.com/7sDream/geko v0.1.1
 	github.com/99designs/gqlgen v0.17.45
 	github.com/agnivade/levenshtein v1.1.1
 	github.com/charmbracelet/glamour v0.6.0

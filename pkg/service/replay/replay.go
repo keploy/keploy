@@ -1,7 +1,9 @@
 package replay
 
 import (
+	// "bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
 	"time"
 
 	"github.com/k0kubun/pp/v3"
@@ -47,7 +50,7 @@ type Replayer struct {
 	testDB          TestDB
 	mockDB          MockDB
 	reportDB        ReportDB
-	testSetConf     Config
+	TestSetConf     Config
 	telemetry       Telemetry
 	instrumentation Instrumentation
 	config          *config.Config
@@ -68,7 +71,7 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 		testDB:          testDB,
 		mockDB:          mockDB,
 		reportDB:        reportDB,
-		testSetConf:     testSetConf,
+		TestSetConf:     testSetConf,
 		telemetry:       telemetry,
 		instrumentation: instrumentation,
 		config:          config,
@@ -190,6 +193,19 @@ func (r *Replayer) Start(ctx context.Context) error {
 	abortTestRun := false
 
 	for i, testSetID := range testSetIDs {
+		//Execute the Pre-script before each test-set if provided
+		conf, err := r.TestSetConf.Read(ctx, testSetID)
+		if err != nil {
+			if strings.Contains(err.Error(), "no such file or directory") {
+				r.logger.Info("config file not found, continuing execution...", zap.String("test-set", testSetID))
+			} else {
+				utils.LogError(r.logger, err, "failed to read the config file")
+			}
+		}
+
+		if conf == nil {
+			conf = &models.TestSet{}
+		}
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
 		}
@@ -204,7 +220,22 @@ func (r *Replayer) Start(ctx context.Context) error {
 			}
 		}
 
-		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, inst.AppID, false)
+		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, inst.AppID, false, conf)
+		if r.config.Test.UpdateTemp || r.config.Test.BasePath != "" {
+			noQuotes(utils.TemplatizedValues)
+			// Write the templatized values to the yaml.
+			if len(utils.TemplatizedValues) > 0 {
+				err = r.TestSetConf.Write(ctx, testSetID, &models.TestSet{
+					PreScript:  conf.PreScript,
+					PostScript: conf.PostScript,
+					Template:   utils.TemplatizedValues,
+				})
+				if err != nil {
+					r.logger.Error("failed to write the config file", zap.Error(err))
+				}
+			}
+
+		}
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)
 			utils.LogError(r.logger, err, stopReason)
@@ -348,8 +379,7 @@ func (r *Replayer) GetTestCases(ctx context.Context, testID string) ([]*models.T
 	return r.testDB.GetTestCases(ctx, testID)
 }
 
-func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error) {
-
+func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool, conf *models.TestSet) (models.TestSetStatus, error) {
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
 	runTestSetCtx = context.WithValue(runTestSetCtx, models.ErrGroupKey, runTestSetErrGrp)
@@ -404,25 +434,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusIgnored, nil
 	}
 
-	var conf *models.TestSet
-
-	//Execute the Pre-script before each test-set if provided
-	conf, err = r.testSetConf.Read(runTestSetCtx, testSetID)
-	if err != nil {
-		if strings.Contains(err.Error(), "no such file or directory") {
-			r.logger.Info("config file not found, continuing execution...", zap.String("test-set", testSetID))
-		} else {
-			return models.TestSetStatusFailed, fmt.Errorf("failed to read test set config: %w", err)
-		}
-	}
-
-	if conf == nil {
-		conf = &models.TestSet{}
-	}
-
 	if conf.PreScript != "" {
 		r.logger.Info("Running Pre-script", zap.String("script", conf.PreScript), zap.String("test-set", testSetID))
-		err = r.executeScript(runTestSetCtx, conf.PreScript)
+		err := r.executeScript(runTestSetCtx, conf.PreScript)
 		if err != nil {
 			return models.TestSetStatusFaultScript, fmt.Errorf("failed to execute pre-script: %w", err)
 		}
@@ -530,7 +544,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var exitLoop bool
 	// var to store the error in the loop
 	var loopErr error
-
+	testSet, err := r.TestSetConf.Read(ctx, testSetID)
+	if err != nil || testSet == nil {
+		utils.TemplatizedValues = map[string]interface{}{}
+	} else {
+		utils.TemplatizedValues = testSet.Template
+	}
 	for _, testCase := range testCases {
 
 		if _, ok := selectedTests[testCase.Name]; !ok && len(selectedTests) != 0 {
@@ -842,7 +861,7 @@ func (r *Replayer) compareResp(tc *models.TestCase, actualResponse *models.HTTPR
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
-	return match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
+	return Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
 }
 
 func (r *Replayer) printSummary(_ context.Context, _ bool) {
@@ -912,6 +931,166 @@ func (r *Replayer) RunApplication(ctx context.Context, appID uint64, opts models
 	return r.instrumentation.Run(ctx, appID, opts)
 }
 
+func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
+	if len(testSets) == 0 {
+		if len(r.config.Templatize.TestSets) == 0 {
+			allTestSets, err := r.GetAllTestSetIDs(ctx)
+			if err != nil {
+				r.logger.Error("failed to get the test sets", zap.Error(err))
+			} else {
+				testSets = allTestSets
+			}
+		} else {
+			testSets = r.config.Templatize.TestSets
+		}
+	}
+	for _, testSetID := range testSets {
+		testSet, err := r.TestSetConf.Read(ctx, testSetID)
+		if err != nil || testSet == nil {
+			utils.TemplatizedValues = map[string]interface{}{}
+		} else {
+			utils.TemplatizedValues = testSet.Template
+		}
+		tcs, err := r.testDB.GetTestCases(ctx, testSetID)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to get test cases")
+			return err
+		}
+		if len(tcs) == 0 {
+			r.logger.Warn("The test set is empty. Please record some testcases to templatize.", zap.String("testSet:", testSetID))
+		}
+		// Add the quotes back to the templates before using it.
+		for _, tc := range tcs {
+			tc.HTTPReq.Body = addQuotesInTemplates(tc.HTTPReq.Body)
+			tc.HTTPResp.Body = addQuotesInTemplates(tc.HTTPResp.Body)
+		}
+		// Compare the response to the header.
+		for i := 0; i < len(tcs)-1; i++ {
+			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
+			if err != nil {
+				r.logger.Debug("failed to parse response into json. Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
+				continue
+			} else if jsonResponse == nil {
+				continue
+			}
+			// Compare the keys to the headers.
+			for j := i + 1; j < len(tcs); j++ {
+				addTemplates(tcs[j].HTTPReq.Header, &jsonResponse)
+			}
+			// Add the jsonResponse back to tcs.
+			jsonData, err := json.Marshal(jsonResponse)
+			if err != nil {
+				r.logger.Error("failed to marshal json data", zap.Error(err))
+				return err
+			}
+			tcs[i].HTTPResp.Body = string(jsonData)
+		}
+
+		// Compare the requests for the common fields.
+		for i := 0; i < len(tcs)-1; i++ {
+			// Check for headers first.
+			for j := i + 1; j < len(tcs); j++ {
+				compareReqHeaders(tcs[i].HTTPReq.Header, tcs[j].HTTPReq.Header)
+			}
+		}
+
+		// Check the url for any common fields.
+		for i := 0; i < len(tcs)-1; i++ {
+			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
+			if err != nil {
+				r.logger.Debug("failed to parse response into json.  Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
+				continue
+			} else if jsonResponse == nil {
+				continue
+			}
+			for j := i + 1; j < len(tcs); j++ {
+				addTemplates(&tcs[j].HTTPReq.URL, &jsonResponse)
+			}
+			// Record the new testcase.
+			jsonData, err := json.Marshal(jsonResponse)
+			if err != nil {
+				r.logger.Error("failed to marshal json data", zap.Error(err))
+				return err
+			}
+			tcs[i].HTTPResp.Body = string(jsonData)
+		}
+
+		// Check the location header for any common fields.
+		for i := 0; i < len(tcs)-1; i++ {
+			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
+			if err != nil {
+				r.logger.Debug("failed to parse response into json.  Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
+				continue
+			} else if jsonResponse == nil {
+				continue
+			}
+			for j := i + 1; j < len(tcs); j++ {
+				// Check if there is the Location header in the headers.
+				for key, val := range tcs[j].HTTPReq.Header {
+					if key == "Location" {
+						addTemplates(&val, &jsonResponse)
+					}
+				}
+			}
+		}
+
+		// Compare the req and resp body for any common fields.
+		for i := 0; i < len(tcs)-1; i++ {
+			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
+			if err != nil {
+				r.logger.Debug("failed to parse response into json. Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
+				continue
+			} else if jsonResponse == nil {
+				continue
+			}
+			for j := i + 1; j < len(tcs); j++ {
+				jsonRequest, err := parseIntoJSON(tcs[j].HTTPReq.Body)
+				if err != nil {
+					r.logger.Debug("failed to parse request into json. Not templatizing the request of this test.", zap.Error(err), zap.Any("testcase:", tcs[j].Name))
+					continue
+				} else if jsonRequest == nil {
+					continue
+				}
+				addTemplates(jsonResponse, &jsonRequest)
+				jsonData, err := json.Marshal(jsonRequest)
+				if err != nil {
+					r.logger.Error("failed to marshal json data", zap.Error(err))
+					continue
+				}
+				tcs[j].HTTPReq.Body = string(jsonData)
+			}
+			jsonData, err := json.Marshal(jsonResponse)
+			if err != nil {
+				r.logger.Error("failed to marshal json data", zap.Error(err))
+				return err
+			}
+			tcs[i].HTTPResp.Body = string(jsonData)
+		}
+
+		// Updating all the testcases.
+		for _, tc := range tcs {
+			tc.HTTPReq.Body = removeQuotesInTemplates(tc.HTTPReq.Body)
+			tc.HTTPResp.Body = removeQuotesInTemplates(tc.HTTPResp.Body)
+			err = r.testDB.UpdateTestCase(ctx, tc, testSetID)
+			if err != nil {
+				r.logger.Error("failed to update the test case", zap.Error(err))
+				return err
+			}
+		}
+
+		noQuotes(utils.TemplatizedValues)
+		err = r.TestSetConf.Write(ctx, testSetID, &models.TestSet{
+			PreScript:  "",
+			PostScript: "",
+			Template:   utils.TemplatizedValues,
+		})
+		if err != nil {
+			r.logger.Error("failed to write the testset", zap.Error(err))
+			return err
+		}
+	}
+	return nil
+}
 func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error) {
 
 	testCases, err := r.testDB.GetTestCases(ctx, testSetID)
