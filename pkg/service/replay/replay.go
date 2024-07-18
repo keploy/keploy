@@ -995,7 +995,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 		}
 
 		// Check the url for any common fields.
-		for i := 0; i < len(tcs)-1; i++ {\
+		for i := 0; i < len(tcs)-1; i++ {
 			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 			if err != nil {
 				r.logger.Debug("failed to parse response into json.  Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
