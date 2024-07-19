@@ -99,8 +99,7 @@ func (cdb *ConfigDb) setInstallationID(ctx context.Context, id string) error {
 	return nil
 }
 
-// ReadCred reads and return the api-key from the cred.yaml file of .keploy directory
-func (cdb *ConfigDb) ReadAccessToken(ctx context.Context) (string, error) {
+func (cdb *ConfigDb) ReadAccessToken(_ context.Context) (string, error) {
 	// read from cred.yaml
 	filePath := getTokenPath()
 
@@ -108,7 +107,12 @@ func (cdb *ConfigDb) ReadAccessToken(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("keploy access token file not found at %s", filePath)
 	}
-	defer file.Close()
+	defer func() {
+		err := file.Close()
+		if err != nil {
+			utils.LogError(cdb.logger, err, "failed to close file")
+		}
+	}()
 	decoder := yamlV.NewDecoder(file)
 	var apiKey string
 	err = decoder.Decode(&apiKey)

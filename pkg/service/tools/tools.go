@@ -321,7 +321,7 @@ func (t *Tools) IgnoreTestSet(_ context.Context, _ string) error {
 }
 
 func (t *Tools) Login(ctx context.Context) bool {
-	deviceCodeResp, err := requestDeviceCode()
+	deviceCodeResp, err := requestDeviceCode(t.logger)
 	if err != nil {
 		t.logger.Error("Error requesting device code", zap.Error(err))
 		return false
@@ -329,7 +329,7 @@ func (t *Tools) Login(ctx context.Context) bool {
 
 	promptUser(deviceCodeResp)
 
-	tokenResp, err := pollForAccessToken(ctx, deviceCodeResp.DeviceCode, deviceCodeResp.Interval)
+	tokenResp, err := pollForAccessToken(ctx, t.logger, deviceCodeResp.DeviceCode, deviceCodeResp.Interval)
 	if err != nil {
 		if ctx.Err() == context.Canceled {
 			return false
@@ -338,7 +338,7 @@ func (t *Tools) Login(ctx context.Context) bool {
 		return false
 	}
 
-	userEmail, isValid, _, authErr, err := utils.CheckAuth(ctx, utils.ApiServerUrl, tokenResp.AccessToken, true, t.logger)
+	userEmail, isValid, _, authErr, err := utils.CheckAuth(ctx, utils.APIServerURL, tokenResp.AccessToken, true, t.logger)
 	if err != nil {
 		if ctx.Err() == context.Canceled {
 			return false
@@ -364,7 +364,7 @@ func (t *Tools) Login(ctx context.Context) bool {
 	return true
 }
 
-func requestDeviceCode() (*DeviceCodeResponse, error) {
+func requestDeviceCode(logger *zap.Logger) (*DeviceCodeResponse, error) {
 	data := url.Values{}
 	data.Set("client_id", clientID)
 	data.Set("scope", "read:user")
@@ -373,7 +373,12 @@ func requestDeviceCode() (*DeviceCodeResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		err := resp.Body.Close()
+		if err != nil {
+			utils.LogError(logger, err, "failed to close response body")
+		}
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -401,7 +406,7 @@ func promptUser(deviceCodeResp *DeviceCodeResponse) {
 	fmt.Printf("Please go to %s and enter the code: %s\n", deviceCodeResp.VerificationURI, deviceCodeResp.UserCode)
 }
 
-func pollForAccessToken(ctx context.Context, deviceCode string, interval int) (*AccessTokenResponse, error) {
+func pollForAccessToken(ctx context.Context, logger *zap.Logger, deviceCode string, interval int) (*AccessTokenResponse, error) {
 	data := url.Values{}
 	data.Set("client_id", clientID)
 	data.Set("device_code", deviceCode)
@@ -414,7 +419,12 @@ func pollForAccessToken(ctx context.Context, deviceCode string, interval int) (*
 		if err != nil {
 			return nil, err
 		}
-		defer resp.Body.Close()
+		defer func() {
+			err := resp.Body.Close()
+			if err != nil {
+				utils.LogError(logger, err, "failed to close response body")
+			}
+		}()
 
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
