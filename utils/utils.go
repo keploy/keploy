@@ -36,7 +36,7 @@ import (
 
 var WarningSign = "\U000026A0"
 var JwtToken = ""
-var ApiServerUrl = "http://localhost:8080"
+var APIServerURL = "http://localhost:8080"
 
 type GHAuthReq struct {
 	InstallationID string `json:"installationID"`
@@ -45,7 +45,7 @@ type GHAuthReq struct {
 }
 type GHAuthResp struct {
 	IsValid  bool   `json:"isValid"`
-	EmailId  string `json:"email"`
+	EmailID  string `json:"email"`
 	JwtToken string `json:"jwtToken"`
 	Error    string `json:"error"`
 }
@@ -813,8 +813,8 @@ func CreateGitIgnore(logger *zap.Logger, path string) error {
 func CheckAuth(ctx context.Context, host, token string, hardReset bool, logger *zap.Logger) (string, bool, string, string, error) {
 	url := fmt.Sprintf("%s/auth/githubtoken", host)
 	requestBody := &GHAuthReq{
-		Token:          token,
-		HardReset:      hardReset,
+		Token:     token,
+		HardReset: hardReset,
 	}
 	requestJSON, err := json.Marshal(requestBody)
 	if err != nil {
@@ -834,7 +834,12 @@ func CheckAuth(ctx context.Context, host, token string, hardReset bool, logger *
 		LogError(logger, err, "failed to authenticate with github token auth with keploy")
 		return "", false, "", "", fmt.Errorf("error sending the authentication: %s", err.Error())
 	}
-	defer res.Body.Close()
+	defer func() {
+		err := res.Body.Close()
+		if err != nil {
+			LogError(logger, err, "failed to close response body for github token auth")
+		}
+	}()
 
 	var respBody GHAuthResp
 	err = json.NewDecoder(res.Body).Decode(&respBody)
@@ -843,5 +848,5 @@ func CheckAuth(ctx context.Context, host, token string, hardReset bool, logger *
 		return "", false, "", "", fmt.Errorf("error unmarshalling the authentication response: %s", err.Error())
 	}
 	JwtToken = respBody.JwtToken
-	return respBody.EmailId, respBody.IsValid, respBody.JwtToken, respBody.Error, nil
+	return respBody.EmailID, respBody.IsValid, respBody.JwtToken, respBody.Error, nil
 }
