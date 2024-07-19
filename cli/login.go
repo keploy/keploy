@@ -15,7 +15,7 @@ func init() {
 	Register("login", Login)
 }
 
-func Login(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
+func Login(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, _ CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:     "login",
 		Short:   "login to keploy via github",
