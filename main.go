@@ -94,7 +94,7 @@ func WriteKeployConfig(config map[string]string) error {
 	}
 
 	return writer.Flush()
-}``
+}
 func getLatestRelease() (string, error) {
     url := "https://api.github.com/repos/keploy/keploy/releases/latest"
     resp, err := http.Get(url)
