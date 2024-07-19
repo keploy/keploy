@@ -2,6 +2,7 @@ package utils
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"debug/elf"
 	"encoding/json"
@@ -34,6 +35,20 @@ import (
 )
 
 var WarningSign = "\U000026A0"
+var JwtToken = ""
+var ApiServerUrl = "http://localhost:8080"
+
+type GHAuthReq struct {
+	InstallationID string `json:"installationID"`
+	Token          string `json:"apikey"`
+	HardReset      bool   `json:"firstTime"`
+}
+type GHAuthResp struct {
+	IsValid  bool   `json:"isValid"`
+	EmailId  string `json:"email"`
+	JwtToken string `json:"jwtToken"`
+	Error    string `json:"error"`
+}
 
 var ErrCode = 0
 
@@ -793,4 +808,40 @@ func CreateGitIgnore(logger *zap.Logger, path string) error {
 	}
 
 	return nil
+}
+
+func CheckAuth(ctx context.Context, host, token string, hardReset bool, logger *zap.Logger) (string, bool, string, string, error) {
+	url := fmt.Sprintf("%s/auth/githubtoken", host)
+	requestBody := &GHAuthReq{
+		Token:          token,
+		HardReset:      hardReset,
+	}
+	requestJSON, err := json.Marshal(requestBody)
+	if err != nil {
+		LogError(logger, err, "failed to marshal request body for github token auth")
+		return "", false, "", "", fmt.Errorf("error marshaling request body for authentication: %s", err.Error())
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(requestJSON))
+	if err != nil {
+		LogError(logger, err, "failed to create request for github token auth")
+		return "", false, "", "", fmt.Errorf("error creating request for authentication: %s", err.Error())
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{}
+	res, err := client.Do(req)
+	if err != nil || res.StatusCode < 200 || res.StatusCode >= 300 {
+		LogError(logger, err, "failed to authenticate with github token auth with keploy")
+		return "", false, "", "", fmt.Errorf("error sending the authentication: %s", err.Error())
+	}
+	defer res.Body.Close()
+
+	var respBody GHAuthResp
+	err = json.NewDecoder(res.Body).Decode(&respBody)
+	if err != nil {
+		LogError(logger, err, "failed to decode response body for github token auth")
+		return "", false, "", "", fmt.Errorf("error unmarshalling the authentication response: %s", err.Error())
+	}
+	JwtToken = respBody.JwtToken
+	return respBody.EmailId, respBody.IsValid, respBody.JwtToken, respBody.Error, nil
 }

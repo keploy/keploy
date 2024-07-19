@@ -9,29 +9,54 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/glamour"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/platform/yaml/configdb"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	clientID      = "Iv23liFBvIVhL29i9BAp"
+	deviceCodeURL = "https://github.com/login/device/code"
+	tokenURL      = "https://github.com/login/oauth/access_token"
+)
+
+type DeviceCodeResponse struct {
+	DeviceCode      string `json:"device_code"`
+	UserCode        string `json:"user_code"`
+	VerificationURI string `json:"verification_uri"`
+	Interval        int    `json:"interval"`
+}
+
+type AccessTokenResponse struct {
+	AccessToken string `json:"access_token"`
+	TokenType   string `json:"token_type"`
+	Scope       string `json:"scope"`
+}
+
 func NewTools(logger *zap.Logger, telemetry teleDB) Service {
+	configdb := configdb.NewConfigDb(logger)
 	return &Tools{
 		logger:    logger,
 		telemetry: telemetry,
+		configdb:  *configdb,
 	}
 }
 
 type Tools struct {
 	logger    *zap.Logger
 	telemetry teleDB
+	configdb  configdb.ConfigDb
 }
 
 var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
@@ -293,4 +318,134 @@ func (t *Tools) IgnoreTests(_ context.Context, _ string, _ []string) error {
 
 func (t *Tools) IgnoreTestSet(_ context.Context, _ string) error {
 	return nil
+}
+
+func (t *Tools) Login(ctx context.Context) bool {
+	deviceCodeResp, err := requestDeviceCode()
+	if err != nil {
+		t.logger.Error("Error requesting device code", zap.Error(err))
+		return false
+	}
+
+	promptUser(deviceCodeResp)
+
+	tokenResp, err := pollForAccessToken(ctx, deviceCodeResp.DeviceCode, deviceCodeResp.Interval)
+	if err != nil {
+		if ctx.Err() == context.Canceled {
+			return false
+		}
+		utils.LogError(t.logger, err, "failed to poll for access token")
+		return false
+	}
+
+	userEmail, isValid, _, authErr, err := utils.CheckAuth(ctx, utils.ApiServerUrl, tokenResp.AccessToken, true, t.logger)
+	if err != nil {
+		if ctx.Err() == context.Canceled {
+			return false
+		}
+		t.logger.Error("Error checking auth", zap.Error(err))
+		return false
+	}
+
+	if !isValid {
+		t.logger.Error("Invalid token", zap.Any("error", authErr))
+		return false
+	}
+
+	err = t.configdb.WriteAccessToken(ctx, tokenResp.AccessToken)
+	if err != nil {
+		if ctx.Err() == context.Canceled {
+			return false
+		}
+		t.logger.Error("Error writing access token", zap.Error(err))
+		return false
+	}
+	fmt.Println("Successfully logged in to Keploy using GitHub as " + userEmail)
+	return true
+}
+
+func requestDeviceCode() (*DeviceCodeResponse, error) {
+	data := url.Values{}
+	data.Set("client_id", clientID)
+	data.Set("scope", "read:user")
+
+	resp, err := http.PostForm(deviceCodeURL, data)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse the URL-encoded response
+	parsed, err := url.ParseQuery(string(body))
+	if err != nil {
+		return nil, err
+	}
+
+	// Populate the DeviceCodeResponse struct
+	deviceCodeResp := &DeviceCodeResponse{
+		DeviceCode:      parsed.Get("device_code"),
+		UserCode:        parsed.Get("user_code"),
+		VerificationURI: parsed.Get("verification_uri"),
+		Interval:        5, // Default value; you can parse this from the response if needed
+	}
+
+	return deviceCodeResp, nil
+}
+
+func promptUser(deviceCodeResp *DeviceCodeResponse) {
+	fmt.Printf("Please go to %s and enter the code: %s\n", deviceCodeResp.VerificationURI, deviceCodeResp.UserCode)
+}
+
+func pollForAccessToken(ctx context.Context, deviceCode string, interval int) (*AccessTokenResponse, error) {
+	data := url.Values{}
+	data.Set("client_id", clientID)
+	data.Set("device_code", deviceCode)
+	data.Set("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
+
+	fmt.Println("waiting for approval...")
+
+	for {
+		resp, err := http.PostForm(tokenURL, data)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			var tokenResp AccessTokenResponse
+			parsed, err := url.ParseQuery(string(body))
+			if err != nil {
+				return nil, err
+			}
+			if parsed.Get("error") == "authorization_pending" {
+				select {
+				case <-time.After(time.Duration(interval) * time.Second):
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				continue
+			} else if parsed.Get("error") != "" {
+				return nil, fmt.Errorf("error: %s", parsed.Get("error_description"))
+			}
+			if accessToken := parsed.Get("access_token"); accessToken != "" {
+				return &AccessTokenResponse{
+					AccessToken: accessToken,
+					TokenType:   parsed.Get("token_type"),
+					Scope:       parsed.Get("scope"),
+				}, nil
+			}
+			return &tokenResp, nil
+		}
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
 }
