@@ -23,6 +23,7 @@ import (
 
 var version string
 var dsn string
+var apiServerURI = "http://localhost:8080"
 
 func main() {
 
@@ -49,6 +50,7 @@ func setVersion() {
 }
 
 func start(ctx context.Context) {
+	utils.APIServerURL = apiServerURI
 	logger, err := log.New()
 	if err != nil {
 		fmt.Println("Failed to start the logger for the CLI", err)
