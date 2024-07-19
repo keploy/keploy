@@ -13,6 +13,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/fatih/color"
+	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -615,7 +616,11 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg config.Config) error {
 	defaultCfg = c.UpdateConfigData(defaultCfg)
 	toolSvc := tools.NewTools(c.logger, nil)
-	configData := defaultCfg
+	configData, err := c.RemoveInternalParameters(defaultCfg)
+	if err != nil {
+		utils.LogError(c.logger, err, "failed to remove internal parameters from config file")
+		return errors.New("failed to remove internal parameters from config file")
+	}
 	configDataBytes, err := yaml.Marshal(configData)
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to marshal config data")
@@ -642,4 +647,22 @@ func (c *CmdConfigurator) UpdateConfigData(defaultCfg config.Config) config.Conf
 	defaultCfg.Test.SkipCoverage = c.cfg.Test.SkipCoverage
 	defaultCfg.Test.Mocking = c.cfg.Test.Mocking
 	return defaultCfg
+}
+
+func (c *CmdConfigurator) RemoveInternalParameters(defaultCfg config.Config) (map[string]interface{}, error) {
+	var cfgMap map[string]interface{}
+	err := mapstructure.Decode(defaultCfg, &cfgMap)
+
+	if err != nil {
+		utils.LogError(c.logger, err, "error decoding struct")
+		return nil, errors.New("error decoding struct")
+	}
+
+	fieldsToRemove := []string{"generateGithubActions", "keployNetwork", "keployContainer", "inCi", "cmdType"}
+
+	for _, field := range fieldsToRemove {
+		delete(cfgMap, field)
+	}
+
+	return cfgMap, nil
 }
