@@ -19,13 +19,13 @@ dnsPort: 26789
 debug: false
 disableANSI: false
 disableTele: false
-inDocker: false
 generateGithubActions: true
 containerName: ""
 networkName: ""
 buildDelay: 30
 test:
   selectedTests: {}
+  ignoredTests: {}
   globalNoise:
     global: {}
     test-sets: {}
@@ -40,6 +40,7 @@ test:
   removeUnusedMocks: false
   basePath: ""
   mocking: true
+  fallbackOnMiss: false
 record:
   recordTimer: 0s
   filters: []
@@ -61,7 +62,6 @@ keployContainer: "keploy-v2"
 keployNetwork: "keploy-network"
 inDocker: false
 cmdType: "native"
-fallbackOnMiss: false
 `
 
 var config = &Config{}
@@ -71,7 +71,6 @@ func New() *Config {
 	mergedConfig, err := Merge(defaultConfig, InternalConfig)
 	if err != nil {
 		panic(err)
-
 	}
 	err = yaml3.Unmarshal([]byte(mergedConfig), config)
 	if err != nil {

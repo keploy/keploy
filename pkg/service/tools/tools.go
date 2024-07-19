@@ -284,7 +284,6 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 		return nil
 	}
 
-	t.logger.Info("Config file generated successfully")
 	return nil
 }
 

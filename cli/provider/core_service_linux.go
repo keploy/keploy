@@ -27,10 +27,7 @@ import (
 )
 
 type CommonInternalService struct {
-	YamlTestDB      *testdb.TestYaml
-	YamlMockDb      *mockdb.MockYaml
-	YamlReportDb    *reportdb.TestReport
-	YamlTestSetDB   *testset.Db[*models.TestSet]
+	commonPlatformServices
 	Instrumentation *core.Core
 }
 
@@ -98,10 +95,12 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 	reportDB := reportdb.New(logger, c.Path+"/reports")
 	testSetDb := testset.New[*models.TestSet](logger, c.Path)
 	return &CommonInternalService{
-		Instrumentation: instrumentation,
-		YamlTestDB:      testDB,
-		YamlMockDb:      mockDB,
-		YamlReportDb:    reportDB,
-		YamlTestSetDB:   testSetDb,
+		commonPlatformServices{
+			YamlTestDB:    testDB,
+			YamlMockDb:    mockDB,
+			YamlReportDb:  reportDB,
+			YamlTestSetDB: testSetDb,
+		},
+		instrumentation,
 	}, nil
 }
