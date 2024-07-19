@@ -60,7 +60,7 @@ installKeploy (){
         fi
         curl --silent --location "$download_url" | tar xz -C /tmp
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
-        set_alias 'sudo -E env PATH="$PATH" keploybin'
+        set_alias 'sudo -E env PATH="$PATH" keploy'
     }
 
     append_to_rc() {
