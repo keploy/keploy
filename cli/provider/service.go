@@ -51,7 +51,7 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 	}
 	tel.Ping()
 	switch cmd {
-	case "config", "update":
+	case "config", "update", "login":
 		return tools.NewTools(n.logger, tel), nil
 	case "gen":
 		return utgen.NewUnitTestGenerator(n.cfg.Gen.SourceFilePath, n.cfg.Gen.TestFilePath, n.cfg.Gen.CoverageReportPath, n.cfg.Gen.TestCommand, n.cfg.Gen.TestDir, n.cfg.Gen.CoverageFormat, n.cfg.Gen.DesiredCoverage, n.cfg.Gen.MaxIterations, n.cfg.Gen.Model, n.cfg.Gen.APIBaseURL, n.cfg.Gen.APIVersion, n.cfg, tel, n.logger)

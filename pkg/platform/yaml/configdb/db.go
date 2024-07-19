@@ -12,6 +12,8 @@ import (
 	"runtime"
 
 	"go.keploy.io/server/v2/pkg/platform/yaml"
+	yamlV "gopkg.in/yaml.v2"
+
 	"go.keploy.io/server/v2/utils"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.uber.org/zap"
@@ -23,7 +25,6 @@ type ConfigDb struct {
 }
 
 func UserHomeDir() string {
-
 	configFolder := "/.keploy"
 	if runtime.GOOS == "windows" {
 		home := os.Getenv("HOMEDRIVE") + os.Getenv("HOMEPATH")
@@ -95,5 +96,60 @@ func (cdb *ConfigDb) setInstallationID(ctx context.Context, id string) error {
 		return err
 	}
 
+	return nil
+}
+
+// ReadCred reads and return the api-key from the cred.yaml file of .keploy directory
+func (cdb *ConfigDb) ReadAccessToken(ctx context.Context) (string, error) {
+	// read from cred.yaml
+	filePath := getTokenPath()
+
+	file, err := os.OpenFile(filePath, os.O_RDONLY, os.ModePerm)
+	if err != nil {
+		return "", fmt.Errorf("keploy access token file not found at %s", filePath)
+	}
+	defer file.Close()
+	decoder := yamlV.NewDecoder(file)
+	var apiKey string
+	err = decoder.Decode(&apiKey)
+	if errors.Is(err, io.EOF) || apiKey == "" {
+		return "", nil
+	}
+
+	return apiKey, nil
+}
+
+func getTokenPath() string {
+	path := UserHomeDir()
+	fileName := "token.yaml"
+	filePath := filepath.Join(path, fileName)
+	return filePath
+}
+
+func (cdb *ConfigDb) WriteAccessToken(ctx context.Context, token string) error {
+	filePath := getTokenPath()
+
+	// Check if the file exists; if not, create it
+	_, err := os.Stat(filePath)
+	if err != nil && os.IsNotExist(err) {
+		path := filepath.Dir(filePath)
+		_, err := yaml.CreateYamlFile(ctx, cdb.logger, path, "token")
+		if err != nil {
+			fileName := filepath.Base(filePath)
+			return fmt.Errorf("failed to create file %s. error: %s", fileName, err.Error())
+		}
+	} else if err != nil {
+		fileName := filepath.Base(filePath)
+		return fmt.Errorf("unable to access the keploy file %s. error: %s", fileName, err.Error())
+
+	}
+	d, err := yamlV.Marshal(&token)
+	if err != nil {
+		return fmt.Errorf("failed to marshal document to yaml. error: %s", err.Error())
+	}
+	err = os.WriteFile(filePath, d, os.ModePerm)
+	if err != nil {
+		return fmt.Errorf("failed to write token in the yaml file. Please check the Unix permissions error: %s", err.Error())
+	}
 	return nil
 }
