@@ -36,7 +36,7 @@ import (
 
 var WarningSign = "\U000026A0"
 var JwtToken = ""
-var APIServerURL = "http://localhost:8080"
+var APIServerURL string
 
 type GHAuthReq struct {
 	InstallationID string `json:"installationID"`
