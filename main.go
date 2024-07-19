@@ -7,8 +7,6 @@ import (
 	"os"
 	"strings"
 
-	"go.uber.org/zap"
-
 	"go.keploy.io/server/v2/cli"
 	"go.keploy.io/server/v2/cli/provider"
 	"go.keploy.io/server/v2/config"
@@ -52,26 +50,11 @@ func main() {
 
 	printLogo()
 	ctx := utils.NewCtx()
-	checkForUpdate(ctx)
+
+	// Check for updates on every run
+	utils.CheckForUpdate(ctx)
+
 	start(ctx)
-}
-
-func checkForUpdate(ctx context.Context) {
-	currentVersion := "v" + utils.Version
-	logger := zap.NewExample()
-
-	releaseInfo, err := utils.GetLatestGitHubRelease(ctx, logger)
-	latestVersion := releaseInfo.TagName
-
-	if err != nil {
-		fmt.Printf("failed to fetch latest GitHub release version: %v\n", err)
-	}
-
-	if currentVersion != latestVersion {
-		fmt.Println("New version of Keploy is available:")
-		fmt.Printf(currentVersion + " ----> " + latestVersion + "\n")
-		fmt.Println("Run `keploy update` to update")
-	}
 }
 
 func printLogo() {
