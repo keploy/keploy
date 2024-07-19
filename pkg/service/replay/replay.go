@@ -82,8 +82,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
 
-	var stopReason = "replay completed successfully"
 	var hookCancel context.CancelFunc
+	var stopReason = "replay completed successfully"
 
 	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
 	defer func() {
@@ -91,10 +91,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		case <-ctx.Done():
 			break
 		default:
-			err := utils.Stop(r.logger, stopReason)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to stop replaying")
-			}
+			r.logger.Info("stopping Keploy", zap.String("reason", stopReason))
 		}
 		if hookCancel != nil {
 			hookCancel()
@@ -109,9 +106,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get all test set ids: %v", err)
 		utils.LogError(r.logger, err, stopReason)
-		if err == context.Canceled {
-			return err
-		}
 		return fmt.Errorf(stopReason)
 	}
 
@@ -126,9 +120,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get next test run id: %v", err)
 		utils.LogError(r.logger, err, stopReason)
-		if err == context.Canceled {
-			return err
-		}
 		return fmt.Errorf(stopReason)
 	}
 
@@ -186,7 +177,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to instrument: %v", err)
 		utils.LogError(r.logger, err, stopReason)
-		if err == context.Canceled {
+		if ctx.Err() == context.Canceled {
 			return err
 		}
 		return fmt.Errorf(stopReason)
@@ -217,7 +208,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)
 			utils.LogError(r.logger, err, stopReason)
-			if err == context.Canceled {
+			if ctx.Err() == context.Canceled {
 				return err
 			}
 			return fmt.Errorf(stopReason)

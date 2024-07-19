@@ -136,7 +136,7 @@ func (g *Golang) GetCoverage() (models.TestCoverage, error) {
 		totalLines += lines[0]
 		totalCoveredLines += lines[1]
 		testCov.FileCov[filename] = models.CoverageElement{
-			LineCov: coverage.CalCovPercentage(totalCoveredLines, totalLines),
+			LineCov: coverage.CalCovPercentage(lines[1], lines[0]),
 		}
 	}
 	testCov.TotalCov = models.CoverageElement{
