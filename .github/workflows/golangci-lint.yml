@@ -40,3 +40,6 @@ jobs:
           args: --out-format=colored-line-number
           # Optional: The mode to install golangci-lint. It can be 'binary' or 'goinstall'.
           install-mode: "goinstall"
+      - name: Check for Deprecated Dependencies
+        run: |
+            go run ci-scripts/check_deprecated_deps.go
