@@ -107,12 +107,18 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	}
 
 	cmd.Cancel = func() error {
-		return utils.InterruptProcessTree(logger, cmd.Process.Pid, syscall.SIGINT)
+		err := utils.SendSignal(logger, -cmd.Process.Pid, syscall.SIGINT)
+		if err != nil {
+			utils.LogError(logger, err, "failed to start stop docker")
+			return err
+		}
+		return nil
 	}
 
 	cmd.Stdout = os.Stdout
 	cmd.Stdin = os.Stdin
 	cmd.Stderr = os.Stderr
+
 	logger.Debug("running the following command in docker", zap.String("command", cmd.String()))
 	err = cmd.Run()
 	if err != nil {
@@ -140,7 +146,7 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 	if term.IsTerminal(int(os.Stdin.Fd())) {
 		ttyFlag = " -it "
 	} else {
-		ttyFlag = ""
+		ttyFlag = " "
 	}
 
 	switch osName {
