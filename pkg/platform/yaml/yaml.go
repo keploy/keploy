@@ -389,7 +389,7 @@ func generateUniqueID() string {
 	return hex.EncodeToString(b) + "-" + time.Now().Format("20060102150405")
 }
 
-func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath string, name string, outputPath string, readData bool, data models.HTTPSchema2) (success bool) {
+func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath string, name string, outputPath string, readData bool, data models.HTTPSchema2, isAppend bool) (success bool) {
 
 	var custom models.HTTPSchema2
 	if readData {
@@ -604,24 +604,31 @@ func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath stri
 		}
 		logger.Info("Directory created", zap.String("directory", outputPath))
 	}
-	// Save OpenAPI YAML to a file
-	outputFilePath := outputPath + "/" + name + ".yaml"
-	outputFile, err := os.Create(outputFilePath)
+
+	err = WriteFile(ctx, logger, outputPath, name, openapiYAML, isAppend)
 	if err != nil {
-		return false
-	}
-	defer func() {
-		if cerr := outputFile.Close(); cerr != nil {
-			logger.Error("Error closing output file", zap.Error(cerr))
-			success = false
-		}
-	}()
-	_, err = outputFile.Write(openapiYAML)
-	if err != nil {
+		logger.Error("Failed to write OpenAPI YAML to a file", zap.Error(err))
 		return false
 	}
 
-	fmt.Println("OpenAPI YAML has been saved to " + outputFilePath)
+	// // Save OpenAPI YAML to a file
+	// outputFilePath := outputPath + "/" + name + ".yaml"
+	// outputFile, err := os.Create(outputFilePath)
+	// if err != nil {
+	// 	return false
+	// }
+	// defer func() {
+	// 	if cerr := outputFile.Close(); cerr != nil {
+	// 		logger.Error("Error closing output file", zap.Error(cerr))
+	// 		success = false
+	// 	}
+	// }()
+	// _, err = outputFile.Write(openapiYAML)
+	// if err != nil {
+	// 	return false
+	// }
+
+	// fmt.Println("OpenAPI YAML has been saved to " + outputFilePath)
 	return true
 }
 func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.Mock, error) {
@@ -708,7 +715,7 @@ func GenerateHelper(ctx context.Context, logger *zap.Logger, services []string, 
 					return err
 				}
 				for _, testEntry := range testEntries {
-					done := ConvertYamlToOpenAPI(ctx, logger, keployFolder+entry.Name()+"/tests", strings.TrimSuffix(testEntry.Name(), ".yaml"), keployFolder+"schema/tests/"+entry.Name(), true, models.HTTPSchema2{})
+					done := ConvertYamlToOpenAPI(ctx, logger, keployFolder+entry.Name()+"/tests", strings.TrimSuffix(testEntry.Name(), ".yaml"), keployFolder+"schema/tests/"+entry.Name(), true, models.HTTPSchema2{}, false)
 					if !done {
 						logger.Error("Failed to convert the yaml file to openapi")
 						return fmt.Errorf("failed to convert the yaml file to openapi")
@@ -749,18 +756,32 @@ func GenerateHelper(ctx context.Context, logger *zap.Logger, services []string, 
 					}
 					mockYamls = append(mockYamls, doc)
 				}
-
+				var duplicateMocks []string
 				for _, mock := range mockYamls {
 					// Loop over mappings
+					var isAppend bool
 					for service, serviceMappings := range mappings {
 						if !contains(services, service) {
 							continue
 						}
 						var mappingFound bool
+
 						for _, mapping := range serviceMappings {
 							if mapping == mock.Spec.Request.URL {
+								var mockCode string
+								if mock.Spec.Request.URLParams != nil {
+									mockCode = fmt.Sprintf("%v", mock.Spec.Request.Method) + "-" + fmt.Sprintf("%v", mock.Spec.Request.URL) + "-0"
+								} else {
+									mockCode = fmt.Sprintf("%v", mock.Spec.Request.Method) + "-" + fmt.Sprintf("%v", mock.Spec.Request.URL) + "-1"
+								}
+								if contains(duplicateMocks, mockCode) {
+									isAppend = true
+								} else {
+									duplicateMocks = append(duplicateMocks, mockCode)
+								}
+
 								mappingFound = true
-								done := ConvertYamlToOpenAPI(ctx, logger, keployFolder+entry.Name(), "mocks", keployFolder+"schema/mocks/"+service+"/"+entry.Name(), false, *mock)
+								done := ConvertYamlToOpenAPI(ctx, logger, keployFolder+entry.Name(), "mocks", keployFolder+"schema/mocks/"+service+"/"+entry.Name(), false, *mock, isAppend)
 								if !done {
 
 									logger.Error("Failed to convert the yaml file to openapi")
