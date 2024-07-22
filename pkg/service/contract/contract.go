@@ -34,7 +34,7 @@ func (s *contractService) Generate(ctx context.Context, genTests bool) error {
 	}
 	return nil
 }
-func (s *contractService) Download(ctx context.Context, genTests bool) error {
+func (s *contractService) Download(_ context.Context, genTests bool) error {
 	fmt.Printf("Download contract for services: %v\n", s.config.Contract.Services)
 
 	if s.CheckConfigFile() != nil {
@@ -73,7 +73,7 @@ func (s *contractService) Download(ctx context.Context, genTests bool) error {
 		}
 		if genAll {
 			for _, entry := range entries {
-				err := yaml.CopyDir(keployFolder+"schema/tests/"+entry.Name(), path+"/"+entry.Name())
+				err := yaml.CopyDir(keployFolder+"schema/tests/"+entry.Name(), path+"/"+entry.Name(), s.logger)
 				if err != nil {
 					fmt.Println("Error moving directory:", err)
 					return err
@@ -86,7 +86,7 @@ func (s *contractService) Download(ctx context.Context, genTests bool) error {
 				for _, test := range testsProvidedByUser {
 					if entry.Name() == test {
 						downloadedTests = append(downloadedTests, test)
-						err := yaml.CopyDir(keployFolder+"schema/tests/"+entry.Name(), path+"/"+entry.Name())
+						err := yaml.CopyDir(keployFolder+"schema/tests/"+entry.Name(), path+"/"+entry.Name(), s.logger)
 						if err != nil {
 							fmt.Println("Error moving directory:", err)
 							return err
@@ -117,7 +117,7 @@ func (s *contractService) Download(ctx context.Context, genTests bool) error {
 				if entry.Name() == service {
 					downloadedServices = append(downloadedServices, service)
 					// Move that directory to path
-					err := yaml.CopyDir(keployFolder+"schema/mocks/"+entry.Name(), path+"/"+entry.Name())
+					err := yaml.CopyDir(keployFolder+"schema/mocks/"+entry.Name(), path+"/"+entry.Name(), s.logger)
 					if err != nil {
 						fmt.Println("Error moving directory:", err)
 						return err

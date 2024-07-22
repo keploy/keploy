@@ -611,68 +611,11 @@ func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath stri
 		return false
 	}
 
-	// // Save OpenAPI YAML to a file
-	// outputFilePath := outputPath + "/" + name + ".yaml"
-	// outputFile, err := os.Create(outputFilePath)
-	// if err != nil {
-	// 	return false
-	// }
-	// defer func() {
-	// 	if cerr := outputFile.Close(); cerr != nil {
-	// 		logger.Error("Error closing output file", zap.Error(cerr))
-	// 		success = false
-	// 	}
-	// }()
-	// _, err = outputFile.Write(openapiYAML)
-	// if err != nil {
-	// 	return false
-	// }
-
-	// fmt.Println("OpenAPI YAML has been saved to " + outputFilePath)
+	outputFilePath := outputPath + "/" + name + ".yaml"
+	fmt.Println("OpenAPI YAML has been saved to " + outputFilePath)
 	return true
 }
-func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.Mock, error) {
-	mocks := []*models.Mock{}
 
-	for _, m := range yamlMocks {
-		mock := models.Mock{
-			Version:      m.Version,
-			Name:         m.Name,
-			Kind:         m.Kind,
-			ConnectionID: m.ConnectionID,
-		}
-		mockCheck := strings.Split(string(m.Kind), "-")
-		if len(mockCheck) > 1 {
-			logger.Debug("This dependency does not belong to open source version, will be skipped", zap.String("mock kind:", string(m.Kind)))
-			continue
-		}
-		switch m.Kind {
-		case models.HTTP:
-			httpSpec := models.HTTPSchema{}
-			err := m.Spec.Decode(&httpSpec)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal a yaml doc into http mock", zap.Any("mock name", m.Name))
-				return nil, err
-			}
-			mock.Spec = models.MockSpec{
-				Metadata: httpSpec.Metadata,
-				HTTPReq:  &httpSpec.Request,
-				HTTPResp: &httpSpec.Response,
-
-				Created:          httpSpec.Created,
-				ReqTimestampMock: httpSpec.ReqTimestampMock,
-				ResTimestampMock: httpSpec.ResTimestampMock,
-			}
-
-		default:
-			utils.LogError(logger, nil, "failed to unmarshal a mock yaml doc of unknown type", zap.Any("type", m.Kind))
-			continue
-		}
-		mocks = append(mocks, &mock)
-	}
-
-	return mocks, nil
-}
 func contains(services []string, service string) bool {
 	for _, s := range services {
 		if s == service {
@@ -805,18 +748,26 @@ func GenerateHelper(ctx context.Context, logger *zap.Logger, services []string, 
 }
 
 // CopyFile copies a single file from src to dst
-func CopyFile(src, dst string) error {
+func CopyFile(src, dst string, logger *zap.Logger) error {
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	defer srcFile.Close()
+	defer func() {
+		if err := srcFile.Close(); err != nil {
+			utils.LogError(logger, err, "failed to close file", zap.String("file", srcFile.Name()))
+		}
+	}()
 
 	dstFile, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
-	defer dstFile.Close()
+	defer func() {
+		if err := dstFile.Close(); err != nil {
+			utils.LogError(logger, err, "failed to close file", zap.String("file", dstFile.Name()))
+		}
+	}()
 
 	_, err = io.Copy(dstFile, srcFile)
 	if err != nil {
@@ -837,7 +788,7 @@ func CopyFile(src, dst string) error {
 }
 
 // CopyDir recursively copies a directory tree, attempting to preserve permissions
-func CopyDir(srcDir, destDir string) error {
+func CopyDir(srcDir, destDir string, logger *zap.Logger) error {
 	// Ensure the destination directory exists
 	if _, err := os.Stat(destDir); os.IsNotExist(err) {
 		err := os.MkdirAll(destDir, os.ModePerm)
@@ -864,12 +815,12 @@ func CopyDir(srcDir, destDir string) error {
 			if err != nil {
 				return err
 			}
-			err = CopyDir(srcPath, destPath)
+			err = CopyDir(srcPath, destPath, logger)
 			if err != nil {
 				return err
 			}
 		} else {
-			err = CopyFile(srcPath, destPath)
+			err = CopyFile(srcPath, destPath, logger)
 			if err != nil {
 				return err
 			}
