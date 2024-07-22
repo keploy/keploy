@@ -36,10 +36,9 @@ type Config struct {
 	KeployNetwork         string       `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
 	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
 
-	Contract              Contract     `json:"contract" yaml:"contract" mapstructure:"contract"`
+	Contract Contract `json:"contract" yaml:"contract" mapstructure:"contract"`
 
-	InCi                  bool         `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
-
+	InCi bool `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
 }
 
 type UtGen struct {
@@ -67,6 +66,7 @@ type ReRecord struct {
 }
 type Contract struct {
 	Services        []string            `json:"services" yaml:"services" mapstructure:"services"`
+	Tests           []string            `json:"tests" yaml:"tests" mapstructure:"tests"`
 	Path            string              `json:"path" yaml:"path" mapstructure:"path"`
 	Download        bool                `json:"download" yaml:"download" mapstructure:"download"`
 	Generate        bool                `json:"generate" yaml:"generate" mapstructure:"generate"`
@@ -176,6 +176,10 @@ func SetSelectedTests(conf *Config, testSets []string) {
 func SetSelectedServices(conf *Config, services []string) {
 	// string is "s1,s2" so i want to get s1,s2
 	conf.Contract.Services = services
+}
+func SetSelectedContractTests(conf *Config, tests []string) {
+
+	conf.Contract.Tests = tests
 }
 
 func SetSelectedTestsNormalize(conf *Config, value string) error {

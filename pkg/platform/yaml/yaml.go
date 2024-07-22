@@ -1,10 +1,12 @@
 package yaml
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -16,6 +18,7 @@ import (
 	"time"
 
 	"github.com/getkin/kin-openapi/openapi3"
+	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -30,14 +33,6 @@ type NetworkTrafficDoc struct {
 	Spec         yamlLib.Node   `json:"spec" yaml:"spec"`
 	Curl         string         `json:"curl" yaml:"curl,omitempty"`
 	ConnectionID string         `json:"connectionId" yaml:"connectionId,omitempty"`
-}
-type CPRContract struct {
-	ServicesMapping map[string][]string `yaml:"servicesMapping"`
-	Self            string              `yaml:"self"`
-}
-
-type CPRServiceMapping struct {
-	Contract CPRContract `yaml:"contract"`
 }
 
 // ctxReader wraps an io.Reader with a context for cancellation support
@@ -394,22 +389,26 @@ func generateUniqueID() string {
 	return hex.EncodeToString(b) + "-" + time.Now().Format("20060102150405")
 }
 
-func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath string, name string, outputPath string) (success bool) {
-	//This should be added after integration
-	data, err := ReadFile(ctx, logger, filePath, name)
-	if err != nil {
-		logger.Fatal("Error reading file", zap.Error(err))
-		return false
-	}
+func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath string, name string, outputPath string, readData bool, data models.HTTPSchema2) (success bool) {
 
-	// Parse the custom format YAML into the HTTPSchema struct
 	var custom models.HTTPSchema2
-	err = yamlLib.Unmarshal(data, &custom)
-	if err != nil {
-		logger.Error("Error parsing YAML: %v", zap.Error(err))
-		return false
-	}
+	if readData {
+		data, err := ReadFile(ctx, logger, filePath, name)
+		if err != nil {
+			logger.Fatal("Error reading file", zap.Error(err))
+			return false
+		}
 
+		// Parse the custom format YAML into the HTTPSchema struct
+		err = yamlLib.Unmarshal(data, &custom)
+		if err != nil {
+			logger.Error("Error parsing YAML: %v", zap.Error(err))
+			return false
+		}
+	} else {
+		custom = data
+	}
+	var err error
 	// Convert response body to an object
 	var responseBodyObject map[string]interface{}
 	if custom.Spec.Response.Body != "" {
@@ -625,23 +624,69 @@ func ConvertYamlToOpenAPI(ctx context.Context, logger *zap.Logger, filePath stri
 	fmt.Println("OpenAPI YAML has been saved to " + outputFilePath)
 	return true
 }
-func GenerateHelper(ctx context.Context, logger *zap.Logger, services []string, self string, genTests bool) error {
+func decodeMocks(yamlMocks []*NetworkTrafficDoc, logger *zap.Logger) ([]*models.Mock, error) {
+	mocks := []*models.Mock{}
 
-	var svcMapping CPRServiceMapping
-	svcMappingFileData, err := ReadFile(ctx, logger, "./keploy", "svcMapping")
+	for _, m := range yamlMocks {
+		mock := models.Mock{
+			Version:      m.Version,
+			Name:         m.Name,
+			Kind:         m.Kind,
+			ConnectionID: m.ConnectionID,
+		}
+		mockCheck := strings.Split(string(m.Kind), "-")
+		if len(mockCheck) > 1 {
+			logger.Debug("This dependency does not belong to open source version, will be skipped", zap.String("mock kind:", string(m.Kind)))
+			continue
+		}
+		switch m.Kind {
+		case models.HTTP:
+			httpSpec := models.HTTPSchema{}
+			err := m.Spec.Decode(&httpSpec)
+			if err != nil {
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into http mock", zap.Any("mock name", m.Name))
+				return nil, err
+			}
+			mock.Spec = models.MockSpec{
+				Metadata: httpSpec.Metadata,
+				HTTPReq:  &httpSpec.Request,
+				HTTPResp: &httpSpec.Response,
+
+				Created:          httpSpec.Created,
+				ReqTimestampMock: httpSpec.ReqTimestampMock,
+				ResTimestampMock: httpSpec.ResTimestampMock,
+			}
+
+		default:
+			utils.LogError(logger, nil, "failed to unmarshal a mock yaml doc of unknown type", zap.Any("type", m.Kind))
+			continue
+		}
+		mocks = append(mocks, &mock)
+	}
+
+	return mocks, nil
+}
+func contains(services []string, service string) bool {
+	for _, s := range services {
+		if s == service {
+			return true
+		}
+	}
+	return false
+}
+func GenerateHelper(ctx context.Context, logger *zap.Logger, services []string, genTests bool) error {
+	var config config.Config
+	configData, err := ReadFile(ctx, logger, "./", "keploy")
 	if err != nil {
 		logger.Fatal("Error reading file", zap.Error(err))
 		return err
 	}
-
-	err = yamlLib.Unmarshal(svcMappingFileData, &svcMapping)
+	err = yamlLib.Unmarshal(configData, &config)
 	if err != nil {
-		logger.Fatal("Error unmarshalling file", zap.Error(err))
+		logger.Error("Error parsing YAML: %v", zap.Error(err))
 		return err
 	}
-
-	// var mappings map[string][]string
-	mappings := svcMapping.Contract.ServicesMapping
+	mappings := config.Contract.ServicesMapping
 	keployFolder := "./keploy/"
 	// Read the directory contents
 	entries, err := os.ReadDir(keployFolder)
@@ -663,7 +708,7 @@ func GenerateHelper(ctx context.Context, logger *zap.Logger, services []string, 
 					return err
 				}
 				for _, testEntry := range testEntries {
-					done := ConvertYamlToOpenAPI(ctx, logger, keployFolder+entry.Name()+"/tests", strings.TrimSuffix(testEntry.Name(), ".yaml"), keployFolder+"schema/tests/"+entry.Name())
+					done := ConvertYamlToOpenAPI(ctx, logger, keployFolder+entry.Name()+"/tests", strings.TrimSuffix(testEntry.Name(), ".yaml"), keployFolder+"schema/tests/"+entry.Name(), true, models.HTTPSchema2{})
 					if !done {
 						logger.Error("Failed to convert the yaml file to openapi")
 						return fmt.Errorf("failed to convert the yaml file to openapi")
@@ -684,44 +729,132 @@ func GenerateHelper(ctx context.Context, logger *zap.Logger, services []string, 
 		for _, entry := range entries {
 			if entry.IsDir() && strings.Contains(entry.Name(), "test") {
 				mockFolder := keployFolder + entry.Name()
+				////////////////////////////////////
+				var mockYamls []*models.HTTPSchema2
+				// var tcsMocks = make([]*models.Mock, 0)
 				data, err := ReadFile(ctx, logger, mockFolder, "mocks")
 				if err != nil {
-					logger.Fatal("Error reading file", zap.Error(err))
+					utils.LogError(logger, err, "failed to read the mocks from config yaml", zap.Any("session", filepath.Base(mockFolder)))
 					return err
 				}
-
-				// Parse the custom format YAML into the HTTPSchema struct
-				var custom models.HTTPSchema2
-				err = yamlLib.Unmarshal(data, &custom)
-				if err != nil {
-					logger.Error("Error parsing YAML: %v", zap.Error(err))
-					return err
+				dec := yamlLib.NewDecoder(bytes.NewReader(data))
+				for {
+					var doc *models.HTTPSchema2
+					err := dec.Decode(&doc)
+					if errors.Is(err, io.EOF) {
+						break
+					}
+					if err != nil {
+						return fmt.Errorf("failed to decode the yaml file documents. error: %v", err.Error())
+					}
+					mockYamls = append(mockYamls, doc)
 				}
-				// Loop over mappings
-				for service, serviceMappings := range mappings {
-					var mappingFound bool
-					for _, mapping := range serviceMappings {
-						if mapping == custom.Spec.Request.URL {
-							mappingFound = true
-							done := ConvertYamlToOpenAPI(ctx, logger, keployFolder+entry.Name(), "mocks", keployFolder+"schema/mocks/"+service+"/"+entry.Name())
-							if !done {
 
-								logger.Error("Failed to convert the yaml file to openapi")
-								return fmt.Errorf("failed to convert the yaml file to openapi")
+				for _, mock := range mockYamls {
+					// Loop over mappings
+					for service, serviceMappings := range mappings {
+						if !contains(services, service) {
+							continue
+						}
+						var mappingFound bool
+						for _, mapping := range serviceMappings {
+							if mapping == mock.Spec.Request.URL {
+								mappingFound = true
+								done := ConvertYamlToOpenAPI(ctx, logger, keployFolder+entry.Name(), "mocks", keployFolder+"schema/mocks/"+service+"/"+entry.Name(), false, *mock)
+								if !done {
+
+									logger.Error("Failed to convert the yaml file to openapi")
+									return fmt.Errorf("failed to convert the yaml file to openapi")
+								}
+								break
 							}
+						}
+						if mappingFound {
 							break
 						}
 					}
-					if mappingFound {
-						break
-					}
 				}
+
 			}
 		}
 
 	}
 	return nil
 
+}
+
+// CopyFile copies a single file from src to dst
+func CopyFile(src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+
+	_, err = io.Copy(dstFile, srcFile)
+	if err != nil {
+		return err
+	}
+
+	// Ensure the copied file has the same permissions as the original file
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	err = os.Chmod(dst, srcInfo.Mode())
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// CopyDir recursively copies a directory tree, attempting to preserve permissions
+func CopyDir(srcDir, destDir string) error {
+	// Ensure the destination directory exists
+	if _, err := os.Stat(destDir); os.IsNotExist(err) {
+		err := os.MkdirAll(destDir, os.ModePerm)
+		if err != nil {
+			return err
+		}
+	}
+	entries, err := os.ReadDir(srcDir)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		srcPath := filepath.Join(srcDir, entry.Name())
+		destPath := filepath.Join(destDir, entry.Name())
+
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+
+		if info.IsDir() {
+			err = os.MkdirAll(destPath, info.Mode())
+			if err != nil {
+				return err
+			}
+			err = CopyDir(srcPath, destPath)
+			if err != nil {
+				return err
+			}
+		} else {
+			err = CopyFile(srcPath, destPath)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 func DeleteFile(_ context.Context, logger *zap.Logger, path, name string) error {
 	filePath := filepath.Join(path, name+".yaml")

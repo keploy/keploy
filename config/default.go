@@ -46,7 +46,7 @@ record:
   recordTimer: 0s
   filters: []
 contract:
-  servicesMapping: {"s1":["localhost:9000","localhost:9222"],"s5":["localhost:3000","localhost:2112"]}
+  servicesMapping: {"s2":["/s2endpoint","localhost:9222"],"s3":["/s3endpoint","/otp-service/"],"s5":["localhost:3000","/endpoint"]}
   self: "s1"
 configPath: ""
 bypassRules: []

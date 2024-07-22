@@ -48,8 +48,8 @@ func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 				return nil
 			}
 			// Extract services from the flag
-			serviceStr, _ := cmd.Flags().GetString("service")
-			if serviceStr != "" {
+			serviceStr, _ := cmd.Flags().GetStringSlice("services")
+			if len(serviceStr) != 0 {
 				err = contract.Generate(ctx, false)
 			} else {
 				err = contract.Generate(ctx, true)
@@ -93,7 +93,14 @@ func Download(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 				utils.LogError(logger, nil, "service doesn't satisfy contract service interface")
 				return nil
 			}
-			err = contract.Download(ctx)
+			// Extract services from the flag
+			serviceStr, _ := cmd.Flags().GetStringSlice("services")
+			if len(serviceStr) != 0 {
+				err = contract.Download(ctx, false)
+
+			} else {
+				err = contract.Download(ctx, true)
+			}
 			if err != nil {
 				utils.LogError(logger, err, "failed to download contract")
 			}
