@@ -791,6 +791,14 @@
       "created_at": "2024-07-21T08:50:10Z",
       "repoId": 449649393,
       "pullRequestNo": 2107
+    },
+    {
+      "name": "yaten2302",
+      "id": 129659514,
+      "comment_id": 2239431938,
+      "created_at": "2024-07-19T15:12:35Z",
+      "repoId": 449649393,
+      "pullRequestNo": 2105
     }
   ]
 }
