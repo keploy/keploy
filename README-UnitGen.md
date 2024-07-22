@@ -220,8 +220,8 @@ Configure Keploy using command-line flags:
 1. What is Keploy's Unit Test Generator (UTG)? <br>
     - Keploy's UTG automates the creation of unit tests based on code semantics, enhancing test coverage and reliability.
 
-2. Can Keploy handle large codebases efficiently?<br>
-    - Yes, Keploy is designed to handle large codebases efficiently, though processing time may vary based on project size and complexity.
+2. Does Keploy send your private data to any cloud server for test generation?<br>
+    - No, Keploy does not send any user code to remote systems, except when using the unit test generation feature. When using the UT gen feature, only the source code and the unit test code will be sent to the Large Language Model (LLM) you are using. By default, Keploy uses - litellm to support vast number of LLM backends. Yes, if your organization has its own LLM(a private one), you can use it with Keploy. This ensures that data is not sent to any external systems.
 
 3. How does Keploy contribute to improving unit test   coverage?<br>
     - By providing a zero code platform for automated testing, Keploy empowers developers to scale up their unit test coverage without extensive coding knowledge. This integration enhances testing reports, ultimately boosting confidence in the product's quality.
@@ -232,9 +232,8 @@ Configure Keploy using command-line flags:
 5. How does Keploy generate coverage reports?<br>
     - Keploy generates detailed Cobertura format reports, offering insights into test effectiveness and code quality.
 
-6. Does Keploy send your private data to any cloud
-server for test generation?<br>
-   - No, Keploy does not send any user code to remote systems, except when using the unit test generation feature. When using the UT gen feature, only the source code and the unit test code will be sent to the Large Language Model (LLM) you are using. By default, Keploy uses - litellm to support vast number of LLM backends. Yes, if your organization has its own LLM(a private one), you can use it with Keploy. This ensures that data is not sent to any external systems.
+6. Can Keploy handle large codebases efficiently?<br>
+   - Yes, Keploy is designed to handle large codebases efficiently, though processing time may vary based on project size and complexity.
 
 # 🙋🏻‍♀️ Questions? 🙋🏻‍♂️
 
