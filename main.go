@@ -24,18 +24,6 @@ import (
 var version string
 var dsn string
 
-const logo string = `
-       ▓██▓▄
-    ▓▓▓▓██▓█▓▄
-     ████████▓▒
-          ▀▓▓███▄      ▄▄   ▄               ▌
-         ▄▌▌▓▓████▄    ██ ▓█▀  ▄▌▀▄  ▓▓▌▄   ▓█  ▄▌▓▓▌▄ ▌▌   ▓
-       ▓█████████▌▓▓   ██▓█▄  ▓█▄▓▓ ▐█▌  ██ ▓█  █▌  ██  █▌ █▓
-      ▓▓▓▓▀▀▀▀▓▓▓▓▓▓▌  ██  █▓  ▓▌▄▄ ▐█▓▄▓█▀ █▓█ ▀█▄▄█▀   █▓█
-       ▓▌                           ▐█▌                   █▌
-        ▓
-`
-
 func main() {
 
 	// Uncomment the following code to enable pprof for debugging
@@ -47,21 +35,16 @@ func main() {
 	// 		return
 	// 	}
 	// }()
-
-	printLogo()
+	setVersion()
 	ctx := utils.NewCtx()
 	start(ctx)
 }
-
-func printLogo() {
+func setVersion() {
 	if version == "" {
 		version = "2-dev"
 	}
 	utils.Version = version
-	if binaryToDocker := os.Getenv("BINARY_TO_DOCKER"); binaryToDocker != "true" {
-		fmt.Println(logo, " ")
-		fmt.Printf("version: %v\n\n", version)
-	}
+	utils.VersionIdenitfier = "version"
 }
 
 func start(ctx context.Context) {
