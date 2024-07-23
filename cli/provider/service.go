@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/platform/auth"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb/user"
 
@@ -44,15 +45,24 @@ func (n *ServiceProvider) GetTelemetryService(ctx context.Context, config *confi
 	), nil
 }
 
+func (n *ServiceProvider) GetAuthService(ctx context.Context) (*auth.Auth, error) {
+	installationID, err := n.userDb.GetInstallationID(ctx)
+	if err != nil {
+		return nil, errors.New("failed to get installation id")
+	}
+	return auth.New(utils.APIServerURL, installationID, n.logger, utils.GitHubClientID), nil
+}
+
 func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface{}, error) {
 	tel, err := n.GetTelemetryService(ctx, n.cfg)
 	if err != nil {
 		return nil, err
 	}
+	auth, err := n.GetAuthService(ctx)
 	tel.Ping()
 	switch cmd {
 	case "config", "update", "login":
-		return tools.NewTools(n.logger, tel), nil
+		return tools.NewTools(n.logger, tel, auth), nil
 	case "gen":
 		return utgen.NewUnitTestGenerator(n.cfg.Gen.SourceFilePath, n.cfg.Gen.TestFilePath, n.cfg.Gen.CoverageReportPath, n.cfg.Gen.TestCommand, n.cfg.Gen.TestDir, n.cfg.Gen.CoverageFormat, n.cfg.Gen.DesiredCoverage, n.cfg.Gen.MaxIterations, n.cfg.Gen.Model, n.cfg.Gen.APIBaseURL, n.cfg.Gen.APIVersion, n.cfg, tel, n.logger)
 	case "record", "test", "mock", "normalize", "templatize", "rerecord":

@@ -1,0 +1,213 @@
+package auth
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"sync"
+	"time"
+
+	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
+	"go.uber.org/zap"
+)
+
+type Auth struct {
+	serverURL       string
+	jwtToken        string
+	lastUpdatedTime time.Time
+	installationID  string
+	rwMutex         *sync.RWMutex
+	logger          *zap.Logger
+	GitHubClientID  string
+}
+
+func New(serverURL string, installationID string, logger *zap.Logger, gitHubClientID string) *Auth {
+	return &Auth{
+		serverURL:      serverURL,
+		installationID: installationID,
+		logger:         logger,
+		GitHubClientID: gitHubClientID,
+	}
+}
+
+func (a *Auth) Login(ctx context.Context) bool {
+
+	deviceCodeResp, err := requestDeviceCode(a.logger, a.GitHubClientID)
+	if err != nil {
+		a.logger.Error("Error requesting device code", zap.Error(err))
+		return false
+	}
+
+	promptUser(deviceCodeResp)
+
+	tokenResp, err := pollForAccessToken(ctx, a.logger, deviceCodeResp.DeviceCode, a.GitHubClientID, deviceCodeResp.Interval)
+	if err != nil {
+		if ctx.Err() == context.Canceled {
+			return false
+		}
+		utils.LogError(a.logger, err, "failed to poll for access token")
+		return false
+	}
+
+	userEmail, isValid, _, authErr, err := a.Validate(ctx, tokenResp.AccessToken, a.logger)
+	if err != nil {
+		if ctx.Err() == context.Canceled {
+			return false
+		}
+		a.logger.Error("Error checking auth", zap.Error(err))
+		return false
+	}
+
+	if !isValid {
+		a.logger.Error("Invalid token", zap.Any("error", authErr))
+		return false
+	}
+	fmt.Println("Successfully logged in to Keploy using GitHub as " + userEmail)
+	return true
+}
+
+func (a *Auth) Validate(ctx context.Context, token string, logger *zap.Logger) (string, bool, string, string, error) {
+	url := fmt.Sprintf("%s/auth/github", a.serverURL)
+	requestBody := &models.AuthReq{
+		GitHubToken:    token,
+		InstallationID: a.installationID,
+	}
+	requestJSON, err := json.Marshal(requestBody)
+	if err != nil {
+		utils.LogError(logger, err, "failed to marshal request body for github token auth")
+		return "", false, "", "", fmt.Errorf("error marshaling request body for authentication: %s", err.Error())
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(requestJSON))
+	if err != nil {
+		utils.LogError(logger, err, "failed to create request for github token auth")
+		return "", false, "", "", fmt.Errorf("error creating request for authentication: %s", err.Error())
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{}
+	res, err := client.Do(req)
+	if err != nil || res.StatusCode < 200 || res.StatusCode >= 300 {
+		utils.LogError(logger, err, "failed to authenticate with github token auth with keploy")
+		return "", false, "", "", fmt.Errorf("error sending the authentication: %s", err.Error())
+	}
+	defer func() {
+		err := res.Body.Close()
+		if err != nil {
+			utils.LogError(logger, err, "failed to close response body for github token auth")
+		}
+	}()
+
+	var respBody models.AuthResp
+	err = json.NewDecoder(res.Body).Decode(&respBody)
+	if err != nil {
+		utils.LogError(logger, err, "failed to decode response body for github token auth")
+		return "", false, "", "", fmt.Errorf("error unmarshalling the authentication response: %s", err.Error())
+	}
+	a.jwtToken = respBody.JwtToken
+	return respBody.EmailID, respBody.IsValid, respBody.JwtToken, respBody.Error, nil
+}
+
+// requestDeviceCode sends a request to GitHub to get a device code for the users machine to authenticate
+func requestDeviceCode(logger *zap.Logger, gitHubClientID string) (*models.DeviceCodeResponse, error) {
+	data := url.Values{}
+	data.Set("client_id", gitHubClientID)
+	data.Set("scope", "read:user")
+
+	resp, err := http.PostForm(models.DeviceCodeURL, data)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		err := resp.Body.Close()
+		if err != nil {
+			utils.LogError(logger, err, "failed to close response body")
+		}
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse the URL-encoded response
+	parsed, err := url.ParseQuery(string(body))
+	if err != nil {
+		return nil, err
+	}
+
+	// Populate the DeviceCodeResponse struct
+	deviceCodeResp := &models.DeviceCodeResponse{
+		DeviceCode:      parsed.Get("device_code"),
+		UserCode:        parsed.Get("user_code"),
+		VerificationURI: parsed.Get("verification_uri"),
+		Interval:        5, // Default value; you can parse this from the response if needed
+	}
+
+	return deviceCodeResp, nil
+}
+
+func promptUser(deviceCodeResp *models.DeviceCodeResponse) {
+	fmt.Printf("Please go to %s and enter the code: %s\n", deviceCodeResp.VerificationURI, deviceCodeResp.UserCode)
+}
+
+// pollForAccessToken polls GitHub for an access token using the device code provided by requestDeviceCode
+// It will poll every interval seconds until the user has approved the device code
+func pollForAccessToken(ctx context.Context, logger *zap.Logger, deviceCode, gitHubClientID string, interval int) (*models.AccessTokenResponse, error) {
+	data := url.Values{}
+	data.Set("client_id", gitHubClientID)
+	data.Set("device_code", deviceCode)
+	data.Set("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
+
+	fmt.Println("waiting for approval...")
+
+	for {
+		resp, err := http.PostForm(models.TokenURL, data)
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			err := resp.Body.Close()
+			if err != nil {
+				utils.LogError(logger, err, "failed to close response body")
+			}
+		}()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		}
+
+		var tokenResp models.AccessTokenResponse
+		parsed, err := url.ParseQuery(string(body))
+		if err != nil {
+			return nil, err
+		}
+		if parsed.Get("error") == "authorization_pending" {
+			select {
+			case <-time.After(time.Duration(interval) * time.Second):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			continue
+		} else if parsed.Get("error") != "" {
+			return nil, fmt.Errorf("error: %s", parsed.Get("error_description"))
+		}
+		if accessToken := parsed.Get("access_token"); accessToken != "" {
+			return &models.AccessTokenResponse{
+				AccessToken: accessToken,
+				TokenType:   parsed.Get("token_type"),
+				Scope:       parsed.Get("scope"),
+			}, nil
+		}
+		return &tokenResp, nil
+	}
+}
