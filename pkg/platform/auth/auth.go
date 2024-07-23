@@ -1,3 +1,5 @@
+// Package auth defines methods for authenticating with GitHub.
+
 package auth
 
 import (
