@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 
+	"github.com/denisbrodbeck/machineid"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.keploy.io/server/v2/utils"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -43,12 +44,20 @@ func New(logger *zap.Logger) *Db {
 
 func (db *Db) GetInstallationID(ctx context.Context) (string, error) {
 	var id string
+	var err error
 	id = getInstallationFromFile(db.logger)
 	if id == "" {
-		id = primitive.NewObjectID().String()
-		err := db.setInstallationID(ctx, id)
+		id, err = machineid.ID()
 		if err != nil {
-			return "", fmt.Errorf("failed to set installation id in file. error: %s", err.Error())
+			return "", errors.New("failed to get machine id")
+		}
+		if id == "" {
+			db.logger.Warn("could not get machine id for installation ID, generating random id")
+			id = primitive.NewObjectID().String()
+			err := db.setInstallationID(ctx, id)
+			if err != nil {
+				return "", fmt.Errorf("failed to set installation id in file. error: %s", err.Error())
+			}
 		}
 	}
 	return id, nil
@@ -94,6 +103,5 @@ func (db *Db) setInstallationID(ctx context.Context, id string) error {
 		utils.LogError(db.logger, err, "failed to write installation id in yaml file")
 		return err
 	}
-
 	return nil
 }

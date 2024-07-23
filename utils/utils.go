@@ -50,8 +50,6 @@ type GHAuthResp struct {
 	Error    string `json:"error"`
 }
 
-var ErrCode = 0
-
 func ReplaceHostToIP(currentURL string, ipAddress string) (string, error) {
 	// Parse the current URL
 	parsedURL, err := url.Parse(currentURL)

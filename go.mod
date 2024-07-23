@@ -116,6 +116,7 @@ require (
 	github.com/99designs/gqlgen v0.17.45
 	github.com/agnivade/levenshtein v1.1.1
 	github.com/charmbracelet/glamour v0.6.0
+	github.com/denisbrodbeck/machineid v1.0.1
 	github.com/emirpasic/gods v1.18.1
 	github.com/getsentry/sentry-go v0.28.1
 	github.com/jackc/pgproto3/v2 v2.3.2

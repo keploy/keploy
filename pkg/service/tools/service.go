@@ -15,3 +15,7 @@ type Service interface {
 type teleDB interface {
 	SendTelemetry(event string, output ...map[string]interface{})
 }
+
+type auth interface {
+	Login(ctx context.Context) bool
+}
