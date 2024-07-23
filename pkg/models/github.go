@@ -13,6 +13,7 @@ type AccessTokenResponse struct {
 	Scope       string `json:"scope"`
 }
 
+// GitHub URLs
 const (
 	DeviceCodeURL = "https://github.com/login/device/code"
 	TokenURL      = "https://github.com/login/oauth/access_token"

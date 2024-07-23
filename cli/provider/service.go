@@ -59,6 +59,9 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 		return nil, err
 	}
 	auth, err := n.GetAuthService(ctx)
+	if err != nil {
+		return nil, err
+	}
 	tel.Ping()
 	switch cmd {
 	case "config", "update", "login":
