@@ -119,7 +119,7 @@ func (j *Javascript) GetCoverage() (models.TestCoverage, error) {
 		if err != nil {
 			return testCov, err
 		}
-		
+
 		for filename, file := range cov {
 			if _, ok := linesCoveredPerFile[filename]; !ok {
 				linesCoveredPerFile[filename] = make(map[string]bool)
@@ -131,7 +131,7 @@ func (j *Javascript) GetCoverage() (models.TestCoverage, error) {
 
 				switch isExecSegmentCov := isStatementCovered.(type) {
 				case float64:
-					if (isExecSegmentCov)> 0 {
+					if (isExecSegmentCov) > 0 {
 						linesCoveredPerFile[filename][line] = true
 					}
 				default:
