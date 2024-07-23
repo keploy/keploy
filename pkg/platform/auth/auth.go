@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"sync"
 	"time"
 
 	"go.keploy.io/server/v2/pkg/models"
@@ -17,13 +16,11 @@ import (
 )
 
 type Auth struct {
-	serverURL       string
-	jwtToken        string
-	lastUpdatedTime time.Time
-	installationID  string
-	rwMutex         *sync.RWMutex
-	logger          *zap.Logger
-	GitHubClientID  string
+	serverURL      string
+	jwtToken       string
+	installationID string
+	logger         *zap.Logger
+	GitHubClientID string
 }
 
 func New(serverURL string, installationID string, logger *zap.Logger, gitHubClientID string) *Auth {
