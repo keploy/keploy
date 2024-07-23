@@ -212,6 +212,7 @@ func CheckFileExists(path string) bool {
 }
 
 var Version string
+var VersionIdenitfier string
 
 func attachLogFileToSentry(logger *zap.Logger, logFilePath string) error {
 	file, err := os.Open(logFilePath)
