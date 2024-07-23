@@ -35,7 +35,6 @@ import (
 )
 
 var WarningSign = "\U000026A0"
-var JwtToken = ""
 var APIServerURL string
 
 type GHAuthReq struct {
