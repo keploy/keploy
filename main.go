@@ -42,6 +42,7 @@ func main() {
 	utils.CheckForUpdate(ctx)
 
 	start(ctx)
+	os.Exit(utils.ErrCode)
 }
 func setVersion() {
 	if version == "" {
