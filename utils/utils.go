@@ -35,6 +35,8 @@ import (
 
 var WarningSign = "\U000026A0"
 
+var ErrCode = 0
+
 func ReplaceHostToIP(currentURL string, ipAddress string) (string, error) {
 	// Parse the current URL
 	parsedURL, err := url.Parse(currentURL)
