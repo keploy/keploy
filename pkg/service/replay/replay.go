@@ -396,12 +396,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		verdict := TestReportVerdict{
-			total:     testReport.Total,
-			failed:    0,
-			passed:    0,
-			ignored:   testReport.Ignored,
-			status:    true,
-			timeTaken: 0.0,
+			total:    testReport.Total,
+			failed:   0,
+			passed:   0,
+			ignored:  testReport.Ignored,
+			status:   true,
+			duration: time.Duration(0),
 		}
 
 		completeTestReport[testSetID] = verdict
@@ -699,7 +699,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	timeTaken := time.Since(startTime).Seconds()
+	timeTaken := time.Since((startTime))
 
 	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
 	if err != nil {
@@ -753,12 +753,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	// TODO Need to decide on whether to use global variable or not
 	verdict := TestReportVerdict{
-		total:     testReport.Total,
-		failed:    testReport.Failure,
-		passed:    testReport.Success,
-		ignored:   testReport.Ignored,
-		status:    testSetStatus == models.TestSetStatusPassed,
-		timeTaken: timeTaken,
+		total:    testReport.Total,
+		failed:   testReport.Failure,
+		passed:   testReport.Success,
+		ignored:  testReport.Ignored,
+		status:   testSetStatus == models.TestSetStatusPassed,
+		duration: timeTaken,
 	}
 
 	completeTestReport[testSetID] = verdict
@@ -780,11 +780,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			pp.SetColorScheme(PassingColorScheme)
 		}
 		if testReport.Ignored > 0 {
-			if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n"+"\tTime Taken: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure, testReport.Ignored, timeTaken); err != nil {
+			if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n"+"\tTime Taken: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure, testReport.Ignored, timeTaken.Seconds()); err != nil {
 				utils.LogError(r.logger, err, "failed to print testrun summary")
 			}
 		} else {
-			if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTime Taken: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure, timeTaken); err != nil {
+			if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTime Taken: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure, timeTaken.Seconds()); err != nil {
 				utils.LogError(r.logger, err, "failed to print testrun summary")
 			}
 		}
@@ -914,12 +914,12 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 				pp.SetColorScheme(FailingColorScheme)
 			}
 			if totalTestIgnored > 0 {
-				if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed, completeTestReport[testSuiteName].ignored, completeTestReport[testSuiteName].timeTaken); err != nil {
+				if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed, completeTestReport[testSuiteName].ignored, completeTestReport[testSuiteName].duration.Seconds()); err != nil {
 					utils.LogError(r.logger, err, "failed to print test suite details")
 					return
 				}
 			} else {
-				if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed, completeTestReport[testSuiteName].timeTaken); err != nil {
+				if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed, completeTestReport[testSuiteName].duration.Seconds()); err != nil {
 					utils.LogError(r.logger, err, "failed to print test suite details")
 					return
 				}

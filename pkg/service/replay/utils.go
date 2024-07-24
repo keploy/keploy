@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"time"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
@@ -12,12 +13,12 @@ import (
 )
 
 type TestReportVerdict struct {
-	total     int
-	passed    int
-	failed    int
-	ignored   int
-	status    bool
-	timeTaken float64
+	total    int
+	passed   int
+	failed   int
+	ignored  int
+	status   bool
+	duration time.Duration
 }
 
 func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) config.GlobalNoise {
