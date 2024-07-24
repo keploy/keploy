@@ -163,6 +163,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	//sets the displayment of flag-related errors
 	cmd.SilenceErrors = true
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+		PrintLogo(true)
 		color.Red(fmt.Sprintf("❌ error: %v", err))
 		fmt.Println()
 		return err
@@ -405,9 +406,9 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	c.cfg.ConfigPath = configPath
 	return nil
 }
-
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
-
+	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
+	PrintLogo(disableAnsi)
 	if c.cfg.Debug {
 		logger, err := log.ChangeLogLevel(zap.DebugLevel)
 		*c.logger = *logger
