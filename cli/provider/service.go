@@ -7,11 +7,9 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/platform/auth"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
-	"go.keploy.io/server/v2/pkg/platform/yaml/configdb/user"
 
 	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/pkg/service/utgen"
-	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
@@ -19,50 +17,28 @@ var TeleGlobalMap = make(map[string]interface{})
 
 type ServiceProvider struct {
 	logger *zap.Logger
-	userDb *user.Db
 	cfg    *config.Config
 }
 
-func NewServiceProvider(logger *zap.Logger, userDb *user.Db, cfg *config.Config) *ServiceProvider {
+func NewServiceProvider(logger *zap.Logger, cfg *config.Config) *ServiceProvider {
 	return &ServiceProvider{
 		logger: logger,
-		userDb: userDb,
 		cfg:    cfg,
 	}
 }
 
-func (n *ServiceProvider) GetTelemetryService(ctx context.Context, config *config.Config) (*telemetry.Telemetry, error) {
-	installationID, err := n.userDb.GetInstallationID(ctx)
-	if err != nil {
-		return nil, errors.New("failed to get installation id")
-	}
-	return telemetry.NewTelemetry(n.logger, telemetry.Options{
-		Enabled:        !config.DisableTele,
-		Version:        utils.Version,
-		GlobalMap:      TeleGlobalMap,
-		InstallationID: installationID,
-	},
-	), nil
-}
-
-func (n *ServiceProvider) GetAuthService(ctx context.Context) (*auth.Auth, error) {
-	installationID, err := n.userDb.GetInstallationID(ctx)
-	if err != nil {
-		return nil, errors.New("failed to get installation id")
-	}
-	return auth.New(utils.APIServerURL, installationID, n.logger, utils.GitHubClientID), nil
-}
-
 func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface{}, error) {
-	tel, err := n.GetTelemetryService(ctx, n.cfg)
-	if err != nil {
-		return nil, err
-	}
-	auth, err := n.GetAuthService(ctx)
-	if err != nil {
-		return nil, err
-	}
+
+	tel := telemetry.NewTelemetry(n.logger, telemetry.Options{
+		Enabled:        !n.cfg.DisableTele,
+		Version:        n.cfg.Version,
+		GlobalMap:      TeleGlobalMap,
+		InstallationID: n.cfg.InstallationID,
+	})
 	tel.Ping()
+
+	auth := auth.New(n.cfg.APIServerURL, n.cfg.InstallationID, n.logger, n.cfg.GitHubClientID)
+
 	switch cmd {
 	case "config", "update", "login":
 		return tools.NewTools(n.logger, tel, auth), nil

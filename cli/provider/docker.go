@@ -24,14 +24,12 @@ type DockerConfigStruct struct {
 	Envs        map[string]string
 }
 
-var DockerConfig = DockerConfigStruct{
-	DockerImage: "ghcr.io/keploy/keploy",
-}
+var DockerConfig DockerConfigStruct
 
 func GenerateDockerEnvs(config DockerConfigStruct) string {
 	var envs []string
 	for key, value := range config.Envs {
-		envs = append(envs, fmt.Sprintf("-e %s=%s", key, value))
+		envs = append(envs, fmt.Sprintf("-e %s='%s'", key, value))
 	}
 	return strings.Join(envs, " ")
 }
@@ -40,6 +38,14 @@ func GenerateDockerEnvs(config DockerConfigStruct) string {
 // then start the Keploy as a docker container and run the command
 // should also return a boolean if the execution is moved to docker
 func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config) error {
+
+	DockerConfig = DockerConfigStruct{
+		DockerImage: "ghcr.io/keploy/keploy",
+		Envs: map[string]string{
+			"INSTALLATION_ID": conf.InstallationID,
+		},
+	}
+
 	//Check if app command starts with docker or docker-compose.
 	// If it does, then we would run the docker version of keploy and
 	// pass the command and control to it.
@@ -65,6 +71,7 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	if err != nil {
 		return err
 	}
+	
 	var quotedArgs []string
 
 	for _, arg := range os.Args[1:] {
