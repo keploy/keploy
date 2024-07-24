@@ -12,6 +12,7 @@ import (
 	"runtime"
 
 	"github.com/denisbrodbeck/machineid"
+	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.keploy.io/server/v2/utils"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -21,6 +22,7 @@ import (
 
 type Db struct {
 	logger *zap.Logger
+	cfg    *config.Config
 }
 
 func HomeDir() string {
@@ -36,9 +38,10 @@ func HomeDir() string {
 	return os.Getenv("HOME") + configFolder
 }
 
-func New(logger *zap.Logger) *Db {
+func New(logger *zap.Logger, cfg *config.Config) *Db {
 	return &Db{
 		logger: logger,
+		cfg:    cfg,
 	}
 }
 
@@ -47,10 +50,15 @@ func (db *Db) GetInstallationID(ctx context.Context) (string, error) {
 	var err error
 	id = getInstallationFromFile(db.logger)
 	if id == "" {
-		id, err = machineid.ID()
-		if err != nil {
-			return "", errors.New("failed to get machine id")
+		if db.cfg.InDocker == true {
+			id = os.Getenv("INSTALLATION_ID")
+		} else {
+			id, err = machineid.ID()
+			if err != nil {
+				return "", errors.New("failed to get machine id")
+			}
 		}
+		fmt.Println("installation id: ", id)
 		if id == "" {
 			db.logger.Warn("could not get machine id for installation ID, generating random id")
 			id = primitive.NewObjectID().String()

@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
+	userDb "go.keploy.io/server/v2/pkg/platform/yaml/configdb/user"
 	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/utils"
 	"go.keploy.io/server/v2/utils/log"
@@ -419,6 +420,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+	}
+
+	userDb := userDb.New(c.logger, c.cfg)
+	var err error
+	c.cfg.InstallationID, err = userDb.GetInstallationID(ctx)
+	if err != nil {
+		errMsg := "failed to get installation id"
+		utils.LogError(c.logger, err, errMsg)
+		return errors.New(errMsg)
 	}
 
 	if c.cfg.EnableTesting {

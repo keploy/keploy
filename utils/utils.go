@@ -36,18 +36,7 @@ import (
 
 var WarningSign = "\U000026A0"
 var APIServerURL string
-
-type GHAuthReq struct {
-	InstallationID string `json:"installationID"`
-	Token          string `json:"apikey"`
-	HardReset      bool   `json:"firstTime"`
-}
-type GHAuthResp struct {
-	IsValid  bool   `json:"isValid"`
-	EmailID  string `json:"email"`
-	JwtToken string `json:"jwtToken"`
-	Error    string `json:"error"`
-}
+var GitHubClientID string
 
 var TemplatizedValues = map[string]interface{}{}
 

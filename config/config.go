@@ -36,6 +36,10 @@ type Config struct {
 	KeployNetwork         string       `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
 	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
 	InCi                  bool         `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
+	InstallationID        string       `json:"-" yaml:"-" mapstructure:"-"`
+	Version               string       `json:"-" yaml:"-" mapstructure:"-"`
+	APIServerURL          string       `json:"-" yaml:"-" mapstructure:"-"`
+	GitHubClientID        string       `json:"-" yaml:"-" mapstructure:"-"`
 }
 
 type UtGen struct {
