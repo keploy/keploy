@@ -71,7 +71,7 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	if err != nil {
 		return err
 	}
-	
+
 	var quotedArgs []string
 
 	for _, arg := range os.Args[1:] {
