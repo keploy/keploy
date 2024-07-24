@@ -50,7 +50,7 @@ func (db *Db) GetInstallationID(ctx context.Context) (string, error) {
 	var err error
 	id = getInstallationFromFile(db.logger)
 	if id == "" {
-		if db.cfg.InDocker == true {
+		if db.cfg.InDocker {
 			id = os.Getenv("INSTALLATION_ID")
 		} else {
 			id, err = machineid.ID()
