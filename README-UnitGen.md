@@ -215,6 +215,26 @@ Configure Keploy using command-line flags:
 - `model`: Specifies the AI model to use (default "gpt-4o").
 - `llmApiVersion`: API version of the llm if any (default "")
 
+# Frequently Asked Questions
+
+1. What is Keploy's Unit Test Generator (UTG)? <br>
+    - Keploy's UTG automates the creation of unit tests based on code semantics, enhancing test coverage and reliability.
+
+2. Does Keploy send your private data to any cloud server for test generation?<br>
+    - No, Keploy does not send any user code to remote systems, except when using the unit test generation feature. When using the UT gen feature, only the source code and the unit test code will be sent to the Large Language Model (LLM) you are using. By default, Keploy uses - litellm to support vast number of LLM backends. Yes, if your organization has its own LLM(a private one), you can use it with Keploy. This ensures that data is not sent to any external systems.
+
+3. How does Keploy contribute to improving unit test   coverage?<br>
+    - By providing a zero code platform for automated testing, Keploy empowers developers to scale up their unit test coverage without extensive coding knowledge. This integration enhances testing reports, ultimately boosting confidence in the product's quality.
+
+4. Is Keploy cost-effective for automated unit testing?<br>
+   - Yes, Keploy optimizes costs by automating repetitive testing tasks and improving overall test efficiency.
+
+5. How does Keploy generate coverage reports?<br>
+    - Keploy generates detailed Cobertura format reports, offering insights into test effectiveness and code quality.
+
+6. Can Keploy handle large codebases efficiently?<br>
+   - Yes, Keploy is designed to handle large codebases efficiently, though processing time may vary based on project size and complexity.
+
 # 🙋🏻‍♀️ Questions? 🙋🏻‍♂️
 
 Reach out to us. We're here to answer!
