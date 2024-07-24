@@ -83,6 +83,7 @@ for i in {1..2}; do
 done
 
 # Start keploy in test mode.
+echo "Starting test mode"
 sudo -E env PATH=$PATH ./../../../keployv2 test -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --delay 20 --generateGithubActions=false &> test_logs.txt
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."
@@ -92,6 +93,30 @@ fi
 if grep "WARNING: DATA RACE" "test_logs.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
     cat "test_logs.txt"
+    exit 1
+fi
+
+rerecord_container="javaApp_rerecord"
+sudo -E env PATH=$PATH ./../../../keployv2 rerecord -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --inCi=true &> "${rerecord_container}.txt"
+
+if grep "ERROR" "${rerecord_container}.txt"; then
+    echo "Error found in pipeline..."
+    cat "${rerecord_container}.txt"
+    exit 1
+fi
+
+if grep "WARNING: DATA RACE" "${rerecord_container}.txt"; then
+    echo "Race condition detected in test, stopping pipeline..."
+    cat "${rerecord_container}.txt"
+    exit 1
+fi
+
+rerecord_after_test_container="javaApp_rerecord_after_test"
+sudo -E env PATH=$PATH ./../../../keployv2 test -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${rerecord_after_test_container}.txt"
+
+if grep "ERROR" "${rerecord_after_test_container}.txt"; then
+    echo "Error found in pipeline..."
+    cat "${rerecord_after_test_container}.txt"
     exit 1
 fi
 

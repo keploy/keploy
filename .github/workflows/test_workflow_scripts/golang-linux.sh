@@ -105,6 +105,32 @@ if grep "WARNING: DATA RACE" "test_logs.txt"; then
     exit 1
 fi
 
+sleep 10
+
+rerecord_container="ginApp_rerecord"
+sudo -E env PATH=$PATH ./../../keployv2 rerecord -c './ginApp' --inCi=true &> "${rerecord_container}.txt"
+
+if grep "ERROR" "${rerecord_container}.txt"; then
+    echo "Error found in pipeline..."
+    cat "${rerecord_container}.txt"
+    exit 1
+fi
+
+if grep "WARNING: DATA RACE" "${rerecord_container}.txt"; then
+    echo "Race condition detected in test, stopping pipeline..."
+    cat "${rerecord_container}.txt"
+    exit 1
+fi
+
+rerecord_after_test_container="ginApp_rerecord_after_test"
+sudo -E env PATH=$PATH ./../../keployv2 test -c './ginApp' --apiTimeout 60 --delay 10 --generate-github-actions=false &> "${rerecord_after_test_container}.txt"
+
+if grep "ERROR" "${rerecord_after_test_container}.txt"; then
+    echo "Error found in pipeline..."
+    cat "${rerecord_after_test_container}.txt"
+    exit 1
+fi
+
 all_passed=true
 
 
