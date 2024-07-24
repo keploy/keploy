@@ -59,8 +59,8 @@ installKeploy (){
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
         fi
         curl --silent --location "$download_url" | tar xz -C /tmp --overwrite
-        sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploybin
-        set_alias 'sudo -E env PATH="$PATH" keploybin'
+        sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploy
+        set_alias 'sudo -E env PATH="$PATH" keploy'
     }
 
     append_to_rc() {
