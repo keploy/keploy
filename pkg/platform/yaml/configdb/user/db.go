@@ -58,7 +58,6 @@ func (db *Db) GetInstallationID(ctx context.Context) (string, error) {
 				return "", errors.New("failed to get machine id")
 			}
 		}
-		fmt.Println("installation id: ", id)
 		if id == "" {
 			db.logger.Warn("could not get machine id for installation ID, generating random id")
 			id = primitive.NewObjectID().String()
