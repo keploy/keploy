@@ -6,8 +6,8 @@ output=$(go list -m -u all)
 found_deprecated=false
 
 while IFS= read -r line; do
-    if [[ "$line" == *"deprecated"* ]]; then
-        echo "Deprecated dependency found: $line"
+    if [[ "$line" == *"deprecated"* || "$line" == *"retracted"* ]]; then
+        echo "Deprecated/retracted dependency found: $line"
         found_deprecated=true
     fi
 done <<< "$output"
