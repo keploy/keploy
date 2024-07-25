@@ -250,6 +250,25 @@ const (
 	FieldTypeGeometry
 )
 
+// MySQL constants
+const (
+	NOT_NULL_FLAG       = 1
+	PRI_KEY_FLAG        = 2
+	UNIQUE_KEY_FLAG     = 4
+	BLOB_FLAG           = 16
+	UNSIGNED_FLAG       = 32
+	ZEROFILL_FLAG       = 64
+	BINARY_FLAG         = 128
+	ENUM_FLAG           = 256
+	AUTO_INCREMENT_FLAG = 512
+	TIMESTAMP_FLAG      = 1024
+	SET_FLAG            = 2048
+	NUM_FLAG            = 32768
+	PART_KEY_FLAG       = 16384
+	GROUP_FLAG          = 32768
+	UNIQUE_FLAG         = 65536
+)
+
 type contextKey string
 
 const ErrGroupKey contextKey = "errGroup"

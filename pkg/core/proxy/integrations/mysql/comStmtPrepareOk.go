@@ -51,7 +51,7 @@ func decodeComStmtPrepareOk(data []byte) (*models.MySQLStmtPrepareOk, error) {
 
 	data = data[offset:]
 
-	printMySqlStmtPrepareOk(response)
+	printMySQLStmtPrepareOk(response)
 
 	if response.NumParams > 0 {
 		offset = 0
@@ -84,7 +84,7 @@ func decodeComStmtPrepareOk(data []byte) (*models.MySQLStmtPrepareOk, error) {
 	return response, nil
 }
 
-func printMySqlStmtPrepareOk(packet *models.MySQLStmtPrepareOk) {
+func printMySQLStmtPrepareOk(packet *models.MySQLStmtPrepareOk) {
 	fmt.Println("Status:", packet.Status)
 	fmt.Println("StatementID:", packet.StatementID)
 	fmt.Println("NumColumns:", packet.NumColumns)

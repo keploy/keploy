@@ -39,7 +39,7 @@ type MySQLRequest struct {
 	Message   interface{}        `json:"message" yaml:"message"`
 	ReadDelay int64              `json:"read_delay,omitempty"`
 }
-type RowColumnDefinition struct {
+type RowCol struct {
 	Type  FieldType   `yaml:"type"`
 	Name  string      `yaml:"name"`
 	Value interface{} `yaml:"value"`
@@ -116,16 +116,14 @@ type MySQLStmtPrepareOk struct {
 }
 
 type MySQLResultSet struct {
-	Columns             []*ColumnDefinition `yaml:"columns"`
-	Rows                []*Row              `yaml:"rows"`
-	EOFPresent          bool                `yaml:"eofPresent"`
-	PaddingPresent      bool                `yaml:"paddingPresent"`
-	EOFPresentFinal     bool                `yaml:"eofPresentFinal"`
-	PaddingPresentFinal bool                `yaml:"paddingPresentFinal"`
-	OptionalPadding     bool                `yaml:"optionalPadding"`
-	OptionalEOFBytes    []byte              `yaml:"optionalEOFBytes"`
-	EOFAfterColumns     []byte              `yaml:"eofAfterColumns"`
+	Columns               []*ColumnDefinition `yaml:"columns"`
+	EOFPresentAfterColumn bool                `yaml:"eofPresent"`
+	EOFAfterColumns       []byte              `yaml:"eofAfterColumns"`
+	EOFAfterRows          []byte              `yaml:"eofAfterRows"`
+	Rows                  []*Row              `yaml:"rows"`
+	IsBinaryResultSet     bool                `yaml:"isBinaryResultSet"`
 }
+
 type PacketHeader struct {
 	PacketLength     uint8 `yaml:"packet_length"`
 	PacketSequenceID uint8 `yaml:"packet_sequence_id"`
@@ -153,8 +151,10 @@ type ColumnDefinition struct {
 }
 
 type Row struct {
-	Header  RowHeader             `yaml:"header"`
-	Columns []RowColumnDefinition `yaml:"row_column_definition"`
+	Header        PacketHeader `yaml:"header"`
+	OkAfterRow    bool         `yaml:"okAfterRow"`
+	RowNullBuffer []byte       `yaml:"rowNullBuffer"`
+	Columns       []RowCol     `yaml:"row_column_definition"`
 }
 
 type MySQLOKPacket struct {

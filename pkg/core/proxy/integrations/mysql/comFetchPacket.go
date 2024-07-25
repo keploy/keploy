@@ -9,7 +9,8 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-func decodeComStmtFetch(data []byte) (models.MySQLComStmtFetchPacket, error) {
+// DecodeComStmtFetch decodes the COM_STMT_FETCH packet.
+func DecodeComStmtFetch(data []byte) (models.MySQLComStmtFetchPacket, error) {
 	if len(data) < 9 {
 		return models.MySQLComStmtFetchPacket{}, errors.New("Data too short for COM_STMT_FETCH")
 	}

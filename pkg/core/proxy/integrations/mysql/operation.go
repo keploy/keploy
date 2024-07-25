@@ -149,7 +149,15 @@ func DecodeMySQLPacket(logger *zap.Logger, packet models.Packet, clientConn net.
 		case isLengthEncodedInteger(data[0]): // ResultSet Packet
 			logger.Info("ResultSet Packet detected")
 			packetType = "RESULT_SET_PACKET"
-			packetData, err = parseResultSet(data)
+
+			isBinary := false
+			if lastCmd == 0x17 {
+				isBinary = true
+			}
+			// text result set is used for COM_QUERY response
+			// binary result set is used for COM_STMT_EXECUTE response
+
+			packetData, err = parseResultSet(data, isBinary)
 			if err != nil {
 				logger.Error("Error parsing result set", zap.Error(err))
 			}
@@ -198,12 +206,6 @@ func DecodeMySQLPacket(logger *zap.Logger, packet models.Packet, clientConn net.
 		packetType = "COM_CHANGE_USER"
 		packetData, err = decodeComChangeUser(data)
 		lastCommand.Store(clientConn, 0x11)
-
-	case data[0] == 0x04: // Result Set Packet
-		packetType = "RESULT_SET_PACKET"
-		logger.Info("ResultSet Packet detected, which should not be possible in the current context")
-		packetData, err = parseResultSet(data)
-		lastCommand.Store(clientConn, 0x04)
 	case data[0] == 0x0A: // MySQLHandshakeV10
 		packetType = "MySQLHandshakeV10"
 		packetData, err = decodeMySQLHandshakeV10(data)
@@ -358,12 +360,6 @@ func (sg *serverGreetings) load(key net.Conn) (*models.MySQLHandshakeV10Packet, 
 	result, ok := sg.internal[key]
 	sg.RUnlock()
 	return result, ok
-}
-
-func (sg *serverGreetings) delete(key net.Conn) {
-	sg.Lock()
-	delete(sg.internal, key)
-	sg.Unlock()
 }
 
 func (sg *serverGreetings) store(key net.Conn, value *models.MySQLHandshakeV10Packet) {
@@ -545,36 +541,15 @@ func readLengthEncodedInteger(b []byte) (num uint64, isNull bool, n int) {
 	return uint64(b[0]), false, 1
 }
 
-//func readLengthEncodedStringUpdated(data []byte) (string, []byte, error) {
-//	// First, determine the length of the string
-//	strLength, isNull, bytesRead := readLengthEncodedInteger(data)
-//	if isNull {
-//		return "", nil, errors.New("NULL value encountered")
-//	}
-//
-//	// Adjust data to point to the next bytes after the integer
-//	data = data[bytesRead:]
-//
-//	// Check if we have enough data left to read the string
-//	if len(data) < int(strLength) {
-//		return "", nil, errors.New("not enough data to read string")
-//	}
-//
-//	// Read the string
-//	strData := data[:strLength]
-//	remainingData := data[strLength:]
-//
-//	// Convert the byte array to a string
-//	str := string(strData)
-//
-//	return str, remainingData, nil
-//}
+func isEOFPacket(data []byte) bool {
+	return len(data) > 4 && bytes.Contains(data[4:9], []byte{0xfe, 0x00, 0x00})
+}
 
 func readUint24(b []byte) uint32 {
 	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16
 }
 
-func readLengthEncodedStrings(b []byte) ([]byte, bool, int, error) {
+func readLengthEncodedString(b []byte) ([]byte, bool, int, error) {
 	// Get length
 	num, isNull, n := readLengthEncodedInteger(b)
 	if num < 1 {
@@ -590,15 +565,6 @@ func readLengthEncodedStrings(b []byte) ([]byte, bool, int, error) {
 	return nil, false, n, io.EOF
 }
 
-// func readLengthEncodedStrings(b []byte) (string, int) {
-// 	length, n := readLengthEncodedIntegers(b)
-// 	// add check for slice out of range
-// 	if int(length) > len(b) {
-// 		return "", n
-// 	}
-// 	return string(b[n : n+int(length)]), n + int(length)
-// }
-
 func ShouldUseSSL(packet *models.MySQLHandshakeV10Packet) bool {
 	return (packet.CapabilityFlags & models.CLIENT_SSL) != 0
 }
@@ -611,76 +577,3 @@ func GetAuthMethod(packet *models.MySQLHandshakeV10Packet) string {
 func Uint24(data []byte) uint32 {
 	return uint32(data[0]) | uint32(data[1])<<8 | uint32(data[2])<<16
 }
-
-func readLengthEncodedIntegerOff(data []byte, offset *int) (uint64, error) {
-	if *offset >= len(data) {
-		return 0, errors.New("data length is not enough")
-	}
-	var length int
-	firstByte := data[*offset]
-	switch {
-	case firstByte < 0xfb:
-		length = int(firstByte)
-		*offset++
-	case firstByte == 0xfb:
-		*offset++
-		return 0, nil
-	case firstByte == 0xfc:
-		if *offset+3 > len(data) {
-			return 0, errors.New("data length is not enough 1")
-		}
-		length = int(binary.LittleEndian.Uint16(data[*offset+1 : *offset+3]))
-		*offset += 3
-	case firstByte == 0xfd:
-		if *offset+4 > len(data) {
-			return 0, errors.New("data length is not enough 2")
-		}
-		length = int(data[*offset+1]) | int(data[*offset+2])<<8 | int(data[*offset+3])<<16
-		*offset += 4
-	case firstByte == 0xfe:
-		if *offset+9 > len(data) {
-			return 0, errors.New("data length is not enough 3")
-		}
-		length = int(binary.LittleEndian.Uint64(data[*offset+1 : *offset+9]))
-		*offset += 9
-	}
-	result := uint64(length)
-	return result, nil
-}
-
-//func readLengthEncodedStringOff(data []byte, offset *int) (string, error) {
-//	if *offset >= len(data) {
-//		return "", errors.New("data length is not enough")
-//	}
-//	var length int
-//	firstByte := data[*offset]
-//	switch {
-//	case firstByte < 0xfb:
-//		length = int(firstByte)
-//		*offset++
-//	case firstByte == 0xfb:
-//		*offset++
-//		return "", nil
-//	case firstByte == 0xfc:
-//		if *offset+3 > len(data) {
-//			return "", errors.New("data length is not enough 1")
-//		}
-//		length = int(binary.LittleEndian.Uint16(data[*offset+1 : *offset+3]))
-//		*offset += 3
-//	case firstByte == 0xfd:
-//		if *offset+4 > len(data) {
-//			return "", errors.New("data length is not enough 2")
-//		}
-//		length = int(data[*offset+1]) | int(data[*offset+2])<<8 | int(data[*offset+3])<<16
-//		*offset += 4
-//	case firstByte == 0xfe:
-//		if *offset+9 > len(data) {
-//			return "", errors.New("data length is not enough 3")
-//		}
-//		length = int(binary.LittleEndian.Uint64(data[*offset+1 : *offset+9]))
-//		*offset += 9
-//	}
-//	result := string(data[*offset : *offset+length])
-//	*offset += length
-//	return result, nil
-//}

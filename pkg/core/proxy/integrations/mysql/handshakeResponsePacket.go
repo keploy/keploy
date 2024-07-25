@@ -19,7 +19,7 @@ const (
 	CLIENT_CONNECT_ATTRS = 0x0100000
 	// CLIENT_ZSTD_COMPRESSION_ALGORITHM indicates support for Zstandard compression algorithm
 	CLIENT_ZSTD_COMPRESSION_ALGORITHM = 0x010000
-
+	// CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA indicates that the client supports plugin authentication with length encoded client data.
 	CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA = 0x0200000
 )
 
