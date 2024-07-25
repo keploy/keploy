@@ -38,6 +38,7 @@ func main() {
 	setVersion()
 	ctx := utils.NewCtx()
 	start(ctx)
+	os.Exit(utils.ErrCode)
 }
 func setVersion() {
 	if version == "" {
