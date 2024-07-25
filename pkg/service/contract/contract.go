@@ -513,7 +513,7 @@ func (s *contractService) DownloadMocks(path string) error {
 	return nil
 
 }
-func (s *contractService) Download(ctx context.Context, driven string) error {
+func (s *contractService) Download(_ context.Context, driven string) error {
 
 	if s.CheckConfigFile() != nil {
 		s.logger.Error("Error in checking config file while downloading")
