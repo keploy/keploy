@@ -19,9 +19,11 @@ import (
 	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
 	reportdb "go.keploy.io/server/v2/pkg/platform/yaml/reportdb"
 	testdb "go.keploy.io/server/v2/pkg/platform/yaml/testdb"
+	"go.keploy.io/server/v2/pkg/service/contract"
 	"go.keploy.io/server/v2/pkg/service/orchestrator"
 	"go.keploy.io/server/v2/pkg/service/record"
 	"go.keploy.io/server/v2/pkg/service/replay"
+
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -36,7 +38,7 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	if err != nil {
 		return nil, err
 	}
-
+	contractSvc := contract.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, cfg)
 	recordSvc := record.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, cfg)
 	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, cfg)
 
@@ -49,6 +51,9 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	}
 	if cmd == "test" || cmd == "normalize" {
 		return replaySvc, nil
+	}
+	if cmd == "contract" {
+		return contractSvc, nil
 	}
 	return nil, errors.New("invalid command")
 }

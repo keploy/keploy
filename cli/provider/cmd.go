@@ -184,6 +184,9 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+		if cmd.Name() == "download" {
+			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the path to download contracts")
+		}
 
 	case "update":
 		return nil
@@ -225,7 +228,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			}
 			cmd.Flags().Bool("download", c.cfg.Contract.Download, "Specify whether to download contracts or not")
 			cmd.Flags().Bool("generate", c.cfg.Contract.Generate, "Specify")
-			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the path to generate contracts")
+			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the path to validate contracts")
 
 		} else {
 			cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
@@ -501,6 +504,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 			config.SetSelectedContractTests(c.cfg, selectedTests)
 
+		}
+		c.cfg.Contract.Driven, err = cmd.Flags().GetString("driven")
+		if err != nil {
+			errMsg := "failed to get the driven flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
 		}
 	case "config":
 		path, err := cmd.Flags().GetString("path")

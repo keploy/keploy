@@ -4,6 +4,7 @@ package yaml
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
@@ -234,4 +236,86 @@ func ReadDir(path string, fileMode fs.FileMode) (*os.File, error) {
 		return nil, err
 	}
 	return dir, nil
+}
+
+// CopyFile copies a single file from src to dst
+func CopyFile(src, dst string, logger *zap.Logger) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := srcFile.Close(); err != nil {
+			utils.LogError(logger, err, "failed to close file", zap.String("file", srcFile.Name()))
+		}
+	}()
+
+	dstFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := dstFile.Close(); err != nil {
+			utils.LogError(logger, err, "failed to close file", zap.String("file", dstFile.Name()))
+		}
+	}()
+
+	_, err = io.Copy(dstFile, srcFile)
+	if err != nil {
+		return err
+	}
+
+	// Ensure the copied file has the same permissions as the original file
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	err = os.Chmod(dst, srcInfo.Mode())
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// CopyDir recursively copies a directory tree, attempting to preserve permissions
+func CopyDir(srcDir, destDir string, logger *zap.Logger) error {
+	// Ensure the destination directory exists
+	if _, err := os.Stat(destDir); os.IsNotExist(err) {
+		err := os.MkdirAll(destDir, os.ModePerm)
+		if err != nil {
+			return err
+		}
+	}
+	entries, err := os.ReadDir(srcDir)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		srcPath := filepath.Join(srcDir, entry.Name())
+		destPath := filepath.Join(destDir, entry.Name())
+
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+
+		if info.IsDir() {
+			err = os.MkdirAll(destPath, info.Mode())
+			if err != nil {
+				return err
+			}
+			err = CopyDir(srcPath, destPath, logger)
+			if err != nil {
+				return err
+			}
+		} else {
+			err = CopyFile(srcPath, destPath, logger)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

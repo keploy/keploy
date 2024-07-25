@@ -326,3 +326,73 @@ func (ys *MockYaml) filterByTimeStamp(_ context.Context, m []*models.Mock, after
 	}
 	return filteredMocks, unfilteredMocks
 }
+func (ys *MockYaml) GetHttpMocks(ctx context.Context, testSetID string, mockPath string) ([]*models.HTTPSchema2, error) {
+
+	var tcsMocks = make([]*models.Mock, 0)
+	mockFileName := "mocks"
+	if ys.MockName != "" {
+		mockFileName = ys.MockName
+	}
+
+	path := filepath.Join(mockPath, testSetID)
+	mockPath, err := yaml.ValidatePath(path + "/" + mockFileName + ".yaml")
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := os.Stat(mockPath); err == nil {
+		var mockYamls []*yaml.NetworkTrafficDoc
+		data, err := yaml.ReadFile(ctx, ys.Logger, path, mockFileName)
+		if err != nil {
+			utils.LogError(ys.Logger, err, "failed to read the mocks from config yaml", zap.Any("session", filepath.Base(path)))
+			return nil, err
+		}
+		dec := yamlLib.NewDecoder(bytes.NewReader(data))
+		for {
+			var doc *yaml.NetworkTrafficDoc
+			err := dec.Decode(&doc)
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				return nil, fmt.Errorf("failed to decode the yaml file documents. error: %v", err.Error())
+			}
+			mockYamls = append(mockYamls, doc)
+		}
+		mocks, err := decodeMocks(mockYamls, ys.Logger)
+		if err != nil {
+			utils.LogError(ys.Logger, err, "failed to decode the config mocks from yaml docs", zap.Any("session", filepath.Base(path)))
+			return nil, err
+		}
+
+		for _, mock := range mocks {
+			isFilteredMock := true
+			switch mock.Kind {
+			case "Generic":
+				isFilteredMock = false
+			case "Postgres":
+				isFilteredMock = false
+			case "Http":
+				isFilteredMock = true
+			case "Redis":
+				isFilteredMock = false
+			}
+			if isFilteredMock {
+				tcsMocks = append(tcsMocks, mock)
+			}
+		}
+	}
+	var httpMocks []*models.HTTPSchema2
+	for _, mock := range tcsMocks {
+		var httpMock models.HTTPSchema2
+		httpMock.Kind = mock.GetKind()
+		httpMock.Name = mock.Name
+		httpMock.Spec.Request = *mock.Spec.HTTPReq
+		httpMock.Spec.Response = *mock.Spec.HTTPResp
+		httpMock.Spec.Metadata = mock.Spec.Metadata
+		httpMock.Version = string(mock.Version)
+		httpMocks = append(httpMocks, &httpMock)
+	}
+
+	return httpMocks, nil
+}
