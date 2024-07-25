@@ -19,5 +19,5 @@ type TestDB interface {
 	ChangeTcPath()
 }
 type MockDB interface {
-	GetHttpMocks(ctx context.Context, testSetID string, mockPath string) ([]*models.HTTPSchema2, error)
+	GetHTTPMocks(ctx context.Context, testSetID string, mockPath string) ([]*models.HTTPSchema2, error)
 }

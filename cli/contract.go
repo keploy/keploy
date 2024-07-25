@@ -59,7 +59,7 @@ func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 			if len(testStr) != 0 {
 				genAllTests = false
 			}
-			contract.Generate(ctx, genAllTests, genAllMocks)
+			err = contract.Generate(ctx, genAllTests, genAllMocks)
 
 			if err != nil {
 				utils.LogError(logger, err, "failed to generate contract")

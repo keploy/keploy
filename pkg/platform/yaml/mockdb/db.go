@@ -326,7 +326,7 @@ func (ys *MockYaml) filterByTimeStamp(_ context.Context, m []*models.Mock, after
 	}
 	return filteredMocks, unfilteredMocks
 }
-func (ys *MockYaml) GetHttpMocks(ctx context.Context, testSetID string, mockPath string) ([]*models.HTTPSchema2, error) {
+func (ys *MockYaml) GetHTTPMocks(ctx context.Context, testSetID string, mockPath string) ([]*models.HTTPSchema2, error) {
 
 	var tcsMocks = make([]*models.Mock, 0)
 	mockFileName := "mocks"

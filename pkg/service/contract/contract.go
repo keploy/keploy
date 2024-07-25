@@ -33,7 +33,7 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, config *config.Config
 	}
 }
 
-func (s *contractService) ConvertHttpToOpenAPI(ctx context.Context, logger *zap.Logger, filePath string, name string, outputPath string, readData bool, data models.HTTPSchema2, isAppend bool) (success bool) {
+func (s *contractService) ConvertHTTPToOpenAPI(ctx context.Context, logger *zap.Logger, filePath string, name string, outputPath string, readData bool, data models.HTTPSchema2, isAppend bool) (success bool) {
 
 	var custom models.HTTPSchema2
 	if readData {
@@ -278,7 +278,7 @@ func (s *contractService) GenerateMocksSchemas(ctx context.Context, services []s
 	for _, entry := range entries {
 		if entry.IsDir() && strings.Contains(entry.Name(), "test") {
 			testSetID := entry.Name()
-			httpMocks, err := s.mockDB.GetHttpMocks(ctx, testSetID, keployFolder)
+			httpMocks, err := s.mockDB.GetHTTPMocks(ctx, testSetID, keployFolder)
 			if err != nil {
 				s.logger.Error("Failed to get HTTP mocks", zap.String("testSetID", testSetID), zap.Error(err))
 				return err
@@ -307,7 +307,7 @@ func (s *contractService) GenerateMocksSchemas(ctx context.Context, services []s
 							}
 
 							mappingFound = true
-							done := s.ConvertHttpToOpenAPI(ctx, s.logger, keployFolder+entry.Name(), "mocks", keployFolder+"schema/mocks/"+service+"/"+entry.Name(), false, *mock, isAppend)
+							done := s.ConvertHTTPToOpenAPI(ctx, s.logger, keployFolder+entry.Name(), "mocks", keployFolder+"schema/mocks/"+service+"/"+entry.Name(), false, *mock, isAppend)
 							if !done {
 								s.logger.Error("Failed to convert the yaml file to openapi")
 								return fmt.Errorf("failed to convert the yaml file to openapi")
@@ -353,7 +353,7 @@ func (s *contractService) GenerateTestsSchemas(ctx context.Context, selectedTest
 				httpSpec.Spec.Response = tc.HTTPResp
 				httpSpec.Version = string(tc.Version)
 
-				done := s.ConvertHttpToOpenAPI(ctx, s.logger, keployFolder+entry.Name()+"/tests", tc.Name, keployFolder+"schema/tests/"+entry.Name(), false, httpSpec, false)
+				done := s.ConvertHTTPToOpenAPI(ctx, s.logger, keployFolder+entry.Name()+"/tests", tc.Name, keployFolder+"schema/tests/"+entry.Name(), false, httpSpec, false)
 				if !done {
 					s.logger.Error("Failed to convert the yaml file to openapi")
 					return fmt.Errorf("failed to convert the yaml file to openapi")
