@@ -155,16 +155,16 @@ func (j *Java) GetCoverage() (models.TestCoverage, error) {
 		// Calculate coverage percentage for each class
 		classPath := strings.ReplaceAll(record[1], ".", string(os.PathSeparator)) // Replace dots with path separator
 		testCov.FileCov[filepath.Join(classPath, record[2])] = models.CoverageElement{
-			LineCov:   coverage.CalCovPercentage(instructionsCovered, instructionsMissed+instructionsCovered),
-			BranchCov: coverage.CalCovPercentage(branchCovered, branchMissed+branchCovered),
-			FuncCov:   coverage.CalCovPercentage(methodCovered, methodMissed+methodCovered),
+			LineCov:   coverage.Percentage(instructionsCovered, instructionsMissed+instructionsCovered),
+			BranchCov: coverage.Percentage(branchCovered, branchMissed+branchCovered),
+			FuncCov:   coverage.Percentage(methodCovered, methodMissed+methodCovered),
 		}
 	}
 
 	testCov.TotalCov = models.CoverageElement{
-		LineCov:   coverage.CalCovPercentage(coveredInstructions, totalInstructions),
-		BranchCov: coverage.CalCovPercentage(coveredBranches, totalBranches),
-		FuncCov:   coverage.CalCovPercentage(coveredMethods, totalMethods),
+		LineCov:   coverage.Percentage(coveredInstructions, totalInstructions),
+		BranchCov: coverage.Percentage(coveredBranches, totalBranches),
+		FuncCov:   coverage.Percentage(coveredMethods, totalMethods),
 	}
 	return testCov, nil
 }

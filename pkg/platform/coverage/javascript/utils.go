@@ -2,6 +2,7 @@ package javascript
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,36 +48,43 @@ func getCoverageFilePathsJavascript(path string) ([]string, error) {
 	return filePaths, nil
 }
 
-func CalculateCoverageMetrics(execSegmentCoveredPerFile map[string][]int) (int, int) {
+func CalculateCoverageMetrics(execSegmentCoveredPerFile map[string]map[string]bool) (int, int, map[string]int) {
 	totalExecSegments := 0
 	totalCoveredExecSegments := 0
-	for _, coveredSlice := range execSegmentCoveredPerFile {
-		totalExecSegments += coveredSlice[0] + coveredSlice[1]
-		totalCoveredExecSegments += coveredSlice[0]
+	coveredExecSegmentsPerFile := make(map[string]int)
+	for filename, execSegment := range execSegmentCoveredPerFile {
+		for _, isCovered := range execSegment {
+			totalExecSegments++
+			if isCovered {
+				totalCoveredExecSegments++
+				coveredExecSegmentsPerFile[filename]++
+			}
+		}
 	}
-	return totalExecSegments, totalCoveredExecSegments
+	return totalExecSegments, totalCoveredExecSegments, coveredExecSegmentsPerFile
 }
 
-func AddCovInfoPerFile(execSegmentCovPerFile map[string][]int, coverageMap map[string]interface{}, filename string) {
+func AddCovInfoPerFile(execSegmentCovPerFile map[string]map[string]bool, coverageMap map[string]interface{}, filename string) {
 	if _, ok := execSegmentCovPerFile[filename]; !ok {
-		execSegmentCovPerFile[filename] = make([]int, 2)
+		execSegmentCovPerFile[filename] = make(map[string]bool)
 	}
-	for _, isExecSegmentCovered := range coverageMap {
+	for i, isExecSegmentCovered := range coverageMap {
+		if _, ok := execSegmentCovPerFile[filename][i]; !ok {
+			execSegmentCovPerFile[filename][i] = false
+		}
 		switch isExecSegmentCov := isExecSegmentCovered.(type) {
 		case float64:
 			if isExecSegmentCov > 0 {
-				execSegmentCovPerFile[filename][0]++
-			} else {
-				execSegmentCovPerFile[filename][1]++
+				execSegmentCovPerFile[filename][i] = true
 			}
 		case []interface{}:
-			for _, covOrNot := range isExecSegmentCov {
+			for j, covOrNot := range isExecSegmentCov {
 				if covOrNot.(float64) > 0 {
-					execSegmentCovPerFile[filename][0]++
-				} else {
-					execSegmentCovPerFile[filename][1]++
+					execSegmentCovPerFile[filename][i+"_"+fmt.Sprintf("%v", j)] = true
 				}
 			}
+		default:
+			execSegmentCovPerFile[filename][i] = false
 		}
 	}
 }

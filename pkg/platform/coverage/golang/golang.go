@@ -8,8 +8,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"strconv"
-	"strings"
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/coverage"
@@ -81,66 +79,47 @@ func (g *Golang) GetCoverage() (models.TestCoverage, error) {
 		return testCov, err
 	}
 
-	generateCovTxtCmd := exec.CommandContext(g.ctx, "go", "tool", "covdata", "textfmt", "-i="+os.Getenv("GOCOVERDIR"), "-o="+os.Getenv("GOCOVERDIR")+"/total-coverage.txt")
+	generateCovTxtCmd := exec.CommandContext(g.ctx, "go", "tool", "covdata", "textfmt", "-i="+coverageDir, "-o="+coverageDir+"/total-coverage.txt")
 	_, err = generateCovTxtCmd.Output()
 	if err != nil {
 		return testCov, err
 	}
 
-	coveragePerFileTmp := make(map[string][]int) // filename -> [noOfLines, coveredLines]
-	covdata, err := os.ReadFile(os.Getenv("GOCOVERDIR") + "/total-coverage.txt")
+	generateCovPercentCmd := exec.CommandContext(g.ctx, "go", "tool", "covdata", "func", "-i="+coverageDir)
+	funcCoverageOutput, err := generateCovPercentCmd.Output()
 	if err != nil {
 		return testCov, err
 	}
-	// a line is of the form: <filename>:<startLineRow>.<startLineCol>,<endLineRow>.<endLineCol> <noOfLines> <coveredOrNot>
-	for idx, line := range strings.Split(string(covdata), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.Split(line, ":")[0] == "mode" || line == "" {
-			continue
-		}
-		lineFields := strings.Fields(line)
-		malformedErrMsg := "go coverage file is malformed"
-		if len(lineFields) == 3 {
-			noOfLines, err := strconv.Atoi(lineFields[1])
-			if err != nil {
-				return testCov, err
-			}
-			coveredOrNot, err := strconv.Atoi(lineFields[2])
-			if err != nil {
-				return testCov, err
-			}
-			i := strings.Index(line, ":")
-			var filename string
-			if i > 0 {
-				filename = line[:i]
-			} else {
-				return testCov, fmt.Errorf("%s at line %d", malformedErrMsg, idx)
-			}
 
-			if _, ok := coveragePerFileTmp[filename]; !ok {
-				coveragePerFileTmp[filename] = make([]int, 2)
-			}
+	coveragePerFileTmp, err := ParseTextFmtFile()
+	if err != nil {
+		return testCov, err
+	}
 
-			coveragePerFileTmp[filename][0] += noOfLines
-			if coveredOrNot != 0 {
-				coveragePerFileTmp[filename][1] += noOfLines
-			}
-		} else {
-			return testCov, fmt.Errorf("%s at %d", malformedErrMsg, idx)
-		}
+	funcCoveragePerFile, err := ParseFuncFmtFile(string(funcCoverageOutput))
+	if err != nil {
+		return testCov, err
 	}
 
 	totalLines := 0
 	totalCoveredLines := 0
+	totalFunctions := 0
+	totalCoveredFunctions := 0
+
 	for filename, lines := range coveragePerFileTmp {
 		totalLines += lines[0]
 		totalCoveredLines += lines[1]
+		totalFunctions += funcCoveragePerFile[filename][0]
+		totalCoveredFunctions += funcCoveragePerFile[filename][1]
 		testCov.FileCov[filename] = models.CoverageElement{
-			LineCov: coverage.CalCovPercentage(lines[1], lines[0]),
+			LineCov: coverage.Percentage(lines[1], lines[0]),
+			FuncCov: coverage.Percentage(funcCoveragePerFile[filename][1], funcCoveragePerFile[filename][0]),
 		}
 	}
+
 	testCov.TotalCov = models.CoverageElement{
-		LineCov: coverage.CalCovPercentage(totalCoveredLines, totalLines),
+		LineCov: coverage.Percentage(totalCoveredLines, totalLines),
+		FuncCov: coverage.Percentage(totalCoveredFunctions, totalFunctions),
 	}
 	return testCov, nil
 }

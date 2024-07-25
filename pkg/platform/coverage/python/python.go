@@ -42,25 +42,23 @@ func (p *Python) PreProcess() (string, error) {
 	return strings.Replace(p.cmd, p.executable, "coverage run $APPEND --branch --data-file=.coverage.keploy", 1), nil
 }
 
+type Summary struct {
+	CoveredLines          int     `json:"covered_lines"`
+	NumStatements         int     `json:"num_statements"`
+	PercentCovered        float64 `json:"percent_covered"`
+	PercentCoveredDisplay string  `json:"percent_covered_display"`
+	NumBranches           int     `json:"num_branches"`
+	CoveredBranches       int     `json:"covered_branches"`
+}
+
 type pyCoverageFile struct {
 	Files map[string]struct {
-		Summary struct {
-			CoveredLines          int     `json:"covered_lines"`
-			NumStatements         int     `json:"num_statements"`
-			PercentCovered        float64 `json:"percent_covered"`
-			PercentCoveredDisplay string  `json:"percent_covered_display"`
-			NumBranches           int     `json:"num_branches"`
-			CoveredBranches       int     `json:"covered_branches"`
-		} `json:"summary"`
+		Summary   `json:"summary"`
+		Functions map[string]struct {
+			Summary `json:"summary"`
+		} `json:"functions"`
 	} `json:"files"`
-	Totals struct {
-		CoveredLines          int     `json:"covered_lines"`
-		NumStatements         int     `json:"num_statements"`
-		PercentCovered        float64 `json:"percent_covered"`
-		PercentCoveredDisplay string  `json:"percent_covered_display"`
-		NumBranches           int     `json:"num_branches"`
-		CoveredBranches       int     `json:"covered_branches"`
-	} `json:"totals"`
+	Summary `json:"totals"`
 }
 
 func (p *Python) GetCoverage() (models.TestCoverage, error) {
@@ -87,15 +85,33 @@ func (p *Python) GetCoverage() (models.TestCoverage, error) {
 	if err != nil {
 		return testCov, err
 	}
+	totalFunctions := 0
+	totalCoveredFunctions := 0
 	for filename, file := range cov.Files {
+		functions := 0
+		coveredFunctions := 0
+		for funcName, funcSummary := range file.Functions {
+			if funcName == "" {
+				continue
+			}
+			functions++
+			if funcSummary.PercentCovered > 0 {
+				coveredFunctions++
+			}
+		}
+		totalFunctions += functions
+		totalCoveredFunctions += coveredFunctions
+
 		testCov.FileCov[filename] = models.CoverageElement{
-			LineCov:   coverage.CalCovPercentage(file.Summary.CoveredLines, file.Summary.NumStatements),
-			BranchCov: coverage.CalCovPercentage(file.Summary.CoveredBranches, file.Summary.NumBranches),
+			LineCov:   coverage.Percentage(file.Summary.CoveredLines, file.Summary.NumStatements),
+			BranchCov: coverage.Percentage(file.Summary.CoveredBranches, file.Summary.NumBranches),
+			FuncCov:   coverage.Percentage(coveredFunctions, functions),
 		}
 	}
 	testCov.TotalCov = models.CoverageElement{
-		LineCov:   coverage.CalCovPercentage(cov.Totals.CoveredLines, cov.Totals.NumStatements),
-		BranchCov: coverage.CalCovPercentage(cov.Totals.CoveredBranches, cov.Totals.NumBranches),
+		LineCov:   coverage.Percentage(cov.Summary.CoveredLines, cov.Summary.NumStatements),
+		BranchCov: coverage.Percentage(cov.Summary.CoveredBranches, cov.Summary.NumBranches),
+		FuncCov:   coverage.Percentage(totalCoveredFunctions, totalFunctions),
 	}
 	return testCov, nil
 }

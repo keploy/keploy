@@ -60,9 +60,10 @@ func (j *Javascript) GetCoverage() (models.TestCoverage, error) {
 		return testCov, fmt.Errorf("no coverage files found")
 	}
 
-	linesCoveredPerFile := make(map[string][]int)  // filename -> [#line covered, #line not covered]
-	branchCoveredPerFile := make(map[string][]int) // filename -> [#branch covered, #branch not covered]
-	funcCoveredPerFile := make(map[string][]int)   // filename -> [#function covered, #function not covered]
+	// map[string]map[string]bool => filename -> execSegment(line, branch or func) -> covered or not
+	linesCoveredPerFile := make(map[string]map[string]bool)  
+	branchCoveredPerFile := make(map[string]map[string]bool) 
+	funcCoveredPerFile := make(map[string]map[string]bool)   
 
 	for _, coverageFilePath := range coverageFilePaths {
 
@@ -83,22 +84,22 @@ func (j *Javascript) GetCoverage() (models.TestCoverage, error) {
 		}
 	}
 
+	totalLines, totalCoveredLines, coveredLinesPerFile := CalculateCoverageMetrics(linesCoveredPerFile)
+	totalBranches, totalCoveredBranches, coveredBranchesPerFile := CalculateCoverageMetrics(branchCoveredPerFile)
+	totalFunctions, totalCoveredFunctions, coveredFunctionsPerFile := CalculateCoverageMetrics(funcCoveredPerFile)
+
 	for filename, lineCoverageCounts := range linesCoveredPerFile {
 		testCov.FileCov[filename] = models.CoverageElement{
-			LineCov:   coverage.CalCovPercentage(lineCoverageCounts[0], lineCoverageCounts[0]+lineCoverageCounts[1]),
-			BranchCov: coverage.CalCovPercentage(branchCoveredPerFile[filename][0], branchCoveredPerFile[filename][0]+branchCoveredPerFile[filename][1]),
-			FuncCov:   coverage.CalCovPercentage(funcCoveredPerFile[filename][0], funcCoveredPerFile[filename][0]+funcCoveredPerFile[filename][1]),
+			LineCov:   coverage.Percentage(coveredLinesPerFile[filename],len(lineCoverageCounts)),
+			BranchCov: coverage.Percentage(coveredBranchesPerFile[filename], len(branchCoveredPerFile[filename])),
+			FuncCov:   coverage.Percentage(coveredFunctionsPerFile[filename], len(funcCoveredPerFile[filename])),
 		}
 	}
 
-	totalLines, totalCoveredLines := CalculateCoverageMetrics(linesCoveredPerFile)
-	totalBranches, totalCoveredBranches := CalculateCoverageMetrics(branchCoveredPerFile)
-	totalFunctions, totalCoveredFunctions := CalculateCoverageMetrics(funcCoveredPerFile)
-
 	testCov.TotalCov = models.CoverageElement{
-		LineCov:   coverage.CalCovPercentage(totalCoveredLines, totalLines),
-		BranchCov: coverage.CalCovPercentage(totalCoveredBranches, totalBranches),
-		FuncCov:   coverage.CalCovPercentage(totalCoveredFunctions, totalFunctions),
+		LineCov:   coverage.Percentage(totalCoveredLines, totalLines),
+		BranchCov: coverage.Percentage(totalCoveredBranches, totalBranches),
+		FuncCov:   coverage.Percentage(totalCoveredFunctions, totalFunctions),
 	}
 	return testCov, nil
 }

@@ -2,7 +2,7 @@ package coverage
 
 import "strconv"
 
-func CalCovPercentage(covered, total int) string {
+func Percentage(covered, total int) string {
 	if total == 0 {
 		return "100%"
 	}
