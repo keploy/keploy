@@ -371,7 +371,7 @@ func (s *contractService) Generate(ctx context.Context, genAllTests bool, genAll
 		return fmt.Errorf("Error in checking config file while generating")
 	}
 	var config config.Config
-	configData, err := yaml.ReadFile(ctx, s.logger, "./", "keploy")
+	configData, err := yaml.ReadFile(ctx, s.logger, "./keploy/schema", "keploy")
 	if err != nil {
 		s.logger.Fatal("Error reading file", zap.Error(err))
 		return err

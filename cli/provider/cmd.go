@@ -505,11 +505,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			config.SetSelectedContractTests(c.cfg, selectedTests)
 
 		}
-		c.cfg.Contract.Driven, err = cmd.Flags().GetString("driven")
-		if err != nil {
-			errMsg := "failed to get the driven flag"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
+		if cmd.Name() == "download" {
+
+			c.cfg.Contract.Driven, err = cmd.Flags().GetString("driven")
+			if err != nil {
+				errMsg := "failed to get the driven flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
 		}
 	case "config":
 		path, err := cmd.Flags().GetString("path")
@@ -734,7 +737,7 @@ func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg confi
 		utils.LogError(c.logger, err, "failed to marshal config data")
 		return errors.New("failed to marshal config data")
 	}
-	err = toolSvc.CreateConfig(ctx, c.cfg.ConfigPath+"/keploy.yaml", string(configDataBytes))
+	err = toolSvc.CreateConfig(ctx, c.cfg.ConfigPath+"/keploy.yml", string(configDataBytes))
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to create config file")
 		return errors.New("failed to create config file")
