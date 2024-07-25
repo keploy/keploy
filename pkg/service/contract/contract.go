@@ -395,7 +395,7 @@ func (s *contractService) Generate(ctx context.Context, genAllTests bool, genAll
 	return nil
 }
 
-func (s *contractService) DownloadTests(ctx context.Context, path string) error {
+func (s *contractService) DownloadTests(path string) error {
 	keployFolder := "./keploy/"
 	targetPath := path + "/keploy/tests/schema/"
 	// Ensure destination directory exists
@@ -528,7 +528,7 @@ func (s *contractService) Download(ctx context.Context, driven string) error {
 	}
 
 	if driven == "provider" || driven == "server" {
-		err = s.DownloadTests(ctx, path)
+		err = s.DownloadTests(path)
 
 	} else if driven == "consumer" || driven == "client" {
 		err = s.DownloadMocks(path)
