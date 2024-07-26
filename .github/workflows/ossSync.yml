@@ -1,8 +1,8 @@
 name: OSS Sync Pipeline Trigger
 
 on:
-  pull_request:
   pull_request_target:
+
 jobs:
   trigger_pipelines:
     runs-on: ubuntu-latest
