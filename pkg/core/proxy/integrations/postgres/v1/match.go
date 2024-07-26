@@ -772,7 +772,6 @@ func validateMock(tcsMocks []*models.Mock, idx int, requestBuffers [][]byte, log
 		if reflect.DeepEqual(mock.PacketTypes, []string{"B", "E"}) {
 			// logger.Debug("Inside Validate Mock for B, E")
 			copyMock := *tcsMocks[idx]
-			copyMock.Spec.PostgresResponses[0].PacketTypes = []string{"2", "D", "C", "Z"}
 			copyMock.Spec.PostgresResponses[0].Payload = ""
 			return false, &copyMock
 		}
