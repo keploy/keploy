@@ -64,6 +64,8 @@ inDocker: false
 cmdType: "native"
 `
 
+var InternalConfigFields = []string{"generateGithubActions", "keployNetwork", "keployContainer", "inCi", "cmdType"}
+
 var config = &Config{}
 
 func New() *Config {
@@ -109,4 +111,8 @@ func mergeStrings(srcStr, destStr string, infer bool, mergeOptions yaml.MergeOpt
 	}
 
 	return result.String()
+}
+
+func GetInternalConfigFields() []string {
+	return InternalConfigFields
 }

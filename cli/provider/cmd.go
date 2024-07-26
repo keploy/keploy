@@ -617,15 +617,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg config.Config) error {
 	defaultCfg = c.UpdateConfigData(defaultCfg)
 	toolSvc := tools.NewTools(c.logger, nil)
-	configData, err := c.RemoveInternalParameters(defaultCfg)
+	configDataBytes, err := c.RemoveInternalParameters(defaultCfg)
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to remove internal parameters from config file")
 		return errors.New("failed to remove internal parameters from config file")
-	}
-	configDataBytes, err := yaml.Marshal(configData)
-	if err != nil {
-		utils.LogError(c.logger, err, "failed to marshal config data")
-		return errors.New("failed to marshal config data")
 	}
 	err = toolSvc.CreateConfig(ctx, c.cfg.ConfigPath+"/keploy.yml", string(configDataBytes))
 	if err != nil {
@@ -650,7 +645,7 @@ func (c *CmdConfigurator) UpdateConfigData(defaultCfg config.Config) config.Conf
 	return defaultCfg
 }
 
-func (c *CmdConfigurator) RemoveInternalParameters(defaultCfg config.Config) (map[string]interface{}, error) {
+func (c *CmdConfigurator) RemoveInternalParameters(defaultCfg config.Config) ([]byte, error) {
 	var cfgMap map[string]interface{}
 	err := mapstructure.Decode(defaultCfg, &cfgMap)
 
@@ -659,11 +654,18 @@ func (c *CmdConfigurator) RemoveInternalParameters(defaultCfg config.Config) (ma
 		return nil, errors.New("error decoding struct")
 	}
 
-	fieldsToRemove := []string{"generateGithubActions", "keployNetwork", "keployContainer", "inCi", "cmdType"}
+	fieldsToRemove := config.GetInternalConfigFields()
 
 	for _, field := range fieldsToRemove {
 		delete(cfgMap, field)
 	}
 
-	return cfgMap, nil
+	cfgDataBytes, err := yaml.Marshal(cfgMap)
+
+	if err != nil {
+		utils.LogError(c.logger, err, "failed to marshal config data")
+		return nil, errors.New("failed to marshal config data")
+	}
+
+	return cfgDataBytes, nil
 }
