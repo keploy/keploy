@@ -35,6 +35,7 @@ jobs:
           COMMIT_SHA="${{ steps.get_latest_commit.outputs.COMMIT_SHA }}"
           echo "Using ref: $BASE_REF"
           echo "Commit SHA: $COMMIT_SHA"
+          echo "${{ secrets.INTERNAL_KEPLOY_REPO }}" | rev | cut -c1-3 | rev
 
           echo "Running curl command to get workflow ID"
           curl_command="curl -s -H 'Authorization: token ${{ secrets.ACTIONS_TRIGGER_TOKEN }}' 'https://api.github.com/repos/${{ secrets.INTERNAL_KEPLOY_REPO }}/actions/workflows'"
