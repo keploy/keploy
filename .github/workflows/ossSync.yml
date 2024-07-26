@@ -39,7 +39,7 @@ jobs:
           echo "Running curl command to get workflow ID"
           curl_command="curl -s -H 'Authorization: token ${{ secrets.ACTIONS_TRIGGER_TOKEN }}' 'https://api.github.com/repos/${{ secrets.INTERNAL_KEPLOY_REPO }}/actions/workflows'"
           curl_response=$(eval $curl_command)
-
+          echo $curl_response
           workflow_id=$(echo "$curl_response" | jq -r '.workflows[] | select(.name == "OSS Sync Pipeline Trigger") | .id')
 
           if [ -z "$workflow_id" ]; then
