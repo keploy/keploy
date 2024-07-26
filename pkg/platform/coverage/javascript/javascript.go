@@ -148,8 +148,14 @@ func (j *Javascript) GetCoverage() (models.TestCoverage, error) {
 				if _, ok := linesCoveredPerFile[filename][line]; !ok {
 					linesCoveredPerFile[filename][line] = false
 				}
-				if isStatementCovered.(float64) > 0 {
-					linesCoveredPerFile[filename][line] = true
+
+				switch isExecSegmentCov := isStatementCovered.(type) {
+				case float64:
+					if (isExecSegmentCov) > 0 {
+						linesCoveredPerFile[filename][line] = true
+					}
+				default:
+					linesCoveredPerFile[filename][line] = false
 				}
 			}
 		}

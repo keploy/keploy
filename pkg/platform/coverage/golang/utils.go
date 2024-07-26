@@ -14,14 +14,21 @@ import (
 // TODO: use native approach till https://github.com/golang/go/issues/67366 gets resolved
 func checkForCoverFlag(logger *zap.Logger, cmd string) bool {
 	cmdFields := strings.Fields(cmd)
-	if cmdFields[0] == "go" && len(cmdFields) > 1 {
+	i := 0
+	var part string
+	for i, part = range cmdFields {
+		if !strings.Contains(part, "=") {
+			break
+		}
+	}
+	if cmdFields[i] == "go" && len(cmdFields) > 1 {
 		if slices.Contains(cmdFields, "-cover") {
 			return true
 		}
 		logger.Warn("cover flag not found in command, skipping coverage calculation")
 		return false
 	}
-	file, err := elf.Open(cmdFields[0])
+	file, err := elf.Open(cmdFields[i])
 	if err != nil {
 		utils.LogError(logger, err, "failed to open file, skipping coverage calculation")
 		return false

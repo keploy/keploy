@@ -35,6 +35,8 @@ import (
 
 var WarningSign = "\U000026A0"
 
+var ErrCode = 0
+
 func ReplaceHostToIP(currentURL string, ipAddress string) (string, error) {
 	// Parse the current URL
 	parsedURL, err := url.Parse(currentURL)
@@ -212,6 +214,7 @@ func CheckFileExists(path string) bool {
 }
 
 var Version string
+var VersionIdenitfier string
 
 func attachLogFileToSentry(logger *zap.Logger, logFilePath string) error {
 	file, err := os.Open(logFilePath)

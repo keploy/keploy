@@ -56,8 +56,12 @@ func Stop(logger *zap.Logger, reason string) error {
 	}
 
 	logger.Info("stopping Keploy", zap.String("reason", reason))
-	cancel()
+	ExecCancel()
 	return nil
+}
+
+func ExecCancel() {
+	cancel()
 }
 
 func SetCancel(c context.CancelFunc) {
