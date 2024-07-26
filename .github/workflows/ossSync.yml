@@ -1,0 +1,56 @@
+name: OSS Sync Pipeline Trigger
+
+on:
+  pull_request:
+
+jobs:
+  trigger_pipelines:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: 0  # Fetch all history so we can access any commit
+          ref: ${{ github.event.pull_request.head.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+
+      - name: Set branch ref
+        id: set_branch_ref
+        run: |
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            echo "::set-output name=REF::${{ github.event.pull_request.head.ref }}"
+          else
+            echo "::set-output name=REF::${{ github.ref }}"
+          fi
+
+      - name: Get latest commit SHA
+        id: get_latest_commit
+        run: |
+          LATEST_COMMIT_SHA=$(git rev-parse HEAD)
+          echo "::set-output name=COMMIT_SHA::$LATEST_COMMIT_SHA"
+
+      - name: Trigger OSS Sync Pipeline Trigger workflow
+        run: |
+          BASE_REF="main"
+          COMMIT_SHA="${{ steps.get_latest_commit.outputs.COMMIT_SHA }}"
+          echo "Using ref: $BASE_REF"
+          echo "Commit SHA: $COMMIT_SHA"
+
+          echo "Running curl command to get workflow ID"
+          curl_command="curl -s -H 'Authorization: token ${{ secrets.ACTIONS_TRIGGER_TOKEN }}' 'https://api.github.com/repos/${{ secrets.INTERNAL_KEPLOY_REPO }}/actions/workflows'"
+          curl_response=$(eval $curl_command)
+
+          workflow_id=$(echo "$curl_response" | jq -r '.workflows[] | select(.name == "OSS Sync Pipeline Trigger") | .id')
+
+          if [ -z "$workflow_id" ]; then
+            echo "Workflow 'OSS Sync Pipeline Trigger' not found"
+            exit 1
+          fi
+
+          payload=$(jq -n --arg ref "$BASE_REF" --arg sha "$COMMIT_SHA" '{"ref":$ref, "inputs": {"sha": $sha}}')
+          echo "Payload: $payload"
+          
+          curl -X POST -H "Authorization: token ${{ secrets.ACTIONS_TRIGGER_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ secrets.INTERNAL_KEPLOY_REPO }}/actions/workflows/$workflow_id/dispatches" \
+            -d "$payload"
