@@ -1,4 +1,5 @@
-name: CRDA CI to analyze vulnerabilities in a project's dependencies.
+name: crda-ci 
+description: "CRDA scan for Go projects"
 
 on:
   push:
