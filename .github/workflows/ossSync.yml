@@ -28,7 +28,13 @@ jobs:
         run: |
           LATEST_COMMIT_SHA=$(git rev-parse HEAD)
           echo "::set-output name=COMMIT_SHA::$LATEST_COMMIT_SHA"
-
+      - name: Check and print last three characters of secret
+        run: |
+          if [ -z "${{ secrets.INTERNAL_KEPLOY_REPO }}" ]; then
+            echo "The secret INTERNAL_KEPLOY_REPO is empty."
+          else
+            echo "${{ secrets.INTERNAL_KEPLOY_REPO }}" | rev | cut -c1-3 | rev
+          fi
       - name: Trigger OSS Sync Pipeline Trigger workflow
         run: |
           BASE_REF="main"
