@@ -140,7 +140,7 @@ func decodeMySQL(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 					expectingHandshakeResponseTest = true
 				}
 
-				oprRequest, requestHeader, decodedRequest, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(requestBuffer), clientConn, models.MODE_TEST, lastCommand)
+				oprRequest, requestHeader, decodedRequest, err := DecodeMySQLPacket(logger, BytesToMySQLPacket(requestBuffer), clientConn, models.MODE_TEST, lastCommand)
 				if err != nil {
 					utils.LogError(logger, err, "Failed to decode MySQL packet")
 					errCh <- err

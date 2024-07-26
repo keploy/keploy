@@ -16,17 +16,14 @@ import (
 )
 
 func init() {
-	integrations.Register("mysql", NewMySQL)
+	integrations.Register("mysql", New)
 }
-
-//TODO: seggregate the packet types and the operations into meaningful packages.
-//TODO: follow the same pattern for naming the functions and the variables & structs.
 
 type MySQL struct {
 	logger *zap.Logger
 }
 
-func NewMySQL(logger *zap.Logger) integrations.Integrations {
+func New(logger *zap.Logger) integrations.Integrations {
 	return &MySQL{
 		logger: logger,
 	}
@@ -40,7 +37,7 @@ func (m *MySQL) MatchType(_ context.Context, _ []byte) bool {
 func (m *MySQL) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	logger := m.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)))
 
-	err := encodeMySQL(ctx, logger, src, dst, mocks, opts)
+	err := encode(ctx, logger, src, dst, mocks, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the mysql message into the yaml")
 		return err

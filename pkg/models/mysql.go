@@ -62,6 +62,7 @@ type MySQLHandshakeV10Packet struct {
 	AuthPluginName  string `yaml:"auth_plugin_name"`
 }
 
+// /////////////////////////////////
 type PluginDetails struct {
 	Type    string `yaml:"type"`
 	Message string `yaml:"message"`
@@ -71,6 +72,9 @@ type MySQLHandshakeResponseOk struct {
 	PluginDetails   PluginDetails `yaml:"plugin_details"`
 	RemainingBytes  []byte        `yaml:"remaining_bytes"`
 }
+
+// /////////////////////////////////
+
 type MySQLHandshakeResponse struct {
 	CapabilityFlags      uint32            `yaml:"capability_flags"`
 	MaxPacketSize        uint32            `yaml:"max_packet_size"`

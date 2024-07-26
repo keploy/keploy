@@ -5,7 +5,6 @@ package mysql
 import (
 	"context"
 	"encoding/binary"
-	"log"
 	"net"
 
 	"go.uber.org/zap"
@@ -21,25 +20,6 @@ var (
 	expectingHandshakeResponse     = false
 	expectingHandshakeResponseTest = false
 )
-
-func bytesToMySQLPacket(buffer []byte) models.Packet {
-	if buffer == nil || len(buffer) < 4 {
-		log.Fatalf("Error: buffer is nil or too short to be a valid MySQL packet")
-		return models.Packet{}
-	}
-	tempBuffer := make([]byte, 4)
-	copy(tempBuffer, buffer[:3])
-	length := binary.LittleEndian.Uint32(tempBuffer)
-	sequenceID := buffer[3]
-	payload := buffer[4:]
-	return models.Packet{
-		Header: models.SQLPacketHeaderInfo{
-			PayloadLength: length,
-			SequenceID:    sequenceID,
-		},
-		Payload: payload,
-	}
-}
 
 func readFirstBuffer(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn) ([]byte, string, error) {
 	// Attempt to read from destConn first
@@ -60,4 +40,44 @@ func readFirstBuffer(ctx context.Context, logger *zap.Logger, clientConn, destCo
 	}
 	// Return any other error from reading destConn
 	return nil, "", err
+}
+
+// // BytesToMySQLPacket converts a byte slice to a MySQL packet
+// func BytesToMySQLPacket(buffer []byte) (mysql.Packet, error) {
+// 	if buffer == nil || len(buffer) < 4 {
+// 		return mysql.Packet{}, errors.New("buffer is nil or too short to be a valid MySQL packet")
+// 	}
+
+// 	tempBuffer := make([]byte, 4)
+// 	copy(tempBuffer, buffer[:3])
+// 	length := binary.LittleEndian.Uint32(tempBuffer)
+// 	sequenceID := buffer[3]
+
+// 	payload := buffer[4:]
+
+// 	return mysql.Packet{
+// 		Header: mysql.Header{
+// 			PayloadLength: length,
+// 			SequenceID:    sequenceID,
+// 		},
+// 		Payload: payload,
+// 	}, nil
+// }
+
+func BytesToMySQLPacket(buffer []byte) models.Packet {
+	if buffer == nil || len(buffer) < 4 {
+		return models.Packet{}
+	}
+	tempBuffer := make([]byte, 4)
+	copy(tempBuffer, buffer[:3])
+	length := binary.LittleEndian.Uint32(tempBuffer)
+	sequenceID := buffer[3]
+	payload := buffer[4:]
+	return models.Packet{
+		Header: models.SQLPacketHeaderInfo{
+			PayloadLength: length,
+			SequenceID:    sequenceID,
+		},
+		Payload: payload,
+	}
 }

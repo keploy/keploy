@@ -20,7 +20,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
+func encode(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
 
 	var (
 		mysqlRequests  []models.MySQLRequest
@@ -109,7 +109,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 					return nil
 				}
 				expectingHandshakeResponse = true
-				oprRequest, requestHeader, mysqlRequest, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(handshakeResponseFromClient), clientConn, models.MODE_RECORD, lastCommand)
+				oprRequest, requestHeader, mysqlRequest, err := DecodeMySQLPacket(logger, BytesToMySQLPacket(handshakeResponseFromClient), clientConn, models.MODE_RECORD, lastCommand)
 				if err != nil {
 					utils.LogError(logger, err, "failed to decode MySQL packet from client")
 					errCh <- err
@@ -124,7 +124,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 					Message: mysqlRequest,
 				})
 				expectingHandshakeResponse = false
-				oprResponse1, responseHeader1, mysqlResp1, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(handshakeResponseBuffer), clientConn, models.MODE_RECORD, lastCommand)
+				oprResponse1, responseHeader1, mysqlResp1, err := DecodeMySQLPacket(logger, BytesToMySQLPacket(handshakeResponseBuffer), clientConn, models.MODE_RECORD, lastCommand)
 				if err != nil {
 					utils.LogError(logger, err, "failed to decode MySQL packet from destination")
 					errCh <- err
@@ -138,7 +138,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 					},
 					Message: mysqlResp1,
 				})
-				oprResponse2, responseHeader2, mysqlResp2, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(okPacket1), clientConn, models.MODE_RECORD, lastCommand)
+				oprResponse2, responseHeader2, mysqlResp2, err := DecodeMySQLPacket(logger, BytesToMySQLPacket(okPacket1), clientConn, models.MODE_RECORD, lastCommand)
 				if err != nil {
 					utils.LogError(logger, err, "failed to decode MySQL packet from destination")
 					errCh <- err
@@ -186,7 +186,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 					}
 					expectingAuthSwitchResponse = true
 
-					oprRequestFinal, requestHeaderFinal, mysqlRequestFinal, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(authSwitchResponse), clientConn, models.MODE_RECORD, lastCommand)
+					oprRequestFinal, requestHeaderFinal, mysqlRequestFinal, err := DecodeMySQLPacket(logger, BytesToMySQLPacket(authSwitchResponse), clientConn, models.MODE_RECORD, lastCommand)
 					if err != nil {
 						utils.LogError(logger, err, "failed to decode MySQL packet from client after full authentication")
 						errCh <- err
@@ -203,7 +203,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 					expectingAuthSwitchResponse = false
 
 					isPluginData = true
-					oprResponse, responseHeader, mysqlResp, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(serverResponse), clientConn, models.MODE_RECORD, lastCommand)
+					oprResponse, responseHeader, mysqlResp, err := DecodeMySQLPacket(logger, BytesToMySQLPacket(serverResponse), clientConn, models.MODE_RECORD, lastCommand)
 					isPluginData = false
 					if err != nil {
 						utils.LogError(logger, err, "failed to decode MySQL packet from destination after full authentication")
@@ -255,7 +255,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 							errCh <- err
 							return nil
 						}
-						oprRequestFinal, requestHeaderFinal, mysqlRequestFinal, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(clientResponse), clientConn, models.MODE_RECORD, lastCommand)
+						oprRequestFinal, requestHeaderFinal, mysqlRequestFinal, err := DecodeMySQLPacket(logger, BytesToMySQLPacket(clientResponse), clientConn, models.MODE_RECORD, lastCommand)
 						if err != nil {
 							utils.LogError(logger, err, "failed to decode MySQL packet from client after full authentication")
 							errCh <- err
@@ -270,7 +270,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 							Message: mysqlRequestFinal,
 						})
 						isPluginData = true
-						oprResponseFinal, responseHeaderFinal, mysqlRespFinal, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(finalServerResponse), clientConn, models.MODE_RECORD, lastCommand)
+						oprResponseFinal, responseHeaderFinal, mysqlRespFinal, err := DecodeMySQLPacket(logger, BytesToMySQLPacket(finalServerResponse), clientConn, models.MODE_RECORD, lastCommand)
 						isPluginData = false
 						if err != nil {
 							utils.LogError(logger, err, "failed to decode MySQL packet from destination after full authentication")
@@ -315,7 +315,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 							errCh <- err
 							return nil
 						}
-						finalServerResponsetype1, finalServerResponseHeader1, mysqlRespfinalServerResponse, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(finalServerResponse1), clientConn, models.MODE_RECORD, lastCommand)
+						finalServerResponsetype1, finalServerResponseHeader1, mysqlRespfinalServerResponse, err := DecodeMySQLPacket(logger, BytesToMySQLPacket(finalServerResponse1), clientConn, models.MODE_RECORD, lastCommand)
 						if err != nil {
 							utils.LogError(logger, err, "failed to decode MySQL packet from final server response")
 							errCh <- err
@@ -365,7 +365,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 							errCh <- err
 							return nil
 						}
-						oprResponseFinal, responseHeaderFinal, mysqlRespFinal, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(finalServerResponse), clientConn, models.MODE_RECORD, lastCommand)
+						oprResponseFinal, responseHeaderFinal, mysqlRespFinal, err := DecodeMySQLPacket(logger, BytesToMySQLPacket(finalServerResponse), clientConn, models.MODE_RECORD, lastCommand)
 						isPluginData = false
 						if err != nil {
 							utils.LogError(logger, err, "failed to decode MySQL packet from destination after full authentication")
@@ -421,7 +421,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 						errCh <- err
 						return nil
 					}
-					oprRequestFinal, requestHeaderFinal, mysqlRequestFinal, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(clientResponse), clientConn, models.MODE_RECORD, lastCommand)
+					oprRequestFinal, requestHeaderFinal, mysqlRequestFinal, err := DecodeMySQLPacket(logger, BytesToMySQLPacket(clientResponse), clientConn, models.MODE_RECORD, lastCommand)
 					if err != nil {
 						utils.LogError(logger, err, "failed to decode MySQL packet from client after full authentication")
 						errCh <- err
@@ -436,7 +436,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 						Message: mysqlRequestFinal,
 					})
 					isPluginData = true
-					oprResponseFinal, responseHeaderFinal, mysqlRespFinal, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(finalServerResponse), clientConn, models.MODE_RECORD, lastCommand)
+					oprResponseFinal, responseHeaderFinal, mysqlRespFinal, err := DecodeMySQLPacket(logger, BytesToMySQLPacket(finalServerResponse), clientConn, models.MODE_RECORD, lastCommand)
 					isPluginData = false
 					if err != nil {
 						utils.LogError(logger, err, "failed to decode MySQL packet from destination after full authentication")
@@ -481,7 +481,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 						errCh <- err
 						return nil
 					}
-					finalServerResponsetype1, finalServerResponseHeader1, mysqlRespfinalServerResponse, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(finalServerResponse1), clientConn, models.MODE_RECORD, lastCommand)
+					finalServerResponsetype1, finalServerResponseHeader1, mysqlRespfinalServerResponse, err := DecodeMySQLPacket(logger, BytesToMySQLPacket(finalServerResponse1), clientConn, models.MODE_RECORD, lastCommand)
 					if err != nil {
 						utils.LogError(logger, err, "failed to decode MySQL packet from final server response")
 						errCh <- err
@@ -584,7 +584,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, initialBuffer 
 			if len(queryBuffer) == 0 {
 				break
 			}
-			operation, requestHeader, mysqlRequest, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(queryBuffer), clientConn, models.MODE_RECORD, lastCommand)
+			operation, requestHeader, mysqlRequest, err := DecodeMySQLPacket(logger, BytesToMySQLPacket(queryBuffer), clientConn, models.MODE_RECORD, lastCommand)
 			if err != nil {
 				utils.LogError(logger, err, "failed to decode the MySQL packet from the client")
 				return err
@@ -626,7 +626,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, initialBuffer 
 			if len(queryResponse) == 0 {
 				break
 			}
-			responseOperation, responseHeader, mysqlResp, err := DecodeMySQLPacket(logger, bytesToMySQLPacket(queryResponse), clientConn, models.MODE_RECORD, lastCommand)
+			responseOperation, responseHeader, mysqlResp, err := DecodeMySQLPacket(logger, BytesToMySQLPacket(queryResponse), clientConn, models.MODE_RECORD, lastCommand)
 			if err != nil {
 				utils.LogError(logger, err, "failed to decode the MySQL packet from the destination server")
 				continue
