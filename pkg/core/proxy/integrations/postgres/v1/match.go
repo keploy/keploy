@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -692,8 +693,13 @@ func compareExactMatch(mock *models.Mock, actualPgReq *models.Backend, logger *z
 				return false, nil
 			}
 			for j := 0; j < len(actualPgReq.Binds[b-1].Parameters); j++ {
-				for _, v := range actualPgReq.Binds[b-1].Parameters[j] {
-					if v != mock.Spec.PostgresRequests[0].Binds[b-1].Parameters[j][0] {
+				// parameter represents a timestamp value do not compare it just continue
+				if isTimestamp(actualPgReq.Binds[b-1].Parameters[j]) {
+					fmt.Println("Timestamp value")
+					continue
+				}
+				for i, v := range actualPgReq.Binds[b-1].Parameters[j] {
+					if v != mock.Spec.PostgresRequests[0].Binds[b-1].Parameters[j][i] {
 						return false, nil
 					}
 				}
@@ -772,6 +778,7 @@ func validateMock(tcsMocks []*models.Mock, idx int, requestBuffers [][]byte, log
 		if reflect.DeepEqual(mock.PacketTypes, []string{"B", "E"}) {
 			// logger.Debug("Inside Validate Mock for B, E")
 			copyMock := *tcsMocks[idx]
+			copyMock.Spec.PostgresResponses[0].PacketTypes = []string{"2", "C", "Z"}
 			copyMock.Spec.PostgresResponses[0].Payload = ""
 			return false, &copyMock
 		}
@@ -798,4 +805,13 @@ func validateMock(tcsMocks []*models.Mock, idx int, requestBuffers [][]byte, log
 		}
 	}
 	return true, nil
+}
+
+func isTimestamp(byteArray []byte) bool {
+	// Convert byte array to string
+	s := string(byteArray)
+
+	// Define a regex for ISO 8601 timestamps
+	timestampRegex := regexp.MustCompile(`\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(.\d+)?(Z)?`)
+	return timestampRegex.MatchString(s)
 }
