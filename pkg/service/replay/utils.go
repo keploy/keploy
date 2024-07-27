@@ -155,7 +155,6 @@ func timeWithUnits(duration time.Duration) string {
 		return fmt.Sprintf("%.2f s", duration.Seconds())
 	} else if duration.Hours() < 1 {
 		return fmt.Sprintf("%.2f min", duration.Minutes())
-	} else {
-		return fmt.Sprintf("%.2f hr", duration.Hours())
 	}
+	return fmt.Sprintf("%.2f hr", duration.Hours())
 }
