@@ -362,6 +362,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	runTestSetCtx = context.WithValue(runTestSetCtx, models.ErrGroupKey, runTestSetErrGrp)
 	runTestSetCtx, runTestSetCtxCancel := context.WithCancel(runTestSetCtx)
 
+	startTime := time.Now()
+
 	exitLoopChan := make(chan bool, 2)
 	defer func() {
 		runTestSetCtxCancel()
@@ -538,8 +540,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var exitLoop bool
 	// var to store the error in the loop
 	var loopErr error
-
-	startTime := time.Now()
 
 	for _, testCase := range testCases {
 
@@ -769,16 +769,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	totalTestIgnored += testReport.Ignored
 	totalTestTimeTaken += timeTaken
 
-	var timeTakenStr string
-	if timeTaken.Seconds() < 1 {
-		timeTakenStr = fmt.Sprintf("%v ms", timeTaken.Milliseconds())
-	} else if timeTaken.Minutes() < 1 {
-		timeTakenStr = fmt.Sprintf("%.2f s", timeTaken.Seconds())
-	} else if timeTaken.Hours() < 1 {
-		timeTakenStr = fmt.Sprintf("%.2f min", timeTaken.Minutes())
-	} else {
-		timeTakenStr = fmt.Sprintf("%.2f hr", timeTaken.Hours())
-	}
+	timeTakenStr := timeWithUnits(timeTaken)
 
 	if testSetStatus == models.TestSetStatusFailed || testSetStatus == models.TestSetStatusPassed {
 		if testSetStatus == models.TestSetStatusFailed {
@@ -890,16 +881,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 			return testSuiteIDNumberI < testSuiteIDNumberJ
 		})
 
-		var totalTestTimeTakenStr string
-		if totalTestTimeTaken.Seconds() < 1 {
-			totalTestTimeTakenStr = fmt.Sprintf("%v ms", totalTestTimeTaken.Milliseconds())
-		} else if totalTestTimeTaken.Minutes() < 1 {
-			totalTestTimeTakenStr = fmt.Sprintf("%.2f s", totalTestTimeTaken.Seconds())
-		} else if totalTestTimeTaken.Hours() < 1 {
-			totalTestTimeTakenStr = fmt.Sprintf("%.2f min", totalTestTimeTaken.Minutes())
-		} else {
-			totalTestTimeTakenStr = fmt.Sprintf("%.2f hr", totalTestTimeTaken.Hours())
-		}
+		totalTestTimeTakenStr := timeWithUnits(totalTestTimeTaken)
 
 		if totalTestIgnored > 0 {
 			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n"+"\tTotal time taken: %s\n", totalTests, totalTestPassed, totalTestFailed, totalTestIgnored, totalTestTimeTakenStr); err != nil {
@@ -927,16 +909,7 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 				pp.SetColorScheme(models.GetFailingColorScheme())
 			}
 
-			var testSetTimeTakenStr string
-			if completeTestReport[testSuiteName].duration.Seconds() < 1 {
-				testSetTimeTakenStr = fmt.Sprintf("%v ms", completeTestReport[testSuiteName].duration.Milliseconds())
-			} else if completeTestReport[testSuiteName].duration.Minutes() < 1 {
-				testSetTimeTakenStr = fmt.Sprintf("%.2f s", completeTestReport[testSuiteName].duration.Seconds())
-			} else if completeTestReport[testSuiteName].duration.Hours() < 1 {
-				testSetTimeTakenStr = fmt.Sprintf("%.2f min", completeTestReport[testSuiteName].duration.Minutes())
-			} else {
-				testSetTimeTakenStr = fmt.Sprintf("%.2f hr", completeTestReport[testSuiteName].duration.Hours())
-			}
+			testSetTimeTakenStr := timeWithUnits(completeTestReport[testSuiteName].duration)
 
 			if totalTestIgnored > 0 {
 				if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed, completeTestReport[testSuiteName].ignored, testSetTimeTakenStr); err != nil {

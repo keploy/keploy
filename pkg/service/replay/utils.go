@@ -147,3 +147,15 @@ func removeFromMap(map1, map2 map[string][]string) map[string][]string {
 	}
 	return map1
 }
+
+func timeWithUnits(duration time.Duration) string {
+	if duration.Seconds() < 1 {
+		return fmt.Sprintf("%v ms", duration.Milliseconds())
+	} else if duration.Minutes() < 1 {
+		return fmt.Sprintf("%.2f s", duration.Seconds())
+	} else if duration.Hours() < 1 {
+		return fmt.Sprintf("%.2f min", duration.Minutes())
+	} else {
+		return fmt.Sprintf("%.2f hr", duration.Hours())
+	}
+}
