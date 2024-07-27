@@ -695,7 +695,11 @@ func compareExactMatch(mock *models.Mock, actualPgReq *models.Backend, logger *z
 			for j := 0; j < len(actualPgReq.Binds[b-1].Parameters); j++ {
 				// parameter represents a timestamp value do not compare it just continue
 				if isTimestamp(actualPgReq.Binds[b-1].Parameters[j]) {
-					fmt.Println("Timestamp value")
+					logger.Debug("found a timestamp value")
+					continue
+				}
+				if isBcryptHash(actualPgReq.Binds[b-1].Parameters[j]) {
+					logger.Debug("found a bcrypt hash")
 					continue
 				}
 				for i, v := range actualPgReq.Binds[b-1].Parameters[j] {
@@ -814,4 +818,13 @@ func isTimestamp(byteArray []byte) bool {
 	// Define a regex for ISO 8601 timestamps
 	timestampRegex := regexp.MustCompile(`\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(.\d+)?(Z)?`)
 	return timestampRegex.MatchString(s)
+}
+
+func isBcryptHash(byteArray []byte) bool {
+	// Convert byte array to string
+	s := string(byteArray)
+
+	// Define a regex for bcrypt hashes
+	bcryptRegex := regexp.MustCompile(`^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$`)
+	return bcryptRegex.MatchString(s)
 }
