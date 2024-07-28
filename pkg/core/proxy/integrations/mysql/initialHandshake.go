@@ -17,7 +17,14 @@ import (
 	"go.uber.org/zap"
 )
 
-func handleInitialHandshake(ctx context.Context, logger *zap.Logger, data []byte, clientConn, destConn net.Conn, decodeCtx *operation.DecodeContext) ([]mysql.Request, []mysql.Response, error) {
+type handshakeRes struct {
+	req               []mysql.Request
+	resp              []mysql.Response
+	requestOperation  string
+	responseOperation string
+}
+
+func handleInitialHandshake(ctx context.Context, logger *zap.Logger, data []byte, clientConn, destConn net.Conn, decodeCtx *operation.DecodeContext) (handshakeRes, error) {
 	var (
 		requests  []mysql.Request
 		responses []mysql.Response
@@ -25,23 +32,28 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, data []byte
 
 	var err error
 
+	res := handshakeRes{
+		req:  requests,
+		resp: responses,
+	}
+
 	// intial Handshake from server
 	handshake := data
 	_, err = clientConn.Write(handshake)
 	if err != nil {
 		if ctx.Err() != nil {
-			return requests, responses, ctx.Err()
+			return res, ctx.Err()
 		}
 		utils.LogError(logger, err, "failed to write handshake response to client")
 
-		return requests, responses, err
+		return res, err
 	}
 
 	// decode server handshake packet
 	handshakePkt, err := operation.DecodePayload(ctx, logger, handshake, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode handshake packet")
-		return requests, responses, err
+		return res, err
 	}
 
 	responses = append(responses, mysql.Response{
@@ -54,28 +66,28 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, data []byte
 		if err == io.EOF {
 			logger.Debug("recieved request buffer is empty in record mode for mysql call")
 
-			return requests, responses, err
+			return res, err
 		}
 		utils.LogError(logger, err, "failed to read handshake response from client")
 
-		return requests, responses, err
+		return res, err
 	}
 
 	_, err = destConn.Write(handshakeResponse)
 	if err != nil {
 		if ctx.Err() != nil {
-			return requests, responses, ctx.Err()
+			return res, ctx.Err()
 		}
 		utils.LogError(logger, err, "failed to write handshake response to server")
 
-		return requests, responses, err
+		return res, err
 	}
 
 	// decode client handshake response packet
 	handshakeResponsePkt, err := operation.DecodePayload(ctx, logger, handshakeResponse, destConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode handshake response packet")
-		return requests, responses, err
+		return res, err
 	}
 
 	requests = append(requests, mysql.Request{
@@ -88,44 +100,47 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, data []byte
 		if err == io.EOF {
 			logger.Debug("recieved request buffer is empty in record mode for mysql call")
 
-			return requests, responses, err
+			return res, err
 		}
 		utils.LogError(logger, err, "failed to read packet from server after handshake")
-		return requests, responses, err
+		return res, err
 	}
 
 	// tell the auth type to the client
 	_, err = clientConn.Write(authMoreData)
 	if err != nil {
 		if ctx.Err() != nil {
-			return requests, responses, ctx.Err()
+			return res, ctx.Err()
 		}
 		utils.LogError(logger, err, "failed to write packet to client after handshake")
-		return requests, responses, err
+		return res, err
 	}
 
 	// decode auth more data packet
 	authMorePkt, err := operation.DecodePayload(ctx, logger, authMoreData, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode auth more data packet")
-		return requests, responses, err
+		return res, err
 	}
 
 	serverMsg, ok := handshakePkt.Message.(*mysql.HandshakeV10Packet)
 	if !ok {
-		return requests, responses, fmt.Errorf("failed to cast message to HandshakeV10Packet")
+		return res, fmt.Errorf("failed to cast message to HandshakeV10Packet")
 	}
 
 	if serverMsg.AuthPluginName == CachingSha2Password {
-		req, res, err := handleCachingSha2Password(ctx, logger, authMorePkt, clientConn, destConn, decodeCtx)
+		req, resp, err := handleCachingSha2Password(ctx, logger, authMorePkt, clientConn, destConn, decodeCtx)
 		if err != nil {
-			return requests, responses, err
+			return res, err
 		}
 		requests = append(requests, req...)
-		responses = append(responses, res...)
+		responses = append(responses, resp...)
 	}
 
-	return requests, responses, nil
+	res.requestOperation = mysql.AuthStatusToString(mysql.HandshakeResponse41)
+	res.responseOperation = fmt.Sprintf("%s Authentication", serverMsg.AuthPluginName)
+
+	return res, nil
 }
 
 func handleCachingSha2Password(ctx context.Context, logger *zap.Logger, authMorePkt *mysql.PacketBundle, clientConn, destConn net.Conn, decodeCtx *operation.DecodeContext) ([]mysql.Request, []mysql.Response, error) {

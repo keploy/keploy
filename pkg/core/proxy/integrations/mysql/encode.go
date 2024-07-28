@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -66,43 +67,47 @@ func encode(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 			}
 
 			// Getting timestamp for the request
-			// reqTimestamp := time.Now()
+			reqTimestamp := time.Now()
 
 			switch source {
 			case "destination":
-				// handle the initial client-server handshake
-				req, resp, err := handleInitialHandshake(ctx, logger, data, clientConn, destConn, decodeCtx)
+				// handle the initial client-server handshake (connection phase)
+				result, err := handleInitialHandshake(ctx, logger, data, clientConn, destConn, decodeCtx)
 				if err != nil {
 					utils.LogError(logger, err, "failed to handle initial handshake")
 					errCh <- err
 					return nil
 				}
-				requests = append(requests, req...)
-				responses = append(responses, resp...)
+				requests = append(requests, result.req...)
+				responses = append(responses, result.resp...)
+
+				// record the mock
+				recordMock(ctx, requests, responses, "config", result.requestOperation, result.responseOperation, mocks, reqTimestamp)
+
+				// reset the requests and responses
+				requests = []mysql.Request{}
+				responses = []mysql.Response{}
+
+				// handle the client-server interaction (command phase)
+				err = handleClientQueries(ctx, logger, clientConn, destConn, mocks, reqTimestamp, decodeCtx)
+				if err != nil {
+					if err == io.EOF {
+						logger.Debug("recieved request buffer is empty in record mode for mysql call")
+						errCh <- err
+						return nil
+					}
+					utils.LogError(logger, err, "failed to handle client queries")
+					errCh <- err
+					return nil
+				}
 			case "client":
+				err := handleClientQueries(ctx, logger, clientConn, destConn, mocks, reqTimestamp, decodeCtx)
+				if err != nil {
+					utils.LogError(logger, err, "failed to handle client queries")
+					errCh <- err
+					return nil
+				}
 			}
-
-			// if source == "destination" {
-
-			// 	err = handleClientQueries(ctx, logger, nil, clientConn, destConn, mocks, lastCommand, reqTimestamp, preparedStatements, serverGreetings)
-			// 	if err != nil {
-			// 		if err == io.EOF {
-			// 			logger.Debug("recieved request buffer is empty in record mode for mysql call")
-			// 			errCh <- err
-			// 			return nil
-			// 		}
-			// 		utils.LogError(logger, err, "failed to handle client queries")
-			// 		errCh <- err
-			// 		return nil
-			// 	}
-			// } else if source == "client" {
-			// 	err := handleClientQueries(ctx, logger, nil, clientConn, destConn, mocks, lastCommand, reqTimestamp, preparedStatements, serverGreetings)
-			// 	if err != nil {
-			// 		utils.LogError(logger, err, "failed to handle client queries")
-			// 		errCh <- err
-			// 		return nil
-			// 	}
-			// }
 		}
 		return nil
 	})
