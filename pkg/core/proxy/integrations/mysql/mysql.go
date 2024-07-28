@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
+	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.keploy.io/server/v2/utils"
 
 	"go.keploy.io/server/v2/pkg/models"
@@ -55,11 +56,11 @@ func (m *MySQL) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrat
 	return nil
 }
 
-func recordMock(_ context.Context, mysqlRequests []models.MySQLRequest, mysqlResponses []models.MySQLResponse, name, operation, responseOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time) {
+func recordMock(_ context.Context, requests []mysql.Request, responses []mysql.Response, name, reqOperation, respOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time) {
 	meta := map[string]string{
 		"type":              name,
-		"operation":         operation,
-		"responseOperation": responseOperation,
+		"requestOperation":  reqOperation,
+		"responseOperation": respOperation,
 	}
 	mysqlMock := &models.Mock{
 		Version: models.GetVersion(),
@@ -67,8 +68,8 @@ func recordMock(_ context.Context, mysqlRequests []models.MySQLRequest, mysqlRes
 		Name:    name,
 		Spec: models.MockSpec{
 			Metadata:         meta,
-			MySQLRequests:    mysqlRequests,
-			MySQLResponses:   mysqlResponses,
+			MySQLRequests:    requests,
+			MySQLResponses:   responses,
 			Created:          time.Now().Unix(),
 			ReqTimestampMock: reqTimestampMock,
 			ResTimestampMock: time.Now(),
