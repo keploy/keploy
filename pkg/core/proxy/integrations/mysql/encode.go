@@ -7,11 +7,11 @@ import (
 	"errors"
 	"io"
 	"net"
-	"time"
 
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/operation"
+	mysqlUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
 	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
@@ -55,7 +55,7 @@ func encode(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 
 			decodeCtx.LastOp.Store(clientConn, operation.RESET) //resetting last command for new loop
 
-			data, source, err := readFirstBuffer(ctx, logger, clientConn, destConn)
+			data, source, err := mysqlUtils.ReadFirstBuffer(ctx, logger, clientConn, destConn)
 			if len(data) == 0 {
 				break
 			}
@@ -66,7 +66,7 @@ func encode(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 			}
 
 			// Getting timestamp for the request
-			reqTimestamp := time.Now()
+			// reqTimestamp := time.Now()
 
 			switch source {
 			case "destination":

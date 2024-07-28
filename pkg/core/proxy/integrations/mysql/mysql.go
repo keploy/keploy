@@ -55,7 +55,7 @@ func (m *MySQL) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrat
 	return nil
 }
 
-func recordMySQLMessage(_ context.Context, mysqlRequests []models.MySQLRequest, mysqlResponses []models.MySQLResponse, name, operation, responseOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time) {
+func recordMock(_ context.Context, mysqlRequests []models.MySQLRequest, mysqlResponses []models.MySQLResponse, name, operation, responseOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time) {
 	meta := map[string]string{
 		"type":              name,
 		"operation":         operation,
