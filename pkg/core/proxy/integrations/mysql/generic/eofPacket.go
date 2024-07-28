@@ -4,6 +4,7 @@
 package generic
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 
@@ -12,7 +13,7 @@ import (
 
 //ref: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_basic_eof_packet.html
 
-func DecodeEOF(data []byte, capabilities uint32) (*mysql.EOFPacket, error) {
+func DecodeEOF(_ context.Context, data []byte, capabilities uint32) (*mysql.EOFPacket, error) {
 	if len(data) > 5 {
 		return nil, fmt.Errorf("EOF packet too long for EOF")
 	}

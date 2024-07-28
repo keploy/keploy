@@ -1,70 +1,34 @@
 package mysql
 
-//TODO: need to add more comments for related constants
-
-// MySQL constants
+// Basic Response Packet Status
 const (
-	TypeDecimal    byte = 0x00
-	TypeTiny       byte = 0x01
-	TypeShort      byte = 0x02
-	TypeLong       byte = 0x03
-	TypeFloat      byte = 0x04
-	TypeDouble     byte = 0x05
-	TypeNull       byte = 0x06
-	TypeTimestamp  byte = 0x07
-	TypeLongLong   byte = 0x08
-	TypeInt24      byte = 0x09
-	TypeDate       byte = 0x0a
-	TypeTime       byte = 0x0b
-	TypeDateTime   byte = 0x0c
-	TypeYear       byte = 0x0d
-	TypeNewDate    byte = 0x0e
-	TypeVarChar    byte = 0x0f
-	TypeBit        byte = 0x10
-	TypeNewDecimal byte = 0xf6
-	TypeEnum       byte = 0xf7
-	TypeSet        byte = 0xf8
-	TypeTinyBlob   byte = 0xf9
-	TypeMediumBlob byte = 0xfa
-	TypeLongBlob   byte = 0xfb
-	TypeBlob       byte = 0xfc
-	TypeVarString  byte = 0xfd
-	TypeString     byte = 0xfe
-	TypeGeometry   byte = 0xff
+	OK  byte = 0x00
+	ERR byte = 0xff
+	EOF byte = 0xfe
 )
 
-// MySQL constants
+// LocalInFile Request packet type is not supported
+const LocalInFile = 0xfb
+
+// Auth Packet Status
 const (
-	HeaderSize         = 1024
-	OKPacketResulSet   = 0x00
-	EOFPacketResultSet = 0xfe
-	LengthEncodedInt   = 0xfb
+	AuthSwitchRequest   byte = 0xfe
+	AuthMoreData        byte = 0x01
+	AuthNextFactor      byte = 0x02
+	HandshakeV10        byte = 0x0a
+	HandshakeResponse41 byte = 0x8d
 )
 
-// MySQL constants
+type CachingSha2Password byte
+
+// CachingSha2Password constants
 const (
-	OK               = 0x00
-	ERR              = 0xff
-	LocalInFile      = 0xfb
-	EOF         byte = 0xfe
+	RequestPublicKey          CachingSha2Password = 2
+	FastAuthSuccess           CachingSha2Password = 3
+	PerformFullAuthentication CachingSha2Password = 4
 )
 
-// MySQL constants
-const (
-	AuthMoreData                                 byte = 0x01
-	CachingSha2PasswordRequestPublicKey          byte = 2
-	CachingSha2PasswordFastAuthSuccess           byte = 3
-	CachingSha2PasswordPerformFullAuthentication byte = 4
-)
-
-// MySQL constants
-const (
-	MaxPacketSize = 1<<24 - 1
-)
-
-type CapabilityFlags uint32
-
-// MySQL constants
+// Client Capability Flags
 const (
 	// https://dev.mysql.com/doc/dev/mysql-server/latest/group__group__cs__capabilities__flags.html
 
@@ -104,7 +68,7 @@ const (
 
 type FieldType byte
 
-// MySQL constants
+// Field Types
 const (
 	FieldTypeDecimal FieldType = iota
 	FieldTypeTiny
@@ -125,7 +89,7 @@ const (
 	FieldTypeBit
 )
 
-// MySQL constants
+// Additional Field Types
 const (
 	FieldTypeJSON FieldType = iota + 0xf5
 	FieldTypeNewDecimal
@@ -140,7 +104,7 @@ const (
 	FieldTypeGeometry
 )
 
-// MySQL constants
+// Field Flags
 const (
 	NOT_NULL_FLAG       = 1
 	PRI_KEY_FLAG        = 2
@@ -158,3 +122,110 @@ const (
 	GROUP_FLAG          = 32768
 	UNIQUE_FLAG         = 65536
 )
+
+// Utility command Packet Status
+const (
+	COM_QUIT             byte = 0x01
+	COM_INIT_DB          byte = 0x02
+	COM_FIELD_LIST       byte = 0x04
+	COM_STATISTICS       byte = 0x08
+	COM_DEBUG            byte = 0x0d
+	COM_PING             byte = 0x0e
+	COM_CHANGE_USER      byte = 0x11
+	COM_RESET_CONNECTION byte = 0x1f
+	// COM_SET_OPTION       byte = 0x1a
+)
+
+// Command Packet Status
+const (
+	COM_QUERY        byte = 0x03
+	COM_STMT_PREPARE byte = 0x16
+	COM_STMT_EXECUTE byte = 0x17
+	// COM_STMT_FETCH          byte = 0x19
+	COM_STMT_CLOSE          byte = 0x19
+	COM_STMT_RESET          byte = 0x1a
+	COM_STMT_SEND_LONG_DATA byte = 0x18
+)
+
+// ResultSet packets
+type ResultSet string
+
+// ResultSet types
+const (
+	Binary ResultSet = "BinaryProtocolResultSet"
+	Text   ResultSet = "TextResultSet"
+)
+
+// Define the maps for basic response packets
+var statusToString = map[byte]string{
+	OK:          "OK",
+	ERR:         "ERR",
+	EOF:         "EOF",
+	LocalInFile: "LocalInFile",
+}
+
+// Define the maps for auth packet status
+var authStatusToString = map[byte]string{
+	AuthSwitchRequest:   "AuthSwitchRequest",
+	AuthMoreData:        "AuthMoreData",
+	AuthNextFactor:      "AuthNextFactor",
+	HandshakeV10:        "HandshakeV10",
+	HandshakeResponse41: "HandshakeResponse41",
+}
+
+// Define the map for command packet status
+var commandStatusToString = map[byte]string{
+	//utility command
+	COM_QUIT:             "COM_QUIT",
+	COM_INIT_DB:          "COM_INIT_DB",
+	COM_FIELD_LIST:       "COM_FIELD_LIST",
+	COM_STATISTICS:       "COM_STATISTICS",
+	COM_DEBUG:            "COM_DEBUG",
+	COM_PING:             "COM_PING",
+	COM_CHANGE_USER:      "COM_CHANGE_USER",
+	COM_RESET_CONNECTION: "COM_RESET_CONNECTION",
+	// COM_SET_OPTION:       "COM_SET_OPTION",
+	// command
+	COM_QUERY:        "COM_QUERY",
+	COM_STMT_PREPARE: "COM_STMT_PREPARE",
+	COM_STMT_EXECUTE: "COM_STMT_EXECUTE",
+	// COM_STMT_FETCH:          "COM_STMT_FETCH",
+	COM_STMT_CLOSE:          "COM_STMT_CLOSE",
+	COM_STMT_RESET:          "COM_STMT_RESET",
+	COM_STMT_SEND_LONG_DATA: "COM_STMT_SEND_LONG_DATA",
+}
+
+// Define the map for cachingSha2Password
+var cachingSha2PasswordToString = map[CachingSha2Password]string{
+	RequestPublicKey:          "RequestPublicKey",
+	FastAuthSuccess:           "FastAuthSuccess",
+	PerformFullAuthentication: "PerformFullAuthentication",
+}
+
+func StatusToString(status byte) string {
+	if str, ok := statusToString[status]; ok {
+		return str
+	}
+	return "UNKNOWN"
+}
+
+func AuthStatusToString(status byte) string {
+	if str, ok := authStatusToString[status]; ok {
+		return str
+	}
+	return "UNKNOWN"
+}
+
+func CommandStatusToString(status byte) string {
+	if str, ok := commandStatusToString[status]; ok {
+		return str
+	}
+	return "UNKNOWN"
+}
+
+func CachingSha2PasswordToString(status CachingSha2Password) string {
+	if str, ok := cachingSha2PasswordToString[status]; ok {
+		return str
+	}
+	return "UNKNOWN"
+}

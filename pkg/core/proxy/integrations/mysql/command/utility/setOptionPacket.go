@@ -3,6 +3,7 @@
 package utility
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 
@@ -11,7 +12,7 @@ import (
 
 //COM_SET_OPTION: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_set_option.html
 
-func DecodeSetOption(data []byte) (*mysql.SetOptionPacket, error) {
+func DecodeSetOption(_ context.Context, data []byte) (*mysql.SetOptionPacket, error) {
 	if len(data) < 3 {
 		return nil, fmt.Errorf("set option packet too short")
 	}

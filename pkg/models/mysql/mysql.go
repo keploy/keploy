@@ -32,14 +32,17 @@ type PacketInfo struct {
 }
 
 type Request struct {
-	Header  *PacketInfo `json:"header" yaml:"header"`
-	Message interface{} `json:"message" yaml:"message"`
+	PacketBundle `json:"packet_bundle" yaml:"packet_bundle"`
 }
 
 type Response struct {
+	PacketBundle `json:"packet_bundle" yaml:"packet_bundle"`
+	Payload      string `json:"payload,omitempty" yaml:"payload,omitempty"`
+}
+
+type PacketBundle struct {
 	Header  *PacketInfo `json:"header" yaml:"header"`
 	Message interface{} `json:"message" yaml:"message"`
-	Payload string      `json:"payload,omitempty" yaml:"payload,omitempty"`
 }
 
 // MySql Packet

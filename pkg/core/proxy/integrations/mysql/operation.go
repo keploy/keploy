@@ -15,7 +15,6 @@ import (
 	"go.uber.org/zap"
 )
 
-type CapabilityFlags uint32
 
 var handshakePluginName string
 

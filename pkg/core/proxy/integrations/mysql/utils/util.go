@@ -5,8 +5,34 @@ package utils
 
 import (
 	"bytes"
+	"encoding/binary"
+	"errors"
 	"io"
+
+	"go.keploy.io/server/v2/pkg/models/mysql"
 )
+
+// BytesToMySQLPacket converts a byte slice to a MySQL packet
+func BytesToMySQLPacket(buffer []byte) (mysql.Packet, error) {
+	if buffer == nil || len(buffer) < 4 {
+		return mysql.Packet{}, errors.New("buffer is nil or too short to be a valid MySQL packet")
+	}
+
+	tempBuffer := make([]byte, 4)
+	copy(tempBuffer, buffer[:3])
+	length := binary.LittleEndian.Uint32(tempBuffer)
+	sequenceID := buffer[3]
+
+	payload := buffer[4:]
+
+	return mysql.Packet{
+		Header: mysql.Header{
+			PayloadLength: length,
+			SequenceID:    sequenceID,
+		},
+		Payload: payload,
+	}, nil
+}
 
 func ReadLengthEncodedInteger(b []byte) (num uint64, isNull bool, n int) {
 	if len(b) == 0 {
