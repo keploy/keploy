@@ -54,7 +54,7 @@ func NewGreetings() *ServerGreetings {
 	}
 }
 
-func (sg *ServerGreetings) load(key net.Conn) (*mysql.HandshakeV10Packet, bool) {
+func (sg *ServerGreetings) Load(key net.Conn) (*mysql.HandshakeV10Packet, bool) {
 	sg.RLock()
 	result, ok := sg.handshakes[key]
 	sg.RUnlock()
@@ -70,5 +70,5 @@ func (sg *ServerGreetings) store(key net.Conn, value *mysql.HandshakeV10Packet) 
 func setPacketInfo(_ context.Context, parsedPacket *mysql.PacketBundle, pkt interface{}, pktType string, lastOp byte, decodeCtx *DecodeContext) {
 	parsedPacket.Header.Type = pktType
 	parsedPacket.Message = pkt
-	decodeCtx.LastOp.Store(decodeCtx.clientConn, lastOp)
+	decodeCtx.LastOp.Store(decodeCtx.ClientConn, lastOp)
 }

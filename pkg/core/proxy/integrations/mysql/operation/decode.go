@@ -34,7 +34,7 @@ import (
 
 type DecodeContext struct {
 	Mode               models.Mode
-	clientConn         net.Conn
+	ClientConn         net.Conn
 	LastOp             *LastOperation
 	PreparedStatements map[uint32]*mysql.StmtPrepareOkPacket
 	ServerGreetings    *ServerGreetings
@@ -83,7 +83,7 @@ func handleQueryStmtResponse(ctx context.Context, logger *zap.Logger, packet mys
 
 	payloadType := payload[0]
 
-	sg, ok := decodeCtx.ServerGreetings.load(decodeCtx.clientConn)
+	sg, ok := decodeCtx.ServerGreetings.Load(decodeCtx.ClientConn)
 	if !ok {
 		return parsedPacket, fmt.Errorf("Server Greetings not found")
 	}
@@ -108,7 +108,7 @@ func handleQueryStmtResponse(ctx context.Context, logger *zap.Logger, packet mys
 
 	case mysql.LocalInFile:
 		parsedPacket.Header.Type = "LocalInFile"
-		decodeCtx.LastOp.Store(decodeCtx.clientConn, RESET) //reset the last operation
+		decodeCtx.LastOp.Store(decodeCtx.ClientConn, RESET) //reset the last operation
 		return parsedPacket, fmt.Errorf("LocalInFile not supported")
 	default:
 		//If the packet is not OK, ERR or LocalInFile, then it is a result set
@@ -146,7 +146,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 
 	payloadType := payload[0]
 
-	sg, ok := decodeCtx.ServerGreetings.load(decodeCtx.clientConn)
+	sg, ok := decodeCtx.ServerGreetings.Load(decodeCtx.ClientConn)
 	if !ok {
 		return parsedPacket, fmt.Errorf("Server Greetings not found")
 	}
@@ -204,15 +204,19 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		} else {
 			//otherwise it is a AuthMoreData packet
 			logger.Debug("AuthMoreData packet", zap.Any("Type", payloadType))
-
+			pkt, err := connection.DecodeAuthMoreData(ctx, payload)
+			if err != nil {
+				return parsedPacket, fmt.Errorf("failed to decode AuthMoreData packet: %w", err)
+			}
+			setPacketInfo(ctx, parsedPacket, pkt, mysql.AuthStatusToString(mysql.AuthMoreData), mysql.AuthMoreData, decodeCtx)
 		}
 	case payloadType == mysql.AuthSwitchRequest && len(payload) > 5:
 		logger.Debug("AuthSwitchRequest packet", zap.Any("Type", payloadType))
 		return parsedPacket, fmt.Errorf("AuthSwitchRequest not supported")
-	case payloadType == mysql.AuthNextFactor:
+	case payloadType == 0x02:
 		if len(payload) == 1 {
 			logger.Debug(("Request public key detected"))
-			setPacketInfo(ctx, parsedPacket, nil, mysql.CachingSha2PasswordToString(mysql.RequestPublicKey), byte(mysql.RequestPublicKey), decodeCtx)
+			setPacketInfo(ctx, parsedPacket, "request_public_key", mysql.CachingSha2PasswordToString(mysql.RequestPublicKey), byte(mysql.RequestPublicKey), decodeCtx)
 		} else {
 			logger.Debug("AuthNextFactor packet", zap.Any("Type", payloadType))
 			err := connection.DecodeAuthNextFactor(ctx, payload)
@@ -227,7 +231,8 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode HandshakeV10 packet: %w", err)
 		}
-
+		// Store the server greetings to use it later
+		decodeCtx.ServerGreetings.store(decodeCtx.ClientConn, pkt)
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.AuthStatusToString(mysql.HandshakeV10), mysql.HandshakeV10, decodeCtx)
 	case payloadType == mysql.HandshakeResponse41:
 		logger.Debug("HandshakeResponse41 packet", zap.Any("Type", payloadType))
@@ -384,7 +389,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 	}
 
 	if decodeCtx.Mode == models.MODE_TEST {
-		decodeCtx.LastOp.Store(decodeCtx.clientConn, RESET) //reset the last operation
+		decodeCtx.LastOp.Store(decodeCtx.ClientConn, RESET) //reset the last operation
 	}
 
 	return parsedPacket, nil

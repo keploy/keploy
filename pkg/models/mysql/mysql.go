@@ -41,8 +41,9 @@ type Response struct {
 }
 
 type PacketBundle struct {
-	Header  *PacketInfo `json:"header" yaml:"header"`
-	Message interface{} `json:"message" yaml:"message"`
+	Header  *PacketInfo       `json:"header" yaml:"header"`
+	Message interface{}       `json:"message" yaml:"message"`
+	Meta    map[string]string `json:"meta,omitempty" yaml:"meta,omitempty"`
 }
 
 // MySql Packet
