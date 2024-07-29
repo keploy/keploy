@@ -176,7 +176,7 @@ func handleCachingSha2Password(ctx context.Context, logger *zap.Logger, authMore
 		responses = append(responses, res...)
 
 	case mysql.FastAuthSuccess:
-		req, res, err := handleFastAuthSuccess(ctx, logger, authMorePkt, clientConn, decodeCtx)
+		req, res, err := handleFastAuthSuccess(ctx, logger, authMorePkt, clientConn, destConn, decodeCtx)
 		if err != nil {
 			return requests, responses, fmt.Errorf("failed to handle caching sha2 password fast auth success: %w", err)
 		}
@@ -187,7 +187,7 @@ func handleCachingSha2Password(ctx context.Context, logger *zap.Logger, authMore
 	return requests, responses, nil
 }
 
-func handleFastAuthSuccess(ctx context.Context, _ *zap.Logger, authMorePkt *mysql.PacketBundle, clientConn net.Conn, decodeCtx *operation.DecodeContext) ([]mysql.Request, []mysql.Response, error) {
+func handleFastAuthSuccess(ctx context.Context, logger *zap.Logger, authMorePkt *mysql.PacketBundle, clientConn, destConn net.Conn, decodeCtx *operation.DecodeContext) ([]mysql.Request, []mysql.Response, error) {
 	var (
 		requests  []mysql.Request
 		responses []mysql.Response
@@ -205,9 +205,6 @@ func handleFastAuthSuccess(ctx context.Context, _ *zap.Logger, authMorePkt *mysq
 	operation.PrintByteArray("Auth data in fast auth", []byte(authPktPayload.Data))
 
 	authData := []byte(authPktPayload.Data)
-	if len(authData) == 1 {
-		return requests, responses, fmt.Errorf("invalid auth data length, expected more data for ok packet")
-	}
 
 	// update the auth more data and separate the ok packet
 	// (rather than saving the actual status tag i.e (0x03) saving the string for readability
@@ -218,7 +215,45 @@ func handleFastAuthSuccess(ctx context.Context, _ *zap.Logger, authMorePkt *mysq
 		PacketBundle: *authMorePkt,
 	})
 
-	okData := authData[1:]
+	okAfterAuth := true
+	if len(authData) == 1 {
+		okAfterAuth = false
+		logger.Debug("auth data length is 1, expected ok packet is not attached with auth data")
+	}
+
+	var okData []byte
+	var err error
+	if okAfterAuth {
+		//debug log
+		logger.Info("auth data length is more than 1, expected ok packet is attached with auth data")
+		okData = authData[1:]
+	} else {
+		//debug log
+		logger.Info("auth data length is 1, expected ok packet is not attached with auth data")
+
+		// read the ok packet from the server as it is not attached with the auth data
+		okData, err = pUtil.ReadBytes(ctx, logger, destConn)
+		if err != nil {
+			if err == io.EOF {
+				logger.Debug("received request buffer is empty in record mode for mysql call")
+				return requests, responses, err
+			}
+			utils.LogError(logger, err, "failed to read OK packet from server")
+			return requests, responses, err
+		}
+
+		// write the ok packet to the client
+		_, err = clientConn.Write(okData)
+		if err != nil {
+			if ctx.Err() != nil {
+				return requests, responses, ctx.Err()
+			}
+			utils.LogError(logger, err, "failed to write ok packet to client after handshake")
+			return requests, responses, err
+		}
+
+	}
+
 	okPacket, err := mysqlUtils.BytesToMySQLPacket(okData)
 	if err != nil {
 		return requests, responses, fmt.Errorf("failed to parse MySQL packet: %w", err)

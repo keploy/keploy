@@ -60,6 +60,12 @@ func BytesToMySQLPacket(buffer []byte) (mysql.Packet, error) {
 	}, nil
 }
 
+// GetPayloadLength returns the length of the payload from the first 3 bytes of the packet.
+func GetPayloadLength(src []byte) (length int32) {
+	length = int32(src[0]) | int32(src[1])<<8 | int32(src[2])<<16
+	return length
+}
+
 func ReadLengthEncodedInteger(b []byte) (num uint64, isNull bool, n int) {
 	if len(b) == 0 {
 		return 0, true, 0
