@@ -95,6 +95,7 @@ type Test struct {
 	BasePath           string              `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
 	Mocking            bool                `json:"mocking" yaml:"mocking" mapstructure:"mocking"`
 	IgnoredTests       map[string][]string `json:"ignoredTests" yaml:"ignoredTests" mapstructure:"ignoredTests"`
+	SkipPreview        bool                `json:"skipPreview" yaml:"skipPreview" mapstructure:"skipPreview"`
 }
 
 type Language string
