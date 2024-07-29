@@ -42,8 +42,7 @@ func encode(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 
 		// Helper struct for decoding packets
 		decodeCtx := &operation.DecodeContext{
-			Mode:       models.MODE_RECORD,
-			ClientConn: clientConn,
+			Mode: models.MODE_RECORD,
 			// Map for storing last operation per connection
 			LastOp: operation.NewLastOpMap(),
 			// Map for storing server greetings (inc capabilities, auth plugin, etc) per initial handshake (per connection)
@@ -80,6 +79,10 @@ func encode(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 				}
 				requests = append(requests, result.req...)
 				responses = append(responses, result.resp...)
+
+				lstOp, _ := decodeCtx.LastOp.Load(clientConn)
+				//debug log
+				logger.Info("last operation after initial handshake", zap.Any("last operation", lstOp))
 
 				// record the mock
 				recordMock(ctx, requests, responses, "config", result.requestOperation, result.responseOperation, mocks, reqTimestamp)

@@ -67,8 +67,8 @@ func (sg *ServerGreetings) store(key net.Conn, value *mysql.HandshakeV10Packet) 
 	sg.Unlock()
 }
 
-func setPacketInfo(_ context.Context, parsedPacket *mysql.PacketBundle, pkt interface{}, pktType string, lastOp byte, decodeCtx *DecodeContext) {
+func setPacketInfo(_ context.Context, parsedPacket *mysql.PacketBundle, pkt interface{}, pktType string, clientConn net.Conn, lastOp byte, decodeCtx *DecodeContext) {
 	parsedPacket.Header.Type = pktType
 	parsedPacket.Message = pkt
-	decodeCtx.LastOp.Store(decodeCtx.ClientConn, lastOp)
+	decodeCtx.LastOp.Store(clientConn, lastOp)
 }

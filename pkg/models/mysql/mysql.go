@@ -16,14 +16,16 @@ type Spec struct {
 }
 
 type RequestYaml struct {
-	Header  *PacketInfo `json:"header,omitempty" yaml:"header"`
-	Message yaml.Node   `json:"message,omitempty" yaml:"message"`
+	Header  *PacketInfo       `json:"header,omitempty" yaml:"header"`
+	Meta    map[string]string `json:"meta,omitempty" yaml:"meta,omitempty"`
+	Message yaml.Node         `json:"message,omitempty" yaml:"message"`
 }
 
 type ResponseYaml struct {
-	Header  *PacketInfo `json:"header,omitempty" yaml:"header"`
-	Message yaml.Node   `json:"message,omitempty" yaml:"message"`
-	Payload string      `json:"payload,omitempty" yaml:"payload,omitempty"`
+	Header  *PacketInfo       `json:"header,omitempty" yaml:"header"`
+	Meta    map[string]string `json:"meta,omitempty" yaml:"meta,omitempty"`
+	Message yaml.Node         `json:"message,omitempty" yaml:"message"`
+	Payload string            `json:"payload,omitempty" yaml:"payload,omitempty"`
 }
 
 type PacketInfo struct {

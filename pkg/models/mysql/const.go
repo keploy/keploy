@@ -12,11 +12,15 @@ const LocalInFile = 0xfb
 
 // Auth Packet Status
 const (
-	AuthSwitchRequest   byte = 0xfe
-	AuthMoreData        byte = 0x01
-	AuthNextFactor      byte = 0x02
-	HandshakeV10        byte = 0x0a
-	HandshakeResponse41 byte = 0x8d
+	AuthSwitchRequest byte = 0xfe
+	AuthMoreData      byte = 0x01
+	AuthNextFactor    byte = 0x02
+	HandshakeV10      byte = 0x0a
+)
+
+// Some constants for MySQL
+const (
+	HandshakeResponse41 = "HandshakeResponse41"
 )
 
 type CachingSha2Password byte
@@ -145,6 +149,7 @@ const (
 	COM_STMT_CLOSE          byte = 0x19
 	COM_STMT_RESET          byte = 0x1a
 	COM_STMT_SEND_LONG_DATA byte = 0x18
+	COM_TIME                byte = 0x0f
 )
 
 // ResultSet packets
@@ -166,11 +171,10 @@ var statusToString = map[byte]string{
 
 // Define the maps for auth packet status
 var authStatusToString = map[byte]string{
-	AuthSwitchRequest:   "AuthSwitchRequest",
-	AuthMoreData:        "AuthMoreData",
-	AuthNextFactor:      "AuthNextFactor",
-	HandshakeV10:        "HandshakeV10",
-	HandshakeResponse41: "HandshakeResponse41",
+	AuthSwitchRequest: "AuthSwitchRequest",
+	AuthMoreData:      "AuthMoreData",
+	AuthNextFactor:    "AuthNextFactor",
+	HandshakeV10:      "HandshakeV10",
 }
 
 // Define the map for command packet status
@@ -193,6 +197,9 @@ var commandStatusToString = map[byte]string{
 	COM_STMT_CLOSE:          "COM_STMT_CLOSE",
 	COM_STMT_RESET:          "COM_STMT_RESET",
 	COM_STMT_SEND_LONG_DATA: "COM_STMT_SEND_LONG_DATA",
+
+	//Some extra commands
+	COM_TIME: "COM_TIME",
 }
 
 // Define the map for cachingSha2Password

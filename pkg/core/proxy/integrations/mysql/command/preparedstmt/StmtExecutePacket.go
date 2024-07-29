@@ -39,7 +39,12 @@ func DecodeStmtExecute(_ context.Context, _ *zap.Logger, data []byte, preparedSt
 	packet.StatementID = binary.LittleEndian.Uint32(data[pos : pos+4])
 	pos += 4
 
-	packet.ParameterCount = int(preparedStmts[packet.StatementID].NumParams)
+	numParams, ok := preparedStmts[packet.StatementID]
+	if !ok && numParams == nil {
+		return nil, fmt.Errorf("prepared statement with ID %d not found", packet.StatementID)
+	}
+
+	packet.ParameterCount = int(numParams.NumParams)
 
 	// Read Flags
 	if pos+1 > len(data) {

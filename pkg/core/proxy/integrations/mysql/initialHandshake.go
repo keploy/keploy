@@ -26,18 +26,15 @@ type handshakeRes struct {
 
 func handleInitialHandshake(ctx context.Context, logger *zap.Logger, data []byte, clientConn, destConn net.Conn, decodeCtx *operation.DecodeContext) (handshakeRes, error) {
 	var (
-		requests  []mysql.Request
-		responses []mysql.Response
+		err error
 	)
 
-	var err error
-
 	res := handshakeRes{
-		req:  requests,
-		resp: responses,
+		req:  make([]mysql.Request, 0),
+		resp: make([]mysql.Response, 0),
 	}
 
-	// intial Handshake from server
+	// Initial Handshake from server
 	handshake := data
 	_, err = clientConn.Write(handshake)
 	if err != nil {
@@ -49,22 +46,22 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, data []byte
 		return res, err
 	}
 
-	// decode server handshake packet
+	// Decode server handshake packet
 	handshakePkt, err := operation.DecodePayload(ctx, logger, handshake, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode handshake packet")
 		return res, err
 	}
 
-	responses = append(responses, mysql.Response{
+	res.resp = append(res.resp, mysql.Response{
 		PacketBundle: *handshakePkt,
 	})
 
-	// handshake response from client
+	// Handshake response from client
 	handshakeResponse, err := pUtil.ReadBytes(ctx, logger, clientConn)
 	if err != nil {
 		if err == io.EOF {
-			logger.Debug("recieved request buffer is empty in record mode for mysql call")
+			logger.Debug("received request buffer is empty in record mode for mysql call")
 
 			return res, err
 		}
@@ -83,22 +80,22 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, data []byte
 		return res, err
 	}
 
-	// decode client handshake response packet
-	handshakeResponsePkt, err := operation.DecodePayload(ctx, logger, handshakeResponse, destConn, decodeCtx)
+	// Decode client handshake response packet
+	handshakeResponsePkt, err := operation.DecodePayload(ctx, logger, handshakeResponse, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode handshake response packet")
 		return res, err
 	}
 
-	requests = append(requests, mysql.Request{
+	res.req = append(res.req, mysql.Request{
 		PacketBundle: *handshakeResponsePkt,
 	})
 
-	// read the auth more data in order to get the auth type
+	// Read the auth more data in order to get the auth type
 	authMoreData, err := pUtil.ReadBytes(ctx, logger, destConn)
 	if err != nil {
 		if err == io.EOF {
-			logger.Debug("recieved request buffer is empty in record mode for mysql call")
+			logger.Debug("received request buffer is empty in record mode for mysql call")
 
 			return res, err
 		}
@@ -106,7 +103,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, data []byte
 		return res, err
 	}
 
-	// tell the auth type to the client
+	// Tell the auth type to the client
 	_, err = clientConn.Write(authMoreData)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -116,7 +113,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, data []byte
 		return res, err
 	}
 
-	// decode auth more data packet
+	// Decode auth more data packet
 	authMorePkt, err := operation.DecodePayload(ctx, logger, authMoreData, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode auth more data packet")
@@ -128,16 +125,27 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, data []byte
 		return res, fmt.Errorf("failed to cast message to HandshakeV10Packet")
 	}
 
-	if serverMsg.AuthPluginName == CachingSha2Password {
-		req, resp, err := handleCachingSha2Password(ctx, logger, authMorePkt, clientConn, destConn, decodeCtx)
+	var req []mysql.Request
+	var resp []mysql.Response
+
+	switch serverMsg.AuthPluginName {
+	case NativePassword:
+		return res, fmt.Errorf("Native Password authentication is not supported")
+	case CachingSha2Password:
+		req, resp, err = handleCachingSha2Password(ctx, logger, authMorePkt, clientConn, destConn, decodeCtx)
 		if err != nil {
 			return res, err
 		}
-		requests = append(requests, req...)
-		responses = append(responses, resp...)
+	case Sha256Password:
+		return res, fmt.Errorf("Sha256 Password authentication is not supported")
+	default:
+		return res, fmt.Errorf("unsupported authentication plugin: %s", serverMsg.AuthPluginName)
 	}
 
-	res.requestOperation = mysql.AuthStatusToString(mysql.HandshakeResponse41)
+	res.req = append(res.req, req...)
+	res.resp = append(res.resp, resp...)
+
+	res.requestOperation = mysql.HandshakeResponse41
 	res.responseOperation = fmt.Sprintf("%s Authentication", serverMsg.AuthPluginName)
 
 	return res, nil
@@ -179,7 +187,7 @@ func handleCachingSha2Password(ctx context.Context, logger *zap.Logger, authMore
 	return requests, responses, nil
 }
 
-func handleFastAuthSuccess(ctx context.Context, logger *zap.Logger, authMorePkt *mysql.PacketBundle, clientConn net.Conn, decodeCtx *operation.DecodeContext) ([]mysql.Request, []mysql.Response, error) {
+func handleFastAuthSuccess(ctx context.Context, _ *zap.Logger, authMorePkt *mysql.PacketBundle, clientConn net.Conn, decodeCtx *operation.DecodeContext) ([]mysql.Request, []mysql.Response, error) {
 	var (
 		requests  []mysql.Request
 		responses []mysql.Response
@@ -193,13 +201,17 @@ func handleFastAuthSuccess(ctx context.Context, logger *zap.Logger, authMorePkt 
 		return requests, responses, fmt.Errorf("failed to cast message to AuthMoreDataPacket")
 	}
 
+	//debug log
+	operation.PrintByteArray("Auth data in fast auth", []byte(authPktPayload.Data))
+
 	authData := []byte(authPktPayload.Data)
 	if len(authData) == 1 {
 		return requests, responses, fmt.Errorf("invalid auth data length, expected more data for ok packet")
 	}
 
 	// update the auth more data and separate the ok packet
-	authPktPayload.Data = string(authData[0])
+	// (rather than saving the actual status tag i.e (0x03) saving the string for readability
+	authPktPayload.Data = mysql.CachingSha2PasswordToString(mysql.FastAuthSuccess)
 
 	// add auth more data packet to the response
 	responses = append(responses, mysql.Response{
@@ -213,7 +225,7 @@ func handleFastAuthSuccess(ctx context.Context, logger *zap.Logger, authMorePkt 
 	}
 
 	//get the server greeting to decode the ok packet
-	sg, ok := decodeCtx.ServerGreetings.Load(decodeCtx.ClientConn)
+	sg, ok := decodeCtx.ServerGreetings.Load(clientConn)
 	if !ok {
 		return requests, responses, fmt.Errorf("Server Greetings not found")
 	}
@@ -224,7 +236,7 @@ func handleFastAuthSuccess(ctx context.Context, logger *zap.Logger, authMorePkt 
 	}
 
 	//update the last operation from auth more data packet to ok packet
-	decodeCtx.LastOp.Store(decodeCtx.ClientConn, mysql.OK)
+	decodeCtx.LastOp.Store(clientConn, mysql.OK)
 
 	okPacketBundle := mysql.PacketBundle{
 		Header: &mysql.PacketInfo{
@@ -246,6 +258,9 @@ func handleFullAuth(ctx context.Context, logger *zap.Logger, authMorePkt *mysql.
 		requests  []mysql.Request
 		responses []mysql.Response
 	)
+
+	// rather than saving the actual status tag i.e (0x04) saving the string for readability
+	authMorePkt.Message = mysql.CachingSha2PasswordToString(mysql.PerformFullAuthentication)
 
 	// add auth more data packet to the response (authData is just 1 length and contains just the auth type in case of full auth)
 	responses = append(responses, mysql.Response{
@@ -292,12 +307,18 @@ func handleFullAuth(ctx context.Context, logger *zap.Logger, authMorePkt *mysql.
 		return requests, responses, err
 	}
 
-	pubKeyPkt, err := operation.DecodePayload(ctx, logger, pubKey, destConn, decodeCtx)
+	pubKeyPkt, err := operation.DecodePayload(ctx, logger, pubKey, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode public key packet")
 		return requests, responses, err
 	}
-	pubKeyPkt.Meta["auth operation"] = "public key response"
+
+	pubKeyPkt.Meta = map[string]string{
+		"auth operation": "public key response",
+	}
+
+	//debug log
+	logger.Info("public key response meta", zap.Any("public key meta", pubKeyPkt.Meta))
 
 	responses = append(responses, mysql.Response{
 		PacketBundle: *pubKeyPkt,
@@ -353,7 +374,7 @@ func handleFullAuth(ctx context.Context, logger *zap.Logger, authMorePkt *mysql.
 		return requests, responses, err
 	}
 
-	finalResPkt, err := operation.DecodePayload(ctx, logger, finalServerResponse, destConn, decodeCtx)
+	finalResPkt, err := operation.DecodePayload(ctx, logger, finalServerResponse, clientConn, decodeCtx)
 
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode final response packet during caching sha2 password full auth")

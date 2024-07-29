@@ -9,6 +9,7 @@ const (
 	Sha256Password      = "sha256_password"
 )
 
+// Some constants for MySQL
 const (
 	EncryptedPassword = "encrypted_password"
 )

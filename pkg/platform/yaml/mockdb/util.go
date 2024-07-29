@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.keploy.io/server/v2/utils"
 	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
@@ -130,12 +131,12 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			return nil, err
 		}
 	case models.SQL:
-		requests := []models.MysqlRequestYaml{}
+		requests := []mysql.RequestYaml{}
 		for _, v := range mock.Spec.MySQLRequests {
 
-			req := models.MysqlRequestYaml{
-				Header:    v.Header,
-				ReadDelay: v.ReadDelay,
+			req := mysql.RequestYaml{
+				Header: v.Header,
+				Meta:   v.Meta,
 			}
 			err := req.Message.Encode(v.Message)
 			if err != nil {
@@ -144,11 +145,11 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			}
 			requests = append(requests, req)
 		}
-		responses := []models.MysqlResponseYaml{}
+		responses := []mysql.ResponseYaml{}
 		for _, v := range mock.Spec.MySQLResponses {
-			resp := models.MysqlResponseYaml{
-				Header:    v.Header,
-				ReadDelay: v.ReadDelay,
+			resp := mysql.ResponseYaml{
+				Header: v.Header,
+				Meta:   v.Meta,
 			}
 			err := resp.Message.Encode(v.Message)
 			if err != nil {
@@ -158,7 +159,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			responses = append(responses, resp)
 		}
 
-		sqlSpec := models.MySQLSpec{
+		sqlSpec := mysql.Spec{
 			Metadata:         mock.Spec.Metadata,
 			Requests:         requests,
 			Response:         responses,
@@ -284,19 +285,19 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				ReqTimestampMock:  PostSpec.ReqTimestampMock,
 				ResTimestampMock:  PostSpec.ResTimestampMock,
 			}
-		case models.SQL:
-			mysqlSpec := models.MySQLSpec{}
-			err := m.Spec.Decode(&mysqlSpec)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal a yaml doc into mysql mock", zap.Any("mock name", m.Name))
-				return nil, err
-			}
+		// case models.SQL:
+		// 	mysqlSpec := models.MySQLSpec{}
+		// 	err := m.Spec.Decode(&mysqlSpec)
+		// 	if err != nil {
+		// 		utils.LogError(logger, err, "failed to unmarshal a yaml doc into mysql mock", zap.Any("mock name", m.Name))
+		// 		return nil, err
+		// 	}
 
-			mockSpec, err := decodeMySQLMessage(&mysqlSpec, logger)
-			if err != nil {
-				return nil, err
-			}
-			mock.Spec = *mockSpec
+		// 	mockSpec, err := decodeMySQLMessage(&mysqlSpec, logger)
+		// 	if err != nil {
+		// 		return nil, err
+		// 	}
+		// 	mock.Spec = *mockSpec
 		default:
 			utils.LogError(logger, nil, "failed to unmarshal a mock yaml doc of unknown type", zap.Any("type", m.Kind))
 			continue
@@ -307,176 +308,176 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 	return mocks, nil
 }
 
-func decodeMySQLMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models.MockSpec, error) {
-	mockSpec := models.MockSpec{
-		Metadata:         yamlSpec.Metadata,
-		Created:          yamlSpec.CreatedAt,
-		ReqTimestampMock: yamlSpec.ReqTimestampMock,
-		ResTimestampMock: yamlSpec.ResTimestampMock,
-	}
-	requests := []models.MySQLRequest{}
-	for _, v := range yamlSpec.Requests {
-		req := models.MySQLRequest{
-			Header:    v.Header,
-			ReadDelay: v.ReadDelay,
-		}
-		switch v.Header.PacketType {
-		case "HANDSHAKE_RESPONSE":
-			requestMessage := &models.MySQLHandshakeResponse{}
-			err := v.Message.Decode(requestMessage)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLHandshakeResponse")
-				return nil, err
-			}
-			req.Message = requestMessage
-		case "MySQLQuery":
-			requestMessage := &models.MySQLQueryPacket{}
-			err := v.Message.Decode(requestMessage)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLQueryPacket")
-				return nil, err
-			}
-			req.Message = requestMessage
-		case "COM_STMT_PREPARE":
-			requestMessage := &models.MySQLComStmtPreparePacket{}
-			err := v.Message.Decode(requestMessage)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLComStmtPreparePacket")
-				return nil, err
-			}
-			req.Message = requestMessage
-		case "COM_STMT_EXECUTE":
-			requestMessage := &models.MySQLComStmtExecute{}
-			err := v.Message.Decode(requestMessage)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLComStmtExecute")
-				return nil, err
-			}
-			req.Message = requestMessage
-		case "COM_STMT_SEND_LONG_DATA":
-			requestMessage := &models.MySQLCOMSTMTSENDLONGDATA{}
-			err := v.Message.Decode(requestMessage)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLCOM_STMT_SEND_LONG_DATA")
-				return nil, err
-			}
-			req.Message = requestMessage
-		case "COM_STMT_RESET":
-			requestMessage := &models.MySQLCOMSTMTRESET{}
-			err := v.Message.Decode(requestMessage)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLCOM_STMT_RESET")
-				return nil, err
-			}
-			req.Message = requestMessage
-		case "COM_STMT_FETCH":
-			requestMessage := &models.MySQLComStmtFetchPacket{}
-			err := v.Message.Decode(requestMessage)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLComStmtFetchPacket")
-				return nil, err
-			}
-			req.Message = requestMessage
-		case "COM_STMT_CLOSE":
-			requestMessage := &models.MySQLComStmtClosePacket{}
-			err := v.Message.Decode(requestMessage)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLComStmtClosePacket")
-				return nil, err
-			}
-			req.Message = requestMessage
-		case "AUTH_SWITCH_RESPONSE":
-			requestMessage := &models.AuthSwitchRequestPacket{}
-			err := v.Message.Decode(requestMessage)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLComStmtClosePacket")
-				return nil, err
-			}
-			req.Message = requestMessage
-		case "COM_CHANGE_USER":
-			requestMessage := &models.MySQLComChangeUserPacket{}
-			err := v.Message.Decode(requestMessage)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLComChangeUserPacket")
-				return nil, err
-			}
-			req.Message = requestMessage
-		}
-		requests = append(requests, req)
-	}
-	mockSpec.MySQLRequests = requests
+// func decodeMySQLMessage(yamlSpec *models.MySQLSpec, logger *zap.Logger) (*models.MockSpec, error) {
+// 	mockSpec := models.MockSpec{
+// 		Metadata:         yamlSpec.Metadata,
+// 		Created:          yamlSpec.CreatedAt,
+// 		ReqTimestampMock: yamlSpec.ReqTimestampMock,
+// 		ResTimestampMock: yamlSpec.ResTimestampMock,
+// 	}
+// 	requests := []models.MySQLRequest{}
+// 	for _, v := range yamlSpec.Requests {
+// 		req := models.MySQLRequest{
+// 			Header:    v.Header,
+// 			ReadDelay: v.ReadDelay,
+// 		}
+// 		switch v.Header.PacketType {
+// 		case "HANDSHAKE_RESPONSE":
+// 			requestMessage := &models.MySQLHandshakeResponse{}
+// 			err := v.Message.Decode(requestMessage)
+// 			if err != nil {
+// 				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLHandshakeResponse")
+// 				return nil, err
+// 			}
+// 			req.Message = requestMessage
+// 		case "MySQLQuery":
+// 			requestMessage := &models.MySQLQueryPacket{}
+// 			err := v.Message.Decode(requestMessage)
+// 			if err != nil {
+// 				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLQueryPacket")
+// 				return nil, err
+// 			}
+// 			req.Message = requestMessage
+// 		case "COM_STMT_PREPARE":
+// 			requestMessage := &models.MySQLComStmtPreparePacket{}
+// 			err := v.Message.Decode(requestMessage)
+// 			if err != nil {
+// 				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLComStmtPreparePacket")
+// 				return nil, err
+// 			}
+// 			req.Message = requestMessage
+// 		case "COM_STMT_EXECUTE":
+// 			requestMessage := &models.MySQLComStmtExecute{}
+// 			err := v.Message.Decode(requestMessage)
+// 			if err != nil {
+// 				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLComStmtExecute")
+// 				return nil, err
+// 			}
+// 			req.Message = requestMessage
+// 		case "COM_STMT_SEND_LONG_DATA":
+// 			requestMessage := &models.MySQLCOMSTMTSENDLONGDATA{}
+// 			err := v.Message.Decode(requestMessage)
+// 			if err != nil {
+// 				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLCOM_STMT_SEND_LONG_DATA")
+// 				return nil, err
+// 			}
+// 			req.Message = requestMessage
+// 		case "COM_STMT_RESET":
+// 			requestMessage := &models.MySQLCOMSTMTRESET{}
+// 			err := v.Message.Decode(requestMessage)
+// 			if err != nil {
+// 				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLCOM_STMT_RESET")
+// 				return nil, err
+// 			}
+// 			req.Message = requestMessage
+// 		case "COM_STMT_FETCH":
+// 			requestMessage := &models.MySQLComStmtFetchPacket{}
+// 			err := v.Message.Decode(requestMessage)
+// 			if err != nil {
+// 				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLComStmtFetchPacket")
+// 				return nil, err
+// 			}
+// 			req.Message = requestMessage
+// 		case "COM_STMT_CLOSE":
+// 			requestMessage := &models.MySQLComStmtClosePacket{}
+// 			err := v.Message.Decode(requestMessage)
+// 			if err != nil {
+// 				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLComStmtClosePacket")
+// 				return nil, err
+// 			}
+// 			req.Message = requestMessage
+// 		case "AUTH_SWITCH_RESPONSE":
+// 			requestMessage := &models.AuthSwitchRequestPacket{}
+// 			err := v.Message.Decode(requestMessage)
+// 			if err != nil {
+// 				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLComStmtClosePacket")
+// 				return nil, err
+// 			}
+// 			req.Message = requestMessage
+// 		case "COM_CHANGE_USER":
+// 			requestMessage := &models.MySQLComChangeUserPacket{}
+// 			err := v.Message.Decode(requestMessage)
+// 			if err != nil {
+// 				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLComChangeUserPacket")
+// 				return nil, err
+// 			}
+// 			req.Message = requestMessage
+// 		}
+// 		requests = append(requests, req)
+// 	}
+// 	mockSpec.MySQLRequests = requests
 
-	responses := []models.MySQLResponse{}
-	for _, v := range yamlSpec.Response {
-		resp := models.MySQLResponse{
-			Header:    v.Header,
-			ReadDelay: v.ReadDelay,
-		}
-		// decode the yaml document to mysql structs
-		switch v.Header.PacketType {
-		case "HANDSHAKE_RESPONSE_OK":
-			responseMessage := &models.MySQLHandshakeResponseOk{}
-			err := v.Message.Decode(responseMessage)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLHandshakeResponseOk")
-				return nil, err
-			}
-			resp.Message = responseMessage
-		case "MySQLHandshakeV10":
-			responseMessage := &models.MySQLHandshakeV10Packet{}
-			err := v.Message.Decode(responseMessage)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLHandshakeV10Packet")
-				return nil, err
-			}
-			resp.Message = responseMessage
-		case "MySQLOK":
-			responseMessage := &models.MySQLOKPacket{}
-			err := v.Message.Decode(responseMessage)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLOKPacket")
-				return nil, err
-			}
-			resp.Message = responseMessage
-		case "COM_STMT_PREPARE_OK":
-			responseMessage := &models.MySQLStmtPrepareOk{}
-			err := v.Message.Decode(responseMessage)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLStmtPrepareOk")
-				return nil, err
-			}
-			resp.Message = responseMessage
-		case "RESULT_SET_PACKET":
-			responseMessage := &models.MySQLResultSet{}
-			err := v.Message.Decode(responseMessage)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLResultSet")
-				return nil, err
-			}
-			resp.Message = responseMessage
-		case "AUTH_SWITCH_REQUEST":
-			responseMessage := &models.AuthSwitchRequestPacket{}
-			err := v.Message.Decode(responseMessage)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal yml document into AuthSwitchRequestPacket")
-				return nil, err
-			}
-			resp.Message = responseMessage
-		case "MySQLErr":
-			responseMessage := &models.MySQLERRPacket{}
-			err := v.Message.Decode(responseMessage)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLERRPacket")
-				return nil, err
-			}
-			resp.Message = responseMessage
-		}
-		responses = append(responses, resp)
-	}
-	mockSpec.MySQLResponses = responses
-	return &mockSpec, nil
+// 	responses := []models.MySQLResponse{}
+// 	for _, v := range yamlSpec.Response {
+// 		resp := models.MySQLResponse{
+// 			Header:    v.Header,
+// 			ReadDelay: v.ReadDelay,
+// 		}
+// 		// decode the yaml document to mysql structs
+// 		switch v.Header.PacketType {
+// 		case "HANDSHAKE_RESPONSE_OK":
+// 			responseMessage := &models.MySQLHandshakeResponseOk{}
+// 			err := v.Message.Decode(responseMessage)
+// 			if err != nil {
+// 				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLHandshakeResponseOk")
+// 				return nil, err
+// 			}
+// 			resp.Message = responseMessage
+// 		case "MySQLHandshakeV10":
+// 			responseMessage := &models.MySQLHandshakeV10Packet{}
+// 			err := v.Message.Decode(responseMessage)
+// 			if err != nil {
+// 				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLHandshakeV10Packet")
+// 				return nil, err
+// 			}
+// 			resp.Message = responseMessage
+// 		case "MySQLOK":
+// 			responseMessage := &models.MySQLOKPacket{}
+// 			err := v.Message.Decode(responseMessage)
+// 			if err != nil {
+// 				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLOKPacket")
+// 				return nil, err
+// 			}
+// 			resp.Message = responseMessage
+// 		case "COM_STMT_PREPARE_OK":
+// 			responseMessage := &models.MySQLStmtPrepareOk{}
+// 			err := v.Message.Decode(responseMessage)
+// 			if err != nil {
+// 				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLStmtPrepareOk")
+// 				return nil, err
+// 			}
+// 			resp.Message = responseMessage
+// 		case "RESULT_SET_PACKET":
+// 			responseMessage := &models.MySQLResultSet{}
+// 			err := v.Message.Decode(responseMessage)
+// 			if err != nil {
+// 				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLResultSet")
+// 				return nil, err
+// 			}
+// 			resp.Message = responseMessage
+// 		case "AUTH_SWITCH_REQUEST":
+// 			responseMessage := &models.AuthSwitchRequestPacket{}
+// 			err := v.Message.Decode(responseMessage)
+// 			if err != nil {
+// 				utils.LogError(logger, err, "failed to unmarshal yml document into AuthSwitchRequestPacket")
+// 				return nil, err
+// 			}
+// 			resp.Message = responseMessage
+// 		case "MySQLErr":
+// 			responseMessage := &models.MySQLERRPacket{}
+// 			err := v.Message.Decode(responseMessage)
+// 			if err != nil {
+// 				utils.LogError(logger, err, "failed to unmarshal yml document into MySQLERRPacket")
+// 				return nil, err
+// 			}
+// 			resp.Message = responseMessage
+// 		}
+// 		responses = append(responses, resp)
+// 	}
+// 	mockSpec.MySQLResponses = responses
+// 	return &mockSpec, nil
+// }
 
-}
 func decodeMongoMessage(yamlSpec *models.MongoSpec, logger *zap.Logger) (*models.MockSpec, error) {
 	mockSpec := models.MockSpec{
 		Metadata:         yamlSpec.Metadata,

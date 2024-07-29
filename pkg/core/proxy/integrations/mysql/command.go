@@ -61,6 +61,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				PacketBundle: *commandPkt,
 			})
 
+			// read the command response from the destination server
 			commandResp, err := pUtil.ReadBytes(ctx, logger, destConn)
 			if err != nil {
 				if err != io.EOF {
@@ -81,7 +82,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				break
 			}
 
-			commandRespPkt, err := operation.DecodePayload(ctx, logger, commandResp, destConn, decodeCtx)
+			commandRespPkt, err := operation.DecodePayload(ctx, logger, commandResp, clientConn, decodeCtx)
 			if err != nil {
 				utils.LogError(logger, err, "failed to decode the MySQL packet from the server")
 				return err
