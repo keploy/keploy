@@ -197,6 +197,35 @@ func (a *App) SetupCompose() error {
 		}
 	}
 
+	serviceNode := a.docker.GetServiceNode(compose, a.container)
+	if serviceNode != nil {
+		fmt.Println(serviceNode)
+		ok = a.docker.VolumeExists(serviceNode, "${PWD}", "${PWD}") || a.docker.VolumeExists(serviceNode, "$PWD", "$PWD")
+		if !ok {
+			a.docker.SetVolume(serviceNode, "${PWD}", "${PWD}")
+			composeChanged = true
+		}
+
+		ok = a.docker.EnvironmentExists(serviceNode, "APPEND", "$APPEND")
+		if !ok {
+			a.docker.SetEnvironment(serviceNode, "APPEND", "$APPEND")
+			composeChanged = true
+		}
+
+		ok = a.docker.EnvironmentExists(serviceNode, "CLEAN", "$CLEAN")
+		if !ok {
+			a.docker.SetEnvironment(serviceNode, "CLEAN", "$CLEAN")
+			composeChanged = true
+		}
+
+		v := "-javaagent:/root/.m2/repository/org/jacoco/org.jacoco.agent/0.8.8/org.jacoco.agent-0.8.8-runtime.jar=destfile=target/$TESTSETID" + ".exec"
+		ok = a.docker.EnvironmentExists(serviceNode, "JACOCOAGENT", v)
+		if !ok {
+			a.docker.SetEnvironment(serviceNode, "JACOCOAGENT", v)
+			composeChanged = true
+		}
+	}
+
 	if composeChanged {
 		err = a.docker.WriteComposeFile(compose, newPath)
 		if err != nil {

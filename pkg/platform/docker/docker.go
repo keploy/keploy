@@ -521,6 +521,111 @@ func (idc *Impl) SetKeployNetwork(c *Compose) (*NetworkInfo, error) {
 	return networkInfo, nil
 }
 
+// GetServiceNode returns the service node for the given container name
+func (idc *Impl) GetServiceNode(compose *Compose, containerName string) *yaml.Node {
+	for _, service := range compose.Services.Content {
+		// Assuming each service is structured as a map with keys such as `container_name`, `image`, etc.
+		for i := 0; i < len(service.Content); i += 2 {
+			if i+1 >= len(service.Content) {
+				break
+			}
+			keyNode := service.Content[i]
+			valueNode := service.Content[i+1]
+			if keyNode.Value == "container_name" && valueNode.Value == containerName {
+				return service
+			}
+		}
+	}
+	idc.logger.Debug("No service found with the specified container name", zap.String("container_name", containerName))
+	return nil
+}
+
+func (idc *Impl) VolumeExists(service *yaml.Node, source, destination string) bool {
+	volume := source + ":" + destination
+	for i := 0; i < len(service.Content); i++ {
+		if i+1 >= len(service.Content) {
+			break
+		}
+		fmt.Println(service.Content[i].Value)
+		if service.Content[i].Value == "volumes" {
+			volumeNode := service.Content[i+1]
+			for _, v := range volumeNode.Content {
+				fmt.Println(v, volume)
+				if v.Value == volume {
+					return true
+				}
+			}
+			break
+		}
+	}
+	return false
+}
+
+func (idc *Impl) SetVolume(service *yaml.Node, source, destination string) {
+	volume := source + ":" + destination
+
+	var volumeNode *yaml.Node
+	// Look for the 'volumes' key and get its node
+	for i := 0; i < len(service.Content); i += 2 {
+		if i+1 >= len(service.Content) {
+			break
+		}
+		if service.Content[i].Value == "volumes" {
+			volumeNode = service.Content[i+1]
+			break
+		}
+	}
+	// If 'volumes' node does not exist, create it
+	if volumeNode == nil {
+		volumeNode = &yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{}}
+		service.Content = append(service.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "volumes"}, volumeNode)
+	}
+	volumeNode.Content = append(volumeNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: volume})
+}
+
+func (idc *Impl) EnvironmentExists(service *yaml.Node, key, value string) bool {
+	env := key + "=" + value
+	for i := 0; i < len(service.Content); i += 2 {
+		if i+1 >= len(service.Content) {
+			break
+		}
+		if service.Content[i].Value == "environment" {
+			envNode := service.Content[i+1]
+			for _, e := range envNode.Content {
+				fmt.Println(e.Value, env)
+				if e.Value == env {
+					fmt.Println("true", e.Value, env)
+					return true
+				}
+			}
+			break
+		}
+	}
+	return false
+}
+
+func (idc *Impl) SetEnvironment(service *yaml.Node, key, value string) {
+	env := key + "=" + value
+
+	var envNode *yaml.Node
+	// Look for the 'environment' key and get its node
+	for i := 0; i < len(service.Content); i += 2 {
+		if i+1 >= len(service.Content) {
+			break
+		}
+		if service.Content[i].Value == "environment" {
+			envNode = service.Content[i+1]
+			break
+		}
+	}
+	// If 'environment' node does not exist, create it
+	if envNode == nil {
+		envNode = &yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{}}
+		service.Content = append(service.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "environment"}, envNode)
+	}
+	envNode.Content = append(envNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: env})
+}
+
 // IsContainerRunning check if the container is already running or not, required for docker start command.
 func (idc *Impl) IsContainerRunning(containerName string) (bool, error) {
 

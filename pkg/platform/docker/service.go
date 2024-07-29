@@ -5,6 +5,7 @@ import (
 
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
+	"gopkg.in/yaml.v3"
 )
 
 type Client interface {
@@ -21,10 +22,15 @@ type Client interface {
 	ForceAbsolutePath(c *Compose, basePath string) error
 
 	GetNetworkInfo(compose *Compose) *NetworkInfo
+	GetServiceNode(compose *Compose, containerName string) *yaml.Node
 
 	CreateNetwork(network string) error
 	MakeNetworkExternal(c *Compose) error
 	SetKeployNetwork(c *Compose) (*NetworkInfo, error)
+	VolumeExists(service *yaml.Node, source, destination string) bool
+	SetVolume(service *yaml.Node, source, destination string)
+	EnvironmentExists(service *yaml.Node, key string, value string) bool
+	SetEnvironment(service *yaml.Node, key, value string)
 	ReadComposeFile(filePath string) (*Compose, error)
 	WriteComposeFile(compose *Compose, path string) error
 
