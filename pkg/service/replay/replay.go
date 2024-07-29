@@ -158,7 +158,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	default:
 		r.config.Test.SkipCoverage = true
 	}
-	if !r.config.Test.SkipCoverage {
+	if !r.config.Test.SkipCoverage && !r.config.Test.SkipPreview {
 		if utils.CmdType(r.config.CommandType) == utils.Native {
 			r.config.Command, err = cov.PreProcess()
 
@@ -166,6 +166,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 				r.config.Test.SkipCoverage = true
 			}
 		}
+	}
+
+	if !r.config.Test.SkipCoverage {
 		err = os.Setenv("CLEAN", "true") // related to javascript coverage calculation
 		if err != nil {
 			r.config.Test.SkipCoverage = true
