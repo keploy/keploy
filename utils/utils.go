@@ -34,8 +34,7 @@ import (
 )
 
 var WarningSign = "\U000026A0"
-var APIServerURL string
-var GitHubClientID string
+
 var ErrCode = 0
 
 func ReplaceHostToIP(currentURL string, ipAddress string) (string, error) {
