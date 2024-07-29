@@ -35,7 +35,7 @@ func Get(ctx context.Context, cmd string, c *config.Config, logger *zap.Logger, 
 		return replaySvc, nil
 	}
 
-	return nil, errors.New("command not supported in non linux OS. if you are running on windows or mac, please try running the dockerized version of your application")
+	return nil, errors.New("command not supported in non linux OS. if you are on windows or mac, please use the dockerized version of your application")
 }
 
 func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) (*CommonInternalService, error) {
