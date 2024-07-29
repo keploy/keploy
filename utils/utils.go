@@ -2,7 +2,6 @@ package utils
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"debug/elf"
 	"encoding/json"
@@ -37,6 +36,7 @@ import (
 var WarningSign = "\U000026A0"
 var APIServerURL string
 var GitHubClientID string
+var ErrCode = 0
 
 func ReplaceHostToIP(currentURL string, ipAddress string) (string, error) {
 	// Parse the current URL
@@ -794,45 +794,4 @@ func CreateGitIgnore(logger *zap.Logger, path string) error {
 	}
 
 	return nil
-}
-
-func CheckAuth(ctx context.Context, host, token string, hardReset bool, logger *zap.Logger) (string, bool, string, string, error) {
-	url := fmt.Sprintf("%s/auth/githubtoken", host)
-	requestBody := &GHAuthReq{
-		Token:     token,
-		HardReset: hardReset,
-	}
-	requestJSON, err := json.Marshal(requestBody)
-	if err != nil {
-		LogError(logger, err, "failed to marshal request body for github token auth")
-		return "", false, "", "", fmt.Errorf("error marshaling request body for authentication: %s", err.Error())
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(requestJSON))
-	if err != nil {
-		LogError(logger, err, "failed to create request for github token auth")
-		return "", false, "", "", fmt.Errorf("error creating request for authentication: %s", err.Error())
-	}
-	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{}
-	res, err := client.Do(req)
-	if err != nil || res.StatusCode < 200 || res.StatusCode >= 300 {
-		LogError(logger, err, "failed to authenticate with github token auth with keploy")
-		return "", false, "", "", fmt.Errorf("error sending the authentication: %s", err.Error())
-	}
-	defer func() {
-		err := res.Body.Close()
-		if err != nil {
-			LogError(logger, err, "failed to close response body for github token auth")
-		}
-	}()
-
-	var respBody GHAuthResp
-	err = json.NewDecoder(res.Body).Decode(&respBody)
-	if err != nil {
-		LogError(logger, err, "failed to decode response body for github token auth")
-		return "", false, "", "", fmt.Errorf("error unmarshalling the authentication response: %s", err.Error())
-	}
-	JwtToken = respBody.JwtToken
-	return respBody.EmailID, respBody.IsValid, respBody.JwtToken, respBody.Error, nil
 }
