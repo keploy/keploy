@@ -75,7 +75,7 @@ func DecodeResultSet(ctx context.Context, logger *zap.Logger, data []byte, rowTy
 	// Parse the rows
 	for len(data) > 0 {
 		if ctx.Err() == context.Canceled {
-			return nil, errors.New("context canceled")
+			return nil, context.Canceled
 		}
 
 		// Check for EOF packet after columns
