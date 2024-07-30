@@ -52,10 +52,14 @@ func convertUnixNanoToTime(unixNano uint64) time.Time {
 }
 
 func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptions) bool {
-	dstPort, err := strconv.Atoi(req.URL.Port())
-	if err != nil {
-		utils.LogError(logger, err, "failed to obtain destination port from request")
-		return false
+	dstPort := 0
+	var err error
+	if p := req.URL.Port(); p != "" {
+		dstPort, err = strconv.Atoi(p)
+		if err != nil {
+			utils.LogError(logger, err, "failed to obtain destination port from request")
+			return false
+		}
 	}
 	var bypassRules []config.BypassRule
 
