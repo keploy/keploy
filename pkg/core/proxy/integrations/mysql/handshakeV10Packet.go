@@ -53,32 +53,35 @@ func decodeMySQLHandshakeV10(data []byte) (*models.MySQLHandshakeV10Packet, erro
 	capabilityFlagsUpper := binary.LittleEndian.Uint16(data[:2])
 	data = data[2:]
 
+	var authPluginDataLen int
+
 	packet.CapabilityFlags = uint32(capabilityFlagsLower) | uint32(capabilityFlagsUpper)<<16
 	if packet.CapabilityFlags&CLIENT_PLUGIN_AUTH != 0 {
-		if len(data) < 11 { // AuthPluginDataLen (1 byte) + Reserved (10 bytes)
-			return nil, fmt.Errorf("handshake packet too short for AuthPluginDataLen")
-		}
-		authPluginDataLen := int(data[0])
-		data = data[11:] // Skip 1 byte AuthPluginDataLen and 10 bytes reserved
-
-		if authPluginDataLen > 8 {
-			lenToRead := min(authPluginDataLen-8, len(data))
-			packet.AuthPluginData = append(packet.AuthPluginData, data[:lenToRead]...)
-			data = data[lenToRead:]
-		}
+		authPluginDataLen = int(data[0])
+		data = data[1:] // Skip 1 byte AuthPluginDataLen
 	} else {
-		data = data[10:] // Skip reserved 10 bytes if CLIENT_PLUGIN_AUTH is not set
+		data = data[1:] // constant 0x00
+	}
+
+	data = data[10:] // Skip 10 bytes reserved (all 0s)
+
+	if authPluginDataLen > 8 {
+		lenToRead := min(authPluginDataLen-8, len(data))
+		packet.AuthPluginData = append(packet.AuthPluginData, data[:lenToRead]...)
+		data = data[lenToRead:]
 	}
 
 	if len(data) == 0 {
 		return nil, fmt.Errorf("handshake packet too short for AuthPluginName")
 	}
 
-	idx = bytes.IndexByte(data, 0x00)
-	if idx == -1 {
-		return nil, fmt.Errorf("malformed handshake packet: missing null terminator for AuthPluginName")
+	if packet.CapabilityFlags&CLIENT_PLUGIN_AUTH != 0 {
+		idx = bytes.IndexByte(data, 0x00)
+		if idx == -1 {
+			return nil, fmt.Errorf("malformed handshake packet: missing null terminator for AuthPluginName")
+		}
+		packet.AuthPluginName = string(data[:idx])
 	}
-	packet.AuthPluginName = string(data[:idx])
 
 	return packet, nil
 }

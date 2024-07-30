@@ -533,6 +533,7 @@ func encodeMySQL(ctx context.Context, logger *zap.Logger, clientConn, destConn n
 				recordMySQLMessage(ctx, mysqlRequests, mysqlResponses, "config", oprRequest, oprResponse2, mocks, reqTimestamp)
 				mysqlRequests = []models.MySQLRequest{}
 				mysqlResponses = []models.MySQLResponse{}
+				println("Handshake response is done")
 
 				err = handleClientQueries(ctx, logger, nil, clientConn, destConn, mocks, lastCommand, reqTimestamp, preparedStatements, serverGreetings)
 				if err != nil {

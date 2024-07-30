@@ -61,11 +61,6 @@ func decodeHandshakeResponse(data []byte) (*models.MySQLHandshakeResponse, error
 			data = data[length:]
 		}
 	} else {
-		// idx = bytes.IndexByte(data, 0x00)
-		// if idx != -1 {
-		// 	packet.AuthData = data[:idx]
-		// 	data = data[idx+1:]
-		// }
 		authLen := int(data[0])
 		data = data[2:]
 		packet.AuthData = data[:authLen]
@@ -131,7 +126,6 @@ func decodeHandshakeResponse(data []byte) (*models.MySQLHandshakeResponse, error
 				return nil, errors.New("handshake response packet too short for ZSTD compression level")
 			}
 			packet.ZstdCompressionLevel = data[0]
-			//data = data[1:]
 		}
 	}
 

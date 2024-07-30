@@ -59,6 +59,8 @@ func decodeMySQLOK(data []byte, serverGreeting *models.MySQLHandshakeV10Packet) 
 	}
 	pos += 2
 
+	// new ok package will check CLIENT_SESSION_TRACK too, but it is not supported in this version
+
 	if pos < len(data) {
 		packet.Info = string(data[pos:])
 	}
