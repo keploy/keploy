@@ -13,18 +13,81 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-func GetVariablesType(obj map[string]interface{}) map[string]map[string]string {
-	types := make(map[string]map[string]string, 0)
+//	func GetVariablesType(obj map[string]interface{}) map[string]map[string]string {
+//		types := make(map[string]map[string]string, 0)
+//		// Loop over body object and get the type of each value
+//		for key, value := range obj {
+//			var valueType string
+//			if fmt.Sprintf("%T", value) == "float64" {
+//				valueType = "number"
+//			} else if fmt.Sprintf("%T", value) == "map[string]interface {}" {
+//				valueType = "object"
+//			} else {
+//				valueType = fmt.Sprintf("%T", value)
+//			}
+//			responseType := map[string]string{
+//				"type": valueType,
+//			}
+//			types[key] = responseType
+//		}
+//		return types
+//	}
+func GetVariablesType(obj map[string]interface{}) map[string]map[string]interface{} {
+	types := make(map[string]map[string]interface{}, 0)
 	// Loop over body object and get the type of each value
 	for key, value := range obj {
 		var valueType string
-		if fmt.Sprintf("%T", value) == "float64" {
+		switch value.(type) {
+		case float64:
 			valueType = "number"
-		} else {
-			valueType = fmt.Sprintf("%T", value)
+		case int, int32, int64:
+			valueType = "integer"
+		case string:
+			valueType = "string"
+		case bool:
+			valueType = "boolean"
+		case map[string]interface{}:
+			valueType = "object"
+		case []interface{}:
+			valueType = "array"
+		default:
+			valueType = "string"
 		}
-		responseType := map[string]string{
+		responseType := map[string]interface{}{
 			"type": valueType,
+		}
+		// If the value is an object, recursively get its properties
+		if valueType == "object" {
+			responseType["properties"] = GetVariablesType(value.(map[string]interface{}))
+		}
+		// If the value is an array, get the type of the first element
+		if valueType == "array" {
+			arrayType := "string" // Default to string if array is empty or type can't be determined
+			if len(value.([]interface{})) > 0 {
+				firstElement := value.([]interface{})[0]
+				switch firstElement.(type) {
+				case float64:
+					arrayType = "number"
+				case int, int32, int64:
+					arrayType = "integer"
+				case string:
+					arrayType = "string"
+				case bool:
+					arrayType = "boolean"
+				case map[string]interface{}:
+					arrayType = "object"
+					responseType["items"] = map[string]interface{}{
+						"type":       arrayType,
+						"properties": GetVariablesType(firstElement.(map[string]interface{})),
+					}
+					continue
+				default:
+					arrayType = "string"
+				}
+			}
+			responseType["items"] = map[string]interface{}{
+				"type": arrayType,
+			}
 		}
 		types[key] = responseType
 	}
@@ -44,7 +107,7 @@ func UnmarshalAndConvertToJSON(bodyStr []byte, bodyObj map[string]interface{}) (
 	return bodyJSON, bodyObj, nil
 }
 
-func GenerateRepsonse(responseCode int, responseMessage string, responseTypes map[string]map[string]string, responseBody map[string]interface{}) map[string]models.ResponseItem {
+func GenerateRepsonse(responseCode int, responseMessage string, responseTypes map[string]map[string]interface{}, responseBody map[string]interface{}) map[string]models.ResponseItem {
 	byCode := map[string]models.ResponseItem{
 		fmt.Sprintf("%d", responseCode): {
 			Description: responseMessage,

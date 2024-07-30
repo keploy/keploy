@@ -231,7 +231,6 @@ func (s *contractService) ConvertHTTPToOpenAPI(ctx context.Context, logger *zap.
 		return false
 
 	}
-
 	// Validate the OpenAPI document
 	if err := doc.Validate(context.Background()); err != nil {
 		logger.Fatal("Error validating OpenAPI document: %v", zap.Error(err))
@@ -294,12 +293,13 @@ func (s *contractService) GenerateMocksSchemas(ctx context.Context, services []s
 					var mappingFound bool
 					for _, mapping := range serviceMappings {
 						if mapping == mock.Spec.Request.URL {
-							var mockCode string
-							if mock.Spec.Request.URLParams != nil {
-								mockCode = fmt.Sprintf("%v", mock.Spec.Request.Method) + "-" + fmt.Sprintf("%v", mock.Spec.Request.URL) + "-0"
-							} else {
-								mockCode = fmt.Sprintf("%v", mock.Spec.Request.Method) + "-" + fmt.Sprintf("%v", mock.Spec.Request.URL) + "-1"
-							}
+							var mockCode string = service
+
+							// if mock.Spec.Request.URLParams != nil {
+							// 	mockCode = fmt.Sprintf("%v", mock.Spec.Request.Method) + "-" + fmt.Sprintf("%v", mock.Spec.Request.URL) + "-0"
+							// } else {
+							// 	mockCode = fmt.Sprintf("%v", mock.Spec.Request.Method) + "-" + fmt.Sprintf("%v", mock.Spec.Request.URL) + "-1"
+							// }
 							if yaml.Contains(duplicateMocks, mockCode) {
 								isAppend = true
 							} else {

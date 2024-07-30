@@ -61,8 +61,8 @@ type ResponseItem struct {
 }
 
 type Schema struct {
-	Type       string                       `json:"type" yaml:"type"`
-	Properties map[string]map[string]string `json:"properties" yaml:"properties"`
+	Type       string                            `json:"type" yaml:"type"`
+	Properties map[string]map[string]interface{} `json:"properties" yaml:"properties"`
 }
 
 type ParamSchema struct {
