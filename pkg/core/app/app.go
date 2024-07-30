@@ -199,7 +199,6 @@ func (a *App) SetupCompose() error {
 
 	serviceNode := a.docker.GetServiceNode(compose, a.container)
 	if serviceNode != nil {
-		fmt.Println(serviceNode)
 		ok = a.docker.VolumeExists(serviceNode, "${PWD}", "${PWD}") || a.docker.VolumeExists(serviceNode, "$PWD", "$PWD")
 		if !ok {
 			a.docker.SetVolume(serviceNode, "${PWD}", "${PWD}")

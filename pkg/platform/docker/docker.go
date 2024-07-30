@@ -546,11 +546,9 @@ func (idc *Impl) VolumeExists(service *yaml.Node, source, destination string) bo
 		if i+1 >= len(service.Content) {
 			break
 		}
-		fmt.Println(service.Content[i].Value)
 		if service.Content[i].Value == "volumes" {
 			volumeNode := service.Content[i+1]
 			for _, v := range volumeNode.Content {
-				fmt.Println(v, volume)
 				if v.Value == volume {
 					return true
 				}
@@ -592,9 +590,7 @@ func (idc *Impl) EnvironmentExists(service *yaml.Node, key, value string) bool {
 		if service.Content[i].Value == "environment" {
 			envNode := service.Content[i+1]
 			for _, e := range envNode.Content {
-				fmt.Println(e.Value, env)
 				if e.Value == env {
-					fmt.Println("true", e.Value, env)
 					return true
 				}
 			}
