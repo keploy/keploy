@@ -107,7 +107,7 @@ func (a *App) SetupDocker() error {
 			return err
 		}
 		if running {
-			return fmt.Errorf("docker container is already in running state")
+			return fmt.Errorf("docker container " + a.container + " is already in running state")
 		}
 	}
 
