@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/getkin/kin-openapi/openapi3"
@@ -293,7 +294,7 @@ func (s *contractService) GenerateMocksSchemas(ctx context.Context, services []s
 					var mappingFound bool
 					for _, mapping := range serviceMappings {
 						if mapping == mock.Spec.Request.URL {
-							var mockCode string = service
+							var mockCode = service
 
 							// if mock.Spec.Request.URLParams != nil {
 							// 	mockCode = fmt.Sprintf("%v", mock.Spec.Request.Method) + "-" + fmt.Sprintf("%v", mock.Spec.Request.URL) + "-0"
@@ -414,7 +415,7 @@ func (s *contractService) DownloadTests(path string) error {
 	}
 
 	for _, entry := range entries {
-		err := yaml.CopyDir(keployFolder+"schema/tests/"+entry.Name(), targetPath+entry.Name(), s.logger)
+		err := yaml.CopyDir(keployFolder+"schema/tests/"+entry.Name(), targetPath+entry.Name(), false, s.logger)
 		if err != nil {
 			fmt.Println("Error moving directory:", err)
 			return err
@@ -440,7 +441,7 @@ func (s *contractService) DownloadTests(path string) error {
 	for _, entry := range entries {
 		if entry.IsDir() && strings.Contains(entry.Name(), "test") {
 			// Move that directory to path
-			err := yaml.CopyDir(keployFolder+entry.Name()+"/tests", targetPath+entry.Name(), s.logger)
+			err := yaml.CopyDir(keployFolder+entry.Name()+"/tests", targetPath+entry.Name(), false, s.logger)
 			if err != nil {
 				fmt.Println("Error moving directory:", err)
 				return err
@@ -451,69 +452,105 @@ func (s *contractService) DownloadTests(path string) error {
 	}
 	return nil
 }
-func (s *contractService) DownloadMocks(path string) error {
-	keployFolder := "./keploy/"
-	targetPath := path + "/keploy/mocks/schema/"
-	// Ensure destination directory exists
-	if _, err := os.Stat(targetPath); os.IsNotExist(err) {
-		err := os.MkdirAll(targetPath, os.ModePerm)
-		if err != nil {
-			s.logger.Error("Error creating destination directory:")
-			return err
-		}
-	}
-	// Move OpenAPI schemas for mocks
-	entries, err := os.ReadDir(keployFolder + "schema/mocks/")
-	if err != nil {
-		s.logger.Error("Failed to read directory", zap.String("directory", keployFolder), zap.Error(err))
+func (s *contractService) DownloadMocks(ctx context.Context, path string) error {
+	targetPath := "./Download"
+	if err := yaml.CreateDir(targetPath, s.logger); err != nil {
 		return err
 	}
+
+	cprFolder := "/home/ahmed/Desktop/GSOC/Keploy/Issues/VirtualCPR"
+
+	entries, err := os.ReadDir(cprFolder)
+	if err != nil {
+		s.logger.Error("Failed to read directory", zap.String("directory", cprFolder), zap.Error(err))
+		return err
+	}
+
 	for _, entry := range entries {
-		// Move that directory to path
-		err := yaml.CopyDir(keployFolder+"schema/mocks/"+entry.Name(), targetPath+entry.Name(), s.logger)
-		if err != nil {
+		if !entry.IsDir() {
+			continue
+		}
+
+		var self = s.config.Contract.Self
+		var schemaConfigFile config.Config
+
+		configFilePath := filepath.Join(cprFolder, entry.Name(), "keploy", "schema")
+		if err := yaml.ReadYAMLFile(ctx, s.logger, configFilePath, "keploy", &schemaConfigFile); err != nil {
+			return err
+		}
+
+		serviceFound := false
+		for key := range schemaConfigFile.Contract.ServicesMapping {
+			if key == self {
+				serviceFound = true
+				break
+			}
+		}
+		if !serviceFound {
+			continue
+		}
+
+		serviceFolder := filepath.Join(targetPath, schemaConfigFile.Contract.Self)
+		if err := yaml.CreateDir(serviceFolder, s.logger); err != nil {
+			return err
+		}
+
+		mocksSourcePath := filepath.Join(cprFolder, entry.Name(), "keploy", "schema", "mocks", self)
+		if err := yaml.CopyDir(mocksSourcePath, serviceFolder, true, s.logger); err != nil {
 			fmt.Println("Error moving directory:", err)
 			return err
 		}
-		s.logger.Info("Service's mocks contracts downloaded", zap.String("service", entry.Name()))
+		s.logger.Info("Service's schema mocks contracts downloaded", zap.String("service", entry.Name()), zap.String("mocks", mocksSourcePath))
 
-	}
-	//Move the Keploy version mocks
-	// Ensure destination directory exists
-	targetPath = path + "/keploy/mocks/keployVersion/"
-	if _, err := os.Stat(targetPath); os.IsNotExist(err) {
-		err := os.MkdirAll(path, os.ModePerm)
+		// Move the Keploy version mocks
+		mocksFolders, err := os.ReadDir(filepath.Join(cprFolder, entry.Name(), "keploy"))
 		if err != nil {
-			s.logger.Error("Error creating destination directory:")
+			s.logger.Error("Failed to read directory", zap.String("directory", cprFolder), zap.Error(err))
 			return err
 		}
-	}
-	entries, err = os.ReadDir(keployFolder)
-	if err != nil {
-		s.logger.Error("Failed to read directory", zap.String("directory", keployFolder), zap.Error(err))
-		return err
-	}
-	for _, entry := range entries {
-		if entry.IsDir() && strings.Contains(entry.Name(), "test") {
-			// Move that directory to path
-			err := os.MkdirAll(targetPath+entry.Name(), os.ModePerm)
+		for _, mockFolder := range mocksFolders {
+			if !mockFolder.IsDir() || !strings.Contains(mockFolder.Name(), "test") {
+				continue
+			}
+			httpMocks, err := s.mockDB.GetHTTPMocks(ctx, mockFolder.Name(), filepath.Join(cprFolder, entry.Name(), "keploy"))
 			if err != nil {
-				s.logger.Error("Error creating destination directory:")
+				s.logger.Error("Failed to get HTTP mocks", zap.String("testSetID", mockFolder.Name()), zap.Error(err))
 				return err
 			}
-			err = yaml.CopyFile(keployFolder+entry.Name()+"/mocks.yaml", targetPath+entry.Name()+"/mocks.yaml", s.logger)
-			if err != nil {
-				fmt.Println("Error moving directory:", err)
-				return err
+			var filteredMocks []*models.HTTPSchema2
+			for _, mock := range httpMocks {
+				for _, service := range schemaConfigFile.Contract.ServicesMapping[self] {
+					if service == mock.Spec.Request.URL {
+						filteredMocks = append(filteredMocks, mock)
+						break
+					}
+				}
+
 			}
-			s.logger.Info("Keploy's Mock downloaded", zap.String("mock", entry.Name()))
+			var initialMock = true
+			for _, mock := range filteredMocks {
+				mockYAML, err := yamlLib.Marshal(mock)
+				if err != nil {
+					return err
+				}
+				err = yaml.WriteFile(ctx, s.logger, filepath.Join(serviceFolder, mockFolder.Name()), "mocks", mockYAML, !initialMock)
+				if err != nil {
+					return err
+				}
+				if initialMock {
+					initialMock = false
+				}
+			}
+			s.logger.Info("Service's HTTP mocks contracts downloaded", zap.String("service", entry.Name()), zap.String("mocks", mockFolder.Name()))
 
 		}
-	}
-	return nil
 
+	}
+
+	return nil
 }
-func (s *contractService) Download(_ context.Context, driven string) error {
+
+func (s *contractService) Download(ctx context.Context, driven string) error {
 
 	if s.CheckConfigFile() != nil {
 		s.logger.Error("Error in checking config file while downloading")
@@ -528,10 +565,10 @@ func (s *contractService) Download(_ context.Context, driven string) error {
 	}
 
 	if driven == "provider" || driven == "server" {
-		err = s.DownloadTests(path)
+		err = s.DownloadMocks(ctx, path)
 
 	} else if driven == "consumer" || driven == "client" {
-		err = s.DownloadMocks(path)
+		err = s.DownloadTests(path)
 	}
 	if err != nil {
 		return err

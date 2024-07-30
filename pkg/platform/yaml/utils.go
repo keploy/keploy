@@ -2,6 +2,7 @@
 package yaml
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
+	"sigs.k8s.io/kustomize/kyaml/yaml"
 )
 
 func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, noise map[string]string) bool {
@@ -238,9 +240,38 @@ func ReadDir(path string, fileMode fs.FileMode) (*os.File, error) {
 	return dir, nil
 }
 
+// CreateDir to create a directory if it doesn't exist
+func CreateDir(path string, logger *zap.Logger) error {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		err := os.MkdirAll(path, os.ModePerm)
+		if err != nil {
+			logger.Error("Error creating directory", zap.String("directory", path), zap.Error(err))
+			return err
+		}
+	}
+	return nil
+}
+
+// ReadYAMLFile to read and parse YAML file
+func ReadYAMLFile(ctx context.Context, logger *zap.Logger, filePath string, fileName string, v interface{}) error {
+	configData, err := ReadFile(ctx, logger, filePath, fileName)
+	if err != nil {
+		logger.Fatal("Error reading file", zap.Error(err))
+		return err
+	}
+
+	err = yaml.Unmarshal(configData, v)
+	if err != nil {
+		logger.Error("Error parsing YAML", zap.Error(err))
+		return err
+	}
+	return nil
+}
+
 // CopyFile copies a single file from src to dst
-func CopyFile(src, dst string, logger *zap.Logger) error {
+func CopyFile(src, dst string, rename bool, logger *zap.Logger) error {
 	srcFile, err := os.Open(src)
+
 	if err != nil {
 		return err
 	}
@@ -249,7 +280,10 @@ func CopyFile(src, dst string, logger *zap.Logger) error {
 			utils.LogError(logger, err, "failed to close file", zap.String("file", srcFile.Name()))
 		}
 	}()
-
+	// If rename is true, generate a new name for the destination file
+	if rename {
+		dst = generateSchemaName(dst)
+	}
 	dstFile, err := os.Create(dst)
 	if err != nil {
 		return err
@@ -279,7 +313,7 @@ func CopyFile(src, dst string, logger *zap.Logger) error {
 }
 
 // CopyDir recursively copies a directory tree, attempting to preserve permissions
-func CopyDir(srcDir, destDir string, logger *zap.Logger) error {
+func CopyDir(srcDir, destDir string, rename bool, logger *zap.Logger) error {
 	// Ensure the destination directory exists
 	if _, err := os.Stat(destDir); os.IsNotExist(err) {
 		err := os.MkdirAll(destDir, os.ModePerm)
@@ -306,16 +340,23 @@ func CopyDir(srcDir, destDir string, logger *zap.Logger) error {
 			if err != nil {
 				return err
 			}
-			err = CopyDir(srcPath, destPath, logger)
+			err = CopyDir(srcPath, destPath, rename, logger)
 			if err != nil {
 				return err
 			}
 		} else {
-			err = CopyFile(srcPath, destPath, logger)
+			err = CopyFile(srcPath, destPath, rename, logger)
 			if err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// generateSchemaName generates a new schema name
+func generateSchemaName(src string) string {
+	dir := filepath.Dir(src)
+	newName := "schema" + filepath.Ext(src)
+	return filepath.Join(dir, newName)
 }

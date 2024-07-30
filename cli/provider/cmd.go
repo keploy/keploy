@@ -186,6 +186,12 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		}
 		if cmd.Name() == "download" {
 			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the path to download contracts")
+			err := cmd.MarkFlagRequired("driven")
+			if err != nil {
+				errMsg := "failed to mark driven as required flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
 		}
 
 	case "update":
@@ -451,7 +457,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	}
 
 	if c.cfg.EnableTesting {
-		// Add mode to logger to debug the keploy during testing
+		// Add mode to logger to debug the keploValidateFlagsy during testing
 		logger, err := log.AddMode(cmd.Name())
 		*c.logger = *logger
 		if err != nil {
