@@ -119,3 +119,12 @@ func ReadLengthEncodedString(b []byte) ([]byte, bool, int, error) {
 	}
 	return nil, false, n, io.EOF
 }
+
+// ReadNullTerminatedString reads a null-terminated string from a byte slice
+func ReadNullTerminatedString(b []byte) ([]byte, int, error) {
+	i := bytes.IndexByte(b, 0x00)
+	if i == -1 {
+		return nil, 0, io.EOF
+	}
+	return b[:i], i + 1, nil
+}

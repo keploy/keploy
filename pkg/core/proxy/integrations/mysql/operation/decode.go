@@ -252,11 +252,11 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 			setPacketInfo(ctx, parsedPacket, "request_public_key", mysql.CachingSha2PasswordToString(mysql.RequestPublicKey), clientConn, byte(mysql.RequestPublicKey), decodeCtx)
 		} else {
 			logger.Debug("AuthNextFactor packet", zap.Any("Type", payloadType))
-			err := connection.DecodeAuthNextFactor(ctx, payload)
+			pkt, err := connection.DecodeAuthNextFactor(ctx, payload)
 			if err != nil {
-				logger.Error("Detected AUTH_NEXT_FACTOR packet", zap.Error(err))
 				return parsedPacket, fmt.Errorf("failed to decode AuthNextFactor packet: %w", err)
 			}
+			setPacketInfo(ctx, parsedPacket, pkt, mysql.AuthStatusToString(mysql.AuthNextFactor), clientConn, mysql.AuthNextFactor, decodeCtx)
 		}
 	case payloadType == mysql.HandshakeV10:
 		logger.Debug("HandshakeV10 packet", zap.Any("Type", payloadType))
