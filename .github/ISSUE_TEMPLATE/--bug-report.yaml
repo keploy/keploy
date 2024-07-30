@@ -6,17 +6,17 @@ body:
 - type: markdown
   attributes:
     value: |
-      Thank you for taking the time to fill out this bug report.
+      Thanks for taking the time to fill out our bug report form 🙏
 - type: checkboxes
   attributes:
-    label: Is there an existing issue for this?
+    label: "👀 Is there an existing issue for this?"
     description: Please search to see if an issue already exists for the bug you encountered
     options:
-    - label: I have searched the existing issues
+    - label: I have searched and didn't find similar issue
       required: true
 - type: textarea
   attributes:
-    label: Current behavior
+    label: 👍 Current behavior
     description: A concise description of what you're experiencing and what you expect
     placeholder: |
       When I do <X>, <Y> happens and I see the error message attached below:
@@ -26,8 +26,8 @@ body:
     required: true
 - type: textarea
   attributes:
-    label: Steps to reproduce
-    description: Add steps to reproduce this behaviour, include console or network logs and screenshots
+    label: 👟 Reproduction steps
+    description: How do you trigger this bug? Please walk us through it step by step.
     placeholder: |
       1. Go to '...'
       2. Click on '....'
@@ -35,22 +35,32 @@ body:
       4. See error
   validations:
     required: true
-- type: dropdown
-  id: env
+- type: textarea
+  id: environment
   attributes:
-    label: Environment
-    options:
-      - Production
-      - Release
-      - Deploy preview
+    label: "🧱 Your Environment"
+    description: "What exact version of Appwrite? What Appwrite SDK and version are you using? Is your environment customized in any way?"
+    placeholder: "I use AWS for ..."
   validations:
     required: false
 - type: dropdown
+  id: operating-system
+  attributes:
+      label: "💻 Operating system"
+      description: "What OS is your server / device running on?"
+      options:
+        - Linux
+        - MacOS
+        - Windows
+        - Something else
+  validations:
+      required: true
+- type: dropdown
   id: version
   attributes:
-    label: Version
+    label: 🎲 Version
     options:
-      - Cloud
+      - Keploy Cloud
       - Self-hosted
       - Local
   validations:
@@ -58,7 +68,7 @@ body:
 - type: dropdown
   id: repository
   attributes:
-    label: Repository
+    label: 💻 Repository
     options:
         - keploy
         - go-sdk
@@ -70,6 +80,8 @@ body:
         - writers-program
         - blog-website
         - ui
+        - vscode-extension
+        - jetbrains-plugin
         - samples-go
         - samples-java
         - samples-rust
@@ -81,4 +93,4 @@ body:
 - type: markdown
   attributes:
     value: |
-      Please add the respective Label to the Issue
+        I have read the [Code of Conduct](https://github.com/keploy/keploy/blob/main/CODE_OF_CONDUCT.md)
