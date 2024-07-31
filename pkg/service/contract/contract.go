@@ -396,64 +396,59 @@ func (s *contractService) Generate(ctx context.Context, genAllTests bool, genAll
 	return nil
 }
 
-func (s *contractService) DownloadTests(path string) error {
-	keployFolder := "./keploy/"
-	targetPath := path + "/keploy/tests/schema/"
-	// Ensure destination directory exists
-	if _, err := os.Stat(targetPath); os.IsNotExist(err) {
-		err := os.MkdirAll(targetPath, os.ModePerm)
-		if err != nil {
-			s.logger.Error("Error creating destination directory:")
-			return err
-		}
-	}
-	// Move OpenAPI schemas for tests
-	entries, err := os.ReadDir(keployFolder + "schema/tests/")
-	if err != nil {
-		s.logger.Error("Failed to read directory", zap.String("directory", keployFolder), zap.Error(err))
+func (s *contractService) DownloadTests(ctx context.Context, path string) error {
+	fmt.Println("Path given (not simulated): ", path)
+
+	targetPath := "./Download/Tests"
+	if err := yaml.CreateDir(targetPath, s.logger); err != nil {
 		return err
 	}
 
-	for _, entry := range entries {
-		err := yaml.CopyDir(keployFolder+"schema/tests/"+entry.Name(), targetPath+entry.Name(), false, s.logger)
-		if err != nil {
-			fmt.Println("Error moving directory:", err)
-			return err
-		}
-		s.logger.Info("Test's contracts downloaded", zap.String("tests", entry.Name()))
+	cprFolder := "/home/ahmed/Desktop/GSOC/Keploy/Issues/VirtualCPR"
 
-	}
-	//Move the Keploy version tests
-	// Ensure destination directory exists
-	targetPath = path + "/keploy/tests/keployVersion/"
-	if _, err := os.Stat(targetPath); os.IsNotExist(err) {
-		err := os.MkdirAll(path, os.ModePerm)
-		if err != nil {
-			s.logger.Error("Error creating destination directory:")
-			return err
-		}
-	}
-	entries, err = os.ReadDir(keployFolder)
-	if err != nil {
-		s.logger.Error("Failed to read directory", zap.String("directory", keployFolder), zap.Error(err))
+	var schemaConfigFile config.Config
+
+	configFilePath := filepath.Join("./keploy", "schema")
+	if err := yaml.ReadYAMLFile(ctx, s.logger, configFilePath, "keploy", &schemaConfigFile); err != nil {
 		return err
 	}
-	for _, entry := range entries {
-		if entry.IsDir() && strings.Contains(entry.Name(), "test") {
-			// Move that directory to path
-			err := yaml.CopyDir(keployFolder+entry.Name()+"/tests", targetPath+entry.Name(), false, s.logger)
-			if err != nil {
-				fmt.Println("Error moving directory:", err)
+	// Loop through the services in the mappings in the config file
+	for service := range schemaConfigFile.Contract.ServicesMapping {
+		// Fetch the tests of those services from virtual cpr
+		testsPath := filepath.Join(cprFolder, service, "keploy", "schema", "tests")
+		// Copy this dir to the target path
+		serviceFolder := filepath.Join(targetPath, service)
+		if err := yaml.CopyDir(testsPath, serviceFolder, false, s.logger); err != nil {
+			fmt.Println("Error copying directory:", err)
+			return err
+		}
+		s.logger.Info("Service's tests contracts downloaded", zap.String("service", service))
+		// Copy the Keploy version (HTTP) tests
+		keployTestsPath := filepath.Join(cprFolder, service, "keploy")
+		testEntries, err := os.ReadDir(keployTestsPath)
+		if err != nil {
+			s.logger.Error("Failed to read directory", zap.String("directory", keployTestsPath), zap.Error(err))
+			return err
+		}
+		for _, testSetID := range testEntries {
+			if !testSetID.IsDir() || !strings.Contains(testSetID.Name(), "test") {
+				continue
+			}
+			// Copy the directory to the target path
+			if err := yaml.CopyDir(filepath.Join(keployTestsPath, testSetID.Name(), "tests"), filepath.Join(serviceFolder, "schema", testSetID.Name()), false, s.logger); err != nil {
+				fmt.Println("Error copying directory:", err)
 				return err
 			}
-			s.logger.Info("Keploy's Tests downloaded", zap.String("tests", entry.Name()))
+			s.logger.Info("Service's HTTP tests contracts downloaded", zap.String("service", service), zap.String("tests", testSetID.Name()))
 
 		}
+
 	}
 	return nil
 }
 func (s *contractService) DownloadMocks(ctx context.Context, path string) error {
-	targetPath := "./Download"
+	fmt.Println("Path given (not simulated): ", path)
+	targetPath := "./Download/Mocks"
 	if err := yaml.CreateDir(targetPath, s.logger); err != nil {
 		return err
 	}
@@ -480,12 +475,10 @@ func (s *contractService) DownloadMocks(ctx context.Context, path string) error 
 		}
 
 		serviceFound := false
-		for key := range schemaConfigFile.Contract.ServicesMapping {
-			if key == self {
-				serviceFound = true
-				break
-			}
+		if _, exists := schemaConfigFile.Contract.ServicesMapping[self]; exists {
+			serviceFound = true
 		}
+
 		if !serviceFound {
 			continue
 		}
@@ -565,10 +558,11 @@ func (s *contractService) Download(ctx context.Context, driven string) error {
 	}
 
 	if driven == "provider" || driven == "server" {
-		err = s.DownloadMocks(ctx, path)
+		err = s.DownloadTests(ctx, path)
 
 	} else if driven == "consumer" || driven == "client" {
-		err = s.DownloadTests(path)
+
+		err = s.DownloadMocks(ctx, path)
 	}
 	if err != nil {
 		return err

@@ -13,25 +13,7 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-//	func GetVariablesType(obj map[string]interface{}) map[string]map[string]string {
-//		types := make(map[string]map[string]string, 0)
-//		// Loop over body object and get the type of each value
-//		for key, value := range obj {
-//			var valueType string
-//			if fmt.Sprintf("%T", value) == "float64" {
-//				valueType = "number"
-//			} else if fmt.Sprintf("%T", value) == "map[string]interface {}" {
-//				valueType = "object"
-//			} else {
-//				valueType = fmt.Sprintf("%T", value)
-//			}
-//			responseType := map[string]string{
-//				"type": valueType,
-//			}
-//			types[key] = responseType
-//		}
-//		return types
-//	}
+// GetVariablesType returns the type of each variable in the object.
 func GetVariablesType(obj map[string]interface{}) map[string]map[string]interface{} {
 	types := make(map[string]map[string]interface{}, 0)
 	// Loop over body object and get the type of each value
