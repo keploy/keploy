@@ -581,6 +581,39 @@ func (idc *Impl) SetVolume(service *yaml.Node, source, destination string) {
 	volumeNode.Content = append(volumeNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: volume})
 }
 
+func (idc *Impl) WorkingDirExists(service *yaml.Node, workingDir string) bool {
+	for i := 0; i < len(service.Content); i += 2 {
+		if i+1 >= len(service.Content) {
+			break
+		}
+		if service.Content[i].Value == "working_dir" {
+			workingDirNode := service.Content[i+1]
+			return workingDirNode.Value == workingDir
+		}
+	}
+	return false
+}
+
+func (idc *Impl) SetWorkingDir(service *yaml.Node, workingDir string) {
+	var workingDirNode *yaml.Node
+	for i := 0; i < len(service.Content); i += 2 {
+		if i+1 >= len(service.Content) {
+			break
+		}
+		if service.Content[i].Value == "working_dir" {
+			workingDirNode = service.Content[i+1]
+			break
+		}
+	}
+
+	if workingDirNode == nil {
+		workingDirNode = &yaml.Node{Kind: yaml.ScalarNode, Value: workingDir}
+		service.Content = append(service.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "working_dir"}, workingDirNode)
+	} else {
+		workingDirNode.Value = workingDir
+	}
+}
+
 func (idc *Impl) EnvironmentExists(service *yaml.Node, key, value string) bool {
 	env := key + "=" + value
 	for i := 0; i < len(service.Content); i += 2 {

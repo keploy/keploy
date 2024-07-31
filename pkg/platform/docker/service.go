@@ -29,6 +29,8 @@ type Client interface {
 	SetKeployNetwork(c *Compose) (*NetworkInfo, error)
 	VolumeExists(service *yaml.Node, source, destination string) bool
 	SetVolume(service *yaml.Node, source, destination string)
+	WorkingDirExists(service *yaml.Node, workingDir string) bool
+	SetWorkingDir(service *yaml.Node, workingDir string)
 	EnvironmentExists(service *yaml.Node, key string, value string) bool
 	SetEnvironment(service *yaml.Node, key, value string)
 	ReadComposeFile(filePath string) (*Compose, error)

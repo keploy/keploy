@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 
 	"github.com/docker/docker/api/types"
@@ -23,11 +24,12 @@ import (
 	"go.uber.org/zap"
 )
 
-func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opts Options) *App {
+func NewApp(logger *zap.Logger, id uint64, cmd string, language config.Language, client docker.Client, opts Options) *App {
 	app := &App{
 		logger:           logger,
 		id:               id,
 		cmd:              cmd,
+		language:         language,
 		docker:           client,
 		kind:             utils.FindDockerCmd(cmd),
 		keployContainer:  "keploy-v2",
@@ -44,6 +46,7 @@ type App struct {
 	docker           docker.Client
 	id               uint64
 	cmd              string
+	language         config.Language
 	kind             utils.CmdType
 	containerDelay   uint64
 	container        string
@@ -204,24 +207,47 @@ func (a *App) SetupCompose() error {
 			a.docker.SetVolume(serviceNode, "${PWD}", "${PWD}")
 			composeChanged = true
 		}
-
-		ok = a.docker.EnvironmentExists(serviceNode, "APPEND", "$APPEND")
-		if !ok {
-			a.docker.SetEnvironment(serviceNode, "APPEND", "$APPEND")
-			composeChanged = true
-		}
-
-		ok = a.docker.EnvironmentExists(serviceNode, "CLEAN", "$CLEAN")
-		if !ok {
-			a.docker.SetEnvironment(serviceNode, "CLEAN", "$CLEAN")
-			composeChanged = true
-		}
-
-		v := "-javaagent:/root/.m2/repository/org/jacoco/org.jacoco.agent/0.8.8/org.jacoco.agent-0.8.8-runtime.jar=destfile=target/$TESTSETID" + ".exec"
-		ok = a.docker.EnvironmentExists(serviceNode, "JACOCOAGENT", v)
-		if !ok {
-			a.docker.SetEnvironment(serviceNode, "JACOCOAGENT", v)
-			composeChanged = true
+		switch a.language {
+		case models.Go:
+			ok = a.docker.EnvironmentExists(serviceNode, "GOCOVERDIR", "$GOCOVERDIR")
+			if !ok {
+				a.docker.SetEnvironment(serviceNode, "GOCOVERDIR", "$GOCOVERDIR")
+				composeChanged = true
+			}
+		case models.Python:
+			ok = a.docker.EnvironmentExists(serviceNode, "APPEND", "$APPEND")
+			if !ok {
+				a.docker.SetEnvironment(serviceNode, "APPEND", "$APPEND")
+				composeChanged = true
+			}
+			ok = a.docker.WorkingDirExists(serviceNode, "$PWD") || a.docker.WorkingDirExists(serviceNode, "${PWD}")
+			if !ok {
+				a.docker.SetWorkingDir(serviceNode, "$PWD")
+				composeChanged = true
+			}
+		case models.Javascript:
+			ok = a.docker.EnvironmentExists(serviceNode, "CLEAN", "$CLEAN")
+			if !ok {
+				a.docker.SetEnvironment(serviceNode, "CLEAN", "$CLEAN")
+				composeChanged = true
+			}
+			ok = a.docker.WorkingDirExists(serviceNode, "$PWD") || a.docker.WorkingDirExists(serviceNode, "${PWD}")
+			if !ok {
+				a.docker.SetWorkingDir(serviceNode, "$PWD")
+				composeChanged = true
+			}
+		case models.Java:
+			v := "-javaagent:/root/.m2/repository/org/jacoco/org.jacoco.agent/0.8.8/org.jacoco.agent-0.8.8-runtime.jar=destfile=target/$TESTSETID" + ".exec"
+			ok = a.docker.EnvironmentExists(serviceNode, "JACOCOAGENT", v)
+			if !ok {
+				a.docker.SetEnvironment(serviceNode, "JACOCOAGENT", v)
+				composeChanged = true
+			}
+			ok = a.docker.WorkingDirExists(serviceNode, "$PWD") || a.docker.WorkingDirExists(serviceNode, "${PWD}")
+			if !ok {
+				a.docker.SetWorkingDir(serviceNode, "$PWD")
+				composeChanged = true
+			}
 		}
 	}
 
