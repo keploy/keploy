@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/getkin/kin-openapi/openapi3"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
@@ -35,25 +34,12 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, config *config.Config
 }
 
 func (s *contractService) ConvertHTTPToOpenAPI(ctx context.Context, logger *zap.Logger, filePath string, name string, outputPath string, readData bool, data models.HTTPSchema2, isAppend bool) (success bool) {
-
-	var custom models.HTTPSchema2
-	if readData {
-		data, err := yaml.ReadFile(ctx, logger, filePath, name)
-		if err != nil {
-			logger.Fatal("Error reading file", zap.Error(err))
-			return false
-		}
-
-		// Parse the custom format YAML into the HTTPSchema struct
-		err = yamlLib.Unmarshal(data, &custom)
-		if err != nil {
-			logger.Error("Error parsing YAML: %v", zap.Error(err))
-			return false
-		}
-	} else {
-		custom = data
+	custom, err := readOrParseData(ctx, logger, filePath, name, readData, data)
+	if err != nil {
+		logger.Fatal("Error reading or parsing data", zap.Error(err))
+		return false
 	}
-	var err error
+
 	// Convert response body to an object
 	var responseBodyObject map[string]interface{}
 	if custom.Spec.Response.Body != "" {
@@ -224,40 +210,13 @@ func (s *contractService) ConvertHTTPToOpenAPI(ctx context.Context, logger *zap.
 	if err != nil {
 		return false
 	}
-	// Validate using kin-openapi
-	loader := openapi3.NewLoader()
-	doc, err := loader.LoadFromData(openapiYAML)
+	err = validateOpenAPIDocument(logger, openapiYAML)
 	if err != nil {
-		logger.Fatal("Error loading OpenAPI document: %v", zap.Error(err))
-		return false
-
-	}
-	// Validate the OpenAPI document
-	if err := doc.Validate(context.Background()); err != nil {
-		logger.Fatal("Error validating OpenAPI document: %v", zap.Error(err))
-	}
-
-	fmt.Println("OpenAPI document is valid.")
-	_, err = os.Stat(outputPath)
-	if os.IsNotExist(err) {
-		// Create the directory if it doesn't exist
-		err = os.MkdirAll(outputPath, os.ModePerm)
-		if err != nil {
-			logger.Error("Failed to create directory", zap.String("directory", outputPath), zap.Error(err))
-			return false
-		}
-		logger.Info("Directory created", zap.String("directory", outputPath))
-	}
-
-	err = yaml.WriteFile(ctx, logger, outputPath, name, openapiYAML, isAppend)
-	if err != nil {
-		logger.Error("Failed to write OpenAPI YAML to a file", zap.Error(err))
 		return false
 	}
 
-	outputFilePath := outputPath + "/" + name + ".yaml"
-	fmt.Println("OpenAPI YAML has been saved to " + outputFilePath)
-	return true
+	err = writeOpenAPIToFile(ctx, logger, outputPath, name, openapiYAML, isAppend)
+	return err == nil
 }
 
 func (s *contractService) GenerateMocksSchemas(ctx context.Context, services []string, mappings map[string][]string, genAllMocks bool) error {

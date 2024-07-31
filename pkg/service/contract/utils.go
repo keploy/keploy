@@ -1,16 +1,22 @@
 package contract
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/getkin/kin-openapi/openapi3"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/platform/yaml"
+	"go.uber.org/zap"
+	yamlLib "gopkg.in/yaml.v3"
 )
 
 // GetVariablesType returns the type of each variable in the object.
@@ -256,4 +262,61 @@ func generateUniqueID() string {
 		return ""
 	}
 	return hex.EncodeToString(b) + "-" + time.Now().Format("20060102150405")
+}
+
+func readOrParseData(ctx context.Context, logger *zap.Logger, filePath, name string, readData bool, data models.HTTPSchema2) (models.HTTPSchema2, error) {
+	var custom models.HTTPSchema2
+	if readData {
+		data, err := yaml.ReadFile(ctx, logger, filePath, name)
+		if err != nil {
+			return custom, err
+		}
+		err = yamlLib.Unmarshal(data, &custom)
+		if err != nil {
+			return custom, err
+		}
+	} else {
+		custom = data
+	}
+	return custom, nil
+}
+func validateOpenAPIDocument(logger *zap.Logger, openapiYAML []byte) error {
+	// Validate using kin-openapi
+	loader := openapi3.NewLoader()
+	doc, err := loader.LoadFromData(openapiYAML)
+	if err != nil {
+		logger.Fatal("Error loading OpenAPI document: %v", zap.Error(err))
+		return nil
+
+	}
+	// Validate the OpenAPI document
+	if err := doc.Validate(context.Background()); err != nil {
+		logger.Fatal("Error validating OpenAPI document: %v", zap.Error(err))
+		return err
+	}
+
+	fmt.Println("OpenAPI document is valid.")
+	return nil
+}
+func writeOpenAPIToFile(ctx context.Context, logger *zap.Logger, outputPath, name string, openapiYAML []byte, isAppend bool) error {
+
+	_, err := os.Stat(outputPath)
+	if os.IsNotExist(err) {
+		err = os.MkdirAll(outputPath, os.ModePerm)
+		if err != nil {
+			logger.Error("Failed to create directory", zap.String("directory", outputPath), zap.Error(err))
+			return err
+		}
+		logger.Info("Directory created", zap.String("directory", outputPath))
+	}
+
+	err = yaml.WriteFile(ctx, logger, outputPath, name, openapiYAML, isAppend)
+	if err != nil {
+		logger.Error("Failed to write OpenAPI YAML to a file", zap.Error(err))
+		return err
+	}
+
+	outputFilePath := outputPath + "/" + name + ".yaml"
+	fmt.Println("OpenAPI YAML has been saved to " + outputFilePath)
+	return nil
 }
