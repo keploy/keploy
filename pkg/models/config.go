@@ -2,7 +2,14 @@
 package models
 
 type TestSet struct {
-	PreScript  string                 `json:"pre_script" bson:"pre_script" yaml:"pre_script,omitempty"`
-	PostScript string                 `json:"post_script" bson:"post_script" yaml:"post_script,omitempty"`
-	Template   map[string]interface{} `json:"template" bson:"template" yaml:"template,omitempty"`
+	PreScript    string                 `json:"pre_script" bson:"pre_script" yaml:"preScript,omitempty"`
+	PostScript   string                 `json:"post_script" bson:"post_script" yaml:"postScript,omitempty"`
+	Template     map[string]interface{} `json:"template" bson:"template" yaml:"template,omitempty"`
+	MockRegistry *MockRegistry          `yaml:"mockRegistry" bson:"mock_registry" json:"mockRegistry,omitempty"`
+}
+
+type MockRegistry struct {
+	Mock string `json:"mock" bson:"mock" yaml:"mock,omitempty"`
+	App  string `json:"app" bson:"app" yaml:"app,omitempty"`
+	User string `json:"user" bson:"user" yaml:"user,omitempty"`
 }

@@ -3,7 +3,9 @@ package utils
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"debug/elf"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -793,4 +795,10 @@ func CreateGitIgnore(logger *zap.Logger, path string) error {
 	}
 
 	return nil
+}
+
+func Hash(data []byte) string {
+	hasher := sha256.New()
+	hasher.Write(data)
+	return hex.EncodeToString(hasher.Sum(nil))
 }

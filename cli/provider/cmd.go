@@ -208,7 +208,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
-
 		cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command to start the user application (native/docker/docker-compose)")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
@@ -271,6 +270,8 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 			cmd.Flags().String("jacoco-agent-path", c.cfg.Test.JacocoAgentPath, "Only applicable for test coverage for Java projects. You can override the jacoco agent jar by proving its path")
 			cmd.Flags().String("base-path", c.cfg.Test.BasePath, "Custom api basePath/origin to replace the actual basePath/origin in the testcases; App flag is ignored and app will not be started & instrumented when this is set since the application running on a different machine")
 			cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
+			cmd.Flags().Bool("disableMockUpload", false, "Store/Fetch mocks locally")
+			cmd.Flags().Bool("useLocalMock", false, "Use local mocks instead of fetching from the cloud")
 		}
 	}
 }

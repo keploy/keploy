@@ -27,21 +27,13 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// TODO we should remove this global variable and use the return value of the function
 var completeTestReport = make(map[string]TestReportVerdict)
 var totalTests int
 var totalTestPassed int
 var totalTestFailed int
 var totalTestIgnored int
 var totalTestTimeTaken time.Duration
-
-// emulator contains the struct instance that implements RequestEmulator interface. This is done for
-// attaching the objects dynamically as plugins.
-var requestMockemulator RequestMockHandler
-
-func SetTestUtilInstance(emulatorInstance RequestMockHandler) {
-	requestMockemulator = emulatorInstance
-}
+var testHooks TestHooks
 
 type Replayer struct {
 	logger          *zap.Logger
@@ -57,8 +49,8 @@ type Replayer struct {
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf Config, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
 	// set the request emulator for simulating test case requests, if not set
-	if requestMockemulator == nil {
-		SetTestUtilInstance(NewRequestMockUtil(logger, config.Path, "mocks", config.Test.APITimeout, config.Test.BasePath))
+	if testHooks == nil {
+		SetTestHook(NewHook(logger, config.Path, "mocks", config.Test.APITimeout, config.Test.BasePath))
 	}
 	instrument := false
 	if config.Command != "" {
@@ -161,7 +153,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if !r.config.Test.SkipCoverage {
 		if utils.CmdType(r.config.CommandType) == utils.Native {
 			r.config.Command, err = cov.PreProcess()
-
 			if err != nil {
 				r.config.Test.SkipCoverage = true
 			}
@@ -1081,4 +1072,8 @@ func (r *Replayer) DeleteTestSet(ctx context.Context, testSetID string) error {
 
 func (r *Replayer) DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error {
 	return r.testDB.DeleteTests(ctx, testSetID, testCaseIDs)
+}
+
+func SetTestHook(testHooks TestHooks) {
+	testHooks = testHooks
 }
