@@ -226,13 +226,8 @@ func (s *contractService) GenerateMocksSchemas(ctx context.Context, services []s
 		s.logger.Error("Failed to read directory", zap.String("directory", keployFolder), zap.Error(err))
 		return err
 	}
-	if !genAllMocks {
-		for _, service := range services {
-			if _, exists := mappings[service]; !exists {
-				s.logger.Warn("Service not found in services mapping, no contract generation", zap.String("service", service))
-				continue
-			}
-		}
+	if err := validateServices(services, mappings, genAllMocks, s.logger); err != nil {
+		return err
 	}
 	for _, entry := range entries {
 		if entry.IsDir() && strings.Contains(entry.Name(), "test") {

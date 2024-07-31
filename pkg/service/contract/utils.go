@@ -320,3 +320,14 @@ func writeOpenAPIToFile(ctx context.Context, logger *zap.Logger, outputPath, nam
 	fmt.Println("OpenAPI YAML has been saved to " + outputFilePath)
 	return nil
 }
+
+func validateServices(services []string, mappings map[string][]string, genAllMocks bool, logger *zap.Logger) error {
+	if !genAllMocks {
+		for _, service := range services {
+			if _, exists := mappings[service]; !exists {
+				logger.Warn("Service not found in services mapping, no contract generation", zap.String("service", service))
+			}
+		}
+	}
+	return nil
+}
