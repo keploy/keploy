@@ -8,11 +8,13 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models/mysql"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
@@ -36,6 +38,60 @@ func ReadFirstBuffer(ctx context.Context, logger *zap.Logger, clientConn, destCo
 	}
 	// Return any other error from reading destConn
 	return nil, "", err
+}
+
+// ReadPacketStream reads packets from the connection and sends them to the bufferChannel
+func ReadPacketStream(ctx context.Context, logger *zap.Logger, conn net.Conn, bufferChannel chan []byte, errChannel chan error) {
+	for {
+		select {
+		case <-ctx.Done():
+			// errChannel <- ctx.Err()
+			return
+		default:
+			if conn == nil {
+				logger.Debug("the conn is nil")
+			}
+			buffer, err := ReadPacketBuffer(ctx, logger, conn)
+			if err != nil {
+				if ctx.Err() != nil { // to avoid sending buffer to closed channel if the context is cancelled
+					return
+				}
+				if err != io.EOF {
+					utils.LogError(logger, err, "failed to read mysql packet buffer")
+				}
+				errChannel <- err
+				return
+			}
+			if ctx.Err() != nil { // to avoid sending buffer to closed channel if the context is cancelled
+				return
+			}
+			bufferChannel <- buffer
+		}
+	}
+}
+
+// ReadPacketBuffer reads a MySQL packet from the connection
+func ReadPacketBuffer(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]byte, error) {
+	var packetBuffer []byte
+	// first read the header length
+	header, err := util.ReadRequiredBytes(ctx, logger, conn, 4)
+	if err != nil {
+		return packetBuffer, fmt.Errorf("failed to read mysql packet header: %w", err)
+	}
+
+	packetBuffer = append(packetBuffer, header...)
+
+	// read the payload length
+	payloadLength := GetPayloadLength(header[:3])
+	if payloadLength > 0 {
+		payload, err := util.ReadRequiredBytes(ctx, logger, conn, int(payloadLength))
+		if err != nil {
+			return packetBuffer, fmt.Errorf("failed to read mysql packet payload: %w", err)
+		}
+		packetBuffer = append(packetBuffer, payload...)
+	}
+
+	return packetBuffer, nil
 }
 
 // BytesToMySQLPacket converts a byte slice to a MySQL packet
@@ -127,4 +183,17 @@ func ReadNullTerminatedString(b []byte) ([]byte, int, error) {
 		return nil, 0, io.EOF
 	}
 	return b[:i], i + 1, nil
+}
+
+func WriteStream(ctx context.Context, logger *zap.Logger, conn net.Conn, buff [][]byte) error {
+	for _, b := range buff {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		_, err := conn.Write(b)
+		if err != nil {
+			utils.LogError(logger, err, "failed to write to connection")
+			return err
+		}
+	}
 }

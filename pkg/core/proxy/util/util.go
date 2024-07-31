@@ -170,7 +170,7 @@ func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byt
 	}
 }
 
-// ReadRequiredBytes ReadBytes function is utilized to read the complete message from the reader until the end of the file (EOF).
+// ReadRequiredBytes ReadBytes function is utilized to read the required number of bytes from the reader.
 // It returns the content as a byte array.
 func ReadRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader, numBytes int) ([]byte, error) {
 	var buffer []byte

@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/connection"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/generic"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
+	itgUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.uber.org/zap"
@@ -37,8 +38,10 @@ type DecodeContext struct {
 	LastOp             *LastOperation
 	PreparedStatements map[uint32]*mysql.StmtPrepareOkPacket
 	ServerGreetings    *ServerGreetings
+	PluginName         string
 }
 
+// DecodePayload is used to decode mysql packets that don't consist of multiple packets within them.
 func DecodePayload(ctx context.Context, logger *zap.Logger, data []byte, clientConn net.Conn, decodeCtx *DecodeContext) (*mysql.PacketBundle, error) {
 	//Parse the data into mysql header and payload
 	packet, err := utils.BytesToMySQLPacket(data)
@@ -184,7 +187,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 
 	switch {
 	// generic response packets
-	case payloadType == mysql.EOF:
+	case payloadType == mysql.EOF && len(payload) == 5: //assuming that the payload is always 5 bytes
 		logger.Debug("EOF packet", zap.Any("Type", payloadType))
 		pkt, err := generic.DecodeEOF(ctx, payload, sg.CapabilityFlags)
 		if err != nil {
@@ -210,7 +213,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 				return parsedPacket, fmt.Errorf("failed to decode COM_STMT_PREPARE_OK packet: %w", err)
 			}
 
-			setPacketInfo(ctx, parsedPacket, pkt, mysql.StatusToString(mysql.OK), clientConn, mysql.OK, decodeCtx)
+			setPacketInfo(ctx, parsedPacket, pkt, "COM_STMT_PREPARE_OK", clientConn, mysql.OK, decodeCtx)
 			// Store the prepared statement to use it later
 			decodeCtx.PreparedStatements[pkt.StatementID] = pkt
 			//debug log
@@ -243,9 +246,14 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 			}
 			setPacketInfo(ctx, parsedPacket, pkt, mysql.AuthStatusToString(mysql.AuthMoreData), clientConn, mysql.AuthMoreData, decodeCtx)
 		}
-	case payloadType == mysql.AuthSwitchRequest && len(payload) > 5:
+	case payloadType == mysql.AuthSwitchRequest && len(payload) > 5: //conflicting with EOF packet, assuming that the payload is always greater than 5 bytes
 		logger.Debug("AuthSwitchRequest packet", zap.Any("Type", payloadType))
-		return parsedPacket, fmt.Errorf("AuthSwitchRequest not supported")
+		pkt, err := connection.DecodeAuthSwitchRequest(ctx, payload)
+		if err != nil {
+			return parsedPacket, fmt.Errorf("failed to decode AuthSwitchRequest packet: %w", err)
+		}
+		setPacketInfo(ctx, parsedPacket, pkt, mysql.AuthStatusToString(mysql.AuthSwitchRequest), clientConn, mysql.AuthSwitchRequest, decodeCtx)
+
 	case payloadType == 0x02:
 		if len(payload) == 1 {
 			logger.Debug(("Request public key detected"))
@@ -267,17 +275,6 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		// Store the server greetings to use it later
 		decodeCtx.ServerGreetings.store(clientConn, pkt)
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.AuthStatusToString(mysql.HandshakeV10), clientConn, mysql.HandshakeV10, decodeCtx)
-	// case payloadType == 0x8d:
-	// 	//debug log
-	// 	logger.Info("HandshakeResponse41 packet", zap.Any("Type", payloadType))
-	// 	pkt, err := connection.DecodeHandshakeResponse41(ctx, logger, payload)
-	// 	if err != nil {
-	// 		return parsedPacket, fmt.Errorf("failed to decode HandshakeResponse41 packet: %w", err)
-	// 	}
-
-	// 	printByteArray("HandshakeResponse41", payload)
-
-	// 	setPacketInfo(ctx, parsedPacket, pkt, mysql.HandshakeResponse41, clientConn, 0x8d, decodeCtx)
 
 	// utility packets
 	case payloadType == mysql.COM_QUIT:
@@ -427,9 +424,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 
 	default:
 		logger.Warn("Unknown packet type", zap.String("PacketType", fmt.Sprintf("%#x", payloadType)), zap.Any("payload", payload), zap.Any("last operation", lastOp))
-		setPacketInfo(ctx, parsedPacket, payload, "Unknown type", clientConn, RESET, decodeCtx)
-		//print the entire payload in hexademical format
-		// printByteArray("Unknown type", payload)
+		setPacketInfo(ctx, parsedPacket, itgUtils.EncodeBase64(payload), "Unknown type", clientConn, RESET, decodeCtx)
 	}
 
 	if decodeCtx.Mode == models.MODE_TEST {

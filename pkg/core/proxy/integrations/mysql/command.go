@@ -4,18 +4,16 @@ package mysql
 
 import (
 	"context"
-	"io"
+	"fmt"
 	"net"
-	"time"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/operation"
-	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
-	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
+/*
 func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, reqTimestamp time.Time, decodeCtx *operation.DecodeContext) error {
 	var (
 		requests  []mysql.Request
@@ -95,4 +93,80 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			recordMock(ctx, requests, responses, "mocks", commandPkt.Header.Type, commandRespPkt.Header.Type, mocks, reqTimestamp)
 		}
 	}
+}
+*/
+
+// packetCompletionStatus is used to check whether the query response packet is completed or not.
+type packetCompletionStatus struct {
+	preparedStatementOK     *queryResponseState // used to check whether preparedStatementOk packet is completed or not.
+	textResultSet           *queryResponseState // used to check whether textResultSet packet is completed or not.
+	binaryProtocolResultSet *queryResponseState // used to check whether BinaryProtocolResultSet packet is completed or not.
+}
+
+type queryResponseState struct {
+	isCompleted bool
+	data        []byte
+}
+
+type preparedStmtOkTracker struct {
+	numParams           uint16
+	numColumns          uint16
+	eofParamsCompleted  bool
+	eofColumnsCompleted bool
+}
+
+// handleQueries is used to decode the client queries.
+
+func handleQueries(ctx context.Context, logger *zap.Logger, data []byte, clientConn net.Conn, decodeCtx *operation.DecodeContext) ([]mysql.Request, error) {
+
+	var requests []mysql.Request
+
+	// decode the command
+	commandPkt, err := operation.DecodePayload(ctx, logger, data, clientConn, decodeCtx)
+	if err != nil {
+		utils.LogError(logger, err, "failed to decode the command packet from the client")
+		return requests, err
+	}
+
+	requests = append(requests, mysql.Request{
+		PacketBundle: *commandPkt,
+	})
+
+	return requests, nil
+}
+
+type QueryResponseResult struct {
+	resp              []mysql.Response
+	saveMock          bool
+	requestOperation  string
+	responseOperation string
+}
+
+
+// handleQueriesResponse is used to handle the response of the client query sent by the server.
+func handleQueriesResponse(ctx context.Context, logger *zap.Logger, clientConn net.Conn, status *packetCompletionStatus, decodeCtx *operation.DecodeContext) (*QueryResponseResult, error) {
+	result := &QueryResponseResult{
+		resp:     make([]mysql.Response, 0),
+		saveMock: false,
+	}
+
+	//Get the last operation
+	lastOp, ok := decodeCtx.LastOp.Load(clientConn)
+	if !ok {
+		utils.LogError(logger, nil, "failed to get the last operation")
+		return result, fmt.Errorf("failed to handle the query response")
+	}
+
+	switch lastOp {
+	case mysql.COM_STMT_PREPARE:
+		handlePrepareStatementOk(ctx, logger, clientConn, status, decodeCtx)
+	case mysql.COM_QUERY:
+
+	case mysql.COM_STMT_EXECUTE:
+
+	default:
+
+	}
+
+	return result, nil
 }

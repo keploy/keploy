@@ -4,13 +4,14 @@ package connection
 
 import (
 	"bytes"
+	"context"
 
 	"go.keploy.io/server/v2/pkg/models/mysql"
 )
 
 //ref: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_phase_packets_protocol_auth_switch_request.html
 
-func DecodeAuthSwitchRequest(data []byte) (*mysql.AuthSwitchRequestPacket, error) {
+func DecodeAuthSwitchRequest(_ context.Context, data []byte) (*mysql.AuthSwitchRequestPacket, error) {
 
 	packet := &mysql.AuthSwitchRequestPacket{
 		StatusTag: data[0],

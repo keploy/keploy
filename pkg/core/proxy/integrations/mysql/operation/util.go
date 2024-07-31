@@ -4,6 +4,7 @@ package operation
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync"
 
@@ -71,4 +72,15 @@ func setPacketInfo(_ context.Context, parsedPacket *mysql.PacketBundle, pkt inte
 	parsedPacket.Header.Type = pktType
 	parsedPacket.Message = pkt
 	decodeCtx.LastOp.Store(clientConn, lastOp)
+}
+
+func GetPluginName(buf interface{}) (string, error) {
+	switch v := buf.(type) {
+	case *mysql.HandshakeV10Packet:
+		return v.AuthPluginName, nil
+	case *mysql.AuthSwitchRequestPacket:
+		return v.PluginName, nil
+	default:
+		return "", fmt.Errorf("invalid packet type to get plugin name")
+	}
 }
