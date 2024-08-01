@@ -1,5 +1,6 @@
 //go:build linux
 
+// Package preparedstmt provides functionality for decoding prepared statement packets.
 package preparedstmt
 
 import (

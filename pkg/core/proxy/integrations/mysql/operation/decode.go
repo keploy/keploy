@@ -115,12 +115,20 @@ func handleQueryStmtResponse(ctx context.Context, logger *zap.Logger, packet mys
 
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.StatusToString(mysql.ERR), clientConn, RESET, decodeCtx)
 
+	case mysql.EOF:
+		pkt, err := generic.DecodeEOF(ctx, payload, sg.CapabilityFlags)
+		if err != nil {
+			return parsedPacket, fmt.Errorf("failed to decode EOF packet: %w", err)
+		}
+
+		setPacketInfo(ctx, parsedPacket, pkt, mysql.StatusToString(mysql.EOF), clientConn, RESET, decodeCtx)
+
 	case mysql.LocalInFile:
 		parsedPacket.Header.Type = "LocalInFile"
 		decodeCtx.LastOp.Store(clientConn, RESET) //reset the last operation
 		return parsedPacket, fmt.Errorf("LocalInFile not supported")
 	default:
-		//If the packet is not OK, ERR or LocalInFile, then it is a result set
+		//If the packet is not OK, ERR, EOF or LocalInFile, then it is a result set
 		var pktType string
 		var rowType command.RowType
 		if lastOp == mysql.COM_STMT_EXECUTE {
@@ -131,12 +139,13 @@ func handleQueryStmtResponse(ctx context.Context, logger *zap.Logger, packet mys
 			pktType = string(mysql.Text)
 		}
 
-		pkt, err := command.DecodeResultSet(ctx, logger, payload, rowType)
+		pkt, err := command.DecodeResultSetMetadata(ctx, logger, payload, rowType)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode result set: %w", err)
 		}
 
-		setPacketInfo(ctx, parsedPacket, pkt, pktType, clientConn, RESET, decodeCtx)
+		// Do not change the last operation if the packet is a result set, it will be changed when the result set is fully received
+		setPacketInfo(ctx, parsedPacket, pkt, pktType, clientConn, lastOp, decodeCtx)
 	}
 
 	return parsedPacket, nil
@@ -376,33 +385,13 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 
 	// case payloadType == mysql.COM_STMT_FETCH:
 	case payloadType == mysql.COM_STMT_CLOSE:
-		if len(payload) > 9 {
-			if payload[9] == mysql.COM_STMT_PREPARE {
-				logger.Debug("COM_STMT_CLOSE_WITH_PREPARE packet", zap.Any("Type", payloadType))
-				pkt, err := preparedstmt.DecodeCloseAndPrepare(ctx, payload)
-				if err != nil {
-					return parsedPacket, fmt.Errorf("failed to decode COM_STMT_CLOSE_WITH_PREPARE packet: %w", err)
-				}
-
-				setPacketInfo(ctx, parsedPacket, pkt, "COM_STMT_CLOSE_WITH_PREPARE", clientConn, mysql.COM_STMT_PREPARE, decodeCtx)
-			} else if payload[9] == mysql.COM_QUERY {
-				logger.Debug("COM_STMT_CLOSE_WITH_QUERY packet", zap.Any("Type", payloadType))
-				pkt, err := preparedstmt.DecodeCloseAndQuery(ctx, payload)
-				if err != nil {
-					return parsedPacket, fmt.Errorf("failed to decode COM_STMT_CLOSE_WITH_QUERY packet: %w", err)
-				}
-
-				setPacketInfo(ctx, parsedPacket, pkt, "COM_STMT_CLOSE_WITH_QUERY", clientConn, mysql.COM_QUERY, decodeCtx)
-			}
-		} else {
-			logger.Debug("COM_STMT_CLOSE packet", zap.Any("Type", payloadType))
-			pkt, err := preparedstmt.DecoderStmtClose(ctx, payload)
-			if err != nil {
-				return parsedPacket, fmt.Errorf("failed to decode COM_STMT_CLOSE packet: %w", err)
-			}
-
-			setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_STMT_CLOSE), clientConn, mysql.COM_STMT_CLOSE, decodeCtx)
+		logger.Debug("COM_STMT_CLOSE packet", zap.Any("Type", payloadType))
+		pkt, err := preparedstmt.DecoderStmtClose(ctx, payload)
+		if err != nil {
+			return parsedPacket, fmt.Errorf("failed to decode COM_STMT_CLOSE packet: %w", err)
 		}
+
+		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_STMT_CLOSE), clientConn, mysql.COM_STMT_CLOSE, decodeCtx)
 
 	case payloadType == mysql.COM_STMT_RESET:
 		logger.Debug("COM_STMT_RESET packet", zap.Any("Type", payloadType))

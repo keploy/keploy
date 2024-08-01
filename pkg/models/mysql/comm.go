@@ -24,27 +24,32 @@ type LocalInFileRequestPacket struct {
 
 // TextResultSet is used as a response packet for COM_QUERY
 type TextResultSet struct {
-	Count           *ColumnCount          `yaml:"columnCount"`
+	ColumnCount     uint64                `yaml:"columnCount"`
 	Columns         []*ColumnDefinition41 `yaml:"columns"`
 	EOFAfterColumns []byte                `yaml:"eofAfterColumns"`
 	Rows            []*TextRow            `yaml:"rows"`
-	EOFAfterRows    []byte                `yaml:"eofAfterRows"`
+	FinalResponse   *GenericResponse      `yaml:"FinalResponse"`
 }
 
 // BinaryProtocolResultSet is used as a response packet for COM_STMT_EXECUTE
 type BinaryProtocolResultSet struct {
-	Count           *ColumnCount          `yaml:"columnCount"`
+	ColumnCount     uint64                `yaml:"columnCount"`
 	Columns         []*ColumnDefinition41 `yaml:"columns"`
 	EOFAfterColumns []byte                `yaml:"eofAfterColumns"`
 	Rows            []*BinaryRow          `yaml:"rows"`
-	EOFAfterRows    []byte                `yaml:"eofAfterRows"`
+	FinalResponse   *GenericResponse      `yaml:"FinalResponse"`
+}
+
+type GenericResponse struct {
+	Data []byte `yaml:"data"`
+	Type string `yaml:"type"`
 }
 
 // Columns
 
 type ColumnCount struct {
-	Header    Header `yaml:"header"`
-	ColumnNum uint64 `yaml:"columnNum"`
+	// Header    Header `yaml:"header"`
+	Count uint64 `yaml:"count"`
 }
 
 type ColumnDefinition41 struct {
@@ -102,10 +107,10 @@ type StmtPrepareOkPacket struct {
 	Filler       byte   `yaml:"filler"`
 	WarningCount uint16 `yaml:"warning_count"`
 
-	ParamDefs          []ColumnDefinition41 `yaml:"param_definitions"`
-	EOFAfterParamDefs  []byte               `yaml:"eofAfterParamDefs"`
-	ColumnDefs         []ColumnDefinition41 `yaml:"column_definitions"`
-	EOFAfterColumnDefs []byte               `yaml:"eofAfterColumnDefs"`
+	ParamDefs          []*ColumnDefinition41 `yaml:"param_definitions"`
+	EOFAfterParamDefs  []byte                `yaml:"eofAfterParamDefs"`
+	ColumnDefs         []*ColumnDefinition41 `yaml:"column_definitions"`
+	EOFAfterColumnDefs []byte                `yaml:"eofAfterColumnDefs"`
 }
 
 // COM_STMT_EXECUTE packet

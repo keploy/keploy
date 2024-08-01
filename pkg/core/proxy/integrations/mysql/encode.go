@@ -7,12 +7,10 @@ import (
 	"errors"
 	"io"
 	"net"
-	"time"
 
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/operation"
-	mysqlUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
 	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
@@ -35,7 +33,6 @@ func encode(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		return errors.New("failed to get the error group from the context")
 	}
 
-	//for keeping conn alive
 	g.Go(func() error {
 		defer pUtil.Recover(logger, clientConn, destConn)
 		defer close(errCh)
@@ -75,32 +72,13 @@ func encode(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		logger.Info("last operation after initial handshake", zap.Any("last operation", lstOp))
 
 		// handle the client-server interaction (command phase)
-		for {
-			command, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
-			if err != nil {
-				utils.LogError(logger, err, "failed to command packet from client")
-				errCh <- err
-				return nil
-			}
-
-			// write the command to the destination server
-			_, err = destConn.Write(command)
-			if err != nil {
-				utils.LogError(logger, err, "failed to write command to the server")
-				errCh <- err
-				return nil
-			}
-
-			// Getting timestamp for the request
-			reqTimestamp := time.Now()
-
-			err = handleClientQueries(ctx, logger, clientConn, destConn, mocks, reqTimestamp, decodeCtx)
-			if err != nil {
-				utils.LogError(logger, err, "failed to handle client queries")
-				errCh <- err
-				return nil
-			}
+		err = handleClientQueries(ctx, logger, clientConn, destConn, mocks, decodeCtx)
+		if err != nil {
+			utils.LogError(logger, err, "failed to handle client queries")
+			errCh <- err
+			return nil
 		}
+		return nil
 	})
 
 	select {

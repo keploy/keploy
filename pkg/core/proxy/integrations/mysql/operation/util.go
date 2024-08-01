@@ -106,3 +106,15 @@ func StringToCachingSha2PasswordMechanism(data string) (mysql.CachingSha2Passwor
 		return 0, fmt.Errorf("invalid caching_sha2_password mechanism")
 	}
 }
+
+func IsGenericResponsePkt(packet *mysql.PacketBundle) bool {
+	if packet == nil {
+		return false
+	}
+	switch packet.Message.(type) {
+	case *mysql.OKPacket, *mysql.ERRPacket, *mysql.EOFPacket:
+		return true
+	default:
+		return false
+	}
+}

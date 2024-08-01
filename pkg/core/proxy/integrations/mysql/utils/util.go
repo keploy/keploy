@@ -117,8 +117,8 @@ func BytesToMySQLPacket(buffer []byte) (mysql.Packet, error) {
 }
 
 // GetPayloadLength returns the length of the payload from the first 3 bytes of the packet.
-func GetPayloadLength(src []byte) (length int32) {
-	length = int32(src[0]) | int32(src[1])<<8 | int32(src[2])<<16
+func GetPayloadLength(src []byte) (length uint32) {
+	length = uint32(src[0]) | uint32(src[1])<<8 | uint32(src[2])<<16
 	return length
 }
 
@@ -154,6 +154,27 @@ func ReadLengthEncodedInteger(b []byte) (num uint64, isNull bool, n int) {
 
 func IsEOFPacket(data []byte) bool {
 	return len(data) > 4 && bytes.Contains(data[4:9], []byte{0xfe, 0x00, 0x00})
+}
+
+func IsERRPacket(data []byte) bool {
+	return len(data) > 9 && data[4] == mysql.ERR
+}
+
+func IsOKPacket(data []byte) bool {
+	return len(data) > 7 && data[4] == mysql.OK
+}
+
+func IsGenericResponse(data []byte) (string, bool) {
+	if IsOKPacket(data) {
+		return "OK", true
+	}
+	if IsERRPacket(data) {
+		return "ERR", true
+	}
+	if IsEOFPacket(data) {
+		return "EOF", true
+	}
+	return "", false
 }
 
 func ReadUint24(b []byte) uint32 {

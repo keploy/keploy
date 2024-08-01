@@ -3,44 +3,39 @@
 package mysql
 
 import (
-	"context"
 	"encoding/binary"
-	"net"
 
-	"go.uber.org/zap"
-
-	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-// TODO:Remove these global variables, and find a better way to handle this if possible
-var (
-	isPluginData                   = false
-	expectingAuthSwitchResponse    = false
-	expectingHandshakeResponse     = false
-	expectingHandshakeResponseTest = false
-)
+// // TODO:Remove these global variables, and find a better way to handle this if possible
+// var (
+// 	isPluginData                   = false
+// 	expectingAuthSwitchResponse    = false
+// 	expectingHandshakeResponse     = false
+// 	expectingHandshakeResponseTest = false
+// )
 
-func readFirstBuffer(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn) ([]byte, string, error) {
-	// Attempt to read from destConn first
-	buf, err := util.ReadBytes(ctx, logger, destConn)
-	// If there is data from destConn, return it
-	if err == nil {
-		return buf, "destination", nil
-	}
-	// If the error is a timeout, try to read from clientConn
-	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-		buf, err = util.ReadBytes(ctx, logger, clientConn)
-		// If there is data from clientConn, return it
-		if err == nil {
-			return buf, "client", nil
-		}
-		// Return any error from reading clientConn
-		return nil, "", err
-	}
-	// Return any other error from reading destConn
-	return nil, "", err
-}
+// func readFirstBuffer(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn) ([]byte, string, error) {
+// 	// Attempt to read from destConn first
+// 	buf, err := util.ReadBytes(ctx, logger, destConn)
+// 	// If there is data from destConn, return it
+// 	if err == nil {
+// 		return buf, "destination", nil
+// 	}
+// 	// If the error is a timeout, try to read from clientConn
+// 	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+// 		buf, err = util.ReadBytes(ctx, logger, clientConn)
+// 		// If there is data from clientConn, return it
+// 		if err == nil {
+// 			return buf, "client", nil
+// 		}
+// 		// Return any error from reading clientConn
+// 		return nil, "", err
+// 	}
+// 	// Return any other error from reading destConn
+// 	return nil, "", err
+// }
 
 // // BytesToMySQLPacket converts a byte slice to a MySQL packet
 // func BytesToMySQLPacket(buffer []byte) (mysql.Packet, error) {
