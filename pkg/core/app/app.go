@@ -24,12 +24,13 @@ import (
 	"go.uber.org/zap"
 )
 
-func NewApp(logger *zap.Logger, id uint64, cmd string, language config.Language, client docker.Client, opts Options) *App {
+func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opts Options) *App {
 	app := &App{
 		logger:           logger,
 		id:               id,
 		cmd:              cmd,
-		language:         language,
+		language:         opts.Language,
+		skipCoverage:     opts.SkipCoverage,
 		docker:           client,
 		kind:             utils.FindDockerCmd(cmd),
 		keployContainer:  "keploy-v2",
@@ -47,6 +48,7 @@ type App struct {
 	id               uint64
 	cmd              string
 	language         config.Language
+	skipCoverage     bool
 	kind             utils.CmdType
 	containerDelay   uint64
 	container        string
@@ -66,6 +68,8 @@ type Options struct {
 	Container     string
 	DockerDelay   uint64
 	DockerNetwork string
+	Language      config.Language
+	SkipCoverage  bool
 }
 
 func (a *App) Setup(_ context.Context) error {
@@ -201,7 +205,7 @@ func (a *App) SetupCompose() error {
 	}
 
 	serviceNode := a.docker.GetServiceNode(compose, a.container)
-	if serviceNode != nil {
+	if serviceNode != nil && a.language != "" && !a.skipCoverage {
 		ok = a.docker.VolumeExists(serviceNode, "${PWD}", "${PWD}") || a.docker.VolumeExists(serviceNode, "$PWD", "$PWD")
 		if !ok {
 			a.docker.SetVolume(serviceNode, "${PWD}", "${PWD}")
