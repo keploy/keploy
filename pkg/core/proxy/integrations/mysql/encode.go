@@ -50,17 +50,43 @@ func encode(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 			// Map for storing prepared statements per connection
 			PreparedStatements: make(map[uint32]*mysql.StmtPrepareOkPacket),
 		}
+		decodeCtx.LastOp.Store(clientConn, operation.RESET) //resetting last command for new loop
 
+		// handle the initial client-server handshake (connection phase)
+		result, err := handleInitialHandshake(ctx, logger, clientConn, destConn, decodeCtx)
+		if err != nil {
+			utils.LogError(logger, err, "failed to handle initial handshake")
+			errCh <- err
+			return nil
+		}
+		requests = append(requests, result.req...)
+		responses = append(responses, result.resp...)
+
+		reqTimestamp := result.reqTimestamp
+
+		recordMock(ctx, requests, responses, "config", result.requestOperation, result.responseOperation, mocks, reqTimestamp)
+
+		// reset the requests and responses
+		requests = []mysql.Request{}
+		responses = []mysql.Response{}
+
+		//debug log
+		lstOp, _ := decodeCtx.LastOp.Load(clientConn)
+		logger.Info("last operation after initial handshake", zap.Any("last operation", lstOp))
+
+		// handle the client-server interaction (command phase)
 		for {
-
-			decodeCtx.LastOp.Store(clientConn, operation.RESET) //resetting last command for new loop
-
-			data, source, err := mysqlUtils.ReadFirstBuffer(ctx, logger, clientConn, destConn)
-			if len(data) == 0 {
-				break
-			}
+			command, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
 			if err != nil {
-				utils.LogError(logger, err, "failed to read initial data")
+				utils.LogError(logger, err, "failed to command packet from client")
+				errCh <- err
+				return nil
+			}
+
+			// write the command to the destination server
+			_, err = destConn.Write(command)
+			if err != nil {
+				utils.LogError(logger, err, "failed to write command to the server")
 				errCh <- err
 				return nil
 			}
@@ -68,51 +94,13 @@ func encode(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 			// Getting timestamp for the request
 			reqTimestamp := time.Now()
 
-			switch source {
-			case "destination":
-				// handle the initial client-server handshake (connection phase)
-				result, err := handleInitialHandshake(ctx, logger, data, clientConn, destConn, decodeCtx)
-				if err != nil {
-					utils.LogError(logger, err, "failed to handle initial handshake")
-					errCh <- err
-					return nil
-				}
-				requests = append(requests, result.req...)
-				responses = append(responses, result.resp...)
-
-				lstOp, _ := decodeCtx.LastOp.Load(clientConn)
-				//debug log
-				logger.Info("last operation after initial handshake", zap.Any("last operation", lstOp))
-
-				// record the mock
-				recordMock(ctx, requests, responses, "config", result.requestOperation, result.responseOperation, mocks, reqTimestamp)
-
-				// reset the requests and responses
-				requests = []mysql.Request{}
-				responses = []mysql.Response{}
-
-				// handle the client-server interaction (command phase)
-				err = handleClientQueries(ctx, logger, clientConn, destConn, mocks, reqTimestamp, decodeCtx)
-				if err != nil {
-					if err == io.EOF {
-						logger.Debug("recieved request buffer is empty in record mode for mysql call")
-						errCh <- err
-						return nil
-					}
-					utils.LogError(logger, err, "failed to handle client queries")
-					errCh <- err
-					return nil
-				}
-			case "client":
-				err := handleClientQueries(ctx, logger, clientConn, destConn, mocks, reqTimestamp, decodeCtx)
-				if err != nil {
-					utils.LogError(logger, err, "failed to handle client queries")
-					errCh <- err
-					return nil
-				}
+			err = handleClientQueries(ctx, logger, clientConn, destConn, mocks, reqTimestamp, decodeCtx)
+			if err != nil {
+				utils.LogError(logger, err, "failed to handle client queries")
+				errCh <- err
+				return nil
 			}
 		}
-		return nil
 	})
 
 	select {

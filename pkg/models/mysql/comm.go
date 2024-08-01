@@ -24,6 +24,7 @@ type LocalInFileRequestPacket struct {
 
 // TextResultSet is used as a response packet for COM_QUERY
 type TextResultSet struct {
+	Count           *ColumnCount          `yaml:"columnCount"`
 	Columns         []*ColumnDefinition41 `yaml:"columns"`
 	EOFAfterColumns []byte                `yaml:"eofAfterColumns"`
 	Rows            []*TextRow            `yaml:"rows"`
@@ -32,6 +33,7 @@ type TextResultSet struct {
 
 // BinaryProtocolResultSet is used as a response packet for COM_STMT_EXECUTE
 type BinaryProtocolResultSet struct {
+	Count           *ColumnCount          `yaml:"columnCount"`
 	Columns         []*ColumnDefinition41 `yaml:"columns"`
 	EOFAfterColumns []byte                `yaml:"eofAfterColumns"`
 	Rows            []*BinaryRow          `yaml:"rows"`
@@ -39,6 +41,11 @@ type BinaryProtocolResultSet struct {
 }
 
 // Columns
+
+type ColumnCount struct {
+	Header    Header `yaml:"header"`
+	ColumnNum uint64 `yaml:"columnNum"`
+}
 
 type ColumnDefinition41 struct {
 	Header       Header `yaml:"header"`
@@ -55,7 +62,7 @@ type ColumnDefinition41 struct {
 	Flags        uint16 `yaml:"flags"`
 	Decimals     byte   `yaml:"decimals"`
 	Filler       []byte `yaml:"filler"`
-	DefaultValue string `yaml:"string"`
+	DefaultValue string `yaml:"defaultValue"`
 }
 
 //Rows
@@ -88,14 +95,17 @@ type StmtPreparePacket struct {
 // COM_STMT_PREPARE_OK packet
 
 type StmtPrepareOkPacket struct {
-	Status       byte                 `yaml:"status"`
-	StatementID  uint32               `yaml:"statement_id"`
-	NumColumns   uint16               `yaml:"num_columns"`
-	NumParams    uint16               `yaml:"num_params"`
-	Filler       byte                 `yaml:"filler"`
-	WarningCount uint16               `yaml:"warning_count"`
-	ColumnDefs   []ColumnDefinition41 `yaml:"column_definitions"`
-	ParamDefs    []ColumnDefinition41 `yaml:"param_definitions"`
+	Status       byte   `yaml:"status"`
+	StatementID  uint32 `yaml:"statement_id"`
+	NumColumns   uint16 `yaml:"num_columns"`
+	NumParams    uint16 `yaml:"num_params"`
+	Filler       byte   `yaml:"filler"`
+	WarningCount uint16 `yaml:"warning_count"`
+
+	ParamDefs          []ColumnDefinition41 `yaml:"param_definitions"`
+	EOFAfterParamDefs  []byte               `yaml:"eofAfterParamDefs"`
+	ColumnDefs         []ColumnDefinition41 `yaml:"column_definitions"`
+	EOFAfterColumnDefs []byte               `yaml:"eofAfterColumnDefs"`
 }
 
 // COM_STMT_EXECUTE packet

@@ -170,7 +170,7 @@ func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byt
 	}
 }
 
-// ReadRequiredBytes ReadBytes function is utilized to read the complete message from the reader until the end of the file (EOF).
+// ReadRequiredBytes ReadBytes function is utilized to read the required number of bytes from the reader.
 // It returns the content as a byte array.
 func ReadRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader, numBytes int) ([]byte, error) {
 	var buffer []byte
@@ -211,10 +211,13 @@ func ReadRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader
 			return nil
 		})
 
-		// Use a select statement to wait for either the read result or context cancellation
+		// Use a select statement to wait for either the read result or context cancellation with timeout
 		select {
 		case <-ctx.Done():
 			return buffer, ctx.Err()
+		case <-time.After(2 * time.Second):
+			logger.Error("timeout occurred while reading the packet")
+			return buffer, context.DeadlineExceeded
 		case result := <-readResult:
 			if result.n > 0 {
 				buffer = append(buffer, result.buf[:result.n]...)

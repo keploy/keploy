@@ -54,6 +54,7 @@ func DecodePrepareOk(ctx context.Context, logger *zap.Logger, data []byte) (*mys
 			response.ParamDefs = append(response.ParamDefs, *column)
 			offset += n
 		}
+		response.EOFAfterParamDefs = data[offset : offset+9]
 		offset += 9 //skip EOF packet for Parameter Definition
 		data = data[offset:]
 	}
@@ -68,6 +69,7 @@ func DecodePrepareOk(ctx context.Context, logger *zap.Logger, data []byte) (*mys
 			response.ColumnDefs = append(response.ColumnDefs, *column)
 			offset += n
 		}
+		response.EOFAfterColumnDefs = data[offset : offset+9]
 		// offset += 9 //skip EOF packet for Column Definitions
 		// data = data[offset:]
 	}

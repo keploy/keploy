@@ -4,6 +4,7 @@ package operation
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync"
 
@@ -71,4 +72,37 @@ func setPacketInfo(_ context.Context, parsedPacket *mysql.PacketBundle, pkt inte
 	parsedPacket.Header.Type = pktType
 	parsedPacket.Message = pkt
 	decodeCtx.LastOp.Store(clientConn, lastOp)
+}
+
+func GetPluginName(buf interface{}) (string, error) {
+	switch v := buf.(type) {
+	case *mysql.HandshakeV10Packet:
+		return v.AuthPluginName, nil
+	case *mysql.AuthSwitchRequestPacket:
+		return v.PluginName, nil
+	default:
+		return "", fmt.Errorf("invalid packet type to get plugin name")
+	}
+}
+
+func GetCachingSha2PasswordMechanism(data byte) (string, error) {
+	switch data {
+	case byte(mysql.PerformFullAuthentication):
+		return mysql.CachingSha2PasswordToString(mysql.PerformFullAuthentication), nil
+	case byte(mysql.FastAuthSuccess):
+		return mysql.CachingSha2PasswordToString(mysql.FastAuthSuccess), nil
+	default:
+		return "", fmt.Errorf("invalid caching_sha2_password mechanism")
+	}
+}
+
+func StringToCachingSha2PasswordMechanism(data string) (mysql.CachingSha2Password, error) {
+	switch data {
+	case "PerformFullAuthentication":
+		return mysql.PerformFullAuthentication, nil
+	case "FastAuthSuccess":
+		return mysql.FastAuthSuccess, nil
+	default:
+		return 0, fmt.Errorf("invalid caching_sha2_password mechanism")
+	}
 }
