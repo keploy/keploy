@@ -553,15 +553,18 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate b
 	}
 
 	if len(volumeList.Volumes) > 0 {
-		if !recreate {
-			idc.logger.Info("volume already exists", zap.Any("volume", volumeName))
-			return err
-		}
-
-		err := idc.VolumeRemove(ctx, volumeName, false)
-		if err != nil {
-			idc.logger.Error("failed to delete volume "+volumeName, zap.Error(err))
-			return err
+		for _,volume := range volumeList.Volumes{
+			if volume.Name == "debugfs"{
+				if volume.Driver == "local" && volume.Options["type"]=="debugfs" && volume.Options["device"]=="debugfs"{
+					return nil
+				}else{
+					err := idc.VolumeRemove(ctx, volumeName, false)
+					if err != nil {
+						idc.logger.Error("failed to delete volume "+volumeName, zap.Error(err))
+						return err
+					}
+				}		
+			}
 		}
 	}
 
