@@ -158,13 +158,16 @@ func (r *Replayer) Start(ctx context.Context) error {
 	default:
 		r.config.Test.SkipCoverage = true
 	}
-	if !r.config.Test.SkipCoverage && !r.config.Test.SkipPreview {
+	if !r.config.Test.SkipCoverage {
 		if utils.CmdType(r.config.CommandType) == utils.Native {
 			r.config.Command, err = cov.PreProcess()
 
 			if err != nil {
 				r.config.Test.SkipCoverage = true
+			} else if r.config.Test.Language == models.Javascript && r.config.Test.SkipPreview {
+				r.config.Command = strings.Replace(r.config.Command, "nyc --clean=$CLEAN ", "nyc --clean=$CLEAN --reporter=none ", 1)
 			}
+
 		}
 	}
 
