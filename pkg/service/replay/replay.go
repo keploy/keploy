@@ -160,7 +160,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 	if !r.config.Test.SkipCoverage {
 		if utils.CmdType(r.config.CommandType) == utils.Native {
-			r.config.Command, err = cov.PreProcess()
+			r.config.Command, err = cov.PreProcess(r.config.Test.DisableLineCoverage)
 
 			if err != nil {
 				r.config.Test.SkipCoverage = true

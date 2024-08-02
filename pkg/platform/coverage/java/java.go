@@ -36,7 +36,7 @@ func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cm
 	}
 }
 
-func (j *Java) PreProcess() (string, error) {
+func (j *Java) PreProcess(disableLineCoverage bool) (string, error) {
 	// default location for jar of jacoco agent
 	jacocoAgentPath := "~/.m2/repository/org/jacoco/org.jacoco.agent/0.8.8/org.jacoco.agent-0.8.8-runtime.jar"
 	if j.jacocoAgentPath != "" {

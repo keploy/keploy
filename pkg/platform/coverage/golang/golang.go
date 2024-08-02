@@ -37,7 +37,7 @@ func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cm
 	}
 }
 
-func (g *Golang) PreProcess() (string, error) {
+func (g *Golang) PreProcess(disableLineCoverage bool) (string, error) {
 	if !checkForCoverFlag(g.logger, g.cmd) {
 		return g.cmd, errors.New("binary not coverable")
 	}
