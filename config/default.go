@@ -113,7 +113,7 @@ func mergeStrings(srcStr, destStr string, infer bool, mergeOptions yaml.MergeOpt
 
 func GetInternalConfigFields() []string {
 
-	InternalConfigFields := []string{"generateGithubActions", "keployNetwork", "keployContainer", "inCi", "cmdType"}
+	internalConfigFields := []string{"generateGithubActions", "keployNetwork", "keployContainer", "inCi", "cmdType"}
 
-	return InternalConfigFields
+	return internalConfigFields
 }
