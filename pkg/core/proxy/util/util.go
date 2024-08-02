@@ -215,9 +215,9 @@ func ReadRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader
 		select {
 		case <-ctx.Done():
 			return buffer, ctx.Err()
-		case <-time.After(2 * time.Second):
-			logger.Error("timeout occurred while reading the packet")
-			return buffer, context.DeadlineExceeded
+		// case <-time.After(5 * time.Second):
+		// 	logger.Error("timeout occurred while reading the packet")
+		// 	return buffer, context.DeadlineExceeded
 		case result := <-readResult:
 			if result.n > 0 {
 				buffer = append(buffer, result.buf[:result.n]...)

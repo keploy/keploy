@@ -75,7 +75,7 @@ func handleTextResultSet(ctx context.Context, logger *zap.Logger, clientConn, de
 
 	// Validate the EOF packet for column definition
 	if !mysqlUtils.IsEOFPacket(eofData) {
-		return nil, fmt.Errorf("expected EOF packet for column definition, got %v", eofData)
+		return nil, fmt.Errorf("expected EOF packet for column definition, got %v, while handling textResultSet", eofData)
 	}
 
 	textResultSet.EOFAfterColumns = eofData
@@ -104,12 +104,24 @@ rowLoop:
 				return nil, err
 			}
 
-			// Break if the data packet is a generic response
-			resp, ok := mysqlUtils.IsGenericResponse(data)
-			if ok {
+			// // Break if the data packet is a generic response
+			// resp, ok := mysqlUtils.IsGenericResponse(data)
+			// if ok {
+			// 	textResultSet.FinalResponse = &mysql.GenericResponse{
+			// 		Data: data,
+			// 		Type: resp,
+			// 	}
+			// 	break rowLoop
+			// }
+
+			// Break if the data packet is an EOF packet, But we need to check for generic response
+			// Right now we are just checking for EOF packet as we couldn't differentiate between the generic response and row data packet
+			if mysqlUtils.IsEOFPacket(data) {
+				//debug log
+				fmt.Println("Found EOF packet after row data")
 				textResultSet.FinalResponse = &mysql.GenericResponse{
 					Data: data,
-					Type: resp,
+					Type: mysql.StatusToString(mysql.EOF),
 				}
 				break rowLoop
 			}
@@ -144,9 +156,14 @@ func handleBinaryResultSet(ctx context.Context, logger *zap.Logger, clientConn, 
 	// Read the column count packet
 	colCount := binaryResultSet.ColumnCount
 
+	//debug log
+	println("ColCount in handleBinaryResultSet: ", colCount)
 	// Read the column definition packets
 	for i := uint64(0); i < colCount; i++ {
 		// Read the column definition packet
+		//debug log
+		println("Reading column count...")
+
 		colData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
 		if err != nil {
 			if err != io.EOF {
@@ -154,6 +171,8 @@ func handleBinaryResultSet(ctx context.Context, logger *zap.Logger, clientConn, 
 			}
 			return nil, err
 		}
+		//debug log
+		println("After reading column count...")
 
 		// Write the column definition packet to the client
 		_, err = clientConn.Write(colData)
@@ -170,6 +189,9 @@ func handleBinaryResultSet(ctx context.Context, logger *zap.Logger, clientConn, 
 
 		binaryResultSet.Columns = append(binaryResultSet.Columns, column)
 	}
+
+	//debug log
+	logger.Info("Columns: ", zap.Any("Columns", binaryResultSet.Columns))
 
 	// Read the EOF packet for column definition
 	eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
@@ -189,7 +211,7 @@ func handleBinaryResultSet(ctx context.Context, logger *zap.Logger, clientConn, 
 
 	// Validate the EOF packet for column definition
 	if !mysqlUtils.IsEOFPacket(eofData) {
-		return nil, fmt.Errorf("expected EOF packet for column definition, got %v", eofData)
+		return nil, fmt.Errorf("expected EOF packet for column definition, got %v, while handling BinaryProtocolResultSet", eofData)
 	}
 
 	binaryResultSet.EOFAfterColumns = eofData
@@ -218,12 +240,29 @@ rowLoop:
 				return nil, err
 			}
 
+			//debug log
+			println("Trying to read row data...")
+
 			// Break if the data packet is a generic response
-			resp, ok := mysqlUtils.IsGenericResponse(data)
-			if ok {
+			// resp, ok := mysqlUtils.IsGenericResponse(data)
+			// if ok {
+			// 	binaryResultSet.FinalResponse = &mysql.GenericResponse{
+			// 		Data: data,
+			// 		Type: resp,
+			// 	}
+			// 	//debug log
+			// 	fmt.Println("Found generic response after row data")
+			// 	break rowLoop
+			// }
+
+			// Break if the data packet is an EOF packet, But we need to check for generic response
+			// Right now we are just checking for EOF packet as we couldn't differentiate between the generic response and row data packet
+			if mysqlUtils.IsEOFPacket(data) {
+				//debug log
+				fmt.Println("Found EOF packet after row data")
 				binaryResultSet.FinalResponse = &mysql.GenericResponse{
 					Data: data,
-					Type: resp,
+					Type: mysql.StatusToString(mysql.EOF),
 				}
 				break rowLoop
 			}
@@ -236,6 +275,9 @@ rowLoop:
 			binaryResultSet.Rows = append(binaryResultSet.Rows, row)
 		}
 	}
+
+	//debug log
+	logger.Info("Rows: ", zap.Any("Rows", binaryResultSet.Rows))
 
 	// reset the last OP
 	decodeCtx.LastOp.Store(clientConn, operation.RESET)

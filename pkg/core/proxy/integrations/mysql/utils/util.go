@@ -76,6 +76,9 @@ func ReadPacketBuffer(ctx context.Context, logger *zap.Logger, conn net.Conn) ([
 	// first read the header length
 	header, err := util.ReadRequiredBytes(ctx, logger, conn, 4)
 	if err != nil {
+		if err == io.EOF {
+			return nil, err
+		}
 		return packetBuffer, fmt.Errorf("failed to read mysql packet header: %w", err)
 	}
 
@@ -86,6 +89,9 @@ func ReadPacketBuffer(ctx context.Context, logger *zap.Logger, conn net.Conn) ([
 	if payloadLength > 0 {
 		payload, err := util.ReadRequiredBytes(ctx, logger, conn, int(payloadLength))
 		if err != nil {
+			if err == io.EOF {
+				return nil, err
+			}
 			return packetBuffer, fmt.Errorf("failed to read mysql packet payload: %w", err)
 		}
 		packetBuffer = append(packetBuffer, payload...)
@@ -153,7 +159,11 @@ func ReadLengthEncodedInteger(b []byte) (num uint64, isNull bool, n int) {
 }
 
 func IsEOFPacket(data []byte) bool {
-	return len(data) > 4 && bytes.Contains(data[4:9], []byte{0xfe, 0x00, 0x00})
+	if data[0] != 5 {
+		return false // The payload length of the header should be 5
+	}
+	data = data[4:] // Skip the header
+	return len(data) > 4 && bytes.Contains(data[0:5], []byte{0xfe, 0x00, 0x00})
 }
 
 func IsERRPacket(data []byte) bool {

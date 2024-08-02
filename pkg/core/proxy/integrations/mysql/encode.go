@@ -74,7 +74,9 @@ func encode(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		// handle the client-server interaction (command phase)
 		err = handleClientQueries(ctx, logger, clientConn, destConn, mocks, decodeCtx)
 		if err != nil {
-			utils.LogError(logger, err, "failed to handle client queries")
+			if err != io.EOF {
+				utils.LogError(logger, err, "failed to handle client queries")
+			}
 			errCh <- err
 			return nil
 		}

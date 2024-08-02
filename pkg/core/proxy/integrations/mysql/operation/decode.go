@@ -222,7 +222,8 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 				return parsedPacket, fmt.Errorf("failed to decode COM_STMT_PREPARE_OK packet: %w", err)
 			}
 
-			setPacketInfo(ctx, parsedPacket, pkt, "COM_STMT_PREPARE_OK", clientConn, mysql.OK, decodeCtx)
+			// Do not change the last operation if the packet is a prepared statement, it will be changed when the prepared statement is fully received
+			setPacketInfo(ctx, parsedPacket, pkt, "COM_STMT_PREPARE_OK", clientConn, lastOp, decodeCtx)
 			// Store the prepared statement to use it later
 			decodeCtx.PreparedStatements[pkt.StatementID] = pkt
 			//debug log
@@ -385,7 +386,8 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 
 	// case payloadType == mysql.COM_STMT_FETCH:
 	case payloadType == mysql.COM_STMT_CLOSE:
-		logger.Debug("COM_STMT_CLOSE packet", zap.Any("Type", payloadType))
+		//debug log
+		logger.Info("COM_STMT_CLOSE packet", zap.Any("Type", payloadType))
 		pkt, err := preparedstmt.DecoderStmtClose(ctx, payload)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode COM_STMT_CLOSE packet: %w", err)

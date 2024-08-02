@@ -32,7 +32,9 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			// read the command from the client
 			command, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
 			if err != nil {
-				utils.LogError(logger, err, "failed to command packet from client")
+				if err != io.EOF {
+					utils.LogError(logger, err, "failed to read command packet from client")
+				}
 				return err
 			}
 
@@ -56,6 +58,16 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				PacketBundle: *commandPkt,
 			})
 
+			// handle no response commands like COM_STMT_CLOSE, COM_STMT_SEND_LONG_DATA, etc
+			if operation.IsNoResponseCommand(commandPkt.Header.Type) {
+				recordMock(ctx, requests, responses, "mocks", commandPkt.Header.Type, "NO Response Packet", mocks, reqTimestamp)
+				// reset the requests and responses
+				requests = []mysql.Request{}
+				responses = []mysql.Response{}
+				println("No response command", commandPkt.Header.Type)
+				continue
+			}
+
 			commandRespPkt, err := handleQueryResponse(ctx, logger, clientConn, destConn, decodeCtx)
 			if err != nil {
 				utils.LogError(logger, err, "failed to handle the query response")
@@ -68,6 +80,10 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 
 			// record the mock
 			recordMock(ctx, requests, responses, "mocks", commandPkt.Header.Type, commandRespPkt.Header.Type, mocks, reqTimestamp)
+
+			// reset the requests and responses
+			requests = []mysql.Request{}
+			responses = []mysql.Response{}
 		}
 	}
 }
@@ -112,6 +128,8 @@ func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn, de
 
 	switch lastOp {
 	case mysql.COM_QUERY:
+		//debug log
+		logger.Info("Handling text result set", zap.Any("lastOp", lastOp))
 		// handle the query response (TextResultSet)
 		queryResponsePkt, err = handleTextResultSet(ctx, logger, clientConn, destConn, commandRespPkt, decodeCtx)
 		if err != nil {
@@ -119,12 +137,16 @@ func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn, de
 		}
 
 	case mysql.COM_STMT_PREPARE:
+		//debug
+		logger.Info("Handling prepare Statement Response OK", zap.Any("lastOp", lastOp))
 		// handle the prepared statement response (COM_STMT_PREPARE_OK)
 		queryResponsePkt, err = handlePreparedStmtResponse(ctx, logger, clientConn, destConn, commandRespPkt, decodeCtx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to handle the prepared statement response: %w", err)
 		}
 	case mysql.COM_STMT_EXECUTE:
+		//debug log
+		logger.Info("Handling binary protocol result set", zap.Any("lastOp", lastOp))
 		// handle the statment execute response (BinaryProtocolResultSet)
 		queryResponsePkt, err = handleBinaryResultSet(ctx, logger, clientConn, destConn, commandRespPkt, decodeCtx)
 		if err != nil {

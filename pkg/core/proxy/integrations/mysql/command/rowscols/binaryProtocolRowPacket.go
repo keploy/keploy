@@ -36,6 +36,7 @@ func DecodeBinaryRow(_ context.Context, _ *zap.Logger, data []byte, columns []*m
 
 	nullBitmapLen := (len(columns) + 7 + 2) / 8
 	nullBitmap := data[offset : offset+nullBitmapLen]
+	row.RowNullBuffer = nullBitmap
 
 	offset += nullBitmapLen
 

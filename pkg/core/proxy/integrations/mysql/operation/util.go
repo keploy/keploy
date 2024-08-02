@@ -118,3 +118,12 @@ func IsGenericResponsePkt(packet *mysql.PacketBundle) bool {
 		return false
 	}
 }
+
+func IsNoResponseCommand(command string) bool {
+	switch command {
+	case mysql.CommandStatusToString(mysql.COM_STMT_CLOSE), mysql.CommandStatusToString(mysql.COM_STMT_SEND_LONG_DATA):
+		return true
+	default:
+		return false
+	}
+}

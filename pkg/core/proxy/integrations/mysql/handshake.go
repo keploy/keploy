@@ -11,6 +11,7 @@ import (
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/operation"
 	mysqlUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
+	intgUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -385,7 +386,7 @@ func handleFullAuth(ctx context.Context, logger *zap.Logger, clientConn, destCon
 			Header: &encPass.Header,
 			Type:   EncryptedPassword,
 		},
-		Message: encPass.Payload,
+		Message: intgUtils.EncodeBase64(encPass.Payload),
 	}
 
 	res.req = append(res.req, mysql.Request{
