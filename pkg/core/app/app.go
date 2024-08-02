@@ -37,6 +37,7 @@ func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opt
 		containerNetwork: opts.DockerNetwork,
 		containerIPv4:    make(chan string, 1),
 	}
+	fmt.Println("check if it came herer ===================")
 	exists, new_name, _ := client.CreateAlternateContainerForKeploy()
 	if exists {
 		app.keployContainer = new_name

@@ -595,13 +595,13 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate b
 func (idc *Impl) CreateAlternateContainerForKeploy() (bool, string, error) {
 	// check if keploy-v2 is present, if yes create alternate container and pass it as cfg.KeployContainer
 	running, err := idc.IsContainerRunning("keploy-v2")
-	if err != nil {
-		return false, "", err
-	}
 	if !running {
 		return false, "", nil
 	}
+	if err != nil {
+		return false, "", err
+	}
 	// create a new container name
-	newname := "keploy" + uuid.New().String()
+	newname := "keploy-" + uuid.New().String()
 	return true, newname, nil
 }
