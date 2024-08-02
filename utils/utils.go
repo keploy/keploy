@@ -760,3 +760,37 @@ func getHomeDir() (string, error) {
 func IsDockerCmd(kind CmdType) bool {
 	return (kind == DockerRun || kind == DockerStart || kind == DockerCompose)
 }
+
+func CreateGitIgnore(logger *zap.Logger, path string) error {
+	gitignorePath := path + "/.gitignore"
+	reportEntry := "/reports/"
+
+	file, err := os.OpenFile(gitignorePath, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		return fmt.Errorf("error opening or creating .gitignore file: %v", err)
+	}
+
+	defer func() {
+		if err := file.Close(); err != nil {
+			logger.Error("error closing .gitignore file: %v", zap.Error(err))
+		}
+	}()
+
+	scanner := bufio.NewScanner(file)
+	found := false
+	for scanner.Scan() {
+		if strings.TrimSpace(scanner.Text()) == reportEntry {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		if _, err := file.WriteString("\n" + reportEntry + "\n"); err != nil {
+			return fmt.Errorf("error writing to .gitignore file: %v", err)
+		}
+		return nil
+	}
+
+	return nil
+}
