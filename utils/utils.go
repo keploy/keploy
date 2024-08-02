@@ -305,6 +305,7 @@ jobs:
 		logger.Error("Error writing GitHub Actions workflow file", zap.Error(err))
 		return
 	}
+	logger.Info("This is a plain string log")
 
 	logger.Info("GitHub Actions workflow file generated successfully", zap.String("path", filePath))
 }
@@ -381,6 +382,62 @@ func FindDockerCmd(cmd string) CmdType {
 	return Native
 }
 
+func FindContainerCmd(cmd string) CmdType {
+	if cmd == "" {
+		return Empty
+	}
+	// Convert command to lowercase for case-insensitive comparison
+	cmdLower := strings.TrimSpace(strings.ToLower(cmd))
+
+	// Define patterns for Docker and Docker Compose
+	dockerRunPatterns := []string{"docker run", "sudo docker run", "docker container run", "sudo docker container run"}
+	dockerStartPatterns := []string{"docker start", "sudo docker start", "docker container start", "sudo docker container start"}
+	dockerComposePatterns := []string{"docker-compose", "sudo docker-compose", "docker compose", "sudo docker compose"}
+
+	// Define patterns for Podman and Podman Compose
+	podmanRunPatterns := []string{"podman run", "sudo podman run", "podman container run", "sudo podman container run"}
+	podmanStartPatterns := []string{"podman start", "sudo podman start", "podman container start", "sudo podman container start"}
+	podmanComposePatterns := []string{"podman-compose", "sudo podman-compose", "podman compose", "sudo podman compose"}
+
+	// Check for Docker Compose command patterns
+	for _, pattern := range dockerComposePatterns {
+		if strings.HasPrefix(cmdLower, pattern) {
+			return DockerCompose
+		}
+	}
+	// Check for Docker start command patterns
+	for _, pattern := range dockerStartPatterns {
+		if strings.HasPrefix(cmdLower, pattern) {
+			return DockerStart
+		}
+	}
+	// Check for Docker run command patterns
+	for _, pattern := range dockerRunPatterns {
+		if strings.HasPrefix(cmdLower, pattern) {
+			return DockerRun
+		}
+	}
+	// Check for Podman Compose command patterns
+	for _, pattern := range podmanComposePatterns {
+		if strings.HasPrefix(cmdLower, pattern) {
+			return PodmanCompose
+		}
+	}
+	// Check for Podman start command patterns
+	for _, pattern := range podmanStartPatterns {
+		if strings.HasPrefix(cmdLower, pattern) {
+			return PodmanStart
+		}
+	}
+	// Check for Podman run command patterns
+	for _, pattern := range podmanRunPatterns {
+		if strings.HasPrefix(cmdLower, pattern) {
+			return PodmanRun
+		}
+	}
+	return Native
+}
+
 type CmdType string
 
 // CmdType constants
@@ -388,6 +445,10 @@ const (
 	DockerRun     CmdType = "docker-run"
 	DockerStart   CmdType = "docker-start"
 	DockerCompose CmdType = "docker-compose"
+	PodmanRun     CmdType = "podman-run"
+	PodmanStart   CmdType = "podman-start"
+	PodmanCompose CmdType = "podman-compose"
+	
 	Native        CmdType = "native"
 	Empty         CmdType = ""
 )
@@ -756,4 +817,7 @@ func getHomeDir() (string, error) {
 
 func IsDockerCmd(kind CmdType) bool {
 	return (kind == DockerRun || kind == DockerStart || kind == DockerCompose)
+}
+func IsPodmanCmd(kind CmdType) bool {
+	return (kind == PodmanRun || kind == PodmanStart || kind == PodmanCompose)
 }
