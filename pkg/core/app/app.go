@@ -24,6 +24,7 @@ import (
 )
 
 func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opts Options) *App {
+
 	app := &App{
 		logger:           logger,
 		id:               id,
@@ -35,6 +36,10 @@ func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opt
 		containerDelay:   opts.DockerDelay,
 		containerNetwork: opts.DockerNetwork,
 		containerIPv4:    make(chan string, 1),
+	}
+	exists, new_name, _ := client.CreateAlternateContainerForKeploy()
+	if exists {
+		app.keployContainer = new_name
 	}
 	return app
 }

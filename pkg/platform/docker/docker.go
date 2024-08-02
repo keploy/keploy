@@ -9,6 +9,7 @@ import (
 	"time"
 
 	nativeDockerClient "github.com/docker/docker/client"
+	"github.com/google/uuid"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -350,21 +351,29 @@ func (idc *Impl) GetHostWorkingDirectory() (string, error) {
 		utils.LogError(idc.logger, err, "failed to get current working directory")
 		return "", err
 	}
-
-	container, err := idc.ContainerInspect(ctx, "keploy-v2")
+	container_name := "keploy-v2"
+	exists, new_name, err := idc.CreateAlternateContainerForKeploy()
 	if err != nil {
-		utils.LogError(idc.logger, err, "error inspecting keploy-v2 container")
+		utils.LogError(idc.logger, err, "error getting alternate container when keploy-v2 is running")
+		return "", err
+	}
+	if exists {
+		container_name = new_name
+	}
+	container, err := idc.ContainerInspect(ctx, container_name)
+	if err != nil {
+		utils.LogError(idc.logger, err, "error inspecting keploy container")
 		return "", err
 	}
 	containerMounts := container.Mounts
 	// Loop through container mounts and find the mount for current directory in the container
 	for _, mount := range containerMounts {
 		if mount.Destination == curDir {
-			idc.logger.Debug(fmt.Sprintf("found mount for %s in keploy-v2 container", curDir), zap.Any("mount", mount))
+			idc.logger.Debug(fmt.Sprintf("found mount for %s in keploy container", curDir), zap.Any("mount", mount))
 			return mount.Source, nil
 		}
 	}
-	return "", fmt.Errorf(fmt.Sprintf("could not find mount for %s in keploy-v2 container", curDir))
+	return "", fmt.Errorf(fmt.Sprintf("could not find mount for %s in keploy container", curDir))
 }
 
 // ForceAbsolutePath replaces relative paths in bind mounts with absolute paths
@@ -581,4 +590,18 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate b
 
 	idc.logger.Debug("volume created", zap.Any("volume", volumeName))
 	return nil
+}
+
+func (idc *Impl) CreateAlternateContainerForKeploy() (bool, string, error) {
+	// check if keploy-v2 is present, if yes create alternate container and pass it as cfg.KeployContainer
+	running, err := idc.IsContainerRunning("keploy-v2")
+	if err != nil {
+		return false, "", err
+	}
+	if !running {
+		return false, "", nil
+	}
+	// create a new container name
+	newname := "keploy" + uuid.New().String()
+	return true, newname, nil
 }
