@@ -2,6 +2,8 @@ package provider
 
 import (
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/platform/auth"
+	"go.keploy.io/server/v2/pkg/platform/storage"
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb/testset"
 	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
 	reportdb "go.keploy.io/server/v2/pkg/platform/yaml/reportdb"
@@ -13,4 +15,6 @@ type commonPlatformServices struct {
 	YamlMockDb    *mockdb.MockYaml
 	YamlReportDb  *reportdb.TestReport
 	YamlTestSetDB *testset.Db[*models.TestSet]
+	Auth          *auth.Auth
+	Storage       *storage.Storage
 }

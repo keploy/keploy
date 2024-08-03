@@ -40,17 +40,19 @@ type Replayer struct {
 	testDB          TestDB
 	mockDB          MockDB
 	reportDB        ReportDB
-	testSetConf     Config
+	testSetConf     TestSetConfig
 	telemetry       Telemetry
 	instrumentation Instrumentation
 	config          *config.Config
+	auth            Auth
+	storage         Storage
 	instrument      bool
 }
 
-func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf Config, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
+func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth Auth, storage Storage, config *config.Config) Service {
 	// set the request emulator for simulating test case requests, if not set
 	if testHooks == nil {
-		SetTestHook(NewHook(logger, config.Path, "mocks", config.Test.APITimeout, config.Test.BasePath))
+		SetTestHook(NewHook(logger, config, testSetConf, storage, auth))
 	}
 	instrument := false
 	if config.Command != "" {
@@ -186,7 +188,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			continue
 		}
 
-		requestMockemulator.ProcessMockFile(ctx, testSetID)
+		testHooks.BeforeTestSetRun(ctx, testSetID)
 
 		if !r.config.Test.SkipCoverage {
 			err = os.Setenv("TESTSETID", testSetID) // related to java coverage calculation
@@ -221,7 +223,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 			testSetResult = false
 		case models.TestSetStatusPassed:
 			testSetResult = true
-			requestMockemulator.ProcessTestRunStatus(ctx, testSetResult, testSetID)
 		case models.TestSetStatusIgnored:
 			testSetResult = true
 		}
@@ -230,8 +231,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 			break
 		}
 
-		if !(!r.config.Test.SkipCoverage && i == len(testSetIDs)-1) {
-			_, err = requestMockemulator.AfterTestHook(ctx, testRunID, testSetID, models.TestCoverage{}, len(testSetIDs))
+		// TODO selected test set flow should be handled
+		if i < len(testSetIDs)-1 {
+			err = testHooks.AfterTestSetRun(ctx, testRunID, testSetID, models.TestCoverage{}, len(testSetIDs), testSetResult)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get after test hook")
 			}
@@ -275,7 +277,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to update report with the coverage data")
 				}
-				_, err = requestMockemulator.AfterTestHook(ctx, testRunID, testSetIDs[len(testSetIDs)-1], coverageData, len(testSetIDs))
+				err = testHooks.AfterTestSetRun(ctx, testRunID, testSetIDs[len(testSetIDs)-1], coverageData, len(testSetIDs), testSetResult)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to get after test hook")
 				}
@@ -545,7 +547,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				Status:       models.TestStatusIgnored,
 				TestCaseID:   testCase.Name,
 				TestCasePath: filepath.Join(r.config.Path, testSetID),
-				MockPath:     filepath.Join(r.config.Path, testSetID, requestMockemulator.FetchMockName()),
+				MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
 			}
 			loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 			if loopErr != nil {
@@ -602,7 +604,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		started := time.Now().UTC()
-		resp, loopErr := requestMockemulator.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
+		resp, loopErr := testHooks.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
 		if loopErr != nil {
 			utils.LogError(r.logger, err, "failed to simulate request")
 			failure++
@@ -661,7 +663,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				},
 				Res:          *resp,
 				TestCasePath: filepath.Join(r.config.Path, testSetID),
-				MockPath:     filepath.Join(r.config.Path, testSetID, requestMockemulator.FetchMockName()),
+				MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
 				Noise:        testCase.Noise,
 				Result:       *testResult,
 			}

@@ -13,7 +13,9 @@ import (
 	"go.keploy.io/server/v2/pkg/core/proxy"
 	"go.keploy.io/server/v2/pkg/core/tester"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/platform/auth"
 	"go.keploy.io/server/v2/pkg/platform/docker"
+	"go.keploy.io/server/v2/pkg/platform/storage"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb/testset"
 	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
@@ -38,7 +40,7 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	}
 
 	recordSvc := record.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, cfg)
-	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, cfg)
+	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, commonServices.Auth, commonServices.Storage, cfg)
 
 	if cmd == "rerecord" {
 		return orchestrator.New(logger, recordSvc, replaySvc, cfg), nil
@@ -94,12 +96,16 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 	mockDB := mockdb.New(logger, c.Path, "")
 	reportDB := reportdb.New(logger, c.Path+"/reports")
 	testSetDb := testset.New[*models.TestSet](logger, c.Path)
+	auth := auth.New(c.APIServerURL, c.InstallationID, logger, c.GitHubClientID)
+	storage := storage.New(c.APIServerURL, c.InstallationID, logger, c.GitHubClientID)
 	return &CommonInternalService{
 		commonPlatformServices{
 			YamlTestDB:    testDB,
 			YamlMockDb:    mockDB,
 			YamlReportDb:  reportDB,
 			YamlTestSetDB: testSetDb,
+			Auth:          auth,
+			Storage:       storage,
 		},
 		instrumentation,
 	}, nil

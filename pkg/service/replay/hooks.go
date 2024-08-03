@@ -1,10 +1,9 @@
 package replay
 
 import (
+	"bytes"
 	"context"
-	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 
@@ -18,12 +17,12 @@ import (
 type Hook struct {
 	logger     *zap.Logger
 	cfg        *config.Config
-	tsConfigDB Config
+	tsConfigDB TestSetConfig
 	storage    Storage
 	auth       Auth
 }
 
-func NewHook(logger *zap.Logger, cfg *config.Config, tsConfigDB Config, storage Storage, auth Auth) TestHooks {
+func NewHook(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, storage Storage, auth Auth) TestHooks {
 	return &Hook{
 		cfg:        cfg,
 		logger:     logger,
@@ -44,17 +43,87 @@ func (h *Hook) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCas
 	return nil, nil
 }
 
-func (h *Hook) AfterTestSetRun(_ context.Context, testRunID, testSetID string, coverage models.TestCoverage, tsCnt int, status bool) (*models.TestReport, error) {
-	h.logger.Debug("AfterTestHook", zap.Any("testRunID", testRunID), zap.Any("testSetID", testSetID), zap.Any("totalTestSetCount", tsCnt), zap.Any("coverage", coverage))
-	return nil, nil
-}
+// TODO autogenerate app name if not provided , ignore mock file in gitignore
+func (h *Hook) AfterTestSetRun(ctx context.Context, testRunID, testSetID string, _ models.TestCoverage, _ int, status bool) error {
 
-func (h *Hook) ProcessTestRunStatus(_ context.Context, status bool, testSetID string) {
-	if status {
-		h.logger.Debug("Test case passed for", zap.String("testSetID", testSetID))
-	} else {
-		h.logger.Debug("Test case failed for", zap.String("testSetID", testSetID))
+	if h.cfg.Test.DisableMockUpload {
+		return nil
 	}
+
+	if h.cfg.Test.BasePath != "" {
+		h.logger.Debug("Mocking is disabled when basePath is given", zap.String("testSetID", testSetID), zap.String("basePath", h.cfg.Test.BasePath))
+		return nil
+	}
+
+	if !status {
+		return nil
+	}
+
+	// Inspect local mock file
+	localMockPath := filepath.Join(h.cfg.Path, testSetID, "mocks.yaml")
+	mockFileContent, err := os.ReadFile(localMockPath)
+	if err != nil {
+		h.logger.Error("Failed to read mock file for mock upload", zap.String("path", localMockPath), zap.Error(err))
+		return nil
+	}
+	mockHash := utils.Hash(mockFileContent)
+	mockFileReader := bytes.NewReader(mockFileContent)
+	token, err := h.auth.GetToken(ctx)
+	if err != nil {
+		h.logger.Error("Failed to get token for mock upload", zap.Error(err))
+		return err
+	}
+
+	// Cross verify the local mock file with the test-set config
+	tsConfig, err := h.tsConfigDB.Read(ctx, testSetID)
+	// If test-set config is not found, upload the mock file
+	if err != nil || tsConfig == nil || tsConfig.MockRegistry == nil {
+		err = h.storage.Upload(ctx, mockFileReader, mockHash, h.cfg.AppName, token)
+		if err != nil {
+			h.logger.Error("Failed to upload mock file", zap.Error(err))
+			return err
+		}
+
+		// create ts config
+		var prescript, postscript string
+		var template map[string]interface{}
+		if tsConfig != nil {
+			prescript = tsConfig.PreScript
+			postscript = tsConfig.PostScript
+			template = tsConfig.Template
+		}
+		tsConfig = &models.TestSet{
+			PreScript:  prescript,
+			PostScript: postscript,
+			Template:   template,
+			MockRegistry: &models.MockRegistry{
+				Mock: mockHash,
+				App:  h.cfg.AppName,
+			},
+		}
+		err := h.tsConfigDB.Write(ctx, testSetID, &models.TestSet{MockRegistry: &models.MockRegistry{Mock: mockHash}})
+		if err != nil {
+			h.logger.Error("Failed to write test set config", zap.Error(err))
+			return err
+		}
+		return nil
+	}
+
+	// If mock file is already uploaded, skip the upload
+	if tsConfig.MockRegistry.Mock == mockHash {
+		h.logger.Debug("Mock file is already uploaded, skipping upload", zap.String("testSetID", testSetID), zap.String("mockPath", localMockPath))
+		return nil
+	}
+
+	// If mock file is changed, upload the new mock file
+	h.logger.Debug("Mock file is changed, uploading new mock", zap.String("testSetID", testSetID), zap.String("mockPath", localMockPath))
+	err = h.storage.Upload(ctx, mockFileReader, mockHash, h.cfg.AppName, token)
+	if err != nil {
+		h.logger.Error("Failed to upload mock file", zap.Error(err))
+		return err
+	}
+
+	return nil
 }
 
 func (h *Hook) BeforeTestSetRun(ctx context.Context, testSetID string) error {
@@ -73,19 +142,20 @@ func (h *Hook) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 		return nil
 	}
 
-	testSetconfig, err := h.tsConfigDB.Read(ctx, testSetID)
-	if err != nil || testSetconfig == nil || testSetconfig.MockRegistry == nil {
+	// Check if test-set config is present
+	tsConfig, err := h.tsConfigDB.Read(ctx, testSetID)
+	if err != nil || tsConfig == nil || tsConfig.MockRegistry == nil {
 		h.logger.Debug("test set config for upload mock not found, continuing with local mock", zap.String("testSetID", testSetID), zap.Error(err))
 		return nil
 	}
 
-	if testSetconfig.MockRegistry.Mock == "" {
-		h.logger.Warn("Mock is empty in test-set config, continuing with local mock", zap.String("testSetID", testSetID))
+	if tsConfig.MockRegistry.Mock == "" {
+		h.logger.Warn("Mock is empty in test-set config, continuing with local mock if present", zap.String("testSetID", testSetID))
 		return nil
 	}
 
-	if testSetconfig.MockRegistry.App == "" {
-		h.logger.Warn("App name is empty in test-set config, continuing with local mock", zap.String("testSetID", testSetID))
+	if tsConfig.MockRegistry.App == "" {
+		h.logger.Warn("App name is empty in test-set config, continuing with local mock if present", zap.String("testSetID", testSetID))
 		return nil
 	}
 
@@ -93,21 +163,30 @@ func (h *Hook) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 	localMockPath := filepath.Join(h.cfg.Path, testSetID, "mocks.yaml")
 	mockContent, err := os.ReadFile(localMockPath)
 	if err == nil {
-		if testSetconfig.MockRegistry.Mock == utils.Hash(mockContent) {
-			h.logger.Debug("Mock file already exists, downloading from cloud is not necessary", zap.String("testSetID", testSetID), zap.String("mockPath", LocalMockPath))
+		if tsConfig.MockRegistry.Mock == utils.Hash(mockContent) {
+			h.logger.Debug("Mock file already exists, downloading from cloud is not necessary", zap.String("testSetID", testSetID), zap.String("mockPath", localMockPath))
 			return nil
 		}
 	}
 
-	// TODO autogenerate app name if not provided
-	if testSetconfig.MockRegistry.App != h.cfg.AppName {
-		h.logger.Warn("App name in the keploy.yml does not match with the app name in the config.yml in the test-set", zap.String("test-set-config-AppName", testSetconfig.MockRegistry.App), zap.String("global-config-Appname", h.cfg.AppName))
-		h.logger.Warn("Using app name from the test-set's config.yml for mock retrival", zap.String("appName", testSetconfig.MockRegistry.App))
+	if tsConfig.MockRegistry.App != h.cfg.AppName {
+		h.logger.Warn("App name in the keploy.yml does not match with the app name in the config.yml in the test-set", zap.String("test-set-config-AppName", tsConfig.MockRegistry.App), zap.String("global-config-Appname", h.cfg.AppName))
+		h.logger.Warn("Using app name from the test-set's config.yml for mock retrieval", zap.String("appName", tsConfig.MockRegistry.App))
 	}
 
-	token := h.auth.GetToken(ctx)
-	h.storage.Download(ctx, testSetconfig.MockRegistry.Mock, testSetconfig.MockRegistry.App, testSetconfig.MockRegistry.User, h.cfg.JWTToken)
+	token, err := h.auth.GetToken(ctx)
+	if err != nil {
+		h.logger.Error("Failed to get token", zap.Error(err))
+		return err
+	}
 
+	cloudFile, err := h.storage.Download(ctx, tsConfig.MockRegistry.Mock, tsConfig.MockRegistry.App, tsConfig.MockRegistry.User, token)
+	if err != nil {
+		h.logger.Error("Failed to download mock file", zap.Error(err))
+		return err
+	}
+
+	// Save the downloaded mock file to local
 	file, err := os.Create(localMockPath)
 	if err != nil {
 		h.logger.Error("Failed to create local file", zap.String("path", localMockPath), zap.Error(err))
@@ -115,20 +194,10 @@ func (h *Hook) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 	}
 	defer file.Close()
 
-	// TODO use platform package
-	resp, err := http.Get(url)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("bad status: %s", resp.Status)
-	}
-
-	_, err = io.Copy(file, resp.Body)
+	_, err = io.Copy(file, cloudFile)
 	if err != nil {
 		return err
 	}
 
+	return nil
 }

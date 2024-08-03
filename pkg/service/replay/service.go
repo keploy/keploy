@@ -63,7 +63,7 @@ type ReportDB interface {
 	UpdateReport(ctx context.Context, testRunID string, testCoverage any) error
 }
 
-type Config interface {
+type TestSetConfig interface {
 	Read(ctx context.Context, testSetID string) (*models.TestSet, error)
 	Write(ctx context.Context, testSetID string, testSet *models.TestSet) error
 }
@@ -77,11 +77,11 @@ type Telemetry interface {
 type TestHooks interface {
 	SimulateRequest(ctx context.Context, appID uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error)
 	BeforeTestSetRun(ctx context.Context, testSetID string) error
-	AfterTestSetRun(ctx context.Context, testRunID, testSetID string, coverage models.TestCoverage, totalTestSets int, status bool) (*models.TestReport, error)
+	AfterTestSetRun(ctx context.Context, testRunID, testSetID string, coverage models.TestCoverage, totalTestSets int, status bool) error
 }
 
 type Storage interface {
-	Upload(ctx context.Context, file io.Reader, fileName string, mockName string, appName string) error
+	Upload(ctx context.Context, file io.Reader, mockName string, appName string, jwtToken string) error
 	Download(ctx context.Context, mockName string, appName string, userName string, jwtToken string) (io.Reader, error)
 }
 

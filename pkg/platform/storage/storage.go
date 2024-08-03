@@ -1,5 +1,5 @@
 // Package auth defines methods for authenticating with GitHub.
-package auth
+package storage
 
 import (
 	"bytes"
@@ -25,7 +25,7 @@ func New(serverURL string, installationID string, logger *zap.Logger, gitHubClie
 	}
 }
 
-func (s *Storage) Upload(ctx context.Context, file io.Reader, mockName string, appName string) error {
+func (s *Storage) Upload(ctx context.Context, file io.Reader, mockName string, appName string, token string) error {
 	// Prepare the multipart form file upload request
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
@@ -46,6 +46,7 @@ func (s *Storage) Upload(ctx context.Context, file io.Reader, mockName string, a
 		return err
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	// Execute the request
 	resp, err := http.DefaultClient.Do(req)
