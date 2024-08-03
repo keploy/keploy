@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v2/pkg/models/mysql"
@@ -123,4 +124,103 @@ func DecodeHandshakeResponse41(_ context.Context, _ *zap.Logger, data []byte) (*
 	}
 
 	return packet, nil
+}
+
+func EncodeHandshakeResponse41(_ context.Context, _ *zap.Logger, packet *mysql.HandshakeResponse41Packet) ([]byte, error) {
+	buf := new(bytes.Buffer)
+
+	// Write Capability Flags
+	if err := binary.Write(buf, binary.LittleEndian, packet.CapabilityFlags); err != nil {
+		return nil, fmt.Errorf("failed to write CapabilityFlags: %w", err)
+	}
+
+	// Write Max Packet Size
+	if err := binary.Write(buf, binary.LittleEndian, packet.MaxPacketSize); err != nil {
+		return nil, fmt.Errorf("failed to write MaxPacketSize: %w", err)
+	}
+
+	// Write Character Set
+	if err := buf.WriteByte(packet.CharacterSet); err != nil {
+		return nil, fmt.Errorf("failed to write CharacterSet: %w", err)
+	}
+
+	// Write Filler
+	if _, err := buf.Write(packet.Filler[:]); err != nil {
+		return nil, fmt.Errorf("failed to write Filler: %w", err)
+	}
+
+	// Write Username
+	if _, err := buf.WriteString(packet.Username); err != nil {
+		return nil, fmt.Errorf("failed to write Username: %w", err)
+	}
+	if err := buf.WriteByte(0x00); err != nil {
+		return nil, fmt.Errorf("failed to write null terminator for Username: %w", err)
+	}
+
+	// Write Auth Response
+	if packet.CapabilityFlags&mysql.CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA != 0 {
+		if err := buf.WriteByte(byte(len(packet.AuthResponse))); err != nil {
+			return nil, fmt.Errorf("failed to write length of AuthResponse: %w", err)
+		}
+		if _, err := buf.Write(packet.AuthResponse); err != nil {
+			return nil, fmt.Errorf("failed to write AuthResponse: %w", err)
+		}
+	} else {
+		if err := buf.WriteByte(byte(len(packet.AuthResponse))); err != nil {
+			return nil, fmt.Errorf("failed to write length of AuthResponse: %w", err)
+		}
+		if _, err := buf.Write(packet.AuthResponse); err != nil {
+			return nil, fmt.Errorf("failed to write AuthResponse: %w", err)
+		}
+	}
+
+	// Write Database
+	if packet.CapabilityFlags&mysql.CLIENT_CONNECT_WITH_DB != 0 {
+		if _, err := buf.WriteString(packet.Database); err != nil {
+			return nil, fmt.Errorf("failed to write Database: %w", err)
+		}
+		if err := buf.WriteByte(0x00); err != nil {
+			return nil, fmt.Errorf("failed to write null terminator for Database: %w", err)
+		}
+	}
+
+	// Write Auth Plugin Name
+	if packet.CapabilityFlags&mysql.CLIENT_PLUGIN_AUTH != 0 {
+		if _, err := buf.WriteString(packet.AuthPluginName); err != nil {
+			return nil, fmt.Errorf("failed to write AuthPluginName: %w", err)
+		}
+		if err := buf.WriteByte(0x00); err != nil {
+			return nil, fmt.Errorf("failed to write null terminator for AuthPluginName: %w", err)
+		}
+	}
+
+	// Write Connection Attributes
+	if packet.CapabilityFlags&mysql.CLIENT_CONNECT_ATTRS != 0 {
+		totalLength := 0
+		for key, value := range packet.ConnectionAttributes {
+			totalLength += len(key) + len(value) + 2 // 2 bytes for length-encoded integer prefixes
+		}
+
+		if err := utils.WriteLengthEncodedInteger(buf, uint64(totalLength)); err != nil {
+			return nil, fmt.Errorf("failed to write total length of ConnectionAttributes: %w", err)
+		}
+
+		for key, value := range packet.ConnectionAttributes {
+			if err := utils.WriteLengthEncodedString(buf, []byte(key)); err != nil {
+				return nil, fmt.Errorf("failed to write ConnectionAttribute key: %w", err)
+			}
+			if err := utils.WriteLengthEncodedString(buf, []byte(value)); err != nil {
+				return nil, fmt.Errorf("failed to write ConnectionAttribute value: %w", err)
+			}
+		}
+	}
+
+	// Write Zstd Compression Level
+	if packet.CapabilityFlags&mysql.CLIENT_ZSTD_COMPRESSION_ALGORITHM != 0 {
+		if err := buf.WriteByte(packet.ZstdCompressionLevel); err != nil {
+			return nil, fmt.Errorf("failed to write ZstdCompressionLevel: %w", err)
+		}
+	}
+
+	return buf.Bytes(), nil
 }

@@ -3,7 +3,9 @@
 package connection
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
@@ -26,4 +28,27 @@ func DecodeAuthNextFactor(_ context.Context, data []byte) (*mysql.AuthNextFactor
 	packet.PluginData = string(data[idx:])
 
 	return packet, nil
+}
+func EncodeAuthNextFactor(_ context.Context, packet *mysql.AuthNextFactorPacket) ([]byte, error) {
+	buf := new(bytes.Buffer)
+
+	// Write PacketType
+	if err := buf.WriteByte(packet.PacketType); err != nil {
+		return nil, errors.New("failed to write PacketType")
+	}
+
+	// Write PluginName followed by a null terminator
+	if _, err := buf.WriteString(packet.PluginName); err != nil {
+		return nil, errors.New("failed to write PluginName")
+	}
+	if err := buf.WriteByte(0x00); err != nil {
+		return nil, errors.New("failed to write null terminator for PluginName")
+	}
+
+	// Write PluginData
+	if _, err := buf.WriteString(packet.PluginData); err != nil {
+		return nil, errors.New("failed to write PluginData")
+	}
+
+	return buf.Bytes(), nil
 }

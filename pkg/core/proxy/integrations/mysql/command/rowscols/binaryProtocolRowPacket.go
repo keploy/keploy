@@ -4,6 +4,7 @@
 package rowscols
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -197,4 +198,107 @@ func parseBinaryTime(b []byte) (interface{}, int, error) {
 		timeString = "-" + timeString
 	}
 	return timeString, int(length) + 1, nil
+}
+func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, columns []*mysql.ColumnDefinition41) ([]byte, error) {
+	buf := new(bytes.Buffer)
+
+	// Write header
+	utils.WriteUint24(buf, row.Header.PayloadLength)
+	buf.WriteByte(row.Header.SequenceID)
+
+	// Write OK-after-row marker
+	if row.OkAfterRow {
+		buf.WriteByte(0x00)
+	} else {
+		buf.WriteByte(0xff) // Assuming 0xff as error marker
+	}
+
+	nullBitmapLen := (len(columns) + 7 + 2) / 8
+	nullBitmap := make([]byte, nullBitmapLen)
+
+	// Initialize null bitmap
+	for i, _ := range columns {
+		if row.Values[i].Value == nil {
+			bytePos := (i + 2) / 8
+			bitPos := (i + 2) % 8
+			nullBitmap[bytePos] |= (1 << bitPos)
+		}
+	}
+
+	buf.Write(nullBitmap)
+
+	for i, col := range columns {
+		if row.Values[i].Value == nil {
+			continue
+		}
+
+		valueBytes, err := writeBinaryValue(row.Values[i].Value, col)
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(valueBytes)
+	}
+
+	return buf.Bytes(), nil
+}
+
+func writeBinaryValue(value interface{}, col *mysql.ColumnDefinition41) ([]byte, error) {
+	buf := new(bytes.Buffer)
+
+	switch v := value.(type) {
+	case uint32:
+		if col.Flags&mysql.UNSIGNED_FLAG != 0 {
+			binary.Write(buf, binary.LittleEndian, v)
+		} else {
+			binary.Write(buf, binary.LittleEndian, int32(v))
+		}
+
+	case int32:
+		binary.Write(buf, binary.LittleEndian, v)
+
+	case string:
+		if err := utils.WriteLengthEncodedString(buf, []byte(v)); err != nil {
+			return nil, err
+		}
+
+	case uint8:
+		buf.WriteByte(v)
+
+	case int8:
+		buf.WriteByte(byte(v))
+
+	case uint16:
+		if col.Flags&mysql.UNSIGNED_FLAG != 0 {
+			binary.Write(buf, binary.LittleEndian, v)
+		} else {
+			binary.Write(buf, binary.LittleEndian, int16(v))
+		}
+
+	case int16:
+		binary.Write(buf, binary.LittleEndian, v)
+
+	case uint64:
+		if col.Flags&mysql.UNSIGNED_FLAG != 0 {
+			binary.Write(buf, binary.LittleEndian, v)
+		} else {
+			binary.Write(buf, binary.LittleEndian, int64(v))
+		}
+
+	case int64:
+		binary.Write(buf, binary.LittleEndian, v)
+
+	case float32:
+		binary.Write(buf, binary.LittleEndian, v)
+
+	case float64:
+		binary.Write(buf, binary.LittleEndian, v)
+
+	case []byte:
+		buf.Write(v)
+
+	default:
+		return nil, fmt.Errorf("unsupported value type: %T", v)
+	}
+
+	return buf.Bytes(), nil
 }

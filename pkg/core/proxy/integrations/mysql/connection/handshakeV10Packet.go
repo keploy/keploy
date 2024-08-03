@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 
 	"go.keploy.io/server/v2/pkg/models/mysql"
@@ -95,6 +96,132 @@ func DecodeHandshakeV10(_ context.Context, _ *zap.Logger, data []byte) (*mysql.H
 		}
 		packet.AuthPluginName = string(data[:idx])
 	}
+	fmt.Printf("ProtocolVersion: %d\n", packet.ProtocolVersion)
+	fmt.Printf("ServerVersion: %s\n", packet.ServerVersion)
+	fmt.Printf("ConnectionID: %d\n", packet.ConnectionID)
+	fmt.Printf("AuthPluginData: %x\n", packet.AuthPluginData)
+	fmt.Printf("Filler: %x\n", packet.Filler)
+	fmt.Printf("CharacterSet: %d\n", packet.CharacterSet)
+	fmt.Printf("StatusFlags: %d\n", packet.StatusFlags)
+	fmt.Printf("CapabilityFlags: %d\n", packet.CapabilityFlags)
+	fmt.Printf("AuthPluginName: %s\n", packet.AuthPluginName)
 
 	return packet, nil
+}
+
+// EncodeHandshakeV10 encodes a MySQLHandshakeV10Packet into a byte slice.
+func EncodeHandshakeV10(_ context.Context, _ *zap.Logger, packet *mysql.HandshakeV10Packet) ([]byte, error) {
+	buf := new(bytes.Buffer)
+
+	// Protocol version
+	buf.WriteByte(packet.ProtocolVersion)
+
+	// Server version
+	buf.WriteString(packet.ServerVersion)
+	buf.WriteByte(0x00) // Null terminator
+
+	// Connection ID
+	if err := binary.Write(buf, binary.LittleEndian, packet.ConnectionID); err != nil {
+		return nil, err
+	}
+
+	// Auth-plugin-data-part-1 (first 8 bytes)
+	if len(packet.AuthPluginData) < 8 {
+		return nil, errors.New("auth plugin data too short")
+	}
+	buf.Write(packet.AuthPluginData[:8])
+
+	// Filler
+	buf.WriteByte(packet.Filler)
+
+	// Capability flags (lower 2 bytes)
+	if err := binary.Write(buf, binary.LittleEndian, uint16(packet.CapabilityFlags&0xFFFF)); err != nil {
+		return nil, err
+	}
+
+	// Character set
+	buf.WriteByte(packet.CharacterSet)
+
+	// Status flags
+	if err := binary.Write(buf, binary.LittleEndian, packet.StatusFlags); err != nil {
+		return nil, err
+	}
+
+	// Capability flags (upper 2 bytes)
+	if err := binary.Write(buf, binary.LittleEndian, uint16((packet.CapabilityFlags>>16)&0xFFFF)); err != nil {
+		return nil, err
+	}
+
+	// Length of auth-plugin-data
+	if packet.CapabilityFlags&mysql.CLIENT_PLUGIN_AUTH != 0 && len(packet.AuthPluginData) >= 21 {
+		buf.WriteByte(byte(len(packet.AuthPluginData))) // Length of entire auth plugin data
+	} else {
+		buf.WriteByte(0x00)
+	}
+
+	// Reserved (10 zero bytes)
+	buf.Write(make([]byte, 10))
+
+	// Auth-plugin-data-part-2 (remaining auth data)
+	if packet.CapabilityFlags&mysql.CLIENT_PLUGIN_AUTH != 0 && len(packet.AuthPluginData) > 8 {
+		buf.Write(packet.AuthPluginData[8:]) // Write all remaining bytes of auth plugin data
+	}
+
+	// Auth-plugin name
+	if packet.CapabilityFlags&mysql.CLIENT_PLUGIN_AUTH != 0 {
+		buf.WriteString(packet.AuthPluginName)
+		buf.WriteByte(0x00) // Null terminator
+	}
+
+	return buf.Bytes(), nil
+}
+
+// TestDecodeEncode tests the decoding and encoding of a HandshakeV10Packet.
+func TestDecodeEncode(ctx context.Context, logger *zap.Logger, original []byte, decodeFunc func(context.Context, *zap.Logger, []byte) (*mysql.HandshakeV10Packet, error), encodeFunc func(context.Context, *zap.Logger, *mysql.HandshakeV10Packet) ([]byte, error)) bool {
+	// Decode the original data
+	decoded, err := decodeFunc(ctx, logger, original)
+	if err != nil {
+		fmt.Printf("Decoding failed: %v\n", err)
+		return false
+	}
+
+	// Encode the decoded data
+	encoded, err := encodeFunc(ctx, logger, decoded)
+	if err != nil {
+		fmt.Printf("Encoding failed: %v\n", err)
+		return false
+	}
+
+	// Compare the original and encoded data
+	if bytes.Equal(original, encoded) {
+		fmt.Println("Test passed: Decoded and encoded values match")
+		fmt.Printf("Decoded: %+v\nEncoded: %v\n", decoded, encoded)
+		return true
+	} else {
+		fmt.Println("Test failed: Decoded and encoded values do not match")
+		fmt.Printf("Original: %v\nEncoded: %v\n", original, encoded)
+		return false
+	}
+}
+
+func main() {
+	logger, _ := zap.NewDevelopment()
+	ctx := context.Background()
+
+	originalData := []byte{
+		0x0a, 0x39, 0x2e, 0x30,
+		0x2e, 0x30, 0x00, 0x09, 0x00, 0x00, 0x00, 0x06,
+		0x2d, 0x2a, 0x26, 0x09, 0x64, 0x7d, 0x79, 0x00,
+		0xff, 0xff, 0xff, 0x02, 0x00, 0xff, 0xdf, 0x15,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x16, 0x16, 0x31, 0x5a, 0x0a, 0x0d,
+		0x5b, 0x29, 0x37, 0x79, 0x45, 0x67, 0x00, 0x63,
+		0x61, 0x63, 0x68, 0x69, 0x6e, 0x67, 0x5f, 0x73,
+		0x68, 0x61, 0x32, 0x5f, 0x70, 0x61, 0x73, 0x73,
+		0x77, 0x6f, 0x72, 0x64, 0x00,
+	}
+
+	// Use the TestDecodeEncode function
+	testResult := TestDecodeEncode(ctx, logger, originalData, DecodeHandshakeV10, EncodeHandshakeV10)
+	fmt.Println("Test result:", testResult)
 }
