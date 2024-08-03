@@ -58,3 +58,24 @@ jobs:
           mode: 0
 
       
+
+      - name: Run testing script for gin-mongo application
+        uses: ./.github/actions/tester
+        id: run_tests
+        with:
+          working-directory: samples-go/gin-mongo
+          command: ./ginApp
+          delay: 7
+          keploy-record-bin: /usr/local/bin/keployR
+          keploy-test-bin: /usr/local/bin/keployB
+          mode: 0 
+
+      - name: Check test result
+        if: always()
+        run: |
+          if [[ "${{ steps.run_tests.outcome }}" == "failure" ]]; then
+            echo "Tests failed"
+            exit 1
+          else
+            echo "All tests passed"
+             fi

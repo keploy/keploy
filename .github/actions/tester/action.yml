@@ -34,6 +34,10 @@ inputs:
     description: Mode to identify the workflow type
     required: true    
 
+outputs:
+  log_file:
+    description: "Path to the log file containing test output"
+
 runs:
   using: "composite"
   steps:
@@ -52,15 +56,22 @@ runs:
     - name: Grant permissions
       run: chmod +x ${GITHUB_ACTION_PATH}/install.sh
       shell: sh
+
     - id: keploy-test-keploy
       name: Run Script
       run: |
-        ${GITHUB_ACTION_PATH}/install.sh
-       
+        LOG_FILE="${GITHUB_WORKSPACE}/keploy_test_log.txt"
+        ${GITHUB_ACTION_PATH}/install.sh > "${LOG_FILE}" 2>&1
+        echo "log_file=${LOG_FILE}" >> $GITHUB_OUTPUT
+        if [ $? -ne 0 ]; then
+          echo "Tests failed. Check the log file for details."
+          cat "${LOG_FILE}"
+          exit 1
+        fi
       shell: bash
       env:
         WORKDIR: ${{ inputs.working-directory }}
-        COMMAND : ${{ inputs.command }}
+        COMMAND: ${{ inputs.command }}
         KEPLOY_PATH: ${{inputs.keploy-path}}
         CONFIG_PATH: ${{inputs.config-path}}
         DELAY: ${{ inputs.delay }}
@@ -68,9 +79,16 @@ runs:
         KEPLOY_TEST_BIN: ${{ inputs.keploy-test-bin }}
         MODE: ${{ inputs.mode }}
 
+    - name: Display Test Logs
+      if: always()
+      run: |
+        echo "Test Logs:"
+        cat ${{ steps.keploy-test-keploy.outputs.log_file }}
+      shell: bash
+
     - name: Get coverage data and zip it
       if: success()
-      id: coverage-zip  # Unique ID for the step
+      id: coverage-zip
       run: |
         echo "Output from script: ${{ steps.keploy-test-keploy.outputs.script_output }}"        
         workdir="${{ inputs.working-directory }}/"
@@ -80,7 +98,7 @@ runs:
         coverage="coverage-reports-${workdir}-${{ inputs.mode }}"
         mv ${{ inputs.working-directory }}/coverage-reports ./$coverage
         echo "coverage=$coverage"
-        echo "::set-output name=coverage_name::$coverage"
+        echo "coverage_name=$coverage" >> $GITHUB_OUTPUT
         zip -r ${coverage}.zip $coverage
       shell: bash
 
