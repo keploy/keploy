@@ -85,10 +85,6 @@ type Storage interface {
 	Download(ctx context.Context, mockName string, appName string, userName string, jwtToken string) (io.Reader, error)
 }
 
-type Auth interface {
-	GetToken(ctx context.Context) (string, error)
-}
-
 type InstrumentState struct {
 	AppID      uint64
 	HookCancel context.CancelFunc

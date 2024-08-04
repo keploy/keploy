@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -19,10 +20,10 @@ type Hooks struct {
 	cfg        *config.Config
 	tsConfigDB TestSetConfig
 	storage    Storage
-	auth       Auth
+	auth       service.Auth
 }
 
-func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, storage Storage, auth Auth) TestHooks {
+func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, storage Storage, auth service.Auth) TestHooks {
 	return &Hooks{
 		cfg:        cfg,
 		logger:     logger,

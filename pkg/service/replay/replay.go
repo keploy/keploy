@@ -22,6 +22,7 @@ import (
 	"go.keploy.io/server/v2/pkg/platform/coverage/java"
 	"go.keploy.io/server/v2/pkg/platform/coverage/javascript"
 	"go.keploy.io/server/v2/pkg/platform/coverage/python"
+	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -44,12 +45,10 @@ type Replayer struct {
 	telemetry       Telemetry
 	instrumentation Instrumentation
 	config          *config.Config
-	auth            Auth
-	storage         Storage
 	instrument      bool
 }
 
-func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth Auth, storage Storage, config *config.Config) Service {
+func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
 	// set the request emulator for simulating test case requests, if not set
 	if testHooks == nil {
 		SetTestHook(NewHooks(logger, config, testSetConf, storage, auth))

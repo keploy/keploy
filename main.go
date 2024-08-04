@@ -10,7 +10,8 @@ import (
 	"go.keploy.io/server/v2/cli"
 	"go.keploy.io/server/v2/cli/provider"
 	"go.keploy.io/server/v2/config"
-
+	"go.keploy.io/server/v2/pkg/platform/auth"
+	userDb "go.keploy.io/server/v2/pkg/platform/yaml/configdb/user"
 	"go.keploy.io/server/v2/utils"
 	"go.keploy.io/server/v2/utils/log"
 	//pprof for debugging
@@ -84,7 +85,15 @@ func start(ctx context.Context) {
 	conf := config.New()
 	conf.APIServerURL = apiServerURI
 	conf.GitHubClientID = gitHubClientID
-	svcProvider := provider.NewServiceProvider(logger, conf)
+	userDb := userDb.New(logger, conf)
+	conf.InstallationID, err = userDb.GetInstallationID(ctx)
+	if err != nil {
+		errMsg := "failed to get installation id"
+		utils.LogError(logger, err, errMsg)
+		os.Exit(1)
+	}
+	auth := auth.New(conf.APIServerURL, conf.InstallationID, logger, conf.GitHubClientID)
+	svcProvider := provider.NewServiceProvider(logger, conf, auth)
 	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
 	if err := rootCmd.Execute(); err != nil {
