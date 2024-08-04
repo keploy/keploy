@@ -52,7 +52,7 @@ type Replayer struct {
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth Auth, storage Storage, config *config.Config) Service {
 	// set the request emulator for simulating test case requests, if not set
 	if testHooks == nil {
-		SetTestHook(NewHook(logger, config, testSetConf, storage, auth))
+		SetTestHook(NewHooks(logger, config, testSetConf, storage, auth))
 	}
 	instrument := false
 	if config.Command != "" {

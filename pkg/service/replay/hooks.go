@@ -14,7 +14,7 @@ import (
 	"go.uber.org/zap"
 )
 
-type Hook struct {
+type Hooks struct {
 	logger     *zap.Logger
 	cfg        *config.Config
 	tsConfigDB TestSetConfig
@@ -22,8 +22,8 @@ type Hook struct {
 	auth       Auth
 }
 
-func NewHook(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, storage Storage, auth Auth) TestHooks {
-	return &Hook{
+func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, storage Storage, auth Auth) TestHooks {
+	return &Hooks{
 		cfg:        cfg,
 		logger:     logger,
 		tsConfigDB: tsConfigDB,
@@ -32,7 +32,7 @@ func NewHook(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, s
 	}
 }
 
-func (h *Hook) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error) {
+func (h *Hooks) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error) {
 	switch tc.Kind {
 	case models.HTTP:
 		h.logger.Debug("Before simulating the request", zap.Any("Test case", tc))
@@ -43,7 +43,7 @@ func (h *Hook) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCas
 	return nil, nil
 }
 
-func (h *Hook) AfterTestSetRun(ctx context.Context, testRunID, testSetID string, _ models.TestCoverage, _ int, status bool) error {
+func (h *Hooks) AfterTestSetRun(ctx context.Context, testRunID, testSetID string, _ models.TestCoverage, _ int, status bool) error {
 
 	if h.cfg.Test.DisableMockUpload {
 		return nil
@@ -130,7 +130,7 @@ func (h *Hook) AfterTestSetRun(ctx context.Context, testRunID, testSetID string,
 	return nil
 }
 
-func (h *Hook) BeforeTestSetRun(ctx context.Context, testSetID string) error {
+func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 
 	if h.cfg.Test.BasePath != "" {
 		h.logger.Debug("Mocking is disabled when basePath is given", zap.String("testSetID", testSetID), zap.String("basePath", h.cfg.Test.BasePath))

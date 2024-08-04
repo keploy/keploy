@@ -29,11 +29,11 @@ func Get(ctx context.Context, cmd string, c *config.Config, logger *zap.Logger, 
 		return nil, err
 	}
 
-	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, c)
+	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, commonServices.Auth, commonServices.Storage, c)
 
 	if (cmd == "test" && c.Test.BasePath != "") || cmd == "normalize" || cmd == "templatize" {
 		return replaySvc, nil
-	}	
+	}
 
 	return nil, errors.New("command not supported in non linux os")
 }
