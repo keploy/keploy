@@ -763,9 +763,8 @@ func IsDockerCmd(kind CmdType) bool {
 	return (kind == DockerRun || kind == DockerStart || kind == DockerCompose)
 }
 
-func CreateGitIgnore(logger *zap.Logger, path string) error {
+func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error {
 	gitignorePath := path + "/.gitignore"
-	reportEntry := "/reports/"
 
 	file, err := os.OpenFile(gitignorePath, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
@@ -781,14 +780,14 @@ func CreateGitIgnore(logger *zap.Logger, path string) error {
 	scanner := bufio.NewScanner(file)
 	found := false
 	for scanner.Scan() {
-		if strings.TrimSpace(scanner.Text()) == reportEntry {
+		if strings.TrimSpace(scanner.Text()) == ignoreString {
 			found = true
 			break
 		}
 	}
 
 	if !found {
-		if _, err := file.WriteString("\n" + reportEntry + "\n"); err != nil {
+		if _, err := file.WriteString("\n" + ignoreString + "\n"); err != nil {
 			return fmt.Errorf("error writing to .gitignore file: %v", err)
 		}
 		return nil
@@ -801,4 +800,16 @@ func Hash(data []byte) string {
 	hasher := sha256.New()
 	hasher.Write(data)
 	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+func GetLastDirectory() (string, error) {
+	// Get the current working directory
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+
+	// Extract the base (last directory)
+	lastDir := filepath.Base(dir)
+	return lastDir, nil
 }

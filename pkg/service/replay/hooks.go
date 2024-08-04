@@ -43,7 +43,6 @@ func (h *Hook) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCas
 	return nil, nil
 }
 
-// TODO autogenerate app name if not provided , ignore mock file in gitignore
 func (h *Hook) AfterTestSetRun(ctx context.Context, testRunID, testSetID string, _ models.TestCoverage, _ int, status bool) error {
 
 	if h.cfg.Test.DisableMockUpload {
@@ -123,6 +122,11 @@ func (h *Hook) AfterTestSetRun(ctx context.Context, testRunID, testSetID string,
 		return err
 	}
 
+	err = utils.AddToGitIgnore(h.logger, h.cfg.Path, "/*/mocks.yaml")
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to add /*/mocks.yaml to .gitignore file")
+	}
+
 	return nil
 }
 
@@ -197,6 +201,11 @@ func (h *Hook) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 	_, err = io.Copy(file, cloudFile)
 	if err != nil {
 		return err
+	}
+
+	err = utils.AddToGitIgnore(h.logger, h.cfg.Path, "/*/mocks.yaml")
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to add /*/mocks.yaml to .gitignore file")
 	}
 
 	return nil

@@ -179,11 +179,14 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	hookCancel = inst.HookCancel
 
-	testSetResult := false
+	var testSetResult bool
 	testRunResult := true
 	abortTestRun := false
 
 	for i, testSetID := range testSetIDs {
+
+		testSetResult = false
+
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
 		}
@@ -224,14 +227,16 @@ func (r *Replayer) Start(ctx context.Context) error {
 		case models.TestSetStatusPassed:
 			testSetResult = true
 		case models.TestSetStatusIgnored:
-			testSetResult = true
-		}
-		testRunResult = testRunResult && testSetResult
-		if abortTestRun {
-			break
+			testSetResult = false
 		}
 
-		// TODO selected test set flow should be handled
+		if testSetStatus != models.TestSetStatusIgnored {
+			testRunResult = testRunResult && testSetResult
+			if abortTestRun {
+				break
+			}
+		}
+
 		if i < len(testSetIDs)-1 {
 			err = testHooks.AfterTestSetRun(ctx, testRunID, testSetID, models.TestCoverage{}, len(testSetIDs), testSetResult)
 			if err != nil {
@@ -735,7 +740,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusInternalErr, fmt.Errorf("failed to insert report")
 	}
 
-	err = utils.CreateGitIgnore(r.logger, r.config.Path)
+	err = utils.AddToGitIgnore(r.logger, r.config.Path, "/reports/")
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to create .gitignore file")
 	}
