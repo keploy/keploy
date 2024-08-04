@@ -38,7 +38,7 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 				utils.LogError(logger, err, "failed to get generate flag")
 				return err
 			}
-			
+
 			if isGenerate {
 				filePath := filepath.Join(cfg.Path, "keploy.yml")
 				if !InCi && utils.CheckFileExists(filePath) {
