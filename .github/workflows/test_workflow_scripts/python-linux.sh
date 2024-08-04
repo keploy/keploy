@@ -7,7 +7,7 @@ git fetch origin
 git checkout native-linux
 
 # Start the postgres database
-docker-compose up -d
+docker compose up -d
 
 # Install dependencies
 pip3 install -r requirements.txt
