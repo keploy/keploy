@@ -5,8 +5,8 @@ import (
 	"errors"
 
 	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/platform/auth"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
+	"go.keploy.io/server/v2/pkg/service"
 
 	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/pkg/service/utgen"
@@ -18,10 +18,10 @@ var TeleGlobalMap = make(map[string]interface{})
 type ServiceProvider struct {
 	logger *zap.Logger
 	cfg    *config.Config
-	auth   *auth.Auth
+	auth   service.Auth
 }
 
-func NewServiceProvider(logger *zap.Logger, cfg *config.Config, auth *auth.Auth) *ServiceProvider {
+func NewServiceProvider(logger *zap.Logger, cfg *config.Config, auth service.Auth) *ServiceProvider {
 	return &ServiceProvider{
 		logger: logger,
 		cfg:    cfg,

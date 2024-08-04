@@ -14,6 +14,7 @@ import (
 	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
 	reportdb "go.keploy.io/server/v2/pkg/platform/yaml/reportdb"
 	testdb "go.keploy.io/server/v2/pkg/platform/yaml/testdb"
+	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/pkg/service/replay"
 	"go.uber.org/zap"
 )
@@ -23,13 +24,13 @@ type CommonInternalService struct {
 	Instrumentation *core.Core
 }
 
-func Get(ctx context.Context, cmd string, c *config.Config, logger *zap.Logger, tel *telemetry.Telemetry) (interface{}, error) {
+func Get(ctx context.Context, cmd string, c *config.Config, logger *zap.Logger, tel *telemetry.Telemetry, auth service.Auth) (interface{}, error) {
 	commonServices, err := GetCommonServices(ctx, c, logger)
 	if err != nil {
 		return nil, err
 	}
 
-	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, commonServices.Auth, commonServices.Storage, c)
+	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, auth, commonServices.Storage, c)
 
 	if (cmd == "test" && c.Test.BasePath != "") || cmd == "normalize" || cmd == "templatize" {
 		return replaySvc, nil

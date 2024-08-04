@@ -110,8 +110,8 @@ func (a *Auth) Validate(ctx context.Context, token string, logger *zap.Logger) (
 	return respBody.EmailID, respBody.IsValid, respBody.JwtToken, respBody.Error, nil
 }
 
-func (a *Auth) GetToken(ctx context.Context) (string, error) {
-	return a.jwtToken, nil
+func (a *Auth) GetToken(ctx context.Context) string {
+	return a.jwtToken
 }
 
 // requestDeviceCode sends a request to GitHub to get a device code for the users machine to authenticate

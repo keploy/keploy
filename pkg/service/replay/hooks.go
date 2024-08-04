@@ -68,11 +68,7 @@ func (h *Hooks) AfterTestSetRun(ctx context.Context, testRunID, testSetID string
 	}
 	mockHash := utils.Hash(mockFileContent)
 	mockFileReader := bytes.NewReader(mockFileContent)
-	token, err := h.auth.GetToken(ctx)
-	if err != nil {
-		h.logger.Error("Failed to get token for mock upload", zap.Error(err))
-		return err
-	}
+	token := h.auth.GetToken(ctx)
 
 	// Cross verify the local mock file with the test-set config
 	tsConfig, err := h.tsConfigDB.Read(ctx, testSetID)
@@ -101,7 +97,7 @@ func (h *Hooks) AfterTestSetRun(ctx context.Context, testRunID, testSetID string
 				App:  h.cfg.AppName,
 			},
 		}
-		err := h.tsConfigDB.Write(ctx, testSetID, &models.TestSet{MockRegistry: &models.MockRegistry{Mock: mockHash}})
+		err := h.tsConfigDB.Write(ctx, testSetID, tsConfig)
 		if err != nil {
 			h.logger.Error("Failed to write test set config", zap.Error(err))
 			return err
@@ -179,11 +175,7 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 		h.logger.Warn("Using app name from the test-set's config.yml for mock retrieval", zap.String("appName", tsConfig.MockRegistry.App))
 	}
 
-	token, err := h.auth.GetToken(ctx)
-	if err != nil {
-		h.logger.Error("Failed to get token", zap.Error(err))
-		return err
-	}
+	token := h.auth.GetToken(ctx)
 
 	cloudFile, err := h.storage.Download(ctx, tsConfig.MockRegistry.Mock, tsConfig.MockRegistry.App, tsConfig.MockRegistry.User, token)
 	if err != nil {

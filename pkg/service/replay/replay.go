@@ -34,7 +34,7 @@ var totalTestPassed int
 var totalTestFailed int
 var totalTestIgnored int
 var totalTestTimeTaken time.Duration
-var testHooks TestHooks
+var HookImpl TestHooks
 
 type Replayer struct {
 	logger          *zap.Logger
@@ -50,8 +50,8 @@ type Replayer struct {
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
 	// set the request emulator for simulating test case requests, if not set
-	if testHooks == nil {
-		SetTestHook(NewHooks(logger, config, testSetConf, storage, auth))
+	if HookImpl == nil {
+		SetTestHooks(NewHooks(logger, config, testSetConf, storage, auth))
 	}
 	instrument := false
 	if config.Command != "" {
@@ -190,7 +190,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			continue
 		}
 
-		testHooks.BeforeTestSetRun(ctx, testSetID)
+		HookImpl.BeforeTestSetRun(ctx, testSetID)
 
 		if !r.config.Test.SkipCoverage {
 			err = os.Setenv("TESTSETID", testSetID) // related to java coverage calculation
@@ -237,7 +237,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 
 		if i < len(testSetIDs)-1 {
-			err = testHooks.AfterTestSetRun(ctx, testRunID, testSetID, models.TestCoverage{}, len(testSetIDs), testSetResult)
+			err = HookImpl.AfterTestSetRun(ctx, testRunID, testSetID, models.TestCoverage{}, len(testSetIDs), testSetResult)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get after test hook")
 			}
@@ -281,7 +281,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to update report with the coverage data")
 				}
-				err = testHooks.AfterTestSetRun(ctx, testRunID, testSetIDs[len(testSetIDs)-1], coverageData, len(testSetIDs), testSetResult)
+				err = HookImpl.AfterTestSetRun(ctx, testRunID, testSetIDs[len(testSetIDs)-1], coverageData, len(testSetIDs), testSetResult)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to get after test hook")
 				}
@@ -608,7 +608,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		started := time.Now().UTC()
-		resp, loopErr := testHooks.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
+		resp, loopErr := HookImpl.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
 		if loopErr != nil {
 			utils.LogError(r.logger, err, "failed to simulate request")
 			failure++
@@ -1080,6 +1080,6 @@ func (r *Replayer) DeleteTests(ctx context.Context, testSetID string, testCaseID
 	return r.testDB.DeleteTests(ctx, testSetID, testCaseIDs)
 }
 
-func SetTestHook(testHooks TestHooks) {
-	testHooks = testHooks
+func SetTestHooks(testHooks TestHooks) {
+	HookImpl = testHooks
 }
