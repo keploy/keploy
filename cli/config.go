@@ -33,7 +33,6 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 				return err
 			}
 
-
 			if isGenerate {
 				filePath := filepath.Join(cfg.Path, "keploy.yml")
 				if !cfg.InCi && utils.CheckFileExists(filePath) {
