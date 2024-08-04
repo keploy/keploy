@@ -11,7 +11,7 @@ rm -rf keploy/  # Clean up old test data
 docker build -t flask-app:1.0 .  # Build the Docker image
 
 # Configure keploy
-sudo -E env PATH=$PATH ./../../keployv2 config --generate --in-ci
+sudo -E env PATH=$PATH ./../../keployv2 config --generate 
 sed -i 's/global: {}/global: {"header": {"Allow":[]}}/' "./keploy.yml"
 sleep 5  # Allow time for configuration to apply
 
