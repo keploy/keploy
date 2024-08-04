@@ -140,7 +140,9 @@ installKeploy (){
         # Remove extracted files /tmp directory
         tmp_files=("LICENSE" "README.md" "READMEes-Es.md" "README-UnitGen.md")
         for file in "${tmp_files[@]}"; do
-            sudo rm -rf "/tmp/$file"
+            if [ -f "/tmp/$file" ]; then
+                sudo rm -rf "/tmp/$file"
+            fi
         done
     }
 
