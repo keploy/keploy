@@ -35,6 +35,7 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 
 			if isGenerate {
 				filePath := filepath.Join(cfg.Path, "keploy.yml")
+				logger.Info("cfg.InCi ", zap.Any("cfg.InCi", cfg.InCi))
 				if !cfg.InCi && utils.CheckFileExists(filePath) {
 					override, err := utils.AskForConfirmation("Config file already exists. Do you want to override it?")
 					if err != nil {
