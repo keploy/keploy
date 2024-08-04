@@ -74,6 +74,11 @@ func (h *Hooks) AfterTestSetRun(ctx context.Context, testRunID, testSetID string
 	tsConfig, err := h.tsConfigDB.Read(ctx, testSetID)
 	// If test-set config is not found, upload the mock file
 	if err != nil || tsConfig == nil || tsConfig.MockRegistry == nil {
+		if token == "" {
+			h.logger.Warn("Looks like you haven't logged in, skipping mock upload")
+			h.logger.Warn("Please login using `keploy login` to upload the mock file")
+			return nil
+		}
 		err = h.storage.Upload(ctx, mockFileReader, mockHash, h.cfg.AppName, token)
 		if err != nil {
 			h.logger.Error("Failed to upload mock file", zap.Error(err))
@@ -113,6 +118,11 @@ func (h *Hooks) AfterTestSetRun(ctx context.Context, testRunID, testSetID string
 
 	// If mock file is changed, upload the new mock file
 	h.logger.Debug("Mock file is changed, uploading new mock", zap.String("testSetID", testSetID), zap.String("mockPath", localMockPath))
+	if token == "" {
+		h.logger.Warn("Looks like you haven't logged in, skipping mock upload")
+		h.logger.Warn("Please login using `keploy login` to upload the mock file")
+		return nil
+	}
 	err = h.storage.Upload(ctx, mockFileReader, mockHash, h.cfg.AppName, token)
 	if err != nil {
 		h.logger.Error("Failed to upload mock file", zap.Error(err))

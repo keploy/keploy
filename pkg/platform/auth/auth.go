@@ -52,7 +52,7 @@ func (a *Auth) Login(ctx context.Context) bool {
 		return false
 	}
 
-	userEmail, isValid, _, authErr, err := a.Validate(ctx, tokenResp.AccessToken, a.logger)
+	userEmail, isValid, authErr, err := a.Validate(ctx, tokenResp.AccessToken, a.logger)
 	if err != nil {
 		if ctx.Err() == context.Canceled {
 			return false
@@ -69,7 +69,7 @@ func (a *Auth) Login(ctx context.Context) bool {
 	return true
 }
 
-func (a *Auth) Validate(ctx context.Context, token string, logger *zap.Logger) (string, bool, string, string, error) {
+func (a *Auth) Validate(ctx context.Context, token string, logger *zap.Logger) (string, bool, string, error) {
 	url := fmt.Sprintf("%s/auth/github", a.serverURL)
 	requestBody := &models.AuthReq{
 		GitHubToken:    token,
@@ -78,20 +78,20 @@ func (a *Auth) Validate(ctx context.Context, token string, logger *zap.Logger) (
 	requestJSON, err := json.Marshal(requestBody)
 	if err != nil {
 		utils.LogError(logger, err, "failed to marshal request body for github token auth")
-		return "", false, "", "", fmt.Errorf("error marshaling request body for authentication: %s", err.Error())
+		return "", false, "", fmt.Errorf("error marshaling request body for authentication: %s", err.Error())
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(logger, err, "failed to create request for github token auth")
-		return "", false, "", "", fmt.Errorf("error creating request for authentication: %s", err.Error())
+		return "", false, "", fmt.Errorf("error creating request for authentication: %s", err.Error())
 	}
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{}
 	res, err := client.Do(req)
 	if err != nil || res.StatusCode < 200 || res.StatusCode >= 300 {
 		utils.LogError(logger, err, "failed to authenticate with github token auth with keploy")
-		return "", false, "", "", fmt.Errorf("error sending the authentication: %s", err.Error())
+		return "", false, "", fmt.Errorf("error sending the authentication: %s", err.Error())
 	}
 	defer func() {
 		err := res.Body.Close()
@@ -104,10 +104,10 @@ func (a *Auth) Validate(ctx context.Context, token string, logger *zap.Logger) (
 	err = json.NewDecoder(res.Body).Decode(&respBody)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode response body for github token auth")
-		return "", false, "", "", fmt.Errorf("error unmarshalling the authentication response: %s", err.Error())
+		return "", false, "", fmt.Errorf("error unmarshalling the authentication response: %s", err.Error())
 	}
 	a.jwtToken = respBody.JwtToken
-	return respBody.EmailID, respBody.IsValid, respBody.JwtToken, respBody.Error, nil
+	return respBody.EmailID, respBody.IsValid, respBody.Error, nil
 }
 
 func (a *Auth) GetToken(ctx context.Context) string {
