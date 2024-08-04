@@ -3,7 +3,9 @@
 package connection
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 
 	"go.keploy.io/server/v2/pkg/models/mysql"
 )
@@ -15,4 +17,20 @@ func DecodeAuthMoreData(_ context.Context, data []byte) (*mysql.AuthMoreDataPack
 		StatusTag: data[0],
 		Data:      string(data[1:]),
 	}, nil
+}
+
+func EncodeAuthMoreData(_ context.Context, packet *mysql.AuthMoreDataPacket) ([]byte, error) {
+	buf := new(bytes.Buffer)
+
+	// Write StatusTag
+	if err := buf.WriteByte(packet.StatusTag); err != nil {
+		return nil, fmt.Errorf("failed to write StatusTag for AuthMoreData packet: %w", err)
+	}
+
+	// Write Data
+	if _, err := buf.WriteString(packet.Data); err != nil {
+		return nil, fmt.Errorf("failed to write Data for authMoreData packet: %w", err)
+	}
+
+	return buf.Bytes(), nil
 }

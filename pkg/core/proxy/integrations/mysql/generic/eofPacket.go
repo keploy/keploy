@@ -4,6 +4,7 @@
 package generic
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -28,4 +29,26 @@ func DecodeEOF(_ context.Context, data []byte, capabilities uint32) (*mysql.EOFP
 	}
 
 	return packet, nil
+}
+
+func EncodeEOF(_ context.Context, packet *mysql.EOFPacket, capabilities uint32) ([]byte, error) {
+	buf := new(bytes.Buffer)
+
+	// Write the header
+	if err := buf.WriteByte(packet.Header); err != nil {
+		return nil, fmt.Errorf("failed to write header: %w", err)
+	}
+
+	// Write the warnings and status flags if CLIENT_PROTOCOL_41 is set
+	if capabilities&uint32(mysql.CLIENT_PROTOCOL_41) > 0 {
+		if err := binary.Write(buf, binary.LittleEndian, packet.Warnings); err != nil {
+			return nil, fmt.Errorf("failed to write warnings for eof packet: %w", err)
+		}
+
+		if err := binary.Write(buf, binary.LittleEndian, packet.StatusFlags); err != nil {
+			return nil, fmt.Errorf("failed to write status flags for eof packet: %w", err)
+		}
+	}
+
+	return buf.Bytes(), nil
 }

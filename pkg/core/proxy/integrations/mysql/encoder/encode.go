@@ -1,12 +1,13 @@
 //go:build linux
 
-package mysql
+package encoder
 
 import (
 	"context"
 	"errors"
 	"io"
 	"net"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -18,7 +19,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func encode(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
+func Encode(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
 
 	var (
 		requests  []mysql.Request
@@ -92,4 +93,26 @@ func encode(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		}
 		return err
 	}
+}
+
+func recordMock(_ context.Context, requests []mysql.Request, responses []mysql.Response, mockType, reqOperation, respOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time) {
+	meta := map[string]string{
+		"type":              mockType,
+		"requestOperation":  reqOperation,
+		"responseOperation": respOperation,
+	}
+	mysqlMock := &models.Mock{
+		Version: models.GetVersion(),
+		Kind:    models.MySQL,
+		Name:    mockType,
+		Spec: models.MockSpec{
+			Metadata:         meta,
+			MySQLRequests:    requests,
+			MySQLResponses:   responses,
+			Created:          time.Now().Unix(),
+			ReqTimestampMock: reqTimestampMock,
+			ResTimestampMock: time.Now(),
+		},
+	}
+	mocks <- mysqlMock
 }

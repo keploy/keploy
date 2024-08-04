@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 
 	"go.keploy.io/server/v2/pkg/models/mysql"
@@ -97,4 +98,70 @@ func DecodeHandshakeV10(_ context.Context, _ *zap.Logger, data []byte) (*mysql.H
 	}
 
 	return packet, nil
+}
+
+func EncodeHandshakeV10(_ context.Context, _ *zap.Logger, packet *mysql.HandshakeV10Packet) ([]byte, error) {
+	buf := new(bytes.Buffer)
+
+	// Protocol version
+	buf.WriteByte(packet.ProtocolVersion)
+
+	// Server version
+	buf.WriteString(packet.ServerVersion)
+	buf.WriteByte(0x00) // Null terminator
+
+	// Connection ID
+	if err := binary.Write(buf, binary.LittleEndian, packet.ConnectionID); err != nil {
+		return nil, err
+	}
+
+	// Auth-plugin-data-part-1 (first 8 bytes)
+	if len(packet.AuthPluginData) < 8 {
+		return nil, errors.New("auth plugin data too short")
+	}
+	buf.Write(packet.AuthPluginData[:8])
+
+	// Filler
+	buf.WriteByte(packet.Filler)
+
+	// Capability flags (lower 2 bytes)
+	if err := binary.Write(buf, binary.LittleEndian, uint16(packet.CapabilityFlags&0xFFFF)); err != nil {
+		return nil, err
+	}
+
+	// Character set
+	buf.WriteByte(packet.CharacterSet)
+
+	// Status flags
+	if err := binary.Write(buf, binary.LittleEndian, packet.StatusFlags); err != nil {
+		return nil, err
+	}
+
+	// Capability flags (upper 2 bytes)
+	if err := binary.Write(buf, binary.LittleEndian, uint16((packet.CapabilityFlags>>16)&0xFFFF)); err != nil {
+		return nil, err
+	}
+
+	// Length of auth-plugin-data
+	if packet.CapabilityFlags&mysql.CLIENT_PLUGIN_AUTH != 0 && len(packet.AuthPluginData) >= 21 {
+		buf.WriteByte(byte(len(packet.AuthPluginData))) // Length of entire auth plugin data
+	} else {
+		buf.WriteByte(0x00)
+	}
+
+	// Reserved (10 zero bytes)
+	buf.Write(make([]byte, 10))
+
+	// Auth-plugin-data-part-2 (remaining auth data)
+	if packet.CapabilityFlags&mysql.CLIENT_PLUGIN_AUTH != 0 && len(packet.AuthPluginData) > 8 {
+		buf.Write(packet.AuthPluginData[8:]) // Write all remaining bytes of auth plugin data
+	}
+
+	// Auth-plugin name
+	if packet.CapabilityFlags&mysql.CLIENT_PLUGIN_AUTH != 0 {
+		buf.WriteString(packet.AuthPluginName)
+		buf.WriteByte(0x00) // Null terminator
+	}
+
+	return buf.Bytes(), nil
 }

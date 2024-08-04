@@ -229,3 +229,53 @@ func WriteStream(ctx context.Context, logger *zap.Logger, conn net.Conn, buff []
 	}
 	return nil
 }
+
+func WriteLengthEncodedString(buf *bytes.Buffer, str []byte) error {
+	if err := WriteLengthEncodedInteger(buf, uint64(len(str))); err != nil {
+		return err
+	}
+
+	if _, err := buf.Write(str); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func WriteLengthEncodedInteger(buf *bytes.Buffer, num uint64) error {
+	switch {
+	case num <= 250:
+		return buf.WriteByte(byte(num))
+	case num <= 0xffff:
+		if err := buf.WriteByte(0xfc); err != nil {
+			return err
+		}
+		return binary.Write(buf, binary.LittleEndian, uint16(num))
+	case num <= 0xffffff:
+		if err := buf.WriteByte(0xfd); err != nil {
+			return err
+		}
+		if err := buf.WriteByte(byte(num)); err != nil {
+			return err
+		}
+		if err := buf.WriteByte(byte(num >> 8)); err != nil {
+			return err
+		}
+		return buf.WriteByte(byte(num >> 16))
+	default:
+		if err := buf.WriteByte(0xfe); err != nil {
+			return err
+		}
+		return binary.Write(buf, binary.LittleEndian, num)
+	}
+}
+
+func WriteUint24(buf *bytes.Buffer, value uint32) error {
+	if value > 0xFFFFFF {
+		return errors.New("value exceeds 24 bits")
+	}
+	buf.WriteByte(byte(value))
+	buf.WriteByte(byte(value >> 8))
+	buf.WriteByte(byte(value >> 16))
+	return nil
+}

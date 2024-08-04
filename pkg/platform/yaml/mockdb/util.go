@@ -130,7 +130,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			utils.LogError(logger, err, "failed to marshal gRPC of external call into yaml")
 			return nil, err
 		}
-	case models.SQL:
+	case models.MySQL:
 		requests := []mysql.RequestYaml{}
 		for _, v := range mock.Spec.MySQLRequests {
 

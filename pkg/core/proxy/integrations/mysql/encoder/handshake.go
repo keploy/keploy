@@ -1,6 +1,6 @@
 //go:build linux
 
-package mysql
+package encoder
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"net"
 	"time"
 
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/constant"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/operation"
 	mysqlUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
 	intgUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
@@ -177,15 +178,15 @@ func handleAuth(ctx context.Context, logger *zap.Logger, authPkt *mysql.PacketBu
 	}
 
 	switch decodeCtx.PluginName {
-	case NativePassword:
+	case constant.NativePassword:
 		return res, fmt.Errorf("Native Password authentication is not supported")
-	case CachingSha2Password:
+	case constant.CachingSha2Password:
 		result, err := handleCachingSha2Password(ctx, logger, authPkt, clientConn, destConn, decodeCtx)
 		if err != nil {
 			return res, fmt.Errorf("failed to handle caching sha2 password: %w", err)
 		}
 		setHandshakeResult(&res, result)
-	case Sha256Password:
+	case constant.Sha256Password:
 		return res, fmt.Errorf("Sha256 Password authentication is not supported")
 	default:
 		return res, fmt.Errorf("unsupported authentication plugin: %s", decodeCtx.PluginName)
@@ -384,7 +385,7 @@ func handleFullAuth(ctx context.Context, logger *zap.Logger, clientConn, destCon
 	encryptPassPkt := &mysql.PacketBundle{
 		Header: &mysql.PacketInfo{
 			Header: &encPass.Header,
-			Type:   EncryptedPassword,
+			Type:   constant.EncryptedPassword,
 		},
 		Message: intgUtils.EncodeBase64(encPass.Payload),
 	}

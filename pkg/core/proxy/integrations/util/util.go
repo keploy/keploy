@@ -6,6 +6,8 @@ package util
 import (
 	"encoding/base64"
 	"unicode"
+
+	"go.keploy.io/server/v2/pkg/models"
 )
 
 func IsASCII(s string) bool {
@@ -67,4 +69,14 @@ func JaccardSimilarity(setA, setB map[string]struct{}) float64 {
 		return 0.0
 	}
 	return float64(intersectionSize) / float64(unionSize)
+}
+
+func GetMockByKind(mocks []*models.Mock, kind string) []*models.Mock {
+	var filteredMocks []*models.Mock
+	for _, mock := range mocks {
+		if mock.Kind == models.Kind(kind) {
+			filteredMocks = append(filteredMocks, mock)
+		}
+	}
+	return filteredMocks
 }

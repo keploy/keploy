@@ -1,6 +1,7 @@
 //go:build linux
 
-package mysql
+// Package constant provides some constants for the MySQL integration.
+package constant
 
 // MySQL authentication methods
 const (

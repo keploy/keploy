@@ -5,6 +5,7 @@ package connection
 import (
 	"bytes"
 	"context"
+	"errors"
 
 	"go.keploy.io/server/v2/pkg/models/mysql"
 )
@@ -25,4 +26,28 @@ func DecodeAuthSwitchRequest(_ context.Context, data []byte) (*mysql.AuthSwitchR
 	}
 
 	return packet, nil
+}
+
+func EncodeAuthSwitchRequest(packet *mysql.AuthSwitchRequestPacket) ([]byte, error) {
+	buf := new(bytes.Buffer)
+
+	// Write StatusTag
+	if err := buf.WriteByte(packet.StatusTag); err != nil {
+		return nil, errors.New("failed to write StatusTag")
+	}
+
+	// Write PluginName followed by a null terminator
+	if _, err := buf.WriteString(packet.PluginName); err != nil {
+		return nil, errors.New("failed to write PluginName for AuthSwitchRequest packet")
+	}
+	if err := buf.WriteByte(0x00); err != nil {
+		return nil, errors.New("failed to write null terminator for PluginName for AuthSwitchRequest packet")
+	}
+
+	// Write PluginData
+	if _, err := buf.WriteString(packet.PluginData); err != nil {
+		return nil, errors.New("failed to write PluginData for AuthSwitchRequest packet")
+	}
+
+	return buf.Bytes(), nil
 }

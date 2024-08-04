@@ -1,6 +1,6 @@
 //go:build linux
 
-package mysql
+package decoder
 
 // import (
 // 	"context"

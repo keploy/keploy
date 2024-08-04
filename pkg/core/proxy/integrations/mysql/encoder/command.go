@@ -1,6 +1,7 @@
 // go:build linux
 
-package mysql
+// Package encoder provides the encoding functions for the MySQL integration.
+package encoder
 
 import (
 	"context"
