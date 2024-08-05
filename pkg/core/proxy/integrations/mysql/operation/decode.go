@@ -266,6 +266,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 			if err != nil {
 				return parsedPacket, fmt.Errorf("failed to decode AuthNextFactor packet: %w", err)
 			}
+			logger.Warn("AuthNextFactor packet not supported, further flow can be affected")
 			setPacketInfo(ctx, parsedPacket, pkt, mysql.AuthStatusToString(mysql.AuthNextFactor), clientConn, mysql.AuthNextFactor, decodeCtx)
 		}
 	case payloadType == mysql.HandshakeV10:
@@ -321,7 +322,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		pkt := &mysql.ChangeUserPacket{
 			Command: payloadType,
 		}
-
+		logger.Warn("COM_CHANGE_USER packet not supported, further flow can be affected")
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_CHANGE_USER), clientConn, mysql.COM_CHANGE_USER, decodeCtx)
 
 	case payloadType == mysql.COM_RESET_CONNECTION:
