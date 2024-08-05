@@ -41,7 +41,7 @@ test:
   basePath: ""
   mocking: true
   fallbackOnMiss: false
-  disableMockUpload: false
+  disableMockUpload: true
 record:
   recordTimer: 0s
   filters: []

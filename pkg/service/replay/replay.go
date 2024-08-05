@@ -268,6 +268,10 @@ func (r *Replayer) Start(ctx context.Context) error {
 		testRunStatus = "pass"
 	}
 
+	if testRunResult && r.config.Test.DisableMockUpload {
+		r.logger.Warn("To enable storing mocks in cloud please use disableMockUpload flag/configuration")
+	}
+
 	r.telemetry.TestRun(totalTestPassed, totalTestFailed, len(testSetIDs), testRunStatus)
 
 	if !abortTestRun {
