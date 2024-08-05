@@ -3,6 +3,7 @@
 package rowscols
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -121,4 +122,88 @@ func DecodeColumn(_ context.Context, _ *zap.Logger, b []byte) (*mysql.ColumnDefi
 	}
 
 	return packet, pos, nil
+}
+
+func EncodeColumn(_ context.Context, _ *zap.Logger, packet *mysql.ColumnDefinition41) ([]byte, error) {
+	buf := new(bytes.Buffer)
+
+	// Write packet header
+	if err := utils.WriteUint24(buf, packet.Header.PayloadLength); err != nil {
+		return nil, fmt.Errorf("failed to write PayloadLength: %w", err)
+	}
+
+	if err := buf.WriteByte(packet.Header.SequenceID); err != nil {
+		return nil, fmt.Errorf("failed to write SequenceID: %w", err)
+	}
+	// Write Catalog
+	if err := utils.WriteLengthEncodedString(buf, packet.Catalog); err != nil {
+		return nil, fmt.Errorf("failed to write Catalog: %w", err)
+	}
+	// Write Schema
+	if err := utils.WriteLengthEncodedString(buf, packet.Schema); err != nil {
+		return nil, fmt.Errorf("failed to write Schema: %w", err)
+	}
+
+	// Write Table
+	if err := utils.WriteLengthEncodedString(buf, packet.Table); err != nil {
+		return nil, fmt.Errorf("failed to write Table: %w", err)
+	}
+	// Write OrgTable
+	if err := utils.WriteLengthEncodedString(buf, packet.OrgTable); err != nil {
+		return nil, fmt.Errorf("failed to write OrgTable: %w", err)
+	}
+
+	// Write Name
+	if err := utils.WriteLengthEncodedString(buf, packet.Name); err != nil {
+		return nil, fmt.Errorf("failed to write Name: %w", err)
+	}
+
+	// Write OrgName
+	if err := utils.WriteLengthEncodedString(buf, packet.OrgName); err != nil {
+		return nil, fmt.Errorf("failed to write OrgName: %w", err)
+	}
+
+	// Write FixedLength (0x0c)
+	if err := buf.WriteByte(packet.FixedLength); err != nil {
+		return nil, fmt.Errorf("failed to write FixedLength: %w", err)
+	}
+
+	// Write CharacterSet
+	if err := binary.Write(buf, binary.LittleEndian, packet.CharacterSet); err != nil {
+		return nil, fmt.Errorf("failed to write CharacterSet: %w", err)
+	}
+
+	// Write ColumnLength
+	if err := binary.Write(buf, binary.LittleEndian, packet.ColumnLength); err != nil {
+		return nil, fmt.Errorf("failed to write ColumnLength: %w", err)
+	}
+
+	// Write Type
+	if err := buf.WriteByte(packet.Type); err != nil {
+		return nil, fmt.Errorf("failed to write Type: %w", err)
+	}
+
+	// Write Flags
+	if err := binary.Write(buf, binary.LittleEndian, packet.Flags); err != nil {
+		return nil, fmt.Errorf("failed to write Flags: %w", err)
+	}
+
+	// Write Decimals
+	if err := buf.WriteByte(packet.Decimals); err != nil {
+		return nil, fmt.Errorf("failed to write Decimals: %w", err)
+	}
+
+	// Write Filler
+	if _, err := buf.Write(packet.Filler); err != nil {
+		return nil, fmt.Errorf("failed to write Filler: %w", err)
+	}
+
+	// Write DefaultValue if it exists
+	if packet.DefaultValue != "" {
+		if err := utils.WriteLengthEncodedString(buf, packet.DefaultValue); err != nil {
+			return nil, fmt.Errorf("failed to write DefaultValue: %w", err)
+		}
+	}
+
+	return buf.Bytes(), nil
 }

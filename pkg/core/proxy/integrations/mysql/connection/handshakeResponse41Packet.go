@@ -206,15 +206,14 @@ func EncodeHandshakeResponse41(_ context.Context, _ *zap.Logger, packet *mysql.H
 		}
 
 		for key, value := range packet.ConnectionAttributes {
-			if err := utils.WriteLengthEncodedString(buf, []byte(key)); err != nil {
+			if err := utils.WriteLengthEncodedString(buf, key); err != nil {
 				return nil, fmt.Errorf("failed to write ConnectionAttribute key for HandshakeResponse41Packet: %w", err)
 			}
-			if err := utils.WriteLengthEncodedString(buf, []byte(value)); err != nil {
+			if err := utils.WriteLengthEncodedString(buf, value); err != nil {
 				return nil, fmt.Errorf("failed to write ConnectionAttribute value for HandshakeResponse41Packet: %w", err)
 			}
 		}
 	}
-
 	// Write Zstd Compression Level
 	if packet.CapabilityFlags&mysql.CLIENT_ZSTD_COMPRESSION_ALGORITHM != 0 {
 		if err := buf.WriteByte(packet.ZstdCompressionLevel); err != nil {

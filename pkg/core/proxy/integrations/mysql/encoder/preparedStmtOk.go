@@ -154,3 +154,4 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 
 	return commandRespPkt, nil
 }
+
