@@ -4,10 +4,13 @@ package decoder
 
 import (
 	"context"
+	"encoding/base64"
+	"fmt"
 	"math"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.uber.org/zap"
 )
 
@@ -21,6 +24,27 @@ func genericResponseMatching() {
 
 func commandPhaseMatching() {
 
+}
+
+func matchEncryptedPassword(expected, actual mysql.Packet) error {
+
+	// Match the payloadlength
+	if actual.Header.PayloadLength != expected.Header.PayloadLength {
+		return fmt.Errorf("payload length mismatch for encrypted password")
+	}
+
+	// Match the sequence number
+	if actual.Header.SequenceID != expected.Header.SequenceID {
+		return fmt.Errorf("sequence number mismatch for encrypted password")
+	}
+
+	// Match the payload
+	// first convert the actual payload to base64 since the expected payload is in base64
+	actualPayload := base64.StdEncoding.EncodeToString(actual.Payload)
+	if actualPayload != string(expected.Payload) {
+		return fmt.Errorf("payload mismatch for encrypted password")
+	}
+	return nil
 }
 
 // The same function is used in http parser as well, If you find this useful you can extract it to a common package
