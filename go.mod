@@ -8,7 +8,7 @@ require (
 	github.com/Microsoft/go-winio v0.6.1 // indirect
 	github.com/cilium/ebpf v0.13.2
 	github.com/cloudflare/cfssl v1.6.4
-	github.com/docker/docker v27.0.1+incompatible
+	github.com/docker/docker v27.1.1+incompatible
 	github.com/docker/go-connections v0.4.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/fatih/color v1.16.0
@@ -148,7 +148,7 @@ require (
 	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
 	github.com/microcosm-cc/bluemonday v1.0.27 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
-	github.com/moby/moby v26.0.2+incompatible
+	github.com/moby/moby v27.1.1+incompatible
 	github.com/muesli/reflow v0.3.0 // indirect
 	github.com/muesli/termenv v0.13.0 // indirect
 	github.com/yuin/goldmark v1.5.2 // indirect
