@@ -334,7 +334,6 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 	return pflag.NormalizedName(name)
 }
 
-// TODO autogenerate app name if not provided in the config
 func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) error {
 	err := isCompatible(c.logger)
 	if err != nil {
@@ -428,7 +427,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 	}
-
 
 	if c.cfg.EnableTesting {
 		// Add mode to logger to debug the keploy during testing

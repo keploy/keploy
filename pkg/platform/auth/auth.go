@@ -90,9 +90,10 @@ func (a *Auth) Validate(ctx context.Context, token string, logger *zap.Logger) (
 	client := &http.Client{}
 	res, err := client.Do(req)
 	if err != nil || res.StatusCode < 200 || res.StatusCode >= 300 {
-		utils.LogError(logger, err, "failed to authenticate with github token auth with keploy")
+		a.logger.Debug("failed to authenticate with github token auth with keploy", zap.Error(err))
 		return "", false, "", fmt.Errorf("error sending the authentication: %s", err.Error())
 	}
+
 	defer func() {
 		err := res.Body.Close()
 		if err != nil {
@@ -110,7 +111,7 @@ func (a *Auth) Validate(ctx context.Context, token string, logger *zap.Logger) (
 	return respBody.EmailID, respBody.IsValid, respBody.Error, nil
 }
 
-func (a *Auth) GetToken(ctx context.Context) string {
+func (a *Auth) GetToken(_ context.Context) string {
 	return a.jwtToken
 }
 

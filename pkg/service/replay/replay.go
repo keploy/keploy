@@ -190,7 +190,15 @@ func (r *Replayer) Start(ctx context.Context) error {
 			continue
 		}
 
-		HookImpl.BeforeTestSetRun(ctx, testSetID)
+		err := HookImpl.BeforeTestSetRun(ctx, testSetID)
+		if err != nil {
+			stopReason = fmt.Sprintf("failed to run before test hook: %v", err)
+			utils.LogError(r.logger, err, stopReason)
+			if ctx.Err() == context.Canceled {
+				return err
+			}
+			return fmt.Errorf(stopReason)
+		}
 
 		if !r.config.Test.SkipCoverage {
 			err = os.Setenv("TESTSETID", testSetID) // related to java coverage calculation

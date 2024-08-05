@@ -44,7 +44,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCa
 	return nil, nil
 }
 
-func (h *Hooks) AfterTestSetRun(ctx context.Context, testRunID, testSetID string, _ models.TestCoverage, _ int, status bool) error {
+func (h *Hooks) AfterTestSetRun(ctx context.Context, _, testSetID string, _ models.TestCoverage, _ int, status bool) error {
 
 	if h.cfg.Test.DisableMockUpload {
 		return nil
@@ -199,7 +199,12 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 		h.logger.Error("Failed to create local file", zap.String("path", localMockPath), zap.Error(err))
 		return err
 	}
-	defer file.Close()
+	defer func() {
+		err := file.Close()
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to close the http response body")
+		}
+	}()
 
 	_, err = io.Copy(file, cloudFile)
 	if err != nil {

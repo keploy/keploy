@@ -96,7 +96,7 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 	mockDB := mockdb.New(logger, c.Path, "")
 	reportDB := reportdb.New(logger, c.Path+"/reports")
 	testSetDb := testset.New[*models.TestSet](logger, c.Path)
-	storage := storage.New(c.APIServerURL, c.InstallationID, logger, c.GitHubClientID)
+	storage := storage.New(c.APIServerURL, logger)
 	return &CommonInternalService{
 		commonPlatformServices{
 			YamlTestDB:    testDB,
