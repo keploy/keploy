@@ -33,15 +33,7 @@ import (
 	10.	UnpackMySQLBytes
 */
 
-type DecodeContext struct {
-	Mode               models.Mode
-	LastOp             *LastOperation
-	PreparedStatements map[uint32]*mysql.StmtPrepareOkPacket
-	ServerGreetings    *ServerGreetings
-	PluginName         string
-}
-
-// DecodePayload is used to decode mysql packets that don't consist of multiple packets within them.
+// DecodePayload is used to decode mysql packets that don't consist of multiple packets within them, because we are reading per packet.
 func DecodePayload(ctx context.Context, logger *zap.Logger, data []byte, clientConn net.Conn, decodeCtx *DecodeContext) (*mysql.PacketBundle, error) {
 	//Parse the data into mysql header and payload
 	packet, err := utils.BytesToMySQLPacket(data)
@@ -283,7 +275,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 			return parsedPacket, fmt.Errorf("failed to decode HandshakeV10 packet: %w", err)
 		}
 		// Store the server greetings to use it later
-		decodeCtx.ServerGreetings.store(clientConn, pkt)
+		decodeCtx.ServerGreetings.Store(clientConn, pkt)
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.AuthStatusToString(mysql.HandshakeV10), clientConn, mysql.HandshakeV10, decodeCtx)
 
 	// utility packets

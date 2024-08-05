@@ -105,7 +105,7 @@ func DecodeColumn(_ context.Context, _ *zap.Logger, b []byte) (*mysql.ColumnDefi
 	pos += 2
 
 	//if more data, command was field list
-	if len(b) > pos {
+	if packet.Header.PayloadLength > uint32(pos) {
 		//length of default value lenenc-int
 		defaultValueLength, _, n := utils.ReadLengthEncodedInteger(b[pos:])
 		pos += n

@@ -2,6 +2,13 @@
 
 package operation
 
+import (
+	"context"
+
+	"go.keploy.io/server/v2/pkg/models/mysql"
+	"go.uber.org/zap"
+)
+
 /*
     1.  MySQLStructToBytes
 	2.	EncodeMySQLStruct
@@ -14,3 +21,9 @@ package operation
 	9.	PackMySQLBytes
 	10.	StructToMySQLBytes
 */
+
+func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.PacketBundle) ([]byte, error) {
+
+	
+	return nil, nil
+}

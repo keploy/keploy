@@ -1,6 +1,7 @@
 // go:build linux
 
 // Package encoder provides the encoding functions for the MySQL integration.
+// Binary to Mock Yaml
 package encoder
 
 import (

@@ -8,10 +8,19 @@ import (
 	"net"
 	"sync"
 
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
 )
 
 const RESET = 0x00
+
+type DecodeContext struct {
+	Mode               models.Mode
+	LastOp             *LastOperation
+	PreparedStatements map[uint32]*mysql.StmtPrepareOkPacket
+	ServerGreetings    *ServerGreetings
+	PluginName         string
+}
 
 // This map is used to store the last operation that was performed on a connection.
 // It helps us to determine the last mysql packet.
@@ -62,7 +71,7 @@ func (sg *ServerGreetings) Load(key net.Conn) (*mysql.HandshakeV10Packet, bool) 
 	return result, ok
 }
 
-func (sg *ServerGreetings) store(key net.Conn, value *mysql.HandshakeV10Packet) {
+func (sg *ServerGreetings) Store(key net.Conn, value *mysql.HandshakeV10Packet) {
 	sg.Lock()
 	sg.handshakes[key] = value
 	sg.Unlock()

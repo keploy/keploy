@@ -169,7 +169,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		}
 		err := yamlDoc.Spec.Encode(sqlSpec)
 		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the SQL input-output as yaml")
+			utils.LogError(logger, err, "failed to marshal the MySQL input-output as yaml")
 			return nil, err
 		}
 	default:
