@@ -305,7 +305,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// return non-zero error code so that pipeline processes
 	// know that there is a failure in tests
-	if !testSetResult {
+	if !testRunResult {
 		utils.ErrCode = 1
 	}
 	return nil
