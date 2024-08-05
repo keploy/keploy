@@ -28,7 +28,7 @@ func DecodeAuthSwitchRequest(_ context.Context, data []byte) (*mysql.AuthSwitchR
 	return packet, nil
 }
 
-func EncodeAuthSwitchRequest(packet *mysql.AuthSwitchRequestPacket) ([]byte, error) {
+func EncodeAuthSwitchRequest(ctx context.Context, packet *mysql.AuthSwitchRequestPacket) ([]byte, error) {
 	buf := new(bytes.Buffer)
 
 	// Write StatusTag
