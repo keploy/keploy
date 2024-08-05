@@ -40,7 +40,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 	decodeCtx.ServerGreetings.Store(clientConn, handshake)
 
 	// encode the response
-	buf, err := operation.EncodeToBinary(ctx, logger, &resp[0].PacketBundle)
+	buf, err := operation.EncodeToBinary(ctx, logger, &resp[0].PacketBundle, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode handshake packet")
 		return err
@@ -108,7 +108,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 
 		CachingSha2PasswordMechanism = pkt.PluginData
 
-		authBuf, err = operation.EncodeToBinary(ctx, logger, &resp[1].PacketBundle)
+		authBuf, err = operation.EncodeToBinary(ctx, logger, &resp[1].PacketBundle, clientConn, decodeCtx)
 		if err != nil {
 			utils.LogError(logger, err, "failed to encode auth switch request packet")
 			return err
@@ -123,7 +123,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 
 		CachingSha2PasswordMechanism = pkt.Data
 
-		authBuf, err = operation.EncodeToBinary(ctx, logger, &resp[1].PacketBundle)
+		authBuf, err = operation.EncodeToBinary(ctx, logger, &resp[1].PacketBundle, clientConn, decodeCtx)
 		if err != nil {
 			utils.LogError(logger, err, "failed to encode auth more data packet")
 			return err
@@ -159,7 +159,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 	return nil
 }
 
-func simulateFastAuthSuccess(ctx context.Context, logger *zap.Logger, clientConn net.Conn, initialHandshakeMock *models.Mock, mockDb integrations.MockMemDb, _ *operation.DecodeContext) error {
+func simulateFastAuthSuccess(ctx context.Context, logger *zap.Logger, clientConn net.Conn, initialHandshakeMock *models.Mock, mockDb integrations.MockMemDb, decodeCtx *operation.DecodeContext) error {
 	resp := initialHandshakeMock.Spec.MySQLResponses
 
 	if len(resp) < 3 {
@@ -170,7 +170,7 @@ func simulateFastAuthSuccess(ctx context.Context, logger *zap.Logger, clientConn
 	logger.Debug("final response for fast auth success", zap.Any("response", resp[2].PacketBundle.Header.Type))
 
 	// Send the final response (OK/Err) to the client
-	buf, err := operation.EncodeToBinary(ctx, logger, &resp[2].PacketBundle)
+	buf, err := operation.EncodeToBinary(ctx, logger, &resp[2].PacketBundle, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode final response packet for fast auth success")
 		return err
@@ -248,7 +248,7 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 	}
 
 	// encode the public key response
-	buf, err := operation.EncodeToBinary(ctx, logger, &resp[2].PacketBundle)
+	buf, err := operation.EncodeToBinary(ctx, logger, &resp[2].PacketBundle, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode public key response packet")
 		return err
@@ -324,7 +324,7 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 
 	// Get the final response (OK/Err) from the mock
 	// Send the final response (OK/Err) to the client
-	buf, err = operation.EncodeToBinary(ctx, logger, &resp[3].PacketBundle)
+	buf, err = operation.EncodeToBinary(ctx, logger, &resp[3].PacketBundle, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode final response packet for full auth")
 		return err
