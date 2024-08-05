@@ -442,7 +442,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.logger.Info("Color encoding is disabled")
 	}
-
 	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", c.cfg))
 
 	switch cmd.Name() {

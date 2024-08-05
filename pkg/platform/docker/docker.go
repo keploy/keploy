@@ -352,13 +352,8 @@ func (idc *Impl) GetHostWorkingDirectory() (string, error) {
 		return "", err
 	}
 	container_name := "keploy-v2"
-	exists, new_name, err := idc.CreateAlternateContainerForKeploy()
-	if err != nil {
-		utils.LogError(idc.logger, err, "error getting alternate container when keploy-v2 is running")
-		return "", err
-	}
-	if exists {
-		container_name = new_name
+	if os.Getenv("KEPLOY_CONTAINER") != "" {
+		container_name = os.Getenv("KEPLOY_CONTAINER")
 	}
 	container, err := idc.ContainerInspect(ctx, container_name)
 	if err != nil {
@@ -592,16 +587,18 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate b
 	return nil
 }
 
-func (idc *Impl) CreateAlternateContainerForKeploy() (bool, string, error) {
+func (idc *Impl) CreateAlternateContainerForKeploy() (bool, error) {
 	// check if keploy-v2 is present, if yes create alternate container and pass it as cfg.KeployContainer
 	running, err := idc.IsContainerRunning("keploy-v2")
+	idc.logger.Debug("is keploy-v2 already running", zap.Any("state", running))
 	if !running {
-		return false, "", nil
+		return false, nil
 	}
 	if err != nil {
-		return false, "", err
+		return false, err
 	}
-	// create a new container name
 	newname := "keploy-" + uuid.New().String()
-	return true, newname, nil
+	os.Setenv("KEPLOY_CONTAINER", newname)
+	idc.logger.Debug("here is random value", zap.Any("here", newname))
+	return true, nil
 }
