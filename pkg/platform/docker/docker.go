@@ -351,11 +351,11 @@ func (idc *Impl) GetHostWorkingDirectory() (string, error) {
 		utils.LogError(idc.logger, err, "failed to get current working directory")
 		return "", err
 	}
-	container_name := "keploy-v2"
+	containerName := "keploy-v2"
 	if os.Getenv("KEPLOY_CONTAINER") != "" {
-		container_name = os.Getenv("KEPLOY_CONTAINER")
+		containerName = os.Getenv("KEPLOY_CONTAINER")
 	}
-	container, err := idc.ContainerInspect(ctx, container_name)
+	container, err := idc.ContainerInspect(ctx, containerName)
 	if err != nil {
 		utils.LogError(idc.logger, err, "error inspecting keploy container")
 		return "", err
