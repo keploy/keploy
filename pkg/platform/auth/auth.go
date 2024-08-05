@@ -91,7 +91,7 @@ func (a *Auth) Validate(ctx context.Context, token string, logger *zap.Logger) (
 	res, err := client.Do(req)
 	if err != nil || res.StatusCode < 200 || res.StatusCode >= 300 {
 		a.logger.Debug("failed to authenticate with github token auth with keploy", zap.Error(err))
-		return "", false, "", fmt.Errorf("error sending the authentication: %s", err.Error())
+		return "", false, "", fmt.Errorf("failed to authenticate")
 	}
 
 	defer func() {
