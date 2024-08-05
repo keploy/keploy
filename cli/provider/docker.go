@@ -210,28 +210,28 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 
 func addKeployNetwork(ctx context.Context, logger *zap.Logger, client docker.Client) {
 
-    // Check if the 'keploy-network' network exists
-    networks, err := client.NetworkList(ctx, network.ListOptions{})
-    if err != nil {
-        logger.Debug("failed to list docker networks")
-        return
-    }
+	// Check if the 'keploy-network' network exists
+	networks, err := client.NetworkList(ctx, network.ListOptions{})
+	if err != nil {
+		logger.Debug("failed to list docker networks")
+		return
+	}
 
-    for _, network := range networks {
-        if network.Name == "keploy-network" {
-            logger.Debug("keploy network already exists")
-            return
-        }
-    }
+	for _, network := range networks {
+		if network.Name == "keploy-network" {
+			logger.Debug("keploy network already exists")
+			return
+		}
+	}
 
-    // Create the 'keploy' network if it doesn't exist
-    _, err = client.NetworkCreate(ctx, "keploy-network", network.CreateOptions{})
-    if err != nil {
-        logger.Debug("failed to create keploy network")
-        return
-    }
+	// Create the 'keploy' network if it doesn't exist
+	_, err = client.NetworkCreate(ctx, "keploy-network", network.CreateOptions{})
+	if err != nil {
+		logger.Debug("failed to create keploy network")
+		return
+	}
 
-    logger.Debug("keploy network created")
+	logger.Debug("keploy network created")
 }
 
 func convertPathToUnixStyle(path string) string {
