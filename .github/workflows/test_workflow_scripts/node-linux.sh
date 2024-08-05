@@ -53,7 +53,7 @@ done
 
 # Test modes and result checking
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10    &> test_logs1.txt
-
+cat "test_logs1.txt"
 if grep "ERROR" "test_logs1.txt"; then
     echo "Error found in pipeline..."
     cat "test_logs1.txt"
@@ -66,6 +66,7 @@ if grep "WARNING: DATA RACE" "test_logs1.txt"; then
 fi
 
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testsets test-set-0    &> test_logs2.txt
+cat "test_logs2.txt"
 if grep "ERROR" "test_logs2.txt"; then
     echo "Error found in pipeline..."
     cat "test_logs2.txt"
@@ -77,9 +78,11 @@ if grep "WARNING: DATA RACE" "test_logs2.txt"; then
     exit 1
 fi
 
+
 sed -i 's/selectedTests: {}/selectedTests: {"test-set-0": ["test-1", "test-2"]}/' "./keploy.yml"
 
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --apiTimeout 30 --delay 10    &> test_logs3.txt
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --apiTimeout 30 --delay 10    &> 
+cat "test_logs3.txt"
 if grep "ERROR" "test_logs3.txt"; then
     echo "Error found in pipeline..."
     cat "test_logs3.txt"
