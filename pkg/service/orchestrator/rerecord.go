@@ -234,7 +234,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 			}
 			o.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HTTPReq.URL))
 		}
-		
+
 		if o.config.ReRecord.Host != "" {
 			tc.HTTPReq.URL, err = utils.ReplaceHost(tc.HTTPReq.URL, o.config.ReRecord.Host)
 			if err != nil {
