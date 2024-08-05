@@ -227,12 +227,20 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 			return false, ctx.Err()
 		}
 		if utils.IsDockerCmd(cmdType) {
-			tc.HTTPReq.URL, err = utils.ReplaceHostToIP(tc.HTTPReq.URL, userIP)
+			tc.HTTPReq.URL, err = utils.ReplaceHost(tc.HTTPReq.URL, userIP)
 			if err != nil {
 				utils.LogError(o.logger, err, "failed to replace host to docker container's IP")
 				break
 			}
 			o.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HTTPReq.URL))
+		}
+		
+		if o.config.ReRecord.Host != "" {
+			tc.HTTPReq.URL, err = utils.ReplaceHost(tc.HTTPReq.URL, o.config.ReRecord.Host)
+			if err != nil {
+				utils.LogError(o.logger, err, "failed to replace host to provided host by the user")
+				break
+			}
 		}
 
 		resp, err := pkg.SimulateHTTP(ctx, *tc, testSet, o.logger, o.config.Test.APITimeout)
