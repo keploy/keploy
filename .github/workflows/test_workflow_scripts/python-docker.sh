@@ -11,7 +11,7 @@ rm -rf keploy/  # Clean up old test data
 docker build -t flask-app:1.0 .  # Build the Docker image
 
 # Configure keploy
-sudo -E env PATH=$PATH ./../../keployv2 config --generate
+sudo -E env PATH=$PATH ./../../keployv2 config --generate --in-ci
 sed -i 's/global: {}/global: {"header": {"Allow":[]}}/' "./keploy.yml"
 sleep 5  # Allow time for configuration to apply
 
@@ -52,7 +52,7 @@ send_request(){
 for i in {1..2}; do
     container_name="flaskApp_${i}"
     send_request &
-    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p6000:6000 --net keploy-network --rm --name $container_name flask-app:1.0" --container-name "$container_name"    &> "${container_name}.txt"
+    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p6000:6000 --net keploy-network --rm --name $container_name flask-app:1.0" --container-name "$container_name" &> "${container_name}.txt"
     if grep "ERROR" "${container_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${container_name}.txt"

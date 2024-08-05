@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
-	"strings"
 	"time"
 
 	"go.keploy.io/server/v2/config"
@@ -53,10 +52,14 @@ func convertUnixNanoToTime(unixNano uint64) time.Time {
 }
 
 func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptions) bool {
-	destPort, err := strconv.Atoi(strings.Split(req.Host, ":")[1])
-	if err != nil {
-		utils.LogError(logger, err, "failed to obtain destination port from request")
-		return false
+	dstPort := 0
+	var err error
+	if p := req.URL.Port(); p != "" {
+		dstPort, err = strconv.Atoi(p)
+		if err != nil {
+			utils.LogError(logger, err, "failed to obtain destination port from request")
+			return false
+		}
 	}
 	var bypassRules []config.BypassRule
 
@@ -71,7 +74,7 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 		SQLDelay:       0,
 		FallBackOnMiss: false,
 	}
-	passThrough := proxyHttp.IsPassThrough(logger, req, uint(destPort), headerOpts)
+	passThrough := proxyHttp.IsPassThrough(logger, req, uint(dstPort), headerOpts)
 
 	for _, filter := range opts.Filters {
 		if filter.URLMethods != nil && len(filter.URLMethods) != 0 {
