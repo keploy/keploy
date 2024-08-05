@@ -33,6 +33,7 @@ test:
   apiTimeout: 5
   coverage: false
   goCoverage: false
+  skipPreview: false 
   coverageReportPath: ""
   ignoreOrdering: true
   mongoPassword: "default@123"
