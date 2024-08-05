@@ -46,7 +46,7 @@ func Decode(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg
 
 		// Helper struct for decoding packets
 		decodeCtx := &operation.DecodeContext{
-			Mode: models.MODE_RECORD,
+			Mode: models.MODE_TEST,
 			// Map for storing last operation per connection
 			LastOp: operation.NewLastOpMap(),
 			// Map for storing server greetings (inc capabilities, auth plugin, etc) per initial handshake (per connection)
@@ -59,12 +59,12 @@ func Decode(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg
 
 		// Simulate the initial client-server handshake (connection phase)
 
-		// err := simulateInitialHandshake(ctx, logger, clientConn, configMocks, mockDb, decodeCtx)
-		// if err != nil {
-		// 	utils.LogError(logger, err, "failed to simulate initial handshake")
-		// 	errCh <- err
-		// 	return
-		// }
+		err := simulateInitialHandshake(ctx, logger, clientConn, configMocks, mockDb, decodeCtx)
+		if err != nil {
+			utils.LogError(logger, err, "failed to simulate initial handshake")
+			errCh <- err
+			return
+		}
 
 		// Simulate the client-server interaction (command phase)
 
