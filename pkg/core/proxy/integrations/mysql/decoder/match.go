@@ -9,22 +9,27 @@ import (
 	"math"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/operation"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.uber.org/zap"
 )
 
-func connectionPhaseMatching() {
+// func matchHanshakeResponse41(ctx context.Context, logger *zap.Logger, expected, actual mysql.Packet) (bool, error) {
+// 	// Match the payloadlength
+// 	if actual.Header.PayloadLength != expected.Header.PayloadLength {
+// 		return false, fmt.Errorf("payload length mismatch for handshake response41")
+// 	}
 
-}
+// 	// Match the sequence number
+// 	if actual.Header.SequenceID != expected.Header.SequenceID {
+// 		return fmt.Errorf("sequence number mismatch for handshake response41")
+// 	}
 
-func genericResponseMatching() {
+// 	// Match the payload
 
-}
-
-func commandPhaseMatching() {
-
-}
+// 	return nil
+// }
 
 func matchEncryptedPassword(expected, actual mysql.Packet) error {
 
@@ -45,6 +50,11 @@ func matchEncryptedPassword(expected, actual mysql.Packet) error {
 		return fmt.Errorf("payload mismatch for encrypted password")
 	}
 	return nil
+}
+
+func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *operation.DecodeContext) (*mysql.Response, bool, error) {
+	logger.Info("implementing matchCommand")
+	return nil, false, nil
 }
 
 // The same function is used in http parser as well, If you find this useful you can extract it to a common package

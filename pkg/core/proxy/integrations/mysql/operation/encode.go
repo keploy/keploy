@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net"
 
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/command"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/command/preparedstmt"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/connection"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/generic"
 	"go.keploy.io/server/v2/pkg/models/mysql"
@@ -30,7 +32,7 @@ import (
 func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.PacketBundle, clientConn net.Conn, decodeCtx *DecodeContext) ([]byte, error) {
 
 	// It helps to tell for which packets we don't need to parse the header
-	byPassHeader := true
+	// byPassHeader := false
 
 	var data []byte
 	var err error
@@ -109,20 +111,45 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 			return nil, fmt.Errorf("error encoding HandshakeV10 packet: %v", err)
 		}
 
-		// We need to encode the header of handshakeV10Packet separately
-		byPassHeader = false
-
 	// command phase packets
 	case *mysql.StmtPrepareOkPacket:
+		pkt, ok := packet.Message.(*mysql.StmtPrepareOkPacket)
+		if !ok {
+			return nil, fmt.Errorf("Expected StmtPrepareOkPacket, got %T", packet.Message)
+		}
+
+		data, err = preparedstmt.EncodePrepareOk(ctx, logger, pkt)
+		if err != nil {
+			return nil, fmt.Errorf("error encoding StmtPrepareOkPacket: %v", err)
+		}
+
 	case *mysql.TextResultSet:
+		pkt, ok := packet.Message.(*mysql.TextResultSet)
+		if !ok {
+			return nil, fmt.Errorf("Expected TextResultSet, got %T", packet.Message)
+		}
+
+		data, err = command.EncodeTextResultSet(ctx, logger, pkt)
+		if err != nil {
+			return nil, fmt.Errorf("error encoding TextResultSet: %v", err)
+		}
+
 	case *mysql.BinaryProtocolResultSet:
+		pkt, ok := packet.Message.(*mysql.BinaryProtocolResultSet)
+		if !ok {
+			return nil, fmt.Errorf("Expected BinaryProtocolResultSet, got %T", packet.Message)
+		}
 
+		data, err = command.EncodeBinaryResultSet(ctx, logger, pkt)
+		if err != nil {
+			return nil, fmt.Errorf("error encoding BinaryProtocolResultSet: %v", err)
+		}
 	}
 
-	if byPassHeader {
-		logger.Debug("Encoded Packet", zap.String("packet", packet.Header.Type), zap.ByteString("data", data))
-		return data, nil
-	}
+	// if byPassHeader {
+	// 	logger.Debug("Encoded Packet", zap.String("packet", packet.Header.Type), zap.ByteString("data", data))
+	// 	return data, nil
+	// }
 
 	// Encode the header for the required packet
 	header := make([]byte, 4)

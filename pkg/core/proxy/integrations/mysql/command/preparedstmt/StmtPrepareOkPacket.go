@@ -47,47 +47,11 @@ func DecodePrepareOk(_ context.Context, _ *zap.Logger, data []byte) (*mysql.Stmt
 	return response, nil
 }
 
-// EncodePrepareOk encodes a StmtPrepareOkPacket back into a byte slice.
 func EncodePrepareOk(ctx context.Context, logger *zap.Logger, packet *mysql.StmtPrepareOkPacket) ([]byte, error) {
 	buf := new(bytes.Buffer)
 
-	// Write Status
-	if err := buf.WriteByte(packet.Status); err != nil {
-		return nil, fmt.Errorf("failed to write Status: %w", err)
-	}
-
-	// Write Statement ID
-	if err := binary.Write(buf, binary.LittleEndian, packet.StatementID); err != nil {
-		return nil, fmt.Errorf("failed to write StatementID: %w", err)
-	}
-
-	// Write Number of Columns
-	if err := binary.Write(buf, binary.LittleEndian, packet.NumColumns); err != nil {
-		return nil, fmt.Errorf("failed to write NumColumns: %w", err)
-	}
-
-	// Write Number of Parameters
-	if err := binary.Write(buf, binary.LittleEndian, packet.NumParams); err != nil {
-		return nil, fmt.Errorf("failed to write NumParams: %w", err)
-	}
-
-	// Write Filler
-	if err := buf.WriteByte(packet.Filler); err != nil {
-		return nil, fmt.Errorf("failed to write Filler: %w", err)
-	}
-
-	// Write Warning Count
-	if err := binary.Write(buf, binary.LittleEndian, packet.WarningCount); err != nil {
-		return nil, fmt.Errorf("failed to write WarningCount: %w", err)
-	}
-
-	return buf.Bytes(), nil
-}
-func EncodePreparedStmtResponse(ctx context.Context, logger *zap.Logger, packet *mysql.StmtPrepareOkPacket) ([]byte, error) {
-	buf := new(bytes.Buffer)
-
 	// Encode the Prepare OK packet
-	prepareOkBytes, err := EncodePrepareOk(ctx, logger, packet)
+	prepareOkBytes, err := EncodePreparedStmtResponse(ctx, logger, packet)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode StmtPrepareOkPacket: %w", err)
 	}
@@ -133,3 +97,43 @@ func EncodePreparedStmtResponse(ctx context.Context, logger *zap.Logger, packet 
 
 	return buf.Bytes(), nil
 }
+
+
+
+func EncodePreparedStmtResponse(ctx context.Context, logger *zap.Logger, packet *mysql.StmtPrepareOkPacket) ([]byte, error) {
+	buf := new(bytes.Buffer)
+
+	// Write Status
+	if err := buf.WriteByte(packet.Status); err != nil {
+		return nil, fmt.Errorf("failed to write Status: %w", err)
+	}
+
+	// Write Statement ID
+	if err := binary.Write(buf, binary.LittleEndian, packet.StatementID); err != nil {
+		return nil, fmt.Errorf("failed to write StatementID: %w", err)
+	}
+
+	// Write Number of Columns
+	if err := binary.Write(buf, binary.LittleEndian, packet.NumColumns); err != nil {
+		return nil, fmt.Errorf("failed to write NumColumns: %w", err)
+	}
+
+	// Write Number of Parameters
+	if err := binary.Write(buf, binary.LittleEndian, packet.NumParams); err != nil {
+		return nil, fmt.Errorf("failed to write NumParams: %w", err)
+	}
+
+	// Write Filler
+	if err := buf.WriteByte(packet.Filler); err != nil {
+		return nil, fmt.Errorf("failed to write Filler: %w", err)
+	}
+
+	// Write Warning Count
+	if err := binary.Write(buf, binary.LittleEndian, packet.WarningCount); err != nil {
+		return nil, fmt.Errorf("failed to write WarningCount: %w", err)
+	}
+
+	return buf.Bytes(), nil
+}
+
+
