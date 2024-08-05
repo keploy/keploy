@@ -125,6 +125,13 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 		if ctx.Err() == context.Canceled {
 			return ctx.Err()
 		}
+		if exitError, ok := err.(*exec.ExitError); ok {
+			exitCode := exitError.ExitCode()
+			if exitCode == 143 {
+				logger.Info("Command terminated with exit code 143 (SIGTERM), treating as successful exit")
+				return nil
+			}
+		}
 		utils.LogError(logger, err, "failed to start keploy in docker")
 		return err
 	}
