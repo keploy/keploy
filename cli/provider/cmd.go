@@ -183,6 +183,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "config":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated config is stored")
 		cmd.Flags().Bool("generate", false, "Generate a new keploy configuration file")
+		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
 	case "gen":
 		cmd.Flags().String("source-file-path", "", "Path to the source file.")
 		cmd.Flags().String("test-file-path", "", "Path to the input test file.")
