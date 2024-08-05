@@ -65,8 +65,10 @@ if grep "WARNING: DATA RACE" "test_logs1.txt"; then
     exit 1
 fi
 
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testsets test-set-0    
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testsets test-set-0 
 
+echo "came here"
+ls
 cat "keploy.yml"
 
 sed -i 's/selectedTests: {}/selectedTests: {"test-set-0": ["test-1", "test-2"]}/' "./keploy.yml"
