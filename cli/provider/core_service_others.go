@@ -33,7 +33,7 @@ func Get(ctx context.Context, cmd string, c *config.Config, logger *zap.Logger, 
 
 	if (cmd == "test" && c.Test.BasePath != "") || cmd == "normalize" || cmd == "templatize" {
 		return replaySvc, nil
-	}	
+	}
 
 	return nil, errors.New("command not supported in non linux os")
 }
