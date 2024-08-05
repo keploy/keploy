@@ -4,8 +4,10 @@ package docker
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	nativeDockerClient "github.com/docker/docker/client"
@@ -601,6 +603,16 @@ func (idc *Impl) CreateAlternateContainerForKeploy() (bool, error) {
 	}
 	newname := "keploy-" + uuid.New().String()
 	err = os.Setenv("KEPLOY_CONTAINER", newname)
+	if err != nil {
+		return false, err
+	}
+
+	// Generate a random uint32 value within the range 15000 to 18000
+	randomNumber := rand.Uint32()%3000 + 15000
+
+	// Convert uint32 to string
+	randomNumberStr := strconv.FormatUint(uint64(randomNumber), 10)
+	err = os.Setenv("KEPLOY_PROXY_PORT", randomNumberStr)
 	if err != nil {
 		return false, err
 	}
