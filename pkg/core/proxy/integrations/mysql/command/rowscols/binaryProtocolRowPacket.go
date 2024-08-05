@@ -4,6 +4,7 @@
 package rowscols
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -198,4 +199,95 @@ func parseBinaryTime(b []byte) (interface{}, int, error) {
 		timeString = "-" + timeString
 	}
 	return timeString, int(length) + 1, nil
+}
+
+func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, columns []*mysql.ColumnDefinition41) ([]byte, error) {
+	buf := new(bytes.Buffer)
+
+	// Write the packet header
+	if err := utils.WriteUint24(buf, row.Header.PayloadLength); err != nil {
+		return nil, fmt.Errorf("failed to write PayloadLength: %w", err)
+	}
+	if err := buf.WriteByte(row.Header.SequenceID); err != nil {
+		return nil, fmt.Errorf("failed to write SequenceID: %w", err)
+	}
+
+	// Write the OkAfterRow field
+	if row.OkAfterRow {
+		if err := buf.WriteByte(0x00); err != nil {
+			return nil, fmt.Errorf("failed to write OkAfterRow: %w", err)
+		}
+	} else {
+		if err := buf.WriteByte(0xff); err != nil {
+			return nil, fmt.Errorf("failed to write OkAfterRow: %w", err)
+		}
+	}
+
+	// Write the null bitmap
+	if _, err := buf.Write(row.RowNullBuffer); err != nil {
+		return nil, fmt.Errorf("failed to write RowNullBuffer: %w", err)
+	}
+
+	// Write each column's value
+	for i, col := range columns {
+		if isNull(row.RowNullBuffer, i) {
+			continue
+		}
+
+		value := row.Values[i].Value
+		switch v := value.(type) {
+		case uint8:
+			if err := buf.WriteByte(v); err != nil {
+				return nil, fmt.Errorf("failed to write uint8 value: %w", err)
+			}
+		case int8:
+			if err := buf.WriteByte(byte(v)); err != nil {
+				return nil, fmt.Errorf("failed to write int8 value: %w", err)
+			}
+		case uint16:
+			if err := binary.Write(buf, binary.LittleEndian, v); err != nil {
+				return nil, fmt.Errorf("failed to write uint16 value: %w", err)
+			}
+		case int16:
+			if err := binary.Write(buf, binary.LittleEndian, v); err != nil {
+				return nil, fmt.Errorf("failed to write int16 value: %w", err)
+			}
+		case uint32:
+			if err := binary.Write(buf, binary.LittleEndian, v); err != nil {
+				return nil, fmt.Errorf("failed to write uint32 value: %w", err)
+			}
+		case int32:
+			if err := binary.Write(buf, binary.LittleEndian, v); err != nil {
+				return nil, fmt.Errorf("failed to write int32 value: %w", err)
+			}
+		case uint64:
+			if err := binary.Write(buf, binary.LittleEndian, v); err != nil {
+				return nil, fmt.Errorf("failed to write uint64 value: %w", err)
+			}
+		case int64:
+			if err := binary.Write(buf, binary.LittleEndian, v); err != nil {
+				return nil, fmt.Errorf("failed to write int64 value: %w", err)
+			}
+		case float32:
+			if err := binary.Write(buf, binary.LittleEndian, v); err != nil {
+				return nil, fmt.Errorf("failed to write float32 value: %w", err)
+			}
+		case float64:
+			if err := binary.Write(buf, binary.LittleEndian, v); err != nil {
+				return nil, fmt.Errorf("failed to write float64 value: %w", err)
+			}
+		case string:
+			if err := utils.WriteLengthEncodedString(buf, v); err != nil {
+				return nil, fmt.Errorf("failed to write string value: %w", err)
+			}
+		case nil:
+			if err := buf.WriteByte(0xfb); err != nil {
+				return nil, fmt.Errorf("failed to write NULL value: %w", err)
+			}
+		default:
+			return nil, fmt.Errorf("unsupported column type: %v", col.Type)
+		}
+	}
+
+	return buf.Bytes(), nil
 }
