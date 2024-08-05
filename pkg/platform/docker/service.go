@@ -30,7 +30,6 @@ type Client interface {
 
 	IsContainerRunning(containerName string) (bool, error)
 	CreateVolume(ctx context.Context, volumeName string, recreate bool) error
-	CreateAlternateContainerForKeploy() (bool, error)
 }
 
 type NetworkInfo struct {

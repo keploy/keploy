@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"syscall"
 	"time"
@@ -37,9 +36,6 @@ func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opt
 		containerDelay:   opts.DockerDelay,
 		containerNetwork: opts.DockerNetwork,
 		containerIPv4:    make(chan string, 1),
-	}
-	if os.Getenv("KEPLOY_CONTAINER") != "" {
-		app.keployContainer = os.Getenv("KEPLOY_CONTAINER")
 	}
 	return app
 }

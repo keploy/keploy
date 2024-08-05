@@ -4,14 +4,12 @@ package docker
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"os"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	nativeDockerClient "github.com/docker/docker/client"
-	"github.com/google/uuid"
+	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -33,9 +31,11 @@ type Impl struct {
 	timeoutForDockerQuery time.Duration
 	logger                *zap.Logger
 	containerID           string
+	containerName         string
+	cfg                   *config.Config
 }
 
-func New(logger *zap.Logger) (Client, error) {
+func New(logger *zap.Logger, containerName string) (Client, error) {
 	dockerClient, err := nativeDockerClient.NewClientWithOpts(nativeDockerClient.FromEnv,
 		nativeDockerClient.WithAPIVersionNegotiation())
 	if err != nil {
@@ -45,6 +45,7 @@ func New(logger *zap.Logger) (Client, error) {
 		APIClient:             dockerClient,
 		timeoutForDockerQuery: defaultTimeoutForDockerQuery,
 		logger:                logger,
+		containerName:         containerName,
 	}, nil
 }
 
@@ -353,11 +354,7 @@ func (idc *Impl) GetHostWorkingDirectory() (string, error) {
 		utils.LogError(idc.logger, err, "failed to get current working directory")
 		return "", err
 	}
-	containerName := "keploy-v2"
-	if os.Getenv("KEPLOY_CONTAINER") != "" {
-		containerName = os.Getenv("KEPLOY_CONTAINER")
-	}
-	container, err := idc.ContainerInspect(ctx, containerName)
+	container, err := idc.ContainerInspect(ctx, idc.containerName)
 	if err != nil {
 		utils.LogError(idc.logger, err, "error inspecting keploy container")
 		return "", err
@@ -589,33 +586,4 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate b
 
 	idc.logger.Debug("volume created", zap.Any("volume", volumeName))
 	return nil
-}
-
-func (idc *Impl) CreateAlternateContainerForKeploy() (bool, error) {
-	// check if keploy-v2 is present, if yes create alternate container and pass it as cfg.KeployContainer
-	running, err := idc.IsContainerRunning("keploy-v2")
-	idc.logger.Debug("is keploy-v2 already running", zap.Any("state", running))
-	if !running {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	newname := "keploy-" + uuid.New().String()
-	err = os.Setenv("KEPLOY_CONTAINER", newname)
-	if err != nil {
-		return false, err
-	}
-
-	// Generate a random uint32 value within the range 15000 to 18000
-	randomNumber := rand.Uint32()%3000 + 15000
-
-	// Convert uint32 to string
-	randomNumberStr := strconv.FormatUint(uint64(randomNumber), 10)
-	err = os.Setenv("KEPLOY_PROXY_PORT", randomNumberStr)
-	if err != nil {
-		return false, err
-	}
-	idc.logger.Debug("here is random value", zap.Any("here", newname))
-	return true, nil
 }

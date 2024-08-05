@@ -70,7 +70,7 @@ func RunInDocker(ctx context.Context, conf *config.Config, logger *zap.Logger) e
 	for _, arg := range os.Args[1:] {
 		quotedArgs = append(quotedArgs, strconv.Quote(arg))
 	}
-	client, err := docker.New(logger)
+	client, err := docker.New(logger, conf.KeployContainer)
 	if err != nil {
 		utils.LogError(logger, err, "failed to initalise docker")
 		return err
