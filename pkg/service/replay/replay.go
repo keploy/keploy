@@ -20,6 +20,8 @@ import (
 	"go.keploy.io/server/v2/pkg/platform/coverage"
 	"go.keploy.io/server/v2/pkg/platform/coverage/golang"
 	"go.keploy.io/server/v2/pkg/platform/coverage/java"
+	"go.keploy.io/server/v2/pkg/platform/coverage/javascript"
+	"go.keploy.io/server/v2/pkg/platform/coverage/python"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -123,9 +125,10 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 
 	var language config.Language
+	var executable string
 	// only find language to calculate coverage if instrument is true
 	if r.instrument {
-		language, _ = utils.DetectLanguage(r.logger, r.config.Command)
+		language, executable = utils.DetectLanguage(r.logger, r.config.Command)
 		// if language is not provided and language detected is known
 		// then set the language to detected language
 		if r.config.Test.Language == "" {
@@ -146,6 +149,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 	switch r.config.Test.Language {
 	case models.Go:
 		cov = golang.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.CoverageReportPath, r.config.CommandType)
+	case models.Python:
+		cov = python.New(ctx, r.logger, r.reportDB, r.config.Command, executable)
+	case models.Javascript:
+		cov = javascript.New(ctx, r.logger, r.reportDB, r.config.Command)
+	case models.Java:
+		cov = java.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.JacocoAgentPath, executable)
 	default:
 		r.config.Test.SkipCoverage = true
 	}
