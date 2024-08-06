@@ -3,6 +3,7 @@
 package decoder
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math"
@@ -160,4 +161,95 @@ func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock,
 	}
 
 	return true
+}
+
+func matchQueryPacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
+	matchCount := 0
+	// Match the type and return zero if the types are not equal
+	if expected.Header.Type != actual.Header.Type {
+		return 0
+	}
+	// Match the header
+	ok := matchHeader(*expected.Header.Header, *actual.Header.Header)
+	if ok {
+		matchCount += 2
+	}
+	expectedMessage, _ := expected.Message.(*mysql.QueryPacket)
+	actualMessage, _ := actual.Message.(*mysql.QueryPacket)
+	// Match the query for query packet
+	if expectedMessage.Query == actualMessage.Query {
+		matchCount += 1
+	}
+	return matchCount
+}
+func matchPreparePacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
+	matchCount := 0
+	// Match the type and return zero if the types are not equal
+	if expected.Header.Type != actual.Header.Type {
+		return 0
+	}
+	// Match the header
+	ok := matchHeader(*expected.Header.Header, *actual.Header.Header)
+	if ok {
+		matchCount += 2
+	}
+	expectedMessage, _ := expected.Message.(*mysql.StmtPreparePacket)
+	actualMessage, _ := actual.Message.(*mysql.StmtPreparePacket)
+
+	// Match the query for prepare packet
+	if expectedMessage.Query == actualMessage.Query {
+		matchCount += 1
+	}
+	return matchCount
+}
+
+func matchStmtExecutePacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
+	matchCount := 0
+
+	// Match the type and return zero if the types are not equal
+	if expected.Header.Type != actual.Header.Type {
+		return 0
+	}
+	// Match the header
+	if matchHeader(*expected.Header.Header, *actual.Header.Header) {
+		matchCount += 2
+	}
+	expectedMessage, _ := expected.Message.(*mysql.StmtExecutePacket)
+	actualMessage, _ := actual.Message.(*mysql.StmtExecutePacket)
+	// Match the status
+	if expectedMessage.Status == actualMessage.Status {
+		matchCount += 1
+	}
+	// Match the statementID
+	if expectedMessage.StatementID == actualMessage.StatementID {
+		matchCount += 1
+	}
+	// Match the flags
+	if expectedMessage.Flags == actualMessage.Flags {
+		matchCount += 1
+	}
+	// Match the iteration count
+	if expectedMessage.IterationCount == actualMessage.IterationCount {
+		matchCount += 1
+	}
+	// Match the parameter count
+	if expectedMessage.ParameterCount == actualMessage.ParameterCount {
+		matchCount += 1
+	}
+
+	// Match the parameters
+	if len(expectedMessage.Parameters) == len(actualMessage.Parameters) {
+		for i := range expectedMessage.Parameters {
+			expectedParam := expectedMessage.Parameters[i]
+			actualParam := actualMessage.Parameters[i]
+			if expectedParam.Type == actualParam.Type &&
+				expectedParam.Name == actualParam.Name &&
+				expectedParam.Unsigned == actualParam.Unsigned &&
+				bytes.Equal(expectedParam.Value, actualParam.Value) {
+				matchCount++
+			}
+		}
+	}
+
+	return matchCount
 }
