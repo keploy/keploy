@@ -263,7 +263,6 @@ func extractClaimsWithoutVerification(tokenString string) (jwt.MapClaims, error)
 
 	if claims, ok := token.Claims.(jwt.MapClaims); ok {
 		return claims, nil
-	} else {
-		return nil, fmt.Errorf("unable to parse claims")
 	}
+	return nil, fmt.Errorf("unable to parse claims")
 }
