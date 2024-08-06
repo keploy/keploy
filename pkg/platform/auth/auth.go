@@ -66,7 +66,7 @@ func (a *Auth) Login(ctx context.Context) bool {
 		a.logger.Error("Invalid token", zap.Any("error", authErr))
 		return false
 	}
-	fmt.Println("Successfully logged in to Keploy using GitHub as " + userEmail)
+	a.logger.Info("Successfully logged in to Keploy using GitHub as " + userEmail)
 	return true
 }
 
