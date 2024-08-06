@@ -26,7 +26,7 @@ body:
     required: true
 - type: textarea
   attributes:
-    label: 👟 Reproduction steps
+    label: 👟 Steps to Replicate
     description: How do you trigger this bug? Please walk us through it step by step.
     placeholder: |
       1. Go to '...'
