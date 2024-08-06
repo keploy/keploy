@@ -40,7 +40,7 @@ test:
   removeUnusedMocks: false
   basePath: ""
   mocking: true
-  disableLineCoverage: false
+  disableLineCoverage: true
   fallbackOnMiss: false
 record:
   recordTimer: 0s
