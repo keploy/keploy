@@ -50,7 +50,7 @@ func matchEncryptedPassword(expected, actual mysql.Packet) error {
 		return fmt.Errorf("payload mismatch for encrypted password")
 	}
 	return nil
-}
+} 
 
 func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *operation.DecodeContext) (*mysql.Response, bool, error) {
 	logger.Info("implementing matchCommand")

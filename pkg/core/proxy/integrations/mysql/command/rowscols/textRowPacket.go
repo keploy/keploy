@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"time"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v2/pkg/models/mysql"
@@ -40,32 +41,28 @@ func DecodeTextRow(_ context.Context, _ *zap.Logger, data []byte, columns []*mys
 
 		switch mysql.FieldType(col.Type) {
 		case mysql.FieldTypeDate, mysql.FieldTypeTime, mysql.FieldTypeDateTime, mysql.FieldTypeTimestamp:
-			if dataLength < 4 || len(data[offset:]) < int(dataLength) {
+			data := data[offset+1:]
+
+			if dataLength < 4 || len(data) < int(dataLength) {
 				return nil, 0, fmt.Errorf("invalid timestamp data length")
 			}
-			offset++
-			var year int
-			var month, day, hour, minute, second int
 
-			if dataLength >= 4 {
-				year = int(binary.LittleEndian.Uint16(data[offset : offset+2]))
-				month = int(data[offset+2])
-				day = int(data[offset+3])
-				offset += 4
-			}
-			if dataLength >= 7 {
-				hour = int(data[offset])
-				minute = int(data[offset+1])
-				second = int(data[offset+2])
-				offset += 3
+			dateStr := string(data[:dataLength])
+			layout := "2006-01-02 15:04:05"
+			t, err := time.Parse(layout, dateStr)
+			if err != nil {
+				return nil, 0, fmt.Errorf("failed to parse the time string")
 			}
 
-			formattedTime := fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d", year, month, day, hour, minute, second)
+			year, month, day := t.Date()
+			hour, minute, second := t.Clock()
 			row.Values = append(row.Values, mysql.ColumnEntry{
 				Type:  mysql.FieldType(col.Type),
 				Name:  col.Name,
-				Value: formattedTime,
+				Value: fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d", year, int(month), day, hour, minute, second),
 			})
+
+			offset += int(dataLength) + 1
 		default:
 			value, _, n, err := utils.ReadLengthEncodedString(data[offset:])
 			if err != nil {

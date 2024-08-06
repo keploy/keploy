@@ -72,6 +72,8 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				utils.LogError(logger, err, "failed to encode the response", zap.Any("response", resp))
 			}
 
+			// We could have just returned before matching the command for no response commands.
+			// But we need to remove the corresponding mock from the mockDb for no response commands.
 			if operation.IsNoResponseCommand(commandPkt.Header.Type) {
 				// No response for COM_STMT_CLOSE and COM_STMT_SEND_LONG_DATA
 				logger.Debug("No response for the command", zap.Any("command", command))

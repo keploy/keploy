@@ -31,9 +31,6 @@ import (
 
 func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.PacketBundle, clientConn net.Conn, decodeCtx *DecodeContext) ([]byte, error) {
 
-	// It helps to tell for which packets we don't need to parse the header
-	// byPassHeader := false
-
 	var data []byte
 	var err error
 
@@ -146,12 +143,7 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 		}
 	}
 
-	// if byPassHeader {
-	// 	logger.Debug("Encoded Packet", zap.String("packet", packet.Header.Type), zap.ByteString("data", data))
-	// 	return data, nil
-	// }
-
-	// Encode the header for the required packet
+	// Encode the header for the packet
 	header := make([]byte, 4)
 	binary.LittleEndian.PutUint32(header, uint32(len(data)))
 	header[3] = packet.Header.Header.SequenceID
