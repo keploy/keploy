@@ -15,32 +15,43 @@ import (
 	"go.uber.org/zap"
 )
 
-// func matchHanshakeResponse41(ctx context.Context, logger *zap.Logger, expected, actual mysql.Packet) (bool, error) {
-// 	// Match the payloadlength
-// 	if actual.Header.PayloadLength != expected.Header.PayloadLength {
-// 		return false, fmt.Errorf("payload length mismatch for handshake response41")
-// 	}
-
-// 	// Match the sequence number
-// 	if actual.Header.SequenceID != expected.Header.SequenceID {
-// 		return fmt.Errorf("sequence number mismatch for handshake response41")
-// 	}
-
-// 	// Match the payload
-
-// 	return nil
-// }
-
-func matchEncryptedPassword(expected, actual mysql.Packet) error {
+func matchHeader(expected, actual mysql.Header) bool {
 
 	// Match the payloadlength
-	if actual.Header.PayloadLength != expected.Header.PayloadLength {
-		return fmt.Errorf("payload length mismatch for encrypted password")
+	if actual.PayloadLength != expected.PayloadLength {
+		return false
 	}
 
 	// Match the sequence number
-	if actual.Header.SequenceID != expected.Header.SequenceID {
-		return fmt.Errorf("sequence number mismatch for encrypted password")
+	if actual.SequenceID != expected.SequenceID {
+		return false
+	}
+
+	return true
+}
+
+func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) error {
+	// Match the type
+	if expected.Header.Type != actual.Header.Type {
+		return fmt.Errorf("type mismatch for handshake response")
+	}
+
+	// Match the header
+	ok := matchHeader(*expected.Header.Header, *actual.Header.Header)
+	if !ok {
+		return fmt.Errorf("header mismatch for handshake response")
+	}
+
+	// Match the payload
+
+	return nil
+}
+
+func matchEncryptedPassword(expected, actual mysql.Packet) error {
+
+	ok := matchHeader(expected.Header, actual.Header)
+	if !ok {
+		return fmt.Errorf("header mismatch for encrypted password")
 	}
 
 	// Match the payload
@@ -50,10 +61,11 @@ func matchEncryptedPassword(expected, actual mysql.Packet) error {
 		return fmt.Errorf("payload mismatch for encrypted password")
 	}
 	return nil
-} 
+}
 
 func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *operation.DecodeContext) (*mysql.Response, bool, error) {
 	logger.Info("implementing matchCommand")
+
 	return nil, false, nil
 }
 

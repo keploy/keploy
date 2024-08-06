@@ -11,14 +11,13 @@ import (
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/operation"
 	mysqlUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
-	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
-func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mockDb integrations.MockMemDb, decodeCtx *operation.DecodeContext, dstCfg *integrations.ConditionalDstCfg, opts models.OutgoingOptions) error {
+func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mockDb integrations.MockMemDb, decodeCtx *operation.DecodeContext, _ models.OutgoingOptions) error {
 
 	for {
 		select {
@@ -54,14 +53,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 
 			if !ok {
 				utils.LogError(logger, nil, "No matching mock found for the command", zap.Any("command", command))
-				if opts.FallBackOnMiss {
-					_, err = pUtil.PassThrough(ctx, logger, clientConn, dstCfg, [][]byte{command})
-					if err != nil {
-						utils.LogError(logger, err, "failed to passThrough mysql request", zap.Any("command", command))
-						return err
-					}
-				}
-				return fmt.Errorf("no matching mock found for the command")
+				return fmt.Errorf("error while simulating the command phase due to no matching mock found")
 			}
 
 			logger.Debug("Matched the command with the mock", zap.Any("mock", resp))

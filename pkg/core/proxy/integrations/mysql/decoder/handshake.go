@@ -87,6 +87,11 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 	// Match the handshake response from the client with the mock
 	//debug log
 	logger.Info("matching handshake response", zap.Any("actual", pkt), zap.Any("mock", req[0].PacketBundle))
+	err = matchHanshakeResponse41(ctx, logger, req[0].PacketBundle, *pkt)
+	if err != nil {
+		utils.LogError(logger, err, "error while matching handshakeResponse41")
+		return err
+	}
 
 	// Get the AuthMoreData or AuthSwitchRequest packet
 	if len(resp) < 2 {
@@ -228,6 +233,13 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 		return nil
 	}
 
+	// Match the header of the public key request
+	ok = matchHeader(*req[1].PacketBundle.Header.Header, *pkt.Header.Header)
+	if !ok {
+		utils.LogError(logger, nil, "header mismatch for public key request", zap.Any("expected", req[1].PacketBundle.Header.Header), zap.Any("actual", pkt.Header.Header))
+		return nil
+	}
+
 	// Match the public key response from the client with the mock
 	if publicKey != publicKeyMock {
 		utils.LogError(logger, nil, "public key mismatch", zap.Any("actual", publicKey), zap.Any("expected", publicKeyMock))
@@ -311,7 +323,7 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 	err = matchEncryptedPassword(encryptedPassPktMock, encryptedPassPkt)
 	if err != nil {
 		utils.LogError(logger, err, "encrypted password mismatch with mock during full auth")
-		return err
+		return fmt.Errorf("encrypted password mismatch with mock during full auth")
 	}
 
 	//Now send the final response (OK/Err) to the client

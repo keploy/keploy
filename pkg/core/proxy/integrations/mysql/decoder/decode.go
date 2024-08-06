@@ -23,7 +23,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func Decode(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+func Decode(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	errCh := make(chan error, 1)
 
 	mocks, err := mockDb.GetUnFilteredMocks()
@@ -40,7 +40,7 @@ func Decode(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg
 		return nil
 	}
 
-	go func(errCh chan error, configMocks []*models.Mock, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) {
+	go func(errCh chan error, configMocks []*models.Mock, mockDb integrations.MockMemDb, opts models.OutgoingOptions) {
 		defer pUtil.Recover(logger, clientConn, nil)
 		defer close(errCh)
 
@@ -67,14 +67,14 @@ func Decode(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg
 		}
 
 		// Simulate the client-server interaction (command phase)
-		err = simulateCommandPhase(ctx, logger, clientConn, mockDb, decodeCtx, dstCfg, opts)
+		err = simulateCommandPhase(ctx, logger, clientConn, mockDb, decodeCtx, opts)
 		if err != nil {
 			utils.LogError(logger, err, "failed to simulate command phase")
 			errCh <- err
 			return
 		}
 
-	}(errCh, configMocks, dstCfg, mockDb, opts)
+	}(errCh, configMocks, mockDb, opts)
 
 	select {
 	case <-ctx.Done():
