@@ -120,6 +120,9 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		// Get the tcs mocks from the mockDb
 		mocks, err := mockDb.GetFilteredMocks()
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, false, ctx.Err()
+			}
 			utils.LogError(logger, err, "failed to get filtered mocks")
 			return nil, false, err
 		}
@@ -128,6 +131,9 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		tcsMocks := intgUtil.GetMockByKind(mocks, "MySQL")
 
 		if len(tcsMocks) == 0 {
+			if ctx.Err() != nil {
+				return nil, false, ctx.Err()
+			}
 			utils.LogError(logger, nil, "no mysql mocks found")
 			return nil, false, fmt.Errorf("no mysql mocks found")
 		}
@@ -152,6 +158,52 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 				logger.Info("Matching the request with the mock", zap.Any("mock", mockReq), zap.Any("request", req))
 
 				switch req.Header.Type {
+				//utiltiy commands
+				case mysql.CommandStatusToString(mysql.COM_QUIT):
+					matchCount := matchQuitPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
+					if matchCount > maxMatchedCount {
+						maxMatchedCount = matchCount
+						matchedResp = &mock.Spec.MySQLResponses[0]
+						matchedMock = mock
+					}
+				case mysql.CommandStatusToString(mysql.COM_INIT_DB):
+					matchCount := matchInitDbPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
+					if matchCount > maxMatchedCount {
+						maxMatchedCount = matchCount
+						matchedResp = &mock.Spec.MySQLResponses[0]
+						matchedMock = mock
+					}
+				case mysql.CommandStatusToString(mysql.COM_STATISTICS):
+					matchCount := matchStatisticsPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
+					if matchCount > maxMatchedCount {
+						maxMatchedCount = matchCount
+						matchedResp = &mock.Spec.MySQLResponses[0]
+						matchedMock = mock
+					}
+				case mysql.CommandStatusToString(mysql.COM_DEBUG):
+					matchCount := matchDebugPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
+					if matchCount > maxMatchedCount {
+						maxMatchedCount = matchCount
+						matchedResp = &mock.Spec.MySQLResponses[0]
+						matchedMock = mock
+					}
+				case mysql.CommandStatusToString(mysql.COM_PING):
+					matchCount := matchPingPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
+					if matchCount > maxMatchedCount {
+						maxMatchedCount = matchCount
+						matchedResp = &mock.Spec.MySQLResponses[0]
+						matchedMock = mock
+					}
+				// case mysql.CommandStatusToString(mysql.COM_CHANGE_USER):
+				case mysql.CommandStatusToString(mysql.COM_RESET_CONNECTION):
+					matchCount := matchResetConnectionPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
+					if matchCount > maxMatchedCount {
+						maxMatchedCount = matchCount
+						matchedResp = &mock.Spec.MySQLResponses[0]
+						matchedMock = mock
+					}
+
+				//query commands
 				case mysql.CommandStatusToString(mysql.COM_STMT_CLOSE):
 					matchCount := matchClosePacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
 					if matchCount > maxMatchedCount {
@@ -325,6 +377,125 @@ func matchStmtExecutePacket(_ context.Context, _ *zap.Logger, expected, actual m
 		}
 	}
 
+	return matchCount
+}
+
+// matching for utility commands
+func matchQuitPacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
+	matchCount := 0
+	// Match the type and return zero if the types are not equal
+	if expected.Header.Type != actual.Header.Type {
+		return 0
+	}
+	// Match the header
+	if matchHeader(*expected.Header.Header, *actual.Header.Header) {
+		matchCount += 2
+	}
+	expectedMessage, _ := expected.Message.(*mysql.QuitPacket)
+	actualMessage, _ := actual.Message.(*mysql.QuitPacket)
+	// Match the command for quit packet
+	if expectedMessage.Command == actualMessage.Command {
+		matchCount++
+	}
+	return matchCount
+}
+
+func matchInitDbPacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
+	matchCount := 0
+	// Match the type and return zero if the types are not equal
+	if expected.Header.Type != actual.Header.Type {
+		return 0
+	}
+	// Match the header
+	if matchHeader(*expected.Header.Header, *actual.Header.Header) {
+		matchCount += 2
+	}
+	expectedMessage, _ := expected.Message.(*mysql.InitDBPacket)
+	actualMessage, _ := actual.Message.(*mysql.InitDBPacket)
+	// Match the command for init db packet
+	if expectedMessage.Command == actualMessage.Command {
+		matchCount++
+	}
+	// Match the schema for init db packet
+	if expectedMessage.Schema == actualMessage.Schema {
+		matchCount++
+	}
+	return matchCount
+}
+
+func matchStatisticsPacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
+	matchCount := 0
+	// Match the type and return zero if the types are not equal
+	if expected.Header.Type != actual.Header.Type {
+		return 0
+	}
+	// Match the header
+	if matchHeader(*expected.Header.Header, *actual.Header.Header) {
+		matchCount += 2
+	}
+	expectedMessage, _ := expected.Message.(*mysql.StatisticsPacket)
+	actualMessage, _ := actual.Message.(*mysql.StatisticsPacket)
+	// Match the command for statistics packet
+	if expectedMessage.Command == actualMessage.Command {
+		matchCount++
+	}
+	return matchCount
+}
+
+func matchDebugPacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
+	matchCount := 0
+	// Match the type and return zero if the types are not equal
+	if expected.Header.Type != actual.Header.Type {
+		return 0
+	}
+	// Match the header
+	if matchHeader(*expected.Header.Header, *actual.Header.Header) {
+		matchCount += 2
+	}
+	expectedMessage, _ := expected.Message.(*mysql.DebugPacket)
+	actualMessage, _ := actual.Message.(*mysql.DebugPacket)
+	// Match the command for debug packet
+	if expectedMessage.Command == actualMessage.Command {
+		matchCount++
+	}
+	return matchCount
+}
+
+func matchPingPacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
+	matchCount := 0
+	// Match the type and return zero if the types are not equal
+	if expected.Header.Type != actual.Header.Type {
+		return 0
+	}
+	// Match the header
+	if matchHeader(*expected.Header.Header, *actual.Header.Header) {
+		matchCount += 2
+	}
+	expectedMessage, _ := expected.Message.(*mysql.PingPacket)
+	actualMessage, _ := actual.Message.(*mysql.PingPacket)
+	// Match the command for ping packet
+	if expectedMessage.Command == actualMessage.Command {
+		matchCount++
+	}
+	return matchCount
+}
+
+func matchResetConnectionPacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
+	matchCount := 0
+	// Match the type and return zero if the types are not equal
+	if expected.Header.Type != actual.Header.Type {
+		return 0
+	}
+	// Match the header
+	if matchHeader(*expected.Header.Header, *actual.Header.Header) {
+		matchCount += 2
+	}
+	expectedMessage, _ := expected.Message.(*mysql.ResetConnectionPacket)
+	actualMessage, _ := actual.Message.(*mysql.ResetConnectionPacket)
+	// Match the command for reset connection packet
+	if expectedMessage.Command == actualMessage.Command {
+		matchCount++
+	}
 	return matchCount
 }
 
