@@ -5,7 +5,6 @@ package rowscols
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"fmt"
 	"time"
 
@@ -46,7 +45,6 @@ func DecodeTextRow(_ context.Context, _ *zap.Logger, data []byte, columns []*mys
 			if dataLength < 4 || len(data) < int(dataLength) {
 				return nil, 0, fmt.Errorf("invalid timestamp data length")
 			}
-
 			dateStr := string(data[:dataLength])
 			layout := "2006-01-02 15:04:05"
 			t, err := time.Parse(layout, dateStr)
@@ -108,35 +106,16 @@ func EncodeTextRow(_ context.Context, _ *zap.Logger, row *mysql.TextRow, columns
 				return nil, fmt.Errorf("invalid value type for date/time field")
 			}
 
-			var year, month, day, hour, minute, second int
-			if _, err := fmt.Sscanf(formattedTime, "%04d-%02d-%02d %02d:%02d:%02d", &year, &month, &day, &hour, &minute, &second); err != nil {
-				return nil, fmt.Errorf("failed to parse formatted time: %w", err)
-			}
-
 			// Write the length of the date/time value
-			if err := buf.WriteByte(11); err != nil {
+			if err := buf.WriteByte(byte(len(formattedTime))); err != nil {
 				return nil, fmt.Errorf("failed to write date/time length: %w", err)
 			}
 
 			// Write the date/time value
-			if err := binary.Write(buf, binary.LittleEndian, uint16(year)); err != nil {
-				return nil, fmt.Errorf("failed to write year: %w", err)
+			if _, err := buf.WriteString(formattedTime); err != nil {
+				return nil, fmt.Errorf("failed to write date/time value: %w", err)
 			}
-			if err := buf.WriteByte(byte(month)); err != nil {
-				return nil, fmt.Errorf("failed to write month: %w", err)
-			}
-			if err := buf.WriteByte(byte(day)); err != nil {
-				return nil, fmt.Errorf("failed to write day: %w", err)
-			}
-			if err := buf.WriteByte(byte(hour)); err != nil {
-				return nil, fmt.Errorf("failed to write hour: %w", err)
-			}
-			if err := buf.WriteByte(byte(minute)); err != nil {
-				return nil, fmt.Errorf("failed to write minute: %w", err)
-			}
-			if err := buf.WriteByte(byte(second)); err != nil {
-				return nil, fmt.Errorf("failed to write second: %w", err)
-			}
+
 		default:
 			// Write length-encoded string for other types
 			strValue, ok := value.(string)
