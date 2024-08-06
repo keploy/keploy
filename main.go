@@ -92,11 +92,11 @@ func start(ctx context.Context) {
 		utils.LogError(logger, err, errMsg)
 		os.Exit(1)
 	}
-	
 	auth := auth.New(conf.APIServerURL, conf.InstallationID, logger, conf.GitHubClientID)
+
 	svcProvider := provider.NewServiceProvider(logger, conf, auth)
 	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
-	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator, conf)
+	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
 	if err := rootCmd.Execute(); err != nil {
 		if strings.HasPrefix(err.Error(), "unknown command") || strings.HasPrefix(err.Error(), "unknown shorthand") {
 			fmt.Println("Error: ", err.Error())
