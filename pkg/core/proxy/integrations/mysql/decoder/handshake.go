@@ -304,26 +304,10 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 		return fmt.Errorf("expected %s but found %s", constant.EncryptedPassword, encryptedPassMock.Header.Type)
 	}
 
-	// Convert the Message into []byte
-	payloadBytes, ok := encryptedPassMock.Message.([]byte)
-	if !ok {
-		utils.LogError(logger, nil, "failed to assert encrypted password mock during full auth")
-		return nil
-	}
-
-	encryptedPassPktMock := mysql.Packet{
-		Header: mysql.Header{
-			PayloadLength: encryptedPassMock.Header.Header.PayloadLength,
-			SequenceID:    encryptedPassMock.Header.Header.SequenceID,
-		},
-		Payload: payloadBytes,
-	}
-
-	// Match the encrypted password from the client with the mock
-	err = matchEncryptedPassword(encryptedPassPktMock, encryptedPassPkt)
-	if err != nil {
-		utils.LogError(logger, err, "encrypted password mismatch with mock during full auth")
-		return fmt.Errorf("encrypted password mismatch with mock during full auth")
+	// Since encrypted password can be different, we should just check the sequence number
+	if encryptedPassMock.Header.Header.SequenceID != encryptedPassPkt.Header.SequenceID {
+		utils.LogError(logger, nil, "sequence number mismatch for encrypted password", zap.Any("expected", encryptedPassMock.Header.Header.SequenceID), zap.Any("actual", encryptedPassPkt.Header.SequenceID))
+		return fmt.Errorf("sequence number mismatch for encrypted password")
 	}
 
 	//Now send the final response (OK/Err) to the client

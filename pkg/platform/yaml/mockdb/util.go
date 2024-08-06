@@ -341,7 +341,7 @@ func decodeMySQLMessage(_ context.Context, logger *zap.Logger, yamlSpec *mysql.S
 
 		case mysql.CachingSha2PasswordToString(mysql.RequestPublicKey):
 			var msg string
-			err := v.Message.Decode(msg)
+			err := v.Message.Decode(&msg)
 			if err != nil {
 				utils.LogError(logger, err, "failed to unmarshal yaml document into mysql (string) RequestPublicKey")
 				return nil, err
@@ -350,7 +350,7 @@ func decodeMySQLMessage(_ context.Context, logger *zap.Logger, yamlSpec *mysql.S
 
 		case "encrypted_password":
 			var msg string
-			err := v.Message.Decode(msg)
+			err := v.Message.Decode(&msg)
 			if err != nil {
 				utils.LogError(logger, err, "failed to unmarshal yaml document into mysql (string) encrypted_password")
 				return nil, err

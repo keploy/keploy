@@ -27,6 +27,13 @@ func EncodeAuthMoreData(_ context.Context, packet *mysql.AuthMoreDataPacket) ([]
 		return nil, fmt.Errorf("failed to write StatusTag for AuthMoreData packet: %w", err)
 	}
 
+	switch packet.Data {
+	case mysql.CachingSha2PasswordToString(mysql.PerformFullAuthentication):
+		packet.Data = string(mysql.PerformFullAuthentication)
+	case mysql.CachingSha2PasswordToString(mysql.FastAuthSuccess):
+		packet.Data = string(mysql.FastAuthSuccess)
+	}
+
 	// Write Data
 	if _, err := buf.WriteString(packet.Data); err != nil {
 		return nil, fmt.Errorf("failed to write Data for authMoreData packet: %w", err)

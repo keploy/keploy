@@ -44,6 +44,13 @@ func EncodeAuthSwitchRequest(ctx context.Context, packet *mysql.AuthSwitchReques
 		return nil, errors.New("failed to write null terminator for PluginName for AuthSwitchRequest packet")
 	}
 
+	switch packet.PluginData {
+	case mysql.CachingSha2PasswordToString(mysql.PerformFullAuthentication):
+		packet.PluginData = string(mysql.PerformFullAuthentication)
+	case mysql.CachingSha2PasswordToString(mysql.FastAuthSuccess):
+		packet.PluginData = string(mysql.FastAuthSuccess)
+	}
+
 	// Write PluginData
 	if _, err := buf.WriteString(packet.PluginData); err != nil {
 		return nil, errors.New("failed to write PluginData for AuthSwitchRequest packet")

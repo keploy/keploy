@@ -52,6 +52,9 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 		if err != nil {
 			return nil, fmt.Errorf("error encoding EOF packet: %v", err)
 		}
+
+		decodeCtx.LastOp.Store(clientConn, mysql.EOF)
+
 	case *mysql.ERRPacket:
 		pkt, ok := packet.Message.(*mysql.ERRPacket)
 		if !ok {
@@ -63,6 +66,8 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 			return nil, fmt.Errorf("error encoding ERR packet: %v", err)
 		}
 
+		decodeCtx.LastOp.Store(clientConn, mysql.ERR)
+
 	case *mysql.OKPacket:
 		pkt, ok := packet.Message.(*mysql.OKPacket)
 		if !ok {
@@ -73,6 +78,8 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 		if err != nil {
 			return nil, fmt.Errorf("error encoding OK packet: %v", err)
 		}
+
+		decodeCtx.LastOp.Store(clientConn, mysql.OK)
 
 	// connection phase packets
 	case *mysql.AuthMoreDataPacket:
@@ -86,6 +93,8 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 			return nil, fmt.Errorf("error encoding AuthMoreData packet: %v", err)
 		}
 
+		decodeCtx.LastOp.Store(clientConn, mysql.AuthMoreData)
+
 	case *mysql.AuthSwitchRequestPacket:
 		pkt, ok := packet.Message.(*mysql.AuthSwitchRequestPacket)
 		if !ok {
@@ -96,6 +105,8 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 		if err != nil {
 			return nil, fmt.Errorf("error encoding AuthSwitchRequest packet: %v", err)
 		}
+
+		decodeCtx.LastOp.Store(clientConn, mysql.AuthSwitchRequest)
 
 	case *mysql.HandshakeV10Packet:
 		pkt, ok := packet.Message.(*mysql.HandshakeV10Packet)
@@ -108,6 +119,8 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 			return nil, fmt.Errorf("error encoding HandshakeV10 packet: %v", err)
 		}
 
+		decodeCtx.LastOp.Store(clientConn, mysql.HandshakeV10)
+
 	// command phase packets
 	case *mysql.StmtPrepareOkPacket:
 		pkt, ok := packet.Message.(*mysql.StmtPrepareOkPacket)
@@ -119,6 +132,8 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 		if err != nil {
 			return nil, fmt.Errorf("error encoding StmtPrepareOkPacket: %v", err)
 		}
+
+		decodeCtx.LastOp.Store(clientConn, mysql.COM_STMT_PREPARE)
 
 	case *mysql.TextResultSet:
 		pkt, ok := packet.Message.(*mysql.TextResultSet)

@@ -66,6 +66,8 @@ func Decode(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *int
 			return
 		}
 
+		logger.Debug("Initial handshake completed successfully")
+
 		// Simulate the client-server interaction (command phase)
 		err = simulateCommandPhase(ctx, logger, clientConn, mockDb, decodeCtx, opts)
 		if err != nil {

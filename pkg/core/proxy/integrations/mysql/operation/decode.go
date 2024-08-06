@@ -179,10 +179,6 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		}
 
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.HandshakeResponse41, clientConn, payloadType, decodeCtx)
-
-		if decodeCtx.Mode == models.MODE_TEST {
-			decodeCtx.LastOp.Store(clientConn, RESET) //reset the last operation
-		}
 		return parsedPacket, nil
 	}
 
@@ -409,10 +405,6 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 	default:
 		logger.Warn("Unknown packet type", zap.String("PacketType", fmt.Sprintf("%#x", payloadType)), zap.Any("payload", payload), zap.Any("last operation", lastOp))
 		setPacketInfo(ctx, parsedPacket, itgUtils.EncodeBase64(payload), "Unknown type", clientConn, RESET, decodeCtx)
-	}
-
-	if decodeCtx.Mode == models.MODE_TEST {
-		decodeCtx.LastOp.Store(clientConn, RESET) //reset the last operation
 	}
 
 	return parsedPacket, nil
