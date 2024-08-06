@@ -10,9 +10,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
-	conf := config.New()
-
+func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cmdConfigurator CmdConfigurator, conf *config.Config) *cobra.Command {
 	var rootCmd = &cobra.Command{
 		Use:     "keploy",
 		Short:   "Keploy CLI",
