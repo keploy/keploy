@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 
 	"github.com/docker/docker/api/types"
@@ -28,6 +29,8 @@ func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opt
 		logger:           logger,
 		id:               id,
 		cmd:              cmd,
+		language:         opts.Language,
+		skipCoverage:     opts.SkipCoverage,
 		docker:           client,
 		kind:             utils.FindDockerCmd(cmd),
 		keployContainer:  "keploy-v2",
@@ -44,6 +47,8 @@ type App struct {
 	docker           docker.Client
 	id               uint64
 	cmd              string
+	language         config.Language
+	skipCoverage     bool
 	kind             utils.CmdType
 	containerDelay   uint64
 	container        string
@@ -63,6 +68,8 @@ type Options struct {
 	Container     string
 	DockerDelay   uint64
 	DockerNetwork string
+	Language      config.Language
+	SkipCoverage  bool
 }
 
 func (a *App) Setup(_ context.Context) error {
@@ -194,6 +201,23 @@ func (a *App) SetupCompose() error {
 		if err != nil {
 			utils.LogError(a.logger, nil, "failed to create default network", zap.String("network", a.keployNetwork))
 			return err
+		}
+	}
+
+	serviceNode := a.docker.GetServiceNode(compose, a.container)
+	if serviceNode != nil && a.language != "" && !a.skipCoverage {
+		ok = a.docker.VolumeExists(serviceNode, "${PWD}", "${PWD}") || a.docker.VolumeExists(serviceNode, "$PWD", "$PWD")
+		if !ok {
+			a.docker.SetVolume(serviceNode, "${PWD}", "${PWD}")
+			composeChanged = true
+		}
+		switch a.language {
+		case models.Go:
+			ok = a.docker.EnvironmentExists(serviceNode, "GOCOVERDIR", "$GOCOVERDIR")
+			if !ok {
+				a.docker.SetEnvironment(serviceNode, "GOCOVERDIR", "$GOCOVERDIR")
+				composeChanged = true
+			}
 		}
 	}
 

@@ -38,20 +38,29 @@ func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cm
 }
 
 func (g *Golang) PreProcess() (string, error) {
-	if !checkForCoverFlag(g.logger, g.cmd) {
-		return g.cmd, errors.New("binary not coverable")
+	goCovPath, err := utils.SetCoveragePath(g.logger, g.coverageReportPath)
+	if err != nil {
+		g.logger.Warn("failed to set go coverage path", zap.Error(err))
+		return g.cmd, err
 	}
-	if utils.CmdType(g.commandType) == utils.Native {
-		goCovPath, err := utils.SetCoveragePath(g.logger, g.coverageReportPath)
-		if err != nil {
-			g.logger.Warn("failed to set go coverage path", zap.Error(err))
-			return g.cmd, err
-		}
-		err = os.Setenv("GOCOVERDIR", goCovPath)
-		if err != nil {
-			g.logger.Warn("failed to set GOCOVERDIR", zap.Error(err))
-			return g.cmd, err
-		}
+	err = os.Setenv("GOCOVERDIR", goCovPath)
+	if err != nil {
+		g.logger.Warn("failed to set GOCOVERDIR", zap.Error(err))
+		return g.cmd, err
+	}
+	if utils.CmdType(g.commandType) == utils.DockerRun {
+		index := strings.Index(g.cmd, "docker run")
+		return g.cmd[:index+len("docker run")] +
+			" -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") +
+			" -e GOCOVERDIR=" + goCovPath + " " +
+			g.cmd[index+len("docker run"):], nil
+	}
+	if utils.CmdType(g.commandType) != utils.Native {
+		return g.cmd, nil
+	}
+	if !checkForCoverFlag(g.logger, g.cmd) {
+		g.logger.Warn("go binary was not built with -cover flag")
+		return g.cmd, errors.New("binary not coverable")
 	}
 	return g.cmd, nil
 }
@@ -81,14 +90,14 @@ func (g *Golang) GetCoverage() (models.TestCoverage, error) {
 		return testCov, err
 	}
 
-	generateCovTxtCmd := exec.CommandContext(g.ctx, "go", "tool", "covdata", "textfmt", "-i="+os.Getenv("GOCOVERDIR"), "-o="+os.Getenv("GOCOVERDIR")+"/total-coverage.txt")
+	generateCovTxtCmd := exec.CommandContext(g.ctx, "go", "tool", "covdata", "textfmt", "-i="+coverageDir, "-o="+coverageDir+"/total-coverage.txt")
 	_, err = generateCovTxtCmd.Output()
 	if err != nil {
 		return testCov, err
 	}
 
 	coveragePerFileTmp := make(map[string][]int) // filename -> [noOfLines, coveredLines]
-	covdata, err := os.ReadFile(os.Getenv("GOCOVERDIR") + "/total-coverage.txt")
+	covdata, err := os.ReadFile(coverageDir + "/total-coverage.txt")
 	if err != nil {
 		return testCov, err
 	}

@@ -20,8 +20,6 @@ import (
 	"go.keploy.io/server/v2/pkg/platform/coverage"
 	"go.keploy.io/server/v2/pkg/platform/coverage/golang"
 	"go.keploy.io/server/v2/pkg/platform/coverage/java"
-	"go.keploy.io/server/v2/pkg/platform/coverage/javascript"
-	"go.keploy.io/server/v2/pkg/platform/coverage/python"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -125,10 +123,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 
 	var language config.Language
-	var executable string
 	// only find language to calculate coverage if instrument is true
 	if r.instrument {
-		language, executable = utils.DetectLanguage(r.logger, r.config.Command)
+		language, _ = utils.DetectLanguage(r.logger, r.config.Command)
 		// if language is not provided and language detected is known
 		// then set the language to detected language
 		if r.config.Test.Language == "" {
@@ -149,27 +146,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 	switch r.config.Test.Language {
 	case models.Go:
 		cov = golang.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.CoverageReportPath, r.config.CommandType)
-	case models.Python:
-		cov = python.New(ctx, r.logger, r.reportDB, r.config.Command, executable)
-	case models.Javascript:
-		cov = javascript.New(ctx, r.logger, r.reportDB, r.config.Command)
-	case models.Java:
-		cov = java.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.JacocoAgentPath, executable)
 	default:
 		r.config.Test.SkipCoverage = true
 	}
 	if !r.config.Test.SkipCoverage {
-		if utils.CmdType(r.config.CommandType) == utils.Native {
-			r.config.Command, err = cov.PreProcess()
-
-			if err != nil {
-				r.config.Test.SkipCoverage = true
-			}
-		}
-		err = os.Setenv("CLEAN", "true") // related to javascript coverage calculation
+		r.config.Command, err = cov.PreProcess()
 		if err != nil {
 			r.config.Test.SkipCoverage = true
-			r.logger.Warn("failed to set CLEAN env variable, skipping coverage caluclation", zap.Error(err))
 		}
 	}
 
@@ -307,7 +290,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.Any("base path", r.config.Test.BasePath))
 		return &InstrumentState{}, nil
 	}
-	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
+	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay, Language: r.config.Test.Language, SkipCoverage: r.config.Test.SkipCoverage})
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return &InstrumentState{}, err
@@ -607,15 +590,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				break
 			}
 			r.logger.Debug("", zap.Any("replaced URL in case of docker env", testCase.HTTPReq.URL))
-		}
-
-		// send the flag replace-host instead of sending the IP
-		if r.config.Test.Host != "" {
-			testCase.HTTPReq.URL, err = utils.ReplaceHost(testCase.HTTPReq.URL, r.config.Test.Host)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to replace host to provided host by the user")
-				break
-			}
 		}
 
 		started := time.Now().UTC()

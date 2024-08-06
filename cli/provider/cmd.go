@@ -287,7 +287,6 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"ignoreOrdering":        "ignore-ordering",
 		"coverage":              "coverage",
 		"removeUnusedMocks":     "remove-unused-mocks",
-		"goCoverage":            "go-coverage",
 		"fallBackOnMiss":        "fallBack-on-miss",
 		"basePath":              "base-path",
 		"mocking":               "mocking",
