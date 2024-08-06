@@ -246,6 +246,10 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 
 		if o.config.ReRecord.Port != 0 {
 			tc.HTTPReq.URL, err = utils.ReplacePort(tc.HTTPReq.URL, strconv.Itoa(int(o.config.ReRecord.Port)))
+			if err != nil {
+				utils.LogError(o.logger, err, "failed to replace port to provided port by the user")
+				break
+			}
 		}
 		resp, err := pkg.SimulateHTTP(ctx, *tc, testSet, o.logger, o.config.Test.APITimeout)
 		if err != nil {
