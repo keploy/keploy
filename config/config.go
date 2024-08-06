@@ -60,6 +60,7 @@ type Record struct {
 type ReRecord struct {
 	SelectedTests []string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
 	Filters       []Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
+	Host          string   `json:"host" yaml:"host" mapstructure:"host"`
 }
 
 type Normalize struct {
