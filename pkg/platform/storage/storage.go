@@ -80,14 +80,14 @@ func (s *Storage) Upload(ctx context.Context, file io.Reader, mockName string, a
 		}
 	}()
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("upload failed with status code: %d", resp.StatusCode)
-	}
-
 	var mockUploadResponse MockUploadResponse
 	if err := json.NewDecoder(resp.Body).Decode(&mockUploadResponse); err != nil {
 		utils.LogError(s.logger, err, "failed to decode the response body")
 		return err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("upload failed with status code: %d and error %s", resp.StatusCode, mockUploadResponse.Error)
 	}
 
 	if !mockUploadResponse.IsSuccess {
