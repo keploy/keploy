@@ -216,11 +216,7 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 		h.logger.Warn("Using app name from the test-set's config.yml for mock retrieval", zap.String("appName", tsConfig.MockRegistry.App))
 	}
 
-	token, err := h.auth.GetToken(ctx)
-	if err != nil {
-		h.logger.Error("Failed to get token", zap.Error(err))
-		return err
-	}
+	token, _ := h.auth.GetToken(ctx)
 
 	cloudFile, err := h.storage.Download(ctx, tsConfig.MockRegistry.Mock, tsConfig.MockRegistry.App, tsConfig.MockRegistry.User, token)
 	if err != nil {

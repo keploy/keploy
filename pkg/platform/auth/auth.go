@@ -90,12 +90,8 @@ func (a *Auth) Validate(ctx context.Context, token string) (string, bool, string
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{}
 	res, err := client.Do(req)
-	if err != nil || res.StatusCode < 200 || res.StatusCode >= 300 {
-		a.logger.Warn("failed to authenticate the user", zap.Error(err))
-		if err == nil {
-			a.logger.Error("recieved status code", zap.Int("status_code", res.StatusCode))
-		}
-		return "", false, "", fmt.Errorf("failed to authenticate")
+	if err != nil {
+		return "", false, "", fmt.Errorf("failed to authenticate: %s", err.Error())
 	}
 
 	defer func() {
@@ -108,10 +104,13 @@ func (a *Auth) Validate(ctx context.Context, token string) (string, bool, string
 	var respBody models.AuthResp
 	err = json.NewDecoder(res.Body).Decode(&respBody)
 	if err != nil {
-		fmt.Println(res.Body)
-		utils.LogError(a.logger, err, "failed to decode response body for authentication")
 		return "", false, "", fmt.Errorf("error unmarshalling the authentication response: %s", err.Error())
 	}
+
+	if res.StatusCode != 200 || res.StatusCode >= 300 {
+		return "", false, "", fmt.Errorf("failed to authenticate: %s", respBody.Error)
+	}
+
 	a.jwtToken = respBody.JwtToken
 	return respBody.EmailID, respBody.IsValid, respBody.Error, nil
 }
@@ -120,7 +119,6 @@ func (a *Auth) GetToken(ctx context.Context) (string, error) {
 	if a.jwtToken == "" {
 		_, _, _, err := a.Validate(ctx, "")
 		if err != nil {
-			a.logger.Error("Error checking auth", zap.Error(err))
 			return "", err
 		}
 	}
