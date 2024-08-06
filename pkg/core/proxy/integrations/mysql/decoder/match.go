@@ -112,33 +112,220 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 }
 
 func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *operation.DecodeContext) (*mysql.Response, bool, error) {
-
-	// Get the tcs mocks from the mockDb
-	mocks, err := mockDb.GetFilteredMocks()
-	if err != nil {
-		utils.LogError(logger, err, "failed to get filtered mocks")
-		return nil, false, err
-	}
-
-	// Get the mysql mocks
-	tcsMocks := intgUtil.GetMockByKind(mocks, "MySQL")
-
-	if len(tcsMocks) == 0 {
-		utils.LogError(logger, nil, "no mysql mocks found")
-		return nil, false, fmt.Errorf("no mysql mocks found")
-	}
-
-	// Match the request with the mock
-	for _, mock := range tcsMocks {
-
+	for {
 		if ctx.Err() != nil {
 			return nil, false, ctx.Err()
 		}
-		println("mock: ", mock)
-		return nil, false, nil
+
+		// Get the tcs mocks from the mockDb
+		mocks, err := mockDb.GetFilteredMocks()
+		if err != nil {
+			utils.LogError(logger, err, "failed to get filtered mocks")
+			return nil, false, err
+		}
+
+		// Get the mysql mocks
+		tcsMocks := intgUtil.GetMockByKind(mocks, "MySQL")
+
+		if len(tcsMocks) == 0 {
+			utils.LogError(logger, nil, "no mysql mocks found")
+			return nil, false, fmt.Errorf("no mysql mocks found")
+		}
+
+		var maxMatchedCount int
+		var matchedResp *mysql.Response
+		var matchedMock *models.Mock
+
+		// Match the request with the mock
+		for _, mock := range tcsMocks {
+
+			if ctx.Err() != nil {
+				return nil, false, ctx.Err()
+			}
+
+			for _, mockReq := range mock.Spec.MySQLRequests {
+				if ctx.Err() != nil {
+					return nil, false, ctx.Err()
+				}
+
+				//debug log
+				logger.Info("Matching the request with the mock", zap.Any("mock", mockReq), zap.Any("request", req))
+
+				switch req.Header.Type {
+				case mysql.CommandStatusToString(mysql.COM_STMT_CLOSE):
+					matchCount := matchClosePacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
+					if matchCount > maxMatchedCount {
+						maxMatchedCount = matchCount
+						matchedResp = &mock.Spec.MySQLResponses[0]
+						matchedMock = mock
+					}
+				// case mysql.CommandStatusToString(mysql.COM_STMT_SEND_LONG_DATA):
+				case mysql.CommandStatusToString(mysql.COM_QUERY):
+					matchCount := matchQueryPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
+					if matchCount > maxMatchedCount {
+						maxMatchedCount = matchCount
+						matchedResp = &mock.Spec.MySQLResponses[0]
+						matchedMock = mock
+					}
+
+				case mysql.CommandStatusToString(mysql.COM_STMT_PREPARE):
+					matchCount := matchPreparePacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
+					if matchCount > maxMatchedCount {
+						maxMatchedCount = matchCount
+						matchedResp = &mock.Spec.MySQLResponses[0]
+						matchedMock = mock
+					}
+				case mysql.CommandStatusToString(mysql.COM_STMT_EXECUTE):
+					matchCount := matchStmtExecutePacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
+					if matchCount > maxMatchedCount {
+						maxMatchedCount = matchCount
+						matchedResp = &mock.Spec.MySQLResponses[0]
+						matchedMock = mock
+					}
+				}
+			}
+		}
+		if matchedResp == nil {
+			logger.Debug("No matching mock found for the command", zap.Any("command", req))
+			return nil, false, nil
+		}
+
+		//if the req was prepared statement, we should store the prepared statement response
+		if req.Header.Type == mysql.CommandStatusToString(mysql.COM_STMT_PREPARE) {
+			prepareOkResp, ok := matchedResp.Message.(*mysql.StmtPrepareOkPacket)
+			if !ok {
+				logger.Error("failed to type assert the StmtPrepareOkPacket")
+				return nil, false, fmt.Errorf("failed to type assert the StmtPrepareOkPacket")
+			}
+			// This prepared statement will be used in the further execute statement packets
+			decodeCtx.PreparedStatements[prepareOkResp.StatementID] = prepareOkResp
+		}
+
+		// Delete the matched mock from the mockDb
+		ok := mockDb.DeleteFilteredMock(*matchedMock)
+		if !ok {
+			//TODO: see what to do in case of failed deletion
+			logger.Debug("failed to delete the matched mock")
+			continue
+		}
+		return matchedResp, true, nil
+	}
+}
+
+func matchClosePacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
+	matchCount := 0
+	// Match the type and return zero if the types are not equal
+	if expected.Header.Type != actual.Header.Type {
+		return 0
+	}
+	// Match the header
+	ok := matchHeader(*expected.Header.Header, *actual.Header.Header)
+	if ok {
+		matchCount += 2
+	}
+	expectedMessage, _ := expected.Message.(*mysql.StmtClosePacket)
+	actualMessage, _ := actual.Message.(*mysql.StmtClosePacket)
+	// Match the statementID
+	if expectedMessage.StatementID == actualMessage.StatementID {
+		matchCount++
+	}
+	return matchCount
+}
+
+func matchQueryPacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
+	matchCount := 0
+	// Match the type and return zero if the types are not equal
+	if expected.Header.Type != actual.Header.Type {
+		return 0
+	}
+	// Match the header
+	ok := matchHeader(*expected.Header.Header, *actual.Header.Header)
+	if ok {
+		matchCount += 2
+	}
+	expectedMessage, _ := expected.Message.(*mysql.QueryPacket)
+	actualMessage, _ := actual.Message.(*mysql.QueryPacket)
+	// Match the query for query packet
+	if expectedMessage.Query == actualMessage.Query {
+		matchCount++
+	}
+	return matchCount
+}
+func matchPreparePacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
+	matchCount := 0
+	// Match the type and return zero if the types are not equal
+	if expected.Header.Type != actual.Header.Type {
+		return 0
+	}
+	// Match the header
+	ok := matchHeader(*expected.Header.Header, *actual.Header.Header)
+	if ok {
+		matchCount += 2
+	}
+	expectedMessage, _ := expected.Message.(*mysql.StmtPreparePacket)
+	actualMessage, _ := actual.Message.(*mysql.StmtPreparePacket)
+
+	// Match the query for prepare packet
+	if expectedMessage.Query == actualMessage.Query {
+		matchCount++
+	}
+	return matchCount
+}
+
+func matchStmtExecutePacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
+	matchCount := 0
+
+	// Match the type and return zero if the types are not equal
+	if expected.Header.Type != actual.Header.Type {
+		return 0
+	}
+	// Match the header
+	if matchHeader(*expected.Header.Header, *actual.Header.Header) {
+		matchCount += 2
+	}
+	expectedMessage, _ := expected.Message.(*mysql.StmtExecutePacket)
+	actualMessage, _ := actual.Message.(*mysql.StmtExecutePacket)
+	// Match the status
+	if expectedMessage.Status == actualMessage.Status {
+		matchCount++
+	}
+	// Match the statementID
+	if expectedMessage.StatementID == actualMessage.StatementID {
+		matchCount++
+	}
+	// Match the flags
+	if expectedMessage.Flags == actualMessage.Flags {
+		matchCount++
+	}
+	// Match the iteration count
+	if expectedMessage.IterationCount == actualMessage.IterationCount {
+		matchCount++
+	}
+	// Match the parameter count
+	if expectedMessage.ParameterCount == actualMessage.ParameterCount {
+		matchCount++
 	}
 
-	return nil, false, nil
+	// Match the newParamsBindFlag
+	if expectedMessage.NewParamsBindFlag == actualMessage.NewParamsBindFlag {
+		matchCount++
+	}
+
+	// Match the parameters
+	if len(expectedMessage.Parameters) == len(actualMessage.Parameters) {
+		for i := range expectedMessage.Parameters {
+			expectedParam := expectedMessage.Parameters[i]
+			actualParam := actualMessage.Parameters[i]
+			if expectedParam.Type == actualParam.Type &&
+				expectedParam.Name == actualParam.Name &&
+				expectedParam.Unsigned == actualParam.Unsigned &&
+				bytes.Equal(expectedParam.Value, actualParam.Value) {
+				matchCount++
+			}
+		}
+	}
+
+	return matchCount
 }
 
 // The same function is used in http parser as well, If you find this useful you can extract it to a common package
@@ -161,95 +348,4 @@ func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock,
 	}
 
 	return true
-}
-
-func matchQueryPacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
-	matchCount := 0
-	// Match the type and return zero if the types are not equal
-	if expected.Header.Type != actual.Header.Type {
-		return 0
-	}
-	// Match the header
-	ok := matchHeader(*expected.Header.Header, *actual.Header.Header)
-	if ok {
-		matchCount += 2
-	}
-	expectedMessage, _ := expected.Message.(*mysql.QueryPacket)
-	actualMessage, _ := actual.Message.(*mysql.QueryPacket)
-	// Match the query for query packet
-	if expectedMessage.Query == actualMessage.Query {
-		matchCount += 1
-	}
-	return matchCount
-}
-func matchPreparePacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
-	matchCount := 0
-	// Match the type and return zero if the types are not equal
-	if expected.Header.Type != actual.Header.Type {
-		return 0
-	}
-	// Match the header
-	ok := matchHeader(*expected.Header.Header, *actual.Header.Header)
-	if ok {
-		matchCount += 2
-	}
-	expectedMessage, _ := expected.Message.(*mysql.StmtPreparePacket)
-	actualMessage, _ := actual.Message.(*mysql.StmtPreparePacket)
-
-	// Match the query for prepare packet
-	if expectedMessage.Query == actualMessage.Query {
-		matchCount += 1
-	}
-	return matchCount
-}
-
-func matchStmtExecutePacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
-	matchCount := 0
-
-	// Match the type and return zero if the types are not equal
-	if expected.Header.Type != actual.Header.Type {
-		return 0
-	}
-	// Match the header
-	if matchHeader(*expected.Header.Header, *actual.Header.Header) {
-		matchCount += 2
-	}
-	expectedMessage, _ := expected.Message.(*mysql.StmtExecutePacket)
-	actualMessage, _ := actual.Message.(*mysql.StmtExecutePacket)
-	// Match the status
-	if expectedMessage.Status == actualMessage.Status {
-		matchCount += 1
-	}
-	// Match the statementID
-	if expectedMessage.StatementID == actualMessage.StatementID {
-		matchCount += 1
-	}
-	// Match the flags
-	if expectedMessage.Flags == actualMessage.Flags {
-		matchCount += 1
-	}
-	// Match the iteration count
-	if expectedMessage.IterationCount == actualMessage.IterationCount {
-		matchCount += 1
-	}
-	// Match the parameter count
-	if expectedMessage.ParameterCount == actualMessage.ParameterCount {
-		matchCount += 1
-	}
-
-	// Match the parameters
-	if len(expectedMessage.Parameters) == len(actualMessage.Parameters) {
-		for i := range expectedMessage.Parameters {
-			expectedParam := expectedMessage.Parameters[i]
-			actualParam := actualMessage.Parameters[i]
-			if expectedParam.Type == actualParam.Type &&
-				expectedParam.Name == actualParam.Name &&
-				expectedParam.Unsigned == actualParam.Unsigned &&
-				bytes.Equal(expectedParam.Value, actualParam.Value) {
-				matchCount++
-			}
-		}
-	}
-
-	return matchCount
 }

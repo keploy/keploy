@@ -497,7 +497,6 @@ func decodeMySQLMessage(_ context.Context, logger *zap.Logger, yamlSpec *mysql.S
 				Header: v.Header,
 				Meta:   v.Meta,
 			},
-			Payload: v.Payload,
 		}
 
 		switch v.Header.Type {

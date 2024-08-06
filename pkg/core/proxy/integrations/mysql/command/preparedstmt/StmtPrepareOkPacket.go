@@ -98,9 +98,7 @@ func EncodePrepareOk(ctx context.Context, logger *zap.Logger, packet *mysql.Stmt
 	return buf.Bytes(), nil
 }
 
-
-
-func EncodePreparedStmtResponse(ctx context.Context, logger *zap.Logger, packet *mysql.StmtPrepareOkPacket) ([]byte, error) {
+func EncodePreparedStmtResponse(_ context.Context, _ *zap.Logger, packet *mysql.StmtPrepareOkPacket) ([]byte, error) {
 	buf := new(bytes.Buffer)
 
 	// Write Status
@@ -135,5 +133,3 @@ func EncodePreparedStmtResponse(ctx context.Context, logger *zap.Logger, packet 
 
 	return buf.Bytes(), nil
 }
-
-

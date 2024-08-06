@@ -1,3 +1,4 @@
+// Package mysql in models provides realted structs for mysql protocol
 package mysql
 
 // This file contains struct for command phase packets
@@ -162,20 +163,6 @@ type StmtSendLongDataPacket struct {
 	StatementID uint32 `yaml:"statement_id"`
 	ParameterID uint16 `yaml:"parameter_id"`
 	Data        []byte `yaml:"data"`
-}
-
-// Some merged packets (identified in the wireshark trace)
-
-type StmtCloseAndPreparePacket struct {
-	StmtClose     StmtClosePacket
-	PrepareHeader Header
-	StmtPrepare   StmtPreparePacket
-}
-
-type StmtCloseAndQueryPacket struct {
-	StmtClose   StmtClosePacket
-	QueryHeader Header
-	StmtQuery   QueryPacket
 }
 
 // Utility commands
