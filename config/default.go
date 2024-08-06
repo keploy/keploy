@@ -56,16 +56,9 @@ func SetDefaultConfig(cfgStr string) {
 	defaultConfig = cfgStr
 }
 
-// const InternalConfig = `
-// enableTesting: false
-// keployContainer: "keploy-v2"
-// keployNetwork: "keploy-network"
-// inDocker: false
-// cmdType: "native"
-// `
-
 const InternalConfig = `
 enableTesting: false
+keployContainer: "keploy-v2"
 keployNetwork: "keploy-network"
 inDocker: false
 cmdType: "native"
