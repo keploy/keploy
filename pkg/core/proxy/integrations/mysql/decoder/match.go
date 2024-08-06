@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"math"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
@@ -112,6 +113,7 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 }
 
 func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *operation.DecodeContext) (*mysql.Response, bool, error) {
+
 	for {
 		if ctx.Err() != nil {
 			return nil, false, ctx.Err()
@@ -134,6 +136,13 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			if ctx.Err() != nil {
 				return nil, false, ctx.Err()
 			}
+
+			if req.Header.Type == mysql.CommandStatusToString(mysql.COM_QUIT) {
+				// If the command is quit, we should return EOF
+				logger.Debug("Received quit command, closing the connection by sending EOF")
+				return nil, false, io.EOF
+			}
+
 			utils.LogError(logger, nil, "no mysql mocks found")
 			return nil, false, fmt.Errorf("no mysql mocks found")
 		}

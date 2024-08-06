@@ -71,7 +71,9 @@ func Decode(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *int
 		// Simulate the client-server interaction (command phase)
 		err = simulateCommandPhase(ctx, logger, clientConn, mockDb, decodeCtx, opts)
 		if err != nil {
-			utils.LogError(logger, err, "failed to simulate command phase")
+			if err != io.EOF {
+				utils.LogError(logger, err, "failed to simulate command phase")
+			}
 			errCh <- err
 			return
 		}
