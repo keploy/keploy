@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
+	"strings"
 
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -115,7 +116,13 @@ func (s *Storage) Download(ctx context.Context, mockName string, appName string,
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("download failed with status code: %d", resp.StatusCode)
+		defer resp.Body.Close()
+		// Read the response body to get the error message
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response body and the resp code is: %d", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("download failed with status code: %d, message: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	return resp.Body, nil
