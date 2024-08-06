@@ -165,11 +165,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			if err != nil {
 				r.config.Test.SkipCoverage = true
 			}
-
 		}
-	}
-
-	if !r.config.Test.SkipCoverage {
 		err = os.Setenv("CLEAN", "true") // related to javascript coverage calculation
 		if err != nil {
 			r.config.Test.SkipCoverage = true
