@@ -4,6 +4,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -17,6 +18,11 @@ import (
 type Storage struct {
 	serverURL string
 	logger    *zap.Logger
+}
+
+type MockUploadResponse struct {
+	IsSuccess bool   `json:"isSuccess"`
+	Error     string `json:"error"`
 }
 
 func New(serverURL string, logger *zap.Logger) *Storage {
@@ -54,7 +60,7 @@ func (s *Storage) Upload(ctx context.Context, file io.Reader, mockName string, a
 	}
 
 	// Create a new HTTP request
-	req, err := http.NewRequestWithContext(ctx, "POST", s.serverURL+"/upload", body)
+	req, err := http.NewRequestWithContext(ctx, "POST", s.serverURL+"/mock/upload", body)
 	if err != nil {
 		return err
 	}
@@ -77,12 +83,25 @@ func (s *Storage) Upload(ctx context.Context, file io.Reader, mockName string, a
 		return fmt.Errorf("upload failed with status code: %d", resp.StatusCode)
 	}
 
+	var mockUploadResponse MockUploadResponse
+	if err := json.NewDecoder(resp.Body).Decode(&mockUploadResponse); err != nil {
+		utils.LogError(s.logger, err, "failed to decode the response body")
+		return err
+	}
+
+	if !mockUploadResponse.IsSuccess {
+		utils.LogError(s.logger, fmt.Errorf("upload failed: %s", mockUploadResponse.Error), "failed to upload the mock")
+		return fmt.Errorf("upload failed: %s", mockUploadResponse.Error)
+	}
+
+	s.logger.Info("Mock uploaded successfully")
+
 	return nil
 }
 
 func (s *Storage) Download(ctx context.Context, mockName string, appName string, userName string, jwtToken string) (io.Reader, error) {
 	// Create the HTTP request
-	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/download?appName=%s&mockName=%s&userName=%s", s.serverURL, appName, mockName, userName), nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/mock/download?appName=%s&mockName=%s&userName=%s", s.serverURL, appName, mockName, userName), nil)
 	if err != nil {
 		return nil, err
 	}

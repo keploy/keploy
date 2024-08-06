@@ -90,7 +90,8 @@ func (a *Auth) Validate(ctx context.Context, token string, logger *zap.Logger) (
 	client := &http.Client{}
 	res, err := client.Do(req)
 	if err != nil || res.StatusCode < 200 || res.StatusCode >= 300 {
-		a.logger.Debug("failed to authenticate with github token auth with keploy", zap.Error(err))
+		fmt.Println(res.StatusCode)
+		a.logger.Error("failed to authenticate with github token auth with keploy", zap.Error(err))
 		return "", false, "", fmt.Errorf("failed to authenticate")
 	}
 
@@ -104,9 +105,11 @@ func (a *Auth) Validate(ctx context.Context, token string, logger *zap.Logger) (
 	var respBody models.AuthResp
 	err = json.NewDecoder(res.Body).Decode(&respBody)
 	if err != nil {
+		fmt.Println(res.Body)
 		utils.LogError(logger, err, "failed to decode response body for github token auth")
 		return "", false, "", fmt.Errorf("error unmarshalling the authentication response: %s", err.Error())
 	}
+	fmt.Println(respBody.Error)
 	a.jwtToken = respBody.JwtToken
 	return respBody.EmailID, respBody.IsValid, respBody.Error, nil
 }

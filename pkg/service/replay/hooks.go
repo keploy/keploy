@@ -3,10 +3,12 @@ package replay
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 
+	"github.com/golang-jwt/jwt/v4"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
@@ -69,6 +71,23 @@ func (h *Hooks) AfterTestSetRun(ctx context.Context, _, testSetID string, _ mode
 	mockHash := utils.Hash(mockFileContent)
 	mockFileReader := bytes.NewReader(mockFileContent)
 	token := h.auth.GetToken(ctx)
+	claims, err := extractClaimsWithoutVerification(token)
+	var role, username string
+	var ok bool
+	if err != nil {
+		h.logger.Error("Failed to extract claim from token for mock upload", zap.Error(err))
+		return nil
+	}
+
+	if role, ok = claims["role"].(string); !ok || role == "" {
+		h.logger.Error("Role not found in the token, skipping mock upload")
+		return nil
+	}
+
+	if username, ok = claims["username"].(string); !ok {
+		h.logger.Error("Username not found in the token, skipping mock upload")
+		return nil
+	}
 
 	// Cross verify the local mock file with the test-set config
 	tsConfig, err := h.tsConfigDB.Read(ctx, testSetID)
@@ -102,6 +121,13 @@ func (h *Hooks) AfterTestSetRun(ctx context.Context, _, testSetID string, _ mode
 				App:  h.cfg.AppName,
 			},
 		}
+		if role == "OSS" {
+			if username == "" {
+				fmt.Println("Username not found in the token, skipping mock upload")
+			}
+			tsConfig.MockRegistry.User = username
+		}
+
 		err := h.tsConfigDB.Write(ctx, testSetID, tsConfig)
 		if err != nil {
 			h.logger.Error("Failed to write test set config", zap.Error(err))
@@ -217,4 +243,18 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 	}
 
 	return nil
+}
+
+// Function to parse and extract claims from a JWT token without verification
+func extractClaimsWithoutVerification(tokenString string) (jwt.MapClaims, error) {
+	token, _, err := new(jwt.Parser).ParseUnverified(tokenString, jwt.MapClaims{})
+	if err != nil {
+		return nil, err
+	}
+
+	if claims, ok := token.Claims.(jwt.MapClaims); ok {
+		return claims, nil
+	} else {
+		return nil, fmt.Errorf("unable to parse claims")
+	}
 }
