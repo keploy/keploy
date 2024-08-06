@@ -99,6 +99,8 @@ type Test struct {
 	BasePath           string              `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
 	Mocking            bool                `json:"mocking" yaml:"mocking" mapstructure:"mocking"`
 	IgnoredTests       map[string][]string `json:"ignoredTests" yaml:"ignoredTests" mapstructure:"ignoredTests"`
+	DisableMockUpload  bool                `json:"disableMockUpload" yaml:"disableMockUpload" mapstructure:"disableMockUpload"`
+	UseLocalMock       bool                `json:"useLocalMock" yaml:"useLocalMock" mapstructure:"useLocalMock"`
 }
 
 type Language string
