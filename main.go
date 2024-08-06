@@ -93,10 +93,6 @@ func start(ctx context.Context) {
 		os.Exit(1)
 	}
 	auth := auth.New(conf.APIServerURL, conf.InstallationID, logger, conf.GitHubClientID)
-	userEmail, isValid, _, _ := auth.Validate(ctx, "", logger)
-	if isValid {
-		fmt.Println("Successfully logged in to Keploy using GitHub as " + userEmail)
-	}
 
 	svcProvider := provider.NewServiceProvider(logger, conf, auth)
 	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)

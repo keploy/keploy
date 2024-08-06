@@ -70,7 +70,12 @@ func (h *Hooks) AfterTestSetRun(ctx context.Context, _, testSetID string, _ mode
 	}
 	mockHash := utils.Hash(mockFileContent)
 	mockFileReader := bytes.NewReader(mockFileContent)
-	token := h.auth.GetToken(ctx)
+	token, err := h.auth.GetToken(ctx)
+	if err != nil || token == "" {
+		h.logger.Error("Failed to Authenticate user, skipping mock upload", zap.Error(err))
+		return nil
+	}
+
 	claims, err := extractClaimsWithoutVerification(token)
 	var role, username string
 	var ok bool
@@ -211,7 +216,11 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 		h.logger.Warn("Using app name from the test-set's config.yml for mock retrieval", zap.String("appName", tsConfig.MockRegistry.App))
 	}
 
-	token := h.auth.GetToken(ctx)
+	token, err := h.auth.GetToken(ctx)
+	if err != nil {
+		h.logger.Error("Failed to get token", zap.Error(err))
+		return err
+	}
 
 	cloudFile, err := h.storage.Download(ctx, tsConfig.MockRegistry.Mock, tsConfig.MockRegistry.App, tsConfig.MockRegistry.User, token)
 	if err != nil {

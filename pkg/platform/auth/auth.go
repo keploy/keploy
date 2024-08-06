@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -24,7 +25,7 @@ type Auth struct {
 	GitHubClientID string
 }
 
-func New(serverURL string, installationID string, logger *zap.Logger, gitHubClientID string) *Auth {
+func New(serverURL string, installationID string, logger *zap.Logger, gitHubClientID string) service.Auth {
 	return &Auth{
 		serverURL:      serverURL,
 		installationID: installationID,
@@ -52,7 +53,7 @@ func (a *Auth) Login(ctx context.Context) bool {
 		return false
 	}
 
-	userEmail, isValid, authErr, err := a.Validate(ctx, tokenResp.AccessToken, a.logger)
+	userEmail, isValid, authErr, err := a.Validate(ctx, tokenResp.AccessToken)
 	if err != nil {
 		if ctx.Err() == context.Canceled {
 			return false
@@ -69,7 +70,7 @@ func (a *Auth) Login(ctx context.Context) bool {
 	return true
 }
 
-func (a *Auth) Validate(ctx context.Context, token string, logger *zap.Logger) (string, bool, string, error) {
+func (a *Auth) Validate(ctx context.Context, token string) (string, bool, string, error) {
 	url := fmt.Sprintf("%s/auth/github", a.serverURL)
 	requestBody := &models.AuthReq{
 		GitHubToken:    token,
@@ -77,28 +78,30 @@ func (a *Auth) Validate(ctx context.Context, token string, logger *zap.Logger) (
 	}
 	requestJSON, err := json.Marshal(requestBody)
 	if err != nil {
-		utils.LogError(logger, err, "failed to marshal request body for github token auth")
+		utils.LogError(a.logger, err, "failed to marshal request body for authentication")
 		return "", false, "", fmt.Errorf("error marshaling request body for authentication: %s", err.Error())
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(requestJSON))
 	if err != nil {
-		utils.LogError(logger, err, "failed to create request for github token auth")
+		utils.LogError(a.logger, err, "failed to create request for authentication")
 		return "", false, "", fmt.Errorf("error creating request for authentication: %s", err.Error())
 	}
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{}
 	res, err := client.Do(req)
 	if err != nil || res.StatusCode < 200 || res.StatusCode >= 300 {
-		fmt.Println(res.StatusCode)
-		a.logger.Error("failed to authenticate with github token auth with keploy", zap.Error(err))
+		a.logger.Warn("failed to authenticate the user", zap.Error(err))
+		if err == nil {
+			a.logger.Error("recieved status code", zap.Int("status_code", res.StatusCode))
+		}
 		return "", false, "", fmt.Errorf("failed to authenticate")
 	}
 
 	defer func() {
 		err := res.Body.Close()
 		if err != nil {
-			utils.LogError(logger, err, "failed to close response body for github token auth")
+			utils.LogError(a.logger, err, "failed to close response body for authentication")
 		}
 	}()
 
@@ -106,16 +109,22 @@ func (a *Auth) Validate(ctx context.Context, token string, logger *zap.Logger) (
 	err = json.NewDecoder(res.Body).Decode(&respBody)
 	if err != nil {
 		fmt.Println(res.Body)
-		utils.LogError(logger, err, "failed to decode response body for github token auth")
+		utils.LogError(a.logger, err, "failed to decode response body for authentication")
 		return "", false, "", fmt.Errorf("error unmarshalling the authentication response: %s", err.Error())
 	}
-	fmt.Println(respBody.Error)
 	a.jwtToken = respBody.JwtToken
 	return respBody.EmailID, respBody.IsValid, respBody.Error, nil
 }
 
-func (a *Auth) GetToken(_ context.Context) string {
-	return a.jwtToken
+func (a *Auth) GetToken(ctx context.Context) (string, error) {
+	if a.jwtToken == "" {
+		_, _, _, err := a.Validate(ctx, "")
+		if err != nil {
+			a.logger.Error("Error checking auth", zap.Error(err))
+			return "", err
+		}
+	}
+	return a.jwtToken, nil
 }
 
 // requestDeviceCode sends a request to GitHub to get a device code for the users machine to authenticate

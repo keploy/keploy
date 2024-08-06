@@ -4,6 +4,6 @@ package service
 import "context"
 
 type Auth interface {
-	GetToken(ctx context.Context) string
+	GetToken(ctx context.Context) (string, error)
 	Login(ctx context.Context) bool
 }
