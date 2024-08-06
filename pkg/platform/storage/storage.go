@@ -116,7 +116,12 @@ func (s *Storage) Download(ctx context.Context, mockName string, appName string,
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
+		defer func() {
+			err := resp.Body.Close()
+			if err != nil {
+				utils.LogError(s.logger, err, "failed to close the http response body")
+			}
+		}()
 		// Read the response body to get the error message
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
