@@ -22,4 +22,23 @@ jobs:
           go build -v ./...
 
       - name: Build arm 
-        run: GOOS=linux GOARCH=arm64 go build -v ./...
+        run: |
+          GOOS=linux GOARCH=arm64 go build -v ./...
+
+      - name: Run Tests
+        run: |
+          go test -v ./...   # This runs all the tests in the project and provides detailed output.
+
+      - name: Display Test Logs
+        if: always()  #  runs regardless whether the tests pass or fail.
+        run: |
+          echo "Displaying logs from tests..."
+          go test -v ./... | tee test-output.log
+
+      - name: Upload Test Logs
+        if: always()  # Uploads logs even if the tests fail.
+        uses: actions/upload-artifact@v2
+        with:
+          name: test-logs
+          path: test-output.log
+
