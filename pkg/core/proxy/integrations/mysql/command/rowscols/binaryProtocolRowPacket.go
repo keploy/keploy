@@ -342,173 +342,170 @@ func encodeBinaryDateTime(fieldType mysql.FieldType, value interface{}) ([]byte,
 	switch fieldType {
 	case mysql.FieldTypeDate, mysql.FieldTypeNewDate:
 		// Date format: YYYY-MM-DD
-		dateStr, ok := value.(string)
-		if !ok {
-			return nil, fmt.Errorf("invalid value type for date field")
-		}
-		var year, month, day int
-		_, err := fmt.Sscanf(dateStr, "%04d-%02d-%02d", &year, &month, &day)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse date string: %w", err)
-		}
-
-		buf := new(bytes.Buffer)
-		err = buf.WriteByte(byte(4))
-		if err != nil {
-			return nil, fmt.Errorf("failed to write date length: %w", err)
-		}
-
-		err = binary.Write(buf, binary.LittleEndian, uint16(year))
-		if err != nil {
-			return nil, fmt.Errorf("failed to write year: %w", err)
-		}
-
-		err = buf.WriteByte(byte(month))
-		if err != nil {
-			return nil, fmt.Errorf("failed to write month: %w", err)
-		}
-
-		err = buf.WriteByte(byte(day))
-		if err != nil {
-			return nil, fmt.Errorf("failed to write day: %w", err)
-		}
-		return buf.Bytes(), nil
-
+		return encodeDate(value)
 	case mysql.FieldTypeTimestamp, mysql.FieldTypeDateTime:
 		// DateTime format: YYYY-MM-DD HH:MM:SS[.ffffff]
-		dateTimeStr, ok := value.(string)
-		if !ok {
-			return nil, fmt.Errorf("invalid value type for datetime field")
-		}
-		var (
-			year, month, day, hour, minute, second, microsecond int
-			length                                              byte
-		)
-		if strings.Contains(dateTimeStr, ".") {
-			_, err := fmt.Sscanf(dateTimeStr, "%04d-%02d-%02d %02d:%02d:%02d.%06d",
-				&year, &month, &day, &hour, &minute, &second, &microsecond)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse datetime string: %w", err)
-			}
-			length = 11
-		} else {
-			_, err := fmt.Sscanf(dateTimeStr, "%04d-%02d-%02d %02d:%02d:%02d",
-				&year, &month, &day, &hour, &minute, &second)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse datetime string: %w", err)
-			}
-			length = 7
-		}
-		buf := new(bytes.Buffer)
-		err := buf.WriteByte(length) // Length of datetime field
-		if err != nil {
-			return nil, fmt.Errorf("failed to write datetime length: %w", err)
-		}
-		err = binary.Write(buf, binary.LittleEndian, uint16(year))
-		if err != nil {
-			return nil, fmt.Errorf("failed to write year: %w", err)
-		}
-
-		err = buf.WriteByte(byte(month))
-		if err != nil {
-			return nil, fmt.Errorf("failed to write month: %w", err)
-		}
-
-		err = buf.WriteByte(byte(day))
-		if err != nil {
-			return nil, fmt.Errorf("failed to write day: %w", err)
-		}
-
-		err = buf.WriteByte(byte(hour))
-		if err != nil {
-			return nil, fmt.Errorf("failed to write hour: %w", err)
-		}
-
-		err = buf.WriteByte(byte(minute))
-		if err != nil {
-			return nil, fmt.Errorf("failed to write minute: %w", err)
-		}
-
-		err = buf.WriteByte(byte(second))
-		if err != nil {
-			return nil, fmt.Errorf("failed to write second: %w", err)
-		}
-		if length == 11 {
-			err = binary.Write(buf, binary.LittleEndian, uint32(microsecond))
-			if err != nil {
-				return nil, fmt.Errorf("failed to write microseconds: %w", err)
-			}
-		}
-		return buf.Bytes(), nil
+		return encodeDateTime(value)
 	case mysql.FieldTypeTime:
 		// Time format: [-]HH:MM:SS[.ffffff]
-		timeStr, ok := value.(string)
-		if !ok {
-			return nil, fmt.Errorf("invalid value type for time field")
-		}
-		var (
-			isNegative                                  bool
-			days, hours, minutes, seconds, microseconds int
-			length                                      byte
-		)
-		if timeStr[0] == '-' {
-			isNegative = true
-			timeStr = timeStr[1:]
-		}
-		if strings.Contains(timeStr, ".") {
-			_, err := fmt.Sscanf(timeStr, "%d %02d:%02d:%02d.%06d",
-				&days, &hours, &minutes, &seconds, &microseconds)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse time string: %w", err)
-			}
-			length = 12
-		} else {
-			_, err := fmt.Sscanf(timeStr, "%d %02d:%02d:%02d",
-				&days, &hours, &minutes, &seconds)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse time string: %w", err)
-			}
-			length = 8
-		}
-		buf := new(bytes.Buffer)
-		err := buf.WriteByte(length) // Length of time field
-		if err != nil {
-			return nil, fmt.Errorf("failed to write time length: %w", err)
-		}
-
-		if isNegative {
-			buf.WriteByte(1)
-		} else {
-			buf.WriteByte(0)
-		}
-		err = binary.Write(buf, binary.LittleEndian, uint32(days))
-		if err != nil {
-			return nil, fmt.Errorf("failed to write days: %w", err)
-		}
-
-		err = buf.WriteByte(byte(hours))
-		if err != nil {
-			return nil, fmt.Errorf("failed to write hours: %w", err)
-		}
-
-		err = buf.WriteByte(byte(minutes))
-		if err != nil {
-			return nil, fmt.Errorf("failed to write minutes: %w", err)
-		}
-
-		err = buf.WriteByte(byte(seconds))
-		if err != nil {
-			return nil, fmt.Errorf("failed to write seconds: %w", err)
-		}
-
-		if length == 12 {
-			err = binary.Write(buf, binary.LittleEndian, uint32(microseconds))
-			if err != nil {
-				return nil, fmt.Errorf("failed to write microseconds: %w", err)
-			}
-		}
-		return buf.Bytes(), nil
+		return encodeTime(value)
 	default:
 		return nil, fmt.Errorf("unsupported date/time field type: %v", fieldType)
 	}
+}
+
+func encodeDate(value interface{}) ([]byte, error) {
+	dateStr, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("invalid value type for date field")
+	}
+	var year, month, day int
+	_, err := fmt.Sscanf(dateStr, "%04d-%02d-%02d", &year, &month, &day)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse date string: %w", err)
+	}
+	buf := new(bytes.Buffer)
+	err = buf.WriteByte(byte(4))
+	if err != nil {
+		return nil, fmt.Errorf("failed to write date length: %w", err)
+	}
+	err = binary.Write(buf, binary.LittleEndian, uint16(year))
+	if err != nil {
+		return nil, fmt.Errorf("failed to write year: %w", err)
+	}
+	err = buf.WriteByte(byte(month))
+	if err != nil {
+		return nil, fmt.Errorf("failed to write month: %w", err)
+	}
+	err = buf.WriteByte(byte(day))
+	if err != nil {
+		return nil, fmt.Errorf("failed to write day: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+func encodeDateTime(value interface{}) ([]byte, error) {
+	dateTimeStr, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("invalid value type for datetime field")
+	}
+	var (
+		year, month, day, hour, minute, second, microsecond int
+		length                                              byte
+	)
+	if strings.Contains(dateTimeStr, ".") {
+		_, err := fmt.Sscanf(dateTimeStr, "%04d-%02d-%02d %02d:%02d:%02d.%06d",
+			&year, &month, &day, &hour, &minute, &second, &microsecond)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse datetime string: %w", err)
+		}
+		length = 11
+	} else {
+		_, err := fmt.Sscanf(dateTimeStr, "%04d-%02d-%02d %02d:%02d:%02d",
+			&year, &month, &day, &hour, &minute, &second)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse datetime string: %w", err)
+		}
+		length = 7
+	}
+	buf := new(bytes.Buffer)
+	err := buf.WriteByte(length)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write datetime length: %w", err)
+	}
+	err = binary.Write(buf, binary.LittleEndian, uint16(year))
+	if err != nil {
+		return nil, fmt.Errorf("failed to write year: %w", err)
+	}
+	err = buf.WriteByte(byte(month))
+	if err != nil {
+		return nil, fmt.Errorf("failed to write month: %w", err)
+	}
+	err = buf.WriteByte(byte(day))
+	if err != nil {
+		return nil, fmt.Errorf("failed to write day: %w", err)
+	}
+	err = buf.WriteByte(byte(hour))
+	if err != nil {
+		return nil, fmt.Errorf("failed to write hour: %w", err)
+	}
+	err = buf.WriteByte(byte(minute))
+	if err != nil {
+		return nil, fmt.Errorf("failed to write minute: %w", err)
+	}
+	err = buf.WriteByte(byte(second))
+	if err != nil {
+		return nil, fmt.Errorf("failed to write second: %w", err)
+	}
+	if length == 11 {
+		err = binary.Write(buf, binary.LittleEndian, uint32(microsecond))
+		if err != nil {
+			return nil, fmt.Errorf("failed to write microseconds: %w", err)
+		}
+	}
+	return buf.Bytes(), nil
+}
+
+func encodeTime(value interface{}) ([]byte, error) {
+	timeStr, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("invalid value type for time field")
+	}
+	var (
+		isNegative                                  bool
+		days, hours, minutes, seconds, microseconds int
+		length                                      byte
+	)
+	if timeStr[0] == '-' {
+		isNegative = true
+		timeStr = timeStr[1:]
+	}
+	if strings.Contains(timeStr, ".") {
+		_, err := fmt.Sscanf(timeStr, "%d %02d:%02d:%02d.%06d",
+			&days, &hours, &minutes, &seconds, &microseconds)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse time string: %w", err)
+		}
+		length = 12
+	} else {
+		_, err := fmt.Sscanf(timeStr, "%d %02d:%02d:%02d",
+			&days, &hours, &minutes, &seconds)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse time string: %w", err)
+		}
+		length = 8
+	}
+	buf := new(bytes.Buffer)
+	err := buf.WriteByte(length)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write time length: %w", err)
+	}
+	if isNegative {
+		buf.WriteByte(1)
+	} else {
+		buf.WriteByte(0)
+	}
+	err = binary.Write(buf, binary.LittleEndian, uint32(days))
+	if err != nil {
+		return nil, fmt.Errorf("failed to write days: %w", err)
+	}
+	err = buf.WriteByte(byte(hours))
+	if err != nil {
+		return nil, fmt.Errorf("failed to write hours: %w", err)
+	}
+	err = buf.WriteByte(byte(minutes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to write minutes: %w", err)
+	}
+	err = buf.WriteByte(byte(seconds))
+	if err != nil {
+		return nil, fmt.Errorf("failed to write seconds: %w", err)
+	}
+	if length == 12 {
+		err = binary.Write(buf, binary.LittleEndian, uint32(microseconds))
+		if err != nil {
+			return nil, fmt.Errorf("failed to write microseconds: %w", err)
+		}
+	}
+	return buf.Bytes(), nil
 }
