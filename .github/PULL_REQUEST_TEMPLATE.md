@@ -21,7 +21,7 @@ Closes: #[issue number that will be closed through this PR]
 Please describe the tests(if any). Provide instructions how its affecting the coverage.
 
 ## Checklist:
-- [ ] Have you read the [Contributing Guidelines on issues](https://github.com/keploy/keploy/blob/master/CONTRIBUTING.md)?
+- [ ] Have you read the [Contributing Guidelines on issues](https://keploy.io/docs/keploy-explained/contribution-guide/)?
 - [ ] My code follows the style guidelines of this project.
 - [ ] I have commented my code, particularly in hard-to-understand areas.
 - [ ] I have made corresponding changes to the documentation.
