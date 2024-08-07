@@ -94,6 +94,13 @@ func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logge
 	req.Header.Set("KEPLOY-TEST-ID", tc.Name)
 	req.Header.Set("KEPLOY-TEST-SET-ID", testSet)
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", req))
+	
+	// override host header if present in the request
+	hostHeader := tc.HTTPReq.Header["Host"]
+	if hostHeader != "" {
+		logger.Info("overriding host header", zap.String("host", hostHeader))
+		req.Host = hostHeader
+	}
 
 	// Creating the client and disabling redirects
 	var client *http.Client
