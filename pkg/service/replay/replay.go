@@ -618,6 +618,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 
+		if r.config.Test.Port != 0 {
+			testCase.HTTPReq.URL, err = utils.ReplacePort(testCase.HTTPReq.URL, strconv.Itoa(int(r.config.Test.Port)))
+		}
+
 		started := time.Now().UTC()
 		resp, loopErr := requestMockemulator.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
 		if loopErr != nil {
