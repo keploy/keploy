@@ -26,18 +26,30 @@ import (
 func Decode(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	errCh := make(chan error, 1)
 
-	mocks, err := mockDb.GetUnFilteredMocks()
+	unfiltered, err := mockDb.GetUnFilteredMocks()
 	if err != nil {
 		utils.LogError(logger, err, "failed to get unfiltered mocks")
 		return err
 	}
 
 	// Get the mysql mocks
-	configMocks := intgUtil.GetMockByKind(mocks, "MySQL")
+	mocks := intgUtil.GetMockByKind(unfiltered, "MySQL")
 
-	if len(configMocks) == 0 {
+	if len(mocks) == 0 {
 		utils.LogError(logger, nil, "no mysql mocks found")
 		return nil
+	}
+
+	var configMocks []*models.Mock
+	// Get the mocks having "config" metadata
+	for _, mock := range mocks {
+		if mock.Spec.Metadata["type"] == "config" {
+			configMocks = append(configMocks, mock)
+		}
+	}
+
+	if len(configMocks) == 0 {
+		utils.LogError(logger, nil, "no mysql config mocks found for handshake")
 	}
 
 	go func(errCh chan error, configMocks []*models.Mock, mockDb integrations.MockMemDb, opts models.OutgoingOptions) {

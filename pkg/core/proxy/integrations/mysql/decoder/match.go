@@ -115,36 +115,54 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *operation.DecodeContext) (*mysql.Response, bool, error) {
 
 	for {
+
 		if ctx.Err() != nil {
 			return nil, false, ctx.Err()
 		}
 
 		// Get the tcs mocks from the mockDb
-		mocks, err := mockDb.GetFilteredMocks()
+		unfiltered, err := mockDb.GetUnFilteredMocks()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, false, ctx.Err()
 			}
-			utils.LogError(logger, err, "failed to get filtered mocks")
+			utils.LogError(logger, err, "failed to get unfiltered mocks")
 			return nil, false, err
 		}
 
 		// Get the mysql mocks
-		tcsMocks := intgUtil.GetMockByKind(mocks, "MySQL")
+		mocks := intgUtil.GetMockByKind(unfiltered, "MySQL")
+
+		if len(mocks) == 0 {
+			if ctx.Err() != nil {
+				return nil, false, ctx.Err()
+			}
+			utils.LogError(logger, nil, "no mysql mocks found")
+			return nil, false, fmt.Errorf("no mysql mocks found")
+		}
+
+		var tcsMocks []*models.Mock
+		// Ignore the "config" metadata mocks
+		for _, mock := range mocks {
+			if mock.Spec.Metadata["type"] != "config" {
+				tcsMocks = append(tcsMocks, mock)
+			}
+		}
 
 		if len(tcsMocks) == 0 {
 			if ctx.Err() != nil {
 				return nil, false, ctx.Err()
 			}
 
+			// COM_QUIT packet can be handled separately, because there might be no mock for it
 			if req.Header.Type == mysql.CommandStatusToString(mysql.COM_QUIT) {
 				// If the command is quit, we should return EOF
 				logger.Debug("Received quit command, closing the connection by sending EOF")
 				return nil, false, io.EOF
 			}
 
-			utils.LogError(logger, nil, "no mysql mocks found")
-			return nil, false, fmt.Errorf("no mysql mocks found")
+			utils.LogError(logger, nil, "no mysql mocks found for handling command phase")
+			return nil, false, fmt.Errorf("no mysql mocks found for handling command phase")
 		}
 
 		var maxMatchedCount int
@@ -164,7 +182,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 				}
 
 				//debug log
-				logger.Info("Matching the request with the mock", zap.Any("mock", mockReq), zap.Any("request", req))
+				// logger.Info("Matching the request with the mock", zap.Any("mock", mockReq), zap.Any("request", req))
 
 				switch req.Header.Type {
 				//utiltiy commands
@@ -248,6 +266,14 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		}
 		if matchedResp == nil {
 			logger.Debug("No matching mock found for the command", zap.Any("command", req))
+
+			// COM_QUIT packet can be handled separately, because there might be no mock for it
+			if req.Header.Type == mysql.CommandStatusToString(mysql.COM_QUIT) {
+				// If the command is quit, we should return EOF
+				logger.Debug("Received quit command, closing the connection by sending EOF")
+				return nil, false, io.EOF
+			}
+
 			return nil, false, nil
 		}
 
@@ -263,10 +289,11 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		}
 
 		// Delete the matched mock from the mockDb
-		ok := mockDb.DeleteFilteredMock(*matchedMock)
+
+		ok := updateMock(ctx, logger, matchedMock, mockDb)
 		if !ok {
 			//TODO: see what to do in case of failed deletion
-			logger.Debug("failed to delete the matched mock")
+			logger.Debug("failed to update the matched mock")
 			continue
 		}
 		return matchedResp, true, nil

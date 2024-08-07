@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"time"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/operation"
@@ -17,7 +18,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mockDb integrations.MockMemDb, decodeCtx *operation.DecodeContext, _ models.OutgoingOptions) error {
+func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mockDb integrations.MockMemDb, decodeCtx *operation.DecodeContext, opts models.OutgoingOptions) error {
 
 	for {
 		select {
@@ -25,12 +26,33 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			return ctx.Err()
 		default:
 
+			// Set a read deadline on the client connection
+			readTimeout := 2 * time.Second * time.Duration(opts.SQLDelay)
+			err := clientConn.SetReadDeadline(time.Now().Add(readTimeout))
+			if err != nil {
+				utils.LogError(logger, err, "failed to set read deadline on client conn")
+				return err
+			}
+
 			// read the command from the client
 			command, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
 			if err != nil {
+				// when the read deadline is reached, we should close the connection
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					utils.LogError(logger, err, "read deadline reached on client conn")
+					logger.Debug("closing the client connection since the read deadline is reached")
+					return nil
+				}
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read command packet from client")
 				}
+				return err
+			}
+
+			// reset the read deadline
+			err = clientConn.SetReadDeadline(time.Time{})
+			if err != nil {
+				utils.LogError(logger, err, "failed to reset read deadline on client conn")
 				return err
 			}
 

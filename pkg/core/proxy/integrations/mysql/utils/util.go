@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 
@@ -79,7 +78,8 @@ func ReadPacketBuffer(ctx context.Context, logger *zap.Logger, conn net.Conn) ([
 		if err == io.EOF {
 			return nil, err
 		}
-		return packetBuffer, fmt.Errorf("failed to read mysql packet header: %w", err)
+		// return packetBuffer, fmt.Errorf("failed to read mysql packet header: %w", err)
+		return packetBuffer, err
 	}
 
 	packetBuffer = append(packetBuffer, header...)
@@ -92,7 +92,8 @@ func ReadPacketBuffer(ctx context.Context, logger *zap.Logger, conn net.Conn) ([
 			if err == io.EOF {
 				return nil, err
 			}
-			return packetBuffer, fmt.Errorf("failed to read mysql packet payload: %w", err)
+			// return packetBuffer, fmt.Errorf("failed to read mysql packet payload: %w", err)
+			return packetBuffer, err
 		}
 		packetBuffer = append(packetBuffer, payload...)
 	}
