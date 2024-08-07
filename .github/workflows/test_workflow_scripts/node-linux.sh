@@ -93,8 +93,6 @@ if grep "WARNING: DATA RACE" "test_logs2.txt"; then
     exit 1
 fi
 
-sudo -E env PATH=$PATH ./../../keployv2 config --generate
-
 sed -i 's/selectedTests: {}/selectedTests: {"test-set-0": ["test-1", "test-2"]}/' "./keploy.yml"
 
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --apiTimeout 30 --delay 10    &> test_logs3.txt
