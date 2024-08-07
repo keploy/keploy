@@ -35,7 +35,7 @@ installKeploy (){
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz"
         fi
 
-        curl --silent --location "$download_url" | tar xz -C /tmp 
+        curl --silent --location "$download_url" | tar xz --overwrite -C /tmp 
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploy
         delete_keploy_alias
     }
