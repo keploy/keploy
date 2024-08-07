@@ -41,7 +41,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					utils.LogError(logger, err, "read deadline reached on client conn")
 					logger.Debug("closing the client connection since the read deadline is reached")
-					return nil
+					return io.EOF
 				}
 				if err != io.EOF {
 					utils.LogError(logger, err, "failed to read command packet from client")
@@ -106,6 +106,9 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				utils.LogError(logger, err, "failed to write the response to the client")
 				return err
 			}
+
+			// debug log
+			logger.Debug("successfully wrote the response to the client", zap.Any("request", req.Header.Type))
 		}
 	}
 }
