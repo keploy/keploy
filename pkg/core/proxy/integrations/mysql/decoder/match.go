@@ -39,11 +39,7 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 		return fmt.Errorf("type mismatch for handshake response")
 	}
 
-	// Match the header
-	ok := matchHeader(*expected.Header.Header, *actual.Header.Header)
-	if !ok {
-		return fmt.Errorf("header mismatch for handshake response")
-	}
+	//Don't match the header, because the payload length can be different.
 
 	// Match the payload
 
@@ -99,7 +95,7 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 	}
 
 	for key, value := range exp.ConnectionAttributes {
-		if act.ConnectionAttributes[key] != value {
+		if act.ConnectionAttributes[key] != value && key != "_pid" {
 			return fmt.Errorf("connection attributes mismatch for handshake response, expected: %s, actual: %s", value, act.ConnectionAttributes[key])
 		}
 	}

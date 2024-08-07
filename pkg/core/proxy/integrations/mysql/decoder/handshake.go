@@ -192,7 +192,13 @@ func simulateFastAuthSuccess(ctx context.Context, logger *zap.Logger, clientConn
 
 	//update the config mock (since it can be reused in case of more connections compared to record mode)
 	//TODO: need to check when updateMock is unsuccessful
-	updateMock(ctx, logger, initialHandshakeMock, mockDb)
+	ok := updateMock(ctx, logger, initialHandshakeMock, mockDb)
+	if !ok {
+		utils.LogError(logger, nil, "failed to update the mock unfiltered mock during fast auth success")
+	}
+
+	//debug log
+	logger.Info("fast auth success completed successfully")
 
 	return nil
 }
@@ -341,8 +347,11 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 	ok = mockDb.DeleteUnFilteredMock(*initialHandshakeMock)
 	// TODO: need to check what to do in this case
 	if !ok {
-		utils.LogError(logger, nil, "failed to delete unfiltered mock")
+		utils.LogError(logger, nil, "failed to delete unfiltered mock during full auth")
 	}
+
+	//debug log
+	logger.Info("full auth completed successfully")
 
 	return nil
 }

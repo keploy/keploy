@@ -39,7 +39,6 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			if err != nil {
 				// when the read deadline is reached, we should close the connection
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					utils.LogError(logger, err, "read deadline reached on client conn")
 					logger.Debug("closing the client connection since the read deadline is reached")
 					return io.EOF
 				}
