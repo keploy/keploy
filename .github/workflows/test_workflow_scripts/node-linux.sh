@@ -9,6 +9,18 @@ npm install
 sed -i "s/mongoDb:27017/localhost:27017/" "src/db/connection.js"
 rm -rf keploy/
 
+# Check if there is a keploy-config file, if there is, delete it.
+if [ -f "./keploy.yml" ]; then
+    rm ./keploy.yml
+fi
+
+# Generate the keploy-config file.
+sudo ./../../keployv2 config --generate
+
+# Update the global noise to ts.
+config_file="./keploy.yml"
+# sed -i 's/global: {}/global: {"body": {"page":""}}/' "$config_file"
+
 send_request(){
     sleep 10
     app_started=false
@@ -23,6 +35,7 @@ send_request(){
     curl --request POST --url http://localhost:8000/students --header 'content-type: application/json' --data '{"name":"John Doe","email":"john@xyiz.com","phone":"0123456799"}'
     curl --request POST --url http://localhost:8000/students --header 'content-type: application/json' --data '{"name":"Alice Green","email":"green@alice.com","phone":"3939201584"}'
     curl -X GET http://localhost:8000/students
+    curl -X GET http://localhost:8000/get
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
     pid=$(pgrep keploy)
@@ -50,6 +63,9 @@ for i in {1..2}; do
     wait
     echo "Recorded test case and mocks for iteration ${i}"
 done
+
+mocks_file="keploy/test-set-0/tests/test-5.yaml"
+sed -i 's/"page":1/"page":4/' "$mocks_file"
 
 # Test modes and result checking
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10    &> test_logs1.txt
