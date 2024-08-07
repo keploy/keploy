@@ -217,7 +217,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					matchCount := matchClosePacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
 					if matchCount > maxMatchedCount {
 						maxMatchedCount = matchCount
-						matchedResp = &mock.Spec.MySQLResponses[0]
+						matchedResp = &mysql.Response{}
 						matchedMock = mock
 					}
 				// case mysql.CommandStatusToString(mysql.COM_STMT_SEND_LONG_DATA):
