@@ -86,9 +86,10 @@ type BinaryRow struct {
 }
 
 type ColumnEntry struct {
-	Type  FieldType   `yaml:"type"`
-	Name  string      `yaml:"name"`
-	Value interface{} `yaml:"value"`
+	Type     FieldType   `yaml:"type"`
+	Name     string      `yaml:"name"`
+	Value    interface{} `yaml:"value"`
+	Unsigned bool        `yaml:"unsigned"`
 }
 
 // COM_STMT_PREPARE packet

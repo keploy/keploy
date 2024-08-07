@@ -50,15 +50,16 @@ func DecodeBinaryRow(_ context.Context, _ *zap.Logger, data []byte, columns []*m
 			continue
 		}
 
-		value, n, err := readBinaryValue(data[offset:], col)
+		res, n, err := readBinaryValue(data[offset:], col)
 		if err != nil {
 			return nil, offset, err
 		}
 
 		row.Values = append(row.Values, mysql.ColumnEntry{
-			Type:  mysql.FieldType(col.Type),
-			Name:  col.Name,
-			Value: value,
+			Type:     mysql.FieldType(col.Type),
+			Name:     col.Name,
+			Value:    res.value,
+			Unsigned: res.isUnsigned,
 		})
 		offset += n
 	}
@@ -71,8 +72,16 @@ func isNull(nullBitmap []byte, index int) bool {
 	return nullBitmap[bytePos]&(1<<bitPos) != 0
 }
 
-func readBinaryValue(data []byte, col *mysql.ColumnDefinition41) (interface{}, int, error) {
+type binaryValueResult struct {
+	value      interface{}
+	isUnsigned bool
+}
+
+func readBinaryValue(data []byte, col *mysql.ColumnDefinition41) (*binaryValueResult, int, error) {
 	isUnsigned := col.Flags&mysql.UNSIGNED_FLAG != 0
+	res := &binaryValueResult{
+		isUnsigned: isUnsigned,
+	}
 
 	switch mysql.FieldType(col.Type) {
 	case mysql.FieldTypeLong:
@@ -80,61 +89,75 @@ func readBinaryValue(data []byte, col *mysql.ColumnDefinition41) (interface{}, i
 			return nil, 0, errors.New("malformed FieldTypeLong value")
 		}
 		if isUnsigned {
-			return uint32(binary.LittleEndian.Uint32(data[:4])), 4, nil
+			res.value = uint32(binary.LittleEndian.Uint32(data[:4]))
+			return res, 4, nil
 		}
-		return int32(binary.LittleEndian.Uint32(data[:4])), 4, nil
+		res.value = int32(binary.LittleEndian.Uint32(data[:4]))
+		return res, 4, nil
 
 	case mysql.FieldTypeString, mysql.FieldTypeVarString, mysql.FieldTypeVarChar, mysql.FieldTypeBLOB, mysql.FieldTypeTinyBLOB, mysql.FieldTypeMediumBLOB, mysql.FieldTypeLongBLOB, mysql.FieldTypeJSON:
 		value, _, n, err := utils.ReadLengthEncodedString(data)
-		return string(value), n, err
+		res.value = string(value)
+		return res, n, err
 
 	case mysql.FieldTypeTiny:
 		if isUnsigned {
-			return uint8(data[0]), 1, nil
+			res.value = uint8(data[0])
+			return res, 1, nil
 		}
-		return int8(data[0]), 1, nil
+		res.value = int8(data[0])
+		return res, 1, nil
 
 	case mysql.FieldTypeShort, mysql.FieldTypeYear:
 		if len(data) < 2 {
 			return nil, 0, errors.New("malformed FieldTypeShort value")
 		}
 		if isUnsigned {
-			return uint16(binary.LittleEndian.Uint16(data[:2])), 2, nil
+			res.value = uint16(binary.LittleEndian.Uint16(data[:2]))
+			return res, 2, nil
 		}
-		return int16(binary.LittleEndian.Uint16(data[:2])), 2, nil
+		res.value = int16(binary.LittleEndian.Uint16(data[:2]))
+		return res, 2, nil
 
 	case mysql.FieldTypeLongLong:
 		if len(data) < 8 {
 			return nil, 0, errors.New("malformed FieldTypeLongLong value")
 		}
 		if isUnsigned {
-			return uint64(binary.LittleEndian.Uint64(data[:8])), 8, nil
+			res.value = uint64(binary.LittleEndian.Uint64(data[:8]))
+			return res, 8, nil
 		}
-		return int64(binary.LittleEndian.Uint64(data[:8])), 8, nil
+		res.value = int64(binary.LittleEndian.Uint64(data[:8]))
+		return res, 8, nil
 
 	case mysql.FieldTypeFloat:
 		if len(data) < 4 {
 			return nil, 0, errors.New("malformed FieldTypeFloat value")
 		}
-		return float32(binary.LittleEndian.Uint32(data[:4])), 4, nil
+		res.value = float32(binary.LittleEndian.Uint32(data[:4]))
+		return res, 4, nil
 
 	case mysql.FieldTypeDouble:
 		if len(data) < 8 {
 			return nil, 0, errors.New("malformed FieldTypeDouble value")
 		}
-		return float64(binary.LittleEndian.Uint64(data[:8])), 8, nil
+		res.value = float64(binary.LittleEndian.Uint64(data[:8]))
+		return res, 8, nil
 
 	case mysql.FieldTypeDate, mysql.FieldTypeNewDate:
 		value, n, err := parseBinaryDate(data)
-		return value, n, err
+		res.value = value
+		return res, n, err
 
 	case mysql.FieldTypeTimestamp, mysql.FieldTypeDateTime:
 		value, n, err := parseBinaryDateTime(data)
-		return value, n, err
+		res.value = value
+		return res, n, err
 
 	case mysql.FieldTypeTime:
 		value, n, err := parseBinaryTime(data)
-		return value, n, err
+		res.value = value
+		return res, n, err
 
 	default:
 		return nil, 0, fmt.Errorf("unsupported column type: %v", col.Type)
@@ -199,7 +222,7 @@ func parseBinaryTime(b []byte) (interface{}, int, error) {
 	}
 	return timeString, int(length) + 1, nil
 }
-func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, columns []*mysql.ColumnDefinition41) ([]byte, error) {
+func EncodeBinaryRow(_ context.Context, logger *zap.Logger, row *mysql.BinaryRow, columns []*mysql.ColumnDefinition41) ([]byte, error) {
 	buf := new(bytes.Buffer)
 
 	// Write the packet header
@@ -221,16 +244,19 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 	}
 
 	// Write each column's value
-	for i, _ := range columns {
+	for i, col := range columns {
+		logger.Debug("encoding column", zap.String("name", col.Name), zap.Any("value", row.Values[i].Value))
+
 		if isNull(row.RowNullBuffer, i) {
 			continue
 		}
 
-		value := row.Values[i].Value
-		switch row.Values[i].Type {
+		columnEntry := row.Values[i]
+
+		switch columnEntry.Type {
 		case mysql.FieldTypeLong:
 			var intValue int32
-			switch v := value.(type) {
+			switch v := columnEntry.Value.(type) {
 			case int32:
 				intValue = v
 			case uint32:
@@ -242,7 +268,7 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 				return nil, fmt.Errorf("failed to write int32 value: %w", err)
 			}
 		case mysql.FieldTypeString, mysql.FieldTypeVarString, mysql.FieldTypeVarChar, mysql.FieldTypeBLOB, mysql.FieldTypeTinyBLOB, mysql.FieldTypeMediumBLOB, mysql.FieldTypeLongBLOB, mysql.FieldTypeJSON:
-			strValue, ok := value.(string)
+			strValue, ok := columnEntry.Value.(string)
 			if !ok {
 				return nil, fmt.Errorf("invalid value type for string field")
 			}
@@ -251,7 +277,7 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 			}
 		case mysql.FieldTypeTiny:
 			var intValue int8
-			switch v := value.(type) {
+			switch v := columnEntry.Value.(type) {
 			case int8:
 				intValue = v
 			case uint8:
@@ -264,7 +290,7 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 			}
 		case mysql.FieldTypeShort, mysql.FieldTypeYear:
 			var intValue int16
-			switch v := value.(type) {
+			switch v := columnEntry.Value.(type) {
 			case int16:
 				intValue = v
 			case uint16:
@@ -277,19 +303,20 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 			}
 		case mysql.FieldTypeLongLong:
 			var intValue int64
-			switch v := value.(type) {
+
+			switch v := columnEntry.Value.(type) {
 			case int64:
 				intValue = v
 			case uint64:
 				intValue = int64(v)
 			default:
-				return nil, fmt.Errorf("invalid value type for long long field")
+				return nil, fmt.Errorf("invalid value type for long long field, got Type %T, Value: %v", v, columnEntry.Value)
 			}
 			if err := binary.Write(buf, binary.LittleEndian, intValue); err != nil {
 				return nil, fmt.Errorf("failed to write int64 value: %w", err)
 			}
 		case mysql.FieldTypeFloat:
-			floatValue, ok := value.(float32)
+			floatValue, ok := columnEntry.Value.(float32)
 			if !ok {
 				return nil, fmt.Errorf("invalid value type for float field")
 			}
@@ -297,7 +324,7 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 				return nil, fmt.Errorf("failed to write float32 value: %w", err)
 			}
 		case mysql.FieldTypeDouble:
-			doubleValue, ok := value.(float64)
+			doubleValue, ok := columnEntry.Value.(float64)
 			if !ok {
 				return nil, fmt.Errorf("invalid value type for double field")
 			}
@@ -305,7 +332,7 @@ func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, col
 				return nil, fmt.Errorf("failed to write float64 value: %w", err)
 			}
 		case mysql.FieldTypeDate, mysql.FieldTypeNewDate, mysql.FieldTypeTimestamp, mysql.FieldTypeDateTime, mysql.FieldTypeTime:
-			dateTimeBytes, err := encodeBinaryDateTime(row.Values[i].Type, value)
+			dateTimeBytes, err := encodeBinaryDateTime(row.Values[i].Type, columnEntry.Value)
 			if err != nil {
 				return nil, fmt.Errorf("failed to encode date/time value: %w", err)
 			}
