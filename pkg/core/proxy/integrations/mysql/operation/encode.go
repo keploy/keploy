@@ -160,7 +160,7 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 
 	// Encode the header for the packet
 	header := make([]byte, 4)
-	binary.LittleEndian.PutUint32(header, uint32(len(data)))
+	binary.LittleEndian.PutUint32(header, uint32(packet.Header.Header.PayloadLength))
 	header[3] = packet.Header.Header.SequenceID
 	data = append(header, data...)
 

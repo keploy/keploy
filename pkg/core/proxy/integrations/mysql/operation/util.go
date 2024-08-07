@@ -136,3 +136,17 @@ func IsNoResponseCommand(command string) bool {
 		return false
 	}
 }
+
+// PrintByteArray is only for debugging purpose
+func PrintByteArray(name string, b []byte) {
+	fmt.Printf("%s:\n", name)
+	var i = 1
+	for _, byte := range b {
+		fmt.Printf(" %02x", byte)
+		i++
+		if i%16 == 0 {
+			fmt.Println()
+		}
+	}
+	fmt.Println()
+}

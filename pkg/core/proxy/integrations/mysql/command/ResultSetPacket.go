@@ -48,33 +48,33 @@ func EncodeTextResultSet(ctx context.Context, logger *zap.Logger, resultSet *mys
 
 	// Encode the column count
 	if err := utils.WriteLengthEncodedInteger(buf, resultSet.ColumnCount); err != nil {
-		return nil, fmt.Errorf("failed to write column count: %w", err)
+		return nil, fmt.Errorf("failed to write column count for text resultset: %w", err)
 	}
 
 	// Encode the column definition packets
 	for _, column := range resultSet.Columns {
 		columnBytes, err := rowscols.EncodeColumn(ctx, logger, column)
 		if err != nil {
-			return nil, fmt.Errorf("failed to encode column: %w", err)
+			return nil, fmt.Errorf("failed to encode column for text resultset: %w", err)
 		}
 		if _, err := buf.Write(columnBytes); err != nil {
-			return nil, fmt.Errorf("failed to write column: %w", err)
+			return nil, fmt.Errorf("failed to write column for text resultset: %w", err)
 		}
 	}
 
 	// Write the EOF packet after columns
 	if _, err := buf.Write(resultSet.EOFAfterColumns); err != nil {
-		return nil, fmt.Errorf("failed to write EOF packet after columns: %w", err)
+		return nil, fmt.Errorf("failed to write EOF packet after columns for text resultset: %w", err)
 	}
 
 	// Encode each row data packet
 	for _, row := range resultSet.Rows {
 		rowBytes, err := rowscols.EncodeTextRow(ctx, logger, row, resultSet.Columns)
 		if err != nil {
-			return nil, fmt.Errorf("failed to encode row: %w", err)
+			return nil, fmt.Errorf("failed to encode row for text resultset: %w", err)
 		}
 		if _, err := buf.Write(rowBytes); err != nil {
-			return nil, fmt.Errorf("failed to write row: %w", err)
+			return nil, fmt.Errorf("failed to write row for text resultset: %w", err)
 		}
 	}
 	// Write the final EOF packet if present
