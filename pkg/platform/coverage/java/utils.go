@@ -17,12 +17,19 @@ import (
 	"go.uber.org/zap"
 )
 
-func downloadAndExtractJaCoCoCli(logger *zap.Logger, version, dir string) error {
-	cliPath := filepath.Join(dir, "jacococli.jar")
+func DownloadAndExtractJaCoCoCli(logger *zap.Logger) error {
+	jacocoPath := filepath.Join(os.TempDir(), "jacoco")
+	err := os.MkdirAll(jacocoPath, 0777)
+	if err != nil {
+		logger.Debug("failed to create jacoco directory", zap.Error(err))
+		return err
+	}
 
-	downloadURL := fmt.Sprintf("https://github.com/jacoco/jacoco/releases/download/v%s/jacoco-%s.zip", version, version)
+	cliPath := filepath.Join(jacocoPath, "jacococli.jar")
 
-	_, err := os.Stat(cliPath)
+	downloadURL := fmt.Sprintf("https://github.com/jacoco/jacoco/releases/download/v%s/jacoco-%s.zip", "0.8.12", "0.8.12")
+
+	_, err = os.Stat(cliPath)
 	if err == nil {
 		return nil
 	}
@@ -75,10 +82,9 @@ func downloadAndExtractJaCoCoCli(logger *zap.Logger, version, dir string) error 
 			}
 		}
 	}
+	_, err = os.Stat(cliPath)
 
-	cliStat, err := os.Stat(cliPath)
-
-	if os.IsNotExist(err) || cliStat != nil {
+	if err != nil && os.IsNotExist(err) {
 		return fmt.Errorf("failed to find JaCoCo binaries in the distribution")
 	}
 

@@ -150,11 +150,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 	case models.Go:
 		cov = golang.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.CoverageReportPath, r.config.CommandType)
 	case models.Python:
-		cov = python.New(ctx, r.logger, r.reportDB, r.config.Command, executable)
+		cov = python.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.CommandType, executable)
 	case models.Javascript:
-		cov = javascript.New(ctx, r.logger, r.reportDB, r.config.Command)
+		cov = javascript.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.CommandType)
 	case models.Java:
-		cov = java.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.JacocoAgentPath, executable)
+		cov = java.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.JacocoAgentPath, executable, r.config.CommandType)
 	default:
 		r.config.Test.SkipCoverage = true
 	}
@@ -593,6 +593,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		if utils.IsDockerCmd(cmdType) {
+
 			testCase.HTTPReq.URL, err = utils.ReplaceHost(testCase.HTTPReq.URL, userIP)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to replace host to docker container's IP")
@@ -601,18 +602,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.logger.Debug("", zap.Any("replaced URL in case of docker env", testCase.HTTPReq.URL))
 		}
 
-		// send the flag replace-host instead of sending the IP
-		if r.config.Test.Host != "" {
-			testCase.HTTPReq.URL, err = utils.ReplaceHost(testCase.HTTPReq.URL, r.config.Test.Host)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to replace host to provided host by the user")
-				break
-			}
-		}
-
-		if r.config.Test.Port != 0 {
-			testCase.HTTPReq.URL, err = utils.ReplacePort(testCase.HTTPReq.URL, strconv.Itoa(int(r.config.Test.Port)))
-		}
 		started := time.Now().UTC()
 		resp, loopErr := requestMockemulator.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
 		if loopErr != nil {

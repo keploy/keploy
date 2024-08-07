@@ -218,6 +218,40 @@ func (a *App) SetupCompose() error {
 				a.docker.SetEnvironment(serviceNode, "GOCOVERDIR", "$GOCOVERDIR")
 				composeChanged = true
 			}
+		case models.Python:
+			ok = a.docker.EnvironmentExists(serviceNode, "APPEND", "$APPEND")
+			if !ok {
+				a.docker.SetEnvironment(serviceNode, "APPEND", "$APPEND")
+				composeChanged = true
+			}
+			ok = a.docker.WorkingDirExists(serviceNode, "$PWD") || a.docker.WorkingDirExists(serviceNode, "${PWD}")
+			if !ok {
+				a.docker.SetWorkingDir(serviceNode, "$PWD")
+				composeChanged = true
+			}
+		case models.Javascript:
+			ok = a.docker.EnvironmentExists(serviceNode, "CLEAN", "$CLEAN")
+			if !ok {
+				a.docker.SetEnvironment(serviceNode, "CLEAN", "$CLEAN")
+				composeChanged = true
+			}
+			ok = a.docker.WorkingDirExists(serviceNode, "$PWD") || a.docker.WorkingDirExists(serviceNode, "${PWD}")
+			if !ok {
+				a.docker.SetWorkingDir(serviceNode, "$PWD")
+				composeChanged = true
+			}
+		case models.Java:
+			v := "-javaagent:/root/.m2/repository/org/jacoco/org.jacoco.agent/0.8.8/org.jacoco.agent-0.8.8-runtime.jar=destfile=target/$TESTSETID" + ".exec"
+			ok = a.docker.EnvironmentExists(serviceNode, "JACOCOAGENT", v)
+			if !ok {
+				a.docker.SetEnvironment(serviceNode, "JACOCOAGENT", v)
+				composeChanged = true
+			}
+			ok = a.docker.WorkingDirExists(serviceNode, "$PWD") || a.docker.WorkingDirExists(serviceNode, "${PWD}")
+			if !ok {
+				a.docker.SetWorkingDir(serviceNode, "$PWD")
+				composeChanged = true
+			}
 		}
 	}
 

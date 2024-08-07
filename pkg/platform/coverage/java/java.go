@@ -23,9 +23,10 @@ type Java struct {
 	cmd             string
 	jacocoAgentPath string
 	executable      string
+	commandType     string
 }
 
-func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cmd, jacocoAgentPath, executable string) *Java {
+func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cmd, jacocoAgentPath, executable, commandType string) *Java {
 	return &Java{
 		ctx:             ctx,
 		logger:          logger,
@@ -33,16 +34,32 @@ func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cm
 		cmd:             cmd,
 		jacocoAgentPath: jacocoAgentPath,
 		executable:      executable,
+		commandType:     commandType,
 	}
 }
 
 func (j *Java) PreProcess() (string, error) {
+	err := DownloadAndExtractJaCoCoCli(j.logger)
+	if err != nil {
+		j.logger.Warn("failed to download and extract JaCoCo cli, skipping coverage calculation", zap.Error(err))
+		return j.cmd, err
+	}
+	if utils.CmdType(j.commandType) == utils.DockerRun {
+		index := strings.Index(j.cmd, "docker run")
+		return j.cmd[:index+len("docker run")] +
+			" -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") +
+			" -w " + os.Getenv("PWD") +
+			" -e " + "JACOCOAGENT=-javaagent:/root/.m2/repository/org/jacoco/org.jacoco.agent/0.8.8/org.jacoco.agent-0.8.8-runtime.jar=destfile=target/$TESTSETID" + ".exec" +
+			j.cmd[index+len("docker run"):], nil
+	}
+	if utils.CmdType(j.commandType) != utils.Native {
+		return j.cmd, nil
+	}
 	// default location for jar of jacoco agent
 	jacocoAgentPath := "~/.m2/repository/org/jacoco/org.jacoco.agent/0.8.8/org.jacoco.agent-0.8.8-runtime.jar"
 	if j.jacocoAgentPath != "" {
 		jacocoAgentPath = j.jacocoAgentPath
 	}
-	var err error
 	jacocoAgentPath, err = utils.ExpandPath(jacocoAgentPath)
 	if err == nil {
 		isFileExist, err := utils.FileExists(jacocoAgentPath)
@@ -55,19 +72,7 @@ func (j *Java) PreProcess() (string, error) {
 		}
 	}
 	if err != nil {
-		j.logger.Warn("failed to find jacoco agent. If jacoco agent is present in a different path, please set it using --jacocoAgentPath")
-		return j.cmd, err
-	}
-	// downlaod jacoco cli
-	jacocoPath := filepath.Join(os.TempDir(), "jacoco")
-	err = os.MkdirAll(jacocoPath, 0777)
-	if err != nil {
-		j.logger.Debug("failed to create jacoco directory", zap.Error(err))
-		return j.cmd, err
-	}
-	err = downloadAndExtractJaCoCoCli(j.logger, "0.8.12", jacocoPath)
-	if err != nil {
-		j.logger.Debug("failed to download and extract jacoco binaries", zap.Error(err))
+		j.logger.Warn("failed to find jacoco agent. If jacoco agent is present in a different path, please set it using --jacocoAgentPath", zap.Error(err))
 		return j.cmd, err
 	}
 	return j.cmd, nil
