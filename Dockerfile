@@ -25,7 +25,7 @@ ENV KEPLOY_INDOCKER=true
 
 # Update the package lists and install required packages
 RUN apt-get update
-RUN apt-get install -y ca-certificates curl sudo default-jdk python3-coverage && \
+RUN apt-get install -y ca-certificates curl sudo && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
