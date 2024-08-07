@@ -55,14 +55,12 @@ body:
         - Something else
   validations:
       required: true
-- type: dropdown
+- type: textarea
   id: version
   attributes:
     label: 🎲 Version
-    options:
-      - Keploy Cloud
-      - Self-hosted
-      - Local
+    value: |
+      "I am using latest version v2.0.0-alpha31"
   validations:
     required: true
 - type: dropdown
@@ -93,4 +91,4 @@ body:
 - type: markdown
   attributes:
     value: |
-        I have read the [Code of Conduct](https://github.com/keploy/keploy/blob/main/CODE_OF_CONDUCT.md)
+        I have read the [Code of Conduct](https://github.com/keploy/keploy/blob/main/CODE_OF_CONDUCT.md) and followed [Contribution Guide](https://keploy.io/docs/keploy-explained/contribution-guide/)
