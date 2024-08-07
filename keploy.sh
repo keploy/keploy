@@ -35,7 +35,7 @@ installKeploy (){
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz"
         fi
 
-        curl --silent --location "$download_url" | tar xz -C /tmp --overwrite
+        curl --silent --location "$download_url" | tar xz -C /tmp 
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploy
         delete_keploy_alias
     }
@@ -46,7 +46,7 @@ installKeploy (){
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
         fi
-        curl --silent --location "$download_url" | tar xz -C /tmp --overwrite
+        curl --silent --location "$download_url" | tar xz --overwrite -C /tmp 
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploy
         set_alias 'sudo -E env PATH="$PATH" keploy'
     }
@@ -58,7 +58,7 @@ installKeploy (){
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
         fi
-        curl --silent --location "$download_url" | tar xz -C /tmp --overwrite
+        curl --silent --location "$download_url" | tar xz --overwrite -C /tmp
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploy
         set_alias 'sudo -E env PATH="$PATH" keploy'
     }
