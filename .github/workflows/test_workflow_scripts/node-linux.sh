@@ -19,7 +19,7 @@ sudo ./../../keployv2 config --generate
 
 # Update the global noise to ts.
 config_file="./keploy.yml"
-# sed -i 's/global: {}/global: {"body": {"page":""}}/' "$config_file"
+sed -i 's/global: {}/global: {"body": {"page":""}}/' "$config_file"
 
 send_request(){
     sleep 10
