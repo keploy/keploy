@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"time"
 
 	"go.keploy.io/server/v2/pkg"
@@ -227,7 +228,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 			return false, ctx.Err()
 		}
 		if utils.IsDockerCmd(cmdType) {
-			tc.HTTPReq.URL, err = utils.ReplaceHostToIP(tc.HTTPReq.URL, userIP)
+			tc.HTTPReq.URL, err = utils.ReplaceHost(tc.HTTPReq.URL, userIP)
 			if err != nil {
 				utils.LogError(o.logger, err, "failed to replace host to docker container's IP")
 				break
@@ -235,6 +236,21 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 			o.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HTTPReq.URL))
 		}
 
+		if o.config.ReRecord.Host != "" {
+			tc.HTTPReq.URL, err = utils.ReplaceHost(tc.HTTPReq.URL, o.config.ReRecord.Host)
+			if err != nil {
+				utils.LogError(o.logger, err, "failed to replace host to provided host by the user")
+				break
+			}
+		}
+
+		if o.config.ReRecord.Port != 0 {
+			tc.HTTPReq.URL, err = utils.ReplacePort(tc.HTTPReq.URL, strconv.Itoa(int(o.config.ReRecord.Port)))
+			if err != nil {
+				utils.LogError(o.logger, err, "failed to replace port to provided port by the user")
+				break
+			}
+		}
 		resp, err := pkg.SimulateHTTP(ctx, *tc, testSet, o.logger, o.config.Test.APITimeout)
 		if err != nil {
 			utils.LogError(o.logger, err, "failed to simulate HTTP request")
