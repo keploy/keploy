@@ -255,17 +255,14 @@ func EncodeBinaryRow(_ context.Context, logger *zap.Logger, row *mysql.BinaryRow
 
 		switch columnEntry.Type {
 		case mysql.FieldTypeLong:
-			var intValue int32
-			switch v := columnEntry.Value.(type) {
-			case int32:
-				intValue = v
-			case uint32:
-				intValue = int32(v)
-			default:
-				return nil, fmt.Errorf("invalid value type for long field")
+			var val any
+			if columnEntry.Unsigned {
+				val = uint32(columnEntry.Value.(int32))
+			} else {
+				val = columnEntry.Value.(int32)
 			}
-			if err := binary.Write(buf, binary.LittleEndian, intValue); err != nil {
-				return nil, fmt.Errorf("failed to write int32 value: %w", err)
+			if err := binary.Write(buf, binary.LittleEndian, val); err != nil {
+				return nil, fmt.Errorf("failed to write %T value: %w", val, err)
 			}
 		case mysql.FieldTypeString, mysql.FieldTypeVarString, mysql.FieldTypeVarChar, mysql.FieldTypeBLOB, mysql.FieldTypeTinyBLOB, mysql.FieldTypeMediumBLOB, mysql.FieldTypeLongBLOB, mysql.FieldTypeJSON:
 			strValue, ok := columnEntry.Value.(string)
@@ -276,44 +273,37 @@ func EncodeBinaryRow(_ context.Context, logger *zap.Logger, row *mysql.BinaryRow
 				return nil, fmt.Errorf("failed to write length-encoded string: %w", err)
 			}
 		case mysql.FieldTypeTiny:
-			var intValue int8
-			switch v := columnEntry.Value.(type) {
-			case int8:
-				intValue = v
-			case uint8:
-				intValue = int8(v)
-			default:
-				return nil, fmt.Errorf("invalid value type for tiny field")
+			var val any
+			if columnEntry.Unsigned {
+				val = uint8(columnEntry.Value.(int8))
+			} else {
+				val = columnEntry.Value.(int8)
 			}
-			if err := buf.WriteByte(byte(intValue)); err != nil {
-				return nil, fmt.Errorf("failed to write int8 value: %w", err)
+			if err := binary.Write(buf, binary.LittleEndian, val); err != nil {
+				return nil, fmt.Errorf("failed to write %T value: %w", val, err)
 			}
+
 		case mysql.FieldTypeShort, mysql.FieldTypeYear:
-			var intValue int16
-			switch v := columnEntry.Value.(type) {
-			case int16:
-				intValue = v
-			case uint16:
-				intValue = int16(v)
-			default:
-				return nil, fmt.Errorf("invalid value type for short field")
+			var val any
+			if columnEntry.Unsigned {
+				val = uint16(columnEntry.Value.(int16))
+			} else {
+				val = columnEntry.Value.(int16)
 			}
-			if err := binary.Write(buf, binary.LittleEndian, intValue); err != nil {
+			if err := binary.Write(buf, binary.LittleEndian, val); err != nil {
 				return nil, fmt.Errorf("failed to write int16 value: %w", err)
 			}
 		case mysql.FieldTypeLongLong:
-			var intValue int64
+			var val any
 
-			switch v := columnEntry.Value.(type) {
-			case int64:
-				intValue = v
-			case uint64:
-				intValue = int64(v)
-			default:
-				return nil, fmt.Errorf("invalid value type for long long field, got Type %T, Value: %v", v, columnEntry.Value)
+			if columnEntry.Unsigned {
+				val = uint64(columnEntry.Value.(int64))
+			} else {
+				val = columnEntry.Value.(int64)
 			}
-			if err := binary.Write(buf, binary.LittleEndian, intValue); err != nil {
-				return nil, fmt.Errorf("failed to write int64 value: %w", err)
+
+			if err := binary.Write(buf, binary.LittleEndian, val); err != nil {
+				return nil, fmt.Errorf("failed to write %T value: %w", val, err)
 			}
 		case mysql.FieldTypeFloat:
 			floatValue, ok := columnEntry.Value.(float32)
@@ -361,10 +351,26 @@ func encodeBinaryDateTime(fieldType mysql.FieldType, value interface{}) ([]byte,
 			return nil, fmt.Errorf("failed to parse date string: %w", err)
 		}
 		buf := new(bytes.Buffer)
-		buf.WriteByte(byte(4))
-		binary.Write(buf, binary.LittleEndian, uint16(year))
-		buf.WriteByte(byte(month))
-		buf.WriteByte(byte(day))
+
+		err = buf.WriteByte(byte(4))
+		if err != nil {
+			return nil, fmt.Errorf("failed to write date length: %w", err)
+		}
+
+		err = binary.Write(buf, binary.LittleEndian, uint16(year))
+		if err != nil {
+			return nil, fmt.Errorf("failed to write year: %w", err)
+		}
+
+		err = buf.WriteByte(byte(month))
+		if err != nil {
+			return nil, fmt.Errorf("failed to write month: %w", err)
+		}
+
+		err = buf.WriteByte(byte(day))
+		if err != nil {
+			return nil, fmt.Errorf("failed to write day: %w", err)
+		}
 		return buf.Bytes(), nil
 
 	case mysql.FieldTypeTimestamp, mysql.FieldTypeDateTime:
@@ -379,15 +385,35 @@ func encodeBinaryDateTime(fieldType mysql.FieldType, value interface{}) ([]byte,
 			return nil, fmt.Errorf("failed to parse datetime string: %w", err)
 		}
 		buf := new(bytes.Buffer)
-		buf.WriteByte(byte(7))
-		binary.Write(buf, binary.LittleEndian, uint16(year))
-		buf.WriteByte(byte(month))
-		buf.WriteByte(byte(day))
-		buf.WriteByte(byte(hour))
-		buf.WriteByte(byte(minute))
-		buf.WriteByte(byte(second))
+		err = buf.WriteByte(byte(7))
+		if err != nil {
+			return nil, fmt.Errorf("failed to write datetime length: %w", err)
+		}
+		err = binary.Write(buf, binary.LittleEndian, uint16(year))
+		if err != nil {
+			return nil, fmt.Errorf("failed to write year: %w", err)
+		}
+		err = buf.WriteByte(byte(month))
+		if err != nil {
+			return nil, fmt.Errorf("failed to write month: %w", err)
+		}
+		err = buf.WriteByte(byte(day))
+		if err != nil {
+			return nil, fmt.Errorf("failed to write day: %w", err)
+		}
+		err = buf.WriteByte(byte(hour))
+		if err != nil {
+			return nil, fmt.Errorf("failed to write hour: %w", err)
+		}
+		err = buf.WriteByte(byte(minute))
+		if err != nil {
+			return nil, fmt.Errorf("failed to write minute: %w", err)
+		}
+		err = buf.WriteByte(byte(second))
+		if err != nil {
+			return nil, fmt.Errorf("failed to write second: %w", err)
+		}
 		return buf.Bytes(), nil
-
 	case mysql.FieldTypeTime:
 		// Time format: [-]HH:MM:SS
 		timeStr, ok := value.(string)
@@ -405,18 +431,41 @@ func encodeBinaryDateTime(fieldType mysql.FieldType, value interface{}) ([]byte,
 			return nil, fmt.Errorf("failed to parse time string: %w", err)
 		}
 		buf := new(bytes.Buffer)
-		buf.WriteByte(byte(8))
-		if isNegative {
-			buf.WriteByte(1)
-		} else {
-			buf.WriteByte(0)
+		err = buf.WriteByte(byte(8))
+		if err != nil {
+			return nil, fmt.Errorf("failed to write time length: %w", err)
 		}
-		binary.Write(buf, binary.LittleEndian, uint32(days))
-		buf.WriteByte(byte(hours))
-		buf.WriteByte(byte(minutes))
-		buf.WriteByte(byte(seconds))
-		return buf.Bytes(), nil
 
+		if isNegative {
+			err = buf.WriteByte(1)
+			if err != nil {
+				return nil, fmt.Errorf("failed to write negative flag: %w", err)
+			}
+		} else {
+			err = buf.WriteByte(0)
+			if err != nil {
+				return nil, fmt.Errorf("failed to write negative flag: %w", err)
+			}
+		}
+		err = binary.Write(buf, binary.LittleEndian, uint32(days))
+		if err != nil {
+			return nil, fmt.Errorf("failed to write days: %w", err)
+		}
+		err = buf.WriteByte(byte(hours))
+		if err != nil {
+			return nil, fmt.Errorf("failed to write hours: %w", err)
+		}
+
+		err = buf.WriteByte(byte(minutes))
+		if err != nil {
+			return nil, fmt.Errorf("failed to write minutes: %w", err)
+		}
+
+		err = buf.WriteByte(byte(seconds))
+		if err != nil {
+			return nil, fmt.Errorf("failed to write seconds: %w", err)
+		}
+		return buf.Bytes(), nil
 	default:
 		return nil, fmt.Errorf("unsupported date/time field type: %v", fieldType)
 	}
