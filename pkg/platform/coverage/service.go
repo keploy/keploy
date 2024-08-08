@@ -8,7 +8,7 @@ import (
 )
 
 type Service interface {
-	PreProcess() (string, error)
+	PreProcess(disableLineCoverage bool) (string, error)
 	GetCoverage() (models.TestCoverage, error)
 	AppendCoverage(coverage *models.TestCoverage, testRunID string) error
 }
