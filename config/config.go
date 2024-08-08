@@ -13,7 +13,6 @@ type Config struct {
 	AppID                 uint64       `json:"appId" yaml:"appId" mapstructure:"appId"`
 	AppName               string       `json:"appName" yaml:"appName" mapstructure:"appName"`
 	Command               string       `json:"command" yaml:"command" mapstructure:"command"`
-	Port                  uint32       `json:"port" yaml:"port" mapstructure:"port"`
 	DNSPort               uint32       `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
 	ProxyPort             uint32       `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
 	Debug                 bool         `json:"debug" yaml:"debug" mapstructure:"debug"`
@@ -63,6 +62,8 @@ type Record struct {
 type ReRecord struct {
 	SelectedTests []string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
 	Filters       []Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
+	Host          string   `json:"host" yaml:"host" mapstructure:"host"`
+	Port          uint32   `json:"port" yaml:"port" mapstructure:"port"`
 }
 type Contract struct {
 	Services        []string            `json:"services" yaml:"services" mapstructure:"services"`
@@ -96,6 +97,8 @@ type Test struct {
 	SelectedTests      map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
 	GlobalNoise        Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
 	Delay              uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
+	Host               string              `json:"host" yaml:"host" mapstructure:"host"`
+	Port               uint32              `json:"port" yaml:"port" mapstructure:"port"`
 	APITimeout         uint64              `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
 	SkipCoverage       bool                `json:"skipCoverage" yaml:"skipCoverage" mapstructure:"skipCoverage"`                   // boolean to capture the coverage in test
 	CoverageReportPath string              `json:"coverageReportPath" yaml:"coverageReportPath" mapstructure:"coverageReportPath"` // directory path to store the coverage files
