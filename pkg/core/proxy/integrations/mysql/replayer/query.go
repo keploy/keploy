@@ -1,6 +1,6 @@
 //go:build linux
 
-package decoder
+package replayer
 
 import (
 	"context"
@@ -10,15 +10,15 @@ import (
 	"time"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/operation"
 	mysqlUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
-func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mockDb integrations.MockMemDb, decodeCtx *operation.DecodeContext, opts models.OutgoingOptions) error {
+func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) error {
 
 	for {
 		select {
@@ -56,7 +56,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			}
 
 			// Decode the command
-			commandPkt, err := operation.DecodePayload(ctx, logger, command, clientConn, decodeCtx)
+			commandPkt, err := wire.DecodePayload(ctx, logger, command, clientConn, decodeCtx)
 			if err != nil {
 				utils.LogError(logger, err, "failed to decode the MySQL packet from the client")
 			}
@@ -84,14 +84,14 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 
 			// We could have just returned before matching the command for no response commands.
 			// But we need to remove the corresponding mock from the mockDb for no response commands.
-			if operation.IsNoResponseCommand(commandPkt.Header.Type) {
+			if wire.IsNoResponseCommand(commandPkt.Header.Type) {
 				// No response for COM_STMT_CLOSE and COM_STMT_SEND_LONG_DATA
 				logger.Debug("No response for the command", zap.Any("command", command))
 				continue
 			}
 
 			//Encode the matched resp
-			buf, err := operation.EncodeToBinary(ctx, logger, &resp.PacketBundle, clientConn, decodeCtx)
+			buf, err := wire.EncodeToBinary(ctx, logger, &resp.PacketBundle, clientConn, decodeCtx)
 			if err != nil {
 				utils.LogError(logger, err, "failed to encode the response", zap.Any("response", resp))
 			}

@@ -1,19 +1,20 @@
 //go:build linux
 
-// Package operation provides encoding and decoding of MySQL packets.
-package operation
+// Package wire provides encoding and decoding operation of MySQL packets.
+package wire
 
 import (
 	"context"
 	"fmt"
 	"net"
 
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/command"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/command/preparedstmt"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/command/utility"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/connection"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/generic"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire/phase"
+	connection "go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire/phase/conn"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire/phase/query"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire/phase/query/preparedstmt"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire/phase/query/utility"
+
 	itgUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
@@ -91,7 +92,7 @@ func handleQueryStmtResponse(ctx context.Context, logger *zap.Logger, packet mys
 
 	switch payloadType {
 	case mysql.OK:
-		pkt, err := generic.DecodeOk(ctx, payload, sg.CapabilityFlags)
+		pkt, err := phase.DecodeOk(ctx, payload, sg.CapabilityFlags)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode OK packet: %w", err)
 		}
@@ -100,7 +101,7 @@ func handleQueryStmtResponse(ctx context.Context, logger *zap.Logger, packet mys
 
 	case mysql.ERR:
 
-		pkt, err := generic.DecodeErr(ctx, payload, sg.CapabilityFlags)
+		pkt, err := phase.DecodeERR(ctx, payload, sg.CapabilityFlags)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode ERR packet: %w", err)
 		}
@@ -108,7 +109,7 @@ func handleQueryStmtResponse(ctx context.Context, logger *zap.Logger, packet mys
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.StatusToString(mysql.ERR), clientConn, RESET, decodeCtx)
 
 	case mysql.EOF:
-		pkt, err := generic.DecodeEOF(ctx, payload, sg.CapabilityFlags)
+		pkt, err := phase.DecodeEOF(ctx, payload, sg.CapabilityFlags)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode EOF packet: %w", err)
 		}
@@ -122,16 +123,16 @@ func handleQueryStmtResponse(ctx context.Context, logger *zap.Logger, packet mys
 	default:
 		//If the packet is not OK, ERR, EOF or LocalInFile, then it is a result set
 		var pktType string
-		var rowType command.RowType
+		var rowType query.RowType
 		if lastOp == mysql.COM_STMT_EXECUTE {
-			rowType = command.Binary
+			rowType = query.Binary
 			pktType = string(mysql.Binary)
 		} else {
-			rowType = command.Text
+			rowType = query.Text
 			pktType = string(mysql.Text)
 		}
 
-		pkt, err := command.DecodeResultSetMetadata(ctx, logger, payload, rowType)
+		pkt, err := query.DecodeResultSetMetadata(ctx, logger, payload, rowType)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode result set: %w", err)
 		}
@@ -190,7 +191,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 	// generic response packets
 	case payloadType == mysql.EOF && len(payload) == 5: //assuming that the payload is always 5 bytes
 		logger.Debug("EOF packet", zap.Any("Type", payloadType))
-		pkt, err := generic.DecodeEOF(ctx, payload, sg.CapabilityFlags)
+		pkt, err := phase.DecodeEOF(ctx, payload, sg.CapabilityFlags)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode EOF packet: %w", err)
 		}
@@ -201,7 +202,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 
 	case payloadType == mysql.ERR:
 		logger.Debug("ERR packet", zap.Any("Type", payloadType))
-		pkt, err := generic.DecodeErr(ctx, payload, sg.CapabilityFlags)
+		pkt, err := phase.DecodeERR(ctx, payload, sg.CapabilityFlags)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode ERR packet: %w", err)
 		}
@@ -229,7 +230,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 
 		} else {
 			logger.Debug("OK packet", zap.Any("Type", payloadType))
-			pkt, err := generic.DecodeOk(ctx, payload, sg.CapabilityFlags)
+			pkt, err := phase.DecodeOk(ctx, payload, sg.CapabilityFlags)
 			if err != nil {
 				return parsedPacket, fmt.Errorf("failed to decode OK packet: %w", err)
 			}
@@ -380,7 +381,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		//debug log
 		logger.Info("COM_QUERY packet", zap.Any("Type", payloadType))
 
-		pkt, err := command.DecodeQuery(ctx, payload)
+		pkt, err := query.DecodeQuery(ctx, payload)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode COM_QUERY packet: %w", err)
 		}

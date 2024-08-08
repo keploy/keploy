@@ -1,6 +1,6 @@
 //go:build linux
 
-package encoder
+package recorder
 
 import (
 	"context"
@@ -9,15 +9,15 @@ import (
 	"net"
 	"time"
 
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/constant"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/operation"
 	mysqlUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire"
 	intgUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
+// Record mode
 type handshakeRes struct {
 	req               []mysql.Request
 	resp              []mysql.Response
@@ -26,7 +26,7 @@ type handshakeRes struct {
 	reqTimestamp      time.Time
 }
 
-func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, decodeCtx *operation.DecodeContext) (handshakeRes, error) {
+func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, decodeCtx *wire.DecodeContext) (handshakeRes, error) {
 
 	res := handshakeRes{
 		req:  make([]mysql.Request, 0),
@@ -55,7 +55,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 	res.reqTimestamp = time.Now()
 
 	// Decode server handshake packet
-	handshakePkt, err := operation.DecodePayload(ctx, logger, handshake, clientConn, decodeCtx)
+	handshakePkt, err := wire.DecodePayload(ctx, logger, handshake, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode handshake packet")
 		return res, err
@@ -65,7 +65,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 	res.requestOperation = handshakePkt.Header.Type
 
 	// Get the initial Plugin Name
-	pluginName, err := operation.GetPluginName(handshakePkt.Message)
+	pluginName, err := wire.GetPluginName(handshakePkt.Message)
 	if err != nil {
 		utils.LogError(logger, err, "failed to get initial plugin name")
 		return res, err
@@ -101,7 +101,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 	}
 
 	// Decode client handshake response packet
-	handshakeResponsePkt, err := operation.DecodePayload(ctx, logger, handshakeResponse, clientConn, decodeCtx)
+	handshakeResponsePkt, err := wire.DecodePayload(ctx, logger, handshakeResponse, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode handshake response packet")
 		return res, err
@@ -135,7 +135,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 	}
 
 	// Decode auth packet
-	authPkt, err := operation.DecodePayload(ctx, logger, authData, clientConn, decodeCtx)
+	authPkt, err := wire.DecodePayload(ctx, logger, authData, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode auth more data packet")
 		return res, err
@@ -171,22 +171,22 @@ func setHandshakeResult(res *handshakeRes, authRes handshakeRes) {
 	res.responseOperation = authRes.responseOperation
 }
 
-func handleAuth(ctx context.Context, logger *zap.Logger, authPkt *mysql.PacketBundle, clientConn, destConn net.Conn, decodeCtx *operation.DecodeContext) (handshakeRes, error) {
+func handleAuth(ctx context.Context, logger *zap.Logger, authPkt *mysql.PacketBundle, clientConn, destConn net.Conn, decodeCtx *wire.DecodeContext) (handshakeRes, error) {
 	res := handshakeRes{
 		req:  make([]mysql.Request, 0),
 		resp: make([]mysql.Response, 0),
 	}
 
-	switch decodeCtx.PluginName {
-	case constant.NativePassword:
+	switch mysql.AuthPluginName(decodeCtx.PluginName) {
+	case mysql.Native:
 		return res, fmt.Errorf("Native Password authentication is not supported")
-	case constant.CachingSha2Password:
+	case mysql.CachingSha2:
 		result, err := handleCachingSha2Password(ctx, logger, authPkt, clientConn, destConn, decodeCtx)
 		if err != nil {
 			return res, fmt.Errorf("failed to handle caching sha2 password: %w", err)
 		}
 		setHandshakeResult(&res, result)
-	case constant.Sha256Password:
+	case mysql.Sha256:
 		return res, fmt.Errorf("Sha256 Password authentication is not supported")
 	default:
 		return res, fmt.Errorf("unsupported authentication plugin: %s", decodeCtx.PluginName)
@@ -195,7 +195,7 @@ func handleAuth(ctx context.Context, logger *zap.Logger, authPkt *mysql.PacketBu
 	return res, nil
 }
 
-func handleCachingSha2Password(ctx context.Context, logger *zap.Logger, authPkt *mysql.PacketBundle, clientConn, destConn net.Conn, decodeCtx *operation.DecodeContext) (handshakeRes, error) {
+func handleCachingSha2Password(ctx context.Context, logger *zap.Logger, authPkt *mysql.PacketBundle, clientConn, destConn net.Conn, decodeCtx *wire.DecodeContext) (handshakeRes, error) {
 	res := handshakeRes{
 		req:  make([]mysql.Request, 0),
 		resp: make([]mysql.Response, 0),
@@ -207,7 +207,7 @@ func handleCachingSha2Password(ctx context.Context, logger *zap.Logger, authPkt 
 	case *mysql.AuthSwitchRequestPacket:
 		pkt := authPkt.Message.(*mysql.AuthSwitchRequestPacket)
 		//Change the plugin data to a string for better readability as it is expected to be either "full auth" or "fast auth success"
-		authMechanism, err = operation.GetCachingSha2PasswordMechanism(pkt.PluginData[0])
+		authMechanism, err = wire.GetCachingSha2PasswordMechanism(pkt.PluginData[0])
 		if err != nil {
 			return res, fmt.Errorf("failed to get caching sha2 password mechanism: %w", err)
 		}
@@ -216,7 +216,7 @@ func handleCachingSha2Password(ctx context.Context, logger *zap.Logger, authPkt 
 	case *mysql.AuthMoreDataPacket:
 		authMorePkt := authPkt.Message.(*mysql.AuthMoreDataPacket)
 		// Getting the string value of the caching_sha2_password mechanism
-		authMechanism, err = operation.GetCachingSha2PasswordMechanism(authMorePkt.Data[0])
+		authMechanism, err = wire.GetCachingSha2PasswordMechanism(authMorePkt.Data[0])
 		if err != nil {
 			return res, fmt.Errorf("failed to get caching sha2 password mechanism: %w", err)
 		}
@@ -228,7 +228,7 @@ func handleCachingSha2Password(ctx context.Context, logger *zap.Logger, authPkt 
 		PacketBundle: *authPkt,
 	})
 
-	auth, err := operation.StringToCachingSha2PasswordMechanism(authMechanism)
+	auth, err := wire.StringToCachingSha2PasswordMechanism(authMechanism)
 	if err != nil {
 		return res, fmt.Errorf("failed to convert string to caching sha2 password mechanism: %w", err)
 	}
@@ -252,7 +252,7 @@ func handleCachingSha2Password(ctx context.Context, logger *zap.Logger, authPkt 
 	return res, nil
 }
 
-func handleFastAuthSuccess(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, decodeCtx *operation.DecodeContext) (handshakeRes, error) {
+func handleFastAuthSuccess(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, decodeCtx *wire.DecodeContext) (handshakeRes, error) {
 	res := handshakeRes{
 		req:  make([]mysql.Request, 0),
 		resp: make([]mysql.Response, 0),
@@ -281,7 +281,7 @@ func handleFastAuthSuccess(ctx context.Context, logger *zap.Logger, clientConn, 
 		return res, err
 	}
 
-	finalPkt, err := operation.DecodePayload(ctx, logger, finalResp, clientConn, decodeCtx)
+	finalPkt, err := wire.DecodePayload(ctx, logger, finalResp, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode final response packet after auth data packet")
 		return res, err
@@ -297,7 +297,7 @@ func handleFastAuthSuccess(ctx context.Context, logger *zap.Logger, clientConn, 
 	return res, nil
 }
 
-func handleFullAuth(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, decodeCtx *operation.DecodeContext) (handshakeRes, error) {
+func handleFullAuth(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, decodeCtx *wire.DecodeContext) (handshakeRes, error) {
 	res := handshakeRes{
 		req:  make([]mysql.Request, 0),
 		resp: make([]mysql.Response, 0),
@@ -318,7 +318,7 @@ func handleFullAuth(ctx context.Context, logger *zap.Logger, clientConn, destCon
 		return res, err
 	}
 
-	publicKeyReqPkt, err := operation.DecodePayload(ctx, logger, publicKeyRequest, clientConn, decodeCtx)
+	publicKeyReqPkt, err := wire.DecodePayload(ctx, logger, publicKeyRequest, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode public key request packet")
 		return res, err
@@ -343,7 +343,7 @@ func handleFullAuth(ctx context.Context, logger *zap.Logger, clientConn, destCon
 		return res, err
 	}
 
-	pubKeyPkt, err := operation.DecodePayload(ctx, logger, pubKey, clientConn, decodeCtx)
+	pubKeyPkt, err := wire.DecodePayload(ctx, logger, pubKey, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode public key packet")
 		return res, err
@@ -385,7 +385,7 @@ func handleFullAuth(ctx context.Context, logger *zap.Logger, clientConn, destCon
 	encryptPassPkt := &mysql.PacketBundle{
 		Header: &mysql.PacketInfo{
 			Header: &encPass.Header,
-			Type:   constant.EncryptedPassword,
+			Type:   mysql.EncryptedPassword,
 		},
 		Message: intgUtils.EncodeBase64(encPass.Payload),
 	}
@@ -410,7 +410,7 @@ func handleFullAuth(ctx context.Context, logger *zap.Logger, clientConn, destCon
 		return res, err
 	}
 
-	finalResPkt, err := operation.DecodePayload(ctx, logger, finalServerResponse, clientConn, decodeCtx)
+	finalResPkt, err := wire.DecodePayload(ctx, logger, finalServerResponse, clientConn, decodeCtx)
 
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode final response packet during caching sha2 password full auth")

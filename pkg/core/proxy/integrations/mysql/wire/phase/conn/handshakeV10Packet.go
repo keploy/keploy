@@ -1,7 +1,7 @@
 //go:build linux
 
-// Package connection provides decoding and encoding of connection phase mysql packets
-package connection
+// Package conn provides decoding and encoding of connection phase mysql packets
+package conn
 
 import (
 	"bytes"

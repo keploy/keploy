@@ -1,7 +1,7 @@
 //go:build linux
 
-// Package command provides functions to decode MySQL command packets.
-package command
+// Package query provides functions to decode MySQL command phase packets.
+package query
 
 import (
 	"context"

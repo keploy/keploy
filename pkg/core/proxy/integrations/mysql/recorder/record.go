@@ -1,6 +1,7 @@
 //go:build linux
 
-package encoder
+// Package recorder is used to record the MySQL traffic between the client and the server.
+package recorder
 
 import (
 	"context"
@@ -11,7 +12,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/operation"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire"
 	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
@@ -19,7 +20,9 @@ import (
 	"go.uber.org/zap"
 )
 
-func Encode(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
+// Binary to Mock Yaml
+
+func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
 
 	var (
 		requests  []mysql.Request
@@ -39,16 +42,16 @@ func Encode(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		defer close(errCh)
 
 		// Helper struct for decoding packets
-		decodeCtx := &operation.DecodeContext{
+		decodeCtx := &wire.DecodeContext{
 			Mode: models.MODE_RECORD,
 			// Map for storing last operation per connection
-			LastOp: operation.NewLastOpMap(),
+			LastOp: wire.NewLastOpMap(),
 			// Map for storing server greetings (inc capabilities, auth plugin, etc) per initial handshake (per connection)
-			ServerGreetings: operation.NewGreetings(),
+			ServerGreetings: wire.NewGreetings(),
 			// Map for storing prepared statements per connection
 			PreparedStatements: make(map[uint32]*mysql.StmtPrepareOkPacket),
 		}
-		decodeCtx.LastOp.Store(clientConn, operation.RESET) //resetting last command for new loop
+		decodeCtx.LastOp.Store(clientConn, wire.RESET) //resetting last command for new loop
 
 		// handle the initial client-server handshake (connection phase)
 		result, err := handleInitialHandshake(ctx, logger, clientConn, destConn, decodeCtx)
@@ -95,11 +98,11 @@ func Encode(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 	}
 }
 
-func recordMock(_ context.Context, requests []mysql.Request, responses []mysql.Response, mockType, reqOperation, respOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time) {
+func recordMock(_ context.Context, requests []mysql.Request, responses []mysql.Response, mockType, requestOperation, responseOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time) {
 	meta := map[string]string{
 		"type":              mockType,
-		"requestOperation":  reqOperation,
-		"responseOperation": respOperation,
+		"requestOperation":  requestOperation,
+		"responseOperation": responseOperation,
 	}
 	mysqlMock := &models.Mock{
 		Version: models.GetVersion(),

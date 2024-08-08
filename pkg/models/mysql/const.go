@@ -26,6 +26,22 @@ const (
 
 type CachingSha2Password byte
 
+// MySQL authentication methods
+
+type AuthPluginName string
+
+// AuthPluginName constants
+const (
+	Native      AuthPluginName = "mysql_native_password"
+	CachingSha2 AuthPluginName = "caching_sha2_password"
+	Sha256      AuthPluginName = "sha256_password"
+)
+
+// Some constants for MySQL
+const (
+	EncryptedPassword = "encrypted_password"
+)
+
 // CachingSha2Password constants
 const (
 	RequestPublicKey          CachingSha2Password = 2

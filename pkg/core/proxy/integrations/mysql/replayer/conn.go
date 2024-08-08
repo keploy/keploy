@@ -1,6 +1,6 @@
 //go:build linux
 
-package decoder
+package replayer
 
 import (
 	"context"
@@ -8,16 +8,16 @@ import (
 	"net"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/constant"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/operation"
 	mysqlUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
-func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mocks []*models.Mock, mockDb integrations.MockMemDb, decodeCtx *operation.DecodeContext) error {
+// Replay mode
+func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mocks []*models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) error {
 	// Get the mock for initial handshake
 	initialHandshakeMock := mocks[0]
 
@@ -40,7 +40,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 	decodeCtx.ServerGreetings.Store(clientConn, handshake)
 
 	// encode the response
-	buf, err := operation.EncodeToBinary(ctx, logger, &resp[0].PacketBundle, clientConn, decodeCtx)
+	buf, err := wire.EncodeToBinary(ctx, logger, &resp[0].PacketBundle, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode handshake packet")
 		return err
@@ -65,7 +65,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 	}
 
 	// Decode the handshakeResponse
-	pkt, err := operation.DecodePayload(ctx, logger, handshakeResponseBuf, clientConn, decodeCtx)
+	pkt, err := wire.DecodePayload(ctx, logger, handshakeResponseBuf, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode handshake response from client")
 		return err
@@ -113,7 +113,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 
 		CachingSha2PasswordMechanism = pkt.PluginData
 
-		authBuf, err = operation.EncodeToBinary(ctx, logger, &resp[1].PacketBundle, clientConn, decodeCtx)
+		authBuf, err = wire.EncodeToBinary(ctx, logger, &resp[1].PacketBundle, clientConn, decodeCtx)
 		if err != nil {
 			utils.LogError(logger, err, "failed to encode auth switch request packet")
 			return err
@@ -128,7 +128,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 
 		CachingSha2PasswordMechanism = pkt.Data
 
-		authBuf, err = operation.EncodeToBinary(ctx, logger, &resp[1].PacketBundle, clientConn, decodeCtx)
+		authBuf, err = wire.EncodeToBinary(ctx, logger, &resp[1].PacketBundle, clientConn, decodeCtx)
 		if err != nil {
 			utils.LogError(logger, err, "failed to encode auth more data packet")
 			return err
@@ -164,7 +164,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 	return nil
 }
 
-func simulateFastAuthSuccess(ctx context.Context, logger *zap.Logger, clientConn net.Conn, initialHandshakeMock *models.Mock, mockDb integrations.MockMemDb, decodeCtx *operation.DecodeContext) error {
+func simulateFastAuthSuccess(ctx context.Context, logger *zap.Logger, clientConn net.Conn, initialHandshakeMock *models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) error {
 	resp := initialHandshakeMock.Spec.MySQLResponses
 
 	if len(resp) < 3 {
@@ -175,7 +175,7 @@ func simulateFastAuthSuccess(ctx context.Context, logger *zap.Logger, clientConn
 	logger.Debug("final response for fast auth success", zap.Any("response", resp[2].PacketBundle.Header.Type))
 
 	// Send the final response (OK/Err) to the client
-	buf, err := operation.EncodeToBinary(ctx, logger, &resp[2].PacketBundle, clientConn, decodeCtx)
+	buf, err := wire.EncodeToBinary(ctx, logger, &resp[2].PacketBundle, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode final response packet for fast auth success")
 		return err
@@ -203,7 +203,7 @@ func simulateFastAuthSuccess(ctx context.Context, logger *zap.Logger, clientConn
 	return nil
 }
 
-func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Conn, initialHandshakeMock *models.Mock, mockDb integrations.MockMemDb, decodeCtx *operation.DecodeContext) error {
+func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Conn, initialHandshakeMock *models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) error {
 
 	resp := initialHandshakeMock.Spec.MySQLResponses
 	req := initialHandshakeMock.Spec.MySQLRequests
@@ -216,7 +216,7 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 	}
 
 	// decode the public key request
-	pkt, err := operation.DecodePayload(ctx, logger, publicKeyRequestBuf, clientConn, decodeCtx)
+	pkt, err := wire.DecodePayload(ctx, logger, publicKeyRequestBuf, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode public key request from client")
 		return err
@@ -267,7 +267,7 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 	}
 
 	// encode the public key response
-	buf, err := operation.EncodeToBinary(ctx, logger, &resp[2].PacketBundle, clientConn, decodeCtx)
+	buf, err := wire.EncodeToBinary(ctx, logger, &resp[2].PacketBundle, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode public key response packet")
 		return err
@@ -306,9 +306,9 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 	// Get the encrypted password from the mock
 	encryptedPassMock := req[2].PacketBundle
 
-	if encryptedPassMock.Header.Type != constant.EncryptedPassword {
+	if encryptedPassMock.Header.Type != mysql.EncryptedPassword {
 		utils.LogError(logger, nil, "expected encrypted password mock not found", zap.Any("found", encryptedPassMock.Header.Type))
-		return fmt.Errorf("expected %s but found %s", constant.EncryptedPassword, encryptedPassMock.Header.Type)
+		return fmt.Errorf("expected %s but found %s", mysql.EncryptedPassword, encryptedPassMock.Header.Type)
 	}
 
 	// Since encrypted password can be different, we should just check the sequence number
@@ -327,7 +327,7 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 
 	// Get the final response (OK/Err) from the mock
 	// Send the final response (OK/Err) to the client
-	buf, err = operation.EncodeToBinary(ctx, logger, &resp[3].PacketBundle, clientConn, decodeCtx)
+	buf, err = wire.EncodeToBinary(ctx, logger, &resp[3].PacketBundle, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode final response packet for full auth")
 		return err

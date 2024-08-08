@@ -1,6 +1,6 @@
 //go:build linux
 
-package connection
+package conn
 
 import (
 	"bytes"

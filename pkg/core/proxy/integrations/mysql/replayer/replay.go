@@ -1,29 +1,26 @@
 //go:build linux
 
-// Package decoder provides the decoding functions for the MySQL integration.
-// Mock Yaml to Binary
-package decoder
+// Package replayer is used to mock the MySQL traffic between the client and the server.
+package replayer
 
 import (
 	"context"
 	"io"
-
 	"net"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
-	"go.keploy.io/server/v2/pkg/models/mysql"
-	"go.keploy.io/server/v2/utils"
-
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/constant"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/operation"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire"
 	intgUtil "go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
-
+	"go.keploy.io/server/v2/pkg/models/mysql"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
-func Decode(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+// Mock Yaml to Binary
+
+func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	errCh := make(chan error, 1)
 
 	unfiltered, err := mockDb.GetUnFilteredMocks()
@@ -57,17 +54,17 @@ func Decode(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *int
 		defer close(errCh)
 
 		// Helper struct for decoding packets
-		decodeCtx := &operation.DecodeContext{
+		decodeCtx := &wire.DecodeContext{
 			Mode: models.MODE_TEST,
 			// Map for storing last operation per connection
-			LastOp: operation.NewLastOpMap(),
+			LastOp: wire.NewLastOpMap(),
 			// Map for storing server greetings (inc capabilities, auth plugin, etc) per initial handshake (per connection)
-			ServerGreetings: operation.NewGreetings(),
+			ServerGreetings: wire.NewGreetings(),
 			// Map for storing prepared statements per connection
 			PreparedStatements: make(map[uint32]*mysql.StmtPrepareOkPacket),
-			PluginName:         constant.CachingSha2Password, // Only supported plugin for now
+			PluginName:         string(mysql.CachingSha2), // Only supported plugin for now
 		}
-		decodeCtx.LastOp.Store(clientConn, operation.RESET) //resetting last command for new loop
+		decodeCtx.LastOp.Store(clientConn, wire.RESET) //resetting last command for new loop
 
 		// Simulate the initial client-server handshake (connection phase)
 

@@ -1,6 +1,6 @@
 //go:build linux
 
-package decoder
+package replayer
 
 import (
 	"bytes"
@@ -10,7 +10,7 @@ import (
 	"math"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/operation"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire"
 	intgUtil "go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
@@ -108,7 +108,7 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 	return nil
 }
 
-func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *operation.DecodeContext) (*mysql.Response, bool, error) {
+func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) (*mysql.Response, bool, error) {
 
 	for {
 

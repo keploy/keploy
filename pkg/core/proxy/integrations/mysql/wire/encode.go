@@ -1,6 +1,6 @@
 //go:build linux
 
-package operation
+package wire
 
 import (
 	"context"
@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"net"
 
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/command"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/command/preparedstmt"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/connection"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/generic"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire/phase"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire/phase/conn"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire/phase/query"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire/phase/query/preparedstmt"
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.uber.org/zap"
 )
@@ -48,7 +48,7 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 			return nil, fmt.Errorf("Expected EOFPacket, got %T", packet.Message)
 		}
 
-		data, err = generic.EncodeEOF(ctx, pkt, serverGreeting.CapabilityFlags)
+		data, err = phase.EncodeEOF(ctx, pkt, serverGreeting.CapabilityFlags)
 		if err != nil {
 			return nil, fmt.Errorf("error encoding EOF packet: %v", err)
 		}
@@ -61,7 +61,7 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 			return nil, fmt.Errorf("Expected ERRPacket, got %T", packet.Message)
 		}
 
-		data, err = generic.EncodeErr(ctx, pkt, serverGreeting.CapabilityFlags)
+		data, err = phase.EncodeErr(ctx, pkt, serverGreeting.CapabilityFlags)
 		if err != nil {
 			return nil, fmt.Errorf("error encoding ERR packet: %v", err)
 		}
@@ -74,7 +74,7 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 			return nil, fmt.Errorf("Expected OKPacket, got %T", packet.Message)
 		}
 
-		data, err = generic.EncodeOk(ctx, pkt, serverGreeting.CapabilityFlags)
+		data, err = phase.EncodeOk(ctx, pkt, serverGreeting.CapabilityFlags)
 		if err != nil {
 			return nil, fmt.Errorf("error encoding OK packet: %v", err)
 		}
@@ -88,7 +88,7 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 			return nil, fmt.Errorf("Expected AuthMoreDataPacket, got %T", packet.Message)
 		}
 
-		data, err = connection.EncodeAuthMoreData(ctx, pkt)
+		data, err = conn.EncodeAuthMoreData(ctx, pkt)
 		if err != nil {
 			return nil, fmt.Errorf("error encoding AuthMoreData packet: %v", err)
 		}
@@ -101,7 +101,7 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 			return nil, fmt.Errorf("Expected AuthSwitchRequestPacket, got %T", packet.Message)
 		}
 
-		data, err = connection.EncodeAuthSwitchRequest(ctx, pkt)
+		data, err = conn.EncodeAuthSwitchRequest(ctx, pkt)
 		if err != nil {
 			return nil, fmt.Errorf("error encoding AuthSwitchRequest packet: %v", err)
 		}
@@ -114,7 +114,7 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 			return nil, fmt.Errorf("Expected HandshakeV10Packet, got %T", packet.Message)
 		}
 
-		data, err = connection.EncodeHandshakeV10(ctx, logger, pkt)
+		data, err = conn.EncodeHandshakeV10(ctx, logger, pkt)
 		if err != nil {
 			return nil, fmt.Errorf("error encoding HandshakeV10 packet: %v", err)
 		}
@@ -141,7 +141,7 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 			return nil, fmt.Errorf("Expected TextResultSet, got %T", packet.Message)
 		}
 
-		data, err = command.EncodeTextResultSet(ctx, logger, pkt)
+		data, err = query.EncodeTextResultSet(ctx, logger, pkt)
 		if err != nil {
 			return nil, fmt.Errorf("error encoding TextResultSet: %v", err)
 		}
@@ -152,7 +152,7 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 			return nil, fmt.Errorf("Expected BinaryProtocolResultSet, got %T", packet.Message)
 		}
 
-		data, err = command.EncodeBinaryResultSet(ctx, logger, pkt)
+		data, err = query.EncodeBinaryResultSet(ctx, logger, pkt)
 		if err != nil {
 			return nil, fmt.Errorf("error encoding BinaryProtocolResultSet: %v", err)
 		}
