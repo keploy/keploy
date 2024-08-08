@@ -154,7 +154,7 @@ func (idc *Impl) StopAndRemoveDockerContainer() error {
 		}
 	}
 
-	removeOptions := types.ContainerRemoveOptions{
+	removeOptions := dockerContainerPkg.RemoveOptions{
 		RemoveVolumes: true,
 		Force:         true,
 	}
