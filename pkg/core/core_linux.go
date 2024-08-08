@@ -46,6 +46,8 @@ func (c *Core) Setup(ctx context.Context, cmd string, opts models.SetupOptions) 
 		DockerNetwork: opts.DockerNetwork,
 		Container:     opts.Container,
 		DockerDelay:   opts.DockerDelay,
+		Language:      opts.Language,
+		SkipCoverage:  opts.SkipCoverage,
 	})
 	c.apps.Store(id, a)
 

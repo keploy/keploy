@@ -37,6 +37,12 @@ RUN curl -fsSL https://get.docker.com -o get-docker.sh && \
 # Install docker-compose to PATH
 RUN apt install docker-compose -y
 
+COPY --from=golang:1.22 /usr/local/go /usr/local/go
+ENV GOROOT=/usr/local/go
+ENV PATH="$PATH:$GOROOT/bin"
+
+RUN sed -i 's/\(Defaults\s*secure_path="[^"]*\)/\1:\/usr\/local\/go\/bin/' /etc/sudoers
+
 # Copy the keploy binary and the entrypoint script from the build container
 COPY --from=build /app/keploy /app/keploy
 COPY --from=build /app/entrypoint.sh /app/entrypoint.sh

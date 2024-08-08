@@ -31,8 +31,7 @@ test:
     test-sets: {}
   delay: 5
   apiTimeout: 5
-  coverage: false
-  goCoverage: false
+  coverage: true
   coverageReportPath: ""
   ignoreOrdering: true
   mongoPassword: "default@123"

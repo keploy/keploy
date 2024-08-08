@@ -28,6 +28,8 @@ type SetupOptions struct {
 	Container     string
 	DockerNetwork string
 	DockerDelay   uint64
+	Language      config.Language
+	SkipCoverage  bool
 }
 
 type RunOptions struct {
