@@ -3,7 +3,7 @@
 package wire
 
 import (
-	"context" 
+	"context"
 	"fmt"
 	"net"
 	"sync"
