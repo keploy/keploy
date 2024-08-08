@@ -71,9 +71,8 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		requests = []mysql.Request{}
 		responses = []mysql.Response{}
 
-		//debug log
 		lstOp, _ := decodeCtx.LastOp.Load(clientConn)
-		logger.Info("last operation after initial handshake", zap.Any("last operation", lstOp))
+		logger.Debug("last operation after initial handshake", zap.Any("last operation", lstOp))
 
 		// handle the client-server interaction (command phase)
 		err = handleClientQueries(ctx, logger, clientConn, destConn, mocks, decodeCtx)

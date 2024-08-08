@@ -178,7 +178,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 				}
 
 				//debug log
-				// logger.Info("Matching the request with the mock", zap.Any("mock", mockReq), zap.Any("request", req))
+				// logger.Debug("Matching the request with the mock", zap.Any("mock", mockReq), zap.Any("request", req))
 
 				switch req.Header.Type {
 				//utiltiy commands

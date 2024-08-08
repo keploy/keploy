@@ -85,8 +85,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 	}
 
 	// Match the handshake response from the client with the mock
-	//debug log
-	logger.Info("matching handshake response", zap.Any("actual", pkt), zap.Any("mock", req[0].PacketBundle))
+	logger.Debug("matching handshake response", zap.Any("actual", pkt), zap.Any("mock", req[0].PacketBundle))
 	err = matchHanshakeResponse41(ctx, logger, req[0].PacketBundle, *pkt)
 	if err != nil {
 		utils.LogError(logger, err, "error while matching handshakeResponse41")
@@ -197,8 +196,7 @@ func simulateFastAuthSuccess(ctx context.Context, logger *zap.Logger, clientConn
 		utils.LogError(logger, nil, "failed to update the mock unfiltered mock during fast auth success")
 	}
 
-	//debug log
-	logger.Info("fast auth success completed successfully")
+	logger.Debug("fast auth success completed successfully")
 
 	return nil
 }
@@ -350,8 +348,7 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 		utils.LogError(logger, nil, "failed to delete unfiltered mock during full auth")
 	}
 
-	//debug log
-	logger.Info("full auth completed successfully")
+	logger.Debug("full auth completed successfully")
 
 	return nil
 }

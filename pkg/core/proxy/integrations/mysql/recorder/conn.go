@@ -353,9 +353,6 @@ func handleFullAuth(ctx context.Context, logger *zap.Logger, clientConn, destCon
 		"auth operation": "public key response",
 	}
 
-	//debug log
-	logger.Info("public key response meta", zap.Any("public key meta", pubKeyPkt.Meta))
-
 	res.resp = append(res.resp, mysql.Response{
 		PacketBundle: *pubKeyPkt,
 	})

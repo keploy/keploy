@@ -65,7 +65,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				// reset the requests and responses
 				requests = []mysql.Request{}
 				responses = []mysql.Response{}
-				println("No response command", commandPkt.Header.Type)
+				logger.Debug("No response command", zap.Any("packet", commandPkt.Header.Type))
 				continue
 			}
 
@@ -129,8 +129,7 @@ func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn, de
 
 	switch lastOp {
 	case mysql.COM_QUERY:
-		//debug log
-		logger.Info("Handling text result set", zap.Any("lastOp", lastOp))
+		logger.Debug("Handling text result set", zap.Any("lastOp", lastOp))
 		// handle the query response (TextResultSet)
 		queryResponsePkt, err = handleTextResultSet(ctx, logger, clientConn, destConn, commandRespPkt, decodeCtx)
 		if err != nil {
@@ -138,16 +137,14 @@ func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn, de
 		}
 
 	case mysql.COM_STMT_PREPARE:
-		//debug
-		logger.Info("Handling prepare Statement Response OK", zap.Any("lastOp", lastOp))
+		logger.Debug("Handling prepare Statement Response OK", zap.Any("lastOp", lastOp))
 		// handle the prepared statement response (COM_STMT_PREPARE_OK)
 		queryResponsePkt, err = handlePreparedStmtResponse(ctx, logger, clientConn, destConn, commandRespPkt, decodeCtx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to handle the prepared statement response: %w", err)
 		}
 	case mysql.COM_STMT_EXECUTE:
-		//debug log
-		logger.Info("Handling binary protocol result set", zap.Any("lastOp", lastOp))
+		logger.Debug("Handling binary protocol result set", zap.Any("lastOp", lastOp))
 		// handle the statment execute response (BinaryProtocolResultSet)
 		queryResponsePkt, err = handleBinaryResultSet(ctx, logger, clientConn, destConn, commandRespPkt, decodeCtx)
 		if err != nil {
@@ -171,8 +168,7 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 		return nil, fmt.Errorf("expected StmtPrepareOkPacket, got %T", commandRespPkt.Message)
 	}
 
-	//debug log
-	logger.Info("Parsing the params and columns in the prepared statement response", zap.Any("responseOk", responseOk))
+	logger.Debug("Parsing the params and columns in the prepared statement response", zap.Any("responseOk", responseOk))
 
 	//See if there are any parameters
 	if responseOk.NumParams > 0 {
@@ -203,8 +199,7 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 			responseOk.ParamDefs = append(responseOk.ParamDefs, column)
 		}
 
-		//debug log
-		logger.Info("ParamsDefs after parsing", zap.Any("ParamDefs", responseOk.ParamDefs))
+		logger.Debug("ParamsDefs after parsing", zap.Any("ParamDefs", responseOk.ParamDefs))
 
 		// Read the EOF packet for parameter definition
 		eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
@@ -229,8 +224,7 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 
 		responseOk.EOFAfterParamDefs = eofData
 
-		//debug log
-		logger.Info("Eof after param defs", zap.Any("eofData", eofData))
+		logger.Debug("Eof after param defs", zap.Any("eofData", eofData))
 	}
 
 	//See if there are any columns
@@ -262,8 +256,7 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 			responseOk.ColumnDefs = append(responseOk.ColumnDefs, column)
 		}
 
-		//debug log
-		logger.Info("ColumnDefs after parsing", zap.Any("ColumnDefs", responseOk.ColumnDefs))
+		logger.Debug("ColumnDefs after parsing", zap.Any("ColumnDefs", responseOk.ColumnDefs))
 
 		// Read the EOF packet for column definition
 		eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
@@ -288,8 +281,7 @@ func handlePreparedStmtResponse(ctx context.Context, logger *zap.Logger, clientC
 
 		responseOk.EOFAfterColumnDefs = eofData
 
-		//debug log
-		logger.Info("Eof after column defs", zap.Any("eofData", eofData))
+		logger.Debug("Eof after column defs", zap.Any("eofData", eofData))
 	}
 
 	//set the lastOp to COM_STMT_PREPARE_OK
@@ -409,8 +401,7 @@ rowLoop:
 			// Break if the data packet is an EOF packet, But we need to check for generic response
 			// Right now we are just checking for EOF packet as we couldn't differentiate between the generic response and row data packet
 			if mysqlUtils.IsEOFPacket(data) {
-				//debug log
-				fmt.Println("Found EOF packet after row data")
+				logger.Debug("Found EOF packet after row data in text resultset")
 				textResultSet.FinalResponse = &mysql.GenericResponse{
 					Data: data,
 					Type: mysql.StatusToString(mysql.EOF),
@@ -448,14 +439,10 @@ func handleBinaryResultSet(ctx context.Context, logger *zap.Logger, clientConn, 
 	// Read the column count packet
 	colCount := binaryResultSet.ColumnCount
 
-	//debug log
-	println("ColCount in handleBinaryResultSet: ", colCount)
+	logger.Debug("ColCount in handleBinaryResultSet: ", zap.Any("ColCount", colCount))
 	// Read the column definition packets
 	for i := uint64(0); i < colCount; i++ {
 		// Read the column definition packet
-		//debug log
-		println("Reading column count...")
-
 		colData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
 		if err != nil {
 			if err != io.EOF {
@@ -463,8 +450,6 @@ func handleBinaryResultSet(ctx context.Context, logger *zap.Logger, clientConn, 
 			}
 			return nil, err
 		}
-		//debug log
-		println("After reading column count...")
 
 		// Write the column definition packet to the client
 		_, err = clientConn.Write(colData)
@@ -482,8 +467,7 @@ func handleBinaryResultSet(ctx context.Context, logger *zap.Logger, clientConn, 
 		binaryResultSet.Columns = append(binaryResultSet.Columns, column)
 	}
 
-	//debug log
-	logger.Info("Columns: ", zap.Any("Columns", binaryResultSet.Columns))
+	logger.Debug("Columns: ", zap.Any("Columns", binaryResultSet.Columns))
 
 	// Read the EOF packet for column definition
 	eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
@@ -532,9 +516,6 @@ rowLoop:
 				return nil, err
 			}
 
-			//debug log
-			println("Trying to read row data...")
-
 			// Break if the data packet is a generic response
 			// resp, ok := mysqlUtils.IsGenericResponse(data)
 			// if ok {
@@ -550,8 +531,7 @@ rowLoop:
 			// Break if the data packet is an EOF packet, But we need to check for generic response
 			// Right now we are just checking for EOF packet as we couldn't differentiate between the generic response and row data packet
 			if mysqlUtils.IsEOFPacket(data) {
-				//debug log
-				fmt.Println("Found EOF packet after row data")
+				logger.Debug("Found EOF packet after row data in binary resultset")
 				binaryResultSet.FinalResponse = &mysql.GenericResponse{
 					Data: data,
 					Type: mysql.StatusToString(mysql.EOF),
@@ -568,8 +548,7 @@ rowLoop:
 		}
 	}
 
-	//debug log
-	logger.Info("Rows: ", zap.Any("Rows", binaryResultSet.Rows))
+	logger.Debug("Rows: ", zap.Any("Rows", binaryResultSet.Rows))
 
 	// reset the last OP
 	decodeCtx.LastOp.Store(clientConn, wire.RESET)

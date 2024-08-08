@@ -106,7 +106,6 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				return err
 			}
 
-			// debug log
 			logger.Debug("successfully wrote the response to the client", zap.Any("request", req.Header.Type))
 		}
 	}
