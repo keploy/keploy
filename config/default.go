@@ -19,7 +19,7 @@ dnsPort: 26789
 debug: false
 disableANSI: false
 disableTele: false
-generateGithubActions: true
+generateGithubActions: false
 containerName: ""
 networkName: ""
 buildDelay: 30
@@ -40,6 +40,7 @@ test:
   removeUnusedMocks: false
   basePath: ""
   mocking: true
+  disableLineCoverage: false
   fallbackOnMiss: false
 record:
   recordTimer: 0s

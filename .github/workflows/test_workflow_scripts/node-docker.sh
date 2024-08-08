@@ -60,7 +60,7 @@ for i in {1..2}; do
     # Start keploy in record mode.
     container_name="nodeApp_${i}"
     send_request &
-    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p 8000:8000 --name "${container_name}" --network keploy-network node-app:1.0" --container-name "${container_name}" --generateGithubActions=false &> "${container_name}.txt"
+    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p 8000:8000 --name "${container_name}" --network keploy-network node-app:1.0" --container-name "${container_name}"    &> "${container_name}.txt"
     if grep "ERROR" "${container_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${container_name}.txt"

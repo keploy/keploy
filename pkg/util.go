@@ -95,6 +95,13 @@ func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logge
 	req.Header.Set("KEPLOY-TEST-SET-ID", testSet)
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", req))
 
+	// override host header if present in the request
+	hostHeader := tc.HTTPReq.Header["Host"]
+	if hostHeader != "" {
+		logger.Info("overriding host header", zap.String("host", hostHeader))
+		req.Host = hostHeader
+	}
+
 	// Creating the client and disabling redirects
 	var client *http.Client
 
@@ -210,7 +217,7 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 	}
 
 	for _, v := range files {
-		if v.Name() != "reports" {
+		if v.Name() != "reports" && v.IsDir() {
 			indices = append(indices, v.Name())
 		}
 	}
