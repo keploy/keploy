@@ -39,17 +39,58 @@ func DecodeTextRow(_ context.Context, _ *zap.Logger, data []byte, columns []*mys
 		}
 
 		switch mysql.FieldType(col.Type) {
-		case mysql.FieldTypeDate, mysql.FieldTypeTime, mysql.FieldTypeDateTime, mysql.FieldTypeTimestamp:
+		case mysql.FieldTypeDate:
 			data := data[offset+1:]
-
-			if dataLength < 4 || len(data) < int(dataLength) {
-				return nil, 0, fmt.Errorf("invalid timestamp data length")
+			if dataLength < 10 || len(data) < int(dataLength) {
+				return nil, 0, fmt.Errorf("invalid date data length")
 			}
 			dateStr := string(data[:dataLength])
-			layout := "2006-01-02 15:04:05"
+			layout := "2006-01-02"
 			t, err := time.Parse(layout, dateStr)
 			if err != nil {
+				return nil, 0, fmt.Errorf("failed to parse the date string")
+			}
+
+			year, month, day := t.Date()
+			row.Values = append(row.Values, mysql.ColumnEntry{
+				Type:  mysql.FieldType(col.Type),
+				Name:  col.Name,
+				Value: fmt.Sprintf("%04d-%02d-%02d", year, int(month), day),
+			})
+
+			offset += int(dataLength) + 1
+
+		case mysql.FieldTypeTime:
+			data := data[offset+1:]
+			if dataLength < 8 || len(data) < int(dataLength) {
+				return nil, 0, fmt.Errorf("invalid time data length")
+			}
+			timeStr := string(data[:dataLength])
+			layout := "15:04:05"
+			t, err := time.Parse(layout, timeStr)
+			if err != nil {
 				return nil, 0, fmt.Errorf("failed to parse the time string")
+			}
+
+			hour, minute, second := t.Clock()
+			row.Values = append(row.Values, mysql.ColumnEntry{
+				Type:  mysql.FieldType(col.Type),
+				Name:  col.Name,
+				Value: fmt.Sprintf("%02d:%02d:%02d", hour, minute, second),
+			})
+
+			offset += int(dataLength) + 1
+
+		case mysql.FieldTypeDateTime, mysql.FieldTypeTimestamp:
+			data := data[offset+1:]
+			if dataLength < 19 || len(data) < int(dataLength) {
+				return nil, 0, fmt.Errorf("invalid datetime/timestamp data length")
+			}
+			dateTimeStr := string(data[:dataLength])
+			layout := "2006-01-02 15:04:05"
+			t, err := time.Parse(layout, dateTimeStr)
+			if err != nil {
+				return nil, 0, fmt.Errorf("failed to parse the datetime/timestamp string")
 			}
 
 			year, month, day := t.Date()
@@ -61,6 +102,7 @@ func DecodeTextRow(_ context.Context, _ *zap.Logger, data []byte, columns []*mys
 			})
 
 			offset += int(dataLength) + 1
+
 		default:
 			value, _, n, err := utils.ReadLengthEncodedString(data[offset:])
 			if err != nil {
@@ -100,20 +142,52 @@ func EncodeTextRow(_ context.Context, _ *zap.Logger, row *mysql.TextRow, columns
 		}
 
 		switch row.Values[i].Type {
-		case mysql.FieldTypeDate, mysql.FieldTypeTime, mysql.FieldTypeDateTime, mysql.FieldTypeTimestamp:
-			formattedTime, ok := value.(string)
+		case mysql.FieldTypeDate:
+			dateValue, ok := value.(string)
 			if !ok {
-				return nil, fmt.Errorf("invalid value type for date/time field")
+				return nil, fmt.Errorf("invalid value type for date field")
 			}
 
-			// Write the length of the date/time value
-			if err := buf.WriteByte(byte(len(formattedTime))); err != nil {
-				return nil, fmt.Errorf("failed to write date/time length: %w", err)
+			// Write the length of the date value
+			if err := buf.WriteByte(byte(len(dateValue))); err != nil {
+				return nil, fmt.Errorf("failed to write date length: %w", err)
 			}
 
-			// Write the date/time value
-			if _, err := buf.WriteString(formattedTime); err != nil {
-				return nil, fmt.Errorf("failed to write date/time value: %w", err)
+			// Write the date value
+			if _, err := buf.WriteString(dateValue); err != nil {
+				return nil, fmt.Errorf("failed to write date value: %w", err)
+			}
+
+		case mysql.FieldTypeTime:
+			timeValue, ok := value.(string)
+			if !ok {
+				return nil, fmt.Errorf("invalid value type for time field")
+			}
+
+			// Write the length of the time value
+			if err := buf.WriteByte(byte(len(timeValue))); err != nil {
+				return nil, fmt.Errorf("failed to write time length: %w", err)
+			}
+
+			// Write the time value
+			if _, err := buf.WriteString(timeValue); err != nil {
+				return nil, fmt.Errorf("failed to write time value: %w", err)
+			}
+
+		case mysql.FieldTypeDateTime, mysql.FieldTypeTimestamp:
+			dateTimeValue, ok := value.(string)
+			if !ok {
+				return nil, fmt.Errorf("invalid value type for datetime/timestamp field")
+			}
+
+			// Write the length of the datetime/timestamp value
+			if err := buf.WriteByte(byte(len(dateTimeValue))); err != nil {
+				return nil, fmt.Errorf("failed to write datetime/timestamp length: %w", err)
+			}
+
+			// Write the datetime/timestamp value
+			if _, err := buf.WriteString(dateTimeValue); err != nil {
+				return nil, fmt.Errorf("failed to write datetime/timestamp value: %w", err)
 			}
 
 		default:
