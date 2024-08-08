@@ -37,6 +37,10 @@ func main() {
 	// }()
 	setVersion()
 	ctx := utils.NewCtx()
+
+	// Check for updates on every run
+	utils.CheckForUpdate(ctx)
+
 	start(ctx)
 	os.Exit(utils.ErrCode)
 }

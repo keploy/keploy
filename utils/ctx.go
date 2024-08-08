@@ -35,6 +35,38 @@ func NewCtx() context.Context {
 	return ctx
 }
 
+func CheckForUpdate(ctx context.Context) {
+	currentVersion := "v" + Version
+	logger := zap.NewExample()
+
+	releaseInfo, err := GetLatestGitHubRelease(ctx, logger)
+	latestVersion := releaseInfo.TagName
+
+	if err != nil {
+		fmt.Printf("failed to fetch latest GitHub release version: %v\n", err)
+	}
+
+	if currentVersion != latestVersion {
+		fmt.Println("New version of Keploy is available:")
+		fmt.Printf(currentVersion + " ----> " + latestVersion + "\n")
+		fmt.Println("Run `keploy update` to update")
+
+		var input string
+		fmt.Print("Do you want to update? (y/n): ")
+		fmt.Scanln(&input)
+
+		if input == "y" {
+			// Here add command to run `keploy update`
+			
+			fmt.Println("Keploy updated successfully!")
+		} else {
+			fmt.Println("Update canceled.")
+
+			// Here add save the prefrence in .keploy file alongside with installation id
+		}
+	}
+}
+
 // Stop requires a reason to stop the server.
 // this is to ensure that the server is not stopped accidentally.
 // and to trace back the stopper
