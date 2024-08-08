@@ -58,7 +58,11 @@ func (j *Javascript) PreProcess() (string, error) {
 		j.logger.Warn("coverage tool not found, skipping coverage caluclation. please install coverage tool using 'npm install -g nyc'")
 		return j.cmd, err
 	}
-	return "nyc --clean=$CLEAN " + j.cmd, nil
+	nycCmd := "nyc --clean=$CLEAN "
+	if disableLineCoverage {
+		nycCmd += "--reporter=none "
+	}
+	return nycCmd + j.cmd, nil
 }
 
 type StartTy struct {
