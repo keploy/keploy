@@ -62,9 +62,11 @@ func EncodeTextResultSet(ctx context.Context, logger *zap.Logger, resultSet *mys
 		}
 	}
 
-	// Write the EOF packet after columns
-	if _, err := buf.Write(resultSet.EOFAfterColumns); err != nil {
-		return nil, fmt.Errorf("failed to write EOF packet after columns for text resultset: %w", err)
+	// Write the EOF packet after columns if present
+	if len(resultSet.EOFAfterColumns) != 0 {
+		if _, err := buf.Write(resultSet.EOFAfterColumns); err != nil {
+			return nil, fmt.Errorf("failed to write EOF packet after columns for text resultset: %w", err)
+		}
 	}
 
 	// Encode each row data packet

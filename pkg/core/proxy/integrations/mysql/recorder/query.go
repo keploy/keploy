@@ -314,6 +314,11 @@ func handleTextResultSet(ctx context.Context, logger *zap.Logger, clientConn, de
 	// Read the column count packet
 	colCount := textResultSet.ColumnCount
 
+	sg, ok := decodeCtx.ServerGreetings.Load(clientConn)
+	if !ok {
+		return textResultSetPkt, fmt.Errorf("Server Greetings not found")
+	}
+
 	// Read the column definition packets
 	for i := uint64(0); i < colCount; i++ {
 		// Read the column definition packet
@@ -341,29 +346,32 @@ func handleTextResultSet(ctx context.Context, logger *zap.Logger, clientConn, de
 		textResultSet.Columns = append(textResultSet.Columns, column)
 	}
 
-	// Read the EOF packet for column definition
-	eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
-	if err != nil {
-		if err != io.EOF {
-			utils.LogError(logger, err, "failed to read EOF packet for column definition")
+	if sg.CapabilityFlags == 0&mysql.CLIENT_DEPRECATE_EOF {
+
+		// Read the EOF packet for column definition
+		eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+		if err != nil {
+			if err != io.EOF {
+				utils.LogError(logger, err, "failed to read EOF packet for column definition")
+			}
+			return nil, err
 		}
-		return nil, err
+
+		// Write the EOF packet for column definition to the client
+		_, err = clientConn.Write(eofData)
+		if err != nil {
+			utils.LogError(logger, err, "failed to write EOF packet for column definition to the client")
+			return nil, err
+		}
+
+		// Validate the EOF packet for column definition
+		if !mysqlUtils.IsEOFPacket(eofData) {
+			return nil, fmt.Errorf("expected EOF packet for column definition, got %v, while handling textResultSet", eofData)
+		}
+
+		textResultSet.EOFAfterColumns = eofData
+
 	}
-
-	// Write the EOF packet for column definition to the client
-	_, err = clientConn.Write(eofData)
-	if err != nil {
-		utils.LogError(logger, err, "failed to write EOF packet for column definition to the client")
-		return nil, err
-	}
-
-	// Validate the EOF packet for column definition
-	if !mysqlUtils.IsEOFPacket(eofData) {
-		return nil, fmt.Errorf("expected EOF packet for column definition, got %v, while handling textResultSet", eofData)
-	}
-
-	textResultSet.EOFAfterColumns = eofData
-
 	// Read the row data packets
 rowLoop:
 	for {

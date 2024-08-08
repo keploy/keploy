@@ -160,11 +160,17 @@ func ReadLengthEncodedInteger(b []byte) (num uint64, isNull bool, n int) {
 }
 
 func IsEOFPacket(data []byte) bool {
-	if data[0] != 5 {
-		return false // The payload length of the header should be 5
+	if len(data) < 5 {
+		return false // Packet is too short to be valid
 	}
-	data = data[4:] // Skip the header
-	return len(data) > 4 && bytes.Contains(data[0:5], []byte{0xfe, 0x00, 0x00})
+
+	// Check if the first byte is 5 or 7
+	if data[0] != 5 && data[0] != 7 {
+		return false
+	}
+
+	// Check if the packet contains the EOF marker 0xFE
+	return len(data) > 0 && data[4] == 0xFE
 }
 
 func IsERRPacket(data []byte) bool {
