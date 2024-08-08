@@ -18,18 +18,20 @@ import (
 
 // contractService implements the Service interface
 type contractService struct {
-	logger *zap.Logger
-	testDB TestDB
-	mockDB MockDB
-	config *config.Config
+	logger    *zap.Logger
+	testDB    TestDB
+	mockDB    MockDB
+	openAPIDB OpenAPIDB
+	config    *config.Config
 }
 
-func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, config *config.Config) Service {
+func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, openAPIDB OpenAPIDB, config *config.Config) Service {
 	return &contractService{
-		logger: logger,
-		testDB: testDB,
-		mockDB: mockDB,
-		config: config,
+		logger:    logger,
+		testDB:    testDB,
+		mockDB:    mockDB,
+		openAPIDB: openAPIDB,
+		config:    config,
 	}
 }
 
@@ -232,7 +234,7 @@ func (s *contractService) GenerateMocksSchemas(ctx context.Context, services []s
 	for _, entry := range entries {
 		if entry.IsDir() && strings.Contains(entry.Name(), "test") {
 			testSetID := entry.Name()
-			httpMocks, err := s.mockDB.GetHTTPMocks(ctx, testSetID, keployFolder)
+			httpMocks, err := s.mockDB.GetHTTPMocks(ctx, testSetID, keployFolder, "mocks")
 			if err != nil {
 				s.logger.Error("Failed to get HTTP mocks", zap.String("testSetID", testSetID), zap.Error(err))
 				return err
@@ -282,7 +284,7 @@ func (s *contractService) GenerateMocksSchemas(ctx context.Context, services []s
 }
 func (s *contractService) GenerateTestsSchemas(ctx context.Context, selectedTests []string, genAllTests bool) error {
 	keployFolder := "./keploy/"
-	s.testDB.ChangeTcPath()
+	s.testDB.ChangeTcPath(keployFolder)
 	entries, err := os.ReadDir(keployFolder)
 	if err != nil {
 		s.logger.Error("Failed to read directory", zap.String("directory", keployFolder), zap.Error(err))
@@ -319,7 +321,18 @@ func (s *contractService) GenerateTestsSchemas(ctx context.Context, selectedTest
 	return nil
 }
 
-func (s *contractService) Generate(ctx context.Context, genAllTests bool, genAllMocks bool) error {
+func (s *contractService) Generate(ctx context.Context) error {
+	serviceStr := s.config.Contract.Services
+	testStr := s.config.Contract.Tests
+	var genAllMocks bool = true
+	var genAllTests bool = true
+
+	if len(serviceStr) != 0 {
+		genAllMocks = false
+	}
+	if len(testStr) != 0 {
+		genAllTests = false
+	}
 	fmt.Println("HELLO IN CONTRACT SERVICE")
 	if s.CheckConfigFile() != nil {
 		s.logger.Error("Error in checking config file while generating")
@@ -459,7 +472,7 @@ func (s *contractService) DownloadMocks(ctx context.Context, path string) error 
 			if !mockFolder.IsDir() || !strings.Contains(mockFolder.Name(), "test") {
 				continue
 			}
-			httpMocks, err := s.mockDB.GetHTTPMocks(ctx, mockFolder.Name(), filepath.Join(cprFolder, entry.Name(), "keploy"))
+			httpMocks, err := s.mockDB.GetHTTPMocks(ctx, mockFolder.Name(), filepath.Join(cprFolder, entry.Name(), "keploy"), "mocks")
 			if err != nil {
 				s.logger.Error("Failed to get HTTP mocks", zap.String("testSetID", mockFolder.Name()), zap.Error(err))
 				return err
@@ -497,7 +510,7 @@ func (s *contractService) DownloadMocks(ctx context.Context, path string) error 
 	return nil
 }
 
-func (s *contractService) Download(ctx context.Context, driven string) error {
+func (s *contractService) Download(ctx context.Context) error {
 
 	if s.CheckConfigFile() != nil {
 		s.logger.Error("Error in checking config file while downloading")
@@ -510,17 +523,119 @@ func (s *contractService) Download(ctx context.Context, driven string) error {
 		s.logger.Error("Error in validating path", zap.Error(err))
 		return fmt.Errorf("Error in validating path")
 	}
-
+	driven := s.config.Contract.Driven
 	if driven == "provider" || driven == "server" {
-		err = s.DownloadTests(ctx, path)
+		err = s.DownloadMocks(ctx, path)
 
 	} else if driven == "consumer" || driven == "client" {
+		err = s.DownloadTests(ctx, path)
 
-		err = s.DownloadMocks(ctx, path)
 	}
 	if err != nil {
 		return err
 	}
+	return nil
+}
+func (s *contractService) ServerDrivenValidation(ctx context.Context) error {
+	// Loop over Mocks in DOwnload folder and compare them with the tests in the keploy schema folder
+	downloadTestsFolder := filepath.Join("./Download", "Mocks")
+	entries, err := os.ReadDir(downloadTestsFolder)
+	if err != nil {
+		s.logger.Error("Failed to read directory", zap.String("directory", downloadTestsFolder), zap.Error(err))
+		return err
+	}
+	// Read the test from the schema folder
+	testsFolder := filepath.Join("./keploy", "schema", "tests")
+	s.openAPIDB.ChangeTcPath(testsFolder)
+	testSetIDs, err := os.ReadDir(testsFolder)
+	if err != nil {
+		s.logger.Error("Failed to read directory", zap.String("directory", testsFolder), zap.Error(err))
+		return err
+	}
+	var testsMapping map[string][]*models.OpenAPI = make(map[string][]*models.OpenAPI)
+	var tests []*models.OpenAPI
+	for _, testSetID := range testSetIDs {
+		if !testSetID.IsDir() {
+			continue
+		}
+		tests, err = s.openAPIDB.GetTestCasesSchema(ctx, testSetID.Name())
+		if err != nil {
+			s.logger.Error("Failed to get test cases", zap.String("testSetID", testSetID.Name()), zap.Error(err))
+			return err
+		}
+		testsMapping[testSetID.Name()] = tests
+
+	}
+	passCnt := 0
+	failCnt := 0
+	var failedSummary map[string][]string = make(map[string][]string)
+	var sucessSummary map[string][]string = make(map[string][]string)
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			serviceFolder := filepath.Join(downloadTestsFolder, entry.Name())
+			fmt.Println("Self : ", s.config.Contract.Self, "---> Validate with : ", entry.Name())
+			// Loop over the tests in the service folder
+			mockSetIDs, err := os.ReadDir(serviceFolder)
+			if err != nil {
+				s.logger.Error("Failed to read directory", zap.String("directory", serviceFolder), zap.Error(err))
+				return err
+			}
+			// mockSetID--> test-set-0,test-set-1,etc
+			for _, mockSetID := range mockSetIDs {
+				if !mockSetID.IsDir() {
+					continue
+				}
+				mocks, err := s.openAPIDB.GetMocksSchemas(ctx, mockSetID.Name(), serviceFolder, "schema")
+				if err != nil {
+					s.logger.Error("Failed to get HTTP mocks", zap.String("testSetID", mockSetID.Name()), zap.Error(err))
+					return err
+				}
+				for _, mock := range mocks {
+					for testSetID, tests := range testsMapping {
+
+						for _, test := range tests {
+							// Compare the two models
+							pass, err := match2(*mock, *test, testSetID, mockSetID.Name(), s.logger)
+							if err != nil {
+								s.logger.Error("Error in matching the two models", zap.Error(err))
+								fmt.Println("test-set-id: ", testSetID, ", mock-set-id: ", mockSetID.Name())
+								return err
+							}
+							if pass {
+								sucessSummary[entry.Name()] = append(sucessSummary[entry.Name()], test.Info.Title+" ( "+testSetID+" )"+"  with "+mock.Info.Title+" ( "+mockSetID.Name()+" )")
+
+								passCnt++
+							} else {
+								failedSummary[entry.Name()] = append(failedSummary[entry.Name()], test.Info.Title+" ( "+testSetID+" )"+"  with "+mock.Info.Title+" ( "+mockSetID.Name()+" )")
+
+								failCnt++
+							}
+
+						}
+					}
+				}
+
+			}
+		}
+	}
+	fmt.Println("Pass Count: ", passCnt, " Fail Count: ", failCnt)
+	fmt.Println("Summary  (failed): ")
+	for service, sum := range failedSummary {
+		fmt.Println("Service : ", service)
+		for _, s := range sum {
+			fmt.Println(s)
+		}
+	}
+	fmt.Println("----------------------------------------------------------")
+	fmt.Println("Summary  (success): ")
+	for service, sum := range sucessSummary {
+		fmt.Println("Service : ", service)
+		for _, s := range sum {
+			fmt.Println(s)
+		}
+	}
+
 	return nil
 }
 func (s *contractService) Validate(ctx context.Context) error {
@@ -528,14 +643,18 @@ func (s *contractService) Validate(ctx context.Context) error {
 		s.logger.Error("Error in checking config file while validating")
 		return fmt.Errorf("Error in checking config file while validating")
 	}
-	fmt.Printf("Validate contract for services: %v\n", s.config.Contract.Services)
-	fmt.Printf("ctx: %v\n", ctx)
+	if s.config.Contract.Driven == "server" || s.config.Contract.Driven == "provider" {
+		err := s.ServerDrivenValidation(ctx)
+		if err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
 func (s *contractService) CheckConfigFile() error {
 	servicesMapping := s.config.Contract.ServicesMapping
-	fmt.Println("Services Mapping is : ", servicesMapping)
+	// fmt.Println("Services Mapping is : ", servicesMapping)
 	// Check if the size of servicesMapping is less than 1
 	if len(servicesMapping) < 1 {
 		s.logger.Error("services mapping must contain at least 1 services")

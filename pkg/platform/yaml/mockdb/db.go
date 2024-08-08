@@ -326,64 +326,23 @@ func (ys *MockYaml) filterByTimeStamp(_ context.Context, m []*models.Mock, after
 	}
 	return filteredMocks, unfilteredMocks
 }
-func (ys *MockYaml) GetHTTPMocks(ctx context.Context, testSetID string, mockPath string) ([]*models.HTTPSchema2, error) {
+func (ys *MockYaml) GetHTTPMocks(ctx context.Context, testSetID string, mockPath string, mockFileName string) ([]*models.HTTPSchema2, error) {
 
-	var tcsMocks = make([]*models.Mock, 0)
-	mockFileName := "mocks"
 	if ys.MockName != "" {
-		mockFileName = ys.MockName
+		ys.MockName = mockFileName
 	}
+	ys.MockPath = mockPath
 
-	path := filepath.Join(mockPath, testSetID)
-	mockPath, err := yaml.ValidatePath(path + "/" + mockFileName + ".yaml")
+	tcsMocks, err := ys.GetUnFilteredMocks(ctx, testSetID, time.Time{}, time.Time{})
 	if err != nil {
 		return nil, err
 	}
 
-	if _, err := os.Stat(mockPath); err == nil {
-		var mockYamls []*yaml.NetworkTrafficDoc
-		data, err := yaml.ReadFile(ctx, ys.Logger, path, mockFileName)
-		if err != nil {
-			utils.LogError(ys.Logger, err, "failed to read the mocks from config yaml", zap.Any("session", filepath.Base(path)))
-			return nil, err
-		}
-		dec := yamlLib.NewDecoder(bytes.NewReader(data))
-		for {
-			var doc *yaml.NetworkTrafficDoc
-			err := dec.Decode(&doc)
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
-				return nil, fmt.Errorf("failed to decode the yaml file documents. error: %v", err.Error())
-			}
-			mockYamls = append(mockYamls, doc)
-		}
-		mocks, err := decodeMocks(mockYamls, ys.Logger)
-		if err != nil {
-			utils.LogError(ys.Logger, err, "failed to decode the config mocks from yaml docs", zap.Any("session", filepath.Base(path)))
-			return nil, err
-		}
-
-		for _, mock := range mocks {
-			isFilteredMock := true
-			switch mock.Kind {
-			case "Generic":
-				isFilteredMock = false
-			case "Postgres":
-				isFilteredMock = false
-			case "Http":
-				isFilteredMock = true
-			case "Redis":
-				isFilteredMock = false
-			}
-			if isFilteredMock {
-				tcsMocks = append(tcsMocks, mock)
-			}
-		}
-	}
 	var httpMocks []*models.HTTPSchema2
 	for _, mock := range tcsMocks {
+		if mock.Kind != "Http" {
+			continue
+		}
 		var httpMock models.HTTPSchema2
 		httpMock.Kind = mock.GetKind()
 		httpMock.Name = mock.Name

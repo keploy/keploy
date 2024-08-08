@@ -17,6 +17,7 @@ import (
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb/testset"
 	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
+	"go.keploy.io/server/v2/pkg/platform/yaml/openAPIdb"
 	reportdb "go.keploy.io/server/v2/pkg/platform/yaml/reportdb"
 	testdb "go.keploy.io/server/v2/pkg/platform/yaml/testdb"
 	"go.keploy.io/server/v2/pkg/service/contract"
@@ -38,7 +39,7 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	if err != nil {
 		return nil, err
 	}
-	contractSvc := contract.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, cfg)
+	contractSvc := contract.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlOpenAPIDb, cfg)
 	recordSvc := record.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, cfg)
 	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, cfg)
 
@@ -97,12 +98,14 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 	instrumentation := core.New(logger, h, p, t, client)
 	testDB := testdb.New(logger, c.Path)
 	mockDB := mockdb.New(logger, c.Path, "")
+	openAPIdb := openAPIdb.New(logger, c.Path)
 	reportDB := reportdb.New(logger, c.Path+"/reports")
 	testSetDb := testset.New[*models.TestSet](logger, c.Path)
 	return &CommonInternalService{
 		commonPlatformServices{
 			YamlTestDB:    testDB,
 			YamlMockDb:    mockDB,
+			YamlOpenAPIDb: openAPIdb,
 			YamlReportDb:  reportDB,
 			YamlTestSetDB: testSetDb,
 		},

@@ -165,6 +165,8 @@ func (ts *TestYaml) DeleteTestSet(ctx context.Context, testSetID string) error {
 	}
 	return nil
 }
-func (ts *TestYaml) ChangeTcPath() {
-	ts.TcsPath = "./keploy/"
+func (ts *TestYaml) ChangeTcPath(path string) {
+
+	// ts.TcsPath = "./keploy/"
+	ts.TcsPath = path
 }

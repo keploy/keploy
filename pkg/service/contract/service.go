@@ -8,16 +8,21 @@ import (
 
 // Service defines the contract service interface
 type Service interface {
-	Generate(ctx context.Context, genAllTests bool, genAllMocks bool) error
-	Download(_ context.Context, driven string) error
+	Generate(ctx context.Context) error
+	Download(ctx context.Context) error
 	Validate(ctx context.Context) error
 	CheckConfigFile() error
 }
 
 type TestDB interface {
 	GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error)
-	ChangeTcPath()
+	ChangeTcPath(path string)
 }
 type MockDB interface {
-	GetHTTPMocks(ctx context.Context, testSetID string, mockPath string) ([]*models.HTTPSchema2, error)
+	GetHTTPMocks(ctx context.Context, testSetID string, mockPath string, mockFileName string) ([]*models.HTTPSchema2, error)
+}
+type OpenAPIDB interface {
+	GetTestCasesSchema(ctx context.Context, testSetID string) ([]*models.OpenAPI, error)
+	GetMocksSchemas(ctx context.Context, testSetID string, mockPath string, mockFileName string) ([]*models.OpenAPI, error)
+	ChangeTcPath(path string)
 }

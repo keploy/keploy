@@ -234,7 +234,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			}
 			cmd.Flags().Bool("download", c.cfg.Contract.Download, "Specify whether to download contracts or not")
 			cmd.Flags().Bool("generate", c.cfg.Contract.Generate, "Specify")
-			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the path to validate contracts")
+			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the driven flag to validate contracts")
 
 		} else {
 			cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")

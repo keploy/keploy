@@ -48,18 +48,8 @@ func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 				return nil
 			}
 			// Extract services from the flag
-			serviceStr, _ := cmd.Flags().GetStringSlice("services")
-			testStr, _ := cmd.Flags().GetStringSlice("tests")
-			var genAllMocks bool = true
-			var genAllTests bool = true
 
-			if len(serviceStr) != 0 {
-				genAllMocks = false
-			}
-			if len(testStr) != 0 {
-				genAllTests = false
-			}
-			err = contract.Generate(ctx, genAllTests, genAllMocks)
+			err = contract.Generate(ctx)
 
 			if err != nil {
 				utils.LogError(logger, err, "failed to generate contract")
@@ -99,9 +89,7 @@ func Download(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 				utils.LogError(logger, nil, "service doesn't satisfy contract service interface")
 				return nil
 			}
-			// Extract services from the flag
-			driven, _ := cmd.Flags().GetString("driven")
-			err = contract.Download(ctx, driven)
+			err = contract.Download(ctx)
 
 			if err != nil {
 				utils.LogError(logger, err, "failed to download contract")
