@@ -18,6 +18,7 @@ import (
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
+	userDb "go.keploy.io/server/v2/pkg/platform/yaml/configdb/user"
 	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/utils"
 	"go.keploy.io/server/v2/utils/log"
@@ -416,6 +417,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 	}
 
+	userDb := userDb.New(c.logger, c.cfg)
+	var err error
+	c.cfg.InstallationID, err = userDb.GetInstallationID(ctx)
+	if err != nil {
+		errMsg := "failed to get installation id"
+		utils.LogError(c.logger, err, errMsg)
+		return errors.New(errMsg)
+	}
+
 	if c.cfg.EnableTesting {
 		// Add mode to logger to debug the keploy during testing
 		logger, err := log.AddMode(cmd.Name())
@@ -626,7 +636,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg config.Config) error {
 	defaultCfg = c.UpdateConfigData(defaultCfg)
-	toolSvc := tools.NewTools(c.logger, nil)
+	toolSvc := tools.NewTools(c.logger, nil, nil)
 	configData := defaultCfg
 	configDataBytes, err := yaml.Marshal(configData)
 	if err != nil {
