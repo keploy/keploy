@@ -34,7 +34,10 @@ type Config struct {
 	KeployContainer       string       `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
 	KeployNetwork         string       `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
 	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
-	InCi                  bool         `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
+
+	Contract Contract `json:"contract" yaml:"contract" mapstructure:"contract"`
+
+	InCi bool `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
 }
 
 type UtGen struct {
@@ -61,6 +64,16 @@ type ReRecord struct {
 	Filters       []Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
 	Host          string   `json:"host" yaml:"host" mapstructure:"host"`
 	Port          uint32   `json:"port" yaml:"port" mapstructure:"port"`
+}
+type Contract struct {
+	Services        []string            `json:"services" yaml:"services" mapstructure:"services"`
+	Tests           []string            `json:"tests" yaml:"tests" mapstructure:"tests"`
+	Path            string              `json:"path" yaml:"path" mapstructure:"path"`
+	Download        bool                `json:"download" yaml:"download" mapstructure:"download"`
+	Generate        bool                `json:"generate" yaml:"generate" mapstructure:"generate"`
+	Driven          string              `json:"driven" yaml:"driven" mapstructure:"driven"`
+	ServicesMapping map[string][]string `json:"servicesMapping" yaml:"servicesMapping" mapstructure:"servicesMapping"`
+	Self            string              `json:"self" yaml:"self" mapstructure:"self"`
 }
 
 type Normalize struct {
@@ -163,6 +176,14 @@ func SetSelectedTests(conf *Config, testSets []string) {
 	for _, testSet := range testSets {
 		conf.Test.SelectedTests[testSet] = []string{}
 	}
+}
+func SetSelectedServices(conf *Config, services []string) {
+	// string is "s1,s2" so i want to get s1,s2
+	conf.Contract.Services = services
+}
+func SetSelectedContractTests(conf *Config, tests []string) {
+
+	conf.Contract.Tests = tests
 }
 
 func SetSelectedTestsNormalize(conf *Config, value string) error {
