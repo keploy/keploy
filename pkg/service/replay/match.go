@@ -460,14 +460,8 @@ type DiffsPrinter struct {
 	headNoise             map[string][]string
 	hasarrayIndexMismatch bool
 	text                  string
-	requestExp            string
-	requestAct            string
-	methodExp             string
-	methodAct             string
 	typeExp               string
 	typeAct               string
-	pathExp               string
-	pathAct               string
 }
 
 func (d *DiffsPrinter) HasarrayIndexMismatch(has bool) {
@@ -475,13 +469,7 @@ func (d *DiffsPrinter) HasarrayIndexMismatch(has bool) {
 }
 
 func NewDiffsPrinter(testCase string) DiffsPrinter {
-	return DiffsPrinter{testCase, "", "", map[string]string{}, map[string]string{}, "", "", map[string][]string{}, map[string][]string{}, false, "", "", "", "", "", "", "", "", ""}
-}
-func (d *DiffsPrinter) PushMethodDiff(exp, act string) {
-	d.methodExp, d.methodAct = exp, act
-}
-func (d *DiffsPrinter) PushPathDiff(exp, act string) {
-	d.pathExp, d.pathAct = exp, act
+	return DiffsPrinter{testCase, "", "", map[string]string{}, map[string]string{}, "", "", map[string][]string{}, map[string][]string{}, false, "", "", ""}
 }
 func (d *DiffsPrinter) PushTypeDiff(exp, act string) {
 	d.typeExp, d.typeAct = exp, act
@@ -494,9 +482,7 @@ func (d *DiffsPrinter) PushFooterDiff(key string) {
 	d.hasarrayIndexMismatch = true
 	d.text = key
 }
-func (d *DiffsPrinter) PushRequestDiff(exp, act string) {
-	d.requestExp, d.requestAct = exp, act
-}
+
 func (d *DiffsPrinter) PushHeaderDiff(exp, act, key string, noise map[string][]string) {
 	d.headerExp[key], d.headerAct[key], d.headNoise = exp, act, noise
 }
@@ -587,31 +573,10 @@ func (d *DiffsPrinter) TableWriter(diffs []string) error {
 	return nil
 }
 func (d *DiffsPrinter) RenderAppender() error {
+	//Only show difference for the response body
 	diffs := []string{}
 	pass := true
 
-	if d.pathExp != d.pathAct {
-		diffs = append(diffs, sprintDiff(d.pathExp, d.pathAct, "path"))
-		pass = false
-	}
-	if !pass {
-		err := d.TableWriter(diffs)
-		if err != nil {
-			return err
-		}
-		return nil
-	}
-	if d.methodExp != d.methodAct {
-		diffs = append(diffs, sprintDiff(d.methodExp, d.methodAct, "method"))
-		pass = false
-	}
-	if !pass {
-		err := d.TableWriter(diffs)
-		if err != nil {
-			return err
-		}
-		return nil
-	}
 	if d.typeExp != d.typeAct {
 		diffs = append(diffs, sprintDiff(d.typeExp, d.typeAct, "request body type"))
 		pass = false
@@ -623,40 +588,6 @@ func (d *DiffsPrinter) RenderAppender() error {
 		}
 		return nil
 	}
-
-	if d.statusExp != d.statusAct {
-		diffs = append(diffs, sprintDiff(d.statusExp, d.statusAct, "status"))
-		pass = false
-	}
-	if !pass {
-		err := d.TableWriter(diffs)
-		if err != nil {
-			return err
-		}
-		return nil
-	}
-	if len(d.requestExp) != 0 || len(d.requestAct) != 0 {
-		pass = false
-		rE, rA := []byte(d.requestExp), []byte(d.requestAct)
-		if json.Valid(rE) && json.Valid(rA) {
-			difference, err := sprintJSONDiff(rE, rA, "request", nil)
-			if err != nil {
-				difference = sprintDiff(d.requestExp, d.requestAct, "request")
-			}
-			diffs = append(diffs, difference)
-		} else {
-			diffs = append(diffs, sprintDiff(d.requestExp, d.requestAct, "request"))
-		}
-	}
-	if !pass {
-		err := d.TableWriter(diffs)
-		if err != nil {
-			return err
-		}
-		return nil
-	}
-
-	// diffs = append(diffs, sprintDiffHeader(d.headerExp, d.headerAct))
 
 	if len(d.bodyExp) != 0 || len(d.bodyAct) != 0 {
 		pass = false

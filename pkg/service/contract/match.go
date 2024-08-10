@@ -30,6 +30,8 @@ type JSONComparisonResultWrapper struct {
 	Differences []string `json:"differences"`
 }
 
+const NOTCANDIDATE = -1.0
+
 func findOperation(item models.PathItem) (*models.Operation, string) {
 	if item.Get != nil {
 		return item.Get, "GET"
@@ -48,20 +50,18 @@ func findOperation(item models.PathItem) (*models.Operation, string) {
 	}
 	return nil, ""
 }
-func compareOperationTypes(mockOperationType, testOperationType, testTitle, testSetID, mockTitle, mockSetID string, logDiffs replaySvc.DiffsPrinter, newLogger *pp.PrettyPrinter, logger *zap.Logger) (bool, error) {
+func compareOperationTypes(mockOperationType, testOperationType string) (bool, error) {
 	pass := true
 	if mockOperationType != testOperationType {
 		pass = false
-		logs := newLogger.Sprintf("Contract Check failed for test: %s (%s) / mock: %s (%s) \n\n--------------------------------------------------------------------\n\n", testTitle, testSetID, mockTitle, mockSetID)
-		logDiffs.PushMethodDiff(fmt.Sprint(testOperationType), fmt.Sprint(mockOperationType))
-		if err := printAndRenderLogs(logs, newLogger, logDiffs, logger); err != nil {
-			return false, err
-		}
+		return pass, nil
+
 	}
 	return pass, nil
 }
 func compareRequestBodies(mockOperation, testOperation *models.Operation, logDiffs replaySvc.DiffsPrinter, newLogger *pp.PrettyPrinter, logger *zap.Logger, testName, mockName, testSetID, mockSetID string) (bool, error) {
 	pass := false
+	var score float64
 	mockRequestBodyStr, testRequestBodyStr, err := marshalRequestBodies(mockOperation, testOperation)
 	if err != nil {
 		return false, err
@@ -73,65 +73,65 @@ func compareRequestBodies(mockOperation, testOperation *models.Operation, logDif
 	}
 
 	if validatedJSON.IsIdentical() {
-		if pass, err = handleJSONDiff(validatedJSON, logDiffs, newLogger, logger, testName, mockName, testSetID, mockSetID, mockRequestBodyStr, testRequestBodyStr, "request"); err != nil {
+		if score, pass, err = handleJSONDiff(validatedJSON, logDiffs, newLogger, logger, testName, mockName, testSetID, mockSetID, mockRequestBodyStr, testRequestBodyStr, "request", 0); err != nil {
 			return false, err
+		}
+		if score == NOTCANDIDATE {
+			return false, nil
 		}
 
 	} else {
 		pass = false
-		logDiffs.PushTypeDiff(fmt.Sprint(reflect.TypeOf(validatedJSON.Expected())), fmt.Sprint(reflect.TypeOf(validatedJSON.Actual())))
-		logs := newLogger.Sprintf("Contract Check failed for test: %s (%s) / mock: %s (%s) \n\n--------------------------------------------------------------------\n\n", testName, testSetID, mockName, mockSetID)
+		return pass, nil
 
-		if err := printAndRenderLogs(logs, newLogger, logDiffs, logger); err != nil {
-			return false, err
-		}
 	}
 	return pass, nil
 }
-func compareResponseBodies(status string, mockOperation, testOperation *models.Operation, logDiffs replaySvc.DiffsPrinter, newLogger *pp.PrettyPrinter, logger *zap.Logger, testName, mockName, testSetID, mockSetID string) (bool, error) {
-	pass := false
+func compareResponseBodies(status string, mockOperation, testOperation *models.Operation, logDiffs replaySvc.DiffsPrinter, newLogger *pp.PrettyPrinter, logger *zap.Logger, testName, mockName, testSetID, mockSetID string, mode int) (float64, bool, error) {
+	pass := true
+	overallScore := 0.0
+
+	differencesCount := 0.0
 	if _, ok := testOperation.Responses[status]; ok {
 		mockResponseBodyStr, testResponseBodyStr, err := marshalResponseBodies(status, mockOperation, testOperation)
 		if err != nil {
-			return false, err
+			return differencesCount, false, err
 		}
-
+		overallScore = float64(len(testOperation.Responses[status].Content["application/json"].Schema.Properties))
 		validatedJSON, err := replaySvc.ValidateAndMarshalJSON(logger, &mockResponseBodyStr, &testResponseBodyStr)
 		if err != nil {
-			return false, err
+			return differencesCount, false, err
 		}
 
 		if validatedJSON.IsIdentical() {
-			if pass, err = handleJSONDiff(validatedJSON, logDiffs, newLogger, logger, testName, mockName, testSetID, mockSetID, mockResponseBodyStr, testResponseBodyStr, "response"); err != nil {
-				return false, err
+			if differencesCount, _, err = handleJSONDiff(validatedJSON, logDiffs, newLogger, logger, testName, mockName, testSetID, mockSetID, mockResponseBodyStr, testResponseBodyStr, "response", mode); err != nil {
+				return differencesCount, false, err
 			}
 		} else {
-			pass = false
-			logDiffs.PushTypeDiff(fmt.Sprint(reflect.TypeOf(validatedJSON.Expected())), fmt.Sprint(reflect.TypeOf(validatedJSON.Actual())))
-			logs := newLogger.Sprintf("Contract Check failed for test: %s (%s) / mock: %s (%s) \n\n--------------------------------------------------------------------\n\n", testName, testSetID, mockName, mockSetID)
+			differencesCount = overallScore
 
-			if err := printAndRenderLogs(logs, newLogger, logDiffs, logger); err != nil {
-				return false, err
+			if mode == 1 {
+				logDiffs.PushTypeDiff(fmt.Sprint(reflect.TypeOf(validatedJSON.Expected())), fmt.Sprint(reflect.TypeOf(validatedJSON.Actual())))
+				logs := newLogger.Sprintf("Contract Check failed for test: %s (%s) / mock: %s (%s) \n\n--------------------------------------------------------------------\n\n", testName, testSetID, mockName, mockSetID)
+
+				if err := printAndRenderLogs(logs, newLogger, logDiffs, logger); err != nil {
+					return differencesCount, false, err
+				}
 			}
 		}
 	} else {
 		pass = false
-		var testStatusCode string
-		for status := range testOperation.Responses {
-			testStatusCode = status
-			break
-		}
-		logDiffs.PushStatusDiff(fmt.Sprint(testStatusCode), fmt.Sprint(status))
-		logs := newLogger.Sprintf("Contract Check failed for test: %s (%s) / mock: %s (%s) \n\n--------------------------------------------------------------------\n\n", testName, testSetID, mockName, mockSetID)
+		differencesCount = -1
 
-		if err := printAndRenderLogs(logs, newLogger, logDiffs, logger); err != nil {
-			return false, err
-		}
 	}
-	return pass, nil
+	return differencesCount / overallScore, pass, nil
 }
-func match2(mock, test models.OpenAPI, testSetID string, mockSetID string, logger *zap.Logger) (bool, error) {
+func match2(mock, test models.OpenAPI, testSetID string, mockSetID string, logger *zap.Logger, mode int) (float64, bool, error) {
 	pass := false
+	if mode == 1 {
+		logger.Info("Matching test and mock", zap.String("test", test.Info.Title+" ("+testSetID+")"), zap.String("mock", mock.Info.Title))
+	}
+	candidateScore := -1.0
 	newLogger := pp.New()
 	newLogger.WithLineInfo = false
 	newLogger.SetColorScheme(models.GetFailingColorScheme())
@@ -142,18 +142,20 @@ func match2(mock, test models.OpenAPI, testSetID string, mockSetID string, logge
 		if testItem, found := test.Paths[path]; found {
 			mockOperation, mockOperationType := findOperation(mockItem)
 			testOperation, testOperationType := findOperation(testItem)
-			if pass, err = compareOperationTypes(mockOperationType, testOperationType, test.Info.Title, testSetID, mock.Info.Title, mockSetID, logDiffs, newLogger, logger); err != nil {
-				return false, err
-			}
-			if !pass {
-				continue
-			}
+			if mode == 0 {
+				if pass, err = compareOperationTypes(mockOperationType, testOperationType); err != nil {
+					return candidateScore, false, err
+				}
+				if !pass {
+					continue
+				}
 
-			if pass, err = compareRequestBodies(mockOperation, testOperation, logDiffs, newLogger, logger, test.Info.Title, mock.Info.Title, testSetID, mockSetID); err != nil {
-				return false, err
-			}
-			if !pass {
-				continue
+				if pass, err = compareRequestBodies(mockOperation, testOperation, logDiffs, newLogger, logger, test.Info.Title, mock.Info.Title, testSetID, mockSetID); err != nil {
+					return candidateScore, false, err
+				}
+				if !pass {
+					continue
+				}
 			}
 			var statusCode string
 			for status := range mockOperation.Responses {
@@ -161,28 +163,28 @@ func match2(mock, test models.OpenAPI, testSetID string, mockSetID string, logge
 				break
 
 			}
-			if pass, err = compareResponseBodies(statusCode, mockOperation, testOperation, logDiffs, newLogger, logger, test.Info.Title, mock.Info.Title, testSetID, mockSetID); err != nil {
-				return false, err
+
+			if candidateScore, pass, err = compareResponseBodies(statusCode, mockOperation, testOperation, logDiffs, newLogger, logger, test.Info.Title, mock.Info.Title, testSetID, mockSetID, mode); err != nil {
+				return candidateScore, false, err
 			}
 
 		} else {
-			if err := handleMissingPath(path, test, mock, testSetID, mockSetID, logDiffs, newLogger, logger); err != nil {
-				return false, err
-			}
+			pass = false
+
 		}
 
 	}
-	if pass {
+	if pass && mode == 1 {
 		log2 := newLogger.Sprintf("Contract Check passed for test: %s / mock: %s \n\n--------------------------------------------------------------------\n\n", test.Info.Title, mock.Info.Title)
 		_, err := newLogger.Printf(log2)
 		if err != nil {
 			utils.LogError(logger, err, "failed to print the logs")
-			return false, err
+			return candidateScore, false, err
 		}
 
 	}
 
-	return pass, nil
+	return candidateScore, pass, nil
 }
 func marshalRequestBodies(mockOperation, testOperation *models.Operation) (string, string, error) {
 	var mockRequestBody []byte
@@ -222,11 +224,12 @@ func marshalResponseBodies(status string, mockOperation, testOperation *models.O
 	return string(mockResponseBody), string(testResponseBody), nil
 }
 
-func handleJSONDiff(validatedJSON replaySvc.ValidatedJSON, logDiffs replaySvc.DiffsPrinter, newLogger *pp.PrettyPrinter, logger *zap.Logger, testName string, mockName string, testSetID string, mockSetID string, mockBodyStr string, testBodyStr string, diffType string) (bool, error) {
+func handleJSONDiff(validatedJSON replaySvc.ValidatedJSON, logDiffs replaySvc.DiffsPrinter, newLogger *pp.PrettyPrinter, logger *zap.Logger, testName string, mockName string, testSetID string, mockSetID string, mockBodyStr string, testBodyStr string, diffType string, mode int) (float64, bool, error) {
 	pass := true
+	differencesCount := 0.0
 	jsonComparisonResult, err := replaySvc.JSONDiffWithNoiseControl(validatedJSON, nil, false)
 	if err != nil {
-		return false, err
+		return differencesCount, false, err
 	}
 	if !jsonComparisonResult.IsExact() {
 		pass = false
@@ -235,38 +238,33 @@ func handleJSONDiff(validatedJSON replaySvc.ValidatedJSON, logDiffs replaySvc.Di
 			patch, err := jsondiff.Compare(testBodyStr, mockBodyStr)
 			if err != nil {
 				logger.Warn("failed to compute json diff", zap.Error(err))
-				return false, err
+				return differencesCount, false, err
 			}
-			for _, op := range patch {
-				if jsonComparisonResult.Matches() {
-					logDiffs.HasarrayIndexMismatch(true)
-					logDiffs.PushFooterDiff(strings.Join(jsonComparisonResult.Differences(), ", "))
-				}
-				if diffType == "request" {
-					logDiffs.PushRequestDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value))
+			differencesCount = float64(len(patch))
+			if diffType == "request" && differencesCount > 1 {
+				return -1.0, false, nil
+			}
+			if diffType == "response" {
+				for _, op := range patch {
+					if jsonComparisonResult.Matches() {
+						logDiffs.HasarrayIndexMismatch(true)
+						logDiffs.PushFooterDiff(strings.Join(jsonComparisonResult.Differences(), ", "))
+					}
 
-				} else if diffType == "response" {
 					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), nil)
+
 				}
 			}
 		}
-		if err := printAndRenderLogs(logs, newLogger, logDiffs, logger); err != nil {
-			return false, err
+		if diffType == "response" && mode == 1 {
+			if err := printAndRenderLogs(logs, newLogger, logDiffs, logger); err != nil {
+				return differencesCount, false, err
+			}
 		}
 	}
-	return pass, nil
+	return differencesCount, pass, nil
 }
 
-func handleMissingPath(path string, test, mock models.OpenAPI, testSetID, mockSetID string, logDiffs replaySvc.DiffsPrinter, newLogger *pp.PrettyPrinter, logger *zap.Logger) error {
-	logs := newLogger.Sprintf("Contract Check failed for test: %s (%s) / mock: %s (%s) \n\n--------------------------------------------------------------------\n\n", test.Info.Title, testSetID, mock.Info.Title, mockSetID)
-	var testPath string
-	for path := range test.Paths {
-		testPath = path
-		break
-	}
-	logDiffs.PushPathDiff(fmt.Sprint(testPath), fmt.Sprint(path))
-	return printAndRenderLogs(logs, newLogger, logDiffs, logger)
-}
 func printAndRenderLogs(logs string, newLogger *pp.PrettyPrinter, logDiffs replaySvc.DiffsPrinter, logger *zap.Logger) error {
 	if _, err := newLogger.Printf(logs); err != nil {
 		utils.LogError(logger, err, "failed to print the logs")

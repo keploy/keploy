@@ -16,6 +16,9 @@ import (
 	yamlLib "gopkg.in/yaml.v3"
 )
 
+const IDENTIFYMODE = 0
+const COMPAREMODE = 1
+
 // contractService implements the Service interface
 type contractService struct {
 	logger    *zap.Logger
@@ -324,8 +327,8 @@ func (s *contractService) GenerateTestsSchemas(ctx context.Context, selectedTest
 func (s *contractService) Generate(ctx context.Context) error {
 	serviceStr := s.config.Contract.Services
 	testStr := s.config.Contract.Tests
-	var genAllMocks bool = true
-	var genAllTests bool = true
+	var genAllMocks bool
+	var genAllTests bool
 
 	if len(serviceStr) != 0 {
 		genAllMocks = false
@@ -552,7 +555,7 @@ func (s *contractService) ServerDrivenValidation(ctx context.Context) error {
 		s.logger.Error("Failed to read directory", zap.String("directory", testsFolder), zap.Error(err))
 		return err
 	}
-	var testsMapping map[string][]*models.OpenAPI = make(map[string][]*models.OpenAPI)
+	var testsMapping map[string]map[string]*models.OpenAPI = make(map[string]map[string]*models.OpenAPI)
 	var tests []*models.OpenAPI
 	for _, testSetID := range testSetIDs {
 		if !testSetID.IsDir() {
@@ -563,24 +566,29 @@ func (s *contractService) ServerDrivenValidation(ctx context.Context) error {
 			s.logger.Error("Failed to get test cases", zap.String("testSetID", testSetID.Name()), zap.Error(err))
 			return err
 		}
-		testsMapping[testSetID.Name()] = tests
+		testsMapping[testSetID.Name()] = make(map[string]*models.OpenAPI)
+
+		for _, test := range tests {
+			testsMapping[testSetID.Name()][test.Info.Title] = test
+		}
 
 	}
 	passCnt := 0
 	failCnt := 0
-	var failedSummary map[string][]string = make(map[string][]string)
-	var sucessSummary map[string][]string = make(map[string][]string)
 
+	var scores map[string]map[string]map[string]models.SchemaInfo = make(map[string]map[string]map[string]models.SchemaInfo)
+	// Get the ideal mock for each test case
 	for _, entry := range entries {
 		if entry.IsDir() {
 			serviceFolder := filepath.Join(downloadTestsFolder, entry.Name())
-			fmt.Println("Self : ", s.config.Contract.Self, "---> Validate with : ", entry.Name())
 			// Loop over the tests in the service folder
 			mockSetIDs, err := os.ReadDir(serviceFolder)
 			if err != nil {
 				s.logger.Error("Failed to read directory", zap.String("directory", serviceFolder), zap.Error(err))
 				return err
 			}
+			// Initialize the outermost map if it doesn't exist
+			scores[entry.Name()] = make(map[string]map[string]models.SchemaInfo)
 			// mockSetID--> test-set-0,test-set-1,etc
 			for _, mockSetID := range mockSetIDs {
 				if !mockSetID.IsDir() {
@@ -591,25 +599,33 @@ func (s *contractService) ServerDrivenValidation(ctx context.Context) error {
 					s.logger.Error("Failed to get HTTP mocks", zap.String("testSetID", mockSetID.Name()), zap.Error(err))
 					return err
 				}
-				for _, mock := range mocks {
-					for testSetID, tests := range testsMapping {
+				scores[entry.Name()][mockSetID.Name()] = make(map[string]models.SchemaInfo)
 
+				for _, mock := range mocks {
+
+					scores[entry.Name()][mockSetID.Name()][mock.Info.Title] = models.SchemaInfo{Score: 1.0}
+					for testSetID, tests := range testsMapping {
 						for _, test := range tests {
 							// Compare the two models
-							pass, err := match2(*mock, *test, testSetID, mockSetID.Name(), s.logger)
+							candidateScore, pass, err := match2(*mock, *test, testSetID, mockSetID.Name(), s.logger, IDENTIFYMODE)
 							if err != nil {
 								s.logger.Error("Error in matching the two models", zap.Error(err))
 								fmt.Println("test-set-id: ", testSetID, ", mock-set-id: ", mockSetID.Name())
 								return err
 							}
-							if pass {
-								sucessSummary[entry.Name()] = append(sucessSummary[entry.Name()], test.Info.Title+" ( "+testSetID+" )"+"  with "+mock.Info.Title+" ( "+mockSetID.Name()+" )")
+							if pass && candidateScore >= 0 {
 
-								passCnt++
-							} else {
-								failedSummary[entry.Name()] = append(failedSummary[entry.Name()], test.Info.Title+" ( "+testSetID+" )"+"  with "+mock.Info.Title+" ( "+mockSetID.Name()+" )")
+								if candidateScore < scores[entry.Name()][mockSetID.Name()][mock.Info.Title].Score {
+									idealTest := models.SchemaInfo{
+										Service:   "",
+										TestSetID: testSetID,
+										Name:      test.Info.Title,
+										Score:     candidateScore,
+										Data:      *mock,
+									}
+									scores[entry.Name()][mockSetID.Name()][mock.Info.Title] = idealTest
+								}
 
-								failCnt++
 							}
 
 						}
@@ -619,22 +635,32 @@ func (s *contractService) ServerDrivenValidation(ctx context.Context) error {
 			}
 		}
 	}
-	fmt.Println("Pass Count: ", passCnt, " Fail Count: ", failCnt)
-	fmt.Println("Summary  (failed): ")
-	for service, sum := range failedSummary {
-		fmt.Println("Service : ", service)
-		for _, s := range sum {
-			fmt.Println(s)
+
+	// Match the mocks with their test cases
+	for service, mockSetID := range scores {
+		for mockSetID, mockTest := range mockSetID {
+			s.logger.Info("Service : ", zap.String("service", service), zap.String("mockSetID", mockSetID))
+			for _, mockInfo := range mockTest {
+				// fmt.Println("Service : ", service, " MockSetID : ", mockSetID, " MockTitle : ", mockTitle, " MockInfo : ", mockInfo)
+				if mockInfo.Score == 1.0 {
+					continue
+				}
+				score, _, err := match2(mockInfo.Data, *testsMapping[mockInfo.TestSetID][mockInfo.Name], mockInfo.TestSetID, mockSetID, s.logger, COMPAREMODE)
+				if err != nil {
+					s.logger.Error("Error in matching the two models", zap.Error(err))
+					return err
+				}
+				if score == 0.0 {
+					passCnt++
+				} else {
+					failCnt++
+				}
+
+			}
 		}
 	}
-	fmt.Println("----------------------------------------------------------")
-	fmt.Println("Summary  (success): ")
-	for service, sum := range sucessSummary {
-		fmt.Println("Service : ", service)
-		for _, s := range sum {
-			fmt.Println(s)
-		}
-	}
+	fmt.Println("Pass Count: ", passCnt)
+	fmt.Println("Fail Count: ", failCnt)
 
 	return nil
 }

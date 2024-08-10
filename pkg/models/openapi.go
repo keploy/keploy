@@ -68,17 +68,10 @@ type Schema struct {
 type ParamSchema struct {
 	Type string `json:"type" yaml:"type"`
 }
-
-type OpenAPIResult struct {
-	Matched    bool         `json:"matched"`
-	Metadata   []DiffResult `json:"metadata"`
-	Servers    []DiffResult `json:"servers"`
-	Paths      []DiffResult `json:"paths"`
-	Components []DiffResult `json:"components"`
-}
-
-type DiffResult struct {
-	Field    string      `json:"field"`
-	Expected interface{} `json:"expected"`
-	Actual   interface{} `json:"actual"`
+type SchemaInfo struct {
+	Service   string  `json:"service" yaml:"service"`
+	TestSetID string  `json:"testSetId" yaml:"testSetId"`
+	Name      string  `json:"name" yaml:"name"`
+	Score     float64 `json:"score" yaml:"score"`
+	Data      OpenAPI `json:"data" yaml:"data"`
 }
