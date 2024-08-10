@@ -25,7 +25,7 @@ const (
 	HTTP           Kind     = "Http"
 	GENERIC        Kind     = "Generic"
 	REDIS          Kind     = "Redis"
-	SQL            Kind     = "MySQL"
+	MySQL          Kind     = "MySQL"
 	Postgres       Kind     = "Postgres"
 	GRPC_EXPORT    Kind     = "gRPC"
 	Mongo          Kind     = "Mongo"
