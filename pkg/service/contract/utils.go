@@ -331,3 +331,58 @@ func validateServices(services []string, mappings map[string][]string, genAllMoc
 	}
 	return nil
 }
+func marshalRequestBodies(mockOperation, testOperation *models.Operation) (string, string, error) {
+	var mockRequestBody []byte
+	var testRequestBody []byte
+	var err error
+	if mockOperation.RequestBody != nil {
+		mockRequestBody, err = json.Marshal(mockOperation.RequestBody.Content["application/json"].Schema.Properties)
+		if err != nil {
+			return "", "", fmt.Errorf("error marshalling mock RequestBody: %v", err)
+		}
+	}
+	if testOperation.RequestBody != nil {
+		testRequestBody, err = json.Marshal(testOperation.RequestBody.Content["application/json"].Schema.Properties)
+		if err != nil {
+			return "", "", fmt.Errorf("error marshalling test RequestBody: %v", err)
+		}
+	}
+	return string(mockRequestBody), string(testRequestBody), nil
+}
+
+func marshalResponseBodies(status string, mockOperation, testOperation *models.Operation) (string, string, error) {
+	var mockResponseBody []byte
+	var testResponseBody []byte
+	var err error
+	if mockOperation.Responses[status].Content != nil {
+		mockResponseBody, err = json.Marshal(mockOperation.Responses[status].Content["application/json"].Schema.Properties)
+		if err != nil {
+			return "", "", fmt.Errorf("error marshalling mock ResponseBody: %v", err)
+		}
+	}
+	if testOperation.Responses[status].Content != nil {
+		testResponseBody, err = json.Marshal(testOperation.Responses[status].Content["application/json"].Schema.Properties)
+		if err != nil {
+			return "", "", fmt.Errorf("error marshalling test ResponseBody: %v", err)
+		}
+	}
+	return string(mockResponseBody), string(testResponseBody), nil
+}
+func findOperation(item models.PathItem) (*models.Operation, string) {
+	if item.Get != nil {
+		return item.Get, "GET"
+	}
+	if item.Post != nil {
+		return item.Post, "POST"
+	}
+	if item.Put != nil {
+		return item.Put, "PUT"
+	}
+	if item.Delete != nil {
+		return item.Delete, "DELETE"
+	}
+	if item.Patch != nil {
+		return item.Patch, "PATCH"
+	}
+	return nil, ""
+}

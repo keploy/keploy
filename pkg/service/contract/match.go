@@ -32,24 +32,6 @@ type JSONComparisonResultWrapper struct {
 
 const NOTCANDIDATE = -1.0
 
-func findOperation(item models.PathItem) (*models.Operation, string) {
-	if item.Get != nil {
-		return item.Get, "GET"
-	}
-	if item.Post != nil {
-		return item.Post, "POST"
-	}
-	if item.Put != nil {
-		return item.Put, "PUT"
-	}
-	if item.Delete != nil {
-		return item.Delete, "DELETE"
-	}
-	if item.Patch != nil {
-		return item.Patch, "PATCH"
-	}
-	return nil, ""
-}
 func compareOperationTypes(mockOperationType, testOperationType string) (bool, error) {
 	pass := true
 	if mockOperationType != testOperationType {
@@ -97,15 +79,23 @@ func compareResponseBodies(status string, mockOperation, testOperation *models.O
 		if err != nil {
 			return differencesCount, false, err
 		}
-		overallScore = float64(len(testOperation.Responses[status].Content["application/json"].Schema.Properties))
+		overallScore = float64(len(mockOperation.Responses[status].Content["application/json"].Schema.Properties))
 		validatedJSON, err := replaySvc.ValidateAndMarshalJSON(logger, &mockResponseBodyStr, &testResponseBodyStr)
 		if err != nil {
 			return differencesCount, false, err
 		}
 
 		if validatedJSON.IsIdentical() {
-			if differencesCount, _, err = handleJSONDiff(validatedJSON, logDiffs, newLogger, logger, testName, mockName, testSetID, mockSetID, mockResponseBodyStr, testResponseBodyStr, "response", mode); err != nil {
-				return differencesCount, false, err
+			if mode == 1 {
+				if _, _, err = handleJSONDiff(validatedJSON, logDiffs, newLogger, logger, testName, mockName, testSetID, mockSetID, mockResponseBodyStr, testResponseBodyStr, "response", mode); err != nil {
+					return differencesCount, false, err
+				}
+			} else if mode == 0 {
+				differencesCount, err = calculateSimilarityScore(mockOperation, testOperation, status)
+				if err != nil {
+					return differencesCount, false, err
+				}
+
 			}
 		} else {
 			differencesCount = overallScore
@@ -186,42 +176,18 @@ func match2(mock, test models.OpenAPI, testSetID string, mockSetID string, logge
 
 	return candidateScore, pass, nil
 }
-func marshalRequestBodies(mockOperation, testOperation *models.Operation) (string, string, error) {
-	var mockRequestBody []byte
-	var testRequestBody []byte
-	var err error
-	if mockOperation.RequestBody != nil {
-		mockRequestBody, err = json.Marshal(mockOperation.RequestBody.Content["application/json"].Schema.Properties)
-		if err != nil {
-			return "", "", fmt.Errorf("error marshalling mock RequestBody: %v", err)
+func calculateSimilarityScore(mockOperation, testOperation *models.Operation, status string) (float64, error) {
+	testParameters := testOperation.Responses[status].Content["application/json"].Schema.Properties
+	mockParameters := mockOperation.Responses[status].Content["application/json"].Schema.Properties
+	score := 0.0
+	for key, testParam := range testParameters {
+		if _, ok := mockParameters[key]; ok {
+			if testParam["type"] == mockParameters[key]["type"] {
+				score++
+			}
 		}
 	}
-	if testOperation.RequestBody != nil {
-		testRequestBody, err = json.Marshal(testOperation.RequestBody.Content["application/json"].Schema.Properties)
-		if err != nil {
-			return "", "", fmt.Errorf("error marshalling test RequestBody: %v", err)
-		}
-	}
-	return string(mockRequestBody), string(testRequestBody), nil
-}
-
-func marshalResponseBodies(status string, mockOperation, testOperation *models.Operation) (string, string, error) {
-	var mockResponseBody []byte
-	var testResponseBody []byte
-	var err error
-	if mockOperation.Responses[status].Content != nil {
-		mockResponseBody, err = json.Marshal(mockOperation.Responses[status].Content["application/json"].Schema.Properties)
-		if err != nil {
-			return "", "", fmt.Errorf("error marshalling mock ResponseBody: %v", err)
-		}
-	}
-	if testOperation.Responses[status].Content != nil {
-		testResponseBody, err = json.Marshal(testOperation.Responses[status].Content["application/json"].Schema.Properties)
-		if err != nil {
-			return "", "", fmt.Errorf("error marshalling test ResponseBody: %v", err)
-		}
-	}
-	return string(mockResponseBody), string(testResponseBody), nil
+	return score, nil
 }
 
 func handleJSONDiff(validatedJSON replaySvc.ValidatedJSON, logDiffs replaySvc.DiffsPrinter, newLogger *pp.PrettyPrinter, logger *zap.Logger, testName string, mockName string, testSetID string, mockSetID string, mockBodyStr string, testBodyStr string, diffType string, mode int) (float64, bool, error) {

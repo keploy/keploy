@@ -573,8 +573,6 @@ func (s *contractService) ServerDrivenValidation(ctx context.Context) error {
 		}
 
 	}
-	passCnt := 0
-	failCnt := 0
 
 	var scores map[string]map[string]map[string]models.SchemaInfo = make(map[string]map[string]map[string]models.SchemaInfo)
 	// Get the ideal mock for each test case
@@ -603,7 +601,7 @@ func (s *contractService) ServerDrivenValidation(ctx context.Context) error {
 
 				for _, mock := range mocks {
 
-					scores[entry.Name()][mockSetID.Name()][mock.Info.Title] = models.SchemaInfo{Score: 1.0}
+					scores[entry.Name()][mockSetID.Name()][mock.Info.Title] = models.SchemaInfo{Score: 0.0, Name: mock.Info.Title}
 					for testSetID, tests := range testsMapping {
 						for _, test := range tests {
 							// Compare the two models
@@ -613,9 +611,9 @@ func (s *contractService) ServerDrivenValidation(ctx context.Context) error {
 								fmt.Println("test-set-id: ", testSetID, ", mock-set-id: ", mockSetID.Name())
 								return err
 							}
-							if pass && candidateScore >= 0 {
+							if pass && candidateScore > 0 {
 
-								if candidateScore < scores[entry.Name()][mockSetID.Name()][mock.Info.Title].Score {
+								if candidateScore > scores[entry.Name()][mockSetID.Name()][mock.Info.Title].Score {
 									idealTest := models.SchemaInfo{
 										Service:   "",
 										TestSetID: testSetID,
@@ -642,25 +640,19 @@ func (s *contractService) ServerDrivenValidation(ctx context.Context) error {
 			s.logger.Info("Service : ", zap.String("service", service), zap.String("mockSetID", mockSetID))
 			for _, mockInfo := range mockTest {
 				// fmt.Println("Service : ", service, " MockSetID : ", mockSetID, " MockTitle : ", mockTitle, " MockInfo : ", mockInfo)
-				if mockInfo.Score == 1.0 {
+				if mockInfo.Score == 0.0 {
+					s.logger.Info("No ideal test found for the mock", zap.String("service", service), zap.String("test-set-id", mockSetID), zap.String("mockTitle", mockInfo.Name))
 					continue
 				}
-				score, _, err := match2(mockInfo.Data, *testsMapping[mockInfo.TestSetID][mockInfo.Name], mockInfo.TestSetID, mockSetID, s.logger, COMPAREMODE)
+				_, _, err := match2(mockInfo.Data, *testsMapping[mockInfo.TestSetID][mockInfo.Name], mockInfo.TestSetID, mockSetID, s.logger, COMPAREMODE)
 				if err != nil {
 					s.logger.Error("Error in matching the two models", zap.Error(err))
 					return err
-				}
-				if score == 0.0 {
-					passCnt++
-				} else {
-					failCnt++
 				}
 
 			}
 		}
 	}
-	fmt.Println("Pass Count: ", passCnt)
-	fmt.Println("Fail Count: ", failCnt)
 
 	return nil
 }
