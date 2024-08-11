@@ -39,6 +39,9 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 	// Store the server greetings
 	decodeCtx.ServerGreetings.Store(clientConn, handshake)
 
+	// Set the intial auth plugin
+	decodeCtx.PluginName = handshake.AuthPluginName
+
 	// encode the response
 	buf, err := wire.EncodeToBinary(ctx, logger, &resp[0].PacketBundle, clientConn, decodeCtx)
 	if err != nil {
@@ -92,6 +95,73 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 		return err
 	}
 
+	// Get the next response in order to find the auth mechanism
+	if len(resp) < 2 {
+		utils.LogError(logger, nil, "no mysql mocks found for auth mechanism")
+		return nil
+	}
+
+	// For Native password: next packet is Ok/Err
+	// For CachingSha2 password: next packet is AuthSwitchRequest/AuthMoreData
+
+	authDecider := resp[1].PacketBundle.Header.Type
+
+	switch authDecider {
+	case mysql.StatusToString(mysql.OK):
+		// It means we need to simulate the native password
+		err := simulateNativePassword(ctx, logger, clientConn, initialHandshakeMock, mockDb, decodeCtx)
+		if err != nil {
+			utils.LogError(logger, err, "failed to simulate native password")
+			return err
+		}
+
+	case mysql.AuthStatusToString(mysql.AuthSwitchRequest), mysql.AuthStatusToString(mysql.AuthMoreData):
+		// It means we need to simulate the caching_sha2_password
+		err := simulateCacheSha2Password(ctx, logger, clientConn, initialHandshakeMock, mockDb, decodeCtx)
+		if err != nil {
+			utils.LogError(logger, err, "failed to simulate caching_sha2_password")
+			return err
+		}
+	}
+
+	return nil
+}
+
+func simulateNativePassword(ctx context.Context, logger *zap.Logger, clientConn net.Conn, initialHandshakeMock *models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) error {
+	resp := initialHandshakeMock.Spec.MySQLResponses
+
+	logger.Debug("final response for native password", zap.Any("response", resp[1].PacketBundle.Header.Type))
+
+	// Send the final response (OK/Err) to the client
+	buf, err := wire.EncodeToBinary(ctx, logger, &resp[1].PacketBundle, clientConn, decodeCtx)
+	if err != nil {
+		utils.LogError(logger, err, "failed to encode final response packet for native password")
+		return err
+	}
+
+	_, err = clientConn.Write(buf)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		utils.LogError(logger, err, "failed to write final response for native password to the client")
+		return err
+	}
+
+	//update the config mock (since it can be reused in case of more connections compared to record mode)
+	ok := updateMock(ctx, logger, initialHandshakeMock, mockDb)
+	if !ok {
+		utils.LogError(logger, nil, "failed to update the mock unfiltered mock during native password")
+	}
+
+	logger.Debug("native password completed successfully")
+
+	return nil
+}
+
+func simulateCacheSha2Password(ctx context.Context, logger *zap.Logger, clientConn net.Conn, initialHandshakeMock *models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) error {
+	resp := initialHandshakeMock.Spec.MySQLResponses
+
 	// Get the AuthMoreData or AuthSwitchRequest packet
 	if len(resp) < 2 {
 		utils.LogError(logger, nil, "no mysql mocks found for auth more data or auth switch request")
@@ -99,6 +169,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 
 	// Get the AuthMore or AuthSwitchRequest packet
 	var authBuf []byte
+	var err error
 	var CachingSha2PasswordMechanism string
 
 	switch resp[1].Message.(type) {
@@ -159,7 +230,6 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 			return err
 		}
 	}
-
 	return nil
 }
 
