@@ -523,7 +523,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		c.cfg.Path = path
 	case "record", "test", "rerecord":
 
-		if cmd.HasAlias("validate") {
+		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
 			path, err := cmd.Flags().GetString("path")
 			if err != nil {
 				errMsg := "failed to get the path"
