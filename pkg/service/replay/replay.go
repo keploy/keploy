@@ -931,6 +931,10 @@ func (r *Replayer) RunApplication(ctx context.Context, appID uint64, opts models
 	return r.instrumentation.Run(ctx, appID, opts)
 }
 
+func (r *Replayer) GetTestSetConf(ctx context.Context, testSet string) (*models.TestSet, error) {
+	return r.TestSetConf.Read(ctx, testSet)
+}
+
 func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 	if len(testSets) == 0 {
 		if len(r.config.Templatize.TestSets) == 0 {

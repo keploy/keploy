@@ -31,6 +31,7 @@ type Service interface {
 	RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool, conf *models.TestSet) (models.TestSetStatus, error)
 	GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error)
 	GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error)
+	GetTestSetConf(ctx context.Context, testSetID string) (*models.TestSet, error)
 	RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError
 	Normalize(ctx context.Context) error
 	Templatize(ctx context.Context, testSets []string) error

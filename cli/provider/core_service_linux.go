@@ -41,7 +41,7 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, cfg)
 
 	if cmd == "rerecord" {
-		return orchestrator.New(logger, recordSvc, replaySvc, cfg, commonServices.YamlTestSetDB), nil
+		return orchestrator.New(logger, recordSvc, replaySvc, cfg), nil
 	}
 
 	if cmd == "record" {

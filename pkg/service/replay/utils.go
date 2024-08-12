@@ -490,7 +490,7 @@ func render(testCaseStr string) (string, error) {
 func compareReqHeaders(req1 map[string]string, req2 map[string]string) {
 	for key, val1 := range req1 {
 		// Check if the value is already present in the templatized values.
-		val, ok  := checkForTemplate(val1).(string)
+		val, ok := checkForTemplate(val1).(string)
 		if !ok {
 			return
 		}

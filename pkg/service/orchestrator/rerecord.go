@@ -16,11 +16,11 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-func (o *Orchestrator) ReRecord(ctx context.Context) error {
+func (o *Orchestrator) checkForTemplates(ctx context.Context) {
 	// Check if the testcases are already templatized.
 	var notTemplatized []string
 	for testSet := range o.config.Test.SelectedTests {
-		conf, err := o.TestSetConf.Read(ctx, testSet)
+		conf, err := o.replay.GetTestSetConf(ctx, testSet)
 		if err != nil || conf == nil || conf.Template == nil {
 			notTemplatized = append(notTemplatized, testSet)
 		}
@@ -37,11 +37,13 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		} else if input == "y\n" || input == "Y\n" {
 			if err := o.replay.Templatize(ctx, notTemplatized); err != nil {
 				utils.LogError(o.logger, err, "failed to templatize test cases")
-				return nil
 			}
 		}
 	}
+}
 
+func (o *Orchestrator) ReRecord(ctx context.Context) error {
+	o.checkForTemplates(ctx)
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 
 	var stopReason string
@@ -205,7 +207,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 
 	tcs, err := o.replay.GetTestCases(ctx, testSet)
 	if err != nil {
-		errMsg := "Failed to get all testcases"
+		errMsg := "failed to get all testcases"
 		utils.LogError(o.logger, err, errMsg, zap.String("testset", testSet))
 		return false, fmt.Errorf(errMsg)
 	}
@@ -260,14 +262,14 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 			o.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HTTPReq.URL))
 		}
 		// Read the template values.
-		templateValues, err := o.TestSetConf.Read(ctx, testSet)
+		testSetConf, err := o.replay.GetTestSetConf(ctx, testSet)
 		if err != nil {
 			o.logger.Debug("failed to read template values")
 		}
-		if templateValues == nil {
+		if testSetConf == nil {
 			utils.TemplatizedValues = map[string]interface{}{}
 		} else {
-			utils.TemplatizedValues = templateValues.Template
+			utils.TemplatizedValues = testSetConf.Template
 		}
 
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSet, o.logger, o.config.Test.APITimeout)
