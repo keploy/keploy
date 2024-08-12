@@ -461,7 +461,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	cmdType := utils.CmdType(r.config.CommandType)
 	var userIP string
 
-	err = r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, models.BaseTime, time.Now(), Start)
+	var operation MockAction
+	if runApp {
+		operation = Start
+	} else {
+		operation = Update
+	}
+	err = r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, models.BaseTime, time.Now(), operation)
 	if err != nil {
 		return models.TestSetStatusFailed, err
 	}
