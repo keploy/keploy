@@ -61,9 +61,9 @@ type App struct {
 type Options struct {
 	// canExit disables any error returned if the app exits by itself.
 	//CanExit       bool
-	Container     string
-	DockerDelay   uint64
-	DockerNetwork string
+	Container       string
+	DockerDelay     uint64
+	DockerNetwork   string
 	KeployContainer string
 }
 

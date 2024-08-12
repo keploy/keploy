@@ -9,7 +9,6 @@ import (
 	"time"
 
 	nativeDockerClient "github.com/docker/docker/client"
-	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -32,7 +31,6 @@ type Impl struct {
 	logger                *zap.Logger
 	containerID           string
 	containerName         string
-	cfg                   *config.Config
 }
 
 func New(logger *zap.Logger, containerName string) (Client, error) {
