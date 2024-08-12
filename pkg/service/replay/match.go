@@ -242,7 +242,7 @@ func UnmarshallJSON(s string, log *zap.Logger) (interface{}, error) {
 		return nil, nil
 	}
 	if err := json.Unmarshal([]byte(s), &result); err != nil {
-		utils.LogError(log, err, "cannot convert json string into json object")
+		utils.LogError(log, err, "cannot convert json string into json object", zap.String("json", s))
 		return nil, err
 	}
 	return result, nil
@@ -489,7 +489,6 @@ func (d *DiffsPrinter) Render() error {
 	}
 
 	diffs = append(diffs, sprintDiffHeader(d.headerExp, d.headerAct))
-
 	if len(d.bodyExp) != 0 || len(d.bodyAct) != 0 {
 		bE, bA := []byte(d.bodyExp), []byte(d.bodyAct)
 		if json.Valid(bE) && json.Valid(bA) {
@@ -662,20 +661,31 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 			noised := false
 			lineContent := line[1:] // Remove the diff indicator (+/-)
 			trimmedLine := strings.TrimSpace(lineContent)
-
 			// Update the JSON path stack based on the line content
 			if strings.HasSuffix(trimmedLine, "{") {
 				key := strings.TrimSpace(trimmedLine[:len(trimmedLine)-1]) // Remove '{'
-				jsonPath = append(jsonPath, key)                           // Push to stack
+				key = strings.Trim(key, `"`)                               // Remove surrounding quotes
+				jsonPath = append(jsonPath, key)
 			} else if trimmedLine == "}," || trimmedLine == "}" {
 				jsonPath = jsonPath[:len(jsonPath)-1] // Pop from stack
+			} else {
+				// For key-value pairs, extract the key
+				if colonIndex := strings.Index(trimmedLine, ":"); colonIndex != -1 {
+					key := strings.TrimSpace(trimmedLine[:colonIndex])
+					key = strings.Trim(key, `"`) // Remove surrounding quotes
+					if len(jsonPath) > 0 {
+						jsonPath = append(jsonPath[:len(jsonPath)-1], key)
+					} else {
+						jsonPath = append(jsonPath, key)
+					}
+				}
 			}
 
 			currentPath := strings.Join(jsonPath, ".")
 
 			// Check for noise based on the current JSON path
 			for noisePath := range noise {
-				if strings.HasPrefix(currentPath, noisePath) {
+				if strings.HasPrefix(strings.ToLower(currentPath), noisePath) {
 					line = " " + lineContent
 					if line[0] == '-' {
 						expect += breakWithColor(line, nil, 0)
@@ -686,7 +696,6 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 					break
 				}
 			}
-
 			if noised {
 				continue
 			}

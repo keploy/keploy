@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
+	"time"
 
 	// "encoding/json"
 	"github.com/7sDream/geko"
@@ -22,11 +23,12 @@ import (
 )
 
 type TestReportVerdict struct {
-	total   int
-	passed  int
-	failed  int
-	ignored int
-	status  bool
+	total    int
+	passed   int
+	failed   int
+	ignored  int
+	status   bool
+	duration time.Duration
 }
 
 func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) config.GlobalNoise {
@@ -569,4 +571,15 @@ func removeFromMap(map1, map2 map[string][]string) map[string][]string {
 		delete(map1, key)
 	}
 	return map1
+}
+
+func timeWithUnits(duration time.Duration) string {
+	if duration.Seconds() < 1 {
+		return fmt.Sprintf("%v ms", duration.Milliseconds())
+	} else if duration.Minutes() < 1 {
+		return fmt.Sprintf("%.2f s", duration.Seconds())
+	} else if duration.Hours() < 1 {
+		return fmt.Sprintf("%.2f min", duration.Minutes())
+	}
+	return fmt.Sprintf("%.2f hr", duration.Hours())
 }

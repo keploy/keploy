@@ -48,8 +48,9 @@ func ReadTempValues(testSet string) {
 		log.Fatal("Error unmarshaling templatized values into the map", err)
 	}
 }
+var ErrCode = 0
 
-func ReplaceHostToIP(currentURL string, ipAddress string) (string, error) {
+func ReplaceHost(currentURL string, ipAddress string) (string, error) {
 	// Parse the current URL
 	parsedURL, err := url.Parse(currentURL)
 
@@ -65,6 +66,26 @@ func ReplaceHostToIP(currentURL string, ipAddress string) (string, error) {
 	// Replace hostname with the IP address
 	parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Hostname(), ipAddress, 1)
 	// Return the modified URL
+	return parsedURL.String(), nil
+}
+
+func ReplacePort(currentURL string, port string) (string, error) {
+	if port == "" {
+		return currentURL, fmt.Errorf("failed to replace port in case of docker env")
+	}
+
+	parsedURL, err := url.Parse(currentURL)
+
+	if err != nil {
+		return currentURL, err
+	}
+
+	if parsedURL.Port() == "" {
+		parsedURL.Host = parsedURL.Host + ":" + port
+	} else {
+		parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Port(), port, 1)
+	}
+
 	return parsedURL.String(), nil
 }
 
@@ -226,6 +247,7 @@ func CheckFileExists(path string) bool {
 }
 
 var Version string
+var VersionIdenitfier string
 
 func attachLogFileToSentry(logger *zap.Logger, logFilePath string) error {
 	file, err := os.Open(logFilePath)
@@ -847,4 +869,38 @@ func getHomeDir() (string, error) {
 
 func IsDockerCmd(kind CmdType) bool {
 	return (kind == DockerRun || kind == DockerStart || kind == DockerCompose)
+}
+
+func CreateGitIgnore(logger *zap.Logger, path string) error {
+	gitignorePath := path + "/.gitignore"
+	reportEntry := "/reports/"
+
+	file, err := os.OpenFile(gitignorePath, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		return fmt.Errorf("error opening or creating .gitignore file: %v", err)
+	}
+
+	defer func() {
+		if err := file.Close(); err != nil {
+			logger.Error("error closing .gitignore file: %v", zap.Error(err))
+		}
+	}()
+
+	scanner := bufio.NewScanner(file)
+	found := false
+	for scanner.Scan() {
+		if strings.TrimSpace(scanner.Text()) == reportEntry {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		if _, err := file.WriteString("\n" + reportEntry + "\n"); err != nil {
+			return fmt.Errorf("error writing to .gitignore file: %v", err)
+		}
+		return nil
+	}
+
+	return nil
 }

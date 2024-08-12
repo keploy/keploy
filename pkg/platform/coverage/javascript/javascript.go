@@ -31,14 +31,18 @@ func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cm
 	}
 }
 
-func (j *Javascript) PreProcess() (string, error) {
+func (j *Javascript) PreProcess(disableLineCoverage bool) (string, error) {
 	cmd := exec.Command("nyc", "--version")
 	err := cmd.Run()
 	if err != nil {
 		j.logger.Warn("coverage tool not found, skipping coverage caluclation. please install coverage tool using 'npm install -g nyc'")
 		return j.cmd, err
 	}
-	return "nyc --clean=$CLEAN " + j.cmd, nil
+	nycCmd := "nyc --clean=$CLEAN "
+	if disableLineCoverage {
+		nycCmd += "--reporter=none "
+	}
+	return nycCmd + j.cmd, nil
 }
 
 type StartTy struct {
@@ -128,8 +132,14 @@ func (j *Javascript) GetCoverage() (models.TestCoverage, error) {
 				if _, ok := linesCoveredPerFile[filename][line]; !ok {
 					linesCoveredPerFile[filename][line] = false
 				}
-				if isStatementCovered.(float64) > 0 {
-					linesCoveredPerFile[filename][line] = true
+
+				switch isExecSegmentCov := isStatementCovered.(type) {
+				case float64:
+					if (isExecSegmentCov) > 0 {
+						linesCoveredPerFile[filename][line] = true
+					}
+				default:
+					linesCoveredPerFile[filename][line] = false
 				}
 			}
 		}

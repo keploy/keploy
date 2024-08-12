@@ -16,7 +16,6 @@ import (
 )
 
 func postgresDecoderFrontend(response models.Frontend) ([]byte, error) {
-	// println("Inside PostgresDecoderFrontend")
 	var resbuffer []byte
 	// list of packets available in the buffer
 	packets := response.PacketTypes
@@ -272,7 +271,6 @@ func postgresDecoderBackend(request models.Backend) ([]byte, error) {
 				fallthrough
 			default:
 				// to maintain backwards compatability
-				// println("Here is decoded PASSWORD", request.PasswordMessage.Password)
 				msg = &pgproto3.PasswordMessage{Password: request.PasswordMessage.Password}
 			}
 		case string('Q'):

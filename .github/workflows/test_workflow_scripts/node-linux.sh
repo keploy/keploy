@@ -9,6 +9,18 @@ npm install
 sed -i "s/mongoDb:27017/localhost:27017/" "src/db/connection.js"
 rm -rf keploy/
 
+# Check if there is a keploy-config file, if there is, delete it.
+if [ -f "./keploy.yml" ]; then
+    rm ./keploy.yml
+fi
+
+# Generate the keploy-config file.
+sudo ./../../keployv2 config --generate
+
+# Update the global noise to ts.
+config_file="./keploy.yml"
+sed -i 's/global: {}/global: {"body": {"page":""}}/' "$config_file"
+
 send_request(){
     sleep 10
     app_started=false
@@ -23,6 +35,7 @@ send_request(){
     curl --request POST --url http://localhost:8000/students --header 'content-type: application/json' --data '{"name":"John Doe","email":"john@xyiz.com","phone":"0123456799"}'
     curl --request POST --url http://localhost:8000/students --header 'content-type: application/json' --data '{"name":"Alice Green","email":"green@alice.com","phone":"3939201584"}'
     curl -X GET http://localhost:8000/students
+    curl -X GET http://localhost:8000/get
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
     pid=$(pgrep keploy)
@@ -35,7 +48,7 @@ send_request(){
 for i in {1..2}; do
     app_name="nodeApp_${i}"
     send_request &
-    sudo -E env PATH=$PATH ./../../keployv2 record -c 'npm start' --generateGithubActions=false &> "${app_name}.txt"
+    sudo -E env PATH=$PATH ./../../keployv2 record -c 'npm start'    &> "${app_name}.txt"
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
@@ -51,8 +64,11 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
+mocks_file="keploy/test-set-0/tests/test-5.yaml"
+sed -i 's/"page":1/"page":4/' "$mocks_file"
+
 # Test modes and result checking
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --generateGithubActions=false &> test_logs1.txt
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10    &> test_logs1.txt
 
 if grep "ERROR" "test_logs1.txt"; then
     echo "Error found in pipeline..."
@@ -65,7 +81,7 @@ if grep "WARNING: DATA RACE" "test_logs1.txt"; then
     exit 1
 fi
 
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testsets test-set-0 --generateGithubActions=false &> test_logs2.txt
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testsets test-set-0    &> test_logs2.txt
 if grep "ERROR" "test_logs2.txt"; then
     echo "Error found in pipeline..."
     cat "test_logs2.txt"
@@ -77,11 +93,9 @@ if grep "WARNING: DATA RACE" "test_logs2.txt"; then
     exit 1
 fi
 
-sudo -E env PATH=$PATH ./../../keployv2 config --generate
-
 sed -i 's/selectedTests: {}/selectedTests: {"test-set-0": ["test-1", "test-2"]}/' "./keploy.yml"
 
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --apiTimeout 30 --delay 10 --generateGithubActions=false &> test_logs3.txt
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --apiTimeout 30 --delay 10    &> test_logs3.txt
 if grep "ERROR" "test_logs3.txt"; then
     echo "Error found in pipeline..."
     cat "test_logs3.txt"

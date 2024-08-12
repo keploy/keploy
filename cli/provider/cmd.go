@@ -164,6 +164,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	//sets the displayment of flag-related errors
 	cmd.SilenceErrors = true
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+		PrintLogo(true)
 		color.Red(fmt.Sprintf("❌ error: %v", err))
 		fmt.Println()
 		return err
@@ -206,7 +207,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 
 	case "record", "test", "rerecord":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
-		cmd.Flags().Uint32("port", c.cfg.Port, "GraphQL server port used for executing testcases in unit test library integration")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
@@ -220,12 +220,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
 		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
-		err = cmd.Flags().MarkHidden("port")
-		if err != nil {
-			errMsg := "failed to mark port as hidden flag"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
 		//add rest of the uncommon flags for record, test, rerecord commands
 		c.AddUncommonFlags(cmd)
 
@@ -260,6 +254,8 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Uint64("record-timer", 0, "User provided time to record its application")
 	case "test", "rerecord":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
+		cmd.Flags().String("host", c.cfg.Test.Host, "Custom host to replace the actual host in the testcases")
+		cmd.Flags().Uint32("port", c.cfg.Test.Port, "Custom port to replace the actual port in the testcases")
 		if cmd.Name() == "test" {
 			cmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 			cmd.Flags().Uint64("api-timeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
@@ -274,6 +270,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 			cmd.Flags().String("base-path", c.cfg.Test.BasePath, "Custom api basePath/origin to replace the actual basePath/origin in the testcases; App flag is ignored and app will not be started & instrumented when this is set since the application running on a different machine")
 			cmd.Flags().Bool("update-temp", c.cfg.Test.UpdateTemp, "Update the template with the result of the testcases.")
 			cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
+			cmd.Flags().Bool("disable-line-coverage", c.cfg.Test.DisableLineCoverage, "Disable line coverage generation.")
 		}
 	}
 }
@@ -411,9 +408,9 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	c.cfg.ConfigPath = configPath
 	return nil
 }
-
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
-
+	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
+	PrintLogo(disableAnsi)
 	if c.cfg.Debug {
 		logger, err := log.ChangeLogLevel(zap.DebugLevel)
 		*c.logger = *logger
@@ -554,6 +551,20 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 			if cmd.Name() == "rerecord" {
 				c.cfg.Test.SkipCoverage = true
+				host, err := cmd.Flags().GetString("host")
+				if err != nil {
+					errMsg := "failed to get the provided host"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.ReRecord.Host = host
+				port, err := cmd.Flags().GetUint32("port")
+				if err != nil {
+					errMsg := "failed to get the provided port"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.ReRecord.Port = port
 				return nil
 			}
 
@@ -636,5 +647,6 @@ func (c *CmdConfigurator) UpdateConfigData(defaultCfg config.Config) config.Conf
 	defaultCfg.DisableANSI = c.cfg.DisableANSI
 	defaultCfg.Test.SkipCoverage = c.cfg.Test.SkipCoverage
 	defaultCfg.Test.Mocking = c.cfg.Test.Mocking
+	defaultCfg.Test.DisableLineCoverage = c.cfg.Test.DisableLineCoverage
 	return defaultCfg
 }
