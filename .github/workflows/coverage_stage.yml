@@ -32,11 +32,18 @@ jobs:
           name: coverage-reports-samples-typescript-express-mongo-0
           path: ./temp-coverage-dir
 
+      - name: Download second coverage data of exporess-mongoose application
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-reports-samples-typescript-express-mongo-1
+          path: ./temp-coverage-dir
+
       - name: Unzip all coverage data zip files
         run: |
           unzip temp-coverage-dir/coverage-reports-samples-go-gin-mongo-0.zip -d unzipped-cov
           unzip temp-coverage-dir/coverage-reports-samples-go-gin-mongo-1.zip -d unzipped-cov
           unzip temp-coverage-dir/coverage-reports-samples-typescript-express-mongo-0.zip -d unzipped-cov
+          unzip temp-coverage-dir/coverage-reports-samples-typescript-express-mongo-1.zip -d unzipped-cov
 
       - name: Combine all coverage data
         run: |
