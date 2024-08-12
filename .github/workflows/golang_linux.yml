@@ -14,7 +14,7 @@ jobs:
 
     - name: Build binary
       run: |
-        go build -race -tags=viper_bind_struct -o keployv2
+        go build -tags=viper_bind_struct -o keployv2
     - name: Checkout the samples-go repository
       uses: actions/checkout@v2
       with:
