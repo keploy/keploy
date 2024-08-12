@@ -1,6 +1,10 @@
 package models
 
-import "time"
+import (
+	"time"
+
+	"go.keploy.io/server/v2/pkg/models/mysql"
+)
 
 type Mock struct {
 	Version      Version      `json:"Version,omitempty" bson:"Version,omitempty"`
@@ -36,8 +40,8 @@ type MockSpec struct {
 	PostgresResponses []Frontend        `json:"postgresResponses,omitempty" bson:"postgres_responses,omitempty"`
 	GRPCReq           *GrpcReq          `json:"gRPCRequest,omitempty" bson:"grpc_req,omitempty"`
 	GRPCResp          *GrpcResp         `json:"grpcResponse,omitempty" bson:"grpc_resp,omitempty"`
-	MySQLRequests     []MySQLRequest    `json:"MySqlRequests,omitempty" bson:"my_sql_requests,omitempty"`
-	MySQLResponses    []MySQLResponse   `json:"MySqlResponses,omitempty" bson:"my_sql_responses,omitempty"`
+	MySQLRequests     []mysql.Request   `json:"MySqlRequests,omitempty" bson:"my_sql_requests,omitempty"`
+	MySQLResponses    []mysql.Response  `json:"MySqlResponses,omitempty" bson:"my_sql_responses,omitempty"`
 	ReqTimestampMock  time.Time         `json:"ReqTimestampMock,omitempty" bson:"req_timestamp_mock,omitempty"`
 	ResTimestampMock  time.Time         `json:"ResTimestampMock,omitempty" bson:"res_timestamp_mock,omitempty"`
 }

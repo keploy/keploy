@@ -160,7 +160,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 	if !r.config.Test.SkipCoverage {
 		if utils.CmdType(r.config.CommandType) == utils.Native {
-			r.config.Command, err = cov.PreProcess()
+			r.config.Command, err = cov.PreProcess(r.config.Test.DisableLineCoverage)
 
 			if err != nil {
 				r.config.Test.SkipCoverage = true
@@ -601,13 +601,25 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		if utils.IsDockerCmd(cmdType) {
-
-			testCase.HTTPReq.URL, err = utils.ReplaceHostToIP(testCase.HTTPReq.URL, userIP)
+			testCase.HTTPReq.URL, err = utils.ReplaceHost(testCase.HTTPReq.URL, userIP)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to replace host to docker container's IP")
 				break
 			}
 			r.logger.Debug("", zap.Any("replaced URL in case of docker env", testCase.HTTPReq.URL))
+		}
+
+		// send the flag replace-host instead of sending the IP
+		if r.config.Test.Host != "" {
+			testCase.HTTPReq.URL, err = utils.ReplaceHost(testCase.HTTPReq.URL, r.config.Test.Host)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to replace host to provided host by the user")
+				break
+			}
+		}
+
+		if r.config.Test.Port != 0 {
+			testCase.HTTPReq.URL, err = utils.ReplacePort(testCase.HTTPReq.URL, strconv.Itoa(int(r.config.Test.Port)))
 		}
 
 		started := time.Now().UTC()
