@@ -12,8 +12,10 @@ import (
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb/testset"
 	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
+	"go.keploy.io/server/v2/pkg/platform/yaml/openAPIdb"
 	reportdb "go.keploy.io/server/v2/pkg/platform/yaml/reportdb"
 	testdb "go.keploy.io/server/v2/pkg/platform/yaml/testdb"
+	"go.keploy.io/server/v2/pkg/service/contract"
 	"go.keploy.io/server/v2/pkg/service/replay"
 	"go.uber.org/zap"
 )
@@ -28,13 +30,16 @@ func Get(ctx context.Context, cmd string, c *config.Config, logger *zap.Logger, 
 	if err != nil {
 		return nil, err
 	}
+	contractSvc := contract.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlOpenAPIDb, cfg)
 
 	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, c)
 
 	if (cmd == "test" && c.Test.BasePath != "") || cmd == "normalize" || cmd == "templatize" {
 		return replaySvc, nil
-	}	
-
+	}
+	if cmd == "contract" {
+		return contractSvc, nil
+	}
 	return nil, errors.New("command not supported in non linux os")
 }
 
@@ -42,12 +47,14 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 	instrumentation := core.New(logger)
 	testDB := testdb.New(logger, c.Path)
 	mockDB := mockdb.New(logger, c.Path, "")
+	openAPIdb := openAPIdb.New(logger, c.Path)
 	reportDB := reportdb.New(logger, c.Path+"/reports")
 	testSetDb := testset.New[*models.TestSet](logger, c.Path)
 	return &CommonInternalService{
 		commonPlatformServices{
 			YamlTestDB:    testDB,
 			YamlMockDb:    mockDB,
+			YamlOpenAPIDb: openAPIdb,
 			YamlReportDb:  reportDB,
 			YamlTestSetDB: testSetDb,
 		},

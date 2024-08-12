@@ -20,14 +20,14 @@ func Contract(ctx context.Context, logger *zap.Logger, _ *config.Config, service
 		Short: "Manage keploy contracts",
 	}
 
-	cmd.AddCommand(Generate(ctx, logger, serviceFactory, cmdConfigurator, cmd.Name()))
-	cmd.AddCommand(Download(ctx, logger, serviceFactory, cmdConfigurator, cmd.Name()))
-	cmd.AddCommand(Validate(ctx, logger, serviceFactory, cmdConfigurator, cmd.Name()))
+	Generate(ctx, logger, serviceFactory, cmdConfigurator, cmd)
+	Download(ctx, logger, serviceFactory, cmdConfigurator, cmd)
+	Validate(ctx, logger, serviceFactory, cmdConfigurator, cmd)
 
 	return cmd
 }
 
-func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator, parentCmd string) *cobra.Command {
+func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator, parentCmd *cobra.Command) {
 	var cmd = &cobra.Command{
 		Use:     "generate",
 		Short:   "Generate contract for specified services",
@@ -35,8 +35,8 @@ func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			svc, err := serviceFactory.GetService(ctx, parentCmd)
+		RunE: func(_ *cobra.Command, _ []string) error {
+			svc, err := serviceFactory.GetService(ctx, parentCmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service")
 				return nil
@@ -59,17 +59,16 @@ func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 			return nil
 		},
 	}
-
+	parentCmd.AddCommand(cmd)
 	err := cmdConfigurator.AddFlags(cmd)
 	if err != nil {
 		utils.LogError(logger, err, "failed to add generate flags")
-		return nil
+
 	}
 
-	return cmd
 }
 
-func Download(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator, parentCmd string) *cobra.Command {
+func Download(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator, parentCmd *cobra.Command) {
 	var cmd = &cobra.Command{
 		Use:     "download",
 		Short:   "Download contract for specified services",
@@ -78,7 +77,7 @@ func Download(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			svc, err := serviceFactory.GetService(ctx, parentCmd)
+			svc, err := serviceFactory.GetService(ctx, parentCmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service")
 				return nil
@@ -97,27 +96,27 @@ func Download(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 			return nil
 		},
 	}
+	parentCmd.AddCommand(cmd)
 
 	err := cmdConfigurator.AddFlags(cmd)
 	if err != nil {
 		utils.LogError(logger, err, "failed to add download flags")
-		return nil
+
 	}
 
-	return cmd
 }
 
-func Validate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator, parentCmd string) *cobra.Command {
+func Validate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator, parentCmd *cobra.Command) {
 	var cmd = &cobra.Command{
 		Use:     "test",
 		Short:   "Validate contract for specified services",
 		Example: `keploy contract test --service="email,notify" --path /local/path`,
-		Aliases: []string{"validate"},
+
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(_ *cobra.Command, _ []string) error {
-			svc, err := serviceFactory.GetService(ctx, parentCmd)
+			svc, err := serviceFactory.GetService(ctx, parentCmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service")
 				return nil
@@ -135,11 +134,11 @@ func Validate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 			return nil
 		},
 	}
+	parentCmd.AddCommand(cmd)
+
 	err := cmdConfigurator.AddFlags(cmd)
 	if err != nil {
 		utils.LogError(logger, err, "failed to add download flags")
-		return nil
 	}
 
-	return cmd
 }

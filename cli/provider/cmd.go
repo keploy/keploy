@@ -173,24 +173,24 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	var err error
 	cmd.Flags().SetNormalizeFunc(aliasNormalizeFunc)
 	switch cmd.Name() {
+
 	case "generate", "download":
 		cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate/download contracts")
 		cmd.Flags().StringSliceP("tests", "t", c.cfg.Contract.Tests, "Specify the tests for which to generate/download contracts")
 
 		cmd.Flags().StringP("path", "p", c.cfg.Contract.Path, "Specify the path to generate/download contracts")
-		err := cmd.MarkFlagRequired("path")
-		if err != nil {
-			errMsg := "failed to mark path as required flag"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
+		if cmd.Name() == "generate" {
+			if c.cfg.Contract.Path == "" {
+				c.cfg.Contract.Path = "./keploy/schema"
+			}
 		}
 		if cmd.Name() == "download" {
+			if c.cfg.Contract.Path == "" {
+				c.cfg.Contract.Path = "./"
+			}
 			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the path to download contracts")
-			err := cmd.MarkFlagRequired("driven")
-			if err != nil {
-				errMsg := "failed to mark driven as required flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
+			if c.cfg.Contract.Driven == "" {
+				c.cfg.Contract.Driven = "client"
 			}
 		}
 
@@ -224,14 +224,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		}
 
 	case "record", "test", "rerecord":
-		if cmd.HasAlias("validate") {
+		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
 			cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate contracts")
 			cmd.Flags().StringP("path", "p", c.cfg.Contract.Path, "Specify the path to generate contracts")
-			err := cmd.MarkFlagRequired("path")
-			if err != nil {
-				errMsg := "failed to mark path as required flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
+			if c.cfg.Contract.Path == "" {
+				c.cfg.Contract.Path = "./"
 			}
 			cmd.Flags().Bool("download", c.cfg.Contract.Download, "Specify whether to download contracts or not")
 			cmd.Flags().Bool("generate", c.cfg.Contract.Generate, "Specify")
@@ -239,22 +236,22 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 
 		} else {
 
-		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
-		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
-		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
-		cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
+			cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
+			cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
+			cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
+			cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
 
-		cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command to start the user application (native/docker/docker-compose)")
-		cmd.Flags().Uint64P("build-delay", "b", c.cfg.BuildDelay, "User provided time to wait docker container build")
-		cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
-		cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the application's docker network")
-		cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server and ignore the traffic")
-		cmd.Flags().Uint64P("app-id", "a", c.cfg.AppID, "A unique name for the user's application")
-		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
-		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
-		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
-		//add rest of the uncommon flags for record, test, rerecord commands
-		c.AddUncommonFlags(cmd)
+			cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command to start the user application (native/docker/docker-compose)")
+			cmd.Flags().Uint64P("build-delay", "b", c.cfg.BuildDelay, "User provided time to wait docker container build")
+			cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
+			cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the application's docker network")
+			cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server and ignore the traffic")
+			cmd.Flags().Uint64P("app-id", "a", c.cfg.AppID, "A unique name for the user's application")
+			cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
+			cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
+			cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
+			//add rest of the uncommon flags for record, test, rerecord commands
+			c.AddUncommonFlags(cmd)
 		}
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
@@ -453,7 +450,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	}
 
 	if c.cfg.EnableTesting {
-		// Add mode to logger to debug the keploValidateFlagsy during testing
+		// Add mode to logger to debug the keploy during testing
 		logger, err := log.AddMode(cmd.Name())
 		*c.logger = *logger
 		if err != nil {
@@ -653,7 +650,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					return errors.New(errMsg)
 				}
 
-
 				testSets, err := cmd.Flags().GetStringSlice("testsets")
 				if err != nil {
 					errMsg := "failed to get the testsets"
@@ -661,24 +657,24 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					return errors.New(errMsg)
 				}
 				config.SetSelectedTests(c.cfg, testSets)
-			if cmd.Name() == "rerecord" {
-				c.cfg.Test.SkipCoverage = true
-				host, err := cmd.Flags().GetString("host")
-				if err != nil {
-					errMsg := "failed to get the provided host"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
+				if cmd.Name() == "rerecord" {
+					c.cfg.Test.SkipCoverage = true
+					host, err := cmd.Flags().GetString("host")
+					if err != nil {
+						errMsg := "failed to get the provided host"
+						utils.LogError(c.logger, err, errMsg)
+						return errors.New(errMsg)
+					}
+					c.cfg.ReRecord.Host = host
+					port, err := cmd.Flags().GetUint32("port")
+					if err != nil {
+						errMsg := "failed to get the provided port"
+						utils.LogError(c.logger, err, errMsg)
+						return errors.New(errMsg)
+					}
+					c.cfg.ReRecord.Port = port
+					return nil
 				}
-				c.cfg.ReRecord.Host = host
-				port, err := cmd.Flags().GetUint32("port")
-				if err != nil {
-					errMsg := "failed to get the provided port"
-					utils.LogError(c.logger, err, errMsg)
-					return errors.New(errMsg)
-				}
-				c.cfg.ReRecord.Port = port
-				return nil
-			}
 
 				// skip coverage by default if command is of type docker
 				if utils.CmdType(c.cfg.CommandType) != "native" && !cmd.Flags().Changed("skip-coverage") {
