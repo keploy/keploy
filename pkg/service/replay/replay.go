@@ -458,7 +458,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if r.instrument {
-		if !runApp {
+		if runApp {
 			r.runTestSetErrGrp.Go(func() error {
 				defer utils.Recover(r.logger)
 				appErr = r.RunApplication(r.runTestSetCtx, appID, models.RunOptions{})
