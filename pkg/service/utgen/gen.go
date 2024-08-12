@@ -55,7 +55,7 @@ func NewUnitTestGenerator(srcPath, testPath, reportPath, cmd, dir, coverageForma
 		maxIterations: maxIterations,
 		logger:        logger,
 		tel:           tel,
-		ai:            NewAIClient(model, apiBaseURL, apiVersion, logger),
+		ai:            NewAIClient(model, apiBaseURL, apiVersion, "", logger),
 		cov: &Coverage{
 			Path:    reportPath,
 			Format:  coverageFormat,
@@ -220,6 +220,7 @@ func (g *UnitTestGenerator) GenerateTests(ctx context.Context) (*models.UTDetail
 	fmt.Println("Generating Tests...")
 	response, promptTokenCount, responseTokenCount, err := g.ai.Call(ctx, g.prompt, 4096)
 	if err != nil {
+		fmt.Println("Error calling AI model !1")
 		utils.LogError(g.logger, err, "Error calling AI model")
 		return &models.UTDetails{}, err
 	}

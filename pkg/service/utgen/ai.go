@@ -21,6 +21,7 @@ type AIClient struct {
 	Model      string
 	APIBase    string
 	APIVersion string
+	ApiKey     string
 	Logger     *zap.Logger
 }
 
@@ -70,12 +71,27 @@ type Delta struct {
 	Content string `json:"content"`
 }
 
-func NewAIClient(model, apiBase, apiVersion string, logger *zap.Logger) *AIClient {
+type AIResponse struct {
+	IsSuccess        bool   `json:"isSuccess"`
+	Error            string `json:"error"`
+	FinalContent     string `json:"finalContent"`
+	PromptTokens     int    `json:"promptTokens"`
+	CompletionTokens int    `json:"completionTokens"`
+	ApiKey           string `json:"apiKey"`
+}
+
+type AIRequest struct {
+	MaxTokens int    `json:"maxTokens"`
+	Prompt    Prompt `json:"prompt"`
+}
+
+func NewAIClient(model, apiBase, apiVersion, apiKey string, logger *zap.Logger) *AIClient {
 	return &AIClient{
 		Model:      model,
 		APIBase:    apiBase,
 		APIVersion: apiVersion,
 		Logger:     logger,
+		ApiKey:     apiKey,
 	}
 }
 
@@ -107,7 +123,51 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 		Temperature: 0.2,
 	}
 
-	if ai.APIBase != "" {
+	var apiKey string
+	// here we communicate with the OpenAI API
+
+	if ai.APIBase == "https://api.keploy.io" {
+		// send a request to api server along with user email
+		// think about authentication of jwt token
+		// make a request to the api server
+		httpClient := &http.Client{}
+		// make AI request as request body to the API server
+		aiRequest := AIRequest{
+			MaxTokens: maxTokens,
+			Prompt:    *prompt,
+		}
+		aiRequestBytes, err := json.Marshal(aiRequest)
+		if err != nil {
+			return "", 0, 0, fmt.Errorf("error marshalling AI request: %v", err)
+		}
+		// make a request to the API server
+		req, err := http.NewRequest("POST", "http://localhost:8083/ai/call", bytes.NewBuffer(aiRequestBytes))
+		if err != nil {
+			return "", 0, 0, fmt.Errorf("error creating request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return "", 0, 0, fmt.Errorf("error making request: %v", err)
+		}
+
+		// read the response body AIResponse
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		var aiResponse AIResponse
+		err = json.Unmarshal(bodyBytes, &aiResponse)
+		if err != nil {
+			return "", 0, 0, fmt.Errorf("error unmarshalling response body: %v", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return "", 0, 0, fmt.Errorf("unexpected status code: %v, response body: %s", resp.StatusCode, aiResponse.Error)
+		}
+		fmt.Println("AI response", aiResponse)
+		defer resp.Body.Close()
+		apiKey = aiResponse.ApiKey
+		return aiResponse.FinalContent, aiResponse.PromptTokens, aiResponse.CompletionTokens, nil
+	} else if ai.APIBase != "" {
 		apiBaseURL = ai.APIBase
 	} else {
 		apiBaseURL = "https://api.openai.com/v1"
@@ -128,7 +188,11 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 		return "", 0, 0, fmt.Errorf("error creating request: %v", err)
 	}
 
-	apiKey := os.Getenv("API_KEY")
+	if ai.ApiKey == "" {
+		apiKey = os.Getenv("API_KEY")
+	}
+
+	apiKey = ai.ApiKey
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("api-key", apiKey)
@@ -157,6 +221,8 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 		fmt.Println("Streaming results from LLM model...")
 	}
 
+	fmt.Println("Streaming results from LLM model...")
+	
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil && err != io.EOF {
