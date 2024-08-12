@@ -237,7 +237,12 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		return nil
 	}
 	if testCount == 0 {
-		r.testSetDB.Delete(ctx, newTestSetID)
+		err := r.testSetDB.Delete(ctx, newTestSetID)
+		if err != nil {
+			stopReason = "failed to delete test set"
+			utils.LogError(r.logger, err, stopReason)
+			return fmt.Errorf(stopReason)
+		}
 	}
 	utils.LogError(r.logger, err, stopReason)
 	return fmt.Errorf(stopReason)

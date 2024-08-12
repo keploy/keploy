@@ -1118,14 +1118,14 @@ func sortTestSetsByCmd(testSets map[string]*models.TestSet) []string {
 
 func detectCommonLanguage(logger *zap.Logger, testSets map[string]*models.TestSet) (config.Language, error) {
 	var language config.Language
-	for testSetId, testSet := range testSets {
+	for testSetID, testSet := range testSets {
 		testSetLanguage := utils.DetectLanguage(logger, testSet.AppCmd)
 		if testSetLanguage == models.Unknown {
-			logger.Warn("failed to detect language for", zap.String("test-set-id", testSetId))
-			return models.Unknown, fmt.Errorf("failed to detect language for test-set %s", testSetId)
+			logger.Warn("failed to detect language for", zap.String("test-set-id", testSetID))
+			return models.Unknown, fmt.Errorf("failed to detect language for test-set %s", testSetID)
 		}
 		if language != "" && language != testSetLanguage {
-			logger.Warn("multiple languages detected in the test sets", zap.String("test-set-id", testSetId))
+			logger.Warn("multiple languages detected in the test sets", zap.String("test-set-id", testSetID))
 			return models.Unknown, fmt.Errorf("multiple languages detected in the test sets")
 		}
 	}
