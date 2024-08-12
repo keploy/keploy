@@ -1,9 +1,9 @@
-name: Test Express Mongo
+name: Test Express Mongoose
 on:
   workflow_call:
 
 jobs:
-  test-go-mongo:
+  test-express-mongoose:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -51,7 +51,7 @@ jobs:
         uses: ./.github/actions/tester
         with:
           working-directory: samples-typescript/express-mongoose
-          command: npm start
+          command: node src/app.js
           delay: 7
           keploy-record-bin: /usr/local/bin/keployR
           keploy-test-bin: /usr/local/bin/keployB
