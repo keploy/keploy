@@ -111,7 +111,8 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		PacketBundle: *handshakeResponsePkt,
 	})
 
-	// Read the next auth packet, It can be either auth more data or auth switch request
+	// Read the next auth packet, It can be either auth more data or auth switch request in case of caching_sha2_password
+	// or it can be OK packet in case of native password
 	authData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
 	if err != nil {
 		if err == io.EOF {
@@ -119,12 +120,13 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 
 			return res, err
 		}
-		utils.LogError(logger, err, "failed to read auth packet from server during handshake")
+		utils.LogError(logger, err, "failed to read auth or final response packet from server during handshake")
 		return res, err
 	}
 
-	// AuthSwitchPacket: If the server sends an AuthSwitchRequest, then there must be a diff auth type with its data
+	// AuthSwitchRequest: If the server sends an AuthSwitchRequest, then there must be a diff auth type with its data
 	// AuthMoreData: If the server sends an AuthMoreData, then it tells the auth mechanism type for the initial plugin name
+	// OK/ERR: If the server sends an OK/ERR packet, in case of native password.
 	_, err = clientConn.Write(authData)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -134,29 +136,34 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		return res, err
 	}
 
-	// Decode auth packet
-	authPkt, err := wire.DecodePayload(ctx, logger, authData, clientConn, decodeCtx)
+	// Decode auth or final response packet
+	authDecider, err := wire.DecodePayload(ctx, logger, authData, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode auth more data packet")
 		return res, err
 	}
 
 	var authRes handshakeRes
-	switch authPkt.Message.(type) {
+	switch authDecider.Message.(type) {
 	case *mysql.AuthSwitchRequestPacket:
-		pkt := authPkt.Message.(*mysql.AuthSwitchRequestPacket)
+		pkt := authDecider.Message.(*mysql.AuthSwitchRequestPacket)
 
 		// Change the plugin name due to auth switch request
 		decodeCtx.PluginName = pkt.PluginName
 
-		authRes, err = handleAuth(ctx, logger, authPkt, clientConn, destConn, decodeCtx)
+		authRes, err = handleAuth(ctx, logger, authDecider, clientConn, destConn, decodeCtx)
 		if err != nil {
 			return res, fmt.Errorf("failed to handle auth switch request: %w", err)
 		}
 	case *mysql.AuthMoreDataPacket:
-		authRes, err = handleAuth(ctx, logger, authPkt, clientConn, destConn, decodeCtx)
+		authRes, err = handleAuth(ctx, logger, authDecider, clientConn, destConn, decodeCtx)
 		if err != nil {
 			return res, fmt.Errorf("failed to handle auth more data: %w", err)
+		}
+	case *mysql.OKPacket:
+		authRes, err = handleAuth(ctx, logger, authDecider, clientConn, destConn, decodeCtx)
+		if err != nil {
+			return res, fmt.Errorf("failed to handle ok packet: %w", err)
 		}
 	}
 
@@ -179,7 +186,12 @@ func handleAuth(ctx context.Context, logger *zap.Logger, authPkt *mysql.PacketBu
 
 	switch mysql.AuthPluginName(decodeCtx.PluginName) {
 	case mysql.Native:
-		return res, fmt.Errorf("Native Password authentication is not supported")
+		res.resp = append(res.resp, mysql.Response{
+			PacketBundle: *authPkt,
+		})
+
+		res.responseOperation = authPkt.Header.Type
+		logger.Debug("native password authentication is handled successfully")
 	case mysql.CachingSha2:
 		result, err := handleCachingSha2Password(ctx, logger, authPkt, clientConn, destConn, decodeCtx)
 		if err != nil {
@@ -293,6 +305,7 @@ func handleFastAuthSuccess(ctx context.Context, logger *zap.Logger, clientConn, 
 
 	// Set the final response operation of the handshake
 	res.responseOperation = finalPkt.Header.Type
+	logger.Debug("fast auth success is handled successfully")
 
 	return res, nil
 }
@@ -421,5 +434,6 @@ func handleFullAuth(ctx context.Context, logger *zap.Logger, clientConn, destCon
 	// Set the final response operation of the handshake
 	res.responseOperation = finalResPkt.Header.Type
 
+	logger.Debug("full auth is handled successfully")
 	return res, nil
 }
