@@ -2,7 +2,7 @@ name: Golang On Linux
 on: [pull_request]
 jobs:
   golang_linux:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     steps:
     - name: Checkout repository
       uses: actions/checkout@v2
