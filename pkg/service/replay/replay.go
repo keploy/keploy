@@ -55,6 +55,7 @@ type Replayer struct {
 	appCtx          context.Context
 	appCtxCancel    context.CancelFunc
 	appErrGrp       *errgroup.Group
+	appErrChan      chan models.AppError
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf Config, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
@@ -66,6 +67,7 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 	if config.Command != "" {
 		instrument = true
 	}
+	appErrChan := make(chan models.AppError, 1)
 	return &Replayer{
 		logger:          logger,
 		testDB:          testDB,
@@ -75,6 +77,7 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 		telemetry:       telemetry,
 		instrumentation: instrumentation,
 		config:          config,
+		appErrChan:      appErrChan,
 		instrument:      instrument,
 	}
 }
@@ -444,7 +447,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	var appErrChan = make(chan models.AppError, 1)
 	var appErr models.AppError
 	var success int
 	var failure int
@@ -470,11 +472,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.appCtx, r.appCtxCancel = context.WithCancel(r.appCtx)
 			r.appErrGrp.Go(func() error {
 				defer utils.Recover(r.logger)
-				appErr = r.RunApplication(runTestSetCtx, appID, models.RunOptions{})
+				appErr = r.RunApplication(r.appCtx, appID, models.RunOptions{})
 				if appErr.AppErrorType == models.ErrCtxCanceled {
 					return nil
 				}
-				appErrChan <- appErr
+				r.appErrChan <- appErr
 				return nil
 			})
 		}
@@ -483,7 +485,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		runTestSetErrGrp.Go(func() error {
 			defer utils.Recover(r.logger)
 			select {
-			case err := <-appErrChan:
+			case err := <-r.appErrChan:
 				switch err.AppErrorType {
 				case models.ErrCommandError:
 					testSetStatusByErrChan = models.TestSetStatusFaultUserApp
