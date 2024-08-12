@@ -92,9 +92,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 	defer func() {
 		if r.appCtxCancel != nil {
 			r.appCtxCancel()
-			err := r.appErrGrp.Wait()
-			if err != nil {
-				utils.LogError(r.logger, err, "error in context cancellation of test set")
+			if r.appErrGrp != nil {
+				err := r.appErrGrp.Wait()
+				if err != nil {
+					utils.LogError(r.logger, err, "error in context cancellation of test set")
+				}
 			}
 		}
 		select {
@@ -464,11 +466,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	if r.instrument {
 		if runApp {
-			r.appCtx, r.appCtxCancel = context.WithCancel(ctx)
-			errGrp := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
-			errGrp.Go(func() error {
+			r.appErrGrp, r.appCtx = errgroup.WithContext(ctx)
+			r.appCtx, r.appCtxCancel = context.WithCancel(r.appCtx)
+			r.appErrGrp.Go(func() error {
 				defer utils.Recover(r.logger)
-				appErr = r.RunApplication(r.appCtx, appID, models.RunOptions{})
+				appErr = r.RunApplication(runTestSetCtx, appID, models.RunOptions{})
 				if appErr.AppErrorType == models.ErrCtxCanceled {
 					return nil
 				}
@@ -982,6 +984,7 @@ func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noise
 			}
 		}
 	}
+
 	return noiseParams, nil
 }
 
