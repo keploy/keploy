@@ -7,6 +7,10 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v2
 
+    - name: Run Sudoer
+      run: |
+        echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
+
     - name: Set up Go
       uses: actions/setup-go@v3
       with:
