@@ -464,10 +464,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	if r.instrument {
 		if runApp {
-			r.appErrGrp, r.appCtx = errgroup.WithContext(ctx)
-			r.appCtx = context.WithValue(r.appCtx, models.ErrGroupKey, r.appErrGrp)
-			r.appCtx, r.appCtxCancel = context.WithCancel(r.appCtx)
-			runTestSetErrGrp.Go(func() error {
+			r.appCtx, r.appCtxCancel = context.WithCancel(ctx)
+			errGrp := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+			errGrp.Go(func() error {
 				defer utils.Recover(r.logger)
 				appErr = r.RunApplication(r.appCtx, appID, models.RunOptions{})
 				if appErr.AppErrorType == models.ErrCtxCanceled {
@@ -983,7 +982,6 @@ func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noise
 			}
 		}
 	}
-
 	return noiseParams, nil
 }
 
