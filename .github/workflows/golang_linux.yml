@@ -2,23 +2,14 @@ name: Golang On Linux
 on: [pull_request]
 jobs:
   golang_linux:
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
       uses: actions/checkout@v2
 
-    - name: Run Sudoer
-      run: |
-        echo "root ALL=(ALL:ALL) ALL" | sudo tee -a /etc/sudoers
-
-    - name: Set up Go
-      uses: actions/setup-go@v3
-      with:
-        go-version: 1.21
-
     - name: Build binary
       run: |
-        go build -tags=viper_bind_struct -o keployv2
+        go build -race -tags=viper_bind_struct -o keployv2
     - name: Checkout the samples-go repository
       uses: actions/checkout@v2
       with:
