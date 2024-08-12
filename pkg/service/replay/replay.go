@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -44,15 +43,18 @@ func SetTestUtilInstance(emulatorInstance RequestMockHandler) {
 }
 
 type Replayer struct {
-	logger          *zap.Logger
-	testDB          TestDB
-	mockDB          MockDB
-	reportDB        ReportDB
-	testSetConf     Config
-	telemetry       Telemetry
-	instrumentation Instrumentation
-	config          *config.Config
-	instrument      bool
+	logger              *zap.Logger
+	testDB              TestDB
+	mockDB              MockDB
+	reportDB            ReportDB
+	testSetConf         Config
+	telemetry           Telemetry
+	instrumentation     Instrumentation
+	config              *config.Config
+	instrument          bool
+	runTestSetCtx       context.Context
+	runTestSetCtxCancel context.CancelFunc
+	runTestSetErrGrp    *errgroup.Group
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf Config, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
@@ -86,8 +88,15 @@ func (r *Replayer) Start(ctx context.Context) error {
 	var hookCancel context.CancelFunc
 	var stopReason = "replay completed successfully"
 
-	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
+	// defering the stop function to stop keploy in case of any error in replay or in case of context cancellation
 	defer func() {
+		if r.runTestSetCtxCancel != nil {
+			r.runTestSetCtxCancel()
+			err := r.runTestSetErrGrp.Wait()
+			if err != nil {
+				utils.LogError(r.logger, err, "error in context cancellation of test set")
+			}
+		}
 		select {
 		case <-ctx.Done():
 			break
@@ -103,6 +112,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 	}()
 
+	testRunID, err := r.GetNextTestRunID(ctx)
+	if err != nil {
+		stopReason = fmt.Sprintf("failed to get next test run id: %v", err)
+		utils.LogError(r.logger, err, stopReason)
+		return fmt.Errorf(stopReason)
+	}
+
 	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get all test set ids: %v", err)
@@ -117,59 +133,46 @@ func (r *Replayer) Start(ctx context.Context) error {
 		return fmt.Errorf(errMsg)
 	}
 
-	testRunID, err := r.GetNextTestRunID(ctx)
-	if err != nil {
-		stopReason = fmt.Sprintf("failed to get next test run id: %v", err)
-		utils.LogError(r.logger, err, stopReason)
-		return fmt.Errorf(stopReason)
+	testSets := make(map[string]*models.TestSet)
+	for _, testSetID := range testSetIDs {
+		tsconfig, err := r.testSetConf.Read(ctx, testSetID)
+		if err != nil {
+			testSets[testSetID] = &models.TestSet{AppCmd: r.config.Command}
+		} else {
+			testSets[testSetID] = tsconfig
+		}
 	}
+	testSetIDs = sortTestSetsByCmd(testSets)
 
 	var language config.Language
-	var executable string
-	// only find language to calculate coverage if instrument is true
-	if r.instrument {
-		language, executable = utils.DetectLanguage(r.logger, r.config.Command)
-		// if language is not provided and language detected is known
-		// then set the language to detected language
+	var cov coverage.Service
+
+	if r.instrument && !r.config.Test.SkipCoverage {
+		language, err = detectCommonLanguage(r.logger, testSets)
+		if err != nil {
+			r.config.Test.SkipCoverage = true
+			r.logger.Warn("failed to detect language, skipping coverage caluclation", zap.Error(err))
+		}
+
 		if r.config.Test.Language == "" {
-			if language == models.Unknown {
-				r.logger.Warn("failed to detect language, skipping coverage caluclation. please use --language to manually set the language")
-				r.config.Test.SkipCoverage = true
-			} else {
-				r.logger.Warn(fmt.Sprintf("%s language detected. please use --language to manually set the language if needed", language))
-			}
+			r.logger.Warn(fmt.Sprintf("%s language detected. please use --language to manually set the language if needed", language))
 			r.config.Test.Language = language
-		} else if language != r.config.Test.Language && language != models.Unknown {
+		} else if language != r.config.Test.Language {
 			utils.LogError(r.logger, nil, "language detected is different from the language provided")
 			r.config.Test.SkipCoverage = true
 		}
-	}
 
-	var cov coverage.Service
-	switch r.config.Test.Language {
-	case models.Go:
-		cov = golang.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.CoverageReportPath, r.config.CommandType)
-	case models.Python:
-		cov = python.New(ctx, r.logger, r.reportDB, r.config.Command, executable)
-	case models.Javascript:
-		cov = javascript.New(ctx, r.logger, r.reportDB, r.config.Command)
-	case models.Java:
-		cov = java.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.JacocoAgentPath, executable)
-	default:
-		r.config.Test.SkipCoverage = true
-	}
-	if !r.config.Test.SkipCoverage {
-		if utils.CmdType(r.config.CommandType) == utils.Native {
-			r.config.Command, err = cov.PreProcess(r.config.Test.DisableLineCoverage)
-
-			if err != nil {
-				r.config.Test.SkipCoverage = true
-			}
-		}
-		err = os.Setenv("CLEAN", "true") // related to javascript coverage calculation
-		if err != nil {
+		switch r.config.Test.Language {
+		case models.Go:
+			cov = golang.New(ctx, r.logger, r.config.Test.CoverageReportPath, r.config)
+		case models.Python:
+			cov = python.New(ctx, r.logger, r.config)
+		case models.Javascript:
+			cov = javascript.New(ctx, r.logger, r.config)
+		case models.Java:
+			cov = java.New(ctx, r.logger, r.config.Test.JacocoAgentPath, r.config)
+		default:
 			r.config.Test.SkipCoverage = true
-			r.logger.Warn("failed to set CLEAN env variable, skipping coverage caluclation", zap.Error(err))
 		}
 	}
 
@@ -189,23 +192,36 @@ func (r *Replayer) Start(ctx context.Context) error {
 	testSetResult := false
 	testRunResult := true
 	abortTestRun := false
+	var previousCmd string
 
 	for i, testSetID := range testSetIDs {
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
 		}
 
-		requestMockemulator.ProcessMockFile(ctx, testSetID)
-
 		if !r.config.Test.SkipCoverage {
-			err = os.Setenv("TESTSETID", testSetID) // related to java coverage calculation
+			r.config.Command, err = cov.PreProcess(testSets[testSetID].AppCmd, testSetID)
 			if err != nil {
 				r.config.Test.SkipCoverage = true
-				r.logger.Warn("failed to set TESTSETID env variable, skipping coverage caluclation", zap.Error(err))
 			}
 		}
 
-		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, inst.AppID, false)
+		requestMockemulator.ProcessMockFile(ctx, testSetID)
+
+		var runApp bool
+		if previousCmd != testSets[testSetID].AppCmd || previousCmd == "" {
+			if previousCmd != "" {
+				r.runTestSetCtxCancel()
+				err := r.runTestSetErrGrp.Wait()
+				if err != nil {
+					utils.LogError(r.logger, err, "error in cancelling the test set run")
+				}
+			}
+			runApp = true
+			previousCmd = testSets[testSetID].AppCmd
+		}
+
+		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, inst.AppID, runApp)
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)
 			utils.LogError(r.logger, err, stopReason)
@@ -214,6 +230,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			}
 			return fmt.Errorf(stopReason)
 		}
+
 		switch testSetStatus {
 		case models.TestSetStatusAppHalted:
 			testSetResult = false
@@ -245,20 +262,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 				utils.LogError(r.logger, err, "failed to get after test hook")
 			}
 		}
-
-		if i == 0 && !r.config.Test.SkipCoverage {
-			err = os.Setenv("CLEAN", "false") // related to javascript coverage calculation
-			if err != nil {
-				r.config.Test.SkipCoverage = true
-				r.logger.Warn("failed to set CLEAN env variable, skipping coverage caluclation.", zap.Error(err))
-			}
-			err = os.Setenv("APPEND", "--append") // related to python coverage calculation
-			if err != nil {
-				r.config.Test.SkipCoverage = true
-				r.logger.Warn("failed to set APPEND env variable, skipping coverage caluclation.", zap.Error(err))
-			}
-		}
 	}
+
 	if !r.config.Test.SkipCoverage && r.config.Test.Language == models.Java {
 		err = java.MergeAndGenerateJacocoReport(ctx, r.logger)
 		if err != nil {
@@ -280,7 +285,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			coverageData, err := cov.GetCoverage()
 			if err == nil {
 				r.logger.Sugar().Infoln(models.HighlightPassingString("Total Coverage Percentage: ", coverageData.TotalCov))
-				err = cov.AppendCoverage(&coverageData, testRunID)
+				err := r.reportDB.UpdateReport(ctx, testRunID, coverageData)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to update report with the coverage data")
 				}
@@ -355,26 +360,21 @@ func (r *Replayer) GetTestCases(ctx context.Context, testID string) ([]*models.T
 	return r.testDB.GetTestCases(ctx, testID)
 }
 
-func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error) {
+func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, runApp bool) (models.TestSetStatus, error) {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
-	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
-	runTestSetCtx = context.WithValue(runTestSetCtx, models.ErrGroupKey, runTestSetErrGrp)
-	runTestSetCtx, runTestSetCtxCancel := context.WithCancel(runTestSetCtx)
+	r.runTestSetErrGrp, r.runTestSetCtx = errgroup.WithContext(ctx)
+	r.runTestSetCtx = context.WithValue(r.runTestSetCtx, models.ErrGroupKey, r.runTestSetErrGrp)
+	r.runTestSetCtx, r.runTestSetCtxCancel = context.WithCancel(r.runTestSetCtx)
 
 	startTime := time.Now()
 
 	exitLoopChan := make(chan bool, 2)
 	defer func() {
-		runTestSetCtxCancel()
-		err := runTestSetErrGrp.Wait()
-		if err != nil {
-			utils.LogError(r.logger, err, "error in testLoopErrGrp")
-		}
 		close(exitLoopChan)
 	}()
 
-	testCases, err := r.testDB.GetTestCases(runTestSetCtx, testSetID)
+	testCases, err := r.testDB.GetTestCases(r.runTestSetCtx, testSetID)
 	if err != nil {
 		return models.TestSetStatusFailed, fmt.Errorf("failed to get test cases: %w", err)
 	}
@@ -392,7 +392,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			Ignored: len(testCases),
 		}
 
-		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
+		err = r.reportDB.InsertReport(r.runTestSetCtx, testRunID, testSetID, testReport)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to insert report")
 			return models.TestSetStatusFailed, err
@@ -410,14 +410,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		completeTestReport[testSetID] = verdict
 		totalTests += testReport.Total
 		totalTestIgnored += testReport.Ignored
-
 		return models.TestSetStatusIgnored, nil
 	}
 
 	var conf *models.TestSet
 
 	//Execute the Pre-script before each test-set if provided
-	conf, err = r.testSetConf.Read(runTestSetCtx, testSetID)
+	conf, err = r.testSetConf.Read(r.runTestSetCtx, testSetID)
 	if err != nil {
 		if strings.Contains(err.Error(), "no such file or directory") {
 			r.logger.Info("config file not found, continuing execution...", zap.String("test-set", testSetID))
@@ -432,7 +431,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	if conf.PreScript != "" {
 		r.logger.Info("Running Pre-script", zap.String("script", conf.PreScript), zap.String("test-set", testSetID))
-		err = r.executeScript(runTestSetCtx, conf.PreScript)
+		err = r.executeScript(r.runTestSetCtx, conf.PreScript)
 		if err != nil {
 			return models.TestSetStatusFaultScript, fmt.Errorf("failed to execute pre-script: %w", err)
 		}
@@ -453,16 +452,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	cmdType := utils.CmdType(r.config.CommandType)
 	var userIP string
 
-	err = r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, models.BaseTime, time.Now(), Start)
+	err = r.SetupOrUpdateMocks(r.runTestSetCtx, appID, testSetID, models.BaseTime, time.Now(), Start)
 	if err != nil {
 		return models.TestSetStatusFailed, err
 	}
 
 	if r.instrument {
-		if !serveTest {
-			runTestSetErrGrp.Go(func() error {
+		if !runApp {
+			r.runTestSetErrGrp.Go(func() error {
 				defer utils.Recover(r.logger)
-				appErr = r.RunApplication(runTestSetCtx, appID, models.RunOptions{})
+				appErr = r.RunApplication(r.runTestSetCtx, appID, models.RunOptions{})
 				if appErr.AppErrorType == models.ErrCtxCanceled {
 					return nil
 				}
@@ -472,7 +471,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Checking for errors in the mocking and application
-		runTestSetErrGrp.Go(func() error {
+		r.runTestSetErrGrp.Go(func() error {
 			defer utils.Recover(r.logger)
 			select {
 			case err := <-appErrChan:
@@ -491,18 +490,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					testSetStatusByErrChan = models.TestSetStatusAppHalted
 				}
 				utils.LogError(r.logger, err, "application failed to run")
-			case <-runTestSetCtx.Done():
+			case <-r.runTestSetCtx.Done():
 				testSetStatusByErrChan = models.TestSetStatusUserAbort
 			}
 			exitLoopChan <- true
-			runTestSetCtxCancel()
+			r.runTestSetCtxCancel()
 			return nil
 		})
 
 		// Delay for user application to run
 		select {
 		case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
-		case <-runTestSetCtx.Done():
+		case <-r.runTestSetCtx.Done():
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
 
@@ -530,7 +529,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Status:  string(models.TestStatusRunning),
 	}
 
-	err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
+	err = r.reportDB.InsertReport(r.runTestSetCtx, testRunID, testSetID, testReport)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to insert report")
 		return models.TestSetStatusFailed, err
@@ -556,7 +555,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				TestCasePath: filepath.Join(r.config.Path, testSetID),
 				MockPath:     filepath.Join(r.config.Path, testSetID, requestMockemulator.FetchMockName()),
 			}
-			loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+			loopErr = r.reportDB.InsertTestCaseResult(r.runTestSetCtx, testRunID, testSetID, testCaseResult)
 			if loopErr != nil {
 				utils.LogError(r.logger, err, "failed to insert test case result")
 				break
@@ -594,7 +593,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		var loopErr error
 
 		//No need to handle mocking when basepath is provided
-		err := r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp, Update)
+		err := r.SetupOrUpdateMocks(r.runTestSetCtx, appID, testSetID, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp, Update)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to update mocks")
 			break
@@ -623,7 +622,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		started := time.Now().UTC()
-		resp, loopErr := requestMockemulator.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
+		resp, loopErr := requestMockemulator.SimulateRequest(r.runTestSetCtx, appID, testCase, testSetID)
 		if loopErr != nil {
 			utils.LogError(r.logger, err, "failed to simulate request")
 			failure++
@@ -632,7 +631,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		var consumedMocks []string
 		if r.instrument {
-			consumedMocks, err = r.instrumentation.GetConsumedMocks(runTestSetCtx, appID)
+			consumedMocks, err = r.instrumentation.GetConsumedMocks(r.runTestSetCtx, appID)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 			}
@@ -686,7 +685,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				Noise:        testCase.Noise,
 				Result:       *testResult,
 			}
-			loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+			loopErr = r.reportDB.InsertTestCaseResult(r.runTestSetCtx, testRunID, testSetID, testCaseResult)
 			if loopErr != nil {
 				utils.LogError(r.logger, err, "failed to insert test case result")
 				break
@@ -706,7 +705,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if conf.PostScript != "" {
 		//Execute the Post-script after each test-set if provided
 		r.logger.Info("Running Post-script", zap.String("script", conf.PostScript), zap.String("test-set", testSetID))
-		err = r.executeScript(runTestSetCtx, conf.PostScript)
+		err = r.executeScript(r.runTestSetCtx, conf.PostScript)
 		if err != nil {
 			return models.TestSetStatusFaultScript, fmt.Errorf("failed to execute post-script: %w", err)
 		}
@@ -714,9 +713,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	timeTaken := time.Since((startTime))
 
-	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
+	testCaseResults, err := r.reportDB.GetTestCaseResults(r.runTestSetCtx, testRunID, testSetID)
 	if err != nil {
-		if runTestSetCtx.Err() != context.Canceled {
+		if r.runTestSetCtx.Err() != context.Canceled {
 			utils.LogError(r.logger, err, "failed to get test case results")
 			testSetStatus = models.TestSetStatusInternalErr
 		}
@@ -747,7 +746,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	// final report should have reason for sudden stop of the test run so this should get canceled
-	reportCtx := context.WithoutCancel(runTestSetCtx)
+	reportCtx := context.WithoutCancel(r.runTestSetCtx)
 	err = r.reportDB.InsertReport(reportCtx, testRunID, testSetID, testReport)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to insert report")
@@ -763,7 +762,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if r.config.Test.RemoveUnusedMocks && testSetStatus == models.TestSetStatusPassed && r.instrument {
 		r.logger.Debug("consumed mocks from the completed testset", zap.Any("for test-set", testSetID), zap.Any("consumed mocks", totalConsumedMocks))
 		// delete the unused mocks from the data store
-		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, totalConsumedMocks)
+		err = r.mockDB.UpdateMocks(r.runTestSetCtx, testSetID, totalConsumedMocks)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
 		}
@@ -1093,4 +1092,42 @@ func (r *Replayer) DeleteTestSet(ctx context.Context, testSetID string) error {
 
 func (r *Replayer) DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error {
 	return r.testDB.DeleteTests(ctx, testSetID, testCaseIDs)
+}
+
+// sorts the test sets by the frequency of their commands
+func sortTestSetsByCmd(testSets map[string]*models.TestSet) []string {
+	cmdFrequency := make(map[string]int)
+	for _, testSet := range testSets {
+		cmdFrequency[testSet.AppCmd]++
+	}
+
+	// Create a slice of test set IDs sorted by command frequency
+	sortedTestSetIDs := make([]string, 0, len(testSets))
+	for testSetID := range testSets {
+		sortedTestSetIDs = append(sortedTestSetIDs, testSetID)
+	}
+
+	// sort the testSetIds by the frequency of their commands
+	sort.Slice(sortedTestSetIDs, func(i, j int) bool {
+		cmdI, cmdJ := testSets[sortedTestSetIDs[i]].AppCmd, testSets[sortedTestSetIDs[j]].AppCmd
+		return cmdFrequency[cmdI] > cmdFrequency[cmdJ]
+	})
+
+	return sortedTestSetIDs
+}
+
+func detectCommonLanguage(logger *zap.Logger, testSets map[string]*models.TestSet) (config.Language, error) {
+	var language config.Language
+	for testSetId, testSet := range testSets {
+		testSetLanguage := utils.DetectLanguage(logger, testSet.AppCmd)
+		if testSetLanguage == models.Unknown {
+			logger.Warn("failed to detect language for", zap.String("test-set-id", testSetId))
+			return models.Unknown, fmt.Errorf("failed to detect language for test-set %s", testSetId)
+		}
+		if language != "" && language != testSetLanguage {
+			logger.Warn("multiple languages detected in the test sets", zap.String("test-set-id", testSetId))
+			return models.Unknown, fmt.Errorf("multiple languages detected in the test sets")
+		}
+	}
+	return language, nil
 }

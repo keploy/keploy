@@ -8,38 +8,43 @@ import (
 	"os/exec"
 	"strings"
 
+	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/coverage"
 	"go.uber.org/zap"
 )
 
 type Python struct {
-	ctx        context.Context
-	logger     *zap.Logger
-	reportDB   coverage.ReportDB
-	cmd        string
-	executable string
+	ctx            context.Context
+	logger         *zap.Logger
+	executable     string
+	cfg            *config.Config
+	testSetCounter int
 }
 
-func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cmd, executable string) *Python {
+func New(ctx context.Context, logger *zap.Logger, cfg *config.Config) coverage.Service {
 	return &Python{
-		ctx:        ctx,
-		logger:     logger,
-		reportDB:   reportDB,
-		cmd:        cmd,
-		executable: executable,
+		ctx:    ctx,
+		logger: logger,
+		cfg:    cfg,
 	}
 }
 
-func (p *Python) PreProcess(_ bool) (string, error) {
+func (p *Python) PreProcess(appCmd string, _ string) (string, error) {
 	cmd := exec.Command("coverage")
 	err := cmd.Run()
 	if err != nil {
-		p.logger.Warn("coverage tool not found, skipping coverage caluclation. Please install coverage tool using 'pip install coverage'")
-		return p.cmd, err
+		p.logger.Warn("coverage tool not found, skipping coverage calculation. Please install coverage tool using 'pip install coverage'")
+		return appCmd, err
 	}
 	createPyCoverageConfig(p.logger)
-	return strings.Replace(p.cmd, p.executable, "coverage run $APPEND --data-file=.coverage.keploy", 1), nil
+	if p.testSetCounter == 0 {
+		appCmd = strings.Replace(appCmd, p.executable, "coverage run --data-file=.coverage.keploy", 1)
+	} else {
+		p.testSetCounter++
+		appCmd = strings.Replace(appCmd, p.executable, "coverage run --append --data-file=.coverage.keploy", 1)
+	}
+	return appCmd, nil
 }
 
 type pyCoverageFile struct {
@@ -103,8 +108,4 @@ func (p *Python) GetCoverage() (models.TestCoverage, error) {
 	}
 	testCov.TotalCov = cov.Totals.PercentCoveredDisplay + "%"
 	return testCov, nil
-}
-
-func (p *Python) AppendCoverage(coverage *models.TestCoverage, testRunID string) error {
-	return p.reportDB.UpdateReport(p.ctx, testRunID, coverage)
 }

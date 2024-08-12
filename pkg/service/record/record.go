@@ -23,18 +23,20 @@ type Recorder struct {
 	logger          *zap.Logger
 	testDB          TestDB
 	mockDB          MockDB
+	testSetDB       TestSetDB
 	telemetry       Telemetry
 	instrumentation Instrumentation
 	config          *config.Config
 }
 
-func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
+func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, testSetDB TestSetDB, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
 	return &Recorder{
 		logger:          logger,
 		testDB:          testDB,
 		mockDB:          mockDB,
 		telemetry:       telemetry,
 		instrumentation: instrumentation,
+		testSetDB:       testSetDB,
 		config:          config,
 	}
 }
@@ -145,7 +147,6 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 				}
 				insertTestErrChan <- err
 			} else {
-
 				testCount++
 				r.telemetry.RecordedTestAndMocks()
 			}
@@ -174,6 +175,12 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		runAppError = r.instrumentation.Run(runAppCtx, appID, models.RunOptions{})
 		if runAppError.AppErrorType == models.ErrCtxCanceled {
 			return nil
+		}
+		err = r.testSetDB.Write(ctx, newTestSetID, &models.TestSet{AppCmd: r.config.Command})
+		if err != nil {
+			stopReason = "failed to upsert app command"
+			utils.LogError(r.logger, err, stopReason)
+			return fmt.Errorf(stopReason)
 		}
 		appErrChan <- runAppError
 		return nil
@@ -228,6 +235,9 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		stopReason = "error while inserting mock into db, hence stopping keploy"
 	case <-ctx.Done():
 		return nil
+	}
+	if testCount == 0 {
+		r.testSetDB.Delete(ctx, newTestSetID)
 	}
 	utils.LogError(r.logger, err, stopReason)
 	return fmt.Errorf(stopReason)

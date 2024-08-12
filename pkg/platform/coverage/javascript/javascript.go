@@ -10,39 +10,42 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/coverage"
 	"go.uber.org/zap"
 )
 
 type Javascript struct {
-	ctx      context.Context
-	logger   *zap.Logger
-	reportDB coverage.ReportDB
-	cmd      string
+	ctx            context.Context
+	logger         *zap.Logger
+	cfg            *config.Config
+	testSetCounter int
 }
 
-func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cmd string) *Javascript {
+func New(ctx context.Context, logger *zap.Logger, cfg *config.Config) coverage.Service {
 	return &Javascript{
-		ctx:      ctx,
-		logger:   logger,
-		reportDB: reportDB,
-		cmd:      cmd,
+		ctx:    ctx,
+		logger: logger,
+		cfg:    cfg,
 	}
 }
 
-func (j *Javascript) PreProcess(disableLineCoverage bool) (string, error) {
+func (j *Javascript) PreProcess(appCmd string, _ string) (string, error) {
 	cmd := exec.Command("nyc", "--version")
 	err := cmd.Run()
 	if err != nil {
-		j.logger.Warn("coverage tool not found, skipping coverage caluclation. please install coverage tool using 'npm install -g nyc'")
-		return j.cmd, err
+		j.logger.Warn("coverage tool not found, skipping coverage calculation. please install coverage tool using 'npm install -g nyc'")
+		return appCmd, err
 	}
-	nycCmd := "nyc --clean=$CLEAN "
-	if disableLineCoverage {
-		nycCmd += "--reporter=none "
+	var nycCmd string
+	if j.testSetCounter == 0 {
+		nycCmd = "nyc --clean=true "
+	} else {
+		j.testSetCounter++
+		nycCmd = "nyc --clean=false "
 	}
-	return nycCmd + j.cmd, nil
+	return nycCmd + appCmd, nil
 }
 
 type StartTy struct {
@@ -163,8 +166,4 @@ func (j *Javascript) GetCoverage() (models.TestCoverage, error) {
 	}
 	testCov.TotalCov = strconv.FormatFloat(float64(totalCoveredLines*100)/float64(totalLines), 'f', 2, 64) + "%"
 	return testCov, nil
-}
-
-func (j *Javascript) AppendCoverage(coverage *models.TestCoverage, testRunID string) error {
-	return j.reportDB.UpdateReport(j.ctx, testRunID, coverage)
 }

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/coverage"
 	"go.keploy.io/server/v2/utils"
@@ -20,40 +21,35 @@ import (
 type Golang struct {
 	ctx                context.Context
 	logger             *zap.Logger
-	reportDB           coverage.ReportDB
-	cmd                string
 	coverageReportPath string
 	commandType        string
+	cfg                *config.Config
 }
 
-func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cmd, coverageReportPath, commandType string) *Golang {
+func New(ctx context.Context, logger *zap.Logger, coverageReportPath string, cfg *config.Config) coverage.Service {
 	return &Golang{
 		ctx:                ctx,
 		logger:             logger,
-		reportDB:           reportDB,
-		cmd:                cmd,
 		coverageReportPath: coverageReportPath,
-		commandType:        commandType,
+		cfg:                cfg,
 	}
 }
 
-func (g *Golang) PreProcess(_ bool) (string, error) {
-	if !checkForCoverFlag(g.logger, g.cmd) {
-		return g.cmd, errors.New("binary not coverable")
+func (g *Golang) PreProcess(appCmd string, _ string) (string, error) {
+	if !checkForCoverFlag(g.logger, appCmd) {
+		return appCmd, errors.New("binary not coverable")
 	}
-	if utils.CmdType(g.commandType) == utils.Native {
-		goCovPath, err := utils.SetCoveragePath(g.logger, g.coverageReportPath)
-		if err != nil {
-			g.logger.Warn("failed to set go coverage path", zap.Error(err))
-			return g.cmd, err
-		}
-		err = os.Setenv("GOCOVERDIR", goCovPath)
-		if err != nil {
-			g.logger.Warn("failed to set GOCOVERDIR", zap.Error(err))
-			return g.cmd, err
-		}
+	goCovPath, err := utils.SetCoveragePath(g.logger, g.coverageReportPath)
+	if err != nil {
+		g.logger.Warn("failed to set go coverage path", zap.Error(err))
+		return appCmd, err
 	}
-	return g.cmd, nil
+	err = os.Setenv("GOCOVERDIR", goCovPath)
+	if err != nil {
+		g.logger.Warn("failed to set GOCOVERDIR", zap.Error(err))
+		return appCmd, err
+	}
+	return appCmd, nil
 }
 
 func (g *Golang) GetCoverage() (models.TestCoverage, error) {
@@ -140,8 +136,4 @@ func (g *Golang) GetCoverage() (models.TestCoverage, error) {
 	}
 	testCov.TotalCov = strconv.FormatFloat(float64(totalCoveredLines*100)/float64(totalLines), 'f', 2, 64) + "%"
 	return testCov, nil
-}
-
-func (g *Golang) AppendCoverage(coverage *models.TestCoverage, testRunID string) error {
-	return g.reportDB.UpdateReport(g.ctx, testRunID, coverage)
 }

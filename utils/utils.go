@@ -714,28 +714,28 @@ func isGoBinary(logger *zap.Logger, filePath string) bool {
 }
 
 // DetectLanguage detects the language of the test command and returns the executable
-func DetectLanguage(logger *zap.Logger, cmd string) (config.Language, string) {
+func DetectLanguage(logger *zap.Logger, cmd string) config.Language {
 	if cmd == "" {
-		return models.Unknown, ""
+		return models.Unknown
 	}
 	fields := strings.Fields(cmd)
 	executable := fields[0]
 	if strings.HasPrefix(cmd, "python") {
-		return models.Python, executable
+		return models.Python
 	}
 
 	if executable == "node" || executable == "npm" || executable == "yarn" {
-		return models.Javascript, executable
+		return models.Javascript
 	}
 
 	if executable == "java" {
-		return models.Java, executable
+		return models.Java
 	}
 
 	if executable == "go" || (len(fields) == 1 && isGoBinary(logger, executable)) {
-		return models.Go, executable
+		return models.Go
 	}
-	return models.Unknown, executable
+	return models.Unknown
 }
 
 // FileExists checks if a file exists and is not a directory at the given path.
