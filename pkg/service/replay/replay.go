@@ -43,18 +43,18 @@ func SetTestUtilInstance(emulatorInstance RequestMockHandler) {
 }
 
 type Replayer struct {
-	logger              *zap.Logger
-	testDB              TestDB
-	mockDB              MockDB
-	reportDB            ReportDB
-	testSetConf         Config
-	telemetry           Telemetry
-	instrumentation     Instrumentation
-	config              *config.Config
-	instrument          bool
-	runTestSetCtx       context.Context
-	runTestSetCtxCancel context.CancelFunc
-	runTestSetErrGrp    *errgroup.Group
+	logger          *zap.Logger
+	testDB          TestDB
+	mockDB          MockDB
+	reportDB        ReportDB
+	testSetConf     Config
+	telemetry       Telemetry
+	instrumentation Instrumentation
+	config          *config.Config
+	instrument      bool
+	appCtx          context.Context
+	appCtxCancel    context.CancelFunc
+	appErrGrp       *errgroup.Group
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf Config, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
@@ -90,9 +90,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// defering the stop function to stop keploy in case of any error in replay or in case of context cancellation
 	defer func() {
-		if r.runTestSetCtxCancel != nil {
-			r.runTestSetCtxCancel()
-			err := r.runTestSetErrGrp.Wait()
+		if r.appCtxCancel != nil {
+			r.appCtxCancel()
+			err := r.appErrGrp.Wait()
 			if err != nil {
 				utils.LogError(r.logger, err, "error in context cancellation of test set")
 			}
@@ -211,8 +211,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 		var runApp bool
 		if previousCmd != testSets[testSetID].AppCmd || previousCmd == "" {
 			if previousCmd != "" {
-				r.runTestSetCtxCancel()
-				err := r.runTestSetErrGrp.Wait()
+				r.appCtxCancel()
+				err := r.appErrGrp.Wait()
 				if err != nil {
 					utils.LogError(r.logger, err, "error in cancelling the test set run")
 				}
@@ -363,18 +363,23 @@ func (r *Replayer) GetTestCases(ctx context.Context, testID string) ([]*models.T
 func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, runApp bool) (models.TestSetStatus, error) {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
-	r.runTestSetErrGrp, r.runTestSetCtx = errgroup.WithContext(ctx)
-	r.runTestSetCtx = context.WithValue(r.runTestSetCtx, models.ErrGroupKey, r.runTestSetErrGrp)
-	r.runTestSetCtx, r.runTestSetCtxCancel = context.WithCancel(r.runTestSetCtx)
+	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
+	runTestSetCtx = context.WithValue(runTestSetCtx, models.ErrGroupKey, runTestSetErrGrp)
+	runTestSetCtx, runTestSetCtxCancel := context.WithCancel(runTestSetCtx)
 
 	startTime := time.Now()
 
 	exitLoopChan := make(chan bool, 2)
 	defer func() {
+		runTestSetCtxCancel()
+		err := runTestSetErrGrp.Wait()
+		if err != nil {
+			utils.LogError(r.logger, err, "error in testLoopErrGrp")
+		}
 		close(exitLoopChan)
 	}()
 
-	testCases, err := r.testDB.GetTestCases(r.runTestSetCtx, testSetID)
+	testCases, err := r.testDB.GetTestCases(runTestSetCtx, testSetID)
 	if err != nil {
 		return models.TestSetStatusFailed, fmt.Errorf("failed to get test cases: %w", err)
 	}
@@ -392,7 +397,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			Ignored: len(testCases),
 		}
 
-		err = r.reportDB.InsertReport(r.runTestSetCtx, testRunID, testSetID, testReport)
+		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to insert report")
 			return models.TestSetStatusFailed, err
@@ -416,7 +421,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var conf *models.TestSet
 
 	//Execute the Pre-script before each test-set if provided
-	conf, err = r.testSetConf.Read(r.runTestSetCtx, testSetID)
+	conf, err = r.testSetConf.Read(runTestSetCtx, testSetID)
 	if err != nil {
 		if strings.Contains(err.Error(), "no such file or directory") {
 			r.logger.Info("config file not found, continuing execution...", zap.String("test-set", testSetID))
@@ -431,7 +436,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	if conf.PreScript != "" {
 		r.logger.Info("Running Pre-script", zap.String("script", conf.PreScript), zap.String("test-set", testSetID))
-		err = r.executeScript(r.runTestSetCtx, conf.PreScript)
+		err = r.executeScript(runTestSetCtx, conf.PreScript)
 		if err != nil {
 			return models.TestSetStatusFaultScript, fmt.Errorf("failed to execute pre-script: %w", err)
 		}
@@ -452,16 +457,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	cmdType := utils.CmdType(r.config.CommandType)
 	var userIP string
 
-	err = r.SetupOrUpdateMocks(r.runTestSetCtx, appID, testSetID, models.BaseTime, time.Now(), Start)
+	err = r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, models.BaseTime, time.Now(), Start)
 	if err != nil {
 		return models.TestSetStatusFailed, err
 	}
 
 	if r.instrument {
 		if runApp {
-			r.runTestSetErrGrp.Go(func() error {
+			r.appErrGrp, r.appCtx = errgroup.WithContext(ctx)
+			r.appCtx = context.WithValue(r.appCtx, models.ErrGroupKey, r.appErrGrp)
+			r.appCtx, r.appCtxCancel = context.WithCancel(r.appCtx)
+			runTestSetErrGrp.Go(func() error {
 				defer utils.Recover(r.logger)
-				appErr = r.RunApplication(r.runTestSetCtx, appID, models.RunOptions{})
+				appErr = r.RunApplication(r.appCtx, appID, models.RunOptions{})
 				if appErr.AppErrorType == models.ErrCtxCanceled {
 					return nil
 				}
@@ -471,7 +479,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Checking for errors in the mocking and application
-		r.runTestSetErrGrp.Go(func() error {
+		runTestSetErrGrp.Go(func() error {
 			defer utils.Recover(r.logger)
 			select {
 			case err := <-appErrChan:
@@ -490,18 +498,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					testSetStatusByErrChan = models.TestSetStatusAppHalted
 				}
 				utils.LogError(r.logger, err, "application failed to run")
-			case <-r.runTestSetCtx.Done():
+			case <-runTestSetCtx.Done():
 				testSetStatusByErrChan = models.TestSetStatusUserAbort
 			}
 			exitLoopChan <- true
-			r.runTestSetCtxCancel()
+			runTestSetCtxCancel()
 			return nil
 		})
 
 		// Delay for user application to run
 		select {
 		case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
-		case <-r.runTestSetCtx.Done():
+		case <-runTestSetCtx.Done():
 			return models.TestSetStatusUserAbort, context.Canceled
 		}
 
@@ -529,7 +537,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Status:  string(models.TestStatusRunning),
 	}
 
-	err = r.reportDB.InsertReport(r.runTestSetCtx, testRunID, testSetID, testReport)
+	err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to insert report")
 		return models.TestSetStatusFailed, err
@@ -555,7 +563,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				TestCasePath: filepath.Join(r.config.Path, testSetID),
 				MockPath:     filepath.Join(r.config.Path, testSetID, requestMockemulator.FetchMockName()),
 			}
-			loopErr = r.reportDB.InsertTestCaseResult(r.runTestSetCtx, testRunID, testSetID, testCaseResult)
+			loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 			if loopErr != nil {
 				utils.LogError(r.logger, err, "failed to insert test case result")
 				break
@@ -593,7 +601,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		var loopErr error
 
 		//No need to handle mocking when basepath is provided
-		err := r.SetupOrUpdateMocks(r.runTestSetCtx, appID, testSetID, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp, Update)
+		err := r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp, Update)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to update mocks")
 			break
@@ -622,7 +630,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		started := time.Now().UTC()
-		resp, loopErr := requestMockemulator.SimulateRequest(r.runTestSetCtx, appID, testCase, testSetID)
+		resp, loopErr := requestMockemulator.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
 		if loopErr != nil {
 			utils.LogError(r.logger, err, "failed to simulate request")
 			failure++
@@ -631,7 +639,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		var consumedMocks []string
 		if r.instrument {
-			consumedMocks, err = r.instrumentation.GetConsumedMocks(r.runTestSetCtx, appID)
+			consumedMocks, err = r.instrumentation.GetConsumedMocks(runTestSetCtx, appID)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 			}
@@ -685,7 +693,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				Noise:        testCase.Noise,
 				Result:       *testResult,
 			}
-			loopErr = r.reportDB.InsertTestCaseResult(r.runTestSetCtx, testRunID, testSetID, testCaseResult)
+			loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 			if loopErr != nil {
 				utils.LogError(r.logger, err, "failed to insert test case result")
 				break
@@ -705,7 +713,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if conf.PostScript != "" {
 		//Execute the Post-script after each test-set if provided
 		r.logger.Info("Running Post-script", zap.String("script", conf.PostScript), zap.String("test-set", testSetID))
-		err = r.executeScript(r.runTestSetCtx, conf.PostScript)
+		err = r.executeScript(runTestSetCtx, conf.PostScript)
 		if err != nil {
 			return models.TestSetStatusFaultScript, fmt.Errorf("failed to execute post-script: %w", err)
 		}
@@ -713,9 +721,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	timeTaken := time.Since((startTime))
 
-	testCaseResults, err := r.reportDB.GetTestCaseResults(r.runTestSetCtx, testRunID, testSetID)
+	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
 	if err != nil {
-		if r.runTestSetCtx.Err() != context.Canceled {
+		if runTestSetCtx.Err() != context.Canceled {
 			utils.LogError(r.logger, err, "failed to get test case results")
 			testSetStatus = models.TestSetStatusInternalErr
 		}
@@ -746,7 +754,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	// final report should have reason for sudden stop of the test run so this should get canceled
-	reportCtx := context.WithoutCancel(r.runTestSetCtx)
+	reportCtx := context.WithoutCancel(runTestSetCtx)
 	err = r.reportDB.InsertReport(reportCtx, testRunID, testSetID, testReport)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to insert report")
@@ -762,7 +770,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if r.config.Test.RemoveUnusedMocks && testSetStatus == models.TestSetStatusPassed && r.instrument {
 		r.logger.Debug("consumed mocks from the completed testset", zap.Any("for test-set", testSetID), zap.Any("consumed mocks", totalConsumedMocks))
 		// delete the unused mocks from the data store
-		err = r.mockDB.UpdateMocks(r.runTestSetCtx, testSetID, totalConsumedMocks)
+		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, totalConsumedMocks)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
 		}
