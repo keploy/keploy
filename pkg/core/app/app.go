@@ -35,7 +35,7 @@ func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opt
 		containerDelay:    opts.DockerDelay,
 		containerNetwork:  opts.DockerNetwork,
 		containerIPv4:     "",
-		containerIPV4Chan: make(chan string, 1),
+		containerIPV4Chan: make(chan string),
 	}
 	return app
 }
@@ -95,6 +95,7 @@ func (a *App) KeployIPv4Addr() string {
 }
 
 func (a *App) ContainerIPv4Addr() string {
+	// apply mutexc
 	if a.containerIPv4 == "" {
 		<-a.containerIPV4Chan
 	}
@@ -102,8 +103,8 @@ func (a *App) ContainerIPv4Addr() string {
 }
 
 func (a *App) SetContainerIPv4Addr(ipAddr string) {
-	a.containerIPv4 = ipAddr
 	a.containerIPV4Chan <- ipAddr
+	a.containerIPv4 = ipAddr
 }
 
 func (a *App) SetupDocker() error {
