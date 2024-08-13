@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"sync"
 	"syscall"
 	"time"
 
@@ -31,11 +32,12 @@ func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opt
 		docker:            client,
 		kind:              utils.FindDockerCmd(cmd),
 		keployContainer:   "keploy-v2",
+		mutex:             &sync.Mutex{},
 		container:         opts.Container,
 		containerDelay:    opts.DockerDelay,
 		containerNetwork:  opts.DockerNetwork,
 		containerIPv4:     "",
-		containerIPV4Chan: make(chan string),
+		containerIPV4Chan: make(chan string, 1),
 	}
 	return app
 }
@@ -55,6 +57,7 @@ type App struct {
 	keployContainer   string
 	keployIPv4        string
 	inodeChan         chan uint64
+	mutex             *sync.Mutex
 	EnableTesting     bool
 	Mode              models.Mode
 }
@@ -95,16 +98,19 @@ func (a *App) KeployIPv4Addr() string {
 }
 
 func (a *App) ContainerIPv4Addr() string {
-	// apply mutexc
+	a.mutex.Lock()
 	if a.containerIPv4 == "" {
+		a.mutex.Unlock()
 		<-a.containerIPV4Chan
 	}
 	return a.containerIPv4
 }
 
 func (a *App) SetContainerIPv4Addr(ipAddr string) {
-	a.containerIPV4Chan <- ipAddr
+	a.mutex.Lock()
 	a.containerIPv4 = ipAddr
+	a.mutex.Unlock()
+	a.containerIPV4Chan <- ipAddr
 }
 
 func (a *App) SetupDocker() error {
