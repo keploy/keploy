@@ -174,12 +174,12 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 						// Parse the body into json.
 						expResponse, err := parseIntoJSON(stringVal)
 						if err != nil {
-							logger.Error("failed to parse the exp response into json", zap.Error(err))
+							utils.LogError(logger, err, "failed to parse the exp response into json")
 							break
 						}
 						actResponse, err := parseIntoJSON(val.Value.(string))
 						if err != nil {
-							logger.Error("failed to parse the act response into json", zap.Error(err))
+							utils.LogError(logger, err, "failed to parse the act response into json")
 							break
 						}
 						compareResponses(&expResponse, &actResponse, "")

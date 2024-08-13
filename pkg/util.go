@@ -88,7 +88,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	// convert testcase to string and render the template values.
 	testCaseStr, err := json.Marshal(tc)
 	if err != nil {
-		logger.Error("failed to marshal the testcase")
+		utils.LogError(logger, err, "failed to marshal the testcase")
 	}
 	funcMap := template.FuncMap{
 		"int":    utils.ToInt,
@@ -97,17 +97,17 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	}
 	tmpl, err := template.New("template").Funcs(funcMap).Parse(string(testCaseStr))
 	if err != nil {
-		logger.Error("failed to parse the testcase using template", zap.Error(err))
+		utils.LogError(logger, err, "failed to parse the template")
 	}
 	var output bytes.Buffer
 	err = tmpl.Execute(&output, utils.TemplatizedValues)
 	if err != nil {
-		logger.Error("failed to execute the template")
+		utils.LogError(logger, err, "failed to execute the template")
 	}
 	testCaseStr = output.Bytes()
 	err = json.Unmarshal([]byte(testCaseStr), &tc)
 	if err != nil {
-		logger.Error("failed to unmarshal the testcase", zap.Error(err))
+		utils.LogError(logger, err, "failed to unmarshal the testcase")  
 	}
 	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, bytes.NewBufferString(tc.HTTPReq.Body))
