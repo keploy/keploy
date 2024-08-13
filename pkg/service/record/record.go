@@ -170,21 +170,24 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		return nil
 	})
 
+	fmt.Println("byeee")
+
 	// running the user application
 	runAppErrGrp.Go(func() error {
 		runAppError = r.instrumentation.Run(runAppCtx, appID, models.RunOptions{})
 		if runAppError.AppErrorType == models.ErrCtxCanceled {
 			return nil
 		}
-		err = r.testSetDB.Write(ctx, newTestSetID, &models.TestSet{AppCmd: r.config.Command})
-		if err != nil {
-			stopReason = "failed to upsert app command"
-			utils.LogError(r.logger, err, stopReason)
-			return fmt.Errorf(stopReason)
-		}
 		appErrChan <- runAppError
 		return nil
 	})
+
+	err = r.testSetDB.Write(ctx, newTestSetID, &models.TestSet{AppCmd: r.config.Command})
+	if err != nil {
+		stopReason = "failed to upsert app command"
+		utils.LogError(r.logger, err, stopReason)
+		return fmt.Errorf(stopReason)
+	}
 
 	// setting a timer for recording
 	if r.config.Record.RecordTimer != 0 {
