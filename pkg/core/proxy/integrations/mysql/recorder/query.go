@@ -30,6 +30,9 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
+
+			//debug log
+			println("Now reading from the client...")
 			// read the command from the client
 			command, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
 			if err != nil {
@@ -39,12 +42,19 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 				return err
 			}
 
+			//debug log
+			logger.Debug("Command packet from client", zap.Any("packet", command))
+			println("Writing to the destination server...")
+
 			// write the command to the destination server
 			_, err = destConn.Write(command)
 			if err != nil {
 				utils.LogError(logger, err, "failed to write command to the server")
 				return err
 			}
+
+			//debug log
+			println("successfully written to the destination server")
 
 			// Getting timestamp for the request
 			reqTimestamp := time.Now()

@@ -22,6 +22,7 @@ import (
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 
+	pTls "go.keploy.io/server/v2/pkg/core/proxy/tls"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
@@ -91,7 +92,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 	}
 
 	// set up the CA for tls connections
-	err = SetupCA(ctx, p.logger)
+	err = pTls.SetupCA(ctx, p.logger)
 	if err != nil {
 		// log the error and continue
 		p.logger.Warn("failed to setup CA", zap.Error(err))
@@ -370,6 +371,19 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
 				return err
 			}
+
+			cfg := &tls.Config{
+				InsecureSkipVerify: true,
+				ServerName:         "database-1.c4mc5loxg4w2.us-west-2.rds.amazonaws.com",
+			}
+
+			addr := fmt.Sprintf("%v:%v", "database-1.c4mc5loxg4w2.us-west-2.rds.amazonaws.com", destInfo.Port)
+			dstCfg := &models.ConditionalDstCfg{
+				TLSCfg: cfg,
+				Addr:   addr,
+			}
+			rule.OutgoingOptions.DstCfg = dstCfg
+
 			// Record the outgoing message into a mock
 			err := p.Integrations["mysql"].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil {
@@ -386,7 +400,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 
 		//mock the outgoing message
-		err := p.Integrations["mysql"].MockOutgoing(parserCtx, srcConn, &integrations.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), rule.OutgoingOptions)
+		err := p.Integrations["mysql"].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), rule.OutgoingOptions)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to mock the outgoing message")
 			return err
@@ -414,9 +428,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		logger: p.logger,
 	}
 
-	isTLS := isTLSHandshake(testBuffer)
+	isTLS := pTls.IsTLSHandshake(testBuffer)
 	if isTLS {
-		srcConn, err = p.handleTLSConnection(srcConn)
+		srcConn, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to handle TLS conn")
 			return err
@@ -449,7 +463,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	logger := p.logger.With(zap.Any("Client IP Address", srcConn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientID), zap.Any("Destination IP Address", dstAddr), zap.Any("Destination ConnectionID", destID))
-	dstCfg := &integrations.ConditionalDstCfg{
+	dstCfg := &models.ConditionalDstCfg{
 		Port: uint(destInfo.Port),
 	}
 
@@ -458,10 +472,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		logger.Debug("the external call is tls-encrypted", zap.Any("isTLS", isTLS))
 		cfg := &tls.Config{
 			InsecureSkipVerify: true,
-			ServerName:         dstURL,
+			ServerName:         pTls.DstURL,
 		}
 
-		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
+		addr := fmt.Sprintf("%v:%v", pTls.DstURL, destInfo.Port)
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = tls.Dial("tcp", addr, cfg)
 			if err != nil {

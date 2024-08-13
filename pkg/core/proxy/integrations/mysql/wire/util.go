@@ -20,6 +20,7 @@ type DecodeContext struct {
 	PreparedStatements map[uint32]*mysql.StmtPrepareOkPacket
 	ServerGreetings    *ServerGreetings
 	PluginName         string
+	UseSSL             bool
 }
 
 // This map is used to store the last operation that was performed on a connection.

@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/getsentry/sentry-go"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/models"
 	"golang.org/x/sync/errgroup"
 
@@ -274,7 +273,7 @@ func ReadFromPeer(ctx context.Context, logger *zap.Logger, conn net.Conn, buffCh
 
 // PassThrough function is used to pass the network traffic to the destination connection.
 // It also closes the destination connection if the function returns an error.
-func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, requestBuffer [][]byte) ([]byte, error) {
+func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, requestBuffer [][]byte) ([]byte, error) {
 	logger.Debug("passing through the network traffic to the destination server", zap.Any("Destination Addr", dstCfg.Addr))
 	// making destConn
 	var destConn net.Conn

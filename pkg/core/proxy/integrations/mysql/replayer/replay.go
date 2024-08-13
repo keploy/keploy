@@ -20,7 +20,7 @@ import (
 
 // Mock Yaml to Binary
 
-func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	errCh := make(chan error, 1)
 
 	unfiltered, err := mockDb.GetUnFilteredMocks()

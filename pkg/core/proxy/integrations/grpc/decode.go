@@ -14,7 +14,7 @@ import (
 	"golang.org/x/net/http2"
 )
 
-func decodeGrpc(ctx context.Context, logger *zap.Logger, _ []byte, clientConn net.Conn, _ *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
+func decodeGrpc(ctx context.Context, logger *zap.Logger, _ []byte, clientConn net.Conn, _ *models.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
 	framer := http2.NewFramer(clientConn, clientConn)
 	srv := NewTranscoder(logger, framer, mockDb)
 	// fake server in the test mode

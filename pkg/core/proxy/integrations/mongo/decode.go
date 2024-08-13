@@ -22,7 +22,7 @@ import (
 
 // decodeMongo decodes the mongo wire message from the client connection
 // and sends the response back to the client.
-func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	startedDecoding := time.Now()
 	requestBuffers := [][]byte{reqBuf}
 
