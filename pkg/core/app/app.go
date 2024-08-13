@@ -99,17 +99,17 @@ func (a *App) KeployIPv4Addr() string {
 
 func (a *App) ContainerIPv4Addr() string {
 	a.mutex.Lock()
+	defer a.mutex.Unlock()
 	if a.containerIPv4 == "" {
-		a.mutex.Unlock()
-		<-a.containerIPV4Chan
+		a.containerIPv4 = <-a.containerIPV4Chan
 	}
 	return a.containerIPv4
 }
 
 func (a *App) SetContainerIPv4Addr(ipAddr string) {
 	a.mutex.Lock()
+	defer a.mutex.Unlock()
 	a.containerIPv4 = ipAddr
-	a.mutex.Unlock()
 	a.containerIPV4Chan <- ipAddr
 }
 
@@ -401,6 +401,11 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 	errCh := make(chan error, 1)
 	// listen for the "create container" event in order to send the inode of the container to the kernel
 	errCh2 := a.getDockerMeta(ctx)
+	defer func() {
+		a.mutex.Lock()
+		a.containerIPv4 = ""
+		a.mutex.Unlock()
+	}()
 
 	g.Go(func() error {
 		defer utils.Recover(a.logger)
