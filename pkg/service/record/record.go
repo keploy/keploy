@@ -170,8 +170,6 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		return nil
 	})
 
-	fmt.Println("byeee")
-
 	// running the user application
 	runAppErrGrp.Go(func() error {
 		runAppError = r.instrumentation.Run(runAppCtx, appID, models.RunOptions{})

@@ -29,6 +29,7 @@ rm -rf keploy/
 # Build the binary.
 go build -o ginApp
 
+
 send_request(){
     sleep 10
     app_started=false
@@ -90,8 +91,20 @@ for i in {1..2}; do
 done
 
 # Start the gin-mongo app in test mode.
-sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7
+sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7    &> test_logs.txt
 
+ if grep "ERROR" "test_logs.txt"; then
+     echo "Error found in pipeline..."
+     cat "test_logs.txt"
+     exit 1
+ fi
+
+ if grep "WARNING: DATA RACE" "test_logs.txt"; then
+     echo "Race condition detected in test, stopping pipeline..."
+     cat "test_logs.txt"
+     exit 1
+ fi
+ 
 all_passed=true
 
 
