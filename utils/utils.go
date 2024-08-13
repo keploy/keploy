@@ -38,16 +38,6 @@ var WarningSign = "\U000026A0"
 
 var TemplatizedValues = map[string]interface{}{}
 
-func ReadTempValues(testSet string) {
-	data, err := os.ReadFile("keploy/" + testSet + "/templatized.json")
-	if err != nil {
-		return
-	}
-	err = json.Unmarshal(data, &TemplatizedValues)
-	if err != nil {
-		log.Fatal("Error unmarshaling templatized values into the map", err)
-	}
-}
 var ErrCode = 0
 
 func ReplaceHost(currentURL string, ipAddress string) (string, error) {
@@ -475,16 +465,6 @@ func ToFloat(value interface{}) float64 {
 	return 0
 }
 
-// func convertPathToUnixStyle(path string) string {
-// 	// Replace backslashes with forward slashes
-// 	unixPath := strings.Replace(path, "\\", "/", -1)
-// 	// Remove 'C:'
-// 	if len(unixPath) > 1 && unixPath[1] == ':' {
-// 		unixPath = unixPath[2:]
-// 	}
-// 	return unixPath
-// }
-
 // Keys returns an array containing the keys of the given map.
 func Keys(m map[string][]string) []string {
 	keys := make([]string, 0, len(m))
@@ -529,7 +509,7 @@ func GetAbsPath(path string) (string, error) {
 	return absPath, nil
 }
 
-func ConvertToAbs(logger *zap.Logger, originalPath string) string {
+func ToAbsPath(logger *zap.Logger, originalPath string) string {
 	path := originalPath
 	//if user provides relative path
 	if len(path) > 0 && path[0] != '/' {

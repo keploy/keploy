@@ -4,7 +4,6 @@
 package orchestrator
 
 import (
-
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/service/record"
 	"go.keploy.io/server/v2/pkg/service/replay"
@@ -13,17 +12,17 @@ import (
 )
 
 type Orchestrator struct {
-	logger      *zap.Logger
-	record      record.Service
-	replay      replay.Service
-	config      *config.Config
+	logger *zap.Logger
+	record record.Service
+	replay replay.Service
+	config *config.Config
 }
 
 func New(logger *zap.Logger, record record.Service, replay replay.Service, config *config.Config) *Orchestrator {
 	return &Orchestrator{
-		logger:      logger,
-		record:      record,
-		replay:      replay,
-		config:      config,
+		logger: logger,
+		record: record,
+		replay: replay,
+		config: config,
 	}
 }

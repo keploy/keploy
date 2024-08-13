@@ -14,7 +14,6 @@ type Config struct {
 	AppName               string       `json:"appName" yaml:"appName" mapstructure:"appName"`
 	Command               string       `json:"command" yaml:"command" mapstructure:"command"`
 	Templatize            Templatize   `json:"templatize" yaml:"templatize" mapstructure:"templatize"`
-	Port                  uint32       `json:"port" yaml:"port" mapstructure:"port"`
 	DNSPort               uint32       `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
 	ProxyPort             uint32       `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
 	Debug                 bool         `json:"debug" yaml:"debug" mapstructure:"debug"`
@@ -104,7 +103,7 @@ type Test struct {
 	Mocking             bool                `json:"mocking" yaml:"mocking" mapstructure:"mocking"`
 	IgnoredTests        map[string][]string `json:"ignoredTests" yaml:"ignoredTests" mapstructure:"ignoredTests"`
 	DisableLineCoverage bool                `json:"disableLineCoverage" yaml:"disableLineCoverage" mapstructure:"disableLineCoverage"`
-	UpdateTemp          bool                `json:"updateTemp" yaml:"updateTemp" mapstructure:"updateTemp"`
+	UpdateTemplate      bool                `json:"updateTemplate" yaml:"updateTemplate" mapstructure:"updateTemplate"`
 }
 
 type Language string

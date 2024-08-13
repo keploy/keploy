@@ -19,15 +19,15 @@ import (
 
 func (o *Orchestrator) checkForTemplates(ctx context.Context) {
 	// Check if the testcases are already templatized.
-	var notTemplatized []string
+	var nonTemplatized []string
 	for testSet := range o.config.Test.SelectedTests {
 		conf, err := o.replay.GetTestSetConf(ctx, testSet)
 		if err != nil || conf == nil || conf.Template == nil {
-			notTemplatized = append(notTemplatized, testSet)
+			nonTemplatized = append(nonTemplatized, testSet)
 		}
 	}
-	if len(notTemplatized) > 0 {
-		o.logger.Warn("The following testSets are not templatized. Do you want to templatize them to handle noisy fields?(y/n)", zap.Any("testSets:", notTemplatized))
+	if len(nonTemplatized) > 0 {
+		o.logger.Warn("The following testSets are not templatized. Do you want to templatize them to handle noisy fields?(y/n)", zap.Any("testSets:", nonTemplatized))
 		reader := bufio.NewReader(os.Stdin)
 		input, err := reader.ReadString('\n')
 		if err != nil {
@@ -36,7 +36,7 @@ func (o *Orchestrator) checkForTemplates(ctx context.Context) {
 		if input == "n\n" || input == "N\n" {
 			o.logger.Info("Skipping templatization")
 		} else if input == "y\n" || input == "Y\n" {
-			if err := o.replay.Templatize(ctx, notTemplatized); err != nil {
+			if err := o.replay.Templatize(ctx, nonTemplatized); err != nil {
 				utils.LogError(o.logger, err, "failed to templatize test cases")
 			}
 		}

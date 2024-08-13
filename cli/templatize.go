@@ -23,10 +23,8 @@ func Templatize(ctx context.Context, logger *zap.Logger, _ *config.Config, servi
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(_ *cobra.Command, _ []string) error {
-			// Read the testcases from the path provided.
-			// utils.ReadTempValues(testSet)
 			// Get the replay service.
-			svc, err := serviceFactory.GetService(ctx, "normalize")
+			svc, err := serviceFactory.GetService(ctx, "templatize")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service")
 				return nil
