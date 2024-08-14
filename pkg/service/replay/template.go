@@ -201,7 +201,7 @@ func parseIntoJSON(response string) (interface{}, error) {
 func checkForTemplate(val interface{}) interface{} {
 	stringVal, ok := val.(string)
 	if ok {
-		if strings.HasPrefix(stringVal, "{{") && strings.HasSuffix(stringVal, "}}") {
+		if (strings.HasPrefix(stringVal, "{{") || strings.HasPrefix(stringVal, " {{")) && (strings.HasSuffix(stringVal, "}}") || strings.HasSuffix(stringVal, "}} ")) {
 			// Get the value from the template.
 			val, _ = render(stringVal)
 			// We don't check for string here because we don't put {{string .key}} type of templates in the templatized values.
@@ -336,8 +336,8 @@ func addTemplates1(val1 *string, body *interface{}) bool {
 				if newKey == "" {
 					newKey = key
 				}
-				b[key] = fmt.Sprintf("{{.%s}}", newKey)
-				*val1 = fmt.Sprintf("{{.%s}}", newKey)
+				b[key] = fmt.Sprintf("{{%s .%v }}", getType(val2), newKey)
+				*val1 = fmt.Sprintf("{{%s .%v }}", getType(val2), newKey)
 				return true
 			}
 		}
@@ -359,8 +359,8 @@ func addTemplates1(val1 *string, body *interface{}) bool {
 				if newKey == "" {
 					newKey = key
 				}
-				b[key] = fmt.Sprintf("{{ %s .%s}}", getType(b[key]), newKey)
-				*val1 = fmt.Sprintf("{{ %s .%s }}", getType(*val1), newKey)
+				b[key] = fmt.Sprintf("{{%s .%v}}", getType(b[key]), newKey)
+				*val1 = fmt.Sprintf("{{%s .%v}}", getType(*val1), newKey)
 			}
 		}
 	case float64, int64, int, float32:
@@ -550,12 +550,14 @@ func compareReqHeaders(req1 map[string]string, req2 map[string]string) {
 			}
 			val2 = val
 			if val1 == val2 {
+				// Trim the extra space in the string.
+				val2 = strings.Trim(val2, " ")
 				newKey := insertUnique(key, val2, utils.TemplatizedValues)
 				if newKey == "" {
 					newKey = key
 				}
-				req2[key] = fmt.Sprintf("{{.%s}}", newKey)
-				req1[key] = fmt.Sprintf("{{.%s}}", newKey)
+				req2[key] = fmt.Sprintf("{{%s .%v }}", getType(val2), newKey)
+				req1[key] = fmt.Sprintf("{{%s .%v }}", getType(val2), newKey)
 			}
 		}
 	}
