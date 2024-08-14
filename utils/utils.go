@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -425,7 +424,7 @@ func ToInt(value interface{}) int {
 	case string:
 		i, err := strconv.Atoi(v)
 		if err != nil {
-			log.Fatal("failed to convert string to int", zap.Error(err))
+			fmt.Printf("failed to convert string to int: %v", err)
 			return 0
 		}
 		return i
@@ -455,7 +454,7 @@ func ToFloat(value interface{}) float64 {
 	case string:
 		f, err := strconv.ParseFloat(v, 64)
 		if err != nil {
-			log.Fatal("failed to convert string to float", zap.Error(err))
+			fmt.Printf("failed to convert string to float: %v", err)
 			return 0
 		}
 		return f

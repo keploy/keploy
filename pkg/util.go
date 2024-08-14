@@ -18,8 +18,9 @@ import (
 	"strings"
 	"time"
 
-	"go.keploy.io/server/v2/pkg/models"
 	"text/template"
+
+	"go.keploy.io/server/v2/pkg/models"
 
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -107,7 +108,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	testCaseStr = output.Bytes()
 	err = json.Unmarshal([]byte(testCaseStr), &tc)
 	if err != nil {
-		utils.LogError(logger, err, "failed to unmarshal the testcase")  
+		utils.LogError(logger, err, "failed to unmarshal the testcase")
 	}
 	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, bytes.NewBufferString(tc.HTTPReq.Body))

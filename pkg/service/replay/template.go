@@ -18,33 +18,39 @@ import (
 	"go.uber.org/zap"
 )
 
-func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
+func (r *Replayer) Templatize(ctx context.Context) error {
+	testSets := r.config.Templatize.TestSets
+
 	if len(testSets) == 0 {
-		if len(r.config.Templatize.TestSets) == 0 {
-			allTestSets, err := r.GetAllTestSetIDs(ctx)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to get all test sets")
-				return err
-			}
-			testSets = allTestSets
-		} else {
-			testSets = r.config.Templatize.TestSets
+		all, err := r.GetAllTestSetIDs(ctx)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to get all test sets")
+			return err
 		}
+		testSets = all
 	}
+
+	if len(testSets) == 0 {
+		r.logger.Warn("No test sets found to templatize")
+		return nil
+	}
+
 	for _, testSetID := range testSets {
+
 		testSet, err := r.TestSetConf.Read(ctx, testSetID)
-		if err != nil || testSet == nil {
-			utils.TemplatizedValues = map[string]interface{}{}
-		} else {
+		utils.TemplatizedValues = map[string]interface{}{}
+		if err == nil && testSet != nil {
 			utils.TemplatizedValues = testSet.Template
 		}
+
 		tcs, err := r.testDB.GetTestCases(ctx, testSetID)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to get test cases")
 			return err
 		}
+
 		if len(tcs) == 0 {
-			r.logger.Warn("The test set is empty. Please record some testcases to templatize.", zap.String("testSet:", testSetID))
+			r.logger.Warn("The test set is empty. Please record some testcases to templatize.", zap.String("testSet", testSetID))
 			continue
 		}
 		// Add the quotes back to the templates before using it.
@@ -53,19 +59,25 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 		// 	tc.HTTPResp.Body = addQuotesInTemplates(tc.HTTPResp.Body)
 		// }
 
+		// CASE:1
 		// Compare the response of ith testcase with i+1->n request headers.
 		for i := 0; i < len(tcs)-1; i++ {
 			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 			if err != nil {
 				r.logger.Debug("failed to parse response into json. Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
 				continue
-			} else if jsonResponse == nil {
+			}
+
+			if jsonResponse == nil {
 				continue
 			}
+
+			//debug log
 			println("Checking for Test case: ", tcs[i].Name)
-			// Compare the keys to the headers.
+
+			// addTemplates where response key is matched to some header key in the next testcases.
 			for j := i + 1; j < len(tcs); j++ {
-				addTemplates(tcs[j].HTTPReq.Header, &jsonResponse, r.logger)
+				addTemplates(r.logger, tcs[j].HTTPReq.Header, &jsonResponse)
 			}
 
 			// Now modify the response body to get templatized body if any.
@@ -77,7 +89,8 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 			tcs[i].HTTPResp.Body = string(jsonData)
 		}
 
-		// Compare the requests for the common fields.
+		// CASE:2
+		// Compare the requests headers for the common fields.
 		for i := 0; i < len(tcs)-1; i++ {
 			// Check for headers first.
 			for j := i + 1; j < len(tcs); j++ {
@@ -85,19 +98,25 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 			}
 		}
 
-		// Check the url for any common fields.
+		// CASE:3
+		// Check the url of the request for any common fields in the response.
 		for i := 0; i < len(tcs)-1; i++ {
 			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 			if err != nil {
 				r.logger.Debug("failed to parse response into json.  Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
 				continue
-			} else if jsonResponse == nil {
+			}
+
+			if jsonResponse == nil {
 				continue
 			}
+
+			// Add the templates where the response key is matched to some url in the next testcases.
 			for j := i + 1; j < len(tcs); j++ {
-				addTemplates(&tcs[j].HTTPReq.URL, &jsonResponse, r.logger)
+				addTemplates(r.logger, &tcs[j].HTTPReq.URL, &jsonResponse)
 			}
-			// Record the new testcase.
+
+			// Now modify the response body to get templatized body if any.
 			jsonData, err := json.Marshal(jsonResponse)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to marshal json data")
@@ -106,6 +125,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 			tcs[i].HTTPResp.Body = string(jsonData)
 		}
 
+		// CASE:4 (special case)
 		// Check the location header for any common fields.
 		for i := 0; i < len(tcs)-1; i++ {
 			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
@@ -119,7 +139,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 				// Check if there is the Location header in the headers.
 				for key, val := range tcs[j].HTTPReq.Header {
 					if key == "Location" {
-						addTemplates(&val, &jsonResponse, r.logger)
+						addTemplates(r.logger, &val, &jsonResponse)
 					}
 				}
 			}
@@ -131,7 +151,9 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 			if err != nil {
 				r.logger.Debug("failed to parse response into json. Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
 				continue
-			} else if jsonResponse == nil {
+			}
+
+			if jsonResponse == nil {
 				continue
 			}
 			for j := i + 1; j < len(tcs); j++ {
@@ -139,10 +161,12 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 				if err != nil {
 					r.logger.Debug("failed to parse request into json. Not templatizing the request of this test.", zap.Error(err), zap.Any("testcase:", tcs[j].Name))
 					continue
-				} else if jsonRequest == nil {
+				}
+
+				if jsonRequest == nil {
 					continue
 				}
-				addTemplates(jsonRequest, &jsonResponse, r.logger)
+				addTemplates(r.logger, jsonRequest, &jsonResponse)
 				jsonData, err := json.Marshal(jsonRequest)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to marshal json data")
@@ -184,6 +208,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 }
 
 // Below are the helper functions for templatize.
+
 // Parse the json string into a geko type variable, it will maintain the order of the keys in the json.
 func parseIntoJSON(response string) (interface{}, error) {
 	// Parse the response into a json object.
@@ -200,32 +225,37 @@ func parseIntoJSON(response string) (interface{}, error) {
 // TODO: change the name of this function.
 func checkForTemplate(val interface{}) (interface{}, error) {
 	stringVal, ok := val.(string)
-	if ok {
-		if (strings.HasPrefix(stringVal, "{{") || strings.HasPrefix(stringVal, " {{")) && (strings.HasSuffix(stringVal, "}}") || strings.HasSuffix(stringVal, "}} ")) {
-			// Get the value from the template.
-			var err error
-			val, err  = render(stringVal)
-			if err != nil {
-				return val, err
-			}
-			// We don't check for string here because we don't put {{string .key}} type of templates in the templatized values.
-			// If it is string, we just put it like {{.key}}. But for other we store the type information along with the key.
-			if !strings.Contains(stringVal, "string") {
-				// Convert to its appropriate type.
-				if strings.Contains(stringVal, "int") { // {{int .key}}
-					val = utils.ToInt(val)
-				} else if strings.Contains(stringVal, "float") { // {{float .key}}
-					val = utils.ToFloat(val)
-				}
-			}
-		}
+	if !ok {
+		return val, nil
 	}
+
+	// Check if the value is a template.
+	if !(strings.Contains(stringVal, "{{") && strings.Contains(stringVal, "}}")) {
+		return val, nil
+	}
+
+	// Get the value from the template.
+	val, err := render(stringVal)
+	if err != nil {
+		return val, err
+	}
+
+	// Convert the value to the appropriate type.
+	switch {
+	case strings.Contains(stringVal, "int"):
+		val = utils.ToInt(val)
+	case strings.Contains(stringVal, "float"):
+		val = utils.ToFloat(val)
+	case strings.Contains(stringVal, "string"):
+		val = utils.ToString(val)
+	}
+
 	return val, nil
 }
 
 // Here we simplify the first interface to a string form and then call the second function to simplify the second interface.
 // TODO: add better comment here.
-func addTemplates(interface1 interface{}, interface2 *interface{}, logger *zap.Logger) {
+func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 *interface{}) {
 	switch v := interface1.(type) {
 	case geko.ObjectItems:
 		keys := v.Keys()
@@ -236,12 +266,12 @@ func addTemplates(interface1 interface{}, interface2 *interface{}, logger *zap.L
 			if err != nil {
 				return
 			}
-			addTemplates(vals[i], interface2, logger)
+			addTemplates(logger, vals[i], interface2)
 			v.SetValueByIndex(i, vals[i])
 		}
 	case geko.Array:
 		for _, val := range v.List {
-			addTemplates(&val, interface2, logger)
+			addTemplates(logger, &val, interface2)
 		}
 	case map[string]interface{}:
 		for key, val := range v {
@@ -251,7 +281,7 @@ func addTemplates(interface1 interface{}, interface2 *interface{}, logger *zap.L
 				utils.LogError(logger, err, "failed to render for template")
 				return
 			}
-			addTemplates(val, interface2, logger)
+			addTemplates(logger, val, interface2)
 			v[key] = val
 		}
 	case map[string]string:
@@ -271,7 +301,7 @@ func addTemplates(interface1 interface{}, interface2 *interface{}, logger *zap.L
 				authType = strings.Split(val, " ")[0]
 				val = strings.Split(val, " ")[1]
 			}
-			ok = addTemplates1(&val, interface2, logger)
+			ok = addTemplates1(logger, &val, interface2)
 			if !ok {
 				return
 			}
@@ -286,21 +316,21 @@ func addTemplates(interface1 interface{}, interface2 *interface{}, logger *zap.L
 			return
 		}
 		*v = (tempVal).(string)
-		ok := addTemplates1(v, interface2, logger)
+		ok := addTemplates1(logger, v, interface2)
 		if ok {
 			return
 		}
 		url, err := url.Parse(*v)
 		if err == nil {
 			urlParts := strings.Split(url.Path, "/")
-			addTemplates1(&urlParts[len(urlParts)-1], interface2, logger)
+			addTemplates1(logger, &urlParts[len(urlParts)-1], interface2)
 			url.Path = strings.Join(urlParts, "/")
 			if url.RawQuery != "" {
 				// Only pass the values of the query parameters to the addTemplates1 function.
 				queryParams := strings.Split(url.RawQuery, "&")
 				for i, param := range queryParams {
 					param = strings.Split(param, "=")[1]
-					addTemplates1(&param, interface2, logger)
+					addTemplates1(logger, &param, interface2)
 					queryParams[i] = strings.Split(queryParams[i], "=")[0] + "=" + param
 				}
 				url.RawQuery = strings.Join(queryParams, "&")
@@ -309,11 +339,11 @@ func addTemplates(interface1 interface{}, interface2 *interface{}, logger *zap.L
 				*v = fmt.Sprintf("%s://%s%s", url.Scheme, url.Host, url.Path)
 			}
 		} else {
-			addTemplates1(v, interface2, logger)
+			addTemplates1(logger, v, interface2)
 		}
 	case float64, int64, int, float32:
 		val := toString(v)
-		addTemplates1(&val, interface2, logger)
+		addTemplates1(logger, &val, interface2)
 		parts := strings.Split(val, " ")
 		if len(parts) > 1 {
 			parts1 := strings.Split(parts[0], "{{")
@@ -325,19 +355,19 @@ func addTemplates(interface1 interface{}, interface2 *interface{}, logger *zap.L
 }
 
 // Here we simplify the second interface and finally add the templates.
-func addTemplates1(val1 *string, body *interface{}, logger *zap.Logger) bool {
+func addTemplates1(logger *zap.Logger, val1 *string, body *interface{}) bool {
 	switch b := (*body).(type) {
 	case geko.ObjectItems:
 		keys := b.Keys()
 		vals := b.Values()
 		for i, key := range keys {
 			var err error
-			vals[i], err  = checkForTemplate(vals[i])
+			vals[i], err = checkForTemplate(vals[i])
 			if err != nil {
 				utils.LogError(logger, err, "failed to render for template")
 				return false
 			}
-			ok := addTemplates1(val1, &vals[i], logger)
+			ok := addTemplates1(logger, val1, &vals[i])
 			if ok && reflect.TypeOf(vals[i]) != reflect.TypeOf(b) {
 				newKey := insertUnique(key, *val1, utils.TemplatizedValues)
 				if newKey == "" {
@@ -351,7 +381,7 @@ func addTemplates1(val1 *string, body *interface{}, logger *zap.Logger) bool {
 		}
 	case geko.Array:
 		for _, v := range b.List {
-			addTemplates1(val1, &v, logger)
+			addTemplates1(logger, val1, &v)
 		}
 	case map[string]string:
 		for key, val2 := range b {
@@ -396,7 +426,7 @@ func addTemplates1(val1 *string, body *interface{}, logger *zap.Logger) bool {
 				utils.LogError(logger, err, "failed to render for template")
 				return false
 			}
-			ok := addTemplates1(val1, &val2, logger)
+			ok := addTemplates1(logger, val1, &val2)
 			if ok {
 				newKey := insertUnique(key, *val1, utils.TemplatizedValues)
 				if newKey == "" {
@@ -413,7 +443,7 @@ func addTemplates1(val1 *string, body *interface{}, logger *zap.Logger) bool {
 
 	case []interface{}:
 		for i, val := range b {
-			addTemplates1(val1, &val, logger)
+			addTemplates1(logger, val1, &val)
 			b[i] = val
 		}
 	}
@@ -559,8 +589,6 @@ func render(val string) (string, error) {
 		"float":  utils.ToFloat,
 	}
 
-	// Remove the double quotes if the template does not contain the word string.
-	// Since values like {{.Host}}, {{.Connection}}, etc. are of type string,
 	tmpl, err := template.New("template").Funcs(funcMap).Parse(val)
 	if err != nil {
 		return val, fmt.Errorf("failed to parse the testcase using template %v", zap.Error(err))
@@ -570,11 +598,14 @@ func render(val string) (string, error) {
 	if err != nil {
 		return val, fmt.Errorf("failed to execute the template %v", zap.Error(err))
 	}
-	if !strings.Contains(val, "string") {
-		outputString := strings.Trim(output.String(), `"`)
-		return outputString, nil
+
+	if strings.Contains(val, "string") {
+		return output.String(), nil
 	}
-	return output.String(), nil
+
+	// Remove the double quotes from the output for rest of the values. (int, float)
+	outputString := strings.Trim(output.String(), `"`)
+	return outputString, nil
 }
 
 // Compare the headers of 2 requests and add the templates.

@@ -22,9 +22,9 @@ func Templatize(ctx context.Context, logger *zap.Logger, _ *config.Config, servi
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Get the replay service.
-			svc, err := serviceFactory.GetService(ctx, "templatize")
+			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service")
 				return nil
@@ -35,7 +35,7 @@ func Templatize(ctx context.Context, logger *zap.Logger, _ *config.Config, servi
 				utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
 				return nil
 			}
-			if err := replay.Templatize(ctx, []string{}); err != nil {
+			if err := replay.Templatize(ctx); err != nil {
 				utils.LogError(logger, err, "failed to templatize test cases")
 				return nil
 			}

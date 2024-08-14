@@ -193,7 +193,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 	abortTestRun := false
 
 	for i, testSetID := range testSetIDs {
-		//Execute the Pre-script before each test-set if provided
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
 		}
