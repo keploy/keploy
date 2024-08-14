@@ -53,6 +53,6 @@ jobs:
           working-directory: samples-typescript/express-mongoose
           command: node src/app.js
           delay: 7
-          keploy-record-bin: /usr/local/bin/keployR
-          keploy-test-bin: /usr/local/bin/keployB
+          keploy-record-bin: /usr/local/bin/keployB
+          keploy-test-bin: /usr/local/bin/keployR
           mode: 1
