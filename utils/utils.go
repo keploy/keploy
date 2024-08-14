@@ -706,7 +706,6 @@ func isGoBinary(logger *zap.Logger, filePath string) bool {
 	sections := []string{".go.buildinfo", ".gopclntab"}
 	for _, section := range sections {
 		if sect := f.Section(section); sect != nil {
-			fmt.Println(section)
 			return true
 		}
 	}

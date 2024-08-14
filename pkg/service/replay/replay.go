@@ -93,15 +93,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// defering the stop function to stop keploy in case of any error in replay or in case of context cancellation
 	defer func() {
-		if r.appCtxCancel != nil {
-			r.appCtxCancel()
-			if r.appErrGrp != nil {
-				err := r.appErrGrp.Wait()
-				if err != nil {
-					utils.LogError(r.logger, err, "error in context cancellation of test set")
-				}
-			}
-		}
 		select {
 		case <-ctx.Done():
 			break
@@ -147,24 +138,35 @@ func (r *Replayer) Start(ctx context.Context) error {
 			testSets[testSetID] = tsconfig
 		}
 	}
-	testSetIDs = sortTestSetsByCmd(testSets)
+
+	err = checkForCommandTypeMismatch(r.logger, r.config.CommandType, testSets)
+	if err != nil {
+		r.logger.Warn("command type mismatch in test-sets, using command provided in the cli/config for all test-sets", zap.Error(err))
+		for _, testSetID := range testSetIDs {
+			testSets[testSetID].AppCmd = r.config.Command
+		}
+	} else {
+		testSetIDs = sortTestSetsByCmd(testSets)
+	}
 
 	var language config.Language
 	var cov coverage.Service
 
 	if r.instrument && !r.config.Test.SkipCoverage {
-		language, err = detectCommonLanguage(r.logger, testSets)
-		if err != nil {
-			r.config.Test.SkipCoverage = true
-			r.logger.Warn("failed to detect language, skipping coverage caluclation", zap.Error(err))
-		}
 
-		if r.config.Test.Language == "" {
+		language, err = detectCommonLanguage(r.logger, testSets)
+		if err != nil && r.config.Test.Language == "" {
+			r.config.Test.SkipCoverage = true
+			r.logger.Warn("failed to detect language, skipping coverage calculation", zap.Error(err))
+		}
+		if r.config.Test.Language != "" {
+			if language != r.config.Test.Language && language != models.Unknown {
+				r.logger.Warn("language detected is different from the language provided, skilling coverage calculation", zap.String("detected language", string(language)), zap.String("provided language", string(r.config.Test.Language)))
+				r.config.Test.SkipCoverage = true
+			}
+		} else {
 			r.logger.Warn(fmt.Sprintf("%s language detected. please use --language to manually set the language if needed", language))
 			r.config.Test.Language = language
-		} else if language != r.config.Test.Language {
-			utils.LogError(r.logger, nil, "language detected is different from the language provided")
-			r.config.Test.SkipCoverage = true
 		}
 
 		switch r.config.Test.Language {
@@ -265,6 +267,16 @@ func (r *Replayer) Start(ctx context.Context) error {
 			_, err = requestMockemulator.AfterTestHook(ctx, testRunID, testSetID, models.TestCoverage{}, len(testSetIDs))
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get after test hook")
+			}
+		}
+	}
+
+	if r.appCtxCancel != nil {
+		r.appCtxCancel()
+		if r.appErrGrp != nil {
+			err := r.appErrGrp.Wait()
+			if err != nil {
+				utils.LogError(r.logger, err, "error in context cancellation of test set")
 			}
 		}
 	}
@@ -1140,13 +1152,27 @@ func detectCommonLanguage(logger *zap.Logger, testSets map[string]*models.TestSe
 	for testSetID, testSet := range testSets {
 		testSetLanguage := utils.DetectLanguage(logger, testSet.AppCmd)
 		if testSetLanguage == models.Unknown {
-			logger.Warn("failed to detect language for", zap.String("test-set-id", testSetID))
 			return models.Unknown, fmt.Errorf("failed to detect language for test-set %s", testSetID)
 		}
-		if language != "" && language != testSetLanguage {
-			logger.Warn("multiple languages detected in the test sets", zap.String("test-set-id", testSetID))
+		if language == "" {
+			language = testSetLanguage
+			continue
+		}
+		if language != testSetLanguage {
 			return models.Unknown, fmt.Errorf("multiple languages detected in the test sets")
 		}
 	}
 	return language, nil
+}
+
+func checkForCommandTypeMismatch(logger *zap.Logger, providedCmdType string, testSets map[string]*models.TestSet) error {
+	for testSetID, testSet := range testSets {
+		if testSet.AppCmd == "" {
+			continue
+		}
+		if string(utils.FindDockerCmd(testSet.AppCmd)) != providedCmdType {
+			return fmt.Errorf("command type mismatch for test-set %s", testSetID)
+		}
+	}
+	return nil
 }
