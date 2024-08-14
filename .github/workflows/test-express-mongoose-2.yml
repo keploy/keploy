@@ -30,11 +30,11 @@ jobs:
           curl --silent -o pilot --location "https://github.com/keploy/pilot/releases/latest/download/pilot_linux_amd64" && 
           sudo chmod a+x pilot && sudo mkdir -p /usr/local/bin && sudo mv pilot /usr/local/bin
 
-      - name: Checkout to the samples-typescript/express-mongoose repository
+      - name: Checkout to the samples-typescript repository
         uses: actions/checkout@v4
         with:
           repository: keploy/samples-typescript
-          ref: native-linux
+          ref: main
           path: samples-typescript
 
       - name: Build the express-mongoose application
