@@ -65,7 +65,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 			println("Checking for Test case: ", tcs[i].Name)
 			// Compare the keys to the headers.
 			for j := i + 1; j < len(tcs); j++ {
-				addTemplates(tcs[j].HTTPReq.Header, &jsonResponse)
+				addTemplates(tcs[j].HTTPReq.Header, &jsonResponse, r.logger)
 			}
 
 			// Now modify the response body to get templatized body if any.
@@ -81,7 +81,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 		for i := 0; i < len(tcs)-1; i++ {
 			// Check for headers first.
 			for j := i + 1; j < len(tcs); j++ {
-				compareReqHeaders(tcs[i].HTTPReq.Header, tcs[j].HTTPReq.Header)
+				compareReqHeaders(tcs[i].HTTPReq.Header, tcs[j].HTTPReq.Header, r.logger)
 			}
 		}
 
@@ -95,7 +95,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 				continue
 			}
 			for j := i + 1; j < len(tcs); j++ {
-				addTemplates(&tcs[j].HTTPReq.URL, &jsonResponse)
+				addTemplates(&tcs[j].HTTPReq.URL, &jsonResponse, r.logger)
 			}
 			// Record the new testcase.
 			jsonData, err := json.Marshal(jsonResponse)
@@ -119,7 +119,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 				// Check if there is the Location header in the headers.
 				for key, val := range tcs[j].HTTPReq.Header {
 					if key == "Location" {
-						addTemplates(&val, &jsonResponse)
+						addTemplates(&val, &jsonResponse, r.logger)
 					}
 				}
 			}
@@ -142,7 +142,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 				} else if jsonRequest == nil {
 					continue
 				}
-				addTemplates(jsonRequest, &jsonResponse)
+				addTemplates(jsonRequest, &jsonResponse, r.logger)
 				jsonData, err := json.Marshal(jsonRequest)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to marshal json data")
@@ -198,12 +198,16 @@ func parseIntoJSON(response string) (interface{}, error) {
 }
 
 // TODO: change the name of this function.
-func checkForTemplate(val interface{}) interface{} {
+func checkForTemplate(val interface{}) (interface{}, error) {
 	stringVal, ok := val.(string)
 	if ok {
 		if (strings.HasPrefix(stringVal, "{{") || strings.HasPrefix(stringVal, " {{")) && (strings.HasSuffix(stringVal, "}}") || strings.HasSuffix(stringVal, "}} ")) {
 			// Get the value from the template.
-			val, _ = render(stringVal)
+			var err error
+			val, err  = render(stringVal)
+			if err != nil {
+				return val, err
+			}
 			// We don't check for string here because we don't put {{string .key}} type of templates in the templatized values.
 			// If it is string, we just put it like {{.key}}. But for other we store the type information along with the key.
 			if !strings.Contains(stringVal, "string") {
@@ -216,34 +220,48 @@ func checkForTemplate(val interface{}) interface{} {
 			}
 		}
 	}
-	return val
+	return val, nil
 }
 
 // Here we simplify the first interface to a string form and then call the second function to simplify the second interface.
 // TODO: add better comment here.
-func addTemplates(interface1 interface{}, interface2 *interface{}) {
+func addTemplates(interface1 interface{}, interface2 *interface{}, logger *zap.Logger) {
 	switch v := interface1.(type) {
 	case geko.ObjectItems:
 		keys := v.Keys()
 		vals := v.Values()
 		for i := range keys {
-			vals[i] = checkForTemplate(vals[i])
-			addTemplates(vals[i], interface2)
+			var err error
+			vals[i], err = checkForTemplate(vals[i])
+			if err != nil {
+				return
+			}
+			addTemplates(vals[i], interface2, logger)
 			v.SetValueByIndex(i, vals[i])
 		}
 	case geko.Array:
 		for _, val := range v.List {
-			addTemplates(&val, interface2)
+			addTemplates(&val, interface2, logger)
 		}
 	case map[string]interface{}:
 		for key, val := range v {
-			val = checkForTemplate(val)
-			addTemplates(val, interface2)
+			var err error
+			val, err = checkForTemplate(val)
+			if err != nil {
+				utils.LogError(logger, err, "failed to render for template")
+				return
+			}
+			addTemplates(val, interface2, logger)
 			v[key] = val
 		}
 	case map[string]string:
 		for key, val := range v {
-			val, ok := checkForTemplate(val).(string)
+			val1, err := checkForTemplate(val)
+			if err != nil {
+				utils.LogError(logger, err, "failed to render for template")
+				return
+			}
+			val, ok := (val1).(string)
 			if !ok {
 				return
 			}
@@ -253,7 +271,7 @@ func addTemplates(interface1 interface{}, interface2 *interface{}) {
 				authType = strings.Split(val, " ")[0]
 				val = strings.Split(val, " ")[1]
 			}
-			ok = addTemplates1(&val, interface2)
+			ok = addTemplates1(&val, interface2, logger)
 			if !ok {
 				return
 			}
@@ -262,22 +280,27 @@ func addTemplates(interface1 interface{}, interface2 *interface{}) {
 			v[key] = val
 		}
 	case *string:
-		*v = checkForTemplate(*v).(string)
-		ok := addTemplates1(v, interface2)
+		tempVal, err := checkForTemplate(*v)
+		if err != nil {
+			utils.LogError(logger, err, "failed to render for template")
+			return
+		}
+		*v = (tempVal).(string)
+		ok := addTemplates1(v, interface2, logger)
 		if ok {
 			return
 		}
 		url, err := url.Parse(*v)
 		if err == nil {
 			urlParts := strings.Split(url.Path, "/")
-			addTemplates1(&urlParts[len(urlParts)-1], interface2)
+			addTemplates1(&urlParts[len(urlParts)-1], interface2, logger)
 			url.Path = strings.Join(urlParts, "/")
 			if url.RawQuery != "" {
 				// Only pass the values of the query parameters to the addTemplates1 function.
 				queryParams := strings.Split(url.RawQuery, "&")
 				for i, param := range queryParams {
 					param = strings.Split(param, "=")[1]
-					addTemplates1(&param, interface2)
+					addTemplates1(&param, interface2, logger)
 					queryParams[i] = strings.Split(queryParams[i], "=")[0] + "=" + param
 				}
 				url.RawQuery = strings.Join(queryParams, "&")
@@ -286,11 +309,11 @@ func addTemplates(interface1 interface{}, interface2 *interface{}) {
 				*v = fmt.Sprintf("%s://%s%s", url.Scheme, url.Host, url.Path)
 			}
 		} else {
-			addTemplates1(v, interface2)
+			addTemplates1(v, interface2, logger)
 		}
 	case float64, int64, int, float32:
 		val := toString(v)
-		addTemplates1(&val, interface2)
+		addTemplates1(&val, interface2, logger)
 		parts := strings.Split(val, " ")
 		if len(parts) > 1 {
 			parts1 := strings.Split(parts[0], "{{")
@@ -302,14 +325,19 @@ func addTemplates(interface1 interface{}, interface2 *interface{}) {
 }
 
 // Here we simplify the second interface and finally add the templates.
-func addTemplates1(val1 *string, body *interface{}) bool {
+func addTemplates1(val1 *string, body *interface{}, logger *zap.Logger) bool {
 	switch b := (*body).(type) {
 	case geko.ObjectItems:
 		keys := b.Keys()
 		vals := b.Values()
 		for i, key := range keys {
-			vals[i] = checkForTemplate(vals[i])
-			ok := addTemplates1(val1, &vals[i])
+			var err error
+			vals[i], err  = checkForTemplate(vals[i])
+			if err != nil {
+				utils.LogError(logger, err, "failed to render for template")
+				return false
+			}
+			ok := addTemplates1(val1, &vals[i], logger)
 			if ok && reflect.TypeOf(vals[i]) != reflect.TypeOf(b) {
 				newKey := insertUnique(key, *val1, utils.TemplatizedValues)
 				if newKey == "" {
@@ -323,11 +351,16 @@ func addTemplates1(val1 *string, body *interface{}) bool {
 		}
 	case geko.Array:
 		for _, v := range b.List {
-			addTemplates1(val1, &v)
+			addTemplates1(val1, &v, logger)
 		}
 	case map[string]string:
 		for key, val2 := range b {
-			val2, ok := checkForTemplate(val2).(string)
+			tempVal, err := checkForTemplate(val2)
+			if err != nil {
+				utils.LogError(logger, err, "failed to render for template")
+				return false
+			}
+			val2, ok := (tempVal).(string)
 			if !ok {
 				return false
 			}
@@ -343,7 +376,12 @@ func addTemplates1(val1 *string, body *interface{}) bool {
 		}
 		return false
 	case string:
-		b, ok := checkForTemplate(b).(string)
+		tempVal, err := checkForTemplate(b)
+		if err != nil {
+			utils.LogError(logger, err, "failed to render for template")
+			return false
+		}
+		b, ok := (tempVal).(string)
 		if !ok {
 			return false
 		}
@@ -352,8 +390,13 @@ func addTemplates1(val1 *string, body *interface{}) bool {
 		}
 	case map[string]interface{}:
 		for key, val2 := range b {
-			val2 = checkForTemplate(val2)
-			ok := addTemplates1(val1, &val2)
+			var err error
+			val2, err = checkForTemplate(val2)
+			if err != nil {
+				utils.LogError(logger, err, "failed to render for template")
+				return false
+			}
+			ok := addTemplates1(val1, &val2, logger)
 			if ok {
 				newKey := insertUnique(key, *val1, utils.TemplatizedValues)
 				if newKey == "" {
@@ -370,7 +413,7 @@ func addTemplates1(val1 *string, body *interface{}) bool {
 
 	case []interface{}:
 		for i, val := range b {
-			addTemplates1(val1, &val)
+			addTemplates1(val1, &val, logger)
 			b[i] = val
 		}
 	}
@@ -535,16 +578,26 @@ func render(val string) (string, error) {
 }
 
 // Compare the headers of 2 requests and add the templates.
-func compareReqHeaders(req1 map[string]string, req2 map[string]string) {
+func compareReqHeaders(req1 map[string]string, req2 map[string]string, logger *zap.Logger) {
 	for key, val1 := range req1 {
 		// Check if the value is already present in the templatized values.
-		val, ok := checkForTemplate(val1).(string)
+		tempVal, err := checkForTemplate(val1)
+		if err != nil {
+			utils.LogError(logger, err, "failed to render for template")
+			return
+		}
+		val, ok := (tempVal).(string)
 		if !ok {
 			return
 		}
 		val1 = val
 		if val2, ok := req2[key]; ok {
-			val, ok = checkForTemplate(val2).(string)
+			tempVal, err := checkForTemplate(val2)
+			if err != nil {
+				utils.LogError(logger, err, "failed to render for template")
+				return
+			}
+			val, ok = (tempVal).(string)
 			if !ok {
 				return
 			}
@@ -580,20 +633,20 @@ func removeQuotesInTemplates(jsonStr string) string {
 }
 
 // Add quotes to the template if it is of the type string. eg: "{{string .key}}"
-func addQuotesInTemplates(jsonStr string) string {
-	// Regular expression to find patterns with {{ and }}
-	re := regexp.MustCompile(`\{\{[^{}]*\}\}`)
-	// Function to replace matches by removing surrounding quotes
-	result := re.ReplaceAllStringFunc(jsonStr, func(match string) string {
-		if strings.Contains(match, "{{string") {
-			return match
-		}
-		//Add the surrounding quotes.
-		return `"` + match + `"`
-	})
+// func addQuotesInTemplates(jsonStr string) string {
+// 	// Regular expression to find patterns with {{ and }}
+// 	re := regexp.MustCompile(`\{\{[^{}]*\}\}`)
+// 	// Function to replace matches by removing surrounding quotes
+// 	result := re.ReplaceAllStringFunc(jsonStr, func(match string) string {
+// 		if strings.Contains(match, "{{string") {
+// 			return match
+// 		}
+// 		//Add the surrounding quotes.
+// 		return `"` + match + `"`
+// 	})
 
-	return result
-}
+// 	return result
+// }
 
 func noQuotes(tempMap map[string]interface{}) {
 	// Remove double quotes
