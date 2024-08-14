@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -53,6 +52,10 @@ type Replayer struct {
 	instrumentation Instrumentation
 	config          *config.Config
 	instrument      bool
+	appCtx          context.Context
+	appCtxCancel    context.CancelFunc
+	appErrGrp       *errgroup.Group
+	appErrChan      chan models.AppError
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf Config, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
@@ -64,6 +67,7 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 	if config.Command != "" {
 		instrument = true
 	}
+	appErrChan := make(chan models.AppError, 1)
 	return &Replayer{
 		logger:          logger,
 		testDB:          testDB,
@@ -73,6 +77,7 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 		telemetry:       telemetry,
 		instrumentation: instrumentation,
 		config:          config,
+		appErrChan:      appErrChan,
 		instrument:      instrument,
 	}
 }
@@ -86,7 +91,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	var hookCancel context.CancelFunc
 	var stopReason = "replay completed successfully"
 
-	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
+	// defering the stop function to stop keploy in case of any error in replay or in case of context cancellation
 	defer func() {
 		select {
 		case <-ctx.Done():
@@ -103,6 +108,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 	}()
 
+	testRunID, err := r.GetNextTestRunID(ctx)
+	if err != nil {
+		stopReason = fmt.Sprintf("failed to get next test run id: %v", err)
+		utils.LogError(r.logger, err, stopReason)
+		return fmt.Errorf(stopReason)
+	}
+
 	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get all test set ids: %v", err)
@@ -117,59 +129,57 @@ func (r *Replayer) Start(ctx context.Context) error {
 		return fmt.Errorf(errMsg)
 	}
 
-	testRunID, err := r.GetNextTestRunID(ctx)
+	testSets := make(map[string]*models.TestSet)
+	for _, testSetID := range testSetIDs {
+		tsconfig, err := r.testSetConf.Read(ctx, testSetID)
+		if err != nil {
+			testSets[testSetID] = &models.TestSet{AppCmd: r.config.Command}
+		} else {
+			testSets[testSetID] = tsconfig
+		}
+	}
+
+	err = checkForCommandTypeMismatch(r.config.CommandType, testSets)
 	if err != nil {
-		stopReason = fmt.Sprintf("failed to get next test run id: %v", err)
-		utils.LogError(r.logger, err, stopReason)
-		return fmt.Errorf(stopReason)
+		r.logger.Warn("command type mismatch in test-sets, using command provided in the cli/config for all test-sets", zap.Error(err))
+		for _, testSetID := range testSetIDs {
+			testSets[testSetID].AppCmd = r.config.Command
+		}
+	} else {
+		testSetIDs = sortTestSetsByCmd(testSets)
 	}
 
 	var language config.Language
-	var executable string
-	// only find language to calculate coverage if instrument is true
-	if r.instrument {
-		language, executable = utils.DetectLanguage(r.logger, r.config.Command)
-		// if language is not provided and language detected is known
-		// then set the language to detected language
-		if r.config.Test.Language == "" {
-			if language == models.Unknown {
-				r.logger.Warn("failed to detect language, skipping coverage caluclation. please use --language to manually set the language")
-				r.config.Test.SkipCoverage = true
-			} else {
-				r.logger.Warn(fmt.Sprintf("%s language detected. please use --language to manually set the language if needed", language))
-			}
-			r.config.Test.Language = language
-		} else if language != r.config.Test.Language && language != models.Unknown {
-			utils.LogError(r.logger, nil, "language detected is different from the language provided")
-			r.config.Test.SkipCoverage = true
-		}
-	}
-
 	var cov coverage.Service
-	switch r.config.Test.Language {
-	case models.Go:
-		cov = golang.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.CoverageReportPath, r.config.CommandType)
-	case models.Python:
-		cov = python.New(ctx, r.logger, r.reportDB, r.config.Command, executable)
-	case models.Javascript:
-		cov = javascript.New(ctx, r.logger, r.reportDB, r.config.Command)
-	case models.Java:
-		cov = java.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.JacocoAgentPath, executable)
-	default:
-		r.config.Test.SkipCoverage = true
-	}
-	if !r.config.Test.SkipCoverage {
-		if utils.CmdType(r.config.CommandType) == utils.Native {
-			r.config.Command, err = cov.PreProcess(r.config.Test.DisableLineCoverage)
 
-			if err != nil {
+	if r.instrument && !r.config.Test.SkipCoverage {
+
+		language, err = detectCommonLanguage(r.logger, testSets)
+		if err != nil && r.config.Test.Language == "" {
+			r.config.Test.SkipCoverage = true
+			r.logger.Warn("failed to detect language, skipping coverage calculation", zap.Error(err))
+		}
+		if r.config.Test.Language != "" {
+			if language != r.config.Test.Language && language != models.Unknown {
+				r.logger.Warn("language detected is different from the language provided, skilling coverage calculation", zap.String("detected language", string(language)), zap.String("provided language", string(r.config.Test.Language)))
 				r.config.Test.SkipCoverage = true
 			}
+		} else {
+			r.logger.Warn(fmt.Sprintf("%s language detected. please use --language to manually set the language if needed", language))
+			r.config.Test.Language = language
 		}
-		err = os.Setenv("CLEAN", "true") // related to javascript coverage calculation
-		if err != nil {
+
+		switch r.config.Test.Language {
+		case models.Go:
+			cov = golang.New(ctx, r.logger, r.config.Test.CoverageReportPath, r.config)
+		case models.Python:
+			cov = python.New(ctx, r.logger, r.config)
+		case models.Javascript:
+			cov = javascript.New(ctx, r.logger, r.config)
+		case models.Java:
+			cov = java.New(ctx, r.logger, r.config.Test.JacocoAgentPath, r.config)
+		default:
 			r.config.Test.SkipCoverage = true
-			r.logger.Warn("failed to set CLEAN env variable, skipping coverage caluclation", zap.Error(err))
 		}
 	}
 
@@ -189,23 +199,36 @@ func (r *Replayer) Start(ctx context.Context) error {
 	testSetResult := false
 	testRunResult := true
 	abortTestRun := false
+	var previousCmd string
 
 	for i, testSetID := range testSetIDs {
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
 		}
 
-		requestMockemulator.ProcessMockFile(ctx, testSetID)
-
 		if !r.config.Test.SkipCoverage {
-			err = os.Setenv("TESTSETID", testSetID) // related to java coverage calculation
+			r.config.Command, err = cov.PreProcess(testSets[testSetID].AppCmd, testSetID)
 			if err != nil {
 				r.config.Test.SkipCoverage = true
-				r.logger.Warn("failed to set TESTSETID env variable, skipping coverage caluclation", zap.Error(err))
 			}
 		}
 
-		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, inst.AppID, false)
+		requestMockemulator.ProcessMockFile(ctx, testSetID)
+
+		var runApp bool
+		if previousCmd != testSets[testSetID].AppCmd || previousCmd == "" {
+			if previousCmd != "" {
+				r.appCtxCancel()
+				err := r.appErrGrp.Wait()
+				if err != nil {
+					utils.LogError(r.logger, err, "error in cancelling the test set run")
+				}
+			}
+			runApp = true
+			previousCmd = testSets[testSetID].AppCmd
+		}
+
+		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, inst.AppID, runApp)
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)
 			utils.LogError(r.logger, err, stopReason)
@@ -214,6 +237,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			}
 			return fmt.Errorf(stopReason)
 		}
+
 		switch testSetStatus {
 		case models.TestSetStatusAppHalted:
 			testSetResult = false
@@ -245,20 +269,18 @@ func (r *Replayer) Start(ctx context.Context) error {
 				utils.LogError(r.logger, err, "failed to get after test hook")
 			}
 		}
+	}
 
-		if i == 0 && !r.config.Test.SkipCoverage {
-			err = os.Setenv("CLEAN", "false") // related to javascript coverage calculation
+	if r.appCtxCancel != nil {
+		r.appCtxCancel()
+		if r.appErrGrp != nil {
+			err := r.appErrGrp.Wait()
 			if err != nil {
-				r.config.Test.SkipCoverage = true
-				r.logger.Warn("failed to set CLEAN env variable, skipping coverage caluclation.", zap.Error(err))
-			}
-			err = os.Setenv("APPEND", "--append") // related to python coverage calculation
-			if err != nil {
-				r.config.Test.SkipCoverage = true
-				r.logger.Warn("failed to set APPEND env variable, skipping coverage caluclation.", zap.Error(err))
+				utils.LogError(r.logger, err, "error in context cancellation of test set")
 			}
 		}
 	}
+
 	if !r.config.Test.SkipCoverage && r.config.Test.Language == models.Java {
 		err = java.MergeAndGenerateJacocoReport(ctx, r.logger)
 		if err != nil {
@@ -280,7 +302,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			coverageData, err := cov.GetCoverage()
 			if err == nil {
 				r.logger.Sugar().Infoln(models.HighlightPassingString("Total Coverage Percentage: ", coverageData.TotalCov))
-				err = cov.AppendCoverage(&coverageData, testRunID)
+				err := r.reportDB.UpdateReport(ctx, testRunID, coverageData)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to update report with the coverage data")
 				}
@@ -355,7 +377,7 @@ func (r *Replayer) GetTestCases(ctx context.Context, testID string) ([]*models.T
 	return r.testDB.GetTestCases(ctx, testID)
 }
 
-func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error) {
+func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, runApp bool) (models.TestSetStatus, error) {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
@@ -410,7 +432,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		completeTestReport[testSetID] = verdict
 		totalTests += testReport.Total
 		totalTestIgnored += testReport.Ignored
-
 		return models.TestSetStatusIgnored, nil
 	}
 
@@ -438,7 +459,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	var appErrChan = make(chan models.AppError, 1)
 	var appErr models.AppError
 	var success int
 	var failure int
@@ -453,20 +473,28 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	cmdType := utils.CmdType(r.config.CommandType)
 	var userIP string
 
-	err = r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, models.BaseTime, time.Now(), Start)
+	var operation MockAction
+	if runApp {
+		operation = Start
+	} else {
+		operation = Update
+	}
+	err = r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, models.BaseTime, time.Now(), operation)
 	if err != nil {
 		return models.TestSetStatusFailed, err
 	}
 
 	if r.instrument {
-		if !serveTest {
-			runTestSetErrGrp.Go(func() error {
+		if runApp {
+			r.appErrGrp, r.appCtx = errgroup.WithContext(ctx)
+			r.appCtx, r.appCtxCancel = context.WithCancel(r.appCtx)
+			r.appErrGrp.Go(func() error {
 				defer utils.Recover(r.logger)
-				appErr = r.RunApplication(runTestSetCtx, appID, models.RunOptions{})
+				appErr = r.RunApplication(r.appCtx, appID, models.RunOptions{})
 				if appErr.AppErrorType == models.ErrCtxCanceled {
 					return nil
 				}
-				appErrChan <- appErr
+				r.appErrChan <- appErr
 				return nil
 			})
 		}
@@ -475,7 +503,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		runTestSetErrGrp.Go(func() error {
 			defer utils.Recover(r.logger)
 			select {
-			case err := <-appErrChan:
+			case err := <-r.appErrChan:
 				switch err.AppErrorType {
 				case models.ErrCommandError:
 					testSetStatusByErrChan = models.TestSetStatusFaultUserApp
@@ -500,10 +528,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		})
 
 		// Delay for user application to run
-		select {
-		case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
-		case <-runTestSetCtx.Done():
-			return models.TestSetStatusUserAbort, context.Canceled
+		if runApp {
+			select {
+			case <-time.After(time.Duration(r.config.Test.Delay) * time.Second):
+			case <-runTestSetCtx.Done():
+				return models.TestSetStatusUserAbort, context.Canceled
+			}
 		}
 
 		if utils.IsDockerCmd(cmdType) {
@@ -1093,4 +1123,56 @@ func (r *Replayer) DeleteTestSet(ctx context.Context, testSetID string) error {
 
 func (r *Replayer) DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error {
 	return r.testDB.DeleteTests(ctx, testSetID, testCaseIDs)
+}
+
+// sorts the test sets by the frequency of their commands
+func sortTestSetsByCmd(testSets map[string]*models.TestSet) []string {
+	cmdFrequency := make(map[string]int)
+	for _, testSet := range testSets {
+		cmdFrequency[testSet.AppCmd]++
+	}
+
+	// Create a slice of test set IDs sorted by command frequency
+	sortedTestSetIDs := make([]string, 0, len(testSets))
+	for testSetID := range testSets {
+		sortedTestSetIDs = append(sortedTestSetIDs, testSetID)
+	}
+
+	// sort the testSetIds by the frequency of their commands
+	sort.Slice(sortedTestSetIDs, func(i, j int) bool {
+		cmdI, cmdJ := testSets[sortedTestSetIDs[i]].AppCmd, testSets[sortedTestSetIDs[j]].AppCmd
+		return cmdFrequency[cmdI] > cmdFrequency[cmdJ]
+	})
+
+	return sortedTestSetIDs
+}
+
+func detectCommonLanguage(logger *zap.Logger, testSets map[string]*models.TestSet) (config.Language, error) {
+	var language config.Language
+	for testSetID, testSet := range testSets {
+		testSetLanguage := utils.DetectLanguage(logger, testSet.AppCmd)
+		if testSetLanguage == models.Unknown {
+			return models.Unknown, fmt.Errorf("failed to detect language for test-set %s", testSetID)
+		}
+		if language == "" {
+			language = testSetLanguage
+			continue
+		}
+		if language != testSetLanguage {
+			return models.Unknown, fmt.Errorf("multiple languages detected in the test sets")
+		}
+	}
+	return language, nil
+}
+
+func checkForCommandTypeMismatch(providedCmdType string, testSets map[string]*models.TestSet) error {
+	for testSetID, testSet := range testSets {
+		if testSet.AppCmd == "" {
+			continue
+		}
+		if string(utils.FindDockerCmd(testSet.AppCmd)) != providedCmdType {
+			return fmt.Errorf("command type mismatch for test-set %s", testSetID)
+		}
+	}
+	return nil
 }

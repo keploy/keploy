@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/coverage"
 	"go.keploy.io/server/v2/utils"
@@ -19,24 +20,21 @@ import (
 type Java struct {
 	ctx             context.Context
 	logger          *zap.Logger
-	reportDB        coverage.ReportDB
-	cmd             string
 	jacocoAgentPath string
 	executable      string
+	cfg             *config.Config
 }
 
-func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cmd, jacocoAgentPath, executable string) *Java {
+func New(ctx context.Context, logger *zap.Logger, jacocoAgentPath string, cfg *config.Config) coverage.Service {
 	return &Java{
 		ctx:             ctx,
 		logger:          logger,
-		reportDB:        reportDB,
-		cmd:             cmd,
 		jacocoAgentPath: jacocoAgentPath,
-		executable:      executable,
+		cfg:             cfg,
 	}
 }
 
-func (j *Java) PreProcess(_ bool) (string, error) {
+func (j *Java) PreProcess(appCmd string, testSetID string) (string, error) {
 	// default location for jar of jacoco agent
 	jacocoAgentPath := "~/.m2/repository/org/jacoco/org.jacoco.agent/0.8.8/org.jacoco.agent-0.8.8-runtime.jar"
 	if j.jacocoAgentPath != "" {
@@ -47,30 +45,30 @@ func (j *Java) PreProcess(_ bool) (string, error) {
 	if err == nil {
 		isFileExist, err := utils.FileExists(jacocoAgentPath)
 		if err == nil && isFileExist {
-			j.cmd = strings.Replace(
-				j.cmd,
+			appCmd = strings.Replace(
+				appCmd,
 				j.executable,
-				fmt.Sprintf("%s -javaagent:%s=destfile=target/${TESTSETID}.exec", j.executable, jacocoAgentPath), 1,
+				fmt.Sprintf("%s -javaagent:%s=destfile=target/%s.exec", j.executable, jacocoAgentPath, testSetID), 1,
 			)
 		}
 	}
 	if err != nil {
 		j.logger.Warn("failed to find jacoco agent. If jacoco agent is present in a different path, please set it using --jacocoAgentPath")
-		return j.cmd, err
+		return appCmd, err
 	}
 	// downlaod jacoco cli
 	jacocoPath := filepath.Join(os.TempDir(), "jacoco")
 	err = os.MkdirAll(jacocoPath, 0777)
 	if err != nil {
 		j.logger.Debug("failed to create jacoco directory", zap.Error(err))
-		return j.cmd, err
+		return appCmd, err
 	}
 	err = downloadAndExtractJaCoCoCli(j.logger, "0.8.12", jacocoPath)
 	if err != nil {
 		j.logger.Debug("failed to download and extract jacoco binaries", zap.Error(err))
-		return j.cmd, err
+		return appCmd, err
 	}
-	return j.cmd, nil
+	return appCmd, nil
 }
 
 func (j *Java) GetCoverage() (models.TestCoverage, error) {
@@ -133,8 +131,4 @@ func (j *Java) GetCoverage() (models.TestCoverage, error) {
 	}
 
 	return testCov, nil
-}
-
-func (j *Java) AppendCoverage(coverage *models.TestCoverage, testRunID string) error {
-	return j.reportDB.UpdateReport(j.ctx, testRunID, coverage)
 }

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"sync"
 	"syscall"
 	"time"
 
@@ -25,36 +26,40 @@ import (
 
 func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opts Options) *App {
 	app := &App{
-		logger:           logger,
-		id:               id,
-		cmd:              cmd,
-		docker:           client,
-		kind:             utils.FindDockerCmd(cmd),
-		keployContainer:  "keploy-v2",
-		container:        opts.Container,
-		containerDelay:   opts.DockerDelay,
-		containerNetwork: opts.DockerNetwork,
-		containerIPv4:    make(chan string, 1),
+		logger:            logger,
+		id:                id,
+		cmd:               cmd,
+		docker:            client,
+		kind:              utils.FindDockerCmd(cmd),
+		keployContainer:   "keploy-v2",
+		mutex:             &sync.Mutex{},
+		container:         opts.Container,
+		containerDelay:    opts.DockerDelay,
+		containerNetwork:  opts.DockerNetwork,
+		containerIPv4:     "",
+		containerIPV4Chan: make(chan string, 1),
 	}
 	return app
 }
 
 type App struct {
-	logger           *zap.Logger
-	docker           docker.Client
-	id               uint64
-	cmd              string
-	kind             utils.CmdType
-	containerDelay   uint64
-	container        string
-	containerNetwork string
-	containerIPv4    chan string
-	keployNetwork    string
-	keployContainer  string
-	keployIPv4       string
-	inodeChan        chan uint64
-	EnableTesting    bool
-	Mode             models.Mode
+	logger            *zap.Logger
+	docker            docker.Client
+	id                uint64
+	cmd               string
+	kind              utils.CmdType
+	containerDelay    uint64
+	container         string
+	containerNetwork  string
+	containerIPv4     string
+	containerIPV4Chan chan string
+	keployNetwork     string
+	keployContainer   string
+	keployIPv4        string
+	inodeChan         chan uint64
+	mutex             *sync.Mutex
+	EnableTesting     bool
+	Mode              models.Mode
 }
 
 type Options struct {
@@ -93,10 +98,19 @@ func (a *App) KeployIPv4Addr() string {
 }
 
 func (a *App) ContainerIPv4Addr() string {
-	return <-a.containerIPv4
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+	if a.containerIPv4 == "" {
+		a.containerIPv4 = <-a.containerIPV4Chan
+	}
+	return a.containerIPv4
 }
+
 func (a *App) SetContainerIPv4Addr(ipAddr string) {
-	a.containerIPv4 <- ipAddr
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+	a.containerIPv4 = ipAddr
+	a.containerIPV4Chan <- ipAddr
 }
 
 func (a *App) SetupDocker() error {
@@ -387,6 +401,11 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 	errCh := make(chan error, 1)
 	// listen for the "create container" event in order to send the inode of the container to the kernel
 	errCh2 := a.getDockerMeta(ctx)
+	defer func() {
+		a.mutex.Lock()
+		a.containerIPv4 = ""
+		a.mutex.Unlock()
+	}()
 
 	g.Go(func() error {
 		defer utils.Recover(a.logger)

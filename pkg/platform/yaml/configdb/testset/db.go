@@ -57,3 +57,12 @@ func (db *Db[T]) Write(ctx context.Context, testSetID string, config T) error {
 
 	return nil
 }
+
+func (db *Db[T]) Delete(ctx context.Context, testSetID string) error {
+	err := yaml.DeleteFile(ctx, db.logger, db.path, testSetID)
+	if err != nil {
+		utils.LogError(db.logger, err, "failed to delete test-set configuration file", zap.String("testSet", testSetID))
+		return err
+	}
+	return nil
+}
