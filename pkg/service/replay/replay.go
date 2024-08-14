@@ -139,7 +139,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 	}
 
-	err = checkForCommandTypeMismatch(r.logger, r.config.CommandType, testSets)
+	err = checkForCommandTypeMismatch(r.config.CommandType, testSets)
 	if err != nil {
 		r.logger.Warn("command type mismatch in test-sets, using command provided in the cli/config for all test-sets", zap.Error(err))
 		for _, testSetID := range testSetIDs {
@@ -1165,7 +1165,7 @@ func detectCommonLanguage(logger *zap.Logger, testSets map[string]*models.TestSe
 	return language, nil
 }
 
-func checkForCommandTypeMismatch(logger *zap.Logger, providedCmdType string, testSets map[string]*models.TestSet) error {
+func checkForCommandTypeMismatch(providedCmdType string, testSets map[string]*models.TestSet) error {
 	for testSetID, testSet := range testSets {
 		if testSet.AppCmd == "" {
 			continue
