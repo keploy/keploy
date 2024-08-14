@@ -48,11 +48,12 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 			continue
 		}
 		// Add the quotes back to the templates before using it.
-		for _, tc := range tcs {
-			tc.HTTPReq.Body = addQuotesInTemplates(tc.HTTPReq.Body)
-			tc.HTTPResp.Body = addQuotesInTemplates(tc.HTTPResp.Body)
-		}
-		// Compare the response to the header.
+		// for _, tc := range tcs {
+		// 	tc.HTTPReq.Body = addQuotesInTemplates(tc.HTTPReq.Body)
+		// 	tc.HTTPResp.Body = addQuotesInTemplates(tc.HTTPResp.Body)
+		// }
+
+		// Compare the response of ith testcase with i+1->n request headers.
 		for i := 0; i < len(tcs)-1; i++ {
 			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 			if err != nil {
@@ -61,14 +62,16 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 			} else if jsonResponse == nil {
 				continue
 			}
+			println("Checking for Test case: ", tcs[i].Name)
 			// Compare the keys to the headers.
 			for j := i + 1; j < len(tcs); j++ {
 				addTemplates(tcs[j].HTTPReq.Header, &jsonResponse)
 			}
-			// Add the jsonResponse back to tcs.
+
+			// Now modify the response body to get templatized body if any.
 			jsonData, err := json.Marshal(jsonResponse)
 			if err != nil {
-				utils.LogError(r.logger, err, "failed to marshal json data")
+				utils.LogError(r.logger, err, "failed to marshal json data of templatized response")
 				return err
 			}
 			tcs[i].HTTPResp.Body = string(jsonData)
@@ -139,7 +142,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 				} else if jsonRequest == nil {
 					continue
 				}
-				addTemplates(jsonResponse, &jsonRequest)
+				addTemplates(jsonRequest, &jsonResponse)
 				jsonData, err := json.Marshal(jsonRequest)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to marshal json data")
@@ -181,7 +184,7 @@ func (r *Replayer) Templatize(ctx context.Context, testSets []string) error {
 }
 
 // Below are the helper functions for templatize.
-// Parse the json string into a geko type variable.
+// Parse the json string into a geko type variable, it will maintain the order of the keys in the json.
 func parseIntoJSON(response string) (interface{}, error) {
 	// Parse the response into a json object.
 	if response == "" {
@@ -194,17 +197,20 @@ func parseIntoJSON(response string) (interface{}, error) {
 	return result, nil
 }
 
+// TODO: change the name of this function.
 func checkForTemplate(val interface{}) interface{} {
 	stringVal, ok := val.(string)
 	if ok {
 		if strings.HasPrefix(stringVal, "{{") && strings.HasSuffix(stringVal, "}}") {
 			// Get the value from the template.
 			val, _ = render(stringVal)
+			// We don't check for string here because we don't put {{string .key}} type of templates in the templatized values.
+			// If it is string, we just put it like {{.key}}. But for other we store the type information along with the key.
 			if !strings.Contains(stringVal, "string") {
 				// Convert to its appropriate type.
-				if strings.Contains(stringVal, "int") {
+				if strings.Contains(stringVal, "int") { // {{int .key}}
 					val = utils.ToInt(val)
-				} else if strings.Contains(stringVal, "float") {
+				} else if strings.Contains(stringVal, "float") { // {{float .key}}
 					val = utils.ToFloat(val)
 				}
 			}
@@ -214,6 +220,7 @@ func checkForTemplate(val interface{}) interface{} {
 }
 
 // Here we simplify the first interface to a string form and then call the second function to simplify the second interface.
+// TODO: add better comment here.
 func addTemplates(interface1 interface{}, interface2 *interface{}) {
 	switch v := interface1.(type) {
 	case geko.ObjectItems:
@@ -500,29 +507,27 @@ func toString(val interface{}) string {
 	return ""
 }
 
-// This function renders the template using the templatized values.
-func render(testCaseStr string) (string, error) {
-	// This maps the contents inside the
+// render function gives the value of the templatized field.
+func render(val string) (string, error) {
+	// This is a map of helper functions that is used to convert the values to their appropriate types.
 	funcMap := template.FuncMap{
 		"int":    utils.ToInt,
 		"string": utils.ToString,
 		"float":  utils.ToFloat,
 	}
-	var ok bool
+
 	// Remove the double quotes if the template does not contain the word string.
-	if !strings.Contains(testCaseStr, "string") {
-		ok = true
-	}
-	tmpl, err := template.New("template").Funcs(funcMap).Parse(string(testCaseStr))
+	// Since values like {{.Host}}, {{.Connection}}, etc. are of type string,
+	tmpl, err := template.New("template").Funcs(funcMap).Parse(val)
 	if err != nil {
-		return testCaseStr, fmt.Errorf("failed to parse the testcase using template %v", zap.Error(err))
+		return val, fmt.Errorf("failed to parse the testcase using template %v", zap.Error(err))
 	}
 	var output bytes.Buffer
 	err = tmpl.Execute(&output, utils.TemplatizedValues)
 	if err != nil {
-		return testCaseStr, fmt.Errorf("failed to execute the template %v", zap.Error(err))
+		return val, fmt.Errorf("failed to execute the template %v", zap.Error(err))
 	}
-	if ok {
+	if !strings.Contains(val, "string") {
 		outputString := strings.Trim(output.String(), `"`)
 		return outputString, nil
 	}
