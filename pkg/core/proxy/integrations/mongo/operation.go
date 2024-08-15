@@ -493,11 +493,12 @@ func processOpReply(expected, mongoRequest models.MongoRequest, replySpec *model
 		responseMsgData, ok := responseMsg["speculativeAuthenticate"].(map[string]interface{})
 		if !ok {
 			logger.Debug("failed to extract payload from response data", zap.Any("responseMsgData", responseMsg))
+			continue
 		}
 		resPayload, err := extractAuthPayload(responseMsgData)
 		if err != nil {
 			logger.Debug("Failed to fetch the payload from the received MongoDB response", zap.Error(err))
-			return ""
+			continue
 		}
 		logger.Debug(fmt.Sprintf("Payload of the received response: %s", resPayload))
 
@@ -520,11 +521,12 @@ func processOpReply(expected, mongoRequest models.MongoRequest, replySpec *model
 		expectedRequest, ok := expectedrequestPayloadMap["speculativeAuthenticate"].(map[string]interface{})
 		if !ok {
 			logger.Debug("failed to extract payload from expected request data", zap.Any("expectedRequest", expectedRequest))
+			continue
 		}
 		expectedPayload, err := extractAuthPayload(expectedRequest)
 		if err != nil {
 			logger.Debug("Failed to fetch the payload from the expected MongoDB request", zap.Error(err))
-			return ""
+			continue
 		}
 		logger.Debug(fmt.Sprintf("Payload of the expected request: %s", expectedPayload))
 
@@ -546,12 +548,13 @@ func processOpReply(expected, mongoRequest models.MongoRequest, replySpec *model
 		actualRequest, ok := actualRequestPayloadMap["speculativeAuthenticate"].(map[string]interface{})
 		if !ok {
 			logger.Debug("failed to extract payload from actual request data", zap.Any("expectedRequest", expectedRequest))
+			continue
 		}
 
 		actualReqPayload, err := extractAuthPayload(actualRequest)
 		if err != nil {
 			logger.Debug("Failed to extract the payload from the actual MongoDB request", zap.Error(err))
-			return ""
+			continue
 		}
 		// Extract and decode the payload from the actual MongoDB request
 		decodedReqPayload, err := decodeBase64Str(actualReqPayload)
@@ -583,6 +586,7 @@ func processOpReply(expected, mongoRequest models.MongoRequest, replySpec *model
 		authMechanism, ok := actualRequest["mechanism"].(string)
 		if !ok {
 			logger.Debug("failed to auth mechanism from expected request data", zap.Any("expectedRequest", actualRequest))
+			continue
 		}
 		authMessage = authMessage + ",auth=" + authMechanism
 		authMessageMap.Store(conversationID, authMessage)
