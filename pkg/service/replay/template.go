@@ -618,9 +618,9 @@ func render(val string) (interface{}, error) {
 	// Convert this to the appropriate type and return.
 	switch {
 	case strings.Contains(val, "int"):
-		return utils.ToInt(val), nil
+		return utils.ToInt(output.String()), nil
 	case strings.Contains(val, "float"):
-		return utils.ToFloat(val), nil
+		return utils.ToFloat(output.String()), nil
 	}
 
 	return outputString, nil
