@@ -207,8 +207,8 @@ func parseIntoJSON(response string) (interface{}, error) {
 	return result, nil
 }
 
-// TODO: change the name of this function.
-func checkForTemplate(val interface{}) (interface{}, error) {
+// renderIfTemplatized is used to check if the value is a template and then render it.
+func renderIfTemplatized(val interface{}) (interface{}, error) {
 	stringVal, ok := val.(string)
 	if !ok {
 		return val, nil
@@ -237,11 +237,12 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 *interf
 		vals := v.Values()
 		for i := range keys {
 			var err error
-			vals[i], err = checkForTemplate(vals[i])
+			vals[i], err = renderIfTemplatized(vals[i])
 			if err != nil {
 				return
 			}
 			addTemplates(logger, vals[i], interface2)
+			// we change the current value also in the interface1
 			v.SetValueByIndex(i, vals[i])
 		}
 	case geko.Array:
@@ -251,7 +252,7 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 *interf
 	case map[string]interface{}:
 		for key, val := range v {
 			var err error
-			val, err = checkForTemplate(val)
+			val, err = renderIfTemplatized(val)
 			if err != nil {
 				utils.LogError(logger, err, "failed to render for template")
 				return
@@ -261,7 +262,7 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 *interf
 		}
 	case map[string]string:
 		for key, val := range v {
-			val1, err := checkForTemplate(val)
+			val1, err := renderIfTemplatized(val)
 			if err != nil {
 				utils.LogError(logger, err, "failed to render for template")
 				return
@@ -285,7 +286,7 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 *interf
 			v[key] = val
 		}
 	case *string:
-		tempVal, err := checkForTemplate(*v)
+		tempVal, err := renderIfTemplatized(*v)
 		if err != nil {
 			utils.LogError(logger, err, "failed to render for template")
 			return
@@ -337,7 +338,7 @@ func addTemplates1(logger *zap.Logger, val1 *string, body *interface{}) bool {
 		vals := b.Values()
 		for i, key := range keys {
 			var err error
-			vals[i], err = checkForTemplate(vals[i])
+			vals[i], err = renderIfTemplatized(vals[i])
 			if err != nil {
 				utils.LogError(logger, err, "failed to render for template")
 				return false
@@ -360,7 +361,7 @@ func addTemplates1(logger *zap.Logger, val1 *string, body *interface{}) bool {
 		}
 	case map[string]string:
 		for key, val2 := range b {
-			tempVal, err := checkForTemplate(val2)
+			tempVal, err := renderIfTemplatized(val2)
 			if err != nil {
 				utils.LogError(logger, err, "failed to render for template")
 				return false
@@ -381,7 +382,7 @@ func addTemplates1(logger *zap.Logger, val1 *string, body *interface{}) bool {
 		}
 		return false
 	case string:
-		tempVal, err := checkForTemplate(b)
+		tempVal, err := renderIfTemplatized(b)
 		if err != nil {
 			utils.LogError(logger, err, "failed to render for template")
 			return false
@@ -396,7 +397,7 @@ func addTemplates1(logger *zap.Logger, val1 *string, body *interface{}) bool {
 	case map[string]interface{}:
 		for key, val2 := range b {
 			var err error
-			val2, err = checkForTemplate(val2)
+			val2, err = renderIfTemplatized(val2)
 			if err != nil {
 				utils.LogError(logger, err, "failed to render for template")
 				return false
@@ -600,7 +601,7 @@ func render(val string) (interface{}, error) {
 func compareReqHeaders(logger *zap.Logger, req1 map[string]string, req2 map[string]string) {
 	for key, val1 := range req1 {
 		// Check if the value is already present in the templatized values.
-		tempVal, err := checkForTemplate(val1)
+		tempVal, err := renderIfTemplatized(val1)
 		if err != nil {
 			utils.LogError(logger, err, "failed to render for template")
 			return
@@ -611,7 +612,7 @@ func compareReqHeaders(logger *zap.Logger, req1 map[string]string, req2 map[stri
 		}
 		val1 = val
 		if val2, ok := req2[key]; ok {
-			tempVal, err := checkForTemplate(val2)
+			tempVal, err := renderIfTemplatized(val2)
 			if err != nil {
 				utils.LogError(logger, err, "failed to render for template")
 				return
