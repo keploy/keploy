@@ -281,7 +281,7 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 *interf
 			}
 			ok = addTemplates1(logger, &val, interface2)
 			if !ok {
-				return
+				continue
 			}
 			// Add the authtype to the string.
 			val = authType + " " + val
