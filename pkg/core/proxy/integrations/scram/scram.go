@@ -92,7 +92,11 @@ func GenerateServerFirstMessage(recordedRequestMsg, recievedRequestMsg, firstRes
 	}
 	// Since, the nonce are randomlly generated string. so, each session have unique nonce.
 	// Thus, the mocked server response should be updated according to the current nonce
-	return strings.Replace(string(firstResponseMsg), expectedNonce, actualNonce, -1), nil
+	updatedResponse := strings.Replace(string(firstResponseMsg), expectedNonce, actualNonce, -1)
+
+	logger.Debug("Updated server first message after nonce substitution", zap.String("updatedResponse", updatedResponse))
+
+	return updatedResponse, nil
 }
 
 // GenerateAuthMessage creates an authentication message based on the initial
