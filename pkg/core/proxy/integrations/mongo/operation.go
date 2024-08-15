@@ -477,7 +477,7 @@ func extractSectionSingle(data string) (string, error) {
 	return content, nil
 }
 
-func processSaslStartForOpReply(expected, mongoRequest models.MongoRequest, replySpec *models.MongoOpReply, logger *zap.Logger) string {
+func processOpReply(expected, mongoRequest models.MongoRequest, replySpec *models.MongoOpReply, logger *zap.Logger) string {
 	if len(replySpec.Documents) == 0 {
 		return ""
 	}
@@ -537,7 +537,6 @@ func processSaslStartForOpReply(expected, mongoRequest models.MongoRequest, repl
 
 		actualRequestPayload := mongoRequest.Message.(*models.MongoOpQuery).Query // Assuming the query is the payload
 		var actualRequestPayloadMap map[string]interface{}
-
 		err = json.Unmarshal([]byte(actualRequestPayload), &actualRequestPayloadMap)
 		if err != nil {
 			utils.LogError(logger, err, "failed to unmarshal request payload into map")
@@ -578,7 +577,11 @@ func processSaslStartForOpReply(expected, mongoRequest models.MongoRequest, repl
 			logger.Error("Auth message generation failed", zap.Error(err))
 			return ""
 		}
-		authMessage = authMessage + ",auth=SCRAM-SHA-256"
+		authMechanism, ok := actualRequest["mechanism"].(string)
+		if !ok {
+			logger.Debug("failed to auth mechanism from expected request data", zap.Any("expectedRequest", actualRequest))
+		}
+		authMessage = authMessage + ",auth=" + authMechanism
 		authMessageMap.Store(conversationID, authMessage)
 
 		// Marshal the new first response for the SCRAM authentication
@@ -849,7 +852,7 @@ func (r *opReply) TransactionDetails() *TransactionDetails {
 
 func encodeOpReply(mongoRequests models.MongoRequest, expected models.MongoRequest, reply *models.MongoOpReply, logger *zap.Logger) (*opReply, error) {
 	replyDocs := []bsoncore.Document{}
-	updatedFirstResponse := processSaslStartForOpReply(expected, mongoRequests, reply, logger)
+	updatedFirstResponse := processOpReply(expected, mongoRequests, reply, logger)
 	for _, v := range reply.Documents {
 		var unmarshaledDoc bsoncore.Document
 		logger.Debug(fmt.Sprintf("the document string is: %v", string(v)))

@@ -315,7 +315,11 @@ func handleSaslStart(i int, actualMsg map[string]interface{}, expectedRequestSec
 	logger.Debug("fetch the conversationId for the SCRAM authentication", zap.String("cid", conversationID))
 	// generate the auth message from the recieved first request and recorded first response
 	authMessage := scram.GenerateAuthMessage(string(decodedActualReqPayload), newFirstAuthResponse, logger)
-	authMessage = authMessage + ",auth=SCRAM-SHA-1"
+	authMechanism, ok := actualMsg["mechanism"].(string)
+	if !ok {
+		logger.Info("failed to auth mechanism from expected request data", zap.Any("expectedRequest", actualMsg))
+	}
+	authMessage = authMessage + ",auth=" + authMechanism
 	// store the auth message in the global map for the conversationId
 	authMessageMap.Store(conversationID, authMessage)
 
