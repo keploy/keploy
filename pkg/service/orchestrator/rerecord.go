@@ -34,9 +34,6 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		}
 	}()
 
-	// Check for templates
-	o.checkForTemplates(ctx)
-
 	// Get all the testsets
 	testSets, err := o.replay.GetAllTestSetIDs(ctx)
 	if err != nil {
@@ -44,6 +41,9 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		utils.LogError(o.logger, err, errMsg)
 		return err
 	}
+
+	// Check for templates
+	o.checkForTemplates(ctx, testSets)
 
 	// Sort the testsets to ensure that the testcases are re-recorded in the same order
 	sort.SliceStable(testSets, func(i, j int) bool {
@@ -285,20 +285,23 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 }
 
 // checkForTemplates checks if the testcases are already templatized. If not, it asks the user if they want to templatize the testcases before re-recording
-func (o *Orchestrator) checkForTemplates(ctx context.Context) {
+func (o *Orchestrator) checkForTemplates(ctx context.Context, testSets []string) {
 	// Check if the testcases are already templatized.
 	var nonTemplatized []string
-	for testSet := range o.config.Test.SelectedTests {
-
+	for _, testSet := range testSets {
+		fmt.Println("Before filtering TestSet:", testSet)
 		if _, ok := o.config.Test.SelectedTests[testSet]; !ok && len(o.config.Test.SelectedTests) != 0 {
 			continue
 		}
+		fmt.Println("TestSet:", testSet)
 
 		conf, err := o.replay.GetTestSetConf(ctx, testSet)
 		if err != nil || conf == nil || conf.Template == nil {
 			nonTemplatized = append(nonTemplatized, testSet)
 		}
 	}
+
+	fmt.Println("NonTemplatized:", len(nonTemplatized))
 
 	if len(nonTemplatized) == 0 {
 		return
