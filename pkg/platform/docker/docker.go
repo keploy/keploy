@@ -9,6 +9,7 @@ import (
 	"time"
 
 	nativeDockerClient "github.com/docker/docker/client"
+	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -30,10 +31,10 @@ type Impl struct {
 	timeoutForDockerQuery time.Duration
 	logger                *zap.Logger
 	containerID           string
-	containerName         string
+	config         *config.Config
 }
 
-func New(logger *zap.Logger, containerName string) (Client, error) {
+func New(logger *zap.Logger, config *config.Config) (Client, error) {
 	dockerClient, err := nativeDockerClient.NewClientWithOpts(nativeDockerClient.FromEnv,
 		nativeDockerClient.WithAPIVersionNegotiation())
 	if err != nil {
@@ -43,7 +44,7 @@ func New(logger *zap.Logger, containerName string) (Client, error) {
 		APIClient:             dockerClient,
 		timeoutForDockerQuery: defaultTimeoutForDockerQuery,
 		logger:                logger,
-		containerName:         containerName,
+		config:         config,
 	}, nil
 }
 
@@ -352,7 +353,7 @@ func (idc *Impl) GetHostWorkingDirectory() (string, error) {
 		utils.LogError(idc.logger, err, "failed to get current working directory")
 		return "", err
 	}
-	container, err := idc.ContainerInspect(ctx, idc.containerName)
+	container, err := idc.ContainerInspect(ctx, idc.config.KeployContainer)
 	if err != nil {
 		utils.LogError(idc.logger, err, "error inspecting keploy container")
 		return "", err

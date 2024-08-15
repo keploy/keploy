@@ -65,12 +65,12 @@ func RunInDocker(ctx context.Context, conf *config.Config, logger *zap.Logger) e
 	if err != nil {
 		return err
 	}
-	logger.Debug("alias set here", zap.Any("here", keployAlias))
+	logger.Debug("Alias being used for Docker is", zap.Any("here", keployAlias))
 	var quotedArgs []string
 	for _, arg := range os.Args[1:] {
 		quotedArgs = append(quotedArgs, strconv.Quote(arg))
 	}
-	client, err := docker.New(logger, conf.KeployContainer)
+	client, err := docker.New(logger, conf)
 	if err != nil {
 		utils.LogError(logger, err, "failed to initalise docker")
 		return err
@@ -128,8 +128,12 @@ func RunInDocker(ctx context.Context, conf *config.Config, logger *zap.Logger) e
 		if exitError, ok := err.(*exec.ExitError); ok {
 			exitCode := exitError.ExitCode()
 			if exitCode == 143 {
-				logger.Info("Command terminated with exit code 143 (SIGTERM), treating as successful exit")
+				logger.Debug("Command terminated with exit code 143 (SIGTERM), treating as successful exit")
 				return nil
+			}
+			if exitCode == 1 {
+				logger.Debug("Keploy tests failed")
+				return fmt.Errorf("keploy tests failed with exit code 1 with error %v",exitError.Error())
 			}
 		}
 		utils.LogError(logger, err, "failed to start keploy in docker")
