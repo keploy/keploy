@@ -586,11 +586,13 @@ func processOpReply(expected, mongoRequest models.MongoRequest, replySpec *model
 		if !ok {
 			logger.Debug("failed to auth mechanism from expected request data", zap.Any("expectedRequest", actualRequest))
 			continue
-		} else {
-			authMessage = authMessage + ",auth=" + authMechanism
-			authMessageMap.Store(conversationID, authMessage)
-			// Marshal the new first response for the SCRAM authentication
-			return base64.StdEncoding.EncodeToString([]byte(newFirstAuthResponse))
+		}
+		authMessage = authMessage + ",auth=" + authMechanism
+		authMessageMap.Store(conversationID, authMessage)
+		// Marshal the new first response for the SCRAM authentication
+		authResponse := base64.StdEncoding.EncodeToString([]byte(newFirstAuthResponse))
+		if authResponse != "" {
+			return authResponse
 		}
 	}
 
