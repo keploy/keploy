@@ -481,7 +481,6 @@ func processOpReply(expected, mongoRequest models.MongoRequest, replySpec *model
 	if len(replySpec.Documents) == 0 {
 		return ""
 	}
-
 	for _, responseSection := range replySpec.Documents {
 		var responseMsg map[string]interface{}
 		err := json.Unmarshal([]byte(responseSection), &responseMsg)
@@ -587,12 +586,12 @@ func processOpReply(expected, mongoRequest models.MongoRequest, replySpec *model
 		if !ok {
 			logger.Debug("failed to auth mechanism from expected request data", zap.Any("expectedRequest", actualRequest))
 			continue
+		} else {
+			authMessage = authMessage + ",auth=" + authMechanism
+			authMessageMap.Store(conversationID, authMessage)
+			// Marshal the new first response for the SCRAM authentication
+			return base64.StdEncoding.EncodeToString([]byte(newFirstAuthResponse))
 		}
-		authMessage = authMessage + ",auth=" + authMechanism
-		authMessageMap.Store(conversationID, authMessage)
-
-		// Marshal the new first response for the SCRAM authentication
-		return base64.StdEncoding.EncodeToString([]byte(newFirstAuthResponse))
 	}
 
 	return ""
