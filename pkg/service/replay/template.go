@@ -229,7 +229,7 @@ func renderIfTemplatized(val interface{}) (interface{}, error) {
 }
 
 // Here we simplify the first interface to a string form and then call the second function to simplify the second interface.
-// TODO: add better comment here.
+// TODO: add better comment here. & rename this function
 func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 *interface{}) {
 	switch v := interface1.(type) {
 	case geko.ObjectItems:
@@ -258,6 +258,7 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 *interf
 				return
 			}
 			addTemplates(logger, val, interface2)
+			// we change the current value also in the interface1
 			v[key] = val
 		}
 	case map[string]string:
@@ -267,6 +268,7 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 *interf
 				utils.LogError(logger, err, "failed to render for template")
 				return
 			}
+			// just a type assertion check though it should always be string.
 			val, ok := (val1).(string)
 			if !ok {
 				return
@@ -291,37 +293,57 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 *interf
 			utils.LogError(logger, err, "failed to render for template")
 			return
 		}
-		*v = (tempVal).(string)
-		ok := addTemplates1(logger, v, interface2)
+		var ok bool
+		// just a type assertion check though it should always be string.
+		*v, ok = (tempVal).(string)
+		if !ok {
+			return
+		}
+
+		// passing this v as reference so that it can be changed in the addTemplates1 function if required.
+		ok = addTemplates1(logger, v, interface2)
 		if ok {
 			return
 		}
+
 		url, err := url.Parse(*v)
-		if err == nil {
-			urlParts := strings.Split(url.Path, "/")
-			addTemplates1(logger, &urlParts[len(urlParts)-1], interface2)
-			url.Path = strings.Join(urlParts, "/")
-			if url.RawQuery != "" {
-				// Only pass the values of the query parameters to the addTemplates1 function.
-				queryParams := strings.Split(url.RawQuery, "&")
-				for i, param := range queryParams {
-					param = strings.Split(param, "=")[1]
-					addTemplates1(logger, &param, interface2)
-					queryParams[i] = strings.Split(queryParams[i], "=")[0] + "=" + param
-				}
-				url.RawQuery = strings.Join(queryParams, "&")
-				*v = fmt.Sprintf("%s://%s%s?%s", url.Scheme, url.Host, url.Path, url.RawQuery)
-			} else {
-				*v = fmt.Sprintf("%s://%s%s", url.Scheme, url.Host, url.Path)
-			}
-		} else {
+		if err != nil {
 			addTemplates1(logger, v, interface2)
+			return
 		}
+
+		// Checking the special case of the URL for path and query parameters.
+		urlParts := strings.Split(url.Path, "/")
+		// checking if the last part of the URL is a template.
+
+		addTemplates1(logger, &urlParts[len(urlParts)-1], interface2)
+		url.Path = strings.Join(urlParts, "/")
+
+		if url.RawQuery != "" {
+			// Only pass the values of the query parameters to the addTemplates1 function.
+			queryParams := strings.Split(url.RawQuery, "&")
+			for i, param := range queryParams {
+				param = strings.Split(param, "=")[1]
+				addTemplates1(logger, &param, interface2)
+				// reconstruct the query parameter with the templatized value if any.
+				queryParams[i] = strings.Split(queryParams[i], "=")[0] + "=" + param
+			}
+			// reconstruct the URL with the templatized query parameters.
+			url.RawQuery = strings.Join(queryParams, "&")
+			*v = fmt.Sprintf("%s://%s%s?%s", url.Scheme, url.Host, url.Path, url.RawQuery)
+			return
+		}
+		// reconstruct the URL with the templatized path.
+		*v = fmt.Sprintf("%s://%s%s", url.Scheme, url.Host, url.Path)
+
 	case float64, int64, int, float32:
+		//TODO: inspect this case because it is not being used.
 		val := toString(v)
 		addTemplates1(logger, &val, interface2)
+		// we convert the value to string in order to compare and add the template.
+		// But we need to convert it back to the original type.
 		parts := strings.Split(val, " ")
-		if len(parts) > 1 {
+		if len(parts) > 1 { // if the value is a template.
 			parts1 := strings.Split(parts[0], "{{")
 			if len(parts1) > 1 {
 				val = parts1[0] + "{{" + getType(v) + " " + parts[1] + "}}"
@@ -330,6 +352,7 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 *interf
 	}
 }
 
+// TODO: add better comment here and rename this function.
 // Here we simplify the second interface and finally add the templates.
 func addTemplates1(logger *zap.Logger, val1 *string, body *interface{}) bool {
 	switch b := (*body).(type) {
@@ -344,12 +367,14 @@ func addTemplates1(logger *zap.Logger, val1 *string, body *interface{}) bool {
 				return false
 			}
 			ok := addTemplates1(logger, val1, &vals[i])
+			// we can't change if the type of vals[i] is also object item.
 			if ok && reflect.TypeOf(vals[i]) != reflect.TypeOf(b) {
 				newKey := insertUnique(key, *val1, utils.TemplatizedValues)
-				if newKey == "" {
-					newKey = key
-				}
+				// if newKey == "" {
+				// 	newKey = key
+				// }
 				vals[i] = fmt.Sprintf("{{%s .%v }}", getType(vals[i]), newKey)
+				// Now change the value of the key in the object.
 				b.SetValueByIndex(i, vals[i])
 				*val1 = fmt.Sprintf("{{%s .%v }}", getType(*val1), newKey)
 				return true
@@ -372,11 +397,11 @@ func addTemplates1(logger *zap.Logger, val1 *string, body *interface{}) bool {
 			}
 			if *val1 == val2 {
 				newKey := insertUnique(key, val2, utils.TemplatizedValues)
-				if newKey == "" {
-					newKey = key
-				}
+				// if newKey == "" {
+				// 	newKey = key
+				// }
 				b[key] = fmt.Sprintf("{{%s .%v }}", getType(val2), newKey)
-				*val1 = fmt.Sprintf("{{%s .%v }}", getType(val2), newKey)
+				*val1 = fmt.Sprintf("{{%s .%v }}", getType(*val1), newKey)
 				return true
 			}
 		}
@@ -443,10 +468,13 @@ func getType(val interface{}) string {
 	case float64, float32:
 		return "float"
 	}
+	//TODO: handle the default case properly, return some error.
 	return ""
 }
 
-// Simplify the first response into type string for comparison.
+// This function compares the two responses, if there is any difference in the values,
+// It checks in the templatized values map if the value is already present, it will update the value in the map.
+// It also changes the expected value to the actual value in the response1 (expected body)
 func compareResponses(response1, response2 *interface{}, key string) {
 	switch v1 := (*response1).(type) {
 	case geko.Array:
@@ -458,11 +486,12 @@ func compareResponses(response1, response2 *interface{}, key string) {
 		vals := v1.Values()
 		for i := range keys {
 			compareResponses(&vals[i], response2, keys[i])
+			v1.SetValueByIndex(i, vals[i]) // in order to change the expected value if required
 		}
 	case map[string]interface{}:
 		for key, val := range v1 {
 			compareResponses(&val, response2, key)
-			v1[key] = val
+			v1[key] = val // in order to change the expected value if required
 		}
 	case string:
 		compareSecondResponse(&v1, response2, key, "")

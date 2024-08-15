@@ -166,25 +166,35 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				if err != nil {
 					logger.Warn("failed to compute json diff", zap.Error(err))
 				}
+
 				// Checking for templatized values.
 				for _, val := range patch {
 					// Parse the value in map.
-					stringVal, ok := val.OldValue.(string)
-					if ok {
-						// Parse the body into json.
-						expResponse, err := parseIntoJSON(stringVal)
-						if err != nil {
-							utils.LogError(logger, err, "failed to parse the exp response into json")
-							break
-						}
-						actResponse, err := parseIntoJSON(val.Value.(string))
-						if err != nil {
-							utils.LogError(logger, err, "failed to parse the act response into json")
-							break
-						}
-						compareResponses(&expResponse, &actResponse, "")
+					expStringVal, ok := val.OldValue.(string)
+					if !ok {
+						continue
 					}
+					// Parse the body into json.
+					expResponse, err := parseIntoJSON(expStringVal)
+					if err != nil {
+						utils.LogError(logger, err, "failed to parse the exp response into json")
+						break
+					}
+
+					actStringVal, ok := val.Value.(string)
+					if !ok {
+						continue
+					}
+
+					actResponse, err := parseIntoJSON(actStringVal)
+					if err != nil {
+						utils.LogError(logger, err, "failed to parse the act response into json")
+						break
+					}
+					compareResponses(&expResponse, &actResponse, "")
 				}
+
+				// Comparing the body again after updating the expected
 				patch, err = jsondiff.Compare(tc.HTTPResp.Body, actualResponse.Body)
 				if err != nil {
 					logger.Warn("failed to compute json diff", zap.Error(err))
