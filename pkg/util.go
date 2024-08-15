@@ -86,6 +86,8 @@ func IsTime(stringDate string) bool {
 
 func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HTTPResp, error) {
 	var resp *models.HTTPResp
+
+	//TODO: adjust this logic in the render function in order to remove the redundant code
 	// convert testcase to string and render the template values.
 	testCaseStr, err := json.Marshal(tc)
 	if err != nil {
@@ -110,6 +112,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	if err != nil {
 		utils.LogError(logger, err, "failed to unmarshal the testcase")
 	}
+
 	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, bytes.NewBufferString(tc.HTTPReq.Body))
 	if err != nil {

@@ -53,11 +53,14 @@ func (r *Replayer) Templatize(ctx context.Context) error {
 			r.logger.Warn("The test set is empty. Please record some testcases to templatize.", zap.String("testSet", testSetID))
 			continue
 		}
+
 		// Add the quotes back to the templates before using it.
-		// for _, tc := range tcs {
-		// 	tc.HTTPReq.Body = addQuotesInTemplates(tc.HTTPReq.Body)
-		// 	tc.HTTPResp.Body = addQuotesInTemplates(tc.HTTPResp.Body)
-		// }
+		// Because the templating engine needs the quotes to properly parse the JSON.
+		// Instead of {{float .key}} it should be "{{float .key}}" but in the response body it is saved as {{float .key}}
+		for _, tc := range tcs {
+			tc.HTTPReq.Body = addQuotesInTemplates(tc.HTTPReq.Body)
+			tc.HTTPResp.Body = addQuotesInTemplates(tc.HTTPResp.Body)
+		}
 
 		// CASE:1
 		// Compare the response of ith testcase with i+1->n request headers.
@@ -67,13 +70,9 @@ func (r *Replayer) Templatize(ctx context.Context) error {
 				r.logger.Debug("failed to parse response into json. Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
 				continue
 			}
-
 			if jsonResponse == nil {
 				continue
 			}
-
-			//debug log
-			println("Checking for Test case: ", tcs[i].Name)
 
 			// addTemplates where response key is matched to some header key in the next testcases.
 			for j := i + 1; j < len(tcs); j++ {
@@ -94,12 +93,13 @@ func (r *Replayer) Templatize(ctx context.Context) error {
 		for i := 0; i < len(tcs)-1; i++ {
 			// Check for headers first.
 			for j := i + 1; j < len(tcs); j++ {
-				compareReqHeaders(tcs[i].HTTPReq.Header, tcs[j].HTTPReq.Header, r.logger)
+				compareReqHeaders(r.logger, tcs[i].HTTPReq.Header, tcs[j].HTTPReq.Header)
 			}
 		}
 
 		// CASE:3
 		// Check the url of the request for any common fields in the response.
+		// Compare the response of ith testcase with i+1->n reques urls.
 		for i := 0; i < len(tcs)-1; i++ {
 			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 			if err != nil {
@@ -125,6 +125,7 @@ func (r *Replayer) Templatize(ctx context.Context) error {
 			tcs[i].HTTPResp.Body = string(jsonData)
 		}
 
+		// CASE:4
 		// Compare the req and resp body for any common fields.
 		for i := 0; i < len(tcs)-1; i++ {
 			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
@@ -136,6 +137,7 @@ func (r *Replayer) Templatize(ctx context.Context) error {
 			if jsonResponse == nil {
 				continue
 			}
+
 			for j := i + 1; j < len(tcs); j++ {
 				jsonRequest, err := parseIntoJSON(tcs[j].HTTPReq.Body)
 				if err != nil {
@@ -173,7 +175,9 @@ func (r *Replayer) Templatize(ctx context.Context) error {
 			}
 		}
 
-		noQuotes(utils.TemplatizedValues)
+		// Remove the double quotes from the templatized values in testSet configuration.
+		removeDoubleQuotes(utils.TemplatizedValues)
+
 		err = r.TestSetConf.Write(ctx, testSetID, &models.TestSet{
 			PreScript:  "",
 			PostScript: "",
@@ -184,6 +188,7 @@ func (r *Replayer) Templatize(ctx context.Context) error {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -218,16 +223,6 @@ func checkForTemplate(val interface{}) (interface{}, error) {
 	val, err := render(stringVal)
 	if err != nil {
 		return val, err
-	}
-
-	// Convert the value to the appropriate type.
-	switch {
-	case strings.Contains(stringVal, "int"):
-		val = utils.ToInt(val)
-	case strings.Contains(stringVal, "float"):
-		val = utils.ToFloat(val)
-	case strings.Contains(stringVal, "string"):
-		val = utils.ToString(val)
 	}
 
 	return val, nil
@@ -560,8 +555,11 @@ func toString(val interface{}) string {
 	return ""
 }
 
+// TODO: Make this function generic for one value of string containing more than one template value.
+// Duplicate function is being used in Simulate function as well.
+
 // render function gives the value of the templatized field.
-func render(val string) (string, error) {
+func render(val string) (interface{}, error) {
 	// This is a map of helper functions that is used to convert the values to their appropriate types.
 	funcMap := template.FuncMap{
 		"int":    utils.ToInt,
@@ -585,11 +583,21 @@ func render(val string) (string, error) {
 
 	// Remove the double quotes from the output for rest of the values. (int, float)
 	outputString := strings.Trim(output.String(), `"`)
+
+	// TODO: why do we need this when we have already declared the funcMap.
+	// Convert this to the appropriate type and return.
+	switch {
+	case strings.Contains(val, "int"):
+		return utils.ToInt(val), nil
+	case strings.Contains(val, "float"):
+		return utils.ToFloat(val), nil
+	}
+
 	return outputString, nil
 }
 
 // Compare the headers of 2 requests and add the templates.
-func compareReqHeaders(req1 map[string]string, req2 map[string]string, logger *zap.Logger) {
+func compareReqHeaders(logger *zap.Logger, req1 map[string]string, req2 map[string]string) {
 	for key, val1 := range req1 {
 		// Check if the value is already present in the templatized values.
 		tempVal, err := checkForTemplate(val1)
@@ -627,7 +635,7 @@ func compareReqHeaders(req1 map[string]string, req2 map[string]string, logger *z
 	}
 }
 
-// Removing quotes in templates because they interfere with the templating engine.
+// Removing quotes in templates for non string types like float, int, etc. Because they interfere with the templating engine.
 func removeQuotesInTemplates(jsonStr string) string {
 	// Regular expression to find patterns with {{ and }}
 	re := regexp.MustCompile(`"\{\{[^{}]*\}\}"`)
@@ -643,23 +651,26 @@ func removeQuotesInTemplates(jsonStr string) string {
 	return result
 }
 
-// Add quotes to the template if it is of the type string. eg: "{{string .key}}"
-// func addQuotesInTemplates(jsonStr string) string {
-// 	// Regular expression to find patterns with {{ and }}
-// 	re := regexp.MustCompile(`\{\{[^{}]*\}\}`)
-// 	// Function to replace matches by removing surrounding quotes
-// 	result := re.ReplaceAllStringFunc(jsonStr, func(match string) string {
-// 		if strings.Contains(match, "{{string") {
-// 			return match
-// 		}
-// 		//Add the surrounding quotes.
-// 		return `"` + match + `"`
-// 	})
+// Add quotes to the template if it is not of the type string. eg: "{{float .key}}" ,{{int .key}}
+func addQuotesInTemplates(jsonStr string) string {
+	// Regular expression to find patterns with {{ and }}
+	re := regexp.MustCompile(`\{\{[^{}]*\}\}`)
+	// Function to replace matches by removing surrounding quotes
+	result := re.ReplaceAllStringFunc(jsonStr, func(match string) string {
+		if strings.Contains(match, "{{string") {
+			return match
+		}
+		//Add the surrounding quotes.
+		return `"` + match + `"`
+	})
+	return result
+}
 
-// 	return result
-// }
-
-func noQuotes(tempMap map[string]interface{}) {
+// TODO: check why without single quotes values are being passed in the template map.
+// This is used to handle the case where the value gets both single quotes and double quotes and the templating engine is not able to handle it.
+// eg: '"Not/A)Brand";v="8", "Chromium";v="126", "Brave";v="126"' can't be handled by the templating engine.
+// Not/A)Brand;v=8, Chromium;v=126, Brave;v=126 can be handled.
+func removeDoubleQuotes(tempMap map[string]interface{}) {
 	// Remove double quotes
 	for key, val := range tempMap {
 		if str, ok := val.(string); ok {

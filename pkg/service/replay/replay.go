@@ -809,7 +809,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	r.telemetry.TestSetRun(testReport.Success, testReport.Failure, testSetID, string(testSetStatus))
 
 	if r.config.Test.UpdateTemplate || r.config.Test.BasePath != "" {
-		noQuotes(utils.TemplatizedValues)
+		removeDoubleQuotes(utils.TemplatizedValues)
 		// Write the templatized values to the yaml.
 		if len(utils.TemplatizedValues) > 0 {
 			err = r.TestSetConf.Write(ctx, testSetID, &models.TestSet{
