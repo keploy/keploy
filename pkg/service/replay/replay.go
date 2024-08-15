@@ -1,6 +1,7 @@
 package replay
 
 import (
+	// "bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
 	"time"
 
 	"github.com/k0kubun/pp/v3"
@@ -48,7 +50,7 @@ type Replayer struct {
 	testDB          TestDB
 	mockDB          MockDB
 	reportDB        ReportDB
-	testSetConf     Config
+	TestSetConf     Config
 	telemetry       Telemetry
 	instrumentation Instrumentation
 	config          *config.Config
@@ -69,7 +71,7 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 		testDB:          testDB,
 		mockDB:          mockDB,
 		reportDB:        reportDB,
-		testSetConf:     testSetConf,
+		TestSetConf:     testSetConf,
 		telemetry:       telemetry,
 		instrumentation: instrumentation,
 		config:          config,
@@ -415,9 +417,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	var conf *models.TestSet
-
-	//Execute the Pre-script before each test-set if provided
-	conf, err = r.testSetConf.Read(runTestSetCtx, testSetID)
+	conf, err = r.TestSetConf.Read(runTestSetCtx, testSetID)
 	if err != nil {
 		if strings.Contains(err.Error(), "no such file or directory") {
 			r.logger.Info("config file not found, continuing execution...", zap.String("test-set", testSetID))
@@ -432,7 +432,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	if conf.PreScript != "" {
 		r.logger.Info("Running Pre-script", zap.String("script", conf.PreScript), zap.String("test-set", testSetID))
-		err = r.executeScript(runTestSetCtx, conf.PreScript)
+		err := r.executeScript(runTestSetCtx, conf.PreScript)
 		if err != nil {
 			return models.TestSetStatusFaultScript, fmt.Errorf("failed to execute pre-script: %w", err)
 		}
@@ -540,6 +540,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var exitLoop bool
 	// var to store the error in the loop
 	var loopErr error
+	utils.TemplatizedValues = conf.Template
 
 	for _, testCase := range testCases {
 
@@ -806,6 +807,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	r.telemetry.TestSetRun(testReport.Success, testReport.Failure, testSetID, string(testSetStatus))
+
+	if r.config.Test.UpdateTemplate || r.config.Test.BasePath != "" {
+		removeDoubleQuotes(utils.TemplatizedValues)
+		// Write the templatized values to the yaml.
+		if len(utils.TemplatizedValues) > 0 {
+			err = r.TestSetConf.Write(ctx, testSetID, &models.TestSet{
+				PreScript:  conf.PreScript,
+				PostScript: conf.PostScript,
+				Template:   utils.TemplatizedValues,
+			})
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to write the templatized values to the yaml")
+			}
+		}
+
+	}
+
 	return testSetStatus, nil
 }
 
@@ -875,7 +893,7 @@ func (r *Replayer) compareResp(tc *models.TestCase, actualResponse *models.HTTPR
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
-	return match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
+	return Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
 }
 
 func (r *Replayer) printSummary(_ context.Context, _ bool) {
@@ -949,6 +967,10 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 
 func (r *Replayer) RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError {
 	return r.instrumentation.Run(ctx, appID, opts)
+}
+
+func (r *Replayer) GetTestSetConf(ctx context.Context, testSet string) (*models.TestSet, error) {
+	return r.TestSetConf.Read(ctx, testSet)
 }
 
 func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error) {

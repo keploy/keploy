@@ -39,14 +39,13 @@ type JSONComparisonResult struct {
 	differences []string // Lists the keys or indices of values that are not the same
 }
 
-func match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger) (bool, *models.Result) {
+func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger) (bool, *models.Result) {
 	bodyType := models.BodyTypePlain
 	if json.Valid([]byte(actualResponse.Body)) {
 		bodyType = models.BodyTypeJSON
 	}
 	pass := true
 	hRes := &[]models.HeaderResult{}
-
 	res := &models.Result{
 		StatusCode: models.IntResult{
 			Normal:   false,
@@ -161,10 +160,42 @@ func match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				logDiffs.PushHeaderDiff(fmt.Sprint(j), fmt.Sprint(actualHeader[i]), i, headerNoise)
 			}
 		}
-
 		if !res.BodyResult[0].Normal {
 			if json.Valid([]byte(actualResponse.Body)) {
 				patch, err := jsondiff.Compare(tc.HTTPResp.Body, actualResponse.Body)
+				if err != nil {
+					logger.Warn("failed to compute json diff", zap.Error(err))
+				}
+
+				// Checking for templatized values.
+				for _, val := range patch {
+					// Parse the value in map.
+					expStringVal, ok := val.OldValue.(string)
+					if !ok {
+						continue
+					}
+					// Parse the body into json.
+					expResponse, err := parseIntoJSON(expStringVal)
+					if err != nil {
+						utils.LogError(logger, err, "failed to parse the exp response into json")
+						break
+					}
+
+					actStringVal, ok := val.Value.(string)
+					if !ok {
+						continue
+					}
+
+					actResponse, err := parseIntoJSON(actStringVal)
+					if err != nil {
+						utils.LogError(logger, err, "failed to parse the act response into json")
+						break
+					}
+					compareResponses(&expResponse, &actResponse, "")
+				}
+
+				// Comparing the body again after updating the expected
+				patch, err = jsondiff.Compare(tc.HTTPResp.Body, actualResponse.Body)
 				if err != nil {
 					logger.Warn("failed to compute json diff", zap.Error(err))
 				}
@@ -174,7 +205,6 @@ func match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 						logDiffs.PushFooterDiff(strings.Join(jsonComparisonResult.differences, ", "))
 					}
 					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
-
 				}
 			} else {
 				logDiffs.PushBodyDiff(fmt.Sprint(tc.HTTPResp.Body), fmt.Sprint(actualResponse.Body), bodyNoise)
@@ -218,8 +248,11 @@ func FlattenHTTPResponse(h http.Header, body string) (map[string][]string, error
 // UnmarshallJSON returns unmarshalled JSON object.
 func UnmarshallJSON(s string, log *zap.Logger) (interface{}, error) {
 	var result interface{}
+	if s == "" {
+		return nil, nil
+	}
 	if err := json.Unmarshal([]byte(s), &result); err != nil {
-		utils.LogError(log, err, "cannot convert json string into json object")
+		utils.LogError(log, err, "cannot convert json string into json object", zap.String("json", s))
 		return nil, err
 	}
 	return result, nil
