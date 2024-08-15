@@ -289,19 +289,15 @@ func (o *Orchestrator) checkForTemplates(ctx context.Context, testSets []string)
 	// Check if the testcases are already templatized.
 	var nonTemplatized []string
 	for _, testSet := range testSets {
-		fmt.Println("Before filtering TestSet:", testSet)
 		if _, ok := o.config.Test.SelectedTests[testSet]; !ok && len(o.config.Test.SelectedTests) != 0 {
 			continue
 		}
-		fmt.Println("TestSet:", testSet)
 
 		conf, err := o.replay.GetTestSetConf(ctx, testSet)
 		if err != nil || conf == nil || conf.Template == nil {
 			nonTemplatized = append(nonTemplatized, testSet)
 		}
 	}
-
-	fmt.Println("NonTemplatized:", len(nonTemplatized))
 
 	if len(nonTemplatized) == 0 {
 		return
