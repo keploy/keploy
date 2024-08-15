@@ -39,7 +39,7 @@ func (r *Replayer) Templatize(ctx context.Context) error {
 
 		testSet, err := r.TestSetConf.Read(ctx, testSetID)
 		utils.TemplatizedValues = map[string]interface{}{}
-		if err == nil && testSet != nil {
+		if err == nil && (testSet != nil && testSet.Template != nil) {
 			utils.TemplatizedValues = testSet.Template
 		}
 
@@ -271,7 +271,7 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 *interf
 			// just a type assertion check though it should always be string.
 			val, ok := (val1).(string)
 			if !ok {
-				return
+				continue
 			}
 			// Saving the auth type to add it to the template later.
 			authType := ""
@@ -393,7 +393,7 @@ func addTemplates1(logger *zap.Logger, val1 *string, body *interface{}) bool {
 			}
 			val2, ok := (tempVal).(string)
 			if !ok {
-				return false
+				continue
 			}
 			if *val1 == val2 {
 				newKey := insertUnique(key, val2, utils.TemplatizedValues)
@@ -637,7 +637,7 @@ func compareReqHeaders(logger *zap.Logger, req1 map[string]string, req2 map[stri
 		}
 		val, ok := (tempVal).(string)
 		if !ok {
-			return
+			continue
 		}
 		val1 = val
 		if val2, ok := req2[key]; ok {
@@ -648,7 +648,7 @@ func compareReqHeaders(logger *zap.Logger, req1 map[string]string, req2 map[stri
 			}
 			val, ok = (tempVal).(string)
 			if !ok {
-				return
+				continue
 			}
 			val2 = val
 			if val1 == val2 {

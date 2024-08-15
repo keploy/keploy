@@ -129,7 +129,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	// override host header if present in the request
 	hostHeader := tc.HTTPReq.Header["Host"]
 	if hostHeader != "" {
-		logger.Info("overriding host header", zap.String("host", hostHeader))
+		logger.Debug("overriding host header", zap.String("host", hostHeader))
 		req.Host = hostHeader
 	}
 
