@@ -253,11 +253,35 @@ func CreateDir(path string, logger *zap.Logger) error {
 }
 
 // ReadYAMLFile to read and parse YAML file
-func ReadYAMLFile(ctx context.Context, logger *zap.Logger, filePath string, fileName string, v interface{}) error {
-	configData, err := ReadFile(ctx, logger, filePath, fileName)
+func ReadYAMLFile(ctx context.Context, logger *zap.Logger, filePath string, fileName string, v interface{}, extType bool) error {
+	if !extType {
+		filePath = filepath.Join(filePath, fileName+".yml")
+
+	} else {
+		filePath = filepath.Join(filePath, fileName+".yaml")
+	}
+	file, err := os.Open(filePath)
 	if err != nil {
-		logger.Fatal("Error reading file", zap.Error(err))
-		return err
+		return fmt.Errorf("failed to read the file: %v", err)
+	}
+
+	defer func() {
+		if err := file.Close(); err != nil {
+			utils.LogError(logger, err, "failed to close file", zap.String("file", filePath))
+		}
+	}()
+
+	cr := &ctxReader{
+		ctx: ctx,
+		r:   file,
+	}
+
+	configData, err := io.ReadAll(cr)
+	if err != nil {
+		if err == ctx.Err() {
+			return err // Ignore context cancellation error
+		}
+		return fmt.Errorf("failed to read the file: %v", err)
 	}
 
 	err = yaml.Unmarshal(configData, v)

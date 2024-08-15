@@ -179,11 +179,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().StringSliceP("tests", "t", c.cfg.Contract.Tests, "Specify the tests for which to generate/download contracts")
 
 		cmd.Flags().StringP("path", "p", c.cfg.Contract.Path, "Specify the path to generate/download contracts")
-		if cmd.Name() == "generate" {
-			if c.cfg.Contract.Path == "" {
-				c.cfg.Contract.Path = "./keploy/schema"
-			}
-		}
+		// if cmd.Name() == "generate" {
+		// 	if c.cfg.Contract.Path == "" {
+		// 		c.cfg.Contract.Path = "./keploy/schema"
+		// 	}
+		// }
 		if cmd.Name() == "download" {
 			if c.cfg.Contract.Path == "" {
 				c.cfg.Contract.Path = "./"

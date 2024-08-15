@@ -69,31 +69,31 @@ func compareRequestBodies(mockOperation, testOperation *models.Operation, logDif
 	}
 	return pass, nil
 }
-func compareResponseBodies(status string, mockOperation, testOperation *models.Operation, logDiffs replaySvc.DiffsPrinter, newLogger *pp.PrettyPrinter, logger *zap.Logger, testName, mockName, testSetID, mockSetID string, mode int) (float64, bool, error) {
+func compareResponseBodies(status string, mockOperation, testOperation *models.Operation, logDiffs replaySvc.DiffsPrinter, newLogger *pp.PrettyPrinter, logger *zap.Logger, testName, mockName, testSetID, mockSetID string, mode int) (float64, bool, bool, error) {
 	pass := true
 	overallScore := 0.0
-
+	matched := false
 	differencesCount := 0.0
 	if _, ok := testOperation.Responses[status]; ok {
 		mockResponseBodyStr, testResponseBodyStr, err := marshalResponseBodies(status, mockOperation, testOperation)
 		if err != nil {
-			return differencesCount, false, err
+			return differencesCount, false, false, err
 		}
 		overallScore = float64(len(mockOperation.Responses[status].Content["application/json"].Schema.Properties))
 		validatedJSON, err := replaySvc.ValidateAndMarshalJSON(logger, &mockResponseBodyStr, &testResponseBodyStr)
 		if err != nil {
-			return differencesCount, false, err
+			return differencesCount, false, false, err
 		}
 
 		if validatedJSON.IsIdentical() {
 			if mode == 1 {
-				if _, _, err = handleJSONDiff(validatedJSON, logDiffs, newLogger, logger, testName, mockName, testSetID, mockSetID, mockResponseBodyStr, testResponseBodyStr, "response", mode); err != nil {
-					return differencesCount, false, err
+				if _, matched, err = handleJSONDiff(validatedJSON, logDiffs, newLogger, logger, testName, mockName, testSetID, mockSetID, mockResponseBodyStr, testResponseBodyStr, "response", mode); err != nil {
+					return differencesCount, false, false, err
 				}
 			} else if mode == 0 {
 				differencesCount, err = calculateSimilarityScore(mockOperation, testOperation, status)
 				if err != nil {
-					return differencesCount, false, err
+					return differencesCount, false, false, err
 				}
 
 			}
@@ -105,7 +105,7 @@ func compareResponseBodies(status string, mockOperation, testOperation *models.O
 				logs := newLogger.Sprintf("Contract Check failed for test: %s (%s) / mock: %s (%s) \n\n--------------------------------------------------------------------\n\n", testName, testSetID, mockName, mockSetID)
 
 				if err := printAndRenderLogs(logs, newLogger, logDiffs, logger); err != nil {
-					return differencesCount, false, err
+					return differencesCount, false, false, err
 				}
 			}
 		}
@@ -114,13 +114,14 @@ func compareResponseBodies(status string, mockOperation, testOperation *models.O
 		differencesCount = -1
 
 	}
-	return differencesCount / overallScore, pass, nil
+	return differencesCount / overallScore, pass, matched, nil
 }
 func match2(mock, test models.OpenAPI, testSetID string, mockSetID string, logger *zap.Logger, mode int) (float64, bool, error) {
 	pass := false
-	if mode == 1 {
-		logger.Info("Matching test and mock", zap.String("test", test.Info.Title+" ("+testSetID+")"), zap.String("mock", mock.Info.Title))
-	}
+	matched := false
+	// if mode == 1 {
+	// 	logger.Info("Matching test and mock", zap.String("test", test.Info.Title+" ("+testSetID+")"), zap.String("mock", mock.Info.Title))
+	// }
 	candidateScore := -1.0
 	newLogger := pp.New()
 	newLogger.WithLineInfo = false
@@ -154,7 +155,7 @@ func match2(mock, test models.OpenAPI, testSetID string, mockSetID string, logge
 
 			}
 
-			if candidateScore, pass, err = compareResponseBodies(statusCode, mockOperation, testOperation, logDiffs, newLogger, logger, test.Info.Title, mock.Info.Title, testSetID, mockSetID, mode); err != nil {
+			if candidateScore, pass, matched, err = compareResponseBodies(statusCode, mockOperation, testOperation, logDiffs, newLogger, logger, test.Info.Title, mock.Info.Title, testSetID, mockSetID, mode); err != nil {
 				return candidateScore, false, err
 			}
 
@@ -164,7 +165,7 @@ func match2(mock, test models.OpenAPI, testSetID string, mockSetID string, logge
 		}
 
 	}
-	if pass && mode == 1 {
+	if pass && matched && mode == 1 {
 		log2 := newLogger.Sprintf("Contract Check passed for test: %s / mock: %s \n\n--------------------------------------------------------------------\n\n", test.Info.Title, mock.Info.Title)
 		_, err := newLogger.Printf(log2)
 		if err != nil {
@@ -226,6 +227,8 @@ func handleJSONDiff(validatedJSON replaySvc.ValidatedJSON, logDiffs replaySvc.Di
 			if err := printAndRenderLogs(logs, newLogger, logDiffs, logger); err != nil {
 				return differencesCount, false, err
 			}
+			fmt.Println("--------------------------------------------------------------------")
+
 		}
 	}
 	return differencesCount, pass, nil

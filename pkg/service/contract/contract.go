@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/fatih/color"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
@@ -327,8 +328,8 @@ func (s *contractService) GenerateTestsSchemas(ctx context.Context, selectedTest
 func (s *contractService) Generate(ctx context.Context) error {
 	serviceStr := s.config.Contract.Services
 	testStr := s.config.Contract.Tests
-	var genAllMocks bool
-	var genAllTests bool
+	var genAllMocks bool = true
+	var genAllTests bool = true
 
 	if len(serviceStr) != 0 {
 		genAllMocks = false
@@ -342,17 +343,18 @@ func (s *contractService) Generate(ctx context.Context) error {
 		return fmt.Errorf("Error in checking config file while generating")
 	}
 	var config config.Config
-	configData, err := yaml.ReadFile(ctx, s.logger, "./keploy/schema", "keploy")
+	err := yaml.ReadYAMLFile(ctx, s.logger, "./", "keploy", &config, false)
+	// configData, err := yaml.ReadFile(ctx, s.logger, "./", "keploy")
 	if err != nil {
 		s.logger.Fatal("Error reading file", zap.Error(err))
 		return err
 	}
-	err = yamlLib.Unmarshal(configData, &config)
-	if err != nil {
-		s.logger.Error("Error parsing YAML", zap.Error(err))
-		return err
-	}
+
 	mappings := config.Contract.ServicesMapping
+	serviceColor := color.New(color.FgYellow).SprintFunc()
+	fmt.Println(serviceColor("=========================================="))
+	fmt.Println(serviceColor(fmt.Sprintf("Starting Generating OpenAPI Schemas for Current Service: %s ....", s.config.Contract.Self)))
+	fmt.Println(serviceColor("=========================================="))
 
 	err = s.GenerateTestsSchemas(ctx, s.config.Contract.Tests, genAllTests)
 	if err != nil {
@@ -362,7 +364,16 @@ func (s *contractService) Generate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-
+	// Convert config to []byte
+	configData, err := yamlLib.Marshal(config)
+	if err != nil {
+		return err
+	}
+	// Copy the config file to the schema folder
+	err = yaml.WriteFile(ctx, s.logger, "./keploy/schema", "keploy", configData, false)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -378,8 +389,8 @@ func (s *contractService) DownloadTests(ctx context.Context, path string) error 
 
 	var schemaConfigFile config.Config
 
-	configFilePath := filepath.Join("./keploy", "schema")
-	if err := yaml.ReadYAMLFile(ctx, s.logger, configFilePath, "keploy", &schemaConfigFile); err != nil {
+	configFilePath := "./"
+	if err := yaml.ReadYAMLFile(ctx, s.logger, configFilePath, "keploy", &schemaConfigFile, false); err != nil {
 		return err
 	}
 	// Loop through the services in the mappings in the config file
@@ -440,7 +451,7 @@ func (s *contractService) DownloadMocks(ctx context.Context, path string) error 
 		var schemaConfigFile config.Config
 
 		configFilePath := filepath.Join(cprFolder, entry.Name(), "keploy", "schema")
-		if err := yaml.ReadYAMLFile(ctx, s.logger, configFilePath, "keploy", &schemaConfigFile); err != nil {
+		if err := yaml.ReadYAMLFile(ctx, s.logger, configFilePath, "keploy", &schemaConfigFile, true); err != nil {
 			return err
 		}
 
@@ -459,6 +470,11 @@ func (s *contractService) DownloadMocks(ctx context.Context, path string) error 
 		}
 
 		mocksSourcePath := filepath.Join(cprFolder, entry.Name(), "keploy", "schema", "mocks", self)
+		serviceColor := color.New(color.FgYellow).SprintFunc()
+		fmt.Println(serviceColor("=========================================="))
+		fmt.Println(serviceColor(fmt.Sprintf("Starting Downloading Mocks for Service: %s ....", entry.Name())))
+		fmt.Println(serviceColor("=========================================="))
+
 		if err := yaml.CopyDir(mocksSourcePath, serviceFolder, true, s.logger); err != nil {
 			fmt.Println("Error moving directory:", err)
 			return err
@@ -601,7 +617,7 @@ func (s *contractService) ServerDrivenValidation(ctx context.Context) error {
 
 				for _, mock := range mocks {
 
-					scores[entry.Name()][mockSetID.Name()][mock.Info.Title] = models.SchemaInfo{Score: 0.0, Name: mock.Info.Title}
+					scores[entry.Name()][mockSetID.Name()][mock.Info.Title] = models.SchemaInfo{Score: 0.0, Data: *mock}
 					for testSetID, tests := range testsMapping {
 						for _, test := range tests {
 							// Compare the two models
@@ -636,12 +652,42 @@ func (s *contractService) ServerDrivenValidation(ctx context.Context) error {
 
 	// Match the mocks with their test cases
 	for service, mockSetID := range scores {
+		// Color for service
+
+		serviceColor := color.New(color.FgYellow).SprintFunc()
+		fmt.Println(serviceColor("=========================================="))
+		fmt.Println(serviceColor(fmt.Sprintf("Starting Validation for Service: %s ....", service)))
+		fmt.Println(serviceColor("=========================================="))
+
 		for mockSetID, mockTest := range mockSetID {
-			s.logger.Info("Service : ", zap.String("service", service), zap.String("mockSetID", mockSetID))
+			// s.logger.Info("Service : ", zap.String("service", service), zap.String("mockSetID", mockSetID))
+
 			for _, mockInfo := range mockTest {
 				// fmt.Println("Service : ", service, " MockSetID : ", mockSetID, " MockTitle : ", mockTitle, " MockInfo : ", mockInfo)
+				// Color for mockSetID
+
+				mockSetIDColor := color.New(color.FgGreen).SprintFunc()
+				fmt.Println(mockSetIDColor(fmt.Sprintf("Mock Set ID: %s", mockSetID)))
+
+				// Color for mockTitle and testSetID
+
+				mockTitleColor := color.New(color.FgGreen).SprintFunc()
+				testSetIDColor := color.New(color.FgBlue).SprintFunc()
+
+				fmt.Println(mockTitleColor(fmt.Sprintf("Mock ID: %s", mockInfo.Data.Info.Title)))
+				fmt.Println(testSetIDColor(fmt.Sprintf("Test Set ID: %s", mockInfo.TestSetID)))
+
 				if mockInfo.Score == 0.0 {
-					s.logger.Info("No ideal test found for the mock", zap.String("service", service), zap.String("test-set-id", mockSetID), zap.String("mockTitle", mockInfo.Name))
+					// s.logger.Info("No ideal test found for the mock", zap.String("service", service), zap.String("test-set-id", mockSetID), zap.String("mockTitle", mockInfo.Name))
+					warningColor := color.New(color.FgRed).SprintFunc() // Red for warnings
+					fmt.Println(warningColor("No ideal test case found for the mock"))
+					fmt.Println("--------------------------------------------------------------------")
+
+					// s.logger.Info("No ideal test found for the mock",
+					// 	zap.String("service", service),
+					// 	zap.String("test-set-id", mockSetID),
+					// 	zap.String("mockTitle", mockInfo.Name),
+					// )
 					continue
 				}
 				_, _, err := match2(mockInfo.Data, *testsMapping[mockInfo.TestSetID][mockInfo.Name], mockInfo.TestSetID, mockSetID, s.logger, COMPAREMODE)
@@ -649,8 +695,12 @@ func (s *contractService) ServerDrivenValidation(ctx context.Context) error {
 					s.logger.Error("Error in matching the two models", zap.Error(err))
 					return err
 				}
+				// Log success message with color
+				// successColor := color.New(color.FgHiGreen).SprintFunc()
+				// fmt.Println(successColor(fmt.Sprintf("Successfully validated Mock: %s with Test: %s", mockInfo.Name, mockInfo.TestSetID)))
 
 			}
+
 		}
 	}
 
@@ -660,6 +710,18 @@ func (s *contractService) Validate(ctx context.Context) error {
 	if s.CheckConfigFile() != nil {
 		s.logger.Error("Error in checking config file while validating")
 		return fmt.Errorf("Error in checking config file while validating")
+	}
+	if s.config.Contract.Generate {
+		err := s.Generate(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	if s.config.Contract.Download {
+		err := s.Download(ctx)
+		if err != nil {
+			return err
+		}
 	}
 	if s.config.Contract.Driven == "server" || s.config.Contract.Driven == "provider" {
 		err := s.ServerDrivenValidation(ctx)
