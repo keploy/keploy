@@ -496,10 +496,10 @@ func processOpReply(expected, mongoRequest models.MongoRequest, replySpec *model
 		}
 		resPayload, err := extractAuthPayload(responseMsgData)
 		if err != nil {
-			logger.Debug("Failed to fetch the payload from the received MongoDB request", zap.Error(err))
+			logger.Debug("Failed to fetch the payload from the received MongoDB response", zap.Error(err))
 			return ""
 		}
-		logger.Debug(fmt.Sprintf("Payload of the received request: %s", resPayload))
+		logger.Debug(fmt.Sprintf("Payload of the received response: %s", resPayload))
 
 		decodedResPayload, err := decodeBase64Str(resPayload)
 		if err != nil {
@@ -523,14 +523,14 @@ func processOpReply(expected, mongoRequest models.MongoRequest, replySpec *model
 		}
 		expectedPayload, err := extractAuthPayload(expectedRequest)
 		if err != nil {
-			logger.Debug("Failed to fetch the payload from the recorded MongoDB request", zap.Error(err))
+			logger.Debug("Failed to fetch the payload from the expected MongoDB request", zap.Error(err))
 			return ""
 		}
-		logger.Debug(fmt.Sprintf("Payload of the recorded request: %s", expectedPayload))
+		logger.Debug(fmt.Sprintf("Payload of the expected request: %s", expectedPayload))
 
 		decodedExpPayload, err := decodeBase64Str(expectedPayload)
 		if err != nil {
-			logger.Error("Error decoding the recorded request payload base64 string", zap.Error(err))
+			logger.Error("Error decoding the expected request payload base64 string", zap.Error(err))
 			return ""
 		}
 		logger.Debug(fmt.Sprintf("Decoded payload of the expected for the SASLStart: %s", string(decodedExpPayload)))
@@ -545,18 +545,21 @@ func processOpReply(expected, mongoRequest models.MongoRequest, replySpec *model
 
 		actualRequest, ok := actualRequestPayloadMap["speculativeAuthenticate"].(map[string]interface{})
 		if !ok {
-			logger.Debug("failed to extract payload from expected request data", zap.Any("expectedRequest", expectedRequest))
+			logger.Debug("failed to extract payload from actual request data", zap.Any("expectedRequest", expectedRequest))
 		}
 
 		actualReqPayload, err := extractAuthPayload(actualRequest)
-
-		// Extract and decode the payload from the recorded MongoDB request
-		decodedReqPayload, err := decodeBase64Str(actualReqPayload)
 		if err != nil {
-			logger.Error("Failed to fetch the payload from the recorded MongoDB response", zap.Error(err))
+			logger.Debug("Failed to extract the payload from the actual MongoDB request", zap.Error(err))
 			return ""
 		}
-		logger.Debug(fmt.Sprintf("Payload of the recorded response: %s", decodedReqPayload))
+		// Extract and decode the payload from the actual MongoDB request
+		decodedReqPayload, err := decodeBase64Str(actualReqPayload)
+		if err != nil {
+			logger.Error("Failed to fetch the payload from the actual MongoDB request", zap.Error(err))
+			return ""
+		}
+		logger.Debug(fmt.Sprintf("Payload of the actual request: %s", decodedReqPayload))
 
 		newFirstAuthResponse, err := scram.GenerateServerFirstMessage(decodedExpPayload, decodedReqPayload, decodedResPayload, logger)
 		if err != nil {
