@@ -482,9 +482,9 @@ func processOpReply(expectedRequest, actualRequest models.MongoRequest, expected
 	if len(expectedResponse.Documents) == 0 {
 		return "", false
 	}
-	for _, responseSection := range expectedResponse.Documents {
+	for _, document := range expectedResponse.Documents {
 		var responseMsg map[string]interface{}
-		err := json.Unmarshal([]byte(responseSection), &responseMsg)
+		err := json.Unmarshal([]byte(document), &responseMsg)
 		if err != nil {
 			logger.Error("Failed to unmarshal JSON document of OpReply", zap.Error(err))
 			return "", false
