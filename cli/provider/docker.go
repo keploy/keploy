@@ -166,14 +166,9 @@ func getAlias(ctx context.Context, conf *config.Config, logger *zap.Logger) (str
 		return "", err
 	}
 	running, err := client.IsContainerRunning(conf.KeployContainer)
-	if err != nil {
-		utils.LogError(logger, err, "failed to debugfs volume")
-		return "", err
-	}
 	if running {
 		conf.KeployContainer = "keploy-" + uuid.New().String()
 	}
-	logger.Debug("keploy container name", zap.Any("here", conf.KeployContainer))
 	switch osName {
 	case "linux":
 		alias := "sudo docker container run --name " + conf.KeployContainer + " " + envs + "-e BINARY_TO_DOCKER=true -p " + strconv.Itoa(int(conf.ProxyPort)) + ":" + strconv.Itoa(int(conf.ProxyPort)) + " --privileged --pid=host" + ttyFlag + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
