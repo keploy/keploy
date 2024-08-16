@@ -320,15 +320,16 @@ func handleSaslStart(i int, actualMsg map[string]interface{}, expectedRequestSec
 	authMechanism, ok := actualMsg["mechanism"].(string)
 	if !ok {
 		logger.Info("failed to auth mechanism from expected request data", zap.Any("expectedRequest", actualMsg))
+	} else {
+		if authMechanism != scramUtil.SCRAM_SHA_1 && authMechanism != scramUtil.SCRAM_SHA_256 {
+			logger.Error("Invalid authentication mechanism", zap.String("authMechanism", authMechanism))
+			return "", false, errors.New("invalid authentication mechanism")
+		}
+
+		authMessage = authMessage + ",auth=" + authMechanism
+		// store the auth message in the global map for the conversationId
 	}
 
-	if authMechanism != scramUtil.SCRAM_SHA_1 && authMechanism != scramUtil.SCRAM_SHA_256 {
-		logger.Error("Invalid authentication mechanism", zap.String("authMechanism", authMechanism))
-		return "", false, errors.New("invalid authentication mechanism")
-	}
-
-	authMessage = authMessage + ",auth=" + authMechanism
-	// store the auth message in the global map for the conversationId
 	authMessageMap.Store(conversationID, authMessage)
 
 	logger.Debug("genrate the new auth message for the recieved auth request", zap.String("msg", authMessage))
@@ -381,7 +382,7 @@ func handleSaslContinue(actualMsg map[string]interface{}, responseSection, mongo
 	fields := strings.Split(string(decodedResponsePayload), ",")
 	verifier, err := parseFieldBase64(fields[0], "v")
 	if err != nil {
-		logger.Debug("failed to parse the verifier of final response message")
+		logger.Debug("failed to parse the verifier of final response message", zap.Any("parsing error", err.Error()))
 		return "", false, nil
 	}
 	logger.Debug("the recorded verifier of the auth request", zap.Any("verifier/server-signature", string(verifier)))
@@ -466,6 +467,9 @@ func parseField(s, k string) (string, error) {
 }
 
 func parseFieldBase64(s, k string) ([]byte, error) {
+	if !strings.Contains(s, k+"=") {
+		return nil, fmt.Errorf("verifier doesn't exist in string '%s'", s)
+	}
 	raw, err := parseField(s, k)
 	if err != nil {
 		return nil, err
