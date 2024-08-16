@@ -319,7 +319,7 @@ func handleSaslStart(i int, actualMsg map[string]interface{}, expectedRequestSec
 	authMessage := scram.GenerateAuthMessage(string(decodedActualReqPayload), newFirstAuthResponse, logger)
 	authMechanism, ok := actualMsg["mechanism"].(string)
 	if !ok {
-		logger.Info("failed to auth mechanism from expected request data", zap.Any("expectedRequest", actualMsg))
+		logger.Debug("failed to auth mechanism from expected request data", zap.Any("expectedRequest", actualMsg))
 	} else {
 		if authMechanism != scramUtil.SCRAM_SHA_1 && authMechanism != scramUtil.SCRAM_SHA_256 {
 			logger.Error("Invalid authentication mechanism", zap.String("authMechanism", authMechanism))
