@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/docker/docker/api/types"
+	"github.com/google/uuid"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/platform/docker"
 	"go.keploy.io/server/v2/utils"
@@ -132,8 +133,8 @@ func RunInDocker(ctx context.Context, conf *config.Config, logger *zap.Logger) e
 				return nil
 			}
 			if exitCode == 1 {
-				logger.Debug("Keploy tests failed")
-				return fmt.Errorf("keploy tests failed with exit code 1 with error %v",exitError.Error())
+				utils.LogError(logger, err, "keploy exited with status code 1")
+				return err
 			}
 		}
 		utils.LogError(logger, err, "failed to start keploy in docker")
@@ -158,6 +159,19 @@ func getAlias(ctx context.Context, conf *config.Config, logger *zap.Logger) (str
 		ttyFlag = " -it "
 	} else {
 		ttyFlag = " "
+	}
+	client, err := docker.New(logger, conf)
+	if err != nil {
+		utils.LogError(logger, err, "failed to initalise docker client")
+		return "", err
+	}
+	running, err := client.IsContainerRunning(conf.KeployContainer)
+	if err != nil {
+		utils.LogError(logger, err, "failed to debugfs volume")
+		return "", err
+	}
+	if running {
+		conf.KeployContainer = "keploy-" + uuid.New().String()
 	}
 	logger.Debug("keploy container name", zap.Any("here", conf.KeployContainer))
 	switch osName {

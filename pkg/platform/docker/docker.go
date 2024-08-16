@@ -31,7 +31,7 @@ type Impl struct {
 	timeoutForDockerQuery time.Duration
 	logger                *zap.Logger
 	containerID           string
-	config         *config.Config
+	config                *config.Config
 }
 
 func New(logger *zap.Logger, config *config.Config) (Client, error) {
@@ -44,7 +44,7 @@ func New(logger *zap.Logger, config *config.Config) (Client, error) {
 		APIClient:             dockerClient,
 		timeoutForDockerQuery: defaultTimeoutForDockerQuery,
 		logger:                logger,
-		config:         config,
+		config:                config,
 	}, nil
 }
 
