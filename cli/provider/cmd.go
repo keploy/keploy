@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
 	"strings"
 	"time"
 
@@ -48,18 +49,18 @@ var Examples = `
 Golang Application
 	Record:
 	sudo -E env PATH=$PATH keploy record -c "/path/to/user/app/binary"
-	
+
 	Test:
 	sudo -E env PATH=$PATH keploy test -c "/path/to/user/app/binary" --delay 10
 
 Node Application
 	Record:
 	sudo -E env PATH=$PATH keploy record -c “npm start --prefix /path/to/node/app"
-	
+
 	Test:
 	sudo -E env PATH=$PATH keploy test -c “npm start --prefix /path/to/node/app" --delay 10
 
-Java 
+Java
 	Record:
 	sudo -E env PATH=$PATH keploy record -c "java -jar /path/to/java-project/target/jar"
 
@@ -83,18 +84,18 @@ var ExampleOneClickInstall = `
 Golang Application
 	Record:
 	keploy record -c "/path/to/user/app/binary"
-	
+
 	Test:
 	keploy test -c "/path/to/user/app/binary" --delay 10
 
 Node Application
 	Record:
 	keploy record -c “npm start --prefix /path/to/node/app"
-	
+
 	Test:
 	keploy test -c “npm start --prefix /path/to/node/app" --delay 10
 
-Java 
+Java
 	Record:
 	keploy record -c "java -jar /path/to/java-project/target/jar"
 
@@ -182,7 +183,9 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "config":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated config is stored")
 		cmd.Flags().Bool("generate", false, "Generate a new keploy configuration file")
-		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
+	case "templatize":
+		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
+		cmd.Flags().StringSliceP("testsets", "t", c.cfg.Templatize.TestSets, "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
 	case "gen":
 		cmd.Flags().String("source-file-path", "", "Path to the source file.")
 		cmd.Flags().String("test-file-path", "", "Path to the input test file.")
@@ -265,6 +268,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 			cmd.Flags().Bool("fallBack-on-miss", c.cfg.Test.FallBackOnMiss, "Enable connecting to actual service if mock not found during test mode")
 			cmd.Flags().String("jacoco-agent-path", c.cfg.Test.JacocoAgentPath, "Only applicable for test coverage for Java projects. You can override the jacoco agent jar by proving its path")
 			cmd.Flags().String("base-path", c.cfg.Test.BasePath, "Custom api basePath/origin to replace the actual basePath/origin in the testcases; App flag is ignored and app will not be started & instrumented when this is set since the application running on a different machine")
+			cmd.Flags().Bool("update-temp", c.cfg.Test.UpdateTemplate, "Update the template with the result of the testcases.")
 			cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
 			cmd.Flags().Bool("disable-line-coverage", c.cfg.Test.DisableLineCoverage, "Disable line coverage generation.")
 		}
@@ -285,6 +289,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"goCoverage":            "go-coverage",
 		"fallBackOnMiss":        "fallBack-on-miss",
 		"basePath":              "base-path",
+		"updateTemplate":        "update-template",
 		"mocking":               "mocking",
 		"sourceFilePath":        "source-file-path",
 		"testFilePath":          "test-file-path",
@@ -456,11 +461,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		// empty the command if base path is provided, because no need of command even if provided
 		if c.cfg.Test.BasePath != "" {
 			c.cfg.CommandType = string(utils.Empty)
+			c.cfg.Command = ""
 		}
 
 		if c.cfg.GenerateGithubActions && utils.CmdType(c.cfg.CommandType) != utils.Empty {
 			defer utils.GenerateGithubActions(c.logger, c.cfg.Command)
 		}
+
 		if c.cfg.InDocker {
 			c.logger.Info("detected that Keploy is running in a docker container")
 			if len(c.cfg.Path) > 0 {
@@ -574,23 +581,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 	case "normalize":
-		path := c.cfg.Path
-		//if user provides relative path
-		if len(path) > 0 && path[0] != '/' {
-			absPath, err := filepath.Abs(path)
-			if err != nil {
-				utils.LogError(c.logger, err, "failed to get the absolute path from relative path")
-			}
-			path = absPath
-		} else if len(path) == 0 { // if user doesn't provide any path
-			cdirPath, err := os.Getwd()
-			if err != nil {
-				utils.LogError(c.logger, err, "failed to get the path of current directory")
-			}
-			path = cdirPath
-		}
-		path += "/keploy"
-		c.cfg.Path = path
+		c.cfg.Path = utils.ToAbsPath(c.logger, c.cfg.Path)
 		tests, err := cmd.Flags().GetString("tests")
 		if err != nil {
 			errMsg := "failed to read tests to be normalized"
@@ -603,6 +594,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+
+	case "templatize":
+		c.cfg.Path = utils.ToAbsPath(c.logger, c.cfg.Path)
 	case "gen":
 		if os.Getenv("API_KEY") == "" {
 			utils.LogError(c.logger, nil, "API_KEY is not set")

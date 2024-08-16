@@ -1,3 +1,5 @@
+github.com/7sDream/geko v0.1.1 h1:Ms9RVcUJDPsUuRlk3T3sGmSGAMuttqh2/3okZ4yWUpU=
+github.com/7sDream/geko v0.1.1/go.mod h1:NcSQXSUpcoqNP8BkOLP2TsinxRVjnMkDYCKl9L1Czxk=
 github.com/Azure/go-ansiterm v0.0.0-20210617225240-d185dfc1b5a1 h1:UQHMgLO+TxOElx5B5HZ4hJQsoJ/PvUvKRhJHDQXO8P8=
 github.com/Azure/go-ansiterm v0.0.0-20210617225240-d185dfc1b5a1/go.mod h1:xomTg63KZ2rFqZQzSB4Vz2SUXa1BpHTVz9L5PTmPC4E=
 github.com/Microsoft/go-winio v0.6.1 h1:9/kr64B9VUZrLm5YYwbGtUJnMgqWVOdUAXu6Migciow=
