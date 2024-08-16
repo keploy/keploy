@@ -81,6 +81,7 @@ func GetMockByKind(mocks []*models.Mock, kind string) []*models.Mock {
 	return filteredMocks
 }
 
+// scram enum values
 const (
 	SCRAM_SHA_1   = "SCRAM-SHA-1"
 	SCRAM_SHA_256 = "SCRAM-SHA-256"
