@@ -165,7 +165,7 @@ func getAlias(ctx context.Context, conf *config.Config, logger *zap.Logger) (str
 		utils.LogError(logger, err, "failed to initalise docker client")
 		return "", err
 	}
-	running, err := client.IsContainerRunning(conf.KeployContainer)
+	running, _ := client.IsContainerRunning(conf.KeployContainer)
 	if running {
 		conf.KeployContainer = "keploy-" + uuid.New().String()
 	}
