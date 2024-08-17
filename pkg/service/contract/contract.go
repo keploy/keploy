@@ -544,10 +544,10 @@ func (s *contractService) Download(ctx context.Context) error {
 	}
 	driven := s.config.Contract.Driven
 	if driven == "provider" || driven == "server" {
-		err = s.DownloadMocks(ctx, path)
+		err = s.DownloadTests(ctx, path)
 
 	} else if driven == "consumer" || driven == "client" {
-		err = s.DownloadTests(ctx, path)
+		err = s.DownloadMocks(ctx, path)
 
 	}
 	if err != nil {
@@ -555,15 +555,14 @@ func (s *contractService) Download(ctx context.Context) error {
 	}
 	return nil
 }
-func (s *contractService) ServerDrivenValidation(ctx context.Context) error {
-	// Loop over Mocks in DOwnload folder and compare them with the tests in the keploy schema folder
-	downloadTestsFolder := filepath.Join("./Download", "Mocks")
+
+func (s *contractService) ProviderDrivenValidation(ctx context.Context) error {
+	downloadTestsFolder := filepath.Join("./Download", "Tests")
 	entries, err := os.ReadDir(downloadTestsFolder)
 	if err != nil {
 		s.logger.Error("Failed to read directory", zap.String("directory", downloadTestsFolder), zap.Error(err))
 		return err
 	}
-	// Read the test from the schema folder
 	testsFolder := filepath.Join("./keploy", "schema", "tests")
 	s.openAPIDB.ChangeTcPath(testsFolder)
 	testSetIDs, err := os.ReadDir(testsFolder)
@@ -571,138 +570,100 @@ func (s *contractService) ServerDrivenValidation(ctx context.Context) error {
 		s.logger.Error("Failed to read directory", zap.String("directory", testsFolder), zap.Error(err))
 		return err
 	}
-	var testsMapping map[string]map[string]*models.OpenAPI = make(map[string]map[string]*models.OpenAPI)
-	var tests []*models.OpenAPI
+	var mocksMapping map[string]map[string]*models.OpenAPI = make(map[string]map[string]*models.OpenAPI)
+	var mocks []*models.OpenAPI
 	for _, testSetID := range testSetIDs {
 		if !testSetID.IsDir() {
 			continue
 		}
-		tests, err = s.openAPIDB.GetTestCasesSchema(ctx, testSetID.Name())
+		mocks, err = s.openAPIDB.GetMocksSchemas(ctx, testSetID.Name(), testsFolder, "schema")
 		if err != nil {
-			s.logger.Error("Failed to get test cases", zap.String("testSetID", testSetID.Name()), zap.Error(err))
+			s.logger.Error("Failed to get HTTP mocks", zap.String("testSetID", testSetID.Name()), zap.Error(err))
 			return err
 		}
-		testsMapping[testSetID.Name()] = make(map[string]*models.OpenAPI)
-
-		for _, test := range tests {
-			testsMapping[testSetID.Name()][test.Info.Title] = test
+		mocksMapping[testSetID.Name()] = make(map[string]*models.OpenAPI)
+		for _, mock := range mocks {
+			mocksMapping[testSetID.Name()][mock.Info.Title] = mock
 		}
-
 	}
-
 	var scores map[string]map[string]map[string]models.SchemaInfo = make(map[string]map[string]map[string]models.SchemaInfo)
-	// Get the ideal mock for each test case
 	for _, entry := range entries {
 		if entry.IsDir() {
 			serviceFolder := filepath.Join(downloadTestsFolder, entry.Name())
-			// Loop over the tests in the service folder
-			mockSetIDs, err := os.ReadDir(serviceFolder)
+			testSetIDs, err := os.ReadDir(filepath.Join(serviceFolder, "schema"))
 			if err != nil {
 				s.logger.Error("Failed to read directory", zap.String("directory", serviceFolder), zap.Error(err))
 				return err
 			}
-			// Initialize the outermost map if it doesn't exist
 			scores[entry.Name()] = make(map[string]map[string]models.SchemaInfo)
-			// mockSetID--> test-set-0,test-set-1,etc
-			for _, mockSetID := range mockSetIDs {
-				if !mockSetID.IsDir() {
+			for _, testSetID := range testSetIDs {
+				if !testSetID.IsDir() {
 					continue
 				}
-				mocks, err := s.openAPIDB.GetMocksSchemas(ctx, mockSetID.Name(), serviceFolder, "schema")
+				tests, err := s.openAPIDB.GetTestCasesSchema(ctx, testSetID.Name(), serviceFolder)
 				if err != nil {
-					s.logger.Error("Failed to get HTTP mocks", zap.String("testSetID", mockSetID.Name()), zap.Error(err))
+					s.logger.Error("Failed to get test cases", zap.String("testSetID", testSetID.Name()), zap.Error(err))
 					return err
 				}
-				scores[entry.Name()][mockSetID.Name()] = make(map[string]models.SchemaInfo)
-
-				for _, mock := range mocks {
-
-					scores[entry.Name()][mockSetID.Name()][mock.Info.Title] = models.SchemaInfo{Score: 0.0, Data: *mock}
-					for testSetID, tests := range testsMapping {
-						for _, test := range tests {
-							// Compare the two models
-							candidateScore, pass, err := match2(*mock, *test, testSetID, mockSetID.Name(), s.logger, IDENTIFYMODE)
+				scores[entry.Name()][testSetID.Name()] = make(map[string]models.SchemaInfo)
+				for _, test := range tests {
+					scores[entry.Name()][testSetID.Name()][test.Info.Title] = models.SchemaInfo{Score: 0.0, Data: *test}
+					for mockSetID, mocks := range mocksMapping {
+						for _, mock := range mocks {
+							candidateScore, pass, err := match2(*test, *mock, testSetID.Name(), mockSetID, s.logger, COMPAREMODE)
 							if err != nil {
 								s.logger.Error("Error in matching the two models", zap.Error(err))
-								fmt.Println("test-set-id: ", testSetID, ", mock-set-id: ", mockSetID.Name())
+								fmt.Println("test-set-id: ", testSetID.Name(), ", mock-set-id: ", mockSetID)
 								return err
 							}
 							if pass && candidateScore > 0 {
-
-								if candidateScore > scores[entry.Name()][mockSetID.Name()][mock.Info.Title].Score {
-									idealTest := models.SchemaInfo{
+								if candidateScore > scores[entry.Name()][testSetID.Name()][test.Info.Title].Score {
+									idealMock := models.SchemaInfo{
 										Service:   "",
-										TestSetID: testSetID,
-										Name:      test.Info.Title,
+										TestSetID: testSetID.Name(),
+										Name:      mock.Info.Title,
 										Score:     candidateScore,
-										Data:      *mock,
+										Data:      *test,
 									}
-									scores[entry.Name()][mockSetID.Name()][mock.Info.Title] = idealTest
+									scores[entry.Name()][testSetID.Name()][test.Info.Title] = idealMock
 								}
-
 							}
 
 						}
 					}
 				}
-
 			}
 		}
 	}
 
-	// Match the mocks with their test cases
-	for service, mockSetID := range scores {
-		// Color for service
+	return nil
+}
 
-		serviceColor := color.New(color.FgYellow).SprintFunc()
-		fmt.Println(serviceColor("=========================================="))
-		fmt.Println(serviceColor(fmt.Sprintf("Starting Validation for Service: %s ....", service)))
-		fmt.Println(serviceColor("=========================================="))
+func (s *contractService) ConsumerDrivenValidation(ctx context.Context) error {
+	// Loop over Mocks in DOwnload folder and compare them with the tests in the keploy schema folder
+	downloadMocksFolder := filepath.Join("./Download", "Mocks")
 
-		for mockSetID, mockTest := range mockSetID {
-			// s.logger.Info("Service : ", zap.String("service", service), zap.String("mockSetID", mockSetID))
+	testsFolder := filepath.Join("./keploy", "schema", "tests")
 
-			for _, mockInfo := range mockTest {
-				// fmt.Println("Service : ", service, " MockSetID : ", mockSetID, " MockTitle : ", mockTitle, " MockInfo : ", mockInfo)
-				// Color for mockSetID
-
-				mockSetIDColor := color.New(color.FgGreen).SprintFunc()
-				fmt.Println(mockSetIDColor(fmt.Sprintf("Mock Set ID: %s", mockSetID)))
-
-				// Color for mockTitle and testSetID
-
-				mockTitleColor := color.New(color.FgGreen).SprintFunc()
-				testSetIDColor := color.New(color.FgBlue).SprintFunc()
-
-				fmt.Println(mockTitleColor(fmt.Sprintf("Mock ID: %s", mockInfo.Data.Info.Title)))
-				fmt.Println(testSetIDColor(fmt.Sprintf("Test Set ID: %s", mockInfo.TestSetID)))
-
-				if mockInfo.Score == 0.0 {
-					// s.logger.Info("No ideal test found for the mock", zap.String("service", service), zap.String("test-set-id", mockSetID), zap.String("mockTitle", mockInfo.Name))
-					warningColor := color.New(color.FgRed).SprintFunc() // Red for warnings
-					fmt.Println(warningColor("No ideal test case found for the mock"))
-					fmt.Println("--------------------------------------------------------------------")
-
-					// s.logger.Info("No ideal test found for the mock",
-					// 	zap.String("service", service),
-					// 	zap.String("test-set-id", mockSetID),
-					// 	zap.String("mockTitle", mockInfo.Name),
-					// )
-					continue
-				}
-				_, _, err := match2(mockInfo.Data, *testsMapping[mockInfo.TestSetID][mockInfo.Name], mockInfo.TestSetID, mockSetID, s.logger, COMPAREMODE)
-				if err != nil {
-					s.logger.Error("Error in matching the two models", zap.Error(err))
-					return err
-				}
-				// Log success message with color
-				// successColor := color.New(color.FgHiGreen).SprintFunc()
-				// fmt.Println(successColor(fmt.Sprintf("Successfully validated Mock: %s with Test: %s", mockInfo.Name, mockInfo.TestSetID)))
-
-			}
-
-		}
+	// Retrieve tests from the schema folder
+	testsMapping, err := s.getTestsSchema(ctx, testsFolder)
+	if err != nil {
+		s.logger.Error("Failed to get test cases from schema", zap.Error(err))
+		return err
 	}
+
+	// Retrieve mocks and calculate scores for each service
+	scores, err := s.getMockScores(ctx, downloadMocksFolder, testsMapping)
+	if err != nil {
+		return err
+	}
+	// Compare the scores and generate a summary
+	summary, err := s.ValidateMockAgainstTests(scores, testsMapping)
+	if err != nil {
+		return err
+	}
+	// Print the summary
+	generateSummaryTable(summary)
 
 	return nil
 }
@@ -723,8 +684,13 @@ func (s *contractService) Validate(ctx context.Context) error {
 			return err
 		}
 	}
-	if s.config.Contract.Driven == "server" || s.config.Contract.Driven == "provider" {
-		err := s.ServerDrivenValidation(ctx)
+	if s.config.Contract.Driven == "consumer" || s.config.Contract.Driven == "client" {
+		err := s.ConsumerDrivenValidation(ctx)
+		if err != nil {
+			return err
+		}
+	} else if s.config.Contract.Driven == "provider" || s.config.Contract.Driven == "server" {
+		err := s.ProviderDrivenValidation(ctx)
 		if err != nil {
 			return err
 		}

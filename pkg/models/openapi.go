@@ -75,3 +75,18 @@ type SchemaInfo struct {
 	Score     float64 `json:"score" yaml:"score"`
 	Data      OpenAPI `json:"data" yaml:"data"`
 }
+type Summary struct {
+	ServicesSummary []ServiceSummary `json:"servicesSummary" yaml:"servicesSummary"`
+}
+type ServiceSummary struct {
+	Service     string            `json:"service" yaml:"service"`
+	TestSets    map[string]Status `json:"testSets" yaml:"testSets"`
+	PassedCount int               `json:"passedCount" yaml:"passedCount"`
+	FailedCount int               `json:"failedCount" yaml:"failedCount"`
+	MissedCount int               `json:"missedCount" yaml:"missedCount"`
+}
+type Status struct {
+	Failed []string `json:"failed" yaml:"failed"`
+	Passed []string `json:"passed" yaml:"passed"`
+	Missed []string `json:"missed" yaml:"missed"`
+}

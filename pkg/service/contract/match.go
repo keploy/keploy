@@ -118,10 +118,7 @@ func compareResponseBodies(status string, mockOperation, testOperation *models.O
 }
 func match2(mock, test models.OpenAPI, testSetID string, mockSetID string, logger *zap.Logger, mode int) (float64, bool, error) {
 	pass := false
-	matched := false
-	// if mode == 1 {
-	// 	logger.Info("Matching test and mock", zap.String("test", test.Info.Title+" ("+testSetID+")"), zap.String("mock", mock.Info.Title))
-	// }
+
 	candidateScore := -1.0
 	newLogger := pp.New()
 	newLogger.WithLineInfo = false
@@ -155,22 +152,13 @@ func match2(mock, test models.OpenAPI, testSetID string, mockSetID string, logge
 
 			}
 
-			if candidateScore, pass, matched, err = compareResponseBodies(statusCode, mockOperation, testOperation, logDiffs, newLogger, logger, test.Info.Title, mock.Info.Title, testSetID, mockSetID, mode); err != nil {
+			if candidateScore, pass, _, err = compareResponseBodies(statusCode, mockOperation, testOperation, logDiffs, newLogger, logger, test.Info.Title, mock.Info.Title, testSetID, mockSetID, mode); err != nil {
 				return candidateScore, false, err
 			}
 
 		} else {
 			pass = false
 
-		}
-
-	}
-	if pass && matched && mode == 1 {
-		log2 := newLogger.Sprintf("Contract Check passed for test: %s / mock: %s \n\n--------------------------------------------------------------------\n\n", test.Info.Title, mock.Info.Title)
-		_, err := newLogger.Printf(log2)
-		if err != nil {
-			utils.LogError(logger, err, "failed to print the logs")
-			return candidateScore, false, err
 		}
 
 	}
@@ -200,7 +188,7 @@ func handleJSONDiff(validatedJSON replaySvc.ValidatedJSON, logDiffs replaySvc.Di
 	}
 	if !jsonComparisonResult.IsExact() {
 		pass = false
-		logs := newLogger.Sprintf("Contract Check failed for test: %s (%s) / mock: %s (%s) \n\n--------------------------------------------------------------------\n\n", testName, testSetID, mockName, mockSetID)
+		// logs := newLogger.Sprintf("Contract Check failed for test: %s (%s) / mock: %s (%s) \n\n--------------------------------------------------------------------\n\n", testName, testSetID, mockName, mockSetID)
 		if json.Valid([]byte(mockBodyStr)) {
 			patch, err := jsondiff.Compare(testBodyStr, mockBodyStr)
 			if err != nil {
@@ -224,10 +212,9 @@ func handleJSONDiff(validatedJSON replaySvc.ValidatedJSON, logDiffs replaySvc.Di
 			}
 		}
 		if diffType == "response" && mode == 1 {
-			if err := printAndRenderLogs(logs, newLogger, logDiffs, logger); err != nil {
+			if err := printAndRenderLogs("", newLogger, logDiffs, logger); err != nil {
 				return differencesCount, false, err
 			}
-			fmt.Println("--------------------------------------------------------------------")
 
 		}
 	}

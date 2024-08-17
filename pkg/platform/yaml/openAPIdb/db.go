@@ -30,8 +30,15 @@ func New(logger *zap.Logger, openAPIPath string) *OpenAPIYaml {
 		logger:      logger,
 	}
 }
-func (ts *OpenAPIYaml) GetTestCasesSchema(ctx context.Context, testSetID string) ([]*models.OpenAPI, error) {
-	path := filepath.Join(ts.OpenAPIPath, testSetID)
+func (ts *OpenAPIYaml) GetTestCasesSchema(ctx context.Context, testSetID string, testPath string) ([]*models.OpenAPI, error) {
+	var path string
+	if testPath == "" {
+		path = filepath.Join(ts.OpenAPIPath, testSetID)
+
+	} else {
+		path = filepath.Join(testPath, testSetID)
+	}
+
 	tcs := []*models.OpenAPI{}
 	TestPath, err := yaml.ValidatePath(path)
 	if err != nil {
