@@ -306,11 +306,6 @@ func handleTextResultSet(ctx context.Context, logger *zap.Logger, clientConn, de
 	// Read the column count packet
 	colCount := textResultSet.ColumnCount
 
-	sg, ok := decodeCtx.ServerGreetings.Load(clientConn)
-	if !ok {
-		return textResultSetPkt, fmt.Errorf("Server Greetings not found")
-	}
-
 	// Read the column definition packets
 	for i := uint64(0); i < colCount; i++ {
 		// Read the column definition packet
@@ -338,7 +333,8 @@ func handleTextResultSet(ctx context.Context, logger *zap.Logger, clientConn, de
 		textResultSet.Columns = append(textResultSet.Columns, column)
 	}
 
-	if sg.CapabilityFlags&mysql.CLIENT_DEPRECATE_EOF > 0 {
+	if decodeCtx.ClientCapabilities&mysql.CLIENT_DEPRECATE_EOF == 0 {
+		logger.Debug("EOF packet is not deprecated while handling textResultSet")
 
 		// Read the EOF packet for column definition
 		eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)

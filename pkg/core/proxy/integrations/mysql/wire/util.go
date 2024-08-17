@@ -19,6 +19,7 @@ type DecodeContext struct {
 	LastOp             *LastOperation
 	PreparedStatements map[uint32]*mysql.StmtPrepareOkPacket
 	ServerGreetings    *ServerGreetings
+	ClientCapabilities uint32
 	PluginName         string
 }
 
