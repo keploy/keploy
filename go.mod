@@ -105,6 +105,7 @@ require (
 )
 
 require (
+	github.com/7sDream/geko v0.1.1
 	github.com/agnivade/levenshtein v1.1.1
 	github.com/charmbracelet/glamour v0.6.0
 	github.com/emirpasic/gods v1.18.1

@@ -50,7 +50,7 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	if cmd == "record" {
 		return recordSvc, nil
 	}
-	if cmd == "test" || cmd == "normalize" {
+	if cmd == "test" || cmd == "normalize" || cmd == "templatize" {
 		return replaySvc, nil
 	}
 	if cmd == "contract" {
