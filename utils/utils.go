@@ -39,7 +39,7 @@ var WarningSign = "\U000026A0"
 
 var ErrCode = 0
 
-func ReplaceHostToIP(currentURL string, ipAddress string) (string, error) {
+func ReplaceHost(currentURL string, ipAddress string) (string, error) {
 	// Parse the current URL
 	parsedURL, err := url.Parse(currentURL)
 
@@ -55,6 +55,26 @@ func ReplaceHostToIP(currentURL string, ipAddress string) (string, error) {
 	// Replace hostname with the IP address
 	parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Hostname(), ipAddress, 1)
 	// Return the modified URL
+	return parsedURL.String(), nil
+}
+
+func ReplacePort(currentURL string, port string) (string, error) {
+	if port == "" {
+		return currentURL, fmt.Errorf("failed to replace port in case of docker env")
+	}
+
+	parsedURL, err := url.Parse(currentURL)
+
+	if err != nil {
+		return currentURL, err
+	}
+
+	if parsedURL.Port() == "" {
+		parsedURL.Host = parsedURL.Host + ":" + port
+	} else {
+		parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Port(), port, 1)
+	}
+
 	return parsedURL.String(), nil
 }
 
