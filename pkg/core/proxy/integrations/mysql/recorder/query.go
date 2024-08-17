@@ -338,7 +338,7 @@ func handleTextResultSet(ctx context.Context, logger *zap.Logger, clientConn, de
 		textResultSet.Columns = append(textResultSet.Columns, column)
 	}
 
-	if sg.CapabilityFlags == 0&mysql.CLIENT_DEPRECATE_EOF {
+	if sg.CapabilityFlags&mysql.CLIENT_DEPRECATE_EOF > 0 {
 
 		// Read the EOF packet for column definition
 		eofData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
