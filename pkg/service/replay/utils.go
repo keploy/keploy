@@ -6,8 +6,10 @@ import (
 	"net/url"
 	"time"
 
+	// "encoding/json"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
+
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 )
@@ -98,7 +100,7 @@ func (t *requestMockUtil) SimulateRequest(ctx context.Context, _ uint64, tc *mod
 	switch tc.Kind {
 	case models.HTTP:
 		t.logger.Debug("Before simulating the request", zap.Any("Test case", tc))
-		resp, err := pkg.SimulateHTTP(ctx, *tc, testSetID, t.logger, t.apiTimeout)
+		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, t.logger, t.apiTimeout)
 		t.logger.Debug("After simulating the request", zap.Any("test case id", tc.Name))
 		return resp, err
 	}
