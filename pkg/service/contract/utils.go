@@ -424,6 +424,8 @@ func generateSummaryTable(summary models.Summary) {
 					printOnce(serviceSummary.Service, &serviceNamePrinted),
 					printOnce(testSet, &testSetPrinted),
 					notMatchedColor(mock),
+					"",
+					"", "",
 				})
 			}
 
@@ -431,13 +433,20 @@ func generateSummaryTable(summary models.Summary) {
 				table.Append([]string{
 					printOnce(serviceSummary.Service, &serviceNamePrinted),
 					printOnce(testSet, &testSetPrinted),
-					missedColor(mock),
+					missedColor(mock), "",
+					"", "",
 				})
 			}
+			table.Append([]string{
+				printOnce(serviceSummary.Service, &serviceNamePrinted),
+				printOnce(testSet, &testSetPrinted),
+				"", "",
+				"", "",
+			})
 		}
 		// Add a blank line (or border) after each service
 		if idx < len(summary.ServicesSummary)-1 {
-			table.Append([]string{"", "", "", "", "", ""}) // Empty row to separate services
+			table.Append([]string{"----------------", "----------------", "----------------", "----------------", "----------------", "----------------"})
 		}
 	}
 

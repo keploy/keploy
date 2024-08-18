@@ -69,6 +69,33 @@ func compareRequestBodies(mockOperation, testOperation *models.Operation, logDif
 	}
 	return pass, nil
 }
+
+func compareParameters(mockParameters, testParameters []models.Parameter) (bool, error) {
+	pass := true
+
+	for _, mockParam := range mockParameters {
+		if mockParam.In == "header" {
+			continue
+		}
+		found := false
+		for _, testParam := range testParameters {
+			if mockParam.Name == testParam.Name && mockParam.In == testParam.In {
+				found = true
+				if mockParam.Schema.Type != testParam.Schema.Type {
+					pass = false
+					return pass, nil
+				}
+			}
+		}
+		if !found {
+			pass = false
+			return pass, nil
+		}
+	}
+
+	return pass, nil
+}
+
 func compareResponseBodies(status string, mockOperation, testOperation *models.Operation, logDiffs replaySvc.DiffsPrinter, newLogger *pp.PrettyPrinter, logger *zap.Logger, testName, mockName, testSetID, mockSetID string, mode int) (float64, bool, bool, error) {
 	pass := true
 	overallScore := 0.0
@@ -137,7 +164,12 @@ func match2(mock, test models.OpenAPI, testSetID string, mockSetID string, logge
 				if !pass {
 					continue
 				}
-
+				if pass, err = compareParameters(mockOperation.Parameters, testOperation.Parameters); err != nil {
+					return candidateScore, false, err
+				}
+				if !pass {
+					continue
+				}
 				if pass, err = compareRequestBodies(mockOperation, testOperation, logDiffs, newLogger, logger, test.Info.Title, mock.Info.Title, testSetID, mockSetID); err != nil {
 					return candidateScore, false, err
 				}
