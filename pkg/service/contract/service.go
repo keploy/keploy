@@ -11,10 +11,10 @@ type Service interface {
 	Generate(ctx context.Context) error
 	Download(ctx context.Context) error
 	Validate(ctx context.Context) error
-	CheckConfigFile() error
 }
 
 type TestDB interface {
+	GetAllTestSetIDs(ctx context.Context) ([]string, error)
 	GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error)
 	ChangeTcPath(path string)
 }

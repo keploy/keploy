@@ -508,6 +508,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 
 		}
+		absPath, err := utils.GetAbsPath("./")
+		if err != nil {
+			utils.LogError(c.logger, err, "error while getting absolute path")
+			return errors.New("failed to get the absolute path")
+		}
+		c.cfg.Path = absPath + "/keploy"
 	case "config":
 		path, err := cmd.Flags().GetString("path")
 		if err != nil {
@@ -559,6 +565,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			if c.cfg.Contract.Driven == "" {
 				c.cfg.Contract.Driven = "client"
 			}
+			absPath, err := utils.GetAbsPath("./")
+			if err != nil {
+				utils.LogError(c.logger, err, "error while getting absolute path")
+				return errors.New("failed to get the absolute path")
+			}
+			c.cfg.Path = absPath + "/keploy"
 			return nil
 		}
 		// handle the app command

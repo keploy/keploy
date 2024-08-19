@@ -97,3 +97,12 @@ func (cdb *ConfigDb) setInstallationID(ctx context.Context, id string) error {
 
 	return nil
 }
+func (cdb *ConfigDb) WriteConfig(ctx context.Context, cfgStr string, place string) error {
+	path := filepath.Join(UserHomeDir(), place)
+	err := yaml.WriteFile(ctx, cdb.logger, path, "config", []byte(cfgStr), false)
+	if err != nil {
+		utils.LogError(cdb.logger, err, "failed to write config in yaml file")
+		return err
+	}
+	return nil
+}

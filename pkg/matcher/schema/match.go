@@ -1,4 +1,5 @@
-package contract
+// Package schema for schema matching
+package schema
 
 import (
 	"encoding/json"
@@ -8,8 +9,8 @@ import (
 
 	"github.com/k0kubun/pp/v3"
 	"github.com/wI2L/jsondiff"
+	matcherUtils "go.keploy.io/server/v2/pkg/matcher"
 	"go.keploy.io/server/v2/pkg/models"
-	replaySvc "go.keploy.io/server/v2/pkg/service/replay"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -41,15 +42,15 @@ func compareOperationTypes(mockOperationType, testOperationType string) (bool, e
 	}
 	return pass, nil
 }
-func compareRequestBodies(mockOperation, testOperation *models.Operation, logDiffs replaySvc.DiffsPrinter, newLogger *pp.PrettyPrinter, logger *zap.Logger, testName, mockName, testSetID, mockSetID string) (bool, error) {
+func compareRequestBodies(mockOperation, testOperation *models.Operation, logDiffs matcherUtils.DiffsPrinter, newLogger *pp.PrettyPrinter, logger *zap.Logger, testName, mockName, testSetID, mockSetID string) (bool, error) {
 	pass := false
 	var score float64
-	mockRequestBodyStr, testRequestBodyStr, err := marshalRequestBodies(mockOperation, testOperation)
+	mockRequestBodyStr, testRequestBodyStr, err := matcherUtils.MarshalRequestBodies(mockOperation, testOperation)
 	if err != nil {
 		return false, err
 	}
 
-	validatedJSON, err := replaySvc.ValidateAndMarshalJSON(logger, &mockRequestBodyStr, &testRequestBodyStr)
+	validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &mockRequestBodyStr, &testRequestBodyStr)
 	if err != nil {
 		return false, err
 	}
@@ -96,18 +97,18 @@ func compareParameters(mockParameters, testParameters []models.Parameter) (bool,
 	return pass, nil
 }
 
-func compareResponseBodies(status string, mockOperation, testOperation *models.Operation, logDiffs replaySvc.DiffsPrinter, newLogger *pp.PrettyPrinter, logger *zap.Logger, testName, mockName, testSetID, mockSetID string, mode int) (float64, bool, bool, error) {
+func compareResponseBodies(status string, mockOperation, testOperation *models.Operation, logDiffs matcherUtils.DiffsPrinter, newLogger *pp.PrettyPrinter, logger *zap.Logger, testName, mockName, testSetID, mockSetID string, mode int) (float64, bool, bool, error) {
 	pass := true
 	overallScore := 0.0
 	matched := false
 	differencesCount := 0.0
 	if _, ok := testOperation.Responses[status]; ok {
-		mockResponseBodyStr, testResponseBodyStr, err := marshalResponseBodies(status, mockOperation, testOperation)
+		mockResponseBodyStr, testResponseBodyStr, err := matcherUtils.MarshalResponseBodies(status, mockOperation, testOperation)
 		if err != nil {
 			return differencesCount, false, false, err
 		}
 		overallScore = float64(len(mockOperation.Responses[status].Content["application/json"].Schema.Properties))
-		validatedJSON, err := replaySvc.ValidateAndMarshalJSON(logger, &mockResponseBodyStr, &testResponseBodyStr)
+		validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &mockResponseBodyStr, &testResponseBodyStr)
 		if err != nil {
 			return differencesCount, false, false, err
 		}
@@ -143,7 +144,7 @@ func compareResponseBodies(status string, mockOperation, testOperation *models.O
 	}
 	return differencesCount / overallScore, pass, matched, nil
 }
-func match2(mock, test models.OpenAPI, testSetID string, mockSetID string, logger *zap.Logger, mode int) (float64, bool, error) {
+func Match(mock, test models.OpenAPI, testSetID string, mockSetID string, logger *zap.Logger, mode int) (float64, bool, error) {
 	pass := false
 
 	candidateScore := -1.0
@@ -152,11 +153,11 @@ func match2(mock, test models.OpenAPI, testSetID string, mockSetID string, logge
 	newLogger.SetColorScheme(models.GetFailingColorScheme())
 
 	for path, mockItem := range mock.Paths {
-		logDiffs := replaySvc.NewDiffsPrinter(test.Info.Title + "/" + mock.Info.Title)
+		logDiffs := matcherUtils.NewDiffsPrinter(test.Info.Title + "/" + mock.Info.Title)
 		var err error
 		if testItem, found := test.Paths[path]; found {
-			mockOperation, mockOperationType := findOperation(mockItem)
-			testOperation, testOperationType := findOperation(testItem)
+			mockOperation, mockOperationType := matcherUtils.FindOperation(mockItem)
+			testOperation, testOperationType := matcherUtils.FindOperation(testItem)
 			if mode == 0 {
 				if pass, err = compareOperationTypes(mockOperationType, testOperationType); err != nil {
 					return candidateScore, false, err
@@ -211,10 +212,10 @@ func calculateSimilarityScore(mockOperation, testOperation *models.Operation, st
 	return score, nil
 }
 
-func handleJSONDiff(validatedJSON replaySvc.ValidatedJSON, logDiffs replaySvc.DiffsPrinter, newLogger *pp.PrettyPrinter, logger *zap.Logger, testName string, mockName string, testSetID string, mockSetID string, mockBodyStr string, testBodyStr string, diffType string, mode int) (float64, bool, error) {
+func handleJSONDiff(validatedJSON matcherUtils.ValidatedJSON, logDiffs matcherUtils.DiffsPrinter, newLogger *pp.PrettyPrinter, logger *zap.Logger, testName string, mockName string, testSetID string, mockSetID string, mockBodyStr string, testBodyStr string, diffType string, mode int) (float64, bool, error) {
 	pass := true
 	differencesCount := 0.0
-	jsonComparisonResult, err := replaySvc.JSONDiffWithNoiseControl(validatedJSON, nil, false)
+	jsonComparisonResult, err := matcherUtils.JSONDiffWithNoiseControl(validatedJSON, nil, false)
 	if err != nil {
 		return differencesCount, false, err
 	}
@@ -253,7 +254,7 @@ func handleJSONDiff(validatedJSON replaySvc.ValidatedJSON, logDiffs replaySvc.Di
 	return differencesCount, pass, nil
 }
 
-func printAndRenderLogs(logs string, newLogger *pp.PrettyPrinter, logDiffs replaySvc.DiffsPrinter, logger *zap.Logger) error {
+func printAndRenderLogs(logs string, newLogger *pp.PrettyPrinter, logDiffs matcherUtils.DiffsPrinter, logger *zap.Logger) error {
 	if _, err := newLogger.Printf(logs); err != nil {
 		utils.LogError(logger, err, "failed to print the logs")
 		return err

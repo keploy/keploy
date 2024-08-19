@@ -16,6 +16,8 @@ import (
 	"github.com/fatih/color"
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/olekukonko/tablewriter"
+	"go.keploy.io/server/v2/config"
+	schemaMatcher "go.keploy.io/server/v2/pkg/matcher/schema"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.uber.org/zap"
@@ -334,62 +336,6 @@ func validateServices(services []string, mappings map[string][]string, genAllMoc
 	}
 	return nil
 }
-func marshalRequestBodies(mockOperation, testOperation *models.Operation) (string, string, error) {
-	var mockRequestBody []byte
-	var testRequestBody []byte
-	var err error
-	if mockOperation.RequestBody != nil {
-		mockRequestBody, err = json.Marshal(mockOperation.RequestBody.Content["application/json"].Schema.Properties)
-		if err != nil {
-			return "", "", fmt.Errorf("error marshalling mock RequestBody: %v", err)
-		}
-	}
-	if testOperation.RequestBody != nil {
-		testRequestBody, err = json.Marshal(testOperation.RequestBody.Content["application/json"].Schema.Properties)
-		if err != nil {
-			return "", "", fmt.Errorf("error marshalling test RequestBody: %v", err)
-		}
-	}
-	return string(mockRequestBody), string(testRequestBody), nil
-}
-
-func marshalResponseBodies(status string, mockOperation, testOperation *models.Operation) (string, string, error) {
-	var mockResponseBody []byte
-	var testResponseBody []byte
-	var err error
-	if mockOperation.Responses[status].Content != nil {
-		mockResponseBody, err = json.Marshal(mockOperation.Responses[status].Content["application/json"].Schema.Properties)
-		if err != nil {
-			return "", "", fmt.Errorf("error marshalling mock ResponseBody: %v", err)
-		}
-	}
-	if testOperation.Responses[status].Content != nil {
-		testResponseBody, err = json.Marshal(testOperation.Responses[status].Content["application/json"].Schema.Properties)
-		if err != nil {
-			return "", "", fmt.Errorf("error marshalling test ResponseBody: %v", err)
-		}
-	}
-	return string(mockResponseBody), string(testResponseBody), nil
-}
-func findOperation(item models.PathItem) (*models.Operation, string) {
-	if item.Get != nil {
-		return item.Get, "GET"
-	}
-	if item.Post != nil {
-		return item.Post, "POST"
-	}
-	if item.Put != nil {
-		return item.Put, "PUT"
-	}
-	if item.Delete != nil {
-		return item.Delete, "DELETE"
-	}
-	if item.Patch != nil {
-		return item.Patch, "PATCH"
-	}
-	return nil, ""
-}
-
 func generateSummaryTable(summary models.Summary) {
 	notMatchedColor := color.New(color.FgHiRed).SprintFunc()
 	missedColor := color.New(color.FgHiYellow).SprintFunc()
@@ -569,8 +515,7 @@ func (s *contractService) scoresForMocks(mocks []*models.OpenAPI, mockSet map[st
 			for _, test := range tests {
 				// Call 'match2' to compare the mock with the current test.
 				// This function returns a candidateScore (how well the mock matches the test) and a pass boolean.
-				candidateScore, pass, err := match2(*mock, *test, testSetID, mockSetID, s.logger, IDENTIFYMODE)
-
+				candidateScore, pass, err := schemaMatcher.Match(*mock, *test, testSetID, mockSetID, s.logger, IDENTIFYMODE)
 				// Handle any errors encountered during the comparison process.
 				if err != nil {
 					// Log the error and continue with the next iteration, skipping the current comparison.
@@ -677,7 +622,7 @@ func (s *contractService) ValidateMockAgainstTests(scores map[string]map[string]
 					fmt.Println(fmt.Sprintf("                                    Current %s   ||   Consumer %s  ", serviceColor(s.config.Contract.Self), serviceColor(service)))
 
 					// Perform comparison between the mock and test case again
-					_, _, err := match2(mockInfo.Data, *testsMapping[mockInfo.TestSetID][mockInfo.Name], mockInfo.TestSetID, mockSetID, s.logger, COMPAREMODE)
+					_, _, err := schemaMatcher.Match(mockInfo.Data, *testsMapping[mockInfo.TestSetID][mockInfo.Name], mockInfo.TestSetID, mockSetID, s.logger, COMPAREMODE)
 					if err != nil {
 						// If an error occurs during comparison, return it
 						s.logger.Error("Error in matching the two models", zap.Error(err))
@@ -709,4 +654,28 @@ func (s *contractService) ValidateMockAgainstTests(scores map[string]map[string]
 
 	// Return the overall summary containing details of all services validated
 	return summary, nil
+}
+
+func checkConfigFile(servicesMapping map[string][]string) error {
+	// Check if the size of servicesMapping is less than 1
+	if len(servicesMapping) < 1 {
+		return fmt.Errorf("services mapping must contain at least 1 services")
+	}
+	return nil
+}
+
+func saveServiceMappings(servicesMapping config.Config, filePath string) error {
+	// Marshal the services mapping to YAML
+	servicesMappingYAML, err := yamlLib.Marshal(servicesMapping)
+	if err != nil {
+		return fmt.Errorf("failed to marshal services mapping: %w", err)
+	}
+
+	// Write the services mapping to the specified file path
+	err = yaml.WriteFile(context.Background(), zap.NewNop(), filePath, "keploy", servicesMappingYAML, false)
+	if err != nil {
+		return fmt.Errorf("failed to write services mapping to file: %w", err)
+	}
+
+	return nil
 }
