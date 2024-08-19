@@ -64,7 +64,7 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 		testDB:          testDB,
 		mockDB:          mockDB,
 		reportDB:        reportDB,
-		TestSetConf:     testSetConf,
+		testSetConf:     testSetConf,
 		telemetry:       telemetry,
 		instrumentation: instrumentation,
 		config:          config,
@@ -427,7 +427,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	var conf *models.TestSet
-	conf, err = r.TestSetConf.Read(runTestSetCtx, testSetID)
+	conf, err = r.testSetConf.Read(runTestSetCtx, testSetID)
 	if err != nil {
 		if strings.Contains(err.Error(), "no such file or directory") {
 			r.logger.Info("config file not found, continuing execution...", zap.String("test-set", testSetID))
@@ -822,7 +822,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		removeDoubleQuotes(utils.TemplatizedValues)
 		// Write the templatized values to the yaml.
 		if len(utils.TemplatizedValues) > 0 {
-			err = r.TestSetConf.Write(ctx, testSetID, &models.TestSet{
+			err = r.testSetConf.Write(ctx, testSetID, &models.TestSet{
 				PreScript:  conf.PreScript,
 				PostScript: conf.PostScript,
 				Template:   utils.TemplatizedValues,
@@ -980,7 +980,7 @@ func (r *Replayer) RunApplication(ctx context.Context, appID uint64, opts models
 }
 
 func (r *Replayer) GetTestSetConf(ctx context.Context, testSet string) (*models.TestSet, error) {
-	return r.TestSetConf.Read(ctx, testSet)
+	return r.testSetConf.Read(ctx, testSet)
 }
 
 func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error) {

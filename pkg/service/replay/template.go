@@ -37,7 +37,7 @@ func (r *Replayer) Templatize(ctx context.Context) error {
 
 	for _, testSetID := range testSets {
 
-		testSet, err := r.TestSetConf.Read(ctx, testSetID)
+		testSet, err := r.testSetConf.Read(ctx, testSetID)
 		utils.TemplatizedValues = map[string]interface{}{}
 		if err == nil && (testSet != nil && testSet.Template != nil) {
 			utils.TemplatizedValues = testSet.Template
@@ -178,7 +178,7 @@ func (r *Replayer) Templatize(ctx context.Context) error {
 		// Remove the double quotes from the templatized values in testSet configuration.
 		removeDoubleQuotes(utils.TemplatizedValues)
 
-		err = r.TestSetConf.Write(ctx, testSetID, &models.TestSet{
+		err = r.testSetConf.Write(ctx, testSetID, &models.TestSet{
 			PreScript:  "",
 			PostScript: "",
 			Template:   utils.TemplatizedValues,

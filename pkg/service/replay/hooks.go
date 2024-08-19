@@ -39,7 +39,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCa
 	switch tc.Kind {
 	case models.HTTP:
 		h.logger.Debug("Before simulating the request", zap.Any("Test case", tc))
-		resp, err := pkg.SimulateHTTP(ctx, *tc, testSetID, h.logger, h.cfg.Test.APITimeout)
+		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, h.cfg.Test.APITimeout)
 		h.logger.Debug("After simulating the request", zap.Any("test case id", tc.Name))
 		return resp, err
 	}
