@@ -19,7 +19,7 @@ type TestDB interface {
 	ChangeTcPath(path string)
 }
 type MockDB interface {
-	GetHTTPMocks(ctx context.Context, testSetID string, mockPath string, mockFileName string) ([]*models.HTTPSchema2, error)
+	GetHTTPMocks(ctx context.Context, testSetID string, mockPath string, mockFileName string) ([]*models.HTTPDoc, error)
 }
 type OpenAPIDB interface {
 	GetTestCasesSchema(ctx context.Context, testSetID string, testPath string) ([]*models.OpenAPI, error)

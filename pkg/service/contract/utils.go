@@ -267,8 +267,8 @@ func generateUniqueID() string {
 	return hex.EncodeToString(b) + "-" + time.Now().Format("20060102150405")
 }
 
-func readOrParseData(ctx context.Context, logger *zap.Logger, filePath, name string, readData bool, data models.HTTPSchema2) (models.HTTPSchema2, error) {
-	var custom models.HTTPSchema2
+func readOrParseData(ctx context.Context, logger *zap.Logger, filePath, name string, readData bool, data models.HTTPDoc) (models.HTTPDoc, error) {
+	var custom models.HTTPDoc
 	if readData {
 		data, err := yaml.ReadFile(ctx, logger, filePath, name)
 		if err != nil {

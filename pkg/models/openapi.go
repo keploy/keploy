@@ -1,6 +1,6 @@
 package models
 
-type HTTPSchema2 struct {
+type HTTPDoc struct {
 	Version string     `json:"version" yaml:"version"`
 	Kind    string     `json:"kind" yaml:"kind"`
 	Name    string     `json:"name" yaml:"name"`

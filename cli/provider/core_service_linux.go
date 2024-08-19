@@ -43,20 +43,19 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	recordSvc := record.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, cfg)
 	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, cfg)
 
-	if cmd == "rerecord" {
+	switch cmd {
+	case "rerecord":
 		return orchestrator.New(logger, recordSvc, replaySvc, cfg), nil
+	case "record":
+		return recordSvc, nil
+	case "test", "normalize", "templatize":
+		return replaySvc, nil
+	case "contract":
+		return contractSvc, nil
+	default:
+		return nil, errors.New("invalid command")
 	}
 
-	if cmd == "record" {
-		return recordSvc, nil
-	}
-	if cmd == "test" || cmd == "normalize" || cmd == "templatize" {
-		return replaySvc, nil
-	}
-	if cmd == "contract" {
-		return contractSvc, nil
-	}
-	return nil, errors.New("invalid command")
 }
 
 func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) (*CommonInternalService, error) {

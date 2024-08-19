@@ -39,7 +39,7 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, openAPIDB OpenAPIDB, 
 	}
 }
 
-func (s *contractService) ConvertHTTPToOpenAPI(ctx context.Context, logger *zap.Logger, filePath string, name string, outputPath string, readData bool, data models.HTTPSchema2, isAppend bool) (success bool) {
+func (s *contractService) ConvertHTTPToOpenAPI(ctx context.Context, logger *zap.Logger, filePath string, name string, outputPath string, readData bool, data models.HTTPDoc, isAppend bool) (success bool) {
 	custom, err := readOrParseData(ctx, logger, filePath, name, readData, data)
 	if err != nil {
 		logger.Fatal("Error reading or parsing data", zap.Error(err))
@@ -307,7 +307,7 @@ func (s *contractService) GenerateTestsSchemas(ctx context.Context, selectedTest
 				return err
 			}
 			for _, tc := range testCases {
-				var httpSpec models.HTTPSchema2
+				var httpSpec models.HTTPDoc
 				httpSpec.Kind = string(tc.Kind)
 				httpSpec.Name = tc.Name
 				httpSpec.Spec.Request = tc.HTTPReq
@@ -385,7 +385,10 @@ func (s *contractService) DownloadTests(ctx context.Context, path string) error 
 		return err
 	}
 
-	cprFolder := "/home/ahmed/Desktop/GSOC/Keploy/Issues/VirtualCPR"
+	cprFolder, err := filepath.Abs("../VirtualCPR")
+	if err != nil {
+		s.logger.Fatal("Failed to resolve path:", zap.Error(err))
+	}
 
 	var schemaConfigFile config.Config
 
@@ -434,8 +437,10 @@ func (s *contractService) DownloadMocks(ctx context.Context, path string) error 
 		return err
 	}
 
-	cprFolder := "/home/ahmed/Desktop/GSOC/Keploy/Issues/VirtualCPR"
-
+	cprFolder, err := filepath.Abs("../VirtualCPR")
+	if err != nil {
+		s.logger.Fatal("Failed to resolve path:", zap.Error(err))
+	}
 	entries, err := os.ReadDir(cprFolder)
 	if err != nil {
 		s.logger.Error("Failed to read directory", zap.String("directory", cprFolder), zap.Error(err))
@@ -496,7 +501,7 @@ func (s *contractService) DownloadMocks(ctx context.Context, path string) error 
 				s.logger.Error("Failed to get HTTP mocks", zap.String("testSetID", mockFolder.Name()), zap.Error(err))
 				return err
 			}
-			var filteredMocks []*models.HTTPSchema2
+			var filteredMocks []*models.HTTPDoc
 			for _, mock := range httpMocks {
 				for _, service := range schemaConfigFile.Contract.ServicesMapping[self] {
 					if service == mock.Spec.Request.URL {
