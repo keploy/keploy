@@ -19,7 +19,6 @@ import (
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
-	userDb "go.keploy.io/server/v2/pkg/platform/yaml/configdb/user"
 	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/utils"
 	"go.keploy.io/server/v2/utils/log"
@@ -211,7 +210,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
-
 		cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command to start the user application (native/docker/docker-compose)")
 		cmd.Flags().Uint64P("build-delay", "b", c.cfg.BuildDelay, "User provided time to wait docker container build")
 		cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
@@ -271,6 +269,8 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 			cmd.Flags().String("base-path", c.cfg.Test.BasePath, "Custom api basePath/origin to replace the actual basePath/origin in the testcases; App flag is ignored and app will not be started & instrumented when this is set since the application running on a different machine")
 			cmd.Flags().Bool("update-temp", c.cfg.Test.UpdateTemplate, "Update the template with the result of the testcases.")
 			cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
+			cmd.Flags().Bool("disableMockUpload", c.cfg.Test.DisableMockUpload, "Store/Fetch mocks locally")
+			cmd.Flags().Bool("useLocalMock", false, "Use local mocks instead of fetching from the cloud")
 			cmd.Flags().Bool("disable-line-coverage", c.cfg.Test.DisableLineCoverage, "Disable line coverage generation.")
 		}
 	}
@@ -351,6 +351,13 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 		c.logger.Error("failed to validate flags", zap.Error(err))
 		return err
 	}
+	if c.cfg.AppName == "" {
+		appName, err := utils.GetLastDirectory()
+		if err != nil {
+			return fmt.Errorf("failed to get the last directory: %v", err)
+		}
+		c.cfg.AppName = appName
+	}
 	if !IsConfigFileFound {
 		err := c.CreateConfigFile(ctx, defaultCfg)
 		if err != nil {
@@ -420,15 +427,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-	}
-
-	userDb := userDb.New(c.logger, c.cfg)
-	var err error
-	c.cfg.InstallationID, err = userDb.GetInstallationID(ctx)
-	if err != nil {
-		errMsg := "failed to get installation id"
-		utils.LogError(c.logger, err, errMsg)
-		return errors.New(errMsg)
 	}
 
 	if c.cfg.EnableTesting {

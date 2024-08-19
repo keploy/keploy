@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -24,7 +25,7 @@ type Auth struct {
 	GitHubClientID string
 }
 
-func New(serverURL string, installationID string, logger *zap.Logger, gitHubClientID string) *Auth {
+func New(serverURL string, installationID string, logger *zap.Logger, gitHubClientID string) service.Auth {
 	return &Auth{
 		serverURL:      serverURL,
 		installationID: installationID,
@@ -52,7 +53,7 @@ func (a *Auth) Login(ctx context.Context) bool {
 		return false
 	}
 
-	userEmail, isValid, _, authErr, err := a.Validate(ctx, tokenResp.AccessToken, a.logger)
+	userEmail, isValid, authErr, err := a.Validate(ctx, tokenResp.AccessToken)
 	if err != nil {
 		if ctx.Err() == context.Canceled {
 			return false
@@ -65,49 +66,64 @@ func (a *Auth) Login(ctx context.Context) bool {
 		a.logger.Error("Invalid token", zap.Any("error", authErr))
 		return false
 	}
-	fmt.Println("Successfully logged in to Keploy using GitHub as " + userEmail)
+	a.logger.Info("Successfully logged in to Keploy using GitHub as " + userEmail)
 	return true
 }
 
-func (a *Auth) Validate(ctx context.Context, token string, logger *zap.Logger) (string, bool, string, string, error) {
+func (a *Auth) Validate(ctx context.Context, token string) (string, bool, string, error) {
 	url := fmt.Sprintf("%s/auth/github", a.serverURL)
+	// this i can directly call the vs code extension
 	requestBody := &models.AuthReq{
 		GitHubToken:    token,
 		InstallationID: a.installationID,
 	}
 	requestJSON, err := json.Marshal(requestBody)
 	if err != nil {
-		utils.LogError(logger, err, "failed to marshal request body for github token auth")
-		return "", false, "", "", fmt.Errorf("error marshaling request body for authentication: %s", err.Error())
+		utils.LogError(a.logger, err, "failed to marshal request body for authentication")
+		return "", false, "", fmt.Errorf("error marshaling request body for authentication: %s", err.Error())
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(requestJSON))
 	if err != nil {
-		utils.LogError(logger, err, "failed to create request for github token auth")
-		return "", false, "", "", fmt.Errorf("error creating request for authentication: %s", err.Error())
+		utils.LogError(a.logger, err, "failed to create request for authentication")
+		return "", false, "", fmt.Errorf("error creating request for authentication: %s", err.Error())
 	}
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{}
 	res, err := client.Do(req)
-	if err != nil || res.StatusCode < 200 || res.StatusCode >= 300 {
-		utils.LogError(logger, err, "failed to authenticate with github token auth with keploy")
-		return "", false, "", "", fmt.Errorf("error sending the authentication: %s", err.Error())
+	if err != nil {
+		return "", false, "", fmt.Errorf("failed to authenticate: %s", err.Error())
 	}
+
 	defer func() {
 		err := res.Body.Close()
 		if err != nil {
-			utils.LogError(logger, err, "failed to close response body for github token auth")
+			utils.LogError(a.logger, err, "failed to close response body for authentication")
 		}
 	}()
 
 	var respBody models.AuthResp
 	err = json.NewDecoder(res.Body).Decode(&respBody)
 	if err != nil {
-		utils.LogError(logger, err, "failed to decode response body for github token auth")
-		return "", false, "", "", fmt.Errorf("error unmarshalling the authentication response: %s", err.Error())
+		return "", false, "", fmt.Errorf("error unmarshalling the authentication response: %s", err.Error())
 	}
+
+	if res.StatusCode != 200 || res.StatusCode >= 300 {
+		return "", false, "", fmt.Errorf("failed to authenticate: %s", respBody.Error)
+	}
+
 	a.jwtToken = respBody.JwtToken
-	return respBody.EmailID, respBody.IsValid, respBody.JwtToken, respBody.Error, nil
+	return respBody.EmailID, respBody.IsValid, respBody.Error, nil
+}
+
+func (a *Auth) GetToken(ctx context.Context) (string, error) {
+	if a.jwtToken == "" {
+		_, _, _, err := a.Validate(ctx, "")
+		if err != nil {
+			return "", err
+		}
+	}
+	return a.jwtToken, nil
 }
 
 // requestDeviceCode sends a request to GitHub to get a device code for the users machine to authenticate

@@ -17,12 +17,13 @@ import (
 
 	"github.com/charmbracelet/glamour"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
 
-func NewTools(logger *zap.Logger, telemetry teleDB, auth auth) Service {
+func NewTools(logger *zap.Logger, telemetry teleDB, auth service.Auth) Service {
 	return &Tools{
 		logger:    logger,
 		telemetry: telemetry,
@@ -33,7 +34,7 @@ func NewTools(logger *zap.Logger, telemetry teleDB, auth auth) Service {
 type Tools struct {
 	logger    *zap.Logger
 	telemetry teleDB
-	auth      auth
+	auth      service.Auth
 }
 
 var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")

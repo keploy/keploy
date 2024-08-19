@@ -2,6 +2,7 @@ package replay
 
 import (
 	"context"
+	"io"
 	"time"
 
 	"go.keploy.io/server/v2/pkg/models"
@@ -64,7 +65,7 @@ type ReportDB interface {
 	UpdateReport(ctx context.Context, testRunID string, testCoverage any) error
 }
 
-type Config interface {
+type TestSetConfig interface {
 	Read(ctx context.Context, testSetID string) (*models.TestSet, error)
 	Write(ctx context.Context, testSetID string, testSet *models.TestSet) error
 }
@@ -75,16 +76,15 @@ type Telemetry interface {
 	MockTestRun(utilizedMocks int)
 }
 
-// RequestMockHandler defines an interface for implementing hooks that extend and customize
-// the behavior of request simulations and test workflows. This interface allows for
-// detailed control over various stages of the testing process, including request simulation,
-// test status processing, and post-test actions.
-type RequestMockHandler interface {
+type TestHooks interface {
 	SimulateRequest(ctx context.Context, appID uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error)
-	ProcessTestRunStatus(ctx context.Context, status bool, testSetID string)
-	FetchMockName() string
-	ProcessMockFile(ctx context.Context, testSetID string)
-	AfterTestHook(ctx context.Context, testRunID, testSetID string, coverage models.TestCoverage, totalTestSets int) (*models.TestReport, error)
+	BeforeTestSetRun(ctx context.Context, testSetID string) error
+	AfterTestSetRun(ctx context.Context, testRunID, testSetID string, coverage models.TestCoverage, totalTestSets int, status bool) error
+}
+
+type Storage interface {
+	Upload(ctx context.Context, file io.Reader, mockName string, appName string, jwtToken string) error
+	Download(ctx context.Context, mockName string, appName string, userName string, jwtToken string) (io.Reader, error)
 }
 
 type InstrumentState struct {
