@@ -72,6 +72,7 @@ func (a *Auth) Login(ctx context.Context) bool {
 
 func (a *Auth) Validate(ctx context.Context, token string) (string, bool, string, error) {
 	url := fmt.Sprintf("%s/auth/github", a.serverURL)
+	// this i can directly call the vs code extension
 	requestBody := &models.AuthReq{
 		GitHubToken:    token,
 		InstallationID: a.installationID,
