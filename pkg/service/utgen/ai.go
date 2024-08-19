@@ -88,14 +88,14 @@ type AIRequest struct {
 	Prompt    Prompt `json:"prompt"`
 }
 
-func NewAIClient(model, apiBase, apiVersion, apiKey, apiServerUrl string, auth service.Auth, logger *zap.Logger) *AIClient {
+func NewAIClient(model, apiBase, apiVersion, apiKey, apiServerURL string, auth service.Auth, logger *zap.Logger) *AIClient {
 	return &AIClient{
 		Model:        model,
 		APIBase:      apiBase,
 		APIVersion:   apiVersion,
 		Logger:       logger,
 		APIKey:       apiKey,
-		APIServerURL: apiServerUrl,
+		APIServerURL: apiServerURL,
 		Auth:         auth,
 	}
 }
