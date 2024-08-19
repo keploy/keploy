@@ -22,8 +22,8 @@ type AIClient struct {
 	Model        string
 	APIBase      string
 	APIVersion   string
-	ApiKey       string
-	ApiServerUrl string
+	APIKey       string
+	APIServerURL string
 	Auth         service.Auth
 	Logger       *zap.Logger
 }
@@ -94,8 +94,8 @@ func NewAIClient(model, apiBase, apiVersion, apiKey, apiServerUrl string, auth s
 		APIBase:      apiBase,
 		APIVersion:   apiVersion,
 		Logger:       logger,
-		ApiKey:       apiKey,
-		ApiServerUrl: apiServerUrl,
+		APIKey:       apiKey,
+		APIServerURL: apiServerUrl,
 		Auth:         auth,
 	}
 }
@@ -130,14 +130,14 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 
 	var apiKey string
 
-	if ai.APIBase == fmt.Sprintf("%s/ai/call", ai.ApiServerUrl) {
+	if ai.APIBase == fmt.Sprintf("%s/ai/call", ai.APIServerURL) {
 
 		token, err := ai.Auth.GetToken(ctx)
 		if err != nil {
 			return "", 0, 0, fmt.Errorf("error getting token: %v", err)
 		}
 
-		ai.Logger.Info("Making AI request to API server", zap.String("api_server_url", ai.ApiServerUrl), zap.String("token", token))
+		ai.Logger.Info("Making AI request to API server", zap.String("api_server_url", ai.APIServerURL), zap.String("token", token))
 		httpClient := &http.Client{}
 		// make AI request as request body to the API server
 		aiRequest := AIRequest{
@@ -149,7 +149,7 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 			return "", 0, 0, fmt.Errorf("error marshalling AI request: %v", err)
 		}
 
-		req, err := http.NewRequest("POST", fmt.Sprintf("%s/ai/call", ai.ApiServerUrl), bytes.NewBuffer(aiRequestBytes))
+		req, err := http.NewRequest("POST", fmt.Sprintf("%s/ai/call", ai.APIServerURL), bytes.NewBuffer(aiRequestBytes))
 		if err != nil {
 			return "", 0, 0, fmt.Errorf("error creating request: %v", err)
 		}
@@ -178,7 +178,10 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 				utils.LogError(ai.Logger, err, "failed to close response body for authentication")
 			}
 		}()
-		apiKey = aiResponse.ApiKey
+		if aiResponse.ApiKey != "" {
+			apiKey = aiResponse.ApiKey
+		}
+
 		return aiResponse.FinalContent, aiResponse.PromptTokens, aiResponse.CompletionTokens, nil
 	} else if ai.APIBase != "" {
 		apiBaseURL = ai.APIBase
@@ -201,11 +204,13 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 		return "", 0, 0, fmt.Errorf("error creating request: %v", err)
 	}
 
-	if ai.ApiKey == "" {
+	if ai.APIKey == "" {
 		apiKey = os.Getenv("API_KEY")
 	}
 
-	apiKey = ai.ApiKey
+	if apiKey == "" {
+		apiKey = ai.APIKey
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("api-key", apiKey)
