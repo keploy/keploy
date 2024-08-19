@@ -245,7 +245,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			}
 		}
 
-		if i < len(testSetIDs)-1 {
+		if i < len(testSetIDs)-1 || r.config.Test.SkipCoverage {
 			err = HookImpl.AfterTestSetRun(ctx, testRunID, testSetID, models.TestCoverage{}, len(testSetIDs), testSetResult)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get after test hook")
