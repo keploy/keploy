@@ -13,16 +13,19 @@ import (
 	"strings"
 	"time"
 
+	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
 type AIClient struct {
-	Model      string
-	APIBase    string
-	APIVersion string
-	ApiKey     string
-	Logger     *zap.Logger
+	Model        string
+	APIBase      string
+	APIVersion   string
+	ApiKey       string
+	ApiServerUrl string
+	Auth         service.Auth
+	Logger       *zap.Logger
 }
 
 type Prompt struct {
@@ -85,13 +88,15 @@ type AIRequest struct {
 	Prompt    Prompt `json:"prompt"`
 }
 
-func NewAIClient(model, apiBase, apiVersion, apiKey string, logger *zap.Logger) *AIClient {
+func NewAIClient(model, apiBase, apiVersion, apiKey, apiServerUrl string, auth service.Auth, logger *zap.Logger) *AIClient {
 	return &AIClient{
-		Model:      model,
-		APIBase:    apiBase,
-		APIVersion: apiVersion,
-		Logger:     logger,
-		ApiKey:     apiKey,
+		Model:        model,
+		APIBase:      apiBase,
+		APIVersion:   apiVersion,
+		Logger:       logger,
+		ApiKey:       apiKey,
+		ApiServerUrl: apiServerUrl,
+		Auth:         auth,
 	}
 }
 
@@ -124,12 +129,15 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 	}
 
 	var apiKey string
-	// here we communicate with the OpenAI API
 
-	if ai.APIBase == "https://api.keploy.io" {
-		// send a request to api server along with user email
-		// think about authentication of jwt token
-		// make a request to the api server
+	if ai.APIBase == fmt.Sprintf("%s/ai/call", ai.ApiServerUrl) {
+
+		token, err := ai.Auth.GetToken(ctx)
+		if err != nil {
+			return "", 0, 0, fmt.Errorf("error getting token: %v", err)
+		}
+
+		ai.Logger.Info("Making AI request to API server", zap.String("api_server_url", ai.ApiServerUrl), zap.String("token", token))
 		httpClient := &http.Client{}
 		// make AI request as request body to the API server
 		aiRequest := AIRequest{
@@ -140,12 +148,13 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 		if err != nil {
 			return "", 0, 0, fmt.Errorf("error marshalling AI request: %v", err)
 		}
-		// make a request to the API server
-		req, err := http.NewRequest("POST", "http://localhost:8083/ai/call", bytes.NewBuffer(aiRequestBytes))
+
+		req, err := http.NewRequest("POST", fmt.Sprintf("%s/ai/call", ai.ApiServerUrl), bytes.NewBuffer(aiRequestBytes))
 		if err != nil {
 			return "", 0, 0, fmt.Errorf("error creating request: %v", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
 
 		resp, err := httpClient.Do(req)
 		if err != nil {
@@ -163,8 +172,12 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 		if resp.StatusCode != http.StatusOK {
 			return "", 0, 0, fmt.Errorf("unexpected status code: %v, response body: %s", resp.StatusCode, aiResponse.Error)
 		}
-		fmt.Println("AI response", aiResponse)
-		defer resp.Body.Close()
+		defer func() {
+			err := resp.Body.Close()
+			if err != nil {
+				utils.LogError(ai.Logger, err, "failed to close response body for authentication")
+			}
+		}()
 		apiKey = aiResponse.ApiKey
 		return aiResponse.FinalContent, aiResponse.PromptTokens, aiResponse.CompletionTokens, nil
 	} else if ai.APIBase != "" {
@@ -222,7 +235,7 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 	}
 
 	fmt.Println("Streaming results from LLM model...")
-	
+
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil && err != io.EOF {

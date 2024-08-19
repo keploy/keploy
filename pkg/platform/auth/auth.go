@@ -70,7 +70,6 @@ func (a *Auth) Login(ctx context.Context) bool {
 	return true
 }
 
-// first time call validate and then get token
 func (a *Auth) Validate(ctx context.Context, token string) (string, bool, string, error) {
 	url := fmt.Sprintf("%s/auth/github", a.serverURL)
 	// this i can directly call the vs code extension
@@ -78,7 +77,6 @@ func (a *Auth) Validate(ctx context.Context, token string) (string, bool, string
 		GitHubToken:    token,
 		InstallationID: a.installationID,
 	}
-	fmt.Println("requestBody.GitHubToken", requestBody.GitHubToken, "requestBody.InstallationID", requestBody.InstallationID)
 	requestJSON, err := json.Marshal(requestBody)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to marshal request body for authentication")
@@ -115,11 +113,9 @@ func (a *Auth) Validate(ctx context.Context, token string) (string, bool, string
 	}
 
 	a.jwtToken = respBody.JwtToken
-	fmt.Println("THEN JWT TOKEN", a.jwtToken)
 	return respBody.EmailID, respBody.IsValid, respBody.Error, nil
 }
 
-// use this in utg 
 func (a *Auth) GetToken(ctx context.Context) (string, error) {
 	if a.jwtToken == "" {
 		_, _, _, err := a.Validate(ctx, "")
