@@ -80,7 +80,7 @@ type AIResponse struct {
 	FinalContent     string `json:"finalContent"`
 	PromptTokens     int    `json:"promptTokens"`
 	CompletionTokens int    `json:"completionTokens"`
-	ApiKey           string `json:"apiKey"`
+	APIKey           string `json:"apiKey"`
 }
 
 type AIRequest struct {
@@ -178,9 +178,6 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 				utils.LogError(ai.Logger, err, "failed to close response body for authentication")
 			}
 		}()
-		if aiResponse.ApiKey != "" {
-			apiKey = aiResponse.ApiKey
-		}
 
 		return aiResponse.FinalContent, aiResponse.PromptTokens, aiResponse.CompletionTokens, nil
 	} else if ai.APIBase != "" {
@@ -206,11 +203,10 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 
 	if ai.APIKey == "" {
 		apiKey = os.Getenv("API_KEY")
-	}
-
-	if apiKey == "" {
+	} else {
 		apiKey = ai.APIKey
 	}
+
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("api-key", apiKey)

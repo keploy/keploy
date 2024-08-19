@@ -45,7 +45,6 @@ type UnitTestGenerator struct {
 	maxIterations int
 	Files         []string
 	tel           Telemetry
-	apiServerUrl  string
 }
 
 func NewUnitTestGenerator(srcPath, testPath, reportPath, cmd, dir, coverageFormat string, desiredCoverage float64, maxIterations int, model string, apiBaseURL string, apiVersion, apiServerUrl string, _ *config.Config, tel Telemetry, auth service.Auth, logger *zap.Logger) (*UnitTestGenerator, error) {
