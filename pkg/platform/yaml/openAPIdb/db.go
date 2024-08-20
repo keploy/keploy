@@ -124,3 +124,29 @@ func (ts *OpenAPIYaml) ChangeTcPath(path string) {
 	// ts.OpenAPIPath = "./keploy/"
 	ts.OpenAPIPath = path
 }
+
+func (ts *OpenAPIYaml) WriteOpenAPIToFile(ctx context.Context, logger *zap.Logger, outputPath, name string, openapi models.OpenAPI, isAppend bool) error {
+	openapiYAML, err := yamlLib.Marshal(openapi)
+	if err != nil {
+		return err
+	}
+	_, err = os.Stat(outputPath)
+	if os.IsNotExist(err) {
+		err = os.MkdirAll(outputPath, os.ModePerm)
+		if err != nil {
+			logger.Error("Failed to create directory", zap.String("directory", outputPath), zap.Error(err))
+			return err
+		}
+		logger.Info("Directory created", zap.String("directory", outputPath))
+	}
+
+	err = yaml.WriteFile(ctx, logger, outputPath, name, openapiYAML, isAppend)
+	if err != nil {
+		logger.Error("Failed to write OpenAPI YAML to a file", zap.Error(err))
+		return err
+	}
+
+	outputFilePath := outputPath + "/" + name + ".yaml"
+	fmt.Println("OpenAPI YAML has been saved to " + outputFilePath)
+	return nil
+}

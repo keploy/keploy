@@ -3,6 +3,7 @@ package contract
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.keploy.io/server/v2/pkg/service/contract/consumer"
 	"go.keploy.io/server/v2/pkg/service/contract/provider"
+	"go.keploy.io/server/v2/utils"
 
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
@@ -42,61 +44,72 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, openAPIDB OpenAPIDB, 
 	}
 }
 
-func (s *contract) HTTPDocToOpenAPI(ctx context.Context, logger *zap.Logger, filePath string, name string, outputPath string, readData bool, data models.HTTPDoc, isAppend bool) (success bool) {
-	custom, err := readOrParseData(ctx, logger, filePath, name, readData, data)
-	if err != nil {
-		logger.Fatal("Error reading or parsing data", zap.Error(err))
-		return false
-	}
+func (s *contract) HTTPDocToOpenAPI(logger *zap.Logger, data models.HTTPDoc) (models.OpenAPI, error) {
+	custom := data
 
+	var err error
 	// Convert response body to an object
 	var responseBodyObject map[string]interface{}
 	if custom.Spec.Response.Body != "" {
-		_, responseBodyObject, err = UnmarshalAndConvertToJSON([]byte(custom.Spec.Response.Body), responseBodyObject)
+		err := json.Unmarshal([]byte(custom.Spec.Response.Body), &responseBodyObject)
 		if err != nil {
-			logger.Error("Error converting response body object to JSON string", zap.Error(err))
-			return false
+			return models.OpenAPI{}, err
 		}
+
 	}
 
 	// Get the type of each value in the response body object
-	responseTypes := GetVariablesType(responseBodyObject)
+	responseTypes := ExtractVariableTypes(responseBodyObject)
 
 	// Convert request body to an object
 	var requestBodyObject map[string]interface{}
 	if custom.Spec.Request.Body != "" {
-		_, requestBodyObject, err = UnmarshalAndConvertToJSON([]byte(custom.Spec.Request.Body), requestBodyObject)
+		err := json.Unmarshal([]byte(custom.Spec.Request.Body), &requestBodyObject)
 		if err != nil {
-			logger.Error("Error converting response body object to JSON string", zap.Error(err))
-			return false
+			return models.OpenAPI{}, err
 		}
+
 	}
 
 	// Get the type of each value in the request body object
-	requestTypes := GetVariablesType(requestBodyObject)
+	requestTypes := ExtractVariableTypes(requestBodyObject)
 
 	// Generate response by status code
-	byCode := GenerateRepsonse(custom.Spec.Response.StatusCode, custom.Spec.Response.StatusMessage, responseTypes, responseBodyObject)
+	byCode := GenerateResponse(Response{
+		Code:    custom.Spec.Response.StatusCode,
+		Message: custom.Spec.Response.StatusMessage,
+		Types:   responseTypes,
+		Body:    responseBodyObject,
+	})
 
 	// Add parameters to the request
 	parameters := GenerateHeader(custom.Spec.Request.Header)
 
 	// Extract In Path parameters
-	identifiers, count := ExtractIdentifiersAndCount(custom.Spec.Request.URL)
+	identifiers := ExtractIdentifiers(custom.Spec.Request.URL)
 	// Generate Dummy Names for the identifiers
 	dummyNames := GenerateDummyNamesForIdentifiers(identifiers)
 	// Add In Path parameters to the parameters
-	parameters = AppendInParameters(parameters, dummyNames, count, "path")
+	if len(identifiers) > 0 {
+		parameters = AppendInParameters(parameters, dummyNames, "path")
+	}
 	// Extract Query parameters
 	queryParams, err := ExtractQueryParams(custom.Spec.Request.URL)
 	if err != nil {
-		logger.Error("Error extracting query parameters", zap.Error(err))
-		return false
+		utils.LogError(logger, err, "failed to extract query parameters")
+		return models.OpenAPI{}, err
 	}
 	// Add Query parameters to the parameters
-	parameters = AppendInParameters(parameters, queryParams, len(queryParams), "query")
+	if len(queryParams) > 0 {
+		parameters = AppendInParameters(parameters, queryParams, "query")
+	}
 	// Generate Operation ID
 	operationID := generateUniqueID()
+	if operationID == "" {
+		err := fmt.Errorf("failed to generate unique ID")
+		utils.LogError(logger, err, "failed to generate unique ID")
+		return models.OpenAPI{}, err
+	}
 	// Determine if the request method is GET or POST
 	var pathItem models.PathItem
 	switch custom.Spec.Request.Method {
@@ -178,15 +191,15 @@ func (s *contract) HTTPDocToOpenAPI(ctx context.Context, logger *zap.Logger, fil
 			Responses:   byCode,
 		}
 	default:
-		logger.Fatal("Unsupported method")
-		return false
+		utils.LogError(logger, err, "Unsupported Method")
+		return models.OpenAPI{}, err
 	}
 
 	// Extract the URL path
 	parsedURL, hostName := ExtractURLPath(custom.Spec.Request.URL)
 	if parsedURL == "" {
 		logger.Error("Error extracting URL path")
-		return false
+		return models.OpenAPI{}, err
 	}
 	// Replace numeric identifiers in the path with dummy names (if exists)
 	parsedURL = ReplacePathIdentifiers(parsedURL, dummyNames)
@@ -214,36 +227,30 @@ func (s *contract) HTTPDocToOpenAPI(ctx context.Context, logger *zap.Logger, fil
 		Components: map[string]interface{}{},
 	}
 
-	// Output OpenAPI format as YAML
-	openapiYAML, err := yamlLib.Marshal(openapi)
-	if err != nil {
-		return false
-	}
-	err = validateOpenAPIDocument(logger, openapiYAML)
-	if err != nil {
-		return false
-	}
-
-	err = writeOpenAPIToFile(ctx, logger, outputPath, name, openapiYAML, isAppend)
-	return err == nil
+	return openapi, nil
 }
 
-func (s *contract) GenerateMocksSchemas(ctx context.Context, services []string, mappings map[string][]string, genAllMocks bool) error {
+func (s *contract) GenerateMocksSchemas(ctx context.Context, services []string, mappings map[string][]string) error {
 	keployFolder := "./keploy/"
 	entries, err := os.ReadDir(keployFolder)
 	if err != nil {
-		s.logger.Error("Failed to read directory", zap.String("directory", keployFolder), zap.Error(err))
+		utils.LogError(s.logger, err, "failed to read directory", zap.String("directory", keployFolder))
 		return err
 	}
-	if err := validateServices(services, mappings, genAllMocks, s.logger); err != nil {
-		return err
+	// Checking if the services provided by the user are in the services mapping
+	if len(services) != 0 {
+		for _, service := range services {
+			if _, exists := mappings[service]; !exists {
+				s.logger.Warn("Service not found in services mapping, no contract generation", zap.String("service", service))
+			}
+		}
 	}
 	for _, entry := range entries {
 		if entry.IsDir() && strings.Contains(entry.Name(), "test") {
 			testSetID := entry.Name()
 			httpMocks, err := s.mockDB.GetHTTPMocks(ctx, testSetID, keployFolder, "mocks")
 			if err != nil {
-				s.logger.Error("Failed to get HTTP mocks", zap.String("testSetID", testSetID), zap.Error(err))
+				utils.LogError(s.logger, err, "failed to get HTTP mocks", zap.String("testSetID", testSetID))
 				return err
 			}
 
@@ -251,7 +258,7 @@ func (s *contract) GenerateMocksSchemas(ctx context.Context, services []string, 
 			for _, mock := range httpMocks {
 				var isAppend bool
 				for service, serviceMappings := range mappings {
-					if !yaml.Contains(services, service) && !genAllMocks {
+					if !yaml.Contains(services, service) && len(services) != 0 {
 						continue
 					}
 					var mappingFound bool
@@ -271,10 +278,20 @@ func (s *contract) GenerateMocksSchemas(ctx context.Context, services []string, 
 							}
 
 							mappingFound = true
-							done := s.HTTPDocToOpenAPI(ctx, s.logger, keployFolder+entry.Name(), "mocks", keployFolder+"schema/mocks/"+service+"/"+entry.Name(), false, *mock, isAppend)
-							if !done {
-								s.logger.Error("Failed to convert the yaml file to openapi")
+							openapi, err := s.HTTPDocToOpenAPI(s.logger, *mock)
+							if err != nil {
+								utils.LogError(s.logger, err, "failed to convert the yaml file to openapi")
 								return fmt.Errorf("failed to convert the yaml file to openapi")
+							}
+							// Validate the OpenAPI document
+							err = validateSchema(openapi)
+							if err != nil {
+								return err
+							}
+							// Save it using the OpenAPIDB
+							err = s.openAPIDB.WriteOpenAPIToFile(ctx, s.logger, filepath.Join(keployFolder, "schema", "mocks", service, entry.Name()), "mocks", openapi, isAppend)
+							if err != nil {
+								return err
 							}
 							break
 						}
@@ -289,23 +306,23 @@ func (s *contract) GenerateMocksSchemas(ctx context.Context, services []string, 
 
 	return nil
 }
-func (s *contract) GenerateTestsSchemas(ctx context.Context, selectedTests []string, genAllTests bool) error {
+func (s *contract) GenerateTestsSchemas(ctx context.Context, selectedTests []string) error {
 	keployFolder := "./keploy/"
 	testSetsIDs, err := s.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
-		s.logger.Error("Failed to get test set IDs", zap.Error(err))
+		utils.LogError(s.logger, err, "failed to get test set IDs")
 		return err
 	}
 
 	for _, entry := range testSetsIDs {
 		testSetID := entry
-		if !yaml.Contains(selectedTests, testSetID) && !genAllTests {
+		if !yaml.Contains(selectedTests, testSetID) && len(selectedTests) != 0 {
 			continue
 		}
 
 		testCases, err := s.testDB.GetTestCases(ctx, testSetID)
 		if err != nil {
-			s.logger.Error("Failed to get test cases", zap.String("testSetID", testSetID), zap.Error(err))
+			utils.LogError(s.logger, err, "failed to get test cases", zap.String("testSetID", testSetID))
 			return err
 		}
 		for _, tc := range testCases {
@@ -316,11 +333,22 @@ func (s *contract) GenerateTestsSchemas(ctx context.Context, selectedTests []str
 			httpSpec.Spec.Response = tc.HTTPResp
 			httpSpec.Version = string(tc.Version)
 
-			done := s.HTTPDocToOpenAPI(ctx, s.logger, filepath.Join(keployFolder, entry, "tests"), tc.Name, filepath.Join(keployFolder, "schema", "tests", entry), false, httpSpec, false)
-			if !done {
+			openapi, err := s.HTTPDocToOpenAPI(s.logger, httpSpec)
+			if err != nil {
 				s.logger.Error("Failed to convert the yaml file to openapi")
 				return fmt.Errorf("failed to convert the yaml file to openapi")
 			}
+			// Validate the OpenAPI document
+			err = validateSchema(openapi)
+			if err != nil {
+				return err
+			}
+			// Save it using the OpenAPIDB
+			err = s.openAPIDB.WriteOpenAPIToFile(ctx, s.logger, filepath.Join(keployFolder, "schema", "tests", entry), tc.Name, openapi, false)
+			if err != nil {
+				return err
+			}
+
 		}
 
 	}
@@ -329,25 +357,14 @@ func (s *contract) GenerateTestsSchemas(ctx context.Context, selectedTests []str
 
 func (s *contract) Generate(ctx context.Context) error {
 	if checkConfigFile(s.config.Contract.ServicesMapping) != nil {
-		s.logger.Error("Error in checking config file while validating")
+		utils.LogError(s.logger, fmt.Errorf("Error in checking config file while validating"), "Error in checking config file while validating")
 		return fmt.Errorf("Error in checking config file while validating")
-	}
-
-	genAllMocks := true
-	genAllTests := true
-
-	if len(s.config.Contract.Services) != 0 {
-		genAllMocks = false
-	}
-	if len(s.config.Contract.Tests) != 0 {
-		genAllTests = false
 	}
 
 	var config config.Config
 	err := yaml.ReadYAMLFile(ctx, s.logger, "./", "keploy", &config, false)
 	// configData, err := yaml.ReadFile(ctx, s.logger, "./", "keploy")
 	if err != nil {
-		s.logger.Fatal("Error reading file", zap.Error(err))
 		return err
 	}
 
@@ -357,11 +374,11 @@ func (s *contract) Generate(ctx context.Context) error {
 	fmt.Println(serviceColor(fmt.Sprintf("Starting Generating OpenAPI Schemas for Current Service: %s ....", s.config.Contract.Self)))
 	fmt.Println(serviceColor("=========================================="))
 
-	err = s.GenerateTestsSchemas(ctx, s.config.Contract.Tests, genAllTests)
+	err = s.GenerateTestsSchemas(ctx, s.config.Contract.Tests)
 	if err != nil {
 		return err
 	}
-	err = s.GenerateMocksSchemas(ctx, s.config.Contract.Services, mappings, genAllMocks)
+	err = s.GenerateMocksSchemas(ctx, s.config.Contract.Services, mappings)
 	if err != nil {
 		return err
 	}
@@ -382,7 +399,7 @@ func (s *contract) DownloadTests(ctx context.Context, path string) error {
 
 	cprFolder, err := filepath.Abs("../VirtualCPR")
 	if err != nil {
-		s.logger.Fatal("Failed to resolve path:", zap.Error(err))
+		return err
 	}
 
 	var schemaConfigFile config.Config
@@ -398,7 +415,7 @@ func (s *contract) DownloadTests(ctx context.Context, path string) error {
 		// Copy this dir to the target path
 		serviceFolder := filepath.Join(targetPath, service)
 		if err := yaml.CopyDir(testsPath, serviceFolder, false, s.logger); err != nil {
-			fmt.Println("Error copying directory:", err)
+			utils.LogError(s.logger, err, "failed to copy directory", zap.String("directory", testsPath))
 			return err
 		}
 		s.logger.Info("Service's tests contracts downloaded", zap.String("service", service))
@@ -406,7 +423,7 @@ func (s *contract) DownloadTests(ctx context.Context, path string) error {
 		keployTestsPath := filepath.Join(cprFolder, service, "keploy")
 		testEntries, err := os.ReadDir(keployTestsPath)
 		if err != nil {
-			s.logger.Error("Failed to read directory", zap.String("directory", keployTestsPath), zap.Error(err))
+			utils.LogError(s.logger, err, "failed to read directory", zap.String("directory", keployTestsPath))
 			return err
 		}
 		for _, testSetID := range testEntries {
@@ -434,11 +451,11 @@ func (s *contract) DownloadMocks(ctx context.Context, path string) error {
 
 	cprFolder, err := filepath.Abs("../VirtualCPR")
 	if err != nil {
-		s.logger.Fatal("Failed to resolve path:", zap.Error(err))
+		return err
 	}
 	entries, err := os.ReadDir(cprFolder)
 	if err != nil {
-		s.logger.Error("Failed to read directory", zap.String("directory", cprFolder), zap.Error(err))
+		utils.LogError(s.logger, err, "failed to read directory", zap.String("directory", cprFolder))
 		return err
 	}
 
@@ -484,7 +501,7 @@ func (s *contract) DownloadMocks(ctx context.Context, path string) error {
 		// Move the Keploy version mocks
 		mocksFolders, err := os.ReadDir(filepath.Join(cprFolder, entry.Name(), "keploy"))
 		if err != nil {
-			s.logger.Error("Failed to read directory", zap.String("directory", cprFolder), zap.Error(err))
+			utils.LogError(s.logger, err, "failed to read directory", zap.String("directory", cprFolder), zap.Error(err))
 			return err
 		}
 		for _, mockFolder := range mocksFolders {
@@ -493,7 +510,7 @@ func (s *contract) DownloadMocks(ctx context.Context, path string) error {
 			}
 			httpMocks, err := s.mockDB.GetHTTPMocks(ctx, mockFolder.Name(), filepath.Join(cprFolder, entry.Name(), "keploy"), "mocks")
 			if err != nil {
-				s.logger.Error("Failed to get HTTP mocks", zap.String("testSetID", mockFolder.Name()), zap.Error(err))
+				utils.LogError(s.logger, err, "failed to get HTTP mocks", zap.String("testSetID", mockFolder.Name()), zap.Error(err))
 				return err
 			}
 			var filteredMocks []*models.HTTPDoc
@@ -532,14 +549,14 @@ func (s *contract) DownloadMocks(ctx context.Context, path string) error {
 func (s *contract) Download(ctx context.Context) error {
 
 	if checkConfigFile(s.config.Contract.ServicesMapping) != nil {
-		s.logger.Error("Error in checking config file while validating")
+		utils.LogError(s.logger, fmt.Errorf("Error in checking config file while validating"), "Error in checking config file while validating")
 		return fmt.Errorf("Error in checking config file while validating")
 	}
 	path := s.config.Contract.Path
 	// Validate the path
 	path, err := yaml.ValidatePath(path)
 	if err != nil {
-		s.logger.Error("Error in validating path", zap.Error(err))
+		utils.LogError(s.logger, err, "failed to validate path")
 		return fmt.Errorf("Error in validating path")
 	}
 	driven := s.config.Contract.Driven
@@ -558,7 +575,7 @@ func (s *contract) Download(ctx context.Context) error {
 
 func (s *contract) Validate(ctx context.Context) error {
 	if checkConfigFile(s.config.Contract.ServicesMapping) != nil {
-		s.logger.Error("Error in checking config file while validating")
+		utils.LogError(s.logger, fmt.Errorf("Error in checking config file while validating"), "Error in checking config file while validating")
 		return fmt.Errorf("Error in checking config file while validating")
 	}
 
