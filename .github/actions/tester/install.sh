@@ -108,8 +108,7 @@ test_bench_rec="./test-bench"
 pilot -test-assert -preRecPath $pre_rec -testBenchPath $test_bench_rec
 exit_status=$?
 echo "Test assertion exit status: $exit_status"
-
-if [ $exit_status -e 1 ]; then
+if [ $exit_status -eq 1 ]; then
     echo "Test assertion failed with exit status $exit_status."
     echo "::set-output name=script_output::failure"
     exit 1
@@ -122,7 +121,8 @@ echo "Tests are asserted successfully 🎉"
 
 pilot -mock-assert -preRecPath $pre_rec -testBenchPath $test_bench_rec
 exit_status=$?
-if [ $exit_status -e 1 ]; then
+echo "Mock assertion preparation exit status: $exit_status"
+if [ $exit_status -eq 1 ]; then
     echo "Mock assertion preparation failed with exit status $exit_status."
     echo "::set-output name=script_output::failure"
     exit 1
