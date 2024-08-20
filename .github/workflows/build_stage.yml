@@ -36,6 +36,14 @@ jobs:
     needs: build
     uses: ./.github/workflows/test-express-mongoose-2.yml
 
+  test-django-postgres-1:
+    needs: build
+    uses: ./.github/workflows/test-django-postgres-1.yml
+
+  test-django-postgres-2:
+    needs: build
+    uses: ./.github/workflows/test-django-postgres-2.yml
+
   # Wait for all the test workflows before getting the coverage
   get-coverage:
     needs:
@@ -44,6 +52,8 @@ jobs:
         test-go-mongo-2,
         test-express-mongoose-1,
         test-express-mongoose-2,
+        test-django-postgres-1,
+        test-django-postgres-2,
       ]
     uses: ./.github/workflows/coverage_stage.yml
 #https://github.com/marketplace/actions/delete-artifact
