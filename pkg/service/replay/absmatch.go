@@ -34,11 +34,11 @@ func AbsMatch(tcs1, tcs2 *models.TestCase, noiseConfig map[string]map[string][]s
 		Actual:   tcs2.Name,
 	}
 
-	curlResult := models.StringResult{
-		Normal:   true,
-		Expected: tcs1.Curl,
-		Actual:   tcs2.Curl,
-	}
+	// curlResult := models.StringResult{
+	// 	Normal:   true,
+	// 	Expected: tcs1.Curl,
+	// 	Actual:   tcs2.Curl,
+	// }
 
 	//compare kind
 	if tcs1.Kind != tcs2.Kind {
@@ -54,12 +54,12 @@ func AbsMatch(tcs1, tcs2 *models.TestCase, noiseConfig map[string]map[string][]s
 	}
 
 	//compare curl
-	ok := CompareCurl(tcs1.Curl, tcs2.Curl, logger)
-	if !ok {
-		curlResult.Normal = false
-		logger.Info("test case curl is not equal", zap.Any("tcs1Curl", tcs1.Curl), zap.Any("tcs2Curl", tcs2.Curl))
-		pass = false
-	}
+	// ok := CompareCurl(tcs1.Curl, tcs2.Curl, logger)
+	// if !ok {
+	// 	curlResult.Normal = false
+	// 	logger.Info("test case curl is not equal", zap.Any("tcs1Curl", tcs1.Curl), zap.Any("tcs2Curl", tcs2.Curl))
+	// 	pass = false
+	// }
 
 	//compare http req
 	reqPass, reqCompare := CompareHTTPReq(tcs1, tcs2, noiseConfig, ignoreOrdering, logger)
@@ -79,7 +79,7 @@ func AbsMatch(tcs1, tcs2 *models.TestCase, noiseConfig map[string]map[string][]s
 	absResult.Kind = kindResult
 	absResult.Req = reqCompare
 	absResult.Resp = respCompare
-	absResult.CurlResult = curlResult
+	// absResult.CurlResult = curlResult
 
 	return pass, reqPass, respPass, absResult
 }
