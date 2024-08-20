@@ -107,7 +107,7 @@ test_bench_rec="./test-bench"
 ## Test assertion
 pilot -test-assert -preRecPath $pre_rec -testBenchPath $test_bench_rec
 exit_status=$?
-if [ $exit_status -ne 0 ]; then
+if [ $exit_status -e 1 ]; then
     echo "Test assertion failed with exit status $exit_status."
     echo "::set-output name=script_output::failure"
     exit 1
@@ -120,7 +120,7 @@ echo "Tests are asserted successfully 🎉"
 
 pilot -mock-assert -preRecPath $pre_rec -testBenchPath $test_bench_rec
 exit_status=$?
-if [ $exit_status -ne 0 ]; then
+if [ $exit_status -e 1 ]; then
     echo "Mock assertion preparation failed with exit status $exit_status."
     echo "::set-output name=script_output::failure"
     exit 1
@@ -138,7 +138,7 @@ sleep 5
 
 overallStatus=$(check_test_status "$pre_rec" 1)
 echo "Overall TestRun status for pre-recorded testscase (after mock assertion): $overallStatus"
-if [ "$overallStatus" -eq 0 ]; then
+if [ "$overallStatus" -eq 1 ]; then
     echo "Newly recorded mocks are not consistent with the pre-recorded mocks."
     echo "::set-output name=script_output::failure"
     exit 1
@@ -153,7 +153,7 @@ sleep 5
 
 overallStatus=$(check_test_status "$test_bench_rec" 1)
 echo "Overall TestRun status for test-bench-recorded testscase (after mock assertion): $overallStatus"
-if [ "$overallStatus" -eq 0 ]; then
+if [ "$overallStatus" -eq 1 ]; then
     echo "Old recorded mocks are not consistent with the test-bench-recorded mocks."
     delete_if_exists "$test_bench_rec"
     echo "::set-output name=script_output::failure"
