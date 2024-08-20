@@ -8,6 +8,8 @@ docker run -p 3306:3306 --rm --name mysql --net keploy-network -e MYSQL_ROOT_PAS
 
 # Remove any preexisting keploy tests and mocks.
 sudo rm -rf keploy/
+
+sed -i 's/store, err := CreateStore()/time.Sleep(10 * time.Second)\nstore, err := CreateStore()/g' "main.go"
 # Start keploy in record mode.
 docker build -t url-short .
 
