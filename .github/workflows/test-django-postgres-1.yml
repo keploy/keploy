@@ -39,7 +39,7 @@ jobs:
 
       - name: Build the django-postgres application
         run: |
-          cd samples-python/django-postgres/django-postgres
+          cd samples-python/django-postgres/django_postgres
           python3 -m virtualenv venv
           source venv/bin/activate
           pip3 install -r requirements.txt
@@ -54,7 +54,7 @@ jobs:
       - name: Run testing script for django-postgres application
         uses: ./.github/actions/tester
         with:
-          working-directory: samples-python/django-postgres/django-postgres
+          working-directory: samples-python/django-postgres/django_postgres
           command: python3 manage.py runserver
           delay: 7
           keploy-record-bin: /usr/local/bin/keployR
