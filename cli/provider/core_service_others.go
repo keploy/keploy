@@ -12,9 +12,10 @@ import (
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb/testset"
 	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
-	"go.keploy.io/server/v2/pkg/platform/yaml/openAPIdb"
+	openapidb "go.keploy.io/server/v2/pkg/platform/yaml/openapidb"
 	reportdb "go.keploy.io/server/v2/pkg/platform/yaml/reportdb"
 	testdb "go.keploy.io/server/v2/pkg/platform/yaml/testdb"
+
 	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/pkg/service/contract"
 	"go.keploy.io/server/v2/pkg/service/replay"
@@ -49,7 +50,7 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 	instrumentation := core.New(logger)
 	testDB := testdb.New(logger, c.Path)
 	mockDB := mockdb.New(logger, c.Path, "")
-	openAPIdb := openAPIdb.New(logger, c.Path)
+	openAPIdb := openapidb.New(logger, c.Path)
 	reportDB := reportdb.New(logger, c.Path+"/reports")
 	testSetDb := testset.New[*models.TestSet](logger, c.Path)
 	return &CommonInternalService{
