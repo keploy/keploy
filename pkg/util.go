@@ -102,12 +102,14 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	if err != nil {
 		utils.LogError(logger, err, "failed to parse the template")
 	}
-	var output bytes.Buffer
-	err = tmpl.Execute(&output, utils.TemplatizedValues)
-	if err != nil {
-		utils.LogError(logger, err, "failed to execute the template")
+	if tmpl != nil {
+		var output bytes.Buffer
+		err = tmpl.Execute(&output, utils.TemplatizedValues)
+		if err != nil {
+			utils.LogError(logger, err, "failed to execute the template")
+		}
+		testCaseStr = output.Bytes()
 	}
-	testCaseStr = output.Bytes()
 	err = json.Unmarshal([]byte(testCaseStr), &tc)
 	if err != nil {
 		utils.LogError(logger, err, "failed to unmarshal the testcase")
