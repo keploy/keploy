@@ -40,8 +40,6 @@ jobs:
       - name: Build the django-postgres application
         run: |
           cd samples-python/django-postgres/django_postgres
-          python3 -m virtualenv venv
-          source venv/bin/activate
           pip3 install -r requirements.txt
           python3 manage.py makemigrations
           python3 manage.py migrate
