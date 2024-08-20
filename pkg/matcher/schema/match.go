@@ -212,7 +212,7 @@ func calculateSimilarityScore(mockOperation, testOperation *models.Operation, st
 	return score, nil
 }
 
-func handleJSONDiff(validatedJSON matcherUtils.ValidatedJSON, logDiffs matcherUtils.DiffsPrinter, newLogger *pp.PrettyPrinter, logger *zap.Logger, _ string, mockName string, testSetID string, mockSetID string, mockBodyStr string, testBodyStr string, diffType string, mode int) (float64, bool, error) {
+func handleJSONDiff(validatedJSON matcherUtils.ValidatedJSON, logDiffs matcherUtils.DiffsPrinter, newLogger *pp.PrettyPrinter, logger *zap.Logger, _ string, _ string, testSetID string, mockSetID string, mockBodyStr string, testBodyStr string, diffType string, mode int) (float64, bool, error) {
 	pass := true
 	differencesCount := 0.0
 	jsonComparisonResult, err := matcherUtils.JSONDiffWithNoiseControl(validatedJSON, nil, false)

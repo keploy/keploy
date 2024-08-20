@@ -19,7 +19,7 @@ import (
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb/testset"
 	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
-	openapidb "go.keploy.io/server/v2/pkg/platform/yaml/openAPIdb"
+	openapidb "go.keploy.io/server/v2/pkg/platform/yaml/openapidb"
 	reportdb "go.keploy.io/server/v2/pkg/platform/yaml/reportdb"
 	testdb "go.keploy.io/server/v2/pkg/platform/yaml/testdb"
 	"go.keploy.io/server/v2/pkg/service"
