@@ -43,12 +43,12 @@ func (db *Db) GetInstallationID(_ context.Context) (string, error) {
 	} else {
 		id, err = machineid.ID()
 		if err != nil {
-			db.logger.Warn("failed to get machine id", zap.Error(err))
+			db.logger.Debug("failed to get machine id", zap.Error(err))
 			return "", nil
 		}
 	}
 	if id == "" {
-		db.logger.Warn("got empty machine id")
+		db.logger.Debug("got empty machine id")
 		return "", nil
 	}
 	return id, nil
