@@ -1,5 +1,5 @@
-// Package schema for schema matching
-package matcherUtils
+// Package matcherutils for matching utilities
+package matcherutils
 
 import (
 	"bytes"
@@ -110,7 +110,7 @@ func FindOperation(item models.PathItem) (*models.Operation, string) {
 	return nil, ""
 }
 
-// Parse the json string into a geko type variable, it will maintain the order of the keys in the json.
+// ParseIntoJSON Parse the json string into a geko type variable, it will maintain the order of the keys in the json.
 func ParseIntoJSON(response string) (interface{}, error) {
 	// Parse the response into a json object.
 	if response == "" {
@@ -123,7 +123,7 @@ func ParseIntoJSON(response string) (interface{}, error) {
 	return result, nil
 }
 
-// This function compares the two responses, if there is any difference in the values,
+// CompareResponses compares the two responses, if there is any difference in the values,
 // It checks in the templatized values map if the value is already present, it will update the value in the map.
 // It also changes the expected value to the actual value in the response1 (expected body)
 func CompareResponses(response1, response2 *interface{}, key string) {

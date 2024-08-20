@@ -77,7 +77,7 @@ func Download(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			svc, err := serviceFactory.GetService(ctx, "contract")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service")

@@ -1,5 +1,5 @@
-// Package openAPIdb provides a openAPI database implementation.
-package openAPIdb
+// Package openapidb provides a openAPI database implementation.
+package openapidb
 
 import (
 	"bytes"
@@ -81,7 +81,7 @@ func (ts *OpenAPIYaml) GetTestCasesSchema(ctx context.Context, testSetID string,
 	return tcs, nil
 }
 
-func (ys *OpenAPIYaml) GetMocksSchemas(ctx context.Context, testSetID string, mockPath string, mockFileName string) ([]*models.OpenAPI, error) {
+func (ts *OpenAPIYaml) GetMocksSchemas(ctx context.Context, testSetID string, mockPath string, mockFileName string) ([]*models.OpenAPI, error) {
 
 	var tcsMocks = make([]*models.OpenAPI, 0)
 
@@ -93,9 +93,9 @@ func (ys *OpenAPIYaml) GetMocksSchemas(ctx context.Context, testSetID string, mo
 
 	if _, err := os.Stat(mockPath); err == nil {
 		var mockYamls []*models.OpenAPI
-		data, err := yaml.ReadFile(ctx, ys.logger, path, mockFileName)
+		data, err := yaml.ReadFile(ctx, ts.logger, path, mockFileName)
 		if err != nil {
-			utils.LogError(ys.logger, err, "failed to read the mocks from config yaml", zap.Any("session", filepath.Base(path)))
+			utils.LogError(ts.logger, err, "failed to read the mocks from config yaml", zap.Any("session", filepath.Base(path)))
 			return nil, err
 		}
 		dec := yamlLib.NewDecoder(bytes.NewReader(data))
@@ -111,7 +111,7 @@ func (ys *OpenAPIYaml) GetMocksSchemas(ctx context.Context, testSetID string, mo
 			mockYamls = append(mockYamls, doc)
 		}
 		if err != nil {
-			utils.LogError(ys.logger, err, "failed to decode the config mocks from yaml docs", zap.Any("session", filepath.Base(path)))
+			utils.LogError(ts.logger, err, "failed to decode the config mocks from yaml docs", zap.Any("session", filepath.Base(path)))
 			return nil, err
 		}
 		tcsMocks = mockYamls
