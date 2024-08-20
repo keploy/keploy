@@ -1,0 +1,24 @@
+name: MySQL-Golang On Docker
+on: [pull_request]
+jobs:
+  mysql_golang_docker:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    - name: Run build script
+      run: |
+         source ./.github/workflows/test_workflow_scripts/update-docker.sh
+    - name: Build binary
+      run: |
+        go build  -tags=viper_bind_struct -o keployv2
+    - name: Checkout the samples-go repository
+      uses: actions/checkout@v2
+      with:
+        repository: keploy/samples-go
+        path: samples-go
+    - name: Run echo-mysql application
+      run: |
+        cd samples-go/echo-mysql
+        source ./../../.github/workflows/test_workflow_scripts/golang-mysql-docker.sh
