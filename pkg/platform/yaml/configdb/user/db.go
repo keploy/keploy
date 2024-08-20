@@ -36,7 +36,7 @@ func New(logger *zap.Logger, cfg *config.Config) *Db {
 	}
 }
 
-func (db *Db) GetInstallationID(ctx context.Context) (string, error) {
+func (db *Db) GetInstallationID(_ context.Context) (string, error) {
 	var id string
 	var err error
 	if db.cfg.InDocker {
