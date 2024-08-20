@@ -80,7 +80,7 @@ jobs:
             SENTRY_DSN_DOCKER=${{secrets.SENTRY_DSN_DOCKER}}
             VERSION=${{ env.VERSION }}
             SERVER_URL=https://api.keploy.io
-            GITTHUB_APP_CLIENT_ID=${{ secrets.GITHUB_APP_CLIENT_ID }}
+            GITHUB_APP_CLIENT_ID=${{ secrets.GITHUB_APP_CLIENT_ID }}
 
       # Sign the resulting Docker image digest except on PRs.
       # This will only write to the public Rekor transparency log when the Docker

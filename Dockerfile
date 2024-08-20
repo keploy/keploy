@@ -16,7 +16,7 @@ RUN go mod download
 COPY . /app
 
 # Build the keploy binary
-RUN go build -tags=viper_bind_struct -ldflags="-X main.dsn=$SENTRY_DSN_DOCKER -X main.version=$VERSION -X main.apiServerURI=$SERVER_URL -X main.gitHubClientID=$GITTHUB_APP_CLIENT_ID" -o keploy .
+RUN go build -tags=viper_bind_struct -ldflags="-X main.dsn=$SENTRY_DSN_DOCKER -X main.version=$VERSION -X main.apiServerURI=$SERVER_URL -X main.gitHubClientID=$GITHUB_APP_CLIENT_ID" -o keploy .
 
 # === Runtime Stage ===
 FROM debian:bookworm-slim
