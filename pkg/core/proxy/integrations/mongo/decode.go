@@ -215,7 +215,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					switch mongoResponse.Header.Opcode {
 					case wiremessage.OpReply:
 						replySpec := mongoResponse.Message.(*models.MongoOpReply)
-						replyMessage, err := encodeOpReply(replySpec, logger)
+						replyMessage, err := encodeOpReply(mongoRequests[0], configMocks[bestMatchIndex].Spec.MongoRequests[0], replySpec, logger)
 						if err != nil {
 							utils.LogError(logger, err, "failed to encode the recorded OpReply yaml", zap.Any("for request with id", responseTo))
 							errCh <- err

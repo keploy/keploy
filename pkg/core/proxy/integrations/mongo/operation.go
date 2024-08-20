@@ -3,6 +3,7 @@
 package mongo
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/scram"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.mongodb.org/mongo-driver/bson"
@@ -475,6 +478,132 @@ func extractSectionSingle(data string) (string, error) {
 	return content, nil
 }
 
+func processOpReply(expectedRequest, actualRequest models.MongoRequest, expectedResponse *models.MongoOpReply, logger *zap.Logger) (string, bool) {
+	if len(expectedResponse.Documents) == 0 {
+		return "", false
+	}
+	for _, document := range expectedResponse.Documents {
+		var responseMsg map[string]interface{}
+		err := json.Unmarshal([]byte(document), &responseMsg)
+		if err != nil {
+			logger.Error("Failed to unmarshal JSON document of OpReply", zap.Error(err))
+			return "", false
+		}
+		// Extract and decode the payload from the actual MongoDB request
+		responseMsgData, ok := responseMsg["speculativeAuthenticate"].(map[string]interface{})
+		if !ok {
+			logger.Debug("failed to extract payload from response data", zap.Any("responseMsgData", responseMsg))
+			continue
+		}
+		resPayload, err := extractAuthPayload(responseMsgData)
+		if err != nil {
+			logger.Debug("Failed to fetch the payload from the received MongoDB response", zap.Error(err))
+			continue
+		}
+		logger.Debug(fmt.Sprintf("Payload of the received response: %s", resPayload))
+
+		decodedResPayload, err := decodeBase64Str(resPayload)
+		if err != nil {
+			logger.Error("Error decoding the received payload base64 string", zap.Error(err))
+			return "", false
+		}
+		logger.Debug(fmt.Sprintf("Decoded payload of the actual for the SASLStart: %s", string(decodedResPayload)))
+
+		// Extract and decode the expected MongoDB request payload
+		expectedrequestPayload := expectedRequest.Message.(*models.MongoOpQuery).Query // Assuming the query is the payload
+		var expectedrequestPayloadMap map[string]interface{}
+
+		err = json.Unmarshal([]byte(expectedrequestPayload), &expectedrequestPayloadMap)
+		if err != nil {
+			utils.LogError(logger, err, "failed to unmarshal request payload into map")
+			return "", false
+		}
+		expectedRequest, ok := expectedrequestPayloadMap["speculativeAuthenticate"].(map[string]interface{})
+		if !ok {
+			logger.Debug("failed to extract payload from expected request data", zap.Any("expectedRequest", expectedRequest))
+			continue
+		}
+		expectedPayload, err := extractAuthPayload(expectedRequest)
+		if err != nil {
+			logger.Debug("Failed to fetch the payload from the expected MongoDB request", zap.Error(err))
+			continue
+		}
+		logger.Debug(fmt.Sprintf("Payload of the expected request: %s", expectedPayload))
+
+		decodedExpPayload, err := decodeBase64Str(expectedPayload)
+		if err != nil {
+			logger.Error("Error decoding the expected request payload base64 string", zap.Error(err))
+			return "", false
+		}
+		logger.Debug(fmt.Sprintf("Decoded payload of the expected for the SASLStart: %s", string(decodedExpPayload)))
+
+		actualRequestPayload := actualRequest.Message.(*models.MongoOpQuery).Query // Assuming the query is the payload
+		var actualRequestPayloadMap map[string]interface{}
+		err = json.Unmarshal([]byte(actualRequestPayload), &actualRequestPayloadMap)
+		if err != nil {
+			utils.LogError(logger, err, "failed to unmarshal request payload into map")
+			return "", false
+		}
+
+		actualRequest, ok := actualRequestPayloadMap["speculativeAuthenticate"].(map[string]interface{})
+		if !ok {
+			logger.Debug("failed to extract payload from actual request data", zap.Any("expectedRequest", expectedRequest))
+			continue
+		}
+
+		actualReqPayload, err := extractAuthPayload(actualRequest)
+		if err != nil {
+			logger.Debug("Failed to extract the payload from the actual MongoDB request", zap.Error(err))
+			continue
+		}
+		// Extract and decode the payload from the actual MongoDB request
+		decodedReqPayload, err := decodeBase64Str(actualReqPayload)
+		if err != nil {
+			logger.Error("Failed to fetch the payload from the actual MongoDB request", zap.Error(err))
+			return "", false
+		}
+		logger.Debug(fmt.Sprintf("Payload of the actual request: %s", decodedReqPayload))
+
+		newFirstAuthResponse, err := scram.GenerateServerFirstMessage(decodedExpPayload, decodedReqPayload, decodedResPayload, logger)
+		if err != nil {
+			return "", false
+		}
+		logger.Debug("After replacing the new client nonce in auth response", zap.String("first response", newFirstAuthResponse))
+
+		conversationID, err := extractConversationID(responseMsgData)
+		if err != nil {
+			logger.Error("Failed to fetch the conversationId for the SCRAM auth from the recorded first response", zap.Error(err))
+			return "", false
+		}
+
+		// Generate the auth message from the received first request and recorded first response
+		authMessage := scram.GenerateAuthMessage(string(decodedReqPayload), newFirstAuthResponse, logger)
+		if authMessage == "" {
+			err := errors.New("failed to generate auth message")
+			logger.Error("Auth message generation failed", zap.Error(err))
+			return "", false
+		}
+		authMechanism, ok := actualRequest["mechanism"].(string)
+		if !ok {
+			logger.Debug("failed to auth mechanism from expected request data", zap.Any("expectedRequest", actualRequest))
+			continue
+		}
+		if authMechanism != util.SCRAM_SHA_1 && authMechanism != util.SCRAM_SHA_256 {
+			logger.Error("Invalid authentication mechanism", zap.String("authMechanism", authMechanism))
+			return "", false
+		}
+		authMessage = authMessage + ",auth=" + authMechanism
+		authMessageMap.Store(conversationID, authMessage)
+		// Marshal the new first response for the SCRAM authentication
+		authResponse := base64.StdEncoding.EncodeToString([]byte(newFirstAuthResponse))
+		if authResponse != "" {
+			return authResponse, true
+		}
+	}
+
+	return "", false
+}
+
 // encodeOpMsg encodes the OpMsg value into a mongo wire message.
 func encodeOpMsg(responseOpMsg *models.MongoOpMessage, actualRequestMsgSections []string, expectedRequestMsgSections []string, mongoPassword string, logger *zap.Logger) (*opMsg, error) {
 	message := &opMsg{
@@ -512,7 +641,6 @@ func encodeOpMsg(responseOpMsg *models.MongoOpMessage, actualRequestMsgSections 
 				utils.LogError(logger, err, "failed to extract the msg section from recorded message single section")
 				return nil, err
 			}
-
 			resultStr, ok, err := handleScramAuth(actualRequestMsgSections, expectedRequestMsgSections, sectionStr, mongoPassword, logger)
 			if err != nil {
 				return nil, err
@@ -735,9 +863,10 @@ func (r *opReply) TransactionDetails() *TransactionDetails {
 	return nil
 }
 
-func encodeOpReply(reply *models.MongoOpReply, logger *zap.Logger) (*opReply, error) {
+func encodeOpReply(actualRequest models.MongoRequest, expectedRequest models.MongoRequest, expectedResponse *models.MongoOpReply, logger *zap.Logger) (*opReply, error) {
 	replyDocs := []bsoncore.Document{}
-	for _, v := range reply.Documents {
+	updatedFirstResponse, isResponseUpdated := processOpReply(expectedRequest, actualRequest, expectedResponse, logger)
+	for _, v := range expectedResponse.Documents {
 		var unmarshaledDoc bsoncore.Document
 		logger.Debug(fmt.Sprintf("the document string is: %v", string(v)))
 		var result map[string]interface{}
@@ -749,14 +878,15 @@ func encodeOpReply(reply *models.MongoOpReply, logger *zap.Logger) (*opReply, er
 		}
 		// set the fields for handshake calls at test mode
 		result["localTime"].(map[string]interface{})["$date"].(map[string]interface{})["$numberLong"] = strconv.FormatInt(time.Now().Unix(), 10)
-
+		if isResponseUpdated {
+			result["speculativeAuthenticate"].(map[string]interface{})["payload"].(map[string]interface{})["$binary"].(map[string]interface{})["base64"] = updatedFirstResponse
+		}
 		v, err := json.Marshal(result)
 		if err != nil {
 			utils.LogError(logger, err, "failed to marshal the updated string document of OpReply")
 			return nil, err
 		}
 		logger.Debug(fmt.Sprintf("the updated document string is: %v", result["localTime"].(map[string]interface{})["$date"].(map[string]interface{})["$numberLong"]))
-
 		err = bson.UnmarshalExtJSON([]byte(v), false, &unmarshaledDoc)
 		if err != nil {
 			utils.LogError(logger, err, "failed to unmarshal the updated document string of OpReply")
@@ -768,10 +898,10 @@ func encodeOpReply(reply *models.MongoOpReply, logger *zap.Logger) (*opReply, er
 
 	}
 	return &opReply{
-		flags:        wiremessage.ReplyFlag(reply.ResponseFlags),
-		cursorID:     reply.CursorID,
-		startingFrom: reply.StartingFrom,
-		numReturned:  reply.NumberReturned,
+		flags:        wiremessage.ReplyFlag(expectedResponse.ResponseFlags),
+		cursorID:     expectedResponse.CursorID,
+		startingFrom: expectedResponse.StartingFrom,
+		numReturned:  expectedResponse.NumberReturned,
 		documents:    replyDocs,
 	}, nil
 }
