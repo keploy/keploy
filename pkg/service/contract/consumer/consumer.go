@@ -235,7 +235,8 @@ func (s *consumer) ValidateMockAgainstTests(scores map[string]map[string]map[str
 				if mockInfo.Score != 0.0 {
 					fmt.Print("Validating '")
 					fmt.Print(serviceColor(service)) // Print the service name in blue
-					fmt.Println(fmt.Sprintf("': (%s)/%s for (%s)/%s", mockSetID, mockInfo.Data.Info.Title, mockInfo.TestSetID, mockInfo.Name))
+					fmt.Printf("': (%s)/%s for (%s)/%s\n", mockSetID, mockInfo.Data.Info.Title, mockInfo.TestSetID, mockInfo.Name)
+
 				}
 
 				// Case 1: If the score is 1.0, the mock passed the validation
@@ -253,9 +254,8 @@ func (s *consumer) ValidateMockAgainstTests(scores map[string]map[string]map[str
 					// Print a success message in green
 					fmt.Print("Contract check ")
 					fmt.Print(successColor("passed")) // Print "passed" in green
-					fmt.Println(fmt.Sprintf(" for the test '%s' / mock '%s'", mockInfo.Name, mockInfo.Data.Info.Title))
-					fmt.Println("--------------------------------------------------------------------\n")
-
+					fmt.Printf(" for the test '%s' / mock '%s'\n", mockInfo.Name, mockInfo.Data.Info.Title)
+					fmt.Println("--------------------------------------------------------------------")
 					// Case 2: If the score is between 0 and 1.0, the mock failed the validation
 				} else if mockInfo.Score > 0.0 {
 					// Retrieve the Status struct for the given mockSetID
@@ -271,11 +271,12 @@ func (s *consumer) ValidateMockAgainstTests(scores map[string]map[string]map[str
 					// Print a failure message in red
 					fmt.Print("Contract check")
 					fmt.Print(notMatchedColor(" failed")) // Print "failed" in red
-					fmt.Println(fmt.Sprintf(" for the test '%s' / mock '%s' ", mockInfo.Name, mockInfo.Data.Info.Title))
+					fmt.Printf(" for the test '%s' / mock '%s'\n", mockInfo.Name, mockInfo.Data.Info.Title)
+
 					fmt.Println()
 
 					// Additional information: Print consumer and current service comparison
-					fmt.Println(fmt.Sprintf("                                    Current %s   ||   Consumer %s  ", serviceColor(s.config.Contract.Self), serviceColor(service)))
+					fmt.Printf("                                    Current %s   ||   Consumer %s\n", serviceColor(s.config.Contract.Self), serviceColor(service))
 
 					// Perform comparison between the mock and test case again
 					_, _, err := schemaMatcher.Match(mockInfo.Data, *testsMapping[mockInfo.TestSetID][mockInfo.Name], mockInfo.TestSetID, mockSetID, s.logger, COMPAREMODE)
@@ -299,7 +300,7 @@ func (s *consumer) ValidateMockAgainstTests(scores map[string]map[string]map[str
 
 					// Print a "missed" message in yellow
 					fmt.Println(missedColor(fmt.Sprintf("No ideal test case found for the (%s)/'%s'", mockSetID, mockInfo.Data.Info.Title)))
-					fmt.Println("--------------------------------------------------------------------\n")
+					fmt.Println("--------------------------------------------------------------------")
 				}
 			}
 		}
@@ -324,14 +325,14 @@ func generateSummaryTable(summary models.Summary) {
 	// Set table headers
 	table.SetHeader([]string{"Consumer Service", "Consumer Service Test-set", "Mock-name", "Failed", "Passed", "Missed"})
 	table.SetAlignment(tablewriter.ALIGN_CENTER)
+	table.SetAutoMergeCells(true)
 	// Loop through each service summary to populate the table
 	for idx, serviceSummary := range summary.ServicesSummary {
-		serviceNamePrinted := false // Track if service name is printed
 		failedCount := serviceSummary.FailedCount
 		passedCount := serviceSummary.PassedCount
 		missedCount := serviceSummary.MissedCount
 		table.Append([]string{
-			printOnce(serviceColor(serviceSummary.Service), &serviceNamePrinted),
+			serviceColor(serviceSummary.Service),
 			"",
 			"",
 			notMatchedColor(failedCount),
@@ -339,12 +340,11 @@ func generateSummaryTable(summary models.Summary) {
 			missedColor(missedCount),
 		})
 		for testSet, status := range serviceSummary.TestSets {
-			testSetPrinted := false // Track if test-set name is printed
 			for _, mock := range status.Failed {
 				// Add rows for failed mocks
 				table.Append([]string{
-					printOnce(serviceSummary.Service, &serviceNamePrinted),
-					printOnce(testSet, &testSetPrinted),
+					"",
+					testSet,
 					notMatchedColor(mock),
 					"",
 					"", "",
@@ -353,15 +353,15 @@ func generateSummaryTable(summary models.Summary) {
 
 			for _, mock := range status.Missed {
 				table.Append([]string{
-					printOnce(serviceSummary.Service, &serviceNamePrinted),
-					printOnce(testSet, &testSetPrinted),
+					"",
+					testSet,
 					missedColor(mock), "",
 					"", "",
 				})
 			}
 			table.Append([]string{
-				printOnce(serviceSummary.Service, &serviceNamePrinted),
-				printOnce(testSet, &testSetPrinted),
+				"",
+				"",
 				"", "",
 				"", "",
 			})
@@ -374,12 +374,4 @@ func generateSummaryTable(summary models.Summary) {
 
 	// Render the table to stdout
 	table.Render()
-}
-
-func printOnce(text string, printed *bool) string {
-	if *printed {
-		return "" // Return empty string if already printed
-	}
-	*printed = true
-	return text // Return text and set printed flag to true
 }

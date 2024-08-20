@@ -124,7 +124,7 @@ func Validate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 			}
 			err = contract.Validate(ctx)
 			if err != nil {
-				utils.LogError(logger, err, "failed to download contract")
+				utils.LogError(logger, err, "failed to validate contract")
 			}
 			return nil
 		},
