@@ -1,17 +1,12 @@
 package replay
 
 import (
-	"context"
 	"fmt"
 	"net/url"
 	"time"
 
 	// "encoding/json"
 	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg"
-
-	"go.keploy.io/server/v2/pkg/models"
-	"go.uber.org/zap"
 )
 
 type TestReportVerdict struct {
@@ -77,59 +72,6 @@ func ReplaceBaseURL(newURL, oldURL string) (string, error) {
 
 	replacedURL := parsedOldURL.String()
 	return replacedURL, nil
-}
-
-type requestMockUtil struct {
-	logger     *zap.Logger
-	path       string
-	mockName   string
-	apiTimeout uint64
-	basePath   string
-}
-
-func NewRequestMockUtil(logger *zap.Logger, path, mockName string, apiTimeout uint64, basePath string) RequestMockHandler {
-	return &requestMockUtil{
-		path:       path,
-		logger:     logger,
-		mockName:   mockName,
-		apiTimeout: apiTimeout,
-		basePath:   basePath,
-	}
-}
-func (t *requestMockUtil) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error) {
-	switch tc.Kind {
-	case models.HTTP:
-		t.logger.Debug("Before simulating the request", zap.Any("Test case", tc))
-		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, t.logger, t.apiTimeout)
-		t.logger.Debug("After simulating the request", zap.Any("test case id", tc.Name))
-		return resp, err
-	}
-	return nil, nil
-}
-
-func (t *requestMockUtil) AfterTestHook(_ context.Context, testRunID, testSetID string, coverage models.TestCoverage, tsCnt int) (*models.TestReport, error) {
-	t.logger.Debug("AfterTestHook", zap.Any("testRunID", testRunID), zap.Any("testSetID", testSetID), zap.Any("totalTestSetCount", tsCnt), zap.Any("coverage", coverage))
-	return nil, nil
-}
-
-func (t *requestMockUtil) ProcessTestRunStatus(_ context.Context, status bool, testSetID string) {
-	if status {
-		t.logger.Debug("Test case passed for", zap.String("testSetID", testSetID))
-	} else {
-		t.logger.Debug("Test case failed for", zap.String("testSetID", testSetID))
-	}
-}
-
-func (t *requestMockUtil) FetchMockName() string {
-	return t.mockName
-}
-
-func (t *requestMockUtil) ProcessMockFile(_ context.Context, testSetID string) {
-	if t.basePath != "" {
-		t.logger.Debug("Mocking is disabled when basePath is given", zap.String("testSetID", testSetID), zap.String("basePath", t.basePath))
-		return
-	}
-	t.logger.Debug("Mock file for test set", zap.String("testSetID", testSetID))
 }
 
 func mergeMaps(map1, map2 map[string][]string) map[string][]string {
