@@ -15,12 +15,14 @@ import (
 	"go.keploy.io/server/v2/pkg/core/tester"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/docker"
+	"go.keploy.io/server/v2/pkg/platform/storage"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb/testset"
 	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v2/pkg/platform/yaml/openAPIdb"
 	reportdb "go.keploy.io/server/v2/pkg/platform/yaml/reportdb"
 	testdb "go.keploy.io/server/v2/pkg/platform/yaml/testdb"
+	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/pkg/service/contract"
 	"go.keploy.io/server/v2/pkg/service/orchestrator"
 	"go.keploy.io/server/v2/pkg/service/record"
@@ -35,14 +37,14 @@ type CommonInternalService struct {
 	Instrumentation *core.Core
 }
 
-func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger, tel *telemetry.Telemetry) (interface{}, error) {
+func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger, tel *telemetry.Telemetry, auth service.Auth) (interface{}, error) {
 	commonServices, err := GetCommonServices(ctx, cfg, logger)
 	if err != nil {
 		return nil, err
 	}
 	contractSvc := contract.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlOpenAPIDb, cfg)
 	recordSvc := record.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, cfg)
-	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, cfg)
+	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, auth, commonServices.Storage, cfg)
 
 	switch cmd {
 	case "rerecord":
@@ -101,7 +103,7 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 	openAPIdb := openAPIdb.New(logger, filepath.Join(c.Path, "schema"))
 	reportDB := reportdb.New(logger, c.Path+"/reports")
 	testSetDb := testset.New[*models.TestSet](logger, c.Path)
-
+	storage := storage.New(c.APIServerURL, logger)
 	return &CommonInternalService{
 		commonPlatformServices{
 			YamlTestDB:    testDB,
@@ -109,6 +111,7 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 			YamlOpenAPIDb: openAPIdb,
 			YamlReportDb:  reportDB,
 			YamlTestSetDB: testSetDb,
+			Storage:       storage,
 		},
 		instrumentation,
 	}, nil

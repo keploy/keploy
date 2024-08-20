@@ -42,6 +42,7 @@ test:
   mocking: true
   disableLineCoverage: false
   fallbackOnMiss: false
+  disableMockUpload: true
 record:
   recordTimer: 0s
   filters: []
