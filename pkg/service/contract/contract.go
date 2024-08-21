@@ -230,82 +230,100 @@ func (s *contract) HTTPDocToOpenAPI(logger *zap.Logger, data models.HTTPDoc) (mo
 	return openapi, nil
 }
 
+// GenerateMocksSchemas generates mock schemas based on the provided services and mappings.
 func (s *contract) GenerateMocksSchemas(ctx context.Context, services []string, mappings map[string][]string) error {
 	keployFolder := "./keploy/"
-	entries, err := os.ReadDir(keployFolder)
+
+	// Retrieve all test set IDs from the test database.
+	testSetsIDs, err := s.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
-		utils.LogError(s.logger, err, "failed to read directory", zap.String("directory", keployFolder))
+		// Log and return error if test set IDs retrieval fails.
+		utils.LogError(s.logger, err, "failed to get test set IDs")
 		return err
 	}
-	// Checking if the services provided by the user are in the services mapping
+
+	// If specific services are provided, ensure they exist in the mappings.
 	if len(services) != 0 {
 		for _, service := range services {
 			if _, exists := mappings[service]; !exists {
+				// Warn if the service is not found in the services mapping.
 				s.logger.Warn("Service not found in services mapping, no contract generation", zap.String("service", service))
 			}
 		}
 	}
-	for _, entry := range entries {
-		if entry.IsDir() && strings.Contains(entry.Name(), "test") {
-			testSetID := entry.Name()
-			httpMocks, err := s.mockDB.GetHTTPMocks(ctx, testSetID, keployFolder, "mocks")
-			if err != nil {
-				utils.LogError(s.logger, err, "failed to get HTTP mocks", zap.String("testSetID", testSetID))
-				return err
-			}
 
-			var duplicateMocks []string
-			for _, mock := range httpMocks {
-				var isAppend bool
-				for service, serviceMappings := range mappings {
-					if !yaml.Contains(services, service) && len(services) != 0 {
-						continue
-					}
-					var mappingFound bool
-					for _, mapping := range serviceMappings {
-						if mapping == mock.Spec.Request.URL {
-							var mockCode = service
+	// Loop through each test set ID to process the HTTP mocks.
+	for _, testSetID := range testSetsIDs {
+		// Retrieve HTTP mocks for the test set from the mock database.
+		httpMocks, err := s.mockDB.GetHTTPMocks(ctx, testSetID, keployFolder, "mocks")
+		if err != nil {
+			// Log and return error if HTTP mock retrieval fails.
+			utils.LogError(s.logger, err, "failed to get HTTP mocks", zap.String("testSetID", testSetID))
+			return err
+		}
 
-							// if mock.Spec.Request.URLParams != nil {
-							// 	mockCode = fmt.Sprintf("%v", mock.Spec.Request.Method) + "-" + fmt.Sprintf("%v", mock.Spec.Request.URL) + "-0"
-							// } else {
-							// 	mockCode = fmt.Sprintf("%v", mock.Spec.Request.Method) + "-" + fmt.Sprintf("%v", mock.Spec.Request.URL) + "-1"
-							// }
-							if yaml.Contains(duplicateMocks, mockCode) {
-								isAppend = true
-							} else {
-								duplicateMocks = append(duplicateMocks, mockCode)
-							}
+		// Track duplicate mocks to avoid generating the same schema multiple times.
+		var duplicateServices []string
 
-							mappingFound = true
-							openapi, err := s.HTTPDocToOpenAPI(s.logger, *mock)
-							if err != nil {
-								utils.LogError(s.logger, err, "failed to convert the yaml file to openapi")
-								return fmt.Errorf("failed to convert the yaml file to openapi")
-							}
-							// Validate the OpenAPI document
-							err = validateSchema(openapi)
-							if err != nil {
-								return err
-							}
-							// Save it using the OpenAPIDB
-							err = s.openAPIDB.WriteOpenAPIToFile(ctx, s.logger, filepath.Join(keployFolder, "schema", "mocks", service, entry.Name()), "mocks", openapi, isAppend)
-							if err != nil {
-								return err
-							}
-							break
+		// Loop through each HTTP mock to generate OpenAPI documentation.
+		for _, mock := range httpMocks {
+			var isAppend bool // Flag to indicate whether to append to existing mocks.
+
+			// Loop through services and their mappings to find the relevant mock.
+			for service, serviceMappings := range mappings {
+				// If a specific service list is provided, skip services not in the list.
+				if !yaml.Contains(services, service) && len(services) != 0 {
+					continue
+				}
+
+				var mappingFound bool // Flag to track if the mapping for the service is found.
+
+				// Check if the mock's URL matches any service mapping.
+				for _, mapping := range serviceMappings {
+					if mapping == mock.Spec.Request.URL {
+
+						// Check for duplicate services to append the mock to the existing mocks.yaml before.
+						if yaml.Contains(duplicateServices, service) {
+							isAppend = true
+						} else {
+							duplicateServices = append(duplicateServices, service)
 						}
-					}
-					if mappingFound {
+
+						// Convert the HTTP mock to OpenAPI documentation.
+						openapi, err := s.HTTPDocToOpenAPI(s.logger, *mock)
+						if err != nil {
+							utils.LogError(s.logger, err, "failed to convert the yaml file to openapi")
+							return fmt.Errorf("failed to convert the yaml file to openapi")
+						}
+
+						// Validate the generated OpenAPI schema.
+						err = validateSchema(openapi)
+						if err != nil {
+							return err
+						}
+
+						// Write the OpenAPI document to the specified directory.
+						err = s.openAPIDB.Write(ctx, s.logger, filepath.Join(keployFolder, "schema", "mocks", service, testSetID), "mocks", openapi, isAppend)
+						if err != nil {
+							return err
+						}
+
+						mappingFound = true // Mark the mapping as found.
 						break
 					}
+				}
+
+				// Break the outer loop if the relevant mapping is found.
+				if mappingFound {
+					break
 				}
 			}
 		}
 	}
 
-	return nil
+	return nil // Return nil if the function completes successfully.
 }
+
 func (s *contract) GenerateTestsSchemas(ctx context.Context, selectedTests []string) error {
 	keployFolder := "./keploy/"
 	testSetsIDs, err := s.testDB.GetAllTestSetIDs(ctx)
@@ -344,7 +362,7 @@ func (s *contract) GenerateTestsSchemas(ctx context.Context, selectedTests []str
 				return err
 			}
 			// Save it using the OpenAPIDB
-			err = s.openAPIDB.WriteOpenAPIToFile(ctx, s.logger, filepath.Join(keployFolder, "schema", "tests", entry), tc.Name, openapi, false)
+			err = s.openAPIDB.Write(ctx, s.logger, filepath.Join(keployFolder, "schema", "tests", entry), tc.Name, openapi, false)
 			if err != nil {
 				return err
 			}
@@ -442,107 +460,149 @@ func (s *contract) DownloadTests(ctx context.Context, path string) error {
 	}
 	return nil
 }
+
+// DownloadMocks downloads the mocks for a specific service and stores them in the target path.
+// The mocks are extracted from the VirtualCPR folder and saved in the "Download/Mocks" directory.
 func (s *contract) DownloadMocks(ctx context.Context, path string) error {
+	// Log and display the provided path (this path is not simulated)
 	fmt.Println("Path given (not simulated): ", path)
+
+	// Set the target path where the downloaded mocks will be stored
 	targetPath := "./Download/Mocks"
+
+	// Create the target directory if it doesn't already exist
 	if err := yaml.CreateDir(targetPath, s.logger); err != nil {
 		return err
 	}
 
+	// Get the absolute path to the VirtualCPR folder
 	cprFolder, err := filepath.Abs("../VirtualCPR")
 	if err != nil {
 		return err
 	}
+
+	// Read all entries (files and directories) in the VirtualCPR folder
 	entries, err := os.ReadDir(cprFolder)
 	if err != nil {
 		utils.LogError(s.logger, err, "failed to read directory", zap.String("directory", cprFolder))
 		return err
 	}
 
+	// Loop through each entry in the VirtualCPR folder
 	for _, entry := range entries {
+		// If the entry is not a directory, skip it
 		if !entry.IsDir() {
 			continue
 		}
 
+		// Extract the name of the current service (the one being processed)
 		var self = s.config.Contract.Self
 		var schemaConfigFile config.Config
 
+		// Construct the path to the schema configuration file for the current service
 		configFilePath := filepath.Join(cprFolder, entry.Name(), "keploy", "schema")
+
+		// Read the schema configuration YAML file
 		if err := yaml.ReadYAMLFile(ctx, s.logger, configFilePath, "keploy", &schemaConfigFile, true); err != nil {
 			return err
 		}
 
+		// Check if the current service exists in the service mapping from the schema configuration
 		serviceFound := false
 		if _, exists := schemaConfigFile.Contract.ServicesMapping[self]; exists {
 			serviceFound = true
 		}
 
+		// If the service is not found in the mapping, skip to the next service
 		if !serviceFound {
 			continue
 		}
 
+		// Create a directory for the current service inside the target path
 		serviceFolder := filepath.Join(targetPath, schemaConfigFile.Contract.Self)
 		if err := yaml.CreateDir(serviceFolder, s.logger); err != nil {
 			return err
 		}
 
+		// Construct the path to the mock files for the current service
 		mocksSourcePath := filepath.Join(cprFolder, entry.Name(), "keploy", "schema", "mocks", self)
+
+		// Log and display the start of the mock download process for the service
 		serviceColor := color.New(color.FgYellow).SprintFunc()
 		fmt.Println(serviceColor("=========================================="))
 		fmt.Println(serviceColor(fmt.Sprintf("Starting Downloading Mocks for Service: %s ....", entry.Name())))
 		fmt.Println(serviceColor("=========================================="))
 
+		// Copy the mock files from the source directory to the target directory
 		if err := yaml.CopyDir(mocksSourcePath, serviceFolder, true, s.logger); err != nil {
 			fmt.Println("Error moving directory:", err)
 			return err
 		}
+
+		// Log that the mocks for the service have been downloaded
 		s.logger.Info("Service's schema mocks contracts downloaded", zap.String("service", entry.Name()), zap.String("mocks", mocksSourcePath))
 
-		// Move the Keploy version mocks
+		// Move the Keploy version-specific mocks
+		// Read the contents of the "keploy" folder to find the mock folders
 		mocksFolders, err := os.ReadDir(filepath.Join(cprFolder, entry.Name(), "keploy"))
 		if err != nil {
 			utils.LogError(s.logger, err, "failed to read directory", zap.String("directory", cprFolder), zap.Error(err))
 			return err
 		}
+
+		// Loop through each folder inside the "keploy" folder
 		for _, mockFolder := range mocksFolders {
+			// If the folder is not a directory or does not contain "test" in its name, skip it
 			if !mockFolder.IsDir() || !strings.Contains(mockFolder.Name(), "test") {
 				continue
 			}
+
+			// Retrieve the HTTP mocks from the mock database for the current test set
 			httpMocks, err := s.mockDB.GetHTTPMocks(ctx, mockFolder.Name(), filepath.Join(cprFolder, entry.Name(), "keploy"), "mocks")
 			if err != nil {
 				utils.LogError(s.logger, err, "failed to get HTTP mocks", zap.String("testSetID", mockFolder.Name()), zap.Error(err))
 				return err
 			}
+
+			// Filter the HTTP mocks based on the service URL mappings
 			var filteredMocks []*models.HTTPDoc
 			for _, mock := range httpMocks {
 				for _, service := range schemaConfigFile.Contract.ServicesMapping[self] {
+					// Add the mock to the filtered list if the service URL matches
 					if service == mock.Spec.Request.URL {
 						filteredMocks = append(filteredMocks, mock)
 						break
 					}
 				}
-
 			}
+
+			// Write the filtered mocks to the appropriate folder
 			var initialMock = true
 			for _, mock := range filteredMocks {
+				// Marshal the mock data to YAML format
 				mockYAML, err := yamlLib.Marshal(mock)
 				if err != nil {
 					return err
 				}
+
+				// Write the mock YAML file to the target service folder
 				err = yaml.WriteFile(ctx, s.logger, filepath.Join(serviceFolder, mockFolder.Name()), "mocks", mockYAML, !initialMock)
 				if err != nil {
 					return err
 				}
+
+				// Ensure only the first file is marked as the initial mock
 				if initialMock {
 					initialMock = false
 				}
 			}
+
+			// Log that the HTTP mocks for the service have been downloaded
 			s.logger.Info("Service's HTTP mocks contracts downloaded", zap.String("service", entry.Name()), zap.String("mocks", mockFolder.Name()))
-
 		}
-
 	}
 
+	// Return nil to indicate success
 	return nil
 }
 

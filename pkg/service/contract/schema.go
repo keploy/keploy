@@ -32,7 +32,7 @@ func validateSchema(openapi models.OpenAPI) error {
 	return nil
 }
 
-// GetAllTestsSchema retrieves all the tests from the schema folder.
+// GetAllTestsSchema retrieves all the tests schema from the schema folder.
 func (s *contract) GetAllTestsSchema(ctx context.Context) (map[string]map[string]*models.OpenAPI, error) {
 	testsFolder := filepath.Join("./keploy", "schema", "tests")
 

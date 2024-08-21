@@ -125,7 +125,7 @@ func (ts *OpenAPIYaml) ChangeTcPath(path string) {
 	ts.OpenAPIPath = path
 }
 
-func (ts *OpenAPIYaml) WriteOpenAPIToFile(ctx context.Context, logger *zap.Logger, outputPath, name string, openapi models.OpenAPI, isAppend bool) error {
+func (ts *OpenAPIYaml) Write(ctx context.Context, logger *zap.Logger, outputPath, name string, openapi models.OpenAPI, isAppend bool) error {
 	openapiYAML, err := yamlLib.Marshal(openapi)
 	if err != nil {
 		return err
