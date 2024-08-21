@@ -6,5 +6,5 @@ import (
 
 // Service defines the provider service interface
 type Service interface {
-	ProviderDrivenValidation(ctx context.Context) error
+	ValidateSchema(ctx context.Context) error
 }

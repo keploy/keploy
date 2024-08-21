@@ -26,7 +26,7 @@ func New(logger *zap.Logger, config *config.Config) Service {
 	}
 }
 
-func (s *provider) ProviderDrivenValidation(_ context.Context) error {
+func (s *provider) ValidateSchema(_ context.Context) error {
 	// 	downloadTestsFolder := filepath.Join("./Download", "Tests")
 	// 	entries, err := os.ReadDir(downloadTestsFolder)
 	// 	if err != nil {

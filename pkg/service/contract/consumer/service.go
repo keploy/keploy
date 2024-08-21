@@ -6,5 +6,5 @@ import (
 
 // Service defines the consumer service interface
 type Service interface {
-	ConsumerDrivenValidation(testsMapping map[string]map[string]*models.OpenAPI, mocksMapping []models.MockMapping) error
+	ValidateSchema(testsMapping map[string]map[string]*models.OpenAPI, mocksMapping []models.MockMapping) error
 }

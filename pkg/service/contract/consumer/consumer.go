@@ -30,7 +30,7 @@ func New(logger *zap.Logger, config *config.Config) Service {
 		config: config,
 	}
 }
-func (s *consumer) ConsumerDrivenValidation(testsMapping map[string]map[string]*models.OpenAPI, mocksMapping []models.MockMapping) error {
+func (s *consumer) ValidateSchema(testsMapping map[string]map[string]*models.OpenAPI, mocksMapping []models.MockMapping) error {
 
 	// Retrieve mocks and calculate scores for each service
 	scores, err := s.getMockScores(testsMapping, mocksMapping)

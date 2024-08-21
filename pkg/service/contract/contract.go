@@ -605,12 +605,12 @@ func (s *contract) Validate(ctx context.Context) error {
 			utils.LogError(s.logger, err, "failed to get downloaded mocks schemas")
 			return err
 		}
-		err = s.consumer.ConsumerDrivenValidation(testsMapping, mocksSchemasDownloaded)
+		err = s.consumer.ValidateSchema(testsMapping, mocksSchemasDownloaded)
 		if err != nil {
 			return err
 		}
 	} else if s.config.Contract.Driven == "provider" {
-		err := s.provider.ProviderDrivenValidation(ctx)
+		err := s.provider.ValidateSchema(ctx)
 		if err != nil {
 			return err
 		}
