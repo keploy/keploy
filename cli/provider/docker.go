@@ -24,7 +24,7 @@ type DockerConfigStruct struct {
 	Envs        map[string]string
 }
 
-var DockerConfig DockerConfigStruct = DockerConfigStruct{
+var DockerConfig = DockerConfigStruct{
 	DockerImage: "ghcr.io/keploy/keploy",
 }
 
