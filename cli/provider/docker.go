@@ -24,7 +24,9 @@ type DockerConfigStruct struct {
 	Envs        map[string]string
 }
 
-var DockerConfig DockerConfigStruct
+var DockerConfig = DockerConfigStruct{
+	DockerImage: "ghcr.io/keploy/keploy",
+}
 
 func GenerateDockerEnvs(config DockerConfigStruct) string {
 	var envs []string
@@ -39,11 +41,12 @@ func GenerateDockerEnvs(config DockerConfigStruct) string {
 // should also return a boolean if the execution is moved to docker
 func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config) error {
 
-	DockerConfig = DockerConfigStruct{
-		DockerImage: "ghcr.io/keploy/keploy",
-		Envs: map[string]string{
+	if DockerConfig.Envs == nil {
+		DockerConfig.Envs = map[string]string{
 			"INSTALLATION_ID": conf.InstallationID,
-		},
+		}
+	} else {
+		DockerConfig.Envs["INSTALLATION_ID"] = conf.InstallationID
 	}
 
 	//Check if app command starts with docker or docker-compose.

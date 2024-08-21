@@ -35,16 +35,16 @@ func AbsMatch(tcs1, tcs2 *models.TestCase, noiseConfig map[string]map[string][]s
 		Actual:   tcs2.Name,
 	}
 
-	curlResult := models.StringResult{
-		Normal:   true,
-		Expected: tcs1.Curl,
-		Actual:   tcs2.Curl,
-	}
+	// curlResult := models.StringResult{
+	// 	Normal:   true,
+	// 	Expected: tcs1.Curl,
+	// 	Actual:   tcs2.Curl,
+	// }
 
 	//compare kind
 	if tcs1.Kind != tcs2.Kind {
 		kindResult.Normal = false
-		logger.Debug("test case kind is not equal", zap.Any("tcs1Kind", tcs1.Kind), zap.Any("tcs2Kind", tcs2.Kind))
+		logger.Info("test case kind is not equal", zap.Any("tcs1Kind", tcs1.Kind), zap.Any("tcs2Kind", tcs2.Kind))
 		pass = false
 	}
 
@@ -55,24 +55,24 @@ func AbsMatch(tcs1, tcs2 *models.TestCase, noiseConfig map[string]map[string][]s
 	}
 
 	//compare curl
-	ok := CompareCurl(tcs1.Curl, tcs2.Curl, logger)
-	if !ok {
-		curlResult.Normal = false
-		logger.Debug("test case curl is not equal", zap.Any("tcs1Curl", tcs1.Curl), zap.Any("tcs2Curl", tcs2.Curl))
-		pass = false
-	}
+	// ok := CompareCurl(tcs1.Curl, tcs2.Curl, logger)
+	// if !ok {
+	// 	curlResult.Normal = false
+	// 	logger.Info("test case curl is not equal", zap.Any("tcs1Curl", tcs1.Curl), zap.Any("tcs2Curl", tcs2.Curl))
+	// 	pass = false
+	// }
 
 	//compare http req
 	reqPass, reqCompare := CompareHTTPReq(tcs1, tcs2, noiseConfig, ignoreOrdering, logger)
 	if !reqPass {
-		logger.Debug("test case http req is not equal", zap.Any("tcs1HttpReq", tcs1.HTTPReq), zap.Any("tcs2HttpReq", tcs2.HTTPReq))
+		logger.Info("test case http req is not equal", zap.Any("tcs1HttpReq", tcs1.HTTPReq), zap.Any("tcs2HttpReq", tcs2.HTTPReq))
 		pass = false
 	}
 
 	//compare http resp
 	respPass, respCompare := CompareHTTPResp(tcs1, tcs2, noiseConfig, ignoreOrdering, logger)
 	if !respPass {
-		logger.Debug("test case http resp is not equal", zap.Any("tcs1HttpResp", tcs1.HTTPResp), zap.Any("tcs2HttpResp", tcs2.HTTPResp))
+		logger.Info("test case http resp is not equal", zap.Any("tcs1HttpResp", tcs1.HTTPResp), zap.Any("tcs2HttpResp", tcs2.HTTPResp))
 		pass = false
 	}
 
@@ -80,7 +80,7 @@ func AbsMatch(tcs1, tcs2 *models.TestCase, noiseConfig map[string]map[string][]s
 	absResult.Kind = kindResult
 	absResult.Req = reqCompare
 	absResult.Resp = respCompare
-	absResult.CurlResult = curlResult
+	// absResult.CurlResult = curlResult
 
 	return pass, reqPass, respPass, absResult
 }
@@ -158,7 +158,10 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 	}
 
 	reqHeaderNoise := map[string][]string{}
-	reqHeaderNoise["Keploy-Test-Id"] = []string{}
+	reqHeaderNoise["keploy-test-id"] = []string{}
+	reqHeaderNoise["keploy-test-set-id"] = []string{}
+	tcs1.HTTPReq.Header["Keploy-Test-Id"] = "dummyTest"
+	tcs1.HTTPReq.Header["Keploy-Test-Set-Id"] = "dummyTestSet"
 
 	// compare http req headers
 	ok := matcherUtils.CompareHeaders(pkg.ToHTTPHeader(tcs1.HTTPReq.Header), pkg.ToHTTPHeader(tcs2.HTTPReq.Header), &reqCompare.HeaderResult, reqHeaderNoise)
@@ -288,9 +291,9 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 		a := strings.Split(field, ".")
 		if len(a) > 1 && a[0] == "body" {
 			x := strings.Join(a[1:], ".")
-			bodyNoise[x] = regexArr
+			bodyNoise[strings.ToLower(x)] = regexArr
 		} else if a[0] == "header" {
-			headerNoise[a[len(a)-1]] = regexArr
+			headerNoise[strings.ToLower(a[len(a)-1])] = regexArr
 		}
 	}
 
@@ -422,8 +425,21 @@ func CompareCurl(curl1, curl2 string, logger *zap.Logger) bool {
 		return false
 	}
 
+	// remove any quotes from the header keys (if any due to parsing issues)
+	for k, v := range headers1 {
+		delete(headers1, k)
+		headers1[strings.Trim(k, "'")] = v
+	}
+	for k, v := range headers2 {
+		delete(headers2, k)
+		headers2[strings.Trim(k, "'")] = v
+	}
+
 	curlHeaderNoise := map[string][]string{}
-	curlHeaderNoise["Keploy-Test-Id"] = []string{}
+	curlHeaderNoise["keploy-test-id"] = []string{}
+	curlHeaderNoise["keploy-test-set-id"] = []string{}
+	headers1["Keploy-Test-Id"] = "dummyTest"
+	headers1["Keploy-Test-Set-Id"] = "dummyTestSet"
 
 	hres := []models.HeaderResult{}
 	ok := matcherUtils.CompareHeaders(pkg.ToHTTPHeader(headers1), pkg.ToHTTPHeader(headers2), &hres, curlHeaderNoise)
