@@ -2,15 +2,14 @@
 package consumer
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/fatih/color"
 	"github.com/olekukonko/tablewriter"
 	"go.keploy.io/server/v2/config"
 	schemaMatcher "go.keploy.io/server/v2/pkg/matcher/schema"
+	"go.keploy.io/server/v2/utils"
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
@@ -20,36 +19,21 @@ const IDENTIFYMODE = 0
 const COMPAREMODE = 1
 
 type consumer struct {
-	logger    *zap.Logger
-	testDB    TestDB
-	openAPIDB OpenAPIDB
-	config    *config.Config
+	logger *zap.Logger
+	config *config.Config
 }
 
 // New creates a new instance of the consumer service
-func New(logger *zap.Logger, testDB TestDB, openAPIDB OpenAPIDB, config *config.Config) Service {
+func New(logger *zap.Logger, config *config.Config) Service {
 	return &consumer{
-		logger:    logger,
-		testDB:    testDB,
-		openAPIDB: openAPIDB,
-		config:    config,
+		logger: logger,
+		config: config,
 	}
 }
-func (s *consumer) ConsumerDrivenValidation(ctx context.Context) error {
-	// Loop over Mocks in DOwnload folder and compare them with the tests in the keploy schema folder
-	downloadMocksFolder := filepath.Join("./Download", "Mocks")
-
-	testsFolder := filepath.Join("./keploy", "schema", "tests")
-
-	// Retrieve tests from the schema folder
-	testsMapping, err := s.getTestsSchema(ctx, testsFolder)
-	if err != nil {
-		s.logger.Error("Failed to get test cases from schema", zap.Error(err))
-		return err
-	}
+func (s *consumer) ConsumerDrivenValidation(testsMapping map[string]map[string]*models.OpenAPI, mocksMapping []models.MockMapping) error {
 
 	// Retrieve mocks and calculate scores for each service
-	scores, err := s.getMockScores(ctx, downloadMocksFolder, testsMapping)
+	scores, err := s.getMockScores(testsMapping, mocksMapping)
 	if err != nil {
 		return err
 	}
@@ -64,87 +48,28 @@ func (s *consumer) ConsumerDrivenValidation(ctx context.Context) error {
 	return nil
 }
 
-// getTestsSchema retrieves all the tests from the schema folder.
-func (s *consumer) getTestsSchema(ctx context.Context, testsFolder string) (map[string]map[string]*models.OpenAPI, error) {
-	s.openAPIDB.ChangeTcPath(testsFolder)
-	testSetIDs, err := os.ReadDir(testsFolder)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read tests directory: %w", err)
-	}
-
-	testsMapping := make(map[string]map[string]*models.OpenAPI)
-	for _, testSetID := range testSetIDs {
-		if !testSetID.IsDir() {
-			continue
-		}
-
-		tests, err := s.openAPIDB.GetTestCasesSchema(ctx, testSetID.Name(), "")
-		if err != nil {
-			return nil, fmt.Errorf("failed to get test cases for testSetID %s: %w", testSetID.Name(), err)
-		}
-
-		testsMapping[testSetID.Name()] = make(map[string]*models.OpenAPI)
-		for _, test := range tests {
-			testsMapping[testSetID.Name()][test.Info.Title] = test
-		}
-	}
-
-	return testsMapping, nil
-}
-
 // getMockScores retrieves mocks and compares them with test cases, calculating scores.
-func (s *consumer) getMockScores(ctx context.Context, downloadMocksFolder string, testsMapping map[string]map[string]*models.OpenAPI) (map[string]map[string]map[string]models.SchemaInfo, error) {
-	// Read the contents of the Download Mocks folder to get all service directories.
-	entries, err := os.ReadDir(downloadMocksFolder)
-	if err != nil {
-		// If there's an error reading the directory, return it.
-		return nil, fmt.Errorf("failed to read mocks directory: %w", err)
-	}
+func (s *consumer) getMockScores(testsMapping map[string]map[string]*models.OpenAPI, mocksMapping []models.MockMapping) (map[string]map[string]map[string]models.SchemaInfo, error) {
 
 	// Initialize a map to store the scores for each service, mock set, and mock.
 	scores := make(map[string]map[string]map[string]models.SchemaInfo)
 
-	// Loop over each entry in the Download Mocks folder.
-	for _, entry := range entries {
-		// Check if the entry is a directory (indicating a service folder).
-		if entry.IsDir() {
-			// Define the path to the service folder (e.g., Download/Mocks/service-name).
-			serviceFolder := filepath.Join(downloadMocksFolder, entry.Name())
-
-			// Read the contents of the service folder to get mock set IDs (subdirectories).
-			mockSetIDs, err := os.ReadDir(serviceFolder)
-			if err != nil {
-				// If there's an error reading the service folder, return it.
-				return nil, fmt.Errorf("failed to read service directory %s: %w", serviceFolder, err)
-			}
-
-			// Initialize the service entry in the scores map if it doesn't already exist.
-			if scores[entry.Name()] == nil {
-				scores[entry.Name()] = make(map[string]map[string]models.SchemaInfo)
-			}
-			// Loop over each mock set ID in the service folder.
-			for _, mockSetID := range mockSetIDs {
-				// Ensure the mock set ID is a directory.
-				if !mockSetID.IsDir() {
-					continue
-				}
-				// Initialize the mock set entry if it hasn't been initialized yet.
-				if scores[entry.Name()][mockSetID.Name()] == nil {
-					scores[entry.Name()][mockSetID.Name()] = make(map[string]models.SchemaInfo)
-				}
-				// Retrieve the mocks for the given mock set ID (e.g., schema files in the folder).
-				mocks, err := s.openAPIDB.GetMocksSchemas(ctx, mockSetID.Name(), serviceFolder, "schema")
-				if err != nil {
-					// If there's an error retrieving mocks, return it.
-					return nil, fmt.Errorf("failed to get HTTP mocks for mockSetID %s: %w", mockSetID.Name(), err)
-				}
-
-				// Compare the mocks with test cases and calculate scores.
-				// The result is stored in the scores map under the respective service and mock set ID.
-				s.scoresForMocks(mocks, scores[entry.Name()][mockSetID.Name()], testsMapping, mockSetID.Name())
-			}
+	for _, mapping := range mocksMapping {
+		// Initialize the service entry in the scores map if it doesn't already exist.
+		if scores[mapping.Service] == nil {
+			scores[mapping.Service] = make(map[string]map[string]models.SchemaInfo)
 		}
+		// Initialize the mock set entry if it hasn't been initialized yet.
+		if scores[mapping.Service][mapping.TestSetID] == nil {
+			scores[mapping.Service][mapping.TestSetID] = make(map[string]models.SchemaInfo)
+		}
+
+		// Compare the mocks with test cases and calculate scores.
+		// The result is stored in the scores map under the respective service and mock set ID.
+		s.scoresForMocks(mapping.Mocks, scores[mapping.Service][mapping.TestSetID], testsMapping, mapping.TestSetID)
+
 	}
+
 	// Return the calculated scores.
 	return scores, nil
 }
@@ -175,7 +100,7 @@ func (s *consumer) scoresForMocks(mocks []*models.OpenAPI, mockSet map[string]mo
 				// Handle any errors encountered during the comparison process.
 				if err != nil {
 					// Log the error and continue with the next iteration, skipping the current comparison.
-					s.logger.Error("Error in matching the two models", zap.Error(err))
+					utils.LogError(s.logger, err, "Error in matching the two models")
 					continue
 				}
 

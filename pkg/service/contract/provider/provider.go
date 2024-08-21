@@ -12,19 +12,17 @@ const IDENTIFYMODE = 0
 const COMPAREMODE = 1
 
 type provider struct {
-	logger    *zap.Logger
-	testDB    TestDB
-	openAPIDB OpenAPIDB
-	config    *config.Config
+	logger *zap.Logger
+
+	config *config.Config
 }
 
 // New creates a new instance of the consumer service
-func New(logger *zap.Logger, testDB TestDB, openAPIDB OpenAPIDB, config *config.Config) Service {
+func New(logger *zap.Logger, config *config.Config) Service {
 	return &provider{
-		logger:    logger,
-		testDB:    testDB,
-		openAPIDB: openAPIDB,
-		config:    config,
+		logger: logger,
+
+		config: config,
 	}
 }
 

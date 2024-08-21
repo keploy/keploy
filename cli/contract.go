@@ -26,7 +26,7 @@ func Contract(ctx context.Context, logger *zap.Logger, _ *config.Config, service
 	for _, subCmd := range cmd.Commands() {
 		err := cmdConfigurator.AddFlags(subCmd)
 		if err != nil {
-			utils.LogError(logger, err, "failed to add flags")
+			utils.LogError(logger, err, "failed to add flags to command", zap.String("command", subCmd.Name()))
 		}
 	}
 	return cmd

@@ -92,20 +92,18 @@ func MarshalResponseBodies(status string, mockOperation, testOperation *models.O
 	return string(mockResponseBody), string(testResponseBody), nil
 }
 func FindOperation(item models.PathItem) (*models.Operation, string) {
-	if item.Get != nil {
-		return item.Get, "GET"
+	operations := map[string]*models.Operation{
+		"GET":    item.Get,
+		"POST":   item.Post,
+		"PUT":    item.Put,
+		"DELETE": item.Delete,
+		"PATCH":  item.Patch,
 	}
-	if item.Post != nil {
-		return item.Post, "POST"
-	}
-	if item.Put != nil {
-		return item.Put, "PUT"
-	}
-	if item.Delete != nil {
-		return item.Delete, "DELETE"
-	}
-	if item.Patch != nil {
-		return item.Patch, "PATCH"
+
+	for method, operation := range operations {
+		if operation != nil {
+			return operation, method
+		}
 	}
 	return nil, ""
 }

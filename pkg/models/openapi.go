@@ -90,3 +90,9 @@ type Status struct {
 	Passed []string `json:"passed" yaml:"passed"`
 	Missed []string `json:"missed" yaml:"missed"`
 }
+
+type MockMapping struct {
+	Service   string     `json:"service" yaml:"service"`
+	TestSetID string     `json:"testSetId" yaml:"testSetId"`
+	Mocks     []*OpenAPI `json:"mocks" yaml:"mocks"`
+}

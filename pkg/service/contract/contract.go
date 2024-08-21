@@ -39,8 +39,8 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, openAPIDB OpenAPIDB, 
 		mockDB:    mockDB,
 		openAPIDB: openAPIDB,
 		config:    config,
-		consumer:  consumer.New(logger, testDB, openAPIDB, config),
-		provider:  provider.New(logger, testDB, openAPIDB, config),
+		consumer:  consumer.New(logger, config),
+		provider:  provider.New(logger, config),
 	}
 }
 
@@ -592,7 +592,20 @@ func (s *contract) Validate(ctx context.Context) error {
 		}
 	}
 	if s.config.Contract.Driven == "consumer" {
-		err := s.consumer.ConsumerDrivenValidation(ctx)
+
+		// Retrieve tests from the schema folder
+		testsMapping, err := s.GetAllTestsSchema(ctx)
+		if err != nil {
+			utils.LogError(s.logger, err, "failed to get tests from schema")
+			return err
+		}
+		// Retrieve mocks of each service from the download folder
+		mocksSchemasDownloaded, err := s.GetAllDownloadedMocksSchemas(ctx)
+		if err != nil {
+			utils.LogError(s.logger, err, "failed to get downloaded mocks schemas")
+			return err
+		}
+		err = s.consumer.ConsumerDrivenValidation(testsMapping, mocksSchemasDownloaded)
 		if err != nil {
 			return err
 		}
