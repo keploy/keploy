@@ -2,6 +2,7 @@
 package export
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -136,6 +137,22 @@ func parseCurlCommand(logger *zap.Logger, curlCommand string) map[string]interfa
 		}
 	}
 
+	// Extract query parameters from the URL
+	queryParams := []map[string]string{}
+	for key, values := range parsedURL.Query() {
+		for _, value := range values {
+			queryParams = append(queryParams, map[string]string{
+				"key":   key,
+				"value": value,
+			})
+		}
+	}
+	// Manually construct the raw URL to avoid escaping
+	rawURL := parsedURL.Scheme + "://" + parsedURL.Host + parsedURL.Path
+	if len(parsedURL.RawQuery) > 0 {
+		rawURL += "?" + parsedURL.RawQuery
+	}
+
 	// Extract the last segment of the path as the name
 	pathSegments := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
 	// Create the name by joining segments with dashes
@@ -152,12 +169,12 @@ func parseCurlCommand(logger *zap.Logger, curlCommand string) map[string]interfa
 			"header": headers,
 			"body":   body,
 			"url": map[string]interface{}{
-				"raw":      parsedURL.String(),
+				"raw":      rawURL, // Use manually constructed raw URL
 				"protocol": parsedURL.Scheme,
 				"host":     []string{parsedURL.Hostname()},
 				"port":     parsedURL.Port(),
 				"path":     []string{strings.TrimLeft(parsedURL.Path, "/")},
-				"query":    parsedURL.Query(),
+				"query":    queryParams,
 			},
 		},
 		"response": []interface{}{},
@@ -277,11 +294,19 @@ func Export(_ context.Context, logger *zap.Logger) error {
 	sort.SliceStable(collection.Items, func(i, j int) bool {
 		return collection.Items[i].(map[string]interface{})["name"].(string) < collection.Items[j].(map[string]interface{})["name"].(string)
 	})
-	outputData, err := json.MarshalIndent(collection, "", "    ")
+
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false) // Disable HTML escaping
+	encoder.SetIndent("", "    ")
+
+	err = encoder.Encode(collection)
 	if err != nil {
-		utils.LogError(logger, err, "failed to marshal the Postman collection")
+		utils.LogError(logger, err, "failed to encode the Postman collection")
 		return err
 	}
+
+	outputData := buf.Bytes()
 
 	if err := os.WriteFile("output.json", outputData, 0644); err != nil {
 		utils.LogError(logger, err, "failed to write the output JSON file")

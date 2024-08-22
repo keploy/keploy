@@ -20,8 +20,7 @@ import (
 
 func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
 
-	header := pkg.ToHTTPHeader(tc.HTTPReq.Header)
-	curl := pkg.MakeCurlCommand(string(tc.HTTPReq.Method), tc.HTTPReq.URL, pkg.ToYamlHTTPHeader(header), tc.HTTPReq.Body, tc.HTTPReq.Form)
+	curl := pkg.MakeCurlCommand(tc.HTTPReq)
 	doc := &yaml.NetworkTrafficDoc{
 		Version: tc.Version,
 		Kind:    tc.Kind,
