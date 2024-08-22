@@ -145,7 +145,7 @@ func CompareResponses(response1, response2 *interface{}, key string) {
 	case string:
 		compareSecondResponse(&v1, response2, key, "")
 	case float64, int64, int, float32:
-		v1String := toString(v1)
+		v1String := ToString(v1)
 		compareSecondResponse(&(v1String), response2, key, "")
 	}
 }
@@ -179,12 +179,12 @@ func compareSecondResponse(val1 *string, response2 *interface{}, key1 string, ke
 			}
 		}
 	case float64, int64, int, float32:
-		if *val1 != toString(v2) && key1 == key2 {
+		if *val1 != ToString(v2) && key1 == key2 {
 			revMap := reverseMap(utils.TemplatizedValues)
 			if _, ok := revMap[*val1]; ok {
 				key := revMap[*val1]
 				utils.TemplatizedValues[key] = v2
-				*val1 = toString(v2)
+				*val1 = ToString(v2)
 			}
 		}
 	}
@@ -198,7 +198,7 @@ func reverseMap(m map[string]interface{}) map[interface{}]string {
 }
 
 // Remove all types of value to strings for comparison.
-func toString(val interface{}) string {
+func ToString(val interface{}) string {
 	switch v := val.(type) {
 	case int:
 		return strconv.Itoa(v)

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"text/template"
 
+	matcher "go.keploy.io/server/v2/pkg/matcher"
+
 	"github.com/7sDream/geko"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
@@ -338,7 +340,7 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 *interf
 
 	case float64, int64, int, float32:
 		//TODO: inspect this case because it is not being used.
-		val := toString(v)
+		val := matcher.ToString(v)
 		addTemplates1(logger, &val, interface2)
 		// we convert the value to string in order to compare and add the template.
 		// But we need to convert it back to the original type.
@@ -438,7 +440,7 @@ func addTemplates1(logger *zap.Logger, val1 *string, body *interface{}) bool {
 			}
 		}
 	case float64, int64, int, float32:
-		if *val1 == toString(b) {
+		if *val1 == matcher.ToString(b) {
 			return true
 		}
 
@@ -449,14 +451,6 @@ func addTemplates1(logger *zap.Logger, val1 *string, body *interface{}) bool {
 		}
 	}
 	return false
-}
-
-func reverseMap(m map[string]interface{}) map[interface{}]string {
-	var reverseMap = make(map[interface{}]string)
-	for key, val := range m {
-		reverseMap[val] = key
-	}
-	return reverseMap
 }
 
 func getType(val interface{}) string {
@@ -470,75 +464,6 @@ func getType(val interface{}) string {
 	}
 	//TODO: handle the default case properly, return some error.
 	return ""
-}
-
-// This function compares the two responses, if there is any difference in the values,
-// It checks in the templatized values map if the value is already present, it will update the value in the map.
-// It also changes the expected value to the actual value in the response1 (expected body)
-func compareResponses(response1, response2 *interface{}, key string) {
-	switch v1 := (*response1).(type) {
-	case geko.Array:
-		for _, val1 := range v1.List {
-			compareResponses(&val1, response2, "")
-		}
-	case geko.ObjectItems:
-		keys := v1.Keys()
-		vals := v1.Values()
-		for i := range keys {
-			compareResponses(&vals[i], response2, keys[i])
-			v1.SetValueByIndex(i, vals[i]) // in order to change the expected value if required
-		}
-	case map[string]interface{}:
-		for key, val := range v1 {
-			compareResponses(&val, response2, key)
-			v1[key] = val // in order to change the expected value if required
-		}
-	case string:
-		compareSecondResponse(&v1, response2, key, "")
-	case float64, int64, int, float32:
-		v1String := toString(v1)
-		compareSecondResponse(&(v1String), response2, key, "")
-	}
-}
-
-// Simplify the second response into type string for comparison.
-func compareSecondResponse(val1 *string, response2 *interface{}, key1 string, key2 string) {
-	switch v2 := (*response2).(type) {
-	case geko.Array:
-		for _, val2 := range v2.List {
-			compareSecondResponse(val1, &val2, key1, "")
-		}
-
-	case geko.ObjectItems:
-		keys := v2.Keys()
-		vals := v2.Values()
-		for i := range keys {
-			compareSecondResponse(val1, &vals[i], key1, keys[i])
-		}
-	case map[string]interface{}:
-		for key, val := range v2 {
-			compareSecondResponse(val1, &val, key1, key)
-		}
-	case string:
-		if *val1 != v2 {
-			// Reverse the templatized values map.
-			revMap := reverseMap(utils.TemplatizedValues)
-			if _, ok := revMap[*val1]; ok && key1 == key2 {
-				key := revMap[*val1]
-				utils.TemplatizedValues[key] = v2
-				*val1 = v2
-			}
-		}
-	case float64, int64, int, float32:
-		if *val1 != toString(v2) && key1 == key2 {
-			revMap := reverseMap(utils.TemplatizedValues)
-			if _, ok := revMap[*val1]; ok {
-				key := revMap[*val1]
-				utils.TemplatizedValues[key] = v2
-				*val1 = toString(v2)
-			}
-		}
-	}
 }
 
 // This function returns a unique key for each value, for instance if id already exists, it will return id1.
@@ -564,25 +489,6 @@ func insertUnique(baseKey, value string, myMap map[string]interface{}) string {
 		key = baseKey + strconv.Itoa(i)
 	}
 	return key
-}
-
-// Remove all types of value to strings for comparison.
-func toString(val interface{}) string {
-	switch v := val.(type) {
-	case int:
-		return strconv.Itoa(v)
-	case float64:
-		return strconv.FormatFloat(v, 'f', -1, 64)
-	case float32:
-		return strconv.FormatFloat(float64(v), 'f', -1, 32)
-	case int64:
-		return strconv.FormatInt(v, 10)
-	case int32:
-		return strconv.FormatInt(int64(v), 10)
-	case string:
-		return v
-	}
-	return ""
 }
 
 // TODO: Make this function generic for one value of string containing more than one template value.
