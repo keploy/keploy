@@ -197,7 +197,7 @@ func reverseMap(m map[string]interface{}) map[interface{}]string {
 	return reverseMap
 }
 
-// Remove all types of value to strings for comparison.
+// ToString remove all types of value to strings for comparison.
 func ToString(val interface{}) string {
 	switch v := val.(type) {
 	case int:
