@@ -1,3 +1,4 @@
+// Description: This file contains the implementation of the export service which exports the curl commands from the YAML testcases to a Postman collection.
 package export
 
 import (
@@ -26,22 +27,22 @@ func parseCurlCommand(logger *zap.Logger, curlCommand string) map[string]interfa
 	curlCommand = strings.Replace(curlCommand, "\\\n", " ", -1)
 	curlCommand = strings.Replace(curlCommand, "\n", " ", -1)
 	// Regular expressions to capture parts of the curl command
-	reMethodAndUrl := regexp.MustCompile(`--request\s+(\w+)\s+--url\s+([^ ]+)`)
+	reMethodAndURL := regexp.MustCompile(`--request\s+(\w+)\s+--url\s+([^ ]+)`)
 	reHeader := regexp.MustCompile(`--header '([^:]+): ([^']*)'`)
 	reData := regexp.MustCompile(`--data(?:-raw)?\s+['"]([\s\S]*?)['"](?:\s+--|\s*$)`)
 
 	reFormData := regexp.MustCompile(`--form\s+['"]([^=]+)=([^'"]+)['"]`)
 
 	// Extract method and URL
-	matches := reMethodAndUrl.FindStringSubmatch(curlCommand)
-	method, extractedUrl := "GET", ""
+	matches := reMethodAndURL.FindStringSubmatch(curlCommand)
+	method, extractedURL := "GET", ""
 	if len(matches) > 2 {
 		method = matches[1]
-		extractedUrl = matches[2]
+		extractedURL = matches[2]
 	}
 
-	parsedUrl, err := url.Parse(extractedUrl)
-	if err != nil || parsedUrl.Hostname() == "" {
+	parsedURL, err := url.Parse(extractedURL)
+	if err != nil || parsedURL.Hostname() == "" {
 		utils.LogError(logger, err, "error parsing URL")
 		return nil
 	}
@@ -136,7 +137,7 @@ func parseCurlCommand(logger *zap.Logger, curlCommand string) map[string]interfa
 	}
 
 	// Extract the last segment of the path as the name
-	pathSegments := strings.Split(strings.Trim(parsedUrl.Path, "/"), "/")
+	pathSegments := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
 	// Create the name by joining segments with dashes
 	name := strings.Join(pathSegments, "-")
 
@@ -151,12 +152,12 @@ func parseCurlCommand(logger *zap.Logger, curlCommand string) map[string]interfa
 			"header": headers,
 			"body":   body,
 			"url": map[string]interface{}{
-				"raw":      parsedUrl.String(),
-				"protocol": parsedUrl.Scheme,
-				"host":     []string{parsedUrl.Hostname()},
-				"port":     parsedUrl.Port(),
-				"path":     []string{strings.TrimLeft(parsedUrl.Path, "/")},
-				"query":    parsedUrl.Query(),
+				"raw":      parsedURL.String(),
+				"protocol": parsedURL.Scheme,
+				"host":     []string{parsedURL.Hostname()},
+				"port":     parsedURL.Port(),
+				"path":     []string{strings.TrimLeft(parsedURL.Path, "/")},
+				"query":    parsedURL.Query(),
 			},
 		},
 		"response": []interface{}{},
@@ -172,7 +173,7 @@ type PostmanCollection struct {
 	Items []interface{} `json:"item"`
 }
 
-func Export(logger *zap.Logger, ctx context.Context) error {
+func Export(ctx context.Context, logger *zap.Logger) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		utils.LogError(logger, err, "failed to get current working directory")
@@ -252,14 +253,18 @@ func Export(logger *zap.Logger, ctx context.Context) error {
 							utils.LogError(logger, err, "failed to marshal requestJSON to string")
 							continue
 						}
-						curlRequests[string(requestJSONString)] += 1
+						curlRequests[string(requestJSONString)]++
 					}
 				}
 			}
 			var uniqueRequests []interface{}
 			for request := range curlRequests {
 				var curlRequest interface{}
-				json.Unmarshal([]byte(request.(string)), &curlRequest)
+				err := json.Unmarshal([]byte(request.(string)), &curlRequest)
+				if err != nil {
+					utils.LogError(logger, err, "failed to unmarshal the request JSON")
+					continue
+				}
 				uniqueRequests = append(uniqueRequests, curlRequest)
 			}
 			requestFile := map[string]interface{}{

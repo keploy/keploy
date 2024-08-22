@@ -46,8 +46,7 @@ func (t *Tools) SendTelemetry(event string, output ...map[string]interface{}) {
 }
 
 func (t *Tools) Export(ctx context.Context) error {
-	export.Export(t.logger, ctx)
-	return nil
+	return export.Export(ctx, t.logger)
 }
 
 // Update initiates the tools process for the Keploy binary file.
