@@ -1,4 +1,4 @@
-// Description: This file contains the implementation of the export service which exports the curl commands from the YAML testcases to a Postman collection.
+// Package export contains the implementation of the export service which exports the curl commands from the YAML testcases to a Postman collection.
 package export
 
 import (
