@@ -24,11 +24,12 @@ import (
 func parseCurlCommand(logger *zap.Logger, curlCommand string) map[string]interface{} {
 	// Normalize the curl command by removing newlines and backslashes for easier processing
 	curlCommand = strings.Replace(curlCommand, "\\\n", " ", -1)
-
+	curlCommand = strings.Replace(curlCommand, "\n", " ", -1)
 	// Regular expressions to capture parts of the curl command
 	reMethodAndUrl := regexp.MustCompile(`--request\s+(\w+)\s+--url\s+([^ ]+)`)
 	reHeader := regexp.MustCompile(`--header '([^:]+): ([^']*)'`)
-	reData := regexp.MustCompile(`--data(?:-raw)?\s+['"]([^'"]+)['"]`)
+	reData := regexp.MustCompile(`--data(?:-raw)?\s+['"]([\s\S]*?)['"](?:\s+--|\s*$)`)
+
 	reFormData := regexp.MustCompile(`--form\s+['"]([^=]+)=([^'"]+)['"]`)
 
 	// Extract method and URL
@@ -198,6 +199,8 @@ func Export(logger *zap.Logger, ctx context.Context) error {
 		return err
 
 	}
+	folderName := filepath.Base(cwd)
+
 	collection := PostmanCollection{
 		Info: struct {
 			PostmanID string `json:"_postman_id"`
@@ -205,7 +208,7 @@ func Export(logger *zap.Logger, ctx context.Context) error {
 			Schema    string `json:"schema"`
 		}{
 			PostmanID: uuid.New().String(),
-			Name:      os.Getenv("KEPLOY_PROJECT_NAME"),
+			Name:      folderName,
 			Schema:    "https://schema.getpostman.com/json/collection/v2.0.0/collection.json",
 		},
 	}
