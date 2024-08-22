@@ -7,6 +7,7 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/service"
+	"go.keploy.io/server/v2/utils"
 
 	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/pkg/service/utgen"
@@ -33,7 +34,7 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 
 	tel := telemetry.NewTelemetry(n.logger, telemetry.Options{
 		Enabled:        !n.cfg.DisableTele,
-		Version:        n.cfg.Version,
+		Version:        utils.Version,
 		GlobalMap:      TeleGlobalMap,
 		InstallationID: n.cfg.InstallationID,
 	})

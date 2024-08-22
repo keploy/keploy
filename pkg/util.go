@@ -89,28 +89,35 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	//TODO: adjust this logic in the render function in order to remove the redundant code
 	// convert testcase to string and render the template values.
-	testCaseStr, err := json.Marshal(tc)
-	if err != nil {
-		utils.LogError(logger, err, "failed to marshal the testcase")
-	}
-	funcMap := template.FuncMap{
-		"int":    utils.ToInt,
-		"string": utils.ToString,
-		"float":  utils.ToFloat,
-	}
-	tmpl, err := template.New("template").Funcs(funcMap).Parse(string(testCaseStr))
-	if err != nil {
-		utils.LogError(logger, err, "failed to parse the template")
-	}
-	var output bytes.Buffer
-	err = tmpl.Execute(&output, utils.TemplatizedValues)
-	if err != nil {
-		utils.LogError(logger, err, "failed to execute the template")
-	}
-	testCaseStr = output.Bytes()
-	err = json.Unmarshal([]byte(testCaseStr), &tc)
-	if err != nil {
-		utils.LogError(logger, err, "failed to unmarshal the testcase")
+	if len(utils.TemplatizedValues) > 0 {
+		testCaseStr, err := json.Marshal(tc)
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal the testcase")
+			return nil, err
+		}
+		funcMap := template.FuncMap{
+			"int":    utils.ToInt,
+			"string": utils.ToString,
+			"float":  utils.ToFloat,
+		}
+		tmpl, err := template.New("template").Funcs(funcMap).Parse(string(testCaseStr))
+		if err != nil || tmpl == nil {
+			utils.LogError(logger, err, "failed to parse the template", zap.Any("TestCaseString", string(testCaseStr)), zap.Any("TestCase", tc.Name), zap.Any("TestSet", testSet))
+			return nil, err
+		}
+
+		var output bytes.Buffer
+		err = tmpl.Execute(&output, utils.TemplatizedValues)
+		if err != nil {
+			utils.LogError(logger, err, "failed to execute the template")
+			return nil, err
+		}
+		testCaseStr = output.Bytes()
+		err = json.Unmarshal([]byte(testCaseStr), &tc)
+		if err != nil {
+			utils.LogError(logger, err, "failed to unmarshal the testcase")
+			return nil, err
+		}
 	}
 
 	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
