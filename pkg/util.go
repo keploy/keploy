@@ -232,7 +232,7 @@ func MakeCurlCommand(tc models.HTTPReq) string {
 	curl = curl + fmt.Sprintf("  --url %s \\\n", tc.URL)
 	header := ToHTTPHeader(tc.Header)
 
-	for k, v := range header {
+	for k, v := range ToYamlHTTPHeader(header) {
 		if k != "Content-Length" {
 			curl = curl + fmt.Sprintf("  --header '%s: %s' \\\n", k, v)
 		}
