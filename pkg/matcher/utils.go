@@ -285,7 +285,7 @@ type DiffsPrinter struct {
 	typeAct               string
 }
 
-func (d *DiffsPrinter) HasarrayIndexMismatch(has bool) {
+func (d *DiffsPrinter) SetHasarrayIndexMismatch(has bool) {
 	d.hasarrayIndexMismatch = has
 }
 

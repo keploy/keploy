@@ -179,7 +179,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				}
 				for _, op := range patch {
 					if jsonComparisonResult.Matches() {
-						logDiffs.HasarrayIndexMismatch(true)
+						logDiffs.SetHasarrayIndexMismatch(true)
 						logDiffs.PushFooterDiff(strings.Join(jsonComparisonResult.Differences(), ", "))
 					}
 					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
