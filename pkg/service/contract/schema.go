@@ -36,7 +36,7 @@ func validateSchema(openapi models.OpenAPI) error {
 func (s *contract) GetAllTestsSchema(ctx context.Context) (map[string]map[string]*models.OpenAPI, error) {
 	testsFolder := filepath.Join("./keploy", "schema", "tests")
 
-	s.openAPIDB.ChangeTcPath(testsFolder)
+	s.openAPIDB.ChangePath(testsFolder)
 	testSetIDs, err := os.ReadDir(testsFolder)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read tests directory: %w", err)

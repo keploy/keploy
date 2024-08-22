@@ -9,14 +9,10 @@ import (
 	"github.com/olekukonko/tablewriter"
 	"go.keploy.io/server/v2/config"
 	schemaMatcher "go.keploy.io/server/v2/pkg/matcher/schema"
-	"go.keploy.io/server/v2/utils"
-
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
-
-const IDENTIFYMODE = 0
-const COMPAREMODE = 1
 
 type consumer struct {
 	logger *zap.Logger
@@ -96,7 +92,7 @@ func (s *consumer) scoresForMocks(mocks []*models.OpenAPI, mockSet map[string]mo
 			for _, test := range tests {
 				// Call 'match2' to compare the mock with the current test.
 				// This function returns a candidateScore (how well the mock matches the test) and a pass boolean.
-				candidateScore, pass, err := schemaMatcher.Match(*mock, *test, testSetID, mockSetID, s.logger, IDENTIFYMODE)
+				candidateScore, pass, err := schemaMatcher.Match(*mock, *test, testSetID, mockSetID, s.logger, models.IdentifyMode)
 				// Handle any errors encountered during the comparison process.
 				if err != nil {
 					// Log the error and continue with the next iteration, skipping the current comparison.
@@ -204,10 +200,10 @@ func (s *consumer) ValidateMockAgainstTests(scores map[string]map[string]map[str
 					fmt.Printf("                                    Current %s   ||   Consumer %s\n", serviceColor(s.config.Contract.Self), serviceColor(service))
 
 					// Perform comparison between the mock and test case again
-					_, _, err := schemaMatcher.Match(mockInfo.Data, *testsMapping[mockInfo.TestSetID][mockInfo.Name], mockInfo.TestSetID, mockSetID, s.logger, COMPAREMODE)
+					_, _, err := schemaMatcher.Match(mockInfo.Data, *testsMapping[mockInfo.TestSetID][mockInfo.Name], mockInfo.TestSetID, mockSetID, s.logger, models.CompareMode)
 					if err != nil {
 						// If an error occurs during comparison, return it
-						s.logger.Error("Error in matching the two models", zap.Error(err))
+						utils.LogError(s.logger, err, "Error in matching the two models")
 						return models.Summary{}, err
 					}
 

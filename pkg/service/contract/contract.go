@@ -44,8 +44,7 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, openAPIDB OpenAPIDB, 
 	}
 }
 
-func (s *contract) HTTPDocToOpenAPI(logger *zap.Logger, data models.HTTPDoc) (models.OpenAPI, error) {
-	custom := data
+func (s *contract) HTTPDocToOpenAPI(logger *zap.Logger, custom models.HTTPDoc) (models.OpenAPI, error) {
 
 	var err error
 	// Convert response body to an object
@@ -198,7 +197,7 @@ func (s *contract) HTTPDocToOpenAPI(logger *zap.Logger, data models.HTTPDoc) (mo
 	// Extract the URL path
 	parsedURL, hostName := ExtractURLPath(custom.Spec.Request.URL)
 	if parsedURL == "" {
-		logger.Error("Error extracting URL path")
+		utils.LogError(logger, err, "failed to extract URL path")
 		return models.OpenAPI{}, err
 	}
 	// Replace numeric identifiers in the path with dummy names (if exists)
@@ -232,7 +231,6 @@ func (s *contract) HTTPDocToOpenAPI(logger *zap.Logger, data models.HTTPDoc) (mo
 
 // GenerateMocksSchemas generates mock schemas based on the provided services and mappings.
 func (s *contract) GenerateMocksSchemas(ctx context.Context, services []string, mappings map[string][]string) error {
-	keployFolder := "./keploy/"
 
 	// Retrieve all test set IDs from the test database.
 	testSetsIDs, err := s.testDB.GetAllTestSetIDs(ctx)
@@ -255,7 +253,7 @@ func (s *contract) GenerateMocksSchemas(ctx context.Context, services []string, 
 	// Loop through each test set ID to process the HTTP mocks.
 	for _, testSetID := range testSetsIDs {
 		// Retrieve HTTP mocks for the test set from the mock database.
-		httpMocks, err := s.mockDB.GetHTTPMocks(ctx, testSetID, keployFolder, "mocks")
+		httpMocks, err := s.mockDB.GetHTTPMocks(ctx, testSetID, s.config.Path, "mocks")
 		if err != nil {
 			// Log and return error if HTTP mock retrieval fails.
 			utils.LogError(s.logger, err, "failed to get HTTP mocks", zap.String("testSetID", testSetID))
@@ -299,12 +297,14 @@ func (s *contract) GenerateMocksSchemas(ctx context.Context, services []string, 
 						// Validate the generated OpenAPI schema.
 						err = validateSchema(openapi)
 						if err != nil {
+							utils.LogError(s.logger, err, "failed to validate the OpenAPI schema")
 							return err
 						}
 
 						// Write the OpenAPI document to the specified directory.
-						err = s.openAPIDB.Write(ctx, s.logger, filepath.Join(keployFolder, "schema", "mocks", service, testSetID), "mocks", openapi, isAppend)
+						err = s.openAPIDB.WriteSchema(ctx, s.logger, filepath.Join(s.config.Path, "schema", "mocks", service, testSetID), "mocks", openapi, isAppend)
 						if err != nil {
+							utils.LogError(s.logger, err, "failed to write the OpenAPI schema")
 							return err
 						}
 
@@ -325,15 +325,13 @@ func (s *contract) GenerateMocksSchemas(ctx context.Context, services []string, 
 }
 
 func (s *contract) GenerateTestsSchemas(ctx context.Context, selectedTests []string) error {
-	keployFolder := "./keploy/"
 	testSetsIDs, err := s.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
 		utils.LogError(s.logger, err, "failed to get test set IDs")
 		return err
 	}
 
-	for _, entry := range testSetsIDs {
-		testSetID := entry
+	for _, testSetID := range testSetsIDs {
 		if !yaml.Contains(selectedTests, testSetID) && len(selectedTests) != 0 {
 			continue
 		}
@@ -353,17 +351,19 @@ func (s *contract) GenerateTestsSchemas(ctx context.Context, selectedTests []str
 
 			openapi, err := s.HTTPDocToOpenAPI(s.logger, httpSpec)
 			if err != nil {
-				s.logger.Error("Failed to convert the yaml file to openapi")
+				utils.LogError(s.logger, err, "failed to convert the yaml file to openapi")
 				return fmt.Errorf("failed to convert the yaml file to openapi")
 			}
 			// Validate the OpenAPI document
 			err = validateSchema(openapi)
 			if err != nil {
+				utils.LogError(s.logger, err, "failed to validate the OpenAPI schema")
 				return err
 			}
 			// Save it using the OpenAPIDB
-			err = s.openAPIDB.Write(ctx, s.logger, filepath.Join(keployFolder, "schema", "tests", entry), tc.Name, openapi, false)
+			err = s.openAPIDB.WriteSchema(ctx, s.logger, filepath.Join(s.config.Path, "schema", "tests", testSetID), tc.Name, openapi, false)
 			if err != nil {
+				utils.LogError(s.logger, err, "failed to write the OpenAPI schema")
 				return err
 			}
 
@@ -379,55 +379,46 @@ func (s *contract) Generate(ctx context.Context) error {
 		return fmt.Errorf("Error in checking config file while validating")
 	}
 
-	var config config.Config
-	err := yaml.ReadYAMLFile(ctx, s.logger, "./", "keploy", &config, false)
-	// configData, err := yaml.ReadFile(ctx, s.logger, "./", "keploy")
-	if err != nil {
-		return err
-	}
-
-	mappings := config.Contract.ServicesMapping
+	mappings := s.config.Contract.ServicesMapping
 	serviceColor := color.New(color.FgYellow).SprintFunc()
 	fmt.Println(serviceColor("=========================================="))
 	fmt.Println(serviceColor(fmt.Sprintf("Starting Generating OpenAPI Schemas for Current Service: %s ....", s.config.Contract.Self)))
 	fmt.Println(serviceColor("=========================================="))
 
-	err = s.GenerateTestsSchemas(ctx, s.config.Contract.Tests)
+	err := s.GenerateTestsSchemas(ctx, s.config.Contract.Tests)
 	if err != nil {
+		utils.LogError(s.logger, err, "failed to generate tests schemas")
 		return err
 	}
 	err = s.GenerateMocksSchemas(ctx, s.config.Contract.Services, mappings)
 	if err != nil {
+		utils.LogError(s.logger, err, "failed to generate mocks schemas")
 		return err
 	}
-	if err := saveServiceMappings(config, "./keploy/schema"); err != nil {
+	if err := saveServiceMappings(s.config.Contract, filepath.Join(s.config.Path, "schema")); err != nil {
+		utils.LogError(s.logger, err, "failed to save service mappings")
 		return err
 	}
 
 	return nil
 }
 
-func (s *contract) DownloadTests(ctx context.Context, path string) error {
-	fmt.Println("Path given (not simulated): ", path)
+func (s *contract) DownloadTests(_ string) error {
 
 	targetPath := "./Download/Tests"
 	if err := yaml.CreateDir(targetPath, s.logger); err != nil {
+		utils.LogError(s.logger, err, "failed to create directory", zap.String("directory", targetPath))
 		return err
 	}
 
 	cprFolder, err := filepath.Abs("../VirtualCPR")
 	if err != nil {
+		utils.LogError(s.logger, err, "failed to get absolute path", zap.String("path", "../VirtualCPR"))
 		return err
 	}
 
-	var schemaConfigFile config.Config
-
-	configFilePath := "./"
-	if err := yaml.ReadYAMLFile(ctx, s.logger, configFilePath, "keploy", &schemaConfigFile, false); err != nil {
-		return err
-	}
 	// Loop through the services in the mappings in the config file
-	for service := range schemaConfigFile.Contract.ServicesMapping {
+	for service := range s.config.Contract.ServicesMapping {
 		// Fetch the tests of those services from virtual cpr
 		testsPath := filepath.Join(cprFolder, service, "keploy", "schema", "tests")
 		// Copy this dir to the target path
@@ -436,7 +427,7 @@ func (s *contract) DownloadTests(ctx context.Context, path string) error {
 			utils.LogError(s.logger, err, "failed to copy directory", zap.String("directory", testsPath))
 			return err
 		}
-		s.logger.Info("Service's tests contracts downloaded", zap.String("service", service))
+		s.logger.Info("Service's tests (contracts) downloaded", zap.String("service", service))
 		// Copy the Keploy version (HTTP) tests
 		keployTestsPath := filepath.Join(cprFolder, service, "keploy")
 		testEntries, err := os.ReadDir(keployTestsPath)
@@ -450,10 +441,10 @@ func (s *contract) DownloadTests(ctx context.Context, path string) error {
 			}
 			// Copy the directory to the target path
 			if err := yaml.CopyDir(filepath.Join(keployTestsPath, testSetID.Name(), "tests"), filepath.Join(serviceFolder, "schema", testSetID.Name()), false, s.logger); err != nil {
-				fmt.Println("Error copying directory:", err)
+				utils.LogError(s.logger, err, "failed to copy directory", zap.String("directory", filepath.Join(keployTestsPath, testSetID.Name(), "tests")))
 				return err
 			}
-			s.logger.Info("Service's HTTP tests contracts downloaded", zap.String("service", service), zap.String("tests", testSetID.Name()))
+			s.logger.Info("Service's HTTP tests downloaded", zap.String("service", service), zap.String("tests", testSetID.Name()))
 
 		}
 
@@ -463,21 +454,20 @@ func (s *contract) DownloadTests(ctx context.Context, path string) error {
 
 // DownloadMocks downloads the mocks for a specific service and stores them in the target path.
 // The mocks are extracted from the VirtualCPR folder and saved in the "Download/Mocks" directory.
-func (s *contract) DownloadMocks(ctx context.Context, path string) error {
-	// Log and display the provided path (this path is not simulated)
-	fmt.Println("Path given (not simulated): ", path)
-
+func (s *contract) DownloadMocks(ctx context.Context, _ string) error {
 	// Set the target path where the downloaded mocks will be stored
 	targetPath := "./Download/Mocks"
 
 	// Create the target directory if it doesn't already exist
 	if err := yaml.CreateDir(targetPath, s.logger); err != nil {
+		utils.LogError(s.logger, err, "failed to create directory", zap.String("directory", targetPath))
 		return err
 	}
 
 	// Get the absolute path to the VirtualCPR folder
 	cprFolder, err := filepath.Abs("../VirtualCPR")
 	if err != nil {
+		utils.LogError(s.logger, err, "failed to get absolute path", zap.String("path", "../VirtualCPR"))
 		return err
 	}
 
@@ -497,19 +487,20 @@ func (s *contract) DownloadMocks(ctx context.Context, path string) error {
 
 		// Extract the name of the current service (the one being processed)
 		var self = s.config.Contract.Self
-		var schemaConfigFile config.Config
+		var schemaConfigFile config.Contract
 
 		// Construct the path to the schema configuration file for the current service
 		configFilePath := filepath.Join(cprFolder, entry.Name(), "keploy", "schema")
 
 		// Read the schema configuration YAML file
-		if err := yaml.ReadYAMLFile(ctx, s.logger, configFilePath, "keploy", &schemaConfigFile, true); err != nil {
+		if err := yaml.ReadYAMLFile(ctx, s.logger, configFilePath, "serviceMappings", &schemaConfigFile, true); err != nil {
+			utils.LogError(s.logger, err, "failed to read the schema configuration file", zap.String("file", "serviceMappings"))
 			return err
 		}
 
 		// Check if the current service exists in the service mapping from the schema configuration
 		serviceFound := false
-		if _, exists := schemaConfigFile.Contract.ServicesMapping[self]; exists {
+		if _, exists := schemaConfigFile.ServicesMapping[self]; exists {
 			serviceFound = true
 		}
 
@@ -519,8 +510,9 @@ func (s *contract) DownloadMocks(ctx context.Context, path string) error {
 		}
 
 		// Create a directory for the current service inside the target path
-		serviceFolder := filepath.Join(targetPath, schemaConfigFile.Contract.Self)
+		serviceFolder := filepath.Join(targetPath, schemaConfigFile.Self)
 		if err := yaml.CreateDir(serviceFolder, s.logger); err != nil {
+			utils.LogError(s.logger, err, "failed to create directory", zap.String("directory", serviceFolder))
 			return err
 		}
 
@@ -535,7 +527,7 @@ func (s *contract) DownloadMocks(ctx context.Context, path string) error {
 
 		// Copy the mock files from the source directory to the target directory
 		if err := yaml.CopyDir(mocksSourcePath, serviceFolder, true, s.logger); err != nil {
-			fmt.Println("Error moving directory:", err)
+			utils.LogError(s.logger, err, "failed to copy directory", zap.String("directory", mocksSourcePath))
 			return err
 		}
 
@@ -567,7 +559,7 @@ func (s *contract) DownloadMocks(ctx context.Context, path string) error {
 			// Filter the HTTP mocks based on the service URL mappings
 			var filteredMocks []*models.HTTPDoc
 			for _, mock := range httpMocks {
-				for _, service := range schemaConfigFile.Contract.ServicesMapping[self] {
+				for _, service := range schemaConfigFile.ServicesMapping[self] {
 					// Add the mock to the filtered list if the service URL matches
 					if service == mock.Spec.Request.URL {
 						filteredMocks = append(filteredMocks, mock)
@@ -582,12 +574,14 @@ func (s *contract) DownloadMocks(ctx context.Context, path string) error {
 				// Marshal the mock data to YAML format
 				mockYAML, err := yamlLib.Marshal(mock)
 				if err != nil {
+					utils.LogError(s.logger, err, "failed to marshal mock data", zap.Any("mock", mock))
 					return err
 				}
 
 				// Write the mock YAML file to the target service folder
 				err = yaml.WriteFile(ctx, s.logger, filepath.Join(serviceFolder, mockFolder.Name()), "mocks", mockYAML, !initialMock)
 				if err != nil {
+					utils.LogError(s.logger, err, "failed to write mock file", zap.String("service", entry.Name()), zap.String("testSetID", mockFolder.Name()))
 					return err
 				}
 
@@ -620,16 +614,22 @@ func (s *contract) Download(ctx context.Context) error {
 		return fmt.Errorf("Error in validating path")
 	}
 	driven := s.config.Contract.Driven
-	if driven == "provider" || driven == "server" {
-		err = s.DownloadTests(ctx, path)
+	if driven == models.ProviderMode.String() {
+		err = s.DownloadTests(path)
+		if err != nil {
+			utils.LogError(s.logger, err, "failed to download tests")
+			return err
+		}
 
-	} else if driven == "consumer" || driven == "client" {
+	} else if driven == models.ConsumerMode.String() {
 		err = s.DownloadMocks(ctx, path)
+		if err != nil {
+			utils.LogError(s.logger, err, "failed to download mocks")
+			return err
+		}
 
 	}
-	if err != nil {
-		return err
-	}
+
 	return nil
 }
 
@@ -642,16 +642,18 @@ func (s *contract) Validate(ctx context.Context) error {
 	if s.config.Contract.Generate {
 		err := s.Generate(ctx)
 		if err != nil {
+			utils.LogError(s.logger, err, "failed to generate contract")
 			return err
 		}
 	}
 	if s.config.Contract.Download {
 		err := s.Download(ctx)
 		if err != nil {
+			utils.LogError(s.logger, err, "failed to download contract")
 			return err
 		}
 	}
-	if s.config.Contract.Driven == "consumer" {
+	if s.config.Contract.Driven == models.ConsumerMode.String() {
 
 		// Retrieve tests from the schema folder
 		testsMapping, err := s.GetAllTestsSchema(ctx)
@@ -667,11 +669,13 @@ func (s *contract) Validate(ctx context.Context) error {
 		}
 		err = s.consumer.ValidateSchema(testsMapping, mocksSchemasDownloaded)
 		if err != nil {
+			utils.LogError(s.logger, err, "failed to validate schema")
 			return err
 		}
-	} else if s.config.Contract.Driven == "provider" {
+	} else if s.config.Contract.Driven == models.ProviderMode.String() {
 		err := s.provider.ValidateSchema(ctx)
 		if err != nil {
+			utils.LogError(s.logger, err, "failed to validate schema")
 			return err
 		}
 		fmt.Println("Provider driven validation is not implemented yet")

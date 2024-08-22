@@ -119,13 +119,13 @@ func (ts *OpenAPIYaml) GetMocksSchemas(ctx context.Context, testSetID string, mo
 
 	return tcsMocks, nil
 }
-func (ts *OpenAPIYaml) ChangeTcPath(path string) {
+func (ts *OpenAPIYaml) ChangePath(path string) {
 
 	// ts.OpenAPIPath = "./keploy/"
 	ts.OpenAPIPath = path
 }
 
-func (ts *OpenAPIYaml) Write(ctx context.Context, logger *zap.Logger, outputPath, name string, openapi models.OpenAPI, isAppend bool) error {
+func (ts *OpenAPIYaml) WriteSchema(ctx context.Context, logger *zap.Logger, outputPath, name string, openapi models.OpenAPI, isAppend bool) error {
 	openapiYAML, err := yamlLib.Marshal(openapi)
 	if err != nil {
 		return err
@@ -134,7 +134,7 @@ func (ts *OpenAPIYaml) Write(ctx context.Context, logger *zap.Logger, outputPath
 	if os.IsNotExist(err) {
 		err = os.MkdirAll(outputPath, os.ModePerm)
 		if err != nil {
-			logger.Error("Failed to create directory", zap.String("directory", outputPath), zap.Error(err))
+			utils.LogError(logger, err, "failed to create directory", zap.String("directory", outputPath))
 			return err
 		}
 		logger.Info("Directory created", zap.String("directory", outputPath))
@@ -142,7 +142,7 @@ func (ts *OpenAPIYaml) Write(ctx context.Context, logger *zap.Logger, outputPath
 
 	err = yaml.WriteFile(ctx, logger, outputPath, name, openapiYAML, isAppend)
 	if err != nil {
-		logger.Error("Failed to write OpenAPI YAML to a file", zap.Error(err))
+		utils.LogError(logger, err, "failed to write OpenAPI YAML to a file", zap.String("outputPath", outputPath), zap.String("name", name))
 		return err
 	}
 

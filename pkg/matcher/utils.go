@@ -1,5 +1,5 @@
-// Package matcherutils for matching utilities
-package matcherutils
+// Package matcher for matching utilities
+package matcher
 
 import (
 	"bytes"

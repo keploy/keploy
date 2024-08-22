@@ -1,5 +1,37 @@
 package models
 
+// SchemaMatchMode defines the possible modes for schema matching.
+type SchemaMatchMode int
+
+const (
+	// IdentifyMode is used for identifying schema.
+	IdentifyMode SchemaMatchMode = iota
+
+	// CompareMode is used for comparing schemas.
+	CompareMode
+)
+
+// String returns the string representation of the SchemaMatchMode.
+func (s SchemaMatchMode) String() string {
+	return [...]string{"IDENTIFYMODE", "COMPAREMODE"}[s]
+}
+
+// DrivenMode defines the possible modes for driven contexts.
+type DrivenMode int
+
+const (
+	// ConsumerMode is used for a consumer context.
+	ConsumerMode DrivenMode = iota
+
+	// ProviderMode is used for a provider context.
+	ProviderMode
+)
+
+// String returns the string representation of the DrivenMode.
+func (d DrivenMode) String() string {
+	return [...]string{"consumer", "provider"}[d]
+}
+
 type HTTPDoc struct {
 	Version string     `json:"version" yaml:"version"`
 	Kind    string     `json:"kind" yaml:"kind"`

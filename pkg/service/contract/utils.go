@@ -244,7 +244,7 @@ func checkConfigFile(servicesMapping map[string][]string) error {
 	return nil
 }
 
-func saveServiceMappings(servicesMapping config.Config, filePath string) error {
+func saveServiceMappings(servicesMapping config.Contract, filePath string) error {
 	// Marshal the services mapping to YAML
 	servicesMappingYAML, err := yamlLib.Marshal(servicesMapping)
 	if err != nil {
@@ -252,7 +252,7 @@ func saveServiceMappings(servicesMapping config.Config, filePath string) error {
 	}
 
 	// Write the services mapping to the specified file path
-	err = yaml.WriteFile(context.Background(), zap.NewNop(), filePath, "keploy", servicesMappingYAML, false)
+	err = yaml.WriteFile(context.Background(), zap.NewNop(), filePath, "serviceMappings", servicesMappingYAML, false)
 	if err != nil {
 		return fmt.Errorf("failed to write services mapping to file: %w", err)
 	}

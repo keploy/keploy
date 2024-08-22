@@ -180,7 +180,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "generate", "download":
 		cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate/download contracts")
 		cmd.Flags().StringSliceP("tests", "t", c.cfg.Contract.Tests, "Specify the tests for which to generate/download contracts")
-		cmd.Flags().StringP("path", "p", c.cfg.Contract.Path, "Specify the path to generate/download contracts")
+		cmd.Flags().StringP("path", "p", ".", "Specify the path to generate/download contracts")
 		if cmd.Name() == "download" {
 			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the path to download contracts")
 		}
@@ -219,7 +219,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "record", "test", "rerecord":
 		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
 			cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate contracts")
-			cmd.Flags().StringP("path", "p", c.cfg.Contract.Path, "Specify the path to generate contracts")
+			cmd.Flags().StringP("path", "p", ".", "Specify the path to generate contracts")
 			cmd.Flags().Bool("download", c.cfg.Contract.Download, "Specify whether to download contracts or not")
 			cmd.Flags().Bool("generate", c.cfg.Contract.Generate, "Specify")
 			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the driven flag to validate contracts")
@@ -482,10 +482,11 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+
 		if path == "" {
-			c.cfg.Contract.Path = path
+			c.cfg.Contract.Path = utils.ToAbsPath(c.logger, "./")
 		} else {
-			c.cfg.Contract.Path = "./"
+			c.cfg.Contract.Path = path
 		}
 
 		services, err := cmd.Flags().GetStringSlice("services")
@@ -511,17 +512,11 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}
-			if c.cfg.Contract.Driven == "" {
-				c.cfg.Contract.Driven = "client"
-			}
 
 		}
-		absPath, err := utils.GetAbsPath("./")
-		if err != nil {
-			utils.LogError(c.logger, err, "error while getting absolute path")
-			return errors.New("failed to get the absolute path")
-		}
-		c.cfg.Path = absPath + "/keploy"
+
+		c.cfg.Path = utils.ToAbsPath(c.logger, "./")
+
 	case "config":
 		path, err := cmd.Flags().GetString("path")
 		if err != nil {
@@ -529,7 +524,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		c.cfg.Path = path
+		c.cfg.Path, err = utils.GetAbsPath(path)
+		if err != nil {
+			errMsg := "failed to get the absolute path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
 	case "record", "test", "rerecord":
 
 		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
@@ -540,7 +540,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 			if path == "" {
-				c.cfg.Contract.Path = "./"
+				c.cfg.Contract.Path = utils.ToAbsPath(c.logger, "./")
 			} else {
 				c.cfg.Contract.Path = path
 			}
@@ -570,15 +570,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}
-			if c.cfg.Contract.Driven == "" {
-				c.cfg.Contract.Driven = "client"
-			}
-			absPath, err := utils.GetAbsPath("./")
-			if err != nil {
-				utils.LogError(c.logger, err, "error while getting absolute path")
-				return errors.New("failed to get the absolute path")
-			}
-			c.cfg.Path = absPath + "/keploy"
+
+			c.cfg.Path = utils.ToAbsPath(c.logger, "./")
 			return nil
 		}
 		// handle the app command

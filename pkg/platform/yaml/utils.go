@@ -245,7 +245,7 @@ func CreateDir(path string, logger *zap.Logger) error {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		err := os.MkdirAll(path, os.ModePerm)
 		if err != nil {
-			logger.Error("Error creating directory", zap.String("directory", path), zap.Error(err))
+			utils.LogError(logger, err, "failed to create directory", zap.String("directory", path))
 			return err
 		}
 	}
@@ -286,7 +286,7 @@ func ReadYAMLFile(ctx context.Context, logger *zap.Logger, filePath string, file
 
 	err = yaml.Unmarshal(configData, v)
 	if err != nil {
-		logger.Error("Error parsing YAML", zap.Error(err))
+		utils.LogError(logger, err, "failed to unmarshal YAML", zap.String("file", filePath))
 		return err
 	}
 	return nil

@@ -97,7 +97,7 @@ func compareParameters(mockParameters, testParameters []models.Parameter) (bool,
 	return pass, nil
 }
 
-func compareResponseBodies(status string, mockOperation, testOperation *models.Operation, logDiffs matcherUtils.DiffsPrinter, newLogger *pp.PrettyPrinter, logger *zap.Logger, testName, mockName, testSetID, mockSetID string, mode int) (float64, bool, bool, error) {
+func compareResponseBodies(status string, mockOperation, testOperation *models.Operation, logDiffs matcherUtils.DiffsPrinter, newLogger *pp.PrettyPrinter, logger *zap.Logger, testName, mockName, testSetID, mockSetID string, mode models.SchemaMatchMode) (float64, bool, bool, error) {
 	pass := true
 	overallScore := 0.0
 	matched := false
@@ -144,7 +144,7 @@ func compareResponseBodies(status string, mockOperation, testOperation *models.O
 	}
 	return differencesCount / overallScore, pass, matched, nil
 }
-func Match(mock, test models.OpenAPI, testSetID string, mockSetID string, logger *zap.Logger, mode int) (float64, bool, error) {
+func Match(mock, test models.OpenAPI, testSetID string, mockSetID string, logger *zap.Logger, mode models.SchemaMatchMode) (float64, bool, error) {
 	pass := false
 
 	candidateScore := -1.0
@@ -212,7 +212,7 @@ func calculateSimilarityScore(mockOperation, testOperation *models.Operation, st
 	return score, nil
 }
 
-func handleJSONDiff(validatedJSON matcherUtils.ValidatedJSON, logDiffs matcherUtils.DiffsPrinter, newLogger *pp.PrettyPrinter, logger *zap.Logger, _ string, _ string, _ string, _ string, mockBodyStr string, testBodyStr string, diffType string, mode int) (float64, bool, error) {
+func handleJSONDiff(validatedJSON matcherUtils.ValidatedJSON, logDiffs matcherUtils.DiffsPrinter, newLogger *pp.PrettyPrinter, logger *zap.Logger, _ string, _ string, _ string, _ string, mockBodyStr string, testBodyStr string, diffType string, mode models.SchemaMatchMode) (float64, bool, error) {
 	pass := true
 	differencesCount := 0.0
 	jsonComparisonResult, err := matcherUtils.JSONDiffWithNoiseControl(validatedJSON, nil, false)
