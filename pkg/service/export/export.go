@@ -173,7 +173,7 @@ type PostmanCollection struct {
 	Items []interface{} `json:"item"`
 }
 
-func Export(ctx context.Context, logger *zap.Logger) error {
+func Export(_ context.Context, logger *zap.Logger) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		utils.LogError(logger, err, "failed to get current working directory")
