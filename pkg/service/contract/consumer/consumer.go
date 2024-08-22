@@ -197,7 +197,7 @@ func (s *consumer) ValidateMockAgainstTests(scores map[string]map[string]map[str
 					fmt.Println()
 
 					// Additional information: Print consumer and current service comparison
-					fmt.Printf("                                    Current %s   ||   Consumer %s\n", serviceColor(s.config.Contract.Self), serviceColor(service))
+					fmt.Printf("                                    Current %s   ||   Consumer %s\n", serviceColor(s.config.Contract.Mappings.Self), serviceColor(service))
 
 					// Perform comparison between the mock and test case again
 					_, _, err := schemaMatcher.Match(mockInfo.Data, *testsMapping[mockInfo.TestSetID][mockInfo.Name], mockInfo.TestSetID, mockSetID, s.logger, models.CompareMode)

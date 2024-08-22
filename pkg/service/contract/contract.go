@@ -374,15 +374,15 @@ func (s *contract) GenerateTestsSchemas(ctx context.Context, selectedTests []str
 }
 
 func (s *contract) Generate(ctx context.Context) error {
-	if checkConfigFile(s.config.Contract.ServicesMapping) != nil {
+	if checkConfigFile(s.config.Contract.Mappings.ServicesMapping) != nil {
 		utils.LogError(s.logger, fmt.Errorf("Error in checking config file while validating"), "Error in checking config file while validating")
 		return fmt.Errorf("Error in checking config file while validating")
 	}
 
-	mappings := s.config.Contract.ServicesMapping
+	mappings := s.config.Contract.Mappings.ServicesMapping
 	serviceColor := color.New(color.FgYellow).SprintFunc()
 	fmt.Println(serviceColor("=========================================="))
-	fmt.Println(serviceColor(fmt.Sprintf("Starting Generating OpenAPI Schemas for Current Service: %s ....", s.config.Contract.Self)))
+	fmt.Println(serviceColor(fmt.Sprintf("Starting Generating OpenAPI Schemas for Current Service: %s ....", s.config.Contract.Mappings.Self)))
 	fmt.Println(serviceColor("=========================================="))
 
 	err := s.GenerateTestsSchemas(ctx, s.config.Contract.Tests)
@@ -395,7 +395,7 @@ func (s *contract) Generate(ctx context.Context) error {
 		utils.LogError(s.logger, err, "failed to generate mocks schemas")
 		return err
 	}
-	if err := saveServiceMappings(s.config.Contract, filepath.Join(s.config.Path, "schema")); err != nil {
+	if err := saveServiceMappings(s.config.Contract.Mappings, filepath.Join(s.config.Path, "schema")); err != nil {
 		utils.LogError(s.logger, err, "failed to save service mappings")
 		return err
 	}
@@ -418,7 +418,7 @@ func (s *contract) DownloadTests(_ string) error {
 	}
 
 	// Loop through the services in the mappings in the config file
-	for service := range s.config.Contract.ServicesMapping {
+	for service := range s.config.Contract.Mappings.ServicesMapping {
 		// Fetch the tests of those services from virtual cpr
 		testsPath := filepath.Join(cprFolder, service, "keploy", "schema", "tests")
 		// Copy this dir to the target path
@@ -486,21 +486,21 @@ func (s *contract) DownloadMocks(ctx context.Context, _ string) error {
 		}
 
 		// Extract the name of the current service (the one being processed)
-		var self = s.config.Contract.Self
-		var schemaConfigFile config.Contract
+		var self = s.config.Contract.Mappings.Self
+		var schemaConfigMappings config.Mappings
 
 		// Construct the path to the schema configuration file for the current service
 		configFilePath := filepath.Join(cprFolder, entry.Name(), "keploy", "schema")
 
-		// Read the schema configuration YAML file
-		if err := yaml.ReadYAMLFile(ctx, s.logger, configFilePath, "serviceMappings", &schemaConfigFile, true); err != nil {
+		// Read the schema configuration YAML schemaConfigMappings
+		if err := yaml.ReadYAMLFile(ctx, s.logger, configFilePath, "serviceMappings", &schemaConfigMappings, true); err != nil {
 			utils.LogError(s.logger, err, "failed to read the schema configuration file", zap.String("file", "serviceMappings"))
 			return err
 		}
 
 		// Check if the current service exists in the service mapping from the schema configuration
 		serviceFound := false
-		if _, exists := schemaConfigFile.ServicesMapping[self]; exists {
+		if _, exists := schemaConfigMappings.ServicesMapping[self]; exists {
 			serviceFound = true
 		}
 
@@ -510,7 +510,7 @@ func (s *contract) DownloadMocks(ctx context.Context, _ string) error {
 		}
 
 		// Create a directory for the current service inside the target path
-		serviceFolder := filepath.Join(targetPath, schemaConfigFile.Self)
+		serviceFolder := filepath.Join(targetPath, schemaConfigMappings.Self)
 		if err := yaml.CreateDir(serviceFolder, s.logger); err != nil {
 			utils.LogError(s.logger, err, "failed to create directory", zap.String("directory", serviceFolder))
 			return err
@@ -559,7 +559,7 @@ func (s *contract) DownloadMocks(ctx context.Context, _ string) error {
 			// Filter the HTTP mocks based on the service URL mappings
 			var filteredMocks []*models.HTTPDoc
 			for _, mock := range httpMocks {
-				for _, service := range schemaConfigFile.ServicesMapping[self] {
+				for _, service := range schemaConfigMappings.ServicesMapping[self] {
 					// Add the mock to the filtered list if the service URL matches
 					if service == mock.Spec.Request.URL {
 						filteredMocks = append(filteredMocks, mock)
@@ -602,7 +602,7 @@ func (s *contract) DownloadMocks(ctx context.Context, _ string) error {
 
 func (s *contract) Download(ctx context.Context) error {
 
-	if checkConfigFile(s.config.Contract.ServicesMapping) != nil {
+	if checkConfigFile(s.config.Contract.Mappings.ServicesMapping) != nil {
 		utils.LogError(s.logger, fmt.Errorf("Error in checking config file while validating"), "Error in checking config file while validating")
 		return fmt.Errorf("Error in checking config file while validating")
 	}
@@ -634,7 +634,7 @@ func (s *contract) Download(ctx context.Context) error {
 }
 
 func (s *contract) Validate(ctx context.Context) error {
-	if checkConfigFile(s.config.Contract.ServicesMapping) != nil {
+	if checkConfigFile(s.config.Contract.Mappings.ServicesMapping) != nil {
 		utils.LogError(s.logger, fmt.Errorf("Error in checking config file while validating"), "Error in checking config file while validating")
 		return fmt.Errorf("Error in checking config file while validating")
 	}

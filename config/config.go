@@ -74,12 +74,15 @@ type ReRecord struct {
 	Port          uint32   `json:"port" yaml:"port" mapstructure:"port"`
 }
 type Contract struct {
-	Services        []string            `json:"services" yaml:"services" mapstructure:"services"`
-	Tests           []string            `json:"tests" yaml:"tests" mapstructure:"tests"`
-	Path            string              `json:"path" yaml:"path" mapstructure:"path"`
-	Download        bool                `json:"download" yaml:"download" mapstructure:"download"`
-	Generate        bool                `json:"generate" yaml:"generate" mapstructure:"generate"`
-	Driven          string              `json:"driven" yaml:"driven" mapstructure:"driven"`
+	Services []string `json:"services" yaml:"services" mapstructure:"services"`
+	Tests    []string `json:"tests" yaml:"tests" mapstructure:"tests"`
+	Path     string   `json:"path" yaml:"path" mapstructure:"path"`
+	Download bool     `json:"download" yaml:"download" mapstructure:"download"`
+	Generate bool     `json:"generate" yaml:"generate" mapstructure:"generate"`
+	Driven   string   `json:"driven" yaml:"driven" mapstructure:"driven"`
+	Mappings Mappings `json:"mappings" yaml:"mappings" mapstructure:"mappings"`
+}
+type Mappings struct {
 	ServicesMapping map[string][]string `json:"servicesMapping" yaml:"servicesMapping" mapstructure:"servicesMapping"`
 	Self            string              `json:"self" yaml:"self" mapstructure:"self"`
 }

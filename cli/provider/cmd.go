@@ -483,11 +483,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 
-		if path == "" {
-			c.cfg.Contract.Path = utils.ToAbsPath(c.logger, "./")
-		} else {
-			c.cfg.Contract.Path = path
-		}
+		c.cfg.Contract.Path = utils.ToAbsPath(c.logger, path)
 
 		services, err := cmd.Flags().GetStringSlice("services")
 		if err != nil {
@@ -539,11 +535,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}
-			if path == "" {
-				c.cfg.Contract.Path = utils.ToAbsPath(c.logger, "./")
-			} else {
-				c.cfg.Contract.Path = path
-			}
+
+			c.cfg.Contract.Path = utils.ToAbsPath(c.logger, path)
+
 			services, err := cmd.Flags().GetStringSlice("services")
 			if err != nil {
 				errMsg := "failed to get the services"

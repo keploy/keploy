@@ -201,7 +201,7 @@ func reverseMap(m map[string]interface{}) map[interface{}]string {
 func toString(val interface{}) string {
 	switch v := val.(type) {
 	case int:
-		return strconv.Itoa(v)
+		return fmt.Sprintf("%d", v)
 	case float64:
 		return strconv.FormatFloat(v, 'f', -1, 64)
 	case float32:

@@ -244,7 +244,7 @@ func checkConfigFile(servicesMapping map[string][]string) error {
 	return nil
 }
 
-func saveServiceMappings(servicesMapping config.Contract, filePath string) error {
+func saveServiceMappings(servicesMapping config.Mappings, filePath string) error {
 	// Marshal the services mapping to YAML
 	servicesMappingYAML, err := yamlLib.Marshal(servicesMapping)
 	if err != nil {
