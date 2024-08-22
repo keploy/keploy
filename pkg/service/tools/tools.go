@@ -15,12 +15,14 @@ import (
 	"runtime"
 	"strings"
 
+	"go.keploy.io/server/v2/pkg/service/export"
+
 	"github.com/charmbracelet/glamour"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
-	"gopkg.in/yaml.v3"
+	yamlLib "gopkg.in/yaml.v3"
 )
 
 func NewTools(logger *zap.Logger, telemetry teleDB, auth service.Auth) Service {
@@ -41,6 +43,11 @@ var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
 
 func (t *Tools) SendTelemetry(event string, output ...map[string]interface{}) {
 	t.telemetry.SendTelemetry(event, output...)
+}
+
+func (t *Tools) Export(ctx context.Context) error {
+	export.Export(t.logger, ctx)
+	return nil
 }
 
 // Update initiates the tools process for the Keploy binary file.
@@ -248,7 +255,7 @@ func extractTarGz(gzipPath, destDir string) error {
 }
 
 func (t *Tools) CreateConfig(_ context.Context, filePath string, configData string) error {
-	var node yaml.Node
+	var node yamlLib.Node
 	var data []byte
 	var err error
 
@@ -263,11 +270,11 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 		data = []byte(configData)
 	}
 
-	if err := yaml.Unmarshal(data, &node); err != nil {
+	if err := yamlLib.Unmarshal(data, &node); err != nil {
 		utils.LogError(t.logger, err, "failed to unmarshal the config")
 		return nil
 	}
-	results, err := yaml.Marshal(node.Content[0])
+	results, err := yamlLib.Marshal(node.Content[0])
 	if err != nil {
 		utils.LogError(t.logger, err, "failed to marshal the config")
 		return nil

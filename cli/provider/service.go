@@ -41,7 +41,7 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 	tel.Ping()
 
 	switch cmd {
-	case "config", "update", "login":
+	case "config", "update", "login", "export":
 		return tools.NewTools(n.logger, tel, n.auth), nil
 	case "gen":
 		return utgen.NewUnitTestGenerator(n.cfg, tel, n.auth, n.logger)
