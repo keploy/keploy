@@ -506,6 +506,7 @@ func compareResponses(response1, response2 *interface{}, key string) {
 // Simplify the second response into type string for comparison.
 func compareSecondResponse(val1 *string, response2 *interface{}, key1 string, key2 string) {
 	switch v2 := (*response2).(type) {
+
 	case geko.Array:
 		for _, val2 := range v2.List {
 			compareSecondResponse(val1, &val2, key1, "")

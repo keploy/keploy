@@ -511,7 +511,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		}
 
-		c.cfg.Path = utils.ToAbsPath(c.logger, "./")
+		c.cfg.Path = utils.ToAbsPath(c.logger, path)
 
 	case "config":
 		path, err := cmd.Flags().GetString("path")
@@ -565,7 +565,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 
-			c.cfg.Path = utils.ToAbsPath(c.logger, "./")
+			c.cfg.Path = utils.ToAbsPath(c.logger, path)
 			return nil
 		}
 		// handle the app command

@@ -13,7 +13,13 @@ const (
 
 // String returns the string representation of the SchemaMatchMode.
 func (s SchemaMatchMode) String() string {
-	return [...]string{"IDENTIFYMODE", "COMPAREMODE"}[s]
+	schemaModes := []string{"IDENTIFYMODE", "COMPAREMODE"}
+
+	if int(s) < 0 || int(s) >= len(schemaModes) {
+		return "UNKNOWN"
+	}
+
+	return schemaModes[s]
 }
 
 // DrivenMode defines the possible modes for driven contexts.
@@ -29,7 +35,13 @@ const (
 
 // String returns the string representation of the DrivenMode.
 func (d DrivenMode) String() string {
-	return [...]string{"consumer", "provider"}[d]
+	drivenModes := []string{"consumer", "provider"}
+
+	if int(d) < 0 || int(d) >= len(drivenModes) {
+		return "UNKNOWN"
+	}
+
+	return drivenModes[d]
 }
 
 type HTTPDoc struct {
