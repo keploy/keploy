@@ -66,14 +66,24 @@ func parseCurlCommand(logger *zap.Logger, curlCommand string) map[string]interfa
 	rawData := ""
 	dataMatch := reData.FindStringSubmatch(curlCommand)
 	if len(dataMatch) > 1 {
-		rawData, err = strconv.Unquote(`"` + dataMatch[1] + `"`) // Unquote to remove escape sequences
-		if err != nil {
-			utils.LogError(logger, err, "error unquoting data")
-			return nil
+		rawData = dataMatch[1]
+
+		// Check if rawData needs unquoting (e.g., it starts and ends with quotes)
+		if (strings.HasPrefix(rawData, `"`) && strings.HasSuffix(rawData, `"`)) ||
+			(strings.HasPrefix(rawData, `'`) && strings.HasSuffix(rawData, `'`)) {
+			unquotedData, err := strconv.Unquote(rawData)
+			if err != nil {
+				utils.LogError(logger, err, "error unquoting data")
+				return nil
+			}
+			rawData = unquotedData
 		}
 		// Determine if it's JSON or URL-encoded form data
 		if strings.HasPrefix(rawData, "{") && strings.HasSuffix(rawData, "}") {
 			// Try to parse as JSON
+			rawData = strings.ReplaceAll(rawData, `\n`, "\n")
+			rawData = strings.ReplaceAll(rawData, `\"`, `"`)
+
 			if err := json.Unmarshal([]byte(rawData), &jsonData); err != nil {
 				utils.LogError(logger, err, "error parsing JSON data")
 				return nil
