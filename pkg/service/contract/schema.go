@@ -63,6 +63,7 @@ func (s *contract) GetAllTestsSchema(ctx context.Context) (map[string]map[string
 }
 
 func (s *contract) GetAllDownloadedMocksSchemas(ctx context.Context) ([]models.MockMapping, error) {
+	// ***** TODO: See what part can be moved to DB layer *****
 	downloadMocksFolder := filepath.Join("./Download", "Mocks")
 
 	// Read the contents of the Download Mocks folder to get all service directories.

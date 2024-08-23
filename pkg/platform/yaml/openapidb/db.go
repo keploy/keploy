@@ -147,6 +147,6 @@ func (ts *OpenAPIYaml) WriteSchema(ctx context.Context, logger *zap.Logger, outp
 	}
 
 	outputFilePath := outputPath + "/" + name + ".yaml"
-	fmt.Println("OpenAPI YAML has been saved to " + outputFilePath)
+	logger.Info("OpenAPI YAML has been saved to " + outputFilePath)
 	return nil
 }
