@@ -9,8 +9,8 @@ import (
 
 // Service defines the contract service interface
 type Service interface {
-	Generate(ctx context.Context) error
-	Download(ctx context.Context) error
+	Generate(ctx context.Context, checkConfig bool) error
+	Download(ctx context.Context, checkConfig bool) error
 	Validate(ctx context.Context) error
 }
 

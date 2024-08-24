@@ -28,7 +28,6 @@ func validateSchema(openapi models.OpenAPI) error {
 		return err
 	}
 
-	fmt.Println("OpenAPI document is valid.")
 	return nil
 }
 

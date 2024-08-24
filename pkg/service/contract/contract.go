@@ -373,10 +373,10 @@ func (s *contract) GenerateTestsSchemas(ctx context.Context, selectedTests []str
 	return nil
 }
 
-func (s *contract) Generate(ctx context.Context) error {
-	if checkConfigFile(s.config.Contract.Mappings.ServicesMapping) != nil {
-		utils.LogError(s.logger, fmt.Errorf("Error in checking config file while validating"), "Error in checking config file while validating")
-		return fmt.Errorf("Error in checking config file while validating")
+func (s *contract) Generate(ctx context.Context, checkConfig bool) error {
+	if checkConfig && checkConfigFile(s.config.Contract.Mappings.ServicesMapping) != nil {
+		utils.LogError(s.logger, fmt.Errorf("Unable to find services mappings in the config file"), "Unable to find services mappings in the config file")
+		return fmt.Errorf("Unable to find services mappings in the config file")
 	}
 
 	mappings := s.config.Contract.Mappings.ServicesMapping
@@ -600,11 +600,11 @@ func (s *contract) DownloadMocks(ctx context.Context, _ string) error {
 	return nil
 }
 
-func (s *contract) Download(ctx context.Context) error {
+func (s *contract) Download(ctx context.Context, checkConfig bool) error {
 
-	if checkConfigFile(s.config.Contract.Mappings.ServicesMapping) != nil {
-		utils.LogError(s.logger, fmt.Errorf("Error in checking config file while validating"), "Error in checking config file while validating")
-		return fmt.Errorf("Error in checking config file while validating")
+	if checkConfig && checkConfigFile(s.config.Contract.Mappings.ServicesMapping) != nil {
+		utils.LogError(s.logger, fmt.Errorf("Unable to find services mappings in the config file"), "Unable to find services mappings in the config file")
+		return fmt.Errorf("Unable to find services mappings in the config file")
 	}
 	path := s.config.Contract.Path
 	// Validate the path
@@ -634,20 +634,20 @@ func (s *contract) Download(ctx context.Context) error {
 }
 
 func (s *contract) Validate(ctx context.Context) error {
-	if checkConfigFile(s.config.Contract.Mappings.ServicesMapping) != nil {
-		utils.LogError(s.logger, fmt.Errorf("Error in checking config file while validating"), "Error in checking config file while validating")
-		return fmt.Errorf("Error in checking config file while validating")
+	if s.config.Contract.Mappings.Self == "" {
+		utils.LogError(s.logger, fmt.Errorf("Self service is not defined in the config file"), "Self service is not defined in the config file")
+		return fmt.Errorf("Self service is not defined in the config file")
 	}
 
 	if s.config.Contract.Generate {
-		err := s.Generate(ctx)
+		err := s.Generate(ctx, false)
 		if err != nil {
 			utils.LogError(s.logger, err, "failed to generate contract")
 			return err
 		}
 	}
 	if s.config.Contract.Download {
-		err := s.Download(ctx)
+		err := s.Download(ctx, false)
 		if err != nil {
 			utils.LogError(s.logger, err, "failed to download contract")
 			return err

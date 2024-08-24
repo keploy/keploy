@@ -54,7 +54,7 @@ func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 			}
 			// Extract services from the flag
 
-			err = contract.Generate(ctx)
+			err = contract.Generate(ctx, true)
 
 			if err != nil {
 				utils.LogError(logger, err, "failed to generate contract")
@@ -89,7 +89,7 @@ func Download(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 				utils.LogError(logger, nil, "service doesn't satisfy contract service interface")
 				return nil
 			}
-			err = contract.Download(ctx)
+			err = contract.Download(ctx, true)
 
 			if err != nil {
 				utils.LogError(logger, err, "failed to download contract")
