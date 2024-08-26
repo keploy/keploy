@@ -34,9 +34,12 @@ installKeploy (){
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz"
         fi
-
-        curl --silent --location "$download_url" | tar xz --overwrite -C /tmp 
-        sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploy
+        # macOS tar does not support --overwrite option so we need to remove the directory first
+        # to avoid the "File exists" error
+        rm -rf /tmp/keploy
+        mkdir -p /tmp/keploy
+        curl --silent --location "$download_url" | tar xz -C /tmp/keploy/
+        sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy/keploy /usr/local/bin/keploy
         delete_keploy_alias
     }
 
