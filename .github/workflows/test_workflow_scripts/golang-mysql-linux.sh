@@ -5,11 +5,18 @@ source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 # Start MySQL before starting Keploy.
 docker run --name mysql-container -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=uss -p 3306:3306 --rm mysql:latest
 
+# Wait for MySQL to be ready
+until docker exec mysql-container mysqladmin ping -h "localhost" --silent; do
+    echo "Waiting for MySQL to be ready..."
+    sleep 5
+done
+
 # Check if there is a keploy-config file, if there is, delete it.
 if [ -f "./keploy.yml" ]; then
     rm ./keploy.yml
 fi
 
+sudo ./../../keployv2 config --generate
 # Update the ConnectionString to use the correct database and password
 export ConnectionString="root:password@tcp(localhost:3306)/uss"
 
