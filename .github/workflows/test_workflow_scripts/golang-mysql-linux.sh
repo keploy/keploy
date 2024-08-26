@@ -1,73 +1,113 @@
 #!/bin/bash
 
-set -e  # Exit immediately if a command exits with a non-zero status.
+source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
-# Create Docker network
-docker network create keploy_network || true
+# Start MySQL before starting Keploy.
+docker run --name mysql-container -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=uss -p 3306:3306 --rm mysql:latest
 
-# Start MySQL container
-docker run --network keploy_network --ip 172.18.0.22 --rm --name mysql -e MYSQL_ROOT_PASSWORD=my-secret-pw -d mysql:latest
-
-# Wait for MySQL to initialize
-until docker exec mysql mysqladmin ping -h "127.0.0.1" -uroot -pmy-secret-pw --silent; do
-    echo "Waiting for MySQL to initialize..."
+# Wait until MySQL is ready to accept connections
+until docker exec mysql-container mysqladmin ping -h "127.0.0.1" --silent; do
+    echo "Waiting for MySQL to start..."
     sleep 2
 done
 
-# Grant privileges to root user from any host
-docker exec mysql mysql -uroot -pmy-secret-pw -e "
-    GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' IDENTIFIED BY 'my-secret-pw';
-    FLUSH PRIVILEGES;
-"
-echo "MySQL is ready and privileges are set."
+# Check if there is a keploy-config file, if there is, delete it.
+if [ -f "./keploy.yml" ]; then
+    rm ./keploy.yml
+fi
 
-# Export connection string
-export ConnectionString="root:my-secret-pw@tcp(172.18.0.22:3306)/mysql"
+# Update the ConnectionString to use the correct database and password
+export ConnectionString="root:password@tcp(localhost:3306)/uss"
 
-# Build application
+rm -rf keploy/
+
+# Update the global noise to ts.
 go build -o urlShort
 
-# Start application container
-docker run --network keploy_network --rm --name url_shortener -d url_shortener
+send_request() {
+    sleep 10
+    app_started=false
+    while [ "$app_started" = false ]; do
+        if curl -X GET http://localhost:9090/healthcheck; then
+            app_started=true
+        fi
+        sleep 3
+    done
+    
+    echo "App started"
+    curl -X POST http://localhost:9090/shorten -H "Content-Type: application/json" -d '{"url": "https://github.com"}'
 
-# Wait for application to start
-until curl -s http://localhost:9090/healthcheck; do
-    echo "Waiting for application to start..."
-    sleep 2
+    curl -X GET http://localhost:9090/resolve/4KepjkTT
+
+    # Wait for 10 seconds for Keploy to record the tcs and mocks.
+    sleep 10
+    pid=$(pgrep keploy)
+    echo "$pid Keploy PID"
+    echo "Killing Keploy"
+    sudo kill $pid
+}
+
+for i in {1..2}; do
+    app_name="urlShort_${i}"
+    send_request &
+    sudo -E env PATH="$PATH" ./../../keployv2 record -c "./urlShort" --generateGithubActions=false &> "${app_name}.txt"
+    if grep "ERROR" "${app_name}.txt"; then
+        echo "Error found in pipeline..."
+        cat "${app_name}.txt"
+        exit 1
+    fi
+    if grep "WARNING: DATA RACE" "${app_name}.txt"; then
+      echo "Race condition detected in recording, stopping pipeline..."
+      cat "${app_name}.txt"
+      exit 1
+    fi
+    sleep 5
+    wait
+    echo "Recorded test case and mocks for iteration ${i}"
 done
 
-echo "Application started successfully."
+# Start the gin-mongo app in test mode.
+sudo -E env PATH="$PATH" ./../../keployv2 test -c "./urlShort" --delay 7 --generateGithubActions=false &> test_logs.txt
 
-# Run Keploy recording
-keploy record -c "docker exec url_shortener ./urlShort" --generateGithubActions=false &
+if grep "ERROR" "test_logs.txt"; then
+    echo "Error found in pipeline..."
+    cat "test_logs.txt"
+    exit 1
+fi
 
-# Send requests
-sleep 5  # Ensure Keploy is ready
-curl -X POST http://localhost:9090/shorten -H "Content-Type: application/json" -d '{"url": "https://github.com"}'
-curl -X GET http://localhost:9090/resolve/4KepjkTT
+if grep "WARNING: DATA RACE" "test_logs.txt"; then
+    echo "Race condition detected in test, stopping pipeline..."
+    cat "test_logs.txt"
+    exit 1
+fi
 
-# Stop recording
-sleep 5
-pkill keploy
-
-# Run Keploy tests
-keploy test -c "docker exec url_shortener ./urlShort" --delay 7 --generateGithubActions=false
-
-# Check test results
 all_passed=true
-for report_file in ./keploy/reports/test-run-0/*-report.yaml; do
-    test_status=$(grep 'status:' "$report_file" | awk '{print $2}')
-    echo "Test status in $(basename $report_file): $test_status"
+
+# Get the test results from the testReport file.
+for i in {0..1}
+do
+    # Define the report file for each test set
+    report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
+
+    # Extract the test status
+    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+
+    # Print the status for debugging
+    echo "Test status for test-set-$i: $test_status"
+
+    # Check if any test set did not pass
     if [ "$test_status" != "PASSED" ]; then
         all_passed=false
-        echo "Test failed in $(basename $report_file)."
+        echo "Test-set-$i did not pass."
+        break # Exit the loop early as all tests need to pass
     fi
 done
 
+# Check the overall test status and exit accordingly
 if [ "$all_passed" = true ]; then
-    echo "All tests passed successfully."
+    echo "All tests passed"
     exit 0
 else
-    echo "Some tests failed. Check the reports for details."
+    cat "test_logs.txt"
     exit 1
 fi
