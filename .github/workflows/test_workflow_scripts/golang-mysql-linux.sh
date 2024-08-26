@@ -1,10 +1,15 @@
-
 #!/bin/bash
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
-# Start mongo before starting keploy.
+# Start MySQL before starting Keploy.
 docker run -p 3306:3306 --rm --name mysql -e MYSQL_ROOT_PASSWORD=my-secret-pw -d mysql:latest
+
+# Wait until MySQL is ready to accept connections
+until docker exec mysql mysqladmin ping -h "127.0.0.1" --silent; do
+    echo "Waiting for MySQL to start..."
+    sleep 2
+done
 
 # Check if there is a keploy-config file, if there is, delete it.
 if [ -f "./keploy.yml" ]; then
@@ -28,17 +33,15 @@ send_request() {
     done
     
     echo "App started"
-    curl -X POST http://localhost:9090/shorten 
-    -H "Content-Type: application/json" 
-    -d '{"url": "https://github.com"}'
+    curl -X POST http://localhost:9090/shorten -H "Content-Type: application/json" -d '{"url": "https://github.com"}'
 
     curl -X GET http://localhost:9090/resolve/4KepjkTT
 
-    # Wait for 10 seconds for keploy to record the tcs and mocks.
+    # Wait for 10 seconds for Keploy to record the tcs and mocks.
     sleep 10
     pid=$(pgrep keploy)
     echo "$pid Keploy PID"
-    echo "Killing keploy"
+    echo "Killing Keploy"
     sudo kill $pid
 }
 
