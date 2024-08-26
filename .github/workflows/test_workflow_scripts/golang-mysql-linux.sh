@@ -1,15 +1,31 @@
 #!/bin/bash
 
+set -e  # Exit immediately if a command exits with a non-zero status
+set -o pipefail  # Return the exit status of the last command in the pipe that failed
+
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Start MySQL before starting Keploy.
-docker run -p 3306:3306 --rm --name mysql -e MYSQL_ROOT_PASSWORD=my-secret-pw -d mysql:latest
+docker run -p 3306:3306 --rm --name mysql \
+    -e MYSQL_ROOT_PASSWORD=my-secret-pw \
+    -e MYSQL_ROOT_HOST=% \
+    -d mysql:latest
 
 # Wait until MySQL is ready to accept connections
+echo "Waiting for MySQL to be ready..."
 until docker exec mysql mysqladmin ping -h "127.0.0.1" --silent; do
-    echo "Waiting for MySQL to start..."
+    echo "MySQL is not ready yet. Waiting..."
     sleep 2
 done
+echo "MySQL is up and running."
+
+# Test MySQL connection
+echo "Testing MySQL connection..."
+docker exec mysql mysql -uroot -pmy-secret-pw -e "SELECT 1;" && echo "MySQL connection successful." || { echo "MySQL connection failed."; exit 1; }
+
+# Optionally, display MySQL logs for further debugging
+echo "Fetching MySQL logs..."
+docker logs mysql
 
 # Check if there is a keploy-config file, if there is, delete it.
 if [ -f "./keploy.yml" ]; then
@@ -28,13 +44,14 @@ send_request() {
     while [ "$app_started" = false ]; do
         if curl -X GET http://localhost:9090/healthcheck; then
             app_started=true
+        else
+            echo "Waiting for app to start..."
         fi
         sleep 3
     done
-    
+
     echo "App started"
     curl -X POST http://localhost:9090/shorten -H "Content-Type: application/json" -d '{"url": "https://github.com"}'
-
     curl -X GET http://localhost:9090/resolve/4KepjkTT
 
     # Wait for 10 seconds for Keploy to record the tcs and mocks.
