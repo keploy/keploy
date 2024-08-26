@@ -129,8 +129,7 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 	}
 
 	var apiKey string
-
-	if ai.APIBase == fmt.Sprintf("%s/ai/call", ai.APIServerURL) {
+	if ai.APIBase == ai.APIServerURL {
 
 		token, err := ai.Auth.GetToken(ctx)
 		if err != nil {
