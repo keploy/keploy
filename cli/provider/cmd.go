@@ -173,7 +173,18 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	//add flags
 	var err error
 	cmd.Flags().SetNormalizeFunc(aliasNormalizeFunc)
+	cmd.Flags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
+
 	switch cmd.Name() {
+
+	case "generate", "download":
+		cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate/download contracts")
+		cmd.Flags().StringSliceP("tests", "t", c.cfg.Contract.Tests, "Specify the tests for which to generate/download contracts")
+		cmd.Flags().StringP("path", "p", ".", "Specify the path to generate/download contracts")
+		if cmd.Name() == "download" {
+			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the path to download contracts")
+		}
+
 	case "update":
 		return nil
 	case "normalize":
@@ -206,6 +217,15 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		}
 
 	case "record", "test", "rerecord":
+		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
+			cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate contracts")
+			cmd.Flags().StringP("path", "p", ".", "Specify the path to generate contracts")
+			cmd.Flags().Bool("download", true, "Specify whether to download contracts or not")
+			cmd.Flags().Bool("generate", true, "Specify whether to generate schemas for the current service or not")
+			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the driven flag to validate contracts")
+			return nil
+		}
+
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
@@ -242,7 +262,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	default:
 		return errors.New("unknown command name")
 	}
-	cmd.Flags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
 
 	return nil
 }
@@ -456,15 +475,105 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", c.cfg))
 
 	switch cmd.Name() {
+	case "generate", "download":
+		path, err := cmd.Flags().GetString("path")
+		if err != nil {
+			errMsg := "failed to get the path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+
+		c.cfg.Contract.Path = utils.ToAbsPath(c.logger, path)
+
+		services, err := cmd.Flags().GetStringSlice("services")
+		if err != nil {
+			errMsg := "failed to get the services"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		config.SetSelectedServices(c.cfg, services)
+
+		selectedTests, err := cmd.Flags().GetStringSlice("tests")
+		if err != nil {
+			errMsg := "failed to get the tests"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		config.SetSelectedContractTests(c.cfg, selectedTests)
+
+		if cmd.Name() == "download" {
+			c.cfg.Contract.Driven, err = cmd.Flags().GetString("driven")
+			if err != nil {
+				errMsg := "failed to get the driven flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+
+		}
+
+		c.cfg.Path = utils.ToAbsPath(c.logger, path)
+
+	case "config":
+		path, err := cmd.Flags().GetString("path")
+		if err != nil {
+			errMsg := "failed to get the path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Path, err = utils.GetAbsPath(path)
+		if err != nil {
+			errMsg := "failed to get the absolute path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
 	case "record", "test", "rerecord":
 
+		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
+			path, err := cmd.Flags().GetString("path")
+			if err != nil {
+				errMsg := "failed to get the path"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+
+			c.cfg.Contract.Path = utils.ToAbsPath(c.logger, path)
+
+			services, err := cmd.Flags().GetStringSlice("services")
+			if err != nil {
+				errMsg := "failed to get the services"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			config.SetSelectedServices(c.cfg, services)
+
+			c.cfg.Contract.Download, err = cmd.Flags().GetBool("download")
+			if err != nil {
+				errMsg := "failed to get the download flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.Contract.Generate, err = cmd.Flags().GetBool("generate")
+			if err != nil {
+				errMsg := "failed to get the generate flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.Contract.Driven, err = cmd.Flags().GetString("driven")
+			if err != nil {
+				errMsg := "failed to get the driven flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+
+			c.cfg.Path = utils.ToAbsPath(c.logger, path)
+			return nil
+		}
 		// handle the app command
 		if c.cfg.Command == "" {
 			if !alreadyRunning(cmd.Name(), c.cfg.Test.BasePath) {
 				return c.noCommandError()
 			}
 		}
-
 		// set the command type
 		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
 
@@ -477,7 +586,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if c.cfg.GenerateGithubActions && utils.CmdType(c.cfg.CommandType) != utils.Empty {
 			defer utils.GenerateGithubActions(c.logger, c.cfg.Command)
 		}
-
 		if c.cfg.InDocker {
 			c.logger.Info("detected that Keploy is running in a docker container")
 			if len(c.cfg.Path) > 0 {
@@ -556,7 +664,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 			config.SetSelectedTests(c.cfg, testSets)
-
 			if cmd.Name() == "rerecord" {
 				c.cfg.Test.SkipCoverage = true
 				host, err := cmd.Flags().GetString("host")
@@ -590,6 +697,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 		}
+
 	case "normalize":
 		c.cfg.Path = utils.ToAbsPath(c.logger, c.cfg.Path)
 		tests, err := cmd.Flags().GetString("tests")
