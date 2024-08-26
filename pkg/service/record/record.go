@@ -21,20 +21,20 @@ import (
 
 type Recorder struct {
 	logger          *zap.Logger
-	testDB          TestDB
-	mockDB          MockDB
-	telemetry       Telemetry
-	instrumentation Instrumentation
+	TestDB          TestDB
+	MockDB          MockDB
+	Telemetry       Telemetry
+	Instrumentation Instrumentation
 	config          *config.Config
 }
 
 func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
 	return &Recorder{
 		logger:          logger,
-		testDB:          testDB,
-		mockDB:          mockDB,
-		telemetry:       telemetry,
-		instrumentation: instrumentation,
+		TestDB:          testDB,
+		MockDB:          mockDB,
+		Telemetry:       telemetry,
+		Instrumentation: instrumentation,
 		config:          config,
 	}
 }
@@ -94,7 +94,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
-		r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
+		r.Telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
 	}()
 
 	defer close(appErrChan)
@@ -138,7 +138,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 
 	errGrp.Go(func() error {
 		for testCase := range frames.Incoming {
-			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID)
+			err := r.TestDB.InsertTestCase(ctx, testCase, newTestSetID)
 			if err != nil {
 				if ctx.Err() == context.Canceled {
 					continue
@@ -147,7 +147,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 			} else {
 
 				testCount++
-				r.telemetry.RecordedTestAndMocks()
+				r.Telemetry.RecordedTestAndMocks()
 			}
 		}
 		return nil
@@ -155,7 +155,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 
 	errGrp.Go(func() error {
 		for mock := range frames.Outgoing {
-			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
+			err := r.MockDB.InsertMock(ctx, mock, newTestSetID)
 			if err != nil {
 				if ctx.Err() == context.Canceled {
 					continue
@@ -163,7 +163,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 				insertMockErrChan <- err
 			} else {
 				mockCountMap[mock.GetKind()]++
-				r.telemetry.RecordedTestCaseMock(mock.GetKind())
+				r.Telemetry.RecordedTestCaseMock(mock.GetKind())
 			}
 		}
 		return nil
@@ -171,7 +171,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 
 	// running the user application
 	runAppErrGrp.Go(func() error {
-		runAppError = r.instrumentation.Run(runAppCtx, appID, models.RunOptions{})
+		runAppError = r.Instrumentation.Run(runAppCtx, appID, models.RunOptions{})
 		if runAppError.AppErrorType == models.ErrCtxCanceled {
 			return nil
 		}
@@ -237,7 +237,7 @@ func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
 	var stopReason string
 
 	// setting up the environment for recording
-	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
+	appID, err := r.Instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
 	if err != nil {
 		stopReason = "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
@@ -251,7 +251,7 @@ func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
 		return appID, nil
 	default:
 		// Starting the hooks and proxy
-		err = r.instrumentation.Hook(ctx, appID, models.HookOptions{Mode: models.MODE_RECORD, EnableTesting: r.config.EnableTesting})
+		err = r.Instrumentation.Hook(ctx, appID, models.HookOptions{Mode: models.MODE_RECORD, EnableTesting: r.config.EnableTesting})
 		if err != nil {
 			stopReason = "failed to start the hooks and proxy"
 			utils.LogError(r.logger, err, stopReason)
@@ -268,7 +268,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (Frame
 	incomingOpts := models.IncomingOptions{
 		Filters: r.config.Record.Filters,
 	}
-	incomingChan, err := r.instrumentation.GetIncoming(ctx, appID, incomingOpts)
+	incomingChan, err := r.Instrumentation.GetIncoming(ctx, appID, incomingOpts)
 	if err != nil {
 		return FrameChan{}, fmt.Errorf("failed to get incoming test cases: %w", err)
 	}
@@ -278,7 +278,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (Frame
 		MongoPassword:  r.config.Test.MongoPassword,
 		FallBackOnMiss: r.config.Test.FallBackOnMiss,
 	}
-	outgoingChan, err := r.instrumentation.GetOutgoing(ctx, appID, outgoingOpts)
+	outgoingChan, err := r.Instrumentation.GetOutgoing(ctx, appID, outgoingOpts)
 	if err != nil {
 		return FrameChan{}, fmt.Errorf("failed to get outgoing mocks: %w", err)
 	}
@@ -290,11 +290,11 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (Frame
 }
 
 func (r *Recorder) RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError {
-	return r.instrumentation.Run(ctx, appID, opts)
+	return r.Instrumentation.Run(ctx, appID, opts)
 }
 
 func (r *Recorder) GetNextTestSetID(ctx context.Context) (string, error) {
-	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
+	testSetIDs, err := r.TestDB.GetAllTestSetIDs(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get test set IDs: %w", err)
 	}
@@ -302,5 +302,5 @@ func (r *Recorder) GetNextTestSetID(ctx context.Context) (string, error) {
 }
 
 func (r *Recorder) GetContainerIP(ctx context.Context, id uint64) (string, error) {
-	return r.instrumentation.GetContainerIP(ctx, id)
+	return r.Instrumentation.GetContainerIP(ctx, id)
 }
