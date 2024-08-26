@@ -330,3 +330,32 @@ func (ys *MockYaml) filterByTimeStamp(_ context.Context, m []*models.Mock, after
 	}
 	return filteredMocks, unfilteredMocks
 }
+func (ys *MockYaml) GetHTTPMocks(ctx context.Context, testSetID string, mockPath string, mockFileName string) ([]*models.HTTPDoc, error) {
+
+	if ys.MockName != "" {
+		ys.MockName = mockFileName
+	}
+	ys.MockPath = mockPath
+
+	tcsMocks, err := ys.GetUnFilteredMocks(ctx, testSetID, time.Time{}, time.Time{})
+	if err != nil {
+		return nil, err
+	}
+
+	var httpMocks []*models.HTTPDoc
+	for _, mock := range tcsMocks {
+		if mock.Kind != "Http" {
+			continue
+		}
+		var httpMock models.HTTPDoc
+		httpMock.Kind = mock.GetKind()
+		httpMock.Name = mock.Name
+		httpMock.Spec.Request = *mock.Spec.HTTPReq
+		httpMock.Spec.Response = *mock.Spec.HTTPResp
+		httpMock.Spec.Metadata = mock.Spec.Metadata
+		httpMock.Version = string(mock.Version)
+		httpMocks = append(httpMocks, &httpMock)
+	}
+
+	return httpMocks, nil
+}

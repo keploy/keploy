@@ -18,6 +18,8 @@ import (
 	"github.com/k0kubun/pp/v3"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
+	matcherUtils "go.keploy.io/server/v2/pkg/matcher"
+	httpMatcher "go.keploy.io/server/v2/pkg/matcher/http"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/coverage"
 	"go.keploy.io/server/v2/pkg/platform/coverage/golang"
@@ -280,7 +282,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 
 	if testRunResult && r.config.Test.DisableMockUpload {
-		r.logger.Warn("To enable storing mocks in cloud please use disableMockUpload flag/configuration")
+		r.logger.Warn("To enable storing mocks in cloud, please use --disableMockUpload=false flag or test:disableMockUpload:false in config file")
 	}
 
 	r.telemetry.TestRun(totalTestPassed, totalTestFailed, len(testSetIDs), testRunStatus)
@@ -524,8 +526,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	selectedTests := ArrayToMap(r.config.Test.SelectedTests[testSetID])
-	ignoredTests := ArrayToMap(r.config.Test.IgnoredTests[testSetID])
+	selectedTests := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID])
+	ignoredTests := matcherUtils.ArrayToMap(r.config.Test.IgnoredTests[testSetID])
 
 	testCasesCount := len(testCases)
 
@@ -903,7 +905,7 @@ func (r *Replayer) compareResp(tc *models.TestCase, actualResponse *models.HTTPR
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
-	return Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
+	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
 }
 
 func (r *Replayer) printSummary(_ context.Context, _ bool) {
@@ -1072,7 +1074,7 @@ func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testS
 		selectedTestCases = testCases
 	} else {
 		for _, testCase := range testCases {
-			if _, ok := ArrayToMap(selectedTestCaseIDs)[testCase.Name]; ok {
+			if _, ok := matcherUtils.ArrayToMap(selectedTestCaseIDs)[testCase.Name]; ok {
 				selectedTestCases = append(selectedTestCases, testCase)
 			}
 		}

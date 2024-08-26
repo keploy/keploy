@@ -46,6 +46,10 @@ test:
 record:
   recordTimer: 0s
   filters: []
+contract:
+  driven: "consumer"
+  servicesMapping: {}
+  self: "s1"
 configPath: ""
 bypassRules: []
 `

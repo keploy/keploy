@@ -7,6 +7,7 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/service"
+	"go.keploy.io/server/v2/utils"
 
 	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/pkg/service/utgen"
@@ -33,7 +34,7 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 
 	tel := telemetry.NewTelemetry(n.logger, telemetry.Options{
 		Enabled:        !n.cfg.DisableTele,
-		Version:        n.cfg.Version,
+		Version:        utils.Version,
 		GlobalMap:      TeleGlobalMap,
 		InstallationID: n.cfg.InstallationID,
 	})
@@ -44,7 +45,7 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 		return tools.NewTools(n.logger, tel, n.auth), nil
 	case "gen":
 		return utgen.NewUnitTestGenerator(n.cfg.Gen.SourceFilePath, n.cfg.Gen.TestFilePath, n.cfg.Gen.CoverageReportPath, n.cfg.Gen.TestCommand, n.cfg.Gen.TestDir, n.cfg.Gen.CoverageFormat, n.cfg.Gen.DesiredCoverage, n.cfg.Gen.MaxIterations, n.cfg.Gen.Model, n.cfg.Gen.APIBaseURL, n.cfg.Gen.APIVersion, n.cfg.APIServerURL, n.cfg, tel, n.auth, n.logger)
-	case "record", "test", "mock", "normalize", "templatize", "rerecord":
+	case "record", "test", "mock", "normalize", "templatize", "rerecord", "contract":
 		return Get(ctx, cmd, n.cfg, n.logger, tel, n.auth)
 	default:
 		return nil, errors.New("invalid command")

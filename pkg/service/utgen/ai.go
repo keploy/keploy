@@ -129,15 +129,14 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 	}
 
 	var apiKey string
-
-	if ai.APIBase == fmt.Sprintf("%s/ai/call", ai.APIServerURL) {
+	if ai.APIBase == ai.APIServerURL {
 
 		token, err := ai.Auth.GetToken(ctx)
 		if err != nil {
 			return "", 0, 0, fmt.Errorf("error getting token: %v", err)
 		}
 
-		ai.Logger.Info("Making AI request to API server", zap.String("api_server_url", ai.APIServerURL), zap.String("token", token))
+		ai.Logger.Debug("Making AI request to API server", zap.String("api_server_url", ai.APIServerURL), zap.String("token", token))
 		httpClient := &http.Client{}
 		// make AI request as request body to the API server
 		aiRequest := AIRequest{

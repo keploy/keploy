@@ -97,5 +97,5 @@ jobs:
           AC_PASSWORD: ${{ secrets.APPLE_ACCOUNT_PASSWORD }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SENTRY_DSN_BINARY: ${{ secrets.SENTRY_DSN_BINARY }}
-          GITTHUB_APP_CLIENT_ID: ${{ secrets.GITHUB_APP_CLIENT_ID }}
+          GITTHUB_APP_CLIENT_ID: ${{ secrets.CLIENT_ID_GITHUB_APP }}
           SERVER_URL: https://api.keploy.io
