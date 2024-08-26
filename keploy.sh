@@ -13,10 +13,10 @@ installKeploy (){
             -v)
                 if [[ "$2" =~ ^v[0-9]+.* ]]; then
                     version="$2"
-                    shift 2 
+                    shift 2
                 else
                     echo "Invalid version format. Please use '-v v<semver>'."
-                    return 1 
+                    return 1
                 fi
             ;;
             *)
@@ -28,14 +28,30 @@ installKeploy (){
         echo "Installing Keploy version: $version......"
     fi
 
-    install_keploy_darwin_all() {
-        if [ "$version" != "latest" ]; then
-            download_url="https://github.com/keploy/keploy/releases/download/$version/keploy_darwin_all.tar.gz"
-        else
-            download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz"
-        fi
-        # macOS tar does not support --overwrite option so we need to remove the directory first
-        # to avoid the "File exists" error
+    install_keploy() {
+        os_name="$1"
+        arch="$2"
+
+        case $os_name in
+            "Darwin")
+                download_url="https://github.com/keploy/keploy/releases/$( [ "$version" != "latest" ] && echo "download/$version" || echo "latest/download" )/keploy_darwin_all.tar.gz"
+                ;;
+            "Linux")
+                if [ "$arch" = "x86_64" ]; then
+                    download_url="https://github.com/keploy/keploy/releases/$( [ "$version" != "latest" ] && echo "download/$version" || echo "latest/download" )/keploy_linux_amd64.tar.gz"
+                elif [ "$arch" = "aarch64" ]; then
+                    download_url="https://github.com/keploy/keploy/releases/$( [ "$version" != "latest" ] && echo "download/$version" || echo "latest/download" )/keploy_linux_arm64.tar.gz"
+                else
+                    echo "Unsupported architecture: $arch"
+                    return 1
+                fi
+                ;;
+            *)
+                echo "Unsupported OS: $os_name"
+                return 1
+                ;;
+        esac
+
         rm -rf /tmp/keploy
         mkdir -p /tmp/keploy
         curl --silent --location "$download_url" | tar xz -C /tmp/keploy/
@@ -43,37 +59,14 @@ installKeploy (){
         delete_keploy_alias
     }
 
-    install_keploy_arm() {
-        if [ "$version" != "latest" ]; then
-            download_url="https://github.com/keploy/keploy/releases/download/$version/keploy_linux_arm64.tar.gz"
-        else
-            download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
-        fi
-        curl --silent --location "$download_url" | tar xz --overwrite -C /tmp 
-        sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploy
-        set_alias 'sudo -E env PATH="$PATH" keploy'
-    }
-
-
-    install_keploy_amd() {        
-        if [ "$version" != "latest" ]; then
-            download_url="https://github.com/keploy/keploy/releases/download/$version/keploy_linux_amd64.tar.gz"
-        else
-            download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
-        fi
-        curl --silent --location "$download_url" | tar xz --overwrite -C /tmp
-        sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploy
-        set_alias 'sudo -E env PATH="$PATH" keploy'
-    }
-
     append_to_rc() {
-        last_byte=$(tail -c 1 $2)
+        last_byte=$(tail -c 1 "$2")
         if [[ "$last_byte" != "" ]]; then
-            echo -e "\n$1" >> $2
+            echo -e "\n$1" >> "$2"
         else
-            echo "$1" >> $2
+            echo "$1" >> "$2"
         fi
-        source $2
+        source "$2"
     }
 
     # Get the alias to set and set it
@@ -150,46 +143,10 @@ installKeploy (){
     }
 
     ARCH=$(uname -m)
+    OS_NAME="$(uname -s)"
 
-    if [ "$IS_CI" = false ]; then
-        OS_NAME="$(uname -s)"
-        if [ "$OS_NAME" = "Darwin" ]; then
-            cleanup_tmp
-            install_keploy_darwin_all
-            return
-        elif [ "$OS_NAME" = "Linux" ]; then
-            if ! sudo mountpoint -q /sys/kernel/debug; then
-                sudo mount -t debugfs debugfs /sys/kernel/debug
-            fi
-            if [ "$ARCH" = "x86_64" ]; then
-                cleanup_tmp
-                install_keploy_amd
-            elif [ "$ARCH" = "aarch64" ]; then
-                cleanup_tmp
-                install_keploy_arm
-            else
-                echo "Unsupported architecture: $ARCH"
-                return
-            fi
-        elif [[ "$OS_NAME" == MINGW32_NT* ]]; then
-            echo "\e]8;; https://pureinfotech.com/install-windows-subsystem-linux-2-windows-10\aWindows not supported please run on WSL2\e]8;;\a"
-        elif [[ "$OS_NAME" == MINGW64_NT* ]]; then
-            echo "\e]8;; https://pureinfotech.com/install-windows-subsystem-linux-2-windows-10\aWindows not supported please run on WSL2\e]8;;\a"
-        else
-            echo "Unknown OS, install Linux to run Keploy"
-        fi
-    else
-        if [ "$ARCH" = "x86_64" ]; then
-            cleanup_tmp
-            install_keploy_amd
-        elif [ "$ARCH" = "aarch64" ]; then
-            cleanup_tmp
-            install_keploy_arm
-        else
-            echo "Unsupported architecture: $ARCH"
-            return
-        fi
-    fi
+    cleanup_tmp
+    install_keploy "$OS_NAME" "$ARCH"
 }
 
 installKeploy "$@"
