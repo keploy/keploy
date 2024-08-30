@@ -176,6 +176,9 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.HandshakeResponse41, clientConn, payloadType, decodeCtx)
 
+		// Store the client capabilities to use it later
+		decodeCtx.ClientCapabilities = pkt.CapabilityFlags
+
 		logger.Debug("HandshakeResponse41 decoded", zap.Any("parsed packet", parsedPacket))
 
 		return parsedPacket, nil

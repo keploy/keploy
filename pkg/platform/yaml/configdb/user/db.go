@@ -3,27 +3,20 @@ package user
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"io"
-	"io/fs"
 	"os"
-	"path/filepath"
 	"runtime"
 
-	"go.keploy.io/server/v2/pkg/platform/yaml"
-	"go.keploy.io/server/v2/utils"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"github.com/denisbrodbeck/machineid"
+	"go.keploy.io/server/v2/config"
 	"go.uber.org/zap"
-	yamlLib "gopkg.in/yaml.v3"
 )
 
 type Db struct {
 	logger *zap.Logger
+	cfg    *config.Config
 }
 
 func HomeDir() string {
-
 	configFolder := "/.keploy"
 	if runtime.GOOS == "windows" {
 		home := os.Getenv("HOMEDRIVE") + os.Getenv("HOMEPATH")
@@ -35,65 +28,29 @@ func HomeDir() string {
 	return os.Getenv("HOME") + configFolder
 }
 
-func New(logger *zap.Logger) *Db {
+func New(logger *zap.Logger, cfg *config.Config) *Db {
 	return &Db{
 		logger: logger,
+		cfg:    cfg,
 	}
 }
 
-func (db *Db) GetInstallationID(ctx context.Context) (string, error) {
+func (db *Db) GetInstallationID(_ context.Context) (string, error) {
 	var id string
-	id = getInstallationFromFile(db.logger)
-	if id == "" {
-		id = primitive.NewObjectID().String()
-		err := db.setInstallationID(ctx, id)
+	var err error
+	inDocker := os.Getenv("KEPLOY_INDOCKER")
+	if inDocker == "true" {
+		id = os.Getenv("INSTALLATION_ID")
+	} else {
+		id, err = machineid.ID()
 		if err != nil {
-			return "", fmt.Errorf("failed to set installation id in file. error: %s", err.Error())
+			db.logger.Debug("failed to get machine id", zap.Error(err))
+			return "", nil
 		}
+	}
+	if id == "" {
+		db.logger.Debug("got empty machine id")
+		return "", nil
 	}
 	return id, nil
-}
-
-func getInstallationFromFile(logger *zap.Logger) string {
-	var (
-		path = HomeDir()
-		id   = ""
-	)
-
-	file, err := os.OpenFile(filepath.Join(path, "installation-id.yaml"), os.O_RDONLY, fs.ModePerm)
-	if err != nil {
-		return id
-	}
-	defer func() {
-		if err := file.Close(); err != nil {
-			utils.LogError(logger, err, "failed to close file")
-		}
-	}()
-	decoder := yamlLib.NewDecoder(file)
-	err = decoder.Decode(&id)
-	if errors.Is(err, io.EOF) {
-		return id
-	}
-	if err != nil {
-		return id
-	}
-	return id
-}
-
-func (db *Db) setInstallationID(ctx context.Context, id string) error {
-	path := HomeDir()
-	data := []byte{}
-
-	d, err := yamlLib.Marshal(&id)
-	if err != nil {
-		return fmt.Errorf("failed to marshal document to yaml. error: %s", err.Error())
-	}
-	data = append(data, d...)
-	err = yaml.WriteFile(ctx, db.logger, path, "installation-id", data, false)
-	if err != nil {
-		utils.LogError(db.logger, err, "failed to write installation id in yaml file")
-		return err
-	}
-
-	return nil
 }

@@ -13,6 +13,8 @@ type Config struct {
 	AppID                 uint64       `json:"appId" yaml:"appId" mapstructure:"appId"`
 	AppName               string       `json:"appName" yaml:"appName" mapstructure:"appName"`
 	Command               string       `json:"command" yaml:"command" mapstructure:"command"`
+	Templatize            Templatize   `json:"templatize" yaml:"templatize" mapstructure:"templatize"`
+	Port                  uint32       `json:"port" yaml:"port" mapstructure:"port"`
 	DNSPort               uint32       `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
 	ProxyPort             uint32       `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
 	Debug                 bool         `json:"debug" yaml:"debug" mapstructure:"debug"`
@@ -34,7 +36,13 @@ type Config struct {
 	KeployContainer       string       `json:"keployContainer" yaml:"keployContainer" mapstructure:"keployContainer"`
 	KeployNetwork         string       `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
 	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
-	InCi                  bool         `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
+	Contract              Contract     `json:"contract" yaml:"contract" mapstructure:"contract"`
+
+	InCi           bool   `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
+	InstallationID string `json:"-" yaml:"-" mapstructure:"-"`
+	Version        string `json:"-" yaml:"-" mapstructure:"-"`
+	APIServerURL   string `json:"-" yaml:"-" mapstructure:"-"`
+	GitHubClientID string `json:"-" yaml:"-" mapstructure:"-"`
 }
 
 type UtGen struct {
@@ -50,6 +58,9 @@ type UtGen struct {
 	Model              string  `json:"model" yaml:"model" mapstructure:"model"`
 	APIVersion         string  `json:"llmApiVersion" yaml:"llmApiVersion" mapstructure:"llmApiVersion"`
 }
+type Templatize struct {
+	TestSets []string `json:"testSets" yaml:"testSets" mapstructure:"testSets"`
+}
 
 type Record struct {
 	Filters     []Filter      `json:"filters" yaml:"filters" mapstructure:"filters"`
@@ -61,6 +72,19 @@ type ReRecord struct {
 	Filters       []Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
 	Host          string   `json:"host" yaml:"host" mapstructure:"host"`
 	Port          uint32   `json:"port" yaml:"port" mapstructure:"port"`
+}
+type Contract struct {
+	Services []string `json:"services" yaml:"services" mapstructure:"services"`
+	Tests    []string `json:"tests" yaml:"tests" mapstructure:"tests"`
+	Path     string   `json:"path" yaml:"path" mapstructure:"path"`
+	Download bool     `json:"download" yaml:"download" mapstructure:"download"`
+	Generate bool     `json:"generate" yaml:"generate" mapstructure:"generate"`
+	Driven   string   `json:"driven" yaml:"driven" mapstructure:"driven"`
+	Mappings Mappings `json:"mappings" yaml:"mappings" mapstructure:"mappings"`
+}
+type Mappings struct {
+	ServicesMapping map[string][]string `json:"servicesMapping" yaml:"servicesMapping" mapstructure:"servicesMapping"`
+	Self            string              `json:"self" yaml:"self" mapstructure:"self"`
 }
 
 type Normalize struct {
@@ -99,6 +123,9 @@ type Test struct {
 	Mocking             bool                `json:"mocking" yaml:"mocking" mapstructure:"mocking"`
 	IgnoredTests        map[string][]string `json:"ignoredTests" yaml:"ignoredTests" mapstructure:"ignoredTests"`
 	DisableLineCoverage bool                `json:"disableLineCoverage" yaml:"disableLineCoverage" mapstructure:"disableLineCoverage"`
+	DisableMockUpload   bool                `json:"disableMockUpload" yaml:"disableMockUpload" mapstructure:"disableMockUpload"`
+	UseLocalMock        bool                `json:"useLocalMock" yaml:"useLocalMock" mapstructure:"useLocalMock"`
+	UpdateTemplate      bool                `json:"updateTemplate" yaml:"updateTemplate" mapstructure:"updateTemplate"`
 }
 
 type Language string
@@ -163,6 +190,14 @@ func SetSelectedTests(conf *Config, testSets []string) {
 	for _, testSet := range testSets {
 		conf.Test.SelectedTests[testSet] = []string{}
 	}
+}
+func SetSelectedServices(conf *Config, services []string) {
+	// string is "s1,s2" so i want to get s1,s2
+	conf.Contract.Services = services
+}
+func SetSelectedContractTests(conf *Config, tests []string) {
+
+	conf.Contract.Tests = tests
 }
 
 func SetSelectedTestsNormalize(conf *Config, value string) error {

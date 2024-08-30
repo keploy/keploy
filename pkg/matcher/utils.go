@@ -1,30 +1,26 @@
-// Package replay provides functions for replaying requests and comparing responses.
-package replay
+// Package matcher for matching utilities
+package matcher
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
 
-	"bytes"
-	"os"
-
-	"go.uber.org/zap"
-
+	"github.com/7sDream/geko"
 	"github.com/fatih/color"
-	"github.com/k0kubun/pp/v3"
 	"github.com/olekukonko/tablewriter"
-	"github.com/wI2L/jsondiff"
 	"github.com/yudai/gojsondiff"
 	"github.com/yudai/gojsondiff/formatter"
-	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
+	"go.uber.org/zap"
 )
 
 type ValidatedJSON struct {
@@ -33,240 +29,209 @@ type ValidatedJSON struct {
 	isIdentical bool
 }
 
+func (v *ValidatedJSON) IsIdentical() bool {
+	return v.isIdentical
+}
+func (v *ValidatedJSON) Expected() interface{} {
+	return v.expected
+}
+func (v *ValidatedJSON) Actual() interface{} {
+	return v.actual
+}
+
 type JSONComparisonResult struct {
 	matches     bool     // Indicates if the JSON strings match according to the criteria
 	isExact     bool     // Indicates if the match is exact, considering ordering and noise
 	differences []string // Lists the keys or indices of values that are not the same
 }
 
-func match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger) (bool, *models.Result) {
-	bodyType := models.BodyTypePlain
-	if json.Valid([]byte(actualResponse.Body)) {
-		bodyType = models.BodyTypeJSON
-	}
-	pass := true
-	hRes := &[]models.HeaderResult{}
-
-	res := &models.Result{
-		StatusCode: models.IntResult{
-			Normal:   false,
-			Expected: tc.HTTPResp.StatusCode,
-			Actual:   actualResponse.StatusCode,
-		},
-		BodyResult: []models.BodyResult{{
-			Normal:   false,
-			Type:     bodyType,
-			Expected: tc.HTTPResp.Body,
-			Actual:   actualResponse.Body,
-		}},
-	}
-	noise := tc.Noise
-
-	var (
-		bodyNoise   = noiseConfig["body"]
-		headerNoise = noiseConfig["header"]
-	)
-
-	if bodyNoise == nil {
-		bodyNoise = map[string][]string{}
-	}
-	if headerNoise == nil {
-		headerNoise = map[string][]string{}
-	}
-
-	for field, regexArr := range noise {
-		a := strings.Split(field, ".")
-		if len(a) > 1 && a[0] == "body" {
-			x := strings.Join(a[1:], ".")
-			bodyNoise[strings.ToLower(x)] = regexArr
-		} else if a[0] == "header" {
-			headerNoise[strings.ToLower(a[len(a)-1])] = regexArr
-		}
-	}
-
-	// stores the json body after removing the noise
-	cleanExp, cleanAct := tc.HTTPResp.Body, actualResponse.Body
-	var jsonComparisonResult JSONComparisonResult
-	if !Contains(MapToArray(noise), "body") && bodyType == models.BodyTypeJSON {
-		//validate the stored json
-		validatedJSON, err := ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
+func (v *JSONComparisonResult) IsExact() bool {
+	return v.isExact
+}
+func (v *JSONComparisonResult) Matches() bool {
+	return v.matches
+}
+func (v *JSONComparisonResult) Differences() []string {
+	return v.differences
+}
+func MarshalRequestBodies(mockOperation, testOperation *models.Operation) (string, string, error) {
+	var mockRequestBody []byte
+	var testRequestBody []byte
+	var err error
+	if mockOperation.RequestBody != nil {
+		mockRequestBody, err = json.Marshal(mockOperation.RequestBody.Content["application/json"].Schema.Properties)
 		if err != nil {
-			return false, res
-		}
-		if validatedJSON.isIdentical {
-			jsonComparisonResult, err = JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
-			pass = jsonComparisonResult.isExact
-			if err != nil {
-				return false, res
-			}
-		} else {
-			pass = false
-		}
-
-		// debug log for cleanExp and cleanAct
-		logger.Debug("cleanExp", zap.Any("", cleanExp))
-		logger.Debug("cleanAct", zap.Any("", cleanAct))
-	} else {
-		if !Contains(MapToArray(noise), "body") && tc.HTTPResp.Body != actualResponse.Body {
-			pass = false
+			return "", "", fmt.Errorf("error marshalling mock RequestBody: %v", err)
 		}
 	}
-
-	res.BodyResult[0].Normal = pass
-
-	if !CompareHeaders(pkg.ToHTTPHeader(tc.HTTPResp.Header), pkg.ToHTTPHeader(actualResponse.Header), hRes, headerNoise) {
-
-		pass = false
-	}
-
-	res.HeadersResult = *hRes
-	if tc.HTTPResp.StatusCode == actualResponse.StatusCode {
-		res.StatusCode.Normal = true
-	} else {
-
-		pass = false
-	}
-
-	if !pass {
-		logDiffs := NewDiffsPrinter(tc.Name)
-
-		newLogger := pp.New()
-		newLogger.WithLineInfo = false
-		newLogger.SetColorScheme(models.GetFailingColorScheme())
-		var logs = ""
-
-		logs = logs + newLogger.Sprintf("Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
-
-		// ------------ DIFFS RELATED CODE -----------
-		if !res.StatusCode.Normal {
-			logDiffs.PushStatusDiff(fmt.Sprint(res.StatusCode.Expected), fmt.Sprint(res.StatusCode.Actual))
-		}
-
-		var (
-			actualHeader   = map[string][]string{}
-			expectedHeader = map[string][]string{}
-			unmatched      = true
-		)
-
-		for _, j := range res.HeadersResult {
-			if !j.Normal {
-				unmatched = false
-				actualHeader[j.Actual.Key] = j.Actual.Value
-				expectedHeader[j.Expected.Key] = j.Expected.Value
-			}
-		}
-
-		if !unmatched {
-			for i, j := range expectedHeader {
-				logDiffs.PushHeaderDiff(fmt.Sprint(j), fmt.Sprint(actualHeader[i]), i, headerNoise)
-			}
-		}
-
-		if !res.BodyResult[0].Normal {
-			if json.Valid([]byte(actualResponse.Body)) {
-				patch, err := jsondiff.Compare(tc.HTTPResp.Body, actualResponse.Body)
-				if err != nil {
-					logger.Warn("failed to compute json diff", zap.Error(err))
-				}
-				for _, op := range patch {
-					if jsonComparisonResult.matches {
-						logDiffs.hasarrayIndexMismatch = true
-						logDiffs.PushFooterDiff(strings.Join(jsonComparisonResult.differences, ", "))
-					}
-					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
-
-				}
-			} else {
-				logDiffs.PushBodyDiff(fmt.Sprint(tc.HTTPResp.Body), fmt.Sprint(actualResponse.Body), bodyNoise)
-			}
-		}
-		_, err := newLogger.Printf(logs)
+	if testOperation.RequestBody != nil {
+		testRequestBody, err = json.Marshal(testOperation.RequestBody.Content["application/json"].Schema.Properties)
 		if err != nil {
-			utils.LogError(logger, err, "failed to print the logs")
-		}
-
-		err = logDiffs.Render()
-		if err != nil {
-			utils.LogError(logger, err, "failed to render the diffs")
-		}
-	} else {
-		newLogger := pp.New()
-		newLogger.WithLineInfo = false
-		newLogger.SetColorScheme(models.GetPassingColorScheme())
-		var log2 = ""
-		log2 += newLogger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
-		_, err := newLogger.Printf(log2)
-		if err != nil {
-			utils.LogError(logger, err, "failed to print the logs")
+			return "", "", fmt.Errorf("error marshalling test RequestBody: %v", err)
 		}
 	}
-	return pass, res
+	return string(mockRequestBody), string(testRequestBody), nil
 }
 
-func FlattenHTTPResponse(h http.Header, body string) (map[string][]string, error) {
-	m := map[string][]string{}
-	for k, v := range h {
-		m["header."+k] = []string{strings.Join(v, "")}
+func MarshalResponseBodies(status string, mockOperation, testOperation *models.Operation) (string, string, error) {
+	var mockResponseBody []byte
+	var testResponseBody []byte
+	var err error
+	if mockOperation.Responses[status].Content != nil {
+		mockResponseBody, err = json.Marshal(mockOperation.Responses[status].Content["application/json"].Schema.Properties)
+		if err != nil {
+			return "", "", fmt.Errorf("error marshalling mock ResponseBody: %v", err)
+		}
 	}
-	err := AddHTTPBodyToMap(body, m)
+	if testOperation.Responses[status].Content != nil {
+		testResponseBody, err = json.Marshal(testOperation.Responses[status].Content["application/json"].Schema.Properties)
+		if err != nil {
+			return "", "", fmt.Errorf("error marshalling test ResponseBody: %v", err)
+		}
+	}
+	return string(mockResponseBody), string(testResponseBody), nil
+}
+func FindOperation(item models.PathItem) (*models.Operation, string) {
+	operations := map[string]*models.Operation{
+		"GET":    item.Get,
+		"POST":   item.Post,
+		"PUT":    item.Put,
+		"DELETE": item.Delete,
+		"PATCH":  item.Patch,
+	}
+
+	for method, operation := range operations {
+		if operation != nil {
+			return operation, method
+		}
+	}
+	return nil, ""
+}
+
+// ParseIntoJSON Parse the json string into a geko type variable, it will maintain the order of the keys in the json.
+func ParseIntoJSON(response string) (interface{}, error) {
+	// Parse the response into a json object.
+	if response == "" {
+		return nil, nil
+	}
+	result, err := geko.JSONUnmarshal([]byte(response))
 	if err != nil {
-		return m, err
-	}
-	return m, nil
-}
-
-// UnmarshallJSON returns unmarshalled JSON object.
-func UnmarshallJSON(s string, log *zap.Logger) (interface{}, error) {
-	var result interface{}
-	if err := json.Unmarshal([]byte(s), &result); err != nil {
-		utils.LogError(log, err, "cannot convert json string into json object")
-		return nil, err
+		return nil, fmt.Errorf("failed to unmarshal the response: %v", err)
 	}
 	return result, nil
 }
 
-func ArrayToMap(arr []string) map[string]bool {
-	res := map[string]bool{}
-	for i := range arr {
-		res[arr[i]] = true
+// CompareResponses compares the two responses, if there is any difference in the values,
+// It checks in the templatized values map if the value is already present, it will update the value in the map.
+// It also changes the expected value to the actual value in the response1 (expected body)
+func CompareResponses(response1, response2 *interface{}, key string) {
+	switch v1 := (*response1).(type) {
+	case geko.Array:
+		for _, val1 := range v1.List {
+			CompareResponses(&val1, response2, "")
+		}
+	case geko.ObjectItems:
+		keys := v1.Keys()
+		vals := v1.Values()
+		for i := range keys {
+			CompareResponses(&vals[i], response2, keys[i])
+			v1.SetValueByIndex(i, vals[i]) // in order to change the expected value if required
+		}
+	case map[string]interface{}:
+		for key, val := range v1 {
+			CompareResponses(&val, response2, key)
+			v1[key] = val // in order to change the expected value if required
+		}
+	case string:
+		compareSecondResponse(&v1, response2, key, "")
+	case float64, int64, int, float32:
+		v1String := ToString(v1)
+		compareSecondResponse(&(v1String), response2, key, "")
 	}
-	return res
 }
 
-func InterfaceToString(val interface{}) string {
+// Simplify the second response into type string for comparison.
+func compareSecondResponse(val1 *string, response2 *interface{}, key1 string, key2 string) {
+	switch v2 := (*response2).(type) {
+	case geko.Array:
+		for _, val2 := range v2.List {
+			compareSecondResponse(val1, &val2, key1, "")
+		}
+
+	case geko.ObjectItems:
+		keys := v2.Keys()
+		vals := v2.Values()
+		for i := range keys {
+			compareSecondResponse(val1, &vals[i], key1, keys[i])
+		}
+	case map[string]interface{}:
+		for key, val := range v2 {
+			compareSecondResponse(val1, &val, key1, key)
+		}
+	case string:
+		if *val1 != v2 {
+			// Reverse the templatized values map.
+			revMap := reverseMap(utils.TemplatizedValues)
+			if _, ok := revMap[*val1]; ok && key1 == key2 {
+				key := revMap[*val1]
+				utils.TemplatizedValues[key] = v2
+				*val1 = v2
+			}
+		}
+	case float64, int64, int, float32:
+		if *val1 != ToString(v2) && key1 == key2 {
+			revMap := reverseMap(utils.TemplatizedValues)
+			if _, ok := revMap[*val1]; ok {
+				key := revMap[*val1]
+				utils.TemplatizedValues[key] = v2
+				*val1 = ToString(v2)
+			}
+		}
+	}
+}
+func reverseMap(m map[string]interface{}) map[interface{}]string {
+	var reverseMap = make(map[interface{}]string)
+	for key, val := range m {
+		reverseMap[val] = key
+	}
+	return reverseMap
+}
+
+// ToString remove all types of value to strings for comparison.
+func ToString(val interface{}) string {
 	switch v := val.(type) {
 	case int:
-		return fmt.Sprintf("%d", v)
+		return strconv.Itoa(v)
 	case float64:
-		return fmt.Sprintf("%f", v)
-	case bool:
-		return fmt.Sprintf("%t", v)
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case float32:
+		return strconv.FormatFloat(float64(v), 'f', -1, 32)
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case int32:
+		return strconv.FormatInt(int64(v), 10)
 	case string:
 		return v
-	default:
-		return fmt.Sprintf("%v", v)
 	}
-}
-
-func JSONDiffWithNoiseControl(validatedJSON ValidatedJSON, noise map[string][]string, ignoreOrdering bool) (JSONComparisonResult, error) {
-	var matchJSONComparisonResult JSONComparisonResult
-	matchJSONComparisonResult, err := matchJSONWithNoiseHandling("", validatedJSON.expected, validatedJSON.actual, noise, ignoreOrdering)
-	if err != nil {
-		return matchJSONComparisonResult, err
-	}
-
-	return matchJSONComparisonResult, nil
+	return ""
 }
 
 func ValidateAndMarshalJSON(log *zap.Logger, exp, act *string) (ValidatedJSON, error) {
 	var validatedJSON ValidatedJSON
-	expected, err := UnmarshallJSON(*exp, log)
-	if err != nil {
-		return validatedJSON, err
+	var expected interface{}
+	var actual interface{}
+	var err error
+	if *exp != "" {
+		expected, err = UnmarshallJSON(*exp, log)
+		if err != nil {
+			return validatedJSON, err
+		}
 	}
-	actual, err := UnmarshallJSON(*act, log)
-	if err != nil {
-		return validatedJSON, err
+	if *act != "" {
+		actual, err = UnmarshallJSON(*act, log)
+		if err != nil {
+			return validatedJSON, err
+		}
 	}
 	validatedJSON.expected = expected
 	validatedJSON.actual = actual
@@ -288,135 +253,17 @@ func ValidateAndMarshalJSON(log *zap.Logger, exp, act *string) (ValidatedJSON, e
 	return validatedJSON, nil
 }
 
-// matchJSONWithNoiseHandling returns strcut if expected and actual JSON objects matches(are equal) and in exact order(isExact).
-func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseMap map[string][]string, ignoreOrdering bool) (JSONComparisonResult, error) {
-	var matchJSONComparisonResult JSONComparisonResult
-	if reflect.TypeOf(expected) != reflect.TypeOf(actual) {
-		return matchJSONComparisonResult, errors.New("type not matched")
+// UnmarshallJSON returns unmarshalled JSON object.
+func UnmarshallJSON(s string, log *zap.Logger) (interface{}, error) {
+	var result interface{}
+	if s == "" {
+		return nil, nil
 	}
-	if expected == nil && actual == nil {
-		matchJSONComparisonResult.isExact = true
-		matchJSONComparisonResult.matches = true
-		return matchJSONComparisonResult, nil
+	if err := json.Unmarshal([]byte(s), &result); err != nil {
+		utils.LogError(log, err, "cannot convert json string into json object", zap.String("json", s))
+		return nil, err
 	}
-	x := reflect.ValueOf(expected)
-	prefix := ""
-	if key != "" {
-		prefix = key + "."
-	}
-	switch x.Kind() {
-	case reflect.Float64, reflect.String, reflect.Bool:
-		regexArr, isNoisy := CheckStringExist(key, noiseMap)
-		if isNoisy && len(regexArr) != 0 {
-			isNoisy, _ = MatchesAnyRegex(InterfaceToString(expected), regexArr)
-		}
-		if expected != actual && !isNoisy {
-			return matchJSONComparisonResult, nil
-		}
-
-	case reflect.Map:
-		expMap := expected.(map[string]interface{})
-		actMap := actual.(map[string]interface{})
-		copiedExpMap := make(map[string]interface{})
-		copiedActMap := make(map[string]interface{})
-
-		// Copy each key-value pair from expMap to copiedExpMap
-		for key, value := range expMap {
-			copiedExpMap[key] = value
-		}
-
-		// Repeat the same process for actual map
-		for key, value := range actMap {
-			copiedActMap[key] = value
-		}
-		isExact := true
-		differences := []string{}
-		for k, v := range expMap {
-			val, ok := actMap[k]
-			if !ok {
-				return matchJSONComparisonResult, nil
-			}
-			if valueMatchJSONComparisonResult, er := matchJSONWithNoiseHandling(strings.ToLower(prefix+k), v, val, noiseMap, ignoreOrdering); !valueMatchJSONComparisonResult.matches || er != nil {
-				return valueMatchJSONComparisonResult, nil
-			} else if !valueMatchJSONComparisonResult.isExact {
-				isExact = false
-				differences = append(differences, k)
-				differences = append(differences, valueMatchJSONComparisonResult.differences...)
-			}
-			// remove the noisy key from both expected and actual JSON.
-			// Viper bindings are case insensitive, so we need convert the key to lowercase.
-			if _, ok := CheckStringExist(strings.ToLower(prefix+k), noiseMap); ok {
-				delete(copiedExpMap, prefix+k)
-				delete(copiedActMap, k)
-				continue
-			}
-		}
-		// checks if there is a key which is not present in expMap but present in actMap.
-		for k := range actMap {
-			_, ok := expMap[k]
-			if !ok {
-				return matchJSONComparisonResult, nil
-			}
-		}
-		matchJSONComparisonResult.matches = true
-		matchJSONComparisonResult.isExact = isExact
-		matchJSONComparisonResult.differences = append(matchJSONComparisonResult.differences, differences...)
-		return matchJSONComparisonResult, nil
-	case reflect.Slice:
-		if regexArr, isNoisy := CheckStringExist(key, noiseMap); isNoisy && len(regexArr) != 0 {
-			break
-		}
-		expSlice := reflect.ValueOf(expected)
-		actSlice := reflect.ValueOf(actual)
-		if expSlice.Len() != actSlice.Len() {
-			return matchJSONComparisonResult, nil
-		}
-		isMatched := true
-		isExact := true
-		for i := 0; i < expSlice.Len(); i++ {
-			matched := false
-			for j := 0; j < actSlice.Len(); j++ {
-				if valMatchJSONComparisonResult, err := matchJSONWithNoiseHandling(key, expSlice.Index(i).Interface(), actSlice.Index(j).Interface(), noiseMap, ignoreOrdering); err == nil && valMatchJSONComparisonResult.matches {
-					if !valMatchJSONComparisonResult.isExact {
-						for _, val := range valMatchJSONComparisonResult.differences {
-							prefixedVal := key + "[" + fmt.Sprint(j) + "]." + val // Prefix the value
-							matchJSONComparisonResult.differences = append(matchJSONComparisonResult.differences, prefixedVal)
-						}
-					}
-					matched = true
-					break
-				}
-			}
-
-			if !matched {
-				isMatched = false
-				isExact = false
-				break
-			}
-		}
-		if !isMatched {
-			matchJSONComparisonResult.matches = isMatched
-			matchJSONComparisonResult.isExact = isExact
-			return matchJSONComparisonResult, nil
-		}
-		if !ignoreOrdering {
-			for i := 0; i < expSlice.Len(); i++ {
-				if valMatchJSONComparisonResult, er := matchJSONWithNoiseHandling(key, expSlice.Index(i).Interface(), actSlice.Index(i).Interface(), noiseMap, ignoreOrdering); er != nil || !valMatchJSONComparisonResult.isExact {
-					isExact = false
-					break
-				}
-			}
-		}
-		matchJSONComparisonResult.matches = isMatched
-		matchJSONComparisonResult.isExact = isExact
-
-		return matchJSONComparisonResult, nil
-	default:
-		return matchJSONComparisonResult, errors.New("type not registered for json")
-	}
-	matchJSONComparisonResult.matches = true
-	matchJSONComparisonResult.isExact = true
-	return matchJSONComparisonResult, nil
+	return result, nil
 }
 
 // MAX_LINE_LENGTH is chars PER expected/actual string. Can be changed no problem
@@ -434,12 +281,20 @@ type DiffsPrinter struct {
 	headNoise             map[string][]string
 	hasarrayIndexMismatch bool
 	text                  string
+	typeExp               string
+	typeAct               string
+}
+
+func (d *DiffsPrinter) SetHasarrayIndexMismatch(has bool) {
+	d.hasarrayIndexMismatch = has
 }
 
 func NewDiffsPrinter(testCase string) DiffsPrinter {
-	return DiffsPrinter{testCase, "", "", map[string]string{}, map[string]string{}, "", "", map[string][]string{}, map[string][]string{}, false, ""}
+	return DiffsPrinter{testCase, "", "", map[string]string{}, map[string]string{}, "", "", map[string][]string{}, map[string][]string{}, false, "", "", ""}
 }
-
+func (d *DiffsPrinter) PushTypeDiff(exp, act string) {
+	d.typeExp, d.typeAct = exp, act
+}
 func (d *DiffsPrinter) PushStatusDiff(exp, act string) {
 	d.statusExp, d.statusAct = exp, act
 }
@@ -506,6 +361,76 @@ func (d *DiffsPrinter) Render() error {
 		table.Append([]string{initalPart + midPartpaint + endPaint})
 	}
 	table.Render()
+	return nil
+}
+func (d *DiffsPrinter) TableWriter(diffs []string) error {
+
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetAutoWrapText(false)
+	table.SetHeader([]string{fmt.Sprintf("Diffs %v", d.testCase)})
+	table.SetHeaderColor(tablewriter.Colors{tablewriter.FgHiRedColor})
+	table.SetAlignment(tablewriter.ALIGN_CENTER)
+
+	for _, e := range diffs {
+		table.Append([]string{e})
+	}
+	if d.hasarrayIndexMismatch {
+		yellowPaint := color.New(color.FgYellow).SprintFunc()
+		redPaint := color.New(color.FgRed).SprintFunc()
+		startPart := " Expected and actual value"
+		var midPartpaint string
+		if len(d.text) > 0 {
+			midPartpaint = redPaint(d.text)
+			startPart += " of "
+		}
+		initalPart := yellowPaint(utils.WarningSign + startPart)
+
+		endPaint := yellowPaint(" are in different order but have the same objects")
+		table.SetHeader([]string{initalPart + midPartpaint + endPaint})
+		table.SetAlignment(tablewriter.ALIGN_CENTER)
+		table.Append([]string{initalPart + midPartpaint + endPaint})
+	}
+	table.Render()
+	return nil
+}
+func (d *DiffsPrinter) RenderAppender() error {
+	//Only show difference for the response body
+	diffs := []string{}
+	pass := true
+
+	if d.typeExp != d.typeAct {
+		diffs = append(diffs, sprintDiff(d.typeExp, d.typeAct, "request body type"))
+		pass = false
+	}
+	if !pass {
+		err := d.TableWriter(diffs)
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+
+	if len(d.bodyExp) != 0 || len(d.bodyAct) != 0 {
+		pass = false
+		bE, bA := []byte(d.bodyExp), []byte(d.bodyAct)
+		if json.Valid(bE) && json.Valid(bA) {
+			difference, err := sprintJSONDiff(bE, bA, "response", d.bodyNoise)
+			if err != nil {
+				difference = sprintDiff(d.bodyExp, d.bodyAct, "response")
+			}
+			diffs = append(diffs, difference)
+		} else {
+			diffs = append(diffs, sprintDiff(d.bodyExp, d.bodyAct, "response"))
+		}
+	}
+	if !pass {
+		err := d.TableWriter(diffs)
+		if err != nil {
+			return err
+		}
+
+	}
+
 	return nil
 }
 
@@ -1004,4 +929,168 @@ func Flatten(j interface{}) map[string][]string {
 		}
 	}
 	return o
+}
+
+func JSONDiffWithNoiseControl(validatedJSON ValidatedJSON, noise map[string][]string, ignoreOrdering bool) (JSONComparisonResult, error) {
+	var matchJSONComparisonResult JSONComparisonResult
+	matchJSONComparisonResult, err := matchJSONWithNoiseHandling("", validatedJSON.expected, validatedJSON.actual, noise, ignoreOrdering)
+	if err != nil {
+		return matchJSONComparisonResult, err
+	}
+
+	return matchJSONComparisonResult, nil
+}
+
+// matchJSONWithNoiseHandling returns strcut if expected and actual JSON objects matches(are equal) and in exact order(isExact).
+func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseMap map[string][]string, ignoreOrdering bool) (JSONComparisonResult, error) {
+	var matchJSONComparisonResult JSONComparisonResult
+	if reflect.TypeOf(expected) != reflect.TypeOf(actual) {
+		return matchJSONComparisonResult, errors.New("type not matched")
+	}
+	if expected == nil && actual == nil {
+		matchJSONComparisonResult.isExact = true
+		matchJSONComparisonResult.matches = true
+		return matchJSONComparisonResult, nil
+	}
+	x := reflect.ValueOf(expected)
+	prefix := ""
+	if key != "" {
+		prefix = key + "."
+	}
+	switch x.Kind() {
+	case reflect.Float64, reflect.String, reflect.Bool:
+		regexArr, isNoisy := CheckStringExist(key, noiseMap)
+		if isNoisy && len(regexArr) != 0 {
+			isNoisy, _ = MatchesAnyRegex(InterfaceToString(expected), regexArr)
+		}
+		if expected != actual && !isNoisy {
+			return matchJSONComparisonResult, nil
+		}
+
+	case reflect.Map:
+		expMap := expected.(map[string]interface{})
+		actMap := actual.(map[string]interface{})
+		copiedExpMap := make(map[string]interface{})
+		copiedActMap := make(map[string]interface{})
+
+		// Copy each key-value pair from expMap to copiedExpMap
+		for key, value := range expMap {
+			copiedExpMap[key] = value
+		}
+
+		// Repeat the same process for actual map
+		for key, value := range actMap {
+			copiedActMap[key] = value
+		}
+		isExact := true
+		differences := []string{}
+		for k, v := range expMap {
+			val, ok := actMap[k]
+			if !ok {
+				return matchJSONComparisonResult, nil
+			}
+			if valueMatchJSONComparisonResult, er := matchJSONWithNoiseHandling(strings.ToLower(prefix+k), v, val, noiseMap, ignoreOrdering); !valueMatchJSONComparisonResult.matches || er != nil {
+				return valueMatchJSONComparisonResult, nil
+			} else if !valueMatchJSONComparisonResult.isExact {
+				isExact = false
+				differences = append(differences, k)
+				differences = append(differences, valueMatchJSONComparisonResult.differences...)
+			}
+			// remove the noisy key from both expected and actual JSON.
+			// Viper bindings are case insensitive, so we need convert the key to lowercase.
+			if _, ok := CheckStringExist(strings.ToLower(prefix+k), noiseMap); ok {
+				delete(copiedExpMap, prefix+k)
+				delete(copiedActMap, k)
+				continue
+			}
+		}
+		// checks if there is a key which is not present in expMap but present in actMap.
+		for k := range actMap {
+			_, ok := expMap[k]
+			if !ok {
+				return matchJSONComparisonResult, nil
+			}
+		}
+		matchJSONComparisonResult.matches = true
+		matchJSONComparisonResult.isExact = isExact
+		matchJSONComparisonResult.differences = append(matchJSONComparisonResult.differences, differences...)
+		return matchJSONComparisonResult, nil
+	case reflect.Slice:
+		if regexArr, isNoisy := CheckStringExist(key, noiseMap); isNoisy && len(regexArr) != 0 {
+			break
+		}
+		expSlice := reflect.ValueOf(expected)
+		actSlice := reflect.ValueOf(actual)
+		if expSlice.Len() != actSlice.Len() {
+			return matchJSONComparisonResult, nil
+		}
+		isMatched := true
+		isExact := true
+		for i := 0; i < expSlice.Len(); i++ {
+			matched := false
+			for j := 0; j < actSlice.Len(); j++ {
+				if valMatchJSONComparisonResult, err := matchJSONWithNoiseHandling(key, expSlice.Index(i).Interface(), actSlice.Index(j).Interface(), noiseMap, ignoreOrdering); err == nil && valMatchJSONComparisonResult.matches {
+					if !valMatchJSONComparisonResult.isExact {
+						for _, val := range valMatchJSONComparisonResult.differences {
+							prefixedVal := key + "[" + fmt.Sprint(j) + "]." + val // Prefix the value
+							matchJSONComparisonResult.differences = append(matchJSONComparisonResult.differences, prefixedVal)
+						}
+					}
+					matched = true
+					break
+				}
+			}
+
+			if !matched {
+				isMatched = false
+				isExact = false
+				break
+			}
+		}
+		if !isMatched {
+			matchJSONComparisonResult.matches = isMatched
+			matchJSONComparisonResult.isExact = isExact
+			return matchJSONComparisonResult, nil
+		}
+		if !ignoreOrdering {
+			for i := 0; i < expSlice.Len(); i++ {
+				if valMatchJSONComparisonResult, er := matchJSONWithNoiseHandling(key, expSlice.Index(i).Interface(), actSlice.Index(i).Interface(), noiseMap, ignoreOrdering); er != nil || !valMatchJSONComparisonResult.isExact {
+					isExact = false
+					break
+				}
+			}
+		}
+		matchJSONComparisonResult.matches = isMatched
+		matchJSONComparisonResult.isExact = isExact
+
+		return matchJSONComparisonResult, nil
+	default:
+		return matchJSONComparisonResult, errors.New("type not registered for json")
+	}
+	matchJSONComparisonResult.matches = true
+	matchJSONComparisonResult.isExact = true
+	return matchJSONComparisonResult, nil
+}
+
+func ArrayToMap(arr []string) map[string]bool {
+	res := map[string]bool{}
+	for i := range arr {
+		res[arr[i]] = true
+	}
+	return res
+}
+
+func InterfaceToString(val interface{}) string {
+	switch v := val.(type) {
+	case int:
+		return fmt.Sprintf("%d", v)
+	case float64:
+		return fmt.Sprintf("%f", v)
+	case bool:
+		return fmt.Sprintf("%t", v)
+	case string:
+		return v
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
