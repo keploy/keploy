@@ -30,10 +30,10 @@ func NewCoverageProcessor(reportPath, srcpath, format string) *CoverageProcessor
 
 // ProcessCoverageReport verifies the report and parses it based on its type
 func (cp *CoverageProcessor) ProcessCoverageReport(latestTime int64) (*models.CoverageResult, error) {
-	// err := cp.VerifyReportUpdate(latestTime)
-	// if err != nil {
-	// 	return nil, err
-	// }
+	err := cp.VerifyReportUpdate(latestTime)
+	if err != nil {
+		return nil, err
+	}
 	return cp.ParseCoverageReport()
 }
 
