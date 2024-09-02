@@ -157,7 +157,7 @@ installKeploy (){
                         sed -i '/alias keploy/d' "$HOME/.bashrc"
                     fi
                     append_to_rc "$ALIAS_CMD" "$HOME/.bashrc"
-                else\"$PATH\"
+                else
                     if grep -q "alias keploy=" "$HOME/.profile"; then
                         sed -i '/alias keploy/d' "$HOME/.profile"
                     fi
