@@ -1,3 +1,4 @@
+// Package replay provides the hooks for the replay service
 package replay
 
 import (
@@ -98,11 +99,7 @@ func (h *Hooks) AfterTestSetRun(ctx context.Context, _, testSetID string, _ mode
 	tsConfig, err := h.tsConfigDB.Read(ctx, testSetID)
 	// If test-set config is not found, upload the mock file
 	if err != nil || tsConfig == nil || tsConfig.MockRegistry == nil {
-		if token == "" {
-			h.logger.Warn("Looks like you haven't logged in, skipping mock upload")
-			h.logger.Warn("Please login using `keploy login` to upload the mock file")
-			return nil
-		}
+		h.logger.Info("uploading mock file...")
 		err = h.storage.Upload(ctx, mockFileReader, mockHash, h.cfg.AppName, token)
 		if err != nil {
 			h.logger.Error("Failed to upload mock file", zap.Error(err))
@@ -154,6 +151,7 @@ func (h *Hooks) AfterTestSetRun(ctx context.Context, _, testSetID string, _ mode
 		h.logger.Warn("Please login using `keploy login` to upload the mock file")
 		return nil
 	}
+	h.logger.Info("uploading mock file...")
 	err = h.storage.Upload(ctx, mockFileReader, mockHash, h.cfg.AppName, token)
 	if err != nil {
 		h.logger.Error("Failed to upload mock file", zap.Error(err))
