@@ -13,10 +13,8 @@ import (
 )
 
 type Hooks interface {
-	AppInfo
 	DestInfo
 	OutgoingInfo
-	TestBenchInfo
 	Load(ctx context.Context, id uint64, cfg HookCfg) error
 	Record(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error)
 }
@@ -67,14 +65,11 @@ type Tester interface {
 	Setup(ctx context.Context, opts models.TestingOptions) error
 }
 type TestBenchInfo interface {
-	SendKeployPids(key models.ModeKey, pid uint32) error
-	SendKeployPorts(key models.ModeKey, port uint32) error
 }
 
 // ----------------------
 
 type OutgoingInfo interface {
-	PassThroughPortsInKernel(ctx context.Context, id uint64, ports []uint) error
 }
 
 type NetworkAddress struct {
