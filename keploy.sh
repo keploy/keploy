@@ -127,76 +127,51 @@ installKeploy (){
 
     # Get the alias to set and set it
     set_alias() {
-        OS_NAME=$(uname)
         current_shell="$(basename "$SHELL")"
-        if [ "$OS_NAME" = "Darwin" ]; then
-            # macOS case
-            if [ "$NO_ROOT" = "true" ]; then
-                # Just update the PATH in .zshrc or .bashrc, no alias needed
-                PATH_CMD="export PATH=\"\$HOME/.keploy/bin:\$PATH\""
-                if [[ "$current_shell" = "zsh" || "$current_shell" = "-zsh" ]]; then
-                    append_to_rc "$PATH_CMD" "$HOME/.zshrc"
-                elif [[ "$current_shell" = "bash" || "$current_shell" = "-bash" ]]; then
-                    append_to_rc "$PATH_CMD" "$HOME/.bashrc"
-                else
-                    append_to_rc "$PATH_CMD" "$HOME/.profile"
-                fi
+        if [ "$NO_ROOT" = "true" ]; then
+            # Just update the PATH in .zshrc or .bashrc, no alias needed
+            PATH_CMD="export PATH=\"\$HOME/.keploy/bin:\$PATH\""
+            if [[ "$current_shell" = "zsh" || "$current_shell" = "-zsh" ]]; then
+                append_to_rc "$PATH_CMD" "$HOME/.zshrc"
+            elif [[ "$current_shell" = "bash" || "$current_shell" = "-bash" ]]; then
+                append_to_rc "$PATH_CMD" "$HOME/.bashrc"
             else
-                return  # Exit the function and do nothing
+                append_to_rc "$PATH_CMD" "$HOME/.profile"
             fi
         else
-            if [ "$NO_ROOT" = "true" ]; then
-                ALIAS_CMD="alias keploy='$HOME/.keploy/bin/keploy'"
-                if [[ "$current_shell" = "zsh" || "$current_shell" = "-zsh" ]]; then
+            ALIAS_CMD="alias keploy='sudo -E env PATH="$PATH" keploy'"
+            # Handle zsh or bash for non-macOS systems
+            if [[ "$current_shell" = "zsh" || "$current_shell" = "-zsh" ]]; then
+                if [ -f "$HOME/.zshrc" ]; then
                     if grep -q "alias keploy=" "$HOME/.zshrc"; then
                         sed -i '/alias keploy/d' "$HOME/.zshrc"
                     fi
-                    append_to_rc "$ALIAS_CMD" "$HOME/.zshrc"
-                elif [[ "$current_shell" = "bash" || "$current_shell" = "-bash" ]]; then
+                    append_to_rc "$ALIAS_CMD" ~/.zshrc
+                else
+                    alias keploy="$ALIAS_CMD"
+                fi
+            elif [[ "$current_shell" = "bash" || "$current_shell" = "-bash" ]]; then
+                if [ -f "$HOME/.bashrc" ]; then
                     if grep -q "alias keploy=" "$HOME/.bashrc"; then
                         sed -i '/alias keploy/d' "$HOME/.bashrc"
                     fi
-                    append_to_rc "$ALIAS_CMD" "$HOME/.bashrc"
+                    append_to_rc "$ALIAS_CMD" ~/.bashrc
                 else
+                    alias keploy="$ALIAS_CMD"
+                fi
+            else
+                if [ -f "$HOME/.profile" ]; then
                     if grep -q "alias keploy=" "$HOME/.profile"; then
                         sed -i '/alias keploy/d' "$HOME/.profile"
                     fi
-                    append_to_rc "$ALIAS_CMD" "$HOME/.profile"
-                fi
-            else
-                ALIAS_CMD="alias keploy='sudo -E env PATH="$PATH" keploy'"
-                # Handle zsh or bash for non-macOS systems
-                if [[ "$current_shell" = "zsh" || "$current_shell" = "-zsh" ]]; then
-                    if [ -f "$HOME/.zshrc" ]; then
-                        if grep -q "alias keploy=" "$HOME/.zshrc"; then
-                            sed -i '/alias keploy/d' "$HOME/.zshrc"
-                        fi
-                        append_to_rc "$ALIAS_CMD" ~/.zshrc
-                    else
-                        alias keploy="$ALIAS_CMD"
-                    fi
-                elif [[ "$current_shell" = "bash" || "$current_shell" = "-bash" ]]; then
-                    if [ -f "$HOME/.bashrc" ]; then
-                        if grep -q "alias keploy=" "$HOME/.bashrc"; then
-                            sed -i '/alias keploy/d' "$HOME/.bashrc"
-                        fi
-                        append_to_rc "$ALIAS_CMD" ~/.bashrc
-                    else
-                        alias keploy="$ALIAS_CMD"
-                    fi
+                    append_to_rc "$ALIAS_CMD" ~/.profile
                 else
-                    if [ -f "$HOME/.profile" ]; then
-                        if grep -q "alias keploy=" "$HOME/.profile"; then
-                            sed -i '/alias keploy/d' "$HOME/.profile"
-                        fi
-                        append_to_rc "$ALIAS_CMD" ~/.profile
-                    else
-                        alias keploy="$ALIAS_CMD"
-                    fi
+                    alias keploy="$ALIAS_CMD"
                 fi
-
             fi
+
         fi
+    
     }
 
     delete_keploy_alias() {
