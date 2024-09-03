@@ -41,6 +41,7 @@ func (h *Hooks) GetDestinationInfo(srcPort uint16) (*structs.DestInfo, error) {
 	h.m.Lock()
 	defer h.m.Unlock()
 	destInfo := structs.DestInfo{}
+	fmt.Println("srcPort", srcPort)
 	if err := h.redirectProxyMap.Lookup(srcPort, &destInfo); err != nil {
 		return nil, err
 	}
@@ -65,9 +66,18 @@ func (h *Hooks) CleanProxyEntry(srcPort uint16) error {
 
 func (h *Hooks) SendAppInfo(appInfo structs.AppInfo) error {
 	key := 1234
-	err := h.appRegistrationMap.Update(uint32(key), &appInfo, ebpf.UpdateAny)
+	err := h.appRegistrationMap.Update(uint32(key), appInfo, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the app info to the ebpf program")
+		return err
+	}
+	key = 0
+	var count structs.AppCount = structs.AppCount{}
+	count.AppsCount = uint32(1)
+	count.IdentifiedAppsCount = uint32(0)
+	err = h.appCountMap.Update(uint32(key), count, ebpf.UpdateAny)
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to send app count to ebpf program")
 		return err
 	}
 	return nil
@@ -75,7 +85,7 @@ func (h *Hooks) SendAppInfo(appInfo structs.AppInfo) error {
 
 func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
 	key := 0
-	err := h.agentRegistartionMap.Update(uint32(key), &agentInfo, ebpf.UpdateAny)
+	err := h.agentRegistartionMap.Update(uint32(key), agentInfo, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the agent info to the ebpf program")
 		return err
