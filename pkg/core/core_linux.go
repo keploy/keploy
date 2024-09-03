@@ -218,13 +218,13 @@ func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.A
 			return nil
 		}
 		select {
-		// case inode := <-inodeChan:
-		// 	err := c.Hooks.SendInode(ctx, id, inode)
-		// 	if err != nil {
-		// 		utils.LogError(c.logger, err, "")
+		case inode := <-inodeChan:
+			err := c.Hooks.SendInode(ctx, id, inode)
+			if err != nil {
+				utils.LogError(c.logger, err, "")
 
-		// 		inodeErrCh <- errors.New("failed to send inode to the kernel")
-		// 	}
+				inodeErrCh <- errors.New("failed to send inode to the kernel")
+			}
 		case <-ctx.Done():
 			return nil
 		}
