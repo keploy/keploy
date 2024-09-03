@@ -20,6 +20,8 @@ type DestInfo struct {
 	DestIP6   [4]uint32
 	DestPort  uint32
 	KernelPid uint32
+	AppId     uint32
+	Fake      uint32
 }
 
 // struct proxy_info
@@ -38,8 +40,8 @@ type ProxyInfo struct {
 // struct app_info
 // {
 //     u32 keploy_client_ns_pid;
-//     u32 keploy_client_inode;
-//     s32 app_inode;
+//     u64 keploy_client_inode;
+//     u64 app_inode;
 //     u32 mode;
 //     u32 is_docker_app;
 //     u32 is_keploy_client_registered; // whether the client is registered or not
@@ -47,9 +49,9 @@ type ProxyInfo struct {
 // };
 
 type AppInfo struct {
-	KeployClientNsPid        uint32
 	KeployClientInode        uint64
 	AppInode                 uint64
+	KeployClientNsPid        uint32
 	Mode                     uint32
 	IsDockerApp              uint32
 	IsKeployClientRegistered uint32
