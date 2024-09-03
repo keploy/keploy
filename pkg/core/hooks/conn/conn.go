@@ -16,11 +16,9 @@ const (
 //	   uint64_t tsid;
 //	};
 type ID struct {
-	TsID  uint64
-	FD    int32
-	TGID  uint32
-	AppId uint32
-	Fake  uint32
+	TGID uint32
+	FD   int32
+	TsID uint64
 }
 
 // SocketDataEvent is a conversion of the following C-Struct into GO.
@@ -47,8 +45,6 @@ type SocketDataEvent struct {
 	Msg                  [EventBodyMaxSize]byte
 	ValidateReadBytes    int64
 	ValidateWrittenBytes int64
-	AppId                uint32
-	Fake                 uint32
 }
 
 // SocketOpenEvent is a conversion of the following C-Struct into GO.
@@ -62,8 +58,6 @@ type SocketOpenEvent struct {
 	TimestampNano uint64
 	ConnID        ID
 	Addr          SockAddrIn
-	AppId         uint32
-	Fake          uint32
 }
 
 // SocketCloseEvent is a conversion of the following C-Struct into GO.
@@ -79,8 +73,6 @@ type SocketCloseEvent struct {
 	ConnID        ID
 	WrittenBytes  int64
 	ReadBytes     int64
-	AppId         uint32
-	Fake          uint32
 }
 
 // TrafficDirectionEnum is a GO-equivalent for the following enum.

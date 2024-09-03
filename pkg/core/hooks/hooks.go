@@ -411,11 +411,9 @@ func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 
 	switch opts.Mode {
 	case models.MODE_RECORD:
-		appInfo.Mode = uint32(1)
+		appInfo.Mode = 1
 	case models.MODE_TEST:
-		appInfo.Mode = uint32(2)
-	default:
-		appInfo.Mode = uint32(0)
+		appInfo.Mode = 2
 	}
 
 	//sending keploy pid to kernel to get filtered
@@ -426,9 +424,8 @@ func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 	}
 
 	appInfo.KeployClientInode = inode
+
 	appInfo.KeployClientNsPid = uint32(os.Getpid())
-	appInfo.AppInode = uint64(0)
-	appInfo.IsKeployClientRegistered = uint32(0)
 	h.logger.Debug("Keploy Pid sent successfully...")
 
 	if opts.IsDocker {
@@ -458,7 +455,7 @@ func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 
 	agentInfo.DnsPort = int32(h.dnsPort)
 
-	appInfo.IsDockerApp = uint32(0)
+	appInfo.IsDockerApp = 0
 	appInfo.PassThroughPorts = [10]int32{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1}
 
 	err = h.SendAppInfo(appInfo)
@@ -489,6 +486,9 @@ func (h *Hooks) unLoad(_ context.Context) {
 		utils.LogError(h.logger, err, "failed to close the socket")
 	}
 
+	if err := h.bind.Close(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the bind")
+	}
 	if err := h.udpp4.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the udpp4")
 	}

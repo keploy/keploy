@@ -198,7 +198,7 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 			conn.kernelReqSizes = conn.kernelReqSizes[1:]
 
 			if expectedRecvBytes == 0 || actualRecvBytes == 0 {
-				conn.logger.Warn("Malformed reques", zap.Any("ExpectedRecvBytes", expectedRecvBytes), zap.Any("ActualRecvBytes", actualRecvBytes))
+				conn.logger.Warn("Malformed request", zap.Any("ExpectedRecvBytes", expectedRecvBytes), zap.Any("ActualRecvBytes", actualRecvBytes))
 			}
 
 			if conn.verifyRequestData(expectedRecvBytes, actualRecvBytes) {
@@ -293,7 +293,7 @@ func (conn *Tracker) AddDataEvent(event SocketDataEvent) {
 	defer conn.mutex.Unlock()
 	conn.UpdateTimestamps()
 
-	conn.logger.Info(fmt.Sprintf("Got a data event from eBPF, Direction:%v || current Event Size:%v || ConnectionID:%v\n", event.Direction, event.MsgSize, event.ConnID))
+	conn.logger.Debug(fmt.Sprintf("Got a data event from eBPF, Direction:%v || current Event Size:%v || ConnectionID:%v\n", event.Direction, event.MsgSize, event.ConnID))
 
 	switch event.Direction {
 	case EgressTraffic:
