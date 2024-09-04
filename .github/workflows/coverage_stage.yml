@@ -20,7 +20,7 @@ jobs:
           name: coverage-reports-samples-go-gin-mongo-0
           path: ./temp-coverage-dir
 
-      - name: Download second coverage data of gin-mongo application 
+      - name: Download second coverage data of gin-mongo application
         uses: actions/download-artifact@v4
         with:
           name: coverage-reports-samples-go-gin-mongo-1
@@ -47,11 +47,11 @@ jobs:
 
       # - name: Generate the HTML coverage report
       #   run: |
-      #     go tool cover -html=total-coverage.txt -o=coverage.html    
+      #     go tool cover -html=total-coverage.txt -o=coverage.html
 
       # - name: Upload the HTML coverage report
       #   id: artifact-upload-step
       #   uses: actions/upload-artifact@v4
       #   with:
       #     name: coverage-report-html
-      #     path: coverage.html 
+      #     path: coverage.html

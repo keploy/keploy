@@ -31,7 +31,7 @@ func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cm
 	}
 }
 
-func (p *Python) PreProcess() (string, error) {
+func (p *Python) PreProcess(_ bool) (string, error) {
 	cmd := exec.Command("coverage")
 	err := cmd.Run()
 	if err != nil {

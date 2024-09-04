@@ -6,30 +6,33 @@ body:
 - type: markdown
   attributes:
     value: |
-      Thank you for taking the time to request a feature for Keploy
+      Thank you for taking the time to request a feature for Keploy🙏
 - type: checkboxes
   attributes:
-    label: Is there an existing feature request for this?
+    label: 👀 Is there an existing feature request for this?
     description: Please search to see if an issue related to this feature request/feature request already exists
     options:
     - label: I have searched the existing issues
       required: true
 - type: textarea
   attributes:
-    label: Summary
-    description: One paragraph description of the feature
+    label: 🔖 Enhancement description
+    description: A clear and concise description of what the enhancement is.
+    placeholder: |
+      "I would like to see ..."
   validations:
     required: true
 - type: textarea
   attributes:
-    label: Why should this be worked on?
+    label: 🎤 Why should this be worked on?
     description: A concise description of the problems or use cases for this feature request
+    placeholder: "In my use-case, ..."
   validations:
     required: true
 - type: dropdown
   id: repository
   attributes:
-    label: Repository
+    label: 💻 Repository
     options:
        - keploy
        - go-sdk
@@ -41,6 +44,8 @@ body:
        - writers-program
        - blog-website
        - ui
+       - vscode-extension
+       - jetbrains-plugin
        - samples-go
        - samples-java
        - samples-rust
@@ -52,4 +57,4 @@ body:
 - type: markdown
   attributes:
     value: |
-      Please add the respective Label to the Issue
+        I have read the [Code of Conduct](https://github.com/keploy/keploy/blob/main/CODE_OF_CONDUCT.md)
