@@ -57,17 +57,6 @@ type AppInfo struct {
 	PassThroughPorts         [10]int32
 }
 
-// struct app_count
-// {
-//     u32 apps_count;
-//     u32 identified_apps_count;
-// };
-
-type AppCount struct {
-	AppsCount           uint32
-	IdentifiedAppsCount uint32
-}
-
 // struct agent_info
 // {
 //     u32 keploy_agent_ns_pid;

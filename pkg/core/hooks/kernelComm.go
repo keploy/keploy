@@ -71,15 +71,6 @@ func (h *Hooks) SendAppInfo(appInfo structs.AppInfo) error {
 		utils.LogError(h.logger, err, "failed to send the app info to the ebpf program")
 		return err
 	}
-	key = 0
-	var count structs.AppCount = structs.AppCount{}
-	count.AppsCount = uint32(1)
-	count.IdentifiedAppsCount = uint32(0)
-	err = h.appCountMap.Update(uint32(key), count, ebpf.UpdateAny)
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to send app count to ebpf program")
-		return err
-	}
 	return nil
 }
 

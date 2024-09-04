@@ -92,7 +92,6 @@ type bpfMapSpecs struct {
 	ActiveReadArgsMap          *ebpf.MapSpec `ebpf:"active_read_args_map"`
 	ActiveWriteArgsMap         *ebpf.MapSpec `ebpf:"active_write_args_map"`
 	AppChildKernelPidMap       *ebpf.MapSpec `ebpf:"app_child_kernel_pid_map"`
-	AppCountMap                *ebpf.MapSpec `ebpf:"app_count_map"`
 	AppRegistrationMap         *ebpf.MapSpec `ebpf:"app_registration_map"`
 	ConnInfoMap                *ebpf.MapSpec `ebpf:"conn_info_map"`
 	CurrentSockMap             *ebpf.MapSpec `ebpf:"current_sock_map"`
@@ -132,7 +131,6 @@ type bpfMaps struct {
 	ActiveReadArgsMap          *ebpf.Map `ebpf:"active_read_args_map"`
 	ActiveWriteArgsMap         *ebpf.Map `ebpf:"active_write_args_map"`
 	AppChildKernelPidMap       *ebpf.Map `ebpf:"app_child_kernel_pid_map"`
-	AppCountMap                *ebpf.Map `ebpf:"app_count_map"`
 	AppRegistrationMap         *ebpf.Map `ebpf:"app_registration_map"`
 	ConnInfoMap                *ebpf.Map `ebpf:"conn_info_map"`
 	CurrentSockMap             *ebpf.Map `ebpf:"current_sock_map"`
@@ -155,7 +153,6 @@ func (m *bpfMaps) Close() error {
 		m.ActiveReadArgsMap,
 		m.ActiveWriteArgsMap,
 		m.AppChildKernelPidMap,
-		m.AppCountMap,
 		m.AppRegistrationMap,
 		m.ConnInfoMap,
 		m.CurrentSockMap,
