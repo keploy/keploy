@@ -10,8 +10,8 @@ import (
 	"go.keploy.io/server/v2/cli"
 	"go.keploy.io/server/v2/cli/provider"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/platform/auth"
 	userDb "go.keploy.io/server/v2/pkg/platform/yaml/configdb/user"
-
 	"go.keploy.io/server/v2/utils"
 	"go.keploy.io/server/v2/utils/log"
 	//pprof for debugging
@@ -23,9 +23,10 @@ import (
 
 var version string
 var dsn string
+var apiServerURI = "http://localhost:8083"
+var gitHubClientID = "Iv23liFBvIVhL29i9BAp"
 
 func main() {
-
 	// Uncomment the following code to enable pprof for debugging
 	// go func() {
 	// 	fmt.Println("Starting pprof server for debugging...")
@@ -40,6 +41,7 @@ func main() {
 	start(ctx)
 	os.Exit(utils.ErrCode)
 }
+
 func setVersion() {
 	if version == "" {
 		version = "2-dev"
@@ -63,7 +65,6 @@ func start(ctx context.Context) {
 			utils.LogError(logger, err, "Failed to delete Temporary Docker Compose")
 			return
 		}
-
 	}()
 	defer utils.Recover(logger)
 
@@ -77,14 +78,23 @@ func start(ctx context.Context) {
 	oldMask := utils.SetUmask()
 	defer utils.RestoreUmask(oldMask)
 
-	userDb := userDb.New(logger)
 	if dsn != "" {
 		utils.SentryInit(logger, dsn)
 		//logger = utils.ModifyToSentryLogger(ctx, logger, sentry.CurrentHub().Client(), configDb)
 	}
 	conf := config.New()
+	conf.APIServerURL = apiServerURI
+	conf.GitHubClientID = gitHubClientID
+	userDb := userDb.New(logger, conf)
+	conf.InstallationID, err = userDb.GetInstallationID(ctx)
+	if err != nil {
+		errMsg := "failed to get installation id"
+		utils.LogError(logger, err, errMsg)
+		os.Exit(1)
+	}
+	auth := auth.New(conf.APIServerURL, conf.InstallationID, logger, conf.GitHubClientID)
 
-	svcProvider := provider.NewServiceProvider(logger, userDb, conf)
+	svcProvider := provider.NewServiceProvider(logger, conf, auth)
 	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
 	if err := rootCmd.Execute(); err != nil {

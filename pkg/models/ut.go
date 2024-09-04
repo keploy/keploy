@@ -73,3 +73,57 @@ type Line struct {
 	Number int `xml:"number,attr"`
 	Hits   int `xml:"hits,attr"`
 }
+
+type Jacoco struct {
+	Name        string          `xml:"name,attr"`
+	XMLName     xml.Name        `xml:"report"`
+	Packages    []JacocoPackage `xml:"package"`
+	SessionInfo []SessionInfo   `xml:"sessioninfo"`
+}
+
+type SessionInfo struct {
+	ID    string `xml:"id,attr"`
+	Start string `xml:"start,attr"`
+	Dump  string `xml:"dump,attr"`
+}
+
+type JacocoPackage struct {
+	Name        string             `xml:"name,attr"`
+	Classes     []JacocoClass      `xml:"class"`
+	Counters    []Counter          `xml:"counter"`
+	SourceFiles []JacocoSourceFile `xml:"sourcefile"` // Adding this field to capture source files
+}
+
+type JacocoSourceFile struct {
+	Name     string       `xml:"name,attr"`
+	Lines    []JacocoLine `xml:"line"`
+	Counters []Counter    `xml:"counter"`
+}
+
+type JacocoClass struct {
+	Name       string         `xml:"name,attr"`
+	SourceFile string         `xml:"sourcefilename,attr"`
+	Methods    []JacocoMethod `xml:"method"`
+	Lines      []JacocoLine   `xml:"line"` // This is where JacocoLine is used
+}
+
+type JacocoMethod struct {
+	Name       string    `xml:"name,attr"`
+	Descriptor string    `xml:"desc,attr"`
+	Line       string    `xml:"line,attr"`
+	Counters   []Counter `xml:"counter"`
+}
+
+type JacocoLine struct {
+	Number              string `xml:"nr,attr"`
+	MissedInstructions  string `xml:"mi,attr"`
+	CoveredInstructions string `xml:"ci,attr"`
+	MissedBranches      string `xml:"mb,attr"`
+	CoveredBranches     string `xml:"cb,attr"`
+}
+
+type Counter struct {
+	Type    string `xml:"type,attr"`
+	Missed  string `xml:"missed,attr"`
+	Covered string `xml:"covered,attr"`
+}

@@ -34,9 +34,12 @@ installKeploy (){
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz"
         fi
-
-        curl --silent --location "$download_url" | tar xz -C /tmp
-        sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploy
+        # macOS tar does not support --overwrite option so we need to remove the directory first
+        # to avoid the "File exists" error
+        rm -rf /tmp/keploy
+        mkdir -p /tmp/keploy
+        curl --silent --location "$download_url" | tar xz -C /tmp/keploy/
+        sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy/keploy /usr/local/bin/keploy
         delete_keploy_alias
     }
 
@@ -46,7 +49,7 @@ installKeploy (){
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
         fi
-        curl --silent --location "$download_url" | tar xz -C /tmp
+        curl --silent --location "$download_url" | tar xz --overwrite -C /tmp 
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploy
         set_alias 'sudo -E env PATH="$PATH" keploy'
     }
@@ -58,7 +61,7 @@ installKeploy (){
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
         fi
-        curl --silent --location "$download_url" | tar xz -C /tmp
+        curl --silent --location "$download_url" | tar xz --overwrite -C /tmp
         sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploy
         set_alias 'sudo -E env PATH="$PATH" keploy'
     }
@@ -136,11 +139,22 @@ installKeploy (){
         fi
     }
 
+    cleanup_tmp() {
+        # Remove extracted files /tmp directory
+        tmp_files=("LICENSE" "README.md" "READMEes-Es.md" "README-UnitGen.md")
+        for file in "${tmp_files[@]}"; do
+            if [ -f "/tmp/$file" ]; then
+                sudo rm -rf "/tmp/$file"
+            fi
+        done
+    }
+
     ARCH=$(uname -m)
 
     if [ "$IS_CI" = false ]; then
         OS_NAME="$(uname -s)"
         if [ "$OS_NAME" = "Darwin" ]; then
+            cleanup_tmp
             install_keploy_darwin_all
             return
         elif [ "$OS_NAME" = "Linux" ]; then
@@ -148,8 +162,10 @@ installKeploy (){
                 sudo mount -t debugfs debugfs /sys/kernel/debug
             fi
             if [ "$ARCH" = "x86_64" ]; then
+                cleanup_tmp
                 install_keploy_amd
             elif [ "$ARCH" = "aarch64" ]; then
+                cleanup_tmp
                 install_keploy_arm
             else
                 echo "Unsupported architecture: $ARCH"
@@ -164,8 +180,10 @@ installKeploy (){
         fi
     else
         if [ "$ARCH" = "x86_64" ]; then
+            cleanup_tmp
             install_keploy_amd
         elif [ "$ARCH" = "aarch64" ]; then
+            cleanup_tmp
             install_keploy_arm
         else
             echo "Unsupported architecture: $ARCH"
@@ -178,6 +196,7 @@ installKeploy "$@"
 
 if command -v keploy &> /dev/null; then
     keploy example
+    cleanup_tmp
     rm -rf keploy.sh
     rm -rf install.sh
 fi

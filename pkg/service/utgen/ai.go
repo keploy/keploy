@@ -13,15 +13,19 @@ import (
 	"strings"
 	"time"
 
+	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
 type AIClient struct {
-	Model      string
-	APIBase    string
-	APIVersion string
-	Logger     *zap.Logger
+	Model        string
+	APIBase      string
+	APIVersion   string
+	APIKey       string
+	APIServerURL string
+	Auth         service.Auth
+	Logger       *zap.Logger
 }
 
 type Prompt struct {
@@ -70,12 +74,29 @@ type Delta struct {
 	Content string `json:"content"`
 }
 
-func NewAIClient(model, apiBase, apiVersion string, logger *zap.Logger) *AIClient {
+type AIResponse struct {
+	IsSuccess        bool   `json:"isSuccess"`
+	Error            string `json:"error"`
+	FinalContent     string `json:"finalContent"`
+	PromptTokens     int    `json:"promptTokens"`
+	CompletionTokens int    `json:"completionTokens"`
+	APIKey           string `json:"apiKey"`
+}
+
+type AIRequest struct {
+	MaxTokens int    `json:"maxTokens"`
+	Prompt    Prompt `json:"prompt"`
+}
+
+func NewAIClient(model, apiBase, apiVersion, apiKey, apiServerURL string, auth service.Auth, logger *zap.Logger) *AIClient {
 	return &AIClient{
-		Model:      model,
-		APIBase:    apiBase,
-		APIVersion: apiVersion,
-		Logger:     logger,
+		Model:        model,
+		APIBase:      apiBase,
+		APIVersion:   apiVersion,
+		Logger:       logger,
+		APIKey:       apiKey,
+		APIServerURL: apiServerURL,
+		Auth:         auth,
 	}
 }
 
@@ -107,7 +128,58 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 		Temperature: 0.2,
 	}
 
-	if ai.APIBase != "" {
+	var apiKey string
+	if ai.APIBase == ai.APIServerURL {
+
+		token, err := ai.Auth.GetToken(ctx)
+		if err != nil {
+			return "", 0, 0, fmt.Errorf("error getting token: %v", err)
+		}
+
+		ai.Logger.Debug("Making AI request to API server", zap.String("api_server_url", ai.APIServerURL), zap.String("token", token))
+		httpClient := &http.Client{}
+		// make AI request as request body to the API server
+		aiRequest := AIRequest{
+			MaxTokens: maxTokens,
+			Prompt:    *prompt,
+		}
+		aiRequestBytes, err := json.Marshal(aiRequest)
+		if err != nil {
+			return "", 0, 0, fmt.Errorf("error marshalling AI request: %v", err)
+		}
+
+		req, err := http.NewRequest("POST", fmt.Sprintf("%s/ai/call", ai.APIServerURL), bytes.NewBuffer(aiRequestBytes))
+		if err != nil {
+			return "", 0, 0, fmt.Errorf("error creating request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return "", 0, 0, fmt.Errorf("error making request: %v", err)
+		}
+
+		// read the response body AIResponse
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		var aiResponse AIResponse
+		err = json.Unmarshal(bodyBytes, &aiResponse)
+		if err != nil {
+			return "", 0, 0, fmt.Errorf("error unmarshalling response body: %v", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return "", 0, 0, fmt.Errorf("unexpected status code: %v, response body: %s", resp.StatusCode, aiResponse.Error)
+		}
+		defer func() {
+			err := resp.Body.Close()
+			if err != nil {
+				utils.LogError(ai.Logger, err, "failed to close response body for authentication")
+			}
+		}()
+
+		return aiResponse.FinalContent, aiResponse.PromptTokens, aiResponse.CompletionTokens, nil
+	} else if ai.APIBase != "" {
 		apiBaseURL = ai.APIBase
 	} else {
 		apiBaseURL = "https://api.openai.com/v1"
@@ -128,7 +200,12 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 		return "", 0, 0, fmt.Errorf("error creating request: %v", err)
 	}
 
-	apiKey := os.Getenv("API_KEY")
+	if ai.APIKey == "" {
+		apiKey = os.Getenv("API_KEY")
+	} else {
+		apiKey = ai.APIKey
+	}
+
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("api-key", apiKey)
@@ -156,6 +233,8 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 	if ai.Logger.Level() == zap.DebugLevel {
 		fmt.Println("Streaming results from LLM model...")
 	}
+
+	fmt.Println("Streaming results from LLM model...")
 
 	for {
 		line, err := reader.ReadString('\n')

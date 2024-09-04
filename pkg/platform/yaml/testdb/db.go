@@ -82,7 +82,6 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 			utils.LogError(ts.logger, err, "failed to read the testcase from yaml")
 			return nil, err
 		}
-
 		var testCase *yaml.NetworkTrafficDoc
 		err = yamlLib.Unmarshal(data, &testCase)
 		if err != nil {
@@ -164,4 +163,8 @@ func (ts *TestYaml) DeleteTestSet(ctx context.Context, testSetID string) error {
 		return err
 	}
 	return nil
+}
+func (ts *TestYaml) ChangePath(path string) {
+
+	ts.TcsPath = path
 }
