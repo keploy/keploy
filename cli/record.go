@@ -28,6 +28,7 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 				utils.LogError(logger, err, "failed to get service")
 				return nil
 			}
+
 			var record recordSvc.Service
 			var ok bool
 			if record, ok = svc.(recordSvc.Service); !ok {

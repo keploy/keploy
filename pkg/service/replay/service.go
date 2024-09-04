@@ -10,9 +10,9 @@ import (
 
 type Instrumentation interface {
 	//Setup prepares the environment for the recording
-	Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error)
+	// Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error)
 	//Hook will load hooks and start the proxy server.
-	Hook(ctx context.Context, id uint64, opts models.HookOptions) error
+	// Hook(ctx context.Context, id uint64, opts models.HookOptions) error
 	MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error
 	// SetMocks Allows for setting mocks between test runs for better filtering and matching
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
@@ -26,9 +26,10 @@ type Instrumentation interface {
 
 type Service interface {
 	Start(ctx context.Context) error
-	Instrument(ctx context.Context) (*InstrumentState, error)
+	// Instrument(ctx context.Context) (*InstrumentState, error)
 	GetNextTestRunID(ctx context.Context) (string, error)
 	GetAllTestSetIDs(ctx context.Context) ([]string, error)
+	GetContainerIP(ctx context.Context, id uint64) (string, error)
 	RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error)
 	GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error)
 	GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error)

@@ -89,7 +89,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 		utils.LogError(p.logger, err, "failed to initialize the integrations")
 		return err
 	}
-
+	fmt.Println("Proxy started at port:", p.Port)
 	// set up the CA for tls connections
 	err = SetupCA(ctx, p.logger)
 	if err != nil {
@@ -570,7 +570,7 @@ func (p *Proxy) Record(_ context.Context, id uint64, mocks chan<- *models.Mock, 
 		MC:              mocks,
 		OutgoingOptions: opts,
 	})
-
+	fmt.Println("Record mode enabled")
 	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 
 	////set the new proxy ip:port for a new session

@@ -29,6 +29,8 @@ type Core struct {
 	proxyStarted bool
 }
 
+
+// TODO: Remove this file its no longer needed
 func New(logger *zap.Logger, hook Hooks, proxy Proxy, tester Tester, client docker.Client) *Core {
 	return &Core{
 		logger:       logger,
@@ -72,128 +74,130 @@ func (c *Core) getApp(id uint64) (*app.App, error) {
 	return h, nil
 }
 
-func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) error {
-	hookErr := errors.New("failed to hook into the app")
+// func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) error {
+// 	hookErr := errors.New("failed to hook into the app")
 
-	a, err := c.getApp(id)
-	if err != nil {
-		utils.LogError(c.logger, err, "failed to get app")
-		return hookErr
-	}
+// 	a, err := c.getApp(id)
+// 	if err != nil {
+// 		utils.LogError(c.logger, err, "failed to get app")
+// 		return hookErr
+// 	}
 
-	isDocker := false
-	appKind := a.Kind(ctx)
-	//check if the app is docker/docker-compose or native
-	if utils.IsDockerCmd(appKind) {
-		isDocker = true
-	}
+// 	isDocker := false
+// 	appKind := a.Kind(ctx)
+// 	//check if the app is docker/docker-compose or native
+// 	if utils.IsDockerCmd(appKind) {
+// 		isDocker = true
+// 	}
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
+// 	select {
+// 	case <-ctx.Done():
+// 		return ctx.Err()
+// 	default:
+// 	}
 
-	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
-	if !ok {
-		return errors.New("failed to get the error group from the context")
-	}
+// 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+// 	if !ok {
+// 		return errors.New("failed to get the error group from the context")
+// 	}
 
-	// create a new error group for the hooks
-	hookErrGrp, _ := errgroup.WithContext(ctx)
-	hookCtx := context.WithoutCancel(ctx) //so that main context doesn't cancel the hookCtx to control the lifecycle of the hooks
-	hookCtx, hookCtxCancel := context.WithCancel(hookCtx)
-	hookCtx = context.WithValue(hookCtx, models.ErrGroupKey, hookErrGrp)
+// 	// create a new error group for the hooks
+// 	hookErrGrp, _ := errgroup.WithContext(ctx)
+// 	hookCtx := context.WithoutCancel(ctx) //so that main context doesn't cancel the hookCtx to control the lifecycle of the hooks
+// 	hookCtx, hookCtxCancel := context.WithCancel(hookCtx)
+// 	hookCtx = context.WithValue(hookCtx, models.ErrGroupKey, hookErrGrp)
 
-	// create a new error group for the proxy
-	proxyErrGrp, _ := errgroup.WithContext(ctx)
-	proxyCtx := context.WithoutCancel(ctx) //so that main context doesn't cancel the proxyCtx to control the lifecycle of the proxy
-	proxyCtx, proxyCtxCancel := context.WithCancel(proxyCtx)
-	proxyCtx = context.WithValue(proxyCtx, models.ErrGroupKey, proxyErrGrp)
+// 	// create a new error group for the proxy
+// 	proxyErrGrp, _ := errgroup.WithContext(ctx)
+// 	proxyCtx := context.WithoutCancel(ctx) //so that main context doesn't cancel the proxyCtx to control the lifecycle of the proxy
+// 	proxyCtx, proxyCtxCancel := context.WithCancel(proxyCtx)
+// 	proxyCtx = context.WithValue(proxyCtx, models.ErrGroupKey, proxyErrGrp)
 
-	g.Go(func() error {
-		<-ctx.Done()
+// 	g.Go(func() error {
+// 		<-ctx.Done()
 
-		proxyCtxCancel()
-		err = proxyErrGrp.Wait()
-		if err != nil {
-			utils.LogError(c.logger, err, "failed to stop the proxy")
-		}
+// 		proxyCtxCancel()
+// 		err = proxyErrGrp.Wait()
+// 		if err != nil {
+// 			utils.LogError(c.logger, err, "failed to stop the proxy")
+// 		}
 
-		hookCtxCancel()
-		err := hookErrGrp.Wait()
-		if err != nil {
-			utils.LogError(c.logger, err, "failed to unload the hooks")
-		}
+// 		hookCtxCancel()
+// 		err := hookErrGrp.Wait()
+// 		if err != nil {
+// 			utils.LogError(c.logger, err, "failed to unload the hooks")
+// 		}
 
-		//deleting in order to free the memory in case of rerecord. otherwise different app id will be created for the same app.
-		c.apps.Delete(id)
-		c.id = utils.AutoInc{}
+// 		//deleting in order to free the memory in case of rerecord. otherwise different app id will be created for the same app.
+// 		c.apps.Delete(id)
+// 		c.id = utils.AutoInc{}
 
-		return nil
-	})
+// 		return nil
+// 	})
 
-	//load hooks
-	err = c.Hooks.Load(hookCtx, id, HookCfg{
-		AppID:      id,
-		Pid:        0,
-		IsDocker:   isDocker,
-		KeployIPV4: a.KeployIPv4Addr(),
-		Mode:       opts.Mode,
-	})
-	if err != nil {
-		utils.LogError(c.logger, err, "failed to load hooks")
-		return hookErr
-	}
+// 	//load hooks
+// 	err = c.Hooks.Load(hookCtx, id, HookCfg{
+// 		AppID:      id,
+// 		Pid:        0,
+// 		IsDocker:   isDocker,
+// 		KeployIPV4: a.KeployIPv4Addr(),
+// 		Mode:       opts.Mode,
+// 	})
+// 	if err != nil {
+// 		utils.LogError(c.logger, err, "failed to load hooks")
+// 		return hookErr
+// 	}
 
-	if c.proxyStarted {
-		c.logger.Debug("Proxy already started")
-		// return nil
-	}
+// 	if c.proxyStarted {
+// 		c.logger.Debug("Proxy already started")
+// 		// return nil
+// 	}
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
+// 	select {
+// 	case <-ctx.Done():
+// 		return ctx.Err()
+// 	default:
+// 	}
 
-	// TODO: Hooks can be loaded multiple times but proxy should be started only once
-	// if there is another containerized app, then we need to pass new (ip:port) of proxy to the eBPF
-	// as the network namespace is different for each container and so is the keploy/proxy IP to communicate with the app.
-	// start proxy
-	err = c.Proxy.StartProxy(proxyCtx, ProxyOptions{
-		DNSIPv4Addr: a.KeployIPv4Addr(),
-		//DnsIPv6Addr: ""
-	})
-	if err != nil {
-		utils.LogError(c.logger, err, "failed to start proxy")
-		return hookErr
-	}
+// 	// TODO: Hooks can be loaded multiple times but proxy should be started only once
+// 	// if there is another containerized app, then we need to pass new (ip:port) of proxy to the eBPF
+// 	// as the network namespace is different for each container and so is the keploy/proxy IP to communicate with the app.
+// 	// start proxy
+// 	err = c.Proxy.StartProxy(proxyCtx, ProxyOptions{
+// 		DNSIPv4Addr: a.KeployIPv4Addr(),
+// 		//DnsIPv6Addr: ""
+// 	})
+// 	if err != nil {
+// 		utils.LogError(c.logger, err, "failed to start proxy")
+// 		return hookErr
+// 	}
 
-	c.proxyStarted = true
+// 	c.proxyStarted = true
 
-	// For keploy test bench
-	if opts.EnableTesting {
+// 	// For keploy test bench
+// 	if opts.EnableTesting {
 
-		// enable testing in the app
-		a.EnableTesting = true
-		a.Mode = opts.Mode
+// 		// enable testing in the app
+// 		a.EnableTesting = true
+// 		a.Mode = opts.Mode
 
-		// Setting up the test bench
-		err := c.Tester.Setup(ctx, models.TestingOptions{Mode: opts.Mode})
-		if err != nil {
-			utils.LogError(c.logger, err, "error while setting up the test bench environment")
-			return errors.New("failed to setup the test bench")
-		}
-	}
+// 		// Setting up the test bench
+// 		err := c.Tester.Setup(ctx, models.TestingOptions{Mode: opts.Mode})
+// 		if err != nil {
+// 			utils.LogError(c.logger, err, "error while setting up the test bench environment")
+// 			return errors.New("failed to setup the test bench")
+// 		}
+// 	}
 
-	return nil
-}
+// 	return nil
+// }
 
 func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.AppError {
+	// fmt.Println("Run.....", id)
 	a, err := c.getApp(id)
+
 	if err != nil {
-		utils.LogError(c.logger, err, "failed to get app")
+		utils.LogError(c.logger, err, "failed to get app while running")
 		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 	}
 

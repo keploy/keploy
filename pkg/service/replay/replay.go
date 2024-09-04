@@ -321,33 +321,18 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.Any("base path", r.config.Test.BasePath))
 		return &InstrumentState{}, nil
 	}
-	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
-	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return &InstrumentState{}, err
-		}
-		return &InstrumentState{}, fmt.Errorf("failed to setup instrumentation: %w", err)
-	}
-	r.config.AppID = appID
+	// appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
+	// if err != nil {
+	// 	if errors.Is(err, context.Canceled) {
+	// 		return &InstrumentState{}, err
+	// 	}
+	// 	return &InstrumentState{}, fmt.Errorf("failed to setup instrumentation: %w", err)
+	// }
+	// r.config.AppID = appID
 
 	var cancel context.CancelFunc
-	// starting the hooks and proxy
-	select {
-	case <-ctx.Done():
-		return &InstrumentState{}, context.Canceled
-	default:
-		hookCtx := context.WithoutCancel(ctx)
-		hookCtx, cancel = context.WithCancel(hookCtx)
-		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_TEST, EnableTesting: r.config.EnableTesting})
-		if err != nil {
-			cancel()
-			if errors.Is(err, context.Canceled) {
-				return &InstrumentState{}, err
-			}
-			return &InstrumentState{}, fmt.Errorf("failed to start the hooks and proxy: %w", err)
-		}
-	}
-	return &InstrumentState{AppID: appID, HookCancel: cancel}, nil
+
+	return &InstrumentState{AppID: 0, HookCancel: cancel}, nil
 }
 
 func (r *Replayer) GetNextTestRunID(ctx context.Context) (string, error) {
@@ -866,6 +851,7 @@ func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, testSet
 	}
 
 	if action == Start {
+		// api call here -
 		err = r.instrumentation.MockOutgoing(ctx, appID, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
 			MongoPassword:  r.config.Test.MongoPassword,
@@ -879,6 +865,7 @@ func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, testSet
 		}
 	}
 
+	//
 	err = r.instrumentation.SetMocks(ctx, appID, filteredMocks, unfilteredMocks)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to set mocks")
@@ -1131,4 +1118,8 @@ func (r *Replayer) DeleteTests(ctx context.Context, testSetID string, testCaseID
 
 func SetTestHooks(testHooks TestHooks) {
 	HookImpl = testHooks
+}
+
+func (r *Replayer) GetContainerIP(ctx context.Context, id uint64) (string, error) {
+	return r.instrumentation.GetContainerIP(ctx, id)
 }

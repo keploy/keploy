@@ -28,6 +28,10 @@ type SetupOptions struct {
 	Container     string
 	DockerNetwork string
 	DockerDelay   uint64
+	ClientPid     uint32
+	Cmd           string
+	Mode          Mode
+	IsApi         bool
 }
 
 type RunOptions struct {

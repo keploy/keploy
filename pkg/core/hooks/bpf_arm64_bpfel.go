@@ -92,6 +92,7 @@ type bpfMapSpecs struct {
 	ActiveCloseArgsMap        *ebpf.MapSpec `ebpf:"active_close_args_map"`
 	ActiveReadArgsMap         *ebpf.MapSpec `ebpf:"active_read_args_map"`
 	ActiveWriteArgsMap        *ebpf.MapSpec `ebpf:"active_write_args_map"`
+	AgentNamespacePidMap      *ebpf.MapSpec `ebpf:"agent_namespace_pid_map"`
 	AppKernelPidMap           *ebpf.MapSpec `ebpf:"app_kernel_pid_map"`
 	AppNsPidMap               *ebpf.MapSpec `ebpf:"app_ns_pid_map"`
 	ConnInfoMap               *ebpf.MapSpec `ebpf:"conn_info_map"`
@@ -140,6 +141,7 @@ type bpfMaps struct {
 	ActiveCloseArgsMap        *ebpf.Map `ebpf:"active_close_args_map"`
 	ActiveReadArgsMap         *ebpf.Map `ebpf:"active_read_args_map"`
 	ActiveWriteArgsMap        *ebpf.Map `ebpf:"active_write_args_map"`
+	AgentNamespacePidMap      *ebpf.Map `ebpf:"agent_namespace_pid_map"`
 	AppKernelPidMap           *ebpf.Map `ebpf:"app_kernel_pid_map"`
 	AppNsPidMap               *ebpf.Map `ebpf:"app_ns_pid_map"`
 	ConnInfoMap               *ebpf.Map `ebpf:"conn_info_map"`
@@ -171,6 +173,7 @@ func (m *bpfMaps) Close() error {
 		m.ActiveCloseArgsMap,
 		m.ActiveReadArgsMap,
 		m.ActiveWriteArgsMap,
+		m.AgentNamespacePidMap,
 		m.AppKernelPidMap,
 		m.AppNsPidMap,
 		m.ConnInfoMap,

@@ -64,11 +64,22 @@ func (h *Hooks) CleanProxyEntry(srcPort uint16) error {
 	return nil
 }
 
+// client pid req -> agent -> hooks -> kernel
 func (h *Hooks) SendKeployPid(pid uint32) error {
-	h.logger.Debug("Sending keploy pid to kernel", zap.Any("pid", pid))
+	h.logger.Info("Sending keploy pid to kernel", zap.Any("pid", pid))
 	err := h.keployPid.Update(uint32(0), &pid, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the keploy pid to the ebpf program")
+		return err
+	}
+	return nil
+}
+
+func (h *Hooks) SendAgentPid(pid uint32) error {
+	h.logger.Debug("Sending Agent pid to kernel", zap.Any("pid", pid))
+	err := h.agentPid.Update(uint32(0), &pid, ebpf.UpdateAny)
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to send the agent pid to the ebpf program")
 		return err
 	}
 	return nil
@@ -109,6 +120,7 @@ func (h *Hooks) SendProxyInfo(ip4, port uint32, ip6 [4]uint32) error {
 
 // SendInode sends the inode of the container to ebpf hooks to filter the network traffic
 func (h *Hooks) SendInode(_ context.Context, _ uint64, inode uint64) error {
+	fmt.Println("Sending inode to kernel", inode)
 	return h.SendNameSpaceID(0, inode)
 }
 

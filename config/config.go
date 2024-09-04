@@ -128,6 +128,10 @@ type Test struct {
 	UpdateTemplate      bool                `json:"updateTemplate" yaml:"updateTemplate" mapstructure:"updateTemplate"`
 }
 
+type Agent struct {	
+	IsDocker bool `json:"isDocker" yaml:"isDocker" mapstructure:"isDocker"`
+}
+
 type Language string
 
 // String is used both by fmt.Print and by Cobra in help text
@@ -160,6 +164,7 @@ type SelectedTests struct {
 	TestSet string   `json:"testSet" yaml:"testSet" mapstructure:"testSet"`
 	Tests   []string `json:"tests" yaml:"tests" mapstructure:"tests"`
 }
+
 
 type (
 	Noise        map[string][]string

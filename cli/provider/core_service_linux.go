@@ -9,12 +9,12 @@ import (
 	"path/filepath"
 
 	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/core/proxy"
 	"go.keploy.io/server/v2/pkg/core/tester"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/docker"
+	"go.keploy.io/server/v2/pkg/platform/http"
 	"go.keploy.io/server/v2/pkg/platform/storage"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb/testset"
@@ -27,14 +27,13 @@ import (
 	"go.keploy.io/server/v2/pkg/service/orchestrator"
 	"go.keploy.io/server/v2/pkg/service/record"
 	"go.keploy.io/server/v2/pkg/service/replay"
-
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
 type CommonInternalService struct {
 	commonPlatformServices
-	Instrumentation *core.Core
+	Instrumentation *http.Agent
 }
 
 func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger, tel *telemetry.Telemetry, auth service.Auth) (interface{}, error) {
@@ -97,7 +96,7 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 		}
 	}
 
-	instrumentation := core.New(logger, h, p, t, client)
+	instrumentation := http.New(logger, h, p, t, client)
 	testDB := testdb.New(logger, c.Path)
 	mockDB := mockdb.New(logger, c.Path, "")
 	openAPIdb := openapidb.New(logger, filepath.Join(c.Path, "schema"))

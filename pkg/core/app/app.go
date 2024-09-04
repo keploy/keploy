@@ -39,6 +39,7 @@ func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opt
 	return app
 }
 
+// I think need not be send as we are now running app at the client side
 type App struct {
 	logger           *zap.Logger
 	docker           docker.Client
@@ -65,6 +66,7 @@ type Options struct {
 	DockerNetwork string
 }
 
+// Setup sets up the application for running.
 func (a *App) Setup(_ context.Context) error {
 
 	if utils.IsDockerCmd(a.kind) && isDetachMode(a.logger, a.cmd, a.kind) {

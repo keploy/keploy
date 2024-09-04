@@ -52,6 +52,7 @@ type Hooks struct {
 	redirectProxyMap *ebpf.Map
 	keployModeMap    *ebpf.Map
 	keployPid        *ebpf.Map
+	agentPid         *ebpf.Map
 	appPidMap        *ebpf.Map
 	keployServerPort *ebpf.Map
 	passthroughPorts *ebpf.Map
@@ -133,7 +134,7 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 		h.proxyIP6 = ipv6
 	}
 
-	h.logger.Debug("proxy ips", zap.String("ipv4", h.proxyIP4), zap.Any("ipv6", h.proxyIP6))
+	h.logger.Info("proxy ips", zap.String("ipv4", h.proxyIP4), zap.Any("ipv6", h.proxyIP6))
 
 	proxyIP, err := IPv4ToUint32(h.proxyIP4)
 	if err != nil {
@@ -163,6 +164,7 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 
 func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 	// Allow the current process to lock memory for eBPF resources.
+	fmt.Println("Loading hooks...")
 	if err := rlimit.RemoveMemlock(); err != nil {
 		utils.LogError(h.logger, err, "failed to lock memory for eBPF resources")
 		return err
@@ -181,6 +183,7 @@ func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 	h.redirectProxyMap = objs.RedirectProxyMap
 	h.keployModeMap = objs.KeployModeMap
 	h.keployPid = objs.KeployNamespacePidMap
+	h.agentPid = objs.AgentNamespacePidMap
 	h.appPidMap = objs.AppNsPidMap
 	h.keployServerPort = objs.KeployServerPort
 	h.passthroughPorts = objs.PassThroughPorts
@@ -487,12 +490,13 @@ func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 		utils.LogError(h.logger, err, "failed to send the namespace id to the epbf program")
 		return err
 	}
-	err = h.SendKeployPid(uint32(os.Getpid()))
+
+	err = h.SendAgentPid(uint32(os.Getpid()))
 	if err != nil {
-		utils.LogError(h.logger, err, "failed to send the keploy pid to the ebpf program")
+		utils.LogError(h.logger, err, "failed to send the keploy agent pid to the ebpf program")
 		return err
 	}
-	h.logger.Debug("Keploy Pid sent successfully...")
+	h.logger.Debug("Keploy agent Pid sent successfully...")
 
 	//send app pid to kernel to get filtered in case of mock record/test feature of unit test file
 	// app pid here is the pid of the unit test file process or application pid
@@ -511,6 +515,7 @@ func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOption
 	// TODO use the session to get the app id
 	// and then use the app id to get the test cases chan
 	// and pass that to eBPF consumers/listeners
+	fmt.Println("Recording hooks...")
 	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
 }
 

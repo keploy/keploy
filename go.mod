@@ -111,7 +111,10 @@ require (
 	github.com/denisbrodbeck/machineid v1.0.1
 	github.com/emirpasic/gods v1.18.1
 	github.com/getsentry/sentry-go v0.28.1
+	github.com/go-chi/chi v1.5.5
+	github.com/go-chi/render v1.0.3
 	github.com/golang-jwt/jwt/v4 v4.5.0
+	github.com/google/uuid v1.6.0
 	github.com/jackc/pgproto3/v2 v2.3.2
 	github.com/shirou/gopsutil/v3 v3.24.3
 	github.com/spf13/viper v1.19.0
@@ -126,7 +129,10 @@ require (
 	sigs.k8s.io/kustomize/kyaml v0.17.2
 )
 
-require github.com/perimeterx/marshmallow v1.1.5 // indirect
+require (
+	github.com/ajg/form v1.5.1 // indirect
+	github.com/perimeterx/marshmallow v1.1.5 // indirect
+)
 
 require (
 	github.com/alecthomas/chroma v0.10.0 // indirect
