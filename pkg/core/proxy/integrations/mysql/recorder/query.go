@@ -71,6 +71,10 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 
 			commandRespPkt, err := handleQueryResponse(ctx, logger, clientConn, destConn, decodeCtx)
 			if err != nil {
+				if err == io.EOF && commandPkt.Header.Type == mysql.CommandStatusToString(mysql.COM_QUIT) {
+					logger.Debug("server closed the connection without any response")
+					return err
+				}
 				utils.LogError(logger, err, "failed to handle the query response")
 				return err
 			}
