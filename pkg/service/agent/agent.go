@@ -59,7 +59,8 @@ func (a *Agent) Setup(ctx context.Context, cmd string, opts models.SetupOptions)
 		a.logger.Error("failed to hook into the app", zap.Error(err))
 	}
 
-	a.Hooks.SendKeployPid(opts.ClientPid)
+	// a.logger.Info("Sending keploy client pid in the setup: ", zap.Uint64("pid", uint64(opts.ClientPid)))
+	// a.Hooks.SendKeployPid(opts.ClientPid)
 
 	select {
 	case <-ctx.Done():
@@ -228,6 +229,6 @@ func (a *Agent) UnHook(ctx context.Context, id uint64) error {
 
 // merge it in the setup only
 func (a *Agent) RegisterClient(ctx context.Context, id uint32) error {
-	fmt.Println("Registering client !!", id)
+	fmt.Println("Registering client with keploy client id!! ", id)
 	return a.Hooks.SendKeployPid(id)
 }

@@ -76,7 +76,7 @@ func (h *Hooks) SendKeployPid(pid uint32) error {
 }
 
 func (h *Hooks) SendAgentPid(pid uint32) error {
-	h.logger.Debug("Sending Agent pid to kernel", zap.Any("pid", pid))
+	h.logger.Info("Sending Agent pid to kernel", zap.Any("pid", pid))
 	err := h.agentPid.Update(uint32(0), &pid, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the agent pid to the ebpf program")

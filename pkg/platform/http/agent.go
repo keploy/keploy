@@ -377,7 +377,7 @@ func (a *Agent) Setup(ctx context.Context, cmd string, opts models.SetupOptions)
 	// if the agent is not running, start the agent
 
 	httpClient := &http.Client{
-		Timeout: 5 * time.Second,
+		Timeout: 1 * time.Minute,
 	}
 	clientPid := uint32(os.Getpid())
 	fmt.Println("clientPid", clientPid)
@@ -408,10 +408,11 @@ func (a *Agent) Setup(ctx context.Context, cmd string, opts models.SetupOptions)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		a.logger.Error("failed to send setup request to the server", zap.Error(err))
+		a.logger.Info("Keploy agent is not running in background, starting the agent")
 	} else {
 		isAgentRunning = true
 		a.logger.Info("Setup request sent to the server", zap.String("status", resp.Status))
+		time.Sleep(5 * time.Second)
 	}
 
 	fmt.Println("isAgentRunning", isAgentRunning)
@@ -420,7 +421,7 @@ func (a *Agent) Setup(ctx context.Context, cmd string, opts models.SetupOptions)
 		// Start the keploy agent as a detached process and pipe the logs into a file
 
 		// Open the log file in append mode or create it if it doesn't exist
-		logFile, err := os.OpenFile("keploy_agent.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		logFile, err := os.OpenFile("keploy_agent.log", os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			utils.LogError(a.logger, err, "failed to open log file")
 			return 0, err
@@ -440,12 +441,15 @@ func (a *Agent) Setup(ctx context.Context, cmd string, opts models.SetupOptions)
 			return 0, err
 		}
 
-		a.logger.Info("keploy agent started", zap.Any("pid", agentCmd.Process.Pid))
-		time.Sleep(3 * time.Second)
+		// a.logger.Info("keploy agent started", zap.Any("pid", agentCmd.Process.Pid))
+		time.Sleep(10 * time.Second)
+
+		a.logger.Info("sending request", zap.Any("Reqbody", requestBody))
 		resp, err = httpClient.Do(req)
 		if err != nil {
 			a.logger.Error("failed to send setup request to the server", zap.Error(err))
 		}
+
 		a.logger.Info("Registering client after starting agent", zap.String("status", resp.Status))
 	}
 
