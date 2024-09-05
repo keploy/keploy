@@ -187,14 +187,18 @@ func (r *Replayer) Start(ctx context.Context) error {
 	testRunResult := true
 	abortTestRun := false
 	var testSets []string
-	for i, testSetID := range testSetIDs {
-		testSetResult = false
-
+	for _, testSetID := range testSetIDs {
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
 		}
 		testSets = append(testSets, testSetID)
-		err := HookImpl.BeforeTestSetRun(ctx, testSetID)
+	}
+	if len(testSets) == 0 {
+		testSets = testSetIDs
+	}
+	for i, testSet := range testSets {
+		testSetResult = false
+		err := HookImpl.BeforeTestSetRun(ctx, testSet)
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run before test hook: %v", err)
 			utils.LogError(r.logger, err, stopReason)
@@ -205,14 +209,14 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 
 		if !r.config.Test.SkipCoverage {
-			err = os.Setenv("TESTSETID", testSetID) // related to java coverage calculation
+			err = os.Setenv("TESTSETID", testSet) // related to java coverage calculation
 			if err != nil {
 				r.config.Test.SkipCoverage = true
 				r.logger.Warn("failed to set TESTSETID env variable, skipping coverage caluclation", zap.Error(err))
 			}
 		}
 
-		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, inst.AppID, false)
+		testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.AppID, false)
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)
 			utils.LogError(r.logger, err, stopReason)
@@ -249,7 +253,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 
 		if i < len(testSets)-1 || r.config.Test.SkipCoverage {
-			err = HookImpl.AfterTestSetRun(ctx, testRunID, testSetID, models.TestCoverage{}, len(testSets), testSetResult)
+			err = HookImpl.AfterTestSetRun(ctx, testRunID, testSet, models.TestCoverage{}, len(testSets), testSetResult)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get after test hook")
 			}
@@ -284,7 +288,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		r.logger.Warn("To enable storing mocks in cloud, please use --disableMockUpload=false flag or test:disableMockUpload:false in config file")
 	}
 
-	r.telemetry.TestRun(totalTestPassed, totalTestFailed, len(testSetIDs), testRunStatus)
+	r.telemetry.TestRun(totalTestPassed, totalTestFailed, len(testSets), testRunStatus)
 
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
@@ -297,7 +301,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to update report with the coverage data")
 				}
-				err = HookImpl.AfterTestSetRun(ctx, testRunID, testSets[len(testSets)-1], coverageData, len(testSetIDs), testSetResult)
+				err = HookImpl.AfterTestSetRun(ctx, testRunID, testSets[len(testSets)-1], coverageData, len(testSets), testSetResult)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to get after test hook")
 				}
