@@ -100,15 +100,15 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			newTestFile = isCreated
 		}
 		g.logger.Info(fmt.Sprintf("Generating tests for file: %s", g.srcPath))
-		isEmpty, err := isFileEmpty(g.testPath)
+		isEmpty, err := utils.IsFileEmpty(g.testPath)
 		if err != nil {
 			g.logger.Error("Error checking if test file is empty", zap.Error(err))
 			return err
 		}
-		if isEmpty{
+		if isEmpty {
 			newTestFile = true
 		}
-		if !newTestFile{
+		if !newTestFile {
 			if err = g.runCoverage(); err != nil {
 				return err
 			}
@@ -123,7 +123,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			utils.LogError(g.logger, err, "Error creating prompt builder")
 			return err
 		}
-		if(!isEmpty){
+		if !isEmpty {
 			if err := g.setCursor(ctx); err != nil {
 				utils.LogError(g.logger, err, "Error during initial test suite analysis")
 				return err
@@ -199,15 +199,6 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 		}
 	}
 	return nil
-}
-
-// Helper function to check if a file is empty
-func isFileEmpty(filePath string) (bool, error) {
-	fileInfo, err := os.Stat(filePath)
-	if err != nil {
-		return false, err
-	}
-	return fileInfo.Size() == 0, nil
 }
 
 func (g *UnitTestGenerator) runCoverage() error {

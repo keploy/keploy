@@ -902,3 +902,12 @@ func GetLastDirectory() (string, error) {
 	lastDir := filepath.Base(dir)
 	return lastDir, nil
 }
+
+// Helper function to check if a file is empty
+func IsFileEmpty(filePath string) (bool, error) {
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		return false, err
+	}
+	return fileInfo.Size() == 0, nil
+}
