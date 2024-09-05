@@ -186,15 +186,14 @@ func (r *Replayer) Start(ctx context.Context) error {
 	var testSetResult bool
 	testRunResult := true
 	abortTestRun := false
-
+	var testSets []string
 	for i, testSetID := range testSetIDs {
-
 		testSetResult = false
 
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
 		}
-
+		testSets = append(testSets, testSetID)
 		err := HookImpl.BeforeTestSetRun(ctx, testSetID)
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run before test hook: %v", err)
@@ -249,8 +248,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 			}
 		}
 
-		if i < len(testSetIDs)-1 || r.config.Test.SkipCoverage {
-			err = HookImpl.AfterTestSetRun(ctx, testRunID, testSetID, models.TestCoverage{}, len(testSetIDs), testSetResult)
+		if i < len(testSets)-1 || r.config.Test.SkipCoverage {
+			err = HookImpl.AfterTestSetRun(ctx, testRunID, testSetID, models.TestCoverage{}, len(testSets), testSetResult)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get after test hook")
 			}
@@ -298,7 +297,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to update report with the coverage data")
 				}
-				err = HookImpl.AfterTestSetRun(ctx, testRunID, testSetIDs[len(testSetIDs)-1], coverageData, len(testSetIDs), testSetResult)
+				err = HookImpl.AfterTestSetRun(ctx, testRunID, testSets[len(testSets)-1], coverageData, len(testSetIDs), testSetResult)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to get after test hook")
 				}
