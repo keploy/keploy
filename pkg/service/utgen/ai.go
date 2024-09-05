@@ -26,7 +26,7 @@ type AIClient struct {
 	APIServerURL string
 	Auth         service.Auth
 	Logger       *zap.Logger
-	SessionId    string
+	SessionID    string
 }
 
 type Prompt struct {
@@ -87,10 +87,10 @@ type AIResponse struct {
 type AIRequest struct {
 	MaxTokens int    `json:"maxTokens"`
 	Prompt    Prompt `json:"prompt"`
-	SessionId string `json:"sessionId"`
+	SessionID string `json:"sessionId"`
 }
 
-func NewAIClient(model, apiBase, apiVersion, apiKey, apiServerURL string, auth service.Auth, sessionId string, logger *zap.Logger) *AIClient {
+func NewAIClient(model, apiBase, apiVersion, apiKey, apiServerURL string, auth service.Auth, sessionID string, logger *zap.Logger) *AIClient {
 	return &AIClient{
 		Model:        model,
 		APIBase:      apiBase,
@@ -99,7 +99,7 @@ func NewAIClient(model, apiBase, apiVersion, apiKey, apiServerURL string, auth s
 		APIKey:       apiKey,
 		APIServerURL: apiServerURL,
 		Auth:         auth,
-		SessionId:    sessionId,
+		SessionID:    sessionID,
 	}
 }
 
@@ -145,7 +145,7 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 		aiRequest := AIRequest{
 			MaxTokens: maxTokens,
 			Prompt:    *prompt,
-			SessionId: ai.SessionId,
+			SessionID: ai.SessionID,
 		}
 		aiRequestBytes, err := json.Marshal(aiRequest)
 		if err != nil {
