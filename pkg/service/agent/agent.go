@@ -53,7 +53,7 @@ func (a *Agent) Setup(ctx context.Context, cmd string, opts models.SetupOptions)
 	id := int64(binary.BigEndian.Uint64(newUUID[:8]))
 	fmt.Println("App ID: ", id, "IsApi", opts.IsApi)
 
-	a.logger.Info("Starting the agent !!")
+	a.logger.Info("Starting the agent in ", zap.String(string(opts.Mode), "mode"))
 	err := a.Hook(ctx, 0, models.HookOptions{Mode: opts.Mode, EnableTesting: false})
 	if err != nil {
 		a.logger.Error("failed to hook into the app", zap.Error(err))
@@ -95,6 +95,7 @@ func (a *Agent) GetOutgoing(ctx context.Context, id uint64, opts models.Outgoing
 }
 
 func (a *Agent) MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error {
+	a.logger.Info("Inside MockOutgoing of agent binary !!")
 	ports := core.GetPortToSendToKernel(ctx, opts.Rules)
 	if len(ports) > 0 {
 		err := a.Hooks.PassThroughPortsInKernel(ctx, id, ports)
@@ -155,7 +156,7 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 	})
 
 	fmt.Println("Before loading hooks")
-	//load hooks
+	// load hooks if the mode changes ..
 	err := a.Hooks.Load(hookCtx, id, core.HookCfg{
 		AppID:    id,
 		Pid:      0,
@@ -213,18 +214,19 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 }
 
 func (a *Agent) SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error {
-	return nil
+	fmt.Println("Sending Mocks to the Proxy !!")
+	return a.Proxy.SetMocks(ctx, id, filtered, unFiltered)
 }
 
 func (a *Agent) GetConsumedMocks(ctx context.Context, id uint64) ([]string, error) {
-	return []string{}, nil
+	return a.Proxy.GetConsumedMocks(ctx, id)
 }
 
 func (a *Agent) UnHook(ctx context.Context, id uint64) error {
 	return nil
 }
 
-// merge it in the setup only 
+// merge it in the setup only
 func (a *Agent) RegisterClient(ctx context.Context, id uint32) error {
 	fmt.Println("Registering client !!", id)
 	return a.Hooks.SendKeployPid(id)

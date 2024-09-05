@@ -245,11 +245,44 @@ func (a *Agent) MockOutgoing(ctx context.Context, id uint64, opts models.Outgoin
 }
 
 func (a *Agent) SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error {
+	requestBody := models.SetMocksReq{
+		Filtered:   filtered,
+		UnFiltered: unFiltered,
+		AppId:      0,
+	}
+
+	requestJSON, err := json.Marshal(requestBody)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to marshal request body for mock outgoing")
+		return fmt.Errorf("error marshaling request body for mock outgoing: %s", err.Error())
+	}
+
+	// mock outgoing request
+	req, err := http.NewRequestWithContext(ctx, "POST", "http://localhost:8086/agent/setmocks", bytes.NewBuffer(requestJSON))
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to create request for mock outgoing")
+		return fmt.Errorf("error creating request for mock outgoing: %s", err.Error())
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{}
+
+	// Make the HTTP request
+	res, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request for mockOutgoing: %s", err.Error())
+	}
+
+	resp, err := io.ReadAll(res.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response body for mock outgoing: %s", err.Error())
+	}
+	fmt.Println("Response body: ", string(resp))
+
 	return nil
 }
 
 func (a *Agent) GetConsumedMocks(ctx context.Context, id uint64) ([]string, error) {
-	return []string{}, nil
+	return a.Proxy.GetConsumedMocks(ctx, id)
 }
 
 func (a *Agent) UnHook(ctx context.Context, id uint64) error {
@@ -371,9 +404,8 @@ func (a *Agent) Setup(ctx context.Context, cmd string, opts models.SetupOptions)
 	req, err := http.NewRequestWithContext(ctx, "POST", "http://localhost:8086/agent/health", bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for mock outgoing")
-		// return 0, fmt.Errorf("error creating request for mock outgoing: %s", err.Error())
 	}
-	// make it post request instead
+
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		a.logger.Error("failed to send setup request to the server", zap.Error(err))
@@ -409,11 +441,18 @@ func (a *Agent) Setup(ctx context.Context, cmd string, opts models.SetupOptions)
 		}
 
 		a.logger.Info("keploy agent started", zap.Any("pid", agentCmd.Process.Pid))
+		time.Sleep(3 * time.Second)
+		resp, err = httpClient.Do(req)
+		if err != nil {
+			a.logger.Error("failed to send setup request to the server", zap.Error(err))
+		}
+		a.logger.Info("Registering client after starting agent", zap.String("status", resp.Status))
 	}
 
 	// Doubt: this is currently hardcoded, will it be returned from the server ?
 	id := uint64(a.id.Next())
 
+	// Doubt: will this be needed in test mode as well or somewhere else we have done this ??
 	usrApp := app.NewApp(a.logger, id, cmd, a.dockerClient, app.Options{
 		DockerNetwork: opts.DockerNetwork,
 		Container:     opts.Container,

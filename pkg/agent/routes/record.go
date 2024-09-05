@@ -28,10 +28,11 @@ func New(r chi.Router, agent agent.Service, logger *zap.Logger) {
 		agent:  agent,
 	}
 	r.Route("/agent", func(r chi.Router) {
-		r.Post("/health", a.HealthCheck)
+		r.Post("/health", a.RegisterClient)
 		r.Post("/incoming", a.HandleIncoming)
 		r.Post("/outgoing", a.HandleOutgoing)
 		r.Post("/mock", a.MockOutgoing)
+		r.Post("/setmocks", a.SetMocks)
 	})
 
 }
@@ -112,7 +113,7 @@ func (a *AgentRequest) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *AgentRequest) HealthCheck(w http.ResponseWriter, r *http.Request) {
+func (a *AgentRequest) RegisterClient(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Println("Health check")
 	var SetupRequest models.SetupReq

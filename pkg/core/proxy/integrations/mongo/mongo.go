@@ -82,6 +82,7 @@ func (m *Mongo) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrat
 		return err
 	}
 
+	m.logger.Info("Mocking the mongo message")
 	// converts the yaml string into the binary packet
 	err = decodeMongo(ctx, logger, reqBuf, src, dstCfg, mockDb, opts)
 	if err != nil {

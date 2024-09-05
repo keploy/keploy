@@ -24,3 +24,9 @@ type RunReq struct {
 	RunOptions RunOptions `json:"runOptions"`
 	AppId      int64      `json:"appId"`
 }
+
+type SetMocksReq struct {
+	Filtered   []*Mock `json:"filtered"`
+	UnFiltered []*Mock `json:"unFiltered"`
+	AppId      int64   `json:"appId"`
+}

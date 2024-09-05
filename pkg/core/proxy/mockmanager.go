@@ -50,6 +50,7 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
 	var tcsMocks []*models.Mock
 	mocks := m.filtered.getAll()
+	fmt.Println("mocks are here GetFilteredMocks !!: ", len(mocks))
 	//sending copy of mocks instead of actual mocks
 	mockCopy, err := localMock(mocks)
 	if err != nil {
@@ -72,6 +73,7 @@ func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 	for _, m := range mockCopy {
 		configMocks = append(configMocks, &m)
 	}
+	fmt.Println("configMocks are here !!: ", configMocks)
 	return configMocks, nil
 }
 

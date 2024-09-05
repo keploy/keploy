@@ -249,6 +249,7 @@ func (p *Proxy) start(ctx context.Context) error {
 		case clientConn := <-clientConnCh:
 			clientConnErrGrp.Go(func() error {
 				defer util.Recover(p.logger, clientConn, nil)
+				fmt.Println("BEFORE GOING TO HANDLE CONNECTION")
 				err := p.handleConnection(clientConnCtx, clientConn)
 				if err != nil && err != io.EOF {
 					utils.LogError(p.logger, err, "failed to handle the client connection")
@@ -280,7 +281,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	remoteAddr := srcConn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
 
-	p.logger.Debug("Inside handleConnection of proxyServer", zap.Any("source port", sourcePort), zap.Any("Time", time.Now().Unix()))
+	p.logger.Info("Inside handleConnection of proxyServer", zap.Any("source port", sourcePort), zap.Any("Time", time.Now().Unix()))
 
 	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
 	if err != nil {
@@ -622,7 +623,9 @@ func (p *Proxy) SetMocks(_ context.Context, id uint64, filtered []*models.Mock, 
 		m.(*MockManager).SetFilteredMocks(filtered)
 		m.(*MockManager).SetUnFilteredMocks(unFiltered)
 	}
-
+	fmt.Println("Mocks set successfully", id)
+	fmt.Println("Filtered Mocks:", filtered)
+	fmt.Println("UnFiltered Mocks:", unFiltered)
 	return nil
 }
 
