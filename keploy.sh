@@ -70,11 +70,11 @@ installKeploy (){
                 echo "Error: Failed to make the keploy binary executable"
                 exit 1
             fi
-            set_alias
         else
             # Move with sudo
             sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploy
         fi
+        set_alias
     }
 
     install_keploy_darwin_all() {
@@ -100,7 +100,6 @@ installKeploy (){
         fi
         curl --silent --location "$download_url" | tar xz --overwrite -C /tmp 
         move_keploy_binary
-        set_alias
     }
 
 
@@ -112,7 +111,6 @@ installKeploy (){
         fi
         curl --silent --location "$download_url" | tar xz --overwrite -C /tmp
         move_keploy_binary
-        set_alias
     }
 
     append_to_rc() {
