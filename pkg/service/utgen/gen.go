@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/k0kubun/pp/v3"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
@@ -56,7 +57,7 @@ func NewUnitTestGenerator(srcPath, testPath, reportPath, cmd, dir, coverageForma
 		maxIterations: maxIterations,
 		logger:        logger,
 		tel:           tel,
-		ai:            NewAIClient(model, apiBaseURL, apiVersion, "", apiServerURL, auth, logger),
+		ai:            NewAIClient(model, apiBaseURL, apiVersion, "", apiServerURL, auth, uuid.NewString(), logger),
 		cov: &Coverage{
 			Path:    reportPath,
 			Format:  coverageFormat,
