@@ -101,6 +101,14 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			newTestFile = isCreated
 		}
 		g.logger.Info(fmt.Sprintf("Generating tests for file: %s", g.srcPath))
+		isEmpty, err := utils.IsFileEmpty(g.testPath)
+		if err != nil {
+			g.logger.Error("Error checking if test file is empty", zap.Error(err))
+			return err
+		}
+		if isEmpty {
+			newTestFile = true
+		}
 		if !newTestFile {
 			if err = g.runCoverage(); err != nil {
 				return err
@@ -116,9 +124,11 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			utils.LogError(g.logger, err, "Error creating prompt builder")
 			return err
 		}
-		if err := g.setCursor(ctx); err != nil {
-			utils.LogError(g.logger, err, "Error during initial test suite analysis")
-			return err
+		if !isEmpty {
+			if err := g.setCursor(ctx); err != nil {
+				utils.LogError(g.logger, err, "Error during initial test suite analysis")
+				return err
+			}
 		}
 
 		for g.cov.Current < (g.cov.Desired/100) && iterationCount < g.maxIterations {
