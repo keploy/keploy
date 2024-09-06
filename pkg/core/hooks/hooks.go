@@ -49,10 +49,10 @@ type Hooks struct {
 
 	m sync.Mutex
 	// eBPF C shared maps
-	appRegistrationMap   *ebpf.Map
-	agentRegistartionMap *ebpf.Map
-	appCountMap          *ebpf.Map
-	redirectProxyMap     *ebpf.Map
+	appRegistrationMap       *ebpf.Map
+	agentRegistartionMap     *ebpf.Map
+	dockerAppRegistrationMap *ebpf.Map
+	redirectProxyMap         *ebpf.Map
 	//--------------
 
 	// eBPF C shared objectsobjects
@@ -141,7 +141,7 @@ func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 	h.redirectProxyMap = objs.RedirectProxyMap
 	h.appRegistrationMap = objs.AppRegistrationMap
 	h.agentRegistartionMap = objs.KeployAgentRegistrationMap
-	h.appCountMap = objs.AppCountMap
+	h.dockerAppRegistrationMap = objs.DockerAppRegistrationMap
 	h.objects = objs
 
 	// ---------------

@@ -36,6 +36,10 @@ type ProxyInfo struct {
 	Port uint32
 }
 
+type DockerAppnfo struct {
+	AppInode uint64
+}
+
 // struct app_info
 // {
 //     u32 keploy_client_ns_pid;
