@@ -111,7 +111,9 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		PacketBundle: *handshakeResponsePkt,
 	})
 
-	// Read the next auth packet, It can be either auth more data or auth switch request in case of caching_sha2_password
+	// Read the next auth packet,
+	// It can be either auth more data if authentication from both server and client are agreed.(caching_sha2_password)
+	// or auth switch request if the server wants to switch the auth mechanism
 	// or it can be OK packet in case of native password
 	authData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
 	if err != nil {
@@ -125,7 +127,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 	}
 
 	// AuthSwitchRequest: If the server sends an AuthSwitchRequest, then there must be a diff auth type with its data
-	// AuthMoreData: If the server sends an AuthMoreData, then it tells the auth mechanism type for the initial plugin name
+	// AuthMoreData: If the server sends an AuthMoreData, then it tells the auth mechanism type for the initial plugin name or for the auth switch request.
 	// OK/ERR: If the server sends an OK/ERR packet, in case of native password.
 	_, err = clientConn.Write(authData)
 	if err != nil {
@@ -139,22 +141,99 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 	// Decode auth or final response packet
 	authDecider, err := wire.DecodePayload(ctx, logger, authData, clientConn, decodeCtx)
 	if err != nil {
-		utils.LogError(logger, err, "failed to decode auth more data packet")
+		utils.LogError(logger, err, "failed to decode auth packet during handshake")
 		return res, err
 	}
 
-	var authRes handshakeRes
-	switch authDecider.Message.(type) {
-	case *mysql.AuthSwitchRequestPacket:
+	// check if the authDecider is of type AuthSwitchRequestPacket.
+	// AuthSwitchRequestPacket is sent by the server to the client to switch the auth mechanism
+	if _, ok := authDecider.Message.(*mysql.AuthSwitchRequestPacket); ok {
+
+		logger.Debug("Server is changing the auth mechanism by sending AuthSwitchRequestPacket")
+
+		//save the auth switch request packet
+		res.resp = append(res.resp, mysql.Response{
+			PacketBundle: *authDecider,
+		})
+
 		pkt := authDecider.Message.(*mysql.AuthSwitchRequestPacket)
 
 		// Change the plugin name due to auth switch request
 		decodeCtx.PluginName = pkt.PluginName
 
-		authRes, err = handleAuth(ctx, logger, authDecider, clientConn, destConn, decodeCtx)
+		// read the auth switch response from the client
+		authSwitchResponse, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
 		if err != nil {
-			return res, fmt.Errorf("failed to handle auth switch request: %w", err)
+			if err == io.EOF {
+				logger.Debug("received request buffer is empty in record mode for mysql call")
+				return res, err
+			}
+			utils.LogError(logger, err, "failed to read auth switch response from client")
+			return res, err
 		}
+
+		_, err = destConn.Write(authSwitchResponse)
+		if err != nil {
+			if ctx.Err() != nil {
+				return res, ctx.Err()
+			}
+			utils.LogError(logger, err, "failed to write auth switch response to server")
+			return res, err
+		}
+
+		// Decode the auth switch response packet
+		authSwithResp, err := mysqlUtils.BytesToMySQLPacket(authSwitchResponse)
+		if err != nil {
+			utils.LogError(logger, err, "failed to parse MySQL packet")
+			return res, err
+		}
+
+		authSwithRespPkt := &mysql.PacketBundle{
+			Header: &mysql.PacketInfo{
+				Header: &authSwithResp.Header,
+				Type:   mysql.AuthSwithResponse, // there is no specific identifier for AuthSwitchResponse
+			},
+			Message: intgUtils.EncodeBase64(authSwithResp.Payload),
+		}
+
+		// save the auth switch response packet
+		res.req = append(res.req, mysql.Request{
+			PacketBundle: *authSwithRespPkt,
+		})
+
+		logger.Debug("Auth mechanism is switched successfully")
+
+		// read the further auth packet, now it can be either auth more data or OK packet
+		authData, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+		if err != nil {
+			if err == io.EOF {
+				logger.Debug("received request buffer is empty in record mode for mysql call")
+				return res, err
+			}
+			utils.LogError(logger, err, "failed to read auth data from the server after handling auth switch response")
+
+			return res, err
+		}
+
+		_, err = clientConn.Write(authData)
+		if err != nil {
+			if ctx.Err() != nil {
+				return res, ctx.Err()
+			}
+			utils.LogError(logger, err, "failed to write auth data to client after handling auth switch response")
+			return res, err
+		}
+
+		// It can be either auth more data or OK packet
+		authDecider, err = wire.DecodePayload(ctx, logger, authData, clientConn, decodeCtx)
+		if err != nil {
+			utils.LogError(logger, err, "failed to decode auth data packet after handling auth switch response")
+			return res, err
+		}
+	}
+
+	var authRes handshakeRes
+	switch authDecider.Message.(type) {
 	case *mysql.AuthMoreDataPacket:
 		authRes, err = handleAuth(ctx, logger, authDecider, clientConn, destConn, decodeCtx)
 		if err != nil {
@@ -197,6 +276,7 @@ func handleAuth(ctx context.Context, logger *zap.Logger, authPkt *mysql.PacketBu
 		if err != nil {
 			return res, fmt.Errorf("failed to handle caching sha2 password: %w", err)
 		}
+		logger.Debug("caching sha2 password authentication is handled successfully")
 		setHandshakeResult(&res, result)
 	case mysql.Sha256:
 		return res, fmt.Errorf("Sha256 Password authentication is not supported")
@@ -215,27 +295,22 @@ func handleCachingSha2Password(ctx context.Context, logger *zap.Logger, authPkt 
 
 	var authMechanism string
 	var err error
-	switch authPkt.Message.(type) {
-	case *mysql.AuthSwitchRequestPacket:
-		pkt := authPkt.Message.(*mysql.AuthSwitchRequestPacket)
-		//Change the plugin data to a string for better readability as it is expected to be either "full auth" or "fast auth success"
-		authMechanism, err = wire.GetCachingSha2PasswordMechanism(pkt.PluginData[0])
-		if err != nil {
-			return res, fmt.Errorf("failed to get caching sha2 password mechanism: %w", err)
-		}
-		pkt.PluginData = authMechanism
+	var ok bool
+	var authMorePkt *mysql.AuthMoreDataPacket
 
-	case *mysql.AuthMoreDataPacket:
-		authMorePkt := authPkt.Message.(*mysql.AuthMoreDataPacket)
-		// Getting the string value of the caching_sha2_password mechanism
-		authMechanism, err = wire.GetCachingSha2PasswordMechanism(authMorePkt.Data[0])
-		if err != nil {
-			return res, fmt.Errorf("failed to get caching sha2 password mechanism: %w", err)
-		}
-		authMorePkt.Data = authMechanism
+	// check if the authPkt is of type AuthMoreDataPacket
+	if authMorePkt, ok = authPkt.Message.(*mysql.AuthMoreDataPacket); !ok {
+		return res, fmt.Errorf("invalid packet type for caching sha2 password mechanism, expected: AuthMoreDataPacket, found: %T", authPkt.Message)
 	}
 
-	// save the auth more data or auth switch request packet
+	// Getting the string value of the caching_sha2_password mechanism
+	authMechanism, err = wire.GetCachingSha2PasswordMechanism(authMorePkt.Data[0])
+	if err != nil {
+		return res, fmt.Errorf("failed to get caching sha2 password mechanism: %w", err)
+	}
+	authMorePkt.Data = authMechanism
+
+	// save the auth more data packet
 	res.resp = append(res.resp, mysql.Response{
 		PacketBundle: *authPkt,
 	})
