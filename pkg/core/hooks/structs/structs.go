@@ -36,7 +36,7 @@ type ProxyInfo struct {
 	Port uint32
 }
 
-type DockerAppnfo struct {
+type DockerAppInfo struct {
 	AppInode uint64
 }
 

@@ -12,6 +12,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v2/pkg/core/app"
+	"go.keploy.io/server/v2/pkg/core/hooks/structs"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/docker"
 	"go.keploy.io/server/v2/utils"
@@ -218,13 +219,13 @@ func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.A
 			return nil
 		}
 		select {
-		// case inode := <-inodeChan:
-		// 	err := c.Hooks.SendInode(ctx, id, inode)
-		// 	if err != nil {
-		// 		utils.LogError(c.logger, err, "")
+		case inode := <-inodeChan:
+			err := c.Hooks.SendDockerAppInfo(structs.DockerAppInfo{AppInode: inode})
+			if err != nil {
+				utils.LogError(c.logger, err, "")
 
-		// 		inodeErrCh <- errors.New("failed to send inode to the kernel")
-		// 	}
+				inodeErrCh <- errors.New("failed to send inode to the kernel")
+			}
 		case <-ctx.Done():
 			return nil
 		}

@@ -7,12 +7,14 @@ import (
 	"sync"
 
 	"go.keploy.io/server/v2/pkg/core/app"
+	"go.keploy.io/server/v2/pkg/core/hooks/structs"
 	"go.keploy.io/server/v2/utils"
 
 	"go.keploy.io/server/v2/pkg/models"
 )
 
 type Hooks interface {
+	AppInfo
 	DestInfo
 	OutgoingInfo
 	Load(ctx context.Context, id uint64, cfg HookCfg) error
@@ -56,7 +58,7 @@ type DestInfo interface {
 }
 
 type AppInfo interface {
-	SendInode(ctx context.Context, id uint64, inode uint64) error
+	SendDockerAppInfo(dockerAppInfo structs.DockerAppInfo) error
 }
 
 // For keploy test bench
