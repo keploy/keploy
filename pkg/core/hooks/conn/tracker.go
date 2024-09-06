@@ -293,7 +293,7 @@ func (conn *Tracker) AddDataEvent(event SocketDataEvent) {
 	defer conn.mutex.Unlock()
 	conn.UpdateTimestamps()
 
-	conn.logger.Info(fmt.Sprintf("Got a data event from eBPF, Direction:%v || current Event Size:%v || ConnectionID:%v\n", event.Direction, event.MsgSize, event.ConnID))
+	conn.logger.Debug(fmt.Sprintf("Got a data event from eBPF, Direction:%v || current Event Size:%v || ConnectionID:%v\n", event.Direction, event.MsgSize, event.ConnID))
 
 	switch event.Direction {
 	case EgressTraffic:
