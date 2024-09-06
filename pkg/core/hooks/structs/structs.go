@@ -20,7 +20,7 @@ type DestInfo struct {
 	DestIP6   [4]uint32
 	DestPort  uint32
 	KernelPid uint32
-	clientID  uint64
+	ClientID  uint64
 }
 
 // struct proxy_info
