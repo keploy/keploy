@@ -64,9 +64,8 @@ func (h *Hooks) CleanProxyEntry(srcPort uint16) error {
 	return nil
 }
 
-func (h *Hooks) SendAppInfo(appInfo structs.AppInfo) error {
-	key := 1234
-	err := h.appRegistrationMap.Update(uint64(key), appInfo, ebpf.UpdateAny)
+func (h *Hooks) SendAppInfo(id uint64, appInfo structs.AppInfo) error {
+	err := h.appRegistrationMap.Update(id, appInfo, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the app info to the ebpf program")
 		return err

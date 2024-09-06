@@ -456,7 +456,7 @@ func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 	appInfo.IsDockerApp = uint32(0)
 	appInfo.PassThroughPorts = [10]int32{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1}
 
-	err = h.SendAppInfo(appInfo)
+	err = h.SendAppInfo(opts.AppID, appInfo)
 	if err != nil {
 		h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))
 		return err
