@@ -5,6 +5,7 @@ package conn
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 
 	"go.keploy.io/server/v2/pkg/models/mysql"
@@ -14,7 +15,7 @@ import (
 
 func DecodeAuthSwitchResponse(_ context.Context, data []byte) (*mysql.AuthSwitchResponsePacket, error) {
 	return &mysql.AuthSwitchResponsePacket{
-		Data: string(data),
+		Data: base64.StdEncoding.EncodeToString(data),
 	}, nil
 }
 
