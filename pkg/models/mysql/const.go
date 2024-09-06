@@ -40,6 +40,7 @@ const (
 // Some constants for MySQL
 const (
 	EncryptedPassword = "encrypted_password"
+	AuthSwithResponse = "AuthSwitchResponse"
 )
 
 // CachingSha2Password constants
