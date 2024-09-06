@@ -84,7 +84,7 @@ func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
 	return nil
 }
 
-func (h *Hooks) SendDockerAppInfo(dockerAppInfo structs.DockerAppnfo) error {
+func (h *Hooks) SendDockerAppInfo(dockerAppInfo structs.DockerAppInfo) error {
 	key := 1234
 	err := h.dockerAppRegistrationMap.Update(uint64(key), dockerAppInfo, ebpf.UpdateAny)
 	if err != nil {
