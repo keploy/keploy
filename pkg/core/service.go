@@ -58,7 +58,7 @@ type DestInfo interface {
 }
 
 type AppInfo interface {
-	SendDockerAppInfo(dockerAppInfo structs.DockerAppInfo) error
+	SendDockerAppInfo(id uint64, dockerAppInfo structs.DockerAppInfo) error
 }
 
 // For keploy test bench

@@ -220,7 +220,7 @@ func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.A
 		}
 		select {
 		case inode := <-inodeChan:
-			err := c.Hooks.SendDockerAppInfo(structs.DockerAppInfo{AppInode: inode})
+			err := c.Hooks.SendDockerAppInfo(id, structs.DockerAppInfo{AppInode: inode})
 			if err != nil {
 				utils.LogError(c.logger, err, "")
 
