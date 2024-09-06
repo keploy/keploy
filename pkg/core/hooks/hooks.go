@@ -48,7 +48,7 @@ type Hooks struct {
 
 	m sync.Mutex
 	// eBPF C shared maps
-	appRegistrationMap       *ebpf.Map
+	clientRegistrationMap    *ebpf.Map
 	agentRegistartionMap     *ebpf.Map
 	dockerAppRegistrationMap *ebpf.Map
 	redirectProxyMap         *ebpf.Map
@@ -134,7 +134,7 @@ func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 
 	//getting all the ebpf maps
 	h.redirectProxyMap = objs.RedirectProxyMap
-	h.appRegistrationMap = objs.AppRegistrationMap
+	h.clientRegistrationMap = objs.KeployClientRegistrationMap
 	h.agentRegistartionMap = objs.KeployAgentRegistrationMap
 	h.dockerAppRegistrationMap = objs.DockerAppRegistrationMap
 	h.objects = objs
@@ -402,15 +402,15 @@ func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 
 	h.logger.Info("keploy initialized and probes added to the kernel.")
 
-	var appInfo structs.AppInfo = structs.AppInfo{}
+	var clientInfo structs.ClientInfo = structs.ClientInfo{}
 
 	switch opts.Mode {
 	case models.MODE_RECORD:
-		appInfo.Mode = uint32(1)
+		clientInfo.Mode = uint32(1)
 	case models.MODE_TEST:
-		appInfo.Mode = uint32(2)
+		clientInfo.Mode = uint32(2)
 	default:
-		appInfo.Mode = uint32(0)
+		clientInfo.Mode = uint32(0)
 	}
 
 	//sending keploy pid to kernel to get filtered
@@ -420,10 +420,9 @@ func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 		return err
 	}
 
-	appInfo.KeployClientInode = inode
-	appInfo.KeployClientNsPid = uint32(os.Getpid())
-	appInfo.AppInode = uint64(0)
-	appInfo.IsKeployClientRegistered = uint32(0)
+	clientInfo.KeployClientInode = inode
+	clientInfo.KeployClientNsPid = uint32(os.Getpid())
+	clientInfo.IsKeployClientRegistered = uint32(0)
 	h.logger.Debug("Keploy Pid sent successfully...")
 
 	if opts.IsDocker {
@@ -453,10 +452,10 @@ func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 
 	agentInfo.DNSPort = int32(h.dnsPort)
 
-	appInfo.IsDockerApp = uint32(0)
-	appInfo.PassThroughPorts = [10]int32{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1}
+	clientInfo.IsDockerApp = uint32(0)
+	clientInfo.PassThroughPorts = [10]int32{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1}
 
-	err = h.SendAppInfo(opts.AppID, appInfo)
+	err = h.SendClientInfo(opts.AppID, clientInfo)
 	if err != nil {
 		h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))
 		return err

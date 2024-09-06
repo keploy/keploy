@@ -20,7 +20,7 @@ type DestInfo struct {
 	DestIP6   [4]uint32
 	DestPort  uint32
 	KernelPid uint32
-	AppID     uint64
+	clientID  uint64
 }
 
 // struct proxy_info
@@ -38,6 +38,7 @@ type ProxyInfo struct {
 
 type DockerAppInfo struct {
 	AppInode uint64
+	ClientID uint64
 }
 
 // struct app_info
@@ -51,9 +52,8 @@ type DockerAppInfo struct {
 //     s32 pass_through_ports[PASS_THROUGH_ARRAY_SIZE];
 // };
 
-type AppInfo struct {
+type ClientInfo struct {
 	KeployClientInode        uint64
-	AppInode                 uint64
 	KeployClientNsPid        uint32
 	Mode                     uint32
 	IsDockerApp              uint32

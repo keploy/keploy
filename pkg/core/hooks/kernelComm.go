@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 
+	"math/rand"
+
 	"github.com/cilium/ebpf"
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/hooks/structs"
@@ -64,8 +66,8 @@ func (h *Hooks) CleanProxyEntry(srcPort uint16) error {
 	return nil
 }
 
-func (h *Hooks) SendAppInfo(id uint64, appInfo structs.AppInfo) error {
-	err := h.appRegistrationMap.Update(id, appInfo, ebpf.UpdateAny)
+func (h *Hooks) SendClientInfo(id uint64, appInfo structs.ClientInfo) error {
+	err := h.clientRegistrationMap.Update(id, appInfo, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the app info to the ebpf program")
 		return err
@@ -84,7 +86,9 @@ func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
 }
 
 func (h *Hooks) SendDockerAppInfo(id uint64, dockerAppInfo structs.DockerAppInfo) error {
-	err := h.dockerAppRegistrationMap.Update(id, dockerAppInfo, ebpf.UpdateAny)
+	r := rand.New(rand.NewSource(rand.Int63()))
+	randomNum := r.Uint64()
+	err := h.dockerAppRegistrationMap.Update(randomNum, dockerAppInfo, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the dockerAppInfo info to the ebpf program")
 		return err
