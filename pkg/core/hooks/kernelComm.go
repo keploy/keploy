@@ -85,7 +85,7 @@ func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
 	return nil
 }
 
-func (h *Hooks) SendDockerAppInfo(id uint64, dockerAppInfo structs.DockerAppInfo) error {
+func (h *Hooks) SendDockerAppInfo(_ uint64, dockerAppInfo structs.DockerAppInfo) error {
 	r := rand.New(rand.NewSource(rand.Int63()))
 	randomNum := r.Uint64()
 	err := h.dockerAppRegistrationMap.Update(randomNum, dockerAppInfo, ebpf.UpdateAny)
