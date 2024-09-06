@@ -196,6 +196,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if len(testSets) == 0 {
 		testSets = testSetIDs
 	}
+
+	// Sort the testsets in alphabetical order.
+	sortByNumber(testSets)
 	for i, testSet := range testSets {
 		testSetResult = false
 		err := HookImpl.BeforeTestSetRun(ctx, testSet)
