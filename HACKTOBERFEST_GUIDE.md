@@ -74,7 +74,7 @@ The open source community needs you. Do you have what it takes to join the commu
   	&nbsp;
    <a href="https://community.keploy.io/" target="_blank"><img src="https://img.shields.io/badge/Blog-0A0A0A.svg?style=for-the-badge&logo=rss&logoColor=white"></a>
   	&nbsp;
-   <a href="https://join.slack.com/t/keploy/shared_invite/zt-23foxf3k0-zcsxyOHLMt40K1RCUsefkA" target="_blank"><img src="https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white"></a>
+   <a href="https://join.slack.com/t/keploy/shared_invite/zt-2poflru6f-_VAuvQfCBT8fDWv1WwSbkw" target="_blank"><img src="https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white"></a>
   	&nbsp;
 </p>
 
