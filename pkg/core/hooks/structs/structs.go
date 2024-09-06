@@ -20,7 +20,7 @@ type DestInfo struct {
 	DestIP6   [4]uint32
 	DestPort  uint32
 	KernelPid uint32
-	AppId     uint64
+	AppID     uint64
 }
 
 // struct proxy_info
@@ -73,7 +73,7 @@ type AgentInfo struct {
 	KeployAgentNsPid uint32
 	KeployAgentInode uint32
 	ProxyInfo        ProxyInfo
-	DnsPort          int32
+	DNSPort          int32
 }
 
 // struct proxy_info

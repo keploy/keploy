@@ -451,7 +451,7 @@ func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 		Port: h.proxyPort,
 	}
 
-	agentInfo.DnsPort = int32(h.dnsPort)
+	agentInfo.DNSPort = int32(h.dnsPort)
 
 	appInfo.IsDockerApp = uint32(0)
 	appInfo.PassThroughPorts = [10]int32{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1}
