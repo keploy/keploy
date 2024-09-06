@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"sync"
 
 	"golang.org/x/sync/errgroup"
@@ -129,12 +128,8 @@ func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 	// Load pre-compiled programs and maps into the kernel.
 	objs := bpfObjects{}
 	if err := loadBpfObjects(&objs, nil); err != nil {
-		// log.Fatalf("loading objects: %+v", err)
-		var ve *ebpf.VerifierError
-		if errors.As(err, &ve) {
-			errrStrjng := "verifier log: %s" + strings.Join(ve.Log, "\n")
-			h.logger.Error(errrStrjng)
-		}
+		utils.LogError(h.logger, err, "failed to load eBPF objects")
+		return err
 	}
 
 	//getting all the ebpf maps
