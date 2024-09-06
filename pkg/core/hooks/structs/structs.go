@@ -71,14 +71,7 @@ type AppInfo struct {
 
 type AgentInfo struct {
 	KeployAgentNsPid uint32
-	KeployAgentInode uint32
-	ProxyInfo        ProxyInfo
 	DNSPort          int32
+	KeployAgentInode uint64
+	ProxyInfo        ProxyInfo
 }
-
-// struct proxy_info
-// {
-//     u32 ip4;
-//     u32 ip6[4];
-//     u32 port;
-// };
