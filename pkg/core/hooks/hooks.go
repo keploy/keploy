@@ -452,7 +452,12 @@ func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 
 	agentInfo.DNSPort = int32(h.dnsPort)
 
-	clientInfo.IsDockerApp = uint32(0)
+	if opts.IsDocker {
+		clientInfo.IsDockerApp = uint32(1)
+	} else {
+		clientInfo.IsDockerApp = uint32(0)
+	}
+
 	clientInfo.PassThroughPorts = [10]int32{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1}
 
 	err = h.SendClientInfo(opts.AppID, clientInfo)
