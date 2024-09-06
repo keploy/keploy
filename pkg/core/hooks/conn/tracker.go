@@ -198,7 +198,7 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 			conn.kernelReqSizes = conn.kernelReqSizes[1:]
 
 			if expectedRecvBytes == 0 || actualRecvBytes == 0 {
-				conn.logger.Warn("Malformed reques", zap.Any("ExpectedRecvBytes", expectedRecvBytes), zap.Any("ActualRecvBytes", actualRecvBytes))
+				conn.logger.Warn("Malformed request", zap.Any("ExpectedRecvBytes", expectedRecvBytes), zap.Any("ActualRecvBytes", actualRecvBytes))
 			}
 
 			if conn.verifyRequestData(expectedRecvBytes, actualRecvBytes) {
