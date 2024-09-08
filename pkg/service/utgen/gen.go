@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/k0kubun/pp/v3"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
@@ -56,7 +57,7 @@ func NewUnitTestGenerator(srcPath, testPath, reportPath, cmd, dir, coverageForma
 		maxIterations: maxIterations,
 		logger:        logger,
 		tel:           tel,
-		ai:            NewAIClient(model, apiBaseURL, apiVersion, "", apiServerURL, auth, logger),
+		ai:            NewAIClient(model, apiBaseURL, apiVersion, "", apiServerURL, auth, uuid.NewString(), logger),
 		cov: &Coverage{
 			Path:    reportPath,
 			Format:  coverageFormat,
@@ -100,6 +101,14 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			newTestFile = isCreated
 		}
 		g.logger.Info(fmt.Sprintf("Generating tests for file: %s", g.srcPath))
+		isEmpty, err := utils.IsFileEmpty(g.testPath)
+		if err != nil {
+			g.logger.Error("Error checking if test file is empty", zap.Error(err))
+			return err
+		}
+		if isEmpty {
+			newTestFile = true
+		}
 		if !newTestFile {
 			if err = g.runCoverage(); err != nil {
 				return err
@@ -115,9 +124,11 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			utils.LogError(g.logger, err, "Error creating prompt builder")
 			return err
 		}
-		if err := g.setCursor(ctx); err != nil {
-			utils.LogError(g.logger, err, "Error during initial test suite analysis")
-			return err
+		if !isEmpty {
+			if err := g.setCursor(ctx); err != nil {
+				utils.LogError(g.logger, err, "Error during initial test suite analysis")
+				return err
+			}
 		}
 
 		for g.cov.Current < (g.cov.Desired/100) && iterationCount < g.maxIterations {

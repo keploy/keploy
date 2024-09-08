@@ -186,7 +186,10 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					matchCount := matchQuitPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
 					if matchCount > maxMatchedCount {
 						maxMatchedCount = matchCount
-						matchedResp = &mock.Spec.MySQLResponses[0]
+						matchedResp = &mysql.Response{} // in case if server closed the connection without sending any response
+						if len(mock.Spec.MySQLResponses) > 0 {
+							matchedResp = &mock.Spec.MySQLResponses[0] // if server responded with "error" packet
+						}
 						matchedMock = mock
 					}
 				case mysql.CommandStatusToString(mysql.COM_INIT_DB):
