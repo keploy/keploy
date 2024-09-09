@@ -87,7 +87,7 @@ type Hooks struct {
 	objects     bpfObjects
 	writev      link.Link
 	writevRet   link.Link
-	appId       uint64
+	appID       uint64
 }
 
 func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {

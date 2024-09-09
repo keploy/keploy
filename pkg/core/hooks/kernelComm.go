@@ -86,7 +86,7 @@ func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
 }
 
 func (h *Hooks) SendDockerAppInfo(_ uint64, dockerAppInfo structs.DockerAppInfo) error {
-	if h.appId != 0 {
+	if h.appID != 0 {
 		err := h.dockerAppRegistrationMap.Delete(h.appId)
 		if err != nil {
 			utils.LogError(h.logger, err, "failed to remove entry from dockerAppRegistrationMap")
@@ -95,8 +95,8 @@ func (h *Hooks) SendDockerAppInfo(_ uint64, dockerAppInfo structs.DockerAppInfo)
 	}
 	r := rand.New(rand.NewSource(rand.Int63()))
 	randomNum := r.Uint64()
-	h.appId = randomNum
-	err := h.dockerAppRegistrationMap.Update(h.appId, dockerAppInfo, ebpf.UpdateAny)
+	h.appID = randomNum
+	err := h.dockerAppRegistrationMap.Update(h.appID, dockerAppInfo, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the dockerAppInfo info to the ebpf program")
 		return err
