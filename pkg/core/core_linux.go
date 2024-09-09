@@ -141,6 +141,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		IsDocker:   isDocker,
 		KeployIPV4: a.KeployIPv4Addr(),
 		Mode:       opts.Mode,
+		Rules:      opts.Rules,
 	})
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to load hooks")

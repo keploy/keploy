@@ -6,6 +6,7 @@ import (
 	"context"
 	"sync"
 
+	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core/app"
 	"go.keploy.io/server/v2/pkg/core/hooks/structs"
 	"go.keploy.io/server/v2/utils"
@@ -27,6 +28,7 @@ type HookCfg struct {
 	IsDocker   bool
 	KeployIPV4 string
 	Mode       models.Mode
+	Rules      []config.BypassRule
 }
 
 type App interface {
@@ -67,6 +69,8 @@ type Tester interface {
 	Setup(ctx context.Context, opts models.TestingOptions) error
 }
 type TestBenchInfo interface {
+	// SendKeployPids(key models.ModeKey, pid uint32) error
+	// SendKeployPorts(key models.ModeKey, port uint32) error
 }
 
 // ----------------------

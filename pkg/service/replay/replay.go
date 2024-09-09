@@ -338,7 +338,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 	default:
 		hookCtx := context.WithoutCancel(ctx)
 		hookCtx, cancel = context.WithCancel(hookCtx)
-		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_TEST, EnableTesting: r.config.EnableTesting})
+		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_TEST, EnableTesting: r.config.EnableTesting, Rules: r.config.BypassRules})
 		if err != nil {
 			cancel()
 			if errors.Is(err, context.Canceled) {

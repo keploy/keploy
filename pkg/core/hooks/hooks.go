@@ -118,7 +118,7 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 	return nil
 }
 
-func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
+func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
 		utils.LogError(h.logger, err, "failed to lock memory for eBPF resources")
@@ -458,7 +458,14 @@ func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 		clientInfo.IsDockerApp = uint32(0)
 	}
 
-	clientInfo.PassThroughPorts = [10]int32{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1}
+	ports := GetPortToSendToKernel(ctx, opts.Rules)
+	for i := 0; i < 10; i++ {
+		if len(ports) <= i {
+			clientInfo.PassThroughPorts[i] = -1
+			continue
+		}
+		clientInfo.PassThroughPorts[i] = int32(ports[i])
+	}
 
 	err = h.SendClientInfo(opts.AppID, clientInfo)
 	if err != nil {
