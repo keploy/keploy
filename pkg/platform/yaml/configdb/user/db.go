@@ -8,8 +8,15 @@ import (
 
 	"github.com/denisbrodbeck/machineid"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
+	"gopkg.in/yaml.v2"
+	yamlLib "gopkg.in/yaml.v3"
 )
+
+type UserConfig struct {
+	UpdatePrompt string `yaml:"updatePrompt" json:"updatePrompt"`
+}
 
 type Db struct {
 	logger *zap.Logger
@@ -26,6 +33,47 @@ func HomeDir() string {
 		return home + configFolder
 	}
 	return os.Getenv("HOME") + configFolder
+}
+
+// For reading the combined config
+func (db *Db) ReadKeployConfig() (*UserConfig, error) {
+	path := HomeDir() + "/keploy.yaml"
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	// Decode the yaml file
+	var data UserConfig
+	err = yaml.Unmarshal(content, &data)
+	if err != nil {
+		utils.LogError(db.logger, err, "failed to unmarshal keploy.yaml")
+		return nil, err
+	}
+	return &data, nil
+}
+
+func (db *Db) WriteKeployConfig(data *UserConfig) error {
+	// Open the keploy.yaml file
+	path := HomeDir() + "/keploy.yaml"
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		return err
+	}
+	updatedData, err := yamlLib.Marshal(data)
+	if err != nil {
+		return err
+	}
+	// Truncate the file before writing to it.
+	err = file.Truncate(0)
+	if err != nil {
+		return err
+	}
+	_, err = file.Write(updatedData)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return nil
 }
 
 func New(logger *zap.Logger, cfg *config.Config) *Db {
