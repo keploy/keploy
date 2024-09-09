@@ -87,7 +87,7 @@ func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
 
 func (h *Hooks) SendDockerAppInfo(_ uint64, dockerAppInfo structs.DockerAppInfo) error {
 	if h.appID != 0 {
-		err := h.dockerAppRegistrationMap.Delete(h.appId)
+		err := h.dockerAppRegistrationMap.Delete(h.appID)
 		if err != nil {
 			utils.LogError(h.logger, err, "failed to remove entry from dockerAppRegistrationMap")
 			return err
