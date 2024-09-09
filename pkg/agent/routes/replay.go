@@ -2,8 +2,8 @@ package routes
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/render"
 	"go.keploy.io/server/v2/pkg/models"
@@ -37,7 +37,6 @@ func (a *AgentRequest) SetMocks(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	// w.Header().Set("Transfer-Encoding", "chunked")
 	// w.Header().Set("Cache-Control", "no-cache")
-	fmt.Println("Setting mocks!!")
 
 	var SetMocksReq models.SetMocksReq
 	err := json.NewDecoder(r.Body).Decode(&SetMocksReq)
@@ -56,6 +55,26 @@ func (a *AgentRequest) SetMocks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	render.JSON(w, r, "Mocks set successfully")
+	render.Status(r, http.StatusOK)
+
+}
+
+func (a *AgentRequest) GetConsumedMocks(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	appId := r.URL.Query().Get("id")
+
+	// convert string to uint64
+	appIdInt, err := strconv.ParseUint(appId, 10, 64)
+
+	consumedMocks, err := a.agent.GetConsumedMocks(r.Context(), appIdInt)
+	if err != nil {
+		render.JSON(w, r, err)
+		render.Status(r, http.StatusInternalServerError)
+		return
+	}
+
+	render.JSON(w, r, consumedMocks)
 	render.Status(r, http.StatusOK)
 
 }

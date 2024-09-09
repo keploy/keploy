@@ -33,6 +33,7 @@ func New(r chi.Router, agent agent.Service, logger *zap.Logger) {
 		r.Post("/outgoing", a.HandleOutgoing)
 		r.Post("/mock", a.MockOutgoing)
 		r.Post("/setmocks", a.SetMocks)
+		r.Get("/consumedmocks", a.GetConsumedMocks)
 	})
 
 }
@@ -115,7 +116,7 @@ func (a *AgentRequest) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 
 func (a *AgentRequest) RegisterClient(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Println("Health check")
+
 	var SetupRequest models.SetupReq
 	err := json.NewDecoder(r.Body).Decode(&SetupRequest)
 

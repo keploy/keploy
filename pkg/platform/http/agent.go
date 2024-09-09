@@ -282,7 +282,34 @@ func (a *Agent) SetMocks(ctx context.Context, id uint64, filtered []*models.Mock
 }
 
 func (a *Agent) GetConsumedMocks(ctx context.Context, id uint64) ([]string, error) {
-	return a.Proxy.GetConsumedMocks(ctx, id)
+	// Create the URL with query parameters
+	url := fmt.Sprintf("http://localhost:8086/agent/consumedmocks?id=%d", id)
+
+	// Create a new GET request with the query parameter
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %s", err.Error())
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+
+	// Make the HTTP request
+	res, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request for mockOutgoing: %s", err.Error())
+	}
+	defer res.Body.Close() // Close the response body when done
+
+	// Read the response body
+	var consumedMocks []string
+	err = json.NewDecoder(res.Body).Decode(&consumedMocks)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode response body: %s", err.Error())
+	}
+
+	return consumedMocks, nil
 }
 
 func (a *Agent) UnHook(ctx context.Context, id uint64) error {
