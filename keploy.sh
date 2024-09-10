@@ -141,7 +141,7 @@ installKeploy (){
                 append_to_rc "$PATH_CMD" "$HOME/.profile"
             fi
         else
-            ALIAS_CMD="alias keploy='sudo -E env PATH="$PATH" keploy'"
+            ALIAS_CMD="alias keploy='sudo -E env PATH=\"\$PATH\" keploy'"
             # Handle zsh or bash for non-macOS systems
             if [[ "$current_shell" = "zsh" || "$current_shell" = "-zsh" ]]; then
                 if [ -f "$HOME/.zshrc" ]; then
