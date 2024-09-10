@@ -6,7 +6,9 @@ import (
 	"context"
 	"sync"
 
+	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core/app"
+	"go.keploy.io/server/v2/pkg/core/hooks/structs"
 	"go.keploy.io/server/v2/utils"
 
 	"go.keploy.io/server/v2/pkg/models"
@@ -16,7 +18,6 @@ type Hooks interface {
 	AppInfo
 	DestInfo
 	OutgoingInfo
-	TestBenchInfo
 	Load(ctx context.Context, id uint64, cfg HookCfg) error
 	Record(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error)
 	// send KeployClient Pid
@@ -29,6 +30,7 @@ type HookCfg struct {
 	IsDocker   bool
 	KeployIPV4 string
 	Mode       models.Mode
+	Rules      []config.BypassRule
 }
 
 type App interface {
@@ -60,7 +62,7 @@ type DestInfo interface {
 }
 
 type AppInfo interface {
-	SendInode(ctx context.Context, id uint64, inode uint64) error
+	SendDockerAppInfo(id uint64, dockerAppInfo structs.DockerAppInfo) error
 }
 
 // For keploy test bench
@@ -69,14 +71,13 @@ type Tester interface {
 	Setup(ctx context.Context, opts models.TestingOptions) error
 }
 type TestBenchInfo interface {
-	SendKeployPids(key models.ModeKey, pid uint32) error
-	SendKeployPorts(key models.ModeKey, port uint32) error
+	// SendKeployPids(key models.ModeKey, pid uint32) error
+	// SendKeployPorts(key models.ModeKey, port uint32) error
 }
 
 // ----------------------
 
 type OutgoingInfo interface {
-	PassThroughPortsInKernel(ctx context.Context, id uint64, ports []uint) error
 }
 
 type NetworkAddress struct {

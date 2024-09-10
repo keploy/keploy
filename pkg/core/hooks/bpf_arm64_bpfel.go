@@ -59,7 +59,6 @@ type bpfProgramSpecs struct {
 	K_getpeername6                   *ebpf.ProgramSpec `ebpf:"k_getpeername6"`
 	SyscallProbeEntryAccept          *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_accept"`
 	SyscallProbeEntryAccept4         *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_accept4"`
-	SyscallProbeEntryBind            *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_bind"`
 	SyscallProbeEntryClose           *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_close"`
 	SyscallProbeEntryRead            *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_read"`
 	SyscallProbeEntryRecvfrom        *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_recvfrom"`
@@ -179,24 +178,17 @@ func (m *bpfMaps) Close() error {
 		m.ConnInfoMap,
 		m.CurrentSockMap,
 		m.DestInfoMap,
-		m.DnsPortMap,
-		m.DockerCmdMap,
-		m.GlobalNsPidInfoMap,
-		m.InodeMap,
-		m.KeployKernelPidMap,
-		m.KeployModeMap,
-		m.KeployNamespacePidMap,
-		m.KeployServerPort,
-		m.PassThroughPorts,
-		m.ProxyInfoMap,
+		m.DockerAppRegistrationMap,
+		m.KeployAgentKernelPidMap,
+		m.KeployAgentRegistrationMap,
+		m.KeployClientKernelPidMap,
+		m.KeployClientRegistrationMap,
 		m.RedirectProxyMap,
 		m.SocketCloseEvents,
 		m.SocketDataEventBufferHeap,
 		m.SocketDataEvents,
 		m.SocketOpenEvents,
 		m.TaskStructMap,
-		m.TbenchFilterPid,
-		m.TbenchFilterPort,
 	)
 }
 
@@ -210,7 +202,6 @@ type bpfPrograms struct {
 	K_getpeername6                   *ebpf.Program `ebpf:"k_getpeername6"`
 	SyscallProbeEntryAccept          *ebpf.Program `ebpf:"syscall__probe_entry_accept"`
 	SyscallProbeEntryAccept4         *ebpf.Program `ebpf:"syscall__probe_entry_accept4"`
-	SyscallProbeEntryBind            *ebpf.Program `ebpf:"syscall__probe_entry_bind"`
 	SyscallProbeEntryClose           *ebpf.Program `ebpf:"syscall__probe_entry_close"`
 	SyscallProbeEntryRead            *ebpf.Program `ebpf:"syscall__probe_entry_read"`
 	SyscallProbeEntryRecvfrom        *ebpf.Program `ebpf:"syscall__probe_entry_recvfrom"`
@@ -243,7 +234,6 @@ func (p *bpfPrograms) Close() error {
 		p.K_getpeername6,
 		p.SyscallProbeEntryAccept,
 		p.SyscallProbeEntryAccept4,
-		p.SyscallProbeEntryBind,
 		p.SyscallProbeEntryClose,
 		p.SyscallProbeEntryRead,
 		p.SyscallProbeEntryRecvfrom,

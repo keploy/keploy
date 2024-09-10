@@ -123,6 +123,16 @@ func (a *Auth) GetToken(ctx context.Context) (string, error) {
 			return "", err
 		}
 	}
+
+	if a.jwtToken == "" {
+		a.logger.Warn("Looks like you are not logged in.")
+		a.logger.Warn("Please follow the instructions to login.")
+		isSuccessful := a.Login(ctx)
+		if !isSuccessful {
+			return "", fmt.Errorf("failed to login")
+		}
+	}
+
 	return a.jwtToken, nil
 }
 
@@ -177,7 +187,7 @@ func pollForAccessToken(ctx context.Context, logger *zap.Logger, deviceCode, git
 	data.Set("device_code", deviceCode)
 	data.Set("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
 
-	fmt.Println("waiting for approval...")
+	fmt.Println("waiting for approval (this might take 4-5 sec for approval)...")
 
 	for {
 		resp, err := http.PostForm(models.TokenURL, data)

@@ -59,7 +59,6 @@ type bpfProgramSpecs struct {
 	K_getpeername6                   *ebpf.ProgramSpec `ebpf:"k_getpeername6"`
 	SyscallProbeEntryAccept          *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_accept"`
 	SyscallProbeEntryAccept4         *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_accept4"`
-	SyscallProbeEntryBind            *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_bind"`
 	SyscallProbeEntryClose           *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_close"`
 	SyscallProbeEntryRead            *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_read"`
 	SyscallProbeEntryRecvfrom        *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_recvfrom"`
@@ -88,34 +87,25 @@ type bpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
-	ActiveAcceptArgsMap       *ebpf.MapSpec `ebpf:"active_accept_args_map"`
-	ActiveCloseArgsMap        *ebpf.MapSpec `ebpf:"active_close_args_map"`
-	ActiveReadArgsMap         *ebpf.MapSpec `ebpf:"active_read_args_map"`
-	ActiveWriteArgsMap        *ebpf.MapSpec `ebpf:"active_write_args_map"`
-	AgentNamespacePidMap      *ebpf.MapSpec `ebpf:"agent_namespace_pid_map"`
-	AppKernelPidMap           *ebpf.MapSpec `ebpf:"app_kernel_pid_map"`
-	AppNsPidMap               *ebpf.MapSpec `ebpf:"app_ns_pid_map"`
-	ConnInfoMap               *ebpf.MapSpec `ebpf:"conn_info_map"`
-	CurrentSockMap            *ebpf.MapSpec `ebpf:"current_sock_map"`
-	DestInfoMap               *ebpf.MapSpec `ebpf:"dest_info_map"`
-	DnsPortMap                *ebpf.MapSpec `ebpf:"dns_port_map"`
-	DockerCmdMap              *ebpf.MapSpec `ebpf:"docker_cmd_map"`
-	GlobalNsPidInfoMap        *ebpf.MapSpec `ebpf:"global_nsPid_info_map"`
-	InodeMap                  *ebpf.MapSpec `ebpf:"inode_map"`
-	KeployKernelPidMap        *ebpf.MapSpec `ebpf:"keploy_kernel_pid_map"`
-	KeployModeMap             *ebpf.MapSpec `ebpf:"keploy_mode_map"`
-	KeployNamespacePidMap     *ebpf.MapSpec `ebpf:"keploy_namespace_pid_map"`
-	KeployServerPort          *ebpf.MapSpec `ebpf:"keploy_server_port"`
-	PassThroughPorts          *ebpf.MapSpec `ebpf:"pass_through_ports"`
-	ProxyInfoMap              *ebpf.MapSpec `ebpf:"proxy_info_map"`
-	RedirectProxyMap          *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
-	SocketCloseEvents         *ebpf.MapSpec `ebpf:"socket_close_events"`
-	SocketDataEventBufferHeap *ebpf.MapSpec `ebpf:"socket_data_event_buffer_heap"`
-	SocketDataEvents          *ebpf.MapSpec `ebpf:"socket_data_events"`
-	SocketOpenEvents          *ebpf.MapSpec `ebpf:"socket_open_events"`
-	TaskStructMap             *ebpf.MapSpec `ebpf:"task_struct_map"`
-	TbenchFilterPid           *ebpf.MapSpec `ebpf:"tbench_filter_pid"`
-	TbenchFilterPort          *ebpf.MapSpec `ebpf:"tbench_filter_port"`
+	ActiveAcceptArgsMap         *ebpf.MapSpec `ebpf:"active_accept_args_map"`
+	ActiveCloseArgsMap          *ebpf.MapSpec `ebpf:"active_close_args_map"`
+	ActiveReadArgsMap           *ebpf.MapSpec `ebpf:"active_read_args_map"`
+	ActiveWriteArgsMap          *ebpf.MapSpec `ebpf:"active_write_args_map"`
+	AppChildKernelPidMap        *ebpf.MapSpec `ebpf:"app_child_kernel_pid_map"`
+	ConnInfoMap                 *ebpf.MapSpec `ebpf:"conn_info_map"`
+	CurrentSockMap              *ebpf.MapSpec `ebpf:"current_sock_map"`
+	DestInfoMap                 *ebpf.MapSpec `ebpf:"dest_info_map"`
+	DockerAppRegistrationMap    *ebpf.MapSpec `ebpf:"docker_app_registration_map"`
+	KeployAgentKernelPidMap     *ebpf.MapSpec `ebpf:"keploy_agent_kernel_pid_map"`
+	KeployAgentRegistrationMap  *ebpf.MapSpec `ebpf:"keploy_agent_registration_map"`
+	KeployClientKernelPidMap    *ebpf.MapSpec `ebpf:"keploy_client_kernel_pid_map"`
+	KeployClientRegistrationMap *ebpf.MapSpec `ebpf:"keploy_client_registration_map"`
+	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
+	SocketCloseEvents           *ebpf.MapSpec `ebpf:"socket_close_events"`
+	SocketDataEventBufferHeap   *ebpf.MapSpec `ebpf:"socket_data_event_buffer_heap"`
+	SocketDataEvents            *ebpf.MapSpec `ebpf:"socket_data_events"`
+	SocketOpenEvents            *ebpf.MapSpec `ebpf:"socket_open_events"`
+	TaskStructMap               *ebpf.MapSpec `ebpf:"task_struct_map"`
 }
 
 // bpfObjects contains all objects after they have been loaded into the kernel.
@@ -137,34 +127,25 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
-	ActiveAcceptArgsMap       *ebpf.Map `ebpf:"active_accept_args_map"`
-	ActiveCloseArgsMap        *ebpf.Map `ebpf:"active_close_args_map"`
-	ActiveReadArgsMap         *ebpf.Map `ebpf:"active_read_args_map"`
-	ActiveWriteArgsMap        *ebpf.Map `ebpf:"active_write_args_map"`
-	AgentNamespacePidMap      *ebpf.Map `ebpf:"agent_namespace_pid_map"`
-	AppKernelPidMap           *ebpf.Map `ebpf:"app_kernel_pid_map"`
-	AppNsPidMap               *ebpf.Map `ebpf:"app_ns_pid_map"`
-	ConnInfoMap               *ebpf.Map `ebpf:"conn_info_map"`
-	CurrentSockMap            *ebpf.Map `ebpf:"current_sock_map"`
-	DestInfoMap               *ebpf.Map `ebpf:"dest_info_map"`
-	DnsPortMap                *ebpf.Map `ebpf:"dns_port_map"`
-	DockerCmdMap              *ebpf.Map `ebpf:"docker_cmd_map"`
-	GlobalNsPidInfoMap        *ebpf.Map `ebpf:"global_nsPid_info_map"`
-	InodeMap                  *ebpf.Map `ebpf:"inode_map"`
-	KeployKernelPidMap        *ebpf.Map `ebpf:"keploy_kernel_pid_map"`
-	KeployModeMap             *ebpf.Map `ebpf:"keploy_mode_map"`
-	KeployNamespacePidMap     *ebpf.Map `ebpf:"keploy_namespace_pid_map"`
-	KeployServerPort          *ebpf.Map `ebpf:"keploy_server_port"`
-	PassThroughPorts          *ebpf.Map `ebpf:"pass_through_ports"`
-	ProxyInfoMap              *ebpf.Map `ebpf:"proxy_info_map"`
-	RedirectProxyMap          *ebpf.Map `ebpf:"redirect_proxy_map"`
-	SocketCloseEvents         *ebpf.Map `ebpf:"socket_close_events"`
-	SocketDataEventBufferHeap *ebpf.Map `ebpf:"socket_data_event_buffer_heap"`
-	SocketDataEvents          *ebpf.Map `ebpf:"socket_data_events"`
-	SocketOpenEvents          *ebpf.Map `ebpf:"socket_open_events"`
-	TaskStructMap             *ebpf.Map `ebpf:"task_struct_map"`
-	TbenchFilterPid           *ebpf.Map `ebpf:"tbench_filter_pid"`
-	TbenchFilterPort          *ebpf.Map `ebpf:"tbench_filter_port"`
+	ActiveAcceptArgsMap         *ebpf.Map `ebpf:"active_accept_args_map"`
+	ActiveCloseArgsMap          *ebpf.Map `ebpf:"active_close_args_map"`
+	ActiveReadArgsMap           *ebpf.Map `ebpf:"active_read_args_map"`
+	ActiveWriteArgsMap          *ebpf.Map `ebpf:"active_write_args_map"`
+	AppChildKernelPidMap        *ebpf.Map `ebpf:"app_child_kernel_pid_map"`
+	ConnInfoMap                 *ebpf.Map `ebpf:"conn_info_map"`
+	CurrentSockMap              *ebpf.Map `ebpf:"current_sock_map"`
+	DestInfoMap                 *ebpf.Map `ebpf:"dest_info_map"`
+	DockerAppRegistrationMap    *ebpf.Map `ebpf:"docker_app_registration_map"`
+	KeployAgentKernelPidMap     *ebpf.Map `ebpf:"keploy_agent_kernel_pid_map"`
+	KeployAgentRegistrationMap  *ebpf.Map `ebpf:"keploy_agent_registration_map"`
+	KeployClientKernelPidMap    *ebpf.Map `ebpf:"keploy_client_kernel_pid_map"`
+	KeployClientRegistrationMap *ebpf.Map `ebpf:"keploy_client_registration_map"`
+	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
+	SocketCloseEvents           *ebpf.Map `ebpf:"socket_close_events"`
+	SocketDataEventBufferHeap   *ebpf.Map `ebpf:"socket_data_event_buffer_heap"`
+	SocketDataEvents            *ebpf.Map `ebpf:"socket_data_events"`
+	SocketOpenEvents            *ebpf.Map `ebpf:"socket_open_events"`
+	TaskStructMap               *ebpf.Map `ebpf:"task_struct_map"`
 }
 
 func (m *bpfMaps) Close() error {
@@ -173,30 +154,21 @@ func (m *bpfMaps) Close() error {
 		m.ActiveCloseArgsMap,
 		m.ActiveReadArgsMap,
 		m.ActiveWriteArgsMap,
-		m.AgentNamespacePidMap,
-		m.AppKernelPidMap,
-		m.AppNsPidMap,
+		m.AppChildKernelPidMap,
 		m.ConnInfoMap,
 		m.CurrentSockMap,
 		m.DestInfoMap,
-		m.DnsPortMap,
-		m.DockerCmdMap,
-		m.GlobalNsPidInfoMap,
-		m.InodeMap,
-		m.KeployKernelPidMap,
-		m.KeployModeMap,
-		m.KeployNamespacePidMap,
-		m.KeployServerPort,
-		m.PassThroughPorts,
-		m.ProxyInfoMap,
+		m.DockerAppRegistrationMap,
+		m.KeployAgentKernelPidMap,
+		m.KeployAgentRegistrationMap,
+		m.KeployClientKernelPidMap,
+		m.KeployClientRegistrationMap,
 		m.RedirectProxyMap,
 		m.SocketCloseEvents,
 		m.SocketDataEventBufferHeap,
 		m.SocketDataEvents,
 		m.SocketOpenEvents,
 		m.TaskStructMap,
-		m.TbenchFilterPid,
-		m.TbenchFilterPort,
 	)
 }
 
@@ -210,7 +182,6 @@ type bpfPrograms struct {
 	K_getpeername6                   *ebpf.Program `ebpf:"k_getpeername6"`
 	SyscallProbeEntryAccept          *ebpf.Program `ebpf:"syscall__probe_entry_accept"`
 	SyscallProbeEntryAccept4         *ebpf.Program `ebpf:"syscall__probe_entry_accept4"`
-	SyscallProbeEntryBind            *ebpf.Program `ebpf:"syscall__probe_entry_bind"`
 	SyscallProbeEntryClose           *ebpf.Program `ebpf:"syscall__probe_entry_close"`
 	SyscallProbeEntryRead            *ebpf.Program `ebpf:"syscall__probe_entry_read"`
 	SyscallProbeEntryRecvfrom        *ebpf.Program `ebpf:"syscall__probe_entry_recvfrom"`
@@ -243,7 +214,6 @@ func (p *bpfPrograms) Close() error {
 		p.K_getpeername6,
 		p.SyscallProbeEntryAccept,
 		p.SyscallProbeEntryAccept4,
-		p.SyscallProbeEntryBind,
 		p.SyscallProbeEntryClose,
 		p.SyscallProbeEntryRead,
 		p.SyscallProbeEntryRecvfrom,
