@@ -21,6 +21,7 @@ import (
 
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/hooks/conn"
+	"go.keploy.io/server/v2/pkg/core/hooks/structs"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 )
@@ -47,19 +48,10 @@ type Hooks struct {
 
 	m sync.Mutex
 	// eBPF C shared maps
-	proxyInfoMap     *ebpf.Map
-	inodeMap         *ebpf.Map
-	redirectProxyMap *ebpf.Map
-	keployModeMap    *ebpf.Map
-	keployPid        *ebpf.Map
-	appPidMap        *ebpf.Map
-	keployServerPort *ebpf.Map
-	passthroughPorts *ebpf.Map
-	DockerCmdMap     *ebpf.Map
-	DNSPort          *ebpf.Map
-	// for test bench
-	tbenchFilterPid  *ebpf.Map
-	tbenchFilterPort *ebpf.Map
+	clientRegistrationMap    *ebpf.Map
+	agentRegistartionMap     *ebpf.Map
+	dockerAppRegistrationMap *ebpf.Map
+	redirectProxyMap         *ebpf.Map
 	//--------------
 
 	// eBPF C shared objectsobjects
@@ -95,6 +87,7 @@ type Hooks struct {
 	objects     bpfObjects
 	writev      link.Link
 	writevRet   link.Link
+	appID       uint64
 }
 
 func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
@@ -123,45 +116,10 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 		return nil
 	})
 
-	if opts.IsDocker {
-		h.proxyIP4 = opts.KeployIPV4
-		ipv6, err := ToIPv4MappedIPv6(opts.KeployIPV4)
-		if err != nil {
-			return fmt.Errorf("failed to convert ipv4:%v to ipv4 mapped ipv6 in docker env:%v", opts.KeployIPV4, err)
-		}
-		h.logger.Debug(fmt.Sprintf("IPv4-mapped IPv6 for %s is: %08x:%08x:%08x:%08x\n", h.proxyIP4, ipv6[0], ipv6[1], ipv6[2], ipv6[3]))
-		h.proxyIP6 = ipv6
-	}
-
-	h.logger.Debug("proxy ips", zap.String("ipv4", h.proxyIP4), zap.Any("ipv6", h.proxyIP6))
-
-	proxyIP, err := IPv4ToUint32(h.proxyIP4)
-	if err != nil {
-		return fmt.Errorf("failed to convert ip string:[%v] to 32-bit integer", opts.KeployIPV4)
-	}
-
-	err = h.SendProxyInfo(proxyIP, h.proxyPort, h.proxyIP6)
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to send proxy info to kernel", zap.Any("NewProxyIp", proxyIP))
-		return err
-	}
-
-	err = h.SendDNSPort(h.dnsPort)
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to send dns port to kernel", zap.Any("DnsPort", h.dnsPort))
-		return err
-	}
-
-	err = h.SendCmdType(opts.IsDocker)
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to send the cmd type to kernel", zap.Bool("isDocker", opts.IsDocker))
-		return err
-	}
-
 	return nil
 }
 
-func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
+func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
 		utils.LogError(h.logger, err, "failed to lock memory for eBPF resources")
@@ -176,20 +134,12 @@ func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 	}
 
 	//getting all the ebpf maps
-	h.proxyInfoMap = objs.ProxyInfoMap
-	h.inodeMap = objs.InodeMap
 	h.redirectProxyMap = objs.RedirectProxyMap
-	h.keployModeMap = objs.KeployModeMap
-	h.keployPid = objs.KeployNamespacePidMap
-	h.appPidMap = objs.AppNsPidMap
-	h.keployServerPort = objs.KeployServerPort
-	h.passthroughPorts = objs.PassThroughPorts
-	h.DNSPort = objs.DnsPortMap
-	h.DockerCmdMap = objs.DockerCmdMap
+	h.clientRegistrationMap = objs.KeployClientRegistrationMap
+	h.agentRegistartionMap = objs.KeployAgentRegistrationMap
+	h.dockerAppRegistrationMap = objs.DockerAppRegistrationMap
 	h.objects = objs
-	// For test bench
-	h.tbenchFilterPid = objs.TbenchFilterPid
-	h.tbenchFilterPort = objs.TbenchFilterPort
+
 	// ---------------
 
 	// ----- used in case of wsl -----
@@ -201,13 +151,6 @@ func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 	h.socket = socket
 
 	// ------------ For Egress -------------
-
-	bind, err := link.Kprobe("sys_bind", objs.SyscallProbeEntryBind, nil)
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach the kprobe hook on sys_bind")
-		return err
-	}
-	h.bind = bind
 
 	udppC4, err := link.Kprobe("udp_pre_connect", objs.SyscallProbeEntryUdpPreConnect, nil)
 	if err != nil {
@@ -460,19 +403,15 @@ func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 
 	h.logger.Info("keploy initialized and probes added to the kernel.")
 
+	var clientInfo structs.ClientInfo = structs.ClientInfo{}
+
 	switch opts.Mode {
 	case models.MODE_RECORD:
-		err := h.SetKeployModeInKernel(1)
-		if err != nil {
-			utils.LogError(h.logger, nil, "failed to send the keploy mode to the ebpf program")
-			return err
-		}
+		clientInfo.Mode = uint32(1)
 	case models.MODE_TEST:
-		err := h.SetKeployModeInKernel(2)
-		if err != nil {
-			utils.LogError(h.logger, nil, "failed to send the keploy mode to the ebpf program")
-			return err
-		}
+		clientInfo.Mode = uint32(2)
+	default:
+		clientInfo.Mode = uint32(0)
 	}
 
 	//sending keploy pid to kernel to get filtered
@@ -481,27 +420,63 @@ func (h *Hooks) load(_ context.Context, opts core.HookCfg) error {
 		utils.LogError(h.logger, err, "failed to get inode of the keploy process")
 		return err
 	}
-	h.logger.Debug("", zap.Any("Keploy Inode number", inode))
-	err = h.SendNameSpaceID(1, inode)
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to send the namespace id to the epbf program")
-		return err
-	}
-	err = h.SendKeployPid(uint32(os.Getpid()))
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to send the keploy pid to the ebpf program")
-		return err
-	}
+
+	clientInfo.KeployClientInode = inode
+	clientInfo.KeployClientNsPid = uint32(os.Getpid())
+	clientInfo.IsKeployClientRegistered = uint32(0)
 	h.logger.Debug("Keploy Pid sent successfully...")
 
-	//send app pid to kernel to get filtered in case of mock record/test feature of unit test file
-	// app pid here is the pid of the unit test file process or application pid
-	if opts.Pid != 0 {
-		err = h.SendAppPid(opts.Pid)
+	if opts.IsDocker {
+		h.proxyIP4 = opts.KeployIPV4
+		ipv6, err := ToIPv4MappedIPv6(opts.KeployIPV4)
 		if err != nil {
-			utils.LogError(h.logger, err, "failed to send the app pid to the ebpf program")
-			return err
+			return fmt.Errorf("failed to convert ipv4:%v to ipv4 mapped ipv6 in docker env:%v", opts.KeployIPV4, err)
 		}
+		h.logger.Debug(fmt.Sprintf("IPv4-mapped IPv6 for %s is: %08x:%08x:%08x:%08x\n", h.proxyIP4, ipv6[0], ipv6[1], ipv6[2], ipv6[3]))
+		h.proxyIP6 = ipv6
+	}
+
+	h.logger.Debug("proxy ips", zap.String("ipv4", h.proxyIP4), zap.Any("ipv6", h.proxyIP6))
+
+	proxyIP, err := IPv4ToUint32(h.proxyIP4)
+	if err != nil {
+		return fmt.Errorf("failed to convert ip string:[%v] to 32-bit integer", opts.KeployIPV4)
+	}
+
+	var agentInfo structs.AgentInfo = structs.AgentInfo{}
+
+	agentInfo.ProxyInfo = structs.ProxyInfo{
+		IP4:  proxyIP,
+		IP6:  h.proxyIP6,
+		Port: h.proxyPort,
+	}
+
+	agentInfo.DNSPort = int32(h.dnsPort)
+
+	if opts.IsDocker {
+		clientInfo.IsDockerApp = uint32(1)
+	} else {
+		clientInfo.IsDockerApp = uint32(0)
+	}
+
+	ports := GetPortToSendToKernel(ctx, opts.Rules)
+	for i := 0; i < 10; i++ {
+		if len(ports) <= i {
+			clientInfo.PassThroughPorts[i] = -1
+			continue
+		}
+		clientInfo.PassThroughPorts[i] = int32(ports[i])
+	}
+
+	err = h.SendClientInfo(opts.AppID, clientInfo)
+	if err != nil {
+		h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))
+		return err
+	}
+	err = h.SendAgentInfo(agentInfo)
+	if err != nil {
+		h.logger.Error("failed to send agent info to the ebpf program", zap.Error(err))
+		return err
 	}
 
 	return nil
@@ -521,9 +496,6 @@ func (h *Hooks) unLoad(_ context.Context) {
 		utils.LogError(h.logger, err, "failed to close the socket")
 	}
 
-	if err := h.bind.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the bind")
-	}
 	if err := h.udpp4.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the udpp4")
 	}
