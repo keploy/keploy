@@ -106,27 +106,3 @@ func timeWithUnits(duration time.Duration) string {
 	return fmt.Sprintf("%.2f hr", duration.Hours())
 }
 
-func sortByNumber(arr []string) {
-	sort.Slice(arr, func(i, j int) bool {
-		// Extract the number from the "test-set-X" format
-		num1 := extractNumber(arr[i])
-		num2 := extractNumber(arr[j])
-
-		// Compare the extracted numbers
-		return num1 < num2
-	})
-}
-
-func extractNumber(s string) int {
-	// Split the string by "-" and extract the last part
-	parts := strings.Split(s, "-")
-
-	// Convert the last part to an integer
-	num, err := strconv.Atoi(parts[len(parts)-1])
-	if err != nil {
-		fmt.Println("Error converting string to number:", err)
-		return 0
-	}
-
-	return num
-}

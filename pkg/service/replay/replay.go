@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/k0kubun/pp/v3"
+	 "facette.io/natsort"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
 	matcherUtils "go.keploy.io/server/v2/pkg/matcher"
@@ -197,8 +198,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 		testSets = testSetIDs
 	}
 
-	// Sort the testsets in alphabetical order.
-	sortByNumber(testSets)
+	// Sort the testsets.
+	natsort.Sort(testSets)
 	for i, testSet := range testSets {
 		testSetResult = false
 		err := HookImpl.BeforeTestSetRun(ctx, testSet)
