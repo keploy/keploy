@@ -11,7 +11,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/network"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/platform/docker"
 	"go.keploy.io/server/v2/utils"
@@ -221,7 +221,7 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 func addKeployNetwork(ctx context.Context, logger *zap.Logger, client docker.Client) {
 
 	// Check if the 'keploy-network' network exists
-	networks, err := client.NetworkList(ctx, types.NetworkListOptions{})
+	networks, err := client.NetworkList(ctx, network.ListOptions{})
 	if err != nil {
 		logger.Debug("failed to list docker networks")
 		return
@@ -235,9 +235,7 @@ func addKeployNetwork(ctx context.Context, logger *zap.Logger, client docker.Cli
 	}
 
 	// Create the 'keploy' network if it doesn't exist
-	_, err = client.NetworkCreate(ctx, "keploy-network", types.NetworkCreate{
-		CheckDuplicate: true,
-	})
+	_, err = client.NetworkCreate(ctx, "keploy-network", network.CreateOptions{})
 	if err != nil {
 		logger.Debug("failed to create keploy network")
 		return
