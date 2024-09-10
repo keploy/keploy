@@ -14,7 +14,7 @@ import (
 	yamlLib "gopkg.in/yaml.v3"
 )
 
-type UserConfig struct {
+type KeployConfig struct {
 	UpdatePrompt string `yaml:"updatePrompt" json:"updatePrompt"`
 }
 
@@ -35,15 +35,14 @@ func HomeDir() string {
 	return os.Getenv("HOME") + configFolder
 }
 
-// For reading the combined config
-func (db *Db) ReadKeployConfig() (*UserConfig, error) {
+func (db *Db) ReadKeployConfig() (*KeployConfig, error) {
 	path := HomeDir() + "/keploy.yaml"
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 	// Decode the yaml file
-	var data UserConfig
+	var data KeployConfig
 	err = yaml.Unmarshal(content, &data)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to unmarshal keploy.yaml")
@@ -52,13 +51,18 @@ func (db *Db) ReadKeployConfig() (*UserConfig, error) {
 	return &data, nil
 }
 
-func (db *Db) WriteKeployConfig(data *UserConfig) error {
+func (db *Db) WriteKeployConfig(data *KeployConfig) error {
 	// Open the keploy.yaml file
 	path := HomeDir() + "/keploy.yaml"
 	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		return err
 	}
+	defer func () {
+		if err := file.Close(); err != nil {
+			db.logger.Error("failed to close file", zap.Error(err))
+		}
+	}()
 	updatedData, err := yamlLib.Marshal(data)
 	if err != nil {
 		return err
@@ -72,7 +76,6 @@ func (db *Db) WriteKeployConfig(data *UserConfig) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
 	return nil
 }
 
