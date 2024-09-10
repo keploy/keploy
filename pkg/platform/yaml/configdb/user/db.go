@@ -58,7 +58,7 @@ func (db *Db) WriteKeployConfig(data *KeployConfig) error {
 	if err != nil {
 		return err
 	}
-	defer func () {
+	defer func() {
 		if err := file.Close(); err != nil {
 			db.logger.Error("failed to close file", zap.Error(err))
 		}
