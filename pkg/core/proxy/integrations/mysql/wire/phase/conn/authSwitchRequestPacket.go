@@ -5,6 +5,7 @@ package conn
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 
 	"go.keploy.io/server/v2/pkg/models/mysql"
@@ -22,7 +23,7 @@ func DecodeAuthSwitchRequest(_ context.Context, data []byte) (*mysql.AuthSwitchR
 	parts := bytes.SplitN(data[1:], []byte{0x00}, 2)
 	packet.PluginName = string(parts[0])
 	if len(parts) > 1 {
-		packet.PluginData = string(parts[1])
+		packet.PluginData = base64.RawStdEncoding.EncodeToString(parts[1])
 	}
 
 	return packet, nil
@@ -44,15 +45,13 @@ func EncodeAuthSwitchRequest(_ context.Context, packet *mysql.AuthSwitchRequestP
 		return nil, errors.New("failed to write null terminator for PluginName for AuthSwitchRequest packet")
 	}
 
-	switch packet.PluginData {
-	case mysql.CachingSha2PasswordToString(mysql.PerformFullAuthentication):
-		packet.PluginData = string(mysql.PerformFullAuthentication)
-	case mysql.CachingSha2PasswordToString(mysql.FastAuthSuccess):
-		packet.PluginData = string(mysql.FastAuthSuccess)
+	pluginData, err := base64.RawStdEncoding.DecodeString(packet.PluginData)
+	if err != nil {
+		return nil, errors.New("failed to decode PluginData for AuthSwitchRequest packet")
 	}
 
 	// Write PluginData
-	if _, err := buf.WriteString(packet.PluginData); err != nil {
+	if _, err := buf.WriteString(string(pluginData)); err != nil {
 		return nil, errors.New("failed to write PluginData for AuthSwitchRequest packet")
 	}
 
