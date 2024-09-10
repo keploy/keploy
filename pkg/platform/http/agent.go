@@ -455,13 +455,15 @@ func (a *Agent) Setup(ctx context.Context, cmd string, opts models.SetupOptions)
 		}
 		defer logFile.Close()
 
-		agentCmd := exec.Command("oss", "agent")
+		// i guess only sudo will also work
+		agentCmd := exec.Command("sudo", "oss", "agent")
 		agentCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // Detach the process
 
 		// Redirect the standard output and error to the log file
 		agentCmd.Stdout = logFile
 		agentCmd.Stderr = logFile
-
+		agentCmd.Stdin = os.Stdin
+		
 		err = agentCmd.Start()
 		if err != nil {
 			utils.LogError(a.logger, err, "failed to start keploy agent")

@@ -41,6 +41,7 @@ func GenerateDockerEnvs(config DockerConfigStruct) string {
 // should also return a boolean if the execution is moved to docker
 func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config) error {
 
+	fmt.Println("Starting in docker")
 	if DockerConfig.Envs == nil {
 		DockerConfig.Envs = map[string]string{
 			"INSTALLATION_ID": conf.InstallationID,
@@ -85,6 +86,7 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 		utils.LogError(logger, err, "failed to initalise docker")
 		return err
 	}
+	fmt.Println("Creating debugfs volume")
 	addKeployNetwork(ctx, logger, client)
 	err = client.CreateVolume(ctx, "debugfs", true)
 	if err != nil {
@@ -227,6 +229,7 @@ func addKeployNetwork(ctx context.Context, logger *zap.Logger, client docker.Cli
 		return
 	}
 
+	fmt.Println("Creating keploy network")
 	for _, network := range networks {
 		if network.Name == "keploy-network" {
 			logger.Debug("keploy network already exists")

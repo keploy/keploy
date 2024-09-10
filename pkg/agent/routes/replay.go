@@ -11,8 +11,7 @@ import (
 
 func (a *AgentRequest) MockOutgoing(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	// w.Header().Set("Transfer-Encoding", "chunked")
-	// w.Header().Set("Cache-Control", "no-cache")
+
 	var OutgoingReq models.OutgoingReq
 	err := json.NewDecoder(r.Body).Decode(&OutgoingReq)
 
@@ -35,8 +34,6 @@ func (a *AgentRequest) MockOutgoing(w http.ResponseWriter, r *http.Request) {
 
 func (a *AgentRequest) SetMocks(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	// w.Header().Set("Transfer-Encoding", "chunked")
-	// w.Header().Set("Cache-Control", "no-cache")
 
 	var SetMocksReq models.SetMocksReq
 	err := json.NewDecoder(r.Body).Decode(&SetMocksReq)
