@@ -71,8 +71,12 @@ installKeploy (){
                 exit 1
             fi
         else
-            # Move with sudo
-            sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploy
+            source_dir="/tmp/keploy"
+            OS_NAME=$(uname)  # Get the operating system name
+            if [ "$OS_NAME" = "Darwin" ]; then
+                source_dir="/tmp/keploy/keploy"  # Set source directory to the binary inside the extracted folder
+            fi
+            sudo mkdir -p /usr/local/bin && sudo mv "$source_dir" /usr/local/bin/keploy
         fi
         set_alias
     }
