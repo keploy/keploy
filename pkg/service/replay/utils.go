@@ -3,9 +3,6 @@ package replay
 import (
 	"fmt"
 	"net/url"
-	"sort"
-	"strconv"
-	"strings"
 	"time"
 
 	// "encoding/json"
@@ -105,4 +102,3 @@ func timeWithUnits(duration time.Duration) string {
 	}
 	return fmt.Sprintf("%.2f hr", duration.Hours())
 }
-
