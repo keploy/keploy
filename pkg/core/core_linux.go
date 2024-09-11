@@ -12,6 +12,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v2/pkg/core/app"
+	"go.keploy.io/server/v2/pkg/core/hooks/structs"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/docker"
 	"go.keploy.io/server/v2/utils"
@@ -141,6 +142,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		IsDocker:   isDocker,
 		KeployIPV4: a.KeployIPv4Addr(),
 		Mode:       opts.Mode,
+		Rules:      opts.Rules,
 	})
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to load hooks")
@@ -220,7 +222,7 @@ func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.A
 		}
 		select {
 		case inode := <-inodeChan:
-			err := c.Hooks.SendInode(ctx, id, inode)
+			err := c.Hooks.SendDockerAppInfo(id, structs.DockerAppInfo{AppInode: inode, ClientID: id})
 			if err != nil {
 				utils.LogError(c.logger, err, "")
 
