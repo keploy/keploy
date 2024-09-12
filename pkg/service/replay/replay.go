@@ -15,8 +15,8 @@ import (
 
 	"time"
 
+	"facette.io/natsort"
 	"github.com/k0kubun/pp/v3"
-	 "facette.io/natsort"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
 	matcherUtils "go.keploy.io/server/v2/pkg/matcher"
