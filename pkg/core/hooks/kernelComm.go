@@ -43,7 +43,6 @@ func (h *Hooks) GetDestinationInfo(srcPort uint16) (*structs.DestInfo, error) {
 	h.m.Lock()
 	defer h.m.Unlock()
 	destInfo := structs.DestInfo{}
-	fmt.Println("srcPort", srcPort)
 	if err := h.redirectProxyMap.Lookup(srcPort, &destInfo); err != nil {
 		return nil, err
 	}
