@@ -127,36 +127,29 @@ installKeploy (){
         source $2
     }
 
+    update_path() {
+        PATH_CMD="export PATH=\"\$HOME/.keploy/bin:\$PATH\""
+        rc_file="$1"
+        if [ -f "$rc_file" ]; then
+            if ! grep -q "$PATH_CMD" "$rc_file"; then
+                append_to_rc "$PATH_CMD" "$rc_file"
+            fi
+        else
+            export PATH="$PATH_CMD"
+        fi
+    }
+
     # Get the alias to set and set it
     set_alias() {
         current_shell="$(basename "$SHELL")"
         if [ "$NO_ROOT" = "true" ]; then
             # Just update the PATH in .zshrc or .bashrc, no alias needed
-            PATH_CMD="export PATH=\"\$HOME/.keploy/bin:\$PATH\""
             if [[ "$current_shell" = "zsh" || "$current_shell" = "-zsh" ]]; then
-                if [ -f "$HOME/.zshrc" ]; then
-                    if ! grep -q "$PATH_CMD" "$HOME/.zshrc"; then
-                        append_to_rc "$PATH_CMD" "$HOME/.zshrc"
-                    fi
-                else
-                    export PATH="$PATH_CMD"
-                fi
+                update_path "$HOME/.zshrc"
             elif [[ "$current_shell" = "bash" || "$current_shell" = "-bash" ]]; then
-                if [ -f "$HOME/.bashrc" ]; then
-                    if ! grep -q "$PATH_CMD" "$HOME/.bashrc"; then
-                        append_to_rc "$PATH_CMD" "$HOME/.bashrc" 
-                    fi
-                else
-                    export PATH="$PATH_CMD"
-                fi
+                update_path "$HOME/.bashrc"
             else
-                if [ -f "$HOME/.profile" ]; then
-                    if ! grep -q "$PATH_CMD" "$HOME/.profile"; then
-                        append_to_rc "$PATH_CMD" "$HOME/.profile"
-                    fi
-                else
-                    export PATH="$PATH_CMD"
-                fi
+                update_path "$HOME/.profile"
             fi
         else
             ALIAS_CMD="alias keploy='sudo -E env PATH=\"\$PATH\" keploy'"
