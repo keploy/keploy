@@ -134,11 +134,29 @@ installKeploy (){
             # Just update the PATH in .zshrc or .bashrc, no alias needed
             PATH_CMD="export PATH=\"\$HOME/.keploy/bin:\$PATH\""
             if [[ "$current_shell" = "zsh" || "$current_shell" = "-zsh" ]]; then
-                append_to_rc "$PATH_CMD" "$HOME/.zshrc"
+                if [ -f "$HOME/.zshrc" ]; then
+                    if ! grep -q "$PATH_CMD" "$HOME/.zshrc"; then
+                        append_to_rc "$PATH_CMD" "$HOME/.zshrc"
+                    fi
+                else
+                    export PATH="$PATH_CMD"
+                fi
             elif [[ "$current_shell" = "bash" || "$current_shell" = "-bash" ]]; then
-                append_to_rc "$PATH_CMD" "$HOME/.bashrc"
+                if [ -f "$HOME/.bashrc" ]; then
+                    if ! grep -q "$PATH_CMD" "$HOME/.bashrc"; then
+                        append_to_rc "$PATH_CMD" "$HOME/.bashrc" 
+                    fi
+                else
+                    export PATH="$PATH_CMD"
+                fi
             else
-                append_to_rc "$PATH_CMD" "$HOME/.profile"
+                if [ -f "$HOME/.profile" ]; then
+                    if ! grep -q "$PATH_CMD" "$HOME/.profile"; then
+                        append_to_rc "$PATH_CMD" "$HOME/.profile"
+                    fi
+                else
+                    export PATH="$PATH_CMD"
+                fi
             fi
         else
             ALIAS_CMD="alias keploy='sudo -E env PATH=\"\$PATH\" keploy'"
