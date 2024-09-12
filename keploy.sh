@@ -71,8 +71,12 @@ installKeploy (){
                 exit 1
             fi
         else
-            # Move with sudo
-            sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploy
+            source_dir="/tmp/keploy"
+            OS_NAME=$(uname)  # Get the operating system name
+            if [ "$OS_NAME" = "Darwin" ]; then
+                source_dir="/tmp/keploy/keploy"  # Set source directory to the binary inside the extracted folder
+            fi
+            sudo mkdir -p /usr/local/bin && sudo mv "$source_dir" /usr/local/bin/keploy
         fi
         set_alias
     }
@@ -137,7 +141,7 @@ installKeploy (){
                 append_to_rc "$PATH_CMD" "$HOME/.profile"
             fi
         else
-            ALIAS_CMD="alias keploy='sudo -E env PATH="$PATH" keploy'"
+            ALIAS_CMD="alias keploy='sudo -E env PATH=\"\$PATH\" keploy'"
             # Handle zsh or bash for non-macOS systems
             if [[ "$current_shell" = "zsh" || "$current_shell" = "-zsh" ]]; then
                 if [ -f "$HOME/.zshrc" ]; then

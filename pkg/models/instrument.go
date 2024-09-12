@@ -7,6 +7,7 @@ import (
 )
 
 type HookOptions struct {
+	Rules         []config.BypassRule
 	Mode          Mode
 	EnableTesting bool
 }
