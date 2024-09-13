@@ -105,6 +105,7 @@ require (
 )
 
 require (
+	facette.io/natsort v0.0.0-20181210072756-2cd4dd1e2dcb
 	github.com/7sDream/geko v0.1.1
 	github.com/agnivade/levenshtein v1.1.1
 	github.com/charmbracelet/glamour v0.6.0
@@ -127,10 +128,7 @@ require (
 	sigs.k8s.io/kustomize/kyaml v0.17.2
 )
 
-require (
-	github.com/google/uuid v1.6.0 // indirect
-	github.com/perimeterx/marshmallow v1.1.5 // indirect
-)
+require github.com/perimeterx/marshmallow v1.1.5 // indirect
 
 require (
 	github.com/alecthomas/chroma v0.10.0 // indirect
