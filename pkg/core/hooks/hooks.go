@@ -59,7 +59,6 @@ type Hooks struct {
 	// ebpf objects and events
 	socket   link.Link
 	connect4 link.Link
-	bind     link.Link
 	gp4      link.Link
 	udpp4    link.Link
 	tcppv4   link.Link
