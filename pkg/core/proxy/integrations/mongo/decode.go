@@ -207,9 +207,8 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					isUpdated := mockDb.UpdateUnFilteredMock(configMocks[bestMatchIndex], &matchedMock)
 					if !isUpdated {
 						continue
-					} else {
-						break
 					}
+					break
 				}
 
 				responseTo := mongoRequests[0].Header.RequestID
