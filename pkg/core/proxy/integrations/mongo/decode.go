@@ -202,11 +202,14 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 							}
 						}
 					}
-					matchedMock := *configMocks[bestMatchIndex]
-					matchedMock.TestModeInfo.SortOrder = math.MaxInt
-					isUpdated := mockDb.UpdateUnFilteredMock(configMocks[bestMatchIndex], &matchedMock)
-					if !isUpdated {
-						continue
+
+					if bestMatchIndex != -1 && maxMatchScore != 0.0 {
+						matchedMock := *configMocks[bestMatchIndex]
+						matchedMock.TestModeInfo.SortOrder = math.MaxInt
+						isUpdated := mockDb.UpdateUnFilteredMock(configMocks[bestMatchIndex], &matchedMock)
+						if !isUpdated {
+							continue
+						}
 					}
 					break
 				}
