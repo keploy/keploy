@@ -97,7 +97,7 @@ func detectCgroupPath(logger *zap.Logger) (string, error) {
 	return "", errors.New("cgroup2 not mounted")
 }
 
-func getSelfInodeNumber() (uint64, error) {
+func GetSelfInodeNumber() (uint64, error) {
 	p := filepath.Join("/proc", "self", "ns", "pid")
 
 	f, err := os.Stat(p)

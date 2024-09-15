@@ -130,11 +130,8 @@ require (
 )
 
 require (
-	github.com/google/uuid v1.6.0 // indirect
-	(
 	github.com/ajg/form v1.5.1 // indirect
 	github.com/perimeterx/marshmallow v1.1.5 // indirect
-)
 )
 
 require (

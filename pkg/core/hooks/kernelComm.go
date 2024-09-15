@@ -85,6 +85,7 @@ func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
 	return nil
 }
 
+// here I have to send the Inode and container IP ??
 func (h *Hooks) SendDockerAppInfo(_ uint64, dockerAppInfo structs.DockerAppInfo) error {
 	if h.appID != 0 {
 		err := h.dockerAppRegistrationMap.Delete(h.appID)

@@ -241,7 +241,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
 		//add rest of the uncommon flags for record, test, rerecord commands
 		c.AddUncommonFlags(cmd)
-
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
 		cmd.PersistentFlags().Bool("disable-tele", c.cfg.DisableTele, "Run in telemetry mode")
@@ -259,6 +258,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+	case "agent":
+		cmd.Flags().Bool("is-docker", c.cfg.Agent.IsDocker, "Flag to check if the application is running in docker")
 	default:
 		return errors.New("unknown command name")
 	}
@@ -627,10 +628,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					return errors.New("missing required --container-name flag or containerName in config file")
 				}
 			}
-		}
-		err := StartInDocker(ctx, c.logger, c.cfg)
-		if err != nil {
-			return err
 		}
 
 		absPath, err := utils.GetAbsPath(c.cfg.Path)

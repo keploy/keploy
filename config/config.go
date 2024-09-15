@@ -37,12 +37,12 @@ type Config struct {
 	KeployNetwork         string       `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
 	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
 	Contract              Contract     `json:"contract" yaml:"contract" mapstructure:"contract"`
-
-	InCi           bool   `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
-	InstallationID string `json:"-" yaml:"-" mapstructure:"-"`
-	Version        string `json:"-" yaml:"-" mapstructure:"-"`
-	APIServerURL   string `json:"-" yaml:"-" mapstructure:"-"`
-	GitHubClientID string `json:"-" yaml:"-" mapstructure:"-"`
+	Agent                 Agent        `json:"agent" yaml:"agent" mapstructure:"agent"`
+	InCi                  bool         `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
+	InstallationID        string       `json:"-" yaml:"-" mapstructure:"-"`
+	Version               string       `json:"-" yaml:"-" mapstructure:"-"`
+	APIServerURL          string       `json:"-" yaml:"-" mapstructure:"-"`
+	GitHubClientID        string       `json:"-" yaml:"-" mapstructure:"-"`
 }
 
 type UtGen struct {
@@ -128,7 +128,7 @@ type Test struct {
 	UpdateTemplate      bool                `json:"updateTemplate" yaml:"updateTemplate" mapstructure:"updateTemplate"`
 }
 
-type Agent struct {	
+type Agent struct {
 	IsDocker bool `json:"isDocker" yaml:"isDocker" mapstructure:"isDocker"`
 }
 
@@ -164,7 +164,6 @@ type SelectedTests struct {
 	TestSet string   `json:"testSet" yaml:"testSet" mapstructure:"testSet"`
 	Tests   []string `json:"tests" yaml:"tests" mapstructure:"tests"`
 }
-
 
 type (
 	Noise        map[string][]string

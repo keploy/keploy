@@ -21,15 +21,13 @@ func init() {
 }
 
 // keploy record -> keploy agent
-func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, _ CmdConfigurator) *cobra.Command {
+func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:   "agent",
 		Short: "starts keploy agent for hooking and starting proxy",
 		// Hidden: true,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
-			// validate the flags
-
-			return nil
+			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			fmt.Println("Starting keploy agent")
@@ -58,7 +56,7 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 				}
 			}()
 			// Doubt: How can I provide the setup options for the first time?
-			_, err = a.Setup(ctx, "", models.SetupOptions{})
+			err = a.Setup(ctx, "", models.SetupOptions{})
 			if err != nil {
 				utils.LogError(logger, err, "failed to setup agent")
 				return nil
@@ -66,6 +64,12 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 
 			return nil
 		},
+	}
+
+	err := cmdConfigurator.AddFlags(cmd)
+	if err != nil {
+		utils.LogError(logger, err, "failed to add record flags")
+		return nil
 	}
 
 	return cmd

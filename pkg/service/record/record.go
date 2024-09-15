@@ -110,7 +110,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 
 	// Instrument will setup the environment and start the hooks and proxy
 	// scope of modularization: This function is defined in the Instrumentation interface
-	appID, err = r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD})
+	appID, err = r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType})
 	if err != nil {
 		stopReason = "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
@@ -244,7 +244,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (Frame
 	errChan := make(chan error, 2)
 
 	go func() {
-		defer close(incomingChan) 
+		defer close(incomingChan)
 		ch, err := r.instrumentation.GetIncoming(ctx, appID, incomingOpts)
 		if err != nil {
 			errChan <- fmt.Errorf("failed to get incoming test cases: %w", err)
@@ -257,7 +257,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (Frame
 	}()
 
 	go func() {
-		defer close(outgoingChan) 
+		defer close(outgoingChan)
 		ch, err := r.instrumentation.GetOutgoing(ctx, appID, outgoingOpts)
 		if err != nil {
 			errChan <- fmt.Errorf("failed to get outgoing mocks: %w", err)

@@ -26,13 +26,15 @@ type IncomingOptions struct {
 }
 
 type SetupOptions struct {
+	ClientId      uint64
 	Container     string
 	DockerNetwork string
 	DockerDelay   uint64
-	ClientPid     uint32
+	ClientNsPid   uint32
+	ClientInode   uint64
 	Cmd           string
+	CommandType   string
 	Mode          Mode
-	IsApi         bool
 }
 
 type RunOptions struct {

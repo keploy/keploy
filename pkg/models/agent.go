@@ -10,12 +10,11 @@ type IncomingReq struct {
 	AppId           int64           `json:"appId"`
 }
 
-type SetupReq struct {
+type RegisterReq struct {
 	SetupOptions SetupOptions `json:"setupOptions"`
-	AppId        int64        `json:"appId"`
 }
 
-type SetupResp struct {
+type RegisterResp struct {
 	AppId      uint64 `json:"appId"` // uuid of the app
 	IsRunnning bool   `json:"isRunning"`
 }

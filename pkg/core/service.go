@@ -21,7 +21,7 @@ type Hooks interface {
 	Load(ctx context.Context, id uint64, cfg HookCfg) error
 	Record(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error)
 	// send KeployClient Pid
-	SendKeployPid(id uint32) error
+	SendKeployClientInfo(ctx context.Context, clientId uint64, clientInfo structs.ClientInfo) error
 }
 
 type HookCfg struct {
@@ -35,7 +35,7 @@ type HookCfg struct {
 
 type App interface {
 	Setup(ctx context.Context, opts app.Options) error
-	Run(ctx context.Context, inodeChan chan uint64, opts app.Options) error
+	Run(ctx context.Context, opts app.Options) error
 	Kind(ctx context.Context) utils.CmdType
 	KeployIPv4Addr() string
 }

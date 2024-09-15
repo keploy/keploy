@@ -96,7 +96,7 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 		ID: id,
 	})
 
-	err := h.load(ctx, opts)
+	err := h.load(opts)
 	if err != nil {
 		return err
 	}
@@ -119,7 +119,7 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 	return nil
 }
 
-func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
+func (h *Hooks) load(opts core.HookCfg) error {
 	// Allow the current process to lock memory for eBPF resources.
 	fmt.Println("Loading hooks...")
 	if err := rlimit.RemoveMemlock(); err != nil {
@@ -137,8 +137,11 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	//getting all the ebpf maps
 	h.redirectProxyMap = objs.RedirectProxyMap
 	h.clientRegistrationMap = objs.KeployClientRegistrationMap
+	fmt.Println("clientRegistrationMap", h.clientRegistrationMap)
 	h.agentRegistartionMap = objs.KeployAgentRegistrationMap
+	fmt.Println("agentRegistartionMap", h.agentRegistartionMap)
 	h.dockerAppRegistrationMap = objs.DockerAppRegistrationMap
+	fmt.Println("dockerAppRegistrationMap", h.dockerAppRegistrationMap)
 	h.objects = objs
 
 	// ---------------
@@ -404,28 +407,17 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
 	h.logger.Info("keploy initialized and probes added to the kernel.")
 
-	var clientInfo structs.ClientInfo = structs.ClientInfo{}
-
-	switch opts.Mode {
-	case models.MODE_RECORD:
-		clientInfo.Mode = uint32(1)
-	case models.MODE_TEST:
-		clientInfo.Mode = uint32(2)
-	default:
-		clientInfo.Mode = uint32(0)
-	}
-
 	//sending keploy pid to kernel to get filtered
-	inode, err := getSelfInodeNumber()
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to get inode of the keploy process")
-		return err
-	}
+	// inode, err := getSelfInodeNumber()
+	// if err != nil {
+	// 	utils.LogError(h.logger, err, "failed to get inode of the keploy process")
+	// 	return err
+	// }
 
-	clientInfo.KeployClientInode = inode
-	clientInfo.KeployClientNsPid = uint32(os.Getpid())
-	clientInfo.IsKeployClientRegistered = uint32(0)
-	h.logger.Debug("Keploy Pid sent successfully...")
+	// clientInfo.KeployClientInode = inode
+	// clientInfo.KeployClientNsPid = uint32(os.Getpid())
+	// clientInfo.IsKeployClientRegistered = uint32(0)
+	// h.logger.Info("Keploy Pid sent successfully...")
 
 	if opts.IsDocker {
 		h.proxyIP4 = opts.KeployIPV4
@@ -445,6 +437,12 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	}
 
 	var agentInfo structs.AgentInfo = structs.AgentInfo{}
+	agentInfo.KeployAgentNsPid = uint32(os.Getpid())
+	agentInfo.KeployAgentInode, err = GetSelfInodeNumber()
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to get inode of the keploy process")
+		return err
+	}
 
 	agentInfo.ProxyInfo = structs.ProxyInfo{
 		IP4:  proxyIP,
@@ -454,26 +452,29 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
 	agentInfo.DNSPort = int32(h.dnsPort)
 
-	if opts.IsDocker {
-		clientInfo.IsDockerApp = uint32(1)
-	} else {
-		clientInfo.IsDockerApp = uint32(0)
-	}
+	// if opts.IsDocker {
+	// 	clientInfo.IsDockerApp = uint32(1)
+	// } else {
+	// 	clientInfo.IsDockerApp = uint32(0)
+	// }
 
-	ports := GetPortToSendToKernel(ctx, opts.Rules)
-	for i := 0; i < 10; i++ {
-		if len(ports) <= i {
-			clientInfo.PassThroughPorts[i] = -1
-			continue
-		}
-		clientInfo.PassThroughPorts[i] = int32(ports[i])
-	}
+	// ports := GetPortToSendToKernel(ctx, opts.Rules)
+	// for i := 0; i < 10; i++ {
+	// 	if len(ports) <= i {
+	// 		clientInfo.PassThroughPorts[i] = -1
+	// 		continue
+	// 	}
+	// 	clientInfo.PassThroughPorts[i] = int32(ports[i])
+	// }
 
-	err = h.SendClientInfo(opts.AppID, clientInfo)
-	if err != nil {
-		h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))
-		return err
-	}
+	// for sending client pid to kernel
+	// fmt.Println("Sending client info to kernel...", clientInfo)
+	// err = h.SendClientInfo(opts.AppID, clientInfo)
+	// if err != nil {
+	// 	h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))
+	// 	return err
+	// }
+	fmt.Println("Sending agent info to kernel...", agentInfo)
 	err = h.SendAgentInfo(agentInfo)
 	if err != nil {
 		h.logger.Error("failed to send agent info to the ebpf program", zap.Error(err))
@@ -489,6 +490,21 @@ func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOption
 	// and pass that to eBPF consumers/listeners
 	fmt.Println("Recording hooks...")
 	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
+}
+
+func (h *Hooks) SendKeployClientInfo(ctx context.Context, clientId uint64, clientInfo structs.ClientInfo) error {
+	// TODO use the session to get the app id
+	// and then use the app id to get the test cases chan
+	// and pass that to eBPF consumers/listeners
+	fmt.Println("clientInfo ...", clientInfo)
+
+	err := h.SendClientInfo(clientId, clientInfo)
+	if err != nil {
+		h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))
+		return err
+	}
+
+	return nil
 }
 
 func (h *Hooks) unLoad(_ context.Context) {

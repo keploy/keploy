@@ -28,14 +28,20 @@ func New(r chi.Router, agent agent.Service, logger *zap.Logger) {
 		agent:  agent,
 	}
 	r.Route("/agent", func(r chi.Router) {
-		r.Post("/health", a.RegisterClient)
+		r.Get("/health", a.Health)
 		r.Post("/incoming", a.HandleIncoming)
 		r.Post("/outgoing", a.HandleOutgoing)
 		r.Post("/mock", a.MockOutgoing)
 		r.Post("/setmocks", a.SetMocks)
+		r.Post("/register", a.RegisterClients)
 		r.Get("/consumedmocks", a.GetConsumedMocks)
 	})
 
+}
+
+func (a *AgentRequest) Health(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
 }
 
 func (a *AgentRequest) HandleIncoming(w http.ResponseWriter, r *http.Request) {
@@ -109,15 +115,15 @@ func (a *AgentRequest) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 		default:
 			// Stream each mock as JSON
 			render.JSON(w, r, m)
-			flusher.Flush() // Immediately send data to the client
+			flusher.Flush()
 		}
 	}
 }
 
-func (a *AgentRequest) RegisterClient(w http.ResponseWriter, r *http.Request) {
+func (a *AgentRequest) RegisterClients(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	var SetupRequest models.SetupReq
+	var SetupRequest models.RegisterReq
 	err := json.NewDecoder(r.Body).Decode(&SetupRequest)
 
 	if err != nil {
@@ -126,25 +132,26 @@ func (a *AgentRequest) RegisterClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmt.Printf("SetupRequest: %v\n", SetupRequest.SetupOptions.ClientPid)
+	fmt.Printf("SetupRequest: %v\n", SetupRequest.SetupOptions.ClientNsPid)
 
-	if SetupRequest.SetupOptions.ClientPid == 0 {
+	if SetupRequest.SetupOptions.ClientNsPid == 0 {
 		render.JSON(w, r, "Client pid is required")
 		render.Status(r, http.StatusBadRequest)
 		return
 	}
+	fmt.Printf("SetupRequest: %v\n", SetupRequest.SetupOptions)
 
 	// TODO: merge this functionality in setup only
-	err = a.agent.RegisterClient(r.Context(), SetupRequest.SetupOptions.ClientPid)
+	err = a.agent.RegisterClient(r.Context(), SetupRequest.SetupOptions)
 	if err != nil {
 		render.JSON(w, r, err)
 		render.Status(r, http.StatusInternalServerError)
 		return
 	}
 
-	var SetupResponse models.SetupResp
-	SetupResponse = models.SetupResp{
-		AppId:      1234,
+	var SetupResponse models.RegisterResp
+	SetupResponse = models.RegisterResp{
+		AppId:      0,
 		IsRunnning: true,
 	}
 

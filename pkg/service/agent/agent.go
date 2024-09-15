@@ -4,14 +4,12 @@ package agent
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"sync"
 
-	"github.com/google/uuid"
-
 	"go.keploy.io/server/v2/pkg/core"
+	"go.keploy.io/server/v2/pkg/core/hooks/structs"
 	"go.keploy.io/server/v2/pkg/models"
 	Docker "go.keploy.io/server/v2/pkg/platform/docker"
 	"go.keploy.io/server/v2/utils"
@@ -43,49 +41,29 @@ func New(logger *zap.Logger, hook core.Hooks, proxy core.Proxy, tester core.Test
 }
 
 // Setup will create a new app and store it in the map, all the setup will be done here
-func (a *Agent) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
-
-	// Random AppId uint64 will be generated and maintain in a map and return the id to client
-	newUUID := uuid.New()
-
-	// app id will be sent by the client.
-	// Convert the first 8 bytes of the UUID to an int64
-	id := int64(binary.BigEndian.Uint64(newUUID[:8]))
-	fmt.Println("App ID: ", id, "IsApi", opts.IsApi)
+func (a *Agent) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
 
 	a.logger.Info("Starting the agent in ", zap.String(string(opts.Mode), "mode"))
-	err := a.Hook(ctx, 0, models.HookOptions{Mode: opts.Mode, EnableTesting: false})
+	err := a.Hook(ctx, 0, models.HookOptions{Mode: opts.Mode})
 	if err != nil {
 		a.logger.Error("failed to hook into the app", zap.Error(err))
 	}
 
-	// a.logger.Info("Sending keploy client pid in the setup: ", zap.Uint64("pid", uint64(opts.ClientPid)))
-	// a.Hooks.SendKeployPid(opts.ClientPid)
-
 	select {
 	case <-ctx.Done():
 		fmt.Println("Context cancelled, stopping Setup")
-		return uint64(id), nil
+		return context.Canceled
 	}
 }
 
 // Listeners will get activated, details will be stored in the map. And connection will be established
 func (a *Agent) GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
-	fmt.Println("GetIncoming !!")
+	a.logger.Info("Inside GetIncoming of agent binary !!")
 	return a.Hooks.Record(ctx, id, opts)
 }
 
 func (a *Agent) GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 	m := make(chan *models.Mock, 500)
-
-	fmt.Println("GetOutgoing !!")
-	ports := core.GetPortToSendToKernel(ctx, opts.Rules)
-	if len(ports) > 0 {
-		err := a.Hooks.PassThroughPortsInKernel(ctx, id, ports)
-		if err != nil {
-			return nil, err
-		}
-	}
 
 	err := a.Proxy.Record(ctx, id, m, opts)
 	if err != nil {
@@ -97,13 +75,6 @@ func (a *Agent) GetOutgoing(ctx context.Context, id uint64, opts models.Outgoing
 
 func (a *Agent) MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error {
 	a.logger.Info("Inside MockOutgoing of agent binary !!")
-	ports := core.GetPortToSendToKernel(ctx, opts.Rules)
-	if len(ports) > 0 {
-		err := a.Hooks.PassThroughPortsInKernel(ctx, id, ports)
-		if err != nil {
-			return err
-		}
-	}
 
 	err := a.Proxy.Mock(ctx, id, opts)
 	if err != nil {
@@ -148,11 +119,6 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 		if err != nil {
 			utils.LogError(a.logger, err, "failed to unload the hooks")
 		}
-
-		//deleting in order to free the memory in case of rerecord. otherwise different app id will be created for the same app.
-		// a.apps.Delete(id)
-		// a.id = utils.AutoInc{}
-
 		return nil
 	})
 
@@ -161,8 +127,8 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 	err := a.Hooks.Load(hookCtx, id, core.HookCfg{
 		AppID:    id,
 		Pid:      0,
-		IsDocker: false,
-		// KeployIPV4: a.KeployIPv4Addr(),
+		IsDocker: false, // check from the flag
+		// KeployIPV4: a.KeployIPv4Addr(), // this IP will also be provided by the client
 		Mode: opts.Mode,
 	})
 
@@ -173,7 +139,7 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 
 	if a.proxyStarted {
 		a.logger.Info("Proxy already started")
-		// return nil
+		return nil
 	}
 
 	select {
@@ -228,7 +194,31 @@ func (a *Agent) UnHook(ctx context.Context, id uint64) error {
 }
 
 // merge it in the setup only
-func (a *Agent) RegisterClient(ctx context.Context, id uint32) error {
-	fmt.Println("Registering client with keploy client id!! ", id)
-	return a.Hooks.SendKeployPid(id)
+func (a *Agent) RegisterClient(ctx context.Context, opts models.SetupOptions) error {
+	fmt.Println("Registering client with keploy client id!! ", opts)
+	clientInfo := structs.ClientInfo{
+		KeployClientNsPid:        opts.ClientNsPid,
+		IsDockerApp:              0,
+		IsKeployClientRegistered: 0,
+		KeployClientInode:        opts.ClientInode,
+	}
+
+	switch opts.Mode {
+	case models.MODE_RECORD:
+		clientInfo.Mode = uint32(1)
+	case models.MODE_TEST:
+		clientInfo.Mode = uint32(2)
+	default:
+		clientInfo.Mode = uint32(0)
+	}
+
+	return a.Hooks.SendKeployClientInfo(ctx, opts.ClientId, clientInfo)
 }
+
+// Random AppId uint64 will be generated and maintain in a map and return the id to client
+// newUUID := uuid.New()
+
+// // app id will be sent by the client.
+// // Convert the first 8 bytes of the UUID to an int64
+// id := int64(binary.BigEndian.Uint64(newUUID[:8]))
+// fmt.Println("App ID: ", id, "IsApi", opts.IsApi)

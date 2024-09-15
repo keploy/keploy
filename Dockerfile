@@ -29,13 +29,13 @@ RUN apt-get install -y ca-certificates curl sudo && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Docker engine
-RUN curl -fsSL https://get.docker.com -o get-docker.sh && \
-    sh get-docker.sh && \
-    rm get-docker.sh
+# # Install Docker engine
+# RUN curl -fsSL https://get.docker.com -o get-docker.sh && \
+#     sh get-docker.sh && \
+#     rm get-docker.sh
 
 # Install docker-compose to PATH
-RUN apt install docker-compose -y
+# RUN apt install docker-compose -y
 
 # Copy the keploy binary and the entrypoint script from the build container
 COPY --from=build /app/keploy /app/keploy
@@ -48,4 +48,4 @@ RUN sed -i 's/\r$//' /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 # Set the entrypoint
-ENTRYPOINT ["/app/entrypoint.sh", "/app/keploy"]
+ENTRYPOINT ["/app/entrypoint.sh", "/app/keploy", "agent"]

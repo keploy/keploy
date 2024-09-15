@@ -26,7 +26,7 @@ type CommonInternalServices struct {
 
 func Gets(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger, tel *telemetry.Telemetry, auth service.Auth) (interface{}, error) {
 
-	commonServices, err := GetCommonServicess(ctx, cfg, logger)
+	commonServices, err := GetCommonServices(ctx, cfg, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +53,6 @@ func GetCommonServicess(_ context.Context, c *config.Config, logger *zap.Logger)
 	// fixed port for native - 16789
 	// agent ki binary exec karke Indocker boolean
 	// this is to be done client side only
-	
 
 	// instrumentation is to be used for core functionalities, we need to declare all these things in the agent proxy
 	instrumentation := agent.New(logger, h, p, t, client)

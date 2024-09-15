@@ -53,8 +53,9 @@ type DockerAppInfo struct {
 // };
 
 type ClientInfo struct {
-	KeployClientInode        uint64
-	KeployClientNsPid        uint32
+	KeployClientInode uint64
+	KeployClientNsPid uint32
+	// AppInode                 uint64
 	Mode                     uint32
 	IsDockerApp              uint32
 	IsKeployClientRegistered uint32

@@ -7,14 +7,14 @@ import (
 )
 
 type Service interface {
-	Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error)
+	Setup(ctx context.Context, cmd string, opts models.SetupOptions) error
 	GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error)
 	GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) (<-chan *models.Mock, error)
 	// GetContainerIP(ctx context.Context, id uint64) (string, error)
 	MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
 	GetConsumedMocks(ctx context.Context, id uint64) ([]string, error)
-	RegisterClient(ctx context.Context, pid uint32) error
+	RegisterClient(ctx context.Context, opts models.SetupOptions) error
 }
 
 type Options struct {

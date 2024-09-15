@@ -53,7 +53,6 @@ type App struct {
 	keployNetwork    string
 	keployContainer  string
 	keployIPv4       string
-	inodeChan        chan uint64
 	EnableTesting    bool
 	Mode             models.Mode
 }
@@ -292,7 +291,6 @@ func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
 		return false, err
 	}
 
-	a.inodeChan <- inode
 	a.logger.Debug("container started and successfully extracted inode", zap.Any("inode", inode))
 	if info.NetworkSettings == nil || info.NetworkSettings.Networks == nil {
 		a.logger.Debug("container network settings not available", zap.Any("containerDetails.NetworkSettings", info.NetworkSettings))
@@ -311,7 +309,7 @@ func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
 func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 	// listen for the docker daemon events
 	defer a.logger.Debug("exiting from goroutine of docker daemon event listener")
-
+	fmt.Println("Listening for docker daemon events")
 	errCh := make(chan error, 1)
 	timer := time.NewTimer(time.Duration(a.containerDelay) * time.Second)
 	logTicker := time.NewTicker(1 * time.Second)
@@ -417,8 +415,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 	}
 }
 
-func (a *App) Run(ctx context.Context, inodeChan chan uint64) models.AppError {
-	a.inodeChan = inodeChan
+func (a *App) Run(ctx context.Context) models.AppError {
 
 	if utils.IsDockerCmd(a.kind) {
 		return a.runDocker(ctx)
