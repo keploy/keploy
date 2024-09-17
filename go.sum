@@ -1,3 +1,5 @@
+facette.io/natsort v0.0.0-20181210072756-2cd4dd1e2dcb h1:1pSweJFeR3Pqx7uoelppkzeegfUBXL6I2FFAbfXw570=
+facette.io/natsort v0.0.0-20181210072756-2cd4dd1e2dcb/go.mod h1:npRYmtaITVom7rcSo+pRURltHSG2r4TQM1cdqJ2dUB0=
 github.com/7sDream/geko v0.1.1 h1:Ms9RVcUJDPsUuRlk3T3sGmSGAMuttqh2/3okZ4yWUpU=
 github.com/7sDream/geko v0.1.1/go.mod h1:NcSQXSUpcoqNP8BkOLP2TsinxRVjnMkDYCKl9L1Czxk=
 github.com/Azure/go-ansiterm v0.0.0-20210617225240-d185dfc1b5a1 h1:UQHMgLO+TxOElx5B5HZ4hJQsoJ/PvUvKRhJHDQXO8P8=

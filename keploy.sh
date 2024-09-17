@@ -71,8 +71,12 @@ installKeploy (){
                 exit 1
             fi
         else
-            # Move with sudo
-            sudo mkdir -p /usr/local/bin && sudo mv /tmp/keploy /usr/local/bin/keploy
+            source_dir="/tmp/keploy"
+            OS_NAME=$(uname)  # Get the operating system name
+            if [ "$OS_NAME" = "Darwin" ]; then
+                source_dir="/tmp/keploy/keploy"  # Set source directory to the binary inside the extracted folder
+            fi
+            sudo mkdir -p /usr/local/bin && sudo mv "$source_dir" /usr/local/bin/keploy
         fi
         set_alias
     }
@@ -123,21 +127,32 @@ installKeploy (){
         source $2
     }
 
+    update_path() {
+        PATH_CMD="export PATH=\"\$HOME/.keploy/bin:\$PATH\""
+        rc_file="$1"
+        if [ -f "$rc_file" ]; then
+            if ! grep -q "$PATH_CMD" "$rc_file"; then
+                append_to_rc "$PATH_CMD" "$rc_file"
+            fi
+        else
+            export PATH="$PATH_CMD"
+        fi
+    }
+
     # Get the alias to set and set it
     set_alias() {
         current_shell="$(basename "$SHELL")"
         if [ "$NO_ROOT" = "true" ]; then
             # Just update the PATH in .zshrc or .bashrc, no alias needed
-            PATH_CMD="export PATH=\"\$HOME/.keploy/bin:\$PATH\""
             if [[ "$current_shell" = "zsh" || "$current_shell" = "-zsh" ]]; then
-                append_to_rc "$PATH_CMD" "$HOME/.zshrc"
+                update_path "$HOME/.zshrc"
             elif [[ "$current_shell" = "bash" || "$current_shell" = "-bash" ]]; then
-                append_to_rc "$PATH_CMD" "$HOME/.bashrc"
+                update_path "$HOME/.bashrc"
             else
-                append_to_rc "$PATH_CMD" "$HOME/.profile"
+                update_path "$HOME/.profile"
             fi
         else
-            ALIAS_CMD="alias keploy='sudo -E env PATH="$PATH" keploy'"
+            ALIAS_CMD="alias keploy='sudo -E env PATH=\"\$PATH\" keploy'"
             # Handle zsh or bash for non-macOS systems
             if [[ "$current_shell" = "zsh" || "$current_shell" = "-zsh" ]]; then
                 if [ -f "$HOME/.zshrc" ]; then

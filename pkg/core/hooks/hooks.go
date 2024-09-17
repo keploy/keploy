@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	"golang.org/x/sync/errgroup"
@@ -58,7 +59,6 @@ type Hooks struct {
 	// ebpf objects and events
 	socket   link.Link
 	connect4 link.Link
-	bind     link.Link
 	gp4      link.Link
 	udpp4    link.Link
 	tcppv4   link.Link
@@ -130,6 +130,11 @@ func (h *Hooks) load(opts core.HookCfg) error {
 	// Load pre-compiled programs and maps into the kernel.
 	objs := bpfObjects{}
 	if err := loadBpfObjects(&objs, nil); err != nil {
+		var ve *ebpf.VerifierError
+		if errors.As(err, &ve) {
+			errString := strings.Join(ve.Log, "\n")
+			h.logger.Debug("verifier log: ", zap.String("err", errString))
+		}
 		utils.LogError(h.logger, err, "failed to load eBPF objects")
 		return err
 	}
