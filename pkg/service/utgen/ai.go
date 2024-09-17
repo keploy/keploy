@@ -10,7 +10,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"go.keploy.io/server/v2/pkg/service"
@@ -106,6 +108,26 @@ func NewAIClient(model, apiBase, apiVersion, apiKey, apiServerURL string, auth s
 func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (string, int, int, error) {
 
 	var apiBaseURL string
+
+	// Signal handling for Ctrl+C (SIGINT)
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigChan)
+
+	// Create a cancellable context for the request
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Start a goroutine to listen for Ctrl+C and cancel the context
+	go func() {
+		select {
+		case <-sigChan:
+			fmt.Println("Received interrupt signal. Cancelling AI request...")
+			cancel() // Cancel the context if Ctrl+C is pressed
+		case <-ctx.Done():
+			// Context already cancelled, do nothing
+		}
+	}()
 
 	if prompt.System == "" && prompt.User == "" {
 		return "", 0, 0, errors.New("the prompt must contain 'system' and 'user' keys")
@@ -241,40 +263,47 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 	fmt.Println("Streaming results from LLM model...")
 
 	for {
-		line, err := reader.ReadString('\n')
-		if err != nil && err != io.EOF {
-			utils.LogError(ai.Logger, err, "Error reading stream")
-			return "", 0, 0, err
-		}
-		line = strings.TrimSpace(strings.TrimPrefix(line, "data: "))
-		if line == "[DONE]" {
-			break
-		}
+		select {
+		case <-ctx.Done():
+			fmt.Println("contect cancelling")
+			return "", 0, 0, ctx.Err()
+		default:
 
-		if line == "" {
-			continue
-		}
+			line, err := reader.ReadString('\n')
+			if err != nil && err != io.EOF {
+				utils.LogError(ai.Logger, err, "Error reading stream")
+				return "", 0, 0, err
+			}
+			line = strings.TrimSpace(strings.TrimPrefix(line, "data: "))
+			if line == "[DONE]" {
+				break
+			}
 
-		var chunk ModelResponse
-		err = json.Unmarshal([]byte(line), &chunk)
-		if err != nil {
-			utils.LogError(ai.Logger, err, "Error unmarshalling chunk")
-			continue
-		}
+			if line == "" {
+				continue
+			}
 
-		if len(chunk.Choices) > 0 {
-			if chunk.Choices[0].Delta != (Delta{}) {
-				contentBuilder.WriteString(chunk.Choices[0].Delta.Content)
-				if ai.Logger.Level() == zap.DebugLevel {
-					fmt.Print(chunk.Choices[0].Delta.Content)
+			var chunk ModelResponse
+			err = json.Unmarshal([]byte(line), &chunk)
+			if err != nil {
+				utils.LogError(ai.Logger, err, "Error unmarshalling chunk")
+				continue
+			}
+
+			if len(chunk.Choices) > 0 {
+				if chunk.Choices[0].Delta != (Delta{}) {
+					contentBuilder.WriteString(chunk.Choices[0].Delta.Content)
+					if ai.Logger.Level() == zap.DebugLevel {
+						fmt.Print(chunk.Choices[0].Delta.Content)
+					}
 				}
 			}
-		}
 
-		if err == io.EOF {
-			break
+			if err == io.EOF {
+				break
+			}
+			time.Sleep(10 * time.Millisecond) 
 		}
-		time.Sleep(10 * time.Millisecond) // Optional: Delay to simulate more 'natural' response pacing
 	}
 	if ai.Logger.Level() == zap.DebugLevel {
 		fmt.Println()
