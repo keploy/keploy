@@ -302,7 +302,7 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 			if err == io.EOF {
 				break
 			}
-			time.Sleep(10 * time.Millisecond) 
+			time.Sleep(10 * time.Millisecond)
 		}
 	}
 	if ai.Logger.Level() == zap.DebugLevel {
