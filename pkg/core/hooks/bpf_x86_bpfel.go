@@ -95,7 +95,6 @@ type bpfMapSpecs struct {
 	ConnInfoMap                 *ebpf.MapSpec `ebpf:"conn_info_map"`
 	CurrentSockMap              *ebpf.MapSpec `ebpf:"current_sock_map"`
 	DestInfoMap                 *ebpf.MapSpec `ebpf:"dest_info_map"`
-	DockerAppRegistrationMap    *ebpf.MapSpec `ebpf:"docker_app_registration_map"`
 	KeployAgentKernelPidMap     *ebpf.MapSpec `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.MapSpec `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.MapSpec `ebpf:"keploy_client_kernel_pid_map"`
@@ -135,7 +134,6 @@ type bpfMaps struct {
 	ConnInfoMap                 *ebpf.Map `ebpf:"conn_info_map"`
 	CurrentSockMap              *ebpf.Map `ebpf:"current_sock_map"`
 	DestInfoMap                 *ebpf.Map `ebpf:"dest_info_map"`
-	DockerAppRegistrationMap    *ebpf.Map `ebpf:"docker_app_registration_map"`
 	KeployAgentKernelPidMap     *ebpf.Map `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.Map `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.Map `ebpf:"keploy_client_kernel_pid_map"`
@@ -158,7 +156,6 @@ func (m *bpfMaps) Close() error {
 		m.ConnInfoMap,
 		m.CurrentSockMap,
 		m.DestInfoMap,
-		m.DockerAppRegistrationMap,
 		m.KeployAgentKernelPidMap,
 		m.KeployAgentRegistrationMap,
 		m.KeployClientKernelPidMap,

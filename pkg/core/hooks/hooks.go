@@ -140,8 +140,8 @@ func (h *Hooks) load(opts core.HookCfg) error {
 	fmt.Println("clientRegistrationMap", h.clientRegistrationMap)
 	h.agentRegistartionMap = objs.KeployAgentRegistrationMap
 	fmt.Println("agentRegistartionMap", h.agentRegistartionMap)
-	h.dockerAppRegistrationMap = objs.DockerAppRegistrationMap
-	fmt.Println("dockerAppRegistrationMap", h.dockerAppRegistrationMap)
+	// h.dockerAppRegistrationMap = objs.DockerAppRegistrationMap
+	// fmt.Println("dockerAppRegistrationMap", h.dockerAppRegistrationMap)
 	h.objects = objs
 
 	// ---------------
@@ -496,7 +496,7 @@ func (h *Hooks) SendKeployClientInfo(ctx context.Context, clientId uint64, clien
 	// TODO use the session to get the app id
 	// and then use the app id to get the test cases chan
 	// and pass that to eBPF consumers/listeners
-	fmt.Println("clientInfo ...", clientInfo)
+	fmt.Println("clientInfo agya hahahaa ...", clientInfo)
 
 	err := h.SendClientInfo(clientId, clientInfo)
 	if err != nil {

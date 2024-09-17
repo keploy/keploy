@@ -33,7 +33,7 @@ import (
 
 type CommonInternalService struct {
 	commonPlatformServices
-	Instrumentation *http.Agent
+	Instrumentation *http.AgentClient
 }
 
 func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger, tel *telemetry.Telemetry, auth service.Auth) (interface{}, error) {

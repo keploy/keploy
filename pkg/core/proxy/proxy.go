@@ -188,7 +188,7 @@ func (p *Proxy) start(ctx context.Context) error {
 		return err
 	}
 	p.Listener = listener
-	p.logger.Debug(fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(":%v", listener.Addr())))
+	p.logger.Info(fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(":%v", listener.Addr())))
 
 	defer func(listener net.Listener) {
 		err := listener.Close()
@@ -205,7 +205,7 @@ func (p *Proxy) start(ctx context.Context) error {
 		clientConnCancel()
 		err := clientConnErrGrp.Wait()
 		if err != nil {
-			p.logger.Debug("failed to handle the client connection", zap.Error(err))
+			p.logger.Info("failed to handle the client connection", zap.Error(err))
 		}
 		//closing all the mock channels (if any in record mode)
 		for _, mc := range p.sessions.GetAllMC() {
@@ -249,7 +249,6 @@ func (p *Proxy) start(ctx context.Context) error {
 		case clientConn := <-clientConnCh:
 			clientConnErrGrp.Go(func() error {
 				defer util.Recover(p.logger, clientConn, nil)
-				fmt.Println("BEFORE GOING TO HANDLE CONNECTION")
 				err := p.handleConnection(clientConnCtx, clientConn)
 				if err != nil && err != io.EOF {
 					utils.LogError(p.logger, err, "failed to handle the client connection")
@@ -282,12 +281,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	sourcePort := remoteAddr.Port
 
 	p.logger.Info("Inside handleConnection of proxyServer", zap.Any("source port", sourcePort), zap.Any("Time", time.Now().Unix()))
-
 	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
 	if err != nil {
 		utils.LogError(p.logger, err, "failed to fetch the destination info", zap.Any("Source port", sourcePort))
 		return err
 	}
+	fmt.Println("DestInfo", destInfo)
 
 	// releases the occupied source port when done fetching the destination info
 	err = p.DestInfo.Delete(ctx, uint16(sourcePort))

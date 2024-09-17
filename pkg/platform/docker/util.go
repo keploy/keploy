@@ -10,11 +10,10 @@ import (
 	"os/exec"
 	"regexp"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/network"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -86,7 +85,6 @@ func GenerateDockerEnvs(config DockerConfigStruct) string {
 // should also return a boolean if the execution is moved to docker
 func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config) error {
 
-	fmt.Println("Starting in docker")
 	if DockerConfig.Envs == nil {
 		DockerConfig.Envs = map[string]string{
 			"INSTALLATION_ID": conf.InstallationID,
@@ -97,13 +95,9 @@ func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config)
 
 	//Check if app command starts with docker or docker-compose.
 	// If it does, then we would run the docker version of keploy and
-	// pass the command and control to it.
-	// cmdType := utils.FindDockerCmd(conf.Command)
-	// if conf.InDocker || !(utils.IsDockerCmd(cmdType)) {
-	// 	return nil
-	// }
+
 	// pass the all the commands and args to the docker version of Keploy
-	fmt.Println("Before running in docker")
+
 	err := RunInDocker(ctx, logger)
 	if err != nil {
 		utils.LogError(logger, err, "failed to run the command in docker")
@@ -122,17 +116,13 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 		return err
 	}
 	fmt.Println("Running in docker keploy alias", keployAlias)
-	var quotedArgs []string
 
-	for _, arg := range os.Args[1:] {
-		quotedArgs = append(quotedArgs, strconv.Quote(arg))
-	}
 	client, err := New(logger)
 	if err != nil {
 		utils.LogError(logger, err, "failed to initalise docker")
 		return err
 	}
-	fmt.Println("Creating debugfs volume")
+
 	addKeployNetwork(ctx, logger, client)
 	err = client.CreateVolume(ctx, "debugfs", true)
 	if err != nil {
@@ -160,7 +150,7 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 			ctx,
 			"sh",
 			"-c",
-			keployAlias+" "+strings.Join(quotedArgs, " "),
+			keployAlias,
 		)
 	}
 
@@ -209,7 +199,7 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 
 	switch osName {
 	case "linux":
-		alias := "sudo docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
+		alias := "sudo docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 16789:16789 -p 8086:8086 --privileged --pid=host" + ttyFlag + " -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
 		return alias, nil
 	case "windows":
 		// Get the current working directory
@@ -261,7 +251,6 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 		logger.Info("Starting keploy in docker with default context, as that is the current context.")
 		alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
 		return alias, nil
-
 	}
 	return "", errors.New("failed to get alias")
 }
@@ -269,7 +258,7 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 func addKeployNetwork(ctx context.Context, logger *zap.Logger, client Client) {
 
 	// Check if the 'keploy-network' network exists
-	networks, err := client.NetworkList(ctx, types.NetworkListOptions{})
+	networks, err := client.NetworkList(ctx, network.ListOptions{})
 	if err != nil {
 		logger.Debug("failed to list docker networks")
 		return
@@ -284,9 +273,7 @@ func addKeployNetwork(ctx context.Context, logger *zap.Logger, client Client) {
 	}
 
 	// Create the 'keploy' network if it doesn't exist
-	_, err = client.NetworkCreate(ctx, "keploy-network", types.NetworkCreate{
-		CheckDuplicate: true,
-	})
+	_, err = client.NetworkCreate(ctx, "keploy-network", network.CreateOptions{})
 	if err != nil {
 		logger.Debug("failed to create keploy network")
 		return
@@ -303,4 +290,19 @@ func convertPathToUnixStyle(path string) string {
 		unixPath = unixPath[2:]
 	}
 	return unixPath
+}
+
+
+// Function to extract the inode of the PID namespace
+func ExtractPidNamespaceInode(pid int) (string, error) {
+	// Check the namespace file in /proc
+	nsPath := fmt.Sprintf("/proc/%d/ns/pid", pid)
+	fileInfo, err := os.Stat(nsPath)
+	if err != nil {
+		return "", err
+	}
+
+	// Retrieve inode number
+	inode := fileInfo.Sys().(*syscall.Stat_t).Ino
+	return fmt.Sprintf("%d", inode), nil
 }

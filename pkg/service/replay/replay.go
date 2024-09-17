@@ -322,7 +322,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		return &InstrumentState{}, nil
 	}
 	// Instrument will setup the environment and start the hooks and proxy
-	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST})
+	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST})
 	if err != nil {
 		stopReason := "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)

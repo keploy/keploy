@@ -249,7 +249,7 @@ func (a *App) injectNetwork(network string) error {
 	//TODO: check the logic for correctness
 	for n, settings := range keployNetworks {
 		if n == network {
-			a.keployIPv4 = settings.IPAddress
+			a.keployIPv4 = settings.IPAddress // TODO: keployIPv4 needs to be send to the agent
 			a.logger.Info("Successfully injected network to the keploy container", zap.Any("Keploy container", a.keployContainer), zap.Any("appNetwork", network), zap.String("keploy container ip", a.keployIPv4))
 			return nil
 		}
@@ -291,7 +291,7 @@ func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
 		return false, err
 	}
 
-	a.logger.Debug("container started and successfully extracted inode", zap.Any("inode", inode))
+	a.logger.Info("container started and successfully extracted inode", zap.Any("inode", inode))
 	if info.NetworkSettings == nil || info.NetworkSettings.Networks == nil {
 		a.logger.Debug("container network settings not available", zap.Any("containerDetails.NetworkSettings", info.NetworkSettings))
 		return false, nil

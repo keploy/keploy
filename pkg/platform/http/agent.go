@@ -19,9 +19,14 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/client"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
@@ -35,7 +40,7 @@ import (
 )
 
 // agent will implement
-type Agent struct {
+type AgentClient struct {
 	logger       *zap.Logger
 	core.Proxy                  // embedding the Proxy interface to transfer the proxy methods to the core object
 	core.Hooks                  // embedding the Hooks interface to transfer the hooks methods to the core object
@@ -48,8 +53,8 @@ type Agent struct {
 }
 
 // this will be the client side implementation
-func New(logger *zap.Logger, hook core.Hooks, proxy core.Proxy, tester core.Tester, client kdocker.Client) *Agent {
-	return &Agent{
+func New(logger *zap.Logger, hook core.Hooks, proxy core.Proxy, tester core.Tester, client kdocker.Client) *AgentClient {
+	return &AgentClient{
 		logger:       logger,
 		Hooks:        hook,
 		Proxy:        proxy,
@@ -60,7 +65,7 @@ func New(logger *zap.Logger, hook core.Hooks, proxy core.Proxy, tester core.Test
 }
 
 // Listeners will get activated, details will be stored in the map. And connection will be established
-func (a *Agent) GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
+func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	requestBody := models.IncomingReq{
 		IncomingOptions: opts,
 		AppId:           0,
@@ -141,7 +146,7 @@ func (a *Agent) GetIncoming(ctx context.Context, id uint64, opts models.Incoming
 	return tcChan, nil
 }
 
-func (a *Agent) GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
+func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 	requestBody := models.OutgoingReq{
 		OutgoingOptions: opts,
 		AppId:           0,
@@ -206,7 +211,7 @@ func (a *Agent) GetOutgoing(ctx context.Context, id uint64, opts models.Outgoing
 	return mockChan, nil
 }
 
-func (a *Agent) MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error {
+func (a *AgentClient) MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error {
 	// make a request to the server to mock outgoing
 	requestBody := models.OutgoingReq{
 		OutgoingOptions: opts,
@@ -244,7 +249,7 @@ func (a *Agent) MockOutgoing(ctx context.Context, id uint64, opts models.Outgoin
 
 }
 
-func (a *Agent) SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error {
+func (a *AgentClient) SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error {
 	requestBody := models.SetMocksReq{
 		Filtered:   filtered,
 		UnFiltered: unFiltered,
@@ -281,7 +286,7 @@ func (a *Agent) SetMocks(ctx context.Context, id uint64, filtered []*models.Mock
 	return nil
 }
 
-func (a *Agent) GetConsumedMocks(ctx context.Context, id uint64) ([]string, error) {
+func (a *AgentClient) GetConsumedMocks(ctx context.Context, id uint64) ([]string, error) {
 	// Create the URL with query parameters
 	url := fmt.Sprintf("http://localhost:8086/agent/consumedmocks?id=%d", id)
 
@@ -310,32 +315,30 @@ func (a *Agent) GetConsumedMocks(ctx context.Context, id uint64) ([]string, erro
 	return consumedMocks, nil
 }
 
-func (a *Agent) UnHook(ctx context.Context, id uint64) error {
+func (a *AgentClient) UnHook(ctx context.Context, id uint64) error {
 	return nil
 }
 
-func (a *Agent) GetContainerIP(_ context.Context, id uint64) (string, error) {
+func (a *AgentClient) GetContainerIP(_ context.Context, id uint64) (string, error) {
 
-	// a, err := c.getApp(id)
-	// if err != nil {
-	// 	utils.LogError(c.logger, err, "failed to get app")
-	// 	return "", err
-	// }
+	app, err := a.getApp(id)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to get app")
+		return "", err
+	}
 
-	// ip := a.ContainerIPv4Addr()
-	// a.logger.Debug("ip address of the target app container", zap.Any("ip", ip))
-	// if ip == "" {
-	// 	return "", fmt.Errorf("failed to get the IP address of the app container. Try increasing --delay (in seconds)")
-	// }
+	ip := app.ContainerIPv4Addr()
+	a.logger.Debug("ip address of the target app container", zap.Any("ip", ip))
+	if ip == "" {
+		return "", fmt.Errorf("failed to get the IP address of the app container. Try increasing --delay (in seconds)")
+	}
 
-	// return ip, nil
-	return "", nil
+	return ip, nil
 }
 
-func (a *Agent) Run(ctx context.Context, id uint64, _ models.RunOptions) models.AppError {
-	fmt.Println("Run.....", id)
+func (a *AgentClient) Run(ctx context.Context, id uint64, _ models.RunOptions) models.AppError {
+
 	app, err := a.getApp(id)
-	fmt.Println("app::::::", app)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to get app while running")
 		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
@@ -372,7 +375,7 @@ func (a *Agent) Run(ctx context.Context, id uint64, _ models.RunOptions) models.
 	}
 }
 
-func (a *Agent) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
+func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
 	// check if the agent is running
 	isAgentRunning := false
 
@@ -393,7 +396,6 @@ func (a *Agent) Setup(ctx context.Context, cmd string, opts models.SetupOptions)
 	} else {
 		isAgentRunning = true
 		a.logger.Info("Setup request sent to the server", zap.String("status", resp.Status))
-		time.Sleep(5 * time.Second)
 	}
 
 	fmt.Println("isAgentRunning", isAgentRunning)
@@ -401,8 +403,12 @@ func (a *Agent) Setup(ctx context.Context, cmd string, opts models.SetupOptions)
 	if !isAgentRunning {
 		// Start the keploy agent as a detached process and pipe the logs into a file
 		if isDockerCmd {
-			// run the docker container instead of the agent
-			a.StartInDocker(ctx, a.logger, clientId)
+			// run the docker container instead of the agent binary
+			go func() {
+				if err := a.StartInDocker(ctx, a.logger, clientId); err != nil {
+					a.logger.Error("failed to start docker agent", zap.Error(err))
+				}
+			}()
 		} else {
 			// Open the log file in append mode or create it if it doesn't exist
 			logFile, err := os.OpenFile("keploy_agent.log", os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
@@ -425,22 +431,15 @@ func (a *Agent) Setup(ctx context.Context, cmd string, opts models.SetupOptions)
 				utils.LogError(a.logger, err, "failed to start keploy agent")
 				return 0, err
 			}
-		
-		time.Sleep(2 * time.Second)
-		a.logger.Info("keploy agent started", zap.Any("pid", agentCmd.Process.Pid))
-	}
-}
 
-	time.Sleep(5 * time.Second)
-	// Register the client with the server and get the app id
-	opts.ClientId = clientId
-	err = a.RegisterClient(ctx, opts)
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to register client")
-		return 0, err
+			time.Sleep(1 * time.Second)
+			a.logger.Info("keploy agent started", zap.Any("pid", agentCmd.Process.Pid))
+		}
 	}
 
-	// Doubt: will this be needed in test mode as well or somewhere else we have done this ??
+	time.Sleep(10 * time.Second)
+	// check if its docker then create a init container first
+	// and then the app container
 	usrApp := app.NewApp(a.logger, clientId, cmd, a.dockerClient, app.Options{
 		DockerNetwork: opts.DockerNetwork,
 		Container:     opts.Container,
@@ -453,11 +452,35 @@ func (a *Agent) Setup(ctx context.Context, cmd string, opts models.SetupOptions)
 		utils.LogError(a.logger, err, "failed to setup app")
 		return 0, err
 	}
+
+	var inode uint64
+	if isDockerCmd {
+
+		inode, err = a.Initcontainer(ctx, a.logger, app.Options{
+			DockerNetwork: opts.DockerNetwork,
+			Container:     opts.Container,
+			DockerDelay:   opts.DockerDelay,
+		})
+		if err != nil {
+			utils.LogError(a.logger, err, "failed to setup init container")
+			return 0, err
+		}
+	}
+
+	opts.ClientId = clientId
+	opts.AppInode = inode
+	// Register the client with the server
+	err = a.RegisterClient(ctx, opts)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to register client")
+		return 0, err
+	}
+
 	return clientId, nil
 }
 
 // Doubt: where should I place this getApp method ?
-func (ag *Agent) getApp(id uint64) (*app.App, error) {
+func (ag *AgentClient) getApp(id uint64) (*app.App, error) {
 	a, ok := ag.apps.Load(id)
 	if !ok {
 		fmt.Printf("app with id:%v not found", id)
@@ -473,11 +496,9 @@ func (ag *Agent) getApp(id uint64) (*app.App, error) {
 	return h, nil
 }
 
-func (a *Agent) RegisterClient(ctx context.Context, opts models.SetupOptions) error {
+func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptions) error {
 	// Register the client with the server
 	clientPid := uint32(os.Getpid())
-	fmt.Println("clientPid", clientPid)
-	fmt.Println("clientId", opts.ClientId)
 
 	// start the app container and get the inode number
 	// keploy agent would have already runnning,
@@ -495,6 +516,7 @@ func (a *Agent) RegisterClient(ctx context.Context, opts models.SetupOptions) er
 			Mode:          opts.Mode,
 			ClientId:      0,
 			ClientInode:   inode,
+			AppInode:      opts.AppInode,
 		},
 	}
 
@@ -535,20 +557,99 @@ func (a *Agent) RegisterClient(ctx context.Context, opts models.SetupOptions) er
 	return nil
 }
 
-func (a *Agent) StartInDocker(ctx context.Context, logger *zap.Logger, clientId uint64) {
-	// start the keploy agent in the docker container, with entrypoint /app/keploy agent --is-docker
-	// keploy will be running in the host namespace,
-	// client will also start initcontainer, whose containerId will be passed to the appcontainer
-	// for eg- docker run busybox sleep 5 -> take its pid and pass it to the app container
+func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, clientId uint64) error {
 
-	// start the keploy agent in the docker container
+	// Start the keploy agent in a Docker container
+	agentCtx := context.WithoutCancel(context.Background())
 
-	// appErr := a.Run(ctx, clientId, models.RunOptions{})
-	// if appErr.Err != nil {
-	// 	utils.LogError(logger, appErr.Err, "failed to run the app")
-	// }
-
-	kdocker.StartInDocker(ctx, logger, &config.Config{
-		InstallationID: "1234",
+	err := kdocker.StartInDocker(agentCtx, logger, &config.Config{
+		InstallationID: "1234", // TODO: CHANGE IT TO ACTUAL INSTALLATION ID
 	})
+	if err != nil {
+		utils.LogError(logger, err, "failed to start keploy agent in docker")
+		return err
+	}
+	return nil
+}
+
+func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opts app.Options) (uint64, error) {
+
+	// Initialize Docker client
+	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		a.logger.Error("failed to initialize Docker client", zap.Error(err))
+		return 0, err
+	}
+
+	fmt.Println("Docker client initialized", opts.DockerNetwork)
+
+	// Define container and network names
+	containerName := "keploy-init"
+	networkName := "keploy-network"
+
+	// Create network if it does not exist
+	networks, err := cli.NetworkList(ctx, network.ListOptions{})
+	if err != nil {
+		a.logger.Error("failed to list networks", zap.Error(err))
+		return 0, err
+	}
+
+	networkExists := false
+	for _, net := range networks {
+		if net.Name == networkName {
+			networkExists = true
+			break
+		}
+	}
+
+	if !networkExists {
+		_, err := cli.NetworkCreate(ctx, networkName, network.CreateOptions{})
+		if err != nil {
+			a.logger.Error("failed to create network", zap.Error(err))
+			return 0, err
+		}
+		a.logger.Info("Network created", zap.String("network_name", networkName))
+	}
+
+	// Create container with custom name and network settings
+	resp, err := cli.ContainerCreate(ctx, &container.Config{
+		Image: "alpine",
+		Cmd:   []string{"sleep", "infinity"},
+		Tty:   false,
+	}, &container.HostConfig{
+		NetworkMode: container.NetworkMode(networkName),
+	}, nil, nil, containerName)
+	if err != nil {
+		a.logger.Error("failed to create init container", zap.Error(err))
+		return 0, err
+	}
+
+	// Start the container
+	if err := cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		a.logger.Error("failed to start init container", zap.Error(err))
+		return 0, err
+	}
+
+	a.logger.Info("Container started", zap.String("container_id", resp.ID))
+
+	// Get the PID of the container's first process
+	inspect, err := cli.ContainerInspect(ctx, resp.ID)
+	if err != nil {
+		a.logger.Error("failed to inspect container", zap.Error(err))
+		return 0, err
+	}
+
+	pid := inspect.State.Pid
+	a.logger.Info("Container PID", zap.Int("pid", pid))
+
+	// Extract inode from the PID namespace
+	pidNamespaceInode, err := kdocker.ExtractPidNamespaceInode(pid)
+	if err != nil {
+		a.logger.Error("failed to extract PID namespace inode", zap.Error(err))
+		return 0, err
+	}
+
+	a.logger.Info("PID Namespace Inode", zap.String("inode", pidNamespaceInode))
+	iNode, err := strconv.ParseUint(pidNamespaceInode, 10, 64)
+	return iNode, nil
 }

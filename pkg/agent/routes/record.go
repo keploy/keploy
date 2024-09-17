@@ -42,6 +42,7 @@ func New(r chi.Router, agent agent.Service, logger *zap.Logger) {
 func (a *AgentRequest) Health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	render.JSON(w, r, "OK")
 }
 
 func (a *AgentRequest) HandleIncoming(w http.ResponseWriter, r *http.Request) {
@@ -106,7 +107,7 @@ func (a *AgentRequest) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Keep the connection alive and stream data
+	
 	for m := range mockChan {
 		select {
 		case <-r.Context().Done():
@@ -139,9 +140,8 @@ func (a *AgentRequest) RegisterClients(w http.ResponseWriter, r *http.Request) {
 		render.Status(r, http.StatusBadRequest)
 		return
 	}
-	fmt.Printf("SetupRequest: %v\n", SetupRequest.SetupOptions)
+	fmt.Printf("Register Client req: %v\n", SetupRequest.SetupOptions)
 
-	// TODO: merge this functionality in setup only
 	err = a.agent.RegisterClient(r.Context(), SetupRequest.SetupOptions)
 	if err != nil {
 		render.JSON(w, r, err)

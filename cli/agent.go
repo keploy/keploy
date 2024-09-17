@@ -30,7 +30,6 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			fmt.Println("Starting keploy agent")
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service")
@@ -39,6 +38,7 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 
 			disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 			provider.PrintLogo(disableAnsi)
+			isdocker, _ := cmd.Flags().GetBool("is-docker")
 			var a agent.Service
 			var ok bool
 			if a, ok = svc.(agent.Service); !ok {
@@ -49,14 +49,16 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 			router := chi.NewRouter()
 
 			routes.New(router, a, logger)
-
+			fmt.Println("IS DOCKER", isdocker)
 			go func() {
 				if err := http.ListenAndServe(":8086", router); err != nil {
 					logger.Error("failed to start HTTP server", zap.Error(err))
 				}
 			}()
 			// Doubt: How can I provide the setup options for the first time?
-			err = a.Setup(ctx, "", models.SetupOptions{})
+			err = a.Setup(ctx, "", models.SetupOptions{
+				IsDocker: isdocker,
+			})
 			if err != nil {
 				utils.LogError(logger, err, "failed to setup agent")
 				return nil

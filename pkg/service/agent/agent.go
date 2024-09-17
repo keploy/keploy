@@ -11,7 +11,7 @@ import (
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/hooks/structs"
 	"go.keploy.io/server/v2/pkg/models"
-	Docker "go.keploy.io/server/v2/pkg/platform/docker"
+	kdocker "go.keploy.io/server/v2/pkg/platform/docker"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -20,17 +20,17 @@ import (
 // agent will implement
 type Agent struct {
 	logger       *zap.Logger
-	core.Proxy                 // embedding the Proxy interface to transfer the proxy methods to the core object
-	core.Hooks                 // embedding the Hooks interface to transfer the hooks methods to the core object
-	core.Tester                // embedding the Tester interface to transfer the tester methods to the core object
-	dockerClient Docker.Client //embedding the docker client to transfer the docker client methods to the core object
+	core.Proxy                  // embedding the Proxy interface to transfer the proxy methods to the core object
+	core.Hooks                  // embedding the Hooks interface to transfer the hooks methods to the core object
+	core.Tester                 // embedding the Tester interface to transfer the tester methods to the core object
+	dockerClient kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
 	id           utils.AutoInc
 	apps         sync.Map
 	proxyStarted bool
 }
 
 // this will be the server side implementation
-func New(logger *zap.Logger, hook core.Hooks, proxy core.Proxy, tester core.Tester, client Docker.Client) *Agent {
+func New(logger *zap.Logger, hook core.Hooks, proxy core.Proxy, tester core.Tester, client kdocker.Client) *Agent {
 	return &Agent{
 		logger:       logger,
 		Hooks:        hook,
@@ -44,7 +44,7 @@ func New(logger *zap.Logger, hook core.Hooks, proxy core.Proxy, tester core.Test
 func (a *Agent) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
 
 	a.logger.Info("Starting the agent in ", zap.String(string(opts.Mode), "mode"))
-	err := a.Hook(ctx, 0, models.HookOptions{Mode: opts.Mode})
+	err := a.Hook(ctx, 0, models.HookOptions{Mode: opts.Mode, IsDocker: opts.IsDocker})
 	if err != nil {
 		a.logger.Error("failed to hook into the app", zap.Error(err))
 	}
@@ -58,7 +58,6 @@ func (a *Agent) Setup(ctx context.Context, cmd string, opts models.SetupOptions)
 
 // Listeners will get activated, details will be stored in the map. And connection will be established
 func (a *Agent) GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
-	a.logger.Info("Inside GetIncoming of agent binary !!")
 	return a.Hooks.Record(ctx, id, opts)
 }
 
@@ -122,14 +121,13 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 		return nil
 	})
 
-	fmt.Println("Before loading hooks")
 	// load hooks if the mode changes ..
 	err := a.Hooks.Load(hookCtx, id, core.HookCfg{
-		AppID:    id,
-		Pid:      0,
-		IsDocker: false, // check from the flag
-		// KeployIPV4: a.KeployIPv4Addr(), // this IP will also be provided by the client
-		Mode: opts.Mode,
+		AppID:      id,
+		Pid:        0,
+		IsDocker:   opts.IsDocker,
+		KeployIPV4: "172.18.0.3",
+		Mode:       opts.Mode,
 	})
 
 	if err != nil {
@@ -152,7 +150,7 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 	// if there is another containerized app, then we need to pass new (ip:port) of proxy to the eBPF
 	// as the network namespace is different for each container and so is the keploy/proxy IP to communicate with the app.
 	err = a.Proxy.StartProxy(proxyCtx, core.ProxyOptions{
-		// DNSIPv4Addr: a.KeployIPv4Addr(),
+		DNSIPv4Addr: "172.18.0.3",
 		//DnsIPv6Addr: ""
 	})
 	if err != nil {
@@ -193,14 +191,13 @@ func (a *Agent) UnHook(ctx context.Context, id uint64) error {
 	return nil
 }
 
-// merge it in the setup only
 func (a *Agent) RegisterClient(ctx context.Context, opts models.SetupOptions) error {
 	fmt.Println("Registering client with keploy client id!! ", opts)
 	clientInfo := structs.ClientInfo{
-		KeployClientNsPid:        opts.ClientNsPid,
-		IsDockerApp:              0,
-		IsKeployClientRegistered: 0,
-		KeployClientInode:        opts.ClientInode,
+		KeployClientNsPid: opts.ClientNsPid,
+		IsDockerApp:       1,
+		KeployClientInode: opts.ClientInode,
+		AppInode:          opts.AppInode,
 	}
 
 	switch opts.Mode {
