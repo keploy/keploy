@@ -385,6 +385,9 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 
+	if isDockerCmd {
+		opts.IsDocker = true
+	}
 	req, err := http.NewRequestWithContext(ctx, "GET", "http://localhost:8086/agent/health", nil)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for mock outgoing")
@@ -397,8 +400,6 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		isAgentRunning = true
 		a.logger.Info("Setup request sent to the server", zap.String("status", resp.Status))
 	}
-
-	fmt.Println("isAgentRunning", isAgentRunning)
 
 	if !isAgentRunning {
 		// Start the keploy agent as a detached process and pipe the logs into a file
@@ -468,7 +469,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	}
 
 	opts.ClientId = clientId
-	opts.AppInode = inode
+	opts.AppInode = inode // why its required in case of native ?
 	// Register the client with the server
 	err = a.RegisterClient(ctx, opts)
 	if err != nil {
@@ -516,6 +517,7 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 			Mode:          opts.Mode,
 			ClientId:      0,
 			ClientInode:   inode,
+			IsDocker:      opts.IsDocker,
 			AppInode:      opts.AppInode,
 		},
 	}

@@ -192,10 +192,12 @@ func (a *Agent) UnHook(ctx context.Context, id uint64) error {
 }
 
 func (a *Agent) RegisterClient(ctx context.Context, opts models.SetupOptions) error {
-	fmt.Println("Registering client with keploy client id!! ", opts)
+	fmt.Println("Registering client with keploy client id opts.AppInode!! ", opts.AppInode)
+	fmt.Println("Registering client with keploy client id opts.ClientInode!! ", opts.ClientInode)
+
 	clientInfo := structs.ClientInfo{
 		KeployClientNsPid: opts.ClientNsPid,
-		IsDockerApp:       1,
+		IsDockerApp:       0,
 		KeployClientInode: opts.ClientInode,
 		AppInode:          opts.AppInode,
 	}
@@ -207,6 +209,10 @@ func (a *Agent) RegisterClient(ctx context.Context, opts models.SetupOptions) er
 		clientInfo.Mode = uint32(2)
 	default:
 		clientInfo.Mode = uint32(0)
+	}
+
+	if opts.IsDocker {
+		clientInfo.IsDockerApp = 1
 	}
 
 	return a.Hooks.SendKeployClientInfo(ctx, opts.ClientId, clientInfo)

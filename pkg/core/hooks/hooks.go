@@ -444,6 +444,8 @@ func (h *Hooks) load(opts core.HookCfg) error {
 	var agentInfo structs.AgentInfo = structs.AgentInfo{}
 	agentInfo.KeployAgentNsPid = uint32(os.Getpid())
 	agentInfo.KeployAgentInode, err = GetSelfInodeNumber()
+	fmt.Println("Keploy Agent Inode", agentInfo.KeployAgentInode)
+	fmt.Println("Keploy Agent PID", agentInfo.KeployAgentNsPid)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to get inode of the keploy process")
 		return err
