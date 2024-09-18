@@ -249,7 +249,7 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 }
 
 func (h *Hooks) AfterTestRun(_ context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error {
-	h.logger.Info("AfterTestRun hook executed", zap.String("testRunID", testRunID), zap.Any("testSetIDs", testSetIDs), zap.Any("coverage", coverage))
+	h.logger.Debug("AfterTestRun hook executed", zap.String("testRunID", testRunID), zap.Any("testSetIDs", testSetIDs), zap.Any("coverage", coverage))
 	return nil
 }
 
