@@ -47,7 +47,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCa
 	return nil, nil
 }
 
-func (h *Hooks) AfterTestSetRun(ctx context.Context, _, testSetID string, _ models.TestCoverage, _ int, status bool) error {
+func (h *Hooks) AfterTestSetRun(ctx context.Context, testSetID string, status bool) error {
 
 	if h.cfg.Test.DisableMockUpload {
 		return nil
@@ -245,6 +245,11 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 		utils.LogError(h.logger, err, "failed to add /*/mocks.yaml to .gitignore file")
 	}
 
+	return nil
+}
+
+func (h *Hooks) AfterTestRun(_ context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error {
+	h.logger.Info("AfterTestRun hook executed", zap.String("testRunID", testRunID), zap.Any("testSetIDs", testSetIDs), zap.Any("coverage", coverage))
 	return nil
 }
 

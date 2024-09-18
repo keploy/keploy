@@ -256,8 +256,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 			}
 		}
 
-		if i < len(testSets)-1 || r.config.Test.SkipCoverage {
-			err = HookImpl.AfterTestSetRun(ctx, testRunID, testSet, models.TestCoverage{}, len(testSets), testSetResult)
+		if i < len(testSets)-1 {
+			err = HookImpl.AfterTestSetRun(ctx, testSet, testSetResult)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get after test hook")
 			}
@@ -296,22 +296,27 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
+		coverageData := models.TestCoverage{}
+		var err error
 		if !r.config.Test.SkipCoverage {
 			r.logger.Info("calculating coverage for the test run and inserting it into the report")
-			coverageData, err := cov.GetCoverage()
+			coverageData, err = cov.GetCoverage()
 			if err == nil {
 				r.logger.Sugar().Infoln(models.HighlightPassingString("Total Coverage Percentage: ", coverageData.TotalCov))
 				err = cov.AppendCoverage(&coverageData, testRunID)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to update report with the coverage data")
 				}
-				err = HookImpl.AfterTestSetRun(ctx, testRunID, testSets[len(testSets)-1], coverageData, len(testSets), testSetResult)
-				if err != nil {
-					utils.LogError(r.logger, err, "failed to get after test hook")
-				}
+
 			} else {
 				utils.LogError(r.logger, err, "failed to calculate coverage for the test run")
 			}
+		}
+
+		//executing afterTestRun hook, executed after running all the test-sets
+		err = HookImpl.AfterTestRun(ctx, testRunID, testSets, coverageData)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to execute after test run hook")
 		}
 	}
 
