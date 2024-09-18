@@ -169,7 +169,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				g.logger.Error("Error running npm test", zap.Error(err), zap.String("output", string(output)))
 				return fmt.Errorf("npm test failed: %v", err)
 			}
-			g.logger.Info("npm test succeeded", zap.String("output", string(output)))
+			g.logger.Info("npm test succeeded")
 		}
 
 		if g.lang == "python" {
@@ -182,7 +182,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				g.logger.Error("Error running pytest", zap.Error(err), zap.String("output", string(output)))
 				return fmt.Errorf("pytest failed: %v", err)
 			}
-			g.logger.Info("pytest succeeded", zap.String("output", string(output)))
+			g.logger.Info("pytest succeeded")
 		}
 
 		if g.lang == "go" {
@@ -195,7 +195,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				g.logger.Error("Error running go test", zap.Error(err), zap.String("output", string(output)))
 				return fmt.Errorf("go test failed: %v", err)
 			}
-			g.logger.Info("go test succeeded", zap.String("output", string(output)))
+			g.logger.Info("go test succeeded")
 		}
 
 		if g.lang == "java" {
@@ -208,7 +208,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				g.logger.Error("Error running mvn clean test jacoco:report", zap.Error(err), zap.String("output", string(output)))
 				return fmt.Errorf("mvn clean test jacoco:report failed: %v", err)
 			}
-			g.logger.Info("mvn clean test jacoco:report succeeded", zap.String("output", string(output)))
+			g.logger.Info("mvn clean test jacoco:report succeeded")
 		}
 
 		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.logger)
