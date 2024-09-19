@@ -17,7 +17,7 @@ sudo ./../../keployv2 config --generate
 
 # Update the global noise to updated_at.
 config_file="./keploy.yml"
-sed -i 's/global: {}/global: {"body": {"updated_at":[]},"header" : {"Content-Length" : []}}/' "$config_file"
+sed -i 's/global: {}/global: {"body": {"updated_at":[]}}/' "$config_file"
 
 # Update the global noise to ts.
 go build -o urlShort
