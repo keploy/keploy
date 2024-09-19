@@ -483,6 +483,12 @@ func (ag *AgentClient) getApp(id uint64) (*app.App, error) {
 }
 
 func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptions) error {
+
+	isAgent := a.isAgentRunning(ctx)
+	if !isAgent {
+		return fmt.Errorf("keploy agent is not running, please start the agent first")
+	}
+
 	// Register the client with the server
 	clientPid := uint32(os.Getpid())
 
@@ -676,7 +682,7 @@ func (a *AgentClient) isAgentRunning(ctx context.Context) bool {
 
 	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://localhost:%d/agent/health", a.conf.Agent.Port), nil)
 	if err != nil {
-		utils.LogError(a.logger, err, "failed to create request for mock outgoing")
+		utils.LogError(a.logger, err, "failed to send request to the agent server")
 	}
 
 	resp, err := a.client.Do(req)
