@@ -40,24 +40,24 @@ import (
 )
 
 type AgentClient struct {
-	logger        *zap.Logger
-	dockerClient  kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
-	id            utils.AutoInc
-	apps          sync.Map
-	proxyStarted  bool
-	client        http.Client
-	conf          *config.Config
+	logger       *zap.Logger
+	dockerClient kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
+	id           utils.AutoInc
+	apps         sync.Map
+	proxyStarted bool
+	client       http.Client
+	conf         *config.Config
 }
 
 // this will be the client side implementation
 func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClient {
 	fmt.Println("Agent client started::: ", c.Agent.Port, c.Agent.IsDocker)
 	return &AgentClient{
-		logger:        logger,
-		dockerClient:  client,
-		client:        http.Client{},
+		logger:       logger,
+		dockerClient: client,
+		client:       http.Client{},
 
-		conf:          c,
+		conf: c,
 	}
 }
 
@@ -233,11 +233,15 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, id uint64, opts models.O
 		return fmt.Errorf("failed to send request for mockOutgoing: %s", err.Error())
 	}
 
-	resp, err := io.ReadAll(res.Body)
+	var mockResp models.AgentResp
+	err = json.NewDecoder(res.Body).Decode(&mockResp)
 	if err != nil {
-		return fmt.Errorf("failed to read response body for mock outgoing: %s", err.Error())
+		return fmt.Errorf("failed to decode response body for mock outgoing: %s", err.Error())
 	}
-	fmt.Println("Response body: ", string(resp))
+
+	if mockResp.Error != nil {
+		return mockResp.Error
+	}
 
 	return nil
 
@@ -252,29 +256,33 @@ func (a *AgentClient) SetMocks(ctx context.Context, id uint64, filtered []*model
 
 	requestJSON, err := json.Marshal(requestBody)
 	if err != nil {
-		utils.LogError(a.logger, err, "failed to marshal request body for mock outgoing")
-		return fmt.Errorf("error marshaling request body for mock outgoing: %s", err.Error())
+		utils.LogError(a.logger, err, "failed to marshal request body for setmocks")
+		return fmt.Errorf("error marshaling request body for setmocks: %s", err.Error())
 	}
 
 	// mock outgoing request
 	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/setmocks", a.conf.Agent.Port), bytes.NewBuffer(requestJSON))
 	if err != nil {
-		utils.LogError(a.logger, err, "failed to create request for mock outgoing")
-		return fmt.Errorf("error creating request for mock outgoing: %s", err.Error())
+		utils.LogError(a.logger, err, "failed to create request for setmocks outgoing")
+		return fmt.Errorf("error creating request for set mocks: %s", err.Error())
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	// Make the HTTP request
 	res, err := a.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to send request for mockOutgoing: %s", err.Error())
+		return fmt.Errorf("failed to send request for setmocks: %s", err.Error())
 	}
 
-	resp, err := io.ReadAll(res.Body)
+	var mockResp models.AgentResp
+	err = json.NewDecoder(res.Body).Decode(&mockResp)
 	if err != nil {
-		return fmt.Errorf("failed to read response body for mock outgoing: %s", err.Error())
+		return fmt.Errorf("failed to decode response body for setmocks: %s", err.Error())
 	}
-	fmt.Println("Response body: ", string(resp))
+
+	if mockResp.Error != nil {
+		return mockResp.Error
+	}
 
 	return nil
 }
@@ -516,21 +524,15 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 	}
 
 	// TODO: Read the response body in which we return the app id
-	var RegisterResp models.RegisterResp
+	var RegisterResp models.AgentResp
 	err = json.NewDecoder(resp.Body).Decode(&RegisterResp)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to decode response body for register client")
 		return fmt.Errorf("error decoding response body for register client: %s", err.Error())
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://localhost:%d/agent/health", a.conf.Agent.Port), nil)
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to create request for mock outgoing")
-	}
-
-	resp, err = a.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send request for mockOutgoing: %s", err.Error())
+	if RegisterResp.Error != nil {
+		return RegisterResp.Error
 	}
 
 	return nil

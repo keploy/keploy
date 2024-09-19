@@ -14,9 +14,10 @@ type RegisterReq struct {
 	SetupOptions SetupOptions `json:"setupOptions"`
 }
 
-type RegisterResp struct {
-	ClientId int64  `json:"clientId"` // uuid of the app
-	Error    error `json:"error"`
+type AgentResp struct {
+	ClientId  int64 `json:"clientId"` // uuid of the app
+	Error     error `json:"error"`
+	IsSuccess bool  `json:"isSuccess"`
 }
 
 type RunReq struct {
