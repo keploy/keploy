@@ -256,11 +256,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 			}
 		}
 
-		if i < len(testSets)-1 {
-			err = HookImpl.AfterTestSetRun(ctx, testSet, testSetResult)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to get after test hook")
-			}
+		err = HookImpl.AfterTestSetRun(ctx, testSet, testSetResult)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to execute after test set run hook", zap.Any("testSet", testSet))
 		}
 
 		if i == 0 && !r.config.Test.SkipCoverage {
