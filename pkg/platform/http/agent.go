@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 
@@ -39,25 +40,29 @@ import (
 )
 
 type AgentClient struct {
-	logger       *zap.Logger
-	dockerClient kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
-	id           utils.AutoInc
-	apps         sync.Map
-	proxyStarted bool
-	client       http.Client
-	agentPort    uint32
-	isDocker     bool
+	logger        *zap.Logger
+	dockerClient  kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
+	id            utils.AutoInc
+	apps          sync.Map
+	proxyStarted  bool
+	client        http.Client
+	agentPort     uint32
+	isDocker      bool
+	dockerNetwork string
+	appContainer  string
 }
 
 // this will be the client side implementation
 func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClient {
 	fmt.Println("Agent client started::: ", c.Agent.Port, c.Agent.IsDocker)
 	return &AgentClient{
-		logger:       logger,
-		dockerClient: client,
-		client:       http.Client{},
-		agentPort:    c.Agent.Port,
-		isDocker:     c.Agent.IsDocker,
+		logger:        logger,
+		dockerClient:  client,
+		client:        http.Client{},
+		agentPort:     c.Agent.Port,
+		isDocker:      c.Agent.IsDocker,
+		dockerNetwork: c.NetworkName,
+		appContainer:  c.ContainerName,
 	}
 }
 
@@ -379,7 +384,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		opts.IsDocker = true
 	}
 
-	isAgentRunning := a.isAgentRunning(ctx, isDockerCmd)
+	isAgentRunning := a.isAgentRunning(ctx)
 
 	if !isAgentRunning {
 		// Start the keploy agent as a detached process and pipe the logs into a file
@@ -558,7 +563,6 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, cli
 }
 
 func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opts app.Options) (uint64, error) {
-
 	// Initialize Docker client
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
@@ -570,7 +574,44 @@ func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opt
 
 	// Define container and network names
 	containerName := "keploy-init"
-	networkName := "keploy-network"
+	// TODO: This we will get only in case of docker run and start
+	networkName := a.dockerNetwork
+
+	// Check if the image exists locally
+	imageName := "alpine"
+	images, err := cli.ImageList(ctx, image.ListOptions{})
+	if err != nil {
+		a.logger.Error("failed to list images", zap.Error(err))
+		return 0, err
+	}
+
+	imageExists := false
+	for _, img := range images {
+		for _, tag := range img.RepoTags {
+			if tag == imageName+":latest" {
+				imageExists = true
+				break
+			}
+		}
+		if imageExists {
+			break
+		}
+	}
+
+	// Pull the image if it does not exist locally
+	if !imageExists {
+		a.logger.Info("Image not found locally. Pulling from Docker registry...", zap.String("image_name", imageName))
+		out, err := cli.ImagePull(ctx, imageName, image.PullOptions{})
+		if err != nil {
+			a.logger.Error("failed to pull image", zap.Error(err))
+			return 0, err
+		}
+		defer out.Close()
+
+		// Read the output to consume the response and avoid blocking
+		io.Copy(os.Stdout, out)
+		a.logger.Info("Image pulled successfully", zap.String("image_name", imageName))
+	}
 
 	// Create network if it does not exist
 	networks, err := cli.NetworkList(ctx, network.ListOptions{})
@@ -598,7 +639,7 @@ func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opt
 
 	// Create container with custom name and network settings
 	resp, err := cli.ContainerCreate(ctx, &container.Config{
-		Image: "alpine",
+		Image: imageName,
 		Cmd:   []string{"sleep", "infinity"},
 		Tty:   false,
 	}, &container.HostConfig{
@@ -639,7 +680,7 @@ func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opt
 	return iNode, nil
 }
 
-func (a *AgentClient) isAgentRunning(ctx context.Context, isDocker bool) bool {
+func (a *AgentClient) isAgentRunning(ctx context.Context) bool {
 
 	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://localhost:%d/agent/health", a.agentPort), nil)
 	if err != nil {

@@ -118,6 +118,7 @@ func (a *App) SetupDocker() error {
 		utils.LogError(a.logger, err, fmt.Sprintf("failed to inject network:%v to the keploy container", a.containerNetwork))
 		return err
 	}
+	
 	return nil
 }
 

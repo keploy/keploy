@@ -126,7 +126,7 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 		AppID:      id,
 		Pid:        0,
 		IsDocker:   opts.IsDocker,
-		KeployIPV4: "172.18.0.3",
+		KeployIPV4: "172.18.0.2",
 		Mode:       opts.Mode,
 	})
 
@@ -150,7 +150,7 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 	// if there is another containerized app, then we need to pass new (ip:port) of proxy to the eBPF
 	// as the network namespace is different for each container and so is the keploy/proxy IP to communicate with the app.
 	err = a.Proxy.StartProxy(proxyCtx, core.ProxyOptions{
-		DNSIPv4Addr: "172.18.0.3",
+		DNSIPv4Addr: "172.18.0.2",
 		//DnsIPv6Addr: ""
 	})
 	if err != nil {
