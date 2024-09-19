@@ -486,6 +486,7 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 
 	isAgent := a.isAgentRunning(ctx)
 	if !isAgent {
+		exec.Command("cat", "keploy_agent.log").Run()
 		return fmt.Errorf("keploy agent is not running, please start the agent first")
 	}
 
