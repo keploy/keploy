@@ -24,9 +24,9 @@ type CommonInternalServices struct {
 	Instrumentation *agent.Agent
 }
 
-func Gets(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger, tel *telemetry.Telemetry, auth service.Auth) (interface{}, error) {
-
-	commonServices, err := GetCommonServices(ctx, cfg, logger)
+func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger, tel *telemetry.Telemetry, auth service.Auth) (interface{}, error) {
+	
+	commonServices, err := GetAgentService(ctx, cfg, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -40,7 +40,7 @@ func Gets(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logge
 
 }
 
-func GetCommonServicess(_ context.Context, c *config.Config, logger *zap.Logger) (*CommonInternalServices, error) {
+func GetAgentService(_ context.Context, c *config.Config, logger *zap.Logger) (*CommonInternalServices, error) {
 
 	h := hooks.NewHooks(logger, c)
 	p := proxy.New(logger, h, c)
@@ -51,10 +51,7 @@ func GetCommonServicess(_ context.Context, c *config.Config, logger *zap.Logger)
 	// var err error
 	// fixed port for docker - 26789
 	// fixed port for native - 16789
-	// agent ki binary exec karke Indocker boolean
-	// this is to be done client side only
 
-	// instrumentation is to be used for core functionalities, we need to declare all these things in the agent proxy
 	instrumentation := agent.New(logger, h, p, t, client)
 
 	storage := storage.New(c.APIServerURL, logger)

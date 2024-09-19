@@ -69,7 +69,7 @@ Java
 
 Docker
 	Alias:
-	alias keploy='sudo docker run --name keploy-ebpf -p 16789:16789 --privileged --pid=host -it -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup
+	alias keploy='sudo docker run --name keploy-ebpf -p 36789:36789 --privileged --pid=host -it -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup
 	-v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
 
 	Record:
@@ -260,6 +260,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		}
 	case "agent":
 		cmd.Flags().Bool("is-docker", c.cfg.Agent.IsDocker, "Flag to check if the application is running in docker")
+		cmd.Flags().Uint32("port", c.cfg.Agent.Port, "Port used by the Keploy agent to communicate with Keploy's clients")
 	default:
 		return errors.New("unknown command name")
 	}

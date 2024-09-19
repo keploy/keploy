@@ -1,4 +1,4 @@
-//go:build linux
+//go:build !windows
 
 // Package app provides functionality for managing applications.
 package app
@@ -39,7 +39,7 @@ func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opt
 	return app
 }
 
-// I think need not be send as we are now running app at the client side
+
 type App struct {
 	logger           *zap.Logger
 	docker           docker.Client

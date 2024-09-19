@@ -28,6 +28,9 @@ import (
 )
 
 func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
+	if cfg.Agent.IsDocker {
+		cfg.ProxyPort = 36789
+	}
 	return &Hooks{
 		logger:    logger,
 		sess:      core.NewSessions(),
@@ -451,6 +454,7 @@ func (h *Hooks) load(opts core.HookCfg) error {
 		return err
 	}
 
+	
 	agentInfo.ProxyInfo = structs.ProxyInfo{
 		IP4:  proxyIP,
 		IP6:  h.proxyIP6,

@@ -21,7 +21,7 @@ func init() {
 }
 
 // keploy record -> keploy agent
-func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
+func Agent(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:   "agent",
 		Short: "starts keploy agent for hooking and starting proxy",
@@ -39,6 +39,13 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 			disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 			provider.PrintLogo(disableAnsi)
 			isdocker, _ := cmd.Flags().GetBool("is-docker")
+			var port uint32 = 8086
+			// TODO: USE ENV Instead of flags
+			if isdocker {
+				port, _ = cmd.Flags().GetUint32("port")
+				fmt.Println("PORT for docker", port)
+			}
+
 			var a agent.Service
 			var ok bool
 			if a, ok = svc.(agent.Service); !ok {
@@ -49,9 +56,9 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 			router := chi.NewRouter()
 
 			routes.New(router, a, logger)
-			fmt.Println("IS DOCKER", isdocker)
+
 			go func() {
-				if err := http.ListenAndServe(":8086", router); err != nil {
+				if err := http.ListenAndServe(fmt.Sprintf(":%d", port), router); err != nil {
 					logger.Error("failed to start HTTP server", zap.Error(err))
 				}
 			}()

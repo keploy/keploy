@@ -57,6 +57,10 @@ type Proxy struct {
 }
 
 func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
+	if opts.Agent.IsDocker {
+		logger.Info("Running in docker environment proxy port will be set to 36789")
+		opts.ProxyPort = 36789
+	}
 	return &Proxy{
 		logger:       logger,
 		Port:         opts.ProxyPort, // default: 16789

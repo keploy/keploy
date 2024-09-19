@@ -48,7 +48,7 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 	case "record", "test", "mock", "normalize", "templatize", "rerecord", "contract":
 		return Get(ctx, cmd, n.cfg, n.logger, tel, n.auth)
 	case "agent":
-		return Gets(ctx, cmd, n.cfg, n.logger, tel, n.auth)
+		return GetAgent(ctx, cmd, n.cfg, n.logger, tel, n.auth)
 	default:
 		return nil, errors.New("invalid command")
 	}
