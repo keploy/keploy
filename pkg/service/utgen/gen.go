@@ -164,9 +164,9 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			g.logger.Info("Detected JavaScript. Running npm test...")
 
 			cmd := exec.CommandContext(ctx, "npm", "test")
-			output, err := cmd.CombinedOutput()
+			_, err := cmd.CombinedOutput()
 			if err != nil {
-				g.logger.Error("Error running npm test", zap.Error(err), zap.String("output", string(output)))
+				g.logger.Error("Error running npm test")
 				return fmt.Errorf("npm test failed: %v", err)
 			}
 			g.logger.Info("npm test succeeded")
@@ -177,9 +177,9 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			g.logger.Info("Detected Python. Running pytest...")
 
 			cmd := exec.CommandContext(ctx, "pytest")
-			output, err := cmd.CombinedOutput()
+			_, err := cmd.CombinedOutput()
 			if err != nil {
-				g.logger.Error("Error running pytest", zap.Error(err), zap.String("output", string(output)))
+				g.logger.Error("Error running pytest")
 				return fmt.Errorf("pytest failed: %v", err)
 			}
 			g.logger.Info("pytest succeeded")
@@ -190,9 +190,9 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			g.logger.Info("Detected Golang. Running go test...")
 
 			cmd := exec.CommandContext(ctx, "go test")
-			output, err := cmd.CombinedOutput()
+			_, err := cmd.CombinedOutput()
 			if err != nil {
-				g.logger.Error("Error running go test", zap.Error(err), zap.String("output", string(output)))
+				g.logger.Error("Error running go test", zap.Error(err))
 				return fmt.Errorf("go test failed: %v", err)
 			}
 			g.logger.Info("go test succeeded")
@@ -203,9 +203,9 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			g.logger.Info("Detected Java. Running mvn clean test jacoco:report ...")
 
 			cmd := exec.CommandContext(ctx, "mvn clean test jacoco:report")
-			output, err := cmd.CombinedOutput()
+			_, err := cmd.CombinedOutput()
 			if err != nil {
-				g.logger.Error("Error running mvn clean test jacoco:report", zap.Error(err), zap.String("output", string(output)))
+				g.logger.Error("Error running mvn clean test jacoco:report", zap.Error(err))
 				return fmt.Errorf("mvn clean test jacoco:report failed: %v", err)
 			}
 			g.logger.Info("mvn clean test jacoco:report succeeded")
