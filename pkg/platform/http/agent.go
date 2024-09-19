@@ -303,7 +303,13 @@ func (a *AgentClient) GetConsumedMocks(ctx context.Context, id uint64) ([]string
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request for mockOutgoing: %s", err.Error())
 	}
-	defer res.Body.Close()
+
+	defer func() {
+		err := res.Body.Close()
+		if err != nil {
+			utils.LogError(a.logger, err, "failed to close response body for getconsumedmocks")
+		}
+	}()
 
 	var consumedMocks []string
 	err = json.NewDecoder(res.Body).Decode(&consumedMocks)
@@ -404,7 +410,13 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 				utils.LogError(a.logger, err, "failed to open log file")
 				return 0, err
 			}
-			defer logFile.Close()
+
+			defer func() {
+				err := logFile.Close()
+				if err != nil {
+					utils.LogError(a.logger, err, "failed to close agent log file")
+				}
+			}()
 
 			agentCmd := exec.Command("sudo", "oss", "agent")
 			agentCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // Detach the process
@@ -486,7 +498,11 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 
 	isAgent := a.isAgentRunning(ctx)
 	if !isAgent {
-		exec.Command("cat", "keploy_agent.log").Run()
+		a.logger.Info("Keploy agent is not running in background, Loggin the agent file")
+		err:=exec.Command("cat", "keploy_agent.log").Run()
+		if err != nil {
+			a.logger.Error("failed to read keploy agent log file", zap.Error(err))
+		}
 		return fmt.Errorf("keploy agent is not running, please start the agent first")
 	}
 
@@ -605,7 +621,13 @@ func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opt
 			a.logger.Error("failed to pull image", zap.Error(err))
 			return 0, err
 		}
-		defer out.Close()
+
+		defer func() {
+			err := out.Close()
+			if err != nil {
+				utils.LogError(a.logger, err, "failed to close init image pull response")
+			}
+		}()
 
 		// Read the output to consume the response and avoid blocking
 		io.Copy(os.Stdout, out)
