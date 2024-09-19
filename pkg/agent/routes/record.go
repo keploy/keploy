@@ -107,7 +107,6 @@ func (a *AgentRequest) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	
 	for m := range mockChan {
 		select {
 		case <-r.Context().Done():
@@ -127,8 +126,15 @@ func (a *AgentRequest) RegisterClients(w http.ResponseWriter, r *http.Request) {
 	var SetupRequest models.RegisterReq
 	err := json.NewDecoder(r.Body).Decode(&SetupRequest)
 
+	var register models.RegisterResp
+	register = models.RegisterResp{
+		ClientId: 0,
+		Error:    nil,
+	}
+
 	if err != nil {
-		render.JSON(w, r, err)
+		register.Error = err
+		render.JSON(w, r, register)
 		render.Status(r, http.StatusBadRequest)
 		return
 	}
@@ -136,6 +142,7 @@ func (a *AgentRequest) RegisterClients(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("SetupRequest: %v\n", SetupRequest.SetupOptions.ClientNsPid)
 
 	if SetupRequest.SetupOptions.ClientNsPid == 0 {
+		register.Error = fmt.Errorf("Client pid is required")
 		render.JSON(w, r, "Client pid is required")
 		render.Status(r, http.StatusBadRequest)
 		return
@@ -144,17 +151,12 @@ func (a *AgentRequest) RegisterClients(w http.ResponseWriter, r *http.Request) {
 
 	err = a.agent.RegisterClient(r.Context(), SetupRequest.SetupOptions)
 	if err != nil {
+		register.Error = err
 		render.JSON(w, r, err)
 		render.Status(r, http.StatusInternalServerError)
 		return
 	}
 
-	var SetupResponse models.RegisterResp
-	SetupResponse = models.RegisterResp{
-		AppId:      0,
-		IsRunnning: true,
-	}
-
-	render.JSON(w, r, SetupResponse)
+	render.JSON(w, r, register)
 	render.Status(r, http.StatusOK)
 }

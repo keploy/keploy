@@ -46,10 +46,7 @@ type AgentClient struct {
 	apps          sync.Map
 	proxyStarted  bool
 	client        http.Client
-	agentPort     uint32
-	isDocker      bool
-	dockerNetwork string
-	appContainer  string
+	conf          *config.Config
 }
 
 // this will be the client side implementation
@@ -59,10 +56,8 @@ func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClie
 		logger:        logger,
 		dockerClient:  client,
 		client:        http.Client{},
-		agentPort:     c.Agent.Port,
-		isDocker:      c.Agent.IsDocker,
-		dockerNetwork: c.NetworkName,
-		appContainer:  c.ContainerName,
+
+		conf:          c,
 	}
 }
 
@@ -70,7 +65,7 @@ func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClie
 func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	requestBody := models.IncomingReq{
 		IncomingOptions: opts,
-		AppId:           0,
+		ClientId:        0,
 	}
 
 	requestJSON, err := json.Marshal(requestBody)
@@ -79,7 +74,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.In
 		return nil, fmt.Errorf("error marshaling request body for incoming request: %s", err.Error())
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/incoming", a.agentPort), bytes.NewBuffer(requestJSON))
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/incoming", a.conf.Agent.Port), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for incoming request")
 		return nil, fmt.Errorf("error creating request for incoming request: %s", err.Error())
@@ -150,7 +145,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.In
 func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 	requestBody := models.OutgoingReq{
 		OutgoingOptions: opts,
-		AppId:           0,
+		ClientId:        0,
 	}
 
 	requestJSON, err := json.Marshal(requestBody)
@@ -159,7 +154,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 		return nil, fmt.Errorf("error marshaling request body for mock outgoing: %s", err.Error())
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/outgoing", a.agentPort), bytes.NewBuffer(requestJSON))
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/outgoing", a.conf.Agent.Port), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for mock outgoing")
 		return nil, fmt.Errorf("error creating request for mock outgoing: %s", err.Error())
@@ -215,7 +210,7 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, id uint64, opts models.O
 	// make a request to the server to mock outgoing
 	requestBody := models.OutgoingReq{
 		OutgoingOptions: opts,
-		AppId:           0,
+		ClientId:        0,
 	}
 
 	requestJSON, err := json.Marshal(requestBody)
@@ -225,7 +220,7 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, id uint64, opts models.O
 	}
 
 	// mock outgoing request
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/mock", a.agentPort), bytes.NewBuffer(requestJSON))
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/mock", a.conf.Agent.Port), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for mock outgoing")
 		return fmt.Errorf("error creating request for mock outgoing: %s", err.Error())
@@ -262,7 +257,7 @@ func (a *AgentClient) SetMocks(ctx context.Context, id uint64, filtered []*model
 	}
 
 	// mock outgoing request
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/setmocks", a.agentPort), bytes.NewBuffer(requestJSON))
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/setmocks", a.conf.Agent.Port), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for mock outgoing")
 		return fmt.Errorf("error creating request for mock outgoing: %s", err.Error())
@@ -286,7 +281,7 @@ func (a *AgentClient) SetMocks(ctx context.Context, id uint64, filtered []*model
 
 func (a *AgentClient) GetConsumedMocks(ctx context.Context, id uint64) ([]string, error) {
 	// Create the URL with query parameters
-	url := fmt.Sprintf("http://localhost:%d/agent/consumedmocks?id=%d", a.agentPort, id)
+	url := fmt.Sprintf("http://localhost:%d/agent/consumedmocks?id=%d", a.conf.Agent.Port, id)
 
 	// Create a new GET request with the query parameter
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -380,10 +375,6 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 
-	if isDockerCmd {
-		opts.IsDocker = true
-	}
-
 	isAgentRunning := a.isAgentRunning(ctx)
 
 	if !isAgentRunning {
@@ -421,12 +412,11 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 				return 0, err
 			}
 
-			time.Sleep(1 * time.Second)
-			a.logger.Info("keploy agent started", zap.Any("pid", agentCmd.Process.Pid))
+			a.logger.Info("keploy agent started", zap.Int("pid", agentCmd.Process.Pid))
 		}
 	}
 
-	time.Sleep(10 * time.Second)
+	time.Sleep(5 * time.Second)
 	// check if its docker then create a init container first
 	// and then the app container
 	usrApp := app.NewApp(a.logger, clientId, cmd, a.dockerClient, app.Options{
@@ -444,7 +434,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 	var inode uint64
 	if isDockerCmd {
-
+		// Start the init container to get the pid namespace
 		inode, err = a.Initcontainer(ctx, a.logger, app.Options{
 			DockerNetwork: opts.DockerNetwork,
 			Container:     opts.Container,
@@ -468,7 +458,6 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	return clientId, nil
 }
 
-// Doubt: where should I place this getApp method ?
 func (ag *AgentClient) getApp(id uint64) (*app.App, error) {
 	a, ok := ag.apps.Load(id)
 	if !ok {
@@ -505,7 +494,7 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 			Mode:          opts.Mode,
 			ClientId:      0,
 			ClientInode:   inode,
-			IsDocker:      opts.IsDocker,
+			IsDocker:      a.conf.Agent.IsDocker,
 			AppInode:      opts.AppInode,
 		},
 	}
@@ -516,7 +505,7 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 		return fmt.Errorf("error marshaling request body for register client: %s", err.Error())
 	}
 
-	resp, err := a.client.Post(fmt.Sprintf("http://localhost:%d/agent/register", a.agentPort), "application/json", bytes.NewBuffer(requestJSON))
+	resp, err := a.client.Post(fmt.Sprintf("http://localhost:%d/agent/register", a.conf.Agent.Port), "application/json", bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to send register client request")
 		return fmt.Errorf("error sending register client request: %s", err.Error())
@@ -534,7 +523,7 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 		return fmt.Errorf("error decoding response body for register client: %s", err.Error())
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://localhost:%d/agent/health", a.agentPort), nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://localhost:%d/agent/health", a.conf.Agent.Port), nil)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for mock outgoing")
 	}
@@ -553,7 +542,7 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, cli
 	agentCtx := context.WithoutCancel(context.Background())
 
 	err := kdocker.StartInDocker(agentCtx, logger, &config.Config{
-		InstallationID: "1234", // TODO: CHANGE IT TO ACTUAL INSTALLATION ID
+		InstallationID: a.conf.InstallationID,
 	})
 	if err != nil {
 		utils.LogError(logger, err, "failed to start keploy agent in docker")
@@ -574,8 +563,9 @@ func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opt
 
 	// Define container and network names
 	containerName := "keploy-init"
+
 	// TODO: This we will get only in case of docker run and start
-	networkName := a.dockerNetwork
+	networkName := a.conf.NetworkName
 
 	// Check if the image exists locally
 	imageName := "alpine"
@@ -682,7 +672,7 @@ func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opt
 
 func (a *AgentClient) isAgentRunning(ctx context.Context) bool {
 
-	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://localhost:%d/agent/health", a.agentPort), nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://localhost:%d/agent/health", a.conf.Agent.Port), nil)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for mock outgoing")
 	}
