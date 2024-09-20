@@ -122,7 +122,6 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 	go func() {
 		select {
 		case <-sigChan:
-			fmt.Println("Received interrupt signal. Cancelling AI request...")
 			cancel() // Cancel the context if Ctrl+C is pressed
 		case <-ctx.Done():
 			// Context already cancelled, do nothing

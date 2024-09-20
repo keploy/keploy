@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -85,7 +84,6 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 	go func() {
 		select {
 		case <-sigChan:
-			fmt.Println("Received interrupt signal. Cancelling process...")
 			cancel() // Cancel the context if Ctrl+C is pressed
 		case <-ctx.Done():
 			// Context already cancelled, do nothing
@@ -159,57 +157,6 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 		// Run the initial coverage to get the base line
 		iterationCount := 0
 		g.lang = GetCodeLanguage(g.srcPath)
-		if g.lang == "javascript" {
-			// Run 'npm test' and check if it works
-			g.logger.Info("Detected JavaScript. Running npm test...")
-
-			cmd := exec.CommandContext(ctx, "npm", "test")
-			_, err := cmd.CombinedOutput()
-			if err != nil {
-				g.logger.Error("Error running npm test")
-				return fmt.Errorf("npm test failed: %v", err)
-			}
-			g.logger.Info("npm test succeeded")
-		}
-
-		if g.lang == "python" {
-			// Run 'pytest'
-			g.logger.Info("Detected Python. Running pytest...")
-
-			cmd := exec.CommandContext(ctx, "pytest")
-			_, err := cmd.CombinedOutput()
-			if err != nil {
-				g.logger.Error("Error running pytest")
-				return fmt.Errorf("pytest failed: %v", err)
-			}
-			g.logger.Info("pytest succeeded")
-		}
-
-		if g.lang == "go" {
-			// Run 'go test'
-			g.logger.Info("Detected Golang. Running go test...")
-
-			cmd := exec.CommandContext(ctx, "go test")
-			_, err := cmd.CombinedOutput()
-			if err != nil {
-				g.logger.Error("Error running go test", zap.Error(err))
-				return fmt.Errorf("go test failed: %v", err)
-			}
-			g.logger.Info("go test succeeded")
-		}
-
-		if g.lang == "java" {
-			// Run 'mvn clean test jacoco:report'
-			g.logger.Info("Detected Java. Running mvn clean test jacoco:report ...")
-
-			cmd := exec.CommandContext(ctx, "mvn clean test jacoco:report")
-			_, err := cmd.CombinedOutput()
-			if err != nil {
-				g.logger.Error("Error running mvn clean test jacoco:report", zap.Error(err))
-				return fmt.Errorf("mvn clean test jacoco:report failed: %v", err)
-			}
-			g.logger.Info("mvn clean test jacoco:report succeeded")
-		}
 
 		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.logger)
 		if err != nil {
@@ -318,6 +265,7 @@ func (g *UnitTestGenerator) runCoverage() error {
 	_, _, exitCode, lastUpdatedTime, err := RunCommand(g.cmd, g.dir, g.logger)
 	if err != nil {
 		utils.LogError(g.logger, err, "Error running test command")
+		return fmt.Errorf("error running test command: %w", err)
 	}
 	if exitCode != 0 {
 		utils.LogError(g.logger, err, "Error running test command")
