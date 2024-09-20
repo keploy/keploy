@@ -45,13 +45,13 @@ Keploy not only records API calls, but also records database calls and replays t
 > 🐰 **Fun fact:** Keploy uses itself for testing! Check out our swanky coverage badge: [![Coverage Status](https://coveralls.io/repos/github/keploy/keploy/badge.svg?branch=main&kill_cache=1)](https://coveralls.io/github/keploy/keploy?branch=main&kill_cache=1) &nbsp;
 
 ## 🚨 Here for  [Unit Test Generator](README-UnitGen.md) (ut-gen)? 
-Keploy's newly launched world's first unit test generator(ut-gen) implementation of [Meta LLM research paper](https://arxiv.org/pdf/2402.09171), it understands code semantics and generates meaningful unit tests, aiming to:
+Keploy has newly launched the world's first unit test generator(ut-gen) implementation of [Meta LLM research paper](https://arxiv.org/pdf/2402.09171), it understands code semantics and generates meaningful unit tests, aiming to:
 
 - **Automate unit test generation (UTG)**: Quickly generate comprehensive unit tests and reduce redundant manual effort.
 
-- **Improve edge cases**: Extend and improve the scope of atuomated tests to cover more complex scenarios, often missed manually.
+- **Improve edge cases**: Extend and improve the scope of automated tests to cover more complex scenarios, often missed manually.
 
-- **Boost test coverage**: As codebases grow, ensuring exhaustive coverage should become feasible, this aligns with our mission.
+- **Boost test coverage**: As codebases grow, ensuring exhaustive coverage should become feasible, aligning with our mission.
 
 ### 📜 Follow [Unit Test Generator README](README-UnitGen.md)! ✅
 
@@ -90,7 +90,7 @@ keploy test -c "CMD_TO_RUN_APP" --delay 10
 ## ✅ Test Coverage Integration
 To integrate with your unit-testing library and see combine test coverage, follow this [test-coverage guide](https://keploy.io/docs/server/sdk-installation/go/).
 
-> ####  **If You Had Fun:** Please leave a 🌟 star on this repo!  It's free == a smile. 😄 👏
+> ####  **If You Had Fun:** Please leave a 🌟 star on this repo! It's free and will bring a smile. 😄 👏
 
 ## One-Click Setup 🚀
 
@@ -119,7 +119,7 @@ From Go's gopher 🐹 to Python's snake 🐍, we support:
 
 ## 🫰 Keploy Adopters 🧡
 
-If you or your organisation is using Keploy? That’s great. Please add yourselves to [**this list,**](https://github.com/orgs/keploy/discussions/1765) and we'll send you goodies! 💖
+So you and your organisation are using Keploy? That’s great. Please add yourselves to [**this list,**](https://github.com/orgs/keploy/discussions/1765) and we'll send you goodies! 💖
 
 
 We are happy and proud to have you all as part of our community! 💖
