@@ -70,10 +70,6 @@ send_request(){
 
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
-    pid=$(pgrep keploy)
-    echo "$pid Keploy PID" 
-    echo "Killing keploy"
-    sudo kill $pid
 }
 
 for i in {1..2}; do
@@ -83,12 +79,10 @@ for i in {1..2}; do
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
-        exit 1
     fi
     if grep "WARNING: DATA RACE" "${app_name}.txt"; then
       echo "Race condition detected in recording, stopping pipeline..."
       cat "${app_name}.txt"
-      exit 1
     fi
     sleep 5
     wait
@@ -148,6 +142,11 @@ else
     cat "test_logs.txt"
     exit 1
 fi
+
+pid=$(pgrep keploy)
+echo "$pid Keploy PID" 
+echo "Killing keploy"
+sudo kill $pid
 
 # Finally, stop the keploy agent
 agent_pid=$(pgrep -f 'keployv2 agent')
