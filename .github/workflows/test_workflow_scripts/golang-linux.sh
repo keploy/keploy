@@ -32,7 +32,6 @@ echo "Starting the pipeline..."
 go build -o ginApp
 
 # Start keploy agent in the background
-sudo ./../../keployv2 agent &
 
 echo "Keploy agent started"
 
@@ -70,10 +69,17 @@ send_request(){
 
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
+    pid=$(pgrep keploy)
+    echo "$pid Keploy PID" 
+    echo "Killing keploy"
+    sudo kill $pid
 }
 
 for i in {1..2}; do
+    echo "Starting iteration ${i}"
     app_name="javaApp_${i}"
+    sudo ./../../keployv2 agent &
+    sleep 5
     send_request &
     sudo -E env PATH="$PATH" ./../../keployv2 record -c "./ginApp" &> "${app_name}.txt" --debug
     if grep "ERROR" "${app_name}.txt"; then
@@ -142,11 +148,6 @@ else
     cat "test_logs.txt"
     exit 1
 fi
-
-pid=$(pgrep keploy)
-echo "$pid Keploy PID" 
-echo "Killing keploy"
-sudo kill $pid
 
 # Finally, stop the keploy agent
 agent_pid=$(pgrep -f 'keployv2 agent')
