@@ -29,6 +29,8 @@ rm -rf keploy/
 # Build the binary.
 go build -o ginApp
 
+# Start keploy agent in the background
+sudo keploy agent &
 
 send_request(){
     sleep 10
@@ -70,11 +72,10 @@ send_request(){
     sudo kill $pid
 }
 
-
 for i in {1..2}; do
     app_name="javaApp_${i}"
     send_request &
-    sudo -E env PATH="$PATH" ./../../keployv2 record -c "./ginApp"    &> "${app_name}.txt" --debug
+    sudo -E env PATH="$PATH" ./../../keployv2 record -c "./ginApp" &> "${app_name}.txt" --debug
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
@@ -91,7 +92,7 @@ for i in {1..2}; do
 done
 
 # Start the gin-mongo app in test mode.
-sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7    &> test_logs.txt --debug
+sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7 &> test_logs.txt --debug
 
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."
@@ -107,10 +108,8 @@ fi
 
 all_passed=true
 
-
 # Get the test results from the testReport file.
-for i in {0..1}
-do
+for i in {0..1}; do
     # Define the report file for each test set
     report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
 
