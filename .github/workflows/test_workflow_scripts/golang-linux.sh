@@ -20,10 +20,9 @@ sudo ./../../keployv2 config --generate
 # Update the global noise to ts.
 config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
-
 sed -i 's/ports: 0/ports: 27017/' "$config_file"
 
-# Remove any prexisting keploy tests and mocks.
+# Remove any pre-existing keploy tests and mocks.
 rm -rf keploy/
 
 echo "Starting the pipeline..."
@@ -31,27 +30,28 @@ echo "Starting the pipeline..."
 # Build the binary.
 go build -o ginApp
 
-# Start keploy agent in the background
+# Start keploy agent in the background and save its PID.
 sudo ./../../keployv2 agent &
-
-echo "Keploy agent started"
+agent_pid=$!
+echo "Keploy agent started with PID: $agent_pid"
 
 send_request(){
     sleep 10
     app_started=false
     while [ "$app_started" = false ]; do
         if curl --request POST \
-      --url http://localhost:8080/url \
-      --header 'content-type: application/json' \
-      --data '{
-      "url": "https://facebook.com"
-    }'; then
+          --url http://localhost:8080/url \
+          --header 'content-type: application/json' \
+          --data '{
+          "url": "https://facebook.com"
+        }'; then
             app_started=true
         fi
         sleep 3 # wait for 3 seconds before checking again.
     done
     echo "App started"      
-    # Start making curl calls to record the testcases and mocks.
+
+    # Start making curl calls to record the test cases and mocks.
     curl --request POST \
       --url http://localhost:8080/url \
       --header 'content-type: application/json' \
@@ -70,9 +70,10 @@ send_request(){
 
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
-    pid=$(pgrep keploy)
-    echo "$pid Keploy PID" 
-    echo "Killing keploy"
+    # Kill only the `keployv2 record` process, but not the agent.
+    pid=$(pgrep -f 'keployv2 record')
+    echo "$pid Keploy record PID" 
+    echo "Killing keploy record process"
     sudo kill $pid
 }
 
@@ -139,3 +140,7 @@ else
     cat "test_logs.txt"
     exit 1
 fi
+
+# Stop the keploy agent after everything is done
+echo "Stopping keploy agent with PID: $agent_pid"
+sudo kill $agent_pid
