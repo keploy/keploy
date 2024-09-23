@@ -3,6 +3,7 @@ package mockdb
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"go.keploy.io/server/v2/pkg/models"
@@ -175,6 +176,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		}
 	default:
 		utils.LogError(logger, nil, "failed to marshal the recorded mock into yaml due to invalid kind of mock")
+		fmt.Println("mock kind:", mock.Kind, "MOCK", mock.Name)
 		return nil, errors.New("type of mock is invalid")
 	}
 
