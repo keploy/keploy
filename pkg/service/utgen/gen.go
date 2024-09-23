@@ -71,24 +71,9 @@ func NewUnitTestGenerator(srcPath, testPath, reportPath, cmd, dir, coverageForma
 }
 
 func (g *UnitTestGenerator) Start(ctx context.Context) error {
-	// Signal handling for Ctrl+C (SIGINT)
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(sigChan)
-
-	// Create a cancellable context
-	ctx, cancel := context.WithCancel(ctx)
+	// Create a context that cancels on SIGINT (Ctrl+C) or SIGTERM
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-
-	// Start a goroutine to listen for Ctrl+C and cancel the context
-	go func() {
-		select {
-		case <-sigChan:
-			cancel() // Cancel the context if Ctrl+C is pressed
-		case <-ctx.Done():
-			// Context already cancelled, do nothing
-		}
-	}()
 
 	g.tel.GenerateUT()
 
@@ -154,7 +139,6 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			g.cov.Current = 0
 		}
 
-		// Run the initial coverage to get the base line
 		iterationCount := 0
 		g.lang = GetCodeLanguage(g.srcPath)
 
