@@ -12,6 +12,9 @@ Additional guidelines:
 - Brainstorm a list of test cases necessary to fully validate the correctness of the code and achieve 100% code coverage.
 - After adding each test, review all tests to ensure they cover the full range of scenarios, including exception or error handling.
 - If the original test file contains a test suite, assume that each generated test will be part of the same suite. Ensure the new tests are consistent with the existing suite in terms of style, naming conventions, and structure.
+{{- if .additional_command }}
+- {{ .additional_command }}
+{{ end }}
 
 
 ## Source File
