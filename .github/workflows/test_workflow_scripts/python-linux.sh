@@ -61,7 +61,7 @@ send_request(){
 # Record and Test cycles
 for i in {1..2}; do
     app_name="flaskApp_${i}"
-    sudo ./../../keployv2 agent &
+    sudo ./../../../keployv2 agent &
     sleep 5
     send_request &
     sudo -E env PATH="$PATH" ./../../../keployv2 record -c "python3 manage.py runserver"   &> "${app_name}.txt"
@@ -81,7 +81,7 @@ for i in {1..2}; do
 done
 
 
-sudo ./../../keployv2 agent &
+sudo ./../../../keployv2 agent &
 sleep 5
 
 # Testing phase
