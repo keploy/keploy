@@ -4,7 +4,7 @@ installKeploy (){
     version="latest"
     IS_CI=false
     NO_ROOT=false
-    PLATFORM="$PLATFORM"
+    PLATFORM="$(basename "$SHELL")"
     for arg in "$@"
     do
         case $arg in
