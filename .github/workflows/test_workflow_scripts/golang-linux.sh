@@ -95,11 +95,14 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
-
+sleep 10
+echo "Starting the pipeline for test mode..."
 
 sudo ./../../keployv2 agent &
 
 echo "Keploy agent started for test mode"
+
+sleep 10
 
 # Start the gin-mongo app in test mode.
 sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7 &> test_logs.txt --debug
