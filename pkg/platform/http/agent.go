@@ -413,7 +413,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			}()
 
 			agentCmd := exec.Command("sudo", "keployv2", "agent")
-			agentCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // Detach the process
+			agentCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // Detach the process
 
 			// Redirect the standard output and error to the log file
 			agentCmd.Stdout = logFile
