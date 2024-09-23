@@ -23,14 +23,18 @@ sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
 
 sed -i 's/ports: 0/ports: 27017/' "$config_file"
 
-# Remove any preexisting keploy tests and mocks.
+# Remove any prexisting keploy tests and mocks.
 rm -rf keploy/
+
+echo "Starting the pipeline..."
 
 # Build the binary.
 go build -o ginApp
 
 # Start keploy agent in the background
 sudo keploy agent &
+
+echo "Keploy agent started"
 
 send_request(){
     sleep 10
