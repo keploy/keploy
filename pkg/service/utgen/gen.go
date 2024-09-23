@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 
 	"github.com/google/uuid"
 	"github.com/k0kubun/pp/v3"
@@ -71,10 +69,6 @@ func NewUnitTestGenerator(srcPath, testPath, reportPath, cmd, dir, coverageForma
 }
 
 func (g *UnitTestGenerator) Start(ctx context.Context) error {
-	// Create a context that cancels on SIGINT (Ctrl+C) or SIGTERM
-	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-
 	g.tel.GenerateUT()
 
 	// Check for context cancellation before proceeding

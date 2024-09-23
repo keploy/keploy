@@ -10,9 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	"go.keploy.io/server/v2/pkg/service"
@@ -108,10 +106,6 @@ func NewAIClient(model, apiBase, apiVersion, apiKey, apiServerURL string, auth s
 func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (string, int, int, error) {
 
 	var apiBaseURL string
-
-	// Create a context that cancels on SIGINT (Ctrl+C) or SIGTERM
-	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 
 	if prompt.System == "" && prompt.User == "" {
 		return "", 0, 0, errors.New("the prompt must contain 'system' and 'user' keys")
