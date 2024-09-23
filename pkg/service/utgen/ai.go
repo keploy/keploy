@@ -109,24 +109,9 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 
 	var apiBaseURL string
 
-	// Signal handling for Ctrl+C (SIGINT)
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(sigChan)
-
-	// Create a cancellable context for the request
-	ctx, cancel := context.WithCancel(ctx)
+	// Create a context that cancels on SIGINT (Ctrl+C) or SIGTERM
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-
-	// Start a goroutine to listen for Ctrl+C and cancel the context
-	go func() {
-		select {
-		case <-sigChan:
-			cancel() // Cancel the context if Ctrl+C is pressed
-		case <-ctx.Done():
-			// Context already cancelled, do nothing
-		}
-	}()
 
 	if prompt.System == "" && prompt.User == "" {
 		return "", 0, 0, errors.New("the prompt must contain 'system' and 'user' keys")
@@ -162,7 +147,6 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 
 		ai.Logger.Debug("Making AI request to API server", zap.String("api_server_url", ai.APIServerURL), zap.String("token", token))
 		httpClient := &http.Client{}
-		// make AI request as request body to the API server
 		aiRequest := AIRequest{
 			MaxTokens: maxTokens,
 			Prompt:    *prompt,
@@ -185,7 +169,6 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 			return "", 0, 0, fmt.Errorf("error making request: %v", err)
 		}
 
-		// read the response body AIResponse
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		var aiResponse AIResponse
 		err = json.Unmarshal(bodyBytes, &aiResponse)
@@ -264,10 +247,9 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println("contect cancelling")
+			fmt.Println("context cancelling")
 			return "", 0, 0, ctx.Err()
 		default:
-
 			line, err := reader.ReadString('\n')
 			if err != nil && err != io.EOF {
 				utils.LogError(ai.Logger, err, "Error reading stream")
@@ -304,6 +286,7 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
+
 	if ai.Logger.Level() == zap.DebugLevel {
 		fmt.Println()
 	}
