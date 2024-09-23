@@ -412,7 +412,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 				}
 			}()
 
-			agentCmd := exec.Command("sudo", "oss", "agent")
+			agentCmd := exec.Command("sudo", "keployv2", "agent")
 			agentCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // Detach the process
 
 			// Redirect the standard output and error to the log file
@@ -574,7 +574,7 @@ func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opt
 	// Start the init container to get the PID namespace inode
 	cmdCancel := func(cmd *exec.Cmd) func() error {
 		return func() error {
-			a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
+			a.logger.Info("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
 			err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
 			return err
 		}
