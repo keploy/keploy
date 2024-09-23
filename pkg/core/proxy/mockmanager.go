@@ -71,11 +71,12 @@ func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 		return nil, fmt.Errorf("expected mock instance, got %v", m)
 	}
 	for _, m := range mockCopy {
-		fmt.Println("m is here m.Kind: ", m.Kind)
-		fmt.Println("m is here m.Name: ", m.Name)
+		fmt.Print("m kind is here: ", m.Kind, ", ")
+
 		configMocks = append(configMocks, &m)
 	}
-	
+	fmt.Println()
+
 	return configMocks, nil
 }
 
