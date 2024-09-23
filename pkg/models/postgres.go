@@ -75,10 +75,10 @@ type Frontend struct {
 	CloseComplete                   pgproto3.CloseComplete                   `json:"close_complete,omitempty" yaml:"close_complete,omitempty"`
 	CommandComplete                 pgproto3.CommandComplete                 `yaml:"-"`
 	CommandCompletes                []pgproto3.CommandComplete               `json:"command_complete,omitempty" yaml:"command_complete,omitempty"`
-	CopyBothResponse                pgproto3.CopyBothResponse                `json:"copy_both_response,omitempty" yaml:"copy_both_response,omitempty"`
+	// CopyBothResponse                pgproto3.CopyBothResponse                `json:"copy_both_response,omitempty" yaml:"copy_both_response,omitempty"`
 	CopyData                        pgproto3.CopyData                        `json:"copy_data,omitempty" yaml:"copy_data,omitempty"`
-	CopyInResponse                  pgproto3.CopyInResponse                  `json:"copy_in_response,omitempty" yaml:"copy_in_response,omitempty"`
-	CopyOutResponse                 pgproto3.CopyOutResponse                 `json:"copy_out_response,omitempty" yaml:"copy_out_response,omitempty"`
+	// CopyInResponse                  pgproto3.CopyInResponse                  `json:"copy_in_response,omitempty" yaml:"copy_in_response,omitempty"`
+	// CopyOutResponse                 pgproto3.CopyOutResponse                 `json:"copy_out_response,omitempty" yaml:"copy_out_response,omitempty"`
 	CopyDone                        pgproto3.CopyDone                        `json:"copy_done,omitempty" yaml:"copy_done,omitempty"`
 	DataRow                         pgproto3.DataRow                         `yaml:"-"`
 	DataRows                        []pgproto3.DataRow                       `json:"data_row,omitempty" yaml:"data_row,omitempty,flow"`

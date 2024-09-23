@@ -185,7 +185,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 					break
 				}
 				utils.LogError(a.logger, err, "failed to decode mock from stream")
-				break
+				// break, it will exit the loop if there is any decoding error from the stream
 			}
 
 			select {
