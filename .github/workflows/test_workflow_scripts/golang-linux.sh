@@ -32,7 +32,7 @@ echo "Starting the pipeline..."
 go build -o ginApp
 
 # Start keploy agent in the background
-sudo keploy agent &
+sudo keployv2 agent &
 
 echo "Keploy agent started"
 
