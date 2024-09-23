@@ -41,18 +41,17 @@ send_request(){
     app_started=false
     while [ "$app_started" = false ]; do
         if curl --request POST \
-          --url http://localhost:8080/url \
-          --header 'content-type: application/json' \
-          --data '{
-          "url": "https://facebook.com"
-        }'; then
+      --url http://localhost:8080/url \
+      --header 'content-type: application/json' \
+      --data '{
+      "url": "https://facebook.com"
+    }'; then
             app_started=true
         fi
         sleep 3 # wait for 3 seconds before checking again.
     done
     echo "App started"      
-
-    # Start making curl calls to record the test cases and mocks.
+    # Start making curl calls to record the testcases and mocks.
     curl --request POST \
       --url http://localhost:8080/url \
       --header 'content-type: application/json' \
@@ -71,26 +70,10 @@ send_request(){
 
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
-    
-    # Find and kill the keploy record process
-    pid=$(pgrep -f 'keployv2 record')
-    
-    if [ -z "$pid" ]; then
-        echo "Keploy record process not found. Skipping kill."
-    else
-        echo "$pid Keploy record PID"
-        # Attempt to kill the process with a timeout
-        sudo kill $pid
-        
-        # Check if process is still running after the kill command
-        sleep 5
-        if kill -0 $pid 2>/dev/null; then
-            echo "Keploy record process did not stop. Forcing kill..."
-            sudo kill -9 $pid
-        else
-            echo "Keploy record process stopped successfully."
-        fi
-    fi
+    pid=$(pgrep keploy)
+    echo "$pid Keploy PID" 
+    echo "Killing keploy"
+    sudo kill $pid
 }
 
 for i in {1..2}; do
@@ -111,6 +94,12 @@ for i in {1..2}; do
     wait
     echo "Recorded test case and mocks for iteration ${i}"
 done
+
+
+
+sudo ./../../keployv2 agent &
+
+echo "Keploy agent started for test mode"
 
 # Start the gin-mongo app in test mode.
 sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7 &> test_logs.txt --debug
