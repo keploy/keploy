@@ -93,7 +93,6 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 		utils.LogError(p.logger, err, "failed to initialize the integrations")
 		return err
 	}
-	fmt.Println("Proxy started at port:", p.Port)
 	// set up the CA for tls connections
 	err = SetupCA(ctx, p.logger)
 	if err != nil {

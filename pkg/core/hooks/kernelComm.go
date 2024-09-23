@@ -6,8 +6,6 @@ import (
 	"context"
 	"fmt"
 
-	"math/rand"
-
 	"github.com/cilium/ebpf"
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/hooks/structs"
@@ -74,31 +72,23 @@ func (h *Hooks) SendClientInfo(id uint64, appInfo structs.ClientInfo) error {
 	return nil
 }
 
-func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
-	key := 0
-	err := h.agentRegistartionMap.Update(uint32(key), agentInfo, ebpf.UpdateAny)
+// func to send proxyinfo to the kernel
+func (h *Hooks) SendProxyInfo(id uint64, proxInfo structs.ProxyInfo) error {
+	fmt.Println("Sending Proxy Info to the Kernel !!", proxInfo)
+
+	err := h.proxyInfoMap.Update(id, proxInfo, ebpf.UpdateAny)
 	if err != nil {
-		utils.LogError(h.logger, err, "failed to send the agent info to the ebpf program")
+		utils.LogError(h.logger, err, "failed to send the proxy info to the ebpf program")
 		return err
 	}
 	return nil
 }
 
-// here I have to send the Inode and container IP ??
-func (h *Hooks) SendDockerAppInfo(_ uint64, dockerAppInfo structs.DockerAppInfo) error {
-	if h.appID != 0 {
-		err := h.dockerAppRegistrationMap.Delete(h.appID)
-		if err != nil {
-			utils.LogError(h.logger, err, "failed to remove entry from dockerAppRegistrationMap")
-			return err
-		}
-	}
-	r := rand.New(rand.NewSource(rand.Int63()))
-	randomNum := r.Uint64()
-	h.appID = randomNum
-	err := h.dockerAppRegistrationMap.Update(h.appID, dockerAppInfo, ebpf.UpdateAny)
+func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
+	key := 0
+	err := h.agentRegistartionMap.Update(uint32(key), agentInfo, ebpf.UpdateAny)
 	if err != nil {
-		utils.LogError(h.logger, err, "failed to send the dockerAppInfo info to the ebpf program")
+		utils.LogError(h.logger, err, "failed to send the agent info to the ebpf program")
 		return err
 	}
 	return nil

@@ -123,8 +123,8 @@ func (a *AgentRequest) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 func (a *AgentRequest) RegisterClients(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	var SetupRequest models.RegisterReq
-	err := json.NewDecoder(r.Body).Decode(&SetupRequest)
+	var registerReq models.RegisterReq
+	err := json.NewDecoder(r.Body).Decode(&registerReq)
 
 	register := models.AgentResp{
 		ClientId: 0,
@@ -138,20 +138,20 @@ func (a *AgentRequest) RegisterClients(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmt.Printf("SetupRequest: %v\n", SetupRequest.SetupOptions.ClientNsPid)
+	fmt.Printf("SetupRequest: %v\n", registerReq.SetupOptions.ClientNsPid)
 
-	if SetupRequest.SetupOptions.ClientNsPid == 0 {
+	if registerReq.SetupOptions.ClientNsPid == 0 {
 		register.Error = fmt.Errorf("Client pid is required")
-		render.JSON(w, r, "Client pid is required")
+		render.JSON(w, r, register)
 		render.Status(r, http.StatusBadRequest)
 		return
 	}
-	fmt.Printf("Register Client req: %v\n", SetupRequest.SetupOptions)
+	fmt.Printf("Register Client req: %v\n", registerReq.SetupOptions)
 
-	err = a.agent.RegisterClient(r.Context(), SetupRequest.SetupOptions)
+	err = a.agent.RegisterClient(r.Context(), registerReq.SetupOptions)
 	if err != nil {
 		register.Error = err
-		render.JSON(w, r, err)
+		render.JSON(w, r, register)
 		render.Status(r, http.StatusInternalServerError)
 		return
 	}

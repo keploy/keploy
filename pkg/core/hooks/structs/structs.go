@@ -43,5 +43,4 @@ type AgentInfo struct {
 	KeployAgentNsPid uint32
 	DNSPort          int32
 	KeployAgentInode uint64
-	ProxyInfo        ProxyInfo
 }

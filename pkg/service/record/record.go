@@ -185,6 +185,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 					return errors.New("failed to stop recording")
 				}
 			case <-ctx.Done():
+				fmt.Println("Context cancelled 1")
 				return nil
 			}
 			return nil
@@ -219,6 +220,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	case err = <-insertMockErrChan:
 		stopReason = "error while inserting mock into db, hence stopping keploy"
 	case <-ctx.Done():
+		fmt.Println("Context cancelled 2")
 		return nil
 	}
 	utils.LogError(r.logger, err, stopReason)

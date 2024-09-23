@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"go.keploy.io/server/v2/pkg/core"
+	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/core/hooks/structs"
 	"go.keploy.io/server/v2/pkg/models"
 	kdocker "go.keploy.io/server/v2/pkg/platform/docker"
@@ -29,7 +30,6 @@ type Agent struct {
 	proxyStarted bool
 }
 
-// this will be the server side implementation
 func New(logger *zap.Logger, hook core.Hooks, proxy core.Proxy, tester core.Tester, client kdocker.Client) *Agent {
 	return &Agent{
 		logger:       logger,
@@ -52,6 +52,7 @@ func (a *Agent) Setup(ctx context.Context, cmd string, opts models.SetupOptions)
 	select {
 	case <-ctx.Done():
 		fmt.Println("Context cancelled, stopping Setup")
+		fmt.Println("HERE KILL THE INIT CONTAINER")
 		return context.Canceled
 	}
 }
@@ -195,6 +196,13 @@ func (a *Agent) RegisterClient(ctx context.Context, opts models.SetupOptions) er
 	fmt.Println("Registering client with keploy client id opts.AppInode!! ", opts.AppInode)
 	fmt.Println("Registering client with keploy client id opts.ClientInode!! ", opts.ClientInode)
 
+	// send the network info to the kernel
+	err := a.SendNetworkInfo(ctx, opts)
+	if err != nil {
+		a.logger.Error("failed to send network info to the kernel", zap.Error(err))
+		return err
+	}
+
 	clientInfo := structs.ClientInfo{
 		KeployClientNsPid: opts.ClientNsPid,
 		IsDockerApp:       0,
@@ -218,10 +226,66 @@ func (a *Agent) RegisterClient(ctx context.Context, opts models.SetupOptions) er
 	return a.Hooks.SendKeployClientInfo(ctx, opts.ClientId, clientInfo)
 }
 
-// Random AppId uint64 will be generated and maintain in a map and return the id to client
-// newUUID := uuid.New()
+func (a *Agent) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) error {
+	if !opts.IsDocker {
+		proxyIP, err := hooks.IPv4ToUint32("127.0.0.1")
+		proxyInfo := structs.ProxyInfo{
+			IP4:  proxyIP,
+			IP6:  [4]uint32{0, 0, 0, 0},
+			Port: 16789,
+		}
+		fmt.Println("PROXY INFO: ", proxyInfo)
+		err = a.Hooks.SendClientProxyInfo(ctx, opts.ClientId, proxyInfo)
+		if err != nil {
+			return err
+		}
+		return nil
+	}
 
-// // app id will be sent by the client.
-// // Convert the first 8 bytes of the UUID to an int64
-// id := int64(binary.BigEndian.Uint64(newUUID[:8]))
-// fmt.Println("App ID: ", id, "IsApi", opts.IsApi)
+	inspect, err := a.dockerClient.ContainerInspect(ctx, "keploy-v2")
+	if err != nil {
+		utils.LogError(a.logger, nil, fmt.Sprintf("failed to get inspect keploy container:%v", inspect))
+		return err
+	}
+
+	keployNetworks := inspect.NetworkSettings.Networks
+	//Here we considering that the application would use only one custom network.
+	//TODO: handle for application having multiple custom networks
+	//TODO: check the logic for correctness
+	var keployIPv4 string
+	for n, settings := range keployNetworks {
+		if n == opts.DockerNetwork {
+			keployIPv4 = settings.IPAddress // TODO: keployIPv4 needs to be send to the agent
+			// a.logger.Info("Successfully injected network to the keploy container", zap.Any("Keploy container", a.keployContainer), zap.Any("appNetwork", network), zap.String("keploy container ip", a.keployIPv4))
+			break
+		}
+
+	}
+	fmt.Println("Keploy container IP: ", keployIPv4)
+	ipv4, err := hooks.IPv4ToUint32(keployIPv4)
+	if err != nil {
+		return err
+	}
+
+	var ipv6 [4]uint32
+	if opts.IsDocker {
+		ipv6, err := hooks.ToIPv4MappedIPv6(keployIPv4)
+		if err != nil {
+			return fmt.Errorf("failed to convert ipv4:%v to ipv4 mapped ipv6 in docker env:%v", ipv4, err)
+		}
+		a.logger.Debug(fmt.Sprintf("IPv4-mapped IPv6 for %s is: %08x:%08x:%08x:%08x\n", keployIPv4, ipv6[0], ipv6[1], ipv6[2], ipv6[3]))
+
+	}
+
+	proxyInfo := structs.ProxyInfo{
+		IP4: ipv4,
+		IP6: ipv6,
+		Port: 36789,
+	}
+
+	err = a.Hooks.SendClientProxyInfo(ctx, opts.ClientId, proxyInfo)
+	if err != nil {
+		return err
+	}
+	return nil
+}

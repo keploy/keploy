@@ -99,6 +99,7 @@ type bpfMapSpecs struct {
 	KeployAgentRegistrationMap  *ebpf.MapSpec `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.MapSpec `ebpf:"keploy_client_kernel_pid_map"`
 	KeployClientRegistrationMap *ebpf.MapSpec `ebpf:"keploy_client_registration_map"`
+	KeployProxyInfo             *ebpf.MapSpec `ebpf:"keploy_proxy_info"`
 	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
 	SocketCloseEvents           *ebpf.MapSpec `ebpf:"socket_close_events"`
 	SocketDataEventBufferHeap   *ebpf.MapSpec `ebpf:"socket_data_event_buffer_heap"`
@@ -138,6 +139,7 @@ type bpfMaps struct {
 	KeployAgentRegistrationMap  *ebpf.Map `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.Map `ebpf:"keploy_client_kernel_pid_map"`
 	KeployClientRegistrationMap *ebpf.Map `ebpf:"keploy_client_registration_map"`
+	KeployProxyInfo             *ebpf.Map `ebpf:"keploy_proxy_info"`
 	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
 	SocketCloseEvents           *ebpf.Map `ebpf:"socket_close_events"`
 	SocketDataEventBufferHeap   *ebpf.Map `ebpf:"socket_data_event_buffer_heap"`
@@ -160,6 +162,7 @@ func (m *bpfMaps) Close() error {
 		m.KeployAgentRegistrationMap,
 		m.KeployClientKernelPidMap,
 		m.KeployClientRegistrationMap,
+		m.KeployProxyInfo,
 		m.RedirectProxyMap,
 		m.SocketCloseEvents,
 		m.SocketDataEventBufferHeap,

@@ -52,10 +52,11 @@ type Hooks struct {
 
 	m sync.Mutex
 	// eBPF C shared maps
-	clientRegistrationMap    *ebpf.Map
-	agentRegistartionMap     *ebpf.Map
-	dockerAppRegistrationMap *ebpf.Map
-	redirectProxyMap         *ebpf.Map
+	clientRegistrationMap *ebpf.Map
+	agentRegistartionMap  *ebpf.Map
+
+	redirectProxyMap *ebpf.Map
+	proxyInfoMap     *ebpf.Map
 	//--------------
 
 	// eBPF C shared objectsobjects
@@ -148,8 +149,8 @@ func (h *Hooks) load(opts core.HookCfg) error {
 	fmt.Println("clientRegistrationMap", h.clientRegistrationMap)
 	h.agentRegistartionMap = objs.KeployAgentRegistrationMap
 	fmt.Println("agentRegistartionMap", h.agentRegistartionMap)
-	// h.dockerAppRegistrationMap = objs.DockerAppRegistrationMap
-	// fmt.Println("dockerAppRegistrationMap", h.dockerAppRegistrationMap)
+	h.proxyInfoMap = objs.KeployProxyInfo
+
 	h.objects = objs
 
 	// ---------------
@@ -439,11 +440,6 @@ func (h *Hooks) load(opts core.HookCfg) error {
 
 	h.logger.Debug("proxy ips", zap.String("ipv4", h.proxyIP4), zap.Any("ipv6", h.proxyIP6))
 
-	proxyIP, err := IPv4ToUint32(h.proxyIP4)
-	if err != nil {
-		return fmt.Errorf("failed to convert ip string:[%v] to 32-bit integer", opts.KeployIPV4)
-	}
-
 	var agentInfo structs.AgentInfo = structs.AgentInfo{}
 	agentInfo.KeployAgentNsPid = uint32(os.Getpid())
 	agentInfo.KeployAgentInode, err = GetSelfInodeNumber()
@@ -452,13 +448,6 @@ func (h *Hooks) load(opts core.HookCfg) error {
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to get inode of the keploy process")
 		return err
-	}
-
-	
-	agentInfo.ProxyInfo = structs.ProxyInfo{
-		IP4:  proxyIP,
-		IP6:  h.proxyIP6,
-		Port: h.proxyPort,
 	}
 
 	agentInfo.DNSPort = int32(h.dnsPort)
@@ -515,6 +504,15 @@ func (h *Hooks) SendKeployClientInfo(ctx context.Context, clientId uint64, clien
 		return err
 	}
 
+	return nil
+}
+
+func (h *Hooks) SendClientProxyInfo(ctx context.Context, clientId uint64, proxyInfo structs.ProxyInfo) error {
+	err := h.SendProxyInfo(clientId, proxyInfo)
+	if err != nil {
+		h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))
+		return err
+	}
 	return nil
 }
 

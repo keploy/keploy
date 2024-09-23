@@ -24,11 +24,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/client"
-
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core/app"
 	"go.keploy.io/server/v2/pkg/core/hooks"
@@ -381,7 +376,6 @@ func (a *AgentClient) Run(ctx context.Context, id uint64, _ models.RunOptions) m
 }
 
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
-	// check if the agent is running
 
 	// if the agent is not running, start the agent
 	clientId := utils.GenerateID()
@@ -462,8 +456,8 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		})
 		if err != nil {
 			utils.LogError(a.logger, err, "failed to setup init container")
-			return 0, err
 		}
+
 	}
 
 	opts.ClientId = clientId
@@ -499,7 +493,7 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 	isAgent := a.isAgentRunning(ctx)
 	if !isAgent {
 		a.logger.Info("Keploy agent is not running in background, Loggin the agent file")
-		err:=exec.Command("cat", "keploy_agent.log").Run()
+		err := exec.Command("cat", "keploy_agent.log").Run()
 		if err != nil {
 			a.logger.Error("failed to read keploy agent log file", zap.Error(err))
 		}
@@ -577,110 +571,27 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, cli
 }
 
 func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opts app.Options) (uint64, error) {
-	// Initialize Docker client
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
-	if err != nil {
-		a.logger.Error("failed to initialize Docker client", zap.Error(err))
-		return 0, err
-	}
-
-	fmt.Println("Docker client initialized", opts.DockerNetwork)
-
-	// Define container and network names
-	containerName := "keploy-init"
-
-	// TODO: This we will get only in case of docker run and start
-	networkName := a.conf.NetworkName
-
-	// Check if the image exists locally
-	imageName := "alpine"
-	images, err := cli.ImageList(ctx, image.ListOptions{})
-	if err != nil {
-		a.logger.Error("failed to list images", zap.Error(err))
-		return 0, err
-	}
-
-	imageExists := false
-	for _, img := range images {
-		for _, tag := range img.RepoTags {
-			if tag == imageName+":latest" {
-				imageExists = true
-				break
-			}
-		}
-		if imageExists {
-			break
+	// Start the init container to get the PID namespace inode
+	cmdCancel := func(cmd *exec.Cmd) func() error {
+		return func() error {
+			a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
+			err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
+			return err
 		}
 	}
+	cmd := fmt.Sprintf("docker run --network=%s --name keploy-init --rm alpine sleep infinity", a.conf.NetworkName)
 
-	// Pull the image if it does not exist locally
-	if !imageExists {
-		a.logger.Info("Image not found locally. Pulling from Docker registry...", zap.String("image_name", imageName))
-		out, err := cli.ImagePull(ctx, imageName, image.PullOptions{})
-		if err != nil {
-			a.logger.Error("failed to pull image", zap.Error(err))
-			return 0, err
+	// execute the command
+	go func() {
+		cmdErr := utils.ExecuteCommand(ctx, a.logger, cmd, cmdCancel, 25*time.Second)
+		if cmdErr.Err != nil {
+			utils.LogError(a.logger, cmdErr.Err, "failed to execute init container command")
 		}
+	}()
 
-		defer func() {
-			err := out.Close()
-			if err != nil {
-				utils.LogError(a.logger, err, "failed to close init image pull response")
-			}
-		}()
-
-		// Read the output to consume the response and avoid blocking
-		io.Copy(os.Stdout, out)
-		a.logger.Info("Image pulled successfully", zap.String("image_name", imageName))
-	}
-
-	// Create network if it does not exist
-	networks, err := cli.NetworkList(ctx, network.ListOptions{})
-	if err != nil {
-		a.logger.Error("failed to list networks", zap.Error(err))
-		return 0, err
-	}
-
-	networkExists := false
-	for _, net := range networks {
-		if net.Name == networkName {
-			networkExists = true
-			break
-		}
-	}
-
-	if !networkExists {
-		_, err := cli.NetworkCreate(ctx, networkName, network.CreateOptions{})
-		if err != nil {
-			a.logger.Error("failed to create network", zap.Error(err))
-			return 0, err
-		}
-		a.logger.Info("Network created", zap.String("network_name", networkName))
-	}
-
-	// Create container with custom name and network settings
-	resp, err := cli.ContainerCreate(ctx, &container.Config{
-		Image: imageName,
-		Cmd:   []string{"sleep", "infinity"},
-		Tty:   false,
-	}, &container.HostConfig{
-		NetworkMode: container.NetworkMode(networkName),
-	}, nil, nil, containerName)
-	if err != nil {
-		a.logger.Error("failed to create init container", zap.Error(err))
-		return 0, err
-	}
-
-	// Start the container
-	if err := cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		a.logger.Error("failed to start init container", zap.Error(err))
-		return 0, err
-	}
-
-	a.logger.Info("Container started", zap.String("container_id", resp.ID))
-
+	time.Sleep(2 * time.Second)
 	// Get the PID of the container's first process
-	inspect, err := cli.ContainerInspect(ctx, resp.ID)
+	inspect, err := a.dockerClient.ContainerInspect(ctx, "keploy-init")
 	if err != nil {
 		a.logger.Error("failed to inspect container", zap.Error(err))
 		return 0, err
