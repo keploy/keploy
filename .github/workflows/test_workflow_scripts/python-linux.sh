@@ -61,6 +61,8 @@ send_request(){
 # Record and Test cycles
 for i in {1..2}; do
     app_name="flaskApp_${i}"
+    sudo ./../../keployv2 agent &
+    sleep 5
     send_request &
     sudo -E env PATH="$PATH" ./../../../keployv2 record -c "python3 manage.py runserver"   &> "${app_name}.txt"
     if grep "ERROR" "${app_name}.txt"; then
@@ -77,6 +79,10 @@ for i in {1..2}; do
     wait
     echo "Recorded test case and mocks for iteration ${i}"
 done
+
+
+sudo ./../../keployv2 agent &
+sleep 5
 
 # Testing phase
 sudo -E env PATH="$PATH" ./../../../keployv2 test -c "python3 manage.py runserver" --delay 10    &> test_logs.txt
