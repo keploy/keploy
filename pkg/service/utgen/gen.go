@@ -138,7 +138,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 		iterationCount := 0
 		g.lang = GetCodeLanguage(g.srcPath)
 
-		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.logger)
+		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt,g.logger)
 		if err != nil {
 			utils.LogError(g.logger, err, "Error creating prompt builder")
 			return err
