@@ -31,24 +31,25 @@ type Cursor struct {
 }
 
 type UnitTestGenerator struct {
-	srcPath       string
-	testPath      string
-	cmd           string
-	dir           string
-	cov           *Coverage
-	lang          string
-	cur           *Cursor
-	failedTests   []*models.FailedUT
-	prompt        *Prompt
-	ai            *AIClient
-	logger        *zap.Logger
-	promptBuilder *PromptBuilder
-	maxIterations int
-	Files         []string
-	tel           Telemetry
+	srcPath          string
+	testPath         string
+	cmd              string
+	dir              string
+	cov              *Coverage
+	lang             string
+	cur              *Cursor
+	failedTests      []*models.FailedUT
+	prompt           *Prompt
+	ai               *AIClient
+	logger           *zap.Logger
+	promptBuilder    *PromptBuilder
+	maxIterations    int
+	Files            []string
+	tel              Telemetry
+	additionalPrompt string
 }
 
-func NewUnitTestGenerator(srcPath, testPath, reportPath, cmd, dir, coverageFormat string, desiredCoverage float64, maxIterations int, model string, apiBaseURL string, apiVersion, apiServerURL string, _ *config.Config, tel Telemetry, auth service.Auth, logger *zap.Logger) (*UnitTestGenerator, error) {
+func NewUnitTestGenerator(srcPath, testPath, reportPath, cmd, dir, coverageFormat string, desiredCoverage float64, maxIterations int, model string, apiBaseURL string, apiVersion, apiServerURL, additionalPrompt string, _ *config.Config, tel Telemetry, auth service.Auth, logger *zap.Logger) (*UnitTestGenerator, error) {
 	generator := &UnitTestGenerator{
 		srcPath:       srcPath,
 		testPath:      testPath,
@@ -63,7 +64,8 @@ func NewUnitTestGenerator(srcPath, testPath, reportPath, cmd, dir, coverageForma
 			Format:  coverageFormat,
 			Desired: desiredCoverage,
 		},
-		cur: &Cursor{},
+		additionalPrompt: additionalPrompt,
+		cur:              &Cursor{},
 	}
 	return generator, nil
 }
