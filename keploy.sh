@@ -244,8 +244,10 @@ installKeploy (){
             install_keploy_darwin_all
             return
         elif [ "$OS_NAME" = "Linux" ]; then
-            if ! sudo mountpoint -q /sys/kernel/debug; then
-                sudo mount -t debugfs debugfs /sys/kernel/debug
+             if [ "$NO_ROOT" = false ]; then
+                if ! mountpoint -q /sys/kernel/debug; then
+                    sudo mount -t debugfs debugfs /sys/kernel/debug
+                fi
             fi
             if [ "$ARCH" = "x86_64" ]; then
                 cleanup_tmp
@@ -283,6 +285,6 @@ installKeploy "$@"
 if command -v keploy &> /dev/null; then
     keploy example
     cleanup_tmp
-    rm -rf keploy.sh
-    rm -rf install.sh
+    # rm -rf keploy.sh
+    # rm -rf install.sh
 fi
