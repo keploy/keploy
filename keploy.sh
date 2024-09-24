@@ -285,6 +285,6 @@ installKeploy "$@"
 if command -v keploy &> /dev/null; then
     keploy example
     cleanup_tmp
-    # rm -rf keploy.sh
-    # rm -rf install.sh
+    rm -rf keploy.sh
+    rm -rf install.sh
 fi
