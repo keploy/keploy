@@ -79,7 +79,8 @@ type Telemetry interface {
 type TestHooks interface {
 	SimulateRequest(ctx context.Context, appID uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error)
 	BeforeTestSetRun(ctx context.Context, testSetID string) error
-	AfterTestSetRun(ctx context.Context, testRunID, testSetID string, coverage models.TestCoverage, totalTestSets int, status bool) error
+	AfterTestSetRun(ctx context.Context, testSetID string, status bool) error
+	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error // hook executed after running all the test-sets
 }
 
 type Storage interface {
