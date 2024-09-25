@@ -239,46 +239,40 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 	fmt.Println("Streaming results from LLM model...")
 
 	for {
-		select {
-		case <-ctx.Done():
-			fmt.Println("context cancelling")
-			return "", 0, 0, ctx.Err()
-		default:
-			line, err := reader.ReadString('\n')
-			if err != nil && err != io.EOF {
-				utils.LogError(ai.Logger, err, "Error reading stream")
-				return "", 0, 0, err
-			}
-			line = strings.TrimSpace(strings.TrimPrefix(line, "data: "))
-			if line == "[DONE]" {
-				break
-			}
+		line, err := reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			utils.LogError(ai.Logger, err, "Error reading stream")
+			return "", 0, 0, err
+		}
+		line = strings.TrimSpace(strings.TrimPrefix(line, "data: "))
+		if line == "[DONE]" {
+			break
+		}
 
-			if line == "" {
-				continue
-			}
+		if line == "" {
+			continue
+		}
 
-			var chunk ModelResponse
-			err = json.Unmarshal([]byte(line), &chunk)
-			if err != nil {
-				utils.LogError(ai.Logger, err, "Error unmarshalling chunk")
-				continue
-			}
+		var chunk ModelResponse
+		err = json.Unmarshal([]byte(line), &chunk)
+		if err != nil {
+			utils.LogError(ai.Logger, err, "Error unmarshalling chunk")
+			continue
+		}
 
-			if len(chunk.Choices) > 0 {
-				if chunk.Choices[0].Delta != (Delta{}) {
-					contentBuilder.WriteString(chunk.Choices[0].Delta.Content)
-					if ai.Logger.Level() == zap.DebugLevel {
-						fmt.Print(chunk.Choices[0].Delta.Content)
-					}
+		if len(chunk.Choices) > 0 {
+			if chunk.Choices[0].Delta != (Delta{}) {
+				contentBuilder.WriteString(chunk.Choices[0].Delta.Content)
+				if ai.Logger.Level() == zap.DebugLevel {
+					fmt.Print(chunk.Choices[0].Delta.Content)
 				}
 			}
-
-			if err == io.EOF {
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
 		}
+
+		if err == io.EOF {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	if ai.Logger.Level() == zap.DebugLevel {

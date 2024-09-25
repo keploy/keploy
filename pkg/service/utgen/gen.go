@@ -138,7 +138,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 		iterationCount := 0
 		g.lang = GetCodeLanguage(g.srcPath)
 
-		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt,g.logger)
+		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt, g.logger)
 		if err != nil {
 			utils.LogError(g.logger, err, "Error creating prompt builder")
 			return err
@@ -266,17 +266,48 @@ func (g *UnitTestGenerator) runCoverage() error {
 
 func (g *UnitTestGenerator) GenerateTests(ctx context.Context) (*models.UTDetails, error) {
 	fmt.Println("Generating Tests...")
+
+	select {
+	case <-ctx.Done():
+		err := ctx.Err()
+		return &models.UTDetails{}, err
+	default:
+	}
+
 	response, promptTokenCount, responseTokenCount, err := g.ai.Call(ctx, g.prompt, 4096)
 	if err != nil {
-		utils.LogError(g.logger, err, "Error calling AI model")
 		return &models.UTDetails{}, err
 	}
+
+	select {
+	case <-ctx.Done():
+		err := ctx.Err()
+		return &models.UTDetails{}, err
+	default:
+	}
+
 	g.logger.Info(fmt.Sprintf("Total token used count for LLM model %s: %d", g.ai.Model, promptTokenCount+responseTokenCount))
+
+	select {
+	case <-ctx.Done():
+		err := ctx.Err()
+		return &models.UTDetails{}, err
+	default:
+	}
+
 	testsDetails, err := unmarshalYamlTestDetails(response)
 	if err != nil {
 		utils.LogError(g.logger, err, "Error unmarshalling test details")
 		return &models.UTDetails{}, err
 	}
+
+	select {
+	case <-ctx.Done():
+		err := ctx.Err()
+		return &models.UTDetails{}, err
+	default:
+	}
+
 	return testsDetails, nil
 }
 
