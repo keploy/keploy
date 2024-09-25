@@ -10,14 +10,11 @@ import (
 // defaultConfig is a variable to store the default configuration of the Keploy CLI. It is not a constant because enterprise need update the default configuration.
 var defaultConfig = `
 path: ""
-appId: 0
-appName: ""
 command: ""
 port: 0
 proxyPort: 16789
 dnsPort: 26789
 debug: false
-disableANSI: false
 disableTele: false
 generateGithubActions: false
 containerName: ""
@@ -25,31 +22,20 @@ networkName: ""
 buildDelay: 30
 test:
   selectedTests: {}
-  ignoredTests: {}
   globalNoise:
     global: {}
     test-sets: {}
   delay: 5
   apiTimeout: 5
   coverage: false
-  goCoverage: false
   coverageReportPath: ""
   ignoreOrdering: true
   mongoPassword: "default@123"
   language: ""
   removeUnusedMocks: false
-  basePath: ""
-  mocking: true
-  disableLineCoverage: false
-  fallbackOnMiss: false
-  disableMockUpload: true
 record:
   recordTimer: 0s
   filters: []
-contract:
-  driven: "consumer"
-  servicesMapping: {}
-  self: "s1"
 configPath: ""
 bypassRules: []
 `
@@ -66,8 +52,6 @@ const InternalConfig = `
 enableTesting: false
 keployContainer: "keploy-v2"
 keployNetwork: "keploy-network"
-inDocker: false
-cmdType: "native"
 `
 
 var config = &Config{}
