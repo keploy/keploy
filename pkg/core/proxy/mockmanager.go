@@ -55,12 +55,9 @@ func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("expected mock instance, got %v", m)
 	}
-	fmt.Println("FILTERED MOCKS -", len(mockCopy))
 	for _, m := range mockCopy {
-		fmt.Printf("m: %v ,", m.Name)
 		tcsMocks = append(tcsMocks, &m)
 	}
-	fmt.Println()
 	return tcsMocks, nil
 }
 
@@ -72,12 +69,9 @@ func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("expected mock instance, got %v", m)
 	}
-	fmt.Println("UNFILTERED MOCKS -", len(mockCopy))
 	for _, m := range mockCopy {
-		fmt.Printf("m: %v, ", m.Name)
 		configMocks = append(configMocks, &m)
 	}
-	fmt.Println()
 	return configMocks, nil
 }
 

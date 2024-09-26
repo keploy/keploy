@@ -308,7 +308,6 @@ func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
 func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 	// listen for the docker daemon events
 	defer a.logger.Debug("exiting from goroutine of docker daemon event listener")
-	fmt.Println("Listening for docker daemon events")
 	errCh := make(chan error, 1)
 	timer := time.NewTimer(time.Duration(a.containerDelay) * time.Second)
 	logTicker := time.NewTicker(1 * time.Second)

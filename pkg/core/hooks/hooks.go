@@ -125,7 +125,6 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 
 func (h *Hooks) load(opts core.HookCfg) error {
 	// Allow the current process to lock memory for eBPF resources.
-	fmt.Println("Loading hooks...")
 	if err := rlimit.RemoveMemlock(); err != nil {
 		utils.LogError(h.logger, err, "failed to lock memory for eBPF resources")
 		return err
@@ -146,9 +145,7 @@ func (h *Hooks) load(opts core.HookCfg) error {
 	//getting all the ebpf maps
 	h.redirectProxyMap = objs.RedirectProxyMap
 	h.clientRegistrationMap = objs.KeployClientRegistrationMap
-	fmt.Println("clientRegistrationMap", h.clientRegistrationMap)
 	h.agentRegistartionMap = objs.KeployAgentRegistrationMap
-	fmt.Println("agentRegistartionMap", h.agentRegistartionMap)
 	h.proxyInfoMap = objs.KeployProxyInfo
 
 	h.objects = objs
@@ -443,8 +440,6 @@ func (h *Hooks) load(opts core.HookCfg) error {
 	var agentInfo structs.AgentInfo = structs.AgentInfo{}
 	agentInfo.KeployAgentNsPid = uint32(os.Getpid())
 	agentInfo.KeployAgentInode, err = GetSelfInodeNumber()
-	fmt.Println("Keploy Agent Inode", agentInfo.KeployAgentInode)
-	fmt.Println("Keploy Agent PID", agentInfo.KeployAgentNsPid)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to get inode of the keploy process")
 		return err
@@ -474,7 +469,6 @@ func (h *Hooks) load(opts core.HookCfg) error {
 	// 	h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))
 	// 	return err
 	// }
-	fmt.Println("Sending agent info to kernel...", agentInfo)
 	err = h.SendAgentInfo(agentInfo)
 	if err != nil {
 		h.logger.Error("failed to send agent info to the ebpf program", zap.Error(err))
@@ -496,7 +490,6 @@ func (h *Hooks) SendKeployClientInfo(ctx context.Context, clientId uint64, clien
 	// TODO use the session to get the app id
 	// and then use the app id to get the test cases chan
 	// and pass that to eBPF consumers/listeners
-	fmt.Println("clientInfo agya hahahaa ...", clientInfo)
 
 	err := h.SendClientInfo(clientId, clientInfo)
 	if err != nil {

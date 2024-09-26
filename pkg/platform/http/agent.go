@@ -46,7 +46,7 @@ type AgentClient struct {
 
 // this will be the client side implementation
 func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClient {
-	fmt.Println("Agent client started::: ", c.Agent.Port, c.Agent.IsDocker)
+
 	return &AgentClient{
 		logger:       logger,
 		dockerClient: client,
@@ -259,22 +259,11 @@ func (a *AgentClient) SetMocks(ctx context.Context, id uint64, filtered []*model
 		AppId:      0,
 	}
 
-	for _, v := range requestBody.UnFiltered {
-		if v.Kind == "Postgres" && checkForC(v.Spec.PostgresResponses[0].PacketTypes) {
-			if v.Spec.PostgresResponses[0].CommandCompletes[0].CommandTagType == "" {
-				fmt.Println("CommandComplete is empty")
-			} else {
-				fmt.Println("CommandComplete is not empty", v.Spec.PostgresResponses[0].CommandCompletes[0].CommandTagType)
-			}
-		}
-	}
-
 	requestJSON, err := json.Marshal(requestBody)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to marshal request body for setmocks")
 		return fmt.Errorf("error marshaling request body for setmocks: %s", err.Error())
 	}
-	fmt.Println("requestJson: ", string(requestJSON))
 
 	// mock outgoing request
 	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/setmocks", a.conf.Agent.Port), bytes.NewBuffer(requestJSON))

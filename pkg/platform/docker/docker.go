@@ -385,7 +385,6 @@ func (idc *Impl) GetHostWorkingDirectory() (string, error) {
 		return "", err
 	}
 
-	fmt.Println("Current working directory: ", curDir)
 	container, err := idc.ContainerInspect(ctx, "keploy-v2")
 	if err != nil {
 		utils.LogError(idc.logger, err, "error inspecting keploy-v2 container")

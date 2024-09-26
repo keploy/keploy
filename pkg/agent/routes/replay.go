@@ -2,7 +2,6 @@ package routes
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strconv"
 
@@ -68,16 +67,6 @@ func (a *AgentRequest) SetMocks(w http.ResponseWriter, r *http.Request) {
 		render.JSON(w, r, err)
 		render.Status(r, http.StatusBadRequest)
 		return
-	}
-
-	for _, v := range SetMocksReq.UnFiltered {
-		if v.Kind == "Postgres" && checkForC(v.Spec.PostgresResponses[0].PacketTypes) {
-			if v.Spec.PostgresResponses[0].CommandCompletes[0].CommandTagType == "" {
-				fmt.Println("CommandComplete is empty on agent side")
-			} else {
-				fmt.Println("CommandComplete is not empty on agent side ", v.Spec.PostgresResponses[0].CommandCompletes[0].CommandTagType)
-			}
-		}
 	}
 
 	err = a.agent.SetMocks(r.Context(), 0, SetMocksReq.Filtered, SetMocksReq.UnFiltered)

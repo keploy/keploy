@@ -75,7 +75,6 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 		default:
 
 			mocks, err := mockDb.GetUnFilteredMocks()
-			fmt.Println("GetUnFilteredMocks() mocks are here !!: ", len(mocks))
 			var tcsMocks []*models.Mock
 
 			for _, mock := range mocks {
@@ -93,10 +92,9 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 			recordedPrep := getRecordPrepStatement(tcsMocks)
 			reqGoingOn := decodePgRequest(requestBuffers[0], logger)
 			if reqGoingOn != nil {
-				logger.Info("PacketTypes", zap.Any("PacketTypes", reqGoingOn.PacketTypes))
-				fmt.Println("REQUEST GOING ON - ", reqGoingOn)
-				logger.Info("ConnectionId-", zap.String("ConnectionId", ConnectionID))
-				logger.Info("TestMap*****", zap.Any("TestMap", testmap))
+				logger.Debug("PacketTypes", zap.Any("PacketTypes", reqGoingOn.PacketTypes))
+				logger.Debug("ConnectionId-", zap.String("ConnectionId", ConnectionID))
+				logger.Debug("TestMap*****", zap.Any("TestMap", testmap))
 			}
 
 			// merge all the streaming requests into 1 for matching

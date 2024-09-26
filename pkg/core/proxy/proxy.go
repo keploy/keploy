@@ -251,7 +251,6 @@ func (p *Proxy) start(ctx context.Context) error {
 		// handle the client connection
 		case clientConn := <-clientConnCh:
 			clientConnErrGrp.Go(func() error {
-				fmt.Println("Client connection accepted...")
 				defer util.Recover(p.logger, clientConn, nil)
 				err := p.handleConnection(clientConnCtx, clientConn)
 				if err != nil && err != io.EOF {
@@ -290,7 +289,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		utils.LogError(p.logger, err, "failed to fetch the destination info", zap.Any("Source port", sourcePort))
 		return err
 	}
-	fmt.Println("DestInfo", destInfo)
 
 	// releases the occupied source port when done fetching the destination info
 	err = p.DestInfo.Delete(ctx, uint16(sourcePort))
@@ -497,7 +495,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	generic := true
 
-	fmt.Println("BEFORE PARSERS!!!")
 	//Checking for all the parsers.
 	for _, parser := range p.Integrations {
 		if parser.MatchType(parserCtx, initialBuf) {
@@ -575,7 +572,6 @@ func (p *Proxy) Record(_ context.Context, id uint64, mocks chan<- *models.Mock, 
 		MC:              mocks,
 		OutgoingOptions: opts,
 	})
-	fmt.Println("Record mode enabled")
 	p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
 
 	////set the new proxy ip:port for a new session
@@ -627,7 +623,6 @@ func (p *Proxy) SetMocks(_ context.Context, id uint64, filtered []*models.Mock, 
 		m.(*MockManager).SetFilteredMocks(filtered)
 		m.(*MockManager).SetUnFilteredMocks(unFiltered)
 	}
-	fmt.Println("Mocks set successfully", id)
 	return nil
 }
 

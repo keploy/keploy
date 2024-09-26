@@ -74,8 +74,6 @@ func (h *Hooks) SendClientInfo(id uint64, appInfo structs.ClientInfo) error {
 
 // func to send proxyinfo to the kernel
 func (h *Hooks) SendProxyInfo(id uint64, proxInfo structs.ProxyInfo) error {
-	fmt.Println("Sending Proxy Info to the Kernel !!", proxInfo)
-
 	err := h.proxyInfoMap.Update(id, proxInfo, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the proxy info to the ebpf program")

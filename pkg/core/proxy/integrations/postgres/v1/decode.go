@@ -24,7 +24,6 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 	pgRequests := [][]byte{reqBuf}
 	errCh := make(chan error, 1)
 
-	fmt.Println("Inside decodePostgres !!")
 	go func(errCh chan error, pgRequests [][]byte) {
 		defer pUtil.Recover(logger, clientConn, nil)
 		// close should be called from the producer of the channel
@@ -85,7 +84,6 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 					utils.LogError(logger, err, "failed to decode the response message in proxy for postgres dependency")
 					errCh <- err
 				}
-				fmt.Println("ENCODED RESPONSE IS: ", encoded)
 				_, err = clientConn.Write(encoded)
 				if err != nil && err != io.EOF && strings.Contains(err.Error(), "use of closed network connection") {
 					utils.LogError(logger, err, "failed to write the response message to the client application")

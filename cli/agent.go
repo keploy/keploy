@@ -43,7 +43,6 @@ func Agent(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceF
 			// TODO: USE ENV Instead of flags
 			if isdocker {
 				port, _ = cmd.Flags().GetUint32("port")
-				fmt.Println("PORT for docker", port)
 			}
 
 			var a agent.Service

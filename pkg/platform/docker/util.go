@@ -264,7 +264,6 @@ func addKeployNetwork(ctx context.Context, logger *zap.Logger, client Client) {
 		return
 	}
 
-	fmt.Println("Creating keploy network")
 	for _, network := range networks {
 		if network.Name == "keploy-network" {
 			logger.Debug("keploy network already exists")
