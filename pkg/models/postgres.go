@@ -34,12 +34,12 @@ type Backend struct {
 	CopyData            pgproto3.CopyData            `json:"copy_data,omitempty" yaml:"copy_data,omitempty"`
 	CopyDone            pgproto3.CopyDone            `json:"copy_done,omitempty" yaml:"copy_done,omitempty"`
 	Describe            pgproto3.Describe            `json:"describe,omitempty" yaml:"describe,omitempty"`
-	Execute             pgproto3.Execute             `yaml:"-"`
+	Execute             pgproto3.Execute             `json:"-" yaml:"-"`
 	Executes            []pgproto3.Execute           `json:"execute,omitempty" yaml:"execute,omitempty"`
 	Flush               pgproto3.Flush               `json:"flush,omitempty" yaml:"flush,omitempty"`
 	FunctionCall        pgproto3.FunctionCall        `json:"function_call,omitempty" yaml:"function_call,omitempty"`
 	GssEncRequest       pgproto3.GSSEncRequest       `json:"gss_enc_request,omitempty" yaml:"gss_enc_request,omitempty"`
-	Parse               pgproto3.Parse               `yaml:"-"`
+	Parse               pgproto3.Parse               `json:"-" yaml:"-"`
 	Parses              []pgproto3.Parse             `json:"parse,omitempty" yaml:"parse,omitempty"`
 	Query               pgproto3.Query               `json:"query,omitempty" yaml:"query,omitempty"`
 	SSlRequest          pgproto3.SSLRequest          `json:"ssl_request,omitempty" yaml:"ssl_request,omitempty"`
@@ -70,45 +70,33 @@ type Frontend struct {
 	AuthenticationSASLContinue      pgproto3.AuthenticationSASLContinue      `json:"authentication_sasl_continue,omitempty" yaml:"authentication_sasl_continue,omitempty,flow"`
 	AuthenticationSASLFinal         pgproto3.AuthenticationSASLFinal         `json:"authentication_sasl_final,omitempty" yaml:"authentication_sasl_final,omitempty,flow"`
 	BackendKeyData                  pgproto3.BackendKeyData                  `json:"backend_key_data,omitempty" yaml:"backend_key_data,omitempty"`
-	BindComplete                    pgproto3.BindComplete                    `yaml:"-"`
+	BindComplete                    pgproto3.BindComplete                    `json:"-" yaml:"-"`
 	BindCompletes                   []pgproto3.BindComplete                  `json:"bind_complete,omitempty" yaml:"bind_complete,omitempty"`
 	CloseComplete                   pgproto3.CloseComplete                   `json:"close_complete,omitempty" yaml:"close_complete,omitempty"`
-	CommandComplete                 pgproto3.CommandComplete                 `yaml:"-"`
+	CommandComplete                 pgproto3.CommandComplete                 `json:"-" yaml:"-"`
 	CommandCompletes                []pgproto3.CommandComplete               `json:"command_complete,omitempty" yaml:"command_complete,omitempty"`
 	// CopyBothResponse                pgproto3.CopyBothResponse                `json:"copy_both_response,omitempty" yaml:"copy_both_response,omitempty"`
-	CopyData                        pgproto3.CopyData                        `json:"copy_data,omitempty" yaml:"copy_data,omitempty"`
+	CopyData pgproto3.CopyData `json:"copy_data,omitempty" yaml:"copy_data,omitempty"`
 	// CopyInResponse                  pgproto3.CopyInResponse                  `json:"copy_in_response,omitempty" yaml:"copy_in_response,omitempty"`
 	// CopyOutResponse                 pgproto3.CopyOutResponse                 `json:"copy_out_response,omitempty" yaml:"copy_out_response,omitempty"`
-	CopyDone                        pgproto3.CopyDone                        `json:"copy_done,omitempty" yaml:"copy_done,omitempty"`
-	DataRow                         pgproto3.DataRow                         `yaml:"-"`
-	DataRows                        []pgproto3.DataRow                       `json:"data_row,omitempty" yaml:"data_row,omitempty,flow"`
-	EmptyQueryResponse              pgproto3.EmptyQueryResponse              `json:"empty_query_response,omitempty" yaml:"empty_query_response,omitempty"`
-	ErrorResponse                   pgproto3.ErrorResponse                   `json:"error_response,omitempty" yaml:"error_response,omitempty"`
-	FunctionCallResponse            pgproto3.FunctionCallResponse            `json:"function_call_response,omitempty" yaml:"function_call_response,omitempty"`
-	NoData                          pgproto3.NoData                          `json:"no_data,omitempty" yaml:"no_data,omitempty"`
-	NoticeResponse                  pgproto3.NoticeResponse                  `json:"notice_response,omitempty" yaml:"notice_response,omitempty"`
-	NotificationResponse            pgproto3.NotificationResponse            `json:"notification_response,omitempty" yaml:"notification_response,omitempty"`
-	ParameterDescription            pgproto3.ParameterDescription            `json:"parameter_description,omitempty" yaml:"parameter_description,omitempty"`
-	ParameterStatus                 pgproto3.ParameterStatus                 `yaml:"-"`
-	ParameterStatusCombined         []pgproto3.ParameterStatus               `json:"parameter_status,omitempty" yaml:"parameter_status,omitempty"`
-	ParseComplete                   pgproto3.ParseComplete                   `yaml:"-"`
-	ParseCompletes                  []pgproto3.ParseComplete                 `json:"parse_complete,omitempty" yaml:"parse_complete,omitempty"`
-	ReadyForQuery                   pgproto3.ReadyForQuery                   `json:"ready_for_query,omitempty" yaml:"ready_for_query,omitempty"`
-	RowDescription                  pgproto3.RowDescription                  `json:"row_description,omitempty" yaml:"row_description,omitempty,flow"`
-	PortalSuspended                 pgproto3.PortalSuspended                 `json:"portal_suspended,omitempty" yaml:"portal_suspended,omitempty"`
-	MsgType                         byte                                     `json:"msg_type,omitempty" yaml:"msg_type,omitempty"`
-	AuthType                        int32                                    `json:"auth_type" yaml:"auth_type"`
-	// AuthMechanism                   string                                   `json:"auth_mechanism,omitempty" yaml:"auth_mechanism,omitempty"`
-	BodyLen int `json:"body_len,omitempty" yaml:"body_len,omitempty"`
-}
-
-type StartupPacket struct {
-	Length          uint32
-	ProtocolVersion uint32
-}
-
-type RegularPacket struct {
-	Identifier byte
-	Length     uint32
-	Payload    []byte
+	CopyDone                pgproto3.CopyDone             `json:"copy_done,omitempty" yaml:"copy_done,omitempty"`
+	DataRow                 pgproto3.DataRow              `json:"-" yaml:"-"`
+	DataRows                []pgproto3.DataRow            `json:"data_row,omitempty" yaml:"data_row,omitempty,flow"`
+	EmptyQueryResponse      pgproto3.EmptyQueryResponse   `json:"empty_query_response,omitempty" yaml:"empty_query_response,omitempty"`
+	ErrorResponse           pgproto3.ErrorResponse        `json:"error_response,omitempty" yaml:"error_response,omitempty"`
+	FunctionCallResponse    pgproto3.FunctionCallResponse `json:"function_call_response,omitempty" yaml:"function_call_response,omitempty"`
+	NoData                  pgproto3.NoData               `json:"no_data,omitempty" yaml:"no_data,omitempty"`
+	NoticeResponse          pgproto3.NoticeResponse       `json:"notice_response,omitempty" yaml:"notice_response,omitempty"`
+	NotificationResponse    pgproto3.NotificationResponse `json:"notification_response,omitempty" yaml:"notification_response,omitempty"`
+	ParameterDescription    pgproto3.ParameterDescription `json:"parameter_description,omitempty" yaml:"parameter_description,omitempty"`
+	ParameterStatus         pgproto3.ParameterStatus      `json:"-" yaml:"-"`
+	ParameterStatusCombined []pgproto3.ParameterStatus    `json:"parameter_status,omitempty" yaml:"parameter_status,omitempty"`
+	ParseComplete           pgproto3.ParseComplete        `json:"-" yaml:"-"`
+	ParseCompletes          []pgproto3.ParseComplete      `json:"parse_complete,omitempty" yaml:"parse_complete,omitempty"`
+	ReadyForQuery           pgproto3.ReadyForQuery        `json:"ready_for_query,omitempty" yaml:"ready_for_query,omitempty"`
+	RowDescription          pgproto3.RowDescription       `json:"row_description,omitempty" yaml:"row_description,omitempty,flow"`
+	PortalSuspended         pgproto3.PortalSuspended      `json:"portal_suspended,omitempty" yaml:"portal_suspended,omitempty"`
+	MsgType                 byte                          `json:"msg_type,omitempty" yaml:"msg_type,omitempty"`
+	AuthType                int32                         `json:"auth_type" yaml:"auth_type"`
+	BodyLen                 int                           `json:"body_len,omitempty" yaml:"body_len,omitempty"`
 }

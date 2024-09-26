@@ -242,6 +242,16 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, id uint64, opts models.O
 
 }
 
+// checkForC checks if the array contains the string "C"
+func checkForC(arr []string) bool {
+	for _, v := range arr {
+		if v == "C" {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *AgentClient) SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error {
 	requestBody := models.SetMocksReq{
 		Filtered:   filtered,
@@ -249,11 +259,22 @@ func (a *AgentClient) SetMocks(ctx context.Context, id uint64, filtered []*model
 		AppId:      0,
 	}
 
+	for _, v := range requestBody.UnFiltered {
+		if v.Kind == "Postgres" && checkForC(v.Spec.PostgresResponses[0].PacketTypes) {
+			if v.Spec.PostgresResponses[0].CommandCompletes[0].CommandTagType == "" {
+				fmt.Println("CommandComplete is empty")
+			} else {
+				fmt.Println("CommandComplete is not empty", v.Spec.PostgresResponses[0].CommandCompletes[0].CommandTagType)
+			}
+		}
+	}
+
 	requestJSON, err := json.Marshal(requestBody)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to marshal request body for setmocks")
 		return fmt.Errorf("error marshaling request body for setmocks: %s", err.Error())
 	}
+	fmt.Println("requestJson: ", string(requestJSON))
 
 	// mock outgoing request
 	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/setmocks", a.conf.Agent.Port), bytes.NewBuffer(requestJSON))
@@ -467,6 +488,11 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to register client")
 		return 0, err
+	}
+
+	isAgentRunning = a.isAgentRunning(ctx)
+	if !isAgentRunning {
+		return 0, fmt.Errorf("keploy agent is not running, please start the agent first")
 	}
 
 	return clientId, nil

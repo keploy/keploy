@@ -251,6 +251,7 @@ func (p *Proxy) start(ctx context.Context) error {
 		// handle the client connection
 		case clientConn := <-clientConnCh:
 			clientConnErrGrp.Go(func() error {
+				fmt.Println("Client connection accepted...")
 				defer util.Recover(p.logger, clientConn, nil)
 				err := p.handleConnection(clientConnCtx, clientConn)
 				if err != nil && err != io.EOF {
@@ -496,6 +497,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	generic := true
 
+	fmt.Println("BEFORE PARSERS!!!")
 	//Checking for all the parsers.
 	for _, parser := range p.Integrations {
 		if parser.MatchType(parserCtx, initialBuf) {
@@ -626,8 +628,6 @@ func (p *Proxy) SetMocks(_ context.Context, id uint64, filtered []*models.Mock, 
 		m.(*MockManager).SetUnFilteredMocks(unFiltered)
 	}
 	fmt.Println("Mocks set successfully", id)
-	fmt.Println("Filtered Mocks:", filtered)
-	fmt.Println("UnFiltered Mocks:", unFiltered)
 	return nil
 }
 

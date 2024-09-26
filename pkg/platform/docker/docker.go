@@ -137,6 +137,40 @@ func (idc *Impl) AttachNetwork(containerName string, networkNames []string) erro
 	return nil
 }
 
+func (idc *Impl) AttachPid(containerName, initContainer string) error {
+
+	ctx, cancel := context.WithTimeout(context.Background(), idc.timeoutForDockerQuery)
+	defer cancel()
+
+	containerJSON, err := idc.ContainerInspect(ctx, containerName)
+	if err != nil {
+		return fmt.Errorf("failed to inspect the docker container: %w", err)
+	}
+
+	if containerJSON.State.Status != "running" {
+		return fmt.Errorf("container %s is not running", containerName)
+	}
+
+	// Get the PID of the init container
+	initContainerJSON, err := idc.ContainerInspect(ctx, initContainer)
+	if err != nil {
+		return fmt.Errorf("failed to inspect the docker container: %w", err)
+	}
+
+	if initContainerJSON.State.Status != "running" {
+		return fmt.Errorf("init container %s is not running", initContainer)
+	}
+
+	// Attach the init container to the main container
+	// for eg - docker run -p 8080:8080 --name MongoApp --pid=container:keploy-init --network keploy-network gin-app:1.0
+	// err = idc.ContainerUpdate(ctx, containerName, dockerContainerPkg.UpdateConfig{
+	// 	PidsLimit: 0,
+	// 	PidMode:   "container:" + initContainer,
+	// })
+
+	return nil
+}
+
 // StopAndRemoveDockerContainer will Stop and Remove the docker container
 func (idc *Impl) StopAndRemoveDockerContainer() error {
 	dockerClient := idc

@@ -75,6 +75,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 		default:
 
 			mocks, err := mockDb.GetUnFilteredMocks()
+			fmt.Println("GetUnFilteredMocks() mocks are here !!: ", len(mocks))
 			var tcsMocks []*models.Mock
 
 			for _, mock := range mocks {
@@ -92,10 +93,10 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 			recordedPrep := getRecordPrepStatement(tcsMocks)
 			reqGoingOn := decodePgRequest(requestBuffers[0], logger)
 			if reqGoingOn != nil {
-				logger.Debug("PacketTypes", zap.Any("PacketTypes", reqGoingOn.PacketTypes))
-				// fmt.Println("REQUEST GOING ON - ", reqGoingOn)
-				logger.Debug("ConnectionId-", zap.String("ConnectionId", ConnectionID))
-				logger.Debug("TestMap*****", zap.Any("TestMap", testmap))
+				logger.Info("PacketTypes", zap.Any("PacketTypes", reqGoingOn.PacketTypes))
+				fmt.Println("REQUEST GOING ON - ", reqGoingOn)
+				logger.Info("ConnectionId-", zap.String("ConnectionId", ConnectionID))
+				logger.Info("TestMap*****", zap.Any("TestMap", testmap))
 			}
 
 			// merge all the streaming requests into 1 for matching
@@ -142,7 +143,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 							}
 							return true, []models.Frontend{ssl}, nil
 						case initMock.Spec.PostgresRequests[requestIndex].Identfier == "StartupRequest" && isStartupPacket(reqBuff) && initMock.Spec.PostgresRequests[requestIndex].Payload != "AAAACATSFi8=" && initMock.Spec.PostgresResponses[requestIndex].AuthType == 10:
-							logger.Debug("CHANGING TO MD5 for Response", zap.String("mock", initMock.Name), zap.String("Req", bufStr))
+							logger.Info("CHANGING TO MD5 for Response", zap.String("mock", initMock.Name), zap.String("Req", bufStr))
 							res := make([]models.Frontend, len(initMock.Spec.PostgresResponses))
 							copy(res, initMock.Spec.PostgresResponses)
 							res[requestIndex].AuthType = 5
@@ -152,7 +153,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 							}
 							return true, res, nil
 						case len(encodedMock) > 0 && encodedMock[0] == 'p' && initMock.Spec.PostgresRequests[requestIndex].PacketTypes[0] == "p" && reqBuff[0] == 'p':
-							logger.Debug("CHANGING TO MD5 for Request and Response", zap.String("mock", initMock.Name), zap.String("Req", bufStr))
+							logger.Info("CHANGING TO MD5 for Request and Response", zap.String("mock", initMock.Name), zap.String("Req", bufStr))
 
 							res := make([]models.Frontend, len(initMock.Spec.PostgresResponses))
 							copy(res, initMock.Spec.PostgresResponses)
@@ -223,7 +224,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 				getTestPS(requestBuffers, logger, ConnectionID)
 			}
 
-			logger.Debug("Sorted Mocks inside pg parser: ", zap.Any("Len of sortedTcsMocks", len(sortedTcsMocks)))
+			logger.Info("Sorted Mocks inside pg parser: ", zap.Any("Len of sortedTcsMocks", len(sortedTcsMocks)))
 
 			var matched, sorted bool
 			var idx int
@@ -238,7 +239,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 					if newMock != nil {
 						matchedMock = newMock
 					}
-					logger.Debug("Matched In Sorted PG Matching Stream", zap.String("mock", matchedMock.Name))
+					logger.Info("Matched In Sorted PG Matching Stream", zap.String("mock", matchedMock.Name))
 				}
 
 				idx = findBinaryStreamMatch(logger, sortedTcsMocks, requestBuffers, sorted)
@@ -257,7 +258,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 					if newMock != nil {
 						matchedMock = newMock
 					}
-					logger.Debug("Matched In Unsorted PG Matching Stream", zap.String("mock", matchedMock.Name))
+					logger.Info("Matched In Unsorted PG Matching Stream", zap.String("mock", matchedMock.Name))
 				}
 				idx = findBinaryStreamMatch(logger, tcsMocks, requestBuffers, sorted)
 				// check if the validate the query with the matched mock
@@ -273,12 +274,12 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 					if newMock != nil && !isValid {
 						matchedMock = newMock
 					}
-					logger.Debug("Matched In Binary Matching for Unsorted", zap.String("mock", matchedMock.Name))
+					logger.Info("Matched In Binary Matching for Unsorted", zap.String("mock", matchedMock.Name))
 				}
 			}
 
 			if matched {
-				logger.Debug("Matched mock", zap.String("mock", matchedMock.Name))
+				logger.Info("Matched mock", zap.String("mock", matchedMock.Name))
 				if matchedMock.TestModeInfo.IsFiltered {
 					originalMatchedMock := *matchedMock
 					matchedMock.TestModeInfo.IsFiltered = false
@@ -350,13 +351,13 @@ func findBinaryStreamMatch(logger *zap.Logger, tcsMocks []*models.Mock, requestB
 
 	if sorted {
 		if mxIdx != -1 && mxSim >= 0.78 {
-			logger.Debug("Matched with Sorted Stream", zap.Float64("similarity", mxSim))
+			logger.Info("Matched with Sorted Stream", zap.Float64("similarity", mxSim))
 		} else {
 			mxIdx = -1
 		}
 	} else {
 		if mxIdx != -1 {
-			logger.Debug("Matched with Unsorted Stream", zap.Float64("similarity", mxSim))
+			logger.Info("Matched with Unsorted Stream", zap.Float64("similarity", mxSim))
 		}
 	}
 	return mxIdx

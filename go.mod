@@ -2,7 +2,7 @@ module go.keploy.io/server/v2
 
 go 1.22.0
 
-replace github.com/jackc/pgproto3/v2 => github.com/keploy/pgproto3/v2 v2.0.5
+replace github.com/jackc/pgproto3/v2 => github.com/keploy/pgproto3/v2 v2.0.7
 
 require (
 	github.com/Microsoft/go-winio v0.6.1 // indirect
@@ -114,7 +114,6 @@ require (
 	github.com/go-chi/chi v1.5.5
 	github.com/go-chi/render v1.0.3
 	github.com/golang-jwt/jwt/v4 v4.5.0
-	github.com/google/uuid v1.6.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgproto3/v2 v2.3.2
 	github.com/shirou/gopsutil/v3 v3.24.3

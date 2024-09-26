@@ -278,8 +278,8 @@ func (a *Agent) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) e
 	}
 
 	proxyInfo := structs.ProxyInfo{
-		IP4: ipv4,
-		IP6: ipv6,
+		IP4:  ipv4,
+		IP6:  ipv6,
 		Port: 36789,
 	}
 
