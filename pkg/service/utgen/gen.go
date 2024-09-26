@@ -31,24 +31,25 @@ type Cursor struct {
 }
 
 type UnitTestGenerator struct {
-	srcPath       string
-	testPath      string
-	cmd           string
-	dir           string
-	cov           *Coverage
-	lang          string
-	cur           *Cursor
-	failedTests   []*models.FailedUT
-	prompt        *Prompt
-	ai            *AIClient
-	logger        *zap.Logger
-	promptBuilder *PromptBuilder
-	maxIterations int
-	Files         []string
-	tel           Telemetry
+	srcPath          string
+	testPath         string
+	cmd              string
+	dir              string
+	cov              *Coverage
+	lang             string
+	cur              *Cursor
+	failedTests      []*models.FailedUT
+	prompt           *Prompt
+	ai               *AIClient
+	logger           *zap.Logger
+	promptBuilder    *PromptBuilder
+	maxIterations    int
+	Files            []string
+	tel              Telemetry
+	additionalPrompt string
 }
 
-func NewUnitTestGenerator(srcPath, testPath, reportPath, cmd, dir, coverageFormat string, desiredCoverage float64, maxIterations int, model string, apiBaseURL string, apiVersion, apiServerURL string, _ *config.Config, tel Telemetry, auth service.Auth, logger *zap.Logger) (*UnitTestGenerator, error) {
+func NewUnitTestGenerator(srcPath, testPath, reportPath, cmd, dir, coverageFormat string, desiredCoverage float64, maxIterations int, model string, apiBaseURL string, apiVersion, apiServerURL, additionalPrompt string, _ *config.Config, tel Telemetry, auth service.Auth, logger *zap.Logger) (*UnitTestGenerator, error) {
 	generator := &UnitTestGenerator{
 		srcPath:       srcPath,
 		testPath:      testPath,
@@ -63,14 +64,22 @@ func NewUnitTestGenerator(srcPath, testPath, reportPath, cmd, dir, coverageForma
 			Format:  coverageFormat,
 			Desired: desiredCoverage,
 		},
-		cur: &Cursor{},
+		additionalPrompt: additionalPrompt,
+		cur:              &Cursor{},
 	}
 	return generator, nil
 }
 
 func (g *UnitTestGenerator) Start(ctx context.Context) error {
-
 	g.tel.GenerateUT()
+
+	// Check for context cancellation before proceeding
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("process cancelled by user")
+	default:
+		// Continue if no cancellation
+	}
 
 	// To find the source files if the source path is not provided
 	if g.srcPath == "" {
@@ -78,14 +87,22 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			return err
 		}
 		if len(g.Files) == 0 {
-			return fmt.Errorf("couldn't identify the source files Please mention source file and test file using flags")
+			return fmt.Errorf("couldn't identify the source files. Please mention source file and test file using flags")
 		}
 	}
 
 	for i := 0; i < len(g.Files)+1; i++ {
 		newTestFile := false
 		var err error
-		// If the source file path is not provided, then iterate over all the source files and test files
+
+		// Respect context cancellation in each iteration
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("process cancelled by user")
+		default:
+		}
+
+		// If the source file path is not provided, iterate over all the source files and test files
 		if i < len(g.Files) {
 			g.srcPath = g.Files[i]
 			g.testPath, err = getTestFilePath(g.srcPath, g.dir)
@@ -100,6 +117,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			}
 			newTestFile = isCreated
 		}
+
 		g.logger.Info(fmt.Sprintf("Generating tests for file: %s", g.srcPath))
 		isEmpty, err := utils.IsFileEmpty(g.testPath)
 		if err != nil {
@@ -116,10 +134,11 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 		} else {
 			g.cov.Current = 0
 		}
-		// Run the initial coverage to get the base line
+
 		iterationCount := 0
 		g.lang = GetCodeLanguage(g.srcPath)
-		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.logger)
+
+		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt, g.logger)
 		if err != nil {
 			utils.LogError(g.logger, err, "Error creating prompt builder")
 			return err
@@ -131,7 +150,14 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			}
 		}
 
+		// Respect context cancellation in the inner loop
 		for g.cov.Current < (g.cov.Desired/100) && iterationCount < g.maxIterations {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("process cancelled by user")
+			default:
+			}
+
 			pp.SetColorScheme(models.GetPassingColorScheme())
 			if _, err := pp.Printf("Current Coverage: %s%% for file %s\n", math.Round(g.cov.Current*100), g.srcPath); err != nil {
 				utils.LogError(g.logger, err, "failed to print coverage")
@@ -139,7 +165,8 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			if _, err := pp.Printf("Desired Coverage: %s%% for file %s\n", g.cov.Desired, g.srcPath); err != nil {
 				utils.LogError(g.logger, err, "failed to print coverage")
 			}
-			// Check for existence of failed tests:
+
+			// Check for failed tests:
 			failedTestRunsValue := ""
 			if g.failedTests != nil && len(g.failedTests) > 0 {
 				for _, failedTest := range g.failedTests {
@@ -153,6 +180,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 					}
 				}
 			}
+
 			g.prompt, err = g.promptBuilder.BuildPrompt("test_generation", failedTestRunsValue)
 			if err != nil {
 				utils.LogError(g.logger, err, "Error building prompt")
@@ -164,14 +192,21 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				utils.LogError(g.logger, err, "Error generating tests")
 				return err
 			}
+
 			g.logger.Info("Validating new generated tests one by one")
 			for _, generatedTest := range testsDetails.NewTests {
+				select {
+				case <-ctx.Done():
+					return fmt.Errorf("process cancelled by user")
+				default:
+				}
 				err := g.ValidateTest(generatedTest)
 				if err != nil {
 					utils.LogError(g.logger, err, "Error validating test")
 					return err
 				}
 			}
+
 			iterationCount++
 			if g.cov.Current < (g.cov.Desired/100) && g.cov.Current > 0 {
 				if err := g.runCoverage(); err != nil {
@@ -190,7 +225,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 
 		pp.SetColorScheme(models.GetPassingColorScheme())
 		if g.cov.Current >= (g.cov.Desired / 100) {
-			if _, err := pp.Printf("For File %s Reached above target coverage of %s%% (Current Coverage: %s%%) in %s%% iterations.\n", g.srcPath, g.cov.Desired, math.Round(g.cov.Current*100), iterationCount); err != nil {
+			if _, err := pp.Printf("For File %s Reached above target coverage of %s%% (Current Coverage: %s%%) in %s iterations.\n", g.srcPath, g.cov.Desired, math.Round(g.cov.Current*100), iterationCount); err != nil {
 				utils.LogError(g.logger, err, "failed to print coverage")
 			}
 		} else if iterationCount == g.maxIterations {
@@ -199,9 +234,9 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			}
 		}
 	}
+
 	return nil
 }
-
 func (g *UnitTestGenerator) runCoverage() error {
 	// Perform an initial build/test command to generate coverage report and get a baseline
 	if g.srcPath != "" {
@@ -210,6 +245,7 @@ func (g *UnitTestGenerator) runCoverage() error {
 	_, _, exitCode, lastUpdatedTime, err := RunCommand(g.cmd, g.dir, g.logger)
 	if err != nil {
 		utils.LogError(g.logger, err, "Error running test command")
+		return fmt.Errorf("error running test command: %w", err)
 	}
 	if exitCode != 0 {
 		utils.LogError(g.logger, err, "Error running test command")
@@ -230,17 +266,48 @@ func (g *UnitTestGenerator) runCoverage() error {
 
 func (g *UnitTestGenerator) GenerateTests(ctx context.Context) (*models.UTDetails, error) {
 	fmt.Println("Generating Tests...")
+
+	select {
+	case <-ctx.Done():
+		err := ctx.Err()
+		return &models.UTDetails{}, err
+	default:
+	}
+
 	response, promptTokenCount, responseTokenCount, err := g.ai.Call(ctx, g.prompt, 4096)
 	if err != nil {
-		utils.LogError(g.logger, err, "Error calling AI model")
 		return &models.UTDetails{}, err
 	}
+
+	select {
+	case <-ctx.Done():
+		err := ctx.Err()
+		return &models.UTDetails{}, err
+	default:
+	}
+
 	g.logger.Info(fmt.Sprintf("Total token used count for LLM model %s: %d", g.ai.Model, promptTokenCount+responseTokenCount))
+
+	select {
+	case <-ctx.Done():
+		err := ctx.Err()
+		return &models.UTDetails{}, err
+	default:
+	}
+
 	testsDetails, err := unmarshalYamlTestDetails(response)
 	if err != nil {
 		utils.LogError(g.logger, err, "Error unmarshalling test details")
 		return &models.UTDetails{}, err
 	}
+
+	select {
+	case <-ctx.Done():
+		err := ctx.Err()
+		return &models.UTDetails{}, err
+	default:
+	}
+
 	return testsDetails, nil
 }
 
