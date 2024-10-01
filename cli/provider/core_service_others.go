@@ -60,11 +60,15 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 
 	var client docker.Client
 	var err error
+
+	c.Agent.Port = 8086
 	if utils.IsDockerCmd(utils.CmdType(c.CommandType)) {
 		client, err = docker.New(logger)
 		if err != nil {
 			utils.LogError(logger, err, "failed to create docker client")
 		}
+		c.Agent.IsDocker = true
+		c.Agent.Port = 8096
 
 		//parse docker command only in case of docker start or docker run commands
 		if utils.CmdType(c.CommandType) != utils.DockerCompose {

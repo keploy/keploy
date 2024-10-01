@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"sync"
 	"syscall"
@@ -104,19 +105,11 @@ func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.In
 
 		decoder := json.NewDecoder(res.Body)
 		fmt.Println("Starting to read from the response body")
-		// Read from the response body as a stream
-		// have to prevent it from reading
-		// print the response buffer -
-		// resp, err := io.ReadAll(res.Body)
-		// if err != nil {
-		// 	fmt.Println("Error reading response body")
-		// }
-		// fmt.Println("Response body: ", string(resp))
 
 		for {
 			var testCase models.TestCase
 			if err := decoder.Decode(&testCase); err != nil {
-				if err == io.EOF {
+				if err == io.EOF || err == io.ErrUnexpectedEOF {
 					// End of the stream
 					break
 				}
@@ -180,7 +173,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 		for {
 			var mock models.Mock
 			if err := decoder.Decode(&mock); err != nil {
-				if err == io.EOF {
+				if err == io.EOF || err == io.ErrUnexpectedEOF {
 					// End of the stream
 					break
 				}
@@ -507,11 +500,6 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 
 	isAgent := a.isAgentRunning(ctx)
 	if !isAgent {
-		a.logger.Info("Keploy agent is not running in background, Loggin the agent file")
-		err := exec.Command("cat", "keploy_agent.log").Run()
-		if err != nil {
-			a.logger.Error("failed to read keploy agent log file", zap.Error(err))
-		}
 		return fmt.Errorf("keploy agent is not running, please start the agent first")
 	}
 
@@ -521,9 +509,14 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 	// start the app container and get the inode number
 	// keploy agent would have already runnning,
 
-	inode, err := hooks.GetSelfInodeNumber()
-	if err != nil {
-		a.logger.Error("failed to get inode number")
+	var inode uint64
+	var err error
+	if runtime.GOOS == "linux" {
+		// send the network info to the kernel
+		inode, err = hooks.GetSelfInodeNumber()
+		if err != nil {
+			a.logger.Error("failed to get inode number")
+		}
 	}
 
 	// Register the client with the server
@@ -633,6 +626,8 @@ func (a *AgentClient) isAgentRunning(ctx context.Context) bool {
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to send request to the agent server")
 	}
+
+	fmt.Printf("THe url is %v\n", req.URL)
 
 	resp, err := a.client.Do(req)
 	if err != nil {

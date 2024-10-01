@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/docker/docker/api/types/container"
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/core/hooks/structs"
@@ -53,6 +54,10 @@ func (a *Agent) Setup(ctx context.Context, cmd string, opts models.SetupOptions)
 	case <-ctx.Done():
 		fmt.Println("Context cancelled, stopping Setup")
 		fmt.Println("HERE KILL THE INIT CONTAINER")
+		a.dockerClient.ContainerStop(ctx, "keploy-init", container.StopOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to stop the docker container: %w", err)
+		}
 		return context.Canceled
 	}
 }

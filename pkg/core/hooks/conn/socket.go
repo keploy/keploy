@@ -27,7 +27,6 @@ var eventAttributesSize = int(unsafe.Sizeof(SocketDataEvent{}))
 
 // ListenSocket starts the socket event listeners
 func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap *ebpf.Map, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
-	fmt.Println("Starting socket listeners")
 	t := make(chan *models.TestCase, 500)
 	err := initRealTimeOffset()
 	if err != nil {

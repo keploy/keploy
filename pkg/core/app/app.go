@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 
@@ -117,6 +118,13 @@ func (a *App) SetupDocker() error {
 		return err
 	}
 
+	// attaching the init container's PID namespace to the app container
+	err = a.attachInitPid(context.Background())
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to attach init pid")
+		return err
+	}
+
 	return nil
 }
 
@@ -197,6 +205,13 @@ func (a *App) SetupCompose() error {
 		}
 	}
 
+	// adding keploy init pid to the compose file
+	err = a.docker.SetInitPid(compose)
+	if err != nil {
+		utils.LogError(a.logger, nil, "failed to set init pid in the compose file")
+		return err
+	}
+
 	if composeChanged {
 		err = a.docker.WriteComposeFile(compose, newPath)
 		if err != nil {
@@ -259,6 +274,28 @@ func (a *App) injectNetwork(network string) error {
 		//}
 	}
 	return fmt.Errorf("failed to find the network:%v in the keploy container", network)
+}
+
+// AttachInitPid modifies the existing Docker command to attach the init container's PID namespace
+func (a *App) attachInitPid(_ context.Context) error {
+	if a.cmd == "" {
+		return fmt.Errorf("no command provided to modify")
+	}
+
+	// Add the --pid=container:<initContainer> flag to the command
+	pidMode := fmt.Sprintf("--pid=container:%s", "keploy-init")
+	fmt.Println("pidMode:", pidMode)
+	// Inject the pidMode flag after 'docker run' in the command
+	parts := strings.SplitN(a.cmd, " ", 3) // Split by first two spaces to isolate "docker run"
+	if len(parts) < 3 {
+		return fmt.Errorf("invalid command structure: %s", a.cmd)
+	}
+
+	// Modify the command to insert the pidMode
+	a.cmd = fmt.Sprintf("%s %s %s %s", parts[0], parts[1], pidMode, parts[2])
+
+	fmt.Println("Modified command:", a.cmd)
+	return nil
 }
 
 func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {

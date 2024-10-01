@@ -102,6 +102,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	//checking for context cancellation as we don't want to start the instrumentation if the context is cancelled
 	select {
 	case <-ctx.Done():
+		fmt.Println("Context cancelled 0")
 		return nil
 	default:
 	}
