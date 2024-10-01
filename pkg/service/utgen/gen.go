@@ -293,7 +293,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 	fmt.Print(addHeightPadding(paddingHeight, 3, columnWidths3))
 	fmt.Printf("+-------------------------------+-------------------------------+-------------------------------+\n")
 
-	fmt.Printf(("Failed Cases Summary") + "\n")
+	fmt.Printf(("Discarded Cases Summary") + "\n")
 	fmt.Printf("+------------------------------------------+------------------------------------------+\n")
 	fmt.Printf("| %s | %s |\n",
 		centerAlignText("Build failures", 40),
