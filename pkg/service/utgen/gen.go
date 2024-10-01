@@ -94,7 +94,6 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			return fmt.Errorf("couldn't identify the source files. Please mention source file and test file using flags")
 		}
 	}
-	const tableWidth = 150
 	const paddingHeight = 1
 	columnWidths3 := []int{29, 29, 29}
 	columnWidths2 := []int{40, 40}
@@ -234,12 +233,12 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				centerAlignText("Test Cases Passed", 29),
 				centerAlignText("Test Cases Failed", 29))
 			fmt.Printf("+-------------------------------+-------------------------------+-------------------------------+\n")
-			fmt.Printf(addHeightPadding(paddingHeight, 3, columnWidths3))
+			fmt.Print(addHeightPadding(paddingHeight, 3, columnWidths3))
 			fmt.Printf("| \033[33m%s\033[0m | \033[32m%s\033[0m | \033[33m%s\033[0m |\n",
 				centerAlignText(fmt.Sprintf("%d", totalTest), 29),
 				centerAlignText(fmt.Sprintf("%d", passedTests), 29),
 				centerAlignText(fmt.Sprintf("%d", failedBuild+noCoverageTest), 29))
-			fmt.Printf(addHeightPadding(paddingHeight, 3, columnWidths3))
+			fmt.Print(addHeightPadding(paddingHeight, 3, columnWidths3))
 			fmt.Printf("+-------------------------------+-------------------------------+-------------------------------+\n")
 			fmt.Printf(("Discarded tests in session") + "\n")
 			fmt.Printf("+------------------------------------------+------------------------------------------+\n")
@@ -247,11 +246,11 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				centerAlignText("Build failures", 40),
 				centerAlignText("No Coverage output", 40))
 			fmt.Printf("+------------------------------------------+------------------------------------------+\n")
-			fmt.Printf(addHeightPadding(paddingHeight, 2, columnWidths2))
+			fmt.Print(addHeightPadding(paddingHeight, 2, columnWidths2))
 			fmt.Printf("| \033[35m%s\033[0m | \033[92m%s\033[0m |\n",
 				centerAlignText(fmt.Sprintf("%d", failedBuild), 40),
 				centerAlignText(fmt.Sprintf("%d", noCoverageTest), 40))
-			fmt.Printf(addHeightPadding(paddingHeight, 2, columnWidths2))
+			fmt.Print(addHeightPadding(paddingHeight, 2, columnWidths2))
 			fmt.Printf("+------------------------------------------+------------------------------------------+\n")
 			fmt.Printf("<=========================================>\n")
 
@@ -286,12 +285,12 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 		centerAlignText("Test Cases Failed", 29))
 
 	fmt.Printf("+-------------------------------+-------------------------------+-------------------------------+\n")
-	fmt.Printf(addHeightPadding(paddingHeight, 3, columnWidths3))
+	fmt.Print(addHeightPadding(paddingHeight, 3, columnWidths3))
 	fmt.Printf("| \033[33m%s\033[0m | \033[32m%s\033[0m | \033[33m%s\033[0m |\n",
 		centerAlignText(fmt.Sprintf("%d", g.totalTestCase), 29),
 		centerAlignText(fmt.Sprintf("%d", g.testCasePassed), 29),
 		centerAlignText(fmt.Sprintf("%d", g.testCaseFailed+g.noCoverageTest), 29))
-	fmt.Printf(addHeightPadding(paddingHeight, 3, columnWidths3))
+	fmt.Print(addHeightPadding(paddingHeight, 3, columnWidths3))
 	fmt.Printf("+-------------------------------+-------------------------------+-------------------------------+\n")
 
 	fmt.Printf(("Failed Cases Summary") + "\n")
@@ -301,11 +300,11 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 		centerAlignText("No Coverage output", 40))
 
 	fmt.Printf("+------------------------------------------+------------------------------------------+\n")
-	fmt.Printf(addHeightPadding(paddingHeight, 2, columnWidths2))
+	fmt.Print(addHeightPadding(paddingHeight, 2, columnWidths2))
 	fmt.Printf("| \033[35m%s\033[0m | \033[92m%s\033[0m |\n",
 		centerAlignText(fmt.Sprintf("%d", g.testCaseFailed), 40),
 		centerAlignText(fmt.Sprintf("%d", g.noCoverageTest), 40))
-	fmt.Printf(addHeightPadding(paddingHeight, 2, columnWidths2))
+	fmt.Print(addHeightPadding(paddingHeight, 2, columnWidths2))
 	fmt.Printf("+------------------------------------------+------------------------------------------+\n")
 
 	fmt.Printf("<=========================================>\n")
@@ -576,10 +575,9 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 		}
 		g.logger.Info("Skipping a generated test that failed to increase coverage")
 		return nil
-	} else {
-		g.testCasePassed++
-		*passedTests++
 	}
+	g.testCasePassed++
+	*passedTests++
 	g.cov.Current = covResult.Coverage
 	g.cur.Line = g.cur.Line + len(testCodeLines)
 	g.logger.Info("Generated test passed and increased coverage")
