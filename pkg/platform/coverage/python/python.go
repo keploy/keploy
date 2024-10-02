@@ -39,43 +39,32 @@ func (p *Python) PreProcess(_ bool) (string, error) {
 		return p.cmd, err
 	}
 	createPyCoverageConfig(p.logger)
-	return strings.Replace(p.cmd, p.executable, "coverage run $APPEND --data-file=.coverage.keploy", 1), nil
+	return strings.Replace(p.cmd, p.executable, "coverage run $APPEND --branch --data-file=.coverage.keploy", 1), nil
+}
+
+type Summary struct {
+	CoveredLines          int     `json:"covered_lines"`
+	NumStatements         int     `json:"num_statements"`
+	PercentCovered        float64 `json:"percent_covered"`
+	PercentCoveredDisplay string  `json:"percent_covered_display"`
+	NumBranches           int     `json:"num_branches"`
+	CoveredBranches       int     `json:"covered_branches"`
 }
 
 type pyCoverageFile struct {
-	Meta struct {
-		Version        string `json:"version"`
-		Timestamp      string `json:"timestamp"`
-		BranchCoverage bool   `json:"branch_coverage"`
-		ShowContexts   bool   `json:"show_contexts"`
-	} `json:"meta"`
 	Files map[string]struct {
-		ExecutedLines []int `json:"executed_lines"`
-		Summary       struct {
-			CoveredLines          int     `json:"covered_lines"`
-			NumStatements         int     `json:"num_statements"`
-			PercentCovered        float64 `json:"percent_covered"`
-			PercentCoveredDisplay string  `json:"percent_covered_display"`
-			MissingLines          int     `json:"missing_lines"`
-			ExcludedLines         int     `json:"excluded_lines"`
-		} `json:"summary"`
-		MissingLines  []int `json:"missing_lines"`
-		ExcludedLines []int `json:"excluded_lines"`
+		Summary   `json:"summary"`
+		Functions map[string]struct {
+			Summary `json:"summary"`
+		} `json:"functions"`
 	} `json:"files"`
-	Totals struct {
-		CoveredLines          int     `json:"covered_lines"`
-		NumStatements         int     `json:"num_statements"`
-		PercentCovered        float64 `json:"percent_covered"`
-		PercentCoveredDisplay string  `json:"percent_covered_display"`
-		MissingLines          int     `json:"missing_lines"`
-		ExcludedLines         int     `json:"excluded_lines"`
-	} `json:"totals"`
+	Summary `json:"totals"`
 }
 
 func (p *Python) GetCoverage() (models.TestCoverage, error) {
 	testCov := models.TestCoverage{
-		FileCov:  make(map[string]string),
-		TotalCov: "",
+		FileCov:  make(map[string]models.CoverageElement),
+		TotalCov: models.CoverageElement{},
 	}
 
 	covFileName := os.Getenv("COVERAGE_FILE")
@@ -83,9 +72,7 @@ func (p *Python) GetCoverage() (models.TestCoverage, error) {
 		covFileName = ".coverage.keploy"
 	}
 	generateCovJSONCmd := exec.CommandContext(p.ctx, "python3", "-m", "coverage", "json", "--data-file="+covFileName)
-	generateCovJSONCmd.Stdout = os.Stdout
-	generateCovJSONCmd.Stderr = os.Stderr
-	err := generateCovJSONCmd.Run()
+	_, err := generateCovJSONCmd.Output()
 	if err != nil {
 		return testCov, err
 	}
@@ -98,10 +85,34 @@ func (p *Python) GetCoverage() (models.TestCoverage, error) {
 	if err != nil {
 		return testCov, err
 	}
+	totalFunctions := 0
+	totalCoveredFunctions := 0
 	for filename, file := range cov.Files {
-		testCov.FileCov[filename] = file.Summary.PercentCoveredDisplay + "%"
+		functions := 0
+		coveredFunctions := 0
+		for funcName, funcSummary := range file.Functions {
+			if funcName == "" {
+				continue
+			}
+			functions++
+			if funcSummary.PercentCovered > 0 {
+				coveredFunctions++
+			}
+		}
+		totalFunctions += functions
+		totalCoveredFunctions += coveredFunctions
+
+		testCov.FileCov[filename] = models.CoverageElement{
+			LineCov:   coverage.Percentage(file.Summary.CoveredLines, file.Summary.NumStatements),
+			BranchCov: coverage.Percentage(file.Summary.CoveredBranches, file.Summary.NumBranches),
+			FuncCov:   coverage.Percentage(coveredFunctions, functions),
+		}
 	}
-	testCov.TotalCov = cov.Totals.PercentCoveredDisplay + "%"
+	testCov.TotalCov = models.CoverageElement{
+		LineCov:   coverage.Percentage(cov.Summary.CoveredLines, cov.Summary.NumStatements),
+		BranchCov: coverage.Percentage(cov.Summary.CoveredBranches, cov.Summary.NumBranches),
+		FuncCov:   coverage.Percentage(totalCoveredFunctions, totalFunctions),
+	}
 	return testCov, nil
 }
 
