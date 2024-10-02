@@ -27,7 +27,7 @@ type IncomingOptions struct {
 }
 
 type SetupOptions struct {
-	ClientId      uint64
+	ClientID     uint64
 	Container     string
 	DockerNetwork string
 	DockerDelay   uint64

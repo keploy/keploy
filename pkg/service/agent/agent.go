@@ -19,7 +19,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// agent will implement
 type Agent struct {
 	logger       *zap.Logger
 	core.Proxy                  // embedding the Proxy interface to transfer the proxy methods to the core object
@@ -42,7 +41,7 @@ func New(logger *zap.Logger, hook core.Hooks, proxy core.Proxy, tester core.Test
 }
 
 // Setup will create a new app and store it in the map, all the setup will be done here
-func (a *Agent) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
+func (a *Agent) Setup(ctx context.Context, _ string, opts models.SetupOptions) error {
 
 	a.logger.Info("Starting the agent in ", zap.String(string(opts.Mode), "mode"))
 	err := a.Hook(ctx, 0, models.HookOptions{Mode: opts.Mode, IsDocker: opts.IsDocker})
@@ -54,7 +53,7 @@ func (a *Agent) Setup(ctx context.Context, cmd string, opts models.SetupOptions)
 	case <-ctx.Done():
 		fmt.Println("Context cancelled, stopping Setup")
 		fmt.Println("HERE KILL THE INIT CONTAINER")
-		a.dockerClient.ContainerStop(ctx, "keploy-init", container.StopOptions{})
+		err = a.dockerClient.ContainerStop(ctx, "keploy-init", container.StopOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to stop the docker container: %w", err)
 		}
@@ -62,7 +61,6 @@ func (a *Agent) Setup(ctx context.Context, cmd string, opts models.SetupOptions)
 	}
 }
 
-// Listeners will get activated, details will be stored in the map. And connection will be established
 func (a *Agent) GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	return a.Hooks.Record(ctx, id, opts)
 }
@@ -193,7 +191,7 @@ func (a *Agent) GetConsumedMocks(ctx context.Context, id uint64) ([]string, erro
 	return a.Proxy.GetConsumedMocks(ctx, id)
 }
 
-func (a *Agent) UnHook(ctx context.Context, id uint64) error {
+func (a *Agent) UnHook(_ context.Context, id uint64) error {
 	return nil
 }
 
@@ -228,7 +226,7 @@ func (a *Agent) RegisterClient(ctx context.Context, opts models.SetupOptions) er
 		clientInfo.IsDockerApp = 1
 	}
 
-	return a.Hooks.SendKeployClientInfo(ctx, opts.ClientId, clientInfo)
+	return a.Hooks.SendKeployClientInfo(ctx, opts.ClientID, clientInfo)
 }
 
 func (a *Agent) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) error {
@@ -240,7 +238,7 @@ func (a *Agent) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) e
 			Port: 16789,
 		}
 		fmt.Println("PROXY INFO: ", proxyInfo)
-		err = a.Hooks.SendClientProxyInfo(ctx, opts.ClientId, proxyInfo)
+		err = a.Hooks.SendClientProxyInfo(ctx, opts.ClientID, proxyInfo)
 		if err != nil {
 			return err
 		}
@@ -288,7 +286,7 @@ func (a *Agent) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) e
 		Port: 36789,
 	}
 
-	err = a.Hooks.SendClientProxyInfo(ctx, opts.ClientId, proxyInfo)
+	err = a.Hooks.SendClientProxyInfo(ctx, opts.ClientID, proxyInfo)
 	if err != nil {
 		return err
 	}

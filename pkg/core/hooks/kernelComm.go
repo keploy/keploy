@@ -72,7 +72,7 @@ func (h *Hooks) SendClientInfo(id uint64, appInfo structs.ClientInfo) error {
 	return nil
 }
 
-// func to send proxyinfo to the kernel
+// SendProxyInfo sends the network information to the kernel
 func (h *Hooks) SendProxyInfo(id uint64, proxInfo structs.ProxyInfo) error {
 	err := h.proxyInfoMap.Update(id, proxInfo, ebpf.UpdateAny)
 	if err != nil {

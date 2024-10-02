@@ -57,11 +57,10 @@ func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClie
 	}
 }
 
-// Listeners will get activated, details will be stored in the map. And connection will be established
 func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	requestBody := models.IncomingReq{
 		IncomingOptions: opts,
-		ClientId:        0,
+		ClientId:        id,
 	}
 
 	requestJSON, err := json.Marshal(requestBody)
@@ -133,7 +132,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.In
 func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 	requestBody := models.OutgoingReq{
 		OutgoingOptions: opts,
-		ClientId:        0,
+		ClientId:        id,
 	}
 
 	requestJSON, err := json.Marshal(requestBody)
@@ -198,7 +197,7 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, id uint64, opts models.O
 	// make a request to the server to mock outgoing
 	requestBody := models.OutgoingReq{
 		OutgoingOptions: opts,
-		ClientId:        0,
+		ClientId:        id,
 	}
 
 	requestJSON, err := json.Marshal(requestBody)
@@ -235,21 +234,11 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, id uint64, opts models.O
 
 }
 
-// checkForC checks if the array contains the string "C"
-func checkForC(arr []string) bool {
-	for _, v := range arr {
-		if v == "C" {
-			return true
-		}
-	}
-	return false
-}
-
 func (a *AgentClient) SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error {
 	requestBody := models.SetMocksReq{
 		Filtered:   filtered,
 		UnFiltered: unFiltered,
-		AppId:      0,
+		AppId:      id,
 	}
 
 	requestJSON, err := json.Marshal(requestBody)
@@ -318,7 +307,7 @@ func (a *AgentClient) GetConsumedMocks(ctx context.Context, id uint64) ([]string
 	return consumedMocks, nil
 }
 
-func (a *AgentClient) UnHook(ctx context.Context, id uint64) error {
+func (a *AgentClient) UnHook(_ context.Context, _ uint64) error {
 	return nil
 }
 
@@ -381,8 +370,8 @@ func (a *AgentClient) Run(ctx context.Context, id uint64, _ models.RunOptions) m
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
 
 	// if the agent is not running, start the agent
-	clientId := utils.GenerateID()
-	clientId = 0 // how can I retrieve the same client Id in the testmode ??
+	clientID := utils.GenerateID()
+	clientID = 0 // how can I retrieve the same client Id in the testmode ??
 
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 
@@ -396,7 +385,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		if isDockerCmd {
 			// run the docker container instead of the agent binary
 			go func() {
-				if err := a.StartInDocker(ctx, a.logger, clientId); err != nil {
+				if err := a.StartInDocker(ctx, a.logger, clientID); err != nil {
 					a.logger.Error("failed to start docker agent", zap.Error(err))
 				}
 			}()
@@ -436,12 +425,12 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	time.Sleep(5 * time.Second)
 	// check if its docker then create a init container first
 	// and then the app container
-	usrApp := app.NewApp(a.logger, clientId, cmd, a.dockerClient, app.Options{
+	usrApp := app.NewApp(a.logger, clientID, cmd, a.dockerClient, app.Options{
 		DockerNetwork: opts.DockerNetwork,
 		Container:     opts.Container,
 		DockerDelay:   opts.DockerDelay,
 	})
-	a.apps.Store(clientId, usrApp)
+	a.apps.Store(clientID, usrApp)
 
 	err := usrApp.Setup(ctx)
 	if err != nil {
@@ -463,7 +452,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 	}
 
-	opts.ClientId = clientId
+	opts.ClientID = clientID
 	opts.AppInode = inode // why its required in case of native ?
 	// Register the client with the server
 	err = a.RegisterClient(ctx, opts)
@@ -477,7 +466,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		return 0, fmt.Errorf("keploy agent is not running, please start the agent first")
 	}
 
-	return clientId, nil
+	return clientID, nil
 }
 
 func (ag *AgentClient) getApp(id uint64) (*app.App, error) {
@@ -525,7 +514,7 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 			DockerNetwork: opts.DockerNetwork,
 			ClientNsPid:   clientPid,
 			Mode:          opts.Mode,
-			ClientId:      0,
+			ClientID:      0,
 			ClientInode:   inode,
 			IsDocker:      a.conf.Agent.IsDocker,
 			AppInode:      opts.AppInode,
