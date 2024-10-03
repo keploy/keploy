@@ -49,10 +49,10 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 	exp := expected.Message.(*mysql.HandshakeResponse41Packet)
 	act := actual.Message.(*mysql.HandshakeResponse41Packet)
 
-	// Match the CapabilityFlags
-	if exp.CapabilityFlags != act.CapabilityFlags {
-		return fmt.Errorf("capability flags mismatch for handshake response, expected: %d, actual: %d", exp.CapabilityFlags, act.CapabilityFlags)
-	}
+	// // Match the CapabilityFlags
+	// if exp.CapabilityFlags != act.CapabilityFlags {
+	// 	return fmt.Errorf("capability flags mismatch for handshake response, expected: %d, actual: %d", exp.CapabilityFlags, act.CapabilityFlags)
+	// }
 
 	// Match the MaxPacketSize
 	if exp.MaxPacketSize != act.MaxPacketSize {
@@ -89,16 +89,16 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 		return fmt.Errorf("auth plugin name mismatch for handshake response, expected: %s, actual: %s", exp.AuthPluginName, act.AuthPluginName)
 	}
 
-	// Match the ConnectionAttributes
-	if len(exp.ConnectionAttributes) != len(act.ConnectionAttributes) {
-		return fmt.Errorf("connection attributes length mismatch for handshake response, expected: %d, actual: %d", len(exp.ConnectionAttributes), len(act.ConnectionAttributes))
-	}
+	// // Match the ConnectionAttributes
+	// if len(exp.ConnectionAttributes) != len(act.ConnectionAttributes) {
+	// 	return fmt.Errorf("connection attributes length mismatch for handshake response, expected: %d, actual: %d", len(exp.ConnectionAttributes), len(act.ConnectionAttributes))
+	// }
 
-	for key, value := range exp.ConnectionAttributes {
-		if act.ConnectionAttributes[key] != value && key != "_pid" {
-			return fmt.Errorf("connection attributes mismatch for handshake response, expected: %s, actual: %s", value, act.ConnectionAttributes[key])
-		}
-	}
+	// for key, value := range exp.ConnectionAttributes {
+	// 	if act.ConnectionAttributes[key] != value && key != "_pid" {
+	// 		return fmt.Errorf("connection attributes mismatch for handshake response, expected: %s, actual: %s", value, act.ConnectionAttributes[key])
+	// 	}
+	// }
 
 	// Match the ZstdCompressionLevel
 	if exp.ZstdCompressionLevel != act.ZstdCompressionLevel {
@@ -186,7 +186,10 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					matchCount := matchQuitPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
 					if matchCount > maxMatchedCount {
 						maxMatchedCount = matchCount
-						matchedResp = &mock.Spec.MySQLResponses[0]
+						matchedResp = &mysql.Response{} // in case if server closed the connection without sending any response
+						if len(mock.Spec.MySQLResponses) > 0 {
+							matchedResp = &mock.Spec.MySQLResponses[0] // if server responded with "error" packet
+						}
 						matchedMock = mock
 					}
 				case mysql.CommandStatusToString(mysql.COM_INIT_DB):
