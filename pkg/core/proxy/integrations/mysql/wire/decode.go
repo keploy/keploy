@@ -174,9 +174,6 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 			return parsedPacket, fmt.Errorf("failed to decode HandshakeResponse41 packet: %w", err)
 		}
 
-		//debug log
-		logger.Info("SSL supported: ", zap.Any("Server", sg.CapabilityFlags&mysql.CLIENT_SSL))
-
 		var pktType string
 		switch pkt := pkt.(type) {
 		case *mysql.HandshakeResponse41Packet:
@@ -191,6 +188,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 
 			pktType = mysql.SSLRequest
 			decodeCtx.UseSSL = true
+			logger.Info("SSL Request packet detected")
 			// Don't change the last operation if the packet is an SSL Request
 		}
 

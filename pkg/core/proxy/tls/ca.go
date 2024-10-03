@@ -257,7 +257,6 @@ var (
 func CertForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	// Generate a new server certificate and private key for the given hostname
 	DstURL = clientHello.ServerName
-	println("DstURL: ", DstURL)
 
 	cfsslLog.Level = cfsslLog.LevelError
 

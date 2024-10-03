@@ -141,6 +141,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 			Logger: logger,
 		}
 
+		// handle the TLS connection and get the upgraded client connection
 		isTLS := pTls.IsTLSHandshake(testBuffer)
 		if isTLS {
 			clientConn, err = pTls.HandleTLSConnection(ctx, logger, clientConn)
@@ -154,14 +155,13 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		var tlsDestConn *tls.Conn
 		if isTLS {
 			addr := fmt.Sprintf("%v:%v", pTls.DstURL, opts.DstCfg.Port)
-			fmt.Printf("Upgrading the destination connection to TLS\n")
-			fmt.Printf("Tls addr and config: %v, %v\n", addr, opts.DstCfg.TLSCfg)
-			fmt.Printf("Certificate: %v\n", opts.DstCfg.TLSCfg)
 			tlsConfig := &tls.Config{
 				InsecureSkipVerify: true,
 				ServerName:         pTls.DstURL,
 			}
-			fmt.Printf("ServerName: %v\n", tlsConfig.ServerName)
+
+			logger.Debug("Upgrading the destination connection to TLS", zap.String("Destination Addr", addr), zap.String("ServerName", tlsConfig.ServerName))
+
 			tlsDestConn = tls.Client(destConn, tlsConfig)
 			err = tlsDestConn.Handshake()
 			if err != nil {

@@ -19,7 +19,7 @@ func IsTLSHandshake(data []byte) bool {
 	return data[0] == 0x16 && data[1] == 0x03 && (data[2] == 0x00 || data[2] == 0x01 || data[2] == 0x02 || data[2] == 0x03)
 }
 
-func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn) (net.Conn, error) {
+func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn) (net.Conn, error) {
 	//Load the CA certificate and private key
 
 	var err error

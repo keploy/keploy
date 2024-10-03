@@ -137,6 +137,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 			Logger: logger,
 		}
 
+		// handle the TLS connection and get the upgraded client connection
 		isTLS := pTls.IsTLSHandshake(testBuffer)
 		if isTLS {
 			clientConn, err = pTls.HandleTLSConnection(ctx, logger, clientConn)
@@ -170,7 +171,6 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 		}
 	}
 
-	fmt.Printf("Pkt header type: %v\n", pkt.Header.Type)
 	_, ok = pkt.Message.(*mysql.HandshakeResponse41Packet)
 	if !ok {
 		utils.LogError(logger, nil, "failed to assert actual handshake response packet")

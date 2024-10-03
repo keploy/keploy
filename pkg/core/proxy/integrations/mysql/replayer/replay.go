@@ -62,7 +62,7 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *mod
 			ServerGreetings: wire.NewGreetings(),
 			// Map for storing prepared statements per connection
 			PreparedStatements: make(map[uint32]*mysql.StmtPrepareOkPacket),
-			PluginName:         string(mysql.CachingSha2), // Only supported plugin for now
+			PluginName:         string(mysql.CachingSha2), // usually a default plugin in newer versions of MySQL
 		}
 		decodeCtx.LastOp.Store(clientConn, wire.RESET) //resetting last command for new loop
 

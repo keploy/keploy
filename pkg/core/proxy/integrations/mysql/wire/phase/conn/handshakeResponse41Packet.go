@@ -30,8 +30,6 @@ func DecodeHandshakeResponse(_ context.Context, logger *zap.Logger, data []byte)
 	packet.CapabilityFlags = binary.LittleEndian.Uint32(data[:4])
 	data = data[4:]
 
-	//debug log
-	fmt.Printf("CLIENT_PROTOCOL_41: %v\n", packet.CapabilityFlags&mysql.CLIENT_PROTOCOL_41)
 	if packet.CapabilityFlags&mysql.CLIENT_PROTOCOL_41 == 0 {
 		return nil, errors.New("CLIENT_PROTOCOL_41 compatible client is required")
 	}
@@ -47,10 +45,8 @@ func DecodeHandshakeResponse(_ context.Context, logger *zap.Logger, data []byte)
 
 	// Check if it is a SSL Request Packet
 	if len(origData) == (4 + 4 + 1 + 23) {
-		println("SSL Request Packet: ", len(data))
-		fmt.Printf("CLIENT_SSL: %v\n", packet.CapabilityFlags&mysql.CLIENT_SSL)
 		if packet.CapabilityFlags&mysql.CLIENT_SSL != 0 {
-			logger.Info("Client requested SSL connection")
+			logger.Debug("Client requested SSL connection")
 			return &mysql.SSLRequestPacket{
 				CapabilityFlags: packet.CapabilityFlags,
 				MaxPacketSize:   packet.MaxPacketSize,
@@ -147,8 +143,6 @@ func DecodeHandshakeResponse(_ context.Context, logger *zap.Logger, data []byte)
 			packet.ZstdCompressionLevel = data[0]
 		}
 	}
-
-	//
 
 	return packet, nil
 }

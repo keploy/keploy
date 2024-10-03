@@ -1,5 +1,7 @@
 //go:build linux
 
+// Package proxy handles all the outgoing network calls and captures/forwards the request and response messages.
+// It also handles the DNS resolution mechanism.
 package proxy
 
 import (
