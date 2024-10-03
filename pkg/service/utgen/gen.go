@@ -53,22 +53,29 @@ type UnitTestGenerator struct {
 	noCoverageTest   int
 }
 
-func NewUnitTestGenerator(srcPath, testPath, reportPath, cmd, dir, coverageFormat string, desiredCoverage float64, maxIterations int, model string, apiBaseURL string, apiVersion, apiServerURL, additionalPrompt string, _ *config.Config, tel Telemetry, auth service.Auth, logger *zap.Logger) (*UnitTestGenerator, error) {
+func NewUnitTestGenerator(
+	cfg *config.Config,
+	tel Telemetry,
+	auth service.Auth,
+	logger *zap.Logger,
+) (*UnitTestGenerator, error) {
+	genConfig := cfg.Gen
+
 	generator := &UnitTestGenerator{
-		srcPath:       srcPath,
-		testPath:      testPath,
-		cmd:           cmd,
-		dir:           dir,
-		maxIterations: maxIterations,
+		srcPath:       genConfig.SourceFilePath,
+		testPath:      genConfig.TestFilePath,
+		cmd:           genConfig.TestCommand,
+		dir:           genConfig.TestDir,
+		maxIterations: genConfig.MaxIterations,
 		logger:        logger,
 		tel:           tel,
-		ai:            NewAIClient(model, apiBaseURL, apiVersion, "", apiServerURL, auth, uuid.NewString(), logger),
+		ai:            NewAIClient(genConfig.Model, genConfig.APIBaseURL, genConfig.APIVersion, "", cfg.APIServerURL, auth, uuid.NewString(), logger),
 		cov: &Coverage{
-			Path:    reportPath,
-			Format:  coverageFormat,
-			Desired: desiredCoverage,
+			Path:    genConfig.CoverageReportPath,
+			Format:  genConfig.CoverageFormat,
+			Desired: genConfig.DesiredCoverage,
 		},
-		additionalPrompt: additionalPrompt,
+		additionalPrompt: genConfig.AdditionalPrompt,
 		cur:              &Cursor{},
 	}
 	return generator, nil
