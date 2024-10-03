@@ -79,15 +79,16 @@ func updateJavaScriptImports(content string, newImports []string) (string, error
 
 	existingImports := importRegex.FindAllString(content, -1)
 	for _, imp := range existingImports {
-		existingImportsSet[imp] = true
+		if imp != "\"\"" {
+			existingImportsSet[imp] = true
+		}
 	}
 
 	for _, imp := range newImports {
 		imp = strings.TrimSpace(imp)
-		if imp != "" {
+		if imp != "\"\"" {
 			existingImportsSet[imp] = true
 		}
-		existingImportsSet[imp] = true
 	}
 
 	allImports := make([]string, 0, len(existingImportsSet))
@@ -161,7 +162,7 @@ func updateGoImports(content string, newImports []string) (string, error) {
 		newImports = extractGoImports(newImports)
 		for _, imp := range newImports {
 			imp = strings.TrimSpace(imp)
-			if imp != "" {
+			if imp != "\"\"" {
 				existingImportsSet[imp] = true
 			}
 		}
@@ -172,21 +173,21 @@ func updateGoImports(content string, newImports []string) (string, error) {
 		importBlockNew := createGoImportBlock(allImports)
 		updatedContent := importRegex.ReplaceAllString(content, importBlockNew)
 		return updatedContent, nil
-	} else {
-		packageRegex := regexp.MustCompile(`package\s+\w+`)
-
-		pkgMatch := packageRegex.FindStringIndex(content)
-		if pkgMatch == nil {
-			return "", fmt.Errorf("could not find package declaration")
-		}
-		newImports = extractGoImports(newImports)
-		importBlock := createGoImportBlock(newImports)
-
-		insertPos := pkgMatch[1]
-
-		updatedContent := content[:insertPos] + "\n\n" + importBlock + "\n" + content[insertPos:]
-		return updatedContent, nil
 	}
+	packageRegex := regexp.MustCompile(`package\s+\w+`)
+
+	pkgMatch := packageRegex.FindStringIndex(content)
+	if pkgMatch == nil {
+		return "", fmt.Errorf("could not find package declaration")
+	}
+	newImports = extractGoImports(newImports)
+	importBlock := createGoImportBlock(newImports)
+
+	insertPos := pkgMatch[1]
+
+	updatedContent := content[:insertPos] + "\n\n" + importBlock + "\n" + content[insertPos:]
+	return updatedContent, nil
+
 }
 
 func extractGoImports(importLines []string) []string {
@@ -196,9 +197,7 @@ func extractGoImports(importLines []string) []string {
 		if line == "import (" || line == ")" || line == "" {
 			continue
 		}
-		if strings.HasPrefix(line, "import ") {
-			line = strings.TrimPrefix(line, "import ")
-		}
+		line = strings.TrimPrefix(line, "import ")
 		line = strings.Trim(line, `"`)
 		imports = append(imports, line)
 	}
@@ -227,12 +226,10 @@ func updateJavaImports(content string, newImports []string) (string, error) {
 
 	for _, imp := range newImports {
 		imp = strings.TrimSpace(imp)
-		if imp != "" {
-			existingImportsSet[imp] = true
+		if imp != "\"\"" {
+			importStatement := fmt.Sprintf("import %s;", imp)
+			existingImportsSet[importStatement] = true
 		}
-
-		importStatement := fmt.Sprintf("import %s;", imp)
-		existingImportsSet[importStatement] = true
 	}
 
 	allImports := make([]string, 0, len(existingImportsSet))
@@ -271,11 +268,9 @@ func updatePythonImports(content string, newImports []string) (string, error) {
 
 	for _, imp := range newImports {
 		imp = strings.TrimSpace(imp)
-		if imp != "" {
+		if imp != "\"\"" {
 			existingImportsSet[imp] = true
 		}
-
-		existingImportsSet[imp] = true
 	}
 
 	for imp := range existingImportsSet {
@@ -297,11 +292,9 @@ func updateTypeScriptImports(content string, newImports []string) (string, error
 
 	for _, imp := range newImports {
 		imp = strings.TrimSpace(imp)
-		if imp != "" {
+		if imp != "\"\"" {
 			existingImportsSet[imp] = true
 		}
-
-		existingImportsSet[imp] = true
 	}
 
 	allImports := make([]string, 0, len(existingImportsSet))
