@@ -47,6 +47,10 @@ type UnitTestGenerator struct {
 	Files            []string
 	tel              Telemetry
 	additionalPrompt string
+	totalTestCase    int
+	testCasePassed   int
+	testCaseFailed   int
+	noCoverageTest   int
 }
 
 func NewUnitTestGenerator(
@@ -78,8 +82,15 @@ func NewUnitTestGenerator(
 }
 
 func (g *UnitTestGenerator) Start(ctx context.Context) error {
-
 	g.tel.GenerateUT()
+
+	// Check for context cancellation before proceeding
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("process cancelled by user")
+	default:
+		// Continue if no cancellation
+	}
 
 	// To find the source files if the source path is not provided
 	if g.srcPath == "" {
@@ -87,14 +98,25 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			return err
 		}
 		if len(g.Files) == 0 {
-			return fmt.Errorf("couldn't identify the source files Please mention source file and test file using flags")
+			return fmt.Errorf("couldn't identify the source files. Please mention source file and test file using flags")
 		}
 	}
+	const paddingHeight = 1
+	columnWidths3 := []int{29, 29, 29}
+	columnWidths2 := []int{40, 40}
 
 	for i := 0; i < len(g.Files)+1; i++ {
 		newTestFile := false
 		var err error
-		// If the source file path is not provided, then iterate over all the source files and test files
+
+		// Respect context cancellation in each iteration
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("process cancelled by user")
+		default:
+		}
+
+		// If the source file path is not provided, iterate over all the source files and test files
 		if i < len(g.Files) {
 			g.srcPath = g.Files[i]
 			g.testPath, err = getTestFilePath(g.srcPath, g.dir)
@@ -109,6 +131,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			}
 			newTestFile = isCreated
 		}
+
 		g.logger.Info(fmt.Sprintf("Generating tests for file: %s", g.srcPath))
 		isEmpty, err := utils.IsFileEmpty(g.testPath)
 		if err != nil {
@@ -125,9 +148,10 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 		} else {
 			g.cov.Current = 0
 		}
-		// Run the initial coverage to get the base line
+
 		iterationCount := 0
 		g.lang = GetCodeLanguage(g.srcPath)
+
 		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt, g.logger)
 		if err != nil {
 			utils.LogError(g.logger, err, "Error creating prompt builder")
@@ -140,7 +164,15 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			}
 		}
 
+		// Respect context cancellation in the inner loop
 		for g.cov.Current < (g.cov.Desired/100) && iterationCount < g.maxIterations {
+			passedTests, noCoverageTest, failedBuild, totalTest := 0, 0, 0, 0
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("process cancelled by user")
+			default:
+			}
+
 			pp.SetColorScheme(models.GetPassingColorScheme())
 			if _, err := pp.Printf("Current Coverage: %s%% for file %s\n", math.Round(g.cov.Current*100), g.srcPath); err != nil {
 				utils.LogError(g.logger, err, "failed to print coverage")
@@ -148,7 +180,8 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			if _, err := pp.Printf("Desired Coverage: %s%% for file %s\n", g.cov.Desired, g.srcPath); err != nil {
 				utils.LogError(g.logger, err, "failed to print coverage")
 			}
-			// Check for existence of failed tests:
+
+			// Check for failed tests:
 			failedTestRunsValue := ""
 			if g.failedTests != nil && len(g.failedTests) > 0 {
 				for _, failedTest := range g.failedTests {
@@ -162,6 +195,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 					}
 				}
 			}
+
 			g.prompt, err = g.promptBuilder.BuildPrompt("test_generation", failedTestRunsValue)
 			if err != nil {
 				utils.LogError(g.logger, err, "Error building prompt")
@@ -173,14 +207,23 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				utils.LogError(g.logger, err, "Error generating tests")
 				return err
 			}
+
 			g.logger.Info("Validating new generated tests one by one")
+			g.totalTestCase += len(testsDetails.NewTests)
+			totalTest = len(testsDetails.NewTests)
 			for _, generatedTest := range testsDetails.NewTests {
-				err := g.ValidateTest(generatedTest)
+				select {
+				case <-ctx.Done():
+					return fmt.Errorf("process cancelled by user")
+				default:
+				}
+				err := g.ValidateTest(generatedTest, &passedTests, &noCoverageTest, &failedBuild)
 				if err != nil {
 					utils.LogError(g.logger, err, "Error validating test")
 					return err
 				}
 			}
+
 			iterationCount++
 			if g.cov.Current < (g.cov.Desired/100) && g.cov.Current > 0 {
 				if err := g.runCoverage(); err != nil {
@@ -188,6 +231,36 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 					return err
 				}
 			}
+
+			fmt.Printf("\n<=========================================>\n")
+			fmt.Printf(("Tests generated in Session") + "\n")
+			fmt.Printf("+-------------------------------+-------------------------------+-------------------------------+\n")
+			fmt.Printf("| %s | %s | %s |\n",
+				centerAlignText("Total Test Cases", 29),
+				centerAlignText("Test Cases Passed", 29),
+				centerAlignText("Test Cases Failed", 29))
+			fmt.Printf("+-------------------------------+-------------------------------+-------------------------------+\n")
+			fmt.Print(addHeightPadding(paddingHeight, 3, columnWidths3))
+			fmt.Printf("| \033[33m%s\033[0m | \033[32m%s\033[0m | \033[33m%s\033[0m |\n",
+				centerAlignText(fmt.Sprintf("%d", totalTest), 29),
+				centerAlignText(fmt.Sprintf("%d", passedTests), 29),
+				centerAlignText(fmt.Sprintf("%d", failedBuild+noCoverageTest), 29))
+			fmt.Print(addHeightPadding(paddingHeight, 3, columnWidths3))
+			fmt.Printf("+-------------------------------+-------------------------------+-------------------------------+\n")
+			fmt.Printf(("Discarded tests in session") + "\n")
+			fmt.Printf("+------------------------------------------+------------------------------------------+\n")
+			fmt.Printf("| %s | %s |\n",
+				centerAlignText("Build failures", 40),
+				centerAlignText("No Coverage output", 40))
+			fmt.Printf("+------------------------------------------+------------------------------------------+\n")
+			fmt.Print(addHeightPadding(paddingHeight, 2, columnWidths2))
+			fmt.Printf("| \033[35m%s\033[0m | \033[92m%s\033[0m |\n",
+				centerAlignText(fmt.Sprintf("%d", failedBuild), 40),
+				centerAlignText(fmt.Sprintf("%d", noCoverageTest), 40))
+			fmt.Print(addHeightPadding(paddingHeight, 2, columnWidths2))
+			fmt.Printf("+------------------------------------------+------------------------------------------+\n")
+			fmt.Printf("<=========================================>\n")
+
 		}
 
 		if g.cov.Current == 0 && newTestFile {
@@ -199,7 +272,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 
 		pp.SetColorScheme(models.GetPassingColorScheme())
 		if g.cov.Current >= (g.cov.Desired / 100) {
-			if _, err := pp.Printf("For File %s Reached above target coverage of %s%% (Current Coverage: %s%%) in %s%% iterations.\n", g.srcPath, g.cov.Desired, math.Round(g.cov.Current*100), iterationCount); err != nil {
+			if _, err := pp.Printf("For File %s Reached above target coverage of %s%% (Current Coverage: %s%%) in %s iterations.\n", g.srcPath, g.cov.Desired, math.Round(g.cov.Current*100), iterationCount); err != nil {
 				utils.LogError(g.logger, err, "failed to print coverage")
 			}
 		} else if iterationCount == g.maxIterations {
@@ -208,7 +281,69 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			}
 		}
 	}
+	fmt.Printf("\n<=========================================>\n")
+	fmt.Printf(("COMPLETE TEST GENERATE SUMMARY") + "\n")
+	fmt.Printf(("Total Test Summary") + "\n")
+
+	fmt.Printf("+-------------------------------+-------------------------------+-------------------------------+\n")
+	fmt.Printf("| %s | %s | %s |\n",
+		centerAlignText("Total Test Cases", 29),
+		centerAlignText("Test Cases Passed", 29),
+		centerAlignText("Test Cases Failed", 29))
+
+	fmt.Printf("+-------------------------------+-------------------------------+-------------------------------+\n")
+	fmt.Print(addHeightPadding(paddingHeight, 3, columnWidths3))
+	fmt.Printf("| \033[33m%s\033[0m | \033[32m%s\033[0m | \033[33m%s\033[0m |\n",
+		centerAlignText(fmt.Sprintf("%d", g.totalTestCase), 29),
+		centerAlignText(fmt.Sprintf("%d", g.testCasePassed), 29),
+		centerAlignText(fmt.Sprintf("%d", g.testCaseFailed+g.noCoverageTest), 29))
+	fmt.Print(addHeightPadding(paddingHeight, 3, columnWidths3))
+	fmt.Printf("+-------------------------------+-------------------------------+-------------------------------+\n")
+
+	fmt.Printf(("Discarded Cases Summary") + "\n")
+	fmt.Printf("+------------------------------------------+------------------------------------------+\n")
+	fmt.Printf("| %s | %s |\n",
+		centerAlignText("Build failures", 40),
+		centerAlignText("No Coverage output", 40))
+
+	fmt.Printf("+------------------------------------------+------------------------------------------+\n")
+	fmt.Print(addHeightPadding(paddingHeight, 2, columnWidths2))
+	fmt.Printf("| \033[35m%s\033[0m | \033[92m%s\033[0m |\n",
+		centerAlignText(fmt.Sprintf("%d", g.testCaseFailed), 40),
+		centerAlignText(fmt.Sprintf("%d", g.noCoverageTest), 40))
+	fmt.Print(addHeightPadding(paddingHeight, 2, columnWidths2))
+	fmt.Printf("+------------------------------------------+------------------------------------------+\n")
+
+	fmt.Printf("<=========================================>\n")
 	return nil
+}
+
+func centerAlignText(text string, width int) string {
+	text = strings.Trim(text, "\"")
+
+	textLen := len(text)
+	if textLen >= width {
+		return text
+	}
+
+	leftPadding := (width - textLen) / 2
+	rightPadding := width - textLen - leftPadding
+
+	return fmt.Sprintf("%s%s%s", strings.Repeat(" ", leftPadding), text, strings.Repeat(" ", rightPadding))
+}
+
+func addHeightPadding(rows int, columns int, columnWidths []int) string {
+	padding := ""
+	for i := 0; i < rows; i++ {
+		for j := 0; j < columns; j++ {
+			if j == columns-1 {
+				padding += fmt.Sprintf("| %-*s |\n", columnWidths[j], "")
+			} else {
+				padding += fmt.Sprintf("| %-*s ", columnWidths[j], "")
+			}
+		}
+	}
+	return padding
 }
 
 func (g *UnitTestGenerator) runCoverage() error {
@@ -219,6 +354,7 @@ func (g *UnitTestGenerator) runCoverage() error {
 	_, _, exitCode, lastUpdatedTime, err := RunCommand(g.cmd, g.dir, g.logger)
 	if err != nil {
 		utils.LogError(g.logger, err, "Error running test command")
+		return fmt.Errorf("error running test command: %w", err)
 	}
 	if exitCode != 0 {
 		utils.LogError(g.logger, err, "Error running test command")
@@ -239,17 +375,48 @@ func (g *UnitTestGenerator) runCoverage() error {
 
 func (g *UnitTestGenerator) GenerateTests(ctx context.Context) (*models.UTDetails, error) {
 	fmt.Println("Generating Tests...")
+
+	select {
+	case <-ctx.Done():
+		err := ctx.Err()
+		return &models.UTDetails{}, err
+	default:
+	}
+
 	response, promptTokenCount, responseTokenCount, err := g.ai.Call(ctx, g.prompt, 4096)
 	if err != nil {
-		utils.LogError(g.logger, err, "Error calling AI model")
 		return &models.UTDetails{}, err
 	}
+
+	select {
+	case <-ctx.Done():
+		err := ctx.Err()
+		return &models.UTDetails{}, err
+	default:
+	}
+
 	g.logger.Info(fmt.Sprintf("Total token used count for LLM model %s: %d", g.ai.Model, promptTokenCount+responseTokenCount))
+
+	select {
+	case <-ctx.Done():
+		err := ctx.Err()
+		return &models.UTDetails{}, err
+	default:
+	}
+
 	testsDetails, err := unmarshalYamlTestDetails(response)
 	if err != nil {
 		utils.LogError(g.logger, err, "Error unmarshalling test details")
 		return &models.UTDetails{}, err
 	}
+
+	select {
+	case <-ctx.Done():
+		err := ctx.Err()
+		return &models.UTDetails{}, err
+	default:
+	}
+
 	return testsDetails, nil
 }
 
@@ -331,7 +498,7 @@ func (g *UnitTestGenerator) getLine(ctx context.Context) (int, error) {
 	return line, nil
 }
 
-func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT) error {
+func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, noCoverageTest, failedBuild *int) error {
 	testCode := strings.TrimSpace(generatedTest.TestCode)
 	InsertAfter := g.cur.Line
 	Indent := g.cur.Indentation
@@ -388,6 +555,8 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT) error {
 				TestCode: generatedTest.TestCode,
 				ErrorMsg: extractErrorMessage(stdout),
 			})
+			g.testCaseFailed++
+			*failedBuild++
 			return nil
 		}
 		testCommandStartTime = timeOfTestCommand
@@ -400,6 +569,8 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT) error {
 		return fmt.Errorf("error processing coverage report: %w", err)
 	}
 	if covResult.Coverage <= g.cov.Current {
+		g.noCoverageTest++
+		*noCoverageTest++
 		// Test failed to increase coverage, roll back the test file to its original content
 
 		if err := os.Truncate(g.testPath, 0); err != nil {
@@ -412,6 +583,8 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT) error {
 		g.logger.Info("Skipping a generated test that failed to increase coverage")
 		return nil
 	}
+	g.testCasePassed++
+	*passedTests++
 	g.cov.Current = covResult.Coverage
 	g.cur.Line = g.cur.Line + len(testCodeLines)
 	g.logger.Info("Generated test passed and increased coverage")
