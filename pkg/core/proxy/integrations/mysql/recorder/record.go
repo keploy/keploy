@@ -71,18 +71,18 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		requests = []mysql.Request{}
 		responses = []mysql.Response{}
 
-		lstOp, _ := decodeCtx.LastOp.Load(clientConn)
-		logger.Debug("last operation after initial handshake", zap.Any("last operation", lstOp))
-
 		if decodeCtx.UseSSL {
 			if result.tlsClientConn == nil || result.tlsDestConn == nil {
-				utils.LogError(logger, err, "Tls connection expected connection are nil", zap.Any("tlsClientConn", result.tlsClientConn), zap.Any("tlsDestConn", result.tlsDestConn))
+				utils.LogError(logger, err, "Expected Tls connections are nil", zap.Any("tlsClientConn", result.tlsClientConn), zap.Any("tlsDestConn", result.tlsDestConn))
 				errCh <- errors.New("Tls connection is not established")
 				return nil
 			}
 			clientConn = result.tlsClientConn
 			destConn = result.tlsDestConn
 		}
+
+		lstOp, _ := decodeCtx.LastOp.Load(clientConn)
+		logger.Debug("last operation after initial handshake", zap.Any("last operation", lstOp))
 
 		// handle the client-server interaction (command phase)
 		err = handleClientQueries(ctx, logger, clientConn, destConn, mocks, decodeCtx)

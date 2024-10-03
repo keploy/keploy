@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -37,6 +38,23 @@ var idCounter int64 = -1
 
 func GetNextID() int64 {
 	return atomic.AddInt64(&idCounter, 1)
+}
+
+// Conn is helpful for multiple reads from the same connection
+type Conn struct {
+	net.Conn
+	Reader io.Reader
+	Logger *zap.Logger
+	mu     sync.Mutex
+}
+
+func (c *Conn) Read(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(p) == 0 {
+		c.Logger.Debug("the length is 0 for the reading from customConn")
+	}
+	return c.Reader.Read(p)
 }
 
 type Peer string

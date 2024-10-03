@@ -372,15 +372,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				return err
 			}
 
-			cfg := &tls.Config{
-				InsecureSkipVerify: true,
-				ServerName:         "database-1.c4mc5loxg4w2.us-west-2.rds.amazonaws.com",
-			}
-
-			addr := fmt.Sprintf("%v:%v", "database-1.c4mc5loxg4w2.us-west-2.rds.amazonaws.com", destInfo.Port)
 			dstCfg := &models.ConditionalDstCfg{
-				TLSCfg: cfg,
-				Addr:   addr,
+				Port: uint(destInfo.Port),
 			}
 			rule.OutgoingOptions.DstCfg = dstCfg
 
@@ -422,10 +415,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	multiReader := io.MultiReader(reader, srcConn)
-	srcConn = &Conn{
+	srcConn = &util.Conn{
 		Conn:   srcConn,
-		r:      multiReader,
-		logger: p.logger,
+		Reader: multiReader,
+		Logger: p.logger,
 	}
 
 	isTLS := pTls.IsTLSHandshake(testBuffer)
@@ -445,10 +438,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	//update the src connection to have the initial buffer
-	srcConn = &Conn{
+	srcConn = &util.Conn{
 		Conn:   srcConn,
-		r:      io.MultiReader(bytes.NewReader(initialBuf), srcConn),
-		logger: p.logger,
+		Reader: io.MultiReader(bytes.NewReader(initialBuf), srcConn),
+		Logger: p.logger,
 	}
 
 	clientID, ok := parserCtx.Value(models.ClientConnectionIDKey).(string)
