@@ -118,6 +118,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		PacketBundle: *handshakeResponsePkt,
 	})
 
+	// handle the SSL request
 	if decodeCtx.UseSSL {
 
 		reader := bufio.NewReader(clientConn)

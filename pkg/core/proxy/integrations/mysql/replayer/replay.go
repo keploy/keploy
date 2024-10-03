@@ -68,11 +68,20 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *mod
 
 		// Simulate the initial client-server handshake (connection phase)
 
-		err := simulateInitialHandshake(ctx, logger, clientConn, configMocks, mockDb, decodeCtx)
+		res, err := simulateInitialHandshake(ctx, logger, clientConn, configMocks, mockDb, decodeCtx)
 		if err != nil {
 			utils.LogError(logger, err, "failed to simulate initial handshake")
 			errCh <- err
 			return
+		}
+
+		if decodeCtx.UseSSL {
+			if res.tlsClientConn == nil {
+				logger.Error("SSL is enabled but could not get the tls client connection")
+				errCh <- nil
+				return
+			}
+			clientConn = res.tlsClientConn
 		}
 
 		logger.Debug("Initial handshake completed successfully")
