@@ -2,10 +2,13 @@
 package utgen
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
@@ -68,6 +71,248 @@ func NewUnitTestGenerator(srcPath, testPath, reportPath, cmd, dir, coverageForma
 		cur:              &Cursor{},
 	}
 	return generator, nil
+}
+
+func updateJavaScriptImports(content string, newImports []string) (string, error) {
+	importRegex := regexp.MustCompile(`(?m)^(import\s+.*?from\s+['"].*?['"];?|const\s+.*?=\s+require\(['"].*?['"]\);?)`)
+	existingImportsSet := make(map[string]bool)
+
+	existingImports := importRegex.FindAllString(content, -1)
+	for _, imp := range existingImports {
+		existingImportsSet[imp] = true
+	}
+
+	for _, imp := range newImports {
+		imp = strings.TrimSpace(imp)
+		if imp != "" {
+			existingImportsSet[imp] = true
+		}
+		existingImportsSet[imp] = true
+	}
+
+	allImports := make([]string, 0, len(existingImportsSet))
+	for imp := range existingImportsSet {
+		allImports = append(allImports, imp)
+	}
+
+	importSection := strings.Join(allImports, "\n")
+
+	updatedContent := importRegex.ReplaceAllString(content, "")
+	updatedContent = importSection + "\n\n" + strings.TrimSpace(updatedContent)
+
+	return updatedContent, nil
+}
+
+func updateImports(filePath string, language string, imports string) error {
+	newImports := strings.Split(imports, "\n")
+	for i, imp := range newImports {
+		newImports[i] = strings.TrimSpace(imp)
+	}
+	contentBytes, err := os.ReadFile(filePath)
+	if err != nil {
+		return err
+	}
+	content := string(contentBytes)
+
+	var updatedContent string
+
+	switch strings.ToLower(language) {
+	case "go":
+		updatedContent, err = updateGoImports(content, newImports)
+	case "java":
+		updatedContent, err = updateJavaImports(content, newImports)
+	case "python":
+		updatedContent, err = updatePythonImports(content, newImports)
+	case "typescript":
+		updatedContent, err = updateTypeScriptImports(content, newImports)
+	case "javascript":
+		updatedContent, err = updateJavaScriptImports(content, newImports)
+	default:
+		return fmt.Errorf("unsupported language: %s", language)
+	}
+	if err != nil {
+		return err
+	}
+	err = os.WriteFile(filePath, []byte(updatedContent), fs.ModePerm)
+
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func updateGoImports(content string, newImports []string) (string, error) {
+
+	importRegex := regexp.MustCompile(`(?ms)import\s*(\([\s\S]*?\)|"[^"]+")`)
+	existingImportsSet := make(map[string]bool)
+
+	matches := importRegex.FindStringSubmatch(content)
+	if matches != nil {
+		importBlock := matches[0]
+		importLines := strings.Split(importBlock, "\n")
+		existingImports := extractGoImports(importLines)
+		for _, imp := range existingImports {
+			existingImportsSet[imp] = true
+		}
+		for _, imp := range existingImports {
+			existingImportsSet[imp] = true
+		}
+		newImports = extractGoImports(newImports)
+		for _, imp := range newImports {
+			imp = strings.TrimSpace(imp)
+			if imp != "" {
+				existingImportsSet[imp] = true
+			}
+		}
+		allImports := make([]string, 0, len(existingImportsSet))
+		for imp := range existingImportsSet {
+			allImports = append(allImports, imp)
+		}
+		importBlockNew := createGoImportBlock(allImports)
+		updatedContent := importRegex.ReplaceAllString(content, importBlockNew)
+		return updatedContent, nil
+	} else {
+		packageRegex := regexp.MustCompile(`package\s+\w+`)
+
+		pkgMatch := packageRegex.FindStringIndex(content)
+		if pkgMatch == nil {
+			return "", fmt.Errorf("could not find package declaration")
+		}
+		newImports = extractGoImports(newImports)
+		importBlock := createGoImportBlock(newImports)
+
+		insertPos := pkgMatch[1]
+
+		updatedContent := content[:insertPos] + "\n\n" + importBlock + "\n" + content[insertPos:]
+		return updatedContent, nil
+	}
+}
+
+func extractGoImports(importLines []string) []string {
+	imports := []string{}
+	for _, line := range importLines {
+		line = strings.TrimSpace(line)
+		if line == "import (" || line == ")" || line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "import ") {
+			line = strings.TrimPrefix(line, "import ")
+		}
+		line = strings.Trim(line, `"`)
+		imports = append(imports, line)
+	}
+	return imports
+}
+
+func createGoImportBlock(imports []string) string {
+	importBlock := "import (\n"
+	for _, imp := range imports {
+		imp = strings.TrimSpace(imp)
+		imp = strings.Trim(imp, `"`)
+		importBlock += fmt.Sprintf(`    "%s"`+"\n", imp)
+	}
+	importBlock += ")"
+	return importBlock
+}
+
+func updateJavaImports(content string, newImports []string) (string, error) {
+	importRegex := regexp.MustCompile(`(?m)^import\s+.*?;`)
+	existingImportsSet := make(map[string]bool)
+
+	existingImports := importRegex.FindAllString(content, -1)
+	for _, imp := range existingImports {
+		existingImportsSet[imp] = true
+	}
+
+	for _, imp := range newImports {
+		imp = strings.TrimSpace(imp)
+		if imp != "" {
+			existingImportsSet[imp] = true
+		}
+
+		importStatement := fmt.Sprintf("import %s;", imp)
+		existingImportsSet[importStatement] = true
+	}
+
+	allImports := make([]string, 0, len(existingImportsSet))
+	for imp := range existingImportsSet {
+		allImports = append(allImports, imp)
+	}
+	importSection := strings.Join(allImports, "\n")
+
+	updatedContent := importRegex.ReplaceAllString(content, "")
+	packageRegex := regexp.MustCompile(`(?m)^package\s+.*?;`)
+	pkgMatch := packageRegex.FindStringIndex(updatedContent)
+	insertPos := 0
+	if pkgMatch != nil {
+		insertPos = pkgMatch[1]
+	}
+
+	updatedContent = updatedContent[:insertPos] + "\n\n" + importSection + "\n" + updatedContent[insertPos:]
+	return updatedContent, nil
+}
+
+func updatePythonImports(content string, newImports []string) (string, error) {
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	existingImportsSet := make(map[string]bool)
+	codeLines := []string{}
+	importLines := []string{}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		trimmedLine := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmedLine, "import ") || strings.HasPrefix(trimmedLine, "from ") {
+			existingImportsSet[line] = true
+		} else {
+			codeLines = append(codeLines, line)
+		}
+	}
+
+	for _, imp := range newImports {
+		imp = strings.TrimSpace(imp)
+		if imp != "" {
+			existingImportsSet[imp] = true
+		}
+
+		existingImportsSet[imp] = true
+	}
+
+	for imp := range existingImportsSet {
+		importLines = append(importLines, imp)
+	}
+
+	updatedContent := strings.Join(importLines, "\n") + "\n\n" + strings.Join(codeLines, "\n")
+	return updatedContent, nil
+}
+
+func updateTypeScriptImports(content string, newImports []string) (string, error) {
+	importRegex := regexp.MustCompile(`(?m)^import\s+.*?;`)
+	existingImportsSet := make(map[string]bool)
+
+	existingImports := importRegex.FindAllString(content, -1)
+	for _, imp := range existingImports {
+		existingImportsSet[imp] = true
+	}
+
+	for _, imp := range newImports {
+		imp = strings.TrimSpace(imp)
+		if imp != "" {
+			existingImportsSet[imp] = true
+		}
+
+		existingImportsSet[imp] = true
+	}
+
+	allImports := make([]string, 0, len(existingImportsSet))
+	for imp := range existingImportsSet {
+		allImports = append(allImports, imp)
+	}
+	importSection := strings.Join(allImports, "\n")
+
+	updatedContent := importRegex.ReplaceAllString(content, "")
+	updatedContent = importSection + "\n\n" + updatedContent
+	return updatedContent, nil
 }
 
 func (g *UnitTestGenerator) Start(ctx context.Context) error {
@@ -424,7 +669,10 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT) error {
 	g.logger.Info(fmt.Sprintf("Running test 5 times for proper validation with the following command: '%s'", g.cmd))
 
 	var testCommandStartTime int64
-
+	err = updateImports(g.testPath, g.lang, generatedTest.NewImportsCode)
+	if err != nil {
+		g.logger.Warn("Error updating imports", zap.Error(err))
+	}
 	for i := 0; i < 5; i++ {
 
 		g.logger.Info(fmt.Sprintf("Iteration no: %d", i+1))

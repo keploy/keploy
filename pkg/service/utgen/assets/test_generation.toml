@@ -95,7 +95,22 @@ new_tests:
     ...
 {%- endif %}
   new_imports_code: |
-    ""
+    {%- if language == "python" %}
+    - "import pytest"
+    - "from my_module import my_function"
+    {%- elif language == "java" %}
+    - "import org.junit.jupiter.api.Test;"
+    - "import my.package.MyFunction;"
+    {%- elif language == "golang" %}
+    - "import \"testing\""
+    - "import \"my_module\""
+    {%- elif language == "javascript" %}
+    - "const assert = require('assert');"
+    - "const myFunction = require('my_module').myFunction;"
+    {%- elif language == "typescript" %}
+    - "import { assert } from 'assert';"
+    - "import { myFunction } from 'my_module';"
+    {%- endif %}
   test_tags: happy path
     ...
 ```
