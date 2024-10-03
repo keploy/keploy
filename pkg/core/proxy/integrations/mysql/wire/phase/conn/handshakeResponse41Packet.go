@@ -148,6 +148,8 @@ func DecodeHandshakeResponse(_ context.Context, logger *zap.Logger, data []byte)
 		}
 	}
 
+	//
+
 	return packet, nil
 }
 
