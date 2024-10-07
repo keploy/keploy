@@ -1,4 +1,3 @@
-//go:build linux
 
 // Package utility provides encoding and decoding of utility command packets.
 package utility

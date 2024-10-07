@@ -1,5 +1,3 @@
-//go:build linux
-
 // Package record provides functionality for recording and managing test cases and mocks.
 package record
 
@@ -136,22 +134,22 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		return fmt.Errorf(stopReason)
 	}
 
-	errGrp.Go(func() error {
-		for testCase := range frames.Incoming {
-			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID)
-			if err != nil {
-				if ctx.Err() == context.Canceled {
-					continue
-				}
-				insertTestErrChan <- err
-			} else {
+	// errGrp.Go(func() error {
+	// 	for testCase := range frames.Incoming {
+	// 		err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID)
+	// 		if err != nil {
+	// 			if ctx.Err() == context.Canceled {
+	// 				continue
+	// 			}
+	// 			insertTestErrChan <- err
+	// 		} else {
 
-				testCount++
-				r.telemetry.RecordedTestAndMocks()
-			}
-		}
-		return nil
-	})
+	// 			testCount++
+	// 			r.telemetry.RecordedTestAndMocks()
+	// 		}
+	// 	}
+	// 	return nil
+	// })
 
 	errGrp.Go(func() error {
 		for mock := range frames.Outgoing {

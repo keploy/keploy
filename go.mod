@@ -5,7 +5,7 @@ go 1.22.0
 replace github.com/jackc/pgproto3/v2 => github.com/keploy/pgproto3/v2 v2.0.5
 
 require (
-	github.com/Microsoft/go-winio v0.6.1 // indirect
+	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/cilium/ebpf v0.13.2
 	github.com/cloudflare/cfssl v1.6.4
 	github.com/docker/distribution v2.8.2+incompatible // indirect
@@ -24,7 +24,7 @@ require (
 	go.mongodb.org/mongo-driver v1.11.6
 	go.uber.org/zap v1.26.0
 	golang.org/x/crypto v0.24.0 // indirect
-	golang.org/x/sys v0.21.0
+	golang.org/x/sys v0.26.0
 	google.golang.org/protobuf v1.34.1 // indirect
 )
 
@@ -128,7 +128,10 @@ require (
 	sigs.k8s.io/kustomize/kyaml v0.17.2
 )
 
-require github.com/perimeterx/marshmallow v1.1.5 // indirect
+require (
+	github.com/perimeterx/marshmallow v1.1.5 // indirect
+	gopkg.in/natefinch/npipe.v2 v2.0.0-20160621034901-c1b8fa8bdcce // indirect
+)
 
 require (
 	github.com/alecthomas/chroma v0.10.0 // indirect

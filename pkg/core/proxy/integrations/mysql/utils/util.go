@@ -1,4 +1,3 @@
-//go:build linux
 
 // Package utils provides utility functions for MySQL packets
 package utils

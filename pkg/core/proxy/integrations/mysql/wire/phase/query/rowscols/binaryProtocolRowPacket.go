@@ -1,4 +1,3 @@
-//go:build linux
 
 // Package rowscols provides encoding and decoding of MySQL row & column packets.
 package rowscols

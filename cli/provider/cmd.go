@@ -356,12 +356,8 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 }
 
 func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) error {
-	err := isCompatible(c.logger)
-	if err != nil {
-		return err
-	}
 	defaultCfg := *c.cfg
-	err = c.PreProcessFlags(cmd)
+	err := c.PreProcessFlags(cmd)
 	if err != nil {
 		c.logger.Error("failed to preprocess flags", zap.Error(err))
 		return err

@@ -1,5 +1,3 @@
-//go:build linux
-
 package proxy
 
 import (
@@ -30,7 +28,7 @@ import (
 
 type Proxy struct {
 	logger *zap.Logger
-
+	Name   string
 	IP4     string
 	IP6     string
 	Port    uint32
@@ -111,68 +109,6 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 		}
 		return nil
 	})
-
-	//change the ip4 and ip6 if provided in the opts in case of docker environment
-	if len(opts.DNSIPv4Addr) != 0 {
-		p.IP4 = opts.DNSIPv4Addr
-	}
-
-	if len(opts.DNSIPv6Addr) != 0 {
-		p.IP6 = opts.DNSIPv6Addr
-	}
-
-	// start the TCP DNS server
-	p.logger.Debug("Starting Tcp Dns Server for handling Dns queries over TCP")
-	g.Go(func() error {
-		defer utils.Recover(p.logger)
-		errCh := make(chan error, 1)
-		go func(errCh chan error) {
-			defer utils.Recover(p.logger)
-			err := p.startTCPDNSServer(ctx)
-			if err != nil {
-				errCh <- err
-			}
-		}(errCh)
-
-		select {
-		case <-ctx.Done():
-			err := p.TCPDNSServer.Shutdown()
-			if err != nil {
-				utils.LogError(p.logger, err, "failed to shutdown tcp dns server")
-				return err
-			}
-			return nil
-		case err := <-errCh:
-			return err
-		}
-	})
-
-	// start the UDP DNS server
-	p.logger.Debug("Starting Udp Dns Server for handling Dns queries over UDP")
-	g.Go(func() error {
-		defer utils.Recover(p.logger)
-		errCh := make(chan error, 1)
-		go func(errCh chan error) {
-			defer utils.Recover(p.logger)
-			err := p.startUDPDNSServer(ctx)
-			if err != nil {
-				errCh <- err
-			}
-		}(errCh)
-
-		select {
-		case <-ctx.Done():
-			err := p.UDPDNSServer.Shutdown()
-			if err != nil {
-				utils.LogError(p.logger, err, "failed to shutdown tcp dns server")
-				return err
-			}
-			return nil
-		case err := <-errCh:
-			return err
-		}
-	})
-	p.logger.Info("Keploy has taken control of the DNS resolution mechanism, your application may misbehave if you have provided wrong domain name in your application code.")
 
 	p.logger.Info(fmt.Sprintf("Proxy started at port:%v", p.Port))
 	return nil

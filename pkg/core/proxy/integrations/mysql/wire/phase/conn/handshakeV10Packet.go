@@ -1,4 +1,3 @@
-//go:build linux
 
 // Package conn provides decoding and encoding of connection phase mysql packets
 package conn

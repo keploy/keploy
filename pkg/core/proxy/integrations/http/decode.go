@@ -1,4 +1,3 @@
-//go:build linux
 
 // Package http provides functionality for handling HTTP outgoing calls.
 package http

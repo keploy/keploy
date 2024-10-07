@@ -1,4 +1,3 @@
-//go:build linux
 
 // Package query provides functions to decode MySQL command phase packets.
 package query

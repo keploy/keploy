@@ -1,4 +1,3 @@
-//go:build linux
 
 package replayer
 

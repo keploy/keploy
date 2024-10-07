@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package ipc;
+
+option go_package = "./";
+
+message PacketWithMeta {
+  bytes data = 1;
+  TunnelInfo tunnel_info = 2;
+}
+
+message TunnelInfo {
+  uint32 pid = 1;
+  optional string process_name = 2;
+}
+
+message FromProxy {
+  oneof message {
+    Packet packet = 1;
+    InterceptConf intercept_conf = 2;
+  }
+}
+
+message Packet {
+  bytes data = 1;
+}
+
+message InterceptConf {
+  bool default = 1;
+  repeated string actions = 2;
+}
+
+message NewFlow {
+  oneof message {
+    TcpFlow tcp = 1;
+    UdpFlow udp = 2;
+  }
+}
+
+message TcpFlow {
+  Address remote_address = 1;
+  TunnelInfo tunnel_info = 2;
+}
+
+message UdpFlow {
+  optional Address local_address = 1;
+  TunnelInfo tunnel_info = 3;
+}
+
+message UdpPacket {
+  bytes data = 1;
+  Address remote_address = 2;
+}
+
+message Address {
+  string host = 1;
+  uint32 port = 2;
+}

@@ -1,4 +1,3 @@
-//go:build linux
 
 // Package structs provides data structures for hooks.
 package structs

@@ -1,5 +1,3 @@
-//go:build linux
-
 // Package core provides functionality for managing core functionalities in Keploy.
 package core
 
@@ -63,7 +61,7 @@ func (c *Core) getApp(id uint64) (*app.App, error) {
 	if !ok {
 		return nil, fmt.Errorf("app with id:%v not found", id)
 	}
-
+	
 	// type assertion on the app
 	h, ok := a.(*app.App)
 	if !ok {
