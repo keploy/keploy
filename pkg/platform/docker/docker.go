@@ -9,6 +9,7 @@ import (
 	"time"
 
 	nativeDockerClient "github.com/docker/docker/client"
+	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -30,9 +31,10 @@ type Impl struct {
 	timeoutForDockerQuery time.Duration
 	logger                *zap.Logger
 	containerID           string
+	config                *config.Config
 }
 
-func New(logger *zap.Logger) (Client, error) {
+func New(logger *zap.Logger, config *config.Config) (Client, error) {
 	dockerClient, err := nativeDockerClient.NewClientWithOpts(nativeDockerClient.FromEnv,
 		nativeDockerClient.WithAPIVersionNegotiation())
 	if err != nil {
@@ -42,6 +44,7 @@ func New(logger *zap.Logger) (Client, error) {
 		APIClient:             dockerClient,
 		timeoutForDockerQuery: defaultTimeoutForDockerQuery,
 		logger:                logger,
+		config:                config,
 	}, nil
 }
 
@@ -350,21 +353,20 @@ func (idc *Impl) GetHostWorkingDirectory() (string, error) {
 		utils.LogError(idc.logger, err, "failed to get current working directory")
 		return "", err
 	}
-
-	container, err := idc.ContainerInspect(ctx, "keploy-v2")
+	container, err := idc.ContainerInspect(ctx, idc.config.KeployContainer)
 	if err != nil {
-		utils.LogError(idc.logger, err, "error inspecting keploy-v2 container")
+		utils.LogError(idc.logger, err, "error inspecting keploy container")
 		return "", err
 	}
 	containerMounts := container.Mounts
 	// Loop through container mounts and find the mount for current directory in the container
 	for _, mount := range containerMounts {
 		if mount.Destination == curDir {
-			idc.logger.Debug(fmt.Sprintf("found mount for %s in keploy-v2 container", curDir), zap.Any("mount", mount))
+			idc.logger.Debug(fmt.Sprintf("found mount for %s in keploy container", curDir), zap.Any("mount", mount))
 			return mount.Source, nil
 		}
 	}
-	return "", fmt.Errorf(fmt.Sprintf("could not find mount for %s in keploy-v2 container", curDir))
+	return "", fmt.Errorf(fmt.Sprintf("could not find mount for %s in keploy container", curDir))
 }
 
 // ForceAbsolutePath replaces relative paths in bind mounts with absolute paths
@@ -553,15 +555,17 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate b
 	}
 
 	if len(volumeList.Volumes) > 0 {
-		if !recreate {
-			idc.logger.Info("volume already exists", zap.Any("volume", volumeName))
-			return err
-		}
-
-		err := idc.VolumeRemove(ctx, volumeName, false)
-		if err != nil {
-			idc.logger.Error("failed to delete volume "+volumeName, zap.Error(err))
-			return err
+		for _, volume := range volumeList.Volumes {
+			if volume.Name == "debugfs" {
+				if volume.Driver == "local" && volume.Options["type"] == "debugfs" && volume.Options["device"] == "debugfs" {
+					return nil
+				}
+				err := idc.VolumeRemove(ctx, volumeName, false)
+				if err != nil {
+					idc.logger.Error("failed to delete volume "+volumeName, zap.Error(err))
+					return err
+				}
+			}
 		}
 	}
 

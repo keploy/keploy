@@ -24,13 +24,14 @@ import (
 )
 
 func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opts Options) *App {
+
 	app := &App{
 		logger:           logger,
 		id:               id,
 		cmd:              cmd,
 		docker:           client,
 		kind:             utils.FindDockerCmd(cmd),
-		keployContainer:  "keploy-v2",
+		keployContainer:  opts.KeployContainer,
 		container:        opts.Container,
 		containerDelay:   opts.DockerDelay,
 		containerNetwork: opts.DockerNetwork,
@@ -60,9 +61,10 @@ type App struct {
 type Options struct {
 	// canExit disables any error returned if the app exits by itself.
 	//CanExit       bool
-	Container     string
-	DockerDelay   uint64
-	DockerNetwork string
+	Container       string
+	DockerDelay     uint64
+	DockerNetwork   string
+	KeployContainer string
 }
 
 func (a *App) Setup(_ context.Context) error {
