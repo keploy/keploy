@@ -94,6 +94,7 @@ installKeploy (){
         fi
         # macOS tar does not support --overwrite option so we need to remove the directory first
         # to avoid the "File exists" error
+        sudo chmod -R 777 /tmp/keploy  # Reset permissions in case of permission issues
         rm -rf /tmp/keploy
         mkdir -p /tmp/keploy
         curl --silent --location "$download_url" | tar xz -C /tmp/keploy/
@@ -111,9 +112,8 @@ installKeploy (){
         move_keploy_binary
     }
 
-
     install_keploy_amd() {        
-        if [ "$version" != "latest" ]; then
+        if [ "$version" != "latest" ];then
             download_url="https://github.com/keploy/keploy/releases/download/$version/keploy_linux_amd64.tar.gz"
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
@@ -187,9 +187,7 @@ installKeploy (){
                     alias keploy="$ALIAS_CMD"
                 fi
             fi
-
         fi
-    
     }
 
     delete_keploy_alias() {
@@ -230,7 +228,6 @@ installKeploy (){
                 else
                     sudo rm -rf "/tmp/$file"
                 fi
-                
             fi
         done
     }
@@ -244,7 +241,7 @@ installKeploy (){
             install_keploy_darwin_all
             return
         elif [ "$OS_NAME" = "Linux" ]; then
-             if [ "$NO_ROOT" = false ]; then
+            if [ "$NO_ROOT" = false ]; then
                 if ! mountpoint -q /sys/kernel/debug; then
                     sudo mount -t debugfs debugfs /sys/kernel/debug
                 fi
@@ -259,10 +256,8 @@ installKeploy (){
                 echo "Unsupported architecture: $ARCH"
                 return
             fi
-        elif [[ "$OS_NAME" == MINGW32_NT* ]]; then
-            echo "\e]8;; https://pureinfotech.com/install-windows-subsystem-linux-2-windows-10\aWindows not supported please run on WSL2\e]8;;\a"
-        elif [[ "$OS_NAME" == MINGW64_NT* ]]; then
-            echo "\e]8;; https://pureinfotech.com/install-windows-subsystem-linux-2-windows-10\aWindows not supported please run on WSL2\e]8;;\a"
+        elif [[ "$OS_NAME" == MINGW32_NT* ]] || [[ "$OS_NAME" == MINGW64_NT* ]]; then
+            echo -e "\e]8;;https://pureinfotech.com/install-windows-subsystem-linux-2-windows-10\aWindows not supported, please run on WSL2\e]8;;\a"
         else
             echo "Unknown OS, install Linux to run Keploy"
         fi
