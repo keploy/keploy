@@ -58,6 +58,7 @@ type PromptBuilder struct {
 	Language               string
 	Logger                 *zap.Logger
 	AdditionalPrompt       string
+	InstalledPackages      []string
 }
 
 func NewPromptBuilder(srcPath, testPath, covReportContent, includedFiles, additionalInstructions, language, additionalPrompt string, logger *zap.Logger) (*PromptBuilder, error) {
@@ -141,6 +142,7 @@ func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, erro
 		"language":                     pb.Language,
 		"max_tests":                    MAX_TESTS_PER_RUN,
 		"additional_command":           pb.AdditionalPrompt,
+		"installed_packages":           formatInstalledPackages(pb.InstalledPackages),
 	}
 
 	settings := settings.GetSettings()
@@ -163,6 +165,14 @@ func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, erro
 	prompt.System = systemPrompt
 	prompt.User = userPrompt
 	return prompt, nil
+}
+
+func formatInstalledPackages(packages []string) string {
+	var sb strings.Builder
+	for _, pkg := range packages {
+		sb.WriteString(fmt.Sprintf("- %s\n", pkg))
+	}
+	return sb.String()
 }
 
 func renderTemplate(templateText string, variables map[string]interface{}) (string, error) {

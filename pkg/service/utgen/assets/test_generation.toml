@@ -30,6 +30,13 @@ Here is the file that contains the existing tests, called `{{ .test_file_name }}
 {{ .test_file | trim }}
 =========
 
+## Installed Packages
+The following packages are already installed in the environment. Use these when writing tests to avoid redundant installations:
+
+=========
+{{ .installed_packages | trim }}
+=========
+
 
 {%- if additional_includes_section | trim %}
 {{ .additional_includes_section | trim }}

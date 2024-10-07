@@ -435,6 +435,10 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				}
 			}
 
+			g.promptBuilder.InstalledPackages, err = libraryInstalled(g.lang)
+			if err != nil {
+				utils.LogError(g.logger, err, "Error getting installed packages")
+			}
 			g.prompt, err = g.promptBuilder.BuildPrompt("test_generation", failedTestRunsValue)
 			if err != nil {
 				utils.LogError(g.logger, err, "Error building prompt")
@@ -878,7 +882,8 @@ func libraryInstalled(language string) ([]string, error) {
 		return extractDependencies(out), nil
 
 	case "typescript", "javascript":
-		out, err := exec.Command("npm", "list").Output()
+		cmd := exec.Command("sh", "-c", "npm list --depth=0 --parseable | sed 's|.*/||'")
+		out, err := cmd.Output()
 		if err != nil {
 			return nil, fmt.Errorf("failed to get JavaScript/TypeScript dependencies: %w", err)
 		}
