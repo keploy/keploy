@@ -435,7 +435,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				}
 			}
 
-			g.promptBuilder.InstalledPackages, err = libraryInstalled(g.lang)
+			g.promptBuilder.InstalledPackages, err = libraryInstalled(g.logger, g.lang)
 			if err != nil {
 				utils.LogError(g.logger, err, "Error getting installed packages")
 			}
@@ -455,7 +455,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			g.totalTestCase += len(testsDetails.NewTests)
 			totalTest = len(testsDetails.NewTests)
 			for _, generatedTest := range testsDetails.NewTests {
-				installedPackages, err := libraryInstalled(g.lang)
+				installedPackages, err := libraryInstalled(g.logger, g.lang)
 				if err != nil {
 					g.logger.Warn("Error getting installed packages", zap.Error(err))
 				}
@@ -858,7 +858,7 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 	return nil
 }
 
-func libraryInstalled(language string) ([]string, error) {
+func libraryInstalled(logger *zap.Logger, language string) ([]string, error) {
 	switch strings.ToLower(language) {
 	case "go":
 		out, err := exec.Command("go", "list", "-m", "all").Output()
@@ -877,8 +877,13 @@ func libraryInstalled(language string) ([]string, error) {
 	case "python":
 		out, err := exec.Command("pip", "freeze").Output()
 		if err != nil {
-			return nil, fmt.Errorf("failed to get Python dependencies: %w", err)
+			logger.Info("Error getting Python dependencies with `pip` command, trying `pip3` command")
+			out, err = exec.Command("pip3", "freeze").Output()
+			if err != nil {
+				return nil, fmt.Errorf("failed to get Python dependencies: %w", err)
+			}
 		}
+
 		return extractDependencies(out), nil
 
 	case "typescript", "javascript":
