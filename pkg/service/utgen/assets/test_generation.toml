@@ -65,12 +65,13 @@ class SingleTest(BaseModel):
 {%- endif %}
     test_code: str = Field(description="A single test function, that tests the behavior described in 'test_behavior'. The test should be a written like its a part of the existing test suite, if there is one, and it can use existing helper functions, setup, or teardown code.")
     new_imports_code: str = Field(description="Code for new imports that are required for the new test function, and are not already present in the test file. Give an empty string if no new imports are required.")
+    library_installation_code: str = Field(description="If new libraries are needed, specify the installation commands. Provide an empty string if no new libraries are required.")
     test_tags: str = Field(description="A single label that best describes the test, out of: ['happy path', 'edge case','other']")
 
 class NewTests(BaseModel):
     language: str = Field(description="The programming language of the source code")
     existing_test_function_signature: str = Field(description="A single line repeating a signature header of one of the existing test functions")
-    new_tests: List[SingleTest] = Field(min_items=1, max_items={{ .max_tests }}, description="A list of new test functions to append to the existing test suite, aiming to increase the code coverage. Each test should run as-is, without requiring any additional inputs or setup code. Don't introduce new dependencies")
+    new_tests: List[SingleTest] = Field(min_items=1, max_items={{ .max_tests }}, description="A list of new test functions to append to the existing test suite, aiming to increase the code coverage. Each test should run as-is, without requiring any additional inputs or setup code.")
 =====
 
 Example output:
@@ -110,6 +111,24 @@ new_tests:
     {%- elif language == "typescript" %}
     - "import { assert } from 'assert';"
     - "import { myFunction } from 'my_module';"
+    {%- endif %}
+  library_installation_code: |
+    {%- if language == "python" %}
+    - pip install pytest
+    {%- elif language == "java" %}
+    # Add the following to your Maven pom.xml:
+    # <dependency>
+    #   <groupId>org.junit.jupiter</groupId>
+    #   <artifactId>junit-jupiter-api</artifactId>
+    #   <version>5.7.0</version>
+    #   <scope>test</scope>
+    # </dependency>
+    {%- elif language == "golang" %}
+    - go get github.com/my_module
+    {%- elif language == "javascript" %}
+    - npm install assert
+    {%- elif language == "typescript" %}
+    - npm install assert
     {%- endif %}
   test_tags: happy path
     ...

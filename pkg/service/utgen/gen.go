@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"math"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 
@@ -450,12 +451,16 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			g.totalTestCase += len(testsDetails.NewTests)
 			totalTest = len(testsDetails.NewTests)
 			for _, generatedTest := range testsDetails.NewTests {
+				installedPackages, err := libraryInstalled(g.lang)
+				if err != nil {
+					g.logger.Warn("Error getting installed packages", zap.Error(err))
+				}
 				select {
 				case <-ctx.Done():
 					return fmt.Errorf("process cancelled by user")
 				default:
 				}
-				err := g.ValidateTest(generatedTest, &passedTests, &noCoverageTest, &failedBuild)
+				err = g.ValidateTest(generatedTest, &passedTests, &noCoverageTest, &failedBuild, installedPackages)
 				if err != nil {
 					utils.LogError(g.logger, err, "Error validating test")
 					return err
@@ -736,7 +741,7 @@ func (g *UnitTestGenerator) getLine(ctx context.Context) (int, error) {
 	return line, nil
 }
 
-func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, noCoverageTest, failedBuild *int) error {
+func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, noCoverageTest, failedBuild *int, installedPackages []string) error {
 	testCode := strings.TrimSpace(generatedTest.TestCode)
 	InsertAfter := g.cur.Line
 	Indent := g.cur.Indentation
@@ -767,6 +772,11 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 		return fmt.Errorf("failed to write test file: %w", err)
 	}
 
+	newInstalledPackages, err := installLibraries(generatedTest.LibraryInstallationCode, installedPackages, g.logger)
+	if err != nil {
+		g.logger.Debug("Error installing libraries", zap.Error(err))
+	}
+
 	// Run the test using the Runner class
 	g.logger.Info(fmt.Sprintf("Running test 5 times for proper validation with the following command: '%s'", g.cmd))
 
@@ -790,6 +800,11 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 
 			if err := os.WriteFile(g.testPath, []byte(originalContent), 0644); err != nil {
 				return fmt.Errorf("failed to write test file: %w", err)
+			}
+			err = uninstallLibraries(g.lang, newInstalledPackages, g.logger)
+
+			if err != nil {
+				g.logger.Warn("Error uninstalling libraries", zap.Error(err))
 			}
 			g.logger.Info("Skipping a generated test that failed")
 			g.failedTests = append(g.failedTests, &models.FailedUT{
@@ -821,6 +836,13 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 		if err := os.WriteFile(g.testPath, []byte(originalContent), 0644); err != nil {
 			return fmt.Errorf("failed to write test file: %w", err)
 		}
+
+		err = uninstallLibraries(g.lang, newInstalledPackages, g.logger)
+
+		if err != nil {
+			g.logger.Warn("Error uninstalling libraries", zap.Error(err))
+		}
+
 		g.logger.Info("Skipping a generated test that failed to increase coverage")
 		return nil
 	}
@@ -829,5 +851,121 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 	g.cov.Current = covResult.Coverage
 	g.cur.Line = g.cur.Line + len(testCodeLines)
 	g.logger.Info("Generated test passed and increased coverage")
+	return nil
+}
+
+func libraryInstalled(language string) ([]string, error) {
+	switch strings.ToLower(language) {
+	case "go":
+		out, err := exec.Command("go", "list", "-m", "all").Output()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get Go dependencies: %w", err)
+		}
+		return extractDependencies(out), nil
+
+	case "java":
+		out, err := exec.Command("mvn", "dependency:tree").Output()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get Java dependencies: %w", err)
+		}
+		return extractDependencies(out), nil
+
+	case "python":
+		out, err := exec.Command("pip", "freeze").Output()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get Python dependencies: %w", err)
+		}
+		return extractDependencies(out), nil
+
+	case "typescript", "javascript":
+		out, err := exec.Command("npm", "list").Output()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get JavaScript/TypeScript dependencies: %w", err)
+		}
+		return extractDependencies(out), nil
+
+	default:
+		return nil, fmt.Errorf("unsupported language: %s", language)
+	}
+}
+
+func extractDependencies(output []byte) []string {
+	lines := strings.Split(string(output), "\n")
+	var dependencies []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			dependencies = append(dependencies, trimmed)
+		}
+	}
+	return dependencies
+}
+
+func isPackageInList(installedPackages []string, packageName string) bool {
+	for _, pkg := range installedPackages {
+		if pkg == packageName {
+			return true
+		}
+	}
+	return false
+}
+
+func installLibraries(libraryCommands string, installedPackages []string, logger *zap.Logger) ([]string, error) {
+	var newInstalledPackages []string
+	libraryCommands = strings.TrimSpace(libraryCommands)
+	if libraryCommands == "" || libraryCommands == "\"\"" {
+		return newInstalledPackages, nil
+	}
+
+	commands := strings.Split(libraryCommands, "\n")
+	for _, command := range commands {
+		packageName := extractPackageName(command)
+
+		if isPackageInList(installedPackages, packageName) {
+			continue
+		}
+
+		_, _, exitCode, _, err := RunCommand(command, "", logger)
+		if exitCode != 0 || err != nil {
+			return newInstalledPackages, fmt.Errorf("failed to install library: %s", command)
+		}
+
+		installedPackages = append(installedPackages, packageName)
+		newInstalledPackages = append(newInstalledPackages, packageName)
+	}
+	return newInstalledPackages, nil
+}
+
+func extractPackageName(command string) string {
+	fields := strings.Fields(command)
+	if len(fields) < 3 {
+		return ""
+	}
+	return fields[2]
+}
+
+func uninstallLibraries(language string, installedPackages []string, logger *zap.Logger) error {
+	for _, command := range installedPackages {
+		logger.Info(fmt.Sprintf("Uninstalling library: %s", command))
+
+		var uninstallCommand string
+		switch strings.ToLower(language) {
+		case "go":
+			uninstallCommand = fmt.Sprintf("go mod edit -droprequire %s && go mod tidy", command)
+		case "python":
+			uninstallCommand = fmt.Sprintf("pip uninstall -y %s", command)
+		case "javascript":
+			uninstallCommand = fmt.Sprintf("npm uninstall %s", command)
+		case "java":
+			uninstallCommand = fmt.Sprintf("mvn dependency:purge-local-repository -DreResolve=false -Dinclude=%s", command)
+		}
+		if uninstallCommand != "" {
+			logger.Info(fmt.Sprintf("Uninstalling library with command: %s", uninstallCommand))
+			_, _, exitCode, _, err := RunCommand(uninstallCommand, "", logger)
+			if exitCode != 0 || err != nil {
+				logger.Warn(fmt.Sprintf("Failed to uninstall library: %s", uninstallCommand), zap.Error(err))
+			}
+		}
+	}
 	return nil
 }
