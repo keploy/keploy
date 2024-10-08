@@ -111,9 +111,9 @@ func (f *FrontendWrapper) translateToReadableResponse(logger *zap.Logger, msgBod
 	case 'E':
 		msg = &f.FrontendWrapper.ErrorResponse
 	case 'G':
-		msg = &f.FrontendWrapper.CopyInResponse
-	case 'H':
-		msg = &f.FrontendWrapper.CopyOutResponse
+	// 	msg = &f.FrontendWrapper.CopyInResponse
+	// case 'H':
+	// 	msg = &f.FrontendWrapper.CopyOutResponse
 	case 'I':
 		msg = &f.FrontendWrapper.EmptyQueryResponse
 	case 'K':
@@ -138,8 +138,6 @@ func (f *FrontendWrapper) translateToReadableResponse(logger *zap.Logger, msgBod
 		msg = &f.FrontendWrapper.RowDescription
 	case 'V':
 		msg = &f.FrontendWrapper.FunctionCallResponse
-	case 'W':
-		msg = &f.FrontendWrapper.CopyBothResponse
 	case 'Z':
 		msg = &f.FrontendWrapper.ReadyForQuery
 	default:

@@ -27,7 +27,7 @@ type Client interface {
 	SetKeployNetwork(c *Compose) (*NetworkInfo, error)
 	ReadComposeFile(filePath string) (*Compose, error)
 	WriteComposeFile(compose *Compose, path string) error
-
+	SetInitPid(c *Compose) error
 	IsContainerRunning(containerName string) (bool, error)
 	CreateVolume(ctx context.Context, volumeName string, recreate bool) error
 }
