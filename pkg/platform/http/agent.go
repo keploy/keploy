@@ -184,7 +184,6 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 				// If the context is done, exit the loop
 				return
 			case mockChan <- &mock:
-				// Send the decoded mock to the channel
 			}
 		}
 	}()
@@ -379,8 +378,8 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 	if !isAgentRunning {
 		// Start the keploy agent as a detached process and pipe the logs into a file
-		// if !isDockerCmd && !Linux {
-		// 	return 0, fmt.Errorf("keploy agent is not running, please start the agent first")
+		// if !isDockerCmd && runtime.GOOS != "linux" {
+		// 	return 0, fmt.Errorf("Operating system not supported for this feature")
 		// }
 		if isDockerCmd {
 			// run the docker container instead of the agent binary
@@ -403,7 +402,6 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 					utils.LogError(a.logger, err, "failed to close agent log file")
 				}
 			}()
-
 			agentCmd := exec.Command("sudo", "keployv2", "agent")
 			agentCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // Detach the process
 
@@ -453,7 +451,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	}
 
 	opts.ClientID = clientID
-	opts.AppInode = inode
+	opts.AppInode = inode 
 	// Register the client with the server
 	err = a.RegisterClient(ctx, opts)
 	if err != nil {
@@ -469,15 +467,14 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	return clientID, nil
 }
 
-func (ag *AgentClient) getApp(id uint64) (*app.App, error) {
-	a, ok := ag.apps.Load(id)
+func (a *AgentClient) getApp(id uint64) (*app.App, error) {
+	ap, ok := a.apps.Load(id)
 	if !ok {
-		fmt.Printf("app with id:%v not found", id)
 		return nil, fmt.Errorf("app with id:%v not found", id)
 	}
 
 	// type assertion on the app
-	h, ok := a.(*app.App)
+	h, ok := ap.(*app.App)
 	if !ok {
 		return nil, fmt.Errorf("failed to type assert app with id:%v", id)
 	}
@@ -569,6 +566,7 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, cli
 
 func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opts app.Options) (uint64, error) {
 	// Start the init container to get the PID namespace inode
+	
 	cmdCancel := func(cmd *exec.Cmd) func() error {
 		return func() error {
 			a.logger.Info("sending SIGINT to the Initcontainer", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
@@ -576,15 +574,26 @@ func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opt
 			return err
 		}
 	}
-	cmd := fmt.Sprintf("docker run --network=%s --name keploy-init --rm alpine sleep infinity", a.conf.NetworkName)
+
+	cmd := fmt.Sprintf("docker run --network=%s --name keploy-init --rm -v$(pwd)/initStop.sh:/initStop.sh alpine /initStop.sh", a.conf.NetworkName)
 
 	// execute the command
-	go func() {
+	//get the errorgroup from the context
+	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	if !ok {
+		return 0, fmt.Errorf("failed to get errorgroup from the context")
+	}
+	
+	grp.Go(func() error {
+		println("Executing the init container command")
 		cmdErr := utils.ExecuteCommand(ctx, a.logger, cmd, cmdCancel, 25*time.Second)
-		if cmdErr.Err != nil {
+		if cmdErr.Err != nil && cmdErr.Type == utils.Init {
 			utils.LogError(a.logger, cmdErr.Err, "failed to execute init container command")
 		}
-	}()
+
+		println("Init container stopped")
+		return nil
+	})
 
 	time.Sleep(3 * time.Second)
 	// Get the PID of the container's first process
@@ -615,8 +624,6 @@ func (a *AgentClient) isAgentRunning(ctx context.Context) bool {
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to send request to the agent server")
 	}
-
-	fmt.Printf("THe url is %v\n", req.URL)
 
 	resp, err := a.client.Do(req)
 	if err != nil {
