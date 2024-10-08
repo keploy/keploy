@@ -33,6 +33,36 @@ func matchHeader(expected, actual mysql.Header) bool {
 	return true
 }
 
+func matchSSLRequest(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) error {
+	// Match the type
+	if expected.Header.Type != actual.Header.Type {
+		return fmt.Errorf("type mismatch for ssl request")
+	}
+
+	//Don't match the header, because the payload length can be different.
+
+	// Match the payload
+	expectedMessage, _ := expected.Message.(*mysql.SSLRequestPacket)
+	actualMessage, _ := actual.Message.(*mysql.SSLRequestPacket)
+
+	// Match the MaxPacketSize
+	if expectedMessage.MaxPacketSize != actualMessage.MaxPacketSize {
+		return fmt.Errorf("max packet size mismatch for ssl request, expected: %d, actual: %d", expectedMessage.MaxPacketSize, actualMessage.MaxPacketSize)
+	}
+
+	// Match the CharacterSet
+	if expectedMessage.CharacterSet != actualMessage.CharacterSet {
+		return fmt.Errorf("character set mismatch for ssl request, expected: %d, actual: %d", expectedMessage.CharacterSet, actualMessage.CharacterSet)
+	}
+
+	// Match the Filler
+	if expectedMessage.Filler != actualMessage.Filler {
+		return fmt.Errorf("filler mismatch for ssl request, expected: %v, actual: %v", expectedMessage.Filler, actualMessage.Filler)
+	}
+
+	return nil
+}
+
 func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) error {
 	// Match the type
 	if expected.Header.Type != actual.Header.Type {

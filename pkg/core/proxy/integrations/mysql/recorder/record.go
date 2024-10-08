@@ -22,7 +22,7 @@ import (
 
 // Binary to Mock Yaml
 
-func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
+func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 
 	var (
 		requests  []mysql.Request
@@ -54,7 +54,7 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		decodeCtx.LastOp.Store(clientConn, wire.RESET) //resetting last command for new loop
 
 		// handle the initial client-server handshake (connection phase)
-		result, err := handleInitialHandshake(ctx, logger, clientConn, destConn, decodeCtx)
+		result, err := handleInitialHandshake(ctx, logger, clientConn, destConn, decodeCtx, opts)
 		if err != nil {
 			utils.LogError(logger, err, "failed to handle initial handshake")
 			errCh <- err
@@ -70,6 +70,16 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		// reset the requests and responses
 		requests = []mysql.Request{}
 		responses = []mysql.Response{}
+
+		if decodeCtx.UseSSL {
+			if result.tlsClientConn == nil || result.tlsDestConn == nil {
+				utils.LogError(logger, err, "Expected Tls connections are nil", zap.Any("tlsClientConn", result.tlsClientConn), zap.Any("tlsDestConn", result.tlsDestConn))
+				errCh <- errors.New("Tls connection is not established")
+				return nil
+			}
+			clientConn = result.tlsClientConn
+			destConn = result.tlsDestConn
+		}
 
 		lstOp, _ := decodeCtx.LastOp.Load(clientConn)
 		logger.Debug("last operation after initial handshake", zap.Any("last operation", lstOp))

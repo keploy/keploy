@@ -71,7 +71,7 @@ func (m *Mongo) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, 
 
 // MockOutgoing reads the outgoing mongo requests of the client connection and
 // mocks the responses from the yaml file. The database connection is keep-alive
-func (m *Mongo) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+func (m *Mongo) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	// read the initial buffer from the client connection. Initially the
 	// reqBuf contains the first network packet from the client connection
 	// which is used to determine the packet type in MatchType.

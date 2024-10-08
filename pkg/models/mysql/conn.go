@@ -32,6 +32,13 @@ type HandshakeResponse41Packet struct {
 	ZstdCompressionLevel byte              `yaml:"zstdcompressionlevel"`
 }
 
+type SSLRequestPacket struct {
+	CapabilityFlags uint32   `yaml:"capability_flags"`
+	MaxPacketSize   uint32   `yaml:"max_packet_size"`
+	CharacterSet    uint8    `yaml:"character_set"`
+	Filler          [23]byte `yaml:"filler,omitempty,flow"`
+}
+
 // Authentication Packets
 
 // AuthSwitchRequestPacket represents the packet sent by the server to the client to switch to a different authentication method

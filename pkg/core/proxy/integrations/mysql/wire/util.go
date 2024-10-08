@@ -21,6 +21,7 @@ type DecodeContext struct {
 	ServerGreetings    *ServerGreetings
 	ClientCapabilities uint32
 	PluginName         string
+	UseSSL             bool
 }
 
 // This map is used to store the last operation that was performed on a connection.

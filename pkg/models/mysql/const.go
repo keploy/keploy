@@ -21,6 +21,7 @@ const (
 // Some constants for MySQL
 const (
 	HandshakeResponse41 = "HandshakeResponse41"
+	SSLRequest          = "SSLRequest"
 	COM_STMT_PREPARE_OK = "COM_STMT_PREPARE_OK"
 )
 

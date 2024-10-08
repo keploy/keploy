@@ -168,18 +168,33 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 
 	// Handle handshakeResponse41 separately, because its status is not defined and can be changed with the client capabilities.
 	if lastOp == mysql.HandshakeV10 {
-		logger.Debug("HandshakeResponse41 packet", zap.Any("Type", payloadType))
-		pkt, err := connection.DecodeHandshakeResponse41(ctx, logger, payload)
+		logger.Debug("HandshakeResponse41/SSL Request packet", zap.Any("Type", payloadType))
+		pkt, err := connection.DecodeHandshakeResponse(ctx, logger, payload)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode HandshakeResponse41 packet: %w", err)
 		}
 
-		setPacketInfo(ctx, parsedPacket, pkt, mysql.HandshakeResponse41, clientConn, payloadType, decodeCtx)
+		var pktType string
+		switch pkt := pkt.(type) {
+		case *mysql.HandshakeResponse41Packet:
+			// Store the client capabilities to use it later
+			decodeCtx.ClientCapabilities = pkt.CapabilityFlags
 
-		// Store the client capabilities to use it later
-		decodeCtx.ClientCapabilities = pkt.CapabilityFlags
+			pktType = mysql.HandshakeResponse41
+			lastOp = payloadType
+		case *mysql.SSLRequestPacket:
+			// Store the client capabilities to use it later
+			decodeCtx.ClientCapabilities = pkt.CapabilityFlags
 
-		logger.Debug("HandshakeResponse41 decoded", zap.Any("parsed packet", parsedPacket))
+			pktType = mysql.SSLRequest
+			decodeCtx.UseSSL = true
+			logger.Info("SSL Request packet detected")
+			// Don't change the last operation if the packet is an SSL Request
+		}
+
+		setPacketInfo(ctx, parsedPacket, pkt, pktType, clientConn, lastOp, decodeCtx)
+
+		logger.Debug("HandshakeResponse41/SSL Request decoded", zap.Any("parsed packet", parsedPacket))
 
 		return parsedPacket, nil
 	}

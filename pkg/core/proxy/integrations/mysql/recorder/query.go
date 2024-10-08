@@ -30,6 +30,7 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
+
 			// read the command from the client
 			command, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
 			if err != nil {
