@@ -47,6 +47,11 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	runAppCtx := context.WithoutCancel(ctx)
 	runAppCtx, runAppCtxCancel := context.WithCancel(runAppCtx)
 
+	setupErrGrp, _ := errgroup.WithContext(ctx)
+	setupCtx := context.WithoutCancel(ctx)
+	setupCtx, setupCtxCancel := context.WithCancel(setupCtx)
+	setupCtx = context.WithValue(ctx, models.ErrGroupKey, setupErrGrp)
+
 	// reRecordCtx, reRecordCancel := context.WithCancel(ctx)
 	// defer reRecordCancel() // Cancel the context when the function returns
 
@@ -80,8 +85,10 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 			utils.LogError(r.logger, err, "failed to stop application")
 		}
 
+		setupCtxCancel()
+		err = setupErrGrp.Wait()
 		if err != nil {
-			utils.LogError(r.logger, err, "failed to stop hooks")
+			utils.LogError(r.logger, err, "failed to stop setup execution, that covers init container")
 		}
 		err = errGrp.Wait()
 		if err != nil {
@@ -109,7 +116,9 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 
 	// Instrument will setup the environment and start the hooks and proxy
 	// scope of modularization: This function is defined in the Instrumentation interface
-	appID, err = r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType})
+	//set a value in the context to be used by the instrumentation
+	ctx = context.WithValue(ctx, "debugKey", "keployTesting")
+	appID, err = r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType})
 	if err != nil {
 		stopReason = "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)

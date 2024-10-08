@@ -81,7 +81,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
 
-	var hookCancel context.CancelFunc
+	setupErrGrp, _ := errgroup.WithContext(ctx)
+	setupCtx := context.WithoutCancel(ctx)
+	setupCtx = context.WithValue(ctx, models.ErrGroupKey, setupErrGrp)
+	setupCtx, setupCtxCancel := context.WithCancel(setupCtx)
+
 	var stopReason = "replay completed successfully"
 
 	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
@@ -92,10 +96,17 @@ func (r *Replayer) Start(ctx context.Context) error {
 		default:
 			r.logger.Info("stopping Keploy", zap.String("reason", stopReason))
 		}
-		if hookCancel != nil {
-			hookCancel()
+
+		fmt.Printf("SetupCtx?: %v\n", setupCtx.Err())
+		setupCtxCancel()
+		fmt.Printf("SetupCtx?: %v\n", setupCtx.Err())
+		println("setupCtxCancel is cancelled")
+		err := setupErrGrp.Wait()
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to stop setup execution, that covers init container")
 		}
-		err := g.Wait()
+
+		err = g.Wait()
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop replaying")
 		}
@@ -172,7 +183,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 
 	// Instrument will load the hooks and start the proxy
-	inst, err := r.Instrument(ctx)
+	inst, err := r.Instrument(setupCtx)
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to instrument: %v", err)
 		utils.LogError(r.logger, err, stopReason)
@@ -181,8 +192,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 		return fmt.Errorf(stopReason)
 	}
-
-	hookCancel = inst.HookCancel
 
 	var testSetResult bool
 	testRunResult := true
