@@ -2,12 +2,12 @@ package models
 
 type OutgoingReq struct {
 	OutgoingOptions OutgoingOptions `json:"outgoingOptions"`
-	ClientId        uint64           `json:"clientId"`
+	ClientID        uint64           `json:"clientId"`
 }
 
 type IncomingReq struct {
 	IncomingOptions IncomingOptions `json:"incomingOptions"`
-	ClientId        uint64           `json:"clientId"`
+	ClientID        uint64           `json:"clientId"`
 }
 
 type RegisterReq struct {

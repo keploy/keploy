@@ -52,15 +52,14 @@ func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClie
 		logger:       logger,
 		dockerClient: client,
 		client:       http.Client{},
-
-		conf: c,
+		conf:         c,
 	}
 }
 
 func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	requestBody := models.IncomingReq{
 		IncomingOptions: opts,
-		ClientId:        id,
+		ClientID:        id,
 	}
 
 	requestJSON, err := json.Marshal(requestBody)
@@ -132,7 +131,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.In
 func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 	requestBody := models.OutgoingReq{
 		OutgoingOptions: opts,
-		ClientId:        id,
+		ClientID:        id,
 	}
 
 	requestJSON, err := json.Marshal(requestBody)
@@ -197,7 +196,7 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, id uint64, opts models.O
 	// make a request to the server to mock outgoing
 	requestBody := models.OutgoingReq{
 		OutgoingOptions: opts,
-		ClientId:        id,
+		ClientID:        id,
 	}
 
 	requestJSON, err := json.Marshal(requestBody)
@@ -361,6 +360,7 @@ func (a *AgentClient) Run(ctx context.Context, id uint64, _ models.RunOptions) m
 
 	select {
 	case <-runAppCtx.Done():
+		fmt.Println("Context is canceled in the run app function")
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}
 	case appErr := <-appErrCh:
 		return appErr
@@ -453,7 +453,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	}
 
 	opts.ClientID = clientID
-	opts.AppInode = inode // why its required in case of native ?
+	opts.AppInode = inode
 	// Register the client with the server
 	err = a.RegisterClient(ctx, opts)
 	if err != nil {
@@ -571,7 +571,7 @@ func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opt
 	// Start the init container to get the PID namespace inode
 	cmdCancel := func(cmd *exec.Cmd) func() error {
 		return func() error {
-			a.logger.Info("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
+			a.logger.Info("sending SIGINT to the Initcontainer", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
 			err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
 			return err
 		}
@@ -586,7 +586,7 @@ func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opt
 		}
 	}()
 
-	time.Sleep(2 * time.Second)
+	time.Sleep(3 * time.Second)
 	// Get the PID of the container's first process
 	inspect, err := a.dockerClient.ContainerInspect(ctx, "keploy-init")
 	if err != nil {
