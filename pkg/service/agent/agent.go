@@ -50,7 +50,7 @@ func (a *Agent) Setup(ctx context.Context, _ string, opts models.SetupOptions) e
 
 	select {
 	case <-ctx.Done():
-		fmt.Println("Context cancelled, stopping Setup")
+		fmt.Println("Context cancelled, stopping Agent Setup")
 		return context.Canceled
 	}
 }

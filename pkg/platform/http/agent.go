@@ -13,6 +13,7 @@ package http
 import (
 	"bytes"
 	"context"
+	_ "embed" // necessary for embedding
 	"encoding/json"
 	"fmt"
 	"io"
@@ -44,6 +45,9 @@ type AgentClient struct {
 	client       http.Client
 	conf         *config.Config
 }
+
+//go:embed assets/initStop.sh
+var initStopScript []byte
 
 // this will be the client side implementation
 func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClient {
@@ -378,9 +382,9 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 	if !isAgentRunning {
 		// Start the keploy agent as a detached process and pipe the logs into a file
-		// if !isDockerCmd && runtime.GOOS != "linux" {
-		// 	return 0, fmt.Errorf("Operating system not supported for this feature")
-		// }
+		if !isDockerCmd && runtime.GOOS != "linux" {
+			return 0, fmt.Errorf("Operating system not supported for this feature")
+		}
 		if isDockerCmd {
 			// run the docker container instead of the agent binary
 			go func() {
@@ -438,7 +442,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 	var inode uint64
 	if isDockerCmd {
-		fmt.Println("Inside the docker command", isDockerCmd)
+
 		// Start the init container to get the pid namespace
 		inode, err = a.Initcontainer(ctx, a.logger, app.Options{
 			DockerNetwork: opts.DockerNetwork,
@@ -495,7 +499,6 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 
 	// start the app container and get the inode number
 	// keploy agent would have already runnning,
-
 	var inode uint64
 	var err error
 	if runtime.GOOS == "linux" {
@@ -566,8 +569,34 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, cli
 }
 
 func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opts app.Options) (uint64, error) {
-	// Start the init container to get the PID namespace inode
+	// Create a temporary file for the embedded initStop.sh script
+	initFile, err := os.CreateTemp("", "initStop.sh")
+	if err != nil {
+		a.logger.Error("failed to create temporary file", zap.Error(err))
+		return 0, err
+	}
+	defer os.Remove(initFile.Name()) // clean up the file afterward
 
+	_, err = initFile.Write(initStopScript)
+	if err != nil {
+		a.logger.Error("failed to write script to temporary file", zap.Error(err))
+		return 0, err
+	}
+
+	// Close the file after writing to avoid 'text file busy' error
+	if err := initFile.Close(); err != nil {
+		a.logger.Error("failed to close temporary file", zap.Error(err))
+		return 0, err
+	}
+
+	// Make the temporary file executable
+	err = os.Chmod(initFile.Name(), 0755)
+	if err != nil {
+		a.logger.Error("failed to make temporary script executable", zap.Error(err))
+		return 0, err
+	}
+
+	// Start the init container to get the PID namespace inode
 	cmdCancel := func(cmd *exec.Cmd) func() error {
 		return func() error {
 			a.logger.Info("sending SIGINT to the Initcontainer", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
@@ -575,11 +604,11 @@ func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opt
 			return err
 		}
 	}
+	fmt.Println("INIT NAME", initFile.Name())
+	// Use the temporary file path in the Docker command
+	cmd := fmt.Sprintf("docker run --network=%s --name keploy-init --rm -v%s:/initStop.sh alpine /initStop.sh", a.conf.NetworkName, initFile.Name())
 
-	cmd := fmt.Sprintf("docker run --network=%s --name keploy-init --rm -v$(pwd)/initStop.sh:/initStop.sh alpine /initStop.sh", a.conf.NetworkName)
-
-	// execute the command
-	//get the errorgroup from the context
+	// Execute the command
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
 		return 0, fmt.Errorf("failed to get errorgroup from the context")
@@ -596,7 +625,7 @@ func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opt
 		return nil
 	})
 
-	time.Sleep(3 * time.Second)
+	time.Sleep(7 * time.Second)
 	// Get the PID of the container's first process
 	inspect, err := a.dockerClient.ContainerInspect(ctx, "keploy-init")
 	if err != nil {

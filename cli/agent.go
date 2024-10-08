@@ -57,7 +57,7 @@ func Agent(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceF
 					logger.Error("failed to start HTTP server", zap.Error(err))
 				}
 			}()
-			// Doubt: How can I provide the setup options for the first time?
+			
 			err = a.Setup(ctx, "", models.SetupOptions{
 				IsDocker: isdocker,
 			})
