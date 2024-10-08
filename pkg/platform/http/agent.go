@@ -59,7 +59,7 @@ func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClie
 func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	requestBody := models.IncomingReq{
 		IncomingOptions: opts,
-		ClientID:        id,
+		ClientId:        id,
 	}
 
 	requestJSON, err := json.Marshal(requestBody)
@@ -131,7 +131,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.In
 func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) (<-chan *models.Mock, error) {
 	requestBody := models.OutgoingReq{
 		OutgoingOptions: opts,
-		ClientID:        id,
+		ClientId:        id,
 	}
 
 	requestJSON, err := json.Marshal(requestBody)
@@ -201,7 +201,7 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, id uint64, opts models.O
 	// make a request to the server to mock outgoing
 	requestBody := models.OutgoingReq{
 		OutgoingOptions: opts,
-		ClientID:        id,
+		ClientId:        id,
 	}
 
 	requestJSON, err := json.Marshal(requestBody)
@@ -598,7 +598,7 @@ func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opt
 	}
 	
 	grp.Go(func() error {
-		
+
 		cmdErr := utils.ExecuteCommand(ctx, a.logger, cmd, cmdCancel, 25*time.Second)
 		if cmdErr.Err != nil && cmdErr.Type == utils.Init {
 			utils.LogError(a.logger, cmdErr.Err, "failed to execute init container command")
