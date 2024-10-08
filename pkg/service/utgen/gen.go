@@ -91,14 +91,14 @@ func updateJavaScriptImports(content string, newImports []string) (string, error
 
 	existingImports := importRegex.FindAllString(content, -1)
 	for _, imp := range existingImports {
-		if imp != "\"\"" {
+		if imp != "\"\"" && len(imp) > 0 {
 			existingImportsSet[imp] = true
 		}
 	}
 
 	for _, imp := range newImports {
 		imp = strings.TrimSpace(imp)
-		if imp != "\"\"" {
+		if imp != "\"\"" && len(imp) > 0 {
 			existingImportsSet[imp] = true
 		}
 	}
@@ -116,22 +116,22 @@ func updateJavaScriptImports(content string, newImports []string) (string, error
 	return updatedContent, nil
 }
 
-func updateImports(filePath string, language string, imports string) error {
+func updateImports(filePath string, language string, imports string) (int, error) {
 	newImports := strings.Split(imports, "\n")
 	for i, imp := range newImports {
 		newImports[i] = strings.TrimSpace(imp)
 	}
 	contentBytes, err := os.ReadFile(filePath)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	content := string(contentBytes)
 
 	var updatedContent string
-
+	var importLength int
 	switch strings.ToLower(language) {
 	case "go":
-		updatedContent, err = updateGoImports(content, newImports)
+		updatedContent, importLength, err = updateGoImports(content, newImports)
 	case "java":
 		updatedContent, err = updateJavaImports(content, newImports)
 	case "python":
@@ -141,26 +141,25 @@ func updateImports(filePath string, language string, imports string) error {
 	case "javascript":
 		updatedContent, err = updateJavaScriptImports(content, newImports)
 	default:
-		return fmt.Errorf("unsupported language: %s", language)
+		return 0, fmt.Errorf("unsupported language: %s", language)
 	}
 	if err != nil {
-		return err
+		return 0, err
 	}
 	err = os.WriteFile(filePath, []byte(updatedContent), fs.ModePerm)
 
 	if err != nil {
-		return err
+		return 0, err
 	}
 
-	return nil
+	return importLength, nil
 }
 
-func updateGoImports(content string, newImports []string) (string, error) {
-
+func updateGoImports(codeBlock string, newImports []string) (string, int, error) {
 	importRegex := regexp.MustCompile(`(?ms)import\s*(\([\s\S]*?\)|"[^"]+")`)
 	existingImportsSet := make(map[string]bool)
 
-	matches := importRegex.FindStringSubmatch(content)
+	matches := importRegex.FindStringSubmatch(codeBlock)
 	if matches != nil {
 		importBlock := matches[0]
 		importLines := strings.Split(importBlock, "\n")
@@ -168,13 +167,10 @@ func updateGoImports(content string, newImports []string) (string, error) {
 		for _, imp := range existingImports {
 			existingImportsSet[imp] = true
 		}
-		for _, imp := range existingImports {
-			existingImportsSet[imp] = true
-		}
 		newImports = extractGoImports(newImports)
 		for _, imp := range newImports {
 			imp = strings.TrimSpace(imp)
-			if imp != "\"\"" {
+			if imp != "\"\"" && len(imp) > 0 {
 				existingImportsSet[imp] = true
 			}
 		}
@@ -183,22 +179,21 @@ func updateGoImports(content string, newImports []string) (string, error) {
 			allImports = append(allImports, imp)
 		}
 		importBlockNew := createGoImportBlock(allImports)
-		updatedContent := importRegex.ReplaceAllString(content, importBlockNew)
-		return updatedContent, nil
+		updatedContent := importRegex.ReplaceAllString(codeBlock, importBlockNew)
+		return updatedContent, len(strings.Split(importBlockNew, "\n")) - len(importLines), nil
 	}
 	packageRegex := regexp.MustCompile(`package\s+\w+`)
 
-	pkgMatch := packageRegex.FindStringIndex(content)
+	pkgMatch := packageRegex.FindStringIndex(codeBlock)
 	if pkgMatch == nil {
-		return "", fmt.Errorf("could not find package declaration")
+		return "", 0, fmt.Errorf("could not find package declaration")
 	}
 	newImports = extractGoImports(newImports)
 	importBlock := createGoImportBlock(newImports)
 
 	insertPos := pkgMatch[1]
-
-	updatedContent := content[:insertPos] + "\n\n" + importBlock + "\n" + content[insertPos:]
-	return updatedContent, nil
+	updatedContent := codeBlock[:insertPos] + "\n\n" + importBlock + "\n" + codeBlock[insertPos:]
+	return updatedContent, len(strings.Split(importBlock, "\n")) + 1, nil
 
 }
 
@@ -206,7 +201,7 @@ func extractGoImports(importLines []string) []string {
 	imports := []string{}
 	for _, line := range importLines {
 		line = strings.TrimSpace(line)
-		if line == "import (" || line == ")" || line == "" {
+		if (line == "import (" || line == ")" || line == "") || len(line) == 0 {
 			continue
 		}
 		line = strings.TrimPrefix(line, "import ")
@@ -238,7 +233,7 @@ func updateJavaImports(content string, newImports []string) (string, error) {
 
 	for _, imp := range newImports {
 		imp = strings.TrimSpace(imp)
-		if imp != "\"\"" {
+		if imp != "\"\"" && len(imp) > 0 {
 			importStatement := fmt.Sprintf("import %s;", imp)
 			existingImportsSet[importStatement] = true
 		}
@@ -280,7 +275,7 @@ func updatePythonImports(content string, newImports []string) (string, error) {
 
 	for _, imp := range newImports {
 		imp = strings.TrimSpace(imp)
-		if imp != "\"\"" {
+		if imp != "\"\"" && len(imp) > 0 {
 			existingImportsSet[imp] = true
 		}
 	}
@@ -304,7 +299,7 @@ func updateTypeScriptImports(content string, newImports []string) (string, error
 
 	for _, imp := range newImports {
 		imp = strings.TrimSpace(imp)
-		if imp != "\"\"" {
+		if imp != "\"\"" && len(imp) > 0 {
 			existingImportsSet[imp] = true
 		}
 	}
@@ -785,7 +780,7 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 	g.logger.Info(fmt.Sprintf("Running test 5 times for proper validation with the following command: '%s'", g.cmd))
 
 	var testCommandStartTime int64
-	err = updateImports(g.testPath, g.lang, generatedTest.NewImportsCode)
+	importLen, err := updateImports(g.testPath, g.lang, generatedTest.NewImportsCode)
 	if err != nil {
 		g.logger.Warn("Error updating imports", zap.Error(err))
 	}
@@ -853,6 +848,7 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 	g.testCasePassed++
 	*passedTests++
 	g.cov.Current = covResult.Coverage
+	g.cur.Line = g.cur.Line + len(testCodeLines) + importLen
 	g.cur.Line = g.cur.Line + len(testCodeLines)
 	g.logger.Info("Generated test passed and increased coverage")
 	return nil
