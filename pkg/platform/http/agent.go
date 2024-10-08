@@ -438,6 +438,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 	var inode uint64
 	if isDockerCmd {
+		fmt.Println("Inside the docker command", isDockerCmd)
 		// Start the init container to get the pid namespace
 		inode, err = a.Initcontainer(ctx, a.logger, app.Options{
 			DockerNetwork: opts.DockerNetwork,
@@ -451,7 +452,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	}
 
 	opts.ClientID = clientID
-	opts.AppInode = inode 
+	opts.AppInode = inode
 	// Register the client with the server
 	err = a.RegisterClient(ctx, opts)
 	if err != nil {
@@ -566,7 +567,7 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, cli
 
 func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opts app.Options) (uint64, error) {
 	// Start the init container to get the PID namespace inode
-	
+
 	cmdCancel := func(cmd *exec.Cmd) func() error {
 		return func() error {
 			a.logger.Info("sending SIGINT to the Initcontainer", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
@@ -583,7 +584,7 @@ func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opt
 	if !ok {
 		return 0, fmt.Errorf("failed to get errorgroup from the context")
 	}
-	
+
 	grp.Go(func() error {
 		println("Executing the init container command")
 		cmdErr := utils.ExecuteCommand(ctx, a.logger, cmd, cmdCancel, 25*time.Second)
