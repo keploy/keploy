@@ -604,7 +604,6 @@ func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opt
 			return err
 		}
 	}
-	fmt.Println("INIT NAME", initFile.Name())
 	// Use the temporary file path in the Docker command
 	cmd := fmt.Sprintf("docker run --network=%s --name keploy-init --rm -v%s:/initStop.sh alpine /initStop.sh", a.conf.NetworkName, initFile.Name())
 
@@ -625,7 +624,6 @@ func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opt
 		return nil
 	})
 
-	time.Sleep(7 * time.Second)
 	// Get the PID of the container's first process
 	inspect, err := a.dockerClient.ContainerInspect(ctx, "keploy-init")
 	if err != nil {
