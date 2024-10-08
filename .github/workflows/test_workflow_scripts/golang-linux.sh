@@ -81,7 +81,7 @@ for i in {1..2}; do
     sudo ./../../keployv2 agent &
     sleep 5
     send_request &
-    sudo -E env PATH="$PATH" ./../../keployv2 record -c "./ginApp" &> "${app_name}.txt" --debug
+    ./../../keployv2 record -c "./ginApp" &> "${app_name}.txt" --debug
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
@@ -105,7 +105,7 @@ echo "Keploy agent started for test mode"
 sleep 10
 
 # Start the gin-mongo app in test mode.
-sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7 &> test_logs.txt --debug
+./../../keployv2 test -c "./ginApp" --delay 7 &> test_logs.txt --debug
 
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."
