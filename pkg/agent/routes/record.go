@@ -21,7 +21,6 @@ type AgentRequest struct {
 	agent  agent.Service
 }
 
-// handlers -> agent service
 func New(r chi.Router, agent agent.Service, logger *zap.Logger) {
 	a := &AgentRequest{
 		logger: logger,
@@ -123,7 +122,6 @@ func (a *AgentRequest) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 func (a *AgentRequest) RegisterClients(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	fmt.Println("Registering clients.......")
 	var registerReq models.RegisterReq
 	err := json.NewDecoder(r.Body).Decode(&registerReq)
 

@@ -20,12 +20,12 @@ import (
 	"golang.org/x/term"
 )
 
-type DockerConfigStruct struct {
+type ConfigStruct struct {
 	DockerImage string
 	Envs        map[string]string
 }
 
-var DockerConfig = DockerConfigStruct{
+var DockerConfig = ConfigStruct{
 	DockerImage: "ghcr.io/keploy/keploy",
 }
 
@@ -72,7 +72,7 @@ func ParseDockerCmd(cmd string, kind utils.CmdType, idc Client) (string, string,
 	return containerName, networkName, nil
 }
 
-func GenerateDockerEnvs(config DockerConfigStruct) string {
+func GenerateDockerEnvs(config ConfigStruct) string {
 	var envs []string
 	for key, value := range config.Envs {
 		envs = append(envs, fmt.Sprintf("-e %s='%s'", key, value))

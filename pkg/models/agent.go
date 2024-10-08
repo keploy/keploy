@@ -2,12 +2,12 @@ package models
 
 type OutgoingReq struct {
 	OutgoingOptions OutgoingOptions `json:"outgoingOptions"`
-	ClientId        int64           `json:"clientId"`
+	ClientId        uint64           `json:"clientId"`
 }
 
 type IncomingReq struct {
 	IncomingOptions IncomingOptions `json:"incomingOptions"`
-	ClientId        int64           `json:"clientId"`
+	ClientId        uint64           `json:"clientId"`
 }
 
 type RegisterReq struct {
@@ -22,11 +22,11 @@ type AgentResp struct {
 
 type RunReq struct {
 	RunOptions RunOptions `json:"runOptions"`
-	ClientId   int64      `json:"clientId"`
+	ClientId   uint64      `json:"clientId"`
 }
 
 type SetMocksReq struct {
 	Filtered   []*Mock `json:"filtered"`
 	UnFiltered []*Mock `json:"unFiltered"`
-	AppId      int64   `json:"appId"`
+	AppId      uint64   `json:"appId"`
 }

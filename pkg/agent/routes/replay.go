@@ -42,15 +42,6 @@ func (a *AgentRequest) MockOutgoing(w http.ResponseWriter, r *http.Request) {
 	render.Status(r, http.StatusOK)
 }
 
-func checkForC(arr []string) bool {
-	for _, v := range arr {
-		if v == "C" {
-			return true
-		}
-	}
-	return false
-}
-
 func (a *AgentRequest) SetMocks(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -86,12 +77,12 @@ func (a *AgentRequest) SetMocks(w http.ResponseWriter, r *http.Request) {
 func (a *AgentRequest) GetConsumedMocks(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	appId := r.URL.Query().Get("id")
+	appID := r.URL.Query().Get("id")
 
 	// convert string to uint64
-	appIdInt, err := strconv.ParseUint(appId, 10, 64)
+	appIDInt, err := strconv.ParseUint(appID, 10, 64)
 
-	consumedMocks, err := a.agent.GetConsumedMocks(r.Context(), appIdInt)
+	consumedMocks, err := a.agent.GetConsumedMocks(r.Context(), appIDInt)
 	if err != nil {
 		render.JSON(w, r, err)
 		render.Status(r, http.StatusInternalServerError)
