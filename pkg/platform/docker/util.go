@@ -192,7 +192,8 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 	var ttyFlag string
 
 	if term.IsTerminal(int(os.Stdin.Fd())) {
-		ttyFlag = " -it "
+		// ttyFlag = " -it "
+		ttyFlag = " "
 	} else {
 		ttyFlag = " "
 	}
@@ -291,7 +292,7 @@ func convertPathToUnixStyle(path string) string {
 	return unixPath
 }
 
-// Function to extract the inode of the PID namespace
+// ExtractPidNamespaceInode extracts the inode of the PID namespace of a given PID
 func ExtractPidNamespaceInode(pid int) (string, error) {
 	// Check the OS
 	if runtime.GOOS != "linux" {

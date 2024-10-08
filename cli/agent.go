@@ -7,7 +7,6 @@ import (
 
 	"github.com/go-chi/chi"
 	"github.com/spf13/cobra"
-	"go.keploy.io/server/v2/cli/provider"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/agent/routes"
 	"go.keploy.io/server/v2/pkg/models"
@@ -36,11 +35,8 @@ func Agent(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceF
 				return nil
 			}
 
-			disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
-			provider.PrintLogo(disableAnsi)
 			isdocker, _ := cmd.Flags().GetBool("is-docker")
 			var port uint32 = 8086
-			// TODO: USE ENV Instead of flags
 			if isdocker {
 				port, _ = cmd.Flags().GetUint32("port")
 			}
