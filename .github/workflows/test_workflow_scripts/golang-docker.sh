@@ -24,9 +24,23 @@ docker rm -f ginApp 2>/dev/null || true
 container_kill() {
     echo "Inside container_kill"
     pid=$(pgrep -n keploy)
+
+    if [ -z "$pid" ]; then
+        echo "Keploy process not found. It might have already stopped."
+        return 0 # Process not found isn't a critical failure, so exit with success
+    fi
+
     echo "$pid Keploy PID" 
     echo "Killing keploy"
     sudo kill $pid
+
+    if [ $? -ne 0 ]; then
+        echo "Failed to kill keploy process, but continuing..."
+        return 0 # Avoid exiting with 1 in case kill fails
+    fi
+
+    echo "Keploy process killed"
+    return 0
 }
 
 send_request(){
