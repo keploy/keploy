@@ -18,11 +18,12 @@ type UTDetails struct {
 }
 
 type UT struct {
-	TestBehavior   string `yaml:"test_behavior"`
-	TestName       string `yaml:"test_name"`
-	TestCode       string `yaml:"test_code"`
-	NewImportsCode string `yaml:"new_imports_code"`
-	TestsTags      string `yaml:"tests_tags"`
+	TestBehavior            string `yaml:"test_behavior"`
+	TestName                string `yaml:"test_name"`
+	TestCode                string `yaml:"test_code"`
+	NewImportsCode          string `yaml:"new_imports_code"`
+	LibraryInstallationCode string `yaml:"library_installation_code"`
+	TestsTags               string `yaml:"tests_tags"`
 }
 
 type FailedUT struct {
