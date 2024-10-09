@@ -16,6 +16,7 @@ sleep 5  # Allow time for configuration to apply
 
 
 container_kill() {
+    echo "Inside container_kill"
     pid=$(pgrep -n keploy)
     echo "$pid Keploy PID" 
     echo "Killing keploy"
