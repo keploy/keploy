@@ -85,11 +85,11 @@ func NewUnitTestGenerator(
 	return generator, nil
 }
 
-func updateJavaScriptImports(content string, newImports []string) (string, error) {
+func updateJavaScriptImports(importedContent string, newImports []string) (string, int, error) {
 	importRegex := regexp.MustCompile(`(?m)^(import\s+.*?from\s+['"].*?['"];?|const\s+.*?=\s+require\(['"].*?['"]\);?)`)
 	existingImportsSet := make(map[string]bool)
 
-	existingImports := importRegex.FindAllString(content, -1)
+	existingImports := importRegex.FindAllString(importedContent, -1)
 	for _, imp := range existingImports {
 		if imp != "\"\"" && len(imp) > 0 {
 			existingImportsSet[imp] = true
@@ -110,10 +110,13 @@ func updateJavaScriptImports(content string, newImports []string) (string, error
 
 	importSection := strings.Join(allImports, "\n")
 
-	updatedContent := importRegex.ReplaceAllString(content, "")
-	updatedContent = importSection + "\n\n" + strings.TrimSpace(updatedContent)
-
-	return updatedContent, nil
+	updatedContent := importRegex.ReplaceAllString(importedContent, "")
+	updatedContent = importSection + "\n" + strings.TrimSpace(updatedContent)
+	importLength := len(strings.Split(updatedContent, "\n")) - len(strings.Split(importedContent, "\n"))
+	if importLength < 0 {
+		importLength = 0
+	}
+	return updatedContent, importLength, nil
 }
 
 func updateImports(filePath string, language string, imports string) (int, error) {
@@ -137,9 +140,9 @@ func updateImports(filePath string, language string, imports string) (int, error
 	case "python":
 		updatedContent, err = updatePythonImports(content, newImports)
 	case "typescript":
-		updatedContent, err = updateTypeScriptImports(content, newImports)
+		updatedContent, importLength, err = updateTypeScriptImports(content, newImports)
 	case "javascript":
-		updatedContent, err = updateJavaScriptImports(content, newImports)
+		updatedContent, importLength, err = updateJavaScriptImports(content, newImports)
 	default:
 		return 0, fmt.Errorf("unsupported language: %s", language)
 	}
@@ -288,11 +291,11 @@ func updatePythonImports(content string, newImports []string) (string, error) {
 	return updatedContent, nil
 }
 
-func updateTypeScriptImports(content string, newImports []string) (string, error) {
+func updateTypeScriptImports(importedContent string, newImports []string) (string, int, error) {
 	importRegex := regexp.MustCompile(`(?m)^import\s+.*?;`)
 	existingImportsSet := make(map[string]bool)
 
-	existingImports := importRegex.FindAllString(content, -1)
+	existingImports := importRegex.FindAllString(importedContent, -1)
 	for _, imp := range existingImports {
 		existingImportsSet[imp] = true
 	}
@@ -310,9 +313,13 @@ func updateTypeScriptImports(content string, newImports []string) (string, error
 	}
 	importSection := strings.Join(allImports, "\n")
 
-	updatedContent := importRegex.ReplaceAllString(content, "")
-	updatedContent = importSection + "\n\n" + updatedContent
-	return updatedContent, nil
+	updatedContent := importRegex.ReplaceAllString(importedContent, "")
+	updatedContent = importSection + "\n" + updatedContent
+	importLength := len(strings.Split(updatedContent, "\n")) - len(strings.Split(importedContent, "\n"))
+	if importLength < 0 {
+		importLength = 0
+	}
+	return updatedContent, importLength, nil
 }
 
 func (g *UnitTestGenerator) Start(ctx context.Context) error {
