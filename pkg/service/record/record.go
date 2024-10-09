@@ -71,6 +71,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	defer func() {
 		select {
 		case <-ctx.Done():
+			fmt.Println("Context cancelled start ")
 		default:
 			if !reRecord {
 				err := utils.Stop(r.logger, stopReason)

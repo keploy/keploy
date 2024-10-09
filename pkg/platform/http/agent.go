@@ -556,7 +556,14 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, clientId uint64) error {
 
 	// Start the keploy agent in a Docker container
-	agentCtx := context.WithoutCancel(context.Background())
+	agentCtx := context.WithoutCancel(ctx)
+
+	// go func ()  {
+	// 		for{
+	// 			fmt.Printf("Agent ctx is ? %v", agentCtx.Err())
+	// 			time.Sleep(2*time.Second)
+	// 		}
+	// }()
 
 	err := kdocker.StartInDocker(agentCtx, logger, &config.Config{
 		InstallationID: a.conf.InstallationID,

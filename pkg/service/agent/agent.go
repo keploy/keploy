@@ -86,6 +86,7 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 
 	select {
 	case <-ctx.Done():
+		fmt.Println("Context cancelled, stopping Hook")
 		return ctx.Err()
 	default:
 	}
@@ -140,6 +141,7 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 
 	select {
 	case <-ctx.Done():
+		fmt.Println("Hooks context cancelled, stopping Hook")
 		return ctx.Err()
 	default:
 	}
