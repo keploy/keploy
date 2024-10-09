@@ -10,6 +10,7 @@ type HookOptions struct {
 	Rules         []config.BypassRule
 	Mode          Mode
 	EnableTesting bool
+	IsDocker      bool
 }
 
 type OutgoingOptions struct {
@@ -26,9 +27,17 @@ type IncomingOptions struct {
 }
 
 type SetupOptions struct {
+	ClientID     uint64
 	Container     string
 	DockerNetwork string
 	DockerDelay   uint64
+	ClientNsPid   uint32
+	ClientInode   uint64
+	AppInode      uint64
+	Cmd           string
+	IsDocker      bool
+	CommandType   string
+	Mode          Mode
 }
 
 type RunOptions struct {

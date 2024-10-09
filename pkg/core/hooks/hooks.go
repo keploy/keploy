@@ -28,6 +28,9 @@ import (
 )
 
 func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
+	if cfg.Agent.IsDocker {
+		cfg.ProxyPort = 36789
+	}
 	return &Hooks{
 		logger:    logger,
 		sess:      core.NewSessions(),
@@ -49,10 +52,11 @@ type Hooks struct {
 
 	m sync.Mutex
 	// eBPF C shared maps
-	clientRegistrationMap    *ebpf.Map
-	agentRegistartionMap     *ebpf.Map
-	dockerAppRegistrationMap *ebpf.Map
-	redirectProxyMap         *ebpf.Map
+	clientRegistrationMap *ebpf.Map
+	agentRegistartionMap  *ebpf.Map
+
+	redirectProxyMap *ebpf.Map
+	proxyInfoMap     *ebpf.Map
 	//--------------
 
 	// eBPF C shared objectsobjects
@@ -96,7 +100,7 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 		ID: id,
 	})
 
-	err := h.load(ctx, opts)
+	err := h.load(opts)
 	if err != nil {
 		return err
 	}
@@ -119,7 +123,7 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 	return nil
 }
 
-func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
+func (h *Hooks) load(opts core.HookCfg) error {
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
 		utils.LogError(h.logger, err, "failed to lock memory for eBPF resources")
@@ -142,7 +146,8 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	h.redirectProxyMap = objs.RedirectProxyMap
 	h.clientRegistrationMap = objs.KeployClientRegistrationMap
 	h.agentRegistartionMap = objs.KeployAgentRegistrationMap
-	h.dockerAppRegistrationMap = objs.DockerAppRegistrationMap
+	h.proxyInfoMap = objs.KeployProxyInfo
+
 	h.objects = objs
 
 	// ---------------
@@ -408,28 +413,17 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
 	h.logger.Info("keploy initialized and probes added to the kernel.")
 
-	var clientInfo structs.ClientInfo = structs.ClientInfo{}
-
-	switch opts.Mode {
-	case models.MODE_RECORD:
-		clientInfo.Mode = uint32(1)
-	case models.MODE_TEST:
-		clientInfo.Mode = uint32(2)
-	default:
-		clientInfo.Mode = uint32(0)
-	}
-
 	//sending keploy pid to kernel to get filtered
-	inode, err := getSelfInodeNumber()
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to get inode of the keploy process")
-		return err
-	}
+	// inode, err := getSelfInodeNumber()
+	// if err != nil {
+	// 	utils.LogError(h.logger, err, "failed to get inode of the keploy process")
+	// 	return err
+	// }
 
-	clientInfo.KeployClientInode = inode
-	clientInfo.KeployClientNsPid = uint32(os.Getpid())
-	clientInfo.IsKeployClientRegistered = uint32(0)
-	h.logger.Debug("Keploy Pid sent successfully...")
+	// clientInfo.KeployClientInode = inode
+	// clientInfo.KeployClientNsPid = uint32(os.Getpid())
+	// clientInfo.IsKeployClientRegistered = uint32(0)
+	// h.logger.Info("Keploy Pid sent successfully...")
 
 	if opts.IsDocker {
 		h.proxyIP4 = opts.KeployIPV4
@@ -443,41 +437,38 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
 	h.logger.Debug("proxy ips", zap.String("ipv4", h.proxyIP4), zap.Any("ipv6", h.proxyIP6))
 
-	proxyIP, err := IPv4ToUint32(h.proxyIP4)
-	if err != nil {
-		return fmt.Errorf("failed to convert ip string:[%v] to 32-bit integer", opts.KeployIPV4)
-	}
-
 	var agentInfo structs.AgentInfo = structs.AgentInfo{}
-
-	agentInfo.ProxyInfo = structs.ProxyInfo{
-		IP4:  proxyIP,
-		IP6:  h.proxyIP6,
-		Port: h.proxyPort,
+	agentInfo.KeployAgentNsPid = uint32(os.Getpid())
+	agentInfo.KeployAgentInode, err = GetSelfInodeNumber()
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to get inode of the keploy process")
+		return err
 	}
 
 	agentInfo.DNSPort = int32(h.dnsPort)
 
-	if opts.IsDocker {
-		clientInfo.IsDockerApp = uint32(1)
-	} else {
-		clientInfo.IsDockerApp = uint32(0)
-	}
+	// if opts.IsDocker {
+	// 	clientInfo.IsDockerApp = uint32(1)
+	// } else {
+	// 	clientInfo.IsDockerApp = uint32(0)
+	// }
 
-	ports := GetPortToSendToKernel(ctx, opts.Rules)
-	for i := 0; i < 10; i++ {
-		if len(ports) <= i {
-			clientInfo.PassThroughPorts[i] = -1
-			continue
-		}
-		clientInfo.PassThroughPorts[i] = int32(ports[i])
-	}
+	// ports := GetPortToSendToKernel(ctx, opts.Rules)
+	// for i := 0; i < 10; i++ {
+	// 	if len(ports) <= i {
+	// 		clientInfo.PassThroughPorts[i] = -1
+	// 		continue
+	// 	}
+	// 	clientInfo.PassThroughPorts[i] = int32(ports[i])
+	// }
 
-	err = h.SendClientInfo(opts.AppID, clientInfo)
-	if err != nil {
-		h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))
-		return err
-	}
+	// for sending client pid to kernel
+	// fmt.Println("Sending client info to kernel...", clientInfo)
+	// err = h.SendClientInfo(opts.AppID, clientInfo)
+	// if err != nil {
+	// 	h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))
+	// 	return err
+	// }
 	err = h.SendAgentInfo(agentInfo)
 	if err != nil {
 		h.logger.Error("failed to send agent info to the ebpf program", zap.Error(err))
@@ -491,7 +482,31 @@ func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOption
 	// TODO use the session to get the app id
 	// and then use the app id to get the test cases chan
 	// and pass that to eBPF consumers/listeners
+	fmt.Println("Recording hooks...")
 	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
+}
+
+func (h *Hooks) SendKeployClientInfo(ctx context.Context, clientID uint64, clientInfo structs.ClientInfo) error {
+	// TODO use the session to get the app id
+	// and then use the app id to get the test cases chan
+	// and pass that to eBPF consumers/listeners
+
+	err := h.SendClientInfo(clientID, clientInfo)
+	if err != nil {
+		h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))
+		return err
+	}
+
+	return nil
+}
+
+func (h *Hooks) SendClientProxyInfo(ctx context.Context, clientID uint64, proxyInfo structs.ProxyInfo) error {
+	err := h.SendProxyInfo(clientID, proxyInfo)
+	if err != nil {
+		h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))
+		return err
+	}
+	return nil
 }
 
 func (h *Hooks) unLoad(_ context.Context) {

@@ -78,16 +78,16 @@ func postgresDecoderFrontend(response models.Frontend) ([]byte, error) {
 				Line:             response.ErrorResponse.Line,
 				Routine:          response.ErrorResponse.Routine,
 			}
-		case string('G'):
-			msg = &pgproto3.CopyInResponse{
-				OverallFormat:     response.CopyInResponse.OverallFormat,
-				ColumnFormatCodes: response.CopyInResponse.ColumnFormatCodes,
-			}
-		case string('H'):
-			msg = &pgproto3.CopyOutResponse{
-				OverallFormat:     response.CopyOutResponse.OverallFormat,
-				ColumnFormatCodes: response.CopyOutResponse.ColumnFormatCodes,
-			}
+		// case string('G'):
+		// 	msg = &pgproto3.CopyInResponse{
+		// 		OverallFormat:     response.CopyInResponse.OverallFormat,
+		// 		ColumnFormatCodes: response.CopyInResponse.ColumnFormatCodes,
+		// 	}
+		// case string('H'):
+		// 	msg = &pgproto3.CopyOutResponse{
+		// 		OverallFormat:     response.CopyOutResponse.OverallFormat,
+		// 		ColumnFormatCodes: response.CopyOutResponse.ColumnFormatCodes,
+		// 	}
 		case string('I'):
 			msg = &pgproto3.EmptyQueryResponse{}
 		case string('K'):
@@ -165,11 +165,11 @@ func postgresDecoderFrontend(response models.Frontend) ([]byte, error) {
 			msg = &pgproto3.FunctionCallResponse{
 				Result: response.FunctionCallResponse.Result,
 			}
-		case string('W'):
-			msg = &pgproto3.CopyBothResponse{
-				OverallFormat:     response.CopyBothResponse.OverallFormat,
-				ColumnFormatCodes: response.CopyBothResponse.ColumnFormatCodes,
-			}
+		// case string('W'):
+		// 	msg = &pgproto3.CopyBothResponse{
+		// 		// OverallFormat:     response.CopyBothResponse.OverallFormat,
+		// 		ColumnFormatCodes: response.CopyBothResponse.ColumnFormatCodes,
+		// 	}
 		case string('Z'):
 			msg = &pgproto3.ReadyForQuery{
 				TxStatus: response.ReadyForQuery.TxStatus,

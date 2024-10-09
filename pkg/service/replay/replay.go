@@ -81,7 +81,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
 
-	var hookCancel context.CancelFunc
+	setupErrGrp, _ := errgroup.WithContext(ctx)
+	setupCtx := context.WithoutCancel(ctx)
+	setupCtx = context.WithValue(ctx, models.ErrGroupKey, setupErrGrp)
+	setupCtx, setupCtxCancel := context.WithCancel(setupCtx)
+
 	var stopReason = "replay completed successfully"
 
 	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
@@ -92,10 +96,17 @@ func (r *Replayer) Start(ctx context.Context) error {
 		default:
 			r.logger.Info("stopping Keploy", zap.String("reason", stopReason))
 		}
-		if hookCancel != nil {
-			hookCancel()
+
+		fmt.Printf("SetupCtx?: %v\n", setupCtx.Err())
+		setupCtxCancel()
+		fmt.Printf("SetupCtx?: %v\n", setupCtx.Err())
+		println("setupCtxCancel is cancelled")
+		err := setupErrGrp.Wait()
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to stop setup execution, that covers init container")
 		}
-		err := g.Wait()
+
+		err = g.Wait()
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop replaying")
 		}
@@ -172,7 +183,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 
 	// Instrument will load the hooks and start the proxy
-	inst, err := r.Instrument(ctx)
+	inst, err := r.Instrument(setupCtx)
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to instrument: %v", err)
 		utils.LogError(r.logger, err, stopReason)
@@ -181,8 +192,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 		return fmt.Errorf(stopReason)
 	}
-
-	hookCancel = inst.HookCancel
 
 	var testSetResult bool
 	testRunResult := true
@@ -331,33 +340,19 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.Any("base path", r.config.Test.BasePath))
 		return &InstrumentState{}, nil
 	}
-	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
+	// Instrument will setup the environment and start the hooks and proxy
+	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST})
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return &InstrumentState{}, err
-		}
-		return &InstrumentState{}, fmt.Errorf("failed to setup instrumentation: %w", err)
+		stopReason := "failed setting up the environment"
+		utils.LogError(r.logger, err, stopReason)
+		return &InstrumentState{}, fmt.Errorf(stopReason)
 	}
+
 	r.config.AppID = appID
 
 	var cancel context.CancelFunc
-	// starting the hooks and proxy
-	select {
-	case <-ctx.Done():
-		return &InstrumentState{}, context.Canceled
-	default:
-		hookCtx := context.WithoutCancel(ctx)
-		hookCtx, cancel = context.WithCancel(hookCtx)
-		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_TEST, EnableTesting: r.config.EnableTesting, Rules: r.config.BypassRules})
-		if err != nil {
-			cancel()
-			if errors.Is(err, context.Canceled) {
-				return &InstrumentState{}, err
-			}
-			return &InstrumentState{}, fmt.Errorf("failed to start the hooks and proxy: %w", err)
-		}
-	}
-	return &InstrumentState{AppID: appID, HookCancel: cancel}, nil
+
+	return &InstrumentState{AppID: 0, HookCancel: cancel}, nil
 }
 
 func (r *Replayer) GetNextTestRunID(ctx context.Context) (string, error) {
@@ -833,6 +828,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if r.config.Test.UpdateTemplate || r.config.Test.BasePath != "" {
 		removeDoubleQuotes(utils.TemplatizedValues)
 		// Write the templatized values to the yaml.
+		fmt.Println("POSTScript", conf.PostScript)
+		fmt.Println("PREScript", conf.PreScript)
 		if len(utils.TemplatizedValues) > 0 {
 			err = r.testSetConf.Write(ctx, testSetID, &models.TestSet{
 				PreScript:  conf.PreScript,
@@ -876,6 +873,7 @@ func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, testSet
 	}
 
 	if action == Start {
+		// api call here -
 		err = r.instrumentation.MockOutgoing(ctx, appID, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
 			MongoPassword:  r.config.Test.MongoPassword,
@@ -889,6 +887,7 @@ func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, testSet
 		}
 	}
 
+	// this will be sent to the proxy
 	err = r.instrumentation.SetMocks(ctx, appID, filteredMocks, unfilteredMocks)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to set mocks")
@@ -1141,4 +1140,8 @@ func (r *Replayer) DeleteTests(ctx context.Context, testSetID string, testCaseID
 
 func SetTestHooks(testHooks TestHooks) {
 	HookImpl = testHooks
+}
+
+func (r *Replayer) GetContainerIP(ctx context.Context, id uint64) (string, error) {
+	return r.instrumentation.GetContainerIP(ctx, id)
 }

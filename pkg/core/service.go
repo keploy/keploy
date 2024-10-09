@@ -15,11 +15,13 @@ import (
 )
 
 type Hooks interface {
-	AppInfo
 	DestInfo
 	OutgoingInfo
 	Load(ctx context.Context, id uint64, cfg HookCfg) error
 	Record(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error)
+	// send KeployClient Pid
+	SendKeployClientInfo(ctx context.Context, clientID uint64, clientInfo structs.ClientInfo) error
+	SendClientProxyInfo(ctx context.Context, clientID uint64, proxyInfo structs.ProxyInfo) error
 }
 
 type HookCfg struct {
@@ -33,7 +35,7 @@ type HookCfg struct {
 
 type App interface {
 	Setup(ctx context.Context, opts app.Options) error
-	Run(ctx context.Context, inodeChan chan uint64, opts app.Options) error
+	Run(ctx context.Context, opts app.Options) error
 	Kind(ctx context.Context) utils.CmdType
 	KeployIPv4Addr() string
 }
@@ -57,10 +59,6 @@ type ProxyOptions struct {
 type DestInfo interface {
 	Get(ctx context.Context, srcPort uint16) (*NetworkAddress, error)
 	Delete(ctx context.Context, srcPort uint16) error
-}
-
-type AppInfo interface {
-	SendDockerAppInfo(id uint64, dockerAppInfo structs.DockerAppInfo) error
 }
 
 // For keploy test bench

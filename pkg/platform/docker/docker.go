@@ -154,7 +154,7 @@ func (idc *Impl) StopAndRemoveDockerContainer() error {
 		}
 	}
 
-	removeOptions := types.ContainerRemoveOptions{
+	removeOptions := dockerContainerPkg.RemoveOptions{
 		RemoveVolumes: true,
 		Force:         true,
 	}
@@ -360,7 +360,7 @@ func (idc *Impl) GetHostWorkingDirectory() (string, error) {
 	// Loop through container mounts and find the mount for current directory in the container
 	for _, mount := range containerMounts {
 		if mount.Destination == curDir {
-			idc.logger.Debug(fmt.Sprintf("found mount for %s in keploy-v2 container", curDir), zap.Any("mount", mount))
+			idc.logger.Info(fmt.Sprintf("found mount for %s in keploy-v2 container", curDir), zap.Any("mount", mount))
 			return mount.Source, nil
 		}
 	}
@@ -519,6 +519,30 @@ func (idc *Impl) SetKeployNetwork(c *Compose) (*NetworkInfo, error) {
 		}
 	}
 	return networkInfo, nil
+}
+
+func (idc *Impl) SetInitPid(c *Compose) error {
+	// Add or modify network for each service
+	for _, service := range c.Services.Content {
+		pidFound := false
+		for _, item := range service.Content {
+			if item.Value == "pid" {
+				pidFound = true
+				break
+			}
+		}
+
+		if !pidFound {
+			service.Content = append(service.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: "pid"},
+				&yaml.Node{
+					Kind:  yaml.ScalarNode,
+					Value: "container:keploy-init",
+				},
+			)
+		}
+	}
+	return nil
 }
 
 // IsContainerRunning check if the container is already running or not, required for docker start command.
