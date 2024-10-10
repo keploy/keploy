@@ -24,7 +24,7 @@ type CommonInternalServices struct {
 	Instrumentation *agent.Agent
 }
 
-func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger, auth service.Auth) (interface{}, error) {
+func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger, _ service.Auth) (interface{}, error) {
 
 	var client docker.Client
 	var err error

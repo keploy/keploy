@@ -111,6 +111,6 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 	}, nil
 }
 
-func GetAgent(ctx context.Context, cmd string, c *config.Config, logger *zap.Logger, tel *telemetry.Telemetry, auth service.Auth) (interface{}, error) {
+func GetAgent(ctx context.Context, cmd string, c *config.Config, logger *zap.Logger, auth service.Auth) (interface{}, error) {
 	return nil, errors.New("command not supported in non linux os")
 }

@@ -17,18 +17,18 @@ type Service interface {
 }
 
 type Options struct {
-	Platform    Platform
+	// Platform    Platform
 	Network     string
 	Container   string
 	SelfTesting bool
 	Mode        models.Mode
 }
 
-type Platform string
+// type Platform string
 
-var (
-	linux   Platform = "linux"
-	windows Platform = "windows"
-	mac     Platform = "mac"
-	docker  Platform = "docker"
-)
+// var (
+// 	linux   Platform = "linux"
+// 	windows Platform = "windows"
+// 	mac     Platform = "mac"
+// 	docker  Platform = "docker"
+// )

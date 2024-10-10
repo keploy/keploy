@@ -362,7 +362,7 @@ func (a *AgentClient) Run(ctx context.Context, id uint64, _ models.RunOptions) m
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
 
 	// clientID := utils.GenerateID()
-	var clientID uint64 = 0
+	var clientID uint64
 
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 
@@ -433,7 +433,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	if isDockerCmd {
 
 		// Start the init container to get the pid namespace
-		inode, err = a.Initcontainer(ctx, a.logger, app.Options{
+		inode, err = a.Initcontainer(ctx, app.Options{
 			DockerNetwork: opts.DockerNetwork,
 			Container:     opts.Container,
 			DockerDelay:   opts.DockerDelay,
@@ -564,7 +564,7 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger) err
 	return nil
 }
 
-func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opts app.Options) (uint64, error) {
+func (a *AgentClient) Initcontainer(ctx context.Context, opts app.Options) (uint64, error) {
 	// Create a temporary file for the embedded initStop.sh script
 	initFile, err := os.CreateTemp("", "initStop.sh")
 	if err != nil {
@@ -664,8 +664,7 @@ func (a *AgentClient) isAgentRunning(ctx context.Context) bool {
 	if err != nil {
 		a.logger.Info("Keploy agent is not running in background, starting the agent")
 		return false
-	} else {
-		a.logger.Info("Setup request sent to the server", zap.String("status", resp.Status))
-		return true
 	}
+	a.logger.Info("Setup request sent to the server", zap.String("status", resp.Status))
+	return true
 }

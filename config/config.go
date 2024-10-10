@@ -129,7 +129,7 @@ type Test struct {
 }
 
 type Agent struct {
-	IsDocker bool `json:"isDocker" yaml:"isDocker" mapstructure:"isDocker"`
+	IsDocker bool   `json:"isDocker" yaml:"isDocker" mapstructure:"isDocker"`
 	Port     uint32 `json:"port" yaml:"port" mapstructure:"port"`
 }
 

@@ -1,6 +1,5 @@
 //go:build linux
 
-// Agent is the main service that will be used to interact with the agent
 package agent
 
 import (
