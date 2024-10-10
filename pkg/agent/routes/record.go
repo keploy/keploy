@@ -126,7 +126,7 @@ func (a *AgentRequest) RegisterClients(w http.ResponseWriter, r *http.Request) {
 	err := json.NewDecoder(r.Body).Decode(&registerReq)
 
 	register := models.AgentResp{
-		ClientId: 0,
+		ClientID: 0,
 		Error:    nil,
 	}
 

@@ -12,7 +12,6 @@ import (
 	"go.keploy.io/server/v2/pkg/core/tester"
 	"go.keploy.io/server/v2/pkg/platform/docker"
 	"go.keploy.io/server/v2/pkg/platform/storage"
-	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/pkg/service/agent"
 	"go.keploy.io/server/v2/utils"
@@ -25,7 +24,7 @@ type CommonInternalServices struct {
 	Instrumentation *agent.Agent
 }
 
-func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger, tel *telemetry.Telemetry, auth service.Auth) (interface{}, error) {
+func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger, auth service.Auth) (interface{}, error) {
 
 	var client docker.Client
 	var err error

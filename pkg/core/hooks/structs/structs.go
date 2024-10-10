@@ -5,7 +5,6 @@ package structs
 
 type BpfSpinLock struct{ Val uint32 }
 
-
 type DestInfo struct {
 	IPVersion uint32
 	DestIP4   uint32
@@ -14,7 +13,6 @@ type DestInfo struct {
 	KernelPid uint32
 	ClientID  uint64
 }
-
 
 type ProxyInfo struct {
 	IP4  uint32
@@ -27,7 +25,6 @@ type DockerAppInfo struct {
 	ClientID uint64
 }
 
-
 type ClientInfo struct {
 	KeployClientInode        uint64
 	KeployClientNsPid        uint32
@@ -37,7 +34,6 @@ type ClientInfo struct {
 	PassThroughPorts         [10]int32
 	AppInode                 uint64
 }
-
 
 type AgentInfo struct {
 	KeployAgentNsPid uint32

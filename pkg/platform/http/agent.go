@@ -2,14 +2,6 @@
 
 package http
 
-// Instrumentation package client code,
-
-// send the payload to the server
-// enable http chunking/straeming for large payloads
-
-// setup ki call jo agent start karte hi hogi - it will return nothing.
-// docker k liye alag se setup hoga (can setup via agent flag)
-
 import (
 	"bytes"
 	"context"
@@ -374,7 +366,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 	// if the agent is not running, start the agent
 	clientID := utils.GenerateID()
-	clientID = 0 // how can I retrieve the same client Id in the testmode ??
+	clientID = 0 
 
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 
@@ -652,6 +644,10 @@ func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opt
 
 	a.logger.Info("PID Namespace Inode", zap.String("inode", pidNamespaceInode))
 	iNode, err := strconv.ParseUint(pidNamespaceInode, 10, 64)
+	if err != nil {
+		a.logger.Error("failed to convert inode to uint64", zap.Error(err))
+		return 0, err
+	}
 	return iNode, nil
 }
 

@@ -15,7 +15,6 @@ import (
 
 	"github.com/docker/docker/api/types/network"
 
-	"github.com/docker/docker/api/types"
 	dockerContainerPkg "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/volume"
@@ -175,7 +174,7 @@ func (idc *Impl) NetworkExists(networkName string) (bool, error) {
 	defer cancel()
 
 	// Retrieve all networks.
-	networks, err := idc.NetworkList(ctx, types.NetworkListOptions{})
+	networks, err := idc.NetworkList(ctx, network.ListOptions{})
 	if err != nil {
 		return false, fmt.Errorf("error retrieving networks: %v", err)
 	}
@@ -195,7 +194,7 @@ func (idc *Impl) CreateNetwork(networkName string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), idc.timeoutForDockerQuery)
 	defer cancel()
 
-	_, err := idc.NetworkCreate(ctx, networkName, types.NetworkCreate{
+	_, err := idc.NetworkCreate(ctx, networkName, network.CreateOptions{
 		Driver: "bridge",
 	})
 

@@ -91,7 +91,6 @@ type Hooks struct {
 	objects     bpfObjects
 	writev      link.Link
 	writevRet   link.Link
-	appID       uint64
 }
 
 func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
@@ -486,7 +485,7 @@ func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOption
 	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
 }
 
-func (h *Hooks) SendKeployClientInfo(ctx context.Context, clientID uint64, clientInfo structs.ClientInfo) error {
+func (h *Hooks) SendKeployClientInfo(clientID uint64, clientInfo structs.ClientInfo) error {
 	// TODO use the session to get the app id
 	// and then use the app id to get the test cases chan
 	// and pass that to eBPF consumers/listeners
@@ -500,7 +499,7 @@ func (h *Hooks) SendKeployClientInfo(ctx context.Context, clientID uint64, clien
 	return nil
 }
 
-func (h *Hooks) SendClientProxyInfo(ctx context.Context, clientID uint64, proxyInfo structs.ProxyInfo) error {
+func (h *Hooks) SendClientProxyInfo(clientID uint64, proxyInfo structs.ProxyInfo) error {
 	err := h.SendProxyInfo(clientID, proxyInfo)
 	if err != nil {
 		h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))

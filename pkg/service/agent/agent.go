@@ -187,7 +187,7 @@ func (a *Agent) GetConsumedMocks(ctx context.Context, id uint64) ([]string, erro
 	return a.Proxy.GetConsumedMocks(ctx, id)
 }
 
-func (a *Agent) UnHook(_ context.Context, id uint64) error {
+func (a *Agent) UnHook(_ context.Context, _ uint64) error {
 	return nil
 }
 
@@ -222,19 +222,22 @@ func (a *Agent) RegisterClient(ctx context.Context, opts models.SetupOptions) er
 		clientInfo.IsDockerApp = 1
 	}
 
-	return a.Hooks.SendKeployClientInfo(ctx, opts.ClientID, clientInfo)
+	return a.Hooks.SendKeployClientInfo(opts.ClientID, clientInfo)
 }
 
 func (a *Agent) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) error {
 	if !opts.IsDocker {
 		proxyIP, err := hooks.IPv4ToUint32("127.0.0.1")
+		if err != nil {
+			return err
+		}
 		proxyInfo := structs.ProxyInfo{
 			IP4:  proxyIP,
 			IP6:  [4]uint32{0, 0, 0, 0},
 			Port: 16789,
 		}
 		fmt.Println("PROXY INFO: ", proxyInfo)
-		err = a.Hooks.SendClientProxyInfo(ctx, opts.ClientID, proxyInfo)
+		err = a.Hooks.SendClientProxyInfo(opts.ClientID, proxyInfo)
 		if err != nil {
 			return err
 		}
@@ -282,7 +285,7 @@ func (a *Agent) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) e
 		Port: 36789,
 	}
 
-	err = a.Hooks.SendClientProxyInfo(ctx, opts.ClientID, proxyInfo)
+	err = a.Hooks.SendClientProxyInfo(opts.ClientID, proxyInfo)
 	if err != nil {
 		return err
 	}

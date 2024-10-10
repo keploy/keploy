@@ -305,7 +305,6 @@ func (r *Response) UnmarshalJSON(data []byte) error {
 		}
 		r.Message = &msg
 
-		
 	// Connection phase
 	case AuthStatusToString(HandshakeV10):
 		var msg HandshakeV10Packet

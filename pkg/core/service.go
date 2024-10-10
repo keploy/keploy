@@ -20,8 +20,8 @@ type Hooks interface {
 	Load(ctx context.Context, id uint64, cfg HookCfg) error
 	Record(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error)
 	// send KeployClient Pid
-	SendKeployClientInfo(ctx context.Context, clientID uint64, clientInfo structs.ClientInfo) error
-	SendClientProxyInfo(ctx context.Context, clientID uint64, proxyInfo structs.ProxyInfo) error
+	SendKeployClientInfo(clientID uint64, clientInfo structs.ClientInfo) error
+	SendClientProxyInfo(clientID uint64, proxyInfo structs.ProxyInfo) error
 }
 
 type HookCfg struct {

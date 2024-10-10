@@ -16,7 +16,7 @@ func (a *AgentRequest) MockOutgoing(w http.ResponseWriter, r *http.Request) {
 	err := json.NewDecoder(r.Body).Decode(&OutgoingReq)
 
 	mockRes := models.AgentResp{
-		ClientId:  0,
+		ClientID:  0,
 		Error:     nil,
 		IsSuccess: true,
 	}
@@ -49,7 +49,7 @@ func (a *AgentRequest) SetMocks(w http.ResponseWriter, r *http.Request) {
 	err := json.NewDecoder(r.Body).Decode(&SetMocksReq)
 
 	setmockRes := models.AgentResp{
-		ClientId: 0,
+		ClientID: 0,
 		Error:    nil,
 	}
 	if err != nil {
@@ -81,6 +81,11 @@ func (a *AgentRequest) GetConsumedMocks(w http.ResponseWriter, r *http.Request) 
 
 	// convert string to uint64
 	appIDInt, err := strconv.ParseUint(appID, 10, 64)
+	if err != nil {
+		render.JSON(w, r, err)
+		render.Status(r, http.StatusBadRequest)
+		return
+	}
 
 	consumedMocks, err := a.agent.GetConsumedMocks(r.Context(), appIDInt)
 	if err != nil {

@@ -10,6 +10,7 @@ import (
 	"fmt"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.uber.org/zap"
 )
@@ -63,7 +64,7 @@ func DecodeHandshakeResponse41(_ context.Context, _ *zap.Logger, data []byte) (*
 	if packet.CapabilityFlags&mysql.CLIENT_CONNECT_WITH_DB != 0 {
 		idx = bytes.IndexByte(data, 0x00)
 		if idx != -1 {
-			packet.Database = string(data[:idx])
+			packet.Database = util.EncodeBase64(data[:idx])
 			data = data[idx+1:]
 		}
 	}
@@ -73,7 +74,7 @@ func DecodeHandshakeResponse41(_ context.Context, _ *zap.Logger, data []byte) (*
 		if idx == -1 {
 			return nil, errors.New("malformed handshake response packet: missing null terminator for AuthPluginName")
 		}
-		packet.AuthPluginName = string(data[:idx])
+		packet.AuthPluginName = util.EncodeBase64(data[:idx])
 		data = data[idx+1:]
 	}
 

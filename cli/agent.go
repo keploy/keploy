@@ -19,7 +19,6 @@ func init() {
 	Register("agent", Agent)
 }
 
-// keploy record -> keploy agent
 func Agent(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:   "agent",
