@@ -588,7 +588,6 @@ func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opt
 		return 0, err
 	}
 
-	// Make the temporary file executable
 	err = os.Chmod(initFile.Name(), 0755)
 	if err != nil {
 		a.logger.Error("failed to make temporary script executable", zap.Error(err))
