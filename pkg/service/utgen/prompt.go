@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"html/template"
 	"os"
-	"path/filepath"
 	"strings"
 
 	settings "go.keploy.io/server/v2/pkg/service/utgen/assets"
@@ -64,10 +63,10 @@ type PromptBuilder struct {
 func NewPromptBuilder(srcPath, testPath, covReportContent, includedFiles, additionalInstructions, language, additionalPrompt string, logger *zap.Logger) (*PromptBuilder, error) {
 	var err error
 	src := &Source{
-		Name: filepath.Base(srcPath),
+		Name: srcPath,
 	}
 	test := &Test{
-		Name: filepath.Base(testPath),
+		Name: testPath,
 	}
 	promptBuilder := &PromptBuilder{
 		Src:              src,
