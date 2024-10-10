@@ -111,7 +111,18 @@ func updateJavaScriptImports(importedContent string, newImports []string) (strin
 	importSection := strings.Join(allImports, "\n")
 
 	updatedContent := importRegex.ReplaceAllString(importedContent, "")
-	updatedContent = importSection + "\n" + strings.TrimSpace(updatedContent)
+	updatedContent = strings.Trim(updatedContent, "\n")
+	lines := strings.Split(updatedContent, "\n")
+	cleanedLines := []string{}
+	for _, line := range lines {
+		trimmedLine := strings.TrimSpace(line)
+		if trimmedLine != "" {
+			cleanedLines = append(cleanedLines, line)
+		}
+	}
+	updatedContent = strings.Join(cleanedLines, "\n")
+	updatedContent = importSection + "\n" + updatedContent
+
 	importLength := len(strings.Split(updatedContent, "\n")) - len(strings.Split(importedContent, "\n"))
 	if importLength < 0 {
 		importLength = 0
@@ -314,6 +325,16 @@ func updateTypeScriptImports(importedContent string, newImports []string) (strin
 	importSection := strings.Join(allImports, "\n")
 
 	updatedContent := importRegex.ReplaceAllString(importedContent, "")
+	updatedContent = strings.Trim(updatedContent, "\n")
+	lines := strings.Split(updatedContent, "\n")
+	cleanedLines := []string{}
+	for _, line := range lines {
+		trimmedLine := strings.TrimSpace(line)
+		if trimmedLine != "" {
+			cleanedLines = append(cleanedLines, line)
+		}
+	}
+	updatedContent = strings.Join(cleanedLines, "\n")
 	updatedContent = importSection + "\n" + updatedContent
 	importLength := len(strings.Split(updatedContent, "\n")) - len(strings.Split(importedContent, "\n"))
 	if importLength < 0 {
@@ -771,6 +792,9 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 	}
 	originalContentLines := strings.Split(originalContent, "\n")
 	testCodeLines := strings.Split(testCodeIndented, "\n")
+	if InsertAfter > len(originalContentLines) {
+		InsertAfter = len(originalContentLines)
+	}
 	processedTestLines := append(originalContentLines[:InsertAfter], testCodeLines...)
 	processedTestLines = append(processedTestLines, originalContentLines[InsertAfter:]...)
 	processedTest := strings.Join(processedTestLines, "\n")
