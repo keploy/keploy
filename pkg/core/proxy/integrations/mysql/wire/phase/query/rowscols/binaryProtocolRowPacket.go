@@ -285,6 +285,7 @@ func EncodeBinaryRow(_ context.Context, logger *zap.Logger, row *mysql.BinaryRow
 					columnEntry.Value = int32(columnEntry.Value.(uint))
 				}
 			}
+			val = columnEntry.Value
 			if err := binary.Write(buf, binary.LittleEndian, val); err != nil {
 				return nil, fmt.Errorf("failed to write %T value: %w", val, err)
 			}
@@ -309,7 +310,6 @@ func EncodeBinaryRow(_ context.Context, logger *zap.Logger, row *mysql.BinaryRow
 				case uint:
 					columnEntry.Value = uint8(columnEntry.Value.(uint))
 				}
-
 			} else {
 				switch columnEntry.Value.(type) {
 				case float64:
@@ -321,8 +321,8 @@ func EncodeBinaryRow(_ context.Context, logger *zap.Logger, row *mysql.BinaryRow
 				case uint:
 					columnEntry.Value = int8(columnEntry.Value.(uint))
 				}
-
 			}
+			val = columnEntry.Value
 			if err := binary.Write(buf, binary.LittleEndian, val); err != nil {
 				return nil, fmt.Errorf("failed to write %T value: %w", val, err)
 			}
@@ -352,8 +352,8 @@ func EncodeBinaryRow(_ context.Context, logger *zap.Logger, row *mysql.BinaryRow
 				case uint:
 					columnEntry.Value = int16(columnEntry.Value.(uint))
 				}
-
 			}
+			val = columnEntry.Value
 			if err := binary.Write(buf, binary.LittleEndian, val); err != nil {
 				return nil, fmt.Errorf("failed to write int16 value: %w", err)
 			}
@@ -383,6 +383,7 @@ func EncodeBinaryRow(_ context.Context, logger *zap.Logger, row *mysql.BinaryRow
 					columnEntry.Value = int64(columnEntry.Value.(uint))
 				}
 			}
+			val = columnEntry.Value
 			if err := binary.Write(buf, binary.LittleEndian, val); err != nil {
 				return nil, fmt.Errorf("failed to write %T value: %w", val, err)
 			}
