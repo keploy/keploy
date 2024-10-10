@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/google/uuid"
@@ -273,15 +274,46 @@ func updateJavaImports(content string, newImports []string) (string, error) {
 
 func updatePythonImports(content string, newImports []string) (string, error) {
 	scanner := bufio.NewScanner(strings.NewReader(content))
-	existingImportsSet := make(map[string]bool)
+	existingImportsMap := make(map[string]map[string]bool)
 	codeLines := []string{}
 	importLines := []string{}
+
+	ignoredPrefixes := "# checking coverage for file - do not remove"
 
 	for scanner.Scan() {
 		line := scanner.Text()
 		trimmedLine := strings.TrimSpace(line)
+
+		if trimmedLine == "" {
+			continue
+		}
+		shouldIgnore := (strings.HasPrefix(trimmedLine, "import ") || strings.HasPrefix(trimmedLine, "from ")) && strings.Contains(trimmedLine, ignoredPrefixes)
+		if shouldIgnore {
+			parts := strings.Split(trimmedLine, "#")
+			coreImport := strings.TrimSpace(parts[0])
+
+			if strings.HasPrefix(coreImport, "from ") {
+				fields := strings.Fields(coreImport)
+				moduleName := fields[1]
+				importPart := coreImport[strings.Index(coreImport, "import")+len("import "):]
+				importedItems := strings.Split(importPart, ",")
+
+				if _, exists := existingImportsMap[moduleName]; !exists {
+					existingImportsMap[moduleName] = make(map[string]bool)
+				}
+				for _, item := range importedItems {
+					cleanedItem := strings.TrimSpace(item)
+					if cleanedItem != "" {
+						existingImportsMap[moduleName][cleanedItem] = true
+					}
+				}
+			}
+			codeLines = append(codeLines, line)
+			continue
+		}
+
 		if strings.HasPrefix(trimmedLine, "import ") || strings.HasPrefix(trimmedLine, "from ") {
-			existingImportsSet[line] = true
+			codeLines = append(codeLines, line)
 		} else {
 			codeLines = append(codeLines, line)
 		}
@@ -289,17 +321,81 @@ func updatePythonImports(content string, newImports []string) (string, error) {
 
 	for _, imp := range newImports {
 		imp = strings.TrimSpace(imp)
-		if imp != "\"\"" && len(imp) > 0 {
-			existingImportsSet[imp] = true
+		if imp == "\"\"" || len(imp) == 0 {
+			continue
+		}
+		if strings.HasPrefix(imp, "from ") {
+			fields := strings.Fields(imp)
+			moduleName := fields[1]
+			newItems := strings.Split(fields[3], ",")
+			if _, exists := existingImportsMap[moduleName]; !exists {
+				existingImportsMap[moduleName] = make(map[string]bool)
+			}
+			for _, item := range newItems {
+				existingImportsMap[moduleName][strings.TrimSpace(item)] = true
+			}
+		} else if strings.HasPrefix(imp, "import ") {
+			fields := strings.Fields(imp)
+			moduleName := fields[1]
+			if _, exists := existingImportsMap[moduleName]; !exists {
+				existingImportsMap[moduleName] = make(map[string]bool)
+			}
+		}
+	}
+	for i, line := range codeLines {
+		trimmedLine := strings.TrimSpace(line)
+
+		if strings.HasPrefix(trimmedLine, "from ") {
+			fields := strings.Fields(trimmedLine)
+			moduleName := fields[1]
+
+			if itemsMap, exists := existingImportsMap[moduleName]; exists && len(itemsMap) > 0 {
+				items := mapKeysToSortedSlice(itemsMap)
+				importLine := fmt.Sprintf("from %s import %s", moduleName, strings.Join(items, ", "))
+
+				if strings.Contains(trimmedLine, ignoredPrefixes) {
+					importLine += " " + ignoredPrefixes
+				}
+				codeLines[i] = importLine
+				delete(existingImportsMap, moduleName)
+			}
 		}
 	}
 
-	for imp := range existingImportsSet {
-		importLines = append(importLines, imp)
+	for module, itemsMap := range existingImportsMap {
+		if len(itemsMap) > 0 {
+			items := mapKeysToSortedSlice(itemsMap)
+			importLine := fmt.Sprintf("from %s import %s", module, strings.Join(items, ", "))
+			importLine += " " + ignoredPrefixes
+			importLines = append(importLines, importLine)
+		}
+	}
+	nonEmptyCodeLines := []string{}
+	for _, line := range codeLines {
+		if strings.TrimSpace(line) != "" {
+			nonEmptyCodeLines = append(nonEmptyCodeLines, line)
+		}
 	}
 
-	updatedContent := strings.Join(importLines, "\n") + "\n\n" + strings.Join(codeLines, "\n")
+	nonEmptyImportLines := []string{}
+	for _, line := range importLines {
+		if strings.TrimSpace(line) != "" {
+			nonEmptyImportLines = append(nonEmptyImportLines, line)
+		}
+	}
+
+	updatedContent := strings.Join(nonEmptyImportLines, "\n") + "\n" + strings.Join(nonEmptyCodeLines, "\n")
 	return updatedContent, nil
+}
+
+// Helper function to convert map keys to a sorted slice
+func mapKeysToSortedSlice(itemsMap map[string]bool) []string {
+	items := []string{}
+	for item := range itemsMap {
+		items = append(items, item)
+	}
+	sort.Strings(items)
+	return items
 }
 
 func updateTypeScriptImports(importedContent string, newImports []string) (string, int, error) {
