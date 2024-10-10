@@ -1,12 +1,12 @@
 //go:build linux
 
+// Agent is the main service that will be used to interact with the agent
 package agent
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/hooks"
@@ -24,8 +24,6 @@ type Agent struct {
 	core.Hooks                  // embedding the Hooks interface to transfer the hooks methods to the core object
 	core.Tester                 // embedding the Tester interface to transfer the tester methods to the core object
 	dockerClient kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
-	id           utils.AutoInc
-	apps         sync.Map
 	proxyStarted bool
 }
 

@@ -31,9 +31,7 @@ import (
 type AgentClient struct {
 	logger       *zap.Logger
 	dockerClient kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
-	id           utils.AutoInc
 	apps         sync.Map
-	proxyStarted bool
 	client       http.Client
 	conf         *config.Config
 }
@@ -41,7 +39,6 @@ type AgentClient struct {
 //go:embed assets/initStop.sh
 var initStopScript []byte
 
-// this will be the client side implementation
 func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClient {
 
 	return &AgentClient{
@@ -232,7 +229,7 @@ func (a *AgentClient) SetMocks(ctx context.Context, id uint64, filtered []*model
 	requestBody := models.SetMocksReq{
 		Filtered:   filtered,
 		UnFiltered: unFiltered,
-		AppId:      id,
+		ClientID:   id,
 	}
 
 	requestJSON, err := json.Marshal(requestBody)
@@ -364,12 +361,12 @@ func (a *AgentClient) Run(ctx context.Context, id uint64, _ models.RunOptions) m
 
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
 
-	// if the agent is not running, start the agent
-	clientID := utils.GenerateID()
-	clientID = 0 
+	// clientID := utils.GenerateID()
+	var clientID uint64 = 0
 
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 
+	// check if the agent is running
 	isAgentRunning := a.isAgentRunning(ctx)
 
 	if !isAgentRunning {
@@ -380,7 +377,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		if isDockerCmd {
 			// run the docker container instead of the agent binary
 			go func() {
-				if err := a.StartInDocker(ctx, a.logger, clientID); err != nil {
+				if err := a.StartInDocker(ctx, a.logger); err != nil {
 					a.logger.Error("failed to start docker agent", zap.Error(err))
 				}
 			}()
@@ -545,7 +542,7 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 	return nil
 }
 
-func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger, clientId uint64) error {
+func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger) error {
 
 	// Start the keploy agent in a Docker container
 	agentCtx := context.WithoutCancel(ctx)
@@ -574,7 +571,13 @@ func (a *AgentClient) Initcontainer(ctx context.Context, logger *zap.Logger, opt
 		a.logger.Error("failed to create temporary file", zap.Error(err))
 		return 0, err
 	}
-	defer os.Remove(initFile.Name()) // clean up the file afterward
+	defer func() {
+		err := os.Remove(initFile.Name())
+		if err != nil {
+			a.logger.Error("failed to remove temporary file", zap.Error(err))
+		}
+	}()
+	// clean up the file afterward
 
 	_, err = initFile.Write(initStopScript)
 	if err != nil {

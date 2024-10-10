@@ -38,7 +38,7 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 	if !ok {
 		return nil, errors.New("failed to get the error group from the context")
 	}
-	
+
 	g.Go(func() error {
 		defer utils.Recover(l)
 		go func() {

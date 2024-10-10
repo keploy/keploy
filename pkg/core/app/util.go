@@ -64,7 +64,7 @@ func modifyDockerComposeCommand(appCmd, newComposeFile string) string {
 
 func getInode(pid int) (uint64, error) {
 	path := filepath.Join("/proc", strconv.Itoa(pid), "ns", "pid")
-	
+
 	f, err := os.Stat(path)
 	if err != nil {
 		return 0, err

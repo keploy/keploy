@@ -22,11 +22,11 @@ type AgentResp struct {
 
 type RunReq struct {
 	RunOptions RunOptions `json:"runOptions"`
-	ClientId   uint64     `json:"clientId"`
+	ClientID   uint64     `json:"clientId"`
 }
 
 type SetMocksReq struct {
 	Filtered   []*Mock `json:"filtered"`
 	UnFiltered []*Mock `json:"unFiltered"`
-	AppId      uint64  `json:"appId"`
+	ClientID   uint64  `json:"clientId"`
 }
