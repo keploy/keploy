@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -12,11 +13,15 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+
 	"strconv"
 	"strings"
 	"time"
 
+	"text/template"
+
 	"go.keploy.io/server/v2/pkg/models"
+
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -79,8 +84,41 @@ func IsTime(stringDate string) bool {
 	return false
 }
 
-func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HTTPResp, error) {
+func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HTTPResp, error) {
 	var resp *models.HTTPResp
+
+	//TODO: adjust this logic in the render function in order to remove the redundant code
+	// convert testcase to string and render the template values.
+	if len(utils.TemplatizedValues) > 0 {
+		testCaseStr, err := json.Marshal(tc)
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal the testcase")
+			return nil, err
+		}
+		funcMap := template.FuncMap{
+			"int":    utils.ToInt,
+			"string": utils.ToString,
+			"float":  utils.ToFloat,
+		}
+		tmpl, err := template.New("template").Funcs(funcMap).Parse(string(testCaseStr))
+		if err != nil || tmpl == nil {
+			utils.LogError(logger, err, "failed to parse the template", zap.Any("TestCaseString", string(testCaseStr)), zap.Any("TestCase", tc.Name), zap.Any("TestSet", testSet))
+			return nil, err
+		}
+
+		var output bytes.Buffer
+		err = tmpl.Execute(&output, utils.TemplatizedValues)
+		if err != nil {
+			utils.LogError(logger, err, "failed to execute the template")
+			return nil, err
+		}
+		testCaseStr = output.Bytes()
+		err = json.Unmarshal([]byte(testCaseStr), &tc)
+		if err != nil {
+			utils.LogError(logger, err, "failed to unmarshal the testcase")
+			return nil, err
+		}
+	}
 
 	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, bytes.NewBufferString(tc.HTTPReq.Body))
@@ -94,6 +132,13 @@ func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logge
 	req.Header.Set("KEPLOY-TEST-ID", tc.Name)
 	req.Header.Set("KEPLOY-TEST-SET-ID", testSet)
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", req))
+
+	// override host header if present in the request
+	hostHeader := tc.HTTPReq.Header["Host"]
+	if hostHeader != "" {
+		logger.Debug("overriding host header", zap.String("host", hostHeader))
+		req.Host = hostHeader
+	}
 
 	// Creating the client and disabling redirects
 	var client *http.Client
@@ -191,7 +236,7 @@ func MakeCurlCommand(method string, url string, header map[string]string, body s
 		}
 	}
 	if body != "" {
-		curl = curl + fmt.Sprintf("  --data '%s'", body)
+		curl = curl + fmt.Sprintf("  --data %s", strconv.Quote(body))
 	}
 	return curl
 }
