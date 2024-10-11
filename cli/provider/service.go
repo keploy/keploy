@@ -44,7 +44,7 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 	case "config", "update", "login":
 		return tools.NewTools(n.logger, tel, n.auth), nil
 	case "gen":
-		return utgen.NewUnitTestGenerator(n.cfg.Gen.SourceFilePath, n.cfg.Gen.TestFilePath, n.cfg.Gen.CoverageReportPath, n.cfg.Gen.TestCommand, n.cfg.Gen.TestDir, n.cfg.Gen.CoverageFormat, n.cfg.Gen.DesiredCoverage, n.cfg.Gen.MaxIterations, n.cfg.Gen.Model, n.cfg.Gen.APIBaseURL, n.cfg.Gen.APIVersion, n.cfg.APIServerURL, n.cfg, tel, n.auth, n.logger)
+		return utgen.NewUnitTestGenerator(n.cfg, tel, n.auth, n.logger)
 	case "record", "test", "mock", "normalize", "templatize", "rerecord", "contract":
 		return Get(ctx, cmd, n.cfg, n.logger, tel, n.auth)
 	default:

@@ -4,6 +4,7 @@ installKeploy (){
     version="latest"
     IS_CI=false
     NO_ROOT=false
+    PLATFORM="$(basename "$SHELL")"
     for arg in "$@"
     do
         case $arg in
@@ -22,7 +23,11 @@ installKeploy (){
             ;;
             -noRoot)
                 NO_ROOT=true
-                shift
+                shift 1
+            ;;
+            -platform)
+                PLATFORM="$2"
+                shift 2
             ;;
             *)
             ;;
@@ -141,7 +146,7 @@ installKeploy (){
 
     # Get the alias to set and set it
     set_alias() {
-        current_shell="$(basename "$SHELL")"
+        current_shell="$PLATFORM"
         if [ "$NO_ROOT" = "true" ]; then
             # Just update the PATH in .zshrc or .bashrc, no alias needed
             if [[ "$current_shell" = "zsh" || "$current_shell" = "-zsh" ]]; then
@@ -188,7 +193,7 @@ installKeploy (){
     }
 
     delete_keploy_alias() {
-        current_shell="$(basename "$SHELL")"
+        current_shell="$PLATFORM"
         shell_rc_file=""
         # Determine the shell configuration file based on the current shell
         if [[ "$current_shell" = "zsh" || "$current_shell" = "-zsh" ]]; then
@@ -239,8 +244,10 @@ installKeploy (){
             install_keploy_darwin_all
             return
         elif [ "$OS_NAME" = "Linux" ]; then
-            if ! sudo mountpoint -q /sys/kernel/debug; then
-                sudo mount -t debugfs debugfs /sys/kernel/debug
+             if [ "$NO_ROOT" = false ]; then
+                if ! mountpoint -q /sys/kernel/debug; then
+                    sudo mount -t debugfs debugfs /sys/kernel/debug
+                fi
             fi
             if [ "$ARCH" = "x86_64" ]; then
                 cleanup_tmp
