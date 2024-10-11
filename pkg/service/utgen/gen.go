@@ -2,10 +2,15 @@
 package utgen
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
+	"os/exec"
+	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/google/uuid"
@@ -79,6 +84,359 @@ func NewUnitTestGenerator(
 		cur:              &Cursor{},
 	}
 	return generator, nil
+}
+
+func updateJavaScriptImports(importedContent string, newImports []string) (string, int, error) {
+	importRegex := regexp.MustCompile(`(?m)^(import\s+.*?from\s+['"].*?['"];?|const\s+.*?=\s+require\(['"].*?['"]\);?)`)
+	existingImportsSet := make(map[string]bool)
+
+	existingImports := importRegex.FindAllString(importedContent, -1)
+	for _, imp := range existingImports {
+		if imp != "\"\"" && len(imp) > 0 {
+			existingImportsSet[imp] = true
+		}
+	}
+
+	for _, imp := range newImports {
+		imp = strings.TrimSpace(imp)
+		if imp != "\"\"" && len(imp) > 0 {
+			existingImportsSet[imp] = true
+		}
+	}
+
+	allImports := make([]string, 0, len(existingImportsSet))
+	for imp := range existingImportsSet {
+		allImports = append(allImports, imp)
+	}
+
+	importSection := strings.Join(allImports, "\n")
+
+	updatedContent := importRegex.ReplaceAllString(importedContent, "")
+	updatedContent = strings.Trim(updatedContent, "\n")
+	lines := strings.Split(updatedContent, "\n")
+	cleanedLines := []string{}
+	for _, line := range lines {
+		trimmedLine := strings.TrimSpace(line)
+		if trimmedLine != "" {
+			cleanedLines = append(cleanedLines, line)
+		}
+	}
+	updatedContent = strings.Join(cleanedLines, "\n")
+	updatedContent = importSection + "\n" + updatedContent
+
+	importLength := len(strings.Split(updatedContent, "\n")) - len(strings.Split(importedContent, "\n"))
+	if importLength < 0 {
+		importLength = 0
+	}
+	return updatedContent, importLength, nil
+}
+
+func updateImports(filePath string, language string, imports string) (int, error) {
+	newImports := strings.Split(imports, "\n")
+	for i, imp := range newImports {
+		newImports[i] = strings.TrimSpace(imp)
+	}
+	contentBytes, err := os.ReadFile(filePath)
+	if err != nil {
+		return 0, err
+	}
+	content := string(contentBytes)
+
+	var updatedContent string
+	var importLength int
+	switch strings.ToLower(language) {
+	case "go":
+		updatedContent, importLength, err = updateGoImports(content, newImports)
+	case "java":
+		updatedContent, err = updateJavaImports(content, newImports)
+	case "python":
+		updatedContent, err = updatePythonImports(content, newImports)
+	case "typescript":
+		updatedContent, importLength, err = updateTypeScriptImports(content, newImports)
+	case "javascript":
+		updatedContent, importLength, err = updateJavaScriptImports(content, newImports)
+	default:
+		return 0, fmt.Errorf("unsupported language: %s", language)
+	}
+	if err != nil {
+		return 0, err
+	}
+	err = os.WriteFile(filePath, []byte(updatedContent), fs.ModePerm)
+
+	if err != nil {
+		return 0, err
+	}
+
+	return importLength, nil
+}
+
+func updateGoImports(codeBlock string, newImports []string) (string, int, error) {
+	importRegex := regexp.MustCompile(`(?ms)import\s*(\([\s\S]*?\)|"[^"]+")`)
+	existingImportsSet := make(map[string]bool)
+
+	matches := importRegex.FindStringSubmatch(codeBlock)
+	if matches != nil {
+		importBlock := matches[0]
+		importLines := strings.Split(importBlock, "\n")
+		existingImports := extractGoImports(importLines)
+		for _, imp := range existingImports {
+			existingImportsSet[imp] = true
+		}
+		newImports = extractGoImports(newImports)
+		for _, imp := range newImports {
+			imp = strings.TrimSpace(imp)
+			if imp != "\"\"" && len(imp) > 0 {
+				existingImportsSet[imp] = true
+			}
+		}
+		allImports := make([]string, 0, len(existingImportsSet))
+		for imp := range existingImportsSet {
+			allImports = append(allImports, imp)
+		}
+		importBlockNew := createGoImportBlock(allImports)
+		updatedContent := importRegex.ReplaceAllString(codeBlock, importBlockNew)
+		return updatedContent, len(strings.Split(importBlockNew, "\n")) - len(importLines), nil
+	}
+	packageRegex := regexp.MustCompile(`package\s+\w+`)
+
+	pkgMatch := packageRegex.FindStringIndex(codeBlock)
+	if pkgMatch == nil {
+		return "", 0, fmt.Errorf("could not find package declaration")
+	}
+	newImports = extractGoImports(newImports)
+	importBlock := createGoImportBlock(newImports)
+
+	insertPos := pkgMatch[1]
+	updatedContent := codeBlock[:insertPos] + "\n\n" + importBlock + "\n" + codeBlock[insertPos:]
+	return updatedContent, len(strings.Split(importBlock, "\n")) + 1, nil
+
+}
+
+func extractGoImports(importLines []string) []string {
+	imports := []string{}
+	for _, line := range importLines {
+		line = strings.TrimSpace(line)
+		if (line == "import (" || line == ")" || line == "") || len(line) == 0 {
+			continue
+		}
+		line = strings.TrimPrefix(line, "import ")
+		line = strings.Trim(line, `"`)
+		imports = append(imports, line)
+	}
+	return imports
+}
+
+func createGoImportBlock(imports []string) string {
+	importBlock := "import (\n"
+	for _, imp := range imports {
+		imp = strings.TrimSpace(imp)
+		imp = strings.Trim(imp, `"`)
+		importBlock += fmt.Sprintf(`    "%s"`+"\n", imp)
+	}
+	importBlock += ")"
+	return importBlock
+}
+
+func updateJavaImports(content string, newImports []string) (string, error) {
+	importRegex := regexp.MustCompile(`(?m)^import\s+.*?;`)
+	existingImportsSet := make(map[string]bool)
+
+	existingImports := importRegex.FindAllString(content, -1)
+	for _, imp := range existingImports {
+		existingImportsSet[imp] = true
+	}
+
+	for _, imp := range newImports {
+		imp = strings.TrimSpace(imp)
+		if imp != "\"\"" && len(imp) > 0 {
+			importStatement := fmt.Sprintf("import %s;", imp)
+			existingImportsSet[importStatement] = true
+		}
+	}
+
+	allImports := make([]string, 0, len(existingImportsSet))
+	for imp := range existingImportsSet {
+		allImports = append(allImports, imp)
+	}
+	importSection := strings.Join(allImports, "\n")
+
+	updatedContent := importRegex.ReplaceAllString(content, "")
+	packageRegex := regexp.MustCompile(`(?m)^package\s+.*?;`)
+	pkgMatch := packageRegex.FindStringIndex(updatedContent)
+	insertPos := 0
+	if pkgMatch != nil {
+		insertPos = pkgMatch[1]
+	}
+
+	updatedContent = updatedContent[:insertPos] + "\n\n" + importSection + "\n" + updatedContent[insertPos:]
+	return updatedContent, nil
+}
+
+func updatePythonImports(content string, newImports []string) (string, error) {
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	existingImportsMap := make(map[string]map[string]bool)
+	codeLines := []string{}
+	importLines := []string{}
+
+	ignoredPrefixes := "# checking coverage for file - do not remove"
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		trimmedLine := strings.TrimSpace(line)
+
+		if trimmedLine == "" {
+			continue
+		}
+		shouldIgnore := (strings.HasPrefix(trimmedLine, "import ") || strings.HasPrefix(trimmedLine, "from ")) && strings.Contains(trimmedLine, ignoredPrefixes)
+		if shouldIgnore {
+			parts := strings.Split(trimmedLine, "#")
+			coreImport := strings.TrimSpace(parts[0])
+
+			if strings.HasPrefix(coreImport, "from ") {
+				fields := strings.Fields(coreImport)
+				moduleName := fields[1]
+				importPart := coreImport[strings.Index(coreImport, "import")+len("import "):]
+				importedItems := strings.Split(importPart, ",")
+
+				if _, exists := existingImportsMap[moduleName]; !exists {
+					existingImportsMap[moduleName] = make(map[string]bool)
+				}
+				for _, item := range importedItems {
+					cleanedItem := strings.TrimSpace(item)
+					if cleanedItem != "" {
+						existingImportsMap[moduleName][cleanedItem] = true
+					}
+				}
+			}
+			codeLines = append(codeLines, line)
+			continue
+		}
+
+		if strings.HasPrefix(trimmedLine, "import ") || strings.HasPrefix(trimmedLine, "from ") {
+			codeLines = append(codeLines, line)
+		} else {
+			codeLines = append(codeLines, line)
+		}
+	}
+
+	for _, imp := range newImports {
+		imp = strings.TrimSpace(imp)
+		if imp == "\"\"" || len(imp) == 0 {
+			continue
+		}
+		if strings.HasPrefix(imp, "from ") {
+			fields := strings.Fields(imp)
+			moduleName := fields[1]
+			newItems := strings.Split(fields[3], ",")
+			if _, exists := existingImportsMap[moduleName]; !exists {
+				existingImportsMap[moduleName] = make(map[string]bool)
+			}
+			for _, item := range newItems {
+				existingImportsMap[moduleName][strings.TrimSpace(item)] = true
+			}
+		} else if strings.HasPrefix(imp, "import ") {
+			fields := strings.Fields(imp)
+			moduleName := fields[1]
+			if _, exists := existingImportsMap[moduleName]; !exists {
+				existingImportsMap[moduleName] = make(map[string]bool)
+			}
+		}
+	}
+	for i, line := range codeLines {
+		trimmedLine := strings.TrimSpace(line)
+
+		if strings.HasPrefix(trimmedLine, "from ") {
+			fields := strings.Fields(trimmedLine)
+			moduleName := fields[1]
+
+			if itemsMap, exists := existingImportsMap[moduleName]; exists && len(itemsMap) > 0 {
+				items := mapKeysToSortedSlice(itemsMap)
+				importLine := fmt.Sprintf("from %s import %s", moduleName, strings.Join(items, ", "))
+
+				if strings.Contains(trimmedLine, ignoredPrefixes) {
+					importLine += " " + ignoredPrefixes
+				}
+				codeLines[i] = importLine
+				delete(existingImportsMap, moduleName)
+			}
+		}
+	}
+
+	for module, itemsMap := range existingImportsMap {
+		if len(itemsMap) > 0 {
+			items := mapKeysToSortedSlice(itemsMap)
+			importLine := fmt.Sprintf("from %s import %s", module, strings.Join(items, ", "))
+			importLine += " " + ignoredPrefixes
+			importLines = append(importLines, importLine)
+		}
+	}
+	nonEmptyCodeLines := []string{}
+	for _, line := range codeLines {
+		if strings.TrimSpace(line) != "" {
+			nonEmptyCodeLines = append(nonEmptyCodeLines, line)
+		}
+	}
+
+	nonEmptyImportLines := []string{}
+	for _, line := range importLines {
+		if strings.TrimSpace(line) != "" {
+			nonEmptyImportLines = append(nonEmptyImportLines, line)
+		}
+	}
+
+	updatedContent := strings.Join(nonEmptyImportLines, "\n") + "\n" + strings.Join(nonEmptyCodeLines, "\n")
+	return updatedContent, nil
+}
+
+// Helper function to convert map keys to a sorted slice
+func mapKeysToSortedSlice(itemsMap map[string]bool) []string {
+	items := []string{}
+	for item := range itemsMap {
+		items = append(items, item)
+	}
+	sort.Strings(items)
+	return items
+}
+
+func updateTypeScriptImports(importedContent string, newImports []string) (string, int, error) {
+	importRegex := regexp.MustCompile(`(?m)^import\s+.*?;`)
+	existingImportsSet := make(map[string]bool)
+
+	existingImports := importRegex.FindAllString(importedContent, -1)
+	for _, imp := range existingImports {
+		existingImportsSet[imp] = true
+	}
+
+	for _, imp := range newImports {
+		imp = strings.TrimSpace(imp)
+		if imp != "\"\"" && len(imp) > 0 {
+			existingImportsSet[imp] = true
+		}
+	}
+
+	allImports := make([]string, 0, len(existingImportsSet))
+	for imp := range existingImportsSet {
+		allImports = append(allImports, imp)
+	}
+	importSection := strings.Join(allImports, "\n")
+
+	updatedContent := importRegex.ReplaceAllString(importedContent, "")
+	updatedContent = strings.Trim(updatedContent, "\n")
+	lines := strings.Split(updatedContent, "\n")
+	cleanedLines := []string{}
+	for _, line := range lines {
+		trimmedLine := strings.TrimSpace(line)
+		if trimmedLine != "" {
+			cleanedLines = append(cleanedLines, line)
+		}
+	}
+	updatedContent = strings.Join(cleanedLines, "\n")
+	updatedContent = importSection + "\n" + updatedContent
+	importLength := len(strings.Split(updatedContent, "\n")) - len(strings.Split(importedContent, "\n"))
+	if importLength < 0 {
+		importLength = 0
+	}
+	return updatedContent, importLength, nil
 }
 
 func (g *UnitTestGenerator) Start(ctx context.Context) error {
@@ -196,6 +554,10 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				}
 			}
 
+			g.promptBuilder.InstalledPackages, err = libraryInstalled(g.logger, g.lang)
+			if err != nil {
+				utils.LogError(g.logger, err, "Error getting installed packages")
+			}
 			g.prompt, err = g.promptBuilder.BuildPrompt("test_generation", failedTestRunsValue)
 			if err != nil {
 				utils.LogError(g.logger, err, "Error building prompt")
@@ -212,12 +574,16 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			g.totalTestCase += len(testsDetails.NewTests)
 			totalTest = len(testsDetails.NewTests)
 			for _, generatedTest := range testsDetails.NewTests {
+				installedPackages, err := libraryInstalled(g.logger, g.lang)
+				if err != nil {
+					g.logger.Warn("Error getting installed packages", zap.Error(err))
+				}
 				select {
 				case <-ctx.Done():
 					return fmt.Errorf("process cancelled by user")
 				default:
 				}
-				err := g.ValidateTest(generatedTest, &passedTests, &noCoverageTest, &failedBuild)
+				err = g.ValidateTest(generatedTest, &passedTests, &noCoverageTest, &failedBuild, installedPackages)
 				if err != nil {
 					utils.LogError(g.logger, err, "Error validating test")
 					return err
@@ -498,7 +864,7 @@ func (g *UnitTestGenerator) getLine(ctx context.Context) (int, error) {
 	return line, nil
 }
 
-func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, noCoverageTest, failedBuild *int) error {
+func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, noCoverageTest, failedBuild *int, installedPackages []string) error {
 	testCode := strings.TrimSpace(generatedTest.TestCode)
 	InsertAfter := g.cur.Line
 	Indent := g.cur.Indentation
@@ -522,6 +888,9 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 	}
 	originalContentLines := strings.Split(originalContent, "\n")
 	testCodeLines := strings.Split(testCodeIndented, "\n")
+	if InsertAfter > len(originalContentLines) {
+		InsertAfter = len(originalContentLines)
+	}
 	processedTestLines := append(originalContentLines[:InsertAfter], testCodeLines...)
 	processedTestLines = append(processedTestLines, originalContentLines[InsertAfter:]...)
 	processedTest := strings.Join(processedTestLines, "\n")
@@ -529,11 +898,19 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 		return fmt.Errorf("failed to write test file: %w", err)
 	}
 
+	newInstalledPackages, err := installLibraries(generatedTest.LibraryInstallationCode, installedPackages, g.logger)
+	if err != nil {
+		g.logger.Debug("Error installing libraries", zap.Error(err))
+	}
+
 	// Run the test using the Runner class
 	g.logger.Info(fmt.Sprintf("Running test 5 times for proper validation with the following command: '%s'", g.cmd))
 
 	var testCommandStartTime int64
-
+	importLen, err := updateImports(g.testPath, g.lang, generatedTest.NewImportsCode)
+	if err != nil {
+		g.logger.Warn("Error updating imports", zap.Error(err))
+	}
 	for i := 0; i < 5; i++ {
 
 		g.logger.Info(fmt.Sprintf("Iteration no: %d", i+1))
@@ -549,6 +926,11 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 
 			if err := os.WriteFile(g.testPath, []byte(originalContent), 0644); err != nil {
 				return fmt.Errorf("failed to write test file: %w", err)
+			}
+			err = uninstallLibraries(g.lang, newInstalledPackages, g.logger)
+
+			if err != nil {
+				g.logger.Warn("Error uninstalling libraries", zap.Error(err))
 			}
 			g.logger.Info("Skipping a generated test that failed")
 			g.failedTests = append(g.failedTests, &models.FailedUT{
@@ -580,13 +962,193 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 		if err := os.WriteFile(g.testPath, []byte(originalContent), 0644); err != nil {
 			return fmt.Errorf("failed to write test file: %w", err)
 		}
+
+		err = uninstallLibraries(g.lang, newInstalledPackages, g.logger)
+
+		if err != nil {
+			g.logger.Warn("Error uninstalling libraries", zap.Error(err))
+		}
+
 		g.logger.Info("Skipping a generated test that failed to increase coverage")
 		return nil
 	}
 	g.testCasePassed++
 	*passedTests++
 	g.cov.Current = covResult.Coverage
+	g.cur.Line = g.cur.Line + len(testCodeLines) + importLen
 	g.cur.Line = g.cur.Line + len(testCodeLines)
 	g.logger.Info("Generated test passed and increased coverage")
+	return nil
+}
+
+func libraryInstalled(logger *zap.Logger, language string) ([]string, error) {
+	switch strings.ToLower(language) {
+	case "go":
+		out, err := exec.Command("go", "list", "-m", "all").Output()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get Go dependencies: %w", err)
+		}
+		return extractDependencies(out), nil
+
+	case "java":
+		out, err := exec.Command("mvn", "dependency:list", "-DincludeScope=compile", "-Dstyle.color=never", "-B").Output()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get Java dependencies: %w", err)
+		}
+		return extractJavaDependencies(out), nil
+
+	case "python":
+		out, err := exec.Command("pip", "freeze").Output()
+		if err != nil {
+			logger.Info("Error getting Python dependencies with `pip` command, trying `pip3` command")
+			out, err = exec.Command("pip3", "freeze").Output()
+			if err != nil {
+				return nil, fmt.Errorf("failed to get Python dependencies: %w", err)
+			}
+		}
+
+		return extractDependencies(out), nil
+
+	case "typescript", "javascript":
+		cmd := exec.Command("sh", "-c", "npm list --depth=0 --parseable | sed 's|.*/||'")
+		out, err := cmd.Output()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get JavaScript/TypeScript dependencies: %w", err)
+		}
+		return extractDependencies(out), nil
+
+	default:
+		return nil, fmt.Errorf("unsupported language: %s", language)
+	}
+}
+
+func extractJavaDependencies(output []byte) []string {
+	lines := strings.Split(string(output), "\n")
+	var dependencies []string
+	inDependencySection := false
+
+	depRegex := regexp.MustCompile(`^\[INFO\]\s+[\+\|\\\-]{1,2}\s+([\w\.\-]+:[\w\.\-]+):jar:([\w\.\-]+):([\w\.\-]+)`)
+
+	for _, line := range lines {
+		cleanedLine := strings.TrimSpace(line)
+		if strings.HasPrefix(cleanedLine, "[INFO]") {
+			cleanedLine = "[INFO]" + strings.TrimSpace(cleanedLine[6:])
+		}
+		if strings.Contains(cleanedLine, "maven-dependency-plugin") && strings.Contains(cleanedLine, ":list") {
+			inDependencySection = true
+			continue
+		}
+
+		if inDependencySection && (strings.Contains(cleanedLine, "BUILD SUCCESS") || strings.Contains(cleanedLine, "---")) {
+			inDependencySection = false
+			continue
+		}
+
+		if inDependencySection && strings.HasPrefix(cleanedLine, "[INFO]") {
+			matches := depRegex.FindStringSubmatch(cleanedLine)
+			if len(matches) >= 4 {
+				groupArtifact := matches[1]
+				version := matches[2]
+				dep := fmt.Sprintf("%s:%s", groupArtifact, version)
+				dependencies = append(dependencies, dep)
+			} else {
+				cleanedLine = strings.TrimPrefix(cleanedLine, "[INFO]")
+				cleanedLine = strings.TrimSpace(cleanedLine)
+
+				cleanedLine = strings.TrimPrefix(cleanedLine, "+-")
+				cleanedLine = strings.TrimPrefix(cleanedLine, "\\-")
+				cleanedLine = strings.TrimPrefix(cleanedLine, "|")
+
+				cleanedLine = strings.TrimSpace(cleanedLine)
+
+				depParts := strings.Split(cleanedLine, ":")
+				if len(depParts) >= 5 {
+					dep := fmt.Sprintf("%s:%s:%s", depParts[0], depParts[1], depParts[3])
+					dependencies = append(dependencies, dep)
+				}
+			}
+		}
+	}
+	return dependencies
+}
+
+func extractDependencies(output []byte) []string {
+	lines := strings.Split(string(output), "\n")
+	var dependencies []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			dependencies = append(dependencies, trimmed)
+		}
+	}
+	return dependencies
+}
+
+func isPackageInList(installedPackages []string, packageName string) bool {
+	for _, pkg := range installedPackages {
+		if pkg == packageName {
+			return true
+		}
+	}
+	return false
+}
+
+func installLibraries(libraryCommands string, installedPackages []string, logger *zap.Logger) ([]string, error) {
+	var newInstalledPackages []string
+	libraryCommands = strings.TrimSpace(libraryCommands)
+	if libraryCommands == "" || libraryCommands == "\"\"" {
+		return newInstalledPackages, nil
+	}
+
+	commands := strings.Split(libraryCommands, "\n")
+	for _, command := range commands {
+		packageName := extractPackageName(command)
+
+		if isPackageInList(installedPackages, packageName) {
+			continue
+		}
+
+		_, _, exitCode, _, err := RunCommand(command, "", logger)
+		if exitCode != 0 || err != nil {
+			return newInstalledPackages, fmt.Errorf("failed to install library: %s", command)
+		}
+
+		installedPackages = append(installedPackages, packageName)
+		newInstalledPackages = append(newInstalledPackages, packageName)
+	}
+	return newInstalledPackages, nil
+}
+
+func extractPackageName(command string) string {
+	fields := strings.Fields(command)
+	if len(fields) < 3 {
+		return ""
+	}
+	return fields[2]
+}
+
+func uninstallLibraries(language string, installedPackages []string, logger *zap.Logger) error {
+	for _, command := range installedPackages {
+		logger.Info(fmt.Sprintf("Uninstalling library: %s", command))
+
+		var uninstallCommand string
+		switch strings.ToLower(language) {
+		case "go":
+			uninstallCommand = fmt.Sprintf("go mod edit -droprequire %s && go mod tidy", command)
+		case "python":
+			uninstallCommand = fmt.Sprintf("pip uninstall -y %s", command)
+		case "javascript":
+			uninstallCommand = fmt.Sprintf("npm uninstall %s", command)
+		case "java":
+			uninstallCommand = fmt.Sprintf("mvn dependency:purge-local-repository -DreResolve=false -Dinclude=%s", command)
+		}
+		if uninstallCommand != "" {
+			logger.Info(fmt.Sprintf("Uninstalling library with command: %s", uninstallCommand))
+			_, _, exitCode, _, err := RunCommand(uninstallCommand, "", logger)
+			if exitCode != 0 || err != nil {
+				logger.Warn(fmt.Sprintf("Failed to uninstall library: %s", uninstallCommand), zap.Error(err))
+			}
+		}
+	}
 	return nil
 }
