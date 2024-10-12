@@ -74,9 +74,10 @@ send_request(){
     # Wait for 5 seconds for keploy to record the tcs and mocks.
     sleep 5
     sudo docker rm -f keploy-v2
+    sleep 5
     sudo docker rm -f keploy-init
     # container_kill
-
+    sleep 5
     # wait
 }
 
