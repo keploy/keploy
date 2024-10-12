@@ -52,7 +52,7 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	case "contract":
 		return contractSvc, nil
 	default:
-		return nil, errors.New("invalid command")
+		return nil, errors.New("command not supported in non linux os. if you are on windows or mac, please use the dockerized version of your application")
 	}
 }
 
