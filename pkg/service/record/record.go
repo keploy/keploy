@@ -115,9 +115,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	default:
 	}
 
-	// Instrument will setup the environment and start the hooks and proxy
-	// scope of modularization: This function is defined in the Instrumentation interface
-	//set a value in the context to be used by the instrumentation
+	// setting up the environment for recording
 	appID, err = r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType})
 	if err != nil {
 		stopReason = "failed setting up the environment"

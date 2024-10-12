@@ -19,7 +19,7 @@ func init() {
 	Register("agent", Agent)
 }
 
-func Agent(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
+func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var cmd = &cobra.Command{
 		Use:   "agent",
 		Short: "starts keploy agent for hooking and starting proxy",
@@ -56,7 +56,7 @@ func Agent(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceF
 					logger.Error("failed to start HTTP server", zap.Error(err))
 				}
 			}()
-			
+
 			err = a.Setup(ctx, "", models.SetupOptions{
 				IsDocker: isdocker,
 			})

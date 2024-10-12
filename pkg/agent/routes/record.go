@@ -59,7 +59,7 @@ func (a *AgentRequest) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// Create a context with the request's context to manage cancellation
 	errGrp, _ := errgroup.WithContext(r.Context())
 	ctx := context.WithValue(r.Context(), models.ErrGroupKey, errGrp)
-
+	
 	// Call GetIncoming to get the channel
 	tc, err := a.agent.GetIncoming(ctx, 0, models.IncomingOptions{})
 	if err != nil {

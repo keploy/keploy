@@ -49,7 +49,7 @@ type App struct {
 	container        string
 	containerNetwork string
 	containerIPv4    chan string
-	keployNetwork    string
+	KeployNetwork    string
 	keployContainer  string
 	keployIPv4       string
 	EnableTesting    bool
@@ -173,7 +173,7 @@ func (a *App) SetupCompose() error {
 	if info == nil {
 		info, err = a.docker.SetKeployNetwork(compose)
 		if err != nil {
-			utils.LogError(a.logger, nil, "failed to set default network in the compose file", zap.String("network", a.keployNetwork))
+			utils.LogError(a.logger, nil, "failed to set default network in the compose file", zap.String("network", a.KeployNetwork))
 			return err
 		}
 		composeChanged = true
@@ -188,31 +188,36 @@ func (a *App) SetupCompose() error {
 		composeChanged = true
 	}
 
-	a.keployNetwork = info.Name
-
-	ok, err = a.docker.NetworkExists(a.keployNetwork)
+	a.KeployNetwork = info.Name
+	fmt.Println("keployNetwork:", a.KeployNetwork)
+	ok, err = a.docker.NetworkExists(a.KeployNetwork)
 	if err != nil {
-		utils.LogError(a.logger, nil, "failed to find default network", zap.String("network", a.keployNetwork))
+		utils.LogError(a.logger, nil, "failed to find default network", zap.String("network", a.KeployNetwork))
 		return err
 	}
 
 	//if keploy-network doesn't exist locally then create it
 	if !ok {
-		err = a.docker.CreateNetwork(a.keployNetwork)
+		err = a.docker.CreateNetwork(a.KeployNetwork)
 		if err != nil {
-			utils.LogError(a.logger, nil, "failed to create default network", zap.String("network", a.keployNetwork))
+			utils.LogError(a.logger, nil, "failed to create default network", zap.String("network", a.KeployNetwork))
 			return err
 		}
 	}
 
+	//check if compose file has keploy-init container
+
 	// adding keploy init pid to the compose file
-	err = a.docker.SetInitPid(compose)
-	if err != nil {
-		utils.LogError(a.logger, nil, "failed to set init pid in the compose file")
-		return err
-	}
+	// err = a.docker.SetInitPid(compose)
+	// if err != nil {
+	// 	utils.LogError(a.logger, nil, "failed to set init pid in the compose file")
+	// 	return err
+	// }
 
 	if composeChanged {
+		fmt.Println("newPath:", newPath)
+		fmt.Println("composeChanged:", compose)
+
 		err = a.docker.WriteComposeFile(compose, newPath)
 		if err != nil {
 			utils.LogError(a.logger, nil, "failed to write the compose file", zap.String("path", newPath))
@@ -223,7 +228,7 @@ func (a *App) SetupCompose() error {
 	}
 
 	if a.containerNetwork == "" {
-		a.containerNetwork = a.keployNetwork
+		a.containerNetwork = a.KeployNetwork
 	}
 	err = a.injectNetwork(a.containerNetwork)
 	if err != nil {
@@ -248,7 +253,7 @@ func (a *App) injectNetwork(network string) error {
 		return err
 	}
 
-	a.keployNetwork = network
+	a.KeployNetwork = network
 
 	//sending new proxy ip to kernel, since dynamically injected new network has different ip for keploy.
 	inspect, err := a.docker.ContainerInspect(context.Background(), a.keployContainer)

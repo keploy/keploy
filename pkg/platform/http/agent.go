@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/docker/docker/api/types/events"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core/app"
 	"go.keploy.io/server/v2/pkg/core/hooks"
@@ -401,7 +402,6 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			// Redirect the standard output and error to the log file
 			agentCmd.Stdout = logFile
 			agentCmd.Stderr = logFile
-			agentCmd.Stdin = os.Stdin
 
 			err = agentCmd.Start()
 			if err != nil {
@@ -413,44 +413,57 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 	}
 
-	time.Sleep(5 * time.Second)
-	// check if its docker then create a init container first
-	// and then the app container
-	usrApp := app.NewApp(a.logger, clientID, cmd, a.dockerClient, app.Options{
-		DockerNetwork: opts.DockerNetwork,
-		Container:     opts.Container,
-		DockerDelay:   opts.DockerDelay,
-	})
-	a.apps.Store(clientID, usrApp)
+	runningChan := make(chan bool)
 
-	err := usrApp.Setup(ctx)
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to setup app")
-		return 0, err
-	}
+	// Start a goroutine to check if the agent is running
+	go func() {
+		for {
+			if a.isAgentRunning(ctx) {
+				// Signal that the agent is running
+				runningChan <- true
+				return
+			}
+			time.Sleep(1 * time.Second) // Poll every second
+		}
+	}()
 
+	// inode := make(chan uint64)
 	var inode uint64
-	if isDockerCmd {
-
-		// Start the init container to get the pid namespace
-		inode, err = a.Initcontainer(ctx, app.Options{
+	if <-runningChan {
+		// check if its docker then create a init container first
+		// and then the app container
+		usrApp := app.NewApp(a.logger, clientID, cmd, a.dockerClient, app.Options{
 			DockerNetwork: opts.DockerNetwork,
 			Container:     opts.Container,
 			DockerDelay:   opts.DockerDelay,
 		})
+		a.apps.Store(clientID, usrApp)
+
+		err := usrApp.Setup(ctx)
 		if err != nil {
-			utils.LogError(a.logger, err, "failed to setup init container")
+			utils.LogError(a.logger, err, "failed to setup app")
+			return 0, err
 		}
 
-	}
-
-	opts.ClientID = clientID
-	opts.AppInode = inode
-	// Register the client with the server
-	err = a.RegisterClient(ctx, opts)
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to register client")
-		return 0, err
+		if isDockerCmd {
+			// Start the init container to get the pid namespace
+			inode, err = a.Initcontainer(ctx, app.Options{
+				DockerNetwork: usrApp.KeployNetwork,
+				Container:     opts.Container,
+				DockerDelay:   opts.DockerDelay,
+			})
+			if err != nil {
+				utils.LogError(a.logger, err, "failed to setup init container")
+			}
+		}
+		opts.ClientID = clientID
+		opts.AppInode = inode
+		// Register the client with the server
+		err = a.RegisterClient(ctx, opts)
+		if err != nil {
+			utils.LogError(a.logger, err, "failed to register client")
+			return 0, err
+		}
 	}
 
 	isAgentRunning = a.isAgentRunning(ctx)
@@ -547,13 +560,6 @@ func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger) err
 	// Start the keploy agent in a Docker container
 	agentCtx := context.WithoutCancel(ctx)
 
-	// go func ()  {
-	// 		for{
-	// 			fmt.Printf("Agent ctx is ? %v", agentCtx.Err())
-	// 			time.Sleep(2*time.Second)
-	// 		}
-	// }()
-
 	err := kdocker.StartInDocker(agentCtx, logger, &config.Config{
 		InstallationID: a.conf.InstallationID,
 	})
@@ -577,7 +583,6 @@ func (a *AgentClient) Initcontainer(ctx context.Context, opts app.Options) (uint
 			a.logger.Error("failed to remove temporary file", zap.Error(err))
 		}
 	}()
-	// clean up the file afterward
 
 	_, err = initFile.Write(initStopScript)
 	if err != nil {
@@ -597,6 +602,29 @@ func (a *AgentClient) Initcontainer(ctx context.Context, opts app.Options) (uint
 		return 0, err
 	}
 
+	// Create a channel to signal when the container starts
+	containerStarted := make(chan struct{})
+
+	// Start the Docker events listener in a separate goroutine
+	go func() {
+		events, errs := a.dockerClient.Events(ctx, events.ListOptions{})
+		for {
+			select {
+			case event := <-events:
+				if event.Type == "container" && event.Action == "start" && event.Actor.Attributes["name"] == "keploy-init" {
+					a.logger.Info("Container keploy-init started")
+					containerStarted <- struct{}{}
+					return
+				}
+			case err := <-errs:
+				a.logger.Error("Error while listening to Docker events", zap.Error(err))
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	// Start the init container to get the PID namespace inode
 	cmdCancel := func(cmd *exec.Cmd) func() error {
 		return func() error {
@@ -606,8 +634,7 @@ func (a *AgentClient) Initcontainer(ctx context.Context, opts app.Options) (uint
 		}
 	}
 
-	// Use the temporary file path in the Docker command
-	cmd := fmt.Sprintf("docker run --network=%s --name keploy-init --rm -v%s:/initStop.sh alpine /initStop.sh", a.conf.NetworkName, initFile.Name())
+	cmd := fmt.Sprintf("docker run --network=%s --name keploy-init --rm -v%s:/initStop.sh alpine /initStop.sh", opts.DockerNetwork, initFile.Name())
 
 	// Execute the command
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
@@ -626,7 +653,14 @@ func (a *AgentClient) Initcontainer(ctx context.Context, opts app.Options) (uint
 		return nil
 	})
 
-	time.Sleep(7 * time.Second)
+	// Wait for the container to start or context to cancel
+	select {
+	case <-containerStarted:
+		a.logger.Info("keploy-init container is running")
+	case <-ctx.Done():
+		return 0, fmt.Errorf("context canceled while waiting for container to start")
+	}
+
 	// Get the PID of the container's first process
 	inspect, err := a.dockerClient.ContainerInspect(ctx, "keploy-init")
 	if err != nil {

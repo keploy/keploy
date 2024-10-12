@@ -164,7 +164,6 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	}
 
 	cmd.Stdout = os.Stdout
-
 	cmd.Stderr = os.Stderr
 
 	logger.Info("running the following command in docker", zap.String("command", cmd.String()))
@@ -312,6 +311,7 @@ func ExtractPidNamespaceInode(pid int) (string, error) {
 		}
 
 		pidNamespace := match[1]
+		fmt.Println("SENDING PID namespace inode:", pidNamespace)
 		return pidNamespace, nil
 	}
 

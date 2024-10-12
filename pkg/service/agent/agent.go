@@ -233,7 +233,6 @@ func (a *Agent) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) e
 			IP6:  [4]uint32{0, 0, 0, 0},
 			Port: 16789,
 		}
-		fmt.Println("PROXY INFO: ", proxyInfo)
 		err = a.Hooks.SendClientProxyInfo(opts.ClientID, proxyInfo)
 		if err != nil {
 			return err
@@ -247,18 +246,14 @@ func (a *Agent) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) e
 		return err
 	}
 
+	fmt.Println("OPTS::", opts.DockerNetwork)
 	keployNetworks := inspect.NetworkSettings.Networks
-	//Here we considering that the application would use only one custom network.
-	//TODO: handle for application having multiple custom networks
-	//TODO: check the logic for correctness
 	var keployIPv4 string
 	for n, settings := range keployNetworks {
-		if n == opts.DockerNetwork {
-			keployIPv4 = settings.IPAddress // TODO: keployIPv4 needs to be send to the agent
-			// a.logger.Info("Successfully injected network to the keploy container", zap.Any("Keploy container", a.keployContainer), zap.Any("appNetwork", network), zap.String("keploy container ip", a.keployIPv4))
+		if n == "keploy-network" {
+			keployIPv4 = settings.IPAddress //keploy container IP
 			break
 		}
-
 	}
 	fmt.Println("Keploy container IP: ", keployIPv4)
 	ipv4, err := hooks.IPv4ToUint32(keployIPv4)
