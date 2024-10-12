@@ -62,23 +62,23 @@ func (t *Tester) setupReplay(ctx context.Context) error {
 
 	t.logger.Debug(fmt.Sprintf("keployRecord pid:%v", recordPid))
 
-	err = t.testBenchInfo.SendKeployPids(models.RecordKey, recordPid)
-	if err != nil {
-		utils.LogError(t.logger, err, fmt.Sprintf("failed to send keploy %v server pid to the epbf program", models.MODE_RECORD), zap.Any("Keploy Pid", recordPid))
-		return setUpErr
-	}
+	// err = t.testBenchInfo.SendKeployPids(models.RecordKey, recordPid)
+	// if err != nil {
+	// 	utils.LogError(t.logger, err, fmt.Sprintf("failed to send keploy %v server pid to the epbf program", models.MODE_RECORD), zap.Any("Keploy Pid", recordPid))
+	// 	return setUpErr
+	// }
 
-	err = t.testBenchInfo.SendKeployPorts(models.RecordKey, recordPort)
-	if err != nil {
-		utils.LogError(t.logger, err, fmt.Sprintf("failed to send keploy %v server port to the epbf program", models.MODE_RECORD), zap.Any("Keploy server port", recordPort))
-		return setUpErr
-	}
+	// err = t.testBenchInfo.SendKeployPorts(models.RecordKey, recordPort)
+	// if err != nil {
+	// 	utils.LogError(t.logger, err, fmt.Sprintf("failed to send keploy %v server port to the epbf program", models.MODE_RECORD), zap.Any("Keploy server port", recordPort))
+	// 	return setUpErr
+	// }
 
-	err = t.testBenchInfo.SendKeployPorts(models.TestKey, testPort)
-	if err != nil {
-		utils.LogError(t.logger, err, fmt.Sprintf("failed to send keploy %v server port to the epbf program", models.MODE_TEST), zap.Any("Keploy server port", testPort))
-		return setUpErr
-	}
+	// err = t.testBenchInfo.SendKeployPorts(models.TestKey, testPort)
+	// if err != nil {
+	// 	utils.LogError(t.logger, err, fmt.Sprintf("failed to send keploy %v server port to the epbf program", models.MODE_TEST), zap.Any("Keploy server port", testPort))
+	// 	return setUpErr
+	// }
 
 	// to get the pid of keployTest binary in keployRecord binary, we have to wait for some time till the proxy server is started
 	// TODO: find other way to filter child process (keployTest) pid in parent process binary (keployRecord)
@@ -113,11 +113,11 @@ func (t *Tester) setupRecord(ctx context.Context) error {
 
 				t.logger.Debug("keploytest pid", zap.Uint32("pid", testPid))
 
-				// sending keploytest binary pid in keployrecord binary to filter out ingress/egress calls related to keploytest binary.
-				err = t.testBenchInfo.SendKeployPids(models.TestKey, testPid)
-				if err != nil {
-					utils.LogError(t.logger, err, fmt.Sprintf("failed to send keploy %v server pid to the epbf program", models.MODE_TEST), zap.Any("Keploy Pid", testPid))
-				}
+				// // sending keploytest binary pid in keployrecord binary to filter out ingress/egress calls related to keploytest binary.
+				// err = t.testBenchInfo.SendKeployPids(models.TestKey, testPid)
+				// if err != nil {
+				// 	utils.LogError(t.logger, err, fmt.Sprintf("failed to send keploy %v server pid to the epbf program", models.MODE_TEST), zap.Any("Keploy Pid", testPid))
+				// }
 				return
 			case <-time.After(timeout - time.Since(startTime)):
 				t.logger.Info("Timeout reached, exiting loop from setupRecordTesting")

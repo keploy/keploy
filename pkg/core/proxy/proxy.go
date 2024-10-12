@@ -100,11 +100,14 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 	if !ok {
 		return errors.New("failed to get the error group from the context")
 	}
+	// Create a channel to signal readiness of each server
+	readyChan := make(chan error, 1)
 
 	// start the proxy server
 	g.Go(func() error {
 		defer utils.Recover(p.logger)
-		err := p.start(ctx)
+		err := p.start(ctx, readyChan)
+		readyChan <- err
 		if err != nil {
 			utils.LogError(p.logger, err, "error while running the proxy server")
 			return err
@@ -172,6 +175,11 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 			return err
 		}
 	})
+	// Wait for the proxy server to be ready or fail
+	err = <-readyChan
+	if err != nil {
+		return err
+	}
 	p.logger.Info("Keploy has taken control of the DNS resolution mechanism, your application may misbehave if you have provided wrong domain name in your application code.")
 
 	p.logger.Info(fmt.Sprintf("Proxy started at port:%v", p.Port))
@@ -179,17 +187,20 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 }
 
 // start function starts the proxy server on the idle local port
-func (p *Proxy) start(ctx context.Context) error {
+func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 
 	// It will listen on all the interfaces
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%v", p.Port))
 	if err != nil {
 		utils.LogError(p.logger, err, fmt.Sprintf("failed to start proxy on port:%v", p.Port))
+		// Notify failure
+		readyChan <- err
 		return err
 	}
 	p.Listener = listener
 	p.logger.Debug(fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(":%v", listener.Addr())))
-
+	// Signal that the server is ready
+	readyChan <- nil
 	defer func(listener net.Listener) {
 		err := listener.Close()
 
@@ -364,7 +375,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	//checking for the destination port of "mysql"
 	if destInfo.Port == 3306 {
-		var dstConn net.Conn
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = net.Dial("tcp", dstAddr)
 			if err != nil {
