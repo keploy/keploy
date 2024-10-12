@@ -72,8 +72,11 @@ send_request(){
     curl -X GET http://localhost:8080/CJBKJd92
 
     # Wait for 5 seconds for keploy to record the tcs and mocks.
-    # sleep 5
+    sleep 5
+    sudo docker rm -f keploy-v2
+    sudo docker rm -f keploy-init
     # container_kill
+
     # wait
 }
 
