@@ -489,6 +489,7 @@ func (a *AgentClient) getApp(id uint64) (*app.App, error) {
 	return h, nil
 }
 
+// RegisterClient registers the client with the server
 func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptions) error {
 
 	isAgent := a.isAgentRunning(ctx)
