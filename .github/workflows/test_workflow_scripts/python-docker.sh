@@ -61,7 +61,7 @@ send_request(){
     # Wait for 5 seconds for keploy to record the tcs and mocks.
     sleep 5
     container_kill
-    wait
+    # wait
 }
 
 # Record sessions
