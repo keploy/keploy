@@ -72,8 +72,8 @@ send_request(){
     curl -X GET http://localhost:8080/CJBKJd92
 
     # Wait for 5 seconds for keploy to record the tcs and mocks.
-    sleep 5
-    container_kill
+    # sleep 5
+    # container_kill
     # wait
 }
 
@@ -97,7 +97,9 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
-container_kill
+# container_kill
+sudo docker rm -f keploy-v2
+sudo docker rm -f keploy-init
 
 echo "Starting the test phase..."
 # Start the keploy in test mode.
