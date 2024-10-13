@@ -82,8 +82,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
 
 	setupErrGrp, _ := errgroup.WithContext(ctx)
-	setupCtx := context.WithoutCancel(ctx)
-	setupCtx = context.WithValue(ctx, models.ErrGroupKey, setupErrGrp)
+	_ = context.WithoutCancel(ctx)
+	setupCtx := context.WithValue(ctx, models.ErrGroupKey, setupErrGrp)
 	setupCtx, setupCtxCancel := context.WithCancel(setupCtx)
 
 	var stopReason = "replay completed successfully"

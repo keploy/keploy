@@ -87,7 +87,11 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
-container_kill
+
+sleep 4
+
+sudo docker rm -f keploy-v2
+sudo docker rm -f keploy-init
 
 # Testing phase
 test_container="flashApp_test"
