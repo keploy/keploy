@@ -1,5 +1,6 @@
 //go:build linux
 
+// Package agent contains methods for setting up hooks and proxy along with registering keploy clients.
 package agent
 
 import (
