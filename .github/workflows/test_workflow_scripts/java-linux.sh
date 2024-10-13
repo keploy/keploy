@@ -72,12 +72,12 @@ for i in {1..2}; do
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
-        # exit 1
+        exit 1
     fi
     if grep "WARNING: DATA RACE" "${app_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
         cat "${app_name}.txt"
-        # exit 1
+        exit 1
     fi
     sleep 5
     wait
@@ -91,12 +91,12 @@ sudo -E env PATH=$PATH ./../../../keployv2 test -c 'java -jar target/spring-petc
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."
     cat "test_logs.txt"
-    # exit 1
+    exit 1
 fi
 if grep "WARNING: DATA RACE" "test_logs.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
     cat "test_logs.txt"
-    # exit 1
+    exit 1
 fi
 
 all_passed=true

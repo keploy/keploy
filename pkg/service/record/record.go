@@ -150,6 +150,9 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 
 	errGrp.Go(func() error {
 		for mock := range frames.Outgoing {
+			if mock == nil || mock.GetKind() == "" {
+				continue
+			}
 			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
 			if err != nil {
 				if ctx.Err() == context.Canceled {

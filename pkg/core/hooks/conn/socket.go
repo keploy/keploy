@@ -9,8 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 	"unsafe"
 
@@ -40,37 +38,6 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 	if !ok {
 		return nil, errors.New("failed to get the error group from the context")
 	}
-
-	// Create a channel to listen for signals
-	sigChan := make(chan os.Signal, 1)
-
-	// Register the signals you want to listen to (e.g., SIGINT, SIGTERM)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		for {
-			println("Waiting for signal")
-			select {
-			case sig := <-sigChan:
-				// Handle the signal
-				fmt.Printf("Received signal::: %s\n", sig)
-				switch sig {
-				case syscall.SIGINT, syscall.SIGTERM:
-					fmt.Println("Shutting down gracefully...")
-					return
-				default:
-					fmt.Printf("Unhandled signal::: %s\n", sig)
-				}
-			case <-ctx.Done():
-				println("Context done")
-				// Exit the goroutine when the context is canceled
-				return
-			}
-		}
-	}()
-
-	// Simulate some work being done
-	fmt.Println("Application running... Press Ctrl+C to stop.")
 
 	g.Go(func() error {
 		defer utils.Recover(l)

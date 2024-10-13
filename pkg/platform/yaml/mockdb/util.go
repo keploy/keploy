@@ -174,7 +174,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			return nil, err
 		}
 	default:
-		// TODO:
+
 		utils.LogError(logger, nil, "failed to marshal the recorded mock into yaml due to invalid kind of mock")
 		return nil, errors.New("type of mock is invalid")
 	}
