@@ -111,7 +111,6 @@ echo "Starting the test phase..."
 test_container="ginApp_test"
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
 
-sleep 3
 # container_kill
 # sudo docker rm -f keploy-v2
 

@@ -104,7 +104,6 @@ echo "Starting the test phase..."
 test_container="nodeApp_test"
 sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p8000:8000 --rm --name $test_container --network keploy-network node-app:1.0" --containerName "$test_container" --apiTimeout 30 --delay 30 --generate-github-actions=false &> "${test_container}.txt"
 
-sleep 3
 # container_kill
 # sudo docker rm -f keploy-v2
 

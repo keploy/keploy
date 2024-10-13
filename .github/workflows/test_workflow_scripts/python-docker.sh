@@ -90,10 +90,15 @@ sudo docker rm -f keploy-v2
 sudo docker rm -f keploy-init
 
 
+sleep 4
+# container_kill
+sudo docker rm -f keploy-v2
+sudo docker rm -f keploy-init
+
+
 # Testing phase
 test_container="flashApp_test"
 sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p8080:8080 --net keploy-network --name $test_container flask-app:1.0" --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
-sleep 3
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
     cat "${test_container}.txt"
