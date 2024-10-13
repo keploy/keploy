@@ -36,6 +36,10 @@ container_kill() {
     fi
 
     echo "Keploy process killed"
+    sleep 2
+    sudo docker rm -f keploy-init
+    sleep 2
+    sudo docker rm -f keploy-v2
     return 0
 }
 

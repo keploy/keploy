@@ -98,7 +98,7 @@ for i in {1..2}; do
 done
 
 sleep 4
-# container_kill
+
 sudo docker rm -f keploy-v2
 sudo docker rm -f keploy-init
 
