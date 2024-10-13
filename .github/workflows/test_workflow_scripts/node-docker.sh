@@ -93,7 +93,7 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
-sleep 3
+sleep 4
 # container_kill
 sudo docker rm -f keploy-v2
 sudo docker rm -f keploy-init
@@ -106,7 +106,7 @@ sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p8000:8000 --rm --n
 
 sleep 3
 # container_kill
-sudo docker rm -f keploy-v2
+# sudo docker rm -f keploy-v2
 
 
 if grep "ERROR" "${test_container}.txt"; then

@@ -61,7 +61,7 @@ send_request(){
     # Wait for 5 seconds for keploy to record the tcs and mocks.
     sleep 5
     container_kill
-    # wait
+    wait
 }
 
 # Record sessions
@@ -84,9 +84,16 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
+sleep 4
+# container_kill
+sudo docker rm -f keploy-v2
+sudo docker rm -f keploy-init
+
+
 # Testing phase
 test_container="flashApp_test"
 sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p8080:8080 --net keploy-network --name $test_container flask-app:1.0" --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
+sleep 3
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
     cat "${test_container}.txt"
