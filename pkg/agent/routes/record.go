@@ -1,4 +1,4 @@
-// Package routes contains the routes for the agent service.
+// Package routes defines the routes for the agent service.
 package routes
 
 import (

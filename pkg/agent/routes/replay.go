@@ -1,4 +1,4 @@
-// Package routes contains the routes for the agent to mock outgoing requests, set mocks and get consumed mocks.
+// Package routes defines the routes for the agent to mock outgoing requests, set mocks and get consumed mocks.
 package routes
 
 import (
