@@ -1004,7 +1004,7 @@ func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noise
 
 	for _, v := range testCases {
 		for _, noiseParam := range noiseParams {
-			if v.Name == noiseParam.TestCaseID {
+			if noiseParam.IsGlobal || v.Name == noiseParam.TestCaseID {
 				// append the noise map
 				if noiseParam.Ops == string(models.OpsAdd) {
 					v.Noise = mergeMaps(v.Noise, noiseParam.Assertion)

@@ -65,6 +65,7 @@ type NoiseParams struct {
 	Assertion  map[string][]string `json:"assertion"`
 	Ops        string              `json:"ops"`
 	AfterNoise map[string][]string `json:"afterNoise"`
+	IsGlobal   bool                `json:"isGlobal"`
 }
 
 // enum for ops
