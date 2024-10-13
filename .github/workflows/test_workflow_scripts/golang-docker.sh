@@ -73,12 +73,12 @@ send_request(){
 
     # Wait for 5 seconds for keploy to record the tcs and mocks.
     sleep 5
-    sudo docker rm -f keploy-v2
-    sleep 5
-    sudo docker rm -f keploy-init
-    # container_kill
-    sleep 5
-    # wait
+    # sudo docker rm -f keploy-v2
+    # sleep 5
+    # sudo docker rm -f keploy-init
+    container_kill
+    # sleep 5
+    wait
 }
 
 for i in {1..2}; do
@@ -101,6 +101,7 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
+sleep 2
 # container_kill
 sudo docker rm -f keploy-v2
 sudo docker rm -f keploy-init
