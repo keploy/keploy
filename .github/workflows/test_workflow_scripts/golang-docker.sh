@@ -101,7 +101,7 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
-sleep 2
+sleep 3
 # container_kill
 sudo docker rm -f keploy-v2
 sudo docker rm -f keploy-init
@@ -110,6 +110,10 @@ echo "Starting the test phase..."
 # Start the keploy in test mode.
 test_container="ginApp_test"
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
+
+sleep 3
+# container_kill
+sudo docker rm -f keploy-v2
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."

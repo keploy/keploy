@@ -70,7 +70,7 @@ send_request(){
     # Wait for 5 seconds for keploy to record the tcs and mocks.
     sleep 5
     container_kill
-    # wait
+    wait
 }
 
 for i in {1..2}; do
@@ -93,12 +93,22 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
-container_kill
+sleep 3
+# container_kill
+sudo docker rm -f keploy-v2
+sudo docker rm -f keploy-init
+
 echo "Starting the test phase..."
 
 # Start keploy in test mode.
 test_container="nodeApp_test"
 sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p8000:8000 --rm --name $test_container --network keploy-network node-app:1.0" --containerName "$test_container" --apiTimeout 30 --delay 30 --generate-github-actions=false &> "${test_container}.txt"
+
+sleep 3
+# container_kill
+sudo docker rm -f keploy-v2
+
+
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
     cat "${test_container}.txt"
