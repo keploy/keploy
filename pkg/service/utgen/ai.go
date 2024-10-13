@@ -141,7 +141,6 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 
 		ai.Logger.Debug("Making AI request to API server", zap.String("api_server_url", ai.APIServerURL), zap.String("token", token))
 		httpClient := &http.Client{}
-		// make AI request as request body to the API server
 		aiRequest := AIRequest{
 			MaxTokens: maxTokens,
 			Prompt:    *prompt,
@@ -164,7 +163,6 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 			return "", 0, 0, fmt.Errorf("error making request: %v", err)
 		}
 
-		// read the response body AIResponse
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		var aiResponse AIResponse
 		err = json.Unmarshal(bodyBytes, &aiResponse)
@@ -274,8 +272,9 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 		if err == io.EOF {
 			break
 		}
-		time.Sleep(10 * time.Millisecond) // Optional: Delay to simulate more 'natural' response pacing
+		time.Sleep(10 * time.Millisecond)
 	}
+
 	if ai.Logger.Level() == zap.DebugLevel {
 		fmt.Println()
 	}

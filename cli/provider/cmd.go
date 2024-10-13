@@ -209,6 +209,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("llm-base-url", "", "Base URL for the AI model.")
 		cmd.Flags().String("model", "gpt-4o", "Model to use for the AI.")
 		cmd.Flags().String("llm-api-version", "", "API version of the llm")
+		cmd.Flags().String("additional-prompt", "", "Additional prompt to be used for the AI model.")
 		err := cmd.MarkFlagRequired("test-command")
 		if err != nil {
 			errMsg := "failed to mark testCommand as required flag"
