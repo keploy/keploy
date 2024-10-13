@@ -33,6 +33,10 @@ container_kill() {
     fi
 
     echo "Keploy process killed"
+    sleep 2
+    sudo docker rm -f keploy-init
+    sleep 2
+    sudo docker rm -f keploy-v2
     return 0
 }
 
@@ -68,7 +72,7 @@ send_request(){
 
     curl -X GET http://localhost:8000/students
     # Wait for 5 seconds for keploy to record the tcs and mocks.
-    sleep 5
+    sleep 10
     container_kill
     wait
 }
@@ -104,9 +108,6 @@ echo "Starting the test phase..."
 test_container="nodeApp_test"
 sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p8000:8000 --rm --name $test_container --network keploy-network node-app:1.0" --containerName "$test_container" --apiTimeout 30 --delay 30 --generate-github-actions=false &> "${test_container}.txt"
 
-# Capture the exit code of the test command
-test_exit_code=$?
-
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
     cat "${test_container}.txt"
@@ -140,8 +141,10 @@ do
 done
 
 # Check the overall test status and exit accordingly
-# Only exit with the test exit code if all tests didn't pass
-if [ "$test_exit_code" -ne 0 ]; then
-    echo "Keploy test run failed with exit code $test_exit_code"
-    exit $test_exit_code
+if [ "$all_passed" = true ]; then
+    echo "All tests passed"
+    exit 0
+else
+    cat "${test_container}.txt"
+    exit 1
 fi
