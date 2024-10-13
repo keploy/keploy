@@ -49,7 +49,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 
 	setupErrGrp, _ := errgroup.WithContext(ctx)
 	setupCtx := context.WithoutCancel(ctx)
-	setupCtx, setupCtxCancel := context.WithCancel(setupCtx)
+	_, setupCtxCancel := context.WithCancel(setupCtx)
 	setupCtx = context.WithValue(ctx, models.ErrGroupKey, setupErrGrp)
 
 	var stopReason string

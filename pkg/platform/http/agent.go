@@ -1,6 +1,6 @@
 //go:build !windows
 
-// Client side code to communicate with the agent server
+// Package http contains the client side code to communicate with the agent server
 package http
 
 import (

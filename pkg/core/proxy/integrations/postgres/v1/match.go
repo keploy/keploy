@@ -256,7 +256,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 					if newMock != nil {
 						matchedMock = newMock
 					}
-					logger.Info("Matched In Unsorted PG Matching Stream", zap.String("mock", matchedMock.Name))
+					logger.Debug("Matched In Unsorted PG Matching Stream", zap.String("mock", matchedMock.Name))
 				}
 				idx = findBinaryStreamMatch(logger, tcsMocks, requestBuffers, sorted)
 				// check if the validate the query with the matched mock
@@ -272,7 +272,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 					if newMock != nil && !isValid {
 						matchedMock = newMock
 					}
-					logger.Info("Matched In Binary Matching for Unsorted", zap.String("mock", matchedMock.Name))
+					logger.Debug("Matched In Binary Matching for Unsorted", zap.String("mock", matchedMock.Name))
 				}
 			}
 
@@ -349,13 +349,13 @@ func findBinaryStreamMatch(logger *zap.Logger, tcsMocks []*models.Mock, requestB
 
 	if sorted {
 		if mxIdx != -1 && mxSim >= 0.78 {
-			logger.Info("Matched with Sorted Stream", zap.Float64("similarity", mxSim))
+			logger.Debug("Matched with Sorted Stream", zap.Float64("similarity", mxSim))
 		} else {
 			mxIdx = -1
 		}
 	} else {
 		if mxIdx != -1 {
-			logger.Info("Matched with Unsorted Stream", zap.Float64("similarity", mxSim))
+			logger.Debug("Matched with Unsorted Stream", zap.Float64("similarity", mxSim))
 		}
 	}
 	return mxIdx
@@ -479,7 +479,7 @@ func changeResToPS(mock *models.Mock, actualPgReq *models.Backend, logger *zap.L
 	mockPackets := mock.Spec.PostgresRequests[0].PacketTypes
 
 	// [P, B, E, P, B, D, E] => [B, E, B, E]
-	// write code that of packet is ["B", "E"] and mockPackets ["P", "B", "D", "E"] handle it in case1
+	// packet is ["B", "E"] and mockPackets ["P", "B", "D", "E"] handle it in case1
 	// and if packet is [B, E, B, E] and mockPackets [P, B, E, P, B, D, E] handle it in case2
 
 	ischanged := false
@@ -533,7 +533,6 @@ func changeResToPS(mock *models.Mock, actualPgReq *models.Backend, logger *zap.L
 				break
 			}
 		}
-		//Matched In Binary Matching for Unsorted mock-222
 		ischanged2 := false
 		ps2 := actualPgReq.Binds[1].PreparedStatement
 		for _, v := range testmap[connectionID] {
@@ -550,7 +549,6 @@ func changeResToPS(mock *models.Mock, actualPgReq *models.Backend, logger *zap.L
 
 	// Case 4
 	if reflect.DeepEqual(actualpackets, []string{"B", "E", "B", "E"}) && reflect.DeepEqual(mockPackets, []string{"B", "E", "P", "B", "D", "E"}) {
-		// logger.Debug("Handling Case 4 for mock", mock.Name)
 		// get the query for the prepared statement of test mode
 		ischanged := false
 		ps := actualPgReq.Binds[1].PreparedStatement

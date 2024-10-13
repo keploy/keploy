@@ -1,2 +1,2 @@
-// This file contains the utility functions for the agent package.
+// Package agent contains backend for the keploy agent.
 package agent

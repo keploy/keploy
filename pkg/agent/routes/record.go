@@ -1,4 +1,4 @@
-// Description: This file contains the routes for the agent service.
+// Package routes contains the routes for the agent service.
 package routes
 
 import (
@@ -11,10 +11,8 @@ import (
 	"github.com/go-chi/render"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/service/agent"
-	"golang.org/x/sync/errgroup"
-
-	// "go.keploy.io/server/v2/pkg/service/agent"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 type AgentRequest struct {
