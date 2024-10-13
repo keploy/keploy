@@ -83,7 +83,6 @@ func (a *App) Setup(_ context.Context) error {
 			return err
 		}
 	default:
-		// setup native binary
 	}
 	return nil
 }
@@ -289,7 +288,6 @@ func (a *App) attachInitPid(_ context.Context) error {
 
 	// Add the --pid=container:<initContainer> flag to the command
 	pidMode := fmt.Sprintf("--pid=container:%s", "keploy-init")
-	fmt.Println("pidMode:", pidMode)
 	// Inject the pidMode flag after 'docker run' in the command
 	parts := strings.SplitN(a.cmd, " ", 3) // Split by first two spaces to isolate "docker run"
 	if len(parts) < 3 {
@@ -299,7 +297,6 @@ func (a *App) attachInitPid(_ context.Context) error {
 	// Modify the command to insert the pidMode
 	a.cmd = fmt.Sprintf("%s %s %s %s", parts[0], parts[1], pidMode, parts[2])
 
-	fmt.Println("Modified command:", a.cmd)
 	return nil
 }
 

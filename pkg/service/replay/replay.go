@@ -84,7 +84,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	setupErrGrp, _ := errgroup.WithContext(ctx)
 	setupCtx := context.WithoutCancel(ctx)
 	setupCtx = context.WithValue(ctx, models.ErrGroupKey, setupErrGrp)
-	setupCtx, setupCtxCancel := context.WithCancel(setupCtx)
+	_, setupCtxCancel := context.WithCancel(setupCtx)
 
 	var stopReason = "replay completed successfully"
 
@@ -97,10 +97,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.logger.Info("stopping Keploy", zap.String("reason", stopReason))
 		}
 
-		fmt.Printf("SetupCtx?: %v\n", setupCtx.Err())
 		setupCtxCancel()
-		fmt.Printf("SetupCtx?: %v\n", setupCtx.Err())
-		println("setupCtxCancel is cancelled")
 		err := setupErrGrp.Wait()
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop setup execution, that covers init container")
@@ -828,8 +825,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if r.config.Test.UpdateTemplate || r.config.Test.BasePath != "" {
 		removeDoubleQuotes(utils.TemplatizedValues)
 		// Write the templatized values to the yaml.
-		fmt.Println("POSTScript", conf.PostScript)
-		fmt.Println("PREScript", conf.PreScript)
 		if len(utils.TemplatizedValues) > 0 {
 			err = r.testSetConf.Write(ctx, testSetID, &models.TestSet{
 				PreScript:  conf.PreScript,

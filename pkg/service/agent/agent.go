@@ -46,11 +46,10 @@ func (a *Agent) Setup(ctx context.Context, _ string, opts models.SetupOptions) e
 		a.logger.Error("failed to hook into the app", zap.Error(err))
 	}
 
-	select {
-	case <-ctx.Done():
-		fmt.Println("Context cancelled, stopping Agent Setup")
-		return context.Canceled
-	}
+	<-ctx.Done()
+	a.logger.Info("Context cancelled, stopping the agent")
+	return context.Canceled
+
 }
 
 func (a *Agent) GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
@@ -69,7 +68,7 @@ func (a *Agent) GetOutgoing(ctx context.Context, id uint64, opts models.Outgoing
 }
 
 func (a *Agent) MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error {
-	a.logger.Info("Inside MockOutgoing of agent binary !!")
+	a.logger.Debug("Inside MockOutgoing of agent binary !!")
 
 	err := a.Proxy.Mock(ctx, id, opts)
 	if err != nil {
@@ -84,7 +83,6 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 
 	select {
 	case <-ctx.Done():
-		fmt.Println("Context cancelled, stopping Hook")
 		return ctx.Err()
 	default:
 	}
@@ -177,7 +175,7 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 }
 
 func (a *Agent) SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error {
-	fmt.Println("Sending Mocks to the Proxy !!")
+	a.logger.Debug("Inside SetMocks of agent binary !!")
 	return a.Proxy.SetMocks(ctx, id, filtered, unFiltered)
 }
 
@@ -190,8 +188,8 @@ func (a *Agent) UnHook(_ context.Context, _ uint64) error {
 }
 
 func (a *Agent) RegisterClient(ctx context.Context, opts models.SetupOptions) error {
-	fmt.Println("Registering client with keploy client id opts.AppInode!! ", opts.AppInode)
-	fmt.Println("Registering client with keploy client id opts.ClientInode!! ", opts.ClientInode)
+
+	a.logger.Debug("Registering the client with the keploy server")
 
 	// send the network info to the kernel
 	err := a.SendNetworkInfo(ctx, opts)
@@ -247,16 +245,15 @@ func (a *Agent) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) e
 		return err
 	}
 
-	fmt.Println("OPTS::", opts.DockerNetwork)
 	keployNetworks := inspect.NetworkSettings.Networks
 	var keployIPv4 string
 	for n, settings := range keployNetworks {
-		if n == "keploy-network" {
+		if n == opts.DockerNetwork {
 			keployIPv4 = settings.IPAddress //keploy container IP
 			break
 		}
 	}
-	fmt.Println("Keploy container IP: ", keployIPv4)
+
 	ipv4, err := hooks.IPv4ToUint32(keployIPv4)
 	if err != nil {
 		return err

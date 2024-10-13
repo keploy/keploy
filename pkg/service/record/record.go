@@ -49,11 +49,8 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 
 	setupErrGrp, _ := errgroup.WithContext(ctx)
 	setupCtx := context.WithoutCancel(ctx)
-	setupCtx, setupCtxCancel := context.WithCancel(setupCtx)
+	_, setupCtxCancel := context.WithCancel(setupCtx)
 	setupCtx = context.WithValue(ctx, models.ErrGroupKey, setupErrGrp)
-
-	// reRecordCtx, reRecordCancel := context.WithCancel(ctx)
-	// defer reRecordCancel() // Cancel the context when the function returns
 
 	var stopReason string
 
@@ -71,7 +68,6 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	defer func() {
 		select {
 		case <-ctx.Done():
-			fmt.Println("Context cancelled start ")
 		default:
 			if !reRecord {
 				err := utils.Stop(r.logger, stopReason)
@@ -110,7 +106,6 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	//checking for context cancellation as we don't want to start the instrumentation if the context is cancelled
 	select {
 	case <-ctx.Done():
-		fmt.Println("Context cancelled 0")
 		return nil
 	default:
 	}
@@ -193,7 +188,6 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 					return errors.New("failed to stop recording")
 				}
 			case <-ctx.Done():
-				fmt.Println("Context cancelled 1")
 				return nil
 			}
 			return nil
@@ -228,7 +222,6 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	case err = <-insertMockErrChan:
 		stopReason = "error while inserting mock into db, hence stopping keploy"
 	case <-ctx.Done():
-		fmt.Println("Context cancelled 2")
 		return nil
 	}
 	utils.LogError(r.logger, err, stopReason)

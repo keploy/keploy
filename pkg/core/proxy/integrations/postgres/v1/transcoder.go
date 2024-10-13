@@ -30,7 +30,6 @@ func NewFrontend() *FrontendWrapper {
 
 // PG Response Packet Transcoder
 func (b *BackendWrapper) translateToReadableBackend(msgBody []byte) (pgproto3.FrontendMessage, error) {
-	// fmt.Println("msgType", b.BackendWrapper.MsgType)
 	var msg pgproto3.FrontendMessage
 	switch b.BackendWrapper.MsgType {
 	case 'B':

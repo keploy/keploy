@@ -93,11 +93,6 @@ func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config)
 		DockerConfig.Envs["INSTALLATION_ID"] = conf.InstallationID
 	}
 
-	//Check if app command starts with docker or docker-compose.
-	// If it does, then we would run the docker version of keploy and
-
-	// pass the all the commands and args to the docker version of Keploy
-
 	err := RunInDocker(ctx, logger)
 	if err != nil {
 		utils.LogError(logger, err, "failed to run the command in docker")
@@ -115,7 +110,6 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("Running in docker keploy alias", keployAlias)
 
 	client, err := New(logger)
 	if err != nil {
@@ -311,7 +305,6 @@ func ExtractPidNamespaceInode(pid int) (string, error) {
 		}
 
 		pidNamespace := match[1]
-		fmt.Println("SENDING PID namespace inode:", pidNamespace)
 		return pidNamespace, nil
 	}
 

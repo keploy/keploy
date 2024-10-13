@@ -320,7 +320,6 @@ func sliceCommandTag(mock *models.Mock, logger *zap.Logger, prep []QueryData, ac
 	case 1:
 
 		copyMock := *mock
-		// fmt.Println("Inside Slice Command Tag for ", psCase)
 		mockPackets := copyMock.Spec.PostgresResponses[0].PacketTypes
 		for idx, v := range mockPackets {
 			if v == "1" {
@@ -332,9 +331,7 @@ func sliceCommandTag(mock *models.Mock, logger *zap.Logger, prep []QueryData, ac
 
 		return &copyMock
 	case 2:
-		// ["2", D, C, Z]
 		copyMock := *mock
-		// fmt.Println("Inside Slice Command Tag for ", psCase)
 		mockPackets := copyMock.Spec.PostgresResponses[0].PacketTypes
 		for idx, v := range mockPackets {
 			if v == "1" || v == "T" {
@@ -347,11 +344,8 @@ func sliceCommandTag(mock *models.Mock, logger *zap.Logger, prep []QueryData, ac
 
 		for idx, datarow := range copyMock.Spec.PostgresResponses[0].DataRows {
 			for column, rowVal := range datarow.RowValues {
-				// fmt.Println("datarow.RowValues", len(datarow.RowValues))
 				if rsFormat[column] == 1 {
-					// datarows := make([]byte, 4)
 					newRow, _ := getChandedDataRow(rowVal)
-					// logger.Info("New Row Value", zap.String("newRow", newRow))
 					copyMock.Spec.PostgresResponses[0].DataRows[idx].RowValues[column] = newRow
 				}
 			}

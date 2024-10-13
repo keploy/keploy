@@ -96,7 +96,6 @@ func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.In
 		}()
 
 		decoder := json.NewDecoder(res.Body)
-		fmt.Println("Starting to read from the response body")
 
 		for {
 			var testCase models.TestCase
@@ -353,7 +352,6 @@ func (a *AgentClient) Run(ctx context.Context, id uint64, _ models.RunOptions) m
 
 	select {
 	case <-runAppCtx.Done():
-		fmt.Println("Context is canceled in the run app function")
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}
 	case appErr := <-appErrCh:
 		return appErr
@@ -427,7 +425,6 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 	}()
 
-	// inode := make(chan uint64)
 	var inode uint64
 	if <-runningChan {
 		// check if its docker then create a init container first
@@ -446,9 +443,10 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 
 		if isDockerCmd {
+			opts.DockerNetwork = usrApp.KeployNetwork
 			// Start the init container to get the pid namespace
 			inode, err = a.Initcontainer(ctx, app.Options{
-				DockerNetwork: usrApp.KeployNetwork,
+				DockerNetwork: opts.DockerNetwork,
 				Container:     opts.Container,
 				DockerDelay:   opts.DockerDelay,
 			})

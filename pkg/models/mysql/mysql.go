@@ -3,7 +3,6 @@ package mysql
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -86,7 +85,6 @@ func (r *Request) MarshalJSON() ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		fmt.Println("msgJSON::", string(msgJSON))
 		aux.Message = msgJSON
 	}
 
@@ -230,9 +228,6 @@ func (r *Request) UnmarshalJSON(data []byte) error {
 	default:
 		return errors.New("failed to unmarshal unknown request packet type")
 	}
-
-	fmt.Println("r.Message::", r.Message)
-
 	return nil
 }
 
