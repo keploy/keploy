@@ -89,7 +89,6 @@ done
 
 
 sleep 4
-
 sudo docker rm -f keploy-v2
 sudo docker rm -f keploy-init
 
