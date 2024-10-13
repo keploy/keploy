@@ -331,6 +331,16 @@ func decodeMySQLMessage(_ context.Context, logger *zap.Logger, yamlSpec *mysql.S
 
 		switch v.Header.Type {
 		// connection phase
+
+		case mysql.SSLRequest:
+			msg := &mysql.SSLRequestPacket{}
+			err := v.Message.Decode(msg)
+			if err != nil {
+				utils.LogError(logger, err, "failed to unmarshal yaml document into mysql SSLRequestPacket")
+				return nil, err
+			}
+			req.Message = msg
+
 		case mysql.HandshakeResponse41:
 			msg := &mysql.HandshakeResponse41Packet{}
 			err := v.Message.Decode(msg)

@@ -16,16 +16,24 @@ import (
 )
 
 //ref: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_phase_packets_protocol_handshake_response.html
+//ref: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_phase_packets_protocol_ssl_request.html
 
-func DecodeHandshakeResponse41(_ context.Context, _ *zap.Logger, data []byte) (*mysql.HandshakeResponse41Packet, error) {
+func DecodeHandshakeResponse(_ context.Context, logger *zap.Logger, data []byte) (interface{}, error) {
+
 	if len(data) < 32 {
 		return nil, errors.New("handshake response packet too short")
 	}
+
+	origData := data
 
 	packet := &mysql.HandshakeResponse41Packet{}
 
 	packet.CapabilityFlags = binary.LittleEndian.Uint32(data[:4])
 	data = data[4:]
+
+	if packet.CapabilityFlags&mysql.CLIENT_PROTOCOL_41 == 0 {
+		return nil, errors.New("CLIENT_PROTOCOL_41 compatible client is required")
+	}
 
 	packet.MaxPacketSize = binary.LittleEndian.Uint32(data[:4])
 	data = data[4:]
@@ -35,6 +43,19 @@ func DecodeHandshakeResponse41(_ context.Context, _ *zap.Logger, data []byte) (*
 
 	copy(packet.Filler[:], data[:23])
 	data = data[23:]
+
+	// Check if it is a SSL Request Packet
+	if len(origData) == (4 + 4 + 1 + 23) {
+		if packet.CapabilityFlags&mysql.CLIENT_SSL != 0 {
+			logger.Debug("Client requested SSL connection")
+			return &mysql.SSLRequestPacket{
+				CapabilityFlags: packet.CapabilityFlags,
+				MaxPacketSize:   packet.MaxPacketSize,
+				CharacterSet:    packet.CharacterSet,
+				Filler:          packet.Filler,
+			}, nil
+		}
+	}
 
 	idx := bytes.IndexByte(data, 0x00)
 	if idx == -1 {

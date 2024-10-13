@@ -1,6 +1,7 @@
 package models
 
 import (
+	"crypto/tls"
 	"time"
 
 	"go.keploy.io/server/v2/config"
@@ -20,6 +21,13 @@ type OutgoingOptions struct {
 	SQLDelay       time.Duration // This is the same as Application delay.
 	FallBackOnMiss bool          // this enables to pass the request to the actual server if no mock is found during test mode.
 	Mocking        bool          // used to enable/disable mocking
+	DstCfg         *ConditionalDstCfg
+}
+
+type ConditionalDstCfg struct {
+	Addr   string // Destination Addr (ip:port)
+	Port   uint
+	TLSCfg *tls.Config
 }
 
 type IncomingOptions struct {
