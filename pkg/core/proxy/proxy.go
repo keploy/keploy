@@ -200,7 +200,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		readyChan <- err
 		return err
 	}
-  
+
 	p.Listener = listener
 	p.logger.Debug(fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(":%v", listener.Addr())))
 	// Signal that the server is ready
