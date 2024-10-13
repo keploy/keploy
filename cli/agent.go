@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/go-chi/chi"
+	"github.com/go-chi/chi/v5"
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/agent/routes"
