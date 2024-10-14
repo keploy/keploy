@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/utils"
@@ -297,7 +298,7 @@ func (srv *Transcoder) ListenAndServe(ctx context.Context) error {
 			return ctx.Err()
 		default:
 			frame, err := srv.framer.ReadFrame()
-			if err != nil {
+			if err != nil && err.Error() != "EOF" && err.Error() != "http2: connection is closed" && strings.Contains(err.Error(), "read: connection reset by peer") {
 				utils.LogError(srv.logger, err, "Failed to read frame")
 				return err
 			}
