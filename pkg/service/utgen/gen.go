@@ -148,7 +148,7 @@ func updateImports(filePath string, language string, imports string) (int, error
 	case "go":
 		updatedContent, importLength, err = updateGoImports(content, newImports)
 	case "java":
-		updatedContent, err = updateJavaImports(content, newImports)
+		updatedContent, importLength, err = updateJavaImports(content, newImports)
 	case "python":
 		updatedContent, err = updatePythonImports(content, newImports)
 	case "typescript":
@@ -237,19 +237,18 @@ func createGoImportBlock(imports []string) string {
 	return importBlock
 }
 
-func updateJavaImports(content string, newImports []string) (string, error) {
+func updateJavaImports(codeContent string, newImports []string) (string, int, error) {
 	importRegex := regexp.MustCompile(`(?m)^import\s+.*?;`)
 	existingImportsSet := make(map[string]bool)
 
-	existingImports := importRegex.FindAllString(content, -1)
+	existingImports := importRegex.FindAllString(codeContent, -1)
 	for _, imp := range existingImports {
 		existingImportsSet[imp] = true
 	}
-
-	for _, imp := range newImports {
-		imp = strings.TrimSpace(imp)
-		if imp != "\"\"" && len(imp) > 0 {
-			importStatement := fmt.Sprintf("import %s;", imp)
+	for _, importStatement := range newImports {
+		importStatement = strings.ReplaceAll(importStatement, "-", "")
+		importStatement = strings.TrimSpace(importStatement)
+		if importStatement != "\"\"" && len(importStatement) > 0 {
 			existingImportsSet[importStatement] = true
 		}
 	}
@@ -258,18 +257,35 @@ func updateJavaImports(content string, newImports []string) (string, error) {
 	for imp := range existingImportsSet {
 		allImports = append(allImports, imp)
 	}
-	importSection := strings.Join(allImports, "\n")
+	importedContent := strings.Join(allImports, "\n")
+	updatedContent := importRegex.ReplaceAllString(codeContent, "")
+	updatedContent = strings.Trim(updatedContent, "\n")
+	lines := strings.Split(updatedContent, "\n")
+	cleanedLines := []string{}
 
-	updatedContent := importRegex.ReplaceAllString(content, "")
+	for _, line := range lines {
+		trimmedLine := strings.TrimSpace(line)
+		if trimmedLine != "" {
+			cleanedLines = append(cleanedLines, line) // Keep non-empty lines
+		}
+	}
+	updatedContent = strings.Join(cleanedLines, "\n")
+
 	packageRegex := regexp.MustCompile(`(?m)^package\s+.*?;`)
 	pkgMatch := packageRegex.FindStringIndex(updatedContent)
 	insertPos := 0
 	if pkgMatch != nil {
 		insertPos = pkgMatch[1]
 	}
+	updatedContent = updatedContent[:insertPos] + "\n\n" + importedContent + "\n" + updatedContent[insertPos:]
+	originalImportCount := len(existingImports)
+	newImportCount := len(allImports)
 
-	updatedContent = updatedContent[:insertPos] + "\n\n" + importSection + "\n" + updatedContent[insertPos:]
-	return updatedContent, nil
+	importLength := newImportCount - originalImportCount
+	if importLength < 0 {
+		importLength = 0
+	}
+	return updatedContent, importLength, nil
 }
 
 func updatePythonImports(content string, newImports []string) (string, error) {
@@ -976,7 +992,6 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 	*passedTests++
 	g.cov.Current = covResult.Coverage
 	g.cur.Line = g.cur.Line + len(testCodeLines) + importLen
-	g.cur.Line = g.cur.Line + len(testCodeLines)
 	g.logger.Info("Generated test passed and increased coverage")
 	return nil
 }
