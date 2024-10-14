@@ -3,13 +3,17 @@
 package replayer
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"net"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	mysqlUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire"
+	pTls "go.keploy.io/server/v2/pkg/core/proxy/tls"
+	pUtils "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.keploy.io/server/v2/utils"
@@ -21,8 +25,12 @@ type reqResp struct {
 	resp []mysql.Response
 }
 
+type handshakeRes struct {
+	tlsClientConn net.Conn
+}
+
 // Replay mode
-func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mocks []*models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) error {
+func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mocks []*models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) (handshakeRes, error) {
 	// Get the mock for initial handshake
 	initialHandshakeMock := mocks[0]
 
@@ -30,15 +38,18 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 	resp := initialHandshakeMock.Spec.MySQLResponses
 	req := initialHandshakeMock.Spec.MySQLRequests
 
+	res := handshakeRes{}
+	reqIdx, respIdx := 0, 0
+
 	if len(resp) == 0 || len(req) == 0 {
 		utils.LogError(logger, nil, "no mysql mocks found for initial handshake")
-		return nil
+		return res, nil
 	}
 
-	handshake, ok := resp[0].Message.(*mysql.HandshakeV10Packet)
+	handshake, ok := resp[respIdx].Message.(*mysql.HandshakeV10Packet)
 	if !ok {
 		utils.LogError(logger, nil, "failed to assert handshake packet")
-		return nil
+		return res, nil
 	}
 
 	// Store the server greetings
@@ -46,187 +57,261 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 
 	// Set the intial auth plugin
 	decodeCtx.PluginName = handshake.AuthPluginName
+	var err error
 
 	// encode the response
-	buf, err := wire.EncodeToBinary(ctx, logger, &resp[0].PacketBundle, clientConn, decodeCtx)
+	buf, err := wire.EncodeToBinary(ctx, logger, &resp[respIdx].PacketBundle, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode handshake packet")
-		return err
+		return res, err
 	}
 
 	// Write the initial handshake to the client
 	_, err = clientConn.Write(buf)
 	if err != nil {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return res, ctx.Err()
 		}
 		utils.LogError(logger, err, "failed to write server greetings to the client")
 
-		return err
+		return res, err
 	}
 
-	// Read the client request
+	respIdx++
+
+	// Read the client request, (handshake response or ssl request)
 	handshakeResponseBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read handshake response from client")
-		return err
+		return res, err
 	}
 
-	// Decode the handshakeResponse
+	// Decode the handshakeResponse or sslRequest
 	pkt, err := wire.DecodePayload(ctx, logger, handshakeResponseBuf, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode handshake response from client")
-		return err
+		return res, err
+	}
+
+	// handle the SSL request
+	if decodeCtx.UseSSL {
+		_, ok := pkt.Message.(*mysql.SSLRequestPacket)
+		if !ok {
+			utils.LogError(logger, nil, "failed to assert SSL request packet")
+			return res, nil
+		}
+
+		// Get the SSL request from the mock
+		_, ok = req[reqIdx].Message.(*mysql.SSLRequestPacket)
+		if !ok {
+			utils.LogError(logger, nil, "failed to assert mock SSL request packet", zap.Any("expected", req[reqIdx].PacketBundle.Header.Type))
+			return res, nil
+		}
+
+		// Match the SSL request from the client with the mock
+		err = matchSSLRequest(ctx, logger, req[reqIdx].PacketBundle, *pkt)
+		if err != nil {
+			utils.LogError(logger, err, "error while matching SSL request")
+			return res, err
+		}
+		reqIdx++ // matched with the mock so increment the index
+
+		// Upgrade the client connection to TLS
+		reader := bufio.NewReader(clientConn)
+		initialData := make([]byte, 5)
+		// reading the initial data from the client connection to determine if the connection is a TLS handshake
+		testBuffer, err := reader.Peek(len(initialData))
+		if err != nil {
+			if err == io.EOF && len(testBuffer) == 0 {
+				logger.Debug("received EOF, closing conn", zap.Error(err))
+				return res, nil
+			}
+			utils.LogError(logger, err, "failed to peek the mysql request message in proxy")
+			return res, err
+		}
+
+		multiReader := io.MultiReader(reader, clientConn)
+		clientConn = &pUtils.Conn{
+			Conn:   clientConn,
+			Reader: multiReader,
+			Logger: logger,
+		}
+
+		// handle the TLS connection and get the upgraded client connection
+		isTLS := pTls.IsTLSHandshake(testBuffer)
+		if isTLS {
+			clientConn, err = pTls.HandleTLSConnection(ctx, logger, clientConn)
+			if err != nil {
+				utils.LogError(logger, err, "failed to handle TLS conn")
+				return res, err
+			}
+		}
+
+		// Update this tls connection information in the handshake result
+		res.tlsClientConn = clientConn
+
+		// Store (Reset) the last operation for the upgraded client connection, because after ssl request the client will send the handshake response packet again.
+		decodeCtx.LastOp.Store(clientConn, mysql.HandshakeV10)
+
+		// Store the server greeting packet for the upgraded client connection
+		decodeCtx.ServerGreetings.Store(clientConn, handshake)
+
+		// read the actual handshake response packet
+		handshakeResponseBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
+		if err != nil {
+			utils.LogError(logger, err, "failed to read handshake response from client")
+			return res, err
+		}
+
+		// Decode the handshakeResponse
+		pkt, err = wire.DecodePayload(ctx, logger, handshakeResponseBuf, clientConn, decodeCtx)
+		if err != nil {
+			utils.LogError(logger, err, "failed to decode handshake response from client")
+			return res, err
+		}
 	}
 
 	_, ok = pkt.Message.(*mysql.HandshakeResponse41Packet)
 	if !ok {
 		utils.LogError(logger, nil, "failed to assert actual handshake response packet")
-		return nil
+		return res, nil
 	}
 
 	// Get the handshake response from the mock
-	_, ok = req[0].Message.(*mysql.HandshakeResponse41Packet)
+	_, ok = req[reqIdx].Message.(*mysql.HandshakeResponse41Packet)
 	if !ok {
 		utils.LogError(logger, nil, "failed to assert mock handshake response packet")
-		return nil
+		return res, nil
 	}
 
 	// Match the handshake response from the client with the mock
-	logger.Debug("matching handshake response", zap.Any("actual", pkt), zap.Any("mock", req[0].PacketBundle))
-	err = matchHanshakeResponse41(ctx, logger, req[0].PacketBundle, *pkt)
+	logger.Debug("matching handshake response", zap.Any("actual", pkt), zap.Any("mock", req[reqIdx].PacketBundle))
+	err = matchHanshakeResponse41(ctx, logger, req[reqIdx].PacketBundle, *pkt)
 	if err != nil {
 		utils.LogError(logger, err, "error while matching handshakeResponse41")
-		return err
+		return res, err
 	}
+	reqIdx++ // matched with the mock so increment the index
 
 	// Get the next response in order to find the auth mechanism
-	if len(resp) < 2 {
+	if len(resp) < respIdx+1 {
 		utils.LogError(logger, nil, "no mysql mocks found for auth mechanism")
-		return nil
+		return res, nil
 	}
 
 	// Get the next packet to decide the auth mechanism or auth switching
 	// For Native password: next packet is Ok/Err
 	// For CachingSha2 password: next packet is AuthMoreData
 
-	authDecider := resp[1].PacketBundle.Header.Type
-
-	var authSwitched bool
+	authDecider := resp[respIdx].PacketBundle.Header.Type
 
 	// Check if the next packet is AuthSwitchRequest
 	// Server sends AuthSwitchRequest when it wants to switch the auth mechanism
 	if authDecider == mysql.AuthStatusToString(mysql.AuthSwitchRequest) {
 		logger.Debug("Auth switch request found, switching the auth mechanism")
-		authSwitched = true
 
 		// Get the AuthSwitchRequest packet
-		authSwithReqPkt, ok := resp[1].Message.(*mysql.AuthSwitchRequestPacket)
+		authSwithReqPkt, ok := resp[respIdx].Message.(*mysql.AuthSwitchRequestPacket)
 		if !ok {
 			utils.LogError(logger, nil, "failed to assert auth switch request packet")
-			return nil
+			return res, nil
 		}
 
 		// Change the auth plugin name
 		decodeCtx.PluginName = authSwithReqPkt.PluginName
 
 		// Encode the AuthSwitchRequest packet
-		buf, err = wire.EncodeToBinary(ctx, logger, &resp[1].PacketBundle, clientConn, decodeCtx)
+		buf, err = wire.EncodeToBinary(ctx, logger, &resp[respIdx].PacketBundle, clientConn, decodeCtx)
 		if err != nil {
 			utils.LogError(logger, err, "failed to encode auth switch request packet")
-			return err
+			return res, err
 		}
 
 		// Write the AuthSwitchRequest packet to the client
 		_, err = clientConn.Write(buf)
 		if err != nil {
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return res, ctx.Err()
 			}
 			utils.LogError(logger, err, "failed to write auth switch request to the client")
-			return err
+			return res, err
 		}
+
+		respIdx++
 
 		// Read the auth switch response from the client
 		authSwitchRespBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
 		if err != nil {
 			utils.LogError(logger, err, "failed to read auth switch response from the client")
-			return err
+			return res, err
 		}
 
 		// Get the packet from the buffer
 		authSwitchRespPkt, err := mysqlUtils.BytesToMySQLPacket(authSwitchRespBuf)
 		if err != nil {
 			utils.LogError(logger, err, "failed to convert auth switch response to packet")
-			return err
+			return res, err
 		}
 
-		if len(req) < 2 {
+		if len(req) < reqIdx+1 {
 			utils.LogError(logger, nil, "no mysql mocks found for auth switch response")
-			return fmt.Errorf("no mysql mocks found for auth switch response")
+			return res, fmt.Errorf("no mysql mocks found for auth switch response")
 		}
 
 		// Get the auth switch response from the mock
-		authSwitchRespMock := req[1].PacketBundle
+		authSwitchRespMock := req[reqIdx].PacketBundle
 
 		if authSwitchRespMock.Header.Type != mysql.AuthSwithResponse {
 			utils.LogError(logger, nil, "expected auth switch response mock not found", zap.Any("found", authSwitchRespMock.Header.Type))
-			return fmt.Errorf("expected %s but found %s", mysql.AuthSwithResponse, authSwitchRespMock.Header.Type)
+			return res, fmt.Errorf("expected %s but found %s", mysql.AuthSwithResponse, authSwitchRespMock.Header.Type)
 		}
 
 		// Since auth switch response data can be different, we should just check the sequence number
 		if authSwitchRespMock.Header.Header.SequenceID != authSwitchRespPkt.Header.SequenceID {
 			utils.LogError(logger, nil, "sequence number mismatch for auth switch response", zap.Any("expected", authSwitchRespMock.Header.Header.SequenceID), zap.Any("actual", authSwitchRespPkt.Header.SequenceID))
-			return fmt.Errorf("sequence number mismatch for auth switch response")
+			return res, fmt.Errorf("sequence number mismatch for auth switch response")
 		}
 
 		logger.Debug("auth mechanism switched successfully")
 
+		reqIdx++
+
 		// Get the next packet to decide the auth mechanism
-		if len(resp) < 3 {
+		if len(resp) < respIdx+1 {
 			utils.LogError(logger, nil, "no mysql mocks found for auth mechanism after auth switch request")
-			return nil
+			return res, nil
 		}
 
-		authDecider = resp[2].PacketBundle.Header.Type
+		authDecider = resp[respIdx].PacketBundle.Header.Type
 	}
 
 	switch authDecider {
 	case mysql.StatusToString(mysql.OK):
 		var nativePassMocks reqResp
-		if authSwitched {
-			nativePassMocks.resp = resp[2:]
-		} else {
-			nativePassMocks.resp = resp[1:]
-		}
+		nativePassMocks.resp = resp[respIdx:]
 
 		// It means we need to simulate the native password
 		err := simulateNativePassword(ctx, logger, clientConn, nativePassMocks, initialHandshakeMock, mockDb, decodeCtx)
 		if err != nil {
 			utils.LogError(logger, err, "failed to simulate native password")
-			return err
+			return res, err
 		}
 
 	case mysql.AuthStatusToString(mysql.AuthMoreData):
 
 		var cacheSha2PassMock reqResp
-		if authSwitched {
-			cacheSha2PassMock.req = req[2:]
-			cacheSha2PassMock.resp = resp[2:]
-		} else {
-			cacheSha2PassMock.req = req[1:]
-			cacheSha2PassMock.resp = resp[1:]
-		}
+		cacheSha2PassMock.req = req[reqIdx:]
+		cacheSha2PassMock.resp = resp[respIdx:]
 
 		// It means we need to simulate the caching_sha2_password
 		err := simulateCacheSha2Password(ctx, logger, clientConn, cacheSha2PassMock, initialHandshakeMock, mockDb, decodeCtx)
 		if err != nil {
 			utils.LogError(logger, err, "failed to simulate caching_sha2_password")
-			return err
+			return res, err
 		}
 	}
 
-	return nil
+	return res, nil
 }
 
 func simulateNativePassword(ctx context.Context, logger *zap.Logger, clientConn net.Conn, nativePassMocks reqResp, initialHandshakeMock *models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) error {

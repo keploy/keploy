@@ -17,7 +17,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
+func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
 	redisRequests := [][]byte{reqBuf}
 	logger.Debug("Into the redis parser in test mode")
 	errCh := make(chan error, 1)
