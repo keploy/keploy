@@ -244,7 +244,7 @@ func Export(_ context.Context, logger *zap.Logger) error {
 		if v.Name() != "reports" && v.Name() != "testReports" && v.IsDir() {
 			testsDir := filepath.Join(keployDir, v.Name(), "tests")
 			if _, err := os.Stat(testsDir); os.IsNotExist(err) {
-				utils.LogError(logger, err, "tests directory does not exist", zap.String("path", testsDir))
+				logger.Info("No tests found. Skipping export.", zap.String("path", testsDir))
 				continue
 			}
 			// Read the "tests" subfolder
@@ -323,7 +323,7 @@ func Export(_ context.Context, logger *zap.Logger) error {
 		return err
 	}
 
-	fmt.Println("Curls exported to output.json")
+	fmt.Println("✅ Curls successfully exported to output.json 🎉")
 
 	return nil
 }
