@@ -20,7 +20,7 @@ import (
 
 // Mock Yaml to Binary
 
-func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	errCh := make(chan error, 1)
 
 	unfiltered, err := mockDb.GetUnFilteredMocks()
@@ -62,17 +62,26 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *int
 			ServerGreetings: wire.NewGreetings(),
 			// Map for storing prepared statements per connection
 			PreparedStatements: make(map[uint32]*mysql.StmtPrepareOkPacket),
-			PluginName:         string(mysql.CachingSha2), // Only supported plugin for now
+			PluginName:         string(mysql.CachingSha2), // usually a default plugin in newer versions of MySQL
 		}
 		decodeCtx.LastOp.Store(clientConn, wire.RESET) //resetting last command for new loop
 
 		// Simulate the initial client-server handshake (connection phase)
 
-		err := simulateInitialHandshake(ctx, logger, clientConn, configMocks, mockDb, decodeCtx)
+		res, err := simulateInitialHandshake(ctx, logger, clientConn, configMocks, mockDb, decodeCtx)
 		if err != nil {
 			utils.LogError(logger, err, "failed to simulate initial handshake")
 			errCh <- err
 			return
+		}
+
+		if decodeCtx.UseSSL {
+			if res.tlsClientConn == nil {
+				logger.Error("SSL is enabled but could not get the tls client connection")
+				errCh <- nil
+				return
+			}
+			clientConn = res.tlsClientConn
 		}
 
 		logger.Debug("Initial handshake completed successfully")

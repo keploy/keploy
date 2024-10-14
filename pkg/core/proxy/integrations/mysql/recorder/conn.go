@@ -3,7 +3,9 @@
 package recorder
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -12,6 +14,9 @@ import (
 	mysqlUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire"
 	intgUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
+	pTls "go.keploy.io/server/v2/pkg/core/proxy/tls"
+	pUtils "go.keploy.io/server/v2/pkg/core/proxy/util"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -24,9 +29,11 @@ type handshakeRes struct {
 	requestOperation  string
 	responseOperation string
 	reqTimestamp      time.Time
+	tlsClientConn     net.Conn
+	tlsDestConn       net.Conn
 }
 
-func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, decodeCtx *wire.DecodeContext) (handshakeRes, error) {
+func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) (handshakeRes, error) {
 
 	res := handshakeRes{
 		req:  make([]mysql.Request, 0),
@@ -78,7 +85,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		PacketBundle: *handshakePkt,
 	})
 
-	// Handshake response from client
+	// Handshake response from client (or SSL request)
 	handshakeResponse, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
 	if err != nil {
 		if err == io.EOF {
@@ -100,7 +107,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		return res, err
 	}
 
-	// Decode client handshake response packet
+	// Decode client handshake response (or SSL) packet
 	handshakeResponsePkt, err := wire.DecodePayload(ctx, logger, handshakeResponse, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode handshake response packet")
@@ -110,6 +117,110 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 	res.req = append(res.req, mysql.Request{
 		PacketBundle: *handshakeResponsePkt,
 	})
+
+	// handle the SSL request
+	if decodeCtx.UseSSL {
+
+		reader := bufio.NewReader(clientConn)
+		initialData := make([]byte, 5)
+		// reading the initial data from the client connection to determine if the connection is a TLS handshake
+		testBuffer, err := reader.Peek(len(initialData))
+		if err != nil {
+			if err == io.EOF && len(testBuffer) == 0 {
+				logger.Debug("received EOF, closing conn", zap.Error(err))
+				return res, nil
+			}
+			utils.LogError(logger, err, "failed to peek the mysql request message in proxy")
+			return res, err
+		}
+
+		multiReader := io.MultiReader(reader, clientConn)
+		clientConn = &pUtils.Conn{
+			Conn:   clientConn,
+			Reader: multiReader,
+			Logger: logger,
+		}
+
+		// handle the TLS connection and get the upgraded client connection
+		isTLS := pTls.IsTLSHandshake(testBuffer)
+		if isTLS {
+			clientConn, err = pTls.HandleTLSConnection(ctx, logger, clientConn)
+			if err != nil {
+				utils.LogError(logger, err, "failed to handle TLS conn")
+				return res, err
+			}
+		}
+
+		// upgrade the destConn to TLS if the client connection is upgraded to TLS
+		var tlsDestConn *tls.Conn
+		if isTLS {
+			addr := fmt.Sprintf("%v:%v", pTls.DstURL, opts.DstCfg.Port)
+			tlsConfig := &tls.Config{
+				InsecureSkipVerify: true,
+				ServerName:         pTls.DstURL,
+			}
+
+			logger.Debug("Upgrading the destination connection to TLS", zap.String("Destination Addr", addr), zap.String("ServerName", tlsConfig.ServerName))
+
+			tlsDestConn = tls.Client(destConn, tlsConfig)
+			err = tlsDestConn.Handshake()
+			if err != nil {
+				utils.LogError(logger, err, "failed to upgrade the destination connection to TLS for mysql")
+				return res, err
+			}
+			logger.Debug("TLS connection established with the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
+
+			// Update the destination connection to TLS connection
+			destConn = tlsDestConn
+		}
+
+		// Update this tls connection information in the handshake result
+		res.tlsClientConn = clientConn
+		res.tlsDestConn = destConn
+
+		// Store (Reset) the last operation for the upgraded client connection, because after ssl request the client will send the handshake response packet again.
+		decodeCtx.LastOp.Store(clientConn, mysql.HandshakeV10)
+
+		// Store the server greeting packet for the upgraded client connection
+		sg, ok := handshakePkt.Message.(*mysql.HandshakeV10Packet)
+		if !ok {
+			return res, fmt.Errorf("failed to type assert handshake packet")
+		}
+		decodeCtx.ServerGreetings.Store(clientConn, sg)
+
+		// Read the handshake response packet from the client
+		handshakeResponse, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
+		if err != nil {
+			if err == io.EOF {
+				logger.Debug("received request buffer is empty in record mode for mysql call")
+				return res, err
+			}
+			utils.LogError(logger, err, "failed to read handshake response from client")
+
+			return res, err
+		}
+
+		_, err = destConn.Write(handshakeResponse)
+		if err != nil {
+			if ctx.Err() != nil {
+				return res, ctx.Err()
+			}
+			utils.LogError(logger, err, "failed to write handshake response to server")
+
+			return res, err
+		}
+
+		// Decode client handshake response packet
+		handshakeResponsePkt, err := wire.DecodePayload(ctx, logger, handshakeResponse, clientConn, decodeCtx)
+		if err != nil {
+			utils.LogError(logger, err, "failed to decode handshake response packet")
+			return res, err
+		}
+
+		res.req = append(res.req, mysql.Request{
+			PacketBundle: *handshakeResponsePkt,
+		})
+	}
 
 	// Read the next auth packet,
 	// It can be either auth more data if authentication from both server and client are agreed.(caching_sha2_password)
