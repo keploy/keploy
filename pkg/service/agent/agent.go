@@ -8,9 +8,9 @@ import (
 	"errors"
 	"fmt"
 
+	"go.keploy.io/server/v2/pkg/agent/hooks"
+	"go.keploy.io/server/v2/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v2/pkg/core"
-	"go.keploy.io/server/v2/pkg/core/hooks"
-	"go.keploy.io/server/v2/pkg/core/hooks/structs"
 	"go.keploy.io/server/v2/pkg/models"
 	kdocker "go.keploy.io/server/v2/pkg/platform/docker"
 	"go.keploy.io/server/v2/utils"

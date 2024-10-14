@@ -8,7 +8,7 @@ import (
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core/app"
-	"go.keploy.io/server/v2/pkg/core/hooks/structs"
+	"go.keploy.io/server/v2/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v2/utils"
 
 	"go.keploy.io/server/v2/pkg/models"

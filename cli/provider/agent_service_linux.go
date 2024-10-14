@@ -7,8 +7,8 @@ import (
 	"errors"
 
 	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/core/hooks"
-	"go.keploy.io/server/v2/pkg/core/proxy"
+	"go.keploy.io/server/v2/pkg/agent/hooks"
+	"go.keploy.io/server/v2/pkg/agent/proxy"
 	"go.keploy.io/server/v2/pkg/core/tester"
 	"go.keploy.io/server/v2/pkg/platform/docker"
 	"go.keploy.io/server/v2/pkg/platform/storage"
