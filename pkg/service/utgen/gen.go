@@ -241,11 +241,10 @@ func updateJavaImports(codeContent string, newImports []string) (string, int, er
 	importRegex := regexp.MustCompile(`(?m)^import\s+.*?;`)
 	existingImportsSet := make(map[string]bool)
 	existingImportMatches := importRegex.FindAllStringIndex(codeContent, -1)
-	existingImports := []string{}
+
 	for _, match := range existingImportMatches {
 		imp := codeContent[match[0]:match[1]]
 		existingImportsSet[imp] = true
-		existingImports = append(existingImports, imp)
 	}
 
 	importsToAdd := []string{}
