@@ -62,7 +62,7 @@ func encodeGrpc(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 	g.Go(func() error {
 		defer pUtil.Recover(logger, clientConn, destConn)
 		err := transferFrame(ctx, clientConn, destConn, streamInfoCollection, !reqFromClient, clientSideDecoder, mocks)
-		if err != nil && err.Error() != "EOF" && !strings.Contains(err.Error(), "use of closed network connection") {
+		if err != nil && err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection") {
 			utils.LogError(logger, err, "failed to transfer frame from server to client")
 			if ctx.Err() != nil { //to avoid sending error to the closed channel if the context is cancelled
 				return ctx.Err()

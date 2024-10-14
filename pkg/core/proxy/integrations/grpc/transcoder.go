@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"strings"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
@@ -118,7 +119,7 @@ func (srv *Transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 	}
 
 	// The headers are prepared. Write the frame.
-	srv.logger.Info("Writing the first set of headers in a new HEADER frame.")
+	srv.logger.Debug("Writing the first set of headers in a new HEADER frame.")
 	err = srv.framer.WriteHeaders(http2.HeadersFrameParam{
 		StreamID:      id,
 		BlockFragment: buf.Bytes(),
@@ -171,7 +172,7 @@ func (srv *Transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 	}
 
 	// The trailer is prepared. Write the frame.
-	srv.logger.Info("Writing the trailers in a different HEADER frame")
+	srv.logger.Debug("Writing the trailers in a different HEADER frame")
 	err = srv.framer.WriteHeaders(http2.HeadersFrameParam{
 		StreamID:      id,
 		BlockFragment: buf.Bytes(),
@@ -188,7 +189,7 @@ func (srv *Transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 
 func (srv *Transcoder) ProcessWindowUpdateFrame(_ *http2.WindowUpdateFrame) error {
 	// Silently ignore Window tools frames, as we already know the mock payloads that we would send.
-	srv.logger.Info("Received Window Update Frame. Skipping it...")
+	srv.logger.Debug("Received Window Update Frame. Skipping it...")
 	return nil
 }
 
@@ -210,7 +211,7 @@ func (srv *Transcoder) ProcessSettingsFrame(settingsFrame *http2.SettingsFrame) 
 func (srv *Transcoder) ProcessGoAwayFrame(_ *http2.GoAwayFrame) error {
 	// We do not support a client that requests a server to shut down during test mode. Warn the user.
 	// TODO : Add support for dynamically shutting down mock server using a channel to send close request.
-	srv.logger.Warn("Received GoAway Frame. Ideally, clients should not close server during test mode.")
+	srv.logger.Debug("Received GoAway Frame. Ideally, clients should not close server during test mode.")
 	return nil
 }
 
@@ -298,7 +299,7 @@ func (srv *Transcoder) ListenAndServe(ctx context.Context) error {
 			return ctx.Err()
 		default:
 			frame, err := srv.framer.ReadFrame()
-			if err != nil && err.Error() != "EOF" && err.Error() != "http2: connection is closed" && !strings.Contains(err.Error(), "read: connection reset by peer") {
+			if err != nil && err != io.EOF && err.Error() != "http2: connection is closed" && !strings.Contains(err.Error(), "read: connection reset by peer") {
 				utils.LogError(srv.logger, err, "Failed to read frame")
 				return err
 			}

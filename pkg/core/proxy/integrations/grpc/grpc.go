@@ -5,6 +5,7 @@ package grpc
 import (
 	"bytes"
 	"context"
+	"io"
 	"net"
 	"strings"
 
@@ -62,7 +63,7 @@ func (g *Grpc) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.Co
 	}
 
 	err = decodeGrpc(ctx, logger, reqBuf, src, dstCfg, mockDb, opts)
-	if err != nil && err.Error() != "EOF" && !strings.Contains(err.Error(), "use of closed network connection") && !strings.Contains(err.Error(), "unknown frame received from the client") {
+	if err != nil && err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection") && !strings.Contains(err.Error(), "unknown frame received from the client") {
 		utils.LogError(logger, err, "failed to decode the grpc message from the yaml")
 		return err
 	}
