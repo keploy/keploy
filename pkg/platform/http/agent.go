@@ -21,8 +21,8 @@ import (
 
 	"github.com/docker/docker/api/types/events"
 	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/core/app"
 	"go.keploy.io/server/v2/pkg/agent/hooks"
+	"go.keploy.io/server/v2/pkg/core/app"
 	"go.keploy.io/server/v2/pkg/models"
 	kdocker "go.keploy.io/server/v2/pkg/platform/docker"
 	"go.keploy.io/server/v2/utils"
