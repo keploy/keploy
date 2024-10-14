@@ -8,9 +8,9 @@ import (
 	"errors"
 	"fmt"
 
+	"go.keploy.io/server/v2/pkg/agent"
 	"go.keploy.io/server/v2/pkg/agent/hooks"
 	"go.keploy.io/server/v2/pkg/agent/hooks/structs"
-	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/models"
 	kdocker "go.keploy.io/server/v2/pkg/platform/docker"
 	"go.keploy.io/server/v2/utils"
@@ -20,14 +20,14 @@ import (
 
 type Agent struct {
 	logger       *zap.Logger
-	core.Proxy                  // embedding the Proxy interface to transfer the proxy methods to the core object
-	core.Hooks                  // embedding the Hooks interface to transfer the hooks methods to the core object
-	core.Tester                 // embedding the Tester interface to transfer the tester methods to the core object
+	agent.Proxy                 // embedding the Proxy interface to transfer the proxy methods to the core object
+	agent.Hooks                 // embedding the Hooks interface to transfer the hooks methods to the core object
+	agent.Tester                // embedding the Tester interface to transfer the tester methods to the core object
 	dockerClient kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
 	proxyStarted bool
 }
 
-func New(logger *zap.Logger, hook core.Hooks, proxy core.Proxy, tester core.Tester, client kdocker.Client) *Agent {
+func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, tester agent.Tester, client kdocker.Client) *Agent {
 	return &Agent{
 		logger:       logger,
 		Hooks:        hook,
@@ -117,7 +117,7 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 	})
 
 	// load hooks if the mode changes ..
-	err := a.Hooks.Load(hookCtx, id, core.HookCfg{
+	err := a.Hooks.Load(hookCtx, id, agent.HookCfg{
 		AppID:      id,
 		Pid:        0,
 		IsDocker:   opts.IsDocker,
@@ -145,7 +145,7 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 	// TODO: Hooks can be loaded multiple times but proxy should be started only once
 	// if there is another containerized app, then we need to pass new (ip:port) of proxy to the eBPF
 	// as the network namespace is different for each container and so is the keploy/proxy IP to communicate with the app.
-	err = a.Proxy.StartProxy(proxyCtx, core.ProxyOptions{
+	err = a.Proxy.StartProxy(proxyCtx, agent.ProxyOptions{
 		DNSIPv4Addr: "172.18.0.2",
 		//DnsIPv6Addr: ""
 	})

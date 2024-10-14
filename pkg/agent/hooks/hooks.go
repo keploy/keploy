@@ -22,7 +22,7 @@ import (
 
 	"go.keploy.io/server/v2/pkg/agent/hooks/conn"
 	"go.keploy.io/server/v2/pkg/agent/hooks/structs"
-	"go.keploy.io/server/v2/pkg/core"
+	"go.keploy.io/server/v2/pkg/agent"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 )
@@ -33,7 +33,7 @@ func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 	}
 	return &Hooks{
 		logger:    logger,
-		sess:      core.NewSessions(),
+		sess:      agent.NewSessions(),
 		m:         sync.Mutex{},
 		proxyIP4:  "127.0.0.1",
 		proxyIP6:  [4]uint32{0000, 0000, 0000, 0001},
@@ -44,7 +44,7 @@ func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 
 type Hooks struct {
 	logger    *zap.Logger
-	sess      *core.Sessions
+	sess      *agent.Sessions
 	proxyIP4  string
 	proxyIP6  [4]uint32
 	proxyPort uint32
@@ -93,9 +93,9 @@ type Hooks struct {
 	writevRet   link.Link
 }
 
-func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
+func (h *Hooks) Load(ctx context.Context, id uint64, opts agent.HookCfg) error {
 
-	h.sess.Set(id, &core.Session{
+	h.sess.Set(id, &agent.Session{
 		ID: id,
 	})
 
@@ -122,7 +122,7 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 	return nil
 }
 
-func (h *Hooks) load(opts core.HookCfg) error {
+func (h *Hooks) load(opts agent.HookCfg) error {
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
 		utils.LogError(h.logger, err, "failed to lock memory for eBPF resources")

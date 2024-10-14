@@ -1,7 +1,7 @@
 //go:build !linux
 
 // Package core provides functionality for managing core functionalities in Keploy.
-package core
+package agent
 
 import (
 	"context"

@@ -1,14 +1,14 @@
 //go:build linux
 
-package core
+package agent
 
 import (
 	"context"
 	"sync"
 
 	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/core/app"
 	"go.keploy.io/server/v2/pkg/agent/hooks/structs"
+	"go.keploy.io/server/v2/pkg/client/app"
 	"go.keploy.io/server/v2/utils"
 
 	"go.keploy.io/server/v2/pkg/models"

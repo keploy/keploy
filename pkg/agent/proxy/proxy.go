@@ -21,8 +21,8 @@ import (
 
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/agent"
 	"go.keploy.io/server/v2/pkg/agent/proxy/integrations"
-	"go.keploy.io/server/v2/pkg/core"
 
 	pTls "go.keploy.io/server/v2/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v2/pkg/agent/proxy/util"
@@ -39,12 +39,12 @@ type Proxy struct {
 	Port    uint32
 	DNSPort uint32
 
-	DestInfo     core.DestInfo
+	DestInfo     agent.DestInfo
 	Integrations map[string]integrations.Integrations
 
 	MockManagers sync.Map
 
-	sessions *core.Sessions
+	sessions *agent.Sessions
 
 	connMutex *sync.Mutex
 	ipMutex   *sync.Mutex
@@ -59,7 +59,7 @@ type Proxy struct {
 	TCPDNSServer *dns.Server
 }
 
-func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
+func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	if opts.Agent.IsDocker {
 		logger.Info("Running in docker environment proxy port will be set to 36789")
 		opts.ProxyPort = 36789
@@ -73,7 +73,7 @@ func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
 		ipMutex:      &sync.Mutex{},
 		connMutex:    &sync.Mutex{},
 		DestInfo:     info,
-		sessions:     core.NewSessions(),
+		sessions:     agent.NewSessions(),
 		MockManagers: sync.Map{},
 		Integrations: make(map[string]integrations.Integrations),
 	}
@@ -88,7 +88,7 @@ func (p *Proxy) InitIntegrations(_ context.Context) error {
 	return nil
 }
 
-func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
+func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 
 	//first initialize the integrations
 	err := p.InitIntegrations(ctx)
@@ -587,7 +587,7 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 }
 
 func (p *Proxy) Record(_ context.Context, id uint64, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
-	p.sessions.Set(id, &core.Session{
+	p.sessions.Set(id, &agent.Session{
 		ID:              id,
 		Mode:            models.MODE_RECORD,
 		MC:              mocks,
@@ -605,7 +605,7 @@ func (p *Proxy) Record(_ context.Context, id uint64, mocks chan<- *models.Mock, 
 }
 
 func (p *Proxy) Mock(_ context.Context, id uint64, opts models.OutgoingOptions) error {
-	p.sessions.Set(id, &core.Session{
+	p.sessions.Set(id, &agent.Session{
 		ID:              id,
 		Mode:            models.MODE_TEST,
 		OutgoingOptions: opts,

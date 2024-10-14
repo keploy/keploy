@@ -7,8 +7,8 @@ import (
 	"fmt"
 
 	"github.com/cilium/ebpf"
+	"go.keploy.io/server/v2/pkg/agent"
 	"go.keploy.io/server/v2/pkg/agent/hooks/structs"
-	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -16,7 +16,7 @@ import (
 //TODO: rename this file.
 
 // Get Used by proxy
-func (h *Hooks) Get(_ context.Context, srcPort uint16) (*core.NetworkAddress, error) {
+func (h *Hooks) Get(_ context.Context, srcPort uint16) (*agent.NetworkAddress, error) {
 	d, err := h.GetDestinationInfo(srcPort)
 	if err != nil {
 		return nil, err
@@ -27,7 +27,7 @@ func (h *Hooks) Get(_ context.Context, srcPort uint16) (*core.NetworkAddress, er
 		return nil, fmt.Errorf("session not found")
 	}
 
-	return &core.NetworkAddress{
+	return &agent.NetworkAddress{
 		AppID:    s.ID,
 		Version:  d.IPVersion,
 		IPv4Addr: d.DestIP4,

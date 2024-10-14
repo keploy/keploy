@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"time"
 
-	"go.keploy.io/server/v2/pkg/core"
+	"go.keploy.io/server/v2/pkg/agent"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -17,10 +17,10 @@ import (
 
 type Tester struct {
 	logger        *zap.Logger
-	testBenchInfo core.TestBenchInfo
+	testBenchInfo agent.TestBenchInfo
 }
 
-func New(logger *zap.Logger, testBenchInfo core.TestBenchInfo) *Tester {
+func New(logger *zap.Logger, testBenchInfo agent.TestBenchInfo) *Tester {
 	return &Tester{
 		logger:        logger,
 		testBenchInfo: testBenchInfo,
