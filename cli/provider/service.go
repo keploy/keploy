@@ -31,7 +31,6 @@ func NewServiceProvider(logger *zap.Logger, cfg *config.Config, auth service.Aut
 }
 
 func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface{}, error) {
-
 	tel := telemetry.NewTelemetry(n.logger, telemetry.Options{
 		Enabled:        !n.cfg.DisableTele,
 		Version:        utils.Version,
@@ -47,6 +46,8 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 		return utgen.NewUnitTestGenerator(n.cfg, tel, n.auth, n.logger)
 	case "record", "test", "mock", "normalize", "templatize", "rerecord", "contract":
 		return Get(ctx, cmd, n.cfg, n.logger, tel, n.auth)
+	case "diff":
+		return utils.NewDiffService(n.logger), nil
 	default:
 		return nil, errors.New("invalid command")
 	}
