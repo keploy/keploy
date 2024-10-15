@@ -99,7 +99,7 @@ func updateJavaScriptImports(importedContent string, newImports []string) (strin
 
 	for _, imp := range newImports {
 		imp = strings.TrimSpace(imp)
-		if imp != "\"\"" && len(imp) > 0 {
+		if importRegex.MatchString(imp) {
 			existingImportsSet[imp] = true
 		}
 	}
@@ -148,7 +148,7 @@ func updateImports(filePath string, language string, imports string) (int, error
 	case "go":
 		updatedContent, importLength, err = updateGoImports(content, newImports)
 	case "java":
-		updatedContent, err = updateJavaImports(content, newImports)
+		updatedContent, importLength, err = updateJavaImports(content, newImports)
 	case "python":
 		updatedContent, err = updatePythonImports(content, newImports)
 	case "typescript":
@@ -237,39 +237,49 @@ func createGoImportBlock(imports []string) string {
 	return importBlock
 }
 
-func updateJavaImports(content string, newImports []string) (string, error) {
+func updateJavaImports(codeContent string, newImports []string) (string, int, error) {
 	importRegex := regexp.MustCompile(`(?m)^import\s+.*?;`)
 	existingImportsSet := make(map[string]bool)
+	existingImportMatches := importRegex.FindAllStringIndex(codeContent, -1)
 
-	existingImports := importRegex.FindAllString(content, -1)
-	for _, imp := range existingImports {
+	for _, match := range existingImportMatches {
+		imp := codeContent[match[0]:match[1]]
 		existingImportsSet[imp] = true
 	}
 
-	for _, imp := range newImports {
-		imp = strings.TrimSpace(imp)
-		if imp != "\"\"" && len(imp) > 0 {
-			importStatement := fmt.Sprintf("import %s;", imp)
+	importsToAdd := []string{}
+	for _, importStatement := range newImports {
+		importStatement = strings.ReplaceAll(importStatement, "-", "")
+		importStatement = strings.TrimSpace(importStatement)
+		importStatement = strings.Trim(importStatement, "\"")
+		if importRegex.MatchString(importStatement) && !existingImportsSet[importStatement] {
 			existingImportsSet[importStatement] = true
+			importsToAdd = append(importsToAdd, importStatement)
 		}
 	}
+	if len(importsToAdd) > 0 {
+		insertPos := 0
+		if len(existingImportMatches) > 0 {
+			lastImportMatch := existingImportMatches[len(existingImportMatches)-1]
+			insertPos = lastImportMatch[1] // position after last existing import
+		} else {
+			packageRegex := regexp.MustCompile(`(?m)^package\s+.*?;`)
+			pkgMatch := packageRegex.FindStringIndex(codeContent)
+			if pkgMatch != nil {
+				insertPos = pkgMatch[1]
+			} else {
+				insertPos = 0
+			}
+		}
 
-	allImports := make([]string, 0, len(existingImportsSet))
-	for imp := range existingImportsSet {
-		allImports = append(allImports, imp)
+		importedContent := "\n" + strings.Join(importsToAdd, "\n") + "\n"
+
+		updatedContent := codeContent[:insertPos] + importedContent + codeContent[insertPos:]
+
+		return updatedContent, len(importsToAdd), nil
 	}
-	importSection := strings.Join(allImports, "\n")
+	return codeContent, 0, nil
 
-	updatedContent := importRegex.ReplaceAllString(content, "")
-	packageRegex := regexp.MustCompile(`(?m)^package\s+.*?;`)
-	pkgMatch := packageRegex.FindStringIndex(updatedContent)
-	insertPos := 0
-	if pkgMatch != nil {
-		insertPos = pkgMatch[1]
-	}
-
-	updatedContent = updatedContent[:insertPos] + "\n\n" + importSection + "\n" + updatedContent[insertPos:]
-	return updatedContent, nil
 }
 
 func updatePythonImports(content string, newImports []string) (string, error) {
@@ -409,7 +419,7 @@ func updateTypeScriptImports(importedContent string, newImports []string) (strin
 
 	for _, imp := range newImports {
 		imp = strings.TrimSpace(imp)
-		if imp != "\"\"" && len(imp) > 0 {
+		if importRegex.MatchString(imp) {
 			existingImportsSet[imp] = true
 		}
 	}
@@ -976,7 +986,6 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 	*passedTests++
 	g.cov.Current = covResult.Coverage
 	g.cur.Line = g.cur.Line + len(testCodeLines) + importLen
-	g.cur.Line = g.cur.Line + len(testCodeLines)
 	g.logger.Info("Generated test passed and increased coverage")
 	return nil
 }
