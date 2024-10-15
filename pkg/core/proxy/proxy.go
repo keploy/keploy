@@ -14,7 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
-
+	"math/rand"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/miekg/dns"
@@ -26,6 +26,11 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
+	"github.com/google/gopacket"
+    "github.com/google/gopacket/pcap"
+    "github.com/google/gopacket/pcapgo"
+    "os"
+    "log"
 )
 
 type Proxy struct {
@@ -180,83 +185,132 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 
 // start function starts the proxy server on the idle local port
 func (p *Proxy) start(ctx context.Context) error {
-
 	// It will listen on all the interfaces
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%v", p.Port))
-	if err != nil {
-		utils.LogError(p.logger, err, fmt.Sprintf("failed to start proxy on port:%v", p.Port))
-		return err
-	}
-	p.Listener = listener
-	p.logger.Debug(fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(":%v", listener.Addr())))
+    listener, err := net.Listen("tcp", fmt.Sprintf(":%v", p.Port))
+    if err != nil {
+        utils.LogError(p.logger, err, fmt.Sprintf("failed to start proxy on port:%v", p.Port))
+        return err
+    }
+    p.Listener = listener
+    p.logger.Debug(fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(":%v", listener.Addr())))
 
-	defer func(listener net.Listener) {
-		err := listener.Close()
+    defer func(listener net.Listener) {
+        err := listener.Close()
+        if err != nil {
+            p.logger.Error("failed to close the listener", zap.Error(err))
+        }
+        p.logger.Info("proxy stopped...")
+    }(listener)
 
-		if err != nil {
-			p.logger.Error("failed to close the listener", zap.Error(err))
-		}
-		p.logger.Info("proxy stopped...")
-	}(listener)
+    // Start Packet Capture
+    randomID := generateRandomID()
+    go func() {
+        pcapFileName := fmt.Sprintf("capture_%s.pcap", randomID)
 
-	clientConnCtx, clientConnCancel := context.WithCancel(ctx)
-	clientConnErrGrp, _ := errgroup.WithContext(clientConnCtx)
-	defer func() {
-		clientConnCancel()
-		err := clientConnErrGrp.Wait()
-		if err != nil {
-			p.logger.Debug("failed to handle the client connection", zap.Error(err))
-		}
-		//closing all the mock channels (if any in record mode)
-		for _, mc := range p.sessions.GetAllMC() {
-			if mc != nil {
-				close(mc)
-			}
-		}
+        // Create a new PCAP file
+        pcapFile, err := os.Create(pcapFileName)
+        if err != nil {
+            log.Fatal("Error creating PCAP file:", err)
+        }
+        defer pcapFile.Close()
 
-		if string(p.nsswitchData) != "" {
-			// reset the hosts config in nsswitch.conf of the system (in test mode)
-			err = p.resetNsSwitchConfig()
-			if err != nil {
-				utils.LogError(p.logger, err, "failed to reset the nsswitch config")
-			}
-		}
-	}()
+        // Create a new PCAP writer
+        iface := "any" 
+        handle, err := pcap.OpenLive(iface, 65536, true, pcap.BlockForever)
+        if err != nil {
+            log.Fatal("Error opening interface:", err)
+        }
+        defer handle.Close()
 
-	for {
-		clientConnCh := make(chan net.Conn, 1)
-		errCh := make(chan error, 1)
-		go func() {
-			defer utils.Recover(p.logger)
-			conn, err := listener.Accept()
-			if err != nil {
-				if strings.Contains(err.Error(), "use of closed network connection") {
-					errCh <- nil
-					return
-				}
-				utils.LogError(p.logger, err, "failed to accept connection to the proxy")
-				errCh <- nil
-				return
-			}
-			clientConnCh <- conn
-		}()
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-errCh:
-			return err
-		// handle the client connection
-		case clientConn := <-clientConnCh:
-			clientConnErrGrp.Go(func() error {
-				defer util.Recover(p.logger, clientConn, nil)
-				err := p.handleConnection(clientConnCtx, clientConn)
-				if err != nil && err != io.EOF {
-					utils.LogError(p.logger, err, "failed to handle the client connection")
-				}
-				return nil
-			})
-		}
-	}
+        // Set up a packet filter for port 16789
+        filter := "port 16789"
+        err = handle.SetBPFFilter(filter)
+        if err != nil {
+            log.Fatal("Error setting BPF filter:", err)
+        }
+
+        pcapWriter := pcapgo.NewWriter(pcapFile)
+        err = pcapWriter.WriteFileHeader(65536, handle.LinkType())
+        if err != nil {
+            log.Fatal("Error writing PCAP file header:", err)
+        }
+
+        // Start capturing packets
+        packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
+        for packet := range packetSource.Packets() {
+            // Write packet data to the PCAP file
+            err = pcapWriter.WritePacket(packet.Metadata().CaptureInfo, packet.Data())
+            if err != nil {
+                log.Println("Error writing packet data:", err)
+            }
+        }
+        log.Println("Packet capture complete")
+    }()
+
+    clientConnCtx, clientConnCancel := context.WithCancel(ctx)
+    clientConnErrGrp, _ := errgroup.WithContext(clientConnCtx)
+    defer func() {
+        clientConnCancel()
+        err := clientConnErrGrp.Wait()
+        if err != nil {
+            p.logger.Debug("failed to handle the client connection", zap.Error(err))
+        }
+        // Closing all the mock channels (if any in record mode)
+        for _, mc := range p.sessions.GetAllMC() {
+            if mc != nil {
+                close(mc)
+            }
+        }
+
+        if string(p.nsswitchData) != "" {
+            // Reset the hosts config in nsswitch.conf of the system (in test mode)
+            err = p.resetNsSwitchConfig()
+            if err != nil {
+                utils.LogError(p.logger, err, "failed to reset the nsswitch config")
+            }
+        }
+    }()
+
+    for {
+        clientConnCh := make(chan net.Conn, 1)
+        errCh := make(chan error, 1)
+        go func() {
+            defer utils.Recover(p.logger)
+            conn, err := listener.Accept()
+            if err != nil {
+                if strings.Contains(err.Error(), "use of closed network connection") {
+                    errCh <- nil
+                    return
+                }
+                utils.LogError(p.logger, err, "failed to accept connection to the proxy")
+                errCh <- nil
+                return
+            }
+            clientConnCh <- conn
+        }()
+        select {
+        case <-ctx.Done():
+            return nil
+        case <-errCh:
+            return err
+        // Handle the client connection
+        case clientConn := <-clientConnCh:
+            clientConnErrGrp.Go(func() error {
+                defer util.Recover(p.logger, clientConn, nil)
+                err := p.handleConnection(clientConnCtx, clientConn)
+                if err != nil && err != io.EOF {
+                    utils.LogError(p.logger, err, "failed to handle the client connection")
+                }
+                return nil
+            })
+        }
+    }
+}
+
+func generateRandomID() string {
+	rand.Seed(time.Now().UnixNano())
+	id := rand.Intn(100000) // Adjust the range as needed
+	return fmt.Sprintf("%d", id)
 }
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
