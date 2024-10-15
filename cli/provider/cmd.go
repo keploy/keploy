@@ -69,7 +69,7 @@ Java
 
 Docker
 	Alias:
-	alias keploy='sudo docker run --name keploy-ebpf -p 16789:16789 --privileged --pid=host -it -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup
+	alias keploy='sudo docker run --name keploy-ebpf -p 36789:36789 --privileged --pid=host -it -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup
 	-v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
 
 	Record:
@@ -242,7 +242,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
 		//add rest of the uncommon flags for record, test, rerecord commands
 		c.AddUncommonFlags(cmd)
-
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
 		cmd.PersistentFlags().Bool("disable-tele", c.cfg.DisableTele, "Run in telemetry mode")
@@ -260,6 +259,9 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+	case "agent":
+		cmd.Flags().Bool("is-docker", c.cfg.Agent.IsDocker, "Flag to check if the application is running in docker")
+		cmd.Flags().Uint32("port", c.cfg.Agent.Port, "Port used by the Keploy agent to communicate with Keploy's clients")
 	default:
 		return errors.New("unknown command name")
 	}
@@ -628,10 +630,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					return errors.New("missing required --container-name flag or containerName in config file")
 				}
 			}
-		}
-		err := StartInDocker(ctx, c.logger, c.cfg)
-		if err != nil {
-			return err
 		}
 
 		absPath, err := utils.GetAbsPath(c.cfg.Path)
