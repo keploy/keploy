@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"html/template"
 	"os"
-	"path/filepath"
 	"strings"
 
 	settings "go.keploy.io/server/v2/pkg/service/utgen/assets"
@@ -58,15 +57,16 @@ type PromptBuilder struct {
 	Language               string
 	Logger                 *zap.Logger
 	AdditionalPrompt       string
+	InstalledPackages      []string
 }
 
 func NewPromptBuilder(srcPath, testPath, covReportContent, includedFiles, additionalInstructions, language, additionalPrompt string, logger *zap.Logger) (*PromptBuilder, error) {
 	var err error
 	src := &Source{
-		Name: filepath.Base(srcPath),
+		Name: srcPath,
 	}
 	test := &Test{
-		Name: filepath.Base(testPath),
+		Name: testPath,
 	}
 	promptBuilder := &PromptBuilder{
 		Src:              src,
@@ -141,6 +141,7 @@ func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, erro
 		"language":                     pb.Language,
 		"max_tests":                    MAX_TESTS_PER_RUN,
 		"additional_command":           pb.AdditionalPrompt,
+		"installed_packages":           formatInstalledPackages(pb.InstalledPackages),
 	}
 
 	settings := settings.GetSettings()
@@ -163,6 +164,14 @@ func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, erro
 	prompt.System = systemPrompt
 	prompt.User = userPrompt
 	return prompt, nil
+}
+
+func formatInstalledPackages(packages []string) string {
+	var sb strings.Builder
+	for _, pkg := range packages {
+		sb.WriteString(fmt.Sprintf("- %s\n", pkg))
+	}
+	return sb.String()
 }
 
 func renderTemplate(templateText string, variables map[string]interface{}) (string, error) {
