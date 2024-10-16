@@ -227,16 +227,27 @@ func ParseHTTPResponse(data []byte, request *http.Request) (*http.Response, erro
 	return response, nil
 }
 
-func MakeCurlCommand(method string, url string, header map[string]string, body string) string {
-	curl := fmt.Sprintf("curl --request %s \\\n", method)
-	curl = curl + fmt.Sprintf("  --url %s \\\n", url)
-	for k, v := range header {
+func MakeCurlCommand(tc models.HTTPReq) string {
+	curl := fmt.Sprintf("curl --request %s \\\n", string(tc.Method))
+	curl = curl + fmt.Sprintf("  --url %s \\\n", tc.URL)
+	header := ToHTTPHeader(tc.Header)
+
+	for k, v := range ToYamlHTTPHeader(header) {
 		if k != "Content-Length" {
 			curl = curl + fmt.Sprintf("  --header '%s: %s' \\\n", k, v)
 		}
 	}
-	if body != "" {
-		curl = curl + fmt.Sprintf("  --data %s", strconv.Quote(body))
+	if len(tc.Form) > 0 {
+		for _, form := range tc.Form {
+			key := form.Key
+			if len(form.Values) == 0 {
+				continue
+			}
+			value := form.Values[0]
+			curl = curl + fmt.Sprintf("  --form '%s=%s' \\\n", key, value)
+		}
+	} else if tc.Body != "" {
+		curl = curl + fmt.Sprintf("  --data %s", strconv.Quote(tc.Body))
 	}
 	return curl
 }
