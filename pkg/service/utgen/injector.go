@@ -33,7 +33,7 @@ func (i *Injector) libraryInstalled() ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to get Go dependencies: %w", err)
 		}
-		return extractString(out), nil
+		return i.extractGoPackageNames(out), nil
 
 	case "java":
 		out, err := exec.Command("mvn", "dependency:list", "-DincludeScope=compile", "-Dstyle.color=never", "-B").Output()
@@ -51,8 +51,7 @@ func (i *Injector) libraryInstalled() ([]string, error) {
 				return nil, fmt.Errorf("failed to get Python dependencies: %w", err)
 			}
 		}
-
-		return extractString(out), nil
+		return i.extractPackageNames(out), nil
 
 	case "typescript", "javascript":
 		cmd := exec.Command("sh", "-c", "npm list --depth=0 --parseable | sed 's|.*/||'")
@@ -67,6 +66,32 @@ func (i *Injector) libraryInstalled() ([]string, error) {
 	}
 }
 
+func (i *Injector) extractGoPackageNames(output []byte) []string {
+	lines := strings.Split(string(output), "\n")
+	var packages []string
+	for _, line := range lines {
+		if len(line) > 0 {
+			parts := strings.Split(line, " ")
+			if len(parts) > 0 {
+				packages = append(packages, parts[0])
+			}
+		}
+	}
+	return packages
+}
+
+func (i *Injector) extractPackageNames(output []byte) []string {
+	lines := strings.Split(string(output), "\n")
+	var packages []string
+	for _, line := range lines {
+		parts := strings.Split(line, "==")
+		if len(parts) > 0 {
+			packages = append(packages, parts[0])
+		}
+	}
+	return packages
+}
+
 func (i *Injector) installLibraries(libraryCommands string, installedPackages []string) ([]string, error) {
 	var newInstalledPackages []string
 	libraryCommands = strings.TrimSpace(libraryCommands)
@@ -76,8 +101,8 @@ func (i *Injector) installLibraries(libraryCommands string, installedPackages []
 
 	commands := strings.Split(libraryCommands, "\n")
 	for _, command := range commands {
+		command = strings.ReplaceAll(command, "-", "")
 		packageName := i.extractPackageName(command)
-
 		if isStringInarray(installedPackages, packageName) {
 			continue
 		}
@@ -85,7 +110,6 @@ func (i *Injector) installLibraries(libraryCommands string, installedPackages []
 		if exitCode != 0 || err != nil {
 			return newInstalledPackages, fmt.Errorf("failed to install library: %s", command)
 		}
-
 		installedPackages = append(installedPackages, packageName)
 		newInstalledPackages = append(newInstalledPackages, packageName)
 	}
