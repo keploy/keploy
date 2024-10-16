@@ -178,20 +178,22 @@ func updateGoImports(codeBlock string, newImports []string) (string, int, error)
 	if matches != nil {
 		importBlock := matches[0]
 		importLines := strings.Split(importBlock, "\n")
-		existingImports := extractGoImports(importLines)
+		allImports := []string{}
+		existingImports := extractGoImports(importLines, true)
 		for _, imp := range existingImports {
-			existingImportsSet[imp] = true
-		}
-		newImports = extractGoImports(newImports)
-		for _, imp := range newImports {
-			imp = strings.TrimSpace(imp)
-			if imp != "\"\"" && len(imp) > 0 {
-				existingImportsSet[imp] = true
+			trimmedImp := strings.TrimSpace(imp)
+			if trimmedImp != "" {
+				existingImportsSet[trimmedImp] = true
 			}
-		}
-		allImports := make([]string, 0, len(existingImportsSet))
-		for imp := range existingImportsSet {
 			allImports = append(allImports, imp)
+		}
+		newImports = extractGoImports(newImports, false)
+		for _, importStatement := range newImports {
+			importStatement = strings.TrimSpace(importStatement)
+			if !existingImportsSet[importStatement] {
+				existingImportsSet[importStatement] = true
+				allImports = append(allImports, importStatement)
+			}
 		}
 		importBlockNew := createGoImportBlock(allImports)
 		updatedContent := importRegex.ReplaceAllString(codeBlock, importBlockNew)
@@ -203,20 +205,25 @@ func updateGoImports(codeBlock string, newImports []string) (string, int, error)
 	if pkgMatch == nil {
 		return "", 0, fmt.Errorf("could not find package declaration")
 	}
-	newImports = extractGoImports(newImports)
+	newImports = extractGoImports(newImports, false)
 	importBlock := createGoImportBlock(newImports)
-
 	insertPos := pkgMatch[1]
 	updatedContent := codeBlock[:insertPos] + "\n\n" + importBlock + "\n" + codeBlock[insertPos:]
 	return updatedContent, len(strings.Split(importBlock, "\n")) + 1, nil
 
 }
 
-func extractGoImports(importLines []string) []string {
+func extractGoImports(importLines []string, ignoreSpace bool) []string {
 	imports := []string{}
 	for _, line := range importLines {
 		line = strings.TrimSpace(line)
-		if (line == "import (" || line == ")" || line == "") || len(line) == 0 {
+		if line == "import (" || line == ")" {
+			continue
+		}
+		if line == "" {
+			if ignoreSpace {
+				imports = append(imports, "")
+			}
 			continue
 		}
 		line = strings.TrimPrefix(line, "import ")
@@ -228,10 +235,14 @@ func extractGoImports(importLines []string) []string {
 
 func createGoImportBlock(imports []string) string {
 	importBlock := "import (\n"
-	for _, imp := range imports {
-		imp = strings.TrimSpace(imp)
-		imp = strings.Trim(imp, `"`)
-		importBlock += fmt.Sprintf(`    "%s"`+"\n", imp)
+	for _, importLine := range imports {
+		importLine = strings.TrimSpace(importLine)
+		if importLine == "" {
+			importBlock += "\n"
+			continue
+		}
+		importLine = strings.Trim(importLine, `"`)
+		importBlock += fmt.Sprintf(`    "%s"`+"\n", importLine)
 	}
 	importBlock += ")"
 	return importBlock
