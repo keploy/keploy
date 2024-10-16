@@ -77,7 +77,6 @@ func NewUnitTestGenerator(
 			Format:  genConfig.CoverageFormat,
 			Desired: genConfig.DesiredCoverage,
 		},
-		injector:         NewInjectorBuilder(logger),
 		additionalPrompt: genConfig.AdditionalPrompt,
 		cur:              &Cursor{},
 	}
@@ -156,6 +155,8 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 		g.lang = GetCodeLanguage(g.srcPath)
 
 		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt, g.logger)
+		g.injector = NewInjectorBuilder(g.logger, g.lang)
+
 		if err != nil {
 			utils.LogError(g.logger, err, "Error creating prompt builder")
 			return err
@@ -199,7 +200,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				}
 			}
 
-			g.promptBuilder.InstalledPackages, err = g.injector.libraryInstalled(g.lang)
+			g.promptBuilder.InstalledPackages, err = g.injector.libraryInstalled()
 			if err != nil {
 				utils.LogError(g.logger, err, "Error getting installed packages")
 			}
@@ -219,7 +220,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			g.totalTestCase += len(testsDetails.NewTests)
 			totalTest = len(testsDetails.NewTests)
 			for _, generatedTest := range testsDetails.NewTests {
-				installedPackages, err := g.injector.libraryInstalled(g.lang)
+				installedPackages, err := g.injector.libraryInstalled()
 				if err != nil {
 					g.logger.Warn("Error getting installed packages", zap.Error(err))
 				}
@@ -555,7 +556,7 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 			testCodeIndented = strings.Join(lines, "\n")
 		}
 	}
-	testCodeIndented = "\n" + strings.TrimSpace(testCodeIndented) + "\n"
+	testCodeIndented = "\n" + g.injector.addCommentToTest(strings.TrimSpace(testCodeIndented)) + "\n"
 	// Append the generated test to the relevant line in the test file
 	originalContent, err := readFile(g.testPath)
 	if err != nil {
@@ -582,7 +583,7 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 	g.logger.Info(fmt.Sprintf("Running test 5 times for proper validation with the following command: '%s'", g.cmd))
 
 	var testCommandStartTime int64
-	importLen, err := g.injector.updateImports(g.testPath, g.lang, generatedTest.NewImportsCode)
+	importLen, err := g.injector.updateImports(g.testPath, generatedTest.NewImportsCode)
 	if err != nil {
 		g.logger.Warn("Error updating imports", zap.Error(err))
 	}
@@ -602,7 +603,7 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 			if err := os.WriteFile(g.testPath, []byte(originalContent), 0644); err != nil {
 				return fmt.Errorf("failed to write test file: %w", err)
 			}
-			err = g.injector.uninstallLibraries(g.lang, newInstalledPackages)
+			err = g.injector.uninstallLibraries(newInstalledPackages)
 
 			if err != nil {
 				g.logger.Warn("Error uninstalling libraries", zap.Error(err))
@@ -638,7 +639,7 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 			return fmt.Errorf("failed to write test file: %w", err)
 		}
 
-		err = g.injector.uninstallLibraries(g.lang, newInstalledPackages)
+		err = g.injector.uninstallLibraries(newInstalledPackages)
 
 		if err != nil {
 			g.logger.Warn("Error uninstalling libraries", zap.Error(err))
