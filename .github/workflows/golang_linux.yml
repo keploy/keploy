@@ -7,6 +7,10 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v2
 
+    - name: Install libpcap
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libpcap-dev
     - name: Build binary
       run: |
         go build -race -tags=viper_bind_struct -o keployv2
