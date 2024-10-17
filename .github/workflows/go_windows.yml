@@ -17,6 +17,11 @@ jobs:
         with:
           go-version: "1.22"
 
+      -name: Install pcap
+        run: |
+          Invoke-WebRequest -Uri https://nmap.org/npcap/dist/npcap-1.60.exe -OutFile npcap-1.60.exe
+          Start-Process -FilePath npcap-1.60.exe -ArgumentList '/S' -Wait    
+
       - name: Build amd64
         run: |
           set GOARCH=amd64
