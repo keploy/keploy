@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -125,6 +126,45 @@ func extractErrorMessage(failMessage string) string {
 
 func getFilename(filePath string) string {
 	return filepath.Base(filePath)
+}
+
+func formatDuration(duration time.Duration) string {
+	if duration >= time.Minute {
+		minutes := int(duration.Minutes())
+		seconds := duration.Seconds() - float64(minutes*60)
+		return fmt.Sprintf("%dm%.2fs", minutes, seconds)
+	}
+	return fmt.Sprintf("%.2fs", duration.Seconds())
+}
+
+func extractString(output []byte) []string {
+	lines := strings.Split(string(output), "\n")
+	var dependencies []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			dependencies = append(dependencies, trimmed)
+		}
+	}
+	return dependencies
+}
+
+func isStringInarray(array []string, text string) bool {
+	for _, elem := range array {
+		if elem == text {
+			return true
+		}
+	}
+	return false
+}
+
+func mapKeysToSortedSlice(itemsMap map[string]bool) []string {
+	items := []string{}
+	for item := range itemsMap {
+		items = append(items, item)
+	}
+	sort.Strings(items)
+	return items
 }
 
 func RunCommand(command string, cwd string, logger *zap.Logger) (stdout string, stderr string, exitCode int, commandStartTime int64, err error) {
