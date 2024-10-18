@@ -310,6 +310,9 @@ func (ai *AIClient) SendCoverageUpdate(ctx context.Context, sessionID string, ol
 
 	token, err := ai.Auth.GetToken(ctx)
 
+	if err != nil {
+		return fmt.Errorf("error getting token: %v", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 
