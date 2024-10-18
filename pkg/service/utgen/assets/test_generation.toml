@@ -72,7 +72,7 @@ class SingleTest(BaseModel):
 {%- endif %}
     test_code: str = Field(description="A single test function, that tests the behavior described in 'test_behavior'. The test should be a written like its a part of the existing test suite, if there is one, and it can use existing helper functions, setup, or teardown code.")
     new_imports_code: str = Field(description="Code for new imports that are required for the new test function, and are not already present in the test file. Give an empty string if no new imports are required.")
-    library_installation_code: str = Field(description="If new libraries are needed, specify the installation commands. Provide an empty string if no new libraries are required.")
+    library_installation_code: str = Field(description="If new libraries are needed, specify the installation commands for each library separately. Provide an empty string if no new libraries are required.")
     test_tags: str = Field(description="A single label that best describes the test, out of: ['happy path', 'edge case','other']")
 
 class NewTests(BaseModel):

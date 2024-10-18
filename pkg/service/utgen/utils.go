@@ -151,7 +151,7 @@ func extractString(output []byte) []string {
 
 func isStringInarray(array []string, text string) bool {
 	for _, elem := range array {
-		if elem == text {
+		if strings.EqualFold(elem, text) {
 			return true
 		}
 	}
