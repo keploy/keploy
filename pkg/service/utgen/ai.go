@@ -285,3 +285,53 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 
 	return finalContent, promptTokens, completionTokens, nil
 }
+
+func (ai *AIClient) SendCoverageUpdate(ctx context.Context, sessionID string, oldCoverage, newCoverage float64) error {
+	// Construct the request body with session ID, old coverage, and new coverage
+	requestBody, err := json.Marshal(map[string]interface{}{
+		"sessionId":      sessionID,
+		"initalCoverage": oldCoverage,
+		"finalCoverage":  newCoverage,
+	})
+	if err != nil {
+		return fmt.Errorf("error marshalling request body: %v", err)
+	}
+
+	// Determine the base URL
+	var apiBaseURL string
+	if ai.APIBase != "" {
+		apiBaseURL = ai.APIBase
+	}
+	// Create a POST request
+	req, err := http.NewRequestWithContext(ctx, "POST", apiBaseURL+"/ai/coverage/update", bytes.NewBuffer(requestBody))
+	if err != nil {
+		return fmt.Errorf("error creating request: %v", err)
+	}
+
+	token, err := ai.Auth.GetToken(ctx)
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	// Execute the request
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("error making request: %v", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			utils.LogError(ai.Logger, err, "Error closing response body")
+		}
+	}()
+
+	// Check for successful response
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyString := string(bodyBytes)
+		return fmt.Errorf("unexpected status code: %v, response body: %s", resp.StatusCode, bodyString)
+	}
+
+	ai.Logger.Debug("Coverage update sent successfully", zap.String("session_id", sessionID))
+	return nil
+}

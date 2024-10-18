@@ -167,7 +167,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				return err
 			}
 		}
-
+		initialCoverage := g.cov.Current
 		// Respect context cancellation in the inner loop
 		for g.cov.Current < (g.cov.Desired/100) && iterationCount < g.maxIterations {
 			passedTests, noCoverageTest, failedBuild, totalTest := 0, 0, 0, 0
@@ -272,7 +272,10 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			fmt.Print(addHeightPadding(paddingHeight, 2, columnWidths2))
 			fmt.Printf("+------------------------------------------+------------------------------------------+\n")
 			fmt.Printf("<=========================================>\n")
-
+			err = g.ai.SendCoverageUpdate(ctx, g.ai.SessionID, initialCoverage, g.cov.Current)
+			if err != nil {
+				utils.LogError(g.logger, err, "Error sending coverage update")
+			}
 		}
 
 		if g.cov.Current == 0 && newTestFile {
