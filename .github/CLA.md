@@ -23,3 +23,20 @@ You accept and agree to the following terms and conditions for Your present and 
 7. Should You wish to submit work that is not Your original creation, You may submit it to "Keploy" separately from any Contribution, identifying the complete details of its source and of any license or other restriction (including, but not limited to, related patents, trademarks, and license agreements) of which you are personally aware, and conspicuously marking the work as "Submitted on behalf of a third-party: [named here]".
 
 8. You agree to notify "Keploy" of any facts or circumstances of which you become aware that would make these representations inaccurate in any respect.
+
+## What to Do If the CLA Check Fails
+
+If you receive notifications that the CLA check has failed for your pull request, please follow these steps:
+
+1. **Review the CLA Document:** Ensure you fully understand the terms and conditions outlined in this document.
+
+2. **Sign the CLA:** Comment on the PR with the following message:
+`I have read the CLA Document and I hereby sign the CLA.`
+
+3. **Recheck the CLA:** If you believe you have already signed the CLA but the check is still failing, try commenting `recheck` to trigger a new CLA verification.
+
+4. **Contact the Maintainers:** If you continue to experience issues, please reach out to the project maintainers for assistance.
+
+5. **Monitor the PR:** After contacting maintainers, keep an eye on the PR for updates or further comments from maintainers regarding the CLA status.
+
+6. **Respond Promptly:** If maintainers request additional information or clarification, respond as soon as possible to keep the process moving forward.
