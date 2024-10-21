@@ -490,25 +490,23 @@ func (i *Injector) updatePythonImports(content string, newImports []string) (str
 func (i *Injector) updateTypeScriptImports(importedContent string, newImports []string) (string, int, error) {
 	importRegex := regexp.MustCompile(`(?m)^import\s+.*?;`)
 	existingImportsSet := make(map[string]bool)
-
+	allImports := make([]string, 0)
 	existingImports := importRegex.FindAllString(importedContent, -1)
 	for _, imp := range existingImports {
-		existingImportsSet[imp] = true
-	}
-
-	for _, imp := range newImports {
-		imp = strings.TrimSpace(imp)
-		if importRegex.MatchString(imp) {
-			existingImportsSet[imp] = true
+		trimmedImp := strings.TrimSpace(imp)
+		if trimmedImp != "" {
+			existingImportsSet[trimmedImp] = true
 		}
-	}
-
-	allImports := make([]string, 0, len(existingImportsSet))
-	for imp := range existingImportsSet {
 		allImports = append(allImports, imp)
 	}
+	for _, imp := range newImports {
+		trimmedImp := strings.TrimSpace(imp)
+		if !existingImportsSet[trimmedImp] && importRegex.MatchString(trimmedImp) {
+			existingImportsSet[imp] = true
+			allImports = append(allImports, imp)
+		}
+	}
 	importSection := strings.Join(allImports, "\n")
-
 	updatedContent := importRegex.ReplaceAllString(importedContent, "")
 	updatedContent = strings.Trim(updatedContent, "\n")
 	lines := strings.Split(updatedContent, "\n")
