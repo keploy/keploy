@@ -2,6 +2,7 @@
 package matcher
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/7sDream/geko"
 	"github.com/fatih/color"
+	jsonDiff "github.com/keploy/jsonDiff"
 	"github.com/olekukonko/tablewriter"
 	"github.com/yudai/gojsondiff"
 	"github.com/yudai/gojsondiff/formatter"
@@ -266,8 +268,12 @@ func UnmarshallJSON(s string, log *zap.Logger) (interface{}, error) {
 	return result, nil
 }
 
-// MAX_LINE_LENGTH is chars PER expected/actual string. Can be changed no problem
-const MAX_LINE_LENGTH = 50
+// maxLineLength is chars PER expected/actual string. Can be changed no problem
+const maxLineLength = 50
+
+var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+var ansiResetCode = "\x1b[0m"
 
 type DiffsPrinter struct {
 	testCase              string
@@ -441,24 +447,12 @@ func (d *DiffsPrinter) RenderAppender() error {
  */
 func sprintDiffHeader(expect, actual map[string]string) string {
 
-	expectAll := ""
-	actualAll := ""
-	for key, expValue := range expect {
-		actValue := key + ": " + actual[key]
-		expValue = key + ": " + expValue
-		// Offset will be where the string start to unmatch
-		offset, _ := diffIndex(expValue, actValue)
+	diff := jsonDiff.CompareHeaders(expect, actual)
 
-		// Color of the unmatch, can be changed
-		cE, cA := color.FgHiRed, color.FgHiGreen
-
-		expectAll += breakWithColor(expValue, &cE, offset)
-		actualAll += breakWithColor(actValue, &cA, offset)
+	if len(expect) > maxLineLength || len(actual) > maxLineLength {
+		return expectActualTable(diff.Actual, diff.Expected, "header", false) // Don't centerize
 	}
-	if len(expect) > MAX_LINE_LENGTH || len(actual) > MAX_LINE_LENGTH {
-		return expectActualTable(expectAll, actualAll, "header", false) // Don't centerize
-	}
-	return expectActualTable(expectAll, actualAll, "header", true)
+	return expectActualTable(diff.Actual, diff.Expected, "header", true)
 }
 
 /*
@@ -468,18 +462,12 @@ func sprintDiffHeader(expect, actual map[string]string) string {
  */
 func sprintDiff(expect, actual, field string) string {
 
-	// Offset will be where the string start to unmatch
-	offset, _ := diffIndex(expect, actual)
+	diff := jsonDiff.Compare(expect, actual)
 
-	// Color of the unmatch, can be changed
-	cE, cA := color.FgHiRed, color.FgHiGreen
-
-	exp := breakWithColor(expect, &cE, offset)
-	act := breakWithColor(actual, &cA, offset)
-	if len(expect) > MAX_LINE_LENGTH || len(actual) > MAX_LINE_LENGTH {
-		return expectActualTable(exp, act, field, false) // Don't centerize
+	if len(expect) > maxLineLength || len(actual) > maxLineLength {
+		return expectActualTable(diff.Expected, diff.Actual, field, false)
 	}
-	return expectActualTable(exp, act, field, true)
+	return expectActualTable(diff.Expected, diff.Actual, field, true)
 }
 
 /* This will return the json diffs in a beautifull way. It will in fact
@@ -490,12 +478,11 @@ func sprintDiff(expect, actual, field string) string {
  * its better to use a generic diff output as the SprintDiff.
  */
 func sprintJSONDiff(json1 []byte, json2 []byte, field string, noise map[string][]string) (string, error) {
-	diffString, err := calculateJSONDiffs(json1, json2)
+	diff, err := jsonDiff.CompareJSON(json1, json2, noise, false)
 	if err != nil {
 		return "", err
 	}
-	expect, actual := separateAndColorize(diffString, noise)
-	result := expectActualTable(expect, actual, field, false)
+	result := expectActualTable(diff.Expected, diff.Actual, field, false)
 	return result, nil
 }
 
@@ -628,7 +615,7 @@ func separateAndColorize(diffStr string, noise map[string][]string) (string, str
 	return expect, actual
 }
 
-// Will colorize the strubg and do the job of break it if it pass MAX_LINE_LENGTH,
+// Will colorize the strubg and do the job of break it if it pass maxLineLength,
 // always respecting the reset of ascii colors before the break line to dont
 func breakWithColor(input string, c *color.Attribute, offset int) string {
 	var output []string
@@ -640,15 +627,15 @@ func breakWithColor(input string, c *color.Attribute, offset int) string {
 		paint = color.New(*c).SprintFunc()
 	}
 
-	for i := 0; i < len(input); i += MAX_LINE_LENGTH {
-		end := i + MAX_LINE_LENGTH
+	for i := 0; i < len(input); i += maxLineLength {
+		end := i + maxLineLength
 
 		if end > len(input) {
 			end = len(input)
 		}
 
 		// This conditions joins if we are at line where the offset begins
-		if colorize && i+MAX_LINE_LENGTH > offset {
+		if colorize && i+maxLineLength > offset {
 			paintedStart := i
 			if paintedStart < offset {
 				paintedStart = offset
@@ -668,22 +655,67 @@ func breakWithColor(input string, c *color.Attribute, offset int) string {
 	return strings.Join(output, "")
 }
 
-// Will return a string in a two columns table where the left
-// side is the expected string and the right is the actual
-// field: body, header, status...
+func wrapTextWithAnsi(input string) string {
+	scanner := bufio.NewScanner(strings.NewReader(input)) // Create a scanner to read the input string line by line.
+	var wrappedBuilder strings.Builder                    // Builder for the resulting wrapped text.
+	currentAnsiCode := ""                                 // Variable to hold the current ANSI escape sequence.
+	lastAnsiCode := ""                                    // Variable to hold the last ANSI escape sequence.
+
+	// Iterate over each line in the input string.
+	for scanner.Scan() {
+		line := scanner.Text() // Get the current line.
+
+		// If there is a current ANSI code, append it to the builder.
+		if currentAnsiCode != "" {
+			wrappedBuilder.WriteString(currentAnsiCode)
+		}
+
+		// Find all ANSI escape sequences in the current line.
+		startAnsiCodes := ansiRegex.FindAllString(line, -1)
+		if len(startAnsiCodes) > 0 {
+			// Update the last ANSI escape sequence to the last one found in the line.
+			lastAnsiCode = startAnsiCodes[len(startAnsiCodes)-1]
+		}
+
+		// Append the current line to the builder.
+		wrappedBuilder.WriteString(line)
+
+		// Check if the current ANSI code needs to be reset or updated.
+		if (currentAnsiCode != "" && !strings.HasSuffix(line, ansiResetCode)) || len(startAnsiCodes) > 0 {
+			// If the current line does not end with a reset code or if there are ANSI codes, append a reset code.
+			wrappedBuilder.WriteString(ansiResetCode)
+			// Update the current ANSI code to the last one found in the line.
+			currentAnsiCode = lastAnsiCode
+		} else {
+			// If no ANSI codes need to be maintained, reset the current ANSI code.
+			currentAnsiCode = ""
+		}
+
+		// Append a newline character to the builder.
+		wrappedBuilder.WriteString("\n")
+	}
+
+	// Return the processed string with properly wrapped ANSI escape sequences.
+	return wrappedBuilder.String()
+}
+
 func expectActualTable(exp string, act string, field string, centerize bool) string {
 	buf := &bytes.Buffer{}
 	table := tablewriter.NewWriter(buf)
 
 	if centerize {
 		table.SetAlignment(tablewriter.ALIGN_CENTER)
+	} else {
+		table.SetAlignment(tablewriter.ALIGN_LEFT)
 	}
-
+	// jsonDiff.JsonDiff()
+	exp = wrapTextWithAnsi(exp)
+	act = wrapTextWithAnsi(act)
 	table.SetHeader([]string{fmt.Sprintf("Expect %v", field), fmt.Sprintf("Actual %v", field)})
 	table.SetAutoWrapText(false)
 	table.SetBorder(false)
-	table.SetColMinWidth(0, MAX_LINE_LENGTH)
-	table.SetColMinWidth(1, MAX_LINE_LENGTH)
+	table.SetColMinWidth(0, maxLineLength)
+	table.SetColMinWidth(1, maxLineLength)
 	table.Append([]string{exp, act})
 	table.Render()
 	return buf.String()
