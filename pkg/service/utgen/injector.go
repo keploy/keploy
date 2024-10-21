@@ -357,118 +357,136 @@ func (i *Injector) updateJavaImports(codeContent string, newImports []string) (s
 }
 
 func (i *Injector) updatePythonImports(content string, newImports []string) (string, error) {
-	scanner := bufio.NewScanner(strings.NewReader(content))
-	existingImportsMap := make(map[string]map[string]bool)
-	codeLines := []string{}
-	importLines := []string{}
+	newImportsMap := make(map[string]map[string]bool)
 
-	ignoredPrefixes := "# checking coverage for file - do not remove"
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		trimmedLine := strings.TrimSpace(line)
-
-		if trimmedLine == "" {
-			continue
-		}
-		shouldIgnore := (strings.HasPrefix(trimmedLine, "import ") || strings.HasPrefix(trimmedLine, "from ")) && strings.Contains(trimmedLine, ignoredPrefixes)
-		if shouldIgnore {
-			parts := strings.Split(trimmedLine, "#")
-			coreImport := strings.TrimSpace(parts[0])
-
-			if strings.HasPrefix(coreImport, "from ") {
-				fields := strings.Fields(coreImport)
-				moduleName := fields[1]
-				importPart := coreImport[strings.Index(coreImport, "import")+len("import "):]
-				importedItems := strings.Split(importPart, ",")
-
-				if _, exists := existingImportsMap[moduleName]; !exists {
-					existingImportsMap[moduleName] = make(map[string]bool)
-				}
-				for _, item := range importedItems {
-					cleanedItem := strings.TrimSpace(item)
-					if cleanedItem != "" {
-						existingImportsMap[moduleName][cleanedItem] = true
-					}
-				}
-			}
-			codeLines = append(codeLines, line)
-			continue
-		}
-
-		if strings.HasPrefix(trimmedLine, "import ") || strings.HasPrefix(trimmedLine, "from ") {
-			codeLines = append(codeLines, line)
-		} else {
-			codeLines = append(codeLines, line)
-		}
-	}
-
+	// Parse newImports and organize them into a map with the module name as the key and the import items as values
 	for _, imp := range newImports {
 		imp = strings.TrimSpace(imp)
-		if imp == "\"\"" || len(imp) == 0 {
+		if imp == "" || imp == "\"\"" {
 			continue
 		}
+
+		// Handle 'from ... import ...' statements
 		if strings.HasPrefix(imp, "from ") {
 			fields := strings.Fields(imp)
 			moduleName := fields[1]
-			newItems := strings.Split(fields[3], ",")
-			if _, exists := existingImportsMap[moduleName]; !exists {
-				existingImportsMap[moduleName] = make(map[string]bool)
+			if _, exists := newImportsMap[moduleName]; !exists {
+				newImportsMap[moduleName] = make(map[string]bool)
 			}
-			for _, item := range newItems {
-				existingImportsMap[moduleName][strings.TrimSpace(item)] = true
+
+			// Add the imported items (skipping any trailing commas)
+			newItem := fields[3:] // Starting from the fourth field (i.e., after "import")
+			for _, item := range newItem {
+				newImportsMap[moduleName][strings.Trim(item, ",")] = true
 			}
-		} else if strings.HasPrefix(imp, "import ") {
+		} else if strings.HasPrefix(imp, "import ") { // Handle plain 'import ...' statements
 			fields := strings.Fields(imp)
-			moduleName := fields[1]
-			if _, exists := existingImportsMap[moduleName]; !exists {
-				existingImportsMap[moduleName] = make(map[string]bool)
+			moduleName := fields[1] // Only one field: the module name
+			if _, exists := newImportsMap[moduleName]; !exists {
+				newImportsMap[moduleName] = make(map[string]bool)
 			}
 		}
 	}
-	for i, line := range codeLines {
+
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	mergedImports := make(map[string]map[string]bool)
+	var noImportLines []string                                        // Store lines that are not imports
+	ignoredPrefixes := "# checking coverage for file - do not remove" // Special comment to track
+	annotatedModules := make(map[string]bool)                         // Track modules that have this special comment
+
+	// Iterate through the existing content
+	for scanner.Scan() {
+		line := scanner.Text()
 		trimmedLine := strings.TrimSpace(line)
+		if trimmedLine == "" {
+			continue // Skip empty lines
+		}
 
+		// Handle 'from ... import ...' statements
 		if strings.HasPrefix(trimmedLine, "from ") {
-			fields := strings.Fields(trimmedLine)
-			moduleName := fields[1]
+			parts := strings.SplitN(trimmedLine, "#", 2) // Split on comment
+			coreImport := strings.TrimSpace(parts[0])    // The actual import line
+			moduleName := strings.Fields(coreImport)[1]  // Module name
+			importPart := coreImport[strings.Index(coreImport, "import")+len("import "):]
+			existingItems := strings.Split(importPart, ",") // Existing imported items
 
-			if itemsMap, exists := existingImportsMap[moduleName]; exists && len(itemsMap) > 0 {
-				items := mapKeysToSortedSlice(itemsMap)
-				importLine := fmt.Sprintf("from %s import %s", moduleName, strings.Join(items, ", "))
-
-				if strings.Contains(trimmedLine, ignoredPrefixes) {
-					importLine += " " + ignoredPrefixes
-				}
-				codeLines[i] = importLine
-				delete(existingImportsMap, moduleName)
+			// Check if the comment includes the special ignoredPrefixes
+			if len(parts) > 1 && strings.HasSuffix(ignoredPrefixes, parts[1]) {
+				annotatedModules[moduleName] = true
 			}
+
+			// Merge the new imports with the existing ones for the same module
+			if _, exists := newImportsMap[moduleName]; exists {
+				if _, exists = mergedImports[moduleName]; !exists {
+					mergedImports[moduleName] = make(map[string]bool)
+				}
+				for _, item := range existingItems {
+					mergedImports[moduleName][strings.TrimSpace(item)] = true // Merge existing items
+				}
+				for newItem := range newImportsMap[moduleName] {
+					mergedImports[moduleName][newItem] = true // Add new imports
+				}
+				delete(newImportsMap, moduleName) // Remove from newImportsMap after processing
+			} else {
+				// If no new imports, just add the existing imports to mergedImports
+				if _, exists = mergedImports[moduleName]; !exists {
+					mergedImports[moduleName] = make(map[string]bool)
+				}
+				for _, item := range existingItems {
+					mergedImports[moduleName][strings.TrimSpace(item)] = true
+				}
+			}
+		} else if strings.HasPrefix(trimmedLine, "import ") {
+			// Handle plain 'import ...' statements
+			parts := strings.SplitN(trimmedLine, "#", 2)
+			moduleName := strings.Fields(parts[0])[1] // Get the module name
+
+			// Check if the line contains the special comment and mark it
+			if len(parts) > 1 && strings.HasSuffix(ignoredPrefixes, parts[1]) {
+				annotatedModules[moduleName] = true
+			}
+
+			// Add the module to mergedImports even if it has no specific items (plain import)
+			if _, exists := mergedImports[moduleName]; !exists {
+				mergedImports[moduleName] = make(map[string]bool)
+			}
+		} else {
+			// If the line is not an import, add it to noImportLines
+			noImportLines = append(noImportLines, line)
 		}
 	}
 
-	for module, itemsMap := range existingImportsMap {
-		if len(itemsMap) > 0 {
+	// Process any remaining new imports that were not merged yet
+	for module, itemsMap := range newImportsMap {
+		if _, exists := mergedImports[module]; !exists {
+			mergedImports[module] = make(map[string]bool)
+		}
+		for newItem := range itemsMap {
+			mergedImports[module][newItem] = true
+		}
+	}
+
+	var finalImportLines []string
+	// Construct the final import lines
+	for module, itemsMap := range mergedImports {
+		importLine := ""
+		if len(itemsMap) == 0 {
+			// Plain 'import module'
+			importLine = fmt.Sprintf("import %s", module)
+		} else {
+			// 'from module import item1, item2, ...'
 			items := mapKeysToSortedSlice(itemsMap)
-			importLine := fmt.Sprintf("from %s import %s", module, strings.Join(items, ", "))
+			importLine = fmt.Sprintf("from %s import %s", module, strings.Join(items, ", "))
+		}
+		// Add the special comment if the module was marked
+		if annotatedModules[module] {
 			importLine += " " + ignoredPrefixes
-			importLines = append(importLines, importLine)
 		}
-	}
-	nonEmptyCodeLines := []string{}
-	for _, line := range codeLines {
-		if strings.TrimSpace(line) != "" {
-			nonEmptyCodeLines = append(nonEmptyCodeLines, line)
-		}
+		finalImportLines = append(finalImportLines, importLine)
 	}
 
-	nonEmptyImportLines := []string{}
-	for _, line := range importLines {
-		if strings.TrimSpace(line) != "" {
-			nonEmptyImportLines = append(nonEmptyImportLines, line)
-		}
-	}
-
-	updatedContent := strings.Join(nonEmptyImportLines, "\n") + "\n" + strings.Join(nonEmptyCodeLines, "\n")
+	// Join the final import lines with the rest of the content
+	updatedContent := strings.Join(finalImportLines, "\n") + "\n" + strings.Join(noImportLines, "\n")
 	return updatedContent, nil
 }
 
