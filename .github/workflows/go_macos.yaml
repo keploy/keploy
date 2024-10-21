@@ -17,6 +17,11 @@ jobs:
         with:
           go-version: "1.22"
 
+      - name: Install libpcap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcap-dev
+
       - name: Build amd64
         run: GOARCH=amd64 go build -v ./...
 
