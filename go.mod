@@ -112,6 +112,7 @@ require (
 	github.com/denisbrodbeck/machineid v1.0.1
 	github.com/emirpasic/gods v1.18.1
 	github.com/getsentry/sentry-go v0.28.1
+	github.com/go-python/gpython v0.2.0
 	github.com/golang-jwt/jwt/v4 v4.5.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgproto3/v2 v2.3.2
