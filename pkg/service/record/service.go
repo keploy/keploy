@@ -15,6 +15,7 @@ type Instrumentation interface {
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
 	GetContainerIP(ctx context.Context, id uint64) (string, error)
+	UnregisterClient(ctx context.Context, clientID uint64) error
 }
 
 type Service interface {

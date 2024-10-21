@@ -33,6 +33,7 @@ func New(r chi.Router, agent agent.Service, logger *zap.Logger) {
 		r.Post("/setmocks", a.SetMocks)
 		r.Post("/register", a.RegisterClients)
 		r.Get("/consumedmocks", a.GetConsumedMocks)
+		r.Post("/unregister", a.DeRegisterClients)
 	})
 
 }
@@ -59,8 +60,16 @@ func (a *AgentRequest) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	errGrp, _ := errgroup.WithContext(r.Context())
 	ctx := context.WithValue(r.Context(), models.ErrGroupKey, errGrp)
 
+	// decode request body
+	var incomingReq models.IncomingReq
+	err := json.NewDecoder(r.Body).Decode(&incomingReq)
+	if err != nil {
+		http.Error(w, "Error decoding request", http.StatusBadRequest)
+		return
+	}
+
 	// Call GetIncoming to get the channel
-	tc, err := a.agent.GetIncoming(ctx, 0, models.IncomingOptions{})
+	tc, err := a.agent.GetIncoming(ctx, incomingReq.ClientID, incomingReq.IncomingOptions)
 	if err != nil {
 		http.Error(w, "Error retrieving test cases", http.StatusInternalServerError)
 		return
@@ -97,8 +106,15 @@ func (a *AgentRequest) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 	errGrp, _ := errgroup.WithContext(r.Context())
 	ctx := context.WithValue(r.Context(), models.ErrGroupKey, errGrp)
 
+	var outgoingReq models.OutgoingReq
+	err := json.NewDecoder(r.Body).Decode(&outgoingReq)
+	if err != nil {
+		http.Error(w, "Error decoding request", http.StatusBadRequest)
+		return
+	}
+
 	// Call GetOutgoing to get the channel
-	mockChan, err := a.agent.GetOutgoing(ctx, 0, models.OutgoingOptions{})
+	mockChan, err := a.agent.GetOutgoing(ctx, outgoingReq.ClientID, outgoingReq.OutgoingOptions)
 	if err != nil {
 		render.JSON(w, r, err)
 		render.Status(r, http.StatusInternalServerError)
@@ -108,6 +124,12 @@ func (a *AgentRequest) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 	for m := range mockChan {
 		select {
 		case <-r.Context().Done():
+			fmt.Println("Context done in HandleOutgoing")
+			if m != nil {
+				fmt.Println("MOCKING", m)
+				render.JSON(w, r, m)
+				flusher.Flush()
+			}
 			// Client closed the connection or context was cancelled
 			return
 		default:
@@ -125,7 +147,7 @@ func (a *AgentRequest) RegisterClients(w http.ResponseWriter, r *http.Request) {
 	err := json.NewDecoder(r.Body).Decode(&registerReq)
 
 	register := models.AgentResp{
-		ClientID: 0,
+		ClientID: registerReq.SetupOptions.ClientID,
 		Error:    nil,
 	}
 
@@ -156,4 +178,36 @@ func (a *AgentRequest) RegisterClients(w http.ResponseWriter, r *http.Request) {
 
 	render.JSON(w, r, register)
 	render.Status(r, http.StatusOK)
+}
+
+func (a *AgentRequest) DeRegisterClients(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	var OutgoingReq models.OutgoingReq
+	err := json.NewDecoder(r.Body).Decode(&OutgoingReq)
+
+	mockRes := models.AgentResp{
+		ClientID:  OutgoingReq.ClientID,
+		Error:     nil,
+		IsSuccess: true,
+	}
+
+	if err != nil {
+		mockRes.Error = err
+		mockRes.IsSuccess = false
+		render.JSON(w, r, mockRes)
+		render.Status(r, http.StatusBadRequest)
+		return
+	}
+
+	err = a.agent.DeRegisterClient(r.Context(), OutgoingReq.ClientID)
+	if err != nil {
+		mockRes.Error = err
+		mockRes.IsSuccess = false
+		render.JSON(w, r, err)
+		render.Status(r, http.StatusInternalServerError)
+		return
+	}
+
+	render.JSON(w, r, "Client De-registered")
 }

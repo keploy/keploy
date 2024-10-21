@@ -51,7 +51,9 @@ type Proxy struct {
 
 	clientConnections []net.Conn
 
-	Listener net.Listener
+	// channel to mark client connection as closed
+	clientClose chan bool
+	Listener    net.Listener
 
 	//to store the nsswitch.conf file data
 	nsswitchData []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
@@ -73,7 +75,8 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		ipMutex:      &sync.Mutex{},
 		connMutex:    &sync.Mutex{},
 		DestInfo:     info,
-		sessions:     agent.NewSessions(),
+		sessions:     agent.NewSessions(), // sessions to store the session rules
+		clientClose:  make(chan bool),
 		MockManagers: sync.Map{},
 		Integrations: make(map[string]integrations.Integrations),
 	}
@@ -313,9 +316,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	//get the session rule
-	rule, ok := p.sessions.Get(destInfo.AppID)
+	rule, ok := p.sessions.Get(0)
 	if !ok {
-		utils.LogError(p.logger, nil, "failed to fetch the session rule", zap.Any("AppID", destInfo.AppID))
+		utils.LogError(p.logger, nil, "failed to fetch the session rule", zap.Any("AppID", destInfo.ClientID))
 		return err
 	}
 
@@ -394,7 +397,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			rule.OutgoingOptions.DstCfg = dstCfg
 
 			// Record the outgoing message into a mock
-			err := p.Integrations["mysql"].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+			err := p.Integrations["mysql"].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, p.clientClose, rule.OutgoingOptions)
 			if err != nil {
 				utils.LogError(p.logger, err, "failed to record the outgoing message")
 				return err
@@ -402,9 +405,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return nil
 		}
 
-		m, ok := p.MockManagers.Load(destInfo.AppID)
+		m, ok := p.MockManagers.Load(destInfo.ClientID)
 		if !ok {
-			utils.LogError(p.logger, nil, "failed to fetch the mock manager", zap.Any("AppID", destInfo.AppID))
+			utils.LogError(p.logger, nil, "failed to fetch the mock manager", zap.Any("AppID", destInfo.ClientID))
 			return err
 		}
 
@@ -508,9 +511,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	// get the mock manager for the current app
-	m, ok := p.MockManagers.Load(destInfo.AppID)
+	m, ok := p.MockManagers.Load(destInfo.ClientID)
 	if !ok {
-		utils.LogError(logger, err, "failed to fetch the mock manager", zap.Any("AppID", destInfo.AppID))
+		utils.LogError(logger, err, "failed to fetch the mock manager", zap.Any("AppID", destInfo.ClientID))
 		return err
 	}
 
@@ -520,7 +523,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	for _, parser := range p.Integrations {
 		if parser.MatchType(parserCtx, initialBuf) {
 			if rule.Mode == models.MODE_RECORD {
-				err := parser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+				err := parser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, p.clientClose, rule.OutgoingOptions)
 				if err != nil {
 					utils.LogError(logger, err, "failed to record the outgoing message")
 					return err
@@ -539,7 +542,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if generic {
 		logger.Debug("The external dependency is not supported. Hence using generic parser")
 		if rule.Mode == models.MODE_RECORD {
-			err := p.Integrations["generic"].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+			err := p.Integrations["generic"].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, p.clientClose, rule.OutgoingOptions)
 			if err != nil {
 				utils.LogError(logger, err, "failed to record the outgoing message")
 				return err
@@ -586,7 +589,14 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	p.logger.Info("proxy stopped...")
 }
 
+func (p *Proxy) MakeClientDeRegisterd(ctx context.Context) error {
+	p.logger.Info("Inside MakeClientDeregisterd of proxyServer")
+	p.clientClose <- true
+	return nil
+}
+
 func (p *Proxy) Record(_ context.Context, id uint64, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+	fmt.Println("Inside Record of proxyServer", id)
 	p.sessions.Set(id, &agent.Session{
 		ID:              id,
 		Mode:            models.MODE_RECORD,

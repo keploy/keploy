@@ -15,9 +15,9 @@ type RegisterReq struct {
 }
 
 type AgentResp struct {
-	ClientID  int64 `json:"clientID"` // uuid of the app
-	Error     error `json:"error"`
-	IsSuccess bool  `json:"isSuccess"`
+	ClientID  uint64 `json:"clientID"` // uuid of the app
+	Error     error  `json:"error"`
+	IsSuccess bool   `json:"isSuccess"`
 }
 
 type RunReq struct {
@@ -29,4 +29,7 @@ type SetMocksReq struct {
 	Filtered   []*Mock `json:"filtered"`
 	UnFiltered []*Mock `json:"unFiltered"`
 	ClientID   uint64  `json:"clientId"`
+}
+type UnregisterReq struct {
+	ClientID uint64 `json:"clientId"`
 }

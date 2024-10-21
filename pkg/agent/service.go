@@ -25,7 +25,7 @@ type Hooks interface {
 }
 
 type HookCfg struct {
-	AppID      uint64
+	ClientID   uint64
 	Pid        uint32
 	IsDocker   bool
 	KeployIPV4 string
@@ -47,6 +47,7 @@ type Proxy interface {
 	Mock(ctx context.Context, id uint64, opts models.OutgoingOptions) error
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
 	GetConsumedMocks(ctx context.Context, id uint64) ([]string, error)
+	MakeClientDeRegisterd(ctx context.Context) error
 }
 
 type ProxyOptions struct {
@@ -77,7 +78,7 @@ type OutgoingInfo interface {
 }
 
 type NetworkAddress struct {
-	AppID    uint64
+	ClientID uint64
 	Version  uint32
 	IPv4Addr uint32
 	IPv6Addr [4]uint32

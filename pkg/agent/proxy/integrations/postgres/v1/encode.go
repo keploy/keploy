@@ -20,7 +20,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
+func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, clientClose chan bool, _ models.OutgoingOptions) error {
 
 	logger.Debug("Inside the encodePostgresOutgoing function")
 	var pgRequests []models.Backend
@@ -112,6 +112,28 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 
 	for {
 		select {
+		case <-clientClose:
+			fmt.Println("Client connection is closed from the encode function")
+			if !prevChunkWasReq && len(pgRequests) > 0 && len(pgResponses) > 0 {
+				metadata := make(map[string]string)
+				metadata["type"] = "config"
+				// Save the mock
+				mocks <- &models.Mock{
+					Version: models.GetVersion(),
+					Name:    "mocks",
+					Kind:    models.Postgres,
+					Spec: models.MockSpec{
+						PostgresRequests:  pgRequests,
+						PostgresResponses: pgResponses,
+						ReqTimestampMock:  reqTimestampMock,
+						ResTimestampMock:  resTimestampMock,
+						Metadata:          metadata,
+					},
+					ConnectionID: ctx.Value(models.ClientConnectionIDKey).(string),
+				}
+				fmt.Println("Context is done in the postgres encode function", mocks)
+				return ctx.Err()
+			}
 		case <-ctx.Done():
 			if !prevChunkWasReq && len(pgRequests) > 0 && len(pgResponses) > 0 {
 				metadata := make(map[string]string)
@@ -130,6 +152,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 					},
 					ConnectionID: ctx.Value(models.ClientConnectionIDKey).(string),
 				}
+				fmt.Println("Context is done in the postgres encode function", mocks)
 				return ctx.Err()
 			}
 		case buffer := <-clientBuffChan:

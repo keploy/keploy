@@ -78,6 +78,7 @@ func (a *App) Setup(_ context.Context) error {
 			return err
 		}
 	case utils.DockerCompose:
+		a.cmd = a.cmd + " --force-recreate"
 		err := a.SetupCompose()
 		if err != nil {
 			return err
@@ -188,7 +189,6 @@ func (a *App) SetupCompose() error {
 	}
 
 	a.KeployNetwork = info.Name
-	fmt.Println("keployNetwork:", a.KeployNetwork)
 	ok, err = a.docker.NetworkExists(a.KeployNetwork)
 	if err != nil {
 		utils.LogError(a.logger, nil, "failed to find default network", zap.String("network", a.KeployNetwork))
@@ -207,15 +207,15 @@ func (a *App) SetupCompose() error {
 	//check if compose file has keploy-init container
 
 	// adding keploy init pid to the compose file
-	// err = a.docker.SetInitPid(compose)
-	// if err != nil {
-	// 	utils.LogError(a.logger, nil, "failed to set init pid in the compose file")
-	// 	return err
-	// }
+	err = a.docker.SetInitPid(compose)
+	if err != nil {
+		utils.LogError(a.logger, nil, "failed to set init pid in the compose file")
+		return err
+	} else {
+		composeChanged = true
+	}
 
 	if composeChanged {
-		fmt.Println("newPath:", newPath)
-		fmt.Println("composeChanged:", compose)
 
 		err = a.docker.WriteComposeFile(compose, newPath)
 		if err != nil {
@@ -509,6 +509,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	}
 
 	var err error
+	fmt.Println("userCmd", userCmd)
 	cmdErr := utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second)
 	if cmdErr.Err != nil {
 		switch cmdErr.Type {

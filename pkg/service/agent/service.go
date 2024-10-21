@@ -14,6 +14,7 @@ type Service interface {
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
 	GetConsumedMocks(ctx context.Context, id uint64) ([]string, error)
 	RegisterClient(ctx context.Context, opts models.SetupOptions) error
+	DeRegisterClient(ctx context.Context, id uint64) error
 }
 
 type Options struct {

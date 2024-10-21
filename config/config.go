@@ -10,7 +10,7 @@ import (
 
 type Config struct {
 	Path                  string       `json:"path" yaml:"path" mapstructure:"path"`
-	AppID                 uint64       `json:"appId" yaml:"appId" mapstructure:"appId"`
+	ClientID              uint64       `json:"clientID" yaml:"clientID" mapstructure:"clientID"`
 	AppName               string       `json:"appName" yaml:"appName" mapstructure:"appName"`
 	Command               string       `json:"command" yaml:"command" mapstructure:"command"`
 	Templatize            Templatize   `json:"templatize" yaml:"templatize" mapstructure:"templatize"`

@@ -118,7 +118,7 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 
 	// load hooks if the mode changes ..
 	err := a.Hooks.Load(hookCtx, id, agent.HookCfg{
-		AppID:      id,
+		ClientID:   id,
 		Pid:        0,
 		IsDocker:   opts.IsDocker,
 		KeployIPV4: "172.18.0.2",
@@ -142,9 +142,6 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 	default:
 	}
 
-	// TODO: Hooks can be loaded multiple times but proxy should be started only once
-	// if there is another containerized app, then we need to pass new (ip:port) of proxy to the eBPF
-	// as the network namespace is different for each container and so is the keploy/proxy IP to communicate with the app.
 	err = a.Proxy.StartProxy(proxyCtx, agent.ProxyOptions{
 		DNSIPv4Addr: "172.18.0.2",
 		//DnsIPv6Addr: ""
@@ -183,7 +180,9 @@ func (a *Agent) GetConsumedMocks(ctx context.Context, id uint64) ([]string, erro
 	return a.Proxy.GetConsumedMocks(ctx, id)
 }
 
-func (a *Agent) UnHook(_ context.Context, _ uint64) error {
+func (a *Agent) DeRegisterClient(ctx context.Context, id uint64) error {
+	fmt.Println("Inside DeRegisterClient of agent binary !!")
+	a.Proxy.MakeClientDeRegisterd(ctx)
 	return nil
 }
 

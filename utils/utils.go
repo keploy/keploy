@@ -922,3 +922,18 @@ func IsFileEmpty(filePath string) (bool, error) {
 	}
 	return fileInfo.Size() == 0, nil
 }
+
+func GetCurrentBinaryPath() (string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+
+	// Resolve the full path (to avoid issues with symbolic links)
+	executablePath, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		return "", err
+	}
+
+	return executablePath, nil
+}

@@ -95,6 +95,7 @@ type Hooks struct {
 
 func (h *Hooks) Load(ctx context.Context, id uint64, opts agent.HookCfg) error {
 
+	fmt.Println("Loading hooks... and setting ID: ", id)
 	h.sess.Set(id, &agent.Session{
 		ID: id,
 	})

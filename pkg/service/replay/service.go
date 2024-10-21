@@ -90,7 +90,7 @@ type Storage interface {
 }
 
 type InstrumentState struct {
-	AppID      uint64
+	ClientID   uint64
 	HookCancel context.CancelFunc
 }
 

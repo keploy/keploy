@@ -59,7 +59,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	var appErrChan = make(chan models.AppError, 1)
 	var insertTestErrChan = make(chan error, 10)
 	var insertMockErrChan = make(chan error, 10)
-	var appID uint64
+	var clientID uint64
 	var newTestSetID string
 	var testCount = 0
 	var mockCountMap = make(map[string]int)
@@ -68,6 +68,10 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	defer func() {
 		select {
 		case <-ctx.Done():
+			// err := r.instrumentation.UnregisterClient(ctx, clientID)
+			// if err != nil {
+			// 	utils.LogError(r.logger, err, "failed to unregister client")
+			// }
 		default:
 			if !reRecord {
 				err := utils.Stop(r.logger, stopReason)
@@ -106,22 +110,29 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	//checking for context cancellation as we don't want to start the instrumentation if the context is cancelled
 	select {
 	case <-ctx.Done():
+		// fmt.Println("Context cancelled hshsh 2")
+		// call the agent to deregister the client
+		// err = r.instrumentation.UnregisterClient(ctx, clientID)
+		// if err != nil {
+		// 	utils.LogError(r.logger, err, "failed to unregister client")
+		// }
 		return nil
 	default:
 	}
 
 	// setting up the environment for recording
-	appID, err = r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType})
+	clientID, err = r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType})
 	if err != nil {
 		stopReason = "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
 		return fmt.Errorf(stopReason)
 	}
 
-	r.config.AppID = appID
+	r.config.ClientID = clientID
 
 	// fetching test cases and mocks from the application and inserting them into the database
-	frames, err := r.GetTestAndMockChans(ctx, appID)
+	r.logger.Info("GetTestAndMockChans", zap.Uint64("clientID", clientID))
+	frames, err := r.GetTestAndMockChans(ctx, clientID)
 	if err != nil {
 		stopReason = "failed to get data frames"
 		utils.LogError(r.logger, err, stopReason)
@@ -169,7 +180,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 
 	// running the user application
 	runAppErrGrp.Go(func() error {
-		runAppError = r.instrumentation.Run(runAppCtx, appID, models.RunOptions{})
+		runAppError = r.instrumentation.Run(runAppCtx, clientID, models.RunOptions{})
 		if runAppError.AppErrorType == models.ErrCtxCanceled {
 			return nil
 		}
@@ -231,7 +242,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	return fmt.Errorf(stopReason)
 }
 
-func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (FrameChan, error) {
+func (r *Recorder) GetTestAndMockChans(ctx context.Context, clientID uint64) (FrameChan, error) {
 	incomingOpts := models.IncomingOptions{
 		Filters: r.config.Record.Filters,
 	}
@@ -249,7 +260,8 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (Frame
 
 	go func() {
 		defer close(incomingChan)
-		ch, err := r.instrumentation.GetIncoming(ctx, appID, incomingOpts)
+		fmt.Println("GetIncoming :::", clientID)
+		ch, err := r.instrumentation.GetIncoming(ctx, clientID, incomingOpts)
 		if err != nil {
 			errChan <- fmt.Errorf("failed to get incoming test cases: %w", err)
 			return
@@ -262,7 +274,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (Frame
 
 	go func() {
 		defer close(outgoingChan)
-		ch, err := r.instrumentation.GetOutgoing(ctx, appID, outgoingOpts)
+		ch, err := r.instrumentation.GetOutgoing(ctx, clientID, outgoingOpts)
 		if err != nil {
 			errChan <- fmt.Errorf("failed to get outgoing mocks: %w", err)
 			return
@@ -288,8 +300,8 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (Frame
 	}, nil
 }
 
-func (r *Recorder) RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError {
-	return r.instrumentation.Run(ctx, appID, opts)
+func (r *Recorder) RunApplication(ctx context.Context, clientID uint64, opts models.RunOptions) models.AppError {
+	return r.instrumentation.Run(ctx, clientID, opts)
 }
 
 func (r *Recorder) GetNextTestSetID(ctx context.Context) (string, error) {
@@ -300,6 +312,6 @@ func (r *Recorder) GetNextTestSetID(ctx context.Context) (string, error) {
 	return pkg.NextID(testSetIDs, models.TestSetPattern), nil
 }
 
-func (r *Recorder) GetContainerIP(ctx context.Context, id uint64) (string, error) {
-	return r.instrumentation.GetContainerIP(ctx, id)
+func (r *Recorder) GetContainerIP(ctx context.Context, clientID uint64) (string, error) {
+	return r.instrumentation.GetContainerIP(ctx, clientID)
 }

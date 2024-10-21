@@ -21,7 +21,7 @@ import (
 // encodeMongo records the outgoing mongo messages of the client connection,
 // decodes the wiremessage binary and writes readable string
 // to the yaml file.
-func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
+func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, clientClose chan bool, _ models.OutgoingOptions) error {
 
 	errCh := make(chan error, 1)
 

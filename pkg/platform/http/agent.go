@@ -114,6 +114,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.In
 				// If the context is done, exit the loop
 				return
 			case tcChan <- &testCase:
+				fmt.Println("Test case received for client", id)
 				// Send the decoded test case to the channel
 			}
 		}
@@ -134,7 +135,13 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 		return nil, fmt.Errorf("error marshaling request body for mock outgoing: %s", err.Error())
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/outgoing", a.conf.Agent.Port), bytes.NewBuffer(requestJSON))
+	// create a request context without cancel
+	reqCtx := context.WithoutCancel(ctx)
+	reqCtx, reqCancel := context.WithCancel(reqCtx)
+
+	// defer reqCancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, "POST", fmt.Sprintf("http://localhost:%d/agent/outgoing", a.conf.Agent.Port), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for mock outgoing")
 		return nil, fmt.Errorf("error creating request for mock outgoing: %s", err.Error())
@@ -152,6 +159,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 
 	go func() {
 		defer close(mockChan)
+		defer reqCancel()
 		defer func() {
 			err := res.Body.Close()
 			if err != nil {
@@ -175,9 +183,10 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 
 			select {
 			case <-ctx.Done():
-				// If the context is done, exit the loop
+				fmt.Println("Context done...")
 				return
 			case mockChan <- &mock:
+				// fmt.Println("Mock received for client", id)
 			}
 		}
 	}()
@@ -299,13 +308,14 @@ func (a *AgentClient) GetConsumedMocks(ctx context.Context, id uint64) ([]string
 	return consumedMocks, nil
 }
 
+// This will be sent request
 func (a *AgentClient) UnHook(_ context.Context, _ uint64) error {
 	return nil
 }
 
-func (a *AgentClient) GetContainerIP(_ context.Context, id uint64) (string, error) {
+func (a *AgentClient) GetContainerIP(_ context.Context, clientID uint64) (string, error) {
 
-	app, err := a.getApp(id)
+	app, err := a.getApp(clientID)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to get app")
 		return "", err
@@ -320,9 +330,9 @@ func (a *AgentClient) GetContainerIP(_ context.Context, id uint64) (string, erro
 	return ip, nil
 }
 
-func (a *AgentClient) Run(ctx context.Context, id uint64, _ models.RunOptions) models.AppError {
+func (a *AgentClient) Run(ctx context.Context, clientID uint64, _ models.RunOptions) models.AppError {
 
-	app, err := a.getApp(id)
+	app, err := a.getApp(clientID)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to get app while running")
 		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
@@ -395,7 +405,14 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 					utils.LogError(a.logger, err, "failed to close agent log file")
 				}
 			}()
-			agentCmd := exec.Command("sudo", "keployv2", "agent")
+
+			keployBin, err := utils.GetCurrentBinaryPath()
+
+			if err != nil {
+				utils.LogError(a.logger, err, "failed to get current keploy binary path")
+				return 0, err
+			}
+			agentCmd := exec.Command("sudo", keployBin, "agent")
 			agentCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // Detach the process
 
 			// Redirect the standard output and error to the log file
@@ -473,16 +490,16 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	return clientID, nil
 }
 
-func (a *AgentClient) getApp(id uint64) (*app.App, error) {
-	ap, ok := a.apps.Load(id)
+func (a *AgentClient) getApp(clientID uint64) (*app.App, error) {
+	ap, ok := a.apps.Load(clientID)
 	if !ok {
-		return nil, fmt.Errorf("app with id:%v not found", id)
+		return nil, fmt.Errorf("app with id:%v not found", clientID)
 	}
 
 	// type assertion on the app
 	h, ok := ap.(*app.App)
 	if !ok {
-		return nil, fmt.Errorf("failed to type assert app with id:%v", id)
+		return nil, fmt.Errorf("failed to type assert app with id:%v", clientID)
 	}
 
 	return h, nil
@@ -517,7 +534,7 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 			DockerNetwork: opts.DockerNetwork,
 			ClientNsPid:   clientPid,
 			Mode:          opts.Mode,
-			ClientID:      0,
+			ClientID:      opts.ClientID,
 			ClientInode:   inode,
 			IsDocker:      a.conf.Agent.IsDocker,
 			AppInode:      opts.AppInode,
@@ -550,6 +567,31 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 
 	if RegisterResp.Error != nil {
 		return RegisterResp.Error
+	}
+
+	return nil
+}
+
+func (a *AgentClient) UnregisterClient(ctx context.Context, clientID uint64) error {
+	// Unregister the client with the server
+	requestBody := models.UnregisterReq{
+		ClientID: clientID,
+	}
+	fmt.Println("Unregistering the client with the server")
+	requestJSON, err := json.Marshal(requestBody)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to marshal request body for unregister client")
+		return fmt.Errorf("error marshaling request body for unregister client: %s", err.Error())
+	}
+
+	resp, err := a.client.Post(fmt.Sprintf("http://localhost:%d/agent/unregister", a.conf.Agent.Port), "application/json", bytes.NewBuffer(requestJSON))
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to send unregister client request")
+		return fmt.Errorf("error sending unregister client request: %s", err.Error())
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to unregister client: %s", resp.Status)
 	}
 
 	return nil

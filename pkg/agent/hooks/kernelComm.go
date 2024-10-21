@@ -4,7 +4,6 @@ package hooks
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/cilium/ebpf"
 	"go.keploy.io/server/v2/pkg/agent"
@@ -22,13 +21,14 @@ func (h *Hooks) Get(_ context.Context, srcPort uint16) (*agent.NetworkAddress, e
 		return nil, err
 	}
 	// TODO : need to implement eBPF code to differentiate between different apps
-	s, ok := h.sess.Get(0)
-	if !ok {
-		return nil, fmt.Errorf("session not found")
-	}
+	// s, ok := h.sess.Get(d.ClientID)
+	// if !ok {
+	// 	return nil, fmt.Errorf("session not found")
+	// }
 
+	// fmt.Println("Session: ", s)
 	return &agent.NetworkAddress{
-		AppID:    s.ID,
+		ClientID: d.ClientID,
 		Version:  d.IPVersion,
 		IPv4Addr: d.DestIP4,
 		IPv6Addr: d.DestIP6,
@@ -40,7 +40,9 @@ func (h *Hooks) Get(_ context.Context, srcPort uint16) (*agent.NetworkAddress, e
 func (h *Hooks) GetDestinationInfo(srcPort uint16) (*structs.DestInfo, error) {
 	h.m.Lock()
 	defer h.m.Unlock()
-	destInfo := structs.DestInfo{}
+	destInfo := structs.DestInfo{
+		ClientID: 0,
+	}
 	if err := h.redirectProxyMap.Lookup(srcPort, &destInfo); err != nil {
 		return nil, err
 	}

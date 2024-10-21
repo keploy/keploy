@@ -48,7 +48,7 @@ func (m *Mongo) MatchType(_ context.Context, buffer []byte) bool {
 
 // RecordOutgoing records the outgoing mongo messages of the client connection into the yaml file.
 // The database connection is keep-alive so, this function will be called during the connection establishment.
-func (m *Mongo) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func (m *Mongo) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, clientClose chan bool, opts models.OutgoingOptions) error {
 	logger := m.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)))
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
@@ -61,7 +61,7 @@ func (m *Mongo) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, 
 	// initially the reqBuf contains the first network packet
 	// from the client connection which is used to determine
 	// the packet type in MatchType.
-	err = m.encodeMongo(ctx, logger, reqBuf, src, dst, mocks, opts)
+	err = m.encodeMongo(ctx, logger, reqBuf, src, dst, mocks, clientClose, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the mongo message into the yaml")
 		return err
