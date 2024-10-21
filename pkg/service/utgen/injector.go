@@ -155,26 +155,23 @@ func (i *Injector) updateJavaScriptImports(importedContent string, newImports []
 	existingImportsSet := make(map[string]bool)
 
 	existingImports := importRegex.FindAllString(importedContent, -1)
+	allImports := make([]string, 0)
 	for _, imp := range existingImports {
-		if imp != "\"\"" && len(imp) > 0 {
-			existingImportsSet[imp] = true
+		trimmedImp := strings.TrimSpace(imp)
+		if len(trimmedImp) > 0 {
+			existingImportsSet[trimmedImp] = true
 		}
+		allImports = append(allImports, imp)
 	}
-
 	for _, imp := range newImports {
 		imp = strings.TrimSpace(imp)
-		if importRegex.MatchString(imp) {
+		if !existingImportsSet[imp] && importRegex.MatchString(imp) {
 			existingImportsSet[imp] = true
+			allImports = append(allImports, imp)
 		}
-	}
-
-	allImports := make([]string, 0, len(existingImportsSet))
-	for imp := range existingImportsSet {
-		allImports = append(allImports, imp)
 	}
 
 	importSection := strings.Join(allImports, "\n")
-
 	updatedContent := importRegex.ReplaceAllString(importedContent, "")
 	updatedContent = strings.Trim(updatedContent, "\n")
 	lines := strings.Split(updatedContent, "\n")
