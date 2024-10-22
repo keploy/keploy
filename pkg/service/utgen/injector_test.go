@@ -8,6 +8,126 @@ import (
 	"testing"
 )
 
+func TestUpdateJavaScriptImports(t *testing.T) {
+	injector := &Injector{}
+
+	tests := []struct {
+		name         string
+		content      string
+		newImports   []string
+		expected     string
+		expectedDiff int
+	}{
+		{
+			name: "No new imports",
+			content: `import { isEven } from './math';
+const { sum } = require('./utils');
+
+function calculate() {
+    return sum(2, 3);
+}`,
+			newImports: []string{},
+			expected: `import { isEven } from './math';
+const { sum } = require('./utils');
+
+function calculate() {
+    return sum(2, 3);
+}`,
+			expectedDiff: 0,
+		},
+		{
+			name: "New imports with duplicates",
+			content: `import { isEven } from './math';
+const { sum } = require('./utils');
+
+function calculate() {
+    return sum(2, 3);
+}`,
+			newImports: []string{
+				"const { sum } = require('./utils');",   // Duplicate
+				"const { divide } = require('./math');", // New import
+			},
+			expected: `import { isEven } from './math';
+const { sum } = require('./utils');
+const { divide } = require('./math');
+
+function calculate() {
+    return sum(2, 3);
+}`,
+			expectedDiff: 1,
+		},
+		{
+			name: "No existing imports, adding new imports",
+			content: `function calculate() {
+    return sum(2, 3);
+}`,
+			newImports: []string{
+				"import { sum } from './math';",
+			},
+			expected: `import { sum } from './math';
+function calculate() {
+    return sum(2, 3);
+}`,
+			expectedDiff: 1,
+		},
+		{
+			name: "Adding imports to content with no imports",
+			content: `/* This is a comment */
+function calculate() {
+    return 42;
+}`,
+			newImports: []string{
+				"import { sqrt } from './math';",
+			},
+			expected: `import { sqrt } from './math';
+/* This is a comment */
+function calculate() {
+    return 42;
+}`,
+			expectedDiff: 1,
+		},
+		{
+			name: "Handling empty lines and comments",
+			content: `import { isEven } from './math';
+// A comment explaining the code
+const { sum } = require('./utils');
+
+function calculate() {
+    return sum(2, 3);
+}`,
+			newImports: []string{
+				"import { divide } from './math';",
+				"const { multiply } = require('./utils');",
+			},
+			expected: `import { isEven } from './math';
+// A comment explaining the code
+const { sum } = require('./utils');
+import { divide } from './math';
+const { multiply } = require('./utils');
+
+function calculate() {
+    return sum(2, 3);
+}`,
+			expectedDiff: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			updatedContent, diff, err := injector.updateJavaScriptImports(tt.content, tt.newImports)
+			if err != nil {
+				t.Fatalf("Unexpected error: %v", err)
+			}
+			if strings.TrimSpace(updatedContent) != strings.TrimSpace(tt.expected) {
+				t.Errorf("Expected:\n%s\nGot:\n%s", tt.expected, updatedContent)
+			}
+			if diff != tt.expectedDiff {
+				t.Errorf("Expected diff: %d, Got: %d", tt.expectedDiff, diff)
+			}
+		})
+	}
+}
+
 func TestUpdatePythonImports(t *testing.T) {
 	injector := &Injector{}
 
