@@ -1,7 +1,6 @@
 package utgen
 
 import (
-	"bufio"
 	"fmt"
 	"io/fs"
 	"os"
@@ -202,7 +201,7 @@ func (i *Injector) updateImports(filePath string, imports string) (int, error) {
 	case "java":
 		updatedContent, importLength, err = i.updateJavaImports(content, newImports)
 	case "python":
-		updatedContent, err = i.updatePythonImports(content, newImports)
+		updatedContent, importLength, err = i.updatePythonImports(content, newImports)
 	case "typescript":
 		updatedContent, importLength, err = i.updateTypeScriptImports(content, newImports)
 	case "javascript":
@@ -344,138 +343,45 @@ func (i *Injector) updateJavaImports(codeContent string, newImports []string) (s
 
 }
 
-func (i *Injector) updatePythonImports(content string, newImports []string) (string, error) {
-	newImportsMap := make(map[string]map[string]bool)
+func (i *Injector) updatePythonImports(content string, newImports []string) (string, int, error) {
+	// Regular expression to match import statements in Python
+	importRegex := regexp.MustCompile(`(?m)^(from\s+\w+\s+import\s+.*|import\s+\w+)`)
 
-	// Parse newImports and organize them into a map with the module name as the key and the import items as values
+	existingImportsSet := make(map[string]bool)
+	existingImports := importRegex.FindAllString(content, -1)
+
+	// Add existing imports to a set to avoid duplication
+	for _, imp := range existingImports {
+		existingImportsSet[strings.TrimSpace(imp)] = true
+	}
+
+	// Create a list of new imports that aren't duplicates of existing ones
+	var newImportLines []string
 	for _, imp := range newImports {
-		imp = strings.TrimSpace(imp)
-		if imp == "" || imp == "\"\"" {
-			continue
-		}
-
-		// Handle 'from ... import ...' statements
-		if strings.HasPrefix(imp, "from ") {
-			fields := strings.Fields(imp)
-			moduleName := fields[1]
-			if _, exists := newImportsMap[moduleName]; !exists {
-				newImportsMap[moduleName] = make(map[string]bool)
-			}
-
-			// Add the imported items (skipping any trailing commas)
-			newItem := fields[3:] // Starting from the fourth field (i.e., after "import")
-			for _, item := range newItem {
-				newImportsMap[moduleName][strings.Trim(item, ",")] = true
-			}
-		} else if strings.HasPrefix(imp, "import ") { // Handle plain 'import ...' statements
-			fields := strings.Fields(imp)
-			moduleName := fields[1] // Only one field: the module name
-			if _, exists := newImportsMap[moduleName]; !exists {
-				newImportsMap[moduleName] = make(map[string]bool)
-			}
+		trimmedImp := strings.TrimSpace(imp)
+		if !existingImportsSet[trimmedImp] && importRegex.MatchString(trimmedImp) {
+			newImportLines = append(newImportLines, imp)
 		}
 	}
 
-	scanner := bufio.NewScanner(strings.NewReader(content))
-	mergedImports := make(map[string]map[string]bool)
-	var noImportLines []string                                        // Store lines that are not imports
-	ignoredPrefixes := "# checking coverage for file - do not remove" // Special comment to track
-	annotatedModules := make(map[string]bool)                         // Track modules that have this special comment
-
-	// Iterate through the existing content
-	for scanner.Scan() {
-		line := scanner.Text()
-		trimmedLine := strings.TrimSpace(line)
-		if trimmedLine == "" {
-			continue // Skip empty lines
-		}
-
-		// Handle 'from ... import ...' statements
-		if strings.HasPrefix(trimmedLine, "from ") {
-			parts := strings.SplitN(trimmedLine, "#", 2) // Split on comment
-			coreImport := strings.TrimSpace(parts[0])    // The actual import line
-			moduleName := strings.Fields(coreImport)[1]  // Module name
-			importPart := coreImport[strings.Index(coreImport, "import")+len("import "):]
-			existingItems := strings.Split(importPart, ",") // Existing imported items
-
-			// Check if the comment includes the special ignoredPrefixes
-			if len(parts) > 1 && strings.HasSuffix(ignoredPrefixes, parts[1]) {
-				annotatedModules[moduleName] = true
-			}
-
-			// Merge the new imports with the existing ones for the same module
-			if _, exists := newImportsMap[moduleName]; exists {
-				if _, exists = mergedImports[moduleName]; !exists {
-					mergedImports[moduleName] = make(map[string]bool)
-				}
-				for _, item := range existingItems {
-					mergedImports[moduleName][strings.TrimSpace(item)] = true // Merge existing items
-				}
-				for newItem := range newImportsMap[moduleName] {
-					mergedImports[moduleName][newItem] = true // Add new imports
-				}
-				delete(newImportsMap, moduleName) // Remove from newImportsMap after processing
-			} else {
-				// If no new imports, just add the existing imports to mergedImports
-				if _, exists = mergedImports[moduleName]; !exists {
-					mergedImports[moduleName] = make(map[string]bool)
-				}
-				for _, item := range existingItems {
-					mergedImports[moduleName][strings.TrimSpace(item)] = true
-				}
-			}
-		} else if strings.HasPrefix(trimmedLine, "import ") {
-			// Handle plain 'import ...' statements
-			parts := strings.SplitN(trimmedLine, "#", 2)
-			moduleName := strings.Fields(parts[0])[1] // Get the module name
-
-			// Check if the line contains the special comment and mark it
-			if len(parts) > 1 && strings.HasSuffix(ignoredPrefixes, parts[1]) {
-				annotatedModules[moduleName] = true
-			}
-
-			// Add the module to mergedImports even if it has no specific items (plain import)
-			if _, exists := mergedImports[moduleName]; !exists {
-				mergedImports[moduleName] = make(map[string]bool)
-			}
-		} else {
-			// If the line is not an import, add it to noImportLines
-			noImportLines = append(noImportLines, line)
-		}
+	// If no new imports to add, return the original content
+	if len(newImportLines) == 0 {
+		return content, 0, nil
 	}
 
-	// Process any remaining new imports that were not merged yet
-	for module, itemsMap := range newImportsMap {
-		if _, exists := mergedImports[module]; !exists {
-			mergedImports[module] = make(map[string]bool)
-		}
-		for newItem := range itemsMap {
-			mergedImports[module][newItem] = true
-		}
+	// Find the end position of the last import statement
+	lastImportIndex := importRegex.FindAllStringIndex(content, -1)
+	if len(lastImportIndex) > 0 {
+		// Get the position after the last import statement
+		lastImportPos := lastImportIndex[len(lastImportIndex)-1][1]
+		// Insert the new imports after the last existing import statement
+		updatedContent := content[:lastImportPos] + "\n" + strings.Join(newImportLines, "\n") + content[lastImportPos:]
+		return updatedContent, len(newImportLines), nil
 	}
 
-	var finalImportLines []string
-	// Construct the final import lines
-	for module, itemsMap := range mergedImports {
-		importLine := ""
-		if len(itemsMap) == 0 {
-			// Plain 'import module'
-			importLine = fmt.Sprintf("import %s", module)
-		} else {
-			// 'from module import item1, item2, ...'
-			items := mapKeysToSortedSlice(itemsMap)
-			importLine = fmt.Sprintf("from %s import %s", module, strings.Join(items, ", "))
-		}
-		// Add the special comment if the module was marked
-		if annotatedModules[module] {
-			importLine += " " + ignoredPrefixes
-		}
-		finalImportLines = append(finalImportLines, importLine)
-	}
-
-	// Join the final import lines with the rest of the content
-	updatedContent := strings.Join(finalImportLines, "\n") + "\n" + strings.Join(noImportLines, "\n")
-	return updatedContent, nil
+	// If no import statements are found, insert the new imports at the beginning
+	updatedContent := strings.Join(newImportLines, "\n") + "\n" + content
+	return updatedContent, len(newImportLines), nil
 }
 
 func (i *Injector) updateTypeScriptImports(importedContent string, newImports []string) (string, int, error) {
