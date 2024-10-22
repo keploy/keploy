@@ -52,11 +52,11 @@ runs:
     - name: Grant permissions
       run: chmod +x ${GITHUB_ACTION_PATH}/install.sh
       shell: sh
+
     - id: keploy-test-keploy
       name: Run Script
       run: |
         ${GITHUB_ACTION_PATH}/install.sh
-       
       shell: bash
       env:
         WORKDIR: ${{ inputs.working-directory }}
@@ -90,23 +90,3 @@ runs:
       with:
         name: ${{ steps.coverage-zip.outputs.coverage_name }}
         path: ${{ steps.coverage-zip.outputs.coverage_name }}.zip
-                  
-    # - name: Comment on PR
-    #   if: success()
-    #   uses: actions/github-script@v6
-    #   env:
-    #     KEPLOY_REPORT: ${{ steps.keploy-test-report.outputs.KEPLOY_REPORT }}
-    #   with:
-    #     github-token: ${{ github.token }}
-    #     script: |
-    #       if (!process.env.KEPLOY_REPORT) {
-    #         console.error('Error: KEPLOY_REPORT not found.');
-    #         process.exit(1);
-    #       }
-    #       github.rest.issues.createComment({
-    #         issue_number: context.issue.number,
-    #         owner: context.repo.owner,
-    #         repo: context.repo.repo,
-    #         body: process.env.KEPLOY_REPORT
-    #       })
-    #   shell: bash
