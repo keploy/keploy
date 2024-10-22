@@ -153,42 +153,32 @@ func (i *Injector) uninstallLibraries(installedPackages []string) error {
 func (i *Injector) updateJavaScriptImports(importedContent string, newImports []string) (string, int, error) {
 	importRegex := regexp.MustCompile(`(?m)^(import\s+.*?from\s+['"].*?['"];?|const\s+.*?=\s+require\(['"].*?['"]\);?)`)
 	existingImportsSet := make(map[string]bool)
-
+	sanitisedImports := []string{}
 	existingImports := importRegex.FindAllString(importedContent, -1)
 	for _, imp := range existingImports {
-		if imp != "\"\"" && len(imp) > 0 {
+		if imp != "" && !existingImportsSet[imp] {
 			existingImportsSet[imp] = true
+			sanitisedImports = append(sanitisedImports, imp)
 		}
 	}
 
 	for _, imp := range newImports {
 		imp = strings.TrimSpace(imp)
-		if importRegex.MatchString(imp) {
+		if importRegex.MatchString(imp) && !existingImportsSet[imp] {
 			existingImportsSet[imp] = true
+			sanitisedImports = append(sanitisedImports, imp)
 		}
 	}
+	updatedImports := strings.Join(sanitisedImports, "\n") + "\n\n"
 
-	allImports := make([]string, 0, len(existingImportsSet))
-	for imp := range existingImportsSet {
-		allImports = append(allImports, imp)
-	}
+	contentWithoutImports := importRegex.ReplaceAllString(importedContent, "")
 
-	importSection := strings.Join(allImports, "\n")
+	updatedContent := updatedImports + strings.TrimLeft(contentWithoutImports, "\n")
 
-	updatedContent := importRegex.ReplaceAllString(importedContent, "")
-	updatedContent = strings.Trim(updatedContent, "\n")
-	lines := strings.Split(updatedContent, "\n")
-	cleanedLines := []string{}
-	for _, line := range lines {
-		trimmedLine := strings.TrimSpace(line)
-		if trimmedLine != "" {
-			cleanedLines = append(cleanedLines, line)
-		}
-	}
-	updatedContent = strings.Join(cleanedLines, "\n")
-	updatedContent = importSection + "\n" + updatedContent
+	originalLines := strings.Split(importedContent, "\n")
+	updatedLines := strings.Split(updatedContent, "\n")
+	importLength := len(updatedLines) - len(originalLines)
 
-	importLength := len(strings.Split(updatedContent, "\n")) - len(strings.Split(importedContent, "\n"))
 	if importLength < 0 {
 		importLength = 0
 	}
@@ -475,38 +465,32 @@ func (i *Injector) updatePythonImports(content string, newImports []string) (str
 func (i *Injector) updateTypeScriptImports(importedContent string, newImports []string) (string, int, error) {
 	importRegex := regexp.MustCompile(`(?m)^import\s+.*?;`)
 	existingImportsSet := make(map[string]bool)
-
+	sanitisedImports := []string{}
 	existingImports := importRegex.FindAllString(importedContent, -1)
 	for _, imp := range existingImports {
-		existingImportsSet[imp] = true
+		if imp != "" && !existingImportsSet[imp] {
+			existingImportsSet[imp] = true
+			sanitisedImports = append(sanitisedImports, imp)
+		}
 	}
 
 	for _, imp := range newImports {
 		imp = strings.TrimSpace(imp)
-		if importRegex.MatchString(imp) {
+		if importRegex.MatchString(imp) && !existingImportsSet[imp] {
 			existingImportsSet[imp] = true
+			sanitisedImports = append(sanitisedImports, imp)
 		}
 	}
+	updatedImports := strings.Join(sanitisedImports, "\n") + "\n\n"
 
-	allImports := make([]string, 0, len(existingImportsSet))
-	for imp := range existingImportsSet {
-		allImports = append(allImports, imp)
-	}
-	importSection := strings.Join(allImports, "\n")
+	contentWithoutImports := importRegex.ReplaceAllString(importedContent, "")
 
-	updatedContent := importRegex.ReplaceAllString(importedContent, "")
-	updatedContent = strings.Trim(updatedContent, "\n")
-	lines := strings.Split(updatedContent, "\n")
-	cleanedLines := []string{}
-	for _, line := range lines {
-		trimmedLine := strings.TrimSpace(line)
-		if trimmedLine != "" {
-			cleanedLines = append(cleanedLines, line)
-		}
-	}
-	updatedContent = strings.Join(cleanedLines, "\n")
-	updatedContent = importSection + "\n" + updatedContent
-	importLength := len(strings.Split(updatedContent, "\n")) - len(strings.Split(importedContent, "\n"))
+	updatedContent := updatedImports + strings.TrimLeft(contentWithoutImports, "\n")
+
+	originalLines := strings.Split(importedContent, "\n")
+	updatedLines := strings.Split(updatedContent, "\n")
+	importLength := len(updatedLines) - len(originalLines)
+
 	if importLength < 0 {
 		importLength = 0
 	}
