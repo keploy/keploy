@@ -322,18 +322,17 @@ def func():
 `,
 			newImports: []string{
 				"from math import ceil",
-				"from random import shuffle",
+				"from random import randint",
 			},
 			expected: `from math import sqrt
 # A comment explaining the code
 from random import randint # checking coverage for file - do not remove
 from math import ceil
-from random import shuffle
 
 def func():
     return randint(0, sqrt(4))
 `,
-			expectedDiff: 2,
+			expectedDiff: 1,
 		},
 	}
 

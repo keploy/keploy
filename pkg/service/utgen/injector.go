@@ -189,29 +189,42 @@ func (i *Injector) updateImports(filePath string, imports string) (int, error) {
 }
 
 func commonImport(importedContent string, newImports []string, importRegex *regexp.Regexp) (string, int, error) {
-	existingImportsSet := make(map[string]bool)
+	// Maps to track imports: key = import without comment, value = full import (with comments)
+	existingImportsMap := make(map[string]string) // Track existing imports with comments
+	newImportsMap := make(map[string]string)      // Track new imports without duplicates
 
 	// Find existing imports in the content
 	existingImports := importRegex.FindAllString(importedContent, -1)
 	for _, imp := range existingImports {
-		existingImportsSet[strings.TrimSpace(imp)] = true
+		trimmedImp := strings.TrimSpace(imp)
+		// Split import and comment (if any)
+		coreImport := strings.Split(trimmedImp, "#")[0]                // Strip away comment for comparison
+		existingImportsMap[strings.TrimSpace(coreImport)] = trimmedImp // Store full import with comment
 	}
 
-	// Create a list of new imports that aren't duplicates of existing ones
-	var newImportLines []string
+	// Create a list of new imports that aren't duplicates
 	for _, imp := range newImports {
 		trimmedImp := strings.TrimSpace(imp)
-		if !existingImportsSet[trimmedImp] && importRegex.MatchString(trimmedImp) {
-			newImportLines = append(newImportLines, imp)
+		coreImport := strings.Split(trimmedImp, "#")[0] // Strip away comment for comparison
+		// Only add new imports if they are not duplicates
+		if _, exists := existingImportsMap[strings.TrimSpace(coreImport)]; !exists {
+			// Store the full new import (with any comments) in newImportsMap
+			newImportsMap[strings.TrimSpace(coreImport)] = trimmedImp
 		}
 	}
 
 	// If no new imports to add, return the original content
-	if len(newImportLines) == 0 {
+	if len(newImportsMap) == 0 {
 		return importedContent, 0, nil
 	}
 
-	// Find the end position of the last import statement
+	// Prepare the new import lines to append
+	var newImportLines []string
+	for _, fullImport := range newImportsMap {
+		newImportLines = append(newImportLines, fullImport)
+	}
+
+	// Find the position after the last existing import statement
 	lastImportIndex := importRegex.FindAllStringIndex(importedContent, -1)
 	if len(lastImportIndex) > 0 {
 		// Get the position after the last import statement
@@ -221,7 +234,7 @@ func commonImport(importedContent string, newImports []string, importRegex *rege
 		return updatedContent, len(newImportLines), nil
 	}
 
-	// If no import statements are found, insert the new imports at the beginning
+	// If no existing import statements are found, insert the new imports at the beginning
 	updatedContent := strings.Join(newImportLines, "\n") + "\n" + importedContent
 	return updatedContent, len(newImportLines), nil
 }
