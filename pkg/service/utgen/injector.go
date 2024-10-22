@@ -149,39 +149,6 @@ func (i *Injector) uninstallLibraries(installedPackages []string) error {
 	return nil
 }
 
-func (i *Injector) updateJavaScriptImports(importedContent string, newImports []string) (string, int, error) {
-	importRegex := regexp.MustCompile(`(?m)^(import\s+.*?from\s+['"].*?['"];?|const\s+.*?=\s+require\(['"].*?['"]\);?)`)
-	existingImportsSet := make(map[string]bool)
-	existingImports := importRegex.FindAllString(importedContent, -1)
-	for _, imp := range existingImports {
-		existingImportsSet[strings.TrimSpace(imp)] = true
-	}
-	var newImportLines []string
-	for _, imp := range newImports {
-		trimmedImp := strings.TrimSpace(imp)
-		if !existingImportsSet[trimmedImp] && importRegex.MatchString(trimmedImp) {
-			newImportLines = append(newImportLines, imp)
-		}
-	}
-	if len(newImportLines) == 0 {
-		return importedContent, 0, nil
-	}
-
-	// Find the end position of the last import statement
-	lastImportIndex := importRegex.FindAllStringIndex(importedContent, -1)
-	if len(lastImportIndex) > 0 {
-		// Get the position after the last import statement
-		lastImportPos := lastImportIndex[len(lastImportIndex)-1][1]
-		// Insert the new imports after the last existing import statement
-		updatedContent := importedContent[:lastImportPos] + "\n" + strings.Join(newImportLines, "\n") + importedContent[lastImportPos:]
-		return updatedContent, len(newImportLines), nil
-	}
-
-	// If no import statements are found, insert the new imports at the beginning
-	updatedContent := strings.Join(newImportLines, "\n") + "\n" + importedContent
-	return updatedContent, len(newImportLines), nil
-}
-
 func (i *Injector) updateImports(filePath string, imports string) (int, error) {
 	newImports := strings.Split(imports, "\n")
 	for i, imp := range newImports {
@@ -219,6 +186,62 @@ func (i *Injector) updateImports(filePath string, imports string) (int, error) {
 	}
 
 	return importLength, nil
+}
+
+func commonImport(importedContent string, newImports []string, importRegex *regexp.Regexp) (string, int, error) {
+	existingImportsSet := make(map[string]bool)
+
+	// Find existing imports in the content
+	existingImports := importRegex.FindAllString(importedContent, -1)
+	for _, imp := range existingImports {
+		existingImportsSet[strings.TrimSpace(imp)] = true
+	}
+
+	// Create a list of new imports that aren't duplicates of existing ones
+	var newImportLines []string
+	for _, imp := range newImports {
+		trimmedImp := strings.TrimSpace(imp)
+		if !existingImportsSet[trimmedImp] && importRegex.MatchString(trimmedImp) {
+			newImportLines = append(newImportLines, imp)
+		}
+	}
+
+	// If no new imports to add, return the original content
+	if len(newImportLines) == 0 {
+		return importedContent, 0, nil
+	}
+
+	// Find the end position of the last import statement
+	lastImportIndex := importRegex.FindAllStringIndex(importedContent, -1)
+	if len(lastImportIndex) > 0 {
+		// Get the position after the last import statement
+		lastImportPos := lastImportIndex[len(lastImportIndex)-1][1]
+		// Insert the new imports after the last existing import statement
+		updatedContent := importedContent[:lastImportPos] + "\n" + strings.Join(newImportLines, "\n") + importedContent[lastImportPos:]
+		return updatedContent, len(newImportLines), nil
+	}
+
+	// If no import statements are found, insert the new imports at the beginning
+	updatedContent := strings.Join(newImportLines, "\n") + "\n" + importedContent
+	return updatedContent, len(newImportLines), nil
+}
+
+func (i *Injector) updateJavaScriptImports(importedContent string, newImports []string) (string, int, error) {
+	// Regular expression to match JavaScript import/require statements
+	importRegex := regexp.MustCompile(`(?m)^(import\s+.*?from\s+['"].*?['"];?|const\s+.*?=\s+require\(['"].*?['"]\);?)`)
+	return commonImport(importedContent, newImports, importRegex)
+}
+
+func (i *Injector) updateTypeScriptImports(importedContent string, newImports []string) (string, int, error) {
+	// Regular expression to match TypeScript import statements
+	importRegex := regexp.MustCompile(`(?m)^import\s+.*?;`)
+	return commonImport(importedContent, newImports, importRegex)
+}
+
+func (i *Injector) updatePythonImports(content string, newImports []string) (string, int, error) {
+	// Regular expression to match import statements in Python
+	importRegex := regexp.MustCompile(`(?m)^(from\s+\w+\s+import\s+.*|import\s+\w+)`)
+	return commonImport(content, newImports, importRegex)
 }
 
 func (i *Injector) updateGoImports(codeBlock string, newImports []string) (string, int, error) {
@@ -341,86 +364,6 @@ func (i *Injector) updateJavaImports(codeContent string, newImports []string) (s
 	}
 	return codeContent, 0, nil
 
-}
-
-func (i *Injector) updatePythonImports(content string, newImports []string) (string, int, error) {
-	// Regular expression to match import statements in Python
-	importRegex := regexp.MustCompile(`(?m)^(from\s+\w+\s+import\s+.*|import\s+\w+)`)
-
-	existingImportsSet := make(map[string]bool)
-	existingImports := importRegex.FindAllString(content, -1)
-
-	// Add existing imports to a set to avoid duplication
-	for _, imp := range existingImports {
-		existingImportsSet[strings.TrimSpace(imp)] = true
-	}
-
-	// Create a list of new imports that aren't duplicates of existing ones
-	var newImportLines []string
-	for _, imp := range newImports {
-		trimmedImp := strings.TrimSpace(imp)
-		if !existingImportsSet[trimmedImp] && importRegex.MatchString(trimmedImp) {
-			newImportLines = append(newImportLines, imp)
-		}
-	}
-
-	// If no new imports to add, return the original content
-	if len(newImportLines) == 0 {
-		return content, 0, nil
-	}
-
-	// Find the end position of the last import statement
-	lastImportIndex := importRegex.FindAllStringIndex(content, -1)
-	if len(lastImportIndex) > 0 {
-		// Get the position after the last import statement
-		lastImportPos := lastImportIndex[len(lastImportIndex)-1][1]
-		// Insert the new imports after the last existing import statement
-		updatedContent := content[:lastImportPos] + "\n" + strings.Join(newImportLines, "\n") + content[lastImportPos:]
-		return updatedContent, len(newImportLines), nil
-	}
-
-	// If no import statements are found, insert the new imports at the beginning
-	updatedContent := strings.Join(newImportLines, "\n") + "\n" + content
-	return updatedContent, len(newImportLines), nil
-}
-
-func (i *Injector) updateTypeScriptImports(importedContent string, newImports []string) (string, int, error) {
-	importRegex := regexp.MustCompile(`(?m)^import\s+.*?;`)
-	existingImportsSet := make(map[string]bool)
-	allImports := make([]string, 0)
-	existingImports := importRegex.FindAllString(importedContent, -1)
-	for _, imp := range existingImports {
-		trimmedImp := strings.TrimSpace(imp)
-		if trimmedImp != "" {
-			existingImportsSet[trimmedImp] = true
-		}
-		allImports = append(allImports, imp)
-	}
-	for _, imp := range newImports {
-		trimmedImp := strings.TrimSpace(imp)
-		if !existingImportsSet[trimmedImp] && importRegex.MatchString(trimmedImp) {
-			existingImportsSet[imp] = true
-			allImports = append(allImports, imp)
-		}
-	}
-	importSection := strings.Join(allImports, "\n")
-	updatedContent := importRegex.ReplaceAllString(importedContent, "")
-	updatedContent = strings.Trim(updatedContent, "\n")
-	lines := strings.Split(updatedContent, "\n")
-	cleanedLines := []string{}
-	for _, line := range lines {
-		trimmedLine := strings.TrimSpace(line)
-		if trimmedLine != "" {
-			cleanedLines = append(cleanedLines, line)
-		}
-	}
-	updatedContent = strings.Join(cleanedLines, "\n")
-	updatedContent = importSection + "\n" + updatedContent
-	importLength := len(strings.Split(updatedContent, "\n")) - len(strings.Split(importedContent, "\n"))
-	if importLength < 0 {
-		importLength = 0
-	}
-	return updatedContent, importLength, nil
 }
 
 func (i *Injector) extractJavaDependencies(output []byte) []string {
