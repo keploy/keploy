@@ -1,7 +1,6 @@
 package utgen
 
 import (
-	"bufio"
 	"fmt"
 	"io/fs"
 	"os"
@@ -150,51 +149,6 @@ func (i *Injector) uninstallLibraries(installedPackages []string) error {
 	return nil
 }
 
-func (i *Injector) updateJavaScriptImports(importedContent string, newImports []string) (string, int, error) {
-	importRegex := regexp.MustCompile(`(?m)^(import\s+.*?from\s+['"].*?['"];?|const\s+.*?=\s+require\(['"].*?['"]\);?)`)
-	existingImportsSet := make(map[string]bool)
-
-	existingImports := importRegex.FindAllString(importedContent, -1)
-	for _, imp := range existingImports {
-		if imp != "\"\"" && len(imp) > 0 {
-			existingImportsSet[imp] = true
-		}
-	}
-
-	for _, imp := range newImports {
-		imp = strings.TrimSpace(imp)
-		if importRegex.MatchString(imp) {
-			existingImportsSet[imp] = true
-		}
-	}
-
-	allImports := make([]string, 0, len(existingImportsSet))
-	for imp := range existingImportsSet {
-		allImports = append(allImports, imp)
-	}
-
-	importSection := strings.Join(allImports, "\n")
-
-	updatedContent := importRegex.ReplaceAllString(importedContent, "")
-	updatedContent = strings.Trim(updatedContent, "\n")
-	lines := strings.Split(updatedContent, "\n")
-	cleanedLines := []string{}
-	for _, line := range lines {
-		trimmedLine := strings.TrimSpace(line)
-		if trimmedLine != "" {
-			cleanedLines = append(cleanedLines, line)
-		}
-	}
-	updatedContent = strings.Join(cleanedLines, "\n")
-	updatedContent = importSection + "\n" + updatedContent
-
-	importLength := len(strings.Split(updatedContent, "\n")) - len(strings.Split(importedContent, "\n"))
-	if importLength < 0 {
-		importLength = 0
-	}
-	return updatedContent, importLength, nil
-}
-
 func (i *Injector) updateImports(filePath string, imports string) (int, error) {
 	newImports := strings.Split(imports, "\n")
 	for i, imp := range newImports {
@@ -214,7 +168,7 @@ func (i *Injector) updateImports(filePath string, imports string) (int, error) {
 	case "java":
 		updatedContent, importLength, err = i.updateJavaImports(content, newImports)
 	case "python":
-		updatedContent, err = i.updatePythonImports(content, newImports)
+		updatedContent, importLength, err = i.updatePythonImports(content, newImports)
 	case "typescript":
 		updatedContent, importLength, err = i.updateTypeScriptImports(content, newImports)
 	case "javascript":
@@ -232,6 +186,75 @@ func (i *Injector) updateImports(filePath string, imports string) (int, error) {
 	}
 
 	return importLength, nil
+}
+
+func commonImport(importedContent string, newImports []string, importRegex *regexp.Regexp) (string, int, error) {
+	// Maps to track imports: key = import without comment, value = full import (with comments)
+	existingImportsMap := make(map[string]string) // Track existing imports with comments
+	newImportsMap := make(map[string]string)      // Track new imports without duplicates
+
+	// Find existing imports in the content
+	existingImports := importRegex.FindAllString(importedContent, -1)
+	for _, imp := range existingImports {
+		trimmedImp := strings.TrimSpace(imp)
+		// Split import and comment (if any)
+		coreImport := strings.Split(trimmedImp, "#")[0]                // Strip away comment for comparison
+		existingImportsMap[strings.TrimSpace(coreImport)] = trimmedImp // Store full import with comment
+	}
+
+	// Create a list of new imports that aren't duplicates
+	for _, imp := range newImports {
+		trimmedImp := strings.TrimSpace(imp)
+		coreImport := strings.Split(trimmedImp, "#")[0] // Strip away comment for comparison
+		// Only add new imports if they are not duplicates
+		if _, exists := existingImportsMap[strings.TrimSpace(coreImport)]; !exists {
+			// Store the full new import (with any comments) in newImportsMap
+			newImportsMap[strings.TrimSpace(coreImport)] = trimmedImp
+		}
+	}
+
+	// If no new imports to add, return the original content
+	if len(newImportsMap) == 0 {
+		return importedContent, 0, nil
+	}
+
+	// Prepare the new import lines to append
+	var newImportLines []string
+	for _, fullImport := range newImportsMap {
+		newImportLines = append(newImportLines, fullImport)
+	}
+
+	// Find the position after the last existing import statement
+	lastImportIndex := importRegex.FindAllStringIndex(importedContent, -1)
+	if len(lastImportIndex) > 0 {
+		// Get the position after the last import statement
+		lastImportPos := lastImportIndex[len(lastImportIndex)-1][1]
+		// Insert the new imports after the last existing import statement
+		updatedContent := importedContent[:lastImportPos] + "\n" + strings.Join(newImportLines, "\n") + importedContent[lastImportPos:]
+		return updatedContent, len(newImportLines), nil
+	}
+
+	// If no existing import statements are found, insert the new imports at the beginning
+	updatedContent := strings.Join(newImportLines, "\n") + "\n" + importedContent
+	return updatedContent, len(newImportLines), nil
+}
+
+func (i *Injector) updateJavaScriptImports(importedContent string, newImports []string) (string, int, error) {
+	// Regular expression to match JavaScript import/require statements
+	importRegex := regexp.MustCompile(`(?m)^(import\s+.*?from\s+['"].*?['"];?|const\s+.*?=\s+require\(['"].*?['"]\);?)`)
+	return commonImport(importedContent, newImports, importRegex)
+}
+
+func (i *Injector) updateTypeScriptImports(importedContent string, newImports []string) (string, int, error) {
+	// Regular expression to match TypeScript import statements
+	importRegex := regexp.MustCompile(`(?m)^import\s+.*?;`)
+	return commonImport(importedContent, newImports, importRegex)
+}
+
+func (i *Injector) updatePythonImports(content string, newImports []string) (string, int, error) {
+	// Regular expression to match import statements in Python
+	importRegex := regexp.MustCompile(`(?m)^(from\s+\w+\s+import\s+.*|import\s+\w+)`)
+	return commonImport(content, newImports, importRegex)
 }
 
 func (i *Injector) updateGoImports(codeBlock string, newImports []string) (string, int, error) {
@@ -354,163 +377,6 @@ func (i *Injector) updateJavaImports(codeContent string, newImports []string) (s
 	}
 	return codeContent, 0, nil
 
-}
-
-func (i *Injector) updatePythonImports(content string, newImports []string) (string, error) {
-	scanner := bufio.NewScanner(strings.NewReader(content))
-	existingImportsMap := make(map[string]map[string]bool)
-	codeLines := []string{}
-	importLines := []string{}
-
-	ignoredPrefixes := "# checking coverage for file - do not remove"
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		trimmedLine := strings.TrimSpace(line)
-
-		if trimmedLine == "" {
-			continue
-		}
-		shouldIgnore := (strings.HasPrefix(trimmedLine, "import ") || strings.HasPrefix(trimmedLine, "from ")) && strings.Contains(trimmedLine, ignoredPrefixes)
-		if shouldIgnore {
-			parts := strings.Split(trimmedLine, "#")
-			coreImport := strings.TrimSpace(parts[0])
-
-			if strings.HasPrefix(coreImport, "from ") {
-				fields := strings.Fields(coreImport)
-				moduleName := fields[1]
-				importPart := coreImport[strings.Index(coreImport, "import")+len("import "):]
-				importedItems := strings.Split(importPart, ",")
-
-				if _, exists := existingImportsMap[moduleName]; !exists {
-					existingImportsMap[moduleName] = make(map[string]bool)
-				}
-				for _, item := range importedItems {
-					cleanedItem := strings.TrimSpace(item)
-					if cleanedItem != "" {
-						existingImportsMap[moduleName][cleanedItem] = true
-					}
-				}
-			}
-			codeLines = append(codeLines, line)
-			continue
-		}
-
-		if strings.HasPrefix(trimmedLine, "import ") || strings.HasPrefix(trimmedLine, "from ") {
-			codeLines = append(codeLines, line)
-		} else {
-			codeLines = append(codeLines, line)
-		}
-	}
-
-	for _, imp := range newImports {
-		imp = strings.TrimSpace(imp)
-		if imp == "\"\"" || len(imp) == 0 {
-			continue
-		}
-		if strings.HasPrefix(imp, "from ") {
-			fields := strings.Fields(imp)
-			moduleName := fields[1]
-			newItems := strings.Split(fields[3], ",")
-			if _, exists := existingImportsMap[moduleName]; !exists {
-				existingImportsMap[moduleName] = make(map[string]bool)
-			}
-			for _, item := range newItems {
-				existingImportsMap[moduleName][strings.TrimSpace(item)] = true
-			}
-		} else if strings.HasPrefix(imp, "import ") {
-			fields := strings.Fields(imp)
-			moduleName := fields[1]
-			if _, exists := existingImportsMap[moduleName]; !exists {
-				existingImportsMap[moduleName] = make(map[string]bool)
-			}
-		}
-	}
-	for i, line := range codeLines {
-		trimmedLine := strings.TrimSpace(line)
-
-		if strings.HasPrefix(trimmedLine, "from ") {
-			fields := strings.Fields(trimmedLine)
-			moduleName := fields[1]
-
-			if itemsMap, exists := existingImportsMap[moduleName]; exists && len(itemsMap) > 0 {
-				items := mapKeysToSortedSlice(itemsMap)
-				importLine := fmt.Sprintf("from %s import %s", moduleName, strings.Join(items, ", "))
-
-				if strings.Contains(trimmedLine, ignoredPrefixes) {
-					importLine += " " + ignoredPrefixes
-				}
-				codeLines[i] = importLine
-				delete(existingImportsMap, moduleName)
-			}
-		}
-	}
-
-	for module, itemsMap := range existingImportsMap {
-		if len(itemsMap) > 0 {
-			items := mapKeysToSortedSlice(itemsMap)
-			importLine := fmt.Sprintf("from %s import %s", module, strings.Join(items, ", "))
-			importLine += " " + ignoredPrefixes
-			importLines = append(importLines, importLine)
-		}
-	}
-	nonEmptyCodeLines := []string{}
-	for _, line := range codeLines {
-		if strings.TrimSpace(line) != "" {
-			nonEmptyCodeLines = append(nonEmptyCodeLines, line)
-		}
-	}
-
-	nonEmptyImportLines := []string{}
-	for _, line := range importLines {
-		if strings.TrimSpace(line) != "" {
-			nonEmptyImportLines = append(nonEmptyImportLines, line)
-		}
-	}
-
-	updatedContent := strings.Join(nonEmptyImportLines, "\n") + "\n" + strings.Join(nonEmptyCodeLines, "\n")
-	return updatedContent, nil
-}
-
-func (i *Injector) updateTypeScriptImports(importedContent string, newImports []string) (string, int, error) {
-	importRegex := regexp.MustCompile(`(?m)^import\s+.*?;`)
-	existingImportsSet := make(map[string]bool)
-
-	existingImports := importRegex.FindAllString(importedContent, -1)
-	for _, imp := range existingImports {
-		existingImportsSet[imp] = true
-	}
-
-	for _, imp := range newImports {
-		imp = strings.TrimSpace(imp)
-		if importRegex.MatchString(imp) {
-			existingImportsSet[imp] = true
-		}
-	}
-
-	allImports := make([]string, 0, len(existingImportsSet))
-	for imp := range existingImportsSet {
-		allImports = append(allImports, imp)
-	}
-	importSection := strings.Join(allImports, "\n")
-
-	updatedContent := importRegex.ReplaceAllString(importedContent, "")
-	updatedContent = strings.Trim(updatedContent, "\n")
-	lines := strings.Split(updatedContent, "\n")
-	cleanedLines := []string{}
-	for _, line := range lines {
-		trimmedLine := strings.TrimSpace(line)
-		if trimmedLine != "" {
-			cleanedLines = append(cleanedLines, line)
-		}
-	}
-	updatedContent = strings.Join(cleanedLines, "\n")
-	updatedContent = importSection + "\n" + updatedContent
-	importLength := len(strings.Split(updatedContent, "\n")) - len(strings.Split(importedContent, "\n"))
-	if importLength < 0 {
-		importLength = 0
-	}
-	return updatedContent, importLength, nil
 }
 
 func (i *Injector) extractJavaDependencies(output []byte) []string {
