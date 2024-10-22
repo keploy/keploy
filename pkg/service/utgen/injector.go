@@ -172,8 +172,9 @@ func (i *Injector) updateJavaScriptImports(importedContent string, newImports []
 	updatedImports := strings.Join(sanitisedImports, "\n") + "\n\n"
 
 	contentWithoutImports := importRegex.ReplaceAllString(importedContent, "")
+	contentWithoutImports = strings.TrimLeft(contentWithoutImports, "\n")
 
-	updatedContent := updatedImports + strings.TrimLeft(contentWithoutImports, "\n")
+	updatedContent := updatedImports + "\n" + contentWithoutImports
 
 	originalLines := strings.Split(importedContent, "\n")
 	updatedLines := strings.Split(updatedContent, "\n")
@@ -182,6 +183,7 @@ func (i *Injector) updateJavaScriptImports(importedContent string, newImports []
 	if importLength < 0 {
 		importLength = 0
 	}
+
 	return updatedContent, importLength, nil
 }
 
@@ -484,8 +486,9 @@ func (i *Injector) updateTypeScriptImports(importedContent string, newImports []
 	updatedImports := strings.Join(sanitisedImports, "\n") + "\n\n"
 
 	contentWithoutImports := importRegex.ReplaceAllString(importedContent, "")
+	contentWithoutImports = strings.TrimLeft(contentWithoutImports, "\n")
 
-	updatedContent := updatedImports + strings.TrimLeft(contentWithoutImports, "\n")
+	updatedContent := updatedImports + "\n" + contentWithoutImports
 
 	originalLines := strings.Split(importedContent, "\n")
 	updatedLines := strings.Split(updatedContent, "\n")
