@@ -153,43 +153,34 @@ func (i *Injector) uninstallLibraries(installedPackages []string) error {
 func (i *Injector) updateJavaScriptImports(importedContent string, newImports []string) (string, int, error) {
 	importRegex := regexp.MustCompile(`(?m)^(import\s+.*?from\s+['"].*?['"];?|const\s+.*?=\s+require\(['"].*?['"]\);?)`)
 	existingImportsSet := make(map[string]bool)
-
 	existingImports := importRegex.FindAllString(importedContent, -1)
-	allImports := make([]string, 0)
 	for _, imp := range existingImports {
-		trimmedImp := strings.TrimSpace(imp)
-		if len(trimmedImp) > 0 {
-			existingImportsSet[trimmedImp] = true
-		}
-		allImports = append(allImports, imp)
+		existingImportsSet[strings.TrimSpace(imp)] = true
 	}
+	var newImportLines []string
 	for _, imp := range newImports {
-		imp = strings.TrimSpace(imp)
-		if !existingImportsSet[imp] && importRegex.MatchString(imp) {
-			existingImportsSet[imp] = true
-			allImports = append(allImports, imp)
+		trimmedImp := strings.TrimSpace(imp)
+		if !existingImportsSet[trimmedImp] && importRegex.MatchString(trimmedImp) {
+			newImportLines = append(newImportLines, imp)
 		}
 	}
-
-	importSection := strings.Join(allImports, "\n")
-	updatedContent := importRegex.ReplaceAllString(importedContent, "")
-	updatedContent = strings.Trim(updatedContent, "\n")
-	lines := strings.Split(updatedContent, "\n")
-	cleanedLines := []string{}
-	for _, line := range lines {
-		trimmedLine := strings.TrimSpace(line)
-		if trimmedLine != "" {
-			cleanedLines = append(cleanedLines, line)
-		}
+	if len(newImportLines) == 0 {
+		return importedContent, 0, nil
 	}
-	updatedContent = strings.Join(cleanedLines, "\n")
-	updatedContent = importSection + "\n" + updatedContent
 
-	importLength := len(strings.Split(updatedContent, "\n")) - len(strings.Split(importedContent, "\n"))
-	if importLength < 0 {
-		importLength = 0
+	// Find the end position of the last import statement
+	lastImportIndex := importRegex.FindAllStringIndex(importedContent, -1)
+	if len(lastImportIndex) > 0 {
+		// Get the position after the last import statement
+		lastImportPos := lastImportIndex[len(lastImportIndex)-1][1]
+		// Insert the new imports after the last existing import statement
+		updatedContent := importedContent[:lastImportPos] + "\n" + strings.Join(newImportLines, "\n") + importedContent[lastImportPos:]
+		return updatedContent, len(newImportLines), nil
 	}
-	return updatedContent, importLength, nil
+
+	// If no import statements are found, insert the new imports at the beginning
+	updatedContent := strings.Join(newImportLines, "\n") + "\n" + importedContent
+	return updatedContent, len(newImportLines), nil
 }
 
 func (i *Injector) updateImports(filePath string, imports string) (int, error) {
