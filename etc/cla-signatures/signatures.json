@@ -879,6 +879,14 @@
       "created_at": "2024-10-21T07:47:35Z",
       "repoId": 449649393,
       "pullRequestNo": 2357
+    },
+    {
+      "name": "kursataktas",
+      "id": 17837825,
+      "comment_id": 2432928890,
+      "created_at": "2024-10-23T17:20:43Z",
+      "repoId": 449649393,
+      "pullRequestNo": 2374
     }
   ]
 }
