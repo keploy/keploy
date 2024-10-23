@@ -9,7 +9,7 @@ import (
 )
 
 func downloadDotnetCoverage(ctx context.Context) error {
-	// Consruct arguments for command to check if dotnet-coverage is already installed or not.
+	// Consruct arguments for command to check if dotnet-coverage is already installed or not
 	check_args := []string{
 		"dotnet",
 		"tool",
@@ -47,6 +47,39 @@ func downloadDotnetCoverage(ctx context.Context) error {
 
 	if err := installCmd.Run(); err != nil {
 		return fmt.Errorf("failed to install dotnet-coverage. Ensure .NET SDK is installed and try again: %w", err)
+	}
+
+	return nil
+}
+
+func GenerateCoverageReport(ctx context.Context) error {
+	reportDir := "target/site/keployE2E"
+
+	// Ensure that the report dir exists
+	if err := os.MkdirAll(reportDir, 0777); err != nil {
+		return fmt.Errorf("failed to create report directory: %w", err)
+	}
+
+	// Consturct command arguments to generate the coverage reportar
+	args := []string{
+		"dotnet-coverage",
+		"collect",
+		"--output",
+		reportDir,
+		"<output.coverage>",
+		"--output-format",
+		"<html>",
+		"--",
+		"dotnet",
+		"test",
+	}
+
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to generate report: %w", err)
 	}
 
 	return nil
