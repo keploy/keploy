@@ -12,7 +12,7 @@ require (
 	github.com/docker/docker v24.0.4+incompatible
 	github.com/docker/go-connections v0.4.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
-	github.com/fatih/color v1.16.0
+	github.com/fatih/color v1.17.0
 	github.com/k0kubun/pp/v3 v3.2.0
 	github.com/miekg/dns v1.1.55
 	github.com/moby/term v0.5.0 // indirect
@@ -58,7 +58,7 @@ require (
 	github.com/spf13/afero v1.11.0 // indirect
 	github.com/spf13/cast v1.6.0 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
-	github.com/tidwall/gjson v1.17.0 // indirect
+	github.com/tidwall/gjson v1.17.1 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
@@ -115,6 +115,7 @@ require (
 	github.com/golang-jwt/jwt/v4 v4.5.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgproto3/v2 v2.3.2
+	github.com/keploy/jsonDiff v1.0.1
 	github.com/shirou/gopsutil/v3 v3.24.3
 	github.com/spf13/viper v1.19.0
 	github.com/wI2L/jsondiff v0.5.0
