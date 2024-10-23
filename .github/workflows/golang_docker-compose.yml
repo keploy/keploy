@@ -1,7 +1,7 @@
 name: Golang On Docker Compose
 on: [pull_request]
 jobs:
-  golang_docker:
+  golang_docker_compose:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

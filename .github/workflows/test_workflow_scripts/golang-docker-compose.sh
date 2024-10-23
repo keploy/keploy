@@ -3,7 +3,7 @@
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Build Docker Image
-docker-compose build
+docker compose build
 
 # Remove any preexisting keploy tests and mocks.
 sudo rm -rf keploy/
@@ -59,7 +59,7 @@ send_request(){
 for i in {1..2}; do
     container_name="echoApp"
     send_request &
-    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker-compose up" --container-name "$container_name" --generateGithubActions=false &> "${container_name}.txt"
+    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false &> "${container_name}.txt"
 
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
@@ -79,7 +79,7 @@ done
 # Start keploy in test mode.
 test_container="echoApp"
 test_container_logs="echoTest"
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker-compose up' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container_logs}.txt"
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container_logs}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
