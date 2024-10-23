@@ -5,6 +5,8 @@ installKeploy (){
     IS_CI=false
     NO_ROOT=false
     PLATFORM="$(basename "$SHELL")"
+    MAC_VERSION=$(sw_vers -productVersion)  # Detect macOS version
+
     for arg in "$@"
     do
         case $arg in
@@ -33,9 +35,95 @@ installKeploy (){
             ;;
         esac
     done
+
+    # Function to check for macOS version compatibility
+    check_macos_version() {
+        required_version="10.13"  # Set the minimum supported macOS version
+        if [[ "$MAC_VERSION" < "$required_version" ]]; then
+            echo "Warning: You are running an older version of macOS ($MAC_VERSION). Some features might not work as expected."
+            return 1
+        fi
+        return 0
+    }
+
+    # Invoke the check for macOS version
+    check_macos_version
+
     if [ "$version" != "latest" ]; then
         echo "Installing Keploy version: $version......"
     fi
+
+    move_keploy_binary() {
+        # Similar to your original function, we'll ensure binaries are handled correctly for older macOS
+        if [ "$NO_ROOT" = "true" ]; then
+            target_dir="$HOME/.keploy/bin"
+            source_dir="/tmp/keploy"  
+
+            mkdir -p "$target_dir"
+            if [ $? -ne 0 ]; then
+                echo "Error: Failed to create directory $target_dir"
+                exit 1
+            fi
+
+            OS_NAME=$(uname)
+            if [ "$OS_NAME" = "Darwin" ]; then
+                source_dir="/tmp/keploy/keploy"
+            fi
+
+            if [ -f "$source_dir" ]; then
+                mv "$source_dir" "$target_dir/keploy"
+                if [ $? -ne 0 ]; then
+                    echo "Error: Failed to move the keploy binary from $source_dir to $target_dir"
+                    exit 1
+                fi
+            else
+                echo "Error: $source_dir does not exist."
+                exit 1
+            fi
+
+            chmod +x "$target_dir/keploy"
+            if [ $? -ne 0 ]; then
+                echo "Error: Failed to make the keploy binary executable"
+                exit 1
+            fi
+        else
+            source_dir="/tmp/keploy"
+            OS_NAME=$(uname)
+            if [ "$OS_NAME" = "Darwin" ]; then
+                source_dir="/tmp/keploy/keploy"
+            fi
+            sudo mkdir -p /usr/local/bin && sudo mv "$source_dir" /usr/local/bin/keploy
+        fi
+        set_alias
+    }
+
+    # Existing binary installation functions (install_keploy_darwin_all, install_keploy_arm, etc.)
+
+    ARCH=$(uname -m)
+
+    if [ "$IS_CI" = false ]; then
+        OS_NAME="$(uname -s)"
+        if [ "$OS_NAME" = "Darwin" ]; then
+            install_keploy_darwin_all
+            return
+        elif [ "$OS_NAME" = "Linux" ]; then
+            if [ "$ARCH" = "x86_64" ]; then
+                install_keploy_amd
+            elif [ "$ARCH" = "aarch64" ]; then
+                install_keploy_arm
+            else
+                echo "Unsupported architecture: $ARCH"
+                return
+            fi
+        fi
+    fi
+}
+
+installKeploy "$@"
+
+if command -v keploy &> /dev/null; then
+    keploy example
+fi
 
     move_keploy_binary() {
         # Check if NO_ROOT is set to true
@@ -94,6 +182,7 @@ installKeploy (){
         fi
         # macOS tar does not support --overwrite option so we need to remove the directory first
         # to avoid the "File exists" error
+        sudo chmod -R 777 /tmp/keploy  # Reset permissions in case of permission issues
         rm -rf /tmp/keploy
         mkdir -p /tmp/keploy
         curl --silent --location "$download_url" | tar xz -C /tmp/keploy/
@@ -111,9 +200,8 @@ installKeploy (){
         move_keploy_binary
     }
 
-
     install_keploy_amd() {        
-        if [ "$version" != "latest" ]; then
+        if [ "$version" != "latest" ];then
             download_url="https://github.com/keploy/keploy/releases/download/$version/keploy_linux_amd64.tar.gz"
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
@@ -121,6 +209,15 @@ installKeploy (){
         curl --silent --location "$download_url" | tar xz --overwrite -C /tmp
         move_keploy_binary
     }
+    install_keploy_x86() {
+    if [ "$version" != "latest" ]; then
+        download_url="https://github.com/keploy/keploy/releases/download/$version/keploy_linux_x86.tar.gz"
+    else
+        download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_x86.tar.gz"
+    fi
+    curl --silent --location "$download_url" | tar xz --overwrite -C /tmp
+    move_keploy_binary
+}
 
     append_to_rc() {
         last_byte=$(tail -c 1 $2)
@@ -187,9 +284,7 @@ installKeploy (){
                     alias keploy="$ALIAS_CMD"
                 fi
             fi
-
         fi
-    
     }
 
     delete_keploy_alias() {
@@ -230,7 +325,6 @@ installKeploy (){
                 else
                     sudo rm -rf "/tmp/$file"
                 fi
-                
             fi
         done
     }
@@ -244,7 +338,7 @@ installKeploy (){
             install_keploy_darwin_all
             return
         elif [ "$OS_NAME" = "Linux" ]; then
-             if [ "$NO_ROOT" = false ]; then
+            if [ "$NO_ROOT" = false ]; then
                 if ! mountpoint -q /sys/kernel/debug; then
                     sudo mount -t debugfs debugfs /sys/kernel/debug
                 fi
@@ -259,10 +353,8 @@ installKeploy (){
                 echo "Unsupported architecture: $ARCH"
                 return
             fi
-        elif [[ "$OS_NAME" == MINGW32_NT* ]]; then
-            echo "\e]8;; https://pureinfotech.com/install-windows-subsystem-linux-2-windows-10\aWindows not supported please run on WSL2\e]8;;\a"
-        elif [[ "$OS_NAME" == MINGW64_NT* ]]; then
-            echo "\e]8;; https://pureinfotech.com/install-windows-subsystem-linux-2-windows-10\aWindows not supported please run on WSL2\e]8;;\a"
+        elif [[ "$OS_NAME" == MINGW32_NT* ]] || [[ "$OS_NAME" == MINGW64_NT* ]]; then
+            echo -e "\e]8;;https://pureinfotech.com/install-windows-subsystem-linux-2-windows-10\aWindows not supported, please run on WSL2\e]8;;\a"
         else
             echo "Unknown OS, install Linux to run Keploy"
         fi
@@ -278,13 +370,12 @@ installKeploy (){
             return
         fi
     fi
-}
 
 installKeploy "$@"
 
 if command -v keploy &> /dev/null; then
     keploy example
     cleanup_tmp
-    rm -rf keploy.sh
-    rm -rf install.sh
+    rm -rf keploy
+    rm -rf install
 fi
