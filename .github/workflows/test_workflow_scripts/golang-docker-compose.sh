@@ -7,7 +7,6 @@ docker compose build
 
 # Remove any preexisting keploy tests and mocks.
 sudo rm -rf keploy/
-sudo rm keploy.yml
 
 # Generate the keploy-config file.
 sudo -E env PATH=$PATH ./../../keployv2 config --generate
