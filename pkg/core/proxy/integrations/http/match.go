@@ -218,7 +218,8 @@ func mapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
 	}
 
 	for key := range map1 {
-		if key == "KEPLOY-TEST-ID" || key == "KEPLOY-TEST-SET-ID" || key == "keploy-test-id" || key == "keploy-test-set-id" {
+		lkey := strings.ToLower(key)
+		if lkey == "keploy-test-id" || lkey == "keploy-test-set-id" {
 			continue
 		}
 		if _, exists := map2[key]; !exists {
@@ -227,7 +228,8 @@ func mapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
 	}
 
 	for key := range map2 {
-		if key == "KEPLOY-TEST-ID" || key == "KEPLOY-TEST-SET-ID" || key == "keploy-test-id" || key == "keploy-test-set-id" {
+		lkey := strings.ToLower(key)
+		if lkey == "keploy-test-id" || lkey == "keploy-test-set-id" {
 			continue
 		}
 		if _, exists := map1[key]; !exists {
