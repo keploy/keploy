@@ -4,6 +4,9 @@ package hooks
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
 	"sync"
 
 	"golang.org/x/sync/errgroup"
@@ -60,8 +63,6 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 		defer utils.Recover(h.logger)
 		<-ctx.Done()
 		h.unLoad(ctx)
-
-		//deleting in order to free the memory in case of rerecord.
 		h.sess.Delete(id)
 		return nil
 	})
@@ -70,12 +71,24 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 }
 
 func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
-	// start name pipe
-	// start windivert
-	// send pid
-	// make channels for outgoing
-	// make channels for incoming
-	// make receive channels for outgoing 
+	// Create the command using the provided executable path
+	cmd := exec.CommandContext(ctx, `C:\Users\yashk\OneDrive\Desktop\windows_native\mitmproxy_rs\target\debug\windows-redirector.exe`, `\\.\pipe\mitmproxy-transparent-proxy-1`)
+
+	// Optional: Capture output
+	cmd.Stdout = os.Stdout // You can set this to os.Stdout to see output in console
+	cmd.Stderr = os.Stderr // You can set this to os.Stderr to see errors in console
+
+	// Run the command
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start the executable: %w", err)
+	}
+
+	// Wait for the command to complete
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("executable exited with an error: %w", err)
+	}
+
+	fmt.Println("Executable ran successfully")
 	return nil
 }
 

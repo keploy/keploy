@@ -3,6 +3,7 @@ package telemetry
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"runtime"
 	"time"
@@ -46,9 +47,10 @@ func (tel *Telemetry) Ping() {
 		return
 	}
 	go func() {
+		time.Sleep(10 * time.Second)
 		for {
 			tel.SendTelemetry("Ping")
-			time.Sleep(5 * time.Minute)
+			time.Sleep(5 * time.Second)
 		}
 	}()
 }
@@ -120,7 +122,7 @@ func (tel *Telemetry) SendTelemetry(eventType string, output ...map[string]inter
 		}
 
 		req.Header.Set("Content-Type", "application/json; charset=utf-8")
-
+		fmt.Println("pingign")
 		resp, err := tel.client.Do(req)
 		if err != nil {
 			tel.logger.Debug("failed to send request for analytics", zap.Error(err))

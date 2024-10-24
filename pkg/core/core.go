@@ -11,6 +11,7 @@ import (
 
 	"go.keploy.io/server/v2/pkg/core/app"
 	"go.keploy.io/server/v2/pkg/core/hooks/structs"
+	"go.keploy.io/server/v2/pkg/core/hooks/windows"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/docker"
 	"go.keploy.io/server/v2/utils"
@@ -61,7 +62,7 @@ func (c *Core) getApp(id uint64) (*app.App, error) {
 	if !ok {
 		return nil, fmt.Errorf("app with id:%v not found", id)
 	}
-	
+
 	// type assertion on the app
 	h, ok := a.(*app.App)
 	if !ok {
@@ -131,6 +132,20 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 
 		return nil
 	})
+
+	pipe := windows.Pipe{
+		Name:   `\\.\pipe\mitmproxy-transparent-proxy-1`,
+		Logger: c.logger,
+	}
+
+	fmt.Println("reached here")
+
+	err = c.Proxy.StartProxy(proxyCtx, ProxyOptions{
+		DNSIPv4Addr: a.KeployIPv4Addr(),
+		//DnsIPv6Addr: ""
+	})
+
+	pipe.Start(ctx)
 
 	//load hooks
 	err = c.Hooks.Load(hookCtx, id, HookCfg{

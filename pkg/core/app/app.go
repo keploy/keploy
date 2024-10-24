@@ -283,13 +283,7 @@ func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
 		return false, errors.New("failed to get the pid of the container")
 	}
 	a.logger.Debug("", zap.Any("containerDetails.State.Pid", info.State.Pid), zap.String("containerName", a.container))
-	inode, err := getInode(info.State.Pid)
-	if err != nil {
-		return false, err
-	}
 
-	a.inodeChan <- inode
-	a.logger.Debug("container started and successfully extracted inode", zap.Any("inode", inode))
 	if info.NetworkSettings == nil || info.NetworkSettings.Networks == nil {
 		a.logger.Debug("container network settings not available", zap.Any("containerDetails.NetworkSettings", info.NetworkSettings))
 		return false, nil
@@ -301,7 +295,7 @@ func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
 		return false, fmt.Errorf("container network not found: %s", fmt.Sprintf("%+v", info.NetworkSettings.Networks))
 	}
 	a.SetContainerIPv4Addr(n.IPAddress)
-	return inode != 0 && n.IPAddress != "", nil
+	return false, nil
 }
 
 func (a *App) getDockerMeta(ctx context.Context) <-chan error {

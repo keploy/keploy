@@ -3,12 +3,9 @@ package app
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
-	"syscall"
 
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -58,21 +55,6 @@ func modifyDockerComposeCommand(appCmd, newComposeFile string) string {
 	}
 
 	return fmt.Sprintf("%s -f %s", appCmd, newComposeFile)
-}
-
-func getInode(pid int) (uint64, error) {
-	path := filepath.Join("/proc", strconv.Itoa(pid), "ns", "pid")
-
-	f, err := os.Stat(path)
-	if err != nil {
-		return 0, err
-	}
-	// Dev := (f.Sys().(*syscall.Stat_t)).Dev
-	i := (f.Sys().(*syscall.Stat_t)).Ino
-	if i == 0 {
-		return 0, fmt.Errorf("failed to get the inode of the process")
-	}
-	return i, nil
 }
 
 func isDetachMode(logger *zap.Logger, command string, kind utils.CmdType) bool {

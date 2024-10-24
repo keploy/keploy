@@ -27,8 +27,8 @@ import (
 )
 
 type Proxy struct {
-	logger *zap.Logger
-	Name   string
+	logger  *zap.Logger
+	Name    string
 	IP4     string
 	IP6     string
 	Port    uint32
@@ -164,7 +164,10 @@ func (p *Proxy) start(ctx context.Context) error {
 		errCh := make(chan error, 1)
 		go func() {
 			defer utils.Recover(p.logger)
+			fmt.Println("finished setting")
+
 			conn, err := listener.Accept()
+			fmt.Println("got info")
 			if err != nil {
 				if strings.Contains(err.Error(), "use of closed network connection") {
 					errCh <- nil
@@ -204,6 +207,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		duration := time.Since(start)
 		p.logger.Debug("time taken by proxy to execute the flow", zap.Any("Duration(ms)", duration.Milliseconds()))
 	}(start)
+
+	fmt.Println("recieved connection from redirect")
 
 	// making a new client connection id for each client connection
 	clientConnID := util.GetNextID()
