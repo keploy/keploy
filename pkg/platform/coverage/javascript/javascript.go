@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/coverage"
@@ -45,57 +44,16 @@ func (j *Javascript) PreProcess(disableLineCoverage bool) (string, error) {
 	return nycCmd + j.cmd, nil
 }
 
-type StartTy struct {
-	Line   int `json:"line"`
-	Column int `json:"column"`
-}
-
-type EndTy struct {
-	Line   int `json:"line"`
-	Column int `json:"column"`
-}
-
-type Loc struct {
-	StartTy `json:"start"`
-	EndTy   `json:"end"`
-}
-
 type Coverage map[string]struct {
-	Path         string `json:"path"`
-	StatementMap map[string]struct {
-		StartTy `json:"start"`
-		EndTy   `json:"end"`
-	} `json:"statementMap"`
-	FnMap map[string]struct {
-		Name string `json:"name"`
-		Decl struct {
-			StartTy `json:"start"`
-			EndTy   `json:"end"`
-		} `json:"decl"`
-		Loc  `json:"loc"`
-		Line int `json:"line"`
-	} `json:"fnMap"`
-	BranchMap map[string]struct {
-		Loc       `json:"loc"`
-		Type      string `json:"type"`
-		Locations []struct {
-			StartTy `json:"start"`
-			EndTy   `json:"end"`
-		} `json:"locations"`
-		Line int `json:"line"`
-	} `json:"branchMap"`
-	S              map[string]interface{} `json:"s"`
-	F              map[string]interface{} `json:"f"`
-	B              map[string]interface{} `json:"b"`
-	CoverageSchema string                 `json:"_coverageSchema"`
-	Hash           string                 `json:"hash"`
-	ContentHash    string                 `json:"contentHash"`
+	S map[string]interface{} `json:"s"`
+	F map[string]interface{} `json:"f"`
+	B map[string]interface{} `json:"b"`
 }
 
 func (j *Javascript) GetCoverage() (models.TestCoverage, error) {
 	testCov := models.TestCoverage{
-		FileCov:  make(map[string]string),
-		TotalCov: "",
+		FileCov:  make(map[string]models.CoverageElement),
+		TotalCov: models.CoverageElement{},
 	}
 
 	coverageFilePaths, err := getCoverageFilePathsJavascript(filepath.Join(".", ".nyc_output", "processinfo"))
@@ -106,11 +64,10 @@ func (j *Javascript) GetCoverage() (models.TestCoverage, error) {
 		return testCov, fmt.Errorf("no coverage files found")
 	}
 
-	// coverage is calculated as: (no of statements covered / total no of statements) * 100
-	// no of statements covered is the no of entries in S which has a value greater than 0
-	// Total no of statements is len of S
-
-	linesCoveredPerFile := make(map[string]map[string]bool) // filename -> line -> covered/not covered
+	// map[string]map[string]bool => filename -> execSegment(line, branch or func) -> covered or not
+	linesCoveredPerFile := make(map[string]map[string]bool)  
+	branchCoveredPerFile := make(map[string]map[string]bool) 
+	funcCoveredPerFile := make(map[string]map[string]bool)   
 
 	for _, coverageFilePath := range coverageFilePaths {
 
@@ -125,43 +82,29 @@ func (j *Javascript) GetCoverage() (models.TestCoverage, error) {
 		}
 
 		for filename, file := range cov {
-			if _, ok := linesCoveredPerFile[filename]; !ok {
-				linesCoveredPerFile[filename] = make(map[string]bool)
-			}
-			for line, isStatementCovered := range file.S {
-				if _, ok := linesCoveredPerFile[filename][line]; !ok {
-					linesCoveredPerFile[filename][line] = false
-				}
-
-				switch isExecSegmentCov := isStatementCovered.(type) {
-				case float64:
-					if (isExecSegmentCov) > 0 {
-						linesCoveredPerFile[filename][line] = true
-					}
-				default:
-					linesCoveredPerFile[filename][line] = false
-				}
-			}
+			AddCovInfoPerFile(linesCoveredPerFile, file.S, filename)
+			AddCovInfoPerFile(branchCoveredPerFile, file.B, filename)
+			AddCovInfoPerFile(funcCoveredPerFile, file.F, filename)
 		}
 	}
 
-	totalLines := 0
-	totalCoveredLines := 0
-	coveredLinesPerFile := make(map[string]int) // filename -> no of covered lines
-	for filename, lines := range linesCoveredPerFile {
-		for _, isCovered := range lines {
-			totalLines++
-			if isCovered {
-				totalCoveredLines++
-				coveredLinesPerFile[filename]++
-			}
+	totalLines, totalCoveredLines, coveredLinesPerFile := CalculateCoverageMetrics(linesCoveredPerFile)
+	totalBranches, totalCoveredBranches, coveredBranchesPerFile := CalculateCoverageMetrics(branchCoveredPerFile)
+	totalFunctions, totalCoveredFunctions, coveredFunctionsPerFile := CalculateCoverageMetrics(funcCoveredPerFile)
+
+	for filename, lineCoverageCounts := range linesCoveredPerFile {
+		testCov.FileCov[filename] = models.CoverageElement{
+			LineCov:   coverage.Percentage(coveredLinesPerFile[filename],len(lineCoverageCounts)),
+			BranchCov: coverage.Percentage(coveredBranchesPerFile[filename], len(branchCoveredPerFile[filename])),
+			FuncCov:   coverage.Percentage(coveredFunctionsPerFile[filename], len(funcCoveredPerFile[filename])),
 		}
 	}
 
-	for filename, lines := range linesCoveredPerFile {
-		testCov.FileCov[filename] = strconv.FormatFloat(float64(coveredLinesPerFile[filename]*100)/float64(len(lines)), 'f', 2, 64) + "%"
+	testCov.TotalCov = models.CoverageElement{
+		LineCov:   coverage.Percentage(totalCoveredLines, totalLines),
+		BranchCov: coverage.Percentage(totalCoveredBranches, totalBranches),
+		FuncCov:   coverage.Percentage(totalCoveredFunctions, totalFunctions),
 	}
-	testCov.TotalCov = strconv.FormatFloat(float64(totalCoveredLines*100)/float64(totalLines), 'f', 2, 64) + "%"
 	return testCov, nil
 }
 
