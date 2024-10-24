@@ -81,4 +81,4 @@ jobs:
       uses: actions/upload-artifact@v3
       with:
         name: security-report
-        path: ../results
+        path: /home/runner/work/keploy/results
