@@ -52,6 +52,10 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	_, setupCtxCancel := context.WithCancel(setupCtx)
 	setupCtx = context.WithValue(ctx, models.ErrGroupKey, setupErrGrp)
 
+	reqErrGrp, _ := errgroup.WithContext(ctx)
+	reqCtx := context.WithoutCancel(ctx)
+	reqCtx, reqCtxCancel := context.WithCancel(reqCtx)
+	reqCtx = context.WithValue(ctx, models.ErrGroupKey, reqErrGrp)
 	var stopReason string
 
 	// defining all the channels and variables required for the record
@@ -68,10 +72,10 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	defer func() {
 		select {
 		case <-ctx.Done():
-			// err := r.instrumentation.UnregisterClient(ctx, clientID)
-			// if err != nil {
-			// 	utils.LogError(r.logger, err, "failed to unregister client")
-			// }
+			err := r.instrumentation.UnregisterClient(ctx, clientID)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to unregister client")
+			}
 		default:
 			if !reRecord {
 				err := utils.Stop(r.logger, stopReason)
@@ -95,6 +99,11 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
+		reqCtxCancel()
+		err = reqErrGrp.Wait()
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to stop request execution")
+		}
 		r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
 	}()
 
@@ -111,7 +120,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	select {
 	case <-ctx.Done():
 		// fmt.Println("Context cancelled hshsh 2")
-		// call the agent to deregister the client
+		// // call the agent to deregister the client
 		// err = r.instrumentation.UnregisterClient(ctx, clientID)
 		// if err != nil {
 		// 	utils.LogError(r.logger, err, "failed to unregister client")
@@ -131,8 +140,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	r.config.ClientID = clientID
 
 	// fetching test cases and mocks from the application and inserting them into the database
-	r.logger.Info("GetTestAndMockChans", zap.Uint64("clientID", clientID))
-	frames, err := r.GetTestAndMockChans(ctx, clientID)
+	frames, err := r.GetTestAndMockChans(reqCtx, clientID)
 	if err != nil {
 		stopReason = "failed to get data frames"
 		utils.LogError(r.logger, err, stopReason)
@@ -258,41 +266,39 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, clientID uint64) (Fr
 	outgoingChan := make(chan *models.Mock)
 	errChan := make(chan error, 2)
 
-	go func() {
+	g, ctx := errgroup.WithContext(ctx)
+
+	g.Go(func() error {
 		defer close(incomingChan)
-		fmt.Println("GetIncoming :::", clientID)
+
 		ch, err := r.instrumentation.GetIncoming(ctx, clientID, incomingOpts)
 		if err != nil {
-			errChan <- fmt.Errorf("failed to get incoming test cases: %w", err)
-			return
+			errChan <- err
+			return fmt.Errorf("failed to get incoming test cases: %w", err)
 		}
-
 		for testCase := range ch {
 			incomingChan <- testCase
 		}
-	}()
+		return nil
+	})
 
-	go func() {
+	g.Go(func() error {
 		defer close(outgoingChan)
-		ch, err := r.instrumentation.GetOutgoing(ctx, clientID, outgoingOpts)
+		// create a context without cancel
+		reqCtx := context.WithoutCancel(ctx)
+		reqCtx, reqCtxCancel := context.WithCancel(reqCtx)
+		defer reqCtxCancel()
+		ch, err := r.instrumentation.GetOutgoing(reqCtx, clientID, outgoingOpts)
 		if err != nil {
-			errChan <- fmt.Errorf("failed to get outgoing mocks: %w", err)
-			return
+			errChan <- err
+			return fmt.Errorf("failed to get outgoing mocks: %w", err)
 		}
-
+		fmt.Println("Stucked here ..")
 		for mock := range ch {
 			outgoingChan <- mock
 		}
-	}()
-
-	// Check for errors after starting the goroutines
-	select {
-	case err := <-errChan:
-		// If there's an error, return it immediately
-		return FrameChan{}, err
-	default:
-		// No errors, proceed
-	}
+		return nil
+	})
 
 	return FrameChan{
 		Incoming: incomingChan,

@@ -271,6 +271,10 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 	})
 
 	select {
+	case <-clientClose:
+		fmt.Println("client connection is closed from the mongo parser")
+		mocks <- &models.Mock{}
+		return ctx.Err()
 	case <-ctx.Done():
 		return ctx.Err()
 	case err := <-errCh:

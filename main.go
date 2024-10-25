@@ -17,6 +17,7 @@ import (
 
 	//pprof for debugging
 
+	"net/http"
 	_ "net/http/pprof"
 )
 
@@ -30,14 +31,14 @@ var gitHubClientID = "Iv23liFBvIVhL29i9BAp"
 
 func main() {
 	// Uncomment the following code to enable pprof for debugging
-	// go func() {
-	// 	fmt.Println("Starting pprof server for debugging...")
-	// 	err := http.ListenAndServe("0.0.0.0:6060", nil)
-	// 	if err != nil {
-	// 		fmt.Println("Failed to start the pprof server for debugging", err)
-	// 		return
-	// 	}
-	// }()
+	go func() {
+		fmt.Println("Starting pprof server for debugging...")
+		err := http.ListenAndServe("0.0.0.0:6060", nil)
+		if err != nil {
+			fmt.Println("Failed to start the pprof server for debugging", err)
+			return
+		}
+	}()
 	setVersion()
 	ctx := utils.NewCtx()
 	start(ctx)

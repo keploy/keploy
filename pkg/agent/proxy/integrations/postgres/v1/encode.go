@@ -118,7 +118,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 				metadata := make(map[string]string)
 				metadata["type"] = "config"
 				// Save the mock
-				mocks <- &models.Mock{
+				m := &models.Mock{
 					Version: models.GetVersion(),
 					Name:    "mocks",
 					Kind:    models.Postgres,
@@ -131,7 +131,8 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 					},
 					ConnectionID: ctx.Value(models.ClientConnectionIDKey).(string),
 				}
-				fmt.Println("Context is done in the postgres encode function", mocks)
+				mocks <- m
+				fmt.Println("Context is done in the postgres encode function", m)
 				return ctx.Err()
 			}
 		case <-ctx.Done():

@@ -63,7 +63,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.In
 		return nil, fmt.Errorf("error marshaling request body for incoming request: %s", err.Error())
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/incoming", a.conf.Agent.Port), bytes.NewBuffer(requestJSON))
+	req, err := http.NewRequestWithContext(context.Background(), "POST", fmt.Sprintf("http://localhost:%d/agent/incoming", a.conf.Agent.Port), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for incoming request")
 		return nil, fmt.Errorf("error creating request for incoming request: %s", err.Error())
@@ -114,7 +114,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.In
 				// If the context is done, exit the loop
 				return
 			case tcChan <- &testCase:
-				fmt.Println("Test case received for client", id)
+				fmt.Println("Test case received for client", id, "TESTCASE", testCase)
 				// Send the decoded test case to the channel
 			}
 		}
@@ -135,13 +135,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 		return nil, fmt.Errorf("error marshaling request body for mock outgoing: %s", err.Error())
 	}
 
-	// create a request context without cancel
-	reqCtx := context.WithoutCancel(ctx)
-	reqCtx, reqCancel := context.WithCancel(reqCtx)
-
-	// defer reqCancel()
-
-	req, err := http.NewRequestWithContext(reqCtx, "POST", fmt.Sprintf("http://localhost:%d/agent/outgoing", a.conf.Agent.Port), bytes.NewBuffer(requestJSON))
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/outgoing", a.conf.Agent.Port), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for mock outgoing")
 		return nil, fmt.Errorf("error creating request for mock outgoing: %s", err.Error())
@@ -151,7 +145,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 	// Make the HTTP request
 	res, err := a.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to authenticate: %s", err.Error())
+		return nil, fmt.Errorf("failed to get outgoing response: %s", err.Error())
 	}
 
 	// Create a channel to stream Mock data
@@ -159,7 +153,6 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 
 	go func() {
 		defer close(mockChan)
-		defer reqCancel()
 		defer func() {
 			err := res.Body.Close()
 			if err != nil {
@@ -181,12 +174,27 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 				// break, it will exit the loop if there is any decoding error from the stream
 			}
 
+			// go func() {
+			// 	for {
+			// 		// check for the context done
+			// 		select {
+			// 		case <-ctx.Done():
+			// 			fmt.Println("Context done... NEWW", mock)
+			// 			return
+			// 		}
+			// 	}
+			// }()
+
 			select {
 			case <-ctx.Done():
-				fmt.Println("Context done...")
+				fmt.Println("Context done...", mock, "mockID", mock.Name)
+				if &mock != nil {
+					mockChan <- &mock
+				}
+				
 				return
 			case mockChan <- &mock:
-				// fmt.Println("Mock received for client", id)
+				fmt.Println("Mock received for client", id, "mockID", mock.Name)
 			}
 		}
 	}()
@@ -412,7 +420,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 				utils.LogError(a.logger, err, "failed to get current keploy binary path")
 				return 0, err
 			}
-			agentCmd := exec.Command("sudo", keployBin, "agent")
+			agentCmd := exec.Command("sudo", keployBin, "agent", "--debug")
 			agentCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // Detach the process
 
 			// Redirect the standard output and error to the log file
