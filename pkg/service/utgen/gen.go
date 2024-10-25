@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -54,6 +56,8 @@ type UnitTestGenerator struct {
 	testCaseFailed   int
 	noCoverageTest   int
 }
+
+var discardedTestsFilename = "discardedTests.txt"
 
 func NewUnitTestGenerator(
 	cfg *config.Config,
@@ -241,6 +245,13 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				if err := g.runCoverage(); err != nil {
 					utils.LogError(g.logger, err, "Error running coverage")
 					return err
+				}
+			}
+
+			if len(g.failedTests) > 0 {
+				err := g.saveFailedTestCasesToFile()
+				if err != nil {
+					utils.LogError(g.logger, err, "Error adding failed test cases to file")
 				}
 			}
 
@@ -613,8 +624,9 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 			}
 			g.logger.Info("Skipping a generated test that failed")
 			g.failedTests = append(g.failedTests, &models.FailedUT{
-				TestCode: generatedTest.TestCode,
-				ErrorMsg: extractErrorMessage(stdout),
+				TestCode:    generatedTest.TestCode,
+				ErrorMsg:    extractErrorMessage(stdout),
+				ImportsCode: generatedTest.NewImportsCode,
 			})
 			g.testCaseFailed++
 			*failedBuild++
@@ -658,5 +670,74 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 	g.cur.Line = g.cur.Line + len(testCodeLines) + importLen
 
 	g.logger.Info("Generated test passed and increased coverage")
+	return nil
+}
+
+func (g *UnitTestGenerator) saveFailedTestCasesToFile() error {
+	dir := filepath.Dir(g.testPath)
+
+	dir, err := findRootDir(dir, g.lang)
+	if err != nil {
+		g.logger.Error("Error finding root directory", zap.Error(err))
+	}
+
+	newFilePath := filepath.Join(dir, discardedTestsFilename)
+
+	if _, err := os.Stat(newFilePath); os.IsNotExist(err) {
+		testFile, err := os.Create(newFilePath)
+
+		if err != nil {
+			return fmt.Errorf("error creating discarded tests file: %w", err)
+		}
+		defer testFile.Close()
+
+		// Getting package name from test file for go and java
+		if g.lang == "go" || g.lang == "java" {
+			contentBytes, err := os.ReadFile(g.testPath)
+			if err != nil {
+				return fmt.Errorf("error reading test file: %w", err)
+			}
+			content := string(contentBytes)
+			packageRegex := regexp.MustCompile(`package\s+\w+`)
+
+			match := packageRegex.FindStringSubmatch(content)
+			match = strings.Split(match[0], " ")
+			if len(match) < 2 {
+				return fmt.Errorf("error finding package name in test file")
+			}
+
+			packageName := match[1]
+			_, err = testFile.WriteString(fmt.Sprintf("package %s", packageName))
+			if err != nil {
+				return fmt.Errorf("error writing package name to discarded tests file: %w", err)
+			}
+		}
+	}
+
+	fileHandle, err := os.OpenFile(newFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("error opening discarded tests file: %w", err)
+	}
+
+	defer fileHandle.Close()
+
+	testCodes := ""
+
+	// Writing Test Cases To File
+	for _, failedTest := range g.failedTests {
+		if failedTest.ErrorMsg != "" {
+			testCodes += fmt.Sprintf("Error message for test below:\n%s\n", failedTest.ErrorMsg)
+		}
+		_, err = g.injector.updateImports(newFilePath, failedTest.ImportsCode)
+		if err != nil {
+			g.logger.Error("Error writing imports in discarded tests file", zap.Error(err))
+		}
+		testCodes += fmt.Sprintf("\n%s\n", failedTest.TestCode)
+	}
+
+	_, err = fileHandle.WriteString(fmt.Sprintf("%s\n", testCodes))
+	if err != nil {
+		return fmt.Errorf("error writing to discarded tests file: %w", err)
+	}
 	return nil
 }
