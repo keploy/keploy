@@ -1,0 +1,14 @@
+{
+  "name": "Keploy Inc",
+  "description": "Keploy is an open-source, zero-code testing tool that makes API and microservices testing simplify and helps developers boost code coverage. As an open-source project itself, we use a lot of open-source projects and we think it's fit to give it back to community.",
+  "urlLearnMore": "https://keploy.io/blog/community/introducing-the-keploy-oss-fund",
+  "urlSquareLogoWithBackground": "https://avatars.githubusercontent.com/u/92252339",
+  "annualReports": [
+    {
+      "url": "https://keploy.io/blog/community/introducing-the-keploy-oss-fund",
+      "dateYearEnding": "2024-12-31",
+      "averageNumberOfDevs": 12,
+      "payments": 12500
+    }
+  ]
+}
