@@ -689,7 +689,12 @@ func (g *UnitTestGenerator) saveFailedTestCasesToFile() error {
 		if err != nil {
 			return fmt.Errorf("error creating discarded tests file: %w", err)
 		}
-		defer testFile.Close()
+		defer func() {
+			err := testFile.Close()
+			if err != nil {
+				g.logger.Error("Error closing file handle", zap.Error(err))
+			}
+		}()
 
 		// Getting package name from test file for go and java
 		if g.lang == "go" || g.lang == "java" {
@@ -719,7 +724,12 @@ func (g *UnitTestGenerator) saveFailedTestCasesToFile() error {
 		return fmt.Errorf("error opening discarded tests file: %w", err)
 	}
 
-	defer fileHandle.Close()
+	defer func() {
+		err := fileHandle.Close()
+		if err != nil {
+			g.logger.Error("Error closing file handle", zap.Error(err))
+		}
+	}()
 
 	testCodes := ""
 
