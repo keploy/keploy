@@ -359,9 +359,9 @@ func sliceCommandTag(mock *models.Mock, logger *zap.Logger, prep []QueryData, ac
 func getChandedDataRow(input string) (string, error) {
 	// Convert input1 (integer input as string) to integer
 	buffer := make([]byte, 4)
-	if intValue, err := strconv.Atoi(input); err == nil {
+	if uintValue, err := strconv.ParseUint(input, 10, 32); err == nil {
 
-		binary.BigEndian.PutUint32(buffer, uint32(intValue))
+		binary.BigEndian.PutUint32(buffer, uint32(uintValue))
 		return "b64:" + util.EncodeBase64(buffer), nil
 	} else if dateValue, err := time.Parse("2006-01-02", input); err == nil {
 		// Perform additional operations on the date
