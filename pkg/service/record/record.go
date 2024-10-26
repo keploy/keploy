@@ -72,10 +72,10 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	defer func() {
 		select {
 		case <-ctx.Done():
-			err := r.instrumentation.UnregisterClient(ctx, clientID)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to unregister client")
-			}
+			// err := r.instrumentation.UnregisterClient(ctx, clientID)
+			// if err != nil {
+			// 	utils.LogError(r.logger, err, "failed to unregister client")
+			// }
 		default:
 			if !reRecord {
 				err := utils.Stop(r.logger, stopReason)
@@ -285,17 +285,29 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, clientID uint64) (Fr
 	g.Go(func() error {
 		defer close(outgoingChan)
 		// create a context without cancel
-		reqCtx := context.WithoutCancel(ctx)
-		reqCtx, reqCtxCancel := context.WithCancel(reqCtx)
-		defer reqCtxCancel()
-		ch, err := r.instrumentation.GetOutgoing(reqCtx, clientID, outgoingOpts)
+		// reqCtx := context.WithoutCancel(ctx)
+		// reqCtx, reqCtxCancel := context.WithCancel(reqCtx)
+		// defer func() {
+		// 	fmt.Println("closing reqCtx")
+		// 	reqCtxCancel()
+		// }()
+		ch, err := r.instrumentation.GetOutgoing(ctx, clientID, outgoingOpts)
 		if err != nil {
 			errChan <- err
 			return fmt.Errorf("failed to get outgoing mocks: %w", err)
 		}
-		fmt.Println("Stucked here ..")
 		for mock := range ch {
+			// select {
+			// case <-ctx.Done():
+			// 	fmt.Println("context cancelled.....")
+			// 	if mock != nil {
+			// 		fmt.Println("mock is not nil")
+			// 		outgoingChan <- mock
+			// 	}
+			// 	return nil
+			// default:
 			outgoingChan <- mock
+			// }
 		}
 		return nil
 	})

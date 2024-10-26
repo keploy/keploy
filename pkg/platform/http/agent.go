@@ -114,7 +114,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.In
 				// If the context is done, exit the loop
 				return
 			case tcChan <- &testCase:
-				fmt.Println("Test case received for client", id, "TESTCASE", testCase)
+				// fmt.Println("Test case received for client", id, "TESTCASE", testCase)
 				// Send the decoded test case to the channel
 			}
 		}
@@ -134,6 +134,8 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 		utils.LogError(a.logger, err, "failed to marshal request body for mock outgoing")
 		return nil, fmt.Errorf("error marshaling request body for mock outgoing: %s", err.Error())
 	}
+	// reqCtx := context.WithoutCancel(ctx)
+	// reqCtx, reqCtxCancel := context.WithCancel(reqCtx)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/outgoing", a.conf.Agent.Port), bytes.NewBuffer(requestJSON))
 	if err != nil {
@@ -174,27 +176,10 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 				// break, it will exit the loop if there is any decoding error from the stream
 			}
 
-			// go func() {
-			// 	for {
-			// 		// check for the context done
-			// 		select {
-			// 		case <-ctx.Done():
-			// 			fmt.Println("Context done... NEWW", mock)
-			// 			return
-			// 		}
-			// 	}
-			// }()
-
 			select {
 			case <-ctx.Done():
-				fmt.Println("Context done...", mock, "mockID", mock.Name)
-				if &mock != nil {
-					mockChan <- &mock
-				}
-				
 				return
 			case mockChan <- &mock:
-				fmt.Println("Mock received for client", id, "mockID", mock.Name)
 			}
 		}
 	}()
