@@ -151,21 +151,24 @@ func (i *Injector) uninstallLibraries(installedPackages []string) error {
 }
 
 func (i *Injector) updateJavaScriptImports(importedContent string, newImports []string) (string, int, error) {
-	importRegex := regexp.MustCompile(`(?m)^(import\s+.*?from\s+['"].*?['"];?|const\s+.*?=\s+require\(['"].*?['"]\);?)`)
+	importRegex := regexp.MustCompile(`(?m)^\s*(import\s+.*?from\s+['"].*?['"];?|const\s+.*?=\s+require\(['"].*?['"]\);?)`)
 	existingImportsSet := make(map[string]bool)
 	sanitisedImports := []string{}
 	existingImports := importRegex.FindAllString(importedContent, -1)
 	for _, imp := range existingImports {
-		if imp != "" && !existingImportsSet[imp] {
-			existingImportsSet[imp] = true
+		imp = strings.TrimSpace(imp)
+		cleanedImport := strings.ReplaceAll(imp, " ", "")
+		if cleanedImport != "" && !existingImportsSet[cleanedImport] {
+			existingImportsSet[cleanedImport] = true
 			sanitisedImports = append(sanitisedImports, imp)
 		}
 	}
 
 	for _, imp := range newImports {
-		imp = strings.TrimSpace(imp)
-		if importRegex.MatchString(imp) && !existingImportsSet[imp] {
-			existingImportsSet[imp] = true
+		imp = strings.Trim(imp, `"- `)
+		cleanedImport := strings.ReplaceAll(imp, " ", "")
+		if importRegex.MatchString(imp) && !existingImportsSet[cleanedImport] {
+			existingImportsSet[cleanedImport] = true
 			sanitisedImports = append(sanitisedImports, imp)
 		}
 	}
@@ -470,16 +473,19 @@ func (i *Injector) updateTypeScriptImports(importedContent string, newImports []
 	sanitisedImports := []string{}
 	existingImports := importRegex.FindAllString(importedContent, -1)
 	for _, imp := range existingImports {
-		if imp != "" && !existingImportsSet[imp] {
-			existingImportsSet[imp] = true
+		imp = strings.TrimSpace(imp)
+		cleanedImport := strings.ReplaceAll(imp, " ", "")
+		if cleanedImport != "" && !existingImportsSet[cleanedImport] {
+			existingImportsSet[cleanedImport] = true
 			sanitisedImports = append(sanitisedImports, imp)
 		}
 	}
 
 	for _, imp := range newImports {
-		imp = strings.TrimSpace(imp)
-		if importRegex.MatchString(imp) && !existingImportsSet[imp] {
-			existingImportsSet[imp] = true
+		imp = strings.Trim(imp, `"- `)
+		cleanedImport := strings.ReplaceAll(imp, " ", "")
+		if importRegex.MatchString(imp) && !existingImportsSet[cleanedImport] {
+			existingImportsSet[cleanedImport] = true
 			sanitisedImports = append(sanitisedImports, imp)
 		}
 	}

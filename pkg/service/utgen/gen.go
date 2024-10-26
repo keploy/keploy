@@ -593,8 +593,7 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 	for i := 0; i < 5; i++ {
 
 		g.logger.Info(fmt.Sprintf("Iteration no: %d", i+1))
-
-		stdout, _, exitCode, timeOfTestCommand, _ := RunCommand(g.cmd, g.dir, g.logger)
+		stdout, stderr, exitCode, timeOfTestCommand, _ := RunCommand(g.cmd, g.dir, g.logger)
 		if exitCode != 0 {
 			g.logger.Info(fmt.Sprintf("Test failed in %d iteration", i+1))
 			// Test failed, roll back the test file to its original content
@@ -614,7 +613,7 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 			g.logger.Info("Skipping a generated test that failed")
 			g.failedTests = append(g.failedTests, &models.FailedUT{
 				TestCode: generatedTest.TestCode,
-				ErrorMsg: extractErrorMessage(stdout),
+				ErrorMsg: extractErrorMessage(stdout, stderr, g.lang),
 			})
 			g.testCaseFailed++
 			*failedBuild++
