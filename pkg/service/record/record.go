@@ -72,10 +72,6 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	defer func() {
 		select {
 		case <-ctx.Done():
-			// err := r.instrumentation.UnregisterClient(ctx, clientID)
-			// if err != nil {
-			// 	utils.LogError(r.logger, err, "failed to unregister client")
-			// }
 		default:
 			if !reRecord {
 				err := utils.Stop(r.logger, stopReason)
@@ -84,8 +80,14 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 				}
 			}
 		}
+
+		err := r.instrumentation.UnregisterClient(ctx, clientID)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to unregister client")
+		}
+
 		runAppCtxCancel()
-		err := runAppErrGrp.Wait()
+		err = runAppErrGrp.Wait()
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop application")
 		}
@@ -95,10 +97,12 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop setup execution, that covers init container")
 		}
+
 		err = errGrp.Wait()
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
+
 		reqCtxCancel()
 		err = reqErrGrp.Wait()
 		if err != nil {
@@ -119,12 +123,6 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	//checking for context cancellation as we don't want to start the instrumentation if the context is cancelled
 	select {
 	case <-ctx.Done():
-		// fmt.Println("Context cancelled hshsh 2")
-		// // call the agent to deregister the client
-		// err = r.instrumentation.UnregisterClient(ctx, clientID)
-		// if err != nil {
-		// 	utils.LogError(r.logger, err, "failed to unregister client")
-		// }
 		return nil
 	default:
 	}
@@ -266,7 +264,12 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, clientID uint64) (Fr
 	outgoingChan := make(chan *models.Mock)
 	errChan := make(chan error, 2)
 
-	g, ctx := errgroup.WithContext(ctx)
+	// g, ctx := errgroup.WithContext(ctx)
+
+	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	if !ok {
+		return FrameChan{}, fmt.Errorf("failed to get error group from context")
+	}
 
 	g.Go(func() error {
 		defer close(incomingChan)
@@ -285,29 +288,39 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, clientID uint64) (Fr
 	g.Go(func() error {
 		defer close(outgoingChan)
 		// create a context without cancel
-		// reqCtx := context.WithoutCancel(ctx)
-		// reqCtx, reqCtxCancel := context.WithCancel(reqCtx)
-		// defer func() {
-		// 	fmt.Println("closing reqCtx")
-		// 	reqCtxCancel()
-		// }()
-		ch, err := r.instrumentation.GetOutgoing(ctx, clientID, outgoingOpts)
+		// change this name to some mockCtx error group
+		reqErrGrp, _ := errgroup.WithContext(ctx)
+		reqCtx := context.WithoutCancel(ctx)
+		reqCtx, reqCtxCancel := context.WithCancel(reqCtx)
+
+		defer func() {
+			fmt.Println("closing reqCtx")
+			reqCtxCancel()
+			err := reqErrGrp.Wait()
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to stop request execution")
+			}
+		}()
+		
+		ch, err := r.instrumentation.GetOutgoing(reqCtx, clientID, outgoingOpts)
 		if err != nil {
 			errChan <- err
 			return fmt.Errorf("failed to get outgoing mocks: %w", err)
 		}
+
 		for mock := range ch {
-			// select {
-			// case <-ctx.Done():
-			// 	fmt.Println("context cancelled.....")
-			// 	if mock != nil {
-			// 		fmt.Println("mock is not nil")
-			// 		outgoingChan <- mock
-			// 	}
-			// 	return nil
-			// default:
-			outgoingChan <- mock
-			// }
+			select {
+			case <-ctx.Done():
+				fmt.Println("context cancelled.....")
+				if mock != nil {
+					fmt.Println("mock is not nil")
+					outgoingChan <- mock
+					// reqCtxCancel()
+				}
+				return nil
+			default:
+				outgoingChan <- mock
+			}
 		}
 		return nil
 	})

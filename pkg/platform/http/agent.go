@@ -63,7 +63,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.In
 		return nil, fmt.Errorf("error marshaling request body for incoming request: %s", err.Error())
 	}
 
-	req, err := http.NewRequestWithContext(context.Background(), "POST", fmt.Sprintf("http://localhost:%d/agent/incoming", a.conf.Agent.Port), bytes.NewBuffer(requestJSON))
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/incoming", a.conf.Agent.Port), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for incoming request")
 		return nil, fmt.Errorf("error creating request for incoming request: %s", err.Error())
@@ -134,8 +134,6 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 		utils.LogError(a.logger, err, "failed to marshal request body for mock outgoing")
 		return nil, fmt.Errorf("error marshaling request body for mock outgoing: %s", err.Error())
 	}
-	// reqCtx := context.WithoutCancel(ctx)
-	// reqCtx, reqCtxCancel := context.WithCancel(reqCtx)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://localhost:%d/agent/outgoing", a.conf.Agent.Port), bytes.NewBuffer(requestJSON))
 	if err != nil {
@@ -153,18 +151,23 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 	// Create a channel to stream Mock data
 	mockChan := make(chan *models.Mock)
 
-	go func() {
+	// use error group instead of go routine
+	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
+	if !ok {
+		return nil, fmt.Errorf("failed to get errorgroup from the context")
+	}
+
+	grp.Go(func() error {
 		defer close(mockChan)
 		defer func() {
 			err := res.Body.Close()
 			if err != nil {
-				utils.LogError(a.logger, err, "failed to close response body for mock outgoing")
+				utils.LogError(a.logger, err, "failed to close response body for getoutgoing")
 			}
 		}()
 
 		decoder := json.NewDecoder(res.Body)
 
-		// Read from the response body as a stream
 		for {
 			var mock models.Mock
 			if err := decoder.Decode(&mock); err != nil {
@@ -173,16 +176,19 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 					break
 				}
 				utils.LogError(a.logger, err, "failed to decode mock from stream")
-				// break, it will exit the loop if there is any decoding error from the stream
+				break
 			}
 
 			select {
 			case <-ctx.Done():
-				return
+				// If the context is done, exit the loop
+				return nil
 			case mockChan <- &mock:
+				// Send the decoded mock to the channel
 			}
 		}
-	}()
+		return nil
+	})
 
 	return mockChan, nil
 }
