@@ -554,6 +554,8 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("failed to register client: %s", resp.Status)
+	} else {
+		a.logger.Info("Client registered successfully with clientId", zap.Uint64("clientID", opts.ClientID))
 	}
 
 	// TODO: Read the response body in which we return the app id

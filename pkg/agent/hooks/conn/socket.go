@@ -46,6 +46,7 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 			for {
 				select {
 				case <-ctx.Done():
+					fmt.Println("Context Done in ListenSocket")
 					return
 				default:
 					// TODO refactor this to directly consume the events from the maps

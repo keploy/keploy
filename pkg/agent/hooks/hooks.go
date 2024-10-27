@@ -483,6 +483,15 @@ func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOption
 	// and then use the app id to get the test cases chan
 	// and pass that to eBPF consumers/listeners
 	fmt.Println("Recording hooks...")
+	
+	// listen for the context cancellation
+	go func() {
+		select {
+		case <-ctx.Done():
+			fmt.Println("Context canceled, exiting goroutine.")
+		}
+	}()
+
 	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
 }
 

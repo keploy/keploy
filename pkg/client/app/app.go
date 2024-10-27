@@ -448,6 +448,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 		}
 		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 	case <-ctx.Done():
+		fmt.Println("ctx.Done called in runDocker")
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 	}
 }
@@ -500,7 +501,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	cmdCancel := func(cmd *exec.Cmd) func() error {
 		return func() error {
 			if utils.IsDockerCmd(a.kind) {
-				a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
+				a.logger.Info("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
 				err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
 				return err
 			}
@@ -510,6 +511,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 
 	var err error
 	fmt.Println("userCmd", userCmd)
+
 	cmdErr := utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second)
 	if cmdErr.Err != nil {
 		switch cmdErr.Type {

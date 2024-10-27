@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 
 	"time"
 
@@ -82,7 +83,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		}
 
 		err := r.instrumentation.UnregisterClient(ctx, clientID)
-		if err != nil {
+		if err != nil && err != io.EOF {
 			utils.LogError(r.logger, err, "failed to unregister client")
 		}
 
@@ -301,7 +302,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, clientID uint64) (Fr
 				utils.LogError(r.logger, err, "failed to stop request execution")
 			}
 		}()
-		
+
 		ch, err := r.instrumentation.GetOutgoing(reqCtx, clientID, outgoingOpts)
 		if err != nil {
 			errChan <- err
