@@ -100,7 +100,7 @@ func MergeCoverageFiles(ctx context.Context) error {
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stdout
 
-	if err != nil {
+	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to merge coverage files: %w", err)
 	}
 
