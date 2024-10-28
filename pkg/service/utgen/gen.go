@@ -74,7 +74,7 @@ func NewUnitTestGenerator(
 		maxIterations: genConfig.MaxIterations,
 		logger:        logger,
 		tel:           tel,
-		ai:            NewAIClient(genConfig.Model, genConfig.APIBaseURL, genConfig.APIVersion, "", cfg.APIServerURL, auth, uuid.NewString(), logger),
+		ai:            NewAIClient(genConfig, "", cfg.APIServerURL, auth, uuid.NewString(), logger),
 		cov: &Coverage{
 			Path:    genConfig.CoverageReportPath,
 			Format:  genConfig.CoverageFormat,
@@ -157,7 +157,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 		iterationCount := 0
 		g.lang = GetCodeLanguage(g.srcPath)
 
-		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt, g.logger)
+		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt, g.ai.FunctionUnderTest, g.logger)
 		g.injector = NewInjectorBuilder(g.logger, g.lang)
 
 		if err != nil {
@@ -603,8 +603,7 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 	for i := 0; i < 5; i++ {
 
 		g.logger.Info(fmt.Sprintf("Iteration no: %d", i+1))
-
-		stdout, _, exitCode, timeOfTestCommand, _ := RunCommand(g.cmd, g.dir, g.logger)
+		stdout, stderr, exitCode, timeOfTestCommand, _ := RunCommand(g.cmd, g.dir, g.logger)
 		if exitCode != 0 {
 			g.logger.Info(fmt.Sprintf("Test failed in %d iteration", i+1))
 			// Test failed, roll back the test file to its original content
@@ -624,7 +623,7 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 			g.logger.Info("Skipping a generated test that failed")
 			g.failedTests = append(g.failedTests, &models.FailedUT{
 				TestCode:                generatedTest.TestCode,
-				ErrorMsg:                extractErrorMessage(stdout),
+				ErrorMsg:                extractErrorMessage(stdout, stderr, g.lang),
 				NewImportsCode:          generatedTest.NewImportsCode,
 				LibraryInstallationCode: generatedTest.LibraryInstallationCode,
 			})
