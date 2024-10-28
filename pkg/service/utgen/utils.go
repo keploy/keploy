@@ -1,6 +1,7 @@
 package utgen
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"log"
@@ -108,20 +109,40 @@ func convertToInt(value interface{}) (int, error) {
 	}
 }
 
-func extractErrorMessage(failMessage string) string {
-	const MAX_LINES = 15
-	pattern := `={3,} FAILURES ={3,}(.*?)(={3,}|$)`
-	re := regexp.MustCompile(pattern)
-	match := re.FindStringSubmatch(failMessage)
-	if len(match) > 1 {
-		errStr := strings.TrimSpace(match[1])
-		errStrLines := strings.Split(errStr, "\n")
-		if len(errStrLines) > MAX_LINES {
-			errStr = "...\n" + strings.Join(errStrLines[len(errStrLines)-MAX_LINES:], "\n")
-		}
-		return errStr
+func extractErrorMessage(outputMessage, failMessage, language string) string {
+	const maxLines = 15
+	var pattern string
+	message := failMessage
+	switch language {
+	case "python":
+		pattern = `^=+ ERRORS =+$`
+		message = outputMessage
+	case "java":
+		pattern = `^\[ERROR\].*`
+		message = outputMessage
+	case "go":
+		pattern = `(?i)(^FAIL|panic:|undefined:)`
+	case "javascript":
+		pattern = `(?i)● .*`
 	}
-	return ""
+	re := regexp.MustCompile(pattern)
+	scanner := bufio.NewScanner(strings.NewReader(message))
+	var result []string
+	matching := false
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if re.MatchString(line) {
+			matching = true
+		}
+		if matching {
+			result = append(result, line)
+			if len(result) >= maxLines {
+				break
+			}
+		}
+	}
+	return strings.Join(result, "\n")
 }
 
 func getFilename(filePath string) string {
