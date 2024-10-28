@@ -27,9 +27,10 @@ type UT struct {
 }
 
 type FailedUT struct {
-	TestCode    string `yaml:"test_code"`
-	ErrorMsg    string `yaml:"error_msg"`
-	ImportsCode string `yaml:"imports_code"`
+	TestCode                string `yaml:"test_code"`
+	ErrorMsg                string `yaml:"error_msg"`
+	NewImportsCode          string `yaml:"imports_code"`
+	LibraryInstallationCode string `yaml:"library_installation_code"`
 }
 
 type UTIndentationInfo struct {

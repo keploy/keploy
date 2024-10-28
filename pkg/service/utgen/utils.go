@@ -303,30 +303,3 @@ func createTestFile(testFilePath string, sourceFilePath string) (bool, error) {
 
 	return false, nil
 }
-
-func findRootDir(dir string, language string) (string, error) {
-	fileName := ""
-
-	switch language {
-	case "go":
-		fileName = "go.mod"
-	case "javascript", "typescript":
-		fileName = "package.json"
-	case "python":
-		fileName = "requirements.txt"
-	case "java":
-		fileName = "pom.xml"
-	}
-
-	for {
-		if _, err := os.Stat(filepath.Join(dir, fileName)); err == nil {
-			return dir, nil
-		}
-
-		parentDir := filepath.Dir(dir)
-		if parentDir == dir {
-			return "", fmt.Errorf("%s not found", fileName)
-		}
-		dir = parentDir
-	}
-}

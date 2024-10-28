@@ -7,7 +7,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -624,9 +623,10 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 			}
 			g.logger.Info("Skipping a generated test that failed")
 			g.failedTests = append(g.failedTests, &models.FailedUT{
-				TestCode:    generatedTest.TestCode,
-				ErrorMsg:    extractErrorMessage(stdout),
-				ImportsCode: generatedTest.NewImportsCode,
+				TestCode:                generatedTest.TestCode,
+				ErrorMsg:                extractErrorMessage(stdout),
+				NewImportsCode:          generatedTest.NewImportsCode,
+				LibraryInstallationCode: generatedTest.LibraryInstallationCode,
 			})
 			g.testCaseFailed++
 			*failedBuild++
@@ -674,53 +674,12 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 }
 
 func (g *UnitTestGenerator) saveFailedTestCasesToFile() error {
-	dir := filepath.Dir(g.testPath)
-
-	dir, err := findRootDir(dir, g.lang)
+	dir, err := os.Getwd()
 	if err != nil {
-		g.logger.Error("Error finding root directory", zap.Error(err))
+		return fmt.Errorf("error getting current directory: %w", err)
 	}
 
 	newFilePath := filepath.Join(dir, discardedTestsFilename)
-
-	if _, err := os.Stat(newFilePath); os.IsNotExist(err) {
-		testFile, err := os.Create(newFilePath)
-
-		if err != nil {
-			return fmt.Errorf("error creating discarded tests file: %w", err)
-		}
-		defer func() {
-			err := testFile.Close()
-			if err != nil {
-				g.logger.Error("Error closing file handle", zap.Error(err))
-			}
-		}()
-
-		// Getting package name from test file for go and java
-		if g.lang == "go" || g.lang == "java" {
-			contentBytes, err := os.ReadFile(g.testPath)
-			if err != nil {
-				return fmt.Errorf("error reading test file: %w", err)
-			}
-			content := string(contentBytes)
-			packageRegex := regexp.MustCompile(`package\s+\w+`)
-			if g.lang == "java" {
-				packageRegex = regexp.MustCompile(`(?m)^package\s+.*?;`)
-			}
-
-			match := packageRegex.FindStringSubmatch(content)
-			match = strings.Split(match[0], " ")
-			if len(match) < 2 {
-				return fmt.Errorf("error finding package name in test file")
-			}
-
-			packageName := match[1]
-			_, err = testFile.WriteString(fmt.Sprintf("package %s", packageName))
-			if err != nil {
-				return fmt.Errorf("error writing package name to discarded tests file: %w", err)
-			}
-		}
-	}
 
 	fileHandle, err := os.OpenFile(newFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -734,21 +693,22 @@ func (g *UnitTestGenerator) saveFailedTestCasesToFile() error {
 		}
 	}()
 
-	testCodes := ""
+	var builder strings.Builder
 
 	// Writing Test Cases To File
 	for _, failedTest := range g.failedTests {
-		if failedTest.ErrorMsg != "" {
-			testCodes += fmt.Sprintf("Error message for test below:\n%s\n", failedTest.ErrorMsg)
+		builder.WriteString("\n" + strings.Repeat("-", 20) + "Test Case" + strings.Repeat("-", 20) + "\n")
+		if len(failedTest.NewImportsCode) > 0 {
+			builder.WriteString(fmt.Sprintf("Import Statements:\n%s\n", failedTest.NewImportsCode))
 		}
-		_, err = g.injector.updateImports(newFilePath, failedTest.ImportsCode)
-		if err != nil {
-			g.logger.Error("Error writing imports in discarded tests file", zap.Error(err))
+		if len(failedTest.LibraryInstallationCode) > 0 {
+			builder.WriteString(fmt.Sprintf("Required Library Installation\n%s\n", failedTest.LibraryInstallationCode))
 		}
-		testCodes += fmt.Sprintf("\n%s\n", failedTest.TestCode)
+		builder.WriteString(fmt.Sprintf("Test Implementation:\n%s\n\n", failedTest.TestCode))
+		builder.WriteString(strings.Repeat("-", 49) + "\n")
 	}
 
-	_, err = fileHandle.WriteString(fmt.Sprintf("%s\n", testCodes))
+	_, err = fileHandle.WriteString(fmt.Sprintf("%s\n", builder.String()))
 	if err != nil {
 		return fmt.Errorf("error writing to discarded tests file: %w", err)
 	}
