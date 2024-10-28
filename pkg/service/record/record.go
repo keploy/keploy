@@ -290,21 +290,22 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, clientID uint64) (Fr
 		defer close(outgoingChan)
 		// create a context without cancel
 		// change this name to some mockCtx error group
-		reqErrGrp, _ := errgroup.WithContext(ctx)
-		reqCtx := context.WithoutCancel(ctx)
-		reqCtx, reqCtxCancel := context.WithCancel(reqCtx)
+		mockErrGrp, _ := errgroup.WithContext(ctx)
+		mockCtx := context.WithoutCancel(ctx)
+		mockCtx, mockCtxCancel := context.WithCancel(mockCtx)
 
 		defer func() {
 			fmt.Println("closing reqCtx")
-			reqCtxCancel()
-			err := reqErrGrp.Wait()
+			mockCtxCancel()
+			err := mockErrGrp.Wait()
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to stop request execution")
 			}
 		}()
 
-		ch, err := r.instrumentation.GetOutgoing(reqCtx, clientID, outgoingOpts)
+		ch, err := r.instrumentation.GetOutgoing(mockCtx, clientID, outgoingOpts)
 		if err != nil {
+			r.logger.Error("failed to get outgoing mocks", zap.Error(err))
 			errChan <- err
 			return fmt.Errorf("failed to get outgoing mocks: %w", err)
 		}
@@ -316,7 +317,6 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, clientID uint64) (Fr
 				if mock != nil {
 					fmt.Println("mock is not nil")
 					outgoingChan <- mock
-					// reqCtxCancel()
 				}
 				return nil
 			default:

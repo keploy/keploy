@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -382,8 +383,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	exitLoopChan := make(chan bool, 2)
 	defer func() {
+		err := r.instrumentation.UnregisterClient(ctx, clientID)
+		if err != nil && err != io.EOF {
+			utils.LogError(r.logger, err, "failed to unregister client")
+		}
 		runTestSetCtxCancel()
-		err := runTestSetErrGrp.Wait()
+		err = runTestSetErrGrp.Wait()
 		if err != nil {
 			utils.LogError(r.logger, err, "error in testLoopErrGrp")
 		}

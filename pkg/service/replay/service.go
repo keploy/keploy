@@ -20,7 +20,7 @@ type Instrumentation interface {
 	GetConsumedMocks(ctx context.Context, id uint64) ([]string, error)
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
-
+	UnregisterClient(ctx context.Context, clientID uint64) error
 	GetContainerIP(ctx context.Context, id uint64) (string, error)
 }
 

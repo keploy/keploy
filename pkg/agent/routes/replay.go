@@ -30,7 +30,7 @@ func (a *AgentRequest) MockOutgoing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = a.agent.MockOutgoing(r.Context(), 0, OutgoingReq.OutgoingOptions)
+	err = a.agent.MockOutgoing(r.Context(), OutgoingReq.ClientID, OutgoingReq.OutgoingOptions)
 	if err != nil {
 		mockRes.Error = err
 		mockRes.IsSuccess = false
@@ -78,17 +78,17 @@ func (a *AgentRequest) SetMocks(w http.ResponseWriter, r *http.Request) {
 func (a *AgentRequest) GetConsumedMocks(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	appID := r.URL.Query().Get("id")
+	clientID := r.URL.Query().Get("id")
 
 	// convert string to uint64
-	appIDInt, err := strconv.ParseUint(appID, 10, 64)
+	clientIDInt, err := strconv.ParseUint(clientID, 10, 64)
 	if err != nil {
 		render.JSON(w, r, err)
 		render.Status(r, http.StatusBadRequest)
 		return
 	}
 
-	consumedMocks, err := a.agent.GetConsumedMocks(r.Context(), appIDInt)
+	consumedMocks, err := a.agent.GetConsumedMocks(r.Context(), clientIDInt)
 	if err != nil {
 		render.JSON(w, r, err)
 		render.Status(r, http.StatusInternalServerError)

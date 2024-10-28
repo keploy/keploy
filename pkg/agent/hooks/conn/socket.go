@@ -38,7 +38,7 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 	if !ok {
 		return nil, errors.New("failed to get the error group from the context")
 	}
-
+	fmt.Println("Starting the socket listener", c.connections)
 	g.Go(func() error {
 		defer utils.Recover(l)
 		go func() {
@@ -178,6 +178,8 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 					l.Debug(fmt.Sprintf("Request EntryTimestamp :%v\n", convertUnixNanoToTime(event.EntryTimestampNano)))
 				}
 
+				fmt.Println("SocketDataEvent-1: ", event.ClientID)
+				fmt.Println("SocketDataEvent-2: ", event.ConnID)
 				c.GetOrCreate(event.ConnID).AddDataEvent(event)
 			}
 		}()

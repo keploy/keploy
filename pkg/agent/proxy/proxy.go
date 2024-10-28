@@ -316,7 +316,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	//get the session rule
-	rule, ok := p.sessions.Get(0)
+	fmt.Println("destInfo.ClientID:::", destInfo.ClientID)
+	rule, ok := p.sessions.Get(destInfo.ClientID)
 	if !ok {
 		utils.LogError(p.logger, nil, "failed to fetch the session rule", zap.Any("AppID", destInfo.ClientID))
 		return err
@@ -513,7 +514,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// get the mock manager for the current app
 	m, ok := p.MockManagers.Load(destInfo.ClientID)
 	if !ok {
-		utils.LogError(logger, err, "failed to fetch the mock manager", zap.Any("AppID", destInfo.ClientID))
+		utils.LogError(logger, err, "failed to fetch the mock manager", zap.Any("ClientID", destInfo.ClientID))
 		return err
 	}
 

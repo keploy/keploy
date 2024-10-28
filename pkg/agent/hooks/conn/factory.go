@@ -80,6 +80,7 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 
 	// Delete all the processed trackers.
 	for _, key := range trackersToDelete {
+		fmt.Println("Deleting the tracker with key: ", key)
 		delete(factory.connections, key)
 	}
 }
@@ -104,6 +105,7 @@ func capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 		return
 	}
 
+	fmt.Println("Request Body::::::: ", string(reqBody))
 	defer func() {
 		err := resp.Body.Close()
 		if err != nil {

@@ -6,6 +6,20 @@ import (
 	"go.keploy.io/server/v2/pkg/models/mysql"
 )
 
+type MockResponse struct {
+	Type  ResponseType `json:"Type,omitempty" bson:"Type,omitempty"`
+	Error error
+	Mock  *Mock
+}
+
+type ResponseType string
+
+const (
+	EOF    ResponseType = "EOF"
+	PACKET ResponseType = "PACKET"
+	ERROR  ResponseType = "ERROR"
+)
+
 type Mock struct {
 	Version      Version      `json:"Version,omitempty" bson:"Version,omitempty"`
 	Name         string       `json:"Name,omitempty" bson:"Name,omitempty"`

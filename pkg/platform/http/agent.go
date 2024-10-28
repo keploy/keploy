@@ -370,8 +370,7 @@ func (a *AgentClient) Run(ctx context.Context, clientID uint64, _ models.RunOpti
 
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
 
-	// clientID := utils.GenerateID()
-	var clientID uint64
+	clientID := utils.GenerateID()
 
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 
@@ -383,6 +382,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		if !isDockerCmd && runtime.GOOS != "linux" {
 			return 0, fmt.Errorf("Operating system not supported for this feature")
 		}
+
 		if isDockerCmd {
 			// run the docker container instead of the agent binary
 			go func() {
@@ -411,7 +411,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 				utils.LogError(a.logger, err, "failed to get current keploy binary path")
 				return 0, err
 			}
-			agentCmd := exec.Command("sudo", keployBin, "agent", "--debug")
+			agentCmd := exec.Command("sudo", keployBin, "agent")
 			agentCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // Detach the process
 
 			// Redirect the standard output and error to the log file
@@ -431,6 +431,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	runningChan := make(chan bool)
 
 	// Start a goroutine to check if the agent is running
+	// TODO: add context cancellation here
 	go func() {
 		for {
 			if a.isAgentRunning(ctx) {
@@ -585,11 +586,15 @@ func (a *AgentClient) UnregisterClient(ctx context.Context, clientID uint64) err
 		return fmt.Errorf("error marshaling request body for unregister client: %s", err.Error())
 	}
 
-	resp, err := a.client.Post(fmt.Sprintf("http://localhost:%d/agent/unregister", a.conf.Agent.Port), "application/json", bytes.NewBuffer(requestJSON))
+	req, err := http.NewRequestWithContext(context.Background(), "POST", fmt.Sprintf("http://localhost:%d/agent/unregister", a.conf.Agent.Port), bytes.NewBuffer(requestJSON))
 	if err != nil {
-		utils.LogError(a.logger, err, "failed to send unregister client request")
-		return fmt.Errorf("error sending unregister client request: %s", err.Error())
+		utils.LogError(a.logger, err, "failed to create request for unregister client")
+		return fmt.Errorf("error creating request for unregister client: %s", err.Error())
 	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Make the HTTP request
+	resp, err := a.client.Do(req)
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("failed to unregister client: %s", resp.Status)

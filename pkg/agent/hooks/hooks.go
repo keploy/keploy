@@ -478,27 +478,16 @@ func (h *Hooks) load(opts agent.HookCfg) error {
 	return nil
 }
 
-func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
+func (h *Hooks) Record(ctx context.Context, clientID uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	// TODO use the session to get the app id
 	// and then use the app id to get the test cases chan
 	// and pass that to eBPF consumers/listeners
 	fmt.Println("Recording hooks...")
-	
-	// listen for the context cancellation
-	go func() {
-		select {
-		case <-ctx.Done():
-			fmt.Println("Context canceled, exiting goroutine.")
-		}
-	}()
 
 	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
 }
 
 func (h *Hooks) SendKeployClientInfo(clientID uint64, clientInfo structs.ClientInfo) error {
-	// TODO use the session to get the app id
-	// and then use the app id to get the test cases chan
-	// and pass that to eBPF consumers/listeners
 
 	err := h.SendClientInfo(clientID, clientInfo)
 	if err != nil {
@@ -506,6 +495,15 @@ func (h *Hooks) SendKeployClientInfo(clientID uint64, clientInfo structs.ClientI
 		return err
 	}
 
+	return nil
+}
+
+func (h *Hooks) DeleteKeployClientInfo(id uint64) error {
+	err := h.DeleteClientInfo(id)
+	if err != nil {
+		h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))
+		return err
+	}
 	return nil
 }
 

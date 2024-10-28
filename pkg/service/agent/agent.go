@@ -184,14 +184,17 @@ func (a *Agent) GetConsumedMocks(ctx context.Context, id uint64) ([]string, erro
 
 func (a *Agent) DeRegisterClient(ctx context.Context, id uint64) error {
 	fmt.Println("Inside DeRegisterClient of agent binary !!")
-	a.Proxy.MakeClientDeRegisterd(ctx)
+	err := a.Proxy.MakeClientDeRegisterd(ctx)
+	if err != nil {
+		return err
+	}
+	a.Hooks.DeleteKeployClientInfo(id)
 	return nil
 }
 
 func (a *Agent) RegisterClient(ctx context.Context, opts models.SetupOptions) error {
 
-	a.logger.Debug("Registering the client with the keploy server")
-
+	a.logger.Info("Registering the client with the keploy server")
 	// send the network info to the kernel
 	err := a.SendNetworkInfo(ctx, opts)
 	if err != nil {

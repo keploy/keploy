@@ -26,7 +26,6 @@ func (h *Hooks) Get(_ context.Context, srcPort uint16) (*agent.NetworkAddress, e
 	// 	return nil, fmt.Errorf("session not found")
 	// }
 
-	// fmt.Println("Session: ", s)
 	return &agent.NetworkAddress{
 		ClientID: d.ClientID,
 		Version:  d.IPVersion,
@@ -65,12 +64,22 @@ func (h *Hooks) CleanProxyEntry(srcPort uint16) error {
 	return nil
 }
 
-func (h *Hooks) SendClientInfo(id uint64, appInfo structs.ClientInfo) error {
-	err := h.clientRegistrationMap.Update(id, appInfo, ebpf.UpdateAny)
+func (h *Hooks) SendClientInfo(id uint64, clientInfo structs.ClientInfo) error {
+	err := h.clientRegistrationMap.Update(id, clientInfo, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the app info to the ebpf program")
 		return err
 	}
+	return nil
+}
+
+func (h *Hooks) DeleteClientInfo(id uint64) error {
+	err := h.clientRegistrationMap.Delete(id)
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to send the app info to the ebpf program")
+		return err
+	}
+	h.logger.Info("successfully removed the client info from the ebpf program")
 	return nil
 }
 

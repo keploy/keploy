@@ -126,7 +126,6 @@ func (a *AgentRequest) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			fmt.Println("Context done in HandleOutgoing")
 			if m != nil {
-				fmt.Println("MOCKING", m)
 				render.JSON(w, r, m)
 				flusher.Flush()
 			}
