@@ -704,6 +704,9 @@ func (g *UnitTestGenerator) saveFailedTestCasesToFile() error {
 			}
 			content := string(contentBytes)
 			packageRegex := regexp.MustCompile(`package\s+\w+`)
+			if g.lang == "java" {
+				packageRegex = regexp.MustCompile(`(?m)^package\s+.*?;`)
+			}
 
 			match := packageRegex.FindStringSubmatch(content)
 			match = strings.Split(match[0], " ")
