@@ -406,12 +406,26 @@ func (i *Injector) updatePythonImports(content string, newImports []string) (str
 		if strings.HasPrefix(imp, "from ") {
 			fields := strings.Fields(imp)
 			moduleName := fields[1]
-			newItems := strings.Split(fields[3], ",")
+			importIndex := -1
+			for i, field := range fields {
+				if field == "import" {
+					importIndex = i
+					break
+				}
+			}
+			if importIndex == -1 {
+				continue
+			}
+			importPart := strings.Join(fields[importIndex+1:], " ")
+			importedItems := strings.Split(importPart, ",")
 			if _, exists := existingImportsMap[moduleName]; !exists {
 				existingImportsMap[moduleName] = make(map[string]bool)
 			}
-			for _, item := range newItems {
-				existingImportsMap[moduleName][strings.TrimSpace(item)] = true
+			for _, item := range importedItems {
+				cleanedItem := strings.TrimSpace(item)
+				if cleanedItem != "" {
+					existingImportsMap[moduleName][strings.TrimSpace(item)] = true
+				}
 			}
 		} else if strings.HasPrefix(imp, "import ") {
 			fields := strings.Fields(imp)

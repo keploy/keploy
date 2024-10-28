@@ -71,7 +71,7 @@ func NewUnitTestGenerator(
 		maxIterations: genConfig.MaxIterations,
 		logger:        logger,
 		tel:           tel,
-		ai:            NewAIClient(genConfig.Model, genConfig.APIBaseURL, genConfig.APIVersion, "", cfg.APIServerURL, auth, uuid.NewString(), logger),
+		ai:            NewAIClient(genConfig, "", cfg.APIServerURL, auth, uuid.NewString(), logger),
 		cov: &Coverage{
 			Path:    genConfig.CoverageReportPath,
 			Format:  genConfig.CoverageFormat,
@@ -154,7 +154,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 		iterationCount := 0
 		g.lang = GetCodeLanguage(g.srcPath)
 
-		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt, g.logger)
+		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt, g.ai.FunctionUnderTest, g.logger)
 		g.injector = NewInjectorBuilder(g.logger, g.lang)
 
 		if err != nil {
