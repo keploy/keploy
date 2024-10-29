@@ -13,20 +13,22 @@ import (
 	"strings"
 	"time"
 
+	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
 type AIClient struct {
-	Model        string
-	APIBase      string
-	APIVersion   string
-	APIKey       string
-	APIServerURL string
-	Auth         service.Auth
-	Logger       *zap.Logger
-	SessionID    string
+	Model             string
+	APIBase           string
+	APIVersion        string
+	APIKey            string
+	APIServerURL      string
+	Auth              service.Auth
+	Logger            *zap.Logger
+	SessionID         string
+	FunctionUnderTest string
 }
 
 type Prompt struct {
@@ -90,16 +92,17 @@ type AIRequest struct {
 	SessionID string `json:"sessionId"`
 }
 
-func NewAIClient(model, apiBase, apiVersion, apiKey, apiServerURL string, auth service.Auth, sessionID string, logger *zap.Logger) *AIClient {
+func NewAIClient(genConfig config.UtGen, apiKey, apiServerURL string, auth service.Auth, sessionID string, logger *zap.Logger) *AIClient {
 	return &AIClient{
-		Model:        model,
-		APIBase:      apiBase,
-		APIVersion:   apiVersion,
-		Logger:       logger,
-		APIKey:       apiKey,
-		APIServerURL: apiServerURL,
-		Auth:         auth,
-		SessionID:    sessionID,
+		Model:             genConfig.Model,
+		APIBase:           genConfig.APIBaseURL,
+		APIVersion:        genConfig.APIVersion,
+		Logger:            logger,
+		APIKey:            apiKey,
+		APIServerURL:      apiServerURL,
+		Auth:              auth,
+		SessionID:         sessionID,
+		FunctionUnderTest: genConfig.FunctionUnderTest,
 	}
 }
 

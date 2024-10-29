@@ -58,6 +58,7 @@ type UtGen struct {
 	Model              string  `json:"model" yaml:"model" mapstructure:"model"`
 	APIVersion         string  `json:"llmApiVersion" yaml:"llmApiVersion" mapstructure:"llmApiVersion"`
 	AdditionalPrompt   string  `json:"additionalPrompt" yaml:"additionalPrompt" mapstructure:"additionalPrompt"`
+	FunctionUnderTest  string  `json:"functionUnderTest" yaml:"-" mapstructure:"functionUnderTest"`
 }
 type Templatize struct {
 	TestSets []string `json:"testSets" yaml:"testSets" mapstructure:"testSets"`
