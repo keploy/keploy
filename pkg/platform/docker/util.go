@@ -138,10 +138,6 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 			"cmd.exe",
 			args...,
 		)
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			NoInheritHandles: true,
-			HideWindow:       true,
-		}
 	} else {
 		// Use sh -c for Unix-like systems
 		cmd = exec.CommandContext(
