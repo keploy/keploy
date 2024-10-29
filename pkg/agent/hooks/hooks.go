@@ -479,11 +479,7 @@ func (h *Hooks) load(opts agent.HookCfg) error {
 }
 
 func (h *Hooks) Record(ctx context.Context, clientID uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
-	// TODO use the session to get the app id
-	// and then use the app id to get the test cases chan
-	// and pass that to eBPF consumers/listeners
 	fmt.Println("Recording hooks...")
-
 	return conn.ListenSocket(ctx, h.logger, clientID, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
 }
 
