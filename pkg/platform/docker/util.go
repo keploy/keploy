@@ -146,8 +146,8 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 			"-c",
 			keployAlias,
 		)
-		cmd.SysProcAttr =&syscall.SysProcAttr{
-			Setsid:true,
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Setsid: true,
 		}
 	}
 
