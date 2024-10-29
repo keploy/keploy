@@ -3,6 +3,7 @@ package models
 type AuthReq struct {
 	InstallationID string `json:"installationID"`
 	GitHubToken    string `json:"gitHubtoken"`
+	Platform       string `json:"platform"`
 }
 
 type AuthResp struct {
