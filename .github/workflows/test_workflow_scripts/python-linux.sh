@@ -52,8 +52,8 @@ send_request(){
     curl --location 'http://127.0.0.1:8000/user/'
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
-    # pid=$(pgrep keploy)
-    # echo "$pid Keploy PID" 
+    pid=$(pgrep keploy)
+    echo "$pid Keploy PID" 
     echo "Killing keploy"
     sudo kill -9 $(sudo lsof -ti:8086)
 }
