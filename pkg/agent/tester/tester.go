@@ -89,6 +89,7 @@ func (t *Tester) setupReplay(ctx context.Context) error {
 
 func (t *Tester) setupRecord(ctx context.Context) error {
 
+	fmt.Println("Inside setupRecord")
 	go func() {
 		defer utils.Recover(t.logger)
 

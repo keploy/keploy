@@ -69,10 +69,8 @@ send_request(){
 
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
-    pid=$(pgrep keploy)
-    echo "$pid Keploy PID" 
+    sudo kill -9 $(sudo lsof -ti:8086)
     echo "Killing keploy"
-    sudo kill $pid
 }
 
 for i in {1..2}; do

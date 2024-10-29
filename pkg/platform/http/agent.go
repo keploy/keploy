@@ -371,7 +371,7 @@ func (a *AgentClient) Run(ctx context.Context, clientID uint64, _ models.RunOpti
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
 
 	clientID := utils.GenerateID()
-
+	// var clientID uint64
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 
 	// check if the agent is running
