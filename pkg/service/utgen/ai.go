@@ -13,15 +13,22 @@ import (
 	"strings"
 	"time"
 
+	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
 type AIClient struct {
-	Model      string
-	APIBase    string
-	APIVersion string
-	Logger     *zap.Logger
+	Model             string
+	APIBase           string
+	APIVersion        string
+	APIKey            string
+	APIServerURL      string
+	Auth              service.Auth
+	Logger            *zap.Logger
+	SessionID         string
+	FunctionUnderTest string
 }
 
 type Prompt struct {
@@ -70,12 +77,32 @@ type Delta struct {
 	Content string `json:"content"`
 }
 
-func NewAIClient(model, apiBase, apiVersion string, logger *zap.Logger) *AIClient {
+type AIResponse struct {
+	IsSuccess        bool   `json:"isSuccess"`
+	Error            string `json:"error"`
+	FinalContent     string `json:"finalContent"`
+	PromptTokens     int    `json:"promptTokens"`
+	CompletionTokens int    `json:"completionTokens"`
+	APIKey           string `json:"apiKey"`
+}
+
+type AIRequest struct {
+	MaxTokens int    `json:"maxTokens"`
+	Prompt    Prompt `json:"prompt"`
+	SessionID string `json:"sessionId"`
+}
+
+func NewAIClient(genConfig config.UtGen, apiKey, apiServerURL string, auth service.Auth, sessionID string, logger *zap.Logger) *AIClient {
 	return &AIClient{
-		Model:      model,
-		APIBase:    apiBase,
-		APIVersion: apiVersion,
-		Logger:     logger,
+		Model:             genConfig.Model,
+		APIBase:           genConfig.APIBaseURL,
+		APIVersion:        genConfig.APIVersion,
+		Logger:            logger,
+		APIKey:            apiKey,
+		APIServerURL:      apiServerURL,
+		Auth:              auth,
+		SessionID:         sessionID,
+		FunctionUnderTest: genConfig.FunctionUnderTest,
 	}
 }
 
@@ -107,7 +134,57 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 		Temperature: 0.2,
 	}
 
-	if ai.APIBase != "" {
+	var apiKey string
+	if ai.APIBase == ai.APIServerURL {
+
+		token, err := ai.Auth.GetToken(ctx)
+		if err != nil {
+			return "", 0, 0, fmt.Errorf("error getting token: %v", err)
+		}
+
+		ai.Logger.Debug("Making AI request to API server", zap.String("api_server_url", ai.APIServerURL), zap.String("token", token))
+		httpClient := &http.Client{}
+		aiRequest := AIRequest{
+			MaxTokens: maxTokens,
+			Prompt:    *prompt,
+			SessionID: ai.SessionID,
+		}
+		aiRequestBytes, err := json.Marshal(aiRequest)
+		if err != nil {
+			return "", 0, 0, fmt.Errorf("error marshalling AI request: %v", err)
+		}
+
+		req, err := http.NewRequest("POST", fmt.Sprintf("%s/ai/call", ai.APIServerURL), bytes.NewBuffer(aiRequestBytes))
+		if err != nil {
+			return "", 0, 0, fmt.Errorf("error creating request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return "", 0, 0, fmt.Errorf("error making request: %v", err)
+		}
+
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		var aiResponse AIResponse
+		err = json.Unmarshal(bodyBytes, &aiResponse)
+		if err != nil {
+			return "", 0, 0, fmt.Errorf("error unmarshalling response body: %v", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return "", 0, 0, fmt.Errorf("unexpected status code: %v, response body: %s", resp.StatusCode, aiResponse.Error)
+		}
+		defer func() {
+			err := resp.Body.Close()
+			if err != nil {
+				utils.LogError(ai.Logger, err, "failed to close response body for authentication")
+			}
+		}()
+
+		return aiResponse.FinalContent, aiResponse.PromptTokens, aiResponse.CompletionTokens, nil
+	} else if ai.APIBase != "" {
 		apiBaseURL = ai.APIBase
 	} else {
 		apiBaseURL = "https://api.openai.com/v1"
@@ -128,7 +205,12 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 		return "", 0, 0, fmt.Errorf("error creating request: %v", err)
 	}
 
-	apiKey := os.Getenv("API_KEY")
+	if ai.APIKey == "" {
+		apiKey = os.Getenv("API_KEY")
+	} else {
+		apiKey = ai.APIKey
+	}
+
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("api-key", apiKey)
@@ -156,6 +238,8 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 	if ai.Logger.Level() == zap.DebugLevel {
 		fmt.Println("Streaming results from LLM model...")
 	}
+
+	fmt.Println("Streaming results from LLM model...")
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -191,8 +275,9 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 		if err == io.EOF {
 			break
 		}
-		time.Sleep(10 * time.Millisecond) // Optional: Delay to simulate more 'natural' response pacing
+		time.Sleep(10 * time.Millisecond)
 	}
+
 	if ai.Logger.Level() == zap.DebugLevel {
 		fmt.Println()
 	}
@@ -202,4 +287,57 @@ func (ai *AIClient) Call(ctx context.Context, prompt *Prompt, maxTokens int) (st
 	completionTokens := len(strings.Fields(finalContent))
 
 	return finalContent, promptTokens, completionTokens, nil
+}
+
+func (ai *AIClient) SendCoverageUpdate(ctx context.Context, sessionID string, oldCoverage, newCoverage float64) error {
+	// Construct the request body with session ID, old coverage, and new coverage
+	requestBody, err := json.Marshal(map[string]interface{}{
+		"sessionId":      sessionID,
+		"initalCoverage": oldCoverage,
+		"finalCoverage":  newCoverage,
+	})
+	if err != nil {
+		return fmt.Errorf("error marshalling request body: %v", err)
+	}
+
+	// Determine the base URL
+	var apiBaseURL string
+	if ai.APIBase != "" {
+		apiBaseURL = ai.APIBase
+	}
+	// Create a POST request
+	req, err := http.NewRequestWithContext(ctx, "POST", apiBaseURL+"/ai/coverage/update", bytes.NewBuffer(requestBody))
+	if err != nil {
+		return fmt.Errorf("error creating request: %v", err)
+	}
+
+	token, err := ai.Auth.GetToken(ctx)
+
+	if err != nil {
+		return fmt.Errorf("error getting token: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	// Execute the request
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("error making request: %v", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			utils.LogError(ai.Logger, err, "Error closing response body")
+		}
+	}()
+
+	// Check for successful response
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyString := string(bodyBytes)
+		return fmt.Errorf("unexpected status code: %v, response body: %s", resp.StatusCode, bodyString)
+	}
+
+	ai.Logger.Debug("Coverage update sent successfully", zap.String("session_id", sessionID))
+	return nil
 }

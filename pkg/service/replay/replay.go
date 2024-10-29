@@ -1,6 +1,7 @@
 package replay
 
 import (
+	// "bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -11,53 +12,51 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
 	"time"
 
+	"facette.io/natsort"
 	"github.com/k0kubun/pp/v3"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
+	matcherUtils "go.keploy.io/server/v2/pkg/matcher"
+	httpMatcher "go.keploy.io/server/v2/pkg/matcher/http"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/coverage"
 	"go.keploy.io/server/v2/pkg/platform/coverage/golang"
 	"go.keploy.io/server/v2/pkg/platform/coverage/java"
 	"go.keploy.io/server/v2/pkg/platform/coverage/javascript"
 	"go.keploy.io/server/v2/pkg/platform/coverage/python"
+	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
 
-// TODO we should remove this global variable and use the return value of the function
 var completeTestReport = make(map[string]TestReportVerdict)
 var totalTests int
 var totalTestPassed int
 var totalTestFailed int
 var totalTestIgnored int
-
-// emulator contains the struct instance that implements RequestEmulator interface. This is done for
-// attaching the objects dynamically as plugins.
-var requestMockemulator RequestMockHandler
-
-func SetTestUtilInstance(emulatorInstance RequestMockHandler) {
-	requestMockemulator = emulatorInstance
-}
+var totalTestTimeTaken time.Duration
+var HookImpl TestHooks
 
 type Replayer struct {
 	logger          *zap.Logger
 	testDB          TestDB
 	mockDB          MockDB
 	reportDB        ReportDB
-	testSetConf     Config
+	testSetConf     TestSetConfig
 	telemetry       Telemetry
 	instrumentation Instrumentation
 	config          *config.Config
 	instrument      bool
 }
 
-func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf Config, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
+func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
 	// set the request emulator for simulating test case requests, if not set
-	if requestMockemulator == nil {
-		SetTestUtilInstance(NewRequestMockUtil(logger, config.Path, "mocks", config.Test.APITimeout, config.Test.BasePath))
+	if HookImpl == nil {
+		SetTestHooks(NewHooks(logger, config, testSetConf, storage, auth))
 	}
 	instrument := false
 	if config.Command != "" {
@@ -159,7 +158,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 	if !r.config.Test.SkipCoverage {
 		if utils.CmdType(r.config.CommandType) == utils.Native {
-			r.config.Command, err = cov.PreProcess()
+			r.config.Command, err = cov.PreProcess(r.config.Test.DisableLineCoverage)
 
 			if err != nil {
 				r.config.Test.SkipCoverage = true
@@ -185,26 +184,43 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	hookCancel = inst.HookCancel
 
-	testSetResult := false
+	var testSetResult bool
 	testRunResult := true
 	abortTestRun := false
-
-	for i, testSetID := range testSetIDs {
+	var testSets []string
+	for _, testSetID := range testSetIDs {
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
 			continue
 		}
+		testSets = append(testSets, testSetID)
+	}
+	if len(testSets) == 0 {
+		testSets = testSetIDs
+	}
 
-		requestMockemulator.ProcessMockFile(ctx, testSetID)
+	// Sort the testsets.
+	natsort.Sort(testSets)
+	for i, testSet := range testSets {
+		testSetResult = false
+		err := HookImpl.BeforeTestSetRun(ctx, testSet)
+		if err != nil {
+			stopReason = fmt.Sprintf("failed to run before test hook: %v", err)
+			utils.LogError(r.logger, err, stopReason)
+			if ctx.Err() == context.Canceled {
+				return err
+			}
+			return fmt.Errorf(stopReason)
+		}
 
 		if !r.config.Test.SkipCoverage {
-			err = os.Setenv("TESTSETID", testSetID) // related to java coverage calculation
+			err = os.Setenv("TESTSETID", testSet) // related to java coverage calculation
 			if err != nil {
 				r.config.Test.SkipCoverage = true
 				r.logger.Warn("failed to set TESTSETID env variable, skipping coverage caluclation", zap.Error(err))
 			}
 		}
 
-		testSetStatus, err := r.RunTestSet(ctx, testSetID, testRunID, inst.AppID, false)
+		testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.AppID, false)
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)
 			utils.LogError(r.logger, err, stopReason)
@@ -229,20 +245,20 @@ func (r *Replayer) Start(ctx context.Context) error {
 			testSetResult = false
 		case models.TestSetStatusPassed:
 			testSetResult = true
-			requestMockemulator.ProcessTestRunStatus(ctx, testSetResult, testSetID)
 		case models.TestSetStatusIgnored:
-			testSetResult = true
-		}
-		testRunResult = testRunResult && testSetResult
-		if abortTestRun {
-			break
+			testSetResult = false
 		}
 
-		if !(!r.config.Test.SkipCoverage && i == len(testSetIDs)-1) {
-			_, err = requestMockemulator.AfterTestHook(ctx, testRunID, testSetID, models.TestCoverage{}, len(testSetIDs))
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to get after test hook")
+		if testSetStatus != models.TestSetStatusIgnored {
+			testRunResult = testRunResult && testSetResult
+			if abortTestRun {
+				break
 			}
+		}
+
+		err = HookImpl.AfterTestSetRun(ctx, testSet, testSetResult)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to execute after test set run hook", zap.Any("testSet", testSet))
 		}
 
 		if i == 0 && !r.config.Test.SkipCoverage {
@@ -270,32 +286,41 @@ func (r *Replayer) Start(ctx context.Context) error {
 		testRunStatus = "pass"
 	}
 
-	r.telemetry.TestRun(totalTestPassed, totalTestFailed, len(testSetIDs), testRunStatus)
+	if testRunResult && r.config.Test.DisableMockUpload {
+		r.logger.Warn("To enable storing mocks in cloud, please use --disableMockUpload=false flag or test:disableMockUpload:false in config file")
+	}
+
+	r.telemetry.TestRun(totalTestPassed, totalTestFailed, len(testSets), testRunStatus)
 
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
+		coverageData := models.TestCoverage{}
+		var err error
 		if !r.config.Test.SkipCoverage {
 			r.logger.Info("calculating coverage for the test run and inserting it into the report")
-			coverageData, err := cov.GetCoverage()
+			coverageData, err = cov.GetCoverage()
 			if err == nil {
 				r.logger.Sugar().Infoln(models.HighlightPassingString("Total Line Coverage Percentage: ", coverageData.TotalCov.LineCov))
 				err = cov.AppendCoverage(&coverageData, testRunID)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to update report with the coverage data")
 				}
-				_, err = requestMockemulator.AfterTestHook(ctx, testRunID, testSetIDs[len(testSetIDs)-1], coverageData, len(testSetIDs))
-				if err != nil {
-					utils.LogError(r.logger, err, "failed to get after test hook")
-				}
+
 			} else {
 				utils.LogError(r.logger, err, "failed to calculate coverage for the test run")
 			}
+		}
+
+		//executing afterTestRun hook, executed after running all the test-sets
+		err = HookImpl.AfterTestRun(ctx, testRunID, testSets, coverageData)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to execute after test run hook")
 		}
 	}
 
 	// return non-zero error code so that pipeline processes
 	// know that there is a failure in tests
-	if !testSetResult {
+	if !testRunResult {
 		utils.ErrCode = 1
 	}
 	return nil
@@ -323,7 +348,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 	default:
 		hookCtx := context.WithoutCancel(ctx)
 		hookCtx, cancel = context.WithCancel(hookCtx)
-		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_TEST, EnableTesting: r.config.EnableTesting})
+		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_TEST, EnableTesting: r.config.EnableTesting, Rules: r.config.BypassRules})
 		if err != nil {
 			cancel()
 			if errors.Is(err, context.Canceled) {
@@ -361,6 +386,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	runTestSetCtx = context.WithValue(runTestSetCtx, models.ErrGroupKey, runTestSetErrGrp)
 	runTestSetCtx, runTestSetCtxCancel := context.WithCancel(runTestSetCtx)
 
+	startTime := time.Now()
+
 	exitLoopChan := make(chan bool, 2)
 	defer func() {
 		runTestSetCtxCancel()
@@ -396,11 +423,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		verdict := TestReportVerdict{
-			total:   testReport.Total,
-			failed:  0,
-			passed:  0,
-			ignored: testReport.Ignored,
-			status:  true,
+			total:    testReport.Total,
+			failed:   0,
+			passed:   0,
+			ignored:  testReport.Ignored,
+			status:   true,
+			duration: time.Duration(0),
 		}
 
 		completeTestReport[testSetID] = verdict
@@ -411,8 +439,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	var conf *models.TestSet
-
-	//Execute the Pre-script before each test-set if provided
 	conf, err = r.testSetConf.Read(runTestSetCtx, testSetID)
 	if err != nil {
 		if strings.Contains(err.Error(), "no such file or directory") {
@@ -428,7 +454,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	if conf.PreScript != "" {
 		r.logger.Info("Running Pre-script", zap.String("script", conf.PreScript), zap.String("test-set", testSetID))
-		err = r.executeScript(runTestSetCtx, conf.PreScript)
+		err := r.executeScript(runTestSetCtx, conf.PreScript)
 		if err != nil {
 			return models.TestSetStatusFaultScript, fmt.Errorf("failed to execute pre-script: %w", err)
 		}
@@ -510,8 +536,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	selectedTests := ArrayToMap(r.config.Test.SelectedTests[testSetID])
-	ignoredTests := ArrayToMap(r.config.Test.IgnoredTests[testSetID])
+	selectedTests := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID])
+	ignoredTests := matcherUtils.ArrayToMap(r.config.Test.IgnoredTests[testSetID])
 
 	testCasesCount := len(testCases)
 
@@ -536,6 +562,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var exitLoop bool
 	// var to store the error in the loop
 	var loopErr error
+	utils.TemplatizedValues = conf.Template
 
 	for _, testCase := range testCases {
 
@@ -550,7 +577,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				Status:       models.TestStatusIgnored,
 				TestCaseID:   testCase.Name,
 				TestCasePath: filepath.Join(r.config.Path, testSetID),
-				MockPath:     filepath.Join(r.config.Path, testSetID, requestMockemulator.FetchMockName()),
+				MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
 			}
 			loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 			if loopErr != nil {
@@ -597,8 +624,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		if utils.IsDockerCmd(cmdType) {
-
-			testCase.HTTPReq.URL, err = utils.ReplaceHostToIP(testCase.HTTPReq.URL, userIP)
+			testCase.HTTPReq.URL, err = utils.ReplaceHost(testCase.HTTPReq.URL, userIP)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to replace host to docker container's IP")
 				break
@@ -606,8 +632,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.logger.Debug("", zap.Any("replaced URL in case of docker env", testCase.HTTPReq.URL))
 		}
 
+		// send the flag replace-host instead of sending the IP
+		if r.config.Test.Host != "" {
+			testCase.HTTPReq.URL, err = utils.ReplaceHost(testCase.HTTPReq.URL, r.config.Test.Host)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to replace host to provided host by the user")
+				break
+			}
+		}
+
+		if r.config.Test.Port != 0 {
+			testCase.HTTPReq.URL, err = utils.ReplacePort(testCase.HTTPReq.URL, strconv.Itoa(int(r.config.Test.Port)))
+		}
+
 		started := time.Now().UTC()
-		resp, loopErr := requestMockemulator.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
+		resp, loopErr := HookImpl.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
 		if loopErr != nil {
 			utils.LogError(r.logger, err, "failed to simulate request")
 			failure++
@@ -666,7 +705,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				},
 				Res:          *resp,
 				TestCasePath: filepath.Join(r.config.Path, testSetID),
-				MockPath:     filepath.Join(r.config.Path, testSetID, requestMockemulator.FetchMockName()),
+				MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
 				Noise:        testCase.Noise,
 				Result:       *testResult,
 			}
@@ -695,6 +734,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFaultScript, fmt.Errorf("failed to execute post-script: %w", err)
 		}
 	}
+
+	timeTaken := time.Since((startTime))
 
 	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
 	if err != nil {
@@ -736,6 +777,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusInternalErr, fmt.Errorf("failed to insert report")
 	}
 
+	err = utils.AddToGitIgnore(r.logger, r.config.Path, "/reports/")
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to create .gitignore file")
+	}
+
 	// remove the unused mocks by the test cases of a testset (if the base path is not provided )
 	if r.config.Test.RemoveUnusedMocks && testSetStatus == models.TestSetStatusPassed && r.instrument {
 		r.logger.Debug("consumed mocks from the completed testset", zap.Any("for test-set", testSetID), zap.Any("consumed mocks", totalConsumedMocks))
@@ -748,11 +794,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	// TODO Need to decide on whether to use global variable or not
 	verdict := TestReportVerdict{
-		total:   testReport.Total,
-		failed:  testReport.Failure,
-		passed:  testReport.Success,
-		ignored: testReport.Ignored,
-		status:  testSetStatus == models.TestSetStatusPassed,
+		total:    testReport.Total,
+		failed:   testReport.Failure,
+		passed:   testReport.Success,
+		ignored:  testReport.Ignored,
+		status:   testSetStatus == models.TestSetStatusPassed,
+		duration: timeTaken,
 	}
 
 	completeTestReport[testSetID] = verdict
@@ -760,6 +807,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	totalTestPassed += testReport.Success
 	totalTestFailed += testReport.Failure
 	totalTestIgnored += testReport.Ignored
+	totalTestTimeTaken += timeTaken
+
+	timeTakenStr := timeWithUnits(timeTaken)
 
 	if testSetStatus == models.TestSetStatusFailed || testSetStatus == models.TestSetStatusPassed {
 		if testSetStatus == models.TestSetStatusFailed {
@@ -768,17 +818,34 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			pp.SetColorScheme(models.GetPassingColorScheme())
 		}
 		if testReport.Ignored > 0 {
-			if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure, testReport.Ignored); err != nil {
+			if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n"+"\tTime Taken: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure, testReport.Ignored, timeTakenStr); err != nil {
 				utils.LogError(r.logger, err, "failed to print testrun summary")
 			}
 		} else {
-			if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure); err != nil {
+			if _, err := pp.Printf("\n <=========================================> \n  TESTRUN SUMMARY. For test-set: %s\n"+"\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTime Taken: %s\n <=========================================> \n\n", testReport.TestSet, testReport.Total, testReport.Success, testReport.Failure, timeTakenStr); err != nil {
 				utils.LogError(r.logger, err, "failed to print testrun summary")
 			}
 		}
 	}
 
 	r.telemetry.TestSetRun(testReport.Success, testReport.Failure, testSetID, string(testSetStatus))
+
+	if r.config.Test.UpdateTemplate || r.config.Test.BasePath != "" {
+		removeDoubleQuotes(utils.TemplatizedValues)
+		// Write the templatized values to the yaml.
+		if len(utils.TemplatizedValues) > 0 {
+			err = r.testSetConf.Write(ctx, testSetID, &models.TestSet{
+				PreScript:  conf.PreScript,
+				PostScript: conf.PostScript,
+				Template:   utils.TemplatizedValues,
+			})
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to write the templatized values to the yaml")
+			}
+		}
+
+	}
+
 	return testSetStatus, nil
 }
 
@@ -848,7 +915,7 @@ func (r *Replayer) compareResp(tc *models.TestCase, actualResponse *models.HTTPR
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
-	return match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
+	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
 }
 
 func (r *Replayer) printSummary(_ context.Context, _ bool) {
@@ -870,21 +937,24 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 			}
 			return testSuiteIDNumberI < testSuiteIDNumberJ
 		})
+
+		totalTestTimeTakenStr := timeWithUnits(totalTestTimeTaken)
+
 		if totalTestIgnored > 0 {
-			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n", totalTests, totalTestPassed, totalTestFailed, totalTestIgnored); err != nil {
+			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal test ignored: %s\n"+"\tTotal time taken: %s\n", totalTests, totalTestPassed, totalTestFailed, totalTestIgnored, totalTestTimeTakenStr); err != nil {
 				utils.LogError(r.logger, err, "failed to print test run summary")
 				return
 			}
-			if _, err := pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\tIgnored\t\n"); err != nil {
+			if _, err := pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\tIgnored\t\tTime Taken\t\n"); err != nil {
 				utils.LogError(r.logger, err, "failed to print test suite summary")
 				return
 			}
 		} else {
-			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n", totalTests, totalTestPassed, totalTestFailed); err != nil {
+			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal time taken: %s\n", totalTests, totalTestPassed, totalTestFailed, totalTestTimeTakenStr); err != nil {
 				utils.LogError(r.logger, err, "failed to print test run summary")
 				return
 			}
-			if _, err := pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\n"); err != nil {
+			if _, err := pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\tTime Taken\t\n"); err != nil {
 				utils.LogError(r.logger, err, "failed to print test suite summary")
 				return
 			}
@@ -895,13 +965,16 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 			} else {
 				pp.SetColorScheme(models.GetFailingColorScheme())
 			}
+
+			testSetTimeTakenStr := timeWithUnits(completeTestReport[testSuiteName].duration)
+
 			if totalTestIgnored > 0 {
-				if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed, completeTestReport[testSuiteName].ignored); err != nil {
+				if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed, completeTestReport[testSuiteName].ignored, testSetTimeTakenStr); err != nil {
 					utils.LogError(r.logger, err, "failed to print test suite details")
 					return
 				}
 			} else {
-				if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed); err != nil {
+				if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed, testSetTimeTakenStr); err != nil {
 					utils.LogError(r.logger, err, "failed to print test suite details")
 					return
 				}
@@ -916,6 +989,10 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 
 func (r *Replayer) RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError {
 	return r.instrumentation.Run(ctx, appID, opts)
+}
+
+func (r *Replayer) GetTestSetConf(ctx context.Context, testSet string) (*models.TestSet, error) {
+	return r.testSetConf.Read(ctx, testSet)
 }
 
 func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error) {
@@ -1007,7 +1084,7 @@ func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testS
 		selectedTestCases = testCases
 	} else {
 		for _, testCase := range testCases {
-			if _, ok := ArrayToMap(selectedTestCaseIDs)[testCase.Name]; ok {
+			if _, ok := matcherUtils.ArrayToMap(selectedTestCaseIDs)[testCase.Name]; ok {
 				selectedTestCases = append(selectedTestCases, testCase)
 			}
 		}
@@ -1060,4 +1137,8 @@ func (r *Replayer) DeleteTestSet(ctx context.Context, testSetID string) error {
 
 func (r *Replayer) DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error {
 	return r.testDB.DeleteTests(ctx, testSetID, testCaseIDs)
+}
+
+func SetTestHooks(testHooks TestHooks) {
+	HookImpl = testHooks
 }

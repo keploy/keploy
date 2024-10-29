@@ -5,13 +5,46 @@ system="""\
 user="""\
 ## Overview
 You are a code assistant designed to accept a {{ .language }} source file and a {{ .language }} test file. 
-Your task is to generate additional unit tests to complement the existing test suite, aiming to increase the code coverage of the source file.
+Your task is to generate additional unit tests to complement the existing test suite, aiming to significantly increase the code coverage of the source file.
 
-Additional guidelines:
-- Carefully analyze the provided code to understand its purpose, inputs, outputs, and key logic or calculations.
-- Brainstorm a list of test cases necessary to fully validate the correctness of the code and achieve 100% code coverage.
-- After adding each test, review all tests to ensure they cover the full range of scenarios, including exception or error handling.
-- If the original test file contains a test suite, assume that each generated test will be part of the same suite. Ensure the new tests are consistent with the existing suite in terms of style, naming conventions, and structure.
+### Requirements for Creating Tests:
+
+- **Analyze the Provided Code:**
+  - Understand its purpose, inputs, outputs, and key logic or calculations.
+
+- **Utilize the Code Coverage Report:**
+  - Identify specific parts of the code not yet covered by tests.
+  - Focus on uncovered lines, branches, and conditions.
+
+- **Generate Targeted Test Cases:**
+  - Write tests for uncovered code paths, including within functions that already have tests.
+  - Include edge cases, error conditions, and complex logic scenarios.
+
+- **Use Mocks and Stubs:**
+  - Where appropriate, simulate complex dependencies or external interactions.
+
+- **Maximize Coverage:**
+  - Try to include as many functions and code paths as possible.
+  - Aim to cover all branches, error handling paths, and edge cases.
+
+- **Ensure Quality and Consistency:**
+  - Write comprehensive, well-structured tests.
+  - Follow the same style and conventions as the existing test suite.
+  - Ensure test names are unique within the test suite.
+
+- **Focus on the Goal:**
+  - The primary objective is to **increase the overall code coverage significantly**.
+  - Do not include the code coverage report or any policies in your response.
+
+{{- if .function_under_test }}
+- **Focus Function:**  
+  - You must generate test cases specifically targeting the function named `{{ .function_under_test }}`.  
+  - Ensure that the tests for this function cover all logic paths, edge cases, and error handling scenarios.
+{{ end }}
+
+{{- if .additional_command }}
+- {{ .additional_command }}
+{{ end }}
 
 
 ## Source File
@@ -25,6 +58,13 @@ Here is the source file that you will be writing tests against, called `{{ .sour
 Here is the file that contains the existing tests, called `{{ .test_file_name }}`.
 =========
 {{ .test_file | trim }}
+=========
+
+## Installed Packages
+The following packages are already installed in the environment. Use these when writing tests to avoid redundant installations:
+
+=========
+{{ .installed_packages | trim }}
 =========
 
 
@@ -61,13 +101,14 @@ class SingleTest(BaseModel):
     test_name: str = Field(description=" A short unique test name, that should reflect the test objective")
 {%- endif %}
     test_code: str = Field(description="A single test function, that tests the behavior described in 'test_behavior'. The test should be a written like its a part of the existing test suite, if there is one, and it can use existing helper functions, setup, or teardown code.")
-    new_imports_code: str = Field(description="Code for new imports that are required for the new test function, and are not already present in the test file. Give an empty string if no new imports are required.")
+    new_imports_code: str = Field(description="Code for new imports that are required for the new test function, and are not already present in the test file.")
+    library_installation_code: str = Field(description="If new libraries are needed, specify the installation commands for each library separately.")
     test_tags: str = Field(description="A single label that best describes the test, out of: ['happy path', 'edge case','other']")
 
 class NewTests(BaseModel):
     language: str = Field(description="The programming language of the source code")
     existing_test_function_signature: str = Field(description="A single line repeating a signature header of one of the existing test functions")
-    new_tests: List[SingleTest] = Field(min_items=1, max_items={{ .max_tests }}, description="A list of new test functions to append to the existing test suite, aiming to increase the code coverage. Each test should run as-is, without requiring any additional inputs or setup code. Don't introduce new dependencies")
+    new_tests: List[SingleTest] = Field(min_items=1, max_items={{ .max_tests }}, description="A list of new test functions to append to the existing test suite, aiming to increase the code coverage. Each test should run as-is, without requiring any additional inputs or setup code.")
 =====
 
 Example output:
@@ -92,7 +133,40 @@ new_tests:
     ...
 {%- endif %}
   new_imports_code: |
-    ""
+    {%- if language == "python" %}
+    "import pytest"
+    "from my_module import my_function"
+    {%- elif language == "java" %}
+    "import org.junit.jupiter.api.Test;"
+    "import my.package.MyFunction;"
+    {%- elif language == "golang" %}
+    "import "testing" "
+    "import "my_module""
+    {%- elif language == "javascript" %}
+    "const assert = require('assert');"
+    "const myFunction = require('my_module').myFunction;"
+    {%- elif language == "typescript" %}
+    "import { assert } from 'assert';"
+    "import { myFunction } from 'my_module';"
+    {%- endif %}
+  library_installation_code: |
+    {%- if language == "python" %}
+    pip install pytest
+    {%- elif language == "java" %}
+    # Add the following to your Maven pom.xml:
+    # <dependency>
+    #   <groupId>org.junit.jupiter</groupId>
+    #   <artifactId>junit-jupiter-api</artifactId>
+    #   <version>5.7.0</version>
+    #   <scope>test</scope>
+    # </dependency>
+    {%- elif language == "golang" %}
+    go get github.com/my_module
+    {%- elif language == "javascript" %}
+    npm install assert
+    {%- elif language == "typescript" %}
+    npm install assert
+    {%- endif %}
   test_tags: happy path
     ...
 ```

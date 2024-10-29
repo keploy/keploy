@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"html/template"
 	"os"
-	"path/filepath"
 	"strings"
 
 	settings "go.keploy.io/server/v2/pkg/service/utgen/assets"
@@ -57,22 +56,27 @@ type PromptBuilder struct {
 	AdditionalInstructions string
 	Language               string
 	Logger                 *zap.Logger
+	AdditionalPrompt       string
+	InstalledPackages      []string
+	FunctionUnderTest      string
 }
 
-func NewPromptBuilder(srcPath, testPath, covReportContent, includedFiles, additionalInstructions, language string, logger *zap.Logger) (*PromptBuilder, error) {
+func NewPromptBuilder(srcPath, testPath, covReportContent, includedFiles, additionalInstructions, language, additionalPrompt, functionUnderTest string, logger *zap.Logger) (*PromptBuilder, error) {
 	var err error
 	src := &Source{
-		Name: filepath.Base(srcPath),
+		Name: srcPath,
 	}
 	test := &Test{
-		Name: filepath.Base(testPath),
+		Name: testPath,
 	}
 	promptBuilder := &PromptBuilder{
-		Src:              src,
-		Test:             test,
-		Language:         language,
-		CovReportContent: covReportContent,
-		Logger:           logger,
+		Src:               src,
+		Test:              test,
+		Language:          language,
+		CovReportContent:  covReportContent,
+		Logger:            logger,
+		AdditionalPrompt:  additionalPrompt,
+		FunctionUnderTest: functionUnderTest,
 	}
 	promptBuilder.Src.Code, err = readFile(srcPath)
 	if err != nil {
@@ -138,6 +142,9 @@ func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, erro
 		"additional_instructions_text": pb.AdditionalInstructions,
 		"language":                     pb.Language,
 		"max_tests":                    MAX_TESTS_PER_RUN,
+		"additional_command":           pb.AdditionalPrompt,
+		"function_under_test":          pb.FunctionUnderTest,
+		"installed_packages":           formatInstalledPackages(pb.InstalledPackages),
 	}
 
 	settings := settings.GetSettings()
@@ -160,6 +167,14 @@ func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, erro
 	prompt.System = systemPrompt
 	prompt.User = userPrompt
 	return prompt, nil
+}
+
+func formatInstalledPackages(packages []string) string {
+	var sb strings.Builder
+	for _, pkg := range packages {
+		sb.WriteString(fmt.Sprintf("- %s\n", pkg))
+	}
+	return sb.String()
 }
 
 func renderTemplate(templateText string, variables map[string]interface{}) (string, error) {
