@@ -188,7 +188,11 @@ func (a *Agent) DeRegisterClient(ctx context.Context, id uint64) error {
 	if err != nil {
 		return err
 	}
-	a.Hooks.DeleteKeployClientInfo(id)
+	err = a.Hooks.DeleteKeployClientInfo(id)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 

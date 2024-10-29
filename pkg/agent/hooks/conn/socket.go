@@ -26,7 +26,7 @@ import (
 var eventAttributesSize = int(unsafe.Sizeof(SocketDataEvent{}))
 
 // ListenSocket starts the socket event listeners
-func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap *ebpf.Map, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
+func ListenSocket(ctx context.Context, l *zap.Logger, clientID uint64, openMap, dataMap, closeMap *ebpf.Map, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	t := make(chan *models.TestCase, 500)
 	err := initRealTimeOffset()
 	if err != nil {
@@ -65,7 +65,7 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 		utils.LogError(l, err, "failed to start open socket listener")
 		return nil, errors.New("failed to start socket listeners")
 	}
-	err = data(ctx, c, l, dataMap)
+	err = data(ctx, clientID, c, l, dataMap)
 	if err != nil {
 		utils.LogError(l, err, "failed to start data socket listener")
 		return nil, errors.New("failed to start socket listeners")
@@ -130,7 +130,7 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 	return nil
 }
 
-func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
+func data(ctx context.Context, id uint64, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 	r, err := ringbuf.NewReader(m)
 	if err != nil {
 		utils.LogError(l, nil, "failed to create ring buffer of socketDataEvent")
@@ -178,8 +178,12 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 					l.Debug(fmt.Sprintf("Request EntryTimestamp :%v\n", convertUnixNanoToTime(event.EntryTimestampNano)))
 				}
 
+				if event.ClientID != id {
+					continue
+				}
 				fmt.Println("SocketDataEvent-1: ", event.ClientID)
 				fmt.Println("SocketDataEvent-2: ", event.ConnID)
+
 				c.GetOrCreate(event.ConnID).AddDataEvent(event)
 			}
 		}()

@@ -113,7 +113,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 	for {
 		select {
 		case <-clientClose:
-			fmt.Println("Client connection is closed from the encode function")
+			logger.Debug("client connection is closed")
 			if !prevChunkWasReq && len(pgRequests) > 0 && len(pgResponses) > 0 {
 				metadata := make(map[string]string)
 				metadata["type"] = "config"
@@ -132,7 +132,6 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 					ConnectionID: ctx.Value(models.ClientConnectionIDKey).(string),
 				}
 				mocks <- m
-				fmt.Println("Context is done in the postgres encode function", m)
 				return ctx.Err()
 			}
 		case <-ctx.Done():

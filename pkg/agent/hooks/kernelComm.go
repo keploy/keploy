@@ -12,8 +12,6 @@ import (
 	"go.uber.org/zap"
 )
 
-//TODO: rename this file.
-
 // Get Used by proxy
 func (h *Hooks) Get(_ context.Context, srcPort uint16) (*agent.NetworkAddress, error) {
 	d, err := h.GetDestinationInfo(srcPort)
@@ -65,6 +63,8 @@ func (h *Hooks) CleanProxyEntry(srcPort uint16) error {
 }
 
 func (h *Hooks) SendClientInfo(id uint64, clientInfo structs.ClientInfo) error {
+	h.m.Lock()
+	defer h.m.Unlock()
 	err := h.clientRegistrationMap.Update(id, clientInfo, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the app info to the ebpf program")
@@ -74,6 +74,8 @@ func (h *Hooks) SendClientInfo(id uint64, clientInfo structs.ClientInfo) error {
 }
 
 func (h *Hooks) DeleteClientInfo(id uint64) error {
+	h.m.Lock()
+	defer h.m.Unlock()
 	err := h.clientRegistrationMap.Delete(id)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the app info to the ebpf program")
@@ -85,6 +87,8 @@ func (h *Hooks) DeleteClientInfo(id uint64) error {
 
 // SendProxyInfo sends the network information to the kernel
 func (h *Hooks) SendProxyInfo(id uint64, proxInfo structs.ProxyInfo) error {
+	h.m.Lock()
+	defer h.m.Unlock()
 	err := h.proxyInfoMap.Update(id, proxInfo, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the proxy info to the ebpf program")

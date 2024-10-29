@@ -484,7 +484,7 @@ func (h *Hooks) Record(ctx context.Context, clientID uint64, opts models.Incomin
 	// and pass that to eBPF consumers/listeners
 	fmt.Println("Recording hooks...")
 
-	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
+	return conn.ListenSocket(ctx, h.logger, clientID, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
 }
 
 func (h *Hooks) SendKeployClientInfo(clientID uint64, clientInfo structs.ClientInfo) error {
@@ -499,6 +499,7 @@ func (h *Hooks) SendKeployClientInfo(clientID uint64, clientInfo structs.ClientI
 }
 
 func (h *Hooks) DeleteKeployClientInfo(id uint64) error {
+	fmt.Println("Deleting keploy client info...", h.objects.SocketDataEvents)
 	err := h.DeleteClientInfo(id)
 	if err != nil {
 		h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))
