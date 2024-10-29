@@ -576,6 +576,11 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 
 func (a *AgentClient) UnregisterClient(ctx context.Context, clientID uint64) error {
 	// Unregister the client with the server
+	isAgentRunning := a.isAgentRunning(context.Background())
+	if !isAgentRunning {
+		a.logger.Warn("keploy agent is not running, skipping unregister client")
+		return io.EOF
+	}
 	requestBody := models.UnregisterReq{
 		ClientID: clientID,
 	}

@@ -54,6 +54,8 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 		default:
 			ok, requestBuf, responseBuf, reqTimestampTest, resTimestampTest := tracker.IsComplete()
 			if ok {
+				fmt.Println("Processing the tracker with key: ", connID)
+				fmt.Println("Request Buffer::::::::: ", string(requestBuf))
 				if len(requestBuf) == 0 || len(responseBuf) == 0 {
 					factory.logger.Warn("failed processing a request due to invalid request or response", zap.Any("Request Size", len(requestBuf)), zap.Any("Response Size", len(responseBuf)))
 					continue

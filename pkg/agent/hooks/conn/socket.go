@@ -179,8 +179,11 @@ func data(ctx context.Context, id uint64, c *Factory, l *zap.Logger, m *ebpf.Map
 				}
 
 				if event.ClientID != id {
+					// log the expected client id and the received client id
+					l.Info(fmt.Sprintf("Expected ClientID: %v, Received ClientID: %v", id, event.ClientID))
 					continue
 				}
+				
 				fmt.Println("SocketDataEvent-1: ", event.ClientID)
 				fmt.Println("SocketDataEvent-2: ", event.ConnID)
 

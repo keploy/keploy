@@ -156,6 +156,7 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 	// For keploy test bench
 	// Doubt: if this is enabled automatically
 	fmt.Println("opts.EnableTesting", opts.EnableTesting)
+	// opts.EnableTesting = true
 	if opts.EnableTesting {
 
 		// enable testing in the app
