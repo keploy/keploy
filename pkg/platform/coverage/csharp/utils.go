@@ -91,9 +91,9 @@ func MergeCoverageFiles(ctx context.Context) error {
 		"dotnet-coverage",
 		"merge",
 		"--output",
+		"target/*.cobertura",
 		"--output-format",
 		"cobertura",
-		"target/*.cobertura",
 	}
 
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
