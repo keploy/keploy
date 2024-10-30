@@ -110,7 +110,6 @@ pid=$(pgrep keploy)
 echo "$pid Keploy PID" 
 echo "Killing keploy"
 sudo kill $pid
-sudo kill -9 $(sudo lsof -ti:8080)
 
 # Start the gin-mongo app in test mode.
 sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7 &> test_logs.txt 
