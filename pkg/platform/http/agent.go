@@ -368,127 +368,232 @@ func (a *AgentClient) Run(ctx context.Context, clientID uint64, _ models.RunOpti
 	}
 }
 
+// func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
+
+// 	clientID := utils.GenerateID()
+
+// 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
+
+// 	// check if the agent is running
+// 	isAgentRunning := a.isAgentRunning(ctx)
+
+// 	if !isAgentRunning {
+// 		// Start the keploy agent as a detached process and pipe the logs into a file
+// 		if !isDockerCmd && runtime.GOOS != "linux" {
+// 			return 0, fmt.Errorf("Operating system not supported for this feature")
+// 		}
+
+// 		if isDockerCmd {
+// 			// run the docker container instead of the agent binary
+// 			go func() {
+// 				if err := a.StartInDocker(ctx, a.logger); err != nil {
+// 					a.logger.Error("failed to start docker agent", zap.Error(err))
+// 				}
+// 			}()
+// 		} else {
+// 			// Open the log file in append mode or create it if it doesn't exist
+// 			logFile, err := os.OpenFile("keploy_agent.log", os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
+// 			if err != nil {
+// 				utils.LogError(a.logger, err, "failed to open log file")
+// 				return 0, err
+// 			}
+
+// 			defer func() {
+// 				err := logFile.Close()
+// 				if err != nil {
+// 					utils.LogError(a.logger, err, "failed to close agent log file")
+// 				}
+// 			}()
+
+// 			keployBin, err := utils.GetCurrentBinaryPath()
+
+// 			if err != nil {
+// 				utils.LogError(a.logger, err, "failed to get current keploy binary path")
+// 				return 0, err
+// 			}
+// 			agentCmd := exec.Command("sudo", keployBin, "agent")
+// 			agentCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // Detach the process
+
+// 			// Redirect the standard output and error to the log file
+// 			agentCmd.Stdout = logFile
+// 			agentCmd.Stderr = logFile
+
+// 			err = agentCmd.Start()
+// 			if err != nil {
+// 				utils.LogError(a.logger, err, "failed to start keploy agent")
+// 				return 0, err
+// 			}
+
+// 			a.logger.Info("keploy agent started", zap.Int("pid", agentCmd.Process.Pid))
+// 		}
+// 	}
+
+// 	runningChan := make(chan bool)
+
+// 	// Start a goroutine to check if the agent is running
+// 	// TODO: add context cancellation here
+// 	go func() {
+// 		for {
+// 			if a.isAgentRunning(ctx) {
+// 				// Signal that the agent is running
+// 				runningChan <- true
+// 				return
+// 			}
+// 			time.Sleep(1 * time.Second) // Poll every second
+// 		}
+// 	}()
+
+// 	var inode uint64
+// 	if <-runningChan {
+// 		// check if its docker then create a init container first
+// 		// and then the app container
+// 		usrApp := app.NewApp(a.logger, clientID, cmd, a.dockerClient, app.Options{
+// 			DockerNetwork: opts.DockerNetwork,
+// 			Container:     opts.Container,
+// 			DockerDelay:   opts.DockerDelay,
+// 		})
+// 		a.apps.Store(clientID, usrApp)
+
+// 		err := usrApp.Setup(ctx)
+// 		if err != nil {
+// 			utils.LogError(a.logger, err, "failed to setup app")
+// 			return 0, err
+// 		}
+
+// 		if isDockerCmd {
+// 			opts.DockerNetwork = usrApp.KeployNetwork
+// 			// Start the init container to get the pid namespace
+// 			inode, err = a.Initcontainer(ctx, app.Options{
+// 				DockerNetwork: opts.DockerNetwork,
+// 				Container:     opts.Container,
+// 				DockerDelay:   opts.DockerDelay,
+// 			})
+// 			if err != nil {
+// 				utils.LogError(a.logger, err, "failed to setup init container")
+// 			}
+// 		}
+// 		opts.ClientID = clientID
+// 		opts.AppInode = inode
+// 		// Register the client with the server
+// 		err = a.RegisterClient(ctx, opts)
+// 		if err != nil {
+// 			utils.LogError(a.logger, err, "failed to register client")
+// 			return 0, err
+// 		}
+// 	}
+
+// 	isAgentRunning = a.isAgentRunning(ctx)
+// 	if !isAgentRunning {
+// 		return 0, fmt.Errorf("keploy agent is not running, please start the agent first")
+// 	}
+
+// 	return clientID, nil
+// }
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
-
 	clientID := utils.GenerateID()
-
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 
-	// check if the agent is running
-	isAgentRunning := a.isAgentRunning(ctx)
+	// Create an error group with context to manage cancellation
+	grp, grpCtx := errgroup.WithContext(ctx)
 
-	if !isAgentRunning {
-		// Start the keploy agent as a detached process and pipe the logs into a file
-		if !isDockerCmd && runtime.GOOS != "linux" {
-			return 0, fmt.Errorf("Operating system not supported for this feature")
+	// Check if agent is running, or start it if it's not
+	grp.Go(func() error {
+		if !a.isAgentRunning(grpCtx) {
+			if !isDockerCmd && runtime.GOOS != "linux" {
+				return fmt.Errorf("operating system not supported for this feature")
+			}
+
+			// Start the agent based on whether it's Docker or local
+			if isDockerCmd {
+				return a.StartInDocker(grpCtx, a.logger)
+			} else {
+				return a.startLocalAgent(grpCtx)
+			}
 		}
+		return nil
+	})
 
-		if isDockerCmd {
-			// run the docker container instead of the agent binary
-			go func() {
-				if err := a.StartInDocker(ctx, a.logger); err != nil {
-					a.logger.Error("failed to start docker agent", zap.Error(err))
+	// Use the error group to wait until the agent is verified as running or cancellation occurs
+	grp.Go(func() error {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-grpCtx.Done():
+				return grpCtx.Err()
+			case <-ticker.C:
+				if a.isAgentRunning(grpCtx) {
+					return nil
 				}
-			}()
-		} else {
-			// Open the log file in append mode or create it if it doesn't exist
-			logFile, err := os.OpenFile("keploy_agent.log", os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
-			if err != nil {
-				utils.LogError(a.logger, err, "failed to open log file")
-				return 0, err
 			}
-
-			defer func() {
-				err := logFile.Close()
-				if err != nil {
-					utils.LogError(a.logger, err, "failed to close agent log file")
-				}
-			}()
-
-			keployBin, err := utils.GetCurrentBinaryPath()
-
-			if err != nil {
-				utils.LogError(a.logger, err, "failed to get current keploy binary path")
-				return 0, err
-			}
-			agentCmd := exec.Command("sudo", keployBin, "agent")
-			agentCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // Detach the process
-
-			// Redirect the standard output and error to the log file
-			agentCmd.Stdout = logFile
-			agentCmd.Stderr = logFile
-
-			err = agentCmd.Start()
-			if err != nil {
-				utils.LogError(a.logger, err, "failed to start keploy agent")
-				return 0, err
-			}
-
-			a.logger.Info("keploy agent started", zap.Int("pid", agentCmd.Process.Pid))
 		}
+	})
+
+	// Block until the error group finishes, ensuring proper agent startup or handling of cancellation
+	if err := grp.Wait(); err != nil {
+		a.logger.Error("Setup was cancelled or encountered an error", zap.Error(err))
+		return 0, err
 	}
 
-	runningChan := make(chan bool)
+	// Proceed with application setup and registration
+	usrApp := app.NewApp(a.logger, clientID, cmd, a.dockerClient, app.Options{
+		DockerNetwork: opts.DockerNetwork,
+		Container:     opts.Container,
+		DockerDelay:   opts.DockerDelay,
+	})
+	a.apps.Store(clientID, usrApp)
 
-	// Start a goroutine to check if the agent is running
-	// TODO: add context cancellation here
-	go func() {
-		for {
-			if a.isAgentRunning(ctx) {
-				// Signal that the agent is running
-				runningChan <- true
-				return
-			}
-			time.Sleep(1 * time.Second) // Poll every second
-		}
-	}()
+	if err := usrApp.Setup(ctx); err != nil {
+		return 0, fmt.Errorf("failed to setup app: %w", err)
+	}
 
-	var inode uint64
-	if <-runningChan {
-		// check if its docker then create a init container first
-		// and then the app container
-		usrApp := app.NewApp(a.logger, clientID, cmd, a.dockerClient, app.Options{
+	if isDockerCmd {
+		opts.DockerNetwork = usrApp.KeployNetwork
+		inode, err := a.Initcontainer(ctx, app.Options{
 			DockerNetwork: opts.DockerNetwork,
 			Container:     opts.Container,
 			DockerDelay:   opts.DockerDelay,
 		})
-		a.apps.Store(clientID, usrApp)
-
-		err := usrApp.Setup(ctx)
 		if err != nil {
-			utils.LogError(a.logger, err, "failed to setup app")
-			return 0, err
+			return 0, fmt.Errorf("failed to setup init container: %w", err)
 		}
-
-		if isDockerCmd {
-			opts.DockerNetwork = usrApp.KeployNetwork
-			// Start the init container to get the pid namespace
-			inode, err = a.Initcontainer(ctx, app.Options{
-				DockerNetwork: opts.DockerNetwork,
-				Container:     opts.Container,
-				DockerDelay:   opts.DockerDelay,
-			})
-			if err != nil {
-				utils.LogError(a.logger, err, "failed to setup init container")
-			}
-		}
-		opts.ClientID = clientID
 		opts.AppInode = inode
-		// Register the client with the server
-		err = a.RegisterClient(ctx, opts)
-		if err != nil {
-			utils.LogError(a.logger, err, "failed to register client")
-			return 0, err
-		}
 	}
 
-	isAgentRunning = a.isAgentRunning(ctx)
-	if !isAgentRunning {
-		return 0, fmt.Errorf("keploy agent is not running, please start the agent first")
+	opts.ClientID = clientID
+	if err := a.RegisterClient(ctx, opts); err != nil {
+		return 0, fmt.Errorf("failed to register client: %w", err)
 	}
 
 	return clientID, nil
 }
+
+// Helper function to start the agent locally
+func (a *AgentClient) startLocalAgent(ctx context.Context) error {
+	logFile, err := os.OpenFile("keploy_agent.log", os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open log file: %w", err)
+	}
+	defer logFile.Close()
+
+	keployBin, err := utils.GetCurrentBinaryPath()
+	if err != nil {
+		return fmt.Errorf("failed to get current keploy binary path: %w", err)
+	}
+
+	agentCmd := exec.CommandContext(ctx, "sudo", keployBin, "agent")
+	agentCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	agentCmd.Stdout, agentCmd.Stderr = logFile, logFile
+
+	if err := agentCmd.Start(); err != nil {
+		return fmt.Errorf("failed to start keploy agent: %w", err)
+	}
+
+	a.logger.Info("Keploy agent started", zap.Int("pid", agentCmd.Process.Pid))
+	return nil
+}
+
 
 func (a *AgentClient) getApp(clientID uint64) (*app.App, error) {
 	ap, ok := a.apps.Load(clientID)
@@ -576,6 +681,7 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 
 func (a *AgentClient) UnregisterClient(ctx context.Context, clientID uint64) error {
 	// Unregister the client with the server
+	
 	requestBody := models.UnregisterReq{
 		ClientID: clientID,
 	}
@@ -604,19 +710,31 @@ func (a *AgentClient) UnregisterClient(ctx context.Context, clientID uint64) err
 }
 
 func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger) error {
+	// Create an error group to manage cancellation in StartInDocker itself
+	grp, grpCtx := errgroup.WithContext(ctx)
 
-	// Start the keploy agent in a Docker container
-	agentCtx := context.WithoutCancel(ctx)
-
-	err := kdocker.StartInDocker(agentCtx, logger, &config.Config{
-		InstallationID: a.conf.InstallationID,
+	// Start the Docker container within the error group
+	grp.Go(func() error {
+		err := kdocker.StartInDocker(grpCtx, logger, &config.Config{
+			InstallationID: a.conf.InstallationID,
+		})
+		if err != nil {
+			utils.LogError(logger, err, "failed to start keploy agent in Docker")
+			return err
+		}
+		return nil
 	})
-	if err != nil {
-		utils.LogError(logger, err, "failed to start keploy agent in docker")
+
+	// Wait for the Docker startup process to complete or cancel
+	if err := grp.Wait(); err != nil {
+		logger.Info("Agent startup process was cancelled or encountered an error.", zap.Error(err))
 		return err
 	}
+
+	logger.Info("Keploy agent started in Docker successfully.")
 	return nil
 }
+
 
 func (a *AgentClient) Initcontainer(ctx context.Context, opts app.Options) (uint64, error) {
 	// Create a temporary file for the embedded initStop.sh script
