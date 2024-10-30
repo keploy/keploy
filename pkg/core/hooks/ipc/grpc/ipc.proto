@@ -4,9 +4,25 @@ package ipc;
 
 option go_package = "./";
 
+message PacketWithMeta {
+  bytes data = 1;
+  TunnelInfo tunnel_info = 2;
+}
+
 message TunnelInfo {
   uint32 pid = 1;
   optional string process_name = 2;
+}
+
+message FromProxy {
+  oneof message {
+    Packet packet = 1;
+    InterceptConf intercept_conf = 2;
+  }
+}
+
+message Packet {
+  bytes data = 1;
 }
 
 message InterceptConf {
