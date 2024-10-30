@@ -18,7 +18,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
+"errors"
 	"github.com/docker/docker/api/types/events"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/agent/hooks"
@@ -386,8 +386,8 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		if isDockerCmd {
 			// run the docker container instead of the agent binary
 			go func() {
-				if err := a.StartInDocker(ctx, a.logger); err != nil {
-					a.logger.Error("failed to start docker agent", zap.Error(err))
+				if err := a.StartInDocker(ctx, a.logger); err != nil && !errors.Is(ctx.Err(), context.Canceled) {
+					a.logger.Error("failed to start Docker agent", zap.Error(err))
 				}
 			}()
 		} else {
@@ -418,41 +418,53 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			agentCmd.Stdout = logFile
 			agentCmd.Stderr = logFile
 
-			err = agentCmd.Start()
-			if err != nil {
+			if err := agentCmd.Start(); err != nil {
 				utils.LogError(a.logger, err, "failed to start keploy agent")
 				return 0, err
 			}
-
 			a.logger.Info("keploy agent started", zap.Int("pid", agentCmd.Process.Pid))
 		}
 	}
 
+	// Channel to monitor if the agent is up and running
 	runningChan := make(chan bool)
 
 	// Start a goroutine to check if the agent is running
-	// TODO: add context cancellation here
 	go func() {
 		for {
-			if a.isAgentRunning(ctx) {
-				// Signal that the agent is running
-				runningChan <- true
+			select {
+			case <-ctx.Done():
+				// If the context is canceled, close the channel and return immediately
+				close(runningChan)
 				return
+			default:
+				if a.isAgentRunning(ctx) {
+					runningChan <- true
+					return
+				}
+				time.Sleep(1 * time.Second) // Poll every second
 			}
-			time.Sleep(1 * time.Second) // Poll every second
 		}
 	}()
 
-	var inode uint64
-	if <-runningChan {
-		// check if its docker then create a init container first
-		// and then the app container
-		usrApp := app.NewApp(a.logger, clientID, cmd, a.dockerClient, app.Options{
-			DockerNetwork: opts.DockerNetwork,
-			Container:     opts.Container,
-			DockerDelay:   opts.DockerDelay,
-		})
-		a.apps.Store(clientID, usrApp)
+	// Wait until the agent is ready or context is canceled
+	select {
+	case <-ctx.Done():
+		// Handle context cancellation gracefully if Ctrl+C is pressed
+		a.logger.Info("Setup was canceled before the agent became ready")
+		return 0, fmt.Errorf("setup canceled before agent startup")
+	case <-runningChan:
+		// Proceed with setup if the agent becomes ready
+		a.logger.Info("Agent is now running, proceeding with setup")
+	}
+
+	// Continue with app setup and registration as per normal flow
+	usrApp := app.NewApp(a.logger, clientID, cmd, a.dockerClient, app.Options{
+		DockerNetwork: opts.DockerNetwork,
+		Container:     opts.Container,
+		DockerDelay:   opts.DockerDelay,
+	})
+	a.apps.Store(clientID, usrApp)
 
 		err := usrApp.Setup(ctx)
 		if err != nil {
@@ -460,28 +472,24 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			return 0, err
 		}
 
-		if isDockerCmd {
-			opts.DockerNetwork = usrApp.KeployNetwork
-			// Start the init container to get the pid namespace
-			inode, err = a.Initcontainer(ctx, app.Options{
-				DockerNetwork: opts.DockerNetwork,
-				Container:     opts.Container,
-				DockerDelay:   opts.DockerDelay,
-			})
-			if err != nil {
-				utils.LogError(a.logger, err, "failed to setup init container")
-			}
-		}
-		opts.ClientID = clientID
-		opts.AppInode = inode
-		// Register the client with the server
-		err = a.RegisterClient(ctx, opts)
+	if isDockerCmd {
+		inode, err := a.Initcontainer(ctx, app.Options{
+			DockerNetwork: opts.DockerNetwork,
+			Container:     opts.Container,
+			DockerDelay:   opts.DockerDelay,
+		})
 		if err != nil {
-			utils.LogError(a.logger, err, "failed to register client")
+			utils.LogError(a.logger, err, "failed to setup init container")
 			return 0, err
 		}
+		opts.AppInode = inode
 	}
 
+	opts.ClientID = clientID
+	if err := a.RegisterClient(ctx, opts); err != nil {
+		utils.LogError(a.logger, err, "failed to register client")
+		return 0, err
+	}
 	isAgentRunning = a.isAgentRunning(ctx)
 	if !isAgentRunning {
 		return 0, fmt.Errorf("keploy agent is not running, please start the agent first")
@@ -609,11 +617,8 @@ func (a *AgentClient) UnregisterClient(ctx context.Context, clientID uint64) err
 }
 
 func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger) error {
-
-	// Start the keploy agent in a Docker container
-	agentCtx := context.WithoutCancel(ctx)
-
-	err := kdocker.StartInDocker(agentCtx, logger, &config.Config{
+	// Start the Keploy agent in a Docker container, directly using the passed context for cancellation
+	err := kdocker.StartInDocker(ctx, logger, &config.Config{
 		InstallationID: a.conf.InstallationID,
 	})
 	if err != nil {
