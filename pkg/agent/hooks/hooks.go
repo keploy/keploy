@@ -480,6 +480,9 @@ func (h *Hooks) load(opts agent.HookCfg) error {
 
 func (h *Hooks) Record(ctx context.Context, clientID uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	fmt.Println("Recording hooks...")
+	// use mutex to avoid
+	// h.m.Lock()
+	// defer h.m.Unlock()
 	return conn.ListenSocket(ctx, h.logger, clientID, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
 }
 

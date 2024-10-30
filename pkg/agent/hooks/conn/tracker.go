@@ -166,7 +166,8 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 			if len(conn.userReqs) > 0 && len(conn.userResps) > 0 { //validated request, response
 				requestBuf = conn.userReqs[0]
 				responseBuf = conn.userResps[0]
-
+				fmt.Println("Request Buffer::::::::: ", string(requestBuf))
+				fmt.Println("Response Buffer::::::::: ", string(responseBuf))
 				//popping out the current request & response data
 				conn.userReqs = conn.userReqs[1:]
 				conn.userResps = conn.userResps[1:]

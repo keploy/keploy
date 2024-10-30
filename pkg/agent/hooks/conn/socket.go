@@ -146,6 +146,7 @@ func data(ctx context.Context, id uint64, c *Factory, l *zap.Logger, m *ebpf.Map
 		go func() {
 			defer utils.Recover(l)
 			for {
+				fmt.Println("Starting the data listener", id)
 				record, err := r.Read()
 				if err != nil {
 					if !errors.Is(err, ringbuf.ErrClosed) {
@@ -183,7 +184,7 @@ func data(ctx context.Context, id uint64, c *Factory, l *zap.Logger, m *ebpf.Map
 					l.Info(fmt.Sprintf("Expected ClientID: %v, Received ClientID: %v", id, event.ClientID))
 					continue
 				}
-				
+
 				fmt.Println("SocketDataEvent-1: ", event.ClientID)
 				fmt.Println("SocketDataEvent-2: ", event.ConnID)
 

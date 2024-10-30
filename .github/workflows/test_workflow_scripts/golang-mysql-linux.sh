@@ -42,7 +42,7 @@ send_request() {
     pid=$(pgrep keploy)
     echo "$pid Keploy PID"
     echo "Killing Keploy"
-    ssudo kill -9 $(sudo lsof -ti:8086)
+    sudo kill $pid
 }
 
 for i in {1..2}; do

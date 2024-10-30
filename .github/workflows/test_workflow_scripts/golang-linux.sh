@@ -73,6 +73,7 @@ send_request(){
     echo "$pid Keploy PID" 
     echo "Killing keploy"
     sudo kill $pid
+    sudo kill -9 $(sudo lsof -ti:8080)
 }
 
 for i in {1..2}; do
@@ -103,6 +104,12 @@ sudo ./../../keployv2 agent &
 echo "Keploy agent started for test mode"
 
 sleep 10
+
+pid=$(pgrep keploy)
+echo "$pid Keploy PID" 
+echo "Killing keploy"
+sudo kill $pid
+sudo kill -9 $(sudo lsof -ti:8080)
 
 # Start the gin-mongo app in test mode.
 sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7 &> test_logs.txt --debug
