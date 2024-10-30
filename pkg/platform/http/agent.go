@@ -618,7 +618,8 @@ func (a *AgentClient) UnregisterClient(ctx context.Context, clientID uint64) err
 
 func (a *AgentClient) StartInDocker(ctx context.Context, logger *zap.Logger) error {
 	// Start the Keploy agent in a Docker container, directly using the passed context for cancellation
-	err := kdocker.StartInDocker(ctx, logger, &config.Config{
+	agentCtx := context.WithoutCancel(ctx)
+	err := kdocker.StartInDocker(agentCtx, logger, &config.Config{
 		InstallationID: a.conf.InstallationID,
 	})
 	if err != nil {
