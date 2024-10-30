@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux && !windows
 
 package provider
 
@@ -28,12 +28,13 @@ type CommonInternalService struct {
 }
 
 func Get(ctx context.Context, cmd string, c *config.Config, logger *zap.Logger, tel *telemetry.Telemetry, auth service.Auth) (interface{}, error) {
+	
 	commonServices, err := GetCommonServices(ctx, c, logger)
 	if err != nil {
 		return nil, err
 	}
-	contractSvc := contract.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlOpenAPIDb, c)
 
+	contractSvc := contract.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlOpenAPIDb, c)
 	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, auth, commonServices.Storage, c)
 
 	if (cmd == "test" && c.Test.BasePath != "") || cmd == "normalize" || cmd == "templatize" {
@@ -43,7 +44,6 @@ func Get(ctx context.Context, cmd string, c *config.Config, logger *zap.Logger, 
 	if cmd == "contract" {
 		return contractSvc, nil
 	}
-
 
 	return nil, errors.New("command not supported in non linux os. if you are on windows or mac, please use the dockerized version of your application")
 }

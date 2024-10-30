@@ -1,4 +1,4 @@
-//go:build linux
+//go:build windows || linux
 
 // Package util provides utility functions for the proxy package.
 package util

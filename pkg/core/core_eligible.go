@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || windows
 
 // Package core provides functionality for managing core functionalities in Keploy.
 package core

@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || windows
 
 // Package generic provides functionality for decoding generic dependencies.
 package generic

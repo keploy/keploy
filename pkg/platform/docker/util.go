@@ -1,15 +1,20 @@
-//go:build linux
-
 package docker
 
 import (
 	"fmt"
 	"regexp"
+	"runtime"
+	"strings"
 
 	"go.keploy.io/server/v2/utils"
 )
 
 func ParseDockerCmd(cmd string, kind utils.CmdType, idc Client) (string, string, error) {
+
+	// Adjust the command for Windows if needed.
+	if runtime.GOOS == "windows" {
+		cmd = strings.ReplaceAll(cmd, "/", "\\")
+	}
 
 	// Regular expression patterns
 	var containerNamePattern string

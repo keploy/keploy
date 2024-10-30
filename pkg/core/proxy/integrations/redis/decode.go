@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || windows
 
 // Package redis is the decode point for the redis application.
 package redis

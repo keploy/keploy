@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || windows
 
 // Package replayer is used to mock the MySQL traffic between the client and the server.
 package replayer

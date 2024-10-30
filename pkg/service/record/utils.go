@@ -1,3 +1,3 @@
-//go:build linux
+//go:build linux || windows
 
 package record

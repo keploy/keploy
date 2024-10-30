@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || windows
 
 // Package preparedstmt provides functionality for decoding prepared statement packets.
 package preparedstmt

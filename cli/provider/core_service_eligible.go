@@ -1,4 +1,4 @@
-//go:build linux
+//go:build windows || linux
 
 package provider
 
@@ -58,7 +58,6 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	default:
 		return nil, errors.New("invalid command")
 	}
-
 }
 
 func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) (*CommonInternalService, error) {
@@ -83,6 +82,7 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 			if err != nil {
 				utils.LogError(logger, err, "failed to parse container name from given docker command", zap.String("cmd", c.Command))
 			}
+
 			if c.ContainerName != "" && c.ContainerName != cont {
 				logger.Warn(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v), taking parsed value", c.ContainerName, cont))
 			}
@@ -101,7 +101,7 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 	testDB := testdb.New(logger, c.Path)
 	mockDB := mockdb.New(logger, c.Path, "")
 	openAPIdb := openapidb.New(logger, filepath.Join(c.Path, "schema"))
-	reportDB := reportdb.New(logger, c.Path+"/reports")
+	reportDB := reportdb.New(logger, filepath.Join(c.Path, "reports"))
 	testSetDb := testset.New[*models.TestSet](logger, c.Path)
 	storage := storage.New(c.APIServerURL, logger)
 	return &CommonInternalService{
