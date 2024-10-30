@@ -75,7 +75,6 @@ send_request(){
     echo "$pid Keploy PID" 
     echo "Killing keploy"
     sudo kill $pid
-    sudo kill -9 $(sudo lsof -ti:8080)
 }
 
 for i in {1..2}; do
