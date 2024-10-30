@@ -8,17 +8,8 @@ import (
 	"context"
 	_ "embed" // necessary for embedding
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
-	"net/http"
-	"os"
-	"os/exec"
-	"runtime"
-	"strconv"
-	"sync"
-	"syscall"
-	"time"
-"errors"
 	"github.com/docker/docker/api/types/events"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/agent/hooks"
@@ -28,6 +19,15 @@ import (
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"runtime"
+	"strconv"
+	"sync"
+	"syscall"
+	"time"
 )
 
 type AgentClient struct {
@@ -466,11 +466,11 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	})
 	a.apps.Store(clientID, usrApp)
 
-		err := usrApp.Setup(ctx)
-		if err != nil {
-			utils.LogError(a.logger, err, "failed to setup app")
-			return 0, err
-		}
+	err := usrApp.Setup(ctx)
+	if err != nil {
+		utils.LogError(a.logger, err, "failed to setup app")
+		return 0, err
+	}
 
 	if isDockerCmd {
 		inode, err := a.Initcontainer(ctx, app.Options{
