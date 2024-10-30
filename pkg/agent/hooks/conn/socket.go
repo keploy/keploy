@@ -146,7 +146,7 @@ func data(ctx context.Context, id uint64, c *Factory, l *zap.Logger, m *ebpf.Map
 		go func() {
 			defer utils.Recover(l)
 			for {
-				fmt.Println("Starting the data listener", id)
+				// fmt.Println("Starting the data listener", id)
 				record, err := r.Read()
 				if err != nil {
 					if !errors.Is(err, ringbuf.ErrClosed) {
