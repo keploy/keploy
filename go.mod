@@ -128,13 +128,20 @@ require (
 	sigs.k8s.io/kustomize/kyaml v0.17.2
 )
 
-require github.com/perimeterx/marshmallow v1.1.5 // indirect
+require (
+	github.com/andybalholm/brotli v1.1.0 // indirect
+	github.com/perimeterx/marshmallow v1.1.5 // indirect
+	github.com/valyala/bytebufferpool v1.0.0 // indirect
+	github.com/valyala/fasthttp v1.52.0 // indirect
+	github.com/valyala/tcplisten v1.0.0 // indirect
+)
 
 require (
 	github.com/alecthomas/chroma v0.10.0 // indirect
 	github.com/aymanbagabas/go-osc52 v1.0.3 // indirect
 	github.com/aymerick/douceur v0.2.0 // indirect
 	github.com/dlclark/regexp2 v1.4.0 // indirect
+	github.com/gofiber/fiber/v2 v2.52.5
 	github.com/gorilla/css v1.0.1 // indirect
 	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
 	github.com/microcosm-cc/bluemonday v1.0.27 // indirect
