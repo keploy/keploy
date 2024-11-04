@@ -1,7 +1,5 @@
 #!/bin/bash
 
-set -x
-
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Checkout a different branch
@@ -103,13 +101,6 @@ echo "Starting the pipeline for test mode..."
 sudo ./../../keployv2 agent &
 
 echo "Keploy agent started for test mode"
-
-sleep 10
-
-pid=$(pgrep keploy)
-echo "$pid Keploy PID" 
-echo "Killing keploy"
-sudo kill $pid
 
 # Start the gin-mongo app in test mode.
 sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7 &> test_logs.txt 
