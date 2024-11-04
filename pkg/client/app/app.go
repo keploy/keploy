@@ -205,7 +205,6 @@ func (a *App) SetupCompose() error {
 	}
 
 	//check if compose file has keploy-init container
-
 	// adding keploy init pid to the compose file
 	err = a.docker.SetInitPid(compose)
 	if err != nil {

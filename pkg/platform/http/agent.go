@@ -10,15 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/docker/docker/api/types/events"
-	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/agent/hooks"
-	"go.keploy.io/server/v2/pkg/client/app"
-	"go.keploy.io/server/v2/pkg/models"
-	kdocker "go.keploy.io/server/v2/pkg/platform/docker"
-	"go.keploy.io/server/v2/utils"
-	"go.uber.org/zap"
-	"golang.org/x/sync/errgroup"
 	"io"
 	"net/http"
 	"os"
@@ -28,6 +19,16 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/docker/docker/api/types/events"
+	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/agent/hooks"
+	"go.keploy.io/server/v2/pkg/client/app"
+	"go.keploy.io/server/v2/pkg/models"
+	kdocker "go.keploy.io/server/v2/pkg/platform/docker"
+	"go.keploy.io/server/v2/utils"
+	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 type AgentClient struct {
@@ -371,7 +372,6 @@ func (a *AgentClient) Run(ctx context.Context, clientID uint64, _ models.RunOpti
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
 
 	clientID := utils.GenerateID()
-	// var clientID uint64
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 
 	// check if the agent is running
@@ -429,7 +429,6 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	// Channel to monitor if the agent is up and running
 	runningChan := make(chan bool)
 
-	// Start a goroutine to check if the agent is running
 	go func() {
 		for {
 			select {

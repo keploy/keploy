@@ -128,8 +128,10 @@ func (a *AgentRequest) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 			if m != nil {
 				render.JSON(w, r, m)
 				flusher.Flush()
+			} else {
+				render.JSON(w, r, "No more mocks")
+				flusher.Flush()
 			}
-			// Client closed the connection or context was cancelled
 			return
 		default:
 			// Stream each mock as JSON

@@ -142,11 +142,12 @@ func data(ctx context.Context, id uint64, c *Factory, l *zap.Logger, m *ebpf.Map
 		return errors.New("failed to get the error group from the context")
 	}
 	g.Go(func() error {
+		fmt.Println("INSIDE GOROUTINE !!")
 		defer utils.Recover(l)
 		go func() {
+			fmt.Println("INSIDE GOROUTINE 222 !!")
 			defer utils.Recover(l)
 			for {
-				// fmt.Println("Starting the data listener", id)
 				record, err := r.Read()
 				if err != nil {
 					if !errors.Is(err, ringbuf.ErrClosed) {
