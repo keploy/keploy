@@ -183,13 +183,17 @@ func (a *Agent) GetConsumedMocks(ctx context.Context, id uint64) ([]string, erro
 	return a.Proxy.GetConsumedMocks(ctx, id)
 }
 
-func (a *Agent) DeRegisterClient(ctx context.Context, id uint64) error {
+func (a *Agent) DeRegisterClient(ctx context.Context, unregister models.UnregisterReq) error {
 	fmt.Println("Inside DeRegisterClient of agent binary !!")
-	err := a.Proxy.MakeClientDeRegisterd(ctx)
-	if err != nil {
-		return err
+	// send the info of the mode if its test mode we dont need to send the last mock
+
+	if unregister.Mode != models.MODE_TEST {
+		err := a.Proxy.MakeClientDeRegisterd(ctx)
+		if err != nil {
+			return err
+		}
 	}
-	err = a.Hooks.DeleteKeployClientInfo(id)
+	err := a.Hooks.DeleteKeployClientInfo(unregister.ClientID)
 	if err != nil {
 		return err
 	}

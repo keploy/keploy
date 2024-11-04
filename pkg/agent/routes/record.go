@@ -184,11 +184,11 @@ func (a *AgentRequest) RegisterClients(w http.ResponseWriter, r *http.Request) {
 func (a *AgentRequest) DeRegisterClients(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	var OutgoingReq models.OutgoingReq
-	err := json.NewDecoder(r.Body).Decode(&OutgoingReq)
+	var UnregisterReq models.UnregisterReq
+	err := json.NewDecoder(r.Body).Decode(&UnregisterReq)
 
 	mockRes := models.AgentResp{
-		ClientID:  OutgoingReq.ClientID,
+		ClientID:  UnregisterReq.ClientID,
 		Error:     nil,
 		IsSuccess: true,
 	}
@@ -201,7 +201,7 @@ func (a *AgentRequest) DeRegisterClients(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	err = a.agent.DeRegisterClient(r.Context(), OutgoingReq.ClientID)
+	err = a.agent.DeRegisterClient(r.Context(), UnregisterReq)
 	if err != nil {
 		mockRes.Error = err
 		mockRes.IsSuccess = false

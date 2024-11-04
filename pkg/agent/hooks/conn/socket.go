@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -26,17 +27,17 @@ import (
 var eventAttributesSize = int(unsafe.Sizeof(SocketDataEvent{}))
 
 // ListenSocket starts the socket event listeners
-func ListenSocket(ctx context.Context, l *zap.Logger, clientID uint64, openMap, dataMap, closeMap *ebpf.Map, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
-	t := make(chan *models.TestCase, 500)
+func ListenSocket(ctx context.Context, l *zap.Logger, clientID uint64, testMap *sync.Map, openMap, dataMap, closeMap *ebpf.Map, opts models.IncomingOptions) error {
+
 	err := initRealTimeOffset()
 	if err != nil {
 		utils.LogError(l, err, "failed to initialize real time offset")
-		return nil, errors.New("failed to start socket listeners")
+		return errors.New("failed to start socket listeners")
 	}
 	c := NewFactory(time.Minute, l)
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
-		return nil, errors.New("failed to get the error group from the context")
+		return errors.New("failed to get the error group from the context")
 	}
 	fmt.Println("Starting the socket listener", c.connections)
 	g.Go(func() error {
@@ -50,32 +51,44 @@ func ListenSocket(ctx context.Context, l *zap.Logger, clientID uint64, openMap, 
 					return
 				default:
 					// TODO refactor this to directly consume the events from the maps
-					c.ProcessActiveTrackers(ctx, t, opts)
+					c.ProcessActiveTrackers(ctx, testMap, opts)
 					time.Sleep(100 * time.Millisecond)
 				}
 			}
 		}()
 		<-ctx.Done()
-		close(t)
+
+		//get the channel from test map and close it
+		t, ok := testMap.Load(clientID)
+		if ok {
+			tc, ok := t.(chan *models.TestCase)
+			if ok {
+				// Close the channel when the context is done
+				close(tc)
+			} else {
+				println("Failed to type assert the channel from the test map")
+			}
+		}
+
 		return nil
 	})
 
 	err = open(ctx, c, l, openMap)
 	if err != nil {
 		utils.LogError(l, err, "failed to start open socket listener")
-		return nil, errors.New("failed to start socket listeners")
+		return errors.New("failed to start socket listeners")
 	}
 	err = data(ctx, clientID, c, l, dataMap)
 	if err != nil {
 		utils.LogError(l, err, "failed to start data socket listener")
-		return nil, errors.New("failed to start socket listeners")
+		return errors.New("failed to start socket listeners")
 	}
 	err = exit(ctx, c, l, closeMap)
 	if err != nil {
 		utils.LogError(l, err, "failed to start close socket listener")
-		return nil, errors.New("failed to start socket listeners")
+		return errors.New("failed to start socket listeners")
 	}
-	return t, err
+	return err
 }
 
 func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
@@ -142,10 +155,8 @@ func data(ctx context.Context, id uint64, c *Factory, l *zap.Logger, m *ebpf.Map
 		return errors.New("failed to get the error group from the context")
 	}
 	g.Go(func() error {
-		fmt.Println("INSIDE GOROUTINE !!")
 		defer utils.Recover(l)
 		go func() {
-			fmt.Println("INSIDE GOROUTINE 222 !!")
 			defer utils.Recover(l)
 			for {
 				record, err := r.Read()
@@ -180,14 +191,14 @@ func data(ctx context.Context, id uint64, c *Factory, l *zap.Logger, m *ebpf.Map
 					l.Debug(fmt.Sprintf("Request EntryTimestamp :%v\n", convertUnixNanoToTime(event.EntryTimestampNano)))
 				}
 
-				if event.ClientID != id {
-					// log the expected client id and the received client id
-					l.Info(fmt.Sprintf("Expected ClientID: %v, Received ClientID: %v", id, event.ClientID))
-					continue
-				}
+				// if event.ClientID != id {
+				// 	// log the expected client id and the received client id
+				// 	l.Info(fmt.Sprintf("Expected ClientID: %v, Received ClientID: %v", id, event.ClientID))
+
+				// 	continue
+				// }
 
 				fmt.Println("SocketDataEvent-1: ", event.ClientID)
-				fmt.Println("SocketDataEvent-2: ", event.ConnID)
 
 				c.GetOrCreate(event.ConnID).AddDataEvent(event)
 			}

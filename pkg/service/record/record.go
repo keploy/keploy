@@ -82,7 +82,12 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 			}
 		}
 
-		err := r.instrumentation.UnregisterClient(ctx, clientID)
+		unregister := models.UnregisterReq{
+			ClientID: clientID,
+			Mode:     models.MODE_RECORD,
+		}
+
+		err := r.instrumentation.UnregisterClient(ctx, unregister)
 		if err != nil && err != io.EOF {
 			utils.LogError(r.logger, err, "failed to unregister client")
 		}

@@ -581,18 +581,16 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 	return nil
 }
 
-func (a *AgentClient) UnregisterClient(ctx context.Context, clientID uint64) error {
+func (a *AgentClient) UnregisterClient(ctx context.Context, unregister models.UnregisterReq) error {
 	// Unregister the client with the server
 	isAgentRunning := a.isAgentRunning(context.Background())
 	if !isAgentRunning {
 		a.logger.Warn("keploy agent is not running, skipping unregister client")
 		return io.EOF
 	}
-	requestBody := models.UnregisterReq{
-		ClientID: clientID,
-	}
+
 	fmt.Println("Unregistering the client with the server")
-	requestJSON, err := json.Marshal(requestBody)
+	requestJSON, err := json.Marshal(unregister)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to marshal request body for unregister client")
 		return fmt.Errorf("error marshaling request body for unregister client: %s", err.Error())
@@ -605,9 +603,10 @@ func (a *AgentClient) UnregisterClient(ctx context.Context, clientID uint64) err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	// Make the HTTP request
 	resp, err := a.client.Do(req)
-
+	if err != nil {
+		return fmt.Errorf("failed to send request for unregister client: %s", err.Error())
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("failed to unregister client: %s", resp.Status)
 	}

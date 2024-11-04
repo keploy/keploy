@@ -43,7 +43,7 @@ func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger) *Factory 
 
 // ProcessActiveTrackers iterates over all conn the trackers and checks if they are complete. If so, it captures the ingress call and
 // deletes the tracker. If the tracker is inactive for a long time, it deletes it.
-func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *models.TestCase, opts models.IncomingOptions) {
+func (factory *Factory) ProcessActiveTrackers(ctx context.Context, testMap *sync.Map, opts models.IncomingOptions) {
 	factory.mutex.Lock()
 	defer factory.mutex.Unlock()
 	var trackersToDelete []ID
@@ -52,7 +52,7 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 		case <-ctx.Done():
 			return
 		default:
-			ok, requestBuf, responseBuf, reqTimestampTest, resTimestampTest := tracker.IsComplete()
+			ok, requestBuf, responseBuf, reqTimestampTest, resTimestampTest, clientId := tracker.IsComplete()
 			if ok {
 				fmt.Println("Processing the tracker with key: ", connID)
 				fmt.Println("Request Buffer::::::::: ", string(requestBuf))
@@ -71,7 +71,23 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 					utils.LogError(factory.logger, err, "failed to parse the http response from byte array", zap.Any("responseBuf", responseBuf))
 					continue
 				}
-				capture(ctx, factory.logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestampTest, resTimestampTest, opts)
+
+				//get the channel from the test map
+				// failed to get the channel from the test map, if the client id is not found
+				t, ok := testMap.Load(clientId)
+				if !ok {
+					factory.logger.Error("failed to get the channel from the test map")
+					continue
+				}
+
+				// type assert the channel
+				tc, ok := t.(chan *models.TestCase)
+				if !ok {
+					factory.logger.Error("failed to type assert the channel from the test map")
+					continue
+				}
+
+				capture(ctx, factory.logger, tc, parsedHTTPReq, parsedHTTPRes, reqTimestampTest, resTimestampTest, opts)
 
 			} else if tracker.IsInactive(factory.inactivityThreshold) {
 				trackersToDelete = append(trackersToDelete, connID)

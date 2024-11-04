@@ -39,6 +39,7 @@ func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 		proxyIP6:  [4]uint32{0000, 0000, 0000, 0001},
 		proxyPort: cfg.ProxyPort,
 		dnsPort:   cfg.DNSPort,
+		TestMap:   &sync.Map{},
 	}
 }
 
@@ -49,8 +50,9 @@ type Hooks struct {
 	proxyIP6  [4]uint32
 	proxyPort uint32
 	dnsPort   uint32
-
-	m sync.Mutex
+	TestMap   *sync.Map
+	once      sync.Once
+	m         sync.Mutex
 	// eBPF C shared maps
 	clientRegistrationMap *ebpf.Map
 	agentRegistartionMap  *ebpf.Map
@@ -479,8 +481,19 @@ func (h *Hooks) load(opts agent.HookCfg) error {
 }
 
 func (h *Hooks) Record(ctx context.Context, clientID uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
-	fmt.Println("Recording hooks...")
-	return conn.ListenSocket(ctx, h.logger, clientID, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
+	// clientId and <-chan *models.TestCase ka map
+	tc := make(chan *models.TestCase, 1)
+	// create a sync map with key clientId and t as value
+	// this map will be used to store the test cases for each client
+	h.TestMap.Store(clientID, tc)
+
+	err := conn.ListenSocket(ctx, h.logger, clientID, h.TestMap, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// return the receiver of the channel
+	return tc, nil
 }
 
 func (h *Hooks) SendKeployClientInfo(clientID uint64, clientInfo structs.ClientInfo) error {

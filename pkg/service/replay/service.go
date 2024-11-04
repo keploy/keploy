@@ -20,7 +20,7 @@ type Instrumentation interface {
 	GetConsumedMocks(ctx context.Context, id uint64) ([]string, error)
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
-	UnregisterClient(ctx context.Context, clientID uint64) error
+	UnregisterClient(ctx context.Context, opts models.UnregisterReq) error
 	GetContainerIP(ctx context.Context, id uint64) (string, error)
 }
 
@@ -91,7 +91,6 @@ type Storage interface {
 
 type InstrumentState struct {
 	ClientID   uint64
-	HookCancel context.CancelFunc
 }
 
 type MockAction string
