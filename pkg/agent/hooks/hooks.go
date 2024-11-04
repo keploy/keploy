@@ -508,7 +508,6 @@ func (h *Hooks) SendKeployClientInfo(clientID uint64, clientInfo structs.ClientI
 }
 
 func (h *Hooks) DeleteKeployClientInfo(id uint64) error {
-	fmt.Println("Deleting keploy client info...", h.objects.SocketDataEvents)
 	err := h.DeleteClientInfo(id)
 	if err != nil {
 		h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))
