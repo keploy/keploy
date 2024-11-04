@@ -66,6 +66,9 @@ type Tracker struct {
 
 	reqTimestamps []time.Time
 	isNewRequest  bool
+
+	//Client Id's array
+	clientIDs []uint64
 }
 
 func NewTracker(connID ID, logger *zap.Logger) *Tracker {
@@ -107,7 +110,7 @@ func (conn *Tracker) decRecordTestCount() {
 }
 
 // IsComplete checks if the current conn has valid request & response info to capture and also returns the request and response data buffer.
-func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
+func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time, uint64) {
 	conn.mutex.Lock()
 	defer conn.mutex.Unlock()
 
@@ -234,6 +237,7 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 		conn.logger.Debug("unverified recording", zap.Any("recordTraffic", recordTraffic))
 	}
 
+	var clientID uint64
 	// Checking if record traffic is recorded and request & response timestamp is captured or not.
 	if recordTraffic {
 		if len(conn.reqTimestamps) > 0 {
@@ -253,9 +257,16 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 		}
 
 		conn.logger.Debug(fmt.Sprintf("TestRequestTimestamp:%v || TestResponseTimestamp:%v", reqTimestamps, respTimestamp))
+
+		//popping out the client id
+		if len(conn.clientIDs) > 0 {
+			clientID = conn.clientIDs[0]
+			conn.clientIDs = conn.clientIDs[1:]
+		}
+
 	}
 
-	return recordTraffic, requestBuf, responseBuf, reqTimestamps, respTimestamp
+	return recordTraffic, requestBuf, responseBuf, reqTimestamps, respTimestamp, clientID
 }
 
 // reset resets the conn's request and response data buffers.
@@ -302,6 +313,9 @@ func (conn *Tracker) AddDataEvent(event SocketDataEvent) {
 		// This is to ensure that we capture the response timestamp for the first chunk of the response.
 		if !conn.isNewRequest {
 			conn.isNewRequest = true
+
+			// set the client id
+			conn.clientIDs = append(conn.clientIDs, event.ClientID)
 		}
 
 		// Assign the size of the message to the variable msgLengt

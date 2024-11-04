@@ -590,7 +590,7 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 	p.logger.Info("proxy stopped...")
 }
 
-func (p *Proxy) MakeClientDeRegisterd(ctx context.Context) error {
+func (p *Proxy) MakeClientDeRegisterd(_ context.Context) error {
 	p.logger.Info("Inside MakeClientDeregisterd of proxyServer")
 	p.clientClose <- true
 	return nil

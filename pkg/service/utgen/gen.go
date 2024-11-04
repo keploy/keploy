@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -54,6 +55,8 @@ type UnitTestGenerator struct {
 	testCaseFailed   int
 	noCoverageTest   int
 }
+
+var discardedTestsFilename = "discardedTests.txt"
 
 func NewUnitTestGenerator(
 	cfg *config.Config,
@@ -241,6 +244,13 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				if err := g.runCoverage(); err != nil {
 					utils.LogError(g.logger, err, "Error running coverage")
 					return err
+				}
+			}
+
+			if len(g.failedTests) > 0 {
+				err := g.saveFailedTestCasesToFile()
+				if err != nil {
+					utils.LogError(g.logger, err, "Error adding failed test cases to file")
 				}
 			}
 
@@ -612,8 +622,10 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 			}
 			g.logger.Info("Skipping a generated test that failed")
 			g.failedTests = append(g.failedTests, &models.FailedUT{
-				TestCode: generatedTest.TestCode,
-				ErrorMsg: extractErrorMessage(stdout, stderr, g.lang),
+				TestCode:                generatedTest.TestCode,
+				ErrorMsg:                extractErrorMessage(stdout, stderr, g.lang),
+				NewImportsCode:          generatedTest.NewImportsCode,
+				LibraryInstallationCode: generatedTest.LibraryInstallationCode,
 			})
 			g.testCaseFailed++
 			*failedBuild++
@@ -657,5 +669,47 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 	g.cur.Line = g.cur.Line + len(testCodeLines) + importLen
 
 	g.logger.Info("Generated test passed and increased coverage")
+	return nil
+}
+
+func (g *UnitTestGenerator) saveFailedTestCasesToFile() error {
+	dir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("error getting current directory: %w", err)
+	}
+
+	newFilePath := filepath.Join(dir, discardedTestsFilename)
+
+	fileHandle, err := os.OpenFile(newFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("error opening discarded tests file: %w", err)
+	}
+
+	defer func() {
+		err := fileHandle.Close()
+		if err != nil {
+			g.logger.Error("Error closing file handle", zap.Error(err))
+		}
+	}()
+
+	var builder strings.Builder
+
+	// Writing Test Cases To File
+	for _, failedTest := range g.failedTests {
+		builder.WriteString("\n" + strings.Repeat("-", 20) + "Test Case" + strings.Repeat("-", 20) + "\n")
+		if len(failedTest.NewImportsCode) > 0 {
+			builder.WriteString(fmt.Sprintf("Import Statements:\n%s\n", failedTest.NewImportsCode))
+		}
+		if len(failedTest.LibraryInstallationCode) > 0 {
+			builder.WriteString(fmt.Sprintf("Required Library Installation\n%s\n", failedTest.LibraryInstallationCode))
+		}
+		builder.WriteString(fmt.Sprintf("Test Implementation:\n%s\n\n", failedTest.TestCode))
+		builder.WriteString(strings.Repeat("-", 49) + "\n")
+	}
+
+	_, err = fileHandle.WriteString(fmt.Sprintf("%s\n", builder.String()))
+	if err != nil {
+		return fmt.Errorf("error writing to discarded tests file: %w", err)
+	}
 	return nil
 }

@@ -94,6 +94,15 @@ func (r *Replayer) Start(ctx context.Context) error {
 		case <-ctx.Done():
 			break
 		default:
+			unregister := models.UnregisterReq{
+				ClientID: r.config.ClientID,
+				Mode:     models.MODE_TEST,
+			}
+			err := r.instrumentation.UnregisterClient(ctx, unregister)
+			if err != nil {
+				fmt.Println("error in unregistering client replay")
+				utils.LogError(r.logger, err, "failed to unregister client")
+			}
 			r.logger.Info("stopping Keploy", zap.String("reason", stopReason))
 		}
 
@@ -179,7 +188,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 	}
 
-	// Instrument will load the hooks and start the proxy
 	inst, err := r.Instrument(setupCtx)
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to instrument: %v", err)
@@ -347,9 +355,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 
 	r.config.ClientID = clientID
 
-	var cancel context.CancelFunc
-
-	return &InstrumentState{ClientID: clientID, HookCancel: cancel}, nil
+	return &InstrumentState{ClientID: clientID}, nil
 }
 
 func (r *Replayer) GetNextTestRunID(ctx context.Context) (string, error) {
@@ -382,10 +388,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	exitLoopChan := make(chan bool, 2)
 	defer func() {
-		// err := r.instrumentation.UnregisterClient(ctx, clientID)
-		// if err != nil && err != io.EOF {
-		// 	utils.LogError(r.logger, err, "failed to unregister client")
-		// }
 		runTestSetCtxCancel()
 		err := runTestSetErrGrp.Wait()
 		if err != nil {

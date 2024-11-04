@@ -32,4 +32,5 @@ type SetMocksReq struct {
 }
 type UnregisterReq struct {
 	ClientID uint64 `json:"clientId"`
+	Mode     Mode   `json:"mode"`
 }

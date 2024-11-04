@@ -1,7 +1,5 @@
 #!/bin/bash
 
-set -x
-
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Checkout a different branch
@@ -83,7 +81,7 @@ for i in {1..2}; do
     sudo ./../../keployv2 agent &
     sleep 5
     send_request &
-    sudo -E env PATH="$PATH" ./../../keployv2 record -c "./ginApp" &> "${app_name}.txt" 
+    sudo -E env PATH="$PATH" ./../../keployv2 record -c "./ginApp" &> "${app_name}.txt" --debug
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
@@ -104,15 +102,10 @@ sudo ./../../keployv2 agent &
 
 echo "Keploy agent started for test mode"
 
-sleep 10
-
-pid=$(pgrep keploy)
-echo "$pid Keploy PID" 
-echo "Killing keploy"
-sudo kill $pid
+sleep 8
 
 # Start the gin-mongo app in test mode.
-sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7 &> test_logs.txt 
+sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7 &> test_logs.txt
 
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."

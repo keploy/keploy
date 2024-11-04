@@ -10,15 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/docker/docker/api/types/events"
-	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/agent/hooks"
-	"go.keploy.io/server/v2/pkg/client/app"
-	"go.keploy.io/server/v2/pkg/models"
-	kdocker "go.keploy.io/server/v2/pkg/platform/docker"
-	"go.keploy.io/server/v2/utils"
-	"go.uber.org/zap"
-	"golang.org/x/sync/errgroup"
 	"io"
 	"net/http"
 	"os"
@@ -28,6 +19,16 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/docker/docker/api/types/events"
+	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/agent/hooks"
+	"go.keploy.io/server/v2/pkg/client/app"
+	"go.keploy.io/server/v2/pkg/models"
+	kdocker "go.keploy.io/server/v2/pkg/platform/docker"
+	"go.keploy.io/server/v2/utils"
+	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 type AgentClient struct {
@@ -307,11 +308,6 @@ func (a *AgentClient) GetConsumedMocks(ctx context.Context, id uint64) ([]string
 	return consumedMocks, nil
 }
 
-// This will be sent request
-func (a *AgentClient) UnHook(_ context.Context, _ uint64) error {
-	return nil
-}
-
 func (a *AgentClient) GetContainerIP(_ context.Context, clientID uint64) (string, error) {
 
 	app, err := a.getApp(clientID)
@@ -371,7 +367,6 @@ func (a *AgentClient) Run(ctx context.Context, clientID uint64, _ models.RunOpti
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
 
 	clientID := utils.GenerateID()
-	// var clientID uint64
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 
 	// check if the agent is running
@@ -429,7 +424,6 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	// Channel to monitor if the agent is up and running
 	runningChan := make(chan bool)
 
-	// Start a goroutine to check if the agent is running
 	go func() {
 		for {
 			select {
@@ -471,8 +465,8 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		utils.LogError(a.logger, err, "failed to setup app")
 		return 0, err
 	}
-
 	if isDockerCmd {
+		opts.DockerNetwork = usrApp.KeployNetwork
 		inode, err := a.Initcontainer(ctx, app.Options{
 			DockerNetwork: opts.DockerNetwork,
 			Container:     opts.Container,
@@ -563,9 +557,9 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("failed to register client: %s", resp.Status)
-	} else {
-		a.logger.Info("Client registered successfully with clientId", zap.Uint64("clientID", opts.ClientID))
 	}
+
+	a.logger.Info("Client registered successfully with clientId", zap.Uint64("clientID", opts.ClientID))
 
 	// TODO: Read the response body in which we return the app id
 	var RegisterResp models.AgentResp
@@ -582,18 +576,16 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 	return nil
 }
 
-func (a *AgentClient) UnregisterClient(ctx context.Context, clientID uint64) error {
+func (a *AgentClient) UnregisterClient(ctx context.Context, unregister models.UnregisterReq) error {
 	// Unregister the client with the server
 	isAgentRunning := a.isAgentRunning(context.Background())
 	if !isAgentRunning {
 		a.logger.Warn("keploy agent is not running, skipping unregister client")
 		return io.EOF
 	}
-	requestBody := models.UnregisterReq{
-		ClientID: clientID,
-	}
+
 	fmt.Println("Unregistering the client with the server")
-	requestJSON, err := json.Marshal(requestBody)
+	requestJSON, err := json.Marshal(unregister)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to marshal request body for unregister client")
 		return fmt.Errorf("error marshaling request body for unregister client: %s", err.Error())
@@ -606,9 +598,10 @@ func (a *AgentClient) UnregisterClient(ctx context.Context, clientID uint64) err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	// Make the HTTP request
 	resp, err := a.client.Do(req)
-
+	if err != nil && err != io.EOF {
+		return fmt.Errorf("failed to send request for unregister client: %s", err.Error())
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("failed to unregister client: %s", resp.Status)
 	}

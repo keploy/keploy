@@ -237,7 +237,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 					if newMock != nil {
 						matchedMock = newMock
 					}
-					logger.Info("Matched In Sorted PG Matching Stream", zap.String("mock", matchedMock.Name))
+					logger.Debug("Matched In Sorted PG Matching Stream", zap.String("mock", matchedMock.Name))
 				}
 
 				idx = findBinaryStreamMatch(logger, sortedTcsMocks, requestBuffers, sorted)

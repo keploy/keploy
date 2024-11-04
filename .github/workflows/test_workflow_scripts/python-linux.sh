@@ -55,7 +55,7 @@ send_request(){
     pid=$(pgrep keploy)
     echo "$pid Keploy PID" 
     echo "Killing keploy"
-    sudo kill -9 $(sudo lsof -ti:8086)
+    sudo kill $pid
 }
 
 # Record and Test cycles
