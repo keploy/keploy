@@ -151,47 +151,42 @@ func (i *Injector) uninstallLibraries(installedPackages []string) error {
 }
 
 func (i *Injector) updateJavaScriptImports(importedContent string, newImports []string) (string, int, error) {
-	importRegex := regexp.MustCompile(`(?m)^(import\s+.*?from\s+['"].*?['"];?|const\s+.*?=\s+require\(['"].*?['"]\);?)`)
+	importRegex := regexp.MustCompile(`(?m)^\s*(import\s+.*?from\s+['"].*?['"];?|const\s+.*?=\s+require\(['"].*?['"]\);?)`)
 	existingImportsSet := make(map[string]bool)
-
+	sanitisedImports := []string{}
 	existingImports := importRegex.FindAllString(importedContent, -1)
 	for _, imp := range existingImports {
-		if imp != "\"\"" && len(imp) > 0 {
-			existingImportsSet[imp] = true
+		imp = strings.TrimSpace(imp)
+		cleanedImport := strings.ReplaceAll(imp, " ", "")
+		if cleanedImport != "" && !existingImportsSet[cleanedImport] {
+			existingImportsSet[cleanedImport] = true
+			sanitisedImports = append(sanitisedImports, imp)
 		}
 	}
 
 	for _, imp := range newImports {
-		imp = strings.TrimSpace(imp)
-		if importRegex.MatchString(imp) {
-			existingImportsSet[imp] = true
+		imp = strings.Trim(imp, `"- `)
+		cleanedImport := strings.ReplaceAll(imp, " ", "")
+		if importRegex.MatchString(imp) && !existingImportsSet[cleanedImport] {
+			existingImportsSet[cleanedImport] = true
+			sanitisedImports = append(sanitisedImports, imp)
 		}
 	}
+	updatedImports := strings.Join(sanitisedImports, "\n") + "\n\n"
 
-	allImports := make([]string, 0, len(existingImportsSet))
-	for imp := range existingImportsSet {
-		allImports = append(allImports, imp)
-	}
+	contentWithoutImports := importRegex.ReplaceAllString(importedContent, "")
+	contentWithoutImports = strings.TrimLeft(contentWithoutImports, "\n")
 
-	importSection := strings.Join(allImports, "\n")
+	updatedContent := updatedImports + "\n" + contentWithoutImports
 
-	updatedContent := importRegex.ReplaceAllString(importedContent, "")
-	updatedContent = strings.Trim(updatedContent, "\n")
-	lines := strings.Split(updatedContent, "\n")
-	cleanedLines := []string{}
-	for _, line := range lines {
-		trimmedLine := strings.TrimSpace(line)
-		if trimmedLine != "" {
-			cleanedLines = append(cleanedLines, line)
-		}
-	}
-	updatedContent = strings.Join(cleanedLines, "\n")
-	updatedContent = importSection + "\n" + updatedContent
+	originalLines := strings.Split(importedContent, "\n")
+	updatedLines := strings.Split(updatedContent, "\n")
+	importLength := len(updatedLines) - len(originalLines)
 
-	importLength := len(strings.Split(updatedContent, "\n")) - len(strings.Split(importedContent, "\n"))
 	if importLength < 0 {
 		importLength = 0
 	}
+
 	return updatedContent, importLength, nil
 }
 
@@ -411,12 +406,26 @@ func (i *Injector) updatePythonImports(content string, newImports []string) (str
 		if strings.HasPrefix(imp, "from ") {
 			fields := strings.Fields(imp)
 			moduleName := fields[1]
-			newItems := strings.Split(fields[3], ",")
+			importIndex := -1
+			for i, field := range fields {
+				if field == "import" {
+					importIndex = i
+					break
+				}
+			}
+			if importIndex == -1 {
+				continue
+			}
+			importPart := strings.Join(fields[importIndex+1:], " ")
+			importedItems := strings.Split(importPart, ",")
 			if _, exists := existingImportsMap[moduleName]; !exists {
 				existingImportsMap[moduleName] = make(map[string]bool)
 			}
-			for _, item := range newItems {
-				existingImportsMap[moduleName][strings.TrimSpace(item)] = true
+			for _, item := range importedItems {
+				cleanedItem := strings.TrimSpace(item)
+				if cleanedItem != "" {
+					existingImportsMap[moduleName][strings.TrimSpace(item)] = true
+				}
 			}
 		} else if strings.HasPrefix(imp, "import ") {
 			fields := strings.Fields(imp)
@@ -475,38 +484,36 @@ func (i *Injector) updatePythonImports(content string, newImports []string) (str
 func (i *Injector) updateTypeScriptImports(importedContent string, newImports []string) (string, int, error) {
 	importRegex := regexp.MustCompile(`(?m)^import\s+.*?;`)
 	existingImportsSet := make(map[string]bool)
-
+	sanitisedImports := []string{}
 	existingImports := importRegex.FindAllString(importedContent, -1)
 	for _, imp := range existingImports {
-		existingImportsSet[imp] = true
+		imp = strings.TrimSpace(imp)
+		cleanedImport := strings.ReplaceAll(imp, " ", "")
+		if cleanedImport != "" && !existingImportsSet[cleanedImport] {
+			existingImportsSet[cleanedImport] = true
+			sanitisedImports = append(sanitisedImports, imp)
+		}
 	}
 
 	for _, imp := range newImports {
-		imp = strings.TrimSpace(imp)
-		if importRegex.MatchString(imp) {
-			existingImportsSet[imp] = true
+		imp = strings.Trim(imp, `"- `)
+		cleanedImport := strings.ReplaceAll(imp, " ", "")
+		if importRegex.MatchString(imp) && !existingImportsSet[cleanedImport] {
+			existingImportsSet[cleanedImport] = true
+			sanitisedImports = append(sanitisedImports, imp)
 		}
 	}
+	updatedImports := strings.Join(sanitisedImports, "\n") + "\n\n"
 
-	allImports := make([]string, 0, len(existingImportsSet))
-	for imp := range existingImportsSet {
-		allImports = append(allImports, imp)
-	}
-	importSection := strings.Join(allImports, "\n")
+	contentWithoutImports := importRegex.ReplaceAllString(importedContent, "")
+	contentWithoutImports = strings.TrimLeft(contentWithoutImports, "\n")
 
-	updatedContent := importRegex.ReplaceAllString(importedContent, "")
-	updatedContent = strings.Trim(updatedContent, "\n")
-	lines := strings.Split(updatedContent, "\n")
-	cleanedLines := []string{}
-	for _, line := range lines {
-		trimmedLine := strings.TrimSpace(line)
-		if trimmedLine != "" {
-			cleanedLines = append(cleanedLines, line)
-		}
-	}
-	updatedContent = strings.Join(cleanedLines, "\n")
-	updatedContent = importSection + "\n" + updatedContent
-	importLength := len(strings.Split(updatedContent, "\n")) - len(strings.Split(importedContent, "\n"))
+	updatedContent := updatedImports + "\n" + contentWithoutImports
+
+	originalLines := strings.Split(importedContent, "\n")
+	updatedLines := strings.Split(updatedContent, "\n")
+	importLength := len(updatedLines) - len(originalLines)
+
 	if importLength < 0 {
 		importLength = 0
 	}
@@ -564,7 +571,7 @@ func (i *Injector) extractJavaDependencies(output []byte) []string {
 }
 
 func (i *Injector) addCommentToTest(testCode string) string {
-	comment := " Test generated by Keploy \U0001F430"
+	comment := " Test generated using Keploy"
 	switch i.language {
 	case "python":
 		comment = "#" + comment
