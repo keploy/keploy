@@ -521,19 +521,20 @@ func (idc *Impl) SetKeployNetwork(c *Compose) (*NetworkInfo, error) {
 	return networkInfo, nil
 }
 
-func (idc *Impl) SetInitPid(c *Compose) error {
-	// Add or modify network for each service
+func (idc *Impl) SetInitPid(c *Compose, containerName string) error {
 	for _, service := range c.Services.Content {
-		containerNameFound := false
-		for _, item := range service.Content {
-			if item.Kind == yaml.ScalarNode && item.Value == "container_name" {
-				containerNameFound = true
+		var containerNameMatch bool
+		var pidFound bool
+
+		for i := 0; i < len(service.Content)-1; i++ {
+			if service.Content[i].Kind == yaml.ScalarNode && service.Content[i].Value == "container_name" &&
+				service.Content[i+1].Kind == yaml.ScalarNode && service.Content[i+1].Value == containerName {
+				containerNameMatch = true
 				break
 			}
 		}
 
-		if containerNameFound {
-			pidFound := false
+		if containerNameMatch {
 			for _, item := range service.Content {
 				if item.Value == "pid" {
 					pidFound = true
@@ -541,6 +542,7 @@ func (idc *Impl) SetInitPid(c *Compose) error {
 				}
 			}
 
+			// Add `pid: container:keploy-init` only if not already present
 			if !pidFound {
 				service.Content = append(service.Content,
 					&yaml.Node{Kind: yaml.ScalarNode, Value: "pid"},
