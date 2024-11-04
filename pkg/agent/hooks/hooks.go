@@ -51,7 +51,6 @@ type Hooks struct {
 	proxyPort uint32
 	dnsPort   uint32
 	TestMap   *sync.Map
-	once      sync.Once
 	m         sync.Mutex
 	// eBPF C shared maps
 	clientRegistrationMap *ebpf.Map

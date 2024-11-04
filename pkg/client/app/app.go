@@ -210,9 +210,8 @@ func (a *App) SetupCompose() error {
 	if err != nil {
 		utils.LogError(a.logger, nil, "failed to set init pid in the compose file")
 		return err
-	} else {
-		composeChanged = true
 	}
+	composeChanged = true
 
 	if composeChanged {
 

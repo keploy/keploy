@@ -68,7 +68,7 @@ type Tracker struct {
 	isNewRequest  bool
 
 	//Client Id's array
-	clientIds []uint64
+	clientIDs []uint64
 }
 
 func NewTracker(connID ID, logger *zap.Logger) *Tracker {
@@ -259,9 +259,9 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time, u
 		conn.logger.Debug(fmt.Sprintf("TestRequestTimestamp:%v || TestResponseTimestamp:%v", reqTimestamps, respTimestamp))
 
 		//popping out the client id
-		if len(conn.clientIds) > 0 {
-			clientID = conn.clientIds[0]
-			conn.clientIds = conn.clientIds[1:]
+		if len(conn.clientIDs) > 0 {
+			clientID = conn.clientIDs[0]
+			conn.clientIDs = conn.clientIDs[1:]
 		}
 
 	}
@@ -315,7 +315,7 @@ func (conn *Tracker) AddDataEvent(event SocketDataEvent) {
 			conn.isNewRequest = true
 
 			// set the client id
-			conn.clientIds = append(conn.clientIds, event.ClientID)
+			conn.clientIDs = append(conn.clientIDs, event.ClientID)
 		}
 
 		// Assign the size of the message to the variable msgLengt

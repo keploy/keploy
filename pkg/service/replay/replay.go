@@ -94,12 +94,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 		case <-ctx.Done():
 			break
 		default:
-			unregister:=models.UnregisterReq{
+			unregister := models.UnregisterReq{
 				ClientID: r.config.ClientID,
-				Mode:    models.MODE_TEST,
+				Mode:     models.MODE_TEST,
 			}
 			err := r.instrumentation.UnregisterClient(ctx, unregister)
 			if err != nil {
+				fmt.Println("error in unregistering client replay")
 				utils.LogError(r.logger, err, "failed to unregister client")
 			}
 			r.logger.Info("stopping Keploy", zap.String("reason", stopReason))

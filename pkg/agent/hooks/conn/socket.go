@@ -78,7 +78,7 @@ func ListenSocket(ctx context.Context, l *zap.Logger, clientID uint64, testMap *
 		utils.LogError(l, err, "failed to start open socket listener")
 		return errors.New("failed to start socket listeners")
 	}
-	err = data(ctx, clientID, c, l, dataMap)
+	err = data(ctx, c, l, dataMap)
 	if err != nil {
 		utils.LogError(l, err, "failed to start data socket listener")
 		return errors.New("failed to start socket listeners")
@@ -143,7 +143,7 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 	return nil
 }
 
-func data(ctx context.Context, id uint64, c *Factory, l *zap.Logger, m *ebpf.Map) error {
+func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 	r, err := ringbuf.NewReader(m)
 	if err != nil {
 		utils.LogError(l, nil, "failed to create ring buffer of socketDataEvent")

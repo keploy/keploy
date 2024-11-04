@@ -52,7 +52,7 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, testMap *sync
 		case <-ctx.Done():
 			return
 		default:
-			ok, requestBuf, responseBuf, reqTimestampTest, resTimestampTest, clientId := tracker.IsComplete()
+			ok, requestBuf, responseBuf, reqTimestampTest, resTimestampTest, clientID := tracker.IsComplete()
 			if ok {
 				fmt.Println("Processing the tracker with key: ", connID)
 				fmt.Println("Request Buffer::::::::: ", string(requestBuf))
@@ -74,7 +74,7 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, testMap *sync
 
 				//get the channel from the test map
 				// failed to get the channel from the test map, if the client id is not found
-				t, ok := testMap.Load(clientId)
+				t, ok := testMap.Load(clientID)
 				if !ok {
 					factory.logger.Error("failed to get the channel from the test map")
 					continue

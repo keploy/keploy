@@ -55,7 +55,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 
 	reqErrGrp, _ := errgroup.WithContext(ctx)
 	reqCtx := context.WithoutCancel(ctx)
-	reqCtx, reqCtxCancel := context.WithCancel(reqCtx)
+	_, reqCtxCancel := context.WithCancel(reqCtx)
 	reqCtx = context.WithValue(ctx, models.ErrGroupKey, reqErrGrp)
 	var stopReason string
 
@@ -89,6 +89,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 
 		err := r.instrumentation.UnregisterClient(ctx, unregister)
 		if err != nil && err != io.EOF {
+			fmt.Println("error in unregistering client record")
 			utils.LogError(r.logger, err, "failed to unregister client")
 		}
 
@@ -133,7 +134,6 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	default:
 	}
 
-	// setting up the environment for recording
 	clientID, err = r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType})
 	if err != nil {
 		stopReason = "failed setting up the environment"

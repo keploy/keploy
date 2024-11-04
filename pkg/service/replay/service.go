@@ -90,7 +90,7 @@ type Storage interface {
 }
 
 type InstrumentState struct {
-	ClientID   uint64
+	ClientID uint64
 }
 
 type MockAction string

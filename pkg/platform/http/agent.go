@@ -308,11 +308,6 @@ func (a *AgentClient) GetConsumedMocks(ctx context.Context, id uint64) ([]string
 	return consumedMocks, nil
 }
 
-// This will be sent request
-func (a *AgentClient) UnHook(_ context.Context, _ uint64) error {
-	return nil
-}
-
 func (a *AgentClient) GetContainerIP(_ context.Context, clientID uint64) (string, error) {
 
 	app, err := a.getApp(clientID)
@@ -470,8 +465,8 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		utils.LogError(a.logger, err, "failed to setup app")
 		return 0, err
 	}
-
 	if isDockerCmd {
+		opts.DockerNetwork = usrApp.KeployNetwork
 		inode, err := a.Initcontainer(ctx, app.Options{
 			DockerNetwork: opts.DockerNetwork,
 			Container:     opts.Container,
@@ -562,9 +557,9 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("failed to register client: %s", resp.Status)
-	} else {
-		a.logger.Info("Client registered successfully with clientId", zap.Uint64("clientID", opts.ClientID))
 	}
+
+	a.logger.Info("Client registered successfully with clientId", zap.Uint64("clientID", opts.ClientID))
 
 	// TODO: Read the response body in which we return the app id
 	var RegisterResp models.AgentResp
@@ -604,7 +599,7 @@ func (a *AgentClient) UnregisterClient(ctx context.Context, unregister models.Un
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := a.client.Do(req)
-	if err != nil {
+	if err != nil && err != io.EOF {
 		return fmt.Errorf("failed to send request for unregister client: %s", err.Error())
 	}
 	if resp.StatusCode != http.StatusOK {
