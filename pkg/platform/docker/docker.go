@@ -524,22 +524,32 @@ func (idc *Impl) SetKeployNetwork(c *Compose) (*NetworkInfo, error) {
 func (idc *Impl) SetInitPid(c *Compose) error {
 	// Add or modify network for each service
 	for _, service := range c.Services.Content {
-		pidFound := false
+		containerNameFound := false
 		for _, item := range service.Content {
-			if item.Value == "pid" {
-				pidFound = true
+			if item.Kind == yaml.ScalarNode && item.Value == "container_name" {
+				containerNameFound = true
 				break
 			}
 		}
 
-		if !pidFound {
-			service.Content = append(service.Content,
-				&yaml.Node{Kind: yaml.ScalarNode, Value: "pid"},
-				&yaml.Node{
-					Kind:  yaml.ScalarNode,
-					Value: "container:keploy-init",
-				},
-			)
+		if containerNameFound {
+			pidFound := false
+			for _, item := range service.Content {
+				if item.Value == "pid" {
+					pidFound = true
+					break
+				}
+			}
+
+			if !pidFound {
+				service.Content = append(service.Content,
+					&yaml.Node{Kind: yaml.ScalarNode, Value: "pid"},
+					&yaml.Node{
+						Kind:  yaml.ScalarNode,
+						Value: "container:keploy-init",
+					},
+				)
+			}
 		}
 	}
 	return nil
