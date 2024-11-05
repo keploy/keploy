@@ -1,4 +1,4 @@
-// Package Csharp impliments methods for Csharp coverage services.
+// Package csharp impliments methods for Csharp coverage services.
 package csharp
 
 import (
