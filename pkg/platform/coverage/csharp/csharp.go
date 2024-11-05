@@ -3,9 +3,11 @@ package csharp
 
 import (
 	"context"
+	"encoding/xml"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"go.keploy.io/server/v2/pkg/models"
@@ -21,6 +23,10 @@ type Csharp struct {
 	cmd                string
 	executable         string
 	dotnetCoveragePath string
+}
+
+type CoverageStructure struct {
+	LineRate float64 `xml:"line-rate,attr"`
 }
 
 func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cmd, dotnetCoveragePath, executable string) *Csharp {
@@ -86,7 +92,15 @@ func (cs *Csharp) GetCoverage() (models.TestCoverage, error) {
 	}
 	defer func() {
 		if err := file.Close(); err != nil {
-			utils.LogError(cs.logger, err, "error closing cobertura file")
+			utils.LogError(cs.logger, err, "Error closing coverage cobertura file")
 		}
 	}()
+
+	coverageStruct := CoverageStructure{}
+	if err := xml.Unmarshal([]byte(coberturaPath), &coverageStruct); err != nil {
+		return testCov, fmt.Errorf("failed to unmarshal file: %w", err)
+	}
+	testCov.TotalCov = strconv.FormatFloat(coverageStruct.LineRate*100, 'E', -1, 64)
+
+	return testCov, nil
 }
