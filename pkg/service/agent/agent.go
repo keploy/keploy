@@ -137,7 +137,6 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 
 	select {
 	case <-ctx.Done():
-		fmt.Println("Hooks context cancelled, stopping Hook")
 		return ctx.Err()
 	default:
 	}
@@ -156,7 +155,7 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 	// For keploy test bench
 	// Doubt: if this is enabled automatically
 	fmt.Println("opts.EnableTesting", opts.EnableTesting)
-	// opts.EnableTesting = true
+	opts.EnableTesting = true
 	if opts.EnableTesting {
 
 		// enable testing in the app

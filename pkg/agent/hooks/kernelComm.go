@@ -81,7 +81,7 @@ func (h *Hooks) DeleteClientInfo(id uint64) error {
 		utils.LogError(h.logger, err, "failed to send the app info to the ebpf program")
 		return err
 	}
-	h.logger.Info("successfully removed the client info from the ebpf program")
+	h.logger.Info("successfully removed the client info from the ebpf program with clientId", zap.Any("clientId", id))
 	return nil
 }
 

@@ -151,7 +151,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 							}
 							return true, res, nil
 						case len(encodedMock) > 0 && encodedMock[0] == 'p' && initMock.Spec.PostgresRequests[requestIndex].PacketTypes[0] == "p" && reqBuff[0] == 'p':
-							logger.Info("CHANGING TO MD5 for Request and Response", zap.String("mock", initMock.Name), zap.String("Req", bufStr))
+							logger.Debug("CHANGING TO MD5 for Request and Response", zap.String("mock", initMock.Name), zap.String("Req", bufStr))
 
 							res := make([]models.Frontend, len(initMock.Spec.PostgresResponses))
 							copy(res, initMock.Spec.PostgresResponses)
@@ -277,7 +277,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 			}
 
 			if matched {
-				logger.Info("Matched mock", zap.String("mock", matchedMock.Name))
+				logger.Debug("Matched mock", zap.String("mock", matchedMock.Name))
 				if matchedMock.TestModeInfo.IsFiltered {
 					originalMatchedMock := *matchedMock
 					matchedMock.TestModeInfo.IsFiltered = false

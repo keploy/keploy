@@ -78,7 +78,8 @@ func ListenSocket(ctx context.Context, l *zap.Logger, clientID uint64, testMap *
 		utils.LogError(l, err, "failed to start open socket listener")
 		return errors.New("failed to start socket listeners")
 	}
-	err = data(ctx, c, l, dataMap)
+
+	err = data(ctx, c, l, dataMap, clientID)
 	if err != nil {
 		utils.LogError(l, err, "failed to start data socket listener")
 		return errors.New("failed to start socket listeners")
@@ -143,7 +144,7 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 	return nil
 }
 
-func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
+func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, clientID uint64) error {
 	r, err := ringbuf.NewReader(m)
 	if err != nil {
 		utils.LogError(l, nil, "failed to create ring buffer of socketDataEvent")
@@ -191,6 +192,11 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 					l.Debug(fmt.Sprintf("Request EntryTimestamp :%v\n", convertUnixNanoToTime(event.EntryTimestampNano)))
 				}
 
+				// if event.ClientID == clientID {
+				// 	fmt.Println("Event received for the keploy test client")
+				// 	continue
+				// }
+				
 				// if event.ClientID != id {
 				// 	// log the expected client id and the received client id
 				// 	l.Info(fmt.Sprintf("Expected ClientID: %v, Received ClientID: %v", id, event.ClientID))
@@ -199,6 +205,7 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 				// }
 
 				fmt.Println("SocketDataEvent-1: ", event.ClientID)
+				fmt.Printf("Direction: %v\n", event.Direction, "Actual Message: ", string(event.Msg[:event.MsgSize]))
 
 				c.GetOrCreate(event.ConnID).AddDataEvent(event)
 			}

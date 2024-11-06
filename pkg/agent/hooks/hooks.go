@@ -40,6 +40,7 @@ func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 		proxyPort: cfg.ProxyPort,
 		dnsPort:   cfg.DNSPort,
 		TestMap:   &sync.Map{},
+		isLoaded:  false,
 	}
 }
 
@@ -52,6 +53,7 @@ type Hooks struct {
 	dnsPort   uint32
 	TestMap   *sync.Map
 	m         sync.Mutex
+	isLoaded  bool
 	// eBPF C shared maps
 	clientRegistrationMap *ebpf.Map
 	agentRegistartionMap  *ebpf.Map
@@ -480,15 +482,28 @@ func (h *Hooks) load(opts agent.HookCfg) error {
 }
 
 func (h *Hooks) Record(ctx context.Context, clientID uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
-	// clientId and <-chan *models.TestCase ka map
 	tc := make(chan *models.TestCase, 1)
 	// create a sync map with key clientId and t as value
 	// this map will be used to store the test cases for each client
 	h.TestMap.Store(clientID, tc)
-
-	err := conn.ListenSocket(ctx, h.logger, clientID, h.TestMap, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
-	if err != nil {
-		return nil, err
+	if !h.isLoaded {
+		err := conn.ListenSocket(ctx, h.logger, clientID, h.TestMap, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
+		if err != nil {
+			return nil, err
+		}
+		h.isLoaded = true
+	} else {
+		// read from the map
+		fmt.Println("Starting the socket listener....................")
+		t, ok := h.TestMap.Load(clientID)
+		if ok {
+			tc, ok = t.(chan *models.TestCase)
+			if ok {
+				// Close the channel when the context is done
+			} else {
+				println("Failed to type assert the channel from the test map")
+			}
+		}
 	}
 
 	// return the receiver of the channel
