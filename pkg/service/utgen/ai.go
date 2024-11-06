@@ -129,7 +129,6 @@ func (ai *AIClient) Call(ctx context.Context, completionParams CompletionParams,
 	var apiBaseURL string
 
 	var apiKey string
-	println("APIBase: ", ai.APIBase, ai.APIServerURL)
 	if ai.APIBase == ai.APIServerURL {
 
 		token, err := ai.Auth.GetToken(ctx)
