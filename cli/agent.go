@@ -35,9 +35,11 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 			}
 
 			isdocker, _ := cmd.Flags().GetBool("is-docker")
-			var port uint32 = 8086
-			if isdocker {
-				port, _ = cmd.Flags().GetUint32("port")
+			// enableTesting, _ := cmd.Flags().GetBool("enable-testing")
+
+			port, _ := cmd.Flags().GetUint32("port")
+			if port == 0 {
+				port = 8086
 			}
 
 			var a agent.Service
@@ -54,12 +56,15 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 			go func() {
 				if err := http.ListenAndServe(fmt.Sprintf(":%d", port), router); err != nil {
 					logger.Error("failed to start HTTP server", zap.Error(err))
+				} else {
+					logger.Info("HTTP server started successfully on port ", zap.Uint32("port", port))
 				}
 			}()
 
-			err = a.Setup(ctx, "", models.SetupOptions{
+			err = a.Setup(ctx, models.SetupOptions{
 				IsDocker: isdocker,
 			})
+
 			if err != nil {
 				utils.LogError(logger, err, "failed to setup agent")
 				return nil

@@ -28,16 +28,14 @@ import (
 )
 
 func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
-	if cfg.Agent.IsDocker {
-		cfg.ProxyPort = 36789
-	}
+	
 	return &Hooks{
 		logger:    logger,
 		sess:      agent.NewSessions(),
 		m:         sync.Mutex{},
 		proxyIP4:  "127.0.0.1",
 		proxyIP6:  [4]uint32{0000, 0000, 0000, 0001},
-		proxyPort: cfg.ProxyPort,
+		proxyPort: cfg.Agent.ProxyPort,
 		dnsPort:   cfg.DNSPort,
 		TestMap:   &sync.Map{},
 		isLoaded:  false,
@@ -98,7 +96,6 @@ type Hooks struct {
 
 func (h *Hooks) Load(ctx context.Context, id uint64, opts agent.HookCfg) error {
 
-	fmt.Println("Loading hooks... and setting ID: ", id)
 	h.sess.Set(id, &agent.Session{
 		ID: id,
 	})
@@ -483,8 +480,7 @@ func (h *Hooks) load(opts agent.HookCfg) error {
 
 func (h *Hooks) Record(ctx context.Context, clientID uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	tc := make(chan *models.TestCase, 1)
-	// create a sync map with key clientId and t as value
-	// this map will be used to store the test cases for each client
+	fmt.Println("Recording the test case for the client: ", clientID)
 	h.TestMap.Store(clientID, tc)
 	if !h.isLoaded {
 		err := conn.ListenSocket(ctx, h.logger, clientID, h.TestMap, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
@@ -493,8 +489,6 @@ func (h *Hooks) Record(ctx context.Context, clientID uint64, opts models.Incomin
 		}
 		h.isLoaded = true
 	} else {
-		// read from the map
-		fmt.Println("Starting the socket listener....................")
 		t, ok := h.TestMap.Load(clientID)
 		if ok {
 			tc, ok = t.(chan *models.TestCase)

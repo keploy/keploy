@@ -62,6 +62,9 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 	var err error
 
 	c.Agent.Port = 8086
+	if c.ServerPort != 0 {
+		c.Agent.Port = c.ServerPort
+	}
 	if utils.IsDockerCmd(utils.CmdType(c.CommandType)) {
 		client, err = docker.New(logger)
 		if err != nil {

@@ -371,7 +371,10 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 	// check if the agent is running
 	isAgentRunning := a.isAgentRunning(ctx)
-
+	if opts.EnableTesting {
+		fmt.Println("Testing is enabled")
+		isAgentRunning = false
+	}
 	if !isAgentRunning {
 		// Start the keploy agent as a detached process and pipe the logs into a file
 		if !isDockerCmd && runtime.GOOS != "linux" {
@@ -387,7 +390,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			}()
 		} else {
 			// Open the log file in append mode or create it if it doesn't exist
-			logFile, err := os.OpenFile("keploy_agent.log", os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
+			logFile, err := os.OpenFile(fmt.Sprintf("keploy_agent_%d.log", clientID), os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
 			if err != nil {
 				utils.LogError(a.logger, err, "failed to open log file")
 				return 0, err
@@ -406,7 +409,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 				utils.LogError(a.logger, err, "failed to get current keploy binary path")
 				return 0, err
 			}
-			agentCmd := exec.Command("sudo", keployBin, "agent")
+			agentCmd := exec.Command("sudo", keployBin, "agent", "--port", strconv.Itoa(int(a.conf.ServerPort)), "--proxy-port", strconv.Itoa(int(a.conf.ProxyPort)))
 			agentCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // Detach the process
 
 			// Redirect the standard output and error to the log file
@@ -540,6 +543,7 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 			ClientInode:   inode,
 			IsDocker:      a.conf.Agent.IsDocker,
 			AppInode:      opts.AppInode,
+			ProxyPort:     a.conf.ProxyPort,
 		},
 	}
 
@@ -591,6 +595,7 @@ func (a *AgentClient) UnregisterClient(ctx context.Context, unregister models.Un
 		return fmt.Errorf("error marshaling request body for unregister client: %s", err.Error())
 	}
 
+	// Passed background context as we dont want to cancel the unregister request upon client ctx cancellation
 	req, err := http.NewRequestWithContext(context.Background(), "POST", fmt.Sprintf("http://localhost:%d/agent/unregister", a.conf.Agent.Port), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for unregister client")

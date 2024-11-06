@@ -38,10 +38,13 @@ func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, tester agent.T
 }
 
 // Setup will create a new app and store it in the map, all the setup will be done here
-func (a *Agent) Setup(ctx context.Context, _ string, opts models.SetupOptions) error {
-
+func (a *Agent) Setup(ctx context.Context, opts models.SetupOptions) error {
 	a.logger.Info("Starting the agent in ", zap.String(string(opts.Mode), "mode"))
-	err := a.Hook(ctx, 0, models.HookOptions{Mode: opts.Mode, IsDocker: opts.IsDocker})
+	err := a.Hook(ctx, 0, models.HookOptions{
+		Mode:          opts.Mode,
+		IsDocker:      opts.IsDocker,
+		EnableTesting: opts.EnableTesting,
+	})
 	if err != nil {
 		a.logger.Error("failed to hook into the app", zap.Error(err))
 	}
@@ -158,10 +161,6 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 	opts.EnableTesting = true
 	if opts.EnableTesting {
 
-		// enable testing in the app
-		// a.EnableTesting = true
-		// a.Mode = opts.Mode
-
 		// Setting up the test bench
 		err := a.Tester.Setup(ctx, models.TestingOptions{Mode: opts.Mode})
 		if err != nil {
@@ -242,7 +241,7 @@ func (a *Agent) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) e
 		proxyInfo := structs.ProxyInfo{
 			IP4:  proxyIP,
 			IP6:  [4]uint32{0, 0, 0, 0},
-			Port: 16789,
+			Port: opts.ProxyPort,
 		}
 		err = a.Hooks.SendClientProxyInfo(opts.ClientID, proxyInfo)
 		if err != nil {

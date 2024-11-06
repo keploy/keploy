@@ -15,6 +15,7 @@ type Config struct {
 	Command               string       `json:"command" yaml:"command" mapstructure:"command"`
 	Templatize            Templatize   `json:"templatize" yaml:"templatize" mapstructure:"templatize"`
 	Port                  uint32       `json:"port" yaml:"port" mapstructure:"port"`
+	ServerPort            uint32       `json:"serverPort" yaml:"serverPort" mapstructure:"serverPort"`
 	DNSPort               uint32       `json:"dnsPort" yaml:"dnsPort" mapstructure:"dnsPort"`
 	ProxyPort             uint32       `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
 	Debug                 bool         `json:"debug" yaml:"debug" mapstructure:"debug"`
@@ -131,8 +132,9 @@ type Test struct {
 }
 
 type Agent struct {
-	IsDocker bool   `json:"isDocker" yaml:"isDocker" mapstructure:"isDocker"`
-	Port     uint32 `json:"port" yaml:"port" mapstructure:"port"`
+	IsDocker  bool   `json:"isDocker" yaml:"isDocker" mapstructure:"isDocker"`
+	Port      uint32 `json:"port" yaml:"port" mapstructure:"port"`
+	ProxyPort uint32 `json:"proxyPort" yaml:"proxyPort" mapstructure:"proxyPort"`
 }
 
 type Language string

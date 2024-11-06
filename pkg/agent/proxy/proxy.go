@@ -62,16 +62,13 @@ type Proxy struct {
 }
 
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
-	if opts.Agent.IsDocker {
-		logger.Info("Running in docker environment proxy port will be set to 36789")
-		opts.ProxyPort = 36789
-	}
+
 	return &Proxy{
 		logger:       logger,
-		Port:         opts.ProxyPort, // default: 16789
-		DNSPort:      opts.DNSPort,   // default: 26789
-		IP4:          "127.0.0.1",    // default: "127.0.0.1" <-> (2130706433)
-		IP6:          "::1",          //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
+		Port:         opts.Agent.ProxyPort, // default: 16789
+		DNSPort:      opts.DNSPort,         // default: 26789
+		IP4:          "127.0.0.1",          // default: "127.0.0.1" <-> (2130706433)
+		IP6:          "::1",                //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
 		ipMutex:      &sync.Mutex{},
 		connMutex:    &sync.Mutex{},
 		DestInfo:     info,

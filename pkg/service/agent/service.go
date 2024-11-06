@@ -7,7 +7,7 @@ import (
 )
 
 type Service interface {
-	Setup(ctx context.Context, cmd string, opts models.SetupOptions) error
+	Setup(ctx context.Context, opts models.SetupOptions) error
 	GetIncoming(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error)
 	GetOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) (<-chan *models.Mock, error)
 	MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error

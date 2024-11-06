@@ -53,6 +53,7 @@ type Proxy interface {
 }
 
 type ProxyOptions struct {
+	ProxyPort  uint32
 	// DNSIPv4Addr is the proxy IP returned by the DNS server. default is loopback address
 	DNSIPv4Addr string
 	// DNSIPv6Addr is the proxy IP returned by the DNS server. default is loopback address

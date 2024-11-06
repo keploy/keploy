@@ -12,6 +12,8 @@ type HookOptions struct {
 	Mode          Mode
 	EnableTesting bool
 	IsDocker      bool
+	ProxyPort     uint32
+	ServerPort    uint32
 }
 
 type OutgoingOptions struct {
@@ -45,6 +47,8 @@ type SetupOptions struct {
 	Cmd           string
 	IsDocker      bool
 	CommandType   string
+	EnableTesting bool
+	ProxyPort     uint32
 	Mode          Mode
 }
 
