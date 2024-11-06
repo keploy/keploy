@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -55,6 +56,8 @@ type UnitTestGenerator struct {
 	noCoverageTest   int
 }
 
+var discardedTestsFilename = "discardedTests.txt"
+
 func NewUnitTestGenerator(
 	cfg *config.Config,
 	tel Telemetry,
@@ -71,7 +74,7 @@ func NewUnitTestGenerator(
 		maxIterations: genConfig.MaxIterations,
 		logger:        logger,
 		tel:           tel,
-		ai:            NewAIClient(genConfig.Model, genConfig.APIBaseURL, genConfig.APIVersion, "", cfg.APIServerURL, auth, uuid.NewString(), logger),
+		ai:            NewAIClient(genConfig, "", cfg.APIServerURL, auth, uuid.NewString(), logger),
 		cov: &Coverage{
 			Path:    genConfig.CoverageReportPath,
 			Format:  genConfig.CoverageFormat,
@@ -154,7 +157,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 		iterationCount := 0
 		g.lang = GetCodeLanguage(g.srcPath)
 
-		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt, g.logger)
+		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt, g.ai.FunctionUnderTest, g.logger)
 		g.injector = NewInjectorBuilder(g.logger, g.lang)
 
 		if err != nil {
@@ -241,6 +244,13 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				if err := g.runCoverage(); err != nil {
 					utils.LogError(g.logger, err, "Error running coverage")
 					return err
+				}
+			}
+
+			if len(g.failedTests) > 0 {
+				err := g.saveFailedTestCasesToFile()
+				if err != nil {
+					utils.LogError(g.logger, err, "Error adding failed test cases to file")
 				}
 			}
 
@@ -593,8 +603,7 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 	for i := 0; i < 5; i++ {
 
 		g.logger.Info(fmt.Sprintf("Iteration no: %d", i+1))
-
-		stdout, _, exitCode, timeOfTestCommand, _ := RunCommand(g.cmd, g.dir, g.logger)
+		stdout, stderr, exitCode, timeOfTestCommand, _ := RunCommand(g.cmd, g.dir, g.logger)
 		if exitCode != 0 {
 			g.logger.Info(fmt.Sprintf("Test failed in %d iteration", i+1))
 			// Test failed, roll back the test file to its original content
@@ -613,8 +622,10 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 			}
 			g.logger.Info("Skipping a generated test that failed")
 			g.failedTests = append(g.failedTests, &models.FailedUT{
-				TestCode: generatedTest.TestCode,
-				ErrorMsg: extractErrorMessage(stdout),
+				TestCode:                generatedTest.TestCode,
+				ErrorMsg:                extractErrorMessage(stdout, stderr, g.lang),
+				NewImportsCode:          generatedTest.NewImportsCode,
+				LibraryInstallationCode: generatedTest.LibraryInstallationCode,
 			})
 			g.testCaseFailed++
 			*failedBuild++
@@ -658,5 +669,47 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 	g.cur.Line = g.cur.Line + len(testCodeLines) + importLen
 
 	g.logger.Info("Generated test passed and increased coverage")
+	return nil
+}
+
+func (g *UnitTestGenerator) saveFailedTestCasesToFile() error {
+	dir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("error getting current directory: %w", err)
+	}
+
+	newFilePath := filepath.Join(dir, discardedTestsFilename)
+
+	fileHandle, err := os.OpenFile(newFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("error opening discarded tests file: %w", err)
+	}
+
+	defer func() {
+		err := fileHandle.Close()
+		if err != nil {
+			g.logger.Error("Error closing file handle", zap.Error(err))
+		}
+	}()
+
+	var builder strings.Builder
+
+	// Writing Test Cases To File
+	for _, failedTest := range g.failedTests {
+		builder.WriteString("\n" + strings.Repeat("-", 20) + "Test Case" + strings.Repeat("-", 20) + "\n")
+		if len(failedTest.NewImportsCode) > 0 {
+			builder.WriteString(fmt.Sprintf("Import Statements:\n%s\n", failedTest.NewImportsCode))
+		}
+		if len(failedTest.LibraryInstallationCode) > 0 {
+			builder.WriteString(fmt.Sprintf("Required Library Installation\n%s\n", failedTest.LibraryInstallationCode))
+		}
+		builder.WriteString(fmt.Sprintf("Test Implementation:\n%s\n\n", failedTest.TestCode))
+		builder.WriteString(strings.Repeat("-", 49) + "\n")
+	}
+
+	_, err = fileHandle.WriteString(fmt.Sprintf("%s\n", builder.String()))
+	if err != nil {
+		return fmt.Errorf("error writing to discarded tests file: %w", err)
+	}
 	return nil
 }
