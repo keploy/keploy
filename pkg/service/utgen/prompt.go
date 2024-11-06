@@ -58,9 +58,10 @@ type PromptBuilder struct {
 	Logger                 *zap.Logger
 	AdditionalPrompt       string
 	InstalledPackages      []string
+	FunctionUnderTest      string
 }
 
-func NewPromptBuilder(srcPath, testPath, covReportContent, includedFiles, additionalInstructions, language, additionalPrompt string, logger *zap.Logger) (*PromptBuilder, error) {
+func NewPromptBuilder(srcPath, testPath, covReportContent, includedFiles, additionalInstructions, language, additionalPrompt, functionUnderTest string, logger *zap.Logger) (*PromptBuilder, error) {
 	var err error
 	src := &Source{
 		Name: srcPath,
@@ -69,12 +70,13 @@ func NewPromptBuilder(srcPath, testPath, covReportContent, includedFiles, additi
 		Name: testPath,
 	}
 	promptBuilder := &PromptBuilder{
-		Src:              src,
-		Test:             test,
-		Language:         language,
-		CovReportContent: covReportContent,
-		Logger:           logger,
-		AdditionalPrompt: additionalPrompt,
+		Src:               src,
+		Test:              test,
+		Language:          language,
+		CovReportContent:  covReportContent,
+		Logger:            logger,
+		AdditionalPrompt:  additionalPrompt,
+		FunctionUnderTest: functionUnderTest,
 	}
 	promptBuilder.Src.Code, err = readFile(srcPath)
 	if err != nil {
@@ -141,6 +143,7 @@ func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, erro
 		"language":                     pb.Language,
 		"max_tests":                    MAX_TESTS_PER_RUN,
 		"additional_command":           pb.AdditionalPrompt,
+		"function_under_test":          pb.FunctionUnderTest,
 		"installed_packages":           formatInstalledPackages(pb.InstalledPackages),
 	}
 

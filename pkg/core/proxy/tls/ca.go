@@ -1,7 +1,7 @@
 //go:build linux
 
-// Package proxy provides functionality for handling proxies.
-package proxy
+// Package tls provides functionality for handling tls connetions.
+package tls
 
 import (
 	"context"
@@ -251,12 +251,12 @@ func SetupCA(ctx context.Context, logger *zap.Logger) error {
 var (
 	caPrivKey    interface{}
 	caCertParsed *x509.Certificate
-	dstURL       string
+	DstURL       string
 )
 
-func certForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+func CertForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	// Generate a new server certificate and private key for the given hostname
-	dstURL = clientHello.ServerName
+	DstURL = clientHello.ServerName
 
 	cfsslLog.Level = cfsslLog.LevelError
 

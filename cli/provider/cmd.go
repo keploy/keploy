@@ -185,7 +185,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the path to download contracts")
 		}
 
-	case "update":
+	case "update", "export":
 		return nil
 	case "normalize":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks/reports are stored")
@@ -210,6 +210,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("model", "gpt-4o", "Model to use for the AI.")
 		cmd.Flags().String("llm-api-version", "", "API version of the llm")
 		cmd.Flags().String("additional-prompt", "", "Additional prompt to be used for the AI model.")
+		cmd.Flags().String("function-under-test", "", "The specific function for which tests will be generated.")
 		err := cmd.MarkFlagRequired("test-command")
 		if err != nil {
 			errMsg := "failed to mark testCommand as required flag"
