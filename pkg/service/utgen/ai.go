@@ -111,28 +111,6 @@ type UsageData struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
-type CompletionResponse struct {
-	ID      string    `json:"id"`
-	Object  string    `json:"object"`
-	Created int64     `json:"created"`
-	Model   string    `json:"model"`
-	Choices []Choice  `json:"choices"`
-	Usage   UsageData `json:"usage"`
-}
-
-type Choice struct {
-	Index        int     `json:"index"`
-	FinishReason string  `json:"finish_reason"`
-	Message      Message `json:"message"`
-	Delta        Delta   `json:"delta"`
-}
-
-type UsageData struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
-}
-
 func NewAIClient(genConfig config.UtGen, apiKey, apiServerURL string, auth service.Auth, sessionID string, logger *zap.Logger) *AIClient {
 	return &AIClient{
 		Model:             genConfig.Model,
