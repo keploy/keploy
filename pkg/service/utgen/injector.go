@@ -191,9 +191,15 @@ func (i *Injector) updateJavaScriptImports(importedContent string, newImports []
 }
 
 func (i *Injector) updateImports(filePath string, imports string) (int, error) {
-	newImports := strings.Split(imports, "\n")
-	for i, imp := range newImports {
-		newImports[i] = strings.TrimSpace(imp)
+	importLines := strings.Split(imports, "\n")
+	var newImports []string
+
+	for _, imp := range importLines {
+		trimmedImp := strings.TrimSpace(imp)
+		if strings.Contains(trimmedImp, "No new imports") || strings.Contains(trimmedImp, "None") {
+			continue
+		}
+		newImports = append(newImports, trimmedImp)
 	}
 	contentBytes, err := os.ReadFile(filePath)
 	if err != nil {
