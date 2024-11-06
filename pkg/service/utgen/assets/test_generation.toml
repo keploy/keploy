@@ -12,24 +12,31 @@ Your task is to generate additional unit tests to complement the existing test s
 - **Analyze the Provided Code:**
   - Understand its purpose, inputs, outputs, and key logic or calculations.
 
+- **Refactor for Testability:**
+  - **Refactor the provided source code to improve testability**, including making external dependencies easily mockable, especially for asynchronous interactions.
+  - Ensure refactoring enhances testability without altering functionality or breaking existing behavior.
+  - Provide refactored code in the `refactored_source_code` field if changes are made.
+  
 - **Utilize the Code Coverage Report:**
   - Identify specific parts of the code not yet covered by tests.
   - Focus on uncovered lines, branches, and conditions.
 
 - **Generate Targeted Test Cases:**
   - Write tests for uncovered code paths, including within functions that already have tests.
-  - Include edge cases, error conditions, and complex logic scenarios.
+  - Include edge cases, error conditions, and scenarios with complex or async logic.
 
 - **Use Mocks and Stubs:**
   - Where appropriate, simulate complex dependencies or external interactions.
+  - For asynchronous operations, use async-compatible mocking methods.
+  - Test for async edge cases, ensuring proper event loop handling and responses.
 
 - **Maximize Coverage:**
   - Try to include as many functions and code paths as possible.
-  - Aim to cover all branches, error handling paths, and edge cases.
+  - Cover all branches, error handling paths, and edge cases.
 
 - **Ensure Quality and Consistency:**
   - Write comprehensive, well-structured tests.
-  - Follow the same style and conventions as the existing test suite.
+  - Follow the style and conventions of the existing test suite.
   - Ensure test names are unique within the test suite.
 
 - **Focus on the Goal:**
@@ -109,8 +116,10 @@ class NewTests(BaseModel):
     language: str = Field(description="The programming language of the source code")
     existing_test_function_signature: str = Field(description="A single line repeating a signature header of one of the existing test functions")
     new_tests: List[SingleTest] = Field(min_items=1, max_items={{ .max_tests }}, description="A list of new test functions to append to the existing test suite, aiming to increase the code coverage. Each test should run as-is, without requiring any additional inputs or setup code.")
-=====
+    refactored_source_code: str = Field(description="The refactored source code that improves testability while retaining original functionality.")
 
+=====
+    
 Example output:
 ```yaml
 language: {{ .language }}
@@ -168,7 +177,10 @@ new_tests:
     npm install assert
     {%- endif %}
   test_tags: happy path
-    ...
+
+refactored_source_code: |
+  # Here is the modified source code that retains original functionality but improves testability.
+  ...
 ```
 
 Use block scalar('|') to format each YAML output.
