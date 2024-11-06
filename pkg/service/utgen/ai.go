@@ -287,12 +287,13 @@ func (ai *AIClient) Call(ctx context.Context, completionParams CompletionParams,
 	return finalContent, nil
 }
 
-func (ai *AIClient) SendCoverageUpdate(ctx context.Context, sessionID string, oldCoverage, newCoverage float64) error {
+func (ai *AIClient) SendCoverageUpdate(ctx context.Context, sessionID string, oldCoverage, newCoverage float64, iterationCount int) error {
 	// Construct the request body with session ID, old coverage, and new coverage
 	requestBody, err := json.Marshal(map[string]interface{}{
 		"sessionId":      sessionID,
 		"initalCoverage": oldCoverage,
 		"finalCoverage":  newCoverage,
+		"iteration":      iterationCount,
 	})
 	if err != nil {
 		return fmt.Errorf("error marshalling request body: %v", err)

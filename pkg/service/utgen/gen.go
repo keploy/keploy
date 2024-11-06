@@ -285,7 +285,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			fmt.Print(addHeightPadding(paddingHeight, 2, columnWidths2))
 			fmt.Printf("+------------------------------------------+------------------------------------------+\n")
 			fmt.Printf("<=========================================>\n")
-			err = g.ai.SendCoverageUpdate(ctx, g.ai.SessionID, initialCoverage, g.cov.Current)
+			err = g.ai.SendCoverageUpdate(ctx, g.ai.SessionID, initialCoverage, g.cov.Current, iterationCount)
 			if err != nil {
 				utils.LogError(g.logger, err, "Error sending coverage update")
 			}
