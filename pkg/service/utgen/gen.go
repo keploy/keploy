@@ -218,7 +218,10 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				utils.LogError(g.logger, err, "Error generating tests")
 				return err
 			}
-
+			if testsDetails == nil {
+				g.logger.Info("No tests generated")
+				continue
+			}
 			g.logger.Info("Validating new generated tests one by one")
 			g.totalTestCase += len(testsDetails.NewTests)
 			totalTest = len(testsDetails.NewTests)
@@ -438,7 +441,12 @@ func (g *UnitTestGenerator) GenerateTests(ctx context.Context) (*models.UTDetail
 	default:
 	}
 
-	response, promptTokenCount, responseTokenCount, err := g.ai.Call(ctx, g.prompt, 4096)
+	aiRequest := AIRequest{
+		MaxTokens: 4096,
+		Prompt:    *g.prompt,
+		SessionID: g.ai.SessionID,
+	}
+	response, err := g.ai.Call(ctx, CompletionParams{}, aiRequest, false)
 	if err != nil {
 		return &models.UTDetails{}, err
 	}
@@ -450,8 +458,6 @@ func (g *UnitTestGenerator) GenerateTests(ctx context.Context) (*models.UTDetail
 	default:
 	}
 
-	g.logger.Info(fmt.Sprintf("Total token used count for LLM model %s: %d", g.ai.Model, promptTokenCount+responseTokenCount))
-
 	select {
 	case <-ctx.Done():
 		err := ctx.Err()
@@ -460,6 +466,7 @@ func (g *UnitTestGenerator) GenerateTests(ctx context.Context) (*models.UTDetail
 	}
 
 	testsDetails, err := unmarshalYamlTestDetails(response)
+
 	if err != nil {
 		utils.LogError(g.logger, err, "Error unmarshalling test details")
 		return &models.UTDetails{}, err
@@ -500,7 +507,13 @@ func (g *UnitTestGenerator) getIndentation(ctx context.Context) (int, error) {
 		if err != nil {
 			return 0, fmt.Errorf("error building prompt: %w", err)
 		}
-		response, _, _, err := g.ai.Call(ctx, prompt, 4096)
+
+		aiRequest := AIRequest{
+			MaxTokens: 4096,
+			Prompt:    *prompt,
+			SessionID: g.ai.SessionID,
+		}
+		response, err := g.ai.Call(ctx, CompletionParams{}, aiRequest, false)
 		if err != nil {
 			utils.LogError(g.logger, err, "Error calling AI model")
 			return 0, err
@@ -531,7 +544,13 @@ func (g *UnitTestGenerator) getLine(ctx context.Context) (int, error) {
 		if err != nil {
 			return 0, fmt.Errorf("error building prompt: %w", err)
 		}
-		response, _, _, err := g.ai.Call(ctx, prompt, 4096)
+
+		aiRequest := AIRequest{
+			MaxTokens: 4096,
+			Prompt:    *prompt,
+			SessionID: g.ai.SessionID,
+		}
+		response, err := g.ai.Call(ctx, CompletionParams{}, aiRequest, false)
 		if err != nil {
 			utils.LogError(g.logger, err, "Error calling AI model")
 			return 0, err
