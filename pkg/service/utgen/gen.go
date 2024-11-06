@@ -213,7 +213,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				return err
 			}
 			g.failedTests = []*models.FailedUT{}
-			testsDetails, err := g.GenerateTests(ctx)
+			testsDetails, err := g.GenerateTests(ctx, iterationCount)
 			if err != nil {
 				utils.LogError(g.logger, err, "Error generating tests")
 				return err
@@ -431,7 +431,7 @@ func (g *UnitTestGenerator) runCoverage() error {
 	return nil
 }
 
-func (g *UnitTestGenerator) GenerateTests(ctx context.Context) (*models.UTDetails, error) {
+func (g *UnitTestGenerator) GenerateTests(ctx context.Context, iterationCount int) (*models.UTDetails, error) {
 	fmt.Println("Generating Tests...")
 
 	select {
@@ -445,6 +445,7 @@ func (g *UnitTestGenerator) GenerateTests(ctx context.Context) (*models.UTDetail
 		MaxTokens: 4096,
 		Prompt:    *g.prompt,
 		SessionID: g.ai.SessionID,
+		Iteration: iterationCount,
 	}
 	response, err := g.ai.Call(ctx, CompletionParams{}, aiRequest, false)
 	if err != nil {

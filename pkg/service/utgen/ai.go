@@ -86,6 +86,7 @@ type AIRequest struct {
 	MaxTokens int    `json:"maxTokens"`
 	Prompt    Prompt `json:"prompt"`
 	SessionID string `json:"sessionId"`
+	Iteration int    `json:"iteration"`
 }
 
 type CompletionResponse struct {
