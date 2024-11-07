@@ -116,9 +116,9 @@ func (cs *Csharp) GetCoverage() (models.TestCoverage, error) {
 
 	for _, pkg := range coverageStruct.Packages {
 		for _, class := range pkg.Classes {
-			totalClasses += 1
+			totalClasses++
 			if class.ClassLineRate > 0 || class.ClassBranchRate > 0 {
-				classCovered += 1
+				classCovered++
 			}
 
 			classCoverage := (classCovered / totalClasses) * 100
