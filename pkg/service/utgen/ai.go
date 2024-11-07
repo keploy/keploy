@@ -39,7 +39,7 @@ type CompletionParams struct {
 	Model               string    `json:"model"`
 	Messages            []Message `json:"messages"`
 	MaxTokens           int       `json:"max_tokens,omitempty"`
-	MaxCompletionTokens int       `json:"max_completion_tokens"`
+	MaxCompletionTokens int       `json:"max_completion_tokens,omitempty"`
 	Stream              *bool     `json:"stream,omitempty"`
 	Temperature         float32   `json:"temperature,omitempty"`
 }
