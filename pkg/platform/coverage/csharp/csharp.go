@@ -27,6 +27,14 @@ type Csharp struct {
 
 type CoverageStructure struct {
 	LineRate float64 `xml:"line-rate,attr"`
+
+	Packages []struct {
+		Classes []struct {
+			FileName        string  `xml:"filename,attr"`
+			ClassLineRate   float64 `xml:"line-rate,attr"`
+			ClassBranchRate float64 `xml:"branch-rate,attr"`
+		} `xml:"classes>class"`
+	} `xml:"packages>package"`
 }
 
 func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cmd, dotnetCoveragePath, executable string) *Csharp {
@@ -96,11 +104,27 @@ func (cs *Csharp) GetCoverage() (models.TestCoverage, error) {
 		}
 	}()
 
+	// complete line-by-line coverage
 	coverageStruct := CoverageStructure{}
 	if err := xml.Unmarshal([]byte(coberturaPath), &coverageStruct); err != nil {
-		return testCov, fmt.Errorf("failed to unmarshal file: %w", err)
+		return testCov, fmt.Errorf("failed to unmarshal cobertura file: %w", err)
 	}
 	testCov.TotalCov = strconv.FormatFloat(coverageStruct.LineRate*100, 'E', -1, 64)
+
+	// class coverage
+	totalClasses, classCovered := 0.0, 0.0
+
+	for _, pkg := range coverageStruct.Packages {
+		for _, class := range pkg.Classes {
+			totalClasses += 1
+			if class.ClassLineRate > 0 || class.ClassBranchRate > 0 {
+				classCovered += 1
+			}
+
+			classCoverage := (classCovered / totalClasses) * 100
+			testCov.FileCov[class.FileName] = strconv.FormatFloat(classCoverage, 'E', -1, 64) + "%"
+		}
+	}
 
 	return testCov, nil
 }
