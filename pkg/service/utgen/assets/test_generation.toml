@@ -259,6 +259,73 @@ refactored_source_code: |
   ...
 ```
 
+additions:
+  additional_instructions_text: |
+    In JavaScript and TypeScript, to handle asynchronous tests, please use testing frameworks like Jest or Mocha that natively support async/await. Ensure that you:
+    - Import the necessary testing library (e.g., Jest).
+    - Use `async` functions for tests that involve asynchronous operations.
+    - Utilize appropriate hooks (`beforeAll`, `afterAll`, `beforeEach`, `afterEach`) for setup and teardown.
+    - Handle promises correctly to avoid unhandled rejections.
+    
+    Example for Jest:
+    ```javascript
+    const { someAsyncFunction } = require('./sourceFile');
+
+    test('should handle async operation correctly', async () => {
+      const result = await someAsyncFunction();
+      expect(result).toBe(expectedValue);
+    });
+    ```
+
+    In TypeScript, ensure type definitions are correctly handled in your tests.
+
+  refactored_source_code: |
+    # For Golang, ensure that your test functions follow the naming convention `TestFunctionName` and accept a `*testing.T` parameter. Import the `testing` package and utilize it to manage test cases.
+
+    Example:
+    ```go
+    import (
+        "testing"
+    )
+
+    func TestFunctionName(t *testing.T) {
+        result := FunctionUnderTest()
+        if result != expected {
+            t.Errorf("Expected %v, got %v", expected, result)
+        }
+    }
+    ```
+    In Python, to handle asynchronous tests and resolve issues like unclosed client sessions, please:
+    - Use `pytest-asyncio` for managing async tests.
+    - Decorate async test functions with `@pytest.mark.asyncio`.
+    - Import `pytest` and `pytest-asyncio` in your test files.
+    
+    Example:
+    ```python
+    import pytest
+
+
+    In Java, to handle asynchronous tests:
+    - Use JUnit 5 or similar frameworks that support async testing.
+    - Import necessary JUnit libraries.
+    - Utilize `CompletableFuture` or other async constructs.
+    - Annotate test methods with `@Test`.
+    
+    Example:
+    ```java
+    import org.junit.jupiter.api.Test;
+    import static org.junit.jupiter.api.Assertions.*;
+
+    public class MyAsyncTests {
+
+      @Test
+      public void testAsyncFunction() throws Exception {
+          CompletableFuture<String> future = someAsyncOperation();
+          String result = future.get();
+          assertEquals("expectedValue", result);
+      }
+    }
+
 Use block scalar('|') to format each YAML output.
 
 
@@ -270,6 +337,9 @@ Use block scalar('|') to format each YAML output.
 
 In Python, since this can be an issue Unclosed client session client_session: <aiohttp.client.ClientSession object at 0x102fed130>, please ensure using pytest-aiohttp to solve this issue
 In Python, Since  async def functions are not natively supported for testing and can be skipped, please add the decorator @pytest.mark.asyncio to the test functions that are async def functions, also if you are using the decorator, please import pytest and pytest-asyncio as well.
+In Python, use absolute imports instead of relative imports to avoid issues with module resolution.
+
+In Golang, please import testing library and use the testing.T object to run the tests.
 
 Response (should be a valid YAML, and nothing else):
 ```yaml
