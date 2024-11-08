@@ -335,7 +335,6 @@ Use block scalar('|') to format each YAML output.
 {% endif %}
 
 
-In Python, since this can be an issue Unclosed client session client_session: <aiohttp.client.ClientSession object at 0x102fed130>, please ensure using pytest-aiohttp to solve this issue
 In Python, Since  async def functions are not natively supported for testing and can be skipped, please add the decorator @pytest.mark.asyncio to the test functions that are async def functions, also if you are using the decorator, please import pytest and pytest-asyncio as well.
 In Python, use absolute imports instead of relative imports to avoid issues with module resolution.
 
