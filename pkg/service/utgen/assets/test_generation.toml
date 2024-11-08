@@ -212,6 +212,7 @@ new_tests:
 {%- endif %}
   test_code: |
 {%- if language in ["python"] %}
+    import pytest
     @pytest.mark.asyncio
     def ...
 {%- else %}
@@ -235,7 +236,7 @@ new_tests:
     {%- endif %}
   library_installation_code: |
     {%- if language == "python" %}
-    pip install pytest pytest-asyncio
+    pip install pytest
     {%- elif language == "java" %}
     # Add the following to your Maven pom.xml:
     # <dependency>
@@ -268,7 +269,7 @@ Use block scalar('|') to format each YAML output.
 
 
 In Python, since this can be an issue Unclosed client session client_session: <aiohttp.client.ClientSession object at 0x102fed130>, please ensure using pytest-aiohttp to solve this issue
-In Python, Since  async def functions are not natively supported for testing and can be skipped, please add the decorator @pytest.mark.asyncio to the test functions that are async def functions, also if you are using the decorator, please import pytest as well.
+In Python, Since  async def functions are not natively supported for testing and can be skipped, please add the decorator @pytest.mark.asyncio to the test functions that are async def functions, also if you are using the decorator, please import pytest and pytest-asyncio as well.
 
 Response (should be a valid YAML, and nothing else):
 ```yaml
