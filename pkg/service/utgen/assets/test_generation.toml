@@ -212,8 +212,6 @@ new_tests:
 {%- endif %}
   test_code: |
 {%- if language in ["python"] %}
-    import pytest
-    @pytest.mark.asyncio
     def ...
 {%- else %}
     ...
@@ -221,6 +219,7 @@ new_tests:
   new_imports_code: |
     {%- if language == "python" %}
     "import pytest"
+    "from my_module import my_function"
     {%- elif language == "java" %}
     "import org.junit.jupiter.api.Test;"
     "import my.package.MyFunction;"
@@ -260,7 +259,8 @@ refactored_source_code: |
 ```
 
 additions:
-  additional_instructions_text: |
+  additional_instructions_for_tests: |
+    {%- if language in ["javascript","typescript"] %}
     In JavaScript and TypeScript, to handle asynchronous tests, please use testing frameworks like Jest or Mocha that natively support async/await. Ensure that you:
     - Import the necessary testing library (e.g., Jest).
     - Use `async` functions for tests that involve asynchronous operations.
@@ -276,12 +276,11 @@ additions:
       expect(result).toBe(expectedValue);
     });
     ```
-
     In TypeScript, ensure type definitions are correctly handled in your tests.
-
-  refactored_source_code: |
-    # For Golang, ensure that your test functions follow the naming convention `TestFunctionName` and accept a `*testing.T` parameter. Import the `testing` package and utilize it to manage test cases.
-
+    
+    {%- elif language == "golang" %}
+    For Golang, ensure that your test functions follow the naming convention `TestFunctionName` and accept a `*testing.T` parameter. Import the `testing` package and utilize it to manage test cases.
+    Also ,Import testing library and use the testing.T object to run the tests.
     Example:
     ```go
     import (
@@ -295,16 +294,18 @@ additions:
         }
     }
     ```
+    {%- elif language == "python" %}
     In Python, to handle asynchronous tests and resolve issues like unclosed client sessions, please:
     - Use `pytest-asyncio` for managing async tests.
     - Decorate async test functions with `@pytest.mark.asyncio`.
     - Import `pytest` and `pytest-asyncio` in your test files.
+    Also remember to use absolute imports instead of relative imports to avoid issues with module resolution.
     
     Example:
     ```python
     import pytest
 
-
+    {%- elif language == "java" %}
     In Java, to handle asynchronous tests:
     - Use JUnit 5 or similar frameworks that support async testing.
     - Import necessary JUnit libraries.
@@ -325,6 +326,8 @@ additions:
           assertEquals("expectedValue", result);
       }
     }
+    ```
+    {%- endif %}
 
 Use block scalar('|') to format each YAML output.
 
@@ -333,12 +336,6 @@ Use block scalar('|') to format each YAML output.
 
 {{ .additional_instructions_text| trim }}
 {% endif %}
-
-
-In Python, Since  async def functions are not natively supported for testing and can be skipped, please add the decorator @pytest.mark.asyncio to the test functions that are async def functions, also if you are using the decorator, please import pytest and pytest-asyncio as well.
-In Python, use absolute imports instead of relative imports to avoid issues with module resolution.
-
-In Golang, please import testing library and use the testing.T object to run the tests.
 
 Response (should be a valid YAML, and nothing else):
 ```yaml
