@@ -14,11 +14,8 @@ import (
 	userDb "go.keploy.io/server/v2/pkg/platform/yaml/configdb/user"
 	"go.keploy.io/server/v2/utils"
 	"go.keploy.io/server/v2/utils/log"
-
 	//pprof for debugging
-
-	"net/http"
-	_ "net/http/pprof"
+	// _ "net/http/pprof"
 )
 
 // version is the version of the server and will be injected during build by ldflags, same with dsn
@@ -31,14 +28,14 @@ var gitHubClientID = "Iv23liFBvIVhL29i9BAp"
 
 func main() {
 	// Uncomment the following code to enable pprof for debugging
-	go func() {
-		fmt.Println("Starting pprof server for debugging...")
-		err := http.ListenAndServe("0.0.0.0:6060", nil)
-		if err != nil {
-			fmt.Println("Failed to start the pprof server for debugging", err)
-			return
-		}
-	}()
+	// go func() {
+	// 	fmt.Println("Starting pprof server for debugging...")
+	// 	err := http.ListenAndServe("0.0.0.0:6060", nil)
+	// 	if err != nil {
+	// 		fmt.Println("Failed to start the pprof server for debugging", err)
+	// 		return
+	// 	}
+	// }()
 	setVersion()
 	ctx := utils.NewCtx()
 	start(ctx)
