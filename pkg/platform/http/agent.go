@@ -168,7 +168,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 		}()
 
 		decoder := json.NewDecoder(res.Body)
-
+		
 		for {
 			var mock models.Mock
 			if err := decoder.Decode(&mock); err != nil {
@@ -390,7 +390,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			}()
 		} else {
 			// Open the log file in append mode or create it if it doesn't exist
-			logFile, err := os.OpenFile(fmt.Sprintf("keploy_agent_%d.log", clientID), os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
+			logFile, err := os.OpenFile("keploy_agent.log", os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
 			if err != nil {
 				utils.LogError(a.logger, err, "failed to open log file")
 				return 0, err

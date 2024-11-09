@@ -155,12 +155,7 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 
 	a.proxyStarted = true
 
-	// For keploy test bench
-	// Doubt: if this is enabled automatically
-	fmt.Println("opts.EnableTesting", opts.EnableTesting)
-	opts.EnableTesting = true
 	if opts.EnableTesting {
-
 		// Setting up the test bench
 		err := a.Tester.Setup(ctx, models.TestingOptions{Mode: opts.Mode})
 		if err != nil {

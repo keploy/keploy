@@ -94,6 +94,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		case <-ctx.Done():
 			break
 		default:
+			fmt.Println("stopping Keploy fromm test mode")
 			unregister := models.UnregisterReq{
 				ClientID: r.config.ClientID,
 				Mode:     models.MODE_TEST,
@@ -874,7 +875,6 @@ func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, testSet
 	}
 
 	if action == Start {
-		// api call here -
 		err = r.instrumentation.MockOutgoing(ctx, appID, models.OutgoingOptions{
 			Rules:          r.config.BypassRules,
 			MongoPassword:  r.config.Test.MongoPassword,

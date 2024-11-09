@@ -113,7 +113,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 	for {
 		select {
 		case <-clientClose:
-			logger.Debug("client connection is closed")
+			logger.Info("client connection is closed")
 			if !prevChunkWasReq && len(pgRequests) > 0 && len(pgResponses) > 0 {
 				metadata := make(map[string]string)
 				metadata["type"] = "config"

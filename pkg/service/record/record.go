@@ -87,14 +87,17 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 			Mode:     models.MODE_RECORD,
 		}
 
-		err := r.instrumentation.UnregisterClient(ctx, unregister)
-		if err != nil && err != io.EOF {
-			fmt.Println("error in unregistering client record")
-			utils.LogError(r.logger, err, "failed to unregister client")
+		// Dont call the Unregister if there is an error in the running application
+		if runAppError.AppErrorType != models.ErrUnExpected {
+			err := r.instrumentation.UnregisterClient(ctx, unregister)
+			if err != nil && err != io.EOF {
+				fmt.Println("error in unregistering client record")
+				utils.LogError(r.logger, err, "failed to unregister client")
+			}
 		}
 
 		runAppCtxCancel()
-		err = runAppErrGrp.Wait()
+		err := runAppErrGrp.Wait()
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop application")
 		}
@@ -270,8 +273,6 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, clientID uint64) (Fr
 	outgoingChan := make(chan *models.Mock)
 	errChan := make(chan error, 2)
 
-	// g, ctx := errgroup.WithContext(ctx)
-
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
 		return FrameChan{}, fmt.Errorf("failed to get error group from context")
@@ -292,7 +293,9 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, clientID uint64) (Fr
 	})
 
 	g.Go(func() error {
+
 		defer close(outgoingChan)
+		mockReceived := false
 		// create a context without cancel
 		// change this name to some mockCtx error group
 		mockErrGrp, _ := errgroup.WithContext(ctx)
@@ -308,6 +311,17 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, clientID uint64) (Fr
 			}
 		}()
 
+		// listen for ctx canecllation in a go routine
+		go func() {
+			select {
+			case <-ctx.Done():
+				if !mockReceived {
+					fmt.Println("context cancelled in go routine")
+					mockCtxCancel()
+				}
+			}
+		}()
+
 		ch, err := r.instrumentation.GetOutgoing(mockCtx, clientID, outgoingOpts)
 		if err != nil {
 			r.logger.Error("failed to get outgoing mocks", zap.Error(err))
@@ -316,9 +330,9 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, clientID uint64) (Fr
 		}
 
 		for mock := range ch {
+			mockReceived = true // Set flag if a mock is received
 			select {
 			case <-ctx.Done():
-				fmt.Println("context cancelled.....")
 				if mock != nil {
 					fmt.Println("mock is not nil")
 					outgoingChan <- mock

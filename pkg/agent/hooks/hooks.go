@@ -28,7 +28,7 @@ import (
 )
 
 func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
-	
+
 	return &Hooks{
 		logger:    logger,
 		sess:      agent.NewSessions(),
@@ -480,7 +480,6 @@ func (h *Hooks) load(opts agent.HookCfg) error {
 
 func (h *Hooks) Record(ctx context.Context, clientID uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	tc := make(chan *models.TestCase, 1)
-	fmt.Println("Recording the test case for the client: ", clientID)
 	h.TestMap.Store(clientID, tc)
 	if !h.isLoaded {
 		err := conn.ListenSocket(ctx, h.logger, clientID, h.TestMap, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
@@ -495,7 +494,7 @@ func (h *Hooks) Record(ctx context.Context, clientID uint64, opts models.Incomin
 			if ok {
 				// Close the channel when the context is done
 			} else {
-				println("Failed to type assert the channel from the test map")
+				h.logger.Error("Failed to type assert the channel from the test map")
 			}
 		}
 	}
