@@ -80,7 +80,7 @@ Your task is to generate additional unit tests to complement the existing test s
   - The primary objective is to **increase the overall code coverage significantly**.
   - Do not include the code coverage report or any policies in your response.
 
-{{- if .function_under_test }}
+{{ if .function_under_test }}
 - **Focus Function:**  
   - You must generate test cases specifically targeting the function named `{{ .function_under_test }}`.  
   - Ensure that the tests for this function cover all logic paths, edge cases, and error handling scenarios.
@@ -88,17 +88,15 @@ Your task is to generate additional unit tests to complement the existing test s
     - Analyze the return type of `{{ .function_under_test }}` and create tests that validate the correctness and integrity of the returned data.
 {{ end }}
 
-{{- if .additional_command }}
+{{ if .additional_command }}
 - {{ .additional_command }}
 {{ end }}
-
 
 ## Source File
 Here is the source file that you will be writing tests against, called `{{ .source_file_name }}`. Line numbers have been added for clarity and are not part of the original code.
 =========
 {{ .source_file_numbered | trim }}
 =========
-
 
 ## Test File
 Here is the file that contains the existing tests, called `{{ .test_file_name }}`.
@@ -113,21 +111,13 @@ The following packages are already installed in the environment. Use these when 
 {{ .installed_packages | trim }}
 =========
 
-
-{%- if additional_includes_section | trim %}
+{{ if .additional_includes_section | trim }}
 {{ .additional_includes_section | trim }}
-{% endif %}
+{{ end }}
 
-{%- if failed_tests_section | trim  %}
-
+{{ if .failed_tests_section | trim }}
 {{ .failed_tests_section | trim }}
-{% endif %}
-
-{%- if additional_instructions_text | trim  %}
-
-{{ .additional_instructions_text | trim }}
-{% endif %}
-
+{{ end }}
 
 ## Code Coverage
 The following is the existing code coverage report. Use this to determine what tests to write, as you should only write tests that increase the overall coverage:
@@ -177,11 +167,11 @@ The output must be a YAML object equivalent to type $NewTests, according to the 
 =====
 class SingleTest(BaseModel):
     test_behavior: str = Field(description="Short description of the behavior the test covers")
-{%- if language in ["python","java"] %}
-    test_name: str = Field(description=" A short test name, in snake case, that reflects the behaviour to test")
-{%- else %}
-    test_name: str = Field(description=" A short unique test name, that should reflect the test objective")
-{%- endif %}
+{{ if or (eq .language "python") (eq .language "java") }}
+    test_name: str = Field(description="A short test name, in snake case, that reflects the behaviour to test")
+{{ else }}
+    test_name: str = Field(description="A short unique test name, that should reflect the test objective")
+{{ end }}
     test_code: str = Field(description="A single test function, that tests the behavior described in 'test_behavior'. The test should be a written like its a part of the existing test suite, if there is one, and it can use existing helper functions, setup, or teardown code.")
     new_imports_code: str = Field(description="Code for new imports that are required for the new test function, and are not already present in the test file.")
     library_installation_code: str = Field(description="If new libraries are needed, specify the installation commands for each library separately.")
@@ -203,40 +193,40 @@ existing_test_function_signature: |
 new_tests:
 - test_behavior: |
     Test that the function returns the correct output for a single element list
-{%- if language in ["python","java"] %}
+{{- if (or (eq .language "python") (eq .language "java")) }}
   test_name: |
     test_single_element_list
-{%- else %}
+{{- else }}
   test_name: |
     ...
-{%- endif %}
+{{- end }}
   test_code: |
-{%- if language in ["python"] %}
+{{- if eq .language "python" }}
     def ...
-{%- else %}
+{{- else }}
     ...
-{%- endif %}
+{{- end }}
   new_imports_code: |
-    {%- if language == "python" %}
+    {{- if eq .language "python" }}
     "import pytest"
     "from my_module import my_function"
-    {%- elif language == "java" %}
+    {{- else if eq .language "java" }}
     "import org.junit.jupiter.api.Test;"
     "import my.package.MyFunction;"
-    {%- elif language == "golang" %}
+    {{- else if eq .language "go" }}
     "import "testing" "
     "import "my_module""
-    {%- elif language == "javascript" %}
+    {{- else if eq .language "javascript" }}
     "const assert = require('assert');"
     "const myFunction = require('my_module').myFunction;"
-    {%- elif language == "typescript" %}
+    {{- else if eq .language "typescript" }}
     "import { assert } from 'assert';"
     "import { myFunction } from 'my_module';"
-    {%- endif %}
+    {{- end }}
   library_installation_code: |
-    {%- if language == "python" %}
+    {{- if eq .language "python" }}
     pip install pytest
-    {%- elif language == "java" %}
+    {{- else if eq .language "java" }}
     # Add the following to your Maven pom.xml:
     # <dependency>
     #   <groupId>org.junit.jupiter</groupId>
@@ -244,13 +234,13 @@ new_tests:
     #   <version>5.7.0</version>
     #   <scope>test</scope>
     # </dependency>
-    {%- elif language == "golang" %}
+    {{- else if eq .language "go" }}
     go get github.com/my_module
-    {%- elif language == "javascript" %}
+    {{- else if eq .language "javascript" }}
     npm install assert
-    {%- elif language == "typescript" %}
+    {{- else if eq .language "typescript" }}
     npm install assert
-    {%- endif %}
+    {{- end }}
   test_tags: happy path
 
 refactored_source_code: |
@@ -331,11 +321,9 @@ additions:
 
 Use block scalar('|') to format each YAML output.
 
-
-{%- if additional_instructions_text| trim  %}
-
-{{ .additional_instructions_text| trim }}
-{% endif %}
+{{- if .additional_instructions_text | trim }}
+{{ .additional_instructions_text | trim }}
+{{ end }}
 
 Response (should be a valid YAML, and nothing else):
 ```yaml
