@@ -147,9 +147,9 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			newTestFile = true
 		}
 		if !newTestFile {
-			if err = g.runCoverage(); err != nil {
-				return err
-			}
+			// if err = g.runCoverage(); err != nil {
+			// 	return err
+			// }
 		} else {
 			g.cov.Current = 0
 		}
@@ -157,19 +157,19 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 		iterationCount := 0
 		g.lang = GetCodeLanguage(g.srcPath)
 
-		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt, g.ai.FunctionUnderTest, g.logger)
+		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, "", g.additionalPrompt, g.ai.FunctionUnderTest, g.logger)
 		g.injector = NewInjectorBuilder(g.logger, g.lang)
 
 		if err != nil {
 			utils.LogError(g.logger, err, "Error creating prompt builder")
 			return err
 		}
-		if !isEmpty {
-			if err := g.setCursor(ctx); err != nil {
-				utils.LogError(g.logger, err, "Error during initial test suite analysis")
-				return err
-			}
-		}
+		// if !isEmpty {
+		// 	if err := g.setCursor(ctx); err != nil {
+		// 		utils.LogError(g.logger, err, "Error during initial test suite analysis")
+		// 		return err
+		// 	}
+		// }
 		initialCoverage := g.cov.Current
 		// Respect context cancellation in the inner loop
 		for g.cov.Current < (g.cov.Desired/100) && iterationCount < g.maxIterations {
@@ -202,7 +202,10 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 					}
 				}
 			}
-
+			g.promptBuilder.LanguageVersion, err = g.injector.getLanguageVersion()
+			if err != nil {
+				utils.LogError(g.logger, err, "Error getting language version")
+			}
 			g.promptBuilder.InstalledPackages, err = g.injector.libraryInstalled()
 			if err != nil {
 				utils.LogError(g.logger, err, "Error getting installed packages")
