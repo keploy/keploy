@@ -79,14 +79,16 @@ func (i *Injector) libraryInstalled() ([]string, error) {
 		return i.extractGoPackageNames(out), nil
 
 	case "java":
-		out, err := exec.Command("mvn", "dependency:list", "-DincludeScope=compile", "-Dstyle.color=never", "-B").Output()
+		cmd := exec.Command("mvn", "dependency:list", "-DincludeScope=compile", "-Dstyle.color=never", "-B")
+		out, err := cmd.Output()
 		if err != nil {
 			return nil, fmt.Errorf("failed to get Java dependencies: %w", err)
 		}
 		return i.extractJavaDependencies(out), nil
 
 	case "python":
-		out, err := exec.Command("pip", "freeze").Output()
+		cmd := exec.Command("pip", "freeze")
+		out, err := cmd.Output()
 		if err != nil {
 			i.logger.Info("Error getting Python dependencies with `pip` command, trying `pip3` command")
 			out, err = exec.Command("pip3", "freeze").Output()
@@ -94,11 +96,10 @@ func (i *Injector) libraryInstalled() ([]string, error) {
 				return nil, fmt.Errorf("failed to get Python dependencies: %w", err)
 			}
 		}
-		return i.extractPackageNames(out), nil
+		return i.extractPythonPackageNamesWithVersions(out), nil
 
 	case "typescript", "javascript":
 		cmd := exec.Command("sh", "-c", "npm list --depth=0")
-		cmd.Dir = "/home/ahmed/Desktop/Work/Task3/samples-typescript/express-mongoose"
 		out, err := cmd.Output()
 		if err != nil {
 			return nil, fmt.Errorf("failed to get JavaScript/TypeScript dependencies: %w", err)
@@ -124,13 +125,15 @@ func (i *Injector) extractGoPackageNames(output []byte) []string {
 	return packages
 }
 
-func (i *Injector) extractPackageNames(output []byte) []string {
+func (i *Injector) extractPythonPackageNamesWithVersions(output []byte) []string {
 	lines := strings.Split(string(output), "\n")
 	var packages []string
 	for _, line := range lines {
 		parts := strings.Split(line, "==")
-		if len(parts) > 0 {
-			packages = append(packages, parts[0])
+		if len(parts) == 2 {
+			// Append the version directly to the dependency name in "name==version" format
+			dep := fmt.Sprintf("%s==%s", parts[0], parts[1])
+			packages = append(packages, dep)
 		}
 	}
 	return packages
