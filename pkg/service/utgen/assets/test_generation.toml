@@ -250,7 +250,7 @@ refactored_source_code: |
 
 additions:
   additional_instructions_for_tests: |
-    {%- if language in ["javascript","typescript"] %}
+    {{- if or (eq .language "javascript") (eq .language "typescript") }}
     In JavaScript and TypeScript, to handle asynchronous tests, please use testing frameworks like Jest or Mocha that natively support async/await. Ensure that you:
     - Import the necessary testing library (e.g., Jest).
     - Use `async` functions for tests that involve asynchronous operations.
@@ -268,9 +268,9 @@ additions:
     ```
     In TypeScript, ensure type definitions are correctly handled in your tests.
     
-    {%- elif language == "golang" %}
+    {{- else if eq .language "go" }}
     For Golang, ensure that your test functions follow the naming convention `TestFunctionName` and accept a `*testing.T` parameter. Import the `testing` package and utilize it to manage test cases.
-    Also ,Import testing library and use the testing.T object to run the tests.
+    
     Example:
     ```go
     import (
@@ -284,18 +284,22 @@ additions:
         }
     }
     ```
-    {%- elif language == "python" %}
+    {{- else if eq .language "python" }}
     In Python, to handle asynchronous tests and resolve issues like unclosed client sessions, please:
     - Use `pytest-asyncio` for managing async tests.
     - Decorate async test functions with `@pytest.mark.asyncio`.
     - Import `pytest` and `pytest-asyncio` in your test files.
-    Also remember to use absolute imports instead of relative imports to avoid issues with module resolution.
     
     Example:
     ```python
     import pytest
-
-    {%- elif language == "java" %}
+    @pytest.mark.asyncio
+    async def test_async_function():
+        result = await some_async_function()
+        assert result == expected_value
+    ```
+    
+    {{- else if eq .language "java" }}
     In Java, to handle asynchronous tests:
     - Use JUnit 5 or similar frameworks that support async testing.
     - Import necessary JUnit libraries.
@@ -317,7 +321,7 @@ additions:
       }
     }
     ```
-    {%- endif %}
+    {{- end }}
 
 Use block scalar('|') to format each YAML output.
 
