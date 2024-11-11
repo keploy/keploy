@@ -492,11 +492,16 @@ func (g *UnitTestGenerator) GenerateTests(ctx context.Context, iterationCount in
 	default:
 	}
 
+	requestPurpose := TestForFile
+	if len(g.ai.FunctionUnderTest) > 0 {
+		requestPurpose = TestForFunction
+	}
 	aiRequest := AIRequest{
-		MaxTokens: 4096,
-		Prompt:    *g.prompt,
-		SessionID: g.ai.SessionID,
-		Iteration: iterationCount,
+		MaxTokens:      4096,
+		Prompt:         *g.prompt,
+		SessionID:      g.ai.SessionID,
+		Iteration:      iterationCount,
+		RequestPurpose: requestPurpose,
 	}
 	response, err := g.ai.Call(ctx, CompletionParams{}, aiRequest, false)
 	if err != nil {
