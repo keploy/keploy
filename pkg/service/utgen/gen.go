@@ -619,7 +619,6 @@ func (g *UnitTestGenerator) getLine(ctx context.Context) (int, error) {
 			return 0, err
 		}
 
-
 		line, err = convertToInt(testsDetails.Line)
 		if err != nil {
 			return 0, fmt.Errorf("error converting relevant_line_number_to_insert_after to int: %w", err)
