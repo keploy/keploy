@@ -22,7 +22,7 @@ import (
 
 // Binary to Mock Yaml
 
-func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions, clientClose chan bool) error {
 
 	var (
 		requests  []mysql.Request
@@ -97,6 +97,9 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 	})
 
 	select {
+	case <-clientClose:
+		mocks <- &models.Mock{}
+		return ctx.Err()
 	case <-ctx.Done():
 		return ctx.Err()
 	case err := <-errCh:
@@ -105,6 +108,7 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		}
 		return err
 	}
+
 }
 
 func recordMock(_ context.Context, requests []mysql.Request, responses []mysql.Response, mockType, requestOperation, responseOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time) {
