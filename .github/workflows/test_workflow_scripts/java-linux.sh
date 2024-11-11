@@ -84,6 +84,8 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
+sleep 5
+echo "Starting test sessions"
 sudo ./../../../keployv2 agent &
 sleep 5
 # Start keploy in test mode.
