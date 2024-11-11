@@ -222,19 +222,6 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				g.logger.Info("No tests generated")
 				continue
 			}
-			// Print the refactored code
-			fmt.Printf("Refactored Code: \n%s\n", testsDetails.RefactoredSourceCode)
-
-			for _, ut := range testsDetails.NewTests {
-				fmt.Printf("=========================================\n")
-				fmt.Printf("Test Behavior: %s\n", ut.TestBehavior)
-				fmt.Printf("Test Code: %s\n", ut.TestCode)
-				fmt.Printf("Library Installation Code: %s\n", ut.LibraryInstallationCode)
-				fmt.Printf("New Imports Code: %s\n", ut.NewImportsCode)
-				fmt.Printf("Test Name: %s\n", ut.TestName)
-				fmt.Printf("Test Tags: %s\n", ut.TestsTags)
-				fmt.Printf("=========================================\n")
-			}
 
 			var originalSrcCode string
 			var codeModified bool
