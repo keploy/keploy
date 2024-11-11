@@ -83,11 +83,19 @@ type AIResponse struct {
 }
 
 type AIRequest struct {
-	MaxTokens int    `json:"maxTokens"`
-	Prompt    Prompt `json:"prompt"`
-	SessionID string `json:"sessionId"`
-	Iteration int    `json:"iteration"`
+	MaxTokens      int         `json:"maxTokens"`
+	Prompt         Prompt      `json:"prompt"`
+	SessionID      string      `json:"sessionId"`
+	Iteration      int         `json:"iteration"`
+	RequestPurpose PurposeType `json:"requestPurpose"`
 }
+
+type PurposeType string
+
+const (
+	TestForFunction PurposeType = "TestForFunction"
+	TestForFile     PurposeType = "TestForFile"
+)
 
 type CompletionResponse struct {
 	ID      string    `json:"id"`
@@ -289,11 +297,16 @@ func (ai *AIClient) Call(ctx context.Context, completionParams CompletionParams,
 
 func (ai *AIClient) SendCoverageUpdate(ctx context.Context, sessionID string, oldCoverage, newCoverage float64, iterationCount int) error {
 	// Construct the request body with session ID, old coverage, and new coverage
+	requestPurpose := TestForFile
+	if len(ai.FunctionUnderTest) > 0 {
+		requestPurpose = TestForFunction
+	}
 	requestBody, err := json.Marshal(map[string]interface{}{
 		"sessionId":      sessionID,
 		"initalCoverage": oldCoverage,
 		"finalCoverage":  newCoverage,
 		"iteration":      iterationCount,
+		"requestPurpose": requestPurpose,
 	})
 	if err != nil {
 		return fmt.Errorf("error marshalling request body: %v", err)
