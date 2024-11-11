@@ -90,11 +90,15 @@ type AIRequest struct {
 	RequestPurpose PurposeType `json:"requestPurpose"`
 }
 
+// PurposeType defines the type of purpose for the AI request.
 type PurposeType string
 
 const (
+	// TestForFunction represents a purpose type where the request is to test a function.
 	TestForFunction PurposeType = "TestForFunction"
-	TestForFile     PurposeType = "TestForFile"
+
+	// TestForFile represents a purpose type where the request is to test a file.
+	TestForFile PurposeType = "TestForFile"
 )
 
 type CompletionResponse struct {
