@@ -281,12 +281,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				if err != nil {
 					utils.LogError(g.logger, err, "Error reverting source code")
 				}
-			} else {
-				println("Coverage increased, modifying the source code in the prompt builder")
-				// if coverage increased, update the source code in the prompt builder
-				g.promptBuilder.Src.Code = testsDetails.RefactoredSourceCode
 			}
-
 			iterationCount++
 			if g.cov.Current < (g.cov.Desired/100) && g.cov.Current > 0 {
 				if err := g.runCoverage(); err != nil {
