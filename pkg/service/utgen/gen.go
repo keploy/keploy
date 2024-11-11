@@ -240,8 +240,6 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 						return fmt.Errorf("failed to refactor source code:%w", err)
 					}
 					codeModified = true
-					println("sleeping for 5 seconds so that you can see the modified code")
-					time.Sleep(5 * time.Second)
 				}
 			}
 
@@ -583,8 +581,6 @@ func (g *UnitTestGenerator) getIndentation(ctx context.Context) (int, error) {
 			return 0, err
 		}
 
-		fmt.Printf("TestDetails: %v\n", testsDetails)
-
 		indentation, err = convertToInt(testsDetails.Indentation)
 		if err != nil {
 			return 0, fmt.Errorf("error converting test_headers_indentation to int: %w", err)
@@ -623,7 +619,6 @@ func (g *UnitTestGenerator) getLine(ctx context.Context) (int, error) {
 			return 0, err
 		}
 
-		fmt.Printf("TestDetails: %v\n", testsDetails)
 
 		line, err = convertToInt(testsDetails.Line)
 		if err != nil {
