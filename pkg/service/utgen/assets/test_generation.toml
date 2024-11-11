@@ -329,6 +329,13 @@ Use block scalar('|') to format each YAML output.
 {{ .additional_instructions_text | trim }}
 {{ end }}
 
+# Configuration for handling refactored code output
+
+[refactor]
+
+# Response to send if the refactored_source_code field looks like `no refactor response` or is empty
+response_if_no_refactor = "blank output don't refactor code"
+
 Response (should be a valid YAML, and nothing else):
 ```yaml
 """
