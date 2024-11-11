@@ -480,9 +480,10 @@ func (h *Hooks) load(opts agent.HookCfg) error {
 
 func (h *Hooks) Record(ctx context.Context, clientID uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	tc := make(chan *models.TestCase, 1)
+	kctx := context.WithoutCancel(ctx)
 	h.TestMap.Store(clientID, tc)
 	if !h.isLoaded {
-		err := conn.ListenSocket(ctx, h.logger, clientID, h.TestMap, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
+		err := conn.ListenSocket(kctx, h.logger, clientID, h.TestMap, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
 		if err != nil {
 			return nil, err
 		}

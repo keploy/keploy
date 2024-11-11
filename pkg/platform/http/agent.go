@@ -168,7 +168,7 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 		}()
 
 		decoder := json.NewDecoder(res.Body)
-		
+
 		for {
 			var mock models.Mock
 			if err := decoder.Decode(&mock); err != nil {
@@ -372,7 +372,6 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	// check if the agent is running
 	isAgentRunning := a.isAgentRunning(ctx)
 	if opts.EnableTesting {
-		fmt.Println("Testing is enabled")
 		isAgentRunning = false
 	}
 	if !isAgentRunning {
@@ -390,7 +389,8 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			}()
 		} else {
 			// Open the log file in append mode or create it if it doesn't exist
-			logFile, err := os.OpenFile("keploy_agent.log", os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
+			filepath := fmt.Sprintf("keploy_agent_%d.log", clientID)
+			logFile, err := os.OpenFile(filepath, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
 			if err != nil {
 				utils.LogError(a.logger, err, "failed to open log file")
 				return 0, err
