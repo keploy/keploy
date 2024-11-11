@@ -88,7 +88,8 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		}
 
 		// Dont call the Unregister if there is an error in the running application
-		if runAppError.AppErrorType != models.ErrUnExpected {
+		fmt.Println("app error type", runAppError.AppErrorType)
+		if runAppError.AppErrorType == "" {
 			err := r.instrumentation.UnregisterClient(ctx, unregister)
 			if err != nil && err != io.EOF {
 				fmt.Println("error in unregistering client record")

@@ -499,7 +499,6 @@ func (h *Hooks) Record(ctx context.Context, clientID uint64, opts models.Incomin
 		}
 	}
 
-	// return the receiver of the channel
 	return tc, nil
 }
 
