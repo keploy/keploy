@@ -3,6 +3,7 @@ package utgen
 import (
 	"bytes"
 	"fmt"
+	"html"
 	"html/template"
 	"os"
 	"strings"
@@ -165,6 +166,7 @@ func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, erro
 		return prompt, fmt.Errorf("Error rendering user prompt: %v", err)
 	}
 	prompt.System = systemPrompt
+	userPrompt = html.UnescapeString(userPrompt)
 	prompt.User = userPrompt
 	return prompt, nil
 }
