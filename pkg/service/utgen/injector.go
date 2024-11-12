@@ -76,7 +76,7 @@ func (i *Injector) libraryInstalled() ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to get Go dependencies: %w", err)
 		}
-		return i.extractGoPackageNames(out), nil
+		return i.extractGoDependencies(out), nil
 
 	case "java":
 		cmd := exec.Command("mvn", "dependency:list", "-DincludeScope=compile", "-Dstyle.color=never", "-B")
@@ -96,7 +96,7 @@ func (i *Injector) libraryInstalled() ([]string, error) {
 				return nil, fmt.Errorf("failed to get Python dependencies: %w", err)
 			}
 		}
-		return i.extractPythonPackageNamesWithVersions(out), nil
+		return i.extractPythonDependencies(out), nil
 
 	case "typescript", "javascript":
 		cmd := exec.Command("sh", "-c", "npm list --depth=0")
@@ -104,14 +104,14 @@ func (i *Injector) libraryInstalled() ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to get JavaScript/TypeScript dependencies: %w", err)
 		}
-		return i.extractJavaScriptPackageNamesWithVersions(out), nil
+		return i.extractJSDependencies(out), nil
 
 	default:
 		return nil, fmt.Errorf("unsupported language: %s", i.language)
 	}
 }
 
-func (i *Injector) extractGoPackageNames(output []byte) []string {
+func (i *Injector) extractGoDependencies(output []byte) []string {
 	lines := strings.Split(string(output), "\n")
 	var packages []string
 	for _, line := range lines {
@@ -125,7 +125,7 @@ func (i *Injector) extractGoPackageNames(output []byte) []string {
 	return packages
 }
 
-func (i *Injector) extractPythonPackageNamesWithVersions(output []byte) []string {
+func (i *Injector) extractPythonDependencies(output []byte) []string {
 	lines := strings.Split(string(output), "\n")
 	var packages []string
 	for _, line := range lines {
@@ -622,7 +622,7 @@ func (i *Injector) extractJavaDependencies(output []byte) []string {
 	}
 	return dependencies
 }
-func (i *Injector) extractJavaScriptPackageNamesWithVersions(output []byte) []string {
+func (i *Injector) extractJSDependencies(output []byte) []string {
 	lines := strings.Split(string(output), "\n")
 	var packages []string
 	for _, line := range lines {

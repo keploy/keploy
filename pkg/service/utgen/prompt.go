@@ -63,7 +63,7 @@ type PromptBuilder struct {
 	FunctionUnderTest      string
 }
 
-func NewPromptBuilder(srcPath, testPath, covReportContent, includedFiles, additionalInstructions, language, language_version, additionalPrompt, functionUnderTest string, logger *zap.Logger) (*PromptBuilder, error) {
+func NewPromptBuilder(srcPath, testPath, covReportContent, includedFiles, additionalInstructions, language, languageVersion, additionalPrompt, functionUnderTest string, logger *zap.Logger) (*PromptBuilder, error) {
 	var err error
 	src := &Source{
 		Name: srcPath,
@@ -79,7 +79,7 @@ func NewPromptBuilder(srcPath, testPath, covReportContent, includedFiles, additi
 		Logger:            logger,
 		AdditionalPrompt:  additionalPrompt,
 		FunctionUnderTest: functionUnderTest,
-		LanguageVersion:   language_version,
+		LanguageVersion:   languageVersion,
 	}
 	promptBuilder.Src.Code, err = readFile(srcPath)
 	if err != nil {
