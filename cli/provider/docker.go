@@ -192,28 +192,46 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 		alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + pwd + ":" + dpwd + " -w " + dpwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img
 		return alias, nil
 	case "darwin":
-		cmd := exec.CommandContext(ctx, "docker", "context", "ls", "--format", "{{.Name}}\t{{.Current}}")
+		// Get the context and docker daemon endpoint.
+		cmd := exec.CommandContext(ctx, "docker", "context", "inspect", "--format", "{{if .Metadata}}Name={{.Name}} {{end}}{{if .Endpoints.docker}}Endpoint={{.Endpoints.docker.Host}}{{end}}")
 		out, err := cmd.Output()
 		if err != nil {
-			utils.LogError(logger, err, "failed to get the current docker context")
+			utils.LogError(logger, err, "failed to inspect the docker context")
 			return "", errors.New("failed to get alias")
 		}
-		dockerContext := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
-		if len(dockerContext) == 0 {
-			utils.LogError(logger, nil, "failed to get the current docker context")
+
+		output := strings.TrimSpace(string(out))
+		var currentContext, dockerEndpoint string
+
+		// Parse the output for current context and endpoint
+		for _, part := range strings.Fields(output) {
+			if strings.HasPrefix(part, "Name=") {
+				currentContext = strings.TrimPrefix(part, "Name=")
+			} else if strings.HasPrefix(part, "Endpoint=") {
+				dockerEndpoint = strings.TrimPrefix(part, "Endpoint=")
+			}
+		}
+
+		// Check if we found a current context
+		if currentContext == "" {
+			utils.LogError(logger, nil, "failed to find the current docker context")
 			return "", errors.New("failed to get alias")
 		}
-		dockerContext = strings.Split(dockerContext, "\n")[0]
-		if dockerContext == "colima" {
+
+		// Construct the alias command based on context-specific `debugfs` mount
+		var alias string
+		if currentContext == "colima" {
+
+			// To allow docker client to connect to the colima daemon because by default it uses the default docker daemon
+			os.Setenv("DOCKER_HOST", dockerEndpoint)
 			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
 			alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
 			return alias, nil
 		}
 		// if default docker context is used
 		logger.Info("Starting keploy in docker with default context, as that is the current context.")
-		alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
+		alias = "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
 		return alias, nil
-
 	}
 	return "", errors.New("failed to get alias")
 }
