@@ -223,7 +223,11 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 		if currentContext == "colima" {
 
 			// To allow docker client to connect to the colima daemon because by default it uses the default docker daemon
-			os.Setenv("DOCKER_HOST", dockerEndpoint)
+			err := os.Setenv("DOCKER_HOST", dockerEndpoint)
+			if err != nil {
+				utils.LogError(logger, err, "failed to set DOCKER_HOST environment variable for colima context")
+				return "", errors.New("failed to get alias")
+			}
 			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
 			alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 16789:16789 --privileged --pid=host" + ttyFlag + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
 			return alias, nil
