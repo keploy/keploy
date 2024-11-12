@@ -14,7 +14,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-func encodeGrpc(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
+func encodeGrpc(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions, clientClose chan bool) error {
 
 	// Send the client preface to the server. This should be the first thing sent from the client.
 	_, err := destConn.Write(reqBuf)
@@ -72,6 +72,9 @@ func encodeGrpc(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 	})
 
 	select {
+	case <-clientClose:
+		mocks <- &models.Mock{}
+		return ctx.Err()
 	case <-ctx.Done():
 		return ctx.Err()
 	case err := <-errCh:

@@ -44,7 +44,7 @@ func (g *Grpc) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, m
 		return err
 	}
 
-	err = encodeGrpc(ctx, logger, reqBuf, src, dst, mocks, opts)
+	err = encodeGrpc(ctx, logger, reqBuf, src, dst, mocks, opts, clientClose)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the grpc message into the yaml")
 		return err
