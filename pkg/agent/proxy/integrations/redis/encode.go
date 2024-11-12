@@ -17,7 +17,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
+func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions, clientClose chan bool) error {
 
 	var redisRequests []models.Payload
 	var redisResponses []models.Payload
@@ -136,6 +136,9 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 	})
 
 	select {
+	case <-clientClose:
+		mocks <- &models.Mock{}
+		return ctx.Err()
 	case <-ctx.Done():
 		return ctx.Err()
 	case err := <-errCh:

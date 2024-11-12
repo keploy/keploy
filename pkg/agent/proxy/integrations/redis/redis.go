@@ -50,7 +50,7 @@ func (r *Redis) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, 
 		return err
 	}
 
-	err = encodeRedis(ctx, logger, reqBuf, src, dst, mocks, opts)
+	err = encodeRedis(ctx, logger, reqBuf, src, dst, mocks, opts, clientClose)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the redis message into the yaml")
 		return err
