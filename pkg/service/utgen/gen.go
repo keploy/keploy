@@ -411,7 +411,7 @@ func (g *UnitTestGenerator) runCoverage() error {
 	g.logger.Info(fmt.Sprintf("Test command completed in %v", formatDuration(duration)))
 
 	if err != nil {
-		g.logger.Warn(fmt.Sprintf("Test command failed. Ensure no tests are failing, and rerun the command."))
+		g.logger.Warn("Test command failed. Ensure no tests are failing, and rerun the command.")
 		return fmt.Errorf("error running test command: %s", g.cmd)
 	}
 	if exitCode != 0 {
