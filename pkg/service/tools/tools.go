@@ -82,7 +82,7 @@ func (t *Tools) Update(ctx context.Context) error {
 
 	downloadURL := ""
 
-	if runtime.GOOS == "linux"{
+	if runtime.GOOS == "linux" {
 		if runtime.GOARCH == "amd64" {
 			downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
 		} else {
