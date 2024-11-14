@@ -39,7 +39,7 @@ type CompletionParams struct {
 	Model               string    `json:"model"`
 	Messages            []Message `json:"messages"`
 	MaxTokens           int       `json:"max_tokens,omitempty"`
-	MaxCompletionTokens int       `json:"max_completion_tokens"`
+	MaxCompletionTokens int       `json:"max_completion_tokens,omitempty"`
 	Stream              *bool     `json:"stream,omitempty"`
 	Temperature         float32   `json:"temperature,omitempty"`
 }
@@ -83,11 +83,23 @@ type AIResponse struct {
 }
 
 type AIRequest struct {
-	MaxTokens int    `json:"maxTokens"`
-	Prompt    Prompt `json:"prompt"`
-	SessionID string `json:"sessionId"`
-	Iteration int    `json:"iteration"`
+	MaxTokens      int         `json:"maxTokens"`
+	Prompt         Prompt      `json:"prompt"`
+	SessionID      string      `json:"sessionId"`
+	Iteration      int         `json:"iteration"`
+	RequestPurpose PurposeType `json:"requestPurpose"`
 }
+
+// PurposeType defines the type of purpose for the AI request.
+type PurposeType string
+
+const (
+	// TestForFunction represents a purpose type where the request is to test a function.
+	TestForFunction PurposeType = "TestForFunction"
+
+	// TestForFile represents a purpose type where the request is to test a file.
+	TestForFile PurposeType = "TestForFile"
+)
 
 type CompletionResponse struct {
 	ID      string    `json:"id"`
@@ -289,11 +301,16 @@ func (ai *AIClient) Call(ctx context.Context, completionParams CompletionParams,
 
 func (ai *AIClient) SendCoverageUpdate(ctx context.Context, sessionID string, oldCoverage, newCoverage float64, iterationCount int) error {
 	// Construct the request body with session ID, old coverage, and new coverage
+	requestPurpose := TestForFile
+	if len(ai.FunctionUnderTest) > 0 {
+		requestPurpose = TestForFunction
+	}
 	requestBody, err := json.Marshal(map[string]interface{}{
 		"sessionId":      sessionID,
 		"initalCoverage": oldCoverage,
 		"finalCoverage":  newCoverage,
 		"iteration":      iterationCount,
+		"requestPurpose": requestPurpose,
 	})
 	if err != nil {
 		return fmt.Errorf("error marshalling request body: %v", err)
