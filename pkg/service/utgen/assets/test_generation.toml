@@ -163,10 +163,18 @@ new_tests:
 
 Use block scalar('|') to format each YAML output.
 
-{{- if .additional_instructions_text | trim }}
-{{ .additional_instructions_text | trim }}
-{{ end }}
+{{- if .import_details | trim }}
+Imported Structs Overview:
+Below is a list of all structs imported and utilized within this file. These structs are integral to the functionality, 
+and they should be carefully considered when creating mocks and tests. This list serves as a reference for dependencies
+and external types that interact with the main code.
 
+{{ .import_details | trim }}
+{{- end }}
+and external types that interact with the main code.
+
+{{ .import_details | trim }}
+{{- end }}
 
 Response (should be a valid YAML, and nothing else):
 ```yaml

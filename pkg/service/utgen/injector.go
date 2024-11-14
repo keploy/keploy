@@ -2,10 +2,15 @@ package utgen
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -585,4 +590,238 @@ func (i *Injector) addCommentToTest(testCode string) string {
 		comment = "//" + comment
 	}
 	return fmt.Sprintf("%s\n%s", comment, testCode)
+}
+
+func (i *Injector) getModelDetails(sourceFilePath string) string {
+	switch i.language {
+	case "go":
+		return i.getGoImportData(sourceFilePath)
+	default:
+		return ""
+	}
+}
+
+func (i *Injector) getGoImportData(sourceFilePath string) string {
+	builtInTypes := map[string]struct{}{
+		"string":     {},
+		"int":        {},
+		"float64":    {},
+		"bool":       {},
+		"error":      {},
+		"byte":       {},
+		"rune":       {},
+		"uint":       {},
+		"int64":      {},
+		"uint64":     {},
+		"complex64":  {},
+		"complex128": {},
+		"float32":    {},
+		"int32":      {},
+	}
+
+	fset := token.NewFileSet()
+	node, err := parser.ParseFile(fset, sourceFilePath, nil, parser.AllErrors)
+	if err != nil {
+		return ""
+	}
+
+	imports := make(map[string]string)
+	for _, imp := range node.Imports {
+		pkgPath := strings.Trim(imp.Path.Value, "\"")
+		var alias string
+
+		if imp.Name != nil {
+			if imp.Name.Name == "_" || imp.Name.Name == "." {
+				continue
+			}
+			alias = imp.Name.Name
+		} else {
+			parts := strings.Split(pkgPath, "/")
+			alias = parts[len(parts)-1]
+		}
+
+		imports[alias] = pkgPath
+	}
+	// Set to store unique structs with their package paths
+	structSet := make(map[string]struct{})
+	funcSet := make(map[string]struct{})
+
+	var collectStructs func(expr ast.Expr)
+	collectStructs = func(expr ast.Expr) {
+		switch t := expr.(type) {
+		case *ast.Ident:
+			structName := t.Name
+			if _, isBuiltIn := builtInTypes[structName]; isBuiltIn {
+				return
+			}
+			structKey := fmt.Sprintf("%s.%s", node.Name.Name, structName)
+			structSet[structKey] = struct{}{}
+
+		case *ast.SelectorExpr:
+			if ident, ok := t.X.(*ast.Ident); ok {
+				pkgAlias := ident.Name
+				structName := t.Sel.Name
+				if pkgPath, exists := imports[pkgAlias]; exists {
+					structKey := fmt.Sprintf("%s.%s", pkgPath, structName)
+					structSet[structKey] = struct{}{}
+				} else {
+					structKey := fmt.Sprintf("%s.%s", pkgAlias, structName)
+					structSet[structKey] = struct{}{}
+				}
+			}
+
+		case *ast.StarExpr:
+			collectStructs(t.X)
+
+		case *ast.ArrayType:
+			collectStructs(t.Elt)
+
+		case *ast.MapType:
+			collectStructs(t.Key)
+			collectStructs(t.Value)
+
+		case *ast.StructType:
+			packageName := node.Name.Name
+			structSet[fmt.Sprintf("%s.<anonymous_struct>", packageName)] = struct{}{}
+		}
+	}
+
+	// Traverse the AST to collect structs
+	ast.Inspect(node, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.TypeSpec:
+			if _, ok := x.Type.(*ast.StructType); ok {
+				structName := x.Name.Name
+				packageName := node.Name.Name
+				structKey := fmt.Sprintf("%s.%s", packageName, structName)
+				structSet[structKey] = struct{}{}
+			}
+
+		case *ast.CompositeLit:
+			collectStructs(x.Type)
+
+		case *ast.ValueSpec:
+			if x.Type != nil {
+				collectStructs(x.Type)
+			}
+			for _, val := range x.Values {
+				collectStructs(val)
+			}
+
+		case *ast.Field:
+			collectStructs(x.Type)
+
+		case *ast.FuncDecl:
+			if x.Type.Params != nil {
+				for _, field := range x.Type.Params.List {
+					collectStructs(field.Type)
+				}
+			}
+			if x.Type.Results != nil {
+				for _, field := range x.Type.Results.List {
+					collectStructs(field.Type)
+				}
+			}
+		case *ast.CallExpr:
+			if sel, ok := x.Fun.(*ast.SelectorExpr); ok {
+				if ident, ok := sel.X.(*ast.Ident); ok {
+					pkgAlias := ident.Name
+					funcName := sel.Sel.Name
+					if pkgPath, exists := imports[pkgAlias]; exists {
+						// Construct the fully qualified function name
+						funcKey := fmt.Sprintf("%s.%s", pkgPath, funcName)
+						funcSet[funcKey] = struct{}{}
+					}
+				}
+			} else if ident, ok := x.Fun.(*ast.Ident); ok {
+				moduleName, relativePath := GetModuleName(sourceFilePath)
+				packageName, _ := GetPackageName(sourceFilePath)
+
+				if packageName != "main" {
+					relativePath = TrimParentFolder(relativePath)
+				}
+				var funcKey string
+				// Construct the function key conditionally to handle empty relativePath
+				if packageName == "main" {
+					// If the package is `main`, use the module name without extra path details
+					funcKey = fmt.Sprintf("%s/%s.%s", moduleName, relativePath, ident.Name)
+				} else {
+					if relativePath == "" {
+						funcKey = fmt.Sprintf("%s/%s.%s", moduleName, packageName, ident.Name)
+					} else {
+						funcKey = fmt.Sprintf("%s/%s/%s.%s", moduleName, relativePath, packageName, ident.Name)
+					}
+				}
+				funcSet[funcKey] = struct{}{}
+			}
+
+		default:
+		}
+		return true
+	})
+
+	data := ""
+	for structKey := range structSet {
+		var out bytes.Buffer
+		cmd := exec.Command("go", "doc", structKey)
+		cmd.Stdout = &out
+		if err := cmd.Run(); err != nil {
+			continue
+		}
+		data += (out.String()) + "\n"
+	}
+	for structKey := range funcSet {
+		var out bytes.Buffer
+		cmd := exec.Command("go", "doc", structKey)
+		cmd.Stdout = &out
+		if err := cmd.Run(); err != nil {
+			continue
+		}
+		data += (out.String()) + "\n"
+	}
+	return data
+}
+
+func GetModuleName(sourceFilePath string) (string, string) {
+	file, err := os.Open("go.mod")
+	if err != nil {
+		return "", ""
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "module ") {
+			curDir, _ := os.Getwd()
+			dirPath := filepath.Dir(sourceFilePath)
+
+			relativePath, _ := filepath.Rel(curDir, dirPath)
+
+			if relativePath == "." {
+				return strings.TrimSpace(strings.TrimPrefix(line, "module ")), ""
+			}
+
+			return strings.TrimSpace(strings.TrimPrefix(line, "module ")), relativePath
+		}
+	}
+
+	return "", ""
+}
+
+func GetPackageName(sourceFilePath string) (string, error) {
+	fset := token.NewFileSet()
+	node, err := parser.ParseFile(fset, sourceFilePath, nil, parser.PackageClauseOnly)
+	if err != nil {
+		return "", err
+	}
+	return node.Name.Name, nil
+}
+
+func TrimParentFolder(path string) string {
+	parts := strings.Split(path, string(filepath.Separator))
+	if len(parts) > 1 {
+		return filepath.Join(parts[:len(parts)-1]...) // Exclude the last part (file name's parent directory)
+	}
+	return path
 }
