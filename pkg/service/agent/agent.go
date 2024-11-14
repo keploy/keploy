@@ -256,6 +256,7 @@ func (a *Agent) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) e
 	for n, settings := range keployNetworks {
 		if n == opts.DockerNetwork {
 			keployIPv4 = settings.IPAddress //keploy container IP
+			a.logger.Info(fmt.Sprintf("Keploy container IP is: %s", keployIPv4))
 			break
 		}
 	}
