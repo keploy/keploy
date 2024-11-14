@@ -6,7 +6,7 @@ replace github.com/jackc/pgproto3/v2 => github.com/keploy/pgproto3/v2 v2.0.5
 
 require (
 	github.com/Microsoft/go-winio v0.6.1 // indirect
-	github.com/cilium/ebpf v0.13.2
+	github.com/cilium/ebpf v0.16.0
 	github.com/cloudflare/cfssl v1.6.4
 	github.com/docker/distribution v2.8.2+incompatible // indirect
 	github.com/docker/docker v24.0.4+incompatible
@@ -20,11 +20,11 @@ require (
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.0.2 // indirect
-	github.com/spf13/cobra v1.8.0
+	github.com/spf13/cobra v1.8.1
 	go.mongodb.org/mongo-driver v1.11.6
 	go.uber.org/zap v1.26.0
-	golang.org/x/crypto v0.24.0 // indirect
-	golang.org/x/sys v0.21.0
+	golang.org/x/crypto v0.29.0 // indirect
+	golang.org/x/sys v0.27.0
 	google.golang.org/protobuf v1.34.1 // indirect
 )
 
@@ -66,7 +66,7 @@ require (
 	github.com/yudai/golcs v0.0.0-20170316035057-ecda9a501e82 // indirect
 	github.com/yudai/pp v2.0.1+incompatible // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
-	golang.org/x/exp v0.0.0-20240103183307-be819d1f06fc // indirect
+	golang.org/x/exp v0.0.0-20241108190413-2d47ceb2692f // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	k8s.io/kube-openapi v0.0.0-20231010175941-2dd684a91f00 // indirect
 	sigs.k8s.io/yaml v1.4.0 // indirect
@@ -88,19 +88,19 @@ require (
 	github.com/klauspost/compress v1.17.7 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/mattn/go-runewidth v0.0.15 // indirect
+	github.com/mattn/go-runewidth v0.0.16 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/protocolbuffers/protoscope v0.0.0-20221109213918-8e7a6aafa2c9
-	github.com/rivo/uniseg v0.4.4 // indirect
+	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/spf13/pflag v1.0.5
 	github.com/weppos/publicsuffix-go v0.15.1-0.20210511084619-b1f36a2d6c0b // indirect
 	github.com/zmap/zcrypto v0.0.0-20210511125630-18f1e0152cfc // indirect
 	github.com/zmap/zlint/v3 v3.1.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/mod v0.17.0 // indirect
-	golang.org/x/net v0.26.0
-	golang.org/x/text v0.16.0
-	golang.org/x/tools v0.21.1-0.20240508182429-e35e4ccd0d2d // indirect
+	golang.org/x/mod v0.22.0 // indirect
+	golang.org/x/net v0.31.0
+	golang.org/x/text v0.20.0
+	golang.org/x/tools v0.27.0 // indirect
 	k8s.io/klog/v2 v2.120.1 // indirect
 )
 
@@ -122,13 +122,25 @@ require (
 	github.com/xdg-go/scram v1.1.1
 	github.com/xdg-go/stringprep v1.0.4
 	github.com/yudai/gojsondiff v1.0.0
-	golang.org/x/sync v0.7.0
-	golang.org/x/term v0.21.0
+	golang.org/x/sync v0.9.0
+	golang.org/x/term v0.26.0
 	gopkg.in/yaml.v2 v2.4.0
 	sigs.k8s.io/kustomize/kyaml v0.17.2
 )
 
-require github.com/perimeterx/marshmallow v1.1.5 // indirect
+require (
+	github.com/cosiner/argv v0.1.0 // indirect
+	github.com/cpuguy83/go-md2man/v2 v2.0.5 // indirect
+	github.com/derekparker/trie v0.0.0-20230829180723-39f4de51ef7d // indirect
+	github.com/go-delve/delve v1.23.1 // indirect
+	github.com/go-delve/liner v1.2.3-0.20231231155935-4726ab1d7f62 // indirect
+	github.com/google/go-dap v0.12.0 // indirect
+	github.com/hashicorp/golang-lru v1.0.2 // indirect
+	github.com/perimeterx/marshmallow v1.1.5 // indirect
+	github.com/russross/blackfriday/v2 v2.1.0 // indirect
+	go.starlark.net v0.0.0-20240925182052-1207426daebd // indirect
+	golang.org/x/arch v0.12.0 // indirect
+)
 
 require (
 	github.com/alecthomas/chroma v0.10.0 // indirect

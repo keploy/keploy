@@ -104,6 +104,7 @@ class NewTests(BaseModel):
 Example output:
 ```yaml
 language: {{ .language }}
+language version: {{.language_version}}
 existing_test_function_signature: |
   ...
 new_tests:

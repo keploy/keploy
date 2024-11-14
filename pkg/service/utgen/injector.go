@@ -25,7 +25,50 @@ func NewInjectorBuilder(logger *zap.Logger, language string) *Injector {
 
 	return injectBuilder
 }
+func (i *Injector) getLanguageVersion() (string, error) {
+	switch strings.ToLower(i.language) {
+	case "go":
+		out, err := exec.Command("go", "version").Output()
+		if err != nil {
+			return "", fmt.Errorf("failed to get Go version: %w", err)
+		}
+		// Extract only the version part ("go1.22.0") if it's "go version go1.22.0 linux/amd64"
+		parts := strings.Fields(string(out))
+		if len(parts) >= 3 {
+			return parts[2], nil
+		}
+		return "", fmt.Errorf("unexpected output format for Go version: %s", string(out))
+	case "java":
+		out, err := exec.Command("java", "-version").CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("failed to get Java version: %w", err)
+		}
+		// Use regex to extract the version number from the output
+		re := regexp.MustCompile(`"(\d+\.\d+\.\d+)"`)
+		if match := re.FindStringSubmatch(string(out)); len(match) > 1 {
+			return match[1], nil
+		}
+		return "", fmt.Errorf("unexpected output format for Java version: %s", string(out))
 
+	case "python":
+		out, err := exec.Command("python", "--version").Output()
+		if err != nil {
+			out, err = exec.Command("python3", "--version").Output()
+			if err != nil {
+				return "", fmt.Errorf("failed to get Python version: %w", err)
+			}
+		}
+		return strings.TrimSpace(string(out)), nil
+	case "typescript", "javascript":
+		out, err := exec.Command("node", "-v").Output()
+		if err != nil {
+			return "", fmt.Errorf("failed to get Node.js version: %w", err)
+		}
+		return strings.TrimSpace(string(out)), nil
+	default:
+		return "", fmt.Errorf("unsupported language: %s", i.language)
+	}
+}
 func (i *Injector) libraryInstalled() ([]string, error) {
 	switch strings.ToLower(i.language) {
 	case "go":
@@ -33,17 +76,19 @@ func (i *Injector) libraryInstalled() ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to get Go dependencies: %w", err)
 		}
-		return i.extractGoPackageNames(out), nil
+		return i.extractGoDependencies(out), nil
 
 	case "java":
-		out, err := exec.Command("mvn", "dependency:list", "-DincludeScope=compile", "-Dstyle.color=never", "-B").Output()
+		cmd := exec.Command("mvn", "dependency:list", "-DincludeScope=compile", "-Dstyle.color=never", "-B")
+		out, err := cmd.Output()
 		if err != nil {
 			return nil, fmt.Errorf("failed to get Java dependencies: %w", err)
 		}
 		return i.extractJavaDependencies(out), nil
 
 	case "python":
-		out, err := exec.Command("pip", "freeze").Output()
+		cmd := exec.Command("pip", "freeze")
+		out, err := cmd.Output()
 		if err != nil {
 			i.logger.Info("Error getting Python dependencies with `pip` command, trying `pip3` command")
 			out, err = exec.Command("pip3", "freeze").Output()
@@ -51,42 +96,44 @@ func (i *Injector) libraryInstalled() ([]string, error) {
 				return nil, fmt.Errorf("failed to get Python dependencies: %w", err)
 			}
 		}
-		return i.extractPackageNames(out), nil
+		return i.extractPythonDependencies(out), nil
 
 	case "typescript", "javascript":
-		cmd := exec.Command("sh", "-c", "npm list --depth=0 --parseable | sed 's|.*/||'")
+		cmd := exec.Command("sh", "-c", "npm list --depth=0")
 		out, err := cmd.Output()
 		if err != nil {
 			return nil, fmt.Errorf("failed to get JavaScript/TypeScript dependencies: %w", err)
 		}
-		return extractString(out), nil
+		return i.extractJSDependencies(out), nil
 
 	default:
 		return nil, fmt.Errorf("unsupported language: %s", i.language)
 	}
 }
 
-func (i *Injector) extractGoPackageNames(output []byte) []string {
+func (i *Injector) extractGoDependencies(output []byte) []string {
 	lines := strings.Split(string(output), "\n")
 	var packages []string
 	for _, line := range lines {
 		if len(line) > 0 {
 			parts := strings.Split(line, " ")
 			if len(parts) > 0 {
-				packages = append(packages, parts[0])
+				packages = append(packages, line)
 			}
 		}
 	}
 	return packages
 }
 
-func (i *Injector) extractPackageNames(output []byte) []string {
+func (i *Injector) extractPythonDependencies(output []byte) []string {
 	lines := strings.Split(string(output), "\n")
 	var packages []string
 	for _, line := range lines {
 		parts := strings.Split(line, "==")
-		if len(parts) > 0 {
-			packages = append(packages, parts[0])
+		if len(parts) == 2 {
+			// Append the version directly to the dependency name in "name==version" format
+			dep := fmt.Sprintf("%s==%s", parts[0], parts[1])
+			packages = append(packages, dep)
 		}
 	}
 	return packages
@@ -525,14 +572,13 @@ func (i *Injector) updateTypeScriptImports(importedContent string, newImports []
 	}
 	return updatedContent, importLength, nil
 }
-
 func (i *Injector) extractJavaDependencies(output []byte) []string {
 	lines := strings.Split(string(output), "\n")
 	var dependencies []string
 	inDependencySection := false
 
+	// Regular expression to match Maven dependency output format
 	depRegex := regexp.MustCompile(`^\[INFO\]\s+[\+\|\\\-]{1,2}\s+([\w\.\-]+:[\w\.\-]+):jar:([\w\.\-]+):([\w\.\-]+)`)
-
 	for _, line := range lines {
 		cleanedLine := strings.TrimSpace(line)
 		if strings.HasPrefix(cleanedLine, "[INFO]") {
@@ -556,18 +602,19 @@ func (i *Injector) extractJavaDependencies(output []byte) []string {
 				dep := fmt.Sprintf("%s:%s", groupArtifact, version)
 				dependencies = append(dependencies, dep)
 			} else {
+				// Fallback to manual parsing if regex doesn't match
 				cleanedLine = strings.TrimPrefix(cleanedLine, "[INFO]")
 				cleanedLine = strings.TrimSpace(cleanedLine)
-
 				cleanedLine = strings.TrimPrefix(cleanedLine, "+-")
 				cleanedLine = strings.TrimPrefix(cleanedLine, "\\-")
 				cleanedLine = strings.TrimPrefix(cleanedLine, "|")
-
 				cleanedLine = strings.TrimSpace(cleanedLine)
 
 				depParts := strings.Split(cleanedLine, ":")
 				if len(depParts) >= 5 {
-					dep := fmt.Sprintf("%s:%s:%s", depParts[0], depParts[1], depParts[3])
+					groupArtifact := fmt.Sprintf("%s:%s", depParts[0], depParts[1])
+					version := depParts[3]
+					dep := fmt.Sprintf("%s:%s", groupArtifact, version)
 					dependencies = append(dependencies, dep)
 				}
 			}
@@ -575,7 +622,34 @@ func (i *Injector) extractJavaDependencies(output []byte) []string {
 	}
 	return dependencies
 }
+func (i *Injector) extractJSDependencies(output []byte) []string {
+	lines := strings.Split(string(output), "\n")
+	var packages []string
+	for _, line := range lines {
+		// Trim whitespace and remove any leading special characters
+		line = strings.TrimSpace(line)
+		line = strings.TrimPrefix(line, "├──")
+		line = strings.TrimPrefix(line, "└──")
+		line = strings.TrimPrefix(line, "│──")
+		line = strings.TrimPrefix(line, "──")
+		line = strings.TrimSpace(line) // Trim again to remove any whitespace left after trimming prefixes
 
+		if line == "" {
+			continue
+		}
+
+		// Find the last occurrence of "@" to split the name and version
+		lastAt := strings.LastIndex(line, "@")
+		if lastAt > 0 {
+			name := line[:lastAt]
+			version := line[lastAt+1:]
+			// Combine name and version into a single string "name@version"
+			dep := fmt.Sprintf("%s@%s", name, version)
+			packages = append(packages, dep)
+		}
+	}
+	return packages
+}
 func (i *Injector) addCommentToTest(testCode string) string {
 	comment := " Test generated using Keploy"
 	switch i.language {

@@ -157,7 +157,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 		iterationCount := 0
 		g.lang = GetCodeLanguage(g.srcPath)
 
-		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt, g.ai.FunctionUnderTest, g.logger)
+		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, "", g.additionalPrompt, g.ai.FunctionUnderTest, g.logger)
 		g.injector = NewInjectorBuilder(g.logger, g.lang)
 
 		if err != nil {
@@ -202,7 +202,10 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 					}
 				}
 			}
-
+			g.promptBuilder.LanguageVersion, err = g.injector.getLanguageVersion()
+			if err != nil {
+				utils.LogError(g.logger, err, "Error getting language version")
+			}
 			g.promptBuilder.InstalledPackages, err = g.injector.libraryInstalled()
 			if err != nil {
 				utils.LogError(g.logger, err, "Error getting installed packages")
