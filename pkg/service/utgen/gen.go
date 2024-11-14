@@ -414,8 +414,8 @@ func (g *UnitTestGenerator) runCoverage() error {
 	g.logger.Info(fmt.Sprintf("Test command completed in %v", formatDuration(duration)))
 
 	if err != nil {
-		utils.LogError(g.logger, err, "Error running test command")
-		return fmt.Errorf("error running test command: %w", err)
+		g.logger.Warn("Test command failed. Ensure no tests are failing, and rerun the command.")
+		return fmt.Errorf("error running test command: %s", g.cmd)
 	}
 	if exitCode != 0 {
 		utils.LogError(g.logger, err, "Error running test command")
@@ -444,11 +444,16 @@ func (g *UnitTestGenerator) GenerateTests(ctx context.Context, iterationCount in
 	default:
 	}
 
+	requestPurpose := TestForFile
+	if len(g.ai.FunctionUnderTest) > 0 {
+		requestPurpose = TestForFunction
+	}
 	aiRequest := AIRequest{
-		MaxTokens: 4096,
-		Prompt:    *g.prompt,
-		SessionID: g.ai.SessionID,
-		Iteration: iterationCount,
+		MaxTokens:      4096,
+		Prompt:         *g.prompt,
+		SessionID:      g.ai.SessionID,
+		Iteration:      iterationCount,
+		RequestPurpose: requestPurpose,
 	}
 	response, err := g.ai.Call(ctx, CompletionParams{}, aiRequest, false)
 	if err != nil {

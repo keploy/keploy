@@ -39,7 +39,7 @@ body:
   id: environment
   attributes:
     label: "🧱 Your Environment"
-    description: "What exact version of Appwrite? What Appwrite SDK and version are you using? Is your environment customized in any way?"
+    description: "What exact version of Keploy? Is your environment customized in any way?"
     placeholder: "I use AWS for ..."
   validations:
     required: false
