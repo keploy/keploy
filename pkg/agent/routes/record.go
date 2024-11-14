@@ -25,17 +25,18 @@ func New(r chi.Router, agent agent.Service, logger *zap.Logger) {
 		logger: logger,
 		agent:  agent,
 	}
+
 	r.Route("/agent", func(r chi.Router) {
 		r.Get("/health", a.Health)
 		r.Post("/incoming", a.HandleIncoming)
 		r.Post("/outgoing", a.HandleOutgoing)
 		r.Post("/mock", a.MockOutgoing)
 		r.Post("/setmocks", a.SetMocks)
+		r.Post("/testbench", a.SendKtInfo)
 		r.Post("/register", a.RegisterClients)
 		r.Get("/consumedmocks", a.GetConsumedMocks)
 		r.Post("/unregister", a.DeRegisterClients)
 	})
-
 }
 
 func (a *AgentRequest) Health(w http.ResponseWriter, r *http.Request) {

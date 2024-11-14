@@ -125,6 +125,7 @@ func (a *App) SetupDocker() error {
 		return err
 	}
 
+	a.cmd = "sudo docker run -p 8080:8080 --name MongoApp --pid=container:keploy-init --network keploy-network gin-app:1.0"
 	return nil
 }
 

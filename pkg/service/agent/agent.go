@@ -287,3 +287,7 @@ func (a *Agent) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) e
 	}
 	return nil
 }
+
+func (a *Agent) SendKtInfo(ctx context.Context, tb models.TestBenchReq) error {
+	return a.Hooks.SendKtInfo(ctx, tb)
+}

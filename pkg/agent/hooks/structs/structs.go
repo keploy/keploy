@@ -40,3 +40,8 @@ type AgentInfo struct {
 	DNSPort          int32
 	KeployAgentInode uint64
 }
+
+type TestBenchInfo struct {
+	KeployTClientPID uint32
+	KeployTAgentPID  uint32
+}

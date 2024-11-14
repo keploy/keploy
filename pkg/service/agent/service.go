@@ -15,6 +15,7 @@ type Service interface {
 	GetConsumedMocks(ctx context.Context, id uint64) ([]string, error)
 	RegisterClient(ctx context.Context, opts models.SetupOptions) error
 	DeRegisterClient(ctx context.Context, opts models.UnregisterReq) error
+	SendKtInfo(ctx context.Context, tb models.TestBenchReq) error
 }
 
 type Options struct {

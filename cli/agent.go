@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/spf13/cobra"
@@ -41,6 +42,8 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 			if port == 0 {
 				port = 8086
 			}
+
+			fmt.Println("AGENT's RUNNING PID", os.Getpid())
 
 			var a agent.Service
 			var ok bool

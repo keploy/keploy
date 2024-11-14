@@ -373,7 +373,9 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	isAgentRunning := a.isAgentRunning(ctx)
 	if opts.EnableTesting {
 		isAgentRunning = false
+		// get the client pid of the test client and send it to the record agent
 	}
+
 	if !isAgentRunning {
 		// Start the keploy agent as a detached process and pipe the logs into a file
 		if !isDockerCmd && runtime.GOOS != "linux" {
@@ -419,6 +421,33 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			if err := agentCmd.Start(); err != nil {
 				utils.LogError(a.logger, err, "failed to start keploy agent")
 				return 0, err
+			}
+
+			if opts.Mode == models.MODE_TEST && opts.EnableTesting {
+				// Wait briefly to allow the process to start
+				// Wait a bit longer to allow all processes to start
+				// time.Sleep(2 * time.Second)
+
+				// // Find the PID using pgrep (requires knowing part of the process name)
+				// output, err := exec.Command("pgrep", "-f", "keployT agent").Output()
+				// if err != nil {
+				// 	utils.LogError(a.logger, err, "failed to find detached process PID")
+				// 	return 0, err
+				// }
+
+				// fmt.Println("output::::::", string(output))
+				// // Split the output by newline to get all PIDs and pick the last one
+				// pids := strings.Split(strings.TrimSpace(string(output)), "\n")
+				// lastPID := pids[len(pids)-1]
+
+				// detachedPID, err := strconv.Atoi(lastPID)
+				// if err != nil {
+				// 	utils.LogError(a.logger, err, "failed to parse detached process PID")
+				// 	return 0, err
+				// }
+
+				// a.logger.Info("detached keploy agent PID", zap.Int("detachedPID", detachedPID))
+				a.SendKtPID(ctx, clientID)
 			}
 			a.logger.Info("keploy agent started", zap.Int("pid", agentCmd.Process.Pid))
 		}
@@ -468,6 +497,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		utils.LogError(a.logger, err, "failed to setup app")
 		return 0, err
 	}
+
 	if isDockerCmd {
 		opts.DockerNetwork = usrApp.KeployNetwork
 		inode, err := a.Initcontainer(ctx, app.Options{
@@ -750,7 +780,6 @@ func (a *AgentClient) isAgentRunning(ctx context.Context) bool {
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to send request to the agent server")
 	}
-
 	resp, err := a.client.Do(req)
 	if err != nil {
 		a.logger.Info("Keploy agent is not running in background, starting the agent")

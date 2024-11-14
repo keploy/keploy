@@ -24,6 +24,7 @@ type Hooks interface {
 	SendKeployClientInfo(clientID uint64, clientInfo structs.ClientInfo) error
 	DeleteKeployClientInfo(clientID uint64) error
 	SendClientProxyInfo(clientID uint64, proxyInfo structs.ProxyInfo) error
+	SendKtInfo(ctx context.Context, tb models.TestBenchReq) error
 }
 
 type HookCfg struct {
@@ -53,7 +54,7 @@ type Proxy interface {
 }
 
 type ProxyOptions struct {
-	ProxyPort  uint32
+	ProxyPort uint32
 	// DNSIPv4Addr is the proxy IP returned by the DNS server. default is loopback address
 	DNSIPv4Addr string
 	// DNSIPv6Addr is the proxy IP returned by the DNS server. default is loopback address

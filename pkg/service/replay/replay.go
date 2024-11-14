@@ -94,7 +94,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		case <-ctx.Done():
 			break
 		default:
-			fmt.Println("stopping Keploy fromm test mode")
+			fmt.Println("stopping Keploy from test mode")
 			unregister := models.UnregisterReq{
 				ClientID: r.config.ClientID,
 				Mode:     models.MODE_TEST,
@@ -347,7 +347,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		return &InstrumentState{}, nil
 	}
 	// Instrument will setup the environment and start the hooks and proxy
-	clientID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST})
+	clientID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, EnableTesting: r.config.EnableTesting})
 	if err != nil {
 		stopReason := "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)

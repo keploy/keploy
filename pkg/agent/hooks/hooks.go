@@ -60,6 +60,9 @@ type Hooks struct {
 	proxyInfoMap     *ebpf.Map
 	//--------------
 
+	// test bench maps
+	testBenchInfoMap *ebpf.Map
+
 	// eBPF C shared objectsobjects
 	// ebpf objects and events
 	socket   link.Link
@@ -147,6 +150,7 @@ func (h *Hooks) load(opts agent.HookCfg) error {
 	h.clientRegistrationMap = objs.KeployClientRegistrationMap
 	h.agentRegistartionMap = objs.KeployAgentRegistrationMap
 	h.proxyInfoMap = objs.KeployProxyInfo
+	h.testBenchInfoMap = objs.TestbenchInfoMap
 
 	h.objects = objs
 
@@ -525,6 +529,20 @@ func (h *Hooks) DeleteKeployClientInfo(id uint64) error {
 
 func (h *Hooks) SendClientProxyInfo(clientID uint64, proxyInfo structs.ProxyInfo) error {
 	err := h.SendProxyInfo(clientID, proxyInfo)
+	if err != nil {
+		h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))
+		return err
+	}
+	return nil
+}
+
+func (h *Hooks) SendKtInfo(ctx context.Context, tb models.TestBenchReq) error {
+	tbInfo := structs.TestBenchInfo{
+		KeployTClientPID: uint32(tb.KtPid),
+		KeployTAgentPID:  uint32(tb.KaPid),
+	}
+	fmt.Println("Test bench info", tbInfo)
+	err := h.SendTestBenchInfo(tbInfo)
 	if err != nil {
 		h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))
 		return err
