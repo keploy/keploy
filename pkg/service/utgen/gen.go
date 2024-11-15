@@ -41,7 +41,6 @@ type UnitTestGenerator struct {
 	lang             string
 	cur              *Cursor
 	failedTests      []*models.FailedUT
-	modelDetails     string
 	prompt           *Prompt
 	ai               *AIClient
 	logger           *zap.Logger

@@ -734,7 +734,7 @@ func (i *Injector) getGoImportData(sourceFilePath string) string {
 					}
 				}
 			} else if ident, ok := x.Fun.(*ast.Ident); ok {
-				moduleName, relativePath := GetModuleName(sourceFilePath)
+				moduleName, relativePath := GetModuleName(i.logger, sourceFilePath)
 				packageName, _ := GetPackageName(sourceFilePath)
 
 				if packageName != "main" {
@@ -782,13 +782,17 @@ func (i *Injector) getGoImportData(sourceFilePath string) string {
 	return data
 }
 
-func GetModuleName(sourceFilePath string) (string, string) {
+func GetModuleName(logger *zap.Logger, sourceFilePath string) (string, string) {
 	file, err := os.Open("go.mod")
 	if err != nil {
 		return "", ""
 	}
-	defer file.Close()
-
+	defer func() {
+		if err := file.Close(); err != nil {
+			// Handle the error appropriately
+			logger.Error("Error closing file", zap.Error(err))
+		}
+	}()
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := scanner.Text()
