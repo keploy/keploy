@@ -42,12 +42,10 @@ func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.L
 
 	switch cmd {
 	case "agent":
-
 		return agent.New(logger, commonServices.Instrumentation.Hooks, commonServices.Instrumentation.Proxy, commonServices.Instrumentation.Tester, client), nil
 	default:
 		return nil, errors.New("invalid command")
 	}
-
 }
 
 func GetAgentService(_ context.Context, c *config.Config, client docker.Client, logger *zap.Logger) (*CommonInternalServices, error) {

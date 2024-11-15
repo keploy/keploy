@@ -124,7 +124,6 @@ func (a *App) SetupDocker() error {
 		utils.LogError(a.logger, err, "failed to attach init pid")
 		return err
 	}
-
 	return nil
 }
 
@@ -284,7 +283,6 @@ func (a *App) attachInitPid(_ context.Context) error {
 		return fmt.Errorf("no command provided to modify")
 	}
 
-	// Add the --pid=container:<initContainer> flag to the command
 	pidMode := fmt.Sprintf("--pid=container:%s", "keploy-init")
 	// Inject the pidMode flag after 'docker run' in the command
 	parts := strings.SplitN(a.cmd, " ", 3) // Split by first two spaces to isolate "docker run"
@@ -508,7 +506,6 @@ func (a *App) run(ctx context.Context) models.AppError {
 	}
 
 	var err error
-	fmt.Println("userCmd", userCmd)
 
 	cmdErr := utils.ExecuteCommand(ctx, a.logger, userCmd, cmdCancel, 25*time.Second)
 	if cmdErr.Err != nil {

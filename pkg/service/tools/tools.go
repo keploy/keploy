@@ -81,11 +81,19 @@ func (t *Tools) Update(ctx context.Context) error {
 	t.logger.Info("Updating to Version: " + latestVersion)
 
 	downloadURL := ""
-	if runtime.GOARCH == "amd64" {
-		downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
-	} else {
-		downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
+
+	if runtime.GOOS == "linux" {
+		if runtime.GOARCH == "amd64" {
+			downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
+		} else {
+			downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
+		}
 	}
+
+	if runtime.GOOS == "darwin" {
+		downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz"
+	}
+
 	err = t.downloadAndUpdate(ctx, t.logger, downloadURL)
 	if err != nil {
 		return err
