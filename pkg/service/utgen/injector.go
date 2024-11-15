@@ -770,9 +770,9 @@ func (i *Injector) getGoImportData(sourceFilePath string) string {
 		}
 		data += (out.String()) + "\n"
 	}
-	for structKey := range funcSet {
+	for funcKey := range funcSet {
 		var out bytes.Buffer
-		cmd := exec.Command("go", "doc", structKey)
+		cmd := exec.Command("go", "doc", funcKey)
 		cmd.Stdout = &out
 		if err := cmd.Run(); err != nil {
 			continue
