@@ -201,8 +201,12 @@ func (ai *AIClient) Call(ctx context.Context, completionParams CompletionParams,
 				{Role: "user", Content: aiRequest.Prompt.User},
 			}
 		}
+		model := "gpt-4o"
+		if ai.Model != "" {
+			model = ai.Model
+		}
 		completionParams = CompletionParams{
-			Model:    "gpt-4o",
+			Model:    model,
 			Messages: messages,
 		}
 
