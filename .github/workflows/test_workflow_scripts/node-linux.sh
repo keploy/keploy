@@ -66,8 +66,8 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
-mocks_file="keploy/test-set-0/tests/test-5.yaml"
-sed -i 's/"page":1/"page":4/' "$mocks_file"
+# mocks_file="keploy/test-set-0/tests/test-5.yaml"
+# sed -i 's/"page":1/"page":4/' "$mocks_file"
 
 sleep 5
 echo "Starting test sessions"
