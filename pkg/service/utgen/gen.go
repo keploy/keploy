@@ -235,7 +235,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				}
 
 				// modify the source code for refactoring.
-				if strings.Contains(testsDetails.RefactoredSourceCode, "blank output don't refactor code") {
+				if !(strings.Contains(testsDetails.RefactoredSourceCode, "blank output don't refactor code") || strings.Contains(testsDetails.RefactoredSourceCode, "no refactoring")) {
 					if err := os.WriteFile(g.srcPath, []byte(testsDetails.RefactoredSourceCode), 0644); err != nil {
 						return fmt.Errorf("failed to refactor source code:%w", err)
 					}
