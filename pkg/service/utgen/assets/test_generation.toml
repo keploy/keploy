@@ -73,6 +73,13 @@ The following packages are already installed in the environment. Use these when 
 {{ .failed_tests_section | trim }}
 {{ end }}
 
+{{if .module_name | trim}}
+The module name of the go project is 
+<module_name>
+{{.module_name | trim}}
+</module_name>
+{{end}}
+
 ## Code Coverage
 The following is the existing code coverage report. Use this to determine what tests to write, as you should only write tests that increase the overall coverage:
 =========

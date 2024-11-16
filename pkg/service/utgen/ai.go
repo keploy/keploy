@@ -212,6 +212,29 @@ func (ai *AIClient) Call(ctx context.Context, completionParams CompletionParams,
 
 	}
 
+	if completionParams.Model == "" {
+		completionParams.Model = "gpt-4o"
+		if ai.Model != "" {
+			completionParams.Model = ai.Model
+		}
+	}
+
+	if len(completionParams.Messages) == 0 {
+		var messages []Message
+		if aiRequest.Prompt.System == "" {
+			messages = []Message{
+				{Role: "user", Content: aiRequest.Prompt.User},
+			}
+		} else {
+			messages = []Message{
+				{Role: "system", Content: aiRequest.Prompt.System},
+				{Role: "user", Content: aiRequest.Prompt.User},
+			}
+		}
+
+		completionParams.Messages = messages
+	}
+
 	requestBody, err := json.Marshal(completionParams)
 	if err != nil {
 		return "", fmt.Errorf("error marshalling request body: %v", err)

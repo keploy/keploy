@@ -204,7 +204,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 
 			g.promptBuilder.InstalledPackages, err = g.injector.libraryInstalled()
 			g.promptBuilder.ImportDetails = g.injector.getModelDetails(g.srcPath)
-
+			g.promptBuilder.ModuleName, _ = g.injector.GetModuleName(g.srcPath)
 			if err != nil {
 				utils.LogError(g.logger, err, "Error getting installed packages")
 			}
