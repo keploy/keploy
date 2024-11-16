@@ -172,7 +172,7 @@ Use block scalar('|') to format each YAML output.
 
 {{- if .import_details | trim }}
 Imported Structs Overview:
-Below is a list of all structs imported and utilized within this file. These structs are integral to the functionality, 
+Below is a list of all structs and functions imported and utilized within this file. These structs are integral to the functionality, 
 and they should be carefully considered when creating mocks and tests. This list serves as a reference for dependencies
 and external types that interact with the main code.
 
