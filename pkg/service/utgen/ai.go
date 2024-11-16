@@ -190,6 +190,16 @@ func (ai *AIClient) Call(ctx context.Context, completionParams CompletionParams,
 		apiBaseURL = ai.APIBase
 	} else {
 		apiBaseURL = "https://api.openai.com/v1"
+	}
+
+	if completionParams.Model == "" {
+		completionParams.Model = "gpt-4o"
+		if ai.Model != "" {
+			completionParams.Model = ai.Model
+		}
+	}
+
+	if len(completionParams.Messages) == 0 {
 		var messages []Message
 		if aiRequest.Prompt.System == "" {
 			messages = []Message{
@@ -201,15 +211,8 @@ func (ai *AIClient) Call(ctx context.Context, completionParams CompletionParams,
 				{Role: "user", Content: aiRequest.Prompt.User},
 			}
 		}
-		model := "gpt-4o"
-		if ai.Model != "" {
-			model = ai.Model
-		}
-		completionParams = CompletionParams{
-			Model:    model,
-			Messages: messages,
-		}
 
+		completionParams.Messages = messages
 	}
 
 	requestBody, err := json.Marshal(completionParams)
