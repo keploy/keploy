@@ -3,75 +3,17 @@ system="""\
 """
 
 user="""\
-## Overview
-You are a code assistant designed to accept a {{ .language }} source file and a {{ .language }} test file. 
-Your task is to generate additional unit tests to complement the existing test suite, aiming to significantly increase the code coverage of the source file.
 
-### Requirements for Creating Tests:
+You are an advanced AI system specialized in automated test generation. Your task is to analyze source code and existing tests, then create additional test cases to significantly increase overall code coverage. Pay special attention to creating effective mocks for external dependencies and considering various test scenarios.
+First, carefully review the following information:
 
-- **Analyze the Provided Code:**
-  - Understand its purpose, inputs, outputs, and key logic or calculations.
+<source_file>
+<name>{{.source_file_name}}</name>
+<content>
+{{ .source_file_numbered | trim}}
+</content>
+</source_file>
 
-- **Utilize the Code Coverage Report:**
-  - Identify specific parts of the code not yet covered by tests.
-  - Focus on uncovered lines, branches, and conditions.
-
-- **Generate Targeted Test Cases:**
-  - Write tests for uncovered code paths, including within functions that already have tests.
-  - Include edge cases, error conditions, and complex logic scenarios.
-
-- **Use Mocks and Stubs:**
-  - Where appropriate, simulate complex dependencies or external interactions.
-
-- **Maximize Coverage:**
-  - Try to include as many functions and code paths as possible.
-  - Aim to cover all branches, error handling paths, and edge cases.
-
-- **Ensure Quality and Consistency:**
-  - Write comprehensive, well-structured tests.
-  - Follow the same style and conventions as the existing test suite.
-  - Ensure test names are unique within the test suite.
-
-- **Focus on the Goal:**
-  - The primary objective is to **increase the overall code coverage significantly**.
-  - Do not include the code coverage report or any policies in your response.
-
-{{ if .function_under_test }}
-- **Focus Function:**  
-  - You must generate test cases specifically targeting the function named `{{ .function_under_test }}`.  
-  - Ensure that the tests for this function cover all logic paths, edge cases, and error handling scenarios.
-{{ end }}
-
-{{ if .additional_command }}
-- {{ .additional_command }}
-{{ end }}
-
-## Source File
-Here is the source file that you will be writing tests against, called `{{ .source_file_name }}`. Line numbers have been added for clarity and are not part of the original code.
-=========
-{{ .source_file_numbered | trim }}
-=========
-
-## Test File
-Here is the file that contains the existing tests, called `{{ .test_file_name }}`.
-=========
-{{ .test_file | trim }}
-=========
-
-## Installed Packages
-The following packages are already installed in the environment. Use these when writing tests to avoid redundant installations:
-
-=========
-{{ .installed_packages | trim }}
-=========
-
-{{ if .additional_includes_section | trim }}
-{{ .additional_includes_section | trim }}
-{{ end }}
-
-{{ if .failed_tests_section | trim }}
-{{ .failed_tests_section | trim }}
-{{ end }}
 
 {{if .module_name | trim}}
 The module name of the go project is 
@@ -80,15 +22,80 @@ The module name of the go project is
 </module_name>
 {{end}}
 
-## Code Coverage
-The following is the existing code coverage report. Use this to determine what tests to write, as you should only write tests that increase the overall coverage:
-=========
-{{ .code_coverage_report| trim }}
-=========
+<existing_test_file>
+<name>{{.test_file_name}}</name>
+<content>
+{{.test_file | trim}}
+</content>
+</existing_test_file>
+
+<code_coverage_report>
+{{.code_coverage_report| trim}}
+</code_coverage_report>
+
+<installed_packages>
+{{.installed_packages | trim}}
+</installed_packages>
+
+<language>{{.language}}</language>
+
+{{if .additional_includes_section | trim}}
+<additional_includes>
+{{.additional_includes_section | trim}}
+</additional_includes>
+{{end}}
+
+{{if .failed_tests_section | trim}}
+<failed_tests>
+{{.failed_tests_section | trim}}
+</failed_tests>
+{{end}}
 
 
-## Response
-The output must be a YAML object equivalent to type $NewTests, according to the following Pydantic definitions:
+{{- if .import_details | trim }}
+<import_details>
+Imported Structs Overview:
+Below is a list of all structs imported and utilized within this file. These structs are integral to the functionality, 
+and they should be carefully considered when creating mocks and tests. This list serves as a reference for dependencies
+and external types that interact with the main code.
+{{ .import_details | trim }}
+</import_details>
+{{end}}
+
+Now, please follow these steps to generate new test cases:
+
+1. Analyze the source file thoroughly, understanding its purpose, inputs, outputs, and key logic.
+
+2. Review the existing test file to familiarize yourself with the current test suite structure and conventions.
+
+3. Examine the code coverage report to identify specific parts of the code not yet covered by tests.
+
+4. Generate targeted test cases that focus on:
+   - Uncovered code paths, including within functions that already have some tests
+   - Edge cases and error conditions
+   - Complex logic scenarios
+
+5. Use mocks and stubs extensively:
+  - Simulate dependencies and external interactions (e.g., Redis, MongoDB) to isolate code under test.
+  - Ensure all external dependencies are mocked where feasible.
+  - Pay special attention to creating realistic and useful mocks for complex dependencies.
+
+6. Ensure that your new tests:
+   - Maximize overall code coverage
+   - Are comprehensive and well-structured
+   - Follow the same style and conventions as the existing test suite
+   - Have mandatory unique names (no duplicates allowed).
+   - Cover all logic paths, edge cases, and error handling scenarios
+
+{{if .function_under_test}}
+7. Focus specifically on generating test cases for the function named `{{.function_under_test}}`.
+{{end}}
+
+{{if .additional_command}}
+8. {{.additional_command}}
+{{end}}
+
+Provide your output in YAML format according to the following structure:
 =====
 class SingleTest(BaseModel):
     test_behavior: str = Field(description="Short description of the behavior the test covers")
@@ -168,17 +175,8 @@ new_tests:
     ...
 ```
 
-Use block scalar('|') to format each YAML output.
+You may include up to {{.max_tests}} new tests in your response. Ensure that each test can run as-is without requiring additional inputs or setup code.
 
-{{- if .import_details | trim }}
-Imported Structs Overview:
-Below is a list of all structs and functions imported and utilized within this file. These structs are integral to the functionality, 
-and they should be carefully considered when creating mocks and tests. This list serves as a reference for dependencies
-and external types that interact with the main code.
-
-{{ .import_details | trim }}
-
-{{- end }}
 
 Response (should be a valid YAML, and nothing else):
 ```yaml
