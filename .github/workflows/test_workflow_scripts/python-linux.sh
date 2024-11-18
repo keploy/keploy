@@ -33,6 +33,7 @@ send_request(){
         if curl -X GET http://127.0.0.1:8000/; then
             app_started=true
         fi
+        cat "flaskApp_1.txt"
         sleep 3 # wait for 3 seconds before checking again.
     done
     echo "App started"
