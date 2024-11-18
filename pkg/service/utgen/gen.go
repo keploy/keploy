@@ -730,6 +730,9 @@ func (g *UnitTestGenerator) saveFailedTestCasesToFile() error {
 			builder.WriteString(fmt.Sprintf("Required Library Installation\n%s\n", failedTest.LibraryInstallationCode))
 		}
 		builder.WriteString(fmt.Sprintf("Test Implementation:\n%s\n\n", failedTest.TestCode))
+		if len(failedTest.ErrorMsg) > 0 {
+			builder.WriteString(fmt.Sprintf("Error Message:\n%s\n", failedTest.ErrorMsg))
+		}
 		builder.WriteString(strings.Repeat("-", 49) + "\n")
 	}
 
