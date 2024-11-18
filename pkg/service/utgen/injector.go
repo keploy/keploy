@@ -30,25 +30,71 @@ func NewInjectorBuilder(logger *zap.Logger, language string) *Injector {
 
 	return injectBuilder
 }
+func (i *Injector) getLanguageVersion() (string, error) {
+	switch strings.ToLower(i.language) {
+	case "go":
+		out, err := exec.Command("go", "version").Output()
+		if err != nil {
+			return "", fmt.Errorf("failed to get Go version: %w", err)
+		}
+		// Extract only the version part ("go1.22.0") if it's "go version go1.22.0 linux/amd64"
+		parts := strings.Fields(string(out))
+		if len(parts) >= 3 {
+			return parts[2], nil
+		}
+		return "", fmt.Errorf("unexpected output format for Go version: %s", string(out))
+	case "java":
+		out, err := exec.Command("java", "-version").CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("failed to get Java version: %w", err)
+		}
+		// Use regex to extract the version number from the output
+		re := regexp.MustCompile(`"(\d+\.\d+\.\d+)"`)
+		if match := re.FindStringSubmatch(string(out)); len(match) > 1 {
+			return match[1], nil
+		}
+		return "", fmt.Errorf("unexpected output format for Java version: %s", string(out))
 
-func (i *Injector) libraryInstalled() ([]string, error) {
+	case "python":
+		out, err := exec.Command("python", "--version").Output()
+		if err != nil {
+			out, err = exec.Command("python3", "--version").Output()
+			if err != nil {
+				return "", fmt.Errorf("failed to get Python version: %w", err)
+			}
+		}
+		return strings.TrimSpace(string(out)), nil
+	case "typescript", "javascript":
+		out, err := exec.Command("node", "-v").Output()
+		if err != nil {
+			return "", fmt.Errorf("failed to get Node.js version: %w", err)
+		}
+		return strings.TrimSpace(string(out)), nil
+	default:
+		return "", fmt.Errorf("unsupported language: %s", i.language)
+	}
+}
+
+func (i *Injector) libraryInstalled() (map[string]string, error) {
 	switch strings.ToLower(i.language) {
 	case "go":
 		out, err := exec.Command("go", "list", "-m", "all").Output()
 		if err != nil {
 			return nil, fmt.Errorf("failed to get Go dependencies: %w", err)
 		}
-		return i.extractGoPackageNames(out), nil
+		return i.extractGoDependencies(out), nil
 
 	case "java":
-		out, err := exec.Command("mvn", "dependency:list", "-DincludeScope=compile", "-Dstyle.color=never", "-B").Output()
+		cmd := exec.Command("mvn", "dependency:list", "-DincludeScope=compile", "-Dstyle.color=never", "-B")
+		out, err := cmd.Output()
 		if err != nil {
 			return nil, fmt.Errorf("failed to get Java dependencies: %w", err)
 		}
 		return i.extractJavaDependencies(out), nil
 
 	case "python":
-		out, err := exec.Command("pip", "freeze").Output()
+		cmd := exec.Command("pip", "freeze")
+		out, err := cmd.Output()
 		if err != nil {
 			i.logger.Info("Error getting Python dependencies with `pip` command, trying `pip3` command")
 			out, err = exec.Command("pip3", "freeze").Output()
@@ -56,47 +102,152 @@ func (i *Injector) libraryInstalled() ([]string, error) {
 				return nil, fmt.Errorf("failed to get Python dependencies: %w", err)
 			}
 		}
-		return i.extractPackageNames(out), nil
+		return i.extractPythonDependencies(out), nil
 
 	case "typescript", "javascript":
-		cmd := exec.Command("sh", "-c", "npm list --depth=0 --parseable | sed 's|.*/||'")
+		cmd := exec.Command("sh", "-c", "npm list --depth=0")
 		out, err := cmd.Output()
 		if err != nil {
 			return nil, fmt.Errorf("failed to get JavaScript/TypeScript dependencies: %w", err)
 		}
-		return extractString(out), nil
+		return i.extractJSDependencies(out), nil
 
 	default:
 		return nil, fmt.Errorf("unsupported language: %s", i.language)
 	}
 }
 
-func (i *Injector) extractGoPackageNames(output []byte) []string {
+// Extract Go dependencies as a map
+func (i *Injector) extractGoDependencies(output []byte) map[string]string {
 	lines := strings.Split(string(output), "\n")
-	var packages []string
+	dependencies := make(map[string]string)
 	for _, line := range lines {
 		if len(line) > 0 {
 			parts := strings.Split(line, " ")
-			if len(parts) > 0 {
-				packages = append(packages, parts[0])
+			if len(parts) == 2 {
+				dependencies[parts[0]] = parts[1] // Map package name to version
 			}
 		}
 	}
-	return packages
+	return dependencies
 }
 
-func (i *Injector) extractPackageNames(output []byte) []string {
+// Extract Python dependencies as a map
+func (i *Injector) extractPythonDependencies(output []byte) map[string]string {
 	lines := strings.Split(string(output), "\n")
-	var packages []string
+	dependencies := make(map[string]string)
 	for _, line := range lines {
 		parts := strings.Split(line, "==")
-		if len(parts) > 0 {
-			packages = append(packages, parts[0])
+		if len(parts) == 2 {
+			dependencies[parts[0]] = parts[1] // Map package name to version
 		}
 	}
-	return packages
+	return dependencies
 }
 
+// Extract Java dependencies as a map
+func (i *Injector) extractJavaDependencies(output []byte) map[string]string {
+	lines := strings.Split(string(output), "\n")
+	dependencies := make(map[string]string)
+	inDependencySection := false
+	depRegex := regexp.MustCompile(`^\[INFO\]\s+[\+\|\\\-]{1,2}\s+([\w\.\-]+:[\w\.\-]+):jar:([\w\.\-]+):([\w\.\-]+)`)
+
+	for _, line := range lines {
+		cleanedLine := strings.TrimSpace(line)
+		if strings.HasPrefix(cleanedLine, "[INFO]") {
+			cleanedLine = "[INFO]" + strings.TrimSpace(cleanedLine[6:])
+		}
+		if strings.Contains(cleanedLine, "maven-dependency-plugin") && strings.Contains(cleanedLine, ":list") {
+			inDependencySection = true
+			continue
+		}
+
+		if inDependencySection && (strings.Contains(cleanedLine, "BUILD SUCCESS") || strings.Contains(cleanedLine, "---")) {
+			inDependencySection = false
+			continue
+		}
+
+		if inDependencySection && strings.HasPrefix(cleanedLine, "[INFO]") {
+			matches := depRegex.FindStringSubmatch(cleanedLine)
+			if len(matches) >= 4 {
+				groupArtifact := matches[1]
+				version := matches[3]
+				dependencies[groupArtifact] = version // Map group:artifact to version
+			}
+		}
+	}
+	return dependencies
+}
+
+// Extract JS/TS dependencies as a map
+func (i *Injector) extractJSDependencies(output []byte) map[string]string {
+	lines := strings.Split(string(output), "\n")
+	dependencies := make(map[string]string)
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		line = strings.TrimPrefix(line, "├──")
+		line = strings.TrimPrefix(line, "└──")
+		line = strings.TrimPrefix(line, "│──")
+		line = strings.TrimPrefix(line, "──")
+		line = strings.TrimSpace(line)
+
+		if line == "" {
+			continue
+		}
+
+		lastAt := strings.LastIndex(line, "@")
+		if lastAt > 0 {
+			name := line[:lastAt]
+			version := line[lastAt+1:]
+			dependencies[name] = version // Map package name to version
+		}
+	}
+	return dependencies
+}
+func (i *Injector) installLibraries2(libraryCommands string, installedPackages map[string]string) (map[string]map[string]string, error) {
+	newInstalledPackagesMap := make(map[string]map[string]string)
+	libraryCommands = strings.TrimSpace(libraryCommands)
+	if libraryCommands == "" || libraryCommands == "\"\"" {
+		return newInstalledPackagesMap, nil
+	}
+	commands := strings.Split(libraryCommands, "\n")
+	for _, command := range commands {
+		command = strings.ReplaceAll(command, "-", "")
+		packageName, version := i.extractPackageNameAndVersion(command)
+		// Check the current state of the package in installedPackages
+		if currentVersion, exists := installedPackages[packageName]; exists {
+			if currentVersion == version {
+				// Same package and version, skip
+				continue
+			} else if version > currentVersion {
+				// Upgrade needed
+				newInstalledPackagesMap[packageName] = map[string]string{
+					"version": version,
+					"action":  "upgrade",
+				}
+			} else if version < currentVersion {
+				// Downgrade needed
+				newInstalledPackagesMap[packageName] = map[string]string{
+					"version": version,
+					"action":  "downgrade",
+				}
+			}
+		} else {
+			// New package to install
+			newInstalledPackagesMap[packageName] = map[string]string{
+				"version": version,
+				"action":  "install",
+			}
+		}
+		// Run the install command
+		_, _, exitCode, _, err := RunCommand(command, "", i.logger)
+		if exitCode != 0 || err != nil {
+			return nil, fmt.Errorf("failed to install library: %s, error: %w", command, err)
+		}
+	}
+	return newInstalledPackagesMap, nil
+
+}
 func (i *Injector) installLibraries(libraryCommands string, installedPackages []string) ([]string, error) {
 	var newInstalledPackages []string
 	libraryCommands = strings.TrimSpace(libraryCommands)
@@ -121,6 +272,63 @@ func (i *Injector) installLibraries(libraryCommands string, installedPackages []
 	return newInstalledPackages, nil
 }
 
+// func (i *Injector) newInstallLibraries(libraryCommands string, installedPackages map[string]string) ([]string, error) {
+// 	var newInstalledPackages []string
+// 	libraryCommands = strings.TrimSpace(libraryCommands)
+// 	if libraryCommands == "" || libraryCommands == "\"\"" {
+// 		return newInstalledPackages, nil
+// 	}
+
+// 	commands := strings.Split(libraryCommands, "\n")
+// 	for _, command := range commands {
+// 		command = strings.ReplaceAll(command, "-", "")
+// 		packageName,version := i.extractPackageNameAndVersion(command)
+// 		oldVersion, exists := installedPackages[packageName]
+// 		// Determine the operation to perform
+// 		if !exists {
+// 			// New package installation
+// 			err := i.runInstallCommand(packageName, newVersion)
+// 			if err != nil {
+// 				return nil, fmt.Errorf("failed to install library: %s@%s", packageName, newVersion)
+// 			}
+// 			operations = append(operations, LibraryOperation{
+// 				PackageName: packageName,
+// 				OldVersion:  "",
+// 				NewVersion:  newVersion,
+// 				Operation:   "install",
+// 			})
+// 			installedPackages[packageName] = newVersion
+// 		} else if oldVersion != newVersion {
+// 			// Upgrade or downgrade
+// 			err := i.runInstallCommand(packageName, newVersion)
+// 			if err != nil {
+// 				return nil, fmt.Errorf("failed to change version of library: %s from %s to %s", packageName, oldVersion, newVersion)
+// 			}
+// 			op := "upgrade"
+// 			if oldVersion > newVersion {
+// 				op = "downgrade"
+// 			}
+// 			operations = append(operations, LibraryOperation{
+// 				PackageName: packageName,
+// 				OldVersion:  oldVersion,
+// 				NewVersion:  newVersion,
+// 				Operation:   op,
+// 			})
+// 			installedPackages[packageName] = newVersion
+// 		}
+
+//			if isStringInarray(installedPackages, packageName) {
+//				continue
+//			}
+//			_, _, exitCode, _, err := RunCommand(command, "", i.logger)
+//			if exitCode != 0 || err != nil {
+//				return newInstalledPackages, fmt.Errorf("failed to install library: %s", command)
+//			}
+//			installedPackages = append(installedPackages, packageName)
+//			newInstalledPackages = append(newInstalledPackages, packageName)
+//		}
+//		return newInstalledPackages, nil
+//	}
 func (i *Injector) extractPackageName(command string) string {
 	fields := strings.Fields(command)
 	if len(fields) < 3 {
@@ -128,7 +336,82 @@ func (i *Injector) extractPackageName(command string) string {
 	}
 	return fields[2]
 }
+func (i *Injector) extractPackageNameAndVersion(command string) (string, string) {
+	fields := strings.Fields(command)
+	if len(fields) < 3 {
+		return "", ""
+	}
+	return fields[2], fields[3]
+}
 
+func (i *Injector) uninstallLibraries2(installedPackagesMap map[string]string, newInstalledPackagesMap map[string]map[string]string) error {
+	for packageName, packageDetails := range newInstalledPackagesMap {
+		newVersion := packageDetails["version"]
+
+		if originalVersion, exists := installedPackagesMap[packageName]; exists {
+			// If the package exists but the version is different
+			if originalVersion != newVersion {
+				i.logger.Info(fmt.Sprintf("Reverting package %s to original version %s (was %s).", packageName, originalVersion, newVersion))
+				if err := i.installSpecificVersion(packageName, originalVersion); err != nil {
+					i.logger.Warn(fmt.Sprintf("Failed to revert package %s to version %s.", packageName, originalVersion), zap.Error(err))
+				}
+			} else {
+				// If the version matches, do nothing
+				i.logger.Info(fmt.Sprintf("Package %s is already at the correct version (%s). Skipping.", packageName, originalVersion))
+			}
+		} else {
+			// If the package doesn't exist in installedPackagesMap, uninstall it
+			i.logger.Info(fmt.Sprintf("Uninstalling package %s (not part of the original state).", packageName))
+			if err := i.uninstallSpecificPackage(packageName); err != nil {
+				i.logger.Warn(fmt.Sprintf("Failed to uninstall package: %s.", packageName), zap.Error(err))
+			}
+		}
+	}
+	return nil
+
+}
+
+func (i *Injector) installSpecificVersion(packageName, version string) error {
+	var installCommand string
+	switch strings.ToLower(i.language) {
+	case "go":
+		installCommand = fmt.Sprintf("go get %s@%s && go mod tidy", packageName, version)
+	case "python":
+		installCommand = fmt.Sprintf("pip install %s==%s", packageName, version)
+	case "javascript":
+		installCommand = fmt.Sprintf("npm install %s@%s", packageName, version)
+	case "java":
+		installCommand = fmt.Sprintf("mvn dependency:get -Dartifact=%s:%s", packageName, version)
+	}
+	if installCommand != "" {
+		_, _, exitCode, _, err := RunCommand(installCommand, "", i.logger)
+		if exitCode != 0 || err != nil {
+			return fmt.Errorf("failed to install package %s@%s: %w", packageName, version, err)
+		}
+	}
+	return nil
+}
+
+func (i *Injector) uninstallSpecificPackage(packageName string) error {
+	var uninstallCommand string
+	switch strings.ToLower(i.language) {
+	case "go":
+		uninstallCommand = fmt.Sprintf("go mod edit -droprequire %s && go mod tidy", packageName)
+	case "python":
+		uninstallCommand = fmt.Sprintf("pip uninstall -y %s", packageName)
+	case "javascript":
+		uninstallCommand = fmt.Sprintf("npm uninstall %s", packageName)
+	case "java":
+		uninstallCommand = fmt.Sprintf("mvn dependency:purge-local-repository -DreResolve=false -Dinclude=%s", packageName)
+	}
+	if uninstallCommand != "" {
+		_, _, exitCode, _, err := RunCommand(uninstallCommand, "", i.logger)
+		if exitCode != 0 || err != nil {
+			return fmt.Errorf("failed to uninstall package %s: %w", packageName, err)
+		}
+	}
+	return nil
+}
 func (i *Injector) uninstallLibraries(installedPackages []string) error {
 	for _, command := range installedPackages {
 		i.logger.Info(fmt.Sprintf("Uninstalling library: %s", command))
@@ -529,56 +812,6 @@ func (i *Injector) updateTypeScriptImports(importedContent string, newImports []
 		importLength = 0
 	}
 	return updatedContent, importLength, nil
-}
-
-func (i *Injector) extractJavaDependencies(output []byte) []string {
-	lines := strings.Split(string(output), "\n")
-	var dependencies []string
-	inDependencySection := false
-
-	depRegex := regexp.MustCompile(`^\[INFO\]\s+[\+\|\\\-]{1,2}\s+([\w\.\-]+:[\w\.\-]+):jar:([\w\.\-]+):([\w\.\-]+)`)
-
-	for _, line := range lines {
-		cleanedLine := strings.TrimSpace(line)
-		if strings.HasPrefix(cleanedLine, "[INFO]") {
-			cleanedLine = "[INFO]" + strings.TrimSpace(cleanedLine[6:])
-		}
-		if strings.Contains(cleanedLine, "maven-dependency-plugin") && strings.Contains(cleanedLine, ":list") {
-			inDependencySection = true
-			continue
-		}
-
-		if inDependencySection && (strings.Contains(cleanedLine, "BUILD SUCCESS") || strings.Contains(cleanedLine, "---")) {
-			inDependencySection = false
-			continue
-		}
-
-		if inDependencySection && strings.HasPrefix(cleanedLine, "[INFO]") {
-			matches := depRegex.FindStringSubmatch(cleanedLine)
-			if len(matches) >= 4 {
-				groupArtifact := matches[1]
-				version := matches[2]
-				dep := fmt.Sprintf("%s:%s", groupArtifact, version)
-				dependencies = append(dependencies, dep)
-			} else {
-				cleanedLine = strings.TrimPrefix(cleanedLine, "[INFO]")
-				cleanedLine = strings.TrimSpace(cleanedLine)
-
-				cleanedLine = strings.TrimPrefix(cleanedLine, "+-")
-				cleanedLine = strings.TrimPrefix(cleanedLine, "\\-")
-				cleanedLine = strings.TrimPrefix(cleanedLine, "|")
-
-				cleanedLine = strings.TrimSpace(cleanedLine)
-
-				depParts := strings.Split(cleanedLine, ":")
-				if len(depParts) >= 5 {
-					dep := fmt.Sprintf("%s:%s:%s", depParts[0], depParts[1], depParts[3])
-					dependencies = append(dependencies, dep)
-				}
-			}
-		}
-	}
-	return dependencies
 }
 
 func (i *Injector) addCommentToTest(testCode string) string {

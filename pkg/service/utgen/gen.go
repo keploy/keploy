@@ -156,7 +156,8 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 
 		iterationCount := 0
 		g.lang = GetCodeLanguage(g.srcPath)
-		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt, g.ai.FunctionUnderTest, g.logger)
+
+		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, "", g.additionalPrompt, g.ai.FunctionUnderTest, g.logger)
 		g.injector = NewInjectorBuilder(g.logger, g.lang)
 
 		if err != nil {
@@ -201,13 +202,17 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 					}
 				}
 			}
-
-			g.promptBuilder.InstalledPackages, err = g.injector.libraryInstalled()
-			g.promptBuilder.ImportDetails = g.injector.getModelDetails(g.srcPath)
-			g.promptBuilder.ModuleName, _ = g.injector.GetModuleName(g.srcPath)
+			g.promptBuilder.LanguageVersion, err = g.injector.getLanguageVersion()
+			if err != nil {
+				utils.LogError(g.logger, err, "Error getting language version")
+			}
+			existingPackagesMap, err := g.injector.libraryInstalled()
 			if err != nil {
 				utils.LogError(g.logger, err, "Error getting installed packages")
 			}
+			g.promptBuilder.InstalledPackages = mapToSlice(existingPackagesMap)
+			g.promptBuilder.ImportDetails = g.injector.getModelDetails(g.srcPath)
+			g.promptBuilder.ModuleName, _ = g.injector.GetModuleName(g.srcPath)
 			g.prompt, err = g.promptBuilder.BuildPrompt("test_generation", failedTestRunsValue)
 			if err != nil {
 				utils.LogError(g.logger, err, "Error building prompt")
@@ -227,7 +232,8 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			g.totalTestCase += len(testsDetails.NewTests)
 			totalTest = len(testsDetails.NewTests)
 			for _, generatedTest := range testsDetails.NewTests {
-				installedPackages, err := g.injector.libraryInstalled()
+				existingPackagesMap, err := g.injector.libraryInstalled()
+				// installedPackages := mapToSlice(existingPackagesMap)
 				if err != nil {
 					g.logger.Warn("Error getting installed packages", zap.Error(err))
 				}
@@ -236,7 +242,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 					return fmt.Errorf("process cancelled by user")
 				default:
 				}
-				err = g.ValidateTest(generatedTest, &passedTests, &noCoverageTest, &failedBuild, installedPackages)
+				err = g.ValidateTest(generatedTest, &passedTests, &noCoverageTest, &failedBuild, existingPackagesMap)
 				if err != nil {
 					utils.LogError(g.logger, err, "Error validating test")
 					return err
@@ -579,7 +585,8 @@ func (g *UnitTestGenerator) getLine(ctx context.Context) (int, error) {
 	return line, nil
 }
 
-func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, noCoverageTest, failedBuild *int, installedPackages []string) error {
+func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, noCoverageTest, failedBuild *int, installedPackagesMap map[string]string) error {
+	// installedPackages := mapToSlice(installedPackagesMap)
 	testCode := strings.TrimSpace(generatedTest.TestCode)
 	InsertAfter := g.cur.Line
 	Indent := g.cur.Indentation
@@ -612,8 +619,9 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 	if err := os.WriteFile(g.testPath, []byte(processedTest), 0644); err != nil {
 		return fmt.Errorf("failed to write test file: %w", err)
 	}
-
-	newInstalledPackages, err := g.injector.installLibraries(generatedTest.LibraryInstallationCode, installedPackages)
+	g.logger.Info("Commands from GPT\n " + generatedTest.LibraryInstallationCode)
+	println("Commands from GPT\n", generatedTest.LibraryInstallationCode)
+	newInstalledPackagesMap, err := g.injector.installLibraries2(generatedTest.LibraryInstallationCode, installedPackagesMap)
 	if err != nil {
 		g.logger.Debug("Error installing libraries", zap.Error(err))
 	}
@@ -641,7 +649,7 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 			if err := os.WriteFile(g.testPath, []byte(originalContent), 0644); err != nil {
 				return fmt.Errorf("failed to write test file: %w", err)
 			}
-			err = g.injector.uninstallLibraries(newInstalledPackages)
+			err = g.injector.uninstallLibraries2(installedPackagesMap, newInstalledPackagesMap)
 
 			if err != nil {
 				g.logger.Warn("Error uninstalling libraries", zap.Error(err))
@@ -679,7 +687,7 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 			return fmt.Errorf("failed to write test file: %w", err)
 		}
 
-		err = g.injector.uninstallLibraries(newInstalledPackages)
+		err = g.injector.uninstallLibraries2(installedPackagesMap, newInstalledPackagesMap)
 
 		if err != nil {
 			g.logger.Warn("Error uninstalling libraries", zap.Error(err))
@@ -688,6 +696,7 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 		g.logger.Info("Skipping a generated test that failed to increase coverage")
 		return nil
 	}
+	updateInstalledPackages(installedPackagesMap, newInstalledPackagesMap)
 	g.testCasePassed++
 	*passedTests++
 	g.cov.Current = covResult.Coverage
