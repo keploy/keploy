@@ -156,7 +156,6 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 
 		iterationCount := 0
 		g.lang = GetCodeLanguage(g.srcPath)
-
 		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt, g.ai.FunctionUnderTest, g.logger)
 		g.injector = NewInjectorBuilder(g.logger, g.lang)
 
@@ -204,6 +203,8 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			}
 
 			g.promptBuilder.InstalledPackages, err = g.injector.libraryInstalled()
+			g.promptBuilder.ImportDetails = g.injector.getModelDetails(g.srcPath)
+			g.promptBuilder.ModuleName, _ = g.injector.GetModuleName(g.srcPath)
 			if err != nil {
 				utils.LogError(g.logger, err, "Error getting installed packages")
 			}
@@ -782,6 +783,9 @@ func (g *UnitTestGenerator) saveFailedTestCasesToFile() error {
 			builder.WriteString(fmt.Sprintf("Required Library Installation\n%s\n", failedTest.LibraryInstallationCode))
 		}
 		builder.WriteString(fmt.Sprintf("Test Implementation:\n%s\n\n", failedTest.TestCode))
+		if len(failedTest.ErrorMsg) > 0 {
+			builder.WriteString(fmt.Sprintf("Error Message:\n%s\n", failedTest.ErrorMsg))
+		}
 		builder.WriteString(strings.Repeat("-", 49) + "\n")
 	}
 
