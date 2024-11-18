@@ -83,11 +83,13 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop application")
 		}
+
 		hookCtxCancel()
 		err = hookErrGrp.Wait()
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop hooks")
 		}
+
 		err = errGrp.Wait()
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")

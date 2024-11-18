@@ -28,11 +28,11 @@ var eventAttributesSize = int(unsafe.Sizeof(SocketDataEvent{}))
 // ListenSocket starts the socket event listeners
 func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap *ebpf.Map, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	t := make(chan *models.TestCase, 500)
-	err := initRealTimeOffset()
-	if err != nil {
-		utils.LogError(l, err, "failed to initialize real time offset")
-		return nil, errors.New("failed to start socket listeners")
-	}
+	// err := initRealTimeOffset()
+	// if err != nil {
+	// 	utils.LogError(l, err, "failed to initialize real time offset")
+	// 	return nil, errors.New("failed to start socket listeners")
+	// }
 	c := NewFactory(time.Minute, l)
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
@@ -58,7 +58,7 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 		return nil
 	})
 
-	err = open(ctx, c, l, openMap)
+	err := open(ctx, c, l, openMap)
 	if err != nil {
 		utils.LogError(l, err, "failed to start open socket listener")
 		return nil, errors.New("failed to start socket listeners")

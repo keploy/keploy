@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || windows
 
 package conn
 
@@ -160,7 +160,7 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 				validRes = true
 				respTimestamp = time.Now()
 			} else {
-				conn.logger.Debug("Malformed response", zap.Any("ExpectedSentBytes", expectedSentBytes), zap.Any("ActualSentBytes", actualSentBytes))
+				conn.logger.Info("Malformed response", zap.Any("ExpectedSentBytes", expectedSentBytes), zap.Any("ActualSentBytes", actualSentBytes))
 			}
 
 			if len(conn.userReqs) > 0 && len(conn.userResps) > 0 { //validated request, response
@@ -204,7 +204,7 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 			if conn.verifyRequestData(expectedRecvBytes, actualRecvBytes) {
 				recordTraffic = true
 			} else {
-				conn.logger.Debug("Malformed request", zap.Any("ExpectedRecvBytes", expectedRecvBytes), zap.Any("ActualRecvBytes", actualRecvBytes))
+				conn.logger.Warn("Malformed request", zap.Any("ExpectedRecvBytes", expectedRecvBytes), zap.Any("ActualRecvBytes", actualRecvBytes))
 				recordTraffic = false
 			}
 
@@ -241,7 +241,7 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 			// Pop the timestamp of current request
 			conn.reqTimestamps = conn.reqTimestamps[1:]
 		} else {
-			conn.logger.Debug("no request timestamp found")
+			conn.logger.Info("no request timestamp found")
 			if len(requestBuf) > 0 {
 				reqLine := strings.Split(string(requestBuf), "\n")
 				if models.GetMode() == models.MODE_RECORD && len(reqLine) > 0 && reqLine[0] != "" {
@@ -365,7 +365,6 @@ func (conn *Tracker) AddDataEvent(event SocketDataEvent) {
 			//Record a test case for the current request/
 			conn.incRecordTestCount()
 		}
-
 	default:
 	}
 }

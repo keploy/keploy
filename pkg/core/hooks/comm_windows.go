@@ -10,6 +10,7 @@ import (
 	"strconv"
 
 	"go.keploy.io/server/v2/pkg/core"
+	"go.keploy.io/server/v2/pkg/core/hooks/conn"
 	"go.keploy.io/server/v2/pkg/core/hooks/ipc/grpc"
 	"go.keploy.io/server/v2/pkg/core/hooks/structs"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
@@ -43,15 +44,35 @@ func (h *Hooks) Get(_ context.Context, srcPort uint16) (*core.NetworkAddress, er
 
 // GetDestinationInfo retrieves destination information associated with a source port.
 func (h *Hooks) GetDestinationInfo(srcPort uint16) (*structs.DestInfo, error) {
-	h.m.Lock()
-	defer h.m.Unlock()
-	info, ok := h.dstMap[uint32(srcPort)]
+	newPort := uint32(srcPort)
+	info, ok := h.dstMap.Load(newPort)
 	if !ok {
 		h.logger.Error("failed to get the dest info")
 		return nil, errors.New("failed to get dst info")
 	}
+	new, ok := info.(WinDest)
+	if !ok {
+		return nil, errors.New("internal server error")
+	}
+	var host uint32
+	var v6host [4]uint32
+	var ipVersion uint32
+	host, err := util.IP4StrToUint32(new.Host)
+	if err != nil {
+		v6host, err = util.IP6StrToUint32(new.Host)
+		if err != nil {
+			h.logger.Error("failed to convert IP", zap.Error(err))
+			return nil, err
+		}
+		ipVersion = 6
+	} else {
+		ipVersion = 4
+	}
 	dstInfo := structs.DestInfo{
-		DestPort: info.Port,
+		DestIP4:   host,
+		DestPort:  new.Port,
+		DestIP6:   v6host,
+		IPVersion: ipVersion,
 	}
 	return &dstInfo, nil
 }
@@ -71,15 +92,7 @@ func (h *Hooks) SendClientInfo(id uint64, appInfo structs.ClientInfo) error {
 		Actions: []string{strconv.Itoa(int(appInfo.KeployClientNsPid))},
 	}
 
-	interceptConf := &grpc.FromProxy_InterceptConf{
-		InterceptConf: conf,
-	}
-
-	fromProxy := &grpc.FromProxy{
-		Message: interceptConf,
-	}
-
-	data, err := proto.Marshal(fromProxy)
+	data, err := proto.Marshal(conf)
 	if err != nil {
 		h.logger.Info("Failed to marshal response:", zap.Error(err))
 	}
@@ -101,7 +114,7 @@ func (h *Hooks) SendDockerAppInfo(_ uint64, dockerAppInfo structs.DockerAppInfo)
 	return nil
 }
 
-func (h *Hooks) ReadDestInfo(ctx context.Context) error {
+func (h *Hooks) GetEvents(ctx context.Context) error {
 	for {
 		buf, err := util.ReadBytes(ctx, h.logger, h.conn)
 		if err != nil {
@@ -112,12 +125,99 @@ func (h *Hooks) ReadDestInfo(ctx context.Context) error {
 			utils.LogError(h.logger, err, "failed to read request from redirector")
 			return err
 		}
-		var packet grpc.Address
-		err = proto.Unmarshal(buf, &packet)
+		var message grpc.Message
+		err = proto.Unmarshal(buf, &message)
 		if err != nil {
-			utils.LogError(h.logger, err, "failed to decode message from redirector")
+			utils.LogError(h.logger, err, "Failed to decode message from redirector")
 			return err
 		}
-		h.dstMap[packet.Port] = packet
+
+		// Process the message based on its type
+		switch msg := message.Message.(type) {
+		case *grpc.Message_Flow:
+			dst := msg.Flow.GetTcp()
+			addr := dst.GetRemoteAddress()
+			// h.logger.Info("port ", zap.Any("port", addr.GetPort()))
+			// h.logger.Info("host ", zap.Any("addr", addr.GetHost()))
+			// h.logger.Info("version ", zap.Any("version", addr.GetVersion()))
+			// h.logger.Info("srcport", zap.Any("src", addr.GetSrcPort()))
+
+			dest := WinDest{
+				Host:    addr.Host,
+				Port:    addr.Port,
+				Version: addr.Version,
+			}
+			h.dstMap.Store(addr.SrcPort, dest)
+		case *grpc.Message_SocketOpenEvent:
+			event := conn.SocketOpenEvent{
+				TimestampNano: msg.SocketOpenEvent.GetTimeStampNano(),
+				ConnID:        conn.ID{TGID: msg.SocketOpenEvent.GetPid()},
+			}
+			h.openEventChan <- event
+		case *grpc.Message_SocketCloseEvent:
+			event := conn.SocketCloseEvent{
+				TimestampNano: msg.SocketCloseEvent.GetTimeStampNano(),
+				ConnID:        conn.ID{TGID: msg.SocketCloseEvent.GetPid()},
+			}
+			h.closeEventChan <- event
+		case *grpc.Message_SocketDataEvent:
+			direction := conn.EgressTraffic
+			if msg.SocketDataEvent.GetDirection() {
+				direction = conn.IngressTraffic
+			}
+			var msgArray [16384]byte
+			copy(msgArray[:], msg.SocketDataEvent.GetMsg())
+			event := conn.SocketDataEvent{
+				TimestampNano:        msg.SocketDataEvent.GetTimeStampNano(),
+				ConnID:               conn.ID{TGID: msg.SocketDataEvent.GetPid()},
+				EntryTimestampNano:   msg.SocketDataEvent.GetEntryTimeStampNano(),
+				Direction:            direction,
+				MsgSize:              msg.SocketDataEvent.GetMsgSize(),
+				Msg:                  msgArray,
+				ValidateReadBytes:    msg.SocketDataEvent.GetValidateReadBytes(),
+				ValidateWrittenBytes: msg.SocketDataEvent.GetValidateWrittenBytes(),
+			}
+			h.dataEventChan <- event
+		default:
+			h.logger.Error("received unknown message type")
+		}
 	}
 }
+
+// func (h *Hooks) ReadDestInfo(ctx context.Context) error {
+// 	const numBytes = 1024
+// 	for {
+// 		// Read the exact number of bytes specified
+// 		buf := make([]byte, numBytes)
+// 		n, err := h.conn.Read(buf)
+// 		if err != nil {
+// 			if err == io.EOF {
+// 				h.logger.Debug("Received request buffer is empty from redirector")
+// 				return nil
+// 			}
+// 			utils.LogError(h.logger, err, "Failed to read request from redirector")
+// 			return err
+// 		}
+// 		buf = buf[:n] // Trim buffer to actual bytes read
+// 		var packet grpc.NewFlow
+// 		err = proto.Unmarshal(buf, &packet)
+// 		if err != nil {
+// 			utils.LogError(h.logger, err, "failed to decode message from redirector")
+// 			return err
+// 		}
+// 		dst := packet.GetTcp()
+// 		addr := dst.GetRemoteAddress()
+// 		h.logger.Info("port ", zap.Any("port", addr.GetPort()))
+// 		h.logger.Info("host ", zap.Any("addr", addr.GetHost()))
+// 		h.logger.Info("version ", zap.Any("version", addr.GetVersion()))
+// 		h.logger.Info("srcport", zap.Any("src", addr.GetSrcPort()))
+
+// 		dest := WinDest{
+// 			Host:    addr.Host,
+// 			Port:    addr.Port,
+// 			Version: addr.Version,
+// 		}
+// 		h.dstMap.Store(addr.SrcPort, dest)
+// 		h.logger.Info("done")
+// 	}
+// }

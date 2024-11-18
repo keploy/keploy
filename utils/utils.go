@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -177,19 +178,20 @@ func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
 	}
 }
 
-func DeleteFileIfNotExists(logger *zap.Logger, name string) (err error) {
+func DeleteFileIfExists(logger *zap.Logger, name string) (err error) {
 	//Check if file exists
 	_, err = os.Stat(name)
 	if os.IsNotExist(err) {
 		return nil
 	}
+
 	//If it does, remove it.
 	err = os.Remove(name)
+	fmt.Println(err)
 	if err != nil {
 		LogError(logger, err, "Error removing file")
 		return err
 	}
-
 	return nil
 }
 
@@ -640,6 +642,9 @@ func uniqueProcessGroups(pids []int) ([]int, error) {
 }
 
 func getProcessGroupID(pid int) (int, error) {
+	if runtime.GOOS == "windows" {
+		return pid, nil
+	}
 	statusPath := filepath.Join("/proc", strconv.Itoa(pid), "status")
 	statusBytes, err := os.ReadFile(statusPath)
 	if err != nil {

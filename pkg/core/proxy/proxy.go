@@ -296,6 +296,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	p.logger.Debug("Inside handleConnection of proxyServer", zap.Any("source port", sourcePort), zap.Any("Time", time.Now().Unix()))
 
+	time.Sleep(time.Millisecond * 100)
+
 	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
 	if err != nil {
 		utils.LogError(p.logger, err, "failed to fetch the destination info", zap.Any("Source port", sourcePort))
@@ -436,6 +438,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	isTLS := pTls.IsTLSHandshake(testBuffer)
 	if isTLS {
+		fmt.Println("tls connection has been made")
 		srcConn, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to handle TLS conn")
@@ -487,7 +490,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			if err != nil {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
 				return err
-			}
+			}	
 		}
 
 		dstCfg.TLSCfg = cfg

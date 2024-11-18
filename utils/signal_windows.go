@@ -4,7 +4,7 @@ package utils
 
 import (
 	"context"
-	"errors"
+	"os"
 	"os/exec"
 	"syscall"
 	"time"
@@ -40,5 +40,36 @@ func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 }
 
 func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration) CmdError {
-	return CmdError{Type: Init, Err: errors.New("not implemented")}
+	// Create the command without sudo (not needed on Windows)
+	cmd := exec.CommandContext(ctx, "cmd", "/C", userCmd)
+
+	// Log environment variables for debugging
+	logger.Debug("Environment variables", zap.Any("env", os.Environ()))
+
+	// Set cancel function and delay before force-killing
+	if cancel != nil {
+		cmd.Cancel = cancel(cmd)
+	}
+	cmd.WaitDelay = waitDelay
+
+	// Set environment variables and output streams
+	cmd.Env = os.Environ()
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	logger.Debug("Executing CLI command", zap.String("command", cmd.String()))
+
+	// Start the command
+	err := cmd.Start()
+	if err != nil {
+		return CmdError{Type: Init, Err: err}
+	}
+
+	// Wait for the command to complete
+	err = cmd.Wait()
+	if err != nil {
+		return CmdError{Type: Runtime, Err: err}
+	}
+
+	return CmdError{}
 }

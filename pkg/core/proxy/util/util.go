@@ -368,6 +368,27 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 	return nil, nil
 }
 
+func IP6StrToUint32(ipStr string) ([4]uint32, error) {
+	// Parse the IPv6 address string
+	ip := net.ParseIP(ipStr)
+	if ip == nil || ip.To16() == nil {
+		return [4]uint32{}, fmt.Errorf("invalid IPv6 address format")
+	}
+
+	// Convert to a 16-byte representation
+	ip = ip.To16()
+
+	// Prepare the array to hold four uint32 values
+	var result [4]uint32
+
+	// Convert each 4-byte segment to a uint32
+	for i := 0; i < 4; i++ {
+		result[i] = binary.BigEndian.Uint32(ip[i*4 : (i+1)*4])
+	}
+
+	return result, nil
+}
+
 // ToIP4AddressStr converts the integer IP4 Address to the octet format
 func ToIP4AddressStr(ip uint32) string {
 	// convert the IP address to a 32-bit binary number
@@ -381,6 +402,26 @@ func ToIP4AddressStr(ip uint32) string {
 
 	// concatenate the four decimal segments with a dot separator to form the dot-decimal string
 	return fmt.Sprintf("%d.%d.%d.%d", firstByte, secondByte, thirdByte, fourthByte)
+}
+
+func IP4StrToUint32(ipStr string) (uint32, error) {
+	// Split the IP address into its four octets.
+	octets := strings.Split(ipStr, ".")
+	if len(octets) != 4 {
+		return 0, fmt.Errorf("invalid IPv4 address format")
+	}
+
+	// Parse each octet as an integer and shift it to its correct position in the uint32.
+	var ip uint32
+	for i, octet := range octets {
+		octetInt, err := strconv.ParseUint(octet, 10, 8)
+		if err != nil {
+			return 0, fmt.Errorf("invalid octet %q in IP address: %v", octet, err)
+		}
+		ip |= uint32(octetInt) << (8 * uint(3-i))
+	}
+
+	return ip, nil
 }
 
 func ToIPv6AddressStr(ip [4]uint32) string {
