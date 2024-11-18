@@ -64,27 +64,27 @@ and external types that interact with the main code.
 
 Now, please follow these steps to generate new test cases:
 
-1. Analyze the source file thoroughly, understanding its purpose, inputs, outputs, and key logic.
+1. Analyze the source file, understanding its purpose, inputs, outputs, and key logic.
 
-2. Review the existing test file to familiarize yourself with the current test suite structure and conventions.
+2. Review the existing test file to understand the current test suite structure and conventions.
 
 3. Examine the code coverage report to identify specific parts of the code not yet covered by tests.
 
-4. Generate targeted test cases that focus on:
+4. Generate targeted test cases focusing on:
    - Uncovered code paths, including within functions that already have some tests
    - Edge cases and error conditions
    - Complex logic scenarios
 
 5. Use mocks and stubs extensively:
-  - Simulate dependencies and external interactions (e.g., Redis, MongoDB) to isolate code under test.
-  - Ensure all external dependencies are mocked where feasible.
-  - Pay special attention to creating realistic and useful mocks for complex dependencies.
+   - Simulate dependencies and external interactions (e.g., Redis, MongoDB) to isolate code under test.
+   - Ensure all external dependencies are mocked where feasible.
+   - Pay special attention to creating realistic and useful mocks for complex dependencies.
 
 6. Ensure that your new tests:
    - Maximize overall code coverage
    - Are comprehensive and well-structured
    - Follow the same style and conventions as the existing test suite
-   - Have mandatory unique names (no duplicates allowed).
+   - Have mandatory unique names (no duplicates allowed)
    - Cover all logic paths, edge cases, and error handling scenarios
 
 {{if .function_under_test}}
@@ -177,6 +177,7 @@ new_tests:
 
 You may include up to {{.max_tests}} new tests in your response. Ensure that each test can run as-is without requiring additional inputs or setup code.
 
+Remember to focus on generating the most correct and comprehensive test cases possible, paying close attention to edge cases, error conditions, and complex logic scenarios.
 
 Response (should be a valid YAML, and nothing else):
 ```yaml
