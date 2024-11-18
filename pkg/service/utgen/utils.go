@@ -324,3 +324,11 @@ func createTestFile(testFilePath string, sourceFilePath string) (bool, error) {
 
 	return false, nil
 }
+
+func mapToSlice(dependencies map[string]string) []string {
+	var result []string
+	for pkg, version := range dependencies {
+		result = append(result, fmt.Sprintf("%s %s", pkg, version))
+	}
+	return result
+}

@@ -206,10 +206,12 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			if err != nil {
 				utils.LogError(g.logger, err, "Error getting language version")
 			}
-			g.promptBuilder.InstalledPackages, err = g.injector.libraryInstalled()
+			existingPackagesMap, err := g.injector.libraryInstalled()
 			if err != nil {
 				utils.LogError(g.logger, err, "Error getting installed packages")
 			}
+			g.promptBuilder.InstalledPackages = mapToSlice(existingPackagesMap)
+
 			g.prompt, err = g.promptBuilder.BuildPrompt("test_generation", failedTestRunsValue)
 			if err != nil {
 				utils.LogError(g.logger, err, "Error building prompt")
@@ -229,7 +231,8 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			g.totalTestCase += len(testsDetails.NewTests)
 			totalTest = len(testsDetails.NewTests)
 			for _, generatedTest := range testsDetails.NewTests {
-				installedPackages, err := g.injector.libraryInstalled()
+				existingPackagesMap, err := g.injector.libraryInstalled()
+				installedPackages := mapToSlice(existingPackagesMap)
 				if err != nil {
 					g.logger.Warn("Error getting installed packages", zap.Error(err))
 				}
@@ -614,7 +617,7 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 	if err := os.WriteFile(g.testPath, []byte(processedTest), 0644); err != nil {
 		return fmt.Errorf("failed to write test file: %w", err)
 	}
-
+	println("Commands from GPT\n", generatedTest.LibraryInstallationCode)
 	newInstalledPackages, err := g.injector.installLibraries(generatedTest.LibraryInstallationCode, installedPackages)
 	if err != nil {
 		g.logger.Debug("Error installing libraries", zap.Error(err))

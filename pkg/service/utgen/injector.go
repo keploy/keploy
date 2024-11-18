@@ -69,7 +69,8 @@ func (i *Injector) getLanguageVersion() (string, error) {
 		return "", fmt.Errorf("unsupported language: %s", i.language)
 	}
 }
-func (i *Injector) libraryInstalled() ([]string, error) {
+
+func (i *Injector) libraryInstalled() (map[string]string, error) {
 	switch strings.ToLower(i.language) {
 	case "go":
 		out, err := exec.Command("go", "list", "-m", "all").Output()
@@ -111,32 +112,92 @@ func (i *Injector) libraryInstalled() ([]string, error) {
 	}
 }
 
-func (i *Injector) extractGoDependencies(output []byte) []string {
+// Extract Go dependencies as a map
+func (i *Injector) extractGoDependencies(output []byte) map[string]string {
 	lines := strings.Split(string(output), "\n")
-	var packages []string
+	dependencies := make(map[string]string)
 	for _, line := range lines {
 		if len(line) > 0 {
 			parts := strings.Split(line, " ")
-			if len(parts) > 0 {
-				packages = append(packages, line)
+			if len(parts) == 2 {
+				dependencies[parts[0]] = parts[1] // Map package name to version
 			}
 		}
 	}
-	return packages
+	return dependencies
 }
 
-func (i *Injector) extractPythonDependencies(output []byte) []string {
+// Extract Python dependencies as a map
+func (i *Injector) extractPythonDependencies(output []byte) map[string]string {
 	lines := strings.Split(string(output), "\n")
-	var packages []string
+	dependencies := make(map[string]string)
 	for _, line := range lines {
 		parts := strings.Split(line, "==")
 		if len(parts) == 2 {
-			// Append the version directly to the dependency name in "name==version" format
-			dep := fmt.Sprintf("%s==%s", parts[0], parts[1])
-			packages = append(packages, dep)
+			dependencies[parts[0]] = parts[1] // Map package name to version
 		}
 	}
-	return packages
+	return dependencies
+}
+
+// Extract Java dependencies as a map
+func (i *Injector) extractJavaDependencies(output []byte) map[string]string {
+	lines := strings.Split(string(output), "\n")
+	dependencies := make(map[string]string)
+	inDependencySection := false
+	depRegex := regexp.MustCompile(`^\[INFO\]\s+[\+\|\\\-]{1,2}\s+([\w\.\-]+:[\w\.\-]+):jar:([\w\.\-]+):([\w\.\-]+)`)
+
+	for _, line := range lines {
+		cleanedLine := strings.TrimSpace(line)
+		if strings.HasPrefix(cleanedLine, "[INFO]") {
+			cleanedLine = "[INFO]" + strings.TrimSpace(cleanedLine[6:])
+		}
+		if strings.Contains(cleanedLine, "maven-dependency-plugin") && strings.Contains(cleanedLine, ":list") {
+			inDependencySection = true
+			continue
+		}
+
+		if inDependencySection && (strings.Contains(cleanedLine, "BUILD SUCCESS") || strings.Contains(cleanedLine, "---")) {
+			inDependencySection = false
+			continue
+		}
+
+		if inDependencySection && strings.HasPrefix(cleanedLine, "[INFO]") {
+			matches := depRegex.FindStringSubmatch(cleanedLine)
+			if len(matches) >= 4 {
+				groupArtifact := matches[1]
+				version := matches[3]
+				dependencies[groupArtifact] = version // Map group:artifact to version
+			}
+		}
+	}
+	return dependencies
+}
+
+// Extract JS/TS dependencies as a map
+func (i *Injector) extractJSDependencies(output []byte) map[string]string {
+	lines := strings.Split(string(output), "\n")
+	dependencies := make(map[string]string)
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		line = strings.TrimPrefix(line, "├──")
+		line = strings.TrimPrefix(line, "└──")
+		line = strings.TrimPrefix(line, "│──")
+		line = strings.TrimPrefix(line, "──")
+		line = strings.TrimSpace(line)
+
+		if line == "" {
+			continue
+		}
+
+		lastAt := strings.LastIndex(line, "@")
+		if lastAt > 0 {
+			name := line[:lastAt]
+			version := line[lastAt+1:]
+			dependencies[name] = version // Map package name to version
+		}
+	}
+	return dependencies
 }
 
 func (i *Injector) installLibraries(libraryCommands string, installedPackages []string) ([]string, error) {
@@ -163,12 +224,76 @@ func (i *Injector) installLibraries(libraryCommands string, installedPackages []
 	return newInstalledPackages, nil
 }
 
+// func (i *Injector) newInstallLibraries(libraryCommands string, installedPackages map[string]string) ([]string, error) {
+// 	var newInstalledPackages []string
+// 	libraryCommands = strings.TrimSpace(libraryCommands)
+// 	if libraryCommands == "" || libraryCommands == "\"\"" {
+// 		return newInstalledPackages, nil
+// 	}
+
+// 	commands := strings.Split(libraryCommands, "\n")
+// 	for _, command := range commands {
+// 		command = strings.ReplaceAll(command, "-", "")
+// 		packageName,version := i.extractPackageNameAndVersion(command)
+// 		oldVersion, exists := installedPackages[packageName]
+// 		// Determine the operation to perform
+// 		if !exists {
+// 			// New package installation
+// 			err := i.runInstallCommand(packageName, newVersion)
+// 			if err != nil {
+// 				return nil, fmt.Errorf("failed to install library: %s@%s", packageName, newVersion)
+// 			}
+// 			operations = append(operations, LibraryOperation{
+// 				PackageName: packageName,
+// 				OldVersion:  "",
+// 				NewVersion:  newVersion,
+// 				Operation:   "install",
+// 			})
+// 			installedPackages[packageName] = newVersion
+// 		} else if oldVersion != newVersion {
+// 			// Upgrade or downgrade
+// 			err := i.runInstallCommand(packageName, newVersion)
+// 			if err != nil {
+// 				return nil, fmt.Errorf("failed to change version of library: %s from %s to %s", packageName, oldVersion, newVersion)
+// 			}
+// 			op := "upgrade"
+// 			if oldVersion > newVersion {
+// 				op = "downgrade"
+// 			}
+// 			operations = append(operations, LibraryOperation{
+// 				PackageName: packageName,
+// 				OldVersion:  oldVersion,
+// 				NewVersion:  newVersion,
+// 				Operation:   op,
+// 			})
+// 			installedPackages[packageName] = newVersion
+// 		}
+
+//			if isStringInarray(installedPackages, packageName) {
+//				continue
+//			}
+//			_, _, exitCode, _, err := RunCommand(command, "", i.logger)
+//			if exitCode != 0 || err != nil {
+//				return newInstalledPackages, fmt.Errorf("failed to install library: %s", command)
+//			}
+//			installedPackages = append(installedPackages, packageName)
+//			newInstalledPackages = append(newInstalledPackages, packageName)
+//		}
+//		return newInstalledPackages, nil
+//	}
 func (i *Injector) extractPackageName(command string) string {
 	fields := strings.Fields(command)
 	if len(fields) < 3 {
 		return ""
 	}
 	return fields[2]
+}
+func (i *Injector) extractPackageNameAndVersion(command string) (string, string) {
+	fields := strings.Fields(command)
+	if len(fields) < 3 {
+		return "", ""
+	}
+	return fields[2], fields[3]
 }
 
 func (i *Injector) uninstallLibraries(installedPackages []string) error {
@@ -572,84 +697,7 @@ func (i *Injector) updateTypeScriptImports(importedContent string, newImports []
 	}
 	return updatedContent, importLength, nil
 }
-func (i *Injector) extractJavaDependencies(output []byte) []string {
-	lines := strings.Split(string(output), "\n")
-	var dependencies []string
-	inDependencySection := false
 
-	// Regular expression to match Maven dependency output format
-	depRegex := regexp.MustCompile(`^\[INFO\]\s+[\+\|\\\-]{1,2}\s+([\w\.\-]+:[\w\.\-]+):jar:([\w\.\-]+):([\w\.\-]+)`)
-	for _, line := range lines {
-		cleanedLine := strings.TrimSpace(line)
-		if strings.HasPrefix(cleanedLine, "[INFO]") {
-			cleanedLine = "[INFO]" + strings.TrimSpace(cleanedLine[6:])
-		}
-		if strings.Contains(cleanedLine, "maven-dependency-plugin") && strings.Contains(cleanedLine, ":list") {
-			inDependencySection = true
-			continue
-		}
-
-		if inDependencySection && (strings.Contains(cleanedLine, "BUILD SUCCESS") || strings.Contains(cleanedLine, "---")) {
-			inDependencySection = false
-			continue
-		}
-
-		if inDependencySection && strings.HasPrefix(cleanedLine, "[INFO]") {
-			matches := depRegex.FindStringSubmatch(cleanedLine)
-			if len(matches) >= 4 {
-				groupArtifact := matches[1]
-				version := matches[2]
-				dep := fmt.Sprintf("%s:%s", groupArtifact, version)
-				dependencies = append(dependencies, dep)
-			} else {
-				// Fallback to manual parsing if regex doesn't match
-				cleanedLine = strings.TrimPrefix(cleanedLine, "[INFO]")
-				cleanedLine = strings.TrimSpace(cleanedLine)
-				cleanedLine = strings.TrimPrefix(cleanedLine, "+-")
-				cleanedLine = strings.TrimPrefix(cleanedLine, "\\-")
-				cleanedLine = strings.TrimPrefix(cleanedLine, "|")
-				cleanedLine = strings.TrimSpace(cleanedLine)
-
-				depParts := strings.Split(cleanedLine, ":")
-				if len(depParts) >= 5 {
-					groupArtifact := fmt.Sprintf("%s:%s", depParts[0], depParts[1])
-					version := depParts[3]
-					dep := fmt.Sprintf("%s:%s", groupArtifact, version)
-					dependencies = append(dependencies, dep)
-				}
-			}
-		}
-	}
-	return dependencies
-}
-func (i *Injector) extractJSDependencies(output []byte) []string {
-	lines := strings.Split(string(output), "\n")
-	var packages []string
-	for _, line := range lines {
-		// Trim whitespace and remove any leading special characters
-		line = strings.TrimSpace(line)
-		line = strings.TrimPrefix(line, "├──")
-		line = strings.TrimPrefix(line, "└──")
-		line = strings.TrimPrefix(line, "│──")
-		line = strings.TrimPrefix(line, "──")
-		line = strings.TrimSpace(line) // Trim again to remove any whitespace left after trimming prefixes
-
-		if line == "" {
-			continue
-		}
-
-		// Find the last occurrence of "@" to split the name and version
-		lastAt := strings.LastIndex(line, "@")
-		if lastAt > 0 {
-			name := line[:lastAt]
-			version := line[lastAt+1:]
-			// Combine name and version into a single string "name@version"
-			dep := fmt.Sprintf("%s@%s", name, version)
-			packages = append(packages, dep)
-		}
-	}
-	return packages
-}
 func (i *Injector) addCommentToTest(testCode string) string {
 	comment := " Test generated using Keploy"
 	switch i.language {
