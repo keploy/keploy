@@ -332,3 +332,25 @@ func mapToSlice(dependencies map[string]string) []string {
 	}
 	return result
 }
+func updateInstalledPackages(installedPackagesMap map[string]string, newInstalledPackagesMap map[string]map[string]string) {
+	for packageName, details := range newInstalledPackagesMap {
+		version, hasVersion := details["version"]
+		action, hasAction := details["action"]
+
+		if !hasVersion || !hasAction {
+			// Skip invalid entries
+			continue
+		}
+
+		switch action {
+		case "install":
+			// Install a new package
+			installedPackagesMap[packageName] = version
+		case "upgrade", "downgrade":
+			// Update the version for existing packages
+			if _, exists := installedPackagesMap[packageName]; exists {
+				installedPackagesMap[packageName] = version
+			}
+		}
+	}
+}

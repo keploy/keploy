@@ -2,10 +2,15 @@ package utgen
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -199,7 +204,50 @@ func (i *Injector) extractJSDependencies(output []byte) map[string]string {
 	}
 	return dependencies
 }
+func (i *Injector) installLibraries2(libraryCommands string, installedPackages map[string]string) (map[string]map[string]string, error) {
+	newInstalledPackagesMap := make(map[string]map[string]string)
+	libraryCommands = strings.TrimSpace(libraryCommands)
+	if libraryCommands == "" || libraryCommands == "\"\"" {
+		return newInstalledPackagesMap, nil
+	}
+	commands := strings.Split(libraryCommands, "\n")
+	for _, command := range commands {
+		command = strings.ReplaceAll(command, "-", "")
+		packageName, version := i.extractPackageNameAndVersion(command)
+		// Check the current state of the package in installedPackages
+		if currentVersion, exists := installedPackages[packageName]; exists {
+			if currentVersion == version {
+				// Same package and version, skip
+				continue
+			} else if version > currentVersion {
+				// Upgrade needed
+				newInstalledPackagesMap[packageName] = map[string]string{
+					"version": version,
+					"action":  "upgrade",
+				}
+			} else if version < currentVersion {
+				// Downgrade needed
+				newInstalledPackagesMap[packageName] = map[string]string{
+					"version": version,
+					"action":  "downgrade",
+				}
+			}
+		} else {
+			// New package to install
+			newInstalledPackagesMap[packageName] = map[string]string{
+				"version": version,
+				"action":  "install",
+			}
+		}
+		// Run the install command
+		_, _, exitCode, _, err := RunCommand(command, "", i.logger)
+		if exitCode != 0 || err != nil {
+			return nil, fmt.Errorf("failed to install library: %s, error: %w", command, err)
+		}
+	}
+	return newInstalledPackagesMap, nil
 
+}
 func (i *Injector) installLibraries(libraryCommands string, installedPackages []string) ([]string, error) {
 	var newInstalledPackages []string
 	libraryCommands = strings.TrimSpace(libraryCommands)
@@ -296,6 +344,74 @@ func (i *Injector) extractPackageNameAndVersion(command string) (string, string)
 	return fields[2], fields[3]
 }
 
+func (i *Injector) uninstallLibraries2(installedPackagesMap map[string]string, newInstalledPackagesMap map[string]map[string]string) error {
+	for packageName, packageDetails := range newInstalledPackagesMap {
+		newVersion := packageDetails["version"]
+
+		if originalVersion, exists := installedPackagesMap[packageName]; exists {
+			// If the package exists but the version is different
+			if originalVersion != newVersion {
+				i.logger.Info(fmt.Sprintf("Reverting package %s to original version %s (was %s).", packageName, originalVersion, newVersion))
+				if err := i.installSpecificVersion(packageName, originalVersion); err != nil {
+					i.logger.Warn(fmt.Sprintf("Failed to revert package %s to version %s.", packageName, originalVersion), zap.Error(err))
+				}
+			} else {
+				// If the version matches, do nothing
+				i.logger.Info(fmt.Sprintf("Package %s is already at the correct version (%s). Skipping.", packageName, originalVersion))
+			}
+		} else {
+			// If the package doesn't exist in installedPackagesMap, uninstall it
+			i.logger.Info(fmt.Sprintf("Uninstalling package %s (not part of the original state).", packageName))
+			if err := i.uninstallSpecificPackage(packageName); err != nil {
+				i.logger.Warn(fmt.Sprintf("Failed to uninstall package: %s.", packageName), zap.Error(err))
+			}
+		}
+	}
+	return nil
+
+}
+
+func (i *Injector) installSpecificVersion(packageName, version string) error {
+	var installCommand string
+	switch strings.ToLower(i.language) {
+	case "go":
+		installCommand = fmt.Sprintf("go get %s@%s && go mod tidy", packageName, version)
+	case "python":
+		installCommand = fmt.Sprintf("pip install %s==%s", packageName, version)
+	case "javascript":
+		installCommand = fmt.Sprintf("npm install %s@%s", packageName, version)
+	case "java":
+		installCommand = fmt.Sprintf("mvn dependency:get -Dartifact=%s:%s", packageName, version)
+	}
+	if installCommand != "" {
+		_, _, exitCode, _, err := RunCommand(installCommand, "", i.logger)
+		if exitCode != 0 || err != nil {
+			return fmt.Errorf("failed to install package %s@%s: %w", packageName, version, err)
+		}
+	}
+	return nil
+}
+
+func (i *Injector) uninstallSpecificPackage(packageName string) error {
+	var uninstallCommand string
+	switch strings.ToLower(i.language) {
+	case "go":
+		uninstallCommand = fmt.Sprintf("go mod edit -droprequire %s && go mod tidy", packageName)
+	case "python":
+		uninstallCommand = fmt.Sprintf("pip uninstall -y %s", packageName)
+	case "javascript":
+		uninstallCommand = fmt.Sprintf("npm uninstall %s", packageName)
+	case "java":
+		uninstallCommand = fmt.Sprintf("mvn dependency:purge-local-repository -DreResolve=false -Dinclude=%s", packageName)
+	}
+	if uninstallCommand != "" {
+		_, _, exitCode, _, err := RunCommand(uninstallCommand, "", i.logger)
+		if exitCode != 0 || err != nil {
+			return fmt.Errorf("failed to uninstall package %s: %w", packageName, err)
+		}
+	}
+	return nil
+}
 func (i *Injector) uninstallLibraries(installedPackages []string) error {
 	for _, command := range installedPackages {
 		i.logger.Info(fmt.Sprintf("Uninstalling library: %s", command))
@@ -707,4 +823,241 @@ func (i *Injector) addCommentToTest(testCode string) string {
 		comment = "//" + comment
 	}
 	return fmt.Sprintf("%s\n%s", comment, testCode)
+}
+
+func (i *Injector) getModelDetails(sourceFilePath string) string {
+	switch i.language {
+	case "go":
+		return i.getGoImportData(sourceFilePath)
+	default:
+		return ""
+	}
+}
+
+func (i *Injector) getGoImportData(sourceFilePath string) string {
+	builtInTypes := map[string]struct{}{
+		"string":     {},
+		"int":        {},
+		"float64":    {},
+		"bool":       {},
+		"error":      {},
+		"byte":       {},
+		"rune":       {},
+		"uint":       {},
+		"int64":      {},
+		"uint64":     {},
+		"complex64":  {},
+		"complex128": {},
+		"float32":    {},
+		"int32":      {},
+	}
+
+	fset := token.NewFileSet()
+	node, err := parser.ParseFile(fset, sourceFilePath, nil, parser.AllErrors)
+	if err != nil {
+		return ""
+	}
+
+	imports := make(map[string]string)
+	for _, imp := range node.Imports {
+		pkgPath := strings.Trim(imp.Path.Value, "\"")
+		var alias string
+
+		if imp.Name != nil {
+			if imp.Name.Name == "_" || imp.Name.Name == "." {
+				continue
+			}
+			alias = imp.Name.Name
+		} else {
+			parts := strings.Split(pkgPath, "/")
+			alias = parts[len(parts)-1]
+		}
+
+		imports[alias] = pkgPath
+	}
+	// Set to store unique structs with their package paths
+	structSet := make(map[string]struct{})
+	funcSet := make(map[string]struct{})
+
+	var collectStructs func(expr ast.Expr)
+	collectStructs = func(expr ast.Expr) {
+		switch t := expr.(type) {
+		case *ast.Ident:
+			structName := t.Name
+			if _, isBuiltIn := builtInTypes[structName]; isBuiltIn {
+				return
+			}
+			structKey := fmt.Sprintf("%s.%s", node.Name.Name, structName)
+			structSet[structKey] = struct{}{}
+
+		case *ast.SelectorExpr:
+			if ident, ok := t.X.(*ast.Ident); ok {
+				pkgAlias := ident.Name
+				structName := t.Sel.Name
+				if pkgPath, exists := imports[pkgAlias]; exists {
+					structKey := fmt.Sprintf("%s.%s", pkgPath, structName)
+					structSet[structKey] = struct{}{}
+				} else {
+					structKey := fmt.Sprintf("%s.%s", pkgAlias, structName)
+					structSet[structKey] = struct{}{}
+				}
+			}
+
+		case *ast.StarExpr:
+			collectStructs(t.X)
+
+		case *ast.ArrayType:
+			collectStructs(t.Elt)
+
+		case *ast.MapType:
+			collectStructs(t.Key)
+			collectStructs(t.Value)
+
+		case *ast.StructType:
+			packageName := node.Name.Name
+			structSet[fmt.Sprintf("%s.<anonymous_struct>", packageName)] = struct{}{}
+		}
+	}
+
+	// Traverse the AST to collect structs
+	ast.Inspect(node, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.TypeSpec:
+			if _, ok := x.Type.(*ast.StructType); ok {
+				structName := x.Name.Name
+				packageName := node.Name.Name
+				structKey := fmt.Sprintf("%s.%s", packageName, structName)
+				structSet[structKey] = struct{}{}
+			}
+
+		case *ast.CompositeLit:
+			collectStructs(x.Type)
+
+		case *ast.ValueSpec:
+			if x.Type != nil {
+				collectStructs(x.Type)
+			}
+			for _, val := range x.Values {
+				collectStructs(val)
+			}
+
+		case *ast.Field:
+			collectStructs(x.Type)
+
+		case *ast.FuncDecl:
+			if x.Type.Params != nil {
+				for _, field := range x.Type.Params.List {
+					collectStructs(field.Type)
+				}
+			}
+			if x.Type.Results != nil {
+				for _, field := range x.Type.Results.List {
+					collectStructs(field.Type)
+				}
+			}
+		case *ast.CallExpr:
+			if sel, ok := x.Fun.(*ast.SelectorExpr); ok {
+				if ident, ok := sel.X.(*ast.Ident); ok {
+					pkgAlias := ident.Name
+					funcName := sel.Sel.Name
+					if pkgPath, exists := imports[pkgAlias]; exists {
+						// Construct the fully qualified function name
+						funcKey := fmt.Sprintf("%s.%s", pkgPath, funcName)
+						funcSet[funcKey] = struct{}{}
+					}
+				}
+			} else if ident, ok := x.Fun.(*ast.Ident); ok {
+				moduleName, relativePath := i.GetModuleName(sourceFilePath)
+				packageName, _ := GetPackageName(sourceFilePath)
+
+				if packageName != "main" {
+					relativePath = TrimParentFolder(relativePath)
+				}
+				var funcKey string
+				// Construct the function key conditionally to handle empty relativePath
+				if packageName == "main" {
+					// If the package is `main`, use the module name without extra path details
+					funcKey = fmt.Sprintf("%s/%s.%s", moduleName, relativePath, ident.Name)
+				} else {
+					if relativePath == "" {
+						funcKey = fmt.Sprintf("%s/%s.%s", moduleName, packageName, ident.Name)
+					} else {
+						funcKey = fmt.Sprintf("%s/%s/%s.%s", moduleName, relativePath, packageName, ident.Name)
+					}
+				}
+				funcSet[funcKey] = struct{}{}
+			}
+
+		default:
+		}
+		return true
+	})
+
+	data := ""
+	for structKey := range structSet {
+		var out bytes.Buffer
+		cmd := exec.Command("go", "doc", structKey)
+		cmd.Stdout = &out
+		if err := cmd.Run(); err != nil {
+			continue
+		}
+		data += (out.String()) + "\n"
+	}
+	for funcKey := range funcSet {
+		var out bytes.Buffer
+		cmd := exec.Command("go", "doc", funcKey)
+		cmd.Stdout = &out
+		if err := cmd.Run(); err != nil {
+			continue
+		}
+		data += (out.String()) + "\n"
+	}
+	return data
+}
+
+func (i *Injector) GetModuleName(sourceFilePath string) (string, string) {
+	file, err := os.Open("go.mod")
+	if err != nil {
+		return "", ""
+	}
+	defer func() {
+		if err := file.Close(); err != nil {
+			i.logger.Error("Error closing file", zap.Error(err))
+		}
+	}()
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "module ") {
+			curDir, _ := os.Getwd()
+			dirPath := filepath.Dir(sourceFilePath)
+
+			relativePath, _ := filepath.Rel(curDir, dirPath)
+
+			if relativePath == "." {
+				return strings.TrimSpace(strings.TrimPrefix(line, "module ")), ""
+			}
+
+			return strings.TrimSpace(strings.TrimPrefix(line, "module ")), relativePath
+		}
+	}
+
+	return "", ""
+}
+
+func GetPackageName(sourceFilePath string) (string, error) {
+	fset := token.NewFileSet()
+	node, err := parser.ParseFile(fset, sourceFilePath, nil, parser.PackageClauseOnly)
+	if err != nil {
+		return "", err
+	}
+	return node.Name.Name, nil
+}
+
+func TrimParentFolder(path string) string {
+	parts := strings.Split(path, string(filepath.Separator))
+	if len(parts) > 1 {
+		return filepath.Join(parts[:len(parts)-1]...) // Exclude the last part (file name's parent directory)
+	}
+	return path
 }

@@ -73,6 +73,13 @@ The following packages are already installed in the environment. Use these when 
 {{ .failed_tests_section | trim }}
 {{ end }}
 
+{{if .module_name | trim}}
+The module name of the go project is 
+<module_name>
+{{.module_name | trim}}
+</module_name>
+{{end}}
+
 ## Code Coverage
 The following is the existing code coverage report. Use this to determine what tests to write, as you should only write tests that increase the overall coverage:
 =========
@@ -164,10 +171,15 @@ new_tests:
 
 Use block scalar('|') to format each YAML output.
 
-{{- if .additional_instructions_text | trim }}
-{{ .additional_instructions_text | trim }}
-{{ end }}
+{{- if .import_details | trim }}
+Imported Structs Overview:
+Below is a list of all structs and functions imported and utilized within this file. These structs are integral to the functionality, 
+and they should be carefully considered when creating mocks and tests. This list serves as a reference for dependencies
+and external types that interact with the main code.
 
+{{ .import_details | trim }}
+
+{{- end }}
 
 Response (should be a valid YAML, and nothing else):
 ```yaml

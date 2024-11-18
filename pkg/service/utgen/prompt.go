@@ -12,7 +12,7 @@ import (
 	"go.uber.org/zap"
 )
 
-const MAX_TESTS_PER_RUN = 4
+const MAX_TESTS_PER_RUN = 6
 
 const ADDITIONAL_INCLUDES_TEXT = `
 ## Additional Includes
@@ -61,6 +61,8 @@ type PromptBuilder struct {
 	AdditionalPrompt       string
 	InstalledPackages      []string
 	FunctionUnderTest      string
+	ImportDetails          string
+	ModuleName             string
 }
 
 func NewPromptBuilder(srcPath, testPath, covReportContent, includedFiles, additionalInstructions, language, languageVersion, additionalPrompt, functionUnderTest string, logger *zap.Logger) (*PromptBuilder, error) {
@@ -131,7 +133,6 @@ func formatSection(content, templateText string) (string, error) {
 func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, error) {
 	pb.Src.CodeNumbered = numberLines(pb.Src.Code)
 	pb.Test.CodeNumbered = numberLines(pb.Test.Code)
-
 	variables := map[string]interface{}{
 		"source_file_name":             pb.Src.Name,
 		"test_file_name":               pb.Test.Name,
@@ -149,6 +150,8 @@ func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, erro
 		"additional_command":           pb.AdditionalPrompt,
 		"function_under_test":          pb.FunctionUnderTest,
 		"installed_packages":           formatInstalledPackages(pb.InstalledPackages),
+		"import_details":               pb.ImportDetails,
+		"module_name":                  pb.ModuleName,
 	}
 
 	settings := settings.GetSettings()
