@@ -161,6 +161,7 @@ func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, erro
 		prompt.User = ""
 		return prompt, fmt.Errorf("Error rendering system prompt: %v", err)
 	}
+	prompt.System = systemPrompt
 
 	userPrompt, err := renderTemplate(settings.GetString(file+".user"), variables)
 	if err != nil {
@@ -168,7 +169,6 @@ func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, erro
 		prompt.User = ""
 		return prompt, fmt.Errorf("Error rendering user prompt: %v", err)
 	}
-	prompt.System = systemPrompt
 	userPrompt = html.UnescapeString(userPrompt)
 	prompt.User = userPrompt
 	return prompt, nil

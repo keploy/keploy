@@ -223,9 +223,33 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				g.logger.Info("No tests generated")
 				continue
 			}
+
+			var originalSrcCode string
+			var codeModified bool
+
+			// Check if code refactoring is needed
+			if len(testsDetails.RefactoredSourceCode) != 0 {
+				// Read the original source code
+				originalSrcCode, err = readFile(g.srcPath)
+				if err != nil {
+					return fmt.Errorf("failed to read the source code: %w", err)
+				}
+
+				// modify the source code for refactoring.
+				if !(strings.Contains(testsDetails.RefactoredSourceCode, "blank output don't refactor code") || strings.Contains(testsDetails.RefactoredSourceCode, "no refactoring")) {
+					if err := os.WriteFile(g.srcPath, []byte(testsDetails.RefactoredSourceCode), 0644); err != nil {
+						return fmt.Errorf("failed to refactor source code:%w", err)
+					}
+					codeModified = true
+				}
+			}
+
+			var overallCovInc = false
+
 			g.logger.Info("Validating new generated tests one by one")
 			g.totalTestCase += len(testsDetails.NewTests)
 			totalTest = len(testsDetails.NewTests)
+
 			for _, generatedTest := range testsDetails.NewTests {
 				installedPackages, err := g.injector.libraryInstalled()
 				if err != nil {
@@ -236,13 +260,30 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 					return fmt.Errorf("process cancelled by user")
 				default:
 				}
-				err = g.ValidateTest(generatedTest, &passedTests, &noCoverageTest, &failedBuild, installedPackages)
+				coverageInc, err := g.ValidateTest(generatedTest, &passedTests, &noCoverageTest, &failedBuild, installedPackages)
 				if err != nil {
 					utils.LogError(g.logger, err, "Error validating test")
+
+					rerr := revertSourceCode(g.srcPath, originalSrcCode, codeModified)
+					if rerr != nil {
+						utils.LogError(g.logger, rerr, "Error reverting source code")
+					}
+
 					return err
 				}
-			}
 
+				// if any test increases the coverage, set the flag to true
+				overallCovInc = overallCovInc || coverageInc
+			}
+			// if any of the test couldn't increase the coverage, revert the source code
+			if !overallCovInc {
+				err := revertSourceCode(g.srcPath, originalSrcCode, codeModified)
+				if err != nil {
+					utils.LogError(g.logger, err, "Error reverting source code")
+				}
+			} else {
+				g.promptBuilder.Src.Code = testsDetails.RefactoredSourceCode
+			}
 			if g.cov.Current < (g.cov.Desired/100) && g.cov.Current > 0 {
 				if err := g.runCoverage(); err != nil {
 					utils.LogError(g.logger, err, "Error running coverage")
@@ -348,6 +389,17 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 	return nil
 }
 
+func revertSourceCode(srcPath, originalSrcCode string, codeModified bool) error {
+	if !codeModified {
+		return nil
+	}
+
+	if err := os.WriteFile(srcPath, []byte(originalSrcCode), 0644); err != nil {
+		return fmt.Errorf("failed to revert source code to the original state:%w", err)
+	}
+	return nil
+}
+
 func centerAlignText(text string, width int) string {
 	text = strings.Trim(text, "\"")
 
@@ -447,6 +499,20 @@ func (g *UnitTestGenerator) GenerateTests(ctx context.Context, iterationCount in
 	if len(g.ai.FunctionUnderTest) > 0 {
 		requestPurpose = TestForFunction
 	}
+
+	updatedTestContent, err := readFile(g.testPath)
+	if err != nil {
+		g.logger.Error("Error reading updated test file content", zap.Error(err))
+		return &models.UTDetails{}, err
+	}
+	g.promptBuilder.Test.Code = updatedTestContent
+	g.promptBuilder.CovReportContent = g.cov.Content
+	g.prompt, err = g.promptBuilder.BuildPrompt("test_generation", "")
+	if err != nil {
+		utils.LogError(g.logger, err, "Error building prompt")
+		return &models.UTDetails{}, err
+	}
+
 	aiRequest := AIRequest{
 		MaxTokens:      4096,
 		Prompt:         *g.prompt,
@@ -454,37 +520,16 @@ func (g *UnitTestGenerator) GenerateTests(ctx context.Context, iterationCount in
 		Iteration:      iterationCount,
 		RequestPurpose: requestPurpose,
 	}
+
 	response, err := g.ai.Call(ctx, CompletionParams{}, aiRequest, false)
 	if err != nil {
 		return &models.UTDetails{}, err
 	}
 
-	select {
-	case <-ctx.Done():
-		err := ctx.Err()
-		return &models.UTDetails{}, err
-	default:
-	}
-
-	select {
-	case <-ctx.Done():
-		err := ctx.Err()
-		return &models.UTDetails{}, err
-	default:
-	}
-
 	testsDetails, err := unmarshalYamlTestDetails(response)
-
 	if err != nil {
 		utils.LogError(g.logger, err, "Error unmarshalling test details")
 		return &models.UTDetails{}, err
-	}
-
-	select {
-	case <-ctx.Done():
-		err := ctx.Err()
-		return &models.UTDetails{}, err
-	default:
 	}
 
 	return testsDetails, nil
@@ -531,6 +576,7 @@ func (g *UnitTestGenerator) getIndentation(ctx context.Context) (int, error) {
 			utils.LogError(g.logger, err, "Error unmarshalling test headers")
 			return 0, err
 		}
+
 		indentation, err = convertToInt(testsDetails.Indentation)
 		if err != nil {
 			return 0, fmt.Errorf("error converting test_headers_indentation to int: %w", err)
@@ -568,6 +614,7 @@ func (g *UnitTestGenerator) getLine(ctx context.Context) (int, error) {
 			utils.LogError(g.logger, err, "Error unmarshalling test line")
 			return 0, err
 		}
+
 		line, err = convertToInt(testsDetails.Line)
 		if err != nil {
 			return 0, fmt.Errorf("error converting relevant_line_number_to_insert_after to int: %w", err)
@@ -580,7 +627,7 @@ func (g *UnitTestGenerator) getLine(ctx context.Context) (int, error) {
 	return line, nil
 }
 
-func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, noCoverageTest, failedBuild *int, installedPackages []string) error {
+func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, noCoverageTest, failedBuild *int, installedPackages []string) (bool, error) {
 	testCode := strings.TrimSpace(generatedTest.TestCode)
 	InsertAfter := g.cur.Line
 	Indent := g.cur.Indentation
@@ -600,7 +647,7 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 	// Append the generated test to the relevant line in the test file
 	originalContent, err := readFile(g.testPath)
 	if err != nil {
-		return fmt.Errorf("failed to read test file: %w", err)
+		return false, fmt.Errorf("failed to read test file: %w", err)
 	}
 	originalContentLines := strings.Split(originalContent, "\n")
 	testCodeLines := strings.Split(testCodeIndented, "\n")
@@ -611,7 +658,7 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 	processedTestLines = append(processedTestLines, originalContentLines[InsertAfter:]...)
 	processedTest := strings.Join(processedTestLines, "\n")
 	if err := os.WriteFile(g.testPath, []byte(processedTest), 0644); err != nil {
-		return fmt.Errorf("failed to write test file: %w", err)
+		return false, fmt.Errorf("failed to write test file: %w", err)
 	}
 
 	newInstalledPackages, err := g.injector.installLibraries(generatedTest.LibraryInstallationCode, installedPackages)
@@ -636,11 +683,11 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 			// Test failed, roll back the test file to its original content
 
 			if err := os.Truncate(g.testPath, 0); err != nil {
-				return fmt.Errorf("failed to truncate test file: %w", err)
+				return false, fmt.Errorf("failed to truncate test file: %w", err)
 			}
 
 			if err := os.WriteFile(g.testPath, []byte(originalContent), 0644); err != nil {
-				return fmt.Errorf("failed to write test file: %w", err)
+				return false, fmt.Errorf("failed to write test file: %w", err)
 			}
 			err = g.injector.uninstallLibraries(newInstalledPackages)
 
@@ -656,7 +703,7 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 			})
 			g.testCaseFailed++
 			*failedBuild++
-			return nil
+			return false, nil
 		}
 		testCommandStartTime = timeOfTestCommand
 	}
@@ -665,7 +712,7 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 	newCoverageProcessor := NewCoverageProcessor(g.cov.Path, getFilename(g.srcPath), g.cov.Format)
 	covResult, err := newCoverageProcessor.ProcessCoverageReport(testCommandStartTime)
 	if err != nil {
-		return fmt.Errorf("error processing coverage report: %w", err)
+		return false, fmt.Errorf("error processing coverage report: %w", err)
 	}
 	if covResult.Coverage <= g.cov.Current {
 		g.noCoverageTest++
@@ -673,11 +720,11 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 		// Test failed to increase coverage, roll back the test file to its original content
 
 		if err := os.Truncate(g.testPath, 0); err != nil {
-			return fmt.Errorf("failed to truncate test file: %w", err)
+			return false, fmt.Errorf("failed to truncate test file: %w", err)
 		}
 
 		if err := os.WriteFile(g.testPath, []byte(originalContent), 0644); err != nil {
-			return fmt.Errorf("failed to write test file: %w", err)
+			return false, fmt.Errorf("failed to write test file: %w", err)
 		}
 
 		err = g.injector.uninstallLibraries(newInstalledPackages)
@@ -687,7 +734,7 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 		}
 
 		g.logger.Info("Skipping a generated test that failed to increase coverage")
-		return nil
+		return false, nil
 	}
 	g.testCasePassed++
 	*passedTests++
@@ -696,7 +743,7 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 	g.cur.Line = g.cur.Line + len(testCodeLines) + importLen
 
 	g.logger.Info("Generated test passed and increased coverage")
-	return nil
+	return true, nil
 }
 
 func (g *UnitTestGenerator) saveFailedTestCasesToFile() error {
