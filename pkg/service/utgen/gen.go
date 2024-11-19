@@ -154,7 +154,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			g.cov.Current = 0
 		}
 
-		iterationCount := 0
+		iterationCount := 1
 		g.lang = GetCodeLanguage(g.srcPath)
 		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt, g.ai.FunctionUnderTest, g.logger)
 		g.injector = NewInjectorBuilder(g.logger, g.lang)
@@ -171,7 +171,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 		}
 		initialCoverage := g.cov.Current
 		// Respect context cancellation in the inner loop
-		for g.cov.Current < (g.cov.Desired/100) && iterationCount < g.maxIterations {
+		for g.cov.Current < (g.cov.Desired/100) && iterationCount <= g.maxIterations {
 			passedTests, noCoverageTest, failedBuild, totalTest := 0, 0, 0, 0
 			select {
 			case <-ctx.Done():
@@ -243,7 +243,6 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				}
 			}
 
-			iterationCount++
 			if g.cov.Current < (g.cov.Desired/100) && g.cov.Current > 0 {
 				if err := g.runCoverage(); err != nil {
 					utils.LogError(g.logger, err, "Error running coverage")
@@ -290,6 +289,8 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			if err != nil {
 				utils.LogError(g.logger, err, "Error sending coverage update")
 			}
+
+			iterationCount++
 		}
 
 		if g.cov.Current == 0 && newTestFile {
@@ -304,7 +305,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			if _, err := pp.Printf("For File %s Reached above target coverage of %s%% (Current Coverage: %s%%) in %s iterations.\n", g.srcPath, g.cov.Desired, math.Round(g.cov.Current*100), iterationCount); err != nil {
 				utils.LogError(g.logger, err, "failed to print coverage")
 			}
-		} else if iterationCount == g.maxIterations {
+		} else if iterationCount > g.maxIterations {
 			if _, err := pp.Printf("For File %s Reached maximum iteration limit without achieving desired coverage. Current Coverage: %s%%\n", g.srcPath, math.Round(g.cov.Current*100)); err != nil {
 				utils.LogError(g.logger, err, "failed to print coverage")
 			}
