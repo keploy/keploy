@@ -59,7 +59,7 @@ func GetAgentService(_ context.Context, c *config.Config, client docker.Client, 
 	}
 	h := hooks.NewHooks(logger, c)
 	p := proxy.New(logger, h, c)
-	//for keploy test bench
+
 	t := tester.New(logger, h)
 
 	instrumentation := agent.New(logger, h, p, t, client)

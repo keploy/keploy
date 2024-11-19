@@ -4,7 +4,6 @@ package hooks
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/cilium/ebpf"
 	"go.keploy.io/server/v2/pkg/agent"
@@ -98,16 +97,21 @@ func (h *Hooks) SendProxyInfo(id uint64, proxInfo structs.ProxyInfo) error {
 	return nil
 }
 
-func (h *Hooks) SendTestBenchInfo(tb structs.TestBenchInfo) error {
-	fmt.Println("Test bench info", tb)
-	
-	err := h.testBenchInfoMap.Update(uint32(0), tb, ebpf.UpdateAny)
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to send the test bench info to the ebpf program")
-		return err
-	}
-	return nil
-}
+// func (h *Hooks) SendTestBenchInfo(key models.ModeKey, tb structs.TestBenchInfo) error {
+// 	fmt.Println("Test bench info", tb)
+// 	if key == models.RecordKey {
+// 		h.logger.Info("Sending test bench info for record mode")
+// 	} else {
+// 		h.logger.Info("Sending test bench info for test mode")
+// 	}
+
+// 	err := h.tbenchFilterPid.Update(uint32(0), tb, ebpf.UpdateAny)
+// 	if err != nil {
+// 		utils.LogError(h.logger, err, "failed to send the test bench info to the ebpf program")
+// 		return err
+// 	}
+// 	return nil
+// }
 
 func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
 	key := 0

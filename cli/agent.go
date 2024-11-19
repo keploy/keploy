@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/spf13/cobra"
@@ -36,14 +35,12 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 			}
 
 			isdocker, _ := cmd.Flags().GetBool("is-docker")
-			// enableTesting, _ := cmd.Flags().GetBool("enable-testing")
+			enableTesting, _ := cmd.Flags().GetBool("enable-testing")
 
 			port, _ := cmd.Flags().GetUint32("port")
 			if port == 0 {
 				port = 8086
 			}
-
-			fmt.Println("AGENT's RUNNING PID", os.Getpid())
 
 			var a agent.Service
 			var ok bool
@@ -64,9 +61,15 @@ func Agent(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 				}
 			}()
 
-			err = a.Setup(ctx, models.SetupOptions{
-				IsDocker: isdocker,
-			})
+			opts := models.SetupOptions{
+				IsDocker:      isdocker,
+				EnableTesting: enableTesting,
+			}
+			// TODO: remove this later
+			if enableTesting && port == 8090 {
+				opts.Mode = models.MODE_TEST
+			}
+			err = a.Setup(ctx, opts)
 
 			if err != nil {
 				utils.LogError(logger, err, "failed to setup agent")

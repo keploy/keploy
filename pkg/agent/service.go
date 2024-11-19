@@ -24,7 +24,7 @@ type Hooks interface {
 	SendKeployClientInfo(clientID uint64, clientInfo structs.ClientInfo) error
 	DeleteKeployClientInfo(clientID uint64) error
 	SendClientProxyInfo(clientID uint64, proxyInfo structs.ProxyInfo) error
-	SendKtInfo(ctx context.Context, tb models.TestBenchReq) error
+	SendKtInfo(ctx context.Context, tb structs.TestBenchInfo) error
 }
 
 type HookCfg struct {
@@ -72,8 +72,8 @@ type Tester interface {
 	Setup(ctx context.Context, opts models.TestingOptions) error
 }
 type TestBenchInfo interface {
-	// SendKeployPids(key models.ModeKey, pid uint32) error
-	// SendKeployPorts(key models.ModeKey, port uint32) error
+	SendKeployPids(key models.ModeKey, tb structs.TestBenchInfo) error
+	SendKeployPorts(key models.ModeKey, port uint32) error
 }
 
 // ----------------------

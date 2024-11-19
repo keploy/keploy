@@ -95,15 +95,16 @@ func (r *Replayer) Start(ctx context.Context) error {
 			break
 		default:
 			fmt.Println("stopping Keploy from test mode")
-			unregister := models.UnregisterReq{
-				ClientID: r.config.ClientID,
-				Mode:     models.MODE_TEST,
-			}
-			err := r.instrumentation.UnregisterClient(ctx, unregister)
-			if err != nil {
-				fmt.Println("error in unregistering client replay")
-				utils.LogError(r.logger, err, "failed to unregister client")
-			}
+			// unregister := models.UnregisterReq{
+			// 	ClientID: r.config.ClientID,
+			// 	Mode:     models.MODE_TEST,
+			// }
+			// err := r.instrumentation.UnregisterClient(ctx, unregister)
+			// if err != nil {
+			// 	fmt.Println("error in unregistering client replay")
+			// 	utils.LogError(r.logger, err, "failed to unregister client")
+			// }
+			time.Sleep(2 * time.Second)
 			r.logger.Info("stopping Keploy", zap.String("reason", stopReason))
 		}
 

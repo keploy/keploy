@@ -589,8 +589,6 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 
 func (p *Proxy) MakeClientDeRegisterd(_ context.Context) error {
 	p.logger.Info("Inside MakeClientDeregisterd of proxyServer")
-	// mock agar ek bhi stream nhi hua hai us client k saath.
-	// and context cancel hua hai, to we will return nil 
 	p.clientClose <- true
 	return nil
 }

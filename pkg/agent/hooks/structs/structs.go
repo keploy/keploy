@@ -42,6 +42,7 @@ type AgentInfo struct {
 }
 
 type TestBenchInfo struct {
-	KeployTClientPID uint32
-	KeployTAgentPID  uint32
+	KTestClientPID uint32
+	KTestAgentPID  uint32
+	KRecordAgentPID  uint32
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v2/pkg/agent"
+	"go.keploy.io/server/v2/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -28,8 +29,8 @@ func New(logger *zap.Logger, testBenchInfo agent.TestBenchInfo) *Tester {
 }
 
 const (
-	testPort   = 56789
-	recordPort = 36789
+	testPort   = 46789
+	recordPort = 16789
 )
 
 func (t *Tester) Setup(ctx context.Context, opts models.TestingOptions) error {
@@ -51,6 +52,7 @@ func (t *Tester) Setup(ctx context.Context, opts models.TestingOptions) error {
 }
 
 func (t *Tester) setupReplay(ctx context.Context) error {
+	fmt.Println("Inside setupReplay")
 	setUpErr := errors.New("failed to setup the keploy replay testing")
 
 	recordPid, err := utils.GetPIDFromPort(ctx, t.logger, recordPort)
@@ -60,13 +62,16 @@ func (t *Tester) setupReplay(ctx context.Context) error {
 		return setUpErr
 	}
 
-	t.logger.Debug(fmt.Sprintf("keployRecord pid:%v", recordPid))
+	t.logger.Info(fmt.Sprintf("keployRecord pid:%v", recordPid))
 
-	// err = t.testBenchInfo.SendKeployPids(models.RecordKey, recordPid)
-	// if err != nil {
-	// 	utils.LogError(t.logger, err, fmt.Sprintf("failed to send keploy %v server pid to the epbf program", models.MODE_RECORD), zap.Any("Keploy Pid", recordPid))
-	// 	return setUpErr
-	// }
+	err = t.testBenchInfo.SendKeployPids(models.RecordKey, structs.TestBenchInfo{
+		KRecordAgentPID: recordPid,
+	})
+	
+	if err != nil {
+		utils.LogError(t.logger, err, fmt.Sprintf("failed to send keploy %v server pid to the epbf program", models.MODE_RECORD), zap.Any("Keploy Pid", recordPid))
+		return setUpErr
+	}
 
 	// err = t.testBenchInfo.SendKeployPorts(models.RecordKey, recordPort)
 	// if err != nil {
@@ -114,7 +119,7 @@ func (t *Tester) setupRecord(ctx context.Context) error {
 
 				t.logger.Debug("keploytest pid", zap.Uint32("pid", testPid))
 
-				// // sending keploytest binary pid in keployrecord binary to filter out ingress/egress calls related to keploytest binary.
+				// sending keploytest binary pid in keployrecord binary to filter out ingress/egress calls related to keploytest binary.
 				// err = t.testBenchInfo.SendKeployPids(models.TestKey, testPid)
 				// if err != nil {
 				// 	utils.LogError(t.logger, err, fmt.Sprintf("failed to send keploy %v server pid to the epbf program", models.MODE_TEST), zap.Any("Keploy Pid", testPid))

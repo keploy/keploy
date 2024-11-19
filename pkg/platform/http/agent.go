@@ -149,10 +149,8 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 		return nil, fmt.Errorf("failed to get outgoing response: %s", err.Error())
 	}
 
-	// Create a channel to stream Mock data
 	mockChan := make(chan *models.Mock)
 
-	// use error group instead of go routine
 	grp, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
 		return nil, fmt.Errorf("failed to get errorgroup from the context")
@@ -411,7 +409,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 				utils.LogError(a.logger, err, "failed to get current keploy binary path")
 				return 0, err
 			}
-			agentCmd := exec.Command("sudo", keployBin, "agent", "--port", strconv.Itoa(int(a.conf.ServerPort)), "--proxy-port", strconv.Itoa(int(a.conf.ProxyPort)))
+			agentCmd := exec.Command("sudo", keployBin, "agent", "--port", strconv.Itoa(int(a.conf.ServerPort)), "--proxy-port", strconv.Itoa(int(a.conf.ProxyPort)), "--enable-testing", strconv.FormatBool(opts.EnableTesting))
 			agentCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // Detach the process
 
 			// Redirect the standard output and error to the log file
@@ -424,29 +422,6 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			}
 
 			if opts.Mode == models.MODE_TEST && opts.EnableTesting {
-				// Wait briefly to allow the process to start
-				// Wait a bit longer to allow all processes to start
-				// time.Sleep(2 * time.Second)
-
-				// // Find the PID using pgrep (requires knowing part of the process name)
-				// output, err := exec.Command("pgrep", "-f", "keployT agent").Output()
-				// if err != nil {
-				// 	utils.LogError(a.logger, err, "failed to find detached process PID")
-				// 	return 0, err
-				// }
-
-				// fmt.Println("output::::::", string(output))
-				// // Split the output by newline to get all PIDs and pick the last one
-				// pids := strings.Split(strings.TrimSpace(string(output)), "\n")
-				// lastPID := pids[len(pids)-1]
-
-				// detachedPID, err := strconv.Atoi(lastPID)
-				// if err != nil {
-				// 	utils.LogError(a.logger, err, "failed to parse detached process PID")
-				// 	return 0, err
-				// }
-
-				// a.logger.Info("detached keploy agent PID", zap.Int("detachedPID", detachedPID))
 				a.SendKtPID(ctx, clientID)
 			}
 			a.logger.Info("keploy agent started", zap.Int("pid", agentCmd.Process.Pid))

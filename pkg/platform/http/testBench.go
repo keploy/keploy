@@ -58,7 +58,6 @@ func (a *AgentClient) SendKtPID(ctx context.Context, id uint64) error {
 }
 
 func GetPIDFromPort(port int) (int, error) {
-	// Run the `lsof -i :<port>` command
 	cmd := exec.Command("sudo", "lsof", "-i", fmt.Sprintf(":%d", port))
 	var out bytes.Buffer
 	cmd.Stdout = &out

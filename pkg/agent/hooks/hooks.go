@@ -61,8 +61,8 @@ type Hooks struct {
 	//--------------
 
 	// test bench maps
-	testBenchInfoMap *ebpf.Map
-
+	tbenchFilterPid  *ebpf.Map
+	tbenchFilterPort *ebpf.Map
 	// eBPF C shared objectsobjects
 	// ebpf objects and events
 	socket   link.Link
@@ -150,7 +150,7 @@ func (h *Hooks) load(opts agent.HookCfg) error {
 	h.clientRegistrationMap = objs.KeployClientRegistrationMap
 	h.agentRegistartionMap = objs.KeployAgentRegistrationMap
 	h.proxyInfoMap = objs.KeployProxyInfo
-	h.testBenchInfoMap = objs.TestbenchInfoMap
+	h.tbenchFilterPid = objs.TestbenchInfoMap
 
 	h.objects = objs
 
@@ -518,6 +518,29 @@ func (h *Hooks) SendKeployClientInfo(clientID uint64, clientInfo structs.ClientI
 	return nil
 }
 
+// SendKeployPids is used to send keploy recordServer(key-0) or testServer(key-1) Pid to the ebpf program
+func (h *Hooks) SendKeployPids(key models.ModeKey, tb structs.TestBenchInfo) error {
+	fmt.Println("Test bench info in SendKeployPids", tb)
+	err := h.tbenchFilterPid.Update(key, &tb, ebpf.UpdateAny)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// For keploy test bench
+// The below function is used to send the keploy record binary server port to the ebpf so that the flow first reaches to the keploy record proxy and then keploy test proxy
+
+// SendKeployPorts is used to send keploy recordServer(key-0) or testServer(key-1) Port to the ebpf program
+func (h *Hooks) SendKeployPorts(key models.ModeKey, port uint32) error {
+
+	err := h.tbenchFilterPort.Update(key, &port, ebpf.UpdateAny)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func (h *Hooks) DeleteKeployClientInfo(id uint64) error {
 	err := h.DeleteClientInfo(id)
 	if err != nil {
@@ -536,13 +559,10 @@ func (h *Hooks) SendClientProxyInfo(clientID uint64, proxyInfo structs.ProxyInfo
 	return nil
 }
 
-func (h *Hooks) SendKtInfo(ctx context.Context, tb models.TestBenchReq) error {
-	tbInfo := structs.TestBenchInfo{
-		KeployTClientPID: uint32(tb.KtPid),
-		KeployTAgentPID:  uint32(tb.KaPid),
-	}
-	fmt.Println("Test bench info", tbInfo)
-	err := h.SendTestBenchInfo(tbInfo)
+func (h *Hooks) SendKtInfo(ctx context.Context, tb structs.TestBenchInfo) error {
+
+	fmt.Println("Test bench info", tb)
+	err := h.SendKeployPids(models.TestKey, tb)
 	if err != nil {
 		h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))
 		return err

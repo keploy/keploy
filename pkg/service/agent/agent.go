@@ -40,6 +40,7 @@ func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, tester agent.T
 // Setup will create a new app and store it in the map, all the setup will be done here
 func (a *Agent) Setup(ctx context.Context, opts models.SetupOptions) error {
 	a.logger.Info("Starting the agent in ", zap.String(string(opts.Mode), "mode"))
+
 	err := a.Hook(ctx, 0, models.HookOptions{
 		Mode:          opts.Mode,
 		IsDocker:      opts.IsDocker,
@@ -154,7 +155,7 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 	}
 
 	a.proxyStarted = true
-
+	fmt.Println("opts.EnableTesting::", opts.EnableTesting)
 	if opts.EnableTesting {
 		// Setting up the test bench
 		err := a.Tester.Setup(ctx, models.TestingOptions{Mode: opts.Mode})
@@ -289,5 +290,9 @@ func (a *Agent) SendNetworkInfo(ctx context.Context, opts models.SetupOptions) e
 }
 
 func (a *Agent) SendKtInfo(ctx context.Context, tb models.TestBenchReq) error {
-	return a.Hooks.SendKtInfo(ctx, tb)
+	tbInfo := structs.TestBenchInfo{
+		KTestClientPID: tb.KtPid,
+		KTestAgentPID:  tb.KaPid,
+	}
+	return a.Hooks.SendKtInfo(ctx, tbInfo)
 }

@@ -2,7 +2,6 @@ package routes
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 
 	"github.com/go-chi/render"
@@ -14,7 +13,6 @@ func (a *AgentRequest) SendKtInfo(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	var testbenchReq models.TestBenchReq
 	err := json.NewDecoder(r.Body).Decode(&testbenchReq)
-
 	if err != nil {
 		render.Status(r, http.StatusBadRequest)
 		return
@@ -31,8 +29,6 @@ func (a *AgentRequest) SendKtInfo(w http.ResponseWriter, r *http.Request) {
 		IsSuccess: true,
 		Error:     "",
 	}
-
-	fmt.Println("TestBenchReq:::::::: ", testbenchReq)
 
 	render.JSON(w, r, tbRes)
 	render.Status(r, http.StatusOK)

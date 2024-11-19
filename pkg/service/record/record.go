@@ -115,10 +115,6 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		}
 
 		reqCtxCancel()
-		// err = reqErrGrp.Wait()
-		// if err != nil && err != io.EOF {
-		// 	utils.LogError(r.logger, err, "failed to stop request execution")
-		// }
 		r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
 	}()
 
