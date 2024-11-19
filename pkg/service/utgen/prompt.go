@@ -62,7 +62,6 @@ type PromptBuilder struct {
 	FunctionUnderTest      string
 	ImportDetails          string
 	ModuleName             string
-	TestFileContent 	  string
 }
 
 func NewPromptBuilder(srcPath, testPath, covReportContent, includedFiles, additionalInstructions, language, additionalPrompt, functionUnderTest string, logger *zap.Logger) (*PromptBuilder, error) {
@@ -139,7 +138,7 @@ func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, erro
 		"source_file_numbered":         pb.Src.CodeNumbered,
 		"test_file_numbered":           pb.Test.CodeNumbered,
 		"source_file":                  pb.Src.Code,
-		"test_file":                    pb.TestFileContent,
+		"test_file":                    pb.Test.Code,
 		"code_coverage_report":         pb.CovReportContent,
 		"additional_includes_section":  pb.IncludedFiles,
 		"failed_tests_section":         failedTestRuns,

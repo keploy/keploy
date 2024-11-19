@@ -3,7 +3,6 @@ package utgen
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -282,6 +281,8 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				if err != nil {
 					utils.LogError(g.logger, err, "Error reverting source code")
 				}
+			} else {
+				g.promptBuilder.Src.Code = testsDetails.RefactoredSourceCode
 			}
 			iterationCount++
 			if g.cov.Current < (g.cov.Desired/100) && g.cov.Current > 0 {
@@ -505,7 +506,7 @@ func (g *UnitTestGenerator) GenerateTests(ctx context.Context, iterationCount in
 		g.logger.Error("Error reading updated test file content", zap.Error(err))
 		return &models.UTDetails{}, err
 	}
-	g.promptBuilder.TestFileContent = updatedTestContent
+	g.promptBuilder.Test.Code = updatedTestContent
 	g.promptBuilder.CovReportContent = g.cov.Content
 	g.prompt, err = g.promptBuilder.BuildPrompt("test_generation", "")
 	if err != nil {
@@ -521,11 +522,6 @@ func (g *UnitTestGenerator) GenerateTests(ctx context.Context, iterationCount in
 		RequestPurpose: requestPurpose,
 	}
 
-	err = appendPromptToFile("ai_request_prompts.log", aiRequest.Prompt)
-	if err != nil {
-		return &models.UTDetails{}, err
-	}
-
 	response, err := g.ai.Call(ctx, CompletionParams{}, aiRequest, false)
 	if err != nil {
 		return &models.UTDetails{}, err
@@ -538,25 +534,6 @@ func (g *UnitTestGenerator) GenerateTests(ctx context.Context, iterationCount in
 	}
 
 	return testsDetails, nil
-}
-
-func appendPromptToFile(filename string, prompt Prompt) error {
-	// Open the file in append mode, create it if it doesn't exist
-	file, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	// Serialize the prompt to JSON
-	promptJSON, err := json.Marshal(prompt)
-	if err != nil {
-		return err
-	}
-
-	// Write the serialized JSON to the file with a newline
-	_, err = file.WriteString(string(promptJSON) + "\n")
-	return err
 }
 
 func (g *UnitTestGenerator) setCursor(ctx context.Context) error {
