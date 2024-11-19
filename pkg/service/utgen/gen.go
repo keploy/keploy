@@ -3,6 +3,7 @@ package utgen
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -497,6 +498,20 @@ func (g *UnitTestGenerator) GenerateTests(ctx context.Context, iterationCount in
 	if len(g.ai.FunctionUnderTest) > 0 {
 		requestPurpose = TestForFunction
 	}
+
+	updatedTestContent, err := readFile(g.testPath)
+	if err != nil {
+		g.logger.Error("Error reading updated test file content", zap.Error(err))
+		return &models.UTDetails{}, err
+	}
+	g.promptBuilder.TestFileContent = updatedTestContent
+	g.promptBuilder.CovReportContent = g.cov.Content
+	g.prompt, err = g.promptBuilder.BuildPrompt("test_generation", "")
+	if err != nil {
+		utils.LogError(g.logger, err, "Error building prompt")
+		return &models.UTDetails{}, err
+	}
+
 	aiRequest := AIRequest{
 		MaxTokens:      4096,
 		Prompt:         *g.prompt,
@@ -504,40 +519,43 @@ func (g *UnitTestGenerator) GenerateTests(ctx context.Context, iterationCount in
 		Iteration:      iterationCount,
 		RequestPurpose: requestPurpose,
 	}
+
+	err = appendPromptToFile("ai_request_prompts.log", aiRequest.Prompt)
+	if err != nil {
+		return &models.UTDetails{}, err
+	}
+
 	response, err := g.ai.Call(ctx, CompletionParams{}, aiRequest, false)
 	if err != nil {
 		return &models.UTDetails{}, err
 	}
 
-	select {
-	case <-ctx.Done():
-		err := ctx.Err()
-		return &models.UTDetails{}, err
-	default:
-	}
-
-	select {
-	case <-ctx.Done():
-		err := ctx.Err()
-		return &models.UTDetails{}, err
-	default:
-	}
-
 	testsDetails, err := unmarshalYamlTestDetails(response)
-
 	if err != nil {
 		utils.LogError(g.logger, err, "Error unmarshalling test details")
 		return &models.UTDetails{}, err
 	}
 
-	select {
-	case <-ctx.Done():
-		err := ctx.Err()
-		return &models.UTDetails{}, err
-	default:
+	return testsDetails, nil
+}
+
+func appendPromptToFile(filename string, prompt Prompt) error {
+	// Open the file in append mode, create it if it doesn't exist
+	file, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	// Serialize the prompt to JSON
+	promptJSON, err := json.Marshal(prompt)
+	if err != nil {
+		return err
 	}
 
-	return testsDetails, nil
+	// Write the serialized JSON to the file with a newline
+	_, err = file.WriteString(string(promptJSON) + "\n")
+	return err
 }
 
 func (g *UnitTestGenerator) setCursor(ctx context.Context) error {

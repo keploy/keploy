@@ -62,6 +62,7 @@ type PromptBuilder struct {
 	FunctionUnderTest      string
 	ImportDetails          string
 	ModuleName             string
+	TestFileContent 	  string
 }
 
 func NewPromptBuilder(srcPath, testPath, covReportContent, includedFiles, additionalInstructions, language, additionalPrompt, functionUnderTest string, logger *zap.Logger) (*PromptBuilder, error) {
@@ -129,6 +130,7 @@ func formatSection(content, templateText string) (string, error) {
 }
 
 func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, error) {
+	// Ensure the source and test code are numbered
 	pb.Src.CodeNumbered = numberLines(pb.Src.Code)
 	pb.Test.CodeNumbered = numberLines(pb.Test.Code)
 	variables := map[string]interface{}{
@@ -137,7 +139,7 @@ func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, erro
 		"source_file_numbered":         pb.Src.CodeNumbered,
 		"test_file_numbered":           pb.Test.CodeNumbered,
 		"source_file":                  pb.Src.Code,
-		"test_file":                    pb.Test.Code,
+		"test_file":                    pb.TestFileContent,
 		"code_coverage_report":         pb.CovReportContent,
 		"additional_includes_section":  pb.IncludedFiles,
 		"failed_tests_section":         failedTestRuns,
@@ -161,6 +163,7 @@ func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, erro
 		prompt.User = ""
 		return prompt, fmt.Errorf("Error rendering system prompt: %v", err)
 	}
+	prompt.System = systemPrompt
 
 	userPrompt, err := renderTemplate(settings.GetString(file+".user"), variables)
 	if err != nil {
@@ -168,7 +171,6 @@ func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, erro
 		prompt.User = ""
 		return prompt, fmt.Errorf("Error rendering user prompt: %v", err)
 	}
-	prompt.System = systemPrompt
 	userPrompt = html.UnescapeString(userPrompt)
 	prompt.User = userPrompt
 	return prompt, nil
