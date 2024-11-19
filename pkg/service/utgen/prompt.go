@@ -129,7 +129,6 @@ func formatSection(content, templateText string) (string, error) {
 }
 
 func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, error) {
-	// Ensure the source and test code are numbered
 	pb.Src.CodeNumbered = numberLines(pb.Src.Code)
 	pb.Test.CodeNumbered = numberLines(pb.Test.Code)
 	variables := map[string]interface{}{

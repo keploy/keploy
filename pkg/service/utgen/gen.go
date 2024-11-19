@@ -284,7 +284,6 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			} else {
 				g.promptBuilder.Src.Code = testsDetails.RefactoredSourceCode
 			}
-			iterationCount++
 			if g.cov.Current < (g.cov.Desired/100) && g.cov.Current > 0 {
 				if err := g.runCoverage(); err != nil {
 					utils.LogError(g.logger, err, "Error running coverage")
