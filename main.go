@@ -23,7 +23,7 @@ import (
 
 var version string
 var dsn string
-var apiServerURI = "https://api.keploy.io"
+var apiServerURI = "http://localhost:8083"
 var gitHubClientID = "Iv23liFBvIVhL29i9BAp"
 
 func main() {
