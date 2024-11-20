@@ -99,7 +99,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 
 	// To find the source files if the source path is not provided
 	if g.srcPath == "" {
-		if err := g.runCoverage(); err != nil {
+		if err := g.runCoverage(ctx); err != nil {
 			return err
 		}
 		if len(g.Files) == 0 {
@@ -147,7 +147,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			newTestFile = true
 		}
 		if !newTestFile {
-			if err = g.runCoverage(); err != nil {
+			if err = g.runCoverage(ctx); err != nil {
 				return err
 			}
 		} else {
@@ -285,7 +285,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				g.promptBuilder.Src.Code = testsDetails.RefactoredSourceCode
 			}
 			if g.cov.Current < (g.cov.Desired/100) && g.cov.Current > 0 {
-				if err := g.runCoverage(); err != nil {
+				if err := g.runCoverage(ctx); err != nil {
 					utils.LogError(g.logger, err, "Error running coverage")
 					return err
 				}
@@ -448,7 +448,7 @@ func statusUpdater(stop <-chan bool) {
 	}
 }
 
-func (g *UnitTestGenerator) runCoverage() error {
+func (g *UnitTestGenerator) runCoverage(ctx context.Context) error {
 	// Perform an initial build/test command to generate coverage report and get a baseline
 	if g.srcPath != "" {
 		g.logger.Info(fmt.Sprintf("Running test command to generate coverage report: '%s'", g.cmd))
@@ -463,6 +463,20 @@ func (g *UnitTestGenerator) runCoverage() error {
 	duration := time.Since(startTime)
 	stopStatus <- true
 	g.logger.Info(fmt.Sprintf("Test command completed in %v", formatDuration(duration)))
+
+	cmdCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	// Check if the context timed out
+	if cmdCtx.Err() == context.DeadlineExceeded {
+		g.logger.Info("Test command timed out after 5 seconds.")
+		return fmt.Errorf("test command timed out: %s", g.cmd)
+	}
+
+	// Check if the parent context was canceled
+	if ctx.Err() != nil {
+		g.logger.Info("Test command was canceled.")
+		return fmt.Errorf("test command canceled: %s", g.cmd)
+	}
 
 	if err != nil {
 		g.logger.Warn("Test command failed. Ensure no tests are failing, and rerun the command.")

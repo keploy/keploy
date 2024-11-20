@@ -34,7 +34,14 @@ func NewInjectorBuilder(logger *zap.Logger, language string) *Injector {
 func (i *Injector) libraryInstalled() ([]string, error) {
 	switch strings.ToLower(i.language) {
 	case "go":
-		out, err := exec.Command("go", "list", "-m", "all").Output()
+		// handle vendor directory check for go list
+		vendorDir := "vendor"
+		modFlag := "-mod=readonly"
+		if _, err := os.Stat(vendorDir); os.IsNotExist(err) {
+			modFlag = "-mod=mod"
+		}
+		cmd := exec.Command("go", "list", modFlag, "-m", "all")
+		out, err := cmd.Output()
 		if err != nil {
 			return nil, fmt.Errorf("failed to get Go dependencies: %w", err)
 		}
