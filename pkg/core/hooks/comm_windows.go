@@ -117,9 +117,10 @@ func (h *Hooks) SendDockerAppInfo(_ uint64, dockerAppInfo structs.DockerAppInfo)
 func (h *Hooks) GetEvents(ctx context.Context) error {
 	for {
 		buf, err := util.ReadBytes(ctx, h.logger, h.conn)
+		fmt.Println("recieved few bytes")
 		if err != nil {
 			if err == io.EOF {
-				h.logger.Debug("recieved request buffer is empty from redirector")
+				h.logger.Error("recieved request buffer is empty from redirector")
 				return nil
 			}
 			utils.LogError(h.logger, err, "failed to read request from redirector")
@@ -183,41 +184,3 @@ func (h *Hooks) GetEvents(ctx context.Context) error {
 		}
 	}
 }
-
-// func (h *Hooks) ReadDestInfo(ctx context.Context) error {
-// 	const numBytes = 1024
-// 	for {
-// 		// Read the exact number of bytes specified
-// 		buf := make([]byte, numBytes)
-// 		n, err := h.conn.Read(buf)
-// 		if err != nil {
-// 			if err == io.EOF {
-// 				h.logger.Debug("Received request buffer is empty from redirector")
-// 				return nil
-// 			}
-// 			utils.LogError(h.logger, err, "Failed to read request from redirector")
-// 			return err
-// 		}
-// 		buf = buf[:n] // Trim buffer to actual bytes read
-// 		var packet grpc.NewFlow
-// 		err = proto.Unmarshal(buf, &packet)
-// 		if err != nil {
-// 			utils.LogError(h.logger, err, "failed to decode message from redirector")
-// 			return err
-// 		}
-// 		dst := packet.GetTcp()
-// 		addr := dst.GetRemoteAddress()
-// 		h.logger.Info("port ", zap.Any("port", addr.GetPort()))
-// 		h.logger.Info("host ", zap.Any("addr", addr.GetHost()))
-// 		h.logger.Info("version ", zap.Any("version", addr.GetVersion()))
-// 		h.logger.Info("srcport", zap.Any("src", addr.GetSrcPort()))
-
-// 		dest := WinDest{
-// 			Host:    addr.Host,
-// 			Port:    addr.Port,
-// 			Version: addr.Version,
-// 		}
-// 		h.dstMap.Store(addr.SrcPort, dest)
-// 		h.logger.Info("done")
-// 	}
-// }

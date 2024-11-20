@@ -4,10 +4,9 @@ package hooks
 
 import (
 	"context"
-	"errors"
 	"net"
+	"os"
 
-	"github.com/Microsoft/go-winio"
 	"go.uber.org/zap"
 )
 
@@ -27,16 +26,20 @@ const (
 )
 
 func (p *Pipe) Start(ctx context.Context) (net.Conn, error) {
-	pipeConfig := &winio.PipeConfig{
-		InputBufferSize:  IPCBufSize,
-		OutputBufferSize: IPCBufSize,
-		MessageMode:      true,
+	socketPath := `C:\my.sock`
+
+	// Clean up the socket file if it already exists
+	if _, err := os.Stat(socketPath); err == nil {
+		os.Remove(socketPath)
 	}
-	listener, err := winio.ListenPipe(p.Name, pipeConfig)
+
+	// Create a Unix socket listener
+	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
-		p.Logger.Error("failed to create named pipe", zap.Error(err))
-		return nil, errors.New("failed to start pipe")
+		return nil, err
 	}
+
+	defer listener.Close()
 	conn, err := listener.Accept()
 	if err != nil {
 		p.Logger.Error("failed to accept connection")
