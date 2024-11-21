@@ -729,7 +729,7 @@ func (g *UnitTestGenerator) ValidateTest(
 		*noCoverageTest++
 		return false, nil
 	}
-	
+
 	if g.flakiness {
 		// Run the Test Five Times to Check for Flakiness
 		g.logger.Info("Coverage increased. Running additional test iterations to check for flakiness.")
@@ -755,7 +755,7 @@ func (g *UnitTestGenerator) ValidateTest(
 				})
 				g.testCaseFailed++
 				*failedBuild++
-				return false,nil
+				return false, nil
 			}
 		}
 	}
@@ -763,7 +763,7 @@ func (g *UnitTestGenerator) ValidateTest(
 	*passedTests++
 	g.cov.Current = coverageResult.Coverage
 	g.logger.Info("Generated test passed and increased coverage")
-	g.cur.Line = g.cur.Line + len(testCodeLines) + importLen 
+	g.cur.Line = g.cur.Line + len(testCodeLines) + importLen
 	return true, nil
 }
 
