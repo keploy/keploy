@@ -619,8 +619,6 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 	if err := os.WriteFile(g.testPath, []byte(processedTest), 0644); err != nil {
 		return fmt.Errorf("failed to write test file: %w", err)
 	}
-	g.logger.Info("Commands from GPT\n " + generatedTest.LibraryInstallationCode)
-	println("Commands from GPT\n", generatedTest.LibraryInstallationCode)
 	newInstalledPackagesMap, err := g.injector.installLibraries2(generatedTest.LibraryInstallationCode, installedPackagesMap)
 	if err != nil {
 		g.logger.Debug("Error installing libraries", zap.Error(err))

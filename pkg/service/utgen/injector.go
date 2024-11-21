@@ -207,41 +207,66 @@ func (i *Injector) extractJSDependencies(output []byte) map[string]string {
 func (i *Injector) installLibraries2(libraryCommands string, installedPackages map[string]string) (map[string]map[string]string, error) {
 	newInstalledPackagesMap := make(map[string]map[string]string)
 	libraryCommands = strings.TrimSpace(libraryCommands)
+	beforeVersionUpdate := true
 	if libraryCommands == "" || libraryCommands == "\"\"" {
+		i.logger.Info("No new libraries required.")
 		return newInstalledPackagesMap, nil
 	}
 	commands := strings.Split(libraryCommands, "\n")
 	for _, command := range commands {
+		trimmedCommand := strings.TrimSpace(command)
+		if strings.Contains(strings.ToLower(trimmedCommand), "no new") {
+			i.logger.Info("No new libraries required.")
+			return newInstalledPackagesMap, nil
+		}
 		command = strings.ReplaceAll(command, "-", "")
-		packageName, version := i.extractPackageNameAndVersion(command)
-		// Check the current state of the package in installedPackages
-		if currentVersion, exists := installedPackages[packageName]; exists {
-			if currentVersion == version {
-				// Same package and version, skip
-				continue
-			} else if version > currentVersion {
-				// Upgrade needed
-				newInstalledPackagesMap[packageName] = map[string]string{
-					"version": version,
-					"action":  "upgrade",
+		var packageName string
+		var version string
+		if !beforeVersionUpdate {
+			packageName, version = i.extractPackageNameAndVersion(command)
+			// Check the current state of the package in installedPackages
+			if currentVersion, exists := installedPackages[packageName]; exists {
+				if currentVersion == version {
+					// Same package and version, skip
+					continue
+				} else if version > currentVersion {
+					// Upgrade needed
+					newInstalledPackagesMap[packageName] = map[string]string{
+						"version": version,
+						"action":  "upgrade",
+					}
+				} else if version < currentVersion {
+					// Downgrade needed
+					newInstalledPackagesMap[packageName] = map[string]string{
+						"version": version,
+						"action":  "downgrade",
+					}
 				}
-			} else if version < currentVersion {
-				// Downgrade needed
+			} else {
+				// New package to install
 				newInstalledPackagesMap[packageName] = map[string]string{
 					"version": version,
-					"action":  "downgrade",
+					"action":  "install",
 				}
 			}
 		} else {
-			// New package to install
-			newInstalledPackagesMap[packageName] = map[string]string{
-				"version": version,
-				"action":  "install",
+			packageName = i.extractPackageName(command)
+			if _, exists := installedPackages[packageName]; exists {
+				continue
+			} else {
+				// New package to install
+				newInstalledPackagesMap[packageName] = map[string]string{
+					"version": "dummy version",
+					"action":  "install",
+				}
 			}
 		}
+
 		// Run the install command
-		_, _, exitCode, _, err := RunCommand(command, "", i.logger)
+		stdout, stderr, exitCode, _, err := RunCommand(command, "", i.logger)
 		if exitCode != 0 || err != nil {
+			i.logger.Info("FAILED TO INSTALL PACKAGE: " + packageName + " with command: " + command)
+			i.logger.Info("ERROR: " + err.Error() + " , stdout: " + stdout + ", stderr: " + stderr)
 			return nil, fmt.Errorf("failed to install library: %s, error: %w", command, err)
 		}
 	}
@@ -272,63 +297,6 @@ func (i *Injector) installLibraries(libraryCommands string, installedPackages []
 	return newInstalledPackages, nil
 }
 
-// func (i *Injector) newInstallLibraries(libraryCommands string, installedPackages map[string]string) ([]string, error) {
-// 	var newInstalledPackages []string
-// 	libraryCommands = strings.TrimSpace(libraryCommands)
-// 	if libraryCommands == "" || libraryCommands == "\"\"" {
-// 		return newInstalledPackages, nil
-// 	}
-
-// 	commands := strings.Split(libraryCommands, "\n")
-// 	for _, command := range commands {
-// 		command = strings.ReplaceAll(command, "-", "")
-// 		packageName,version := i.extractPackageNameAndVersion(command)
-// 		oldVersion, exists := installedPackages[packageName]
-// 		// Determine the operation to perform
-// 		if !exists {
-// 			// New package installation
-// 			err := i.runInstallCommand(packageName, newVersion)
-// 			if err != nil {
-// 				return nil, fmt.Errorf("failed to install library: %s@%s", packageName, newVersion)
-// 			}
-// 			operations = append(operations, LibraryOperation{
-// 				PackageName: packageName,
-// 				OldVersion:  "",
-// 				NewVersion:  newVersion,
-// 				Operation:   "install",
-// 			})
-// 			installedPackages[packageName] = newVersion
-// 		} else if oldVersion != newVersion {
-// 			// Upgrade or downgrade
-// 			err := i.runInstallCommand(packageName, newVersion)
-// 			if err != nil {
-// 				return nil, fmt.Errorf("failed to change version of library: %s from %s to %s", packageName, oldVersion, newVersion)
-// 			}
-// 			op := "upgrade"
-// 			if oldVersion > newVersion {
-// 				op = "downgrade"
-// 			}
-// 			operations = append(operations, LibraryOperation{
-// 				PackageName: packageName,
-// 				OldVersion:  oldVersion,
-// 				NewVersion:  newVersion,
-// 				Operation:   op,
-// 			})
-// 			installedPackages[packageName] = newVersion
-// 		}
-
-//			if isStringInarray(installedPackages, packageName) {
-//				continue
-//			}
-//			_, _, exitCode, _, err := RunCommand(command, "", i.logger)
-//			if exitCode != 0 || err != nil {
-//				return newInstalledPackages, fmt.Errorf("failed to install library: %s", command)
-//			}
-//			installedPackages = append(installedPackages, packageName)
-//			newInstalledPackages = append(newInstalledPackages, packageName)
-//		}
-//		return newInstalledPackages, nil
-//	}
 func (i *Injector) extractPackageName(command string) string {
 	fields := strings.Fields(command)
 	if len(fields) < 3 {
@@ -338,6 +306,9 @@ func (i *Injector) extractPackageName(command string) string {
 }
 func (i *Injector) extractPackageNameAndVersion(command string) (string, string) {
 	fields := strings.Fields(command)
+	if i.language == "go" && len(fields) < 4 {
+		return fields[2], ""
+	}
 	if len(fields) < 3 {
 		return "", ""
 	}
@@ -345,28 +316,45 @@ func (i *Injector) extractPackageNameAndVersion(command string) (string, string)
 }
 
 func (i *Injector) uninstallLibraries2(installedPackagesMap map[string]string, newInstalledPackagesMap map[string]map[string]string) error {
-	for packageName, packageDetails := range newInstalledPackagesMap {
-		newVersion := packageDetails["version"]
+	beforeVersionUpdate := true
+	if !beforeVersionUpdate {
+		for packageName, packageDetails := range newInstalledPackagesMap {
+			newVersion := packageDetails["version"]
 
-		if originalVersion, exists := installedPackagesMap[packageName]; exists {
-			// If the package exists but the version is different
-			if originalVersion != newVersion {
-				i.logger.Info(fmt.Sprintf("Reverting package %s to original version %s (was %s).", packageName, originalVersion, newVersion))
-				if err := i.installSpecificVersion(packageName, originalVersion); err != nil {
-					i.logger.Warn(fmt.Sprintf("Failed to revert package %s to version %s.", packageName, originalVersion), zap.Error(err))
+			if originalVersion, exists := installedPackagesMap[packageName]; exists {
+				// If the package exists but the version is different
+				if originalVersion != newVersion {
+					i.logger.Info(fmt.Sprintf("Reverting package %s to original version %s (was %s).", packageName, originalVersion, newVersion))
+					if err := i.installSpecificVersion(packageName, originalVersion); err != nil {
+						i.logger.Warn(fmt.Sprintf("Failed to revert package %s to version %s.", packageName, originalVersion), zap.Error(err))
+					}
+				} else {
+					// If the version matches, do nothing
+					i.logger.Info(fmt.Sprintf("Package %s is already at the correct version (%s). Skipping.", packageName, originalVersion))
 				}
 			} else {
-				// If the version matches, do nothing
-				i.logger.Info(fmt.Sprintf("Package %s is already at the correct version (%s). Skipping.", packageName, originalVersion))
+				// If the package doesn't exist in installedPackagesMap, uninstall it
+				i.logger.Info(fmt.Sprintf("Uninstalling package %s (not part of the original state).", packageName))
+				if err := i.uninstallSpecificPackage(packageName); err != nil {
+					i.logger.Warn(fmt.Sprintf("Failed to uninstall package: %s.", packageName), zap.Error(err))
+				}
 			}
-		} else {
-			// If the package doesn't exist in installedPackagesMap, uninstall it
-			i.logger.Info(fmt.Sprintf("Uninstalling package %s (not part of the original state).", packageName))
-			if err := i.uninstallSpecificPackage(packageName); err != nil {
-				i.logger.Warn(fmt.Sprintf("Failed to uninstall package: %s.", packageName), zap.Error(err))
+		}
+	} else {
+		for packageName := range newInstalledPackagesMap {
+
+			if _, exists := installedPackagesMap[packageName]; exists {
+				continue
+			} else {
+				// If the package doesn't exist in installedPackagesMap, uninstall it
+				i.logger.Info(fmt.Sprintf("Uninstalling package %s (not part of the original state).", packageName))
+				if err := i.uninstallSpecificPackage(packageName); err != nil {
+					i.logger.Warn(fmt.Sprintf("Failed to uninstall package: %s.", packageName), zap.Error(err))
+				}
 			}
 		}
 	}
+
 	return nil
 
 }
