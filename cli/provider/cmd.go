@@ -211,6 +211,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("llm-api-version", "", "API version of the llm")
 		cmd.Flags().String("additional-prompt", "", "Additional prompt to be used for the AI model.")
 		cmd.Flags().String("function-under-test", "", "The specific function for which tests will be generated.")
+		cmd.Flags().Bool("flakiness", false, "The flakiness check to run the passed tests for flakiness")
 		err := cmd.MarkFlagRequired("test-command")
 		if err != nil {
 			errMsg := "failed to mark testCommand as required flag"

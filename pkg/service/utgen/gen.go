@@ -54,6 +54,7 @@ type UnitTestGenerator struct {
 	testCasePassed   int
 	testCaseFailed   int
 	noCoverageTest   int
+	flakiness        bool
 }
 
 var discardedTestsFilename = "discardedTests.txt"
@@ -82,6 +83,7 @@ func NewUnitTestGenerator(
 		},
 		additionalPrompt: genConfig.AdditionalPrompt,
 		cur:              &Cursor{},
+		flakiness:        genConfig.Flakiness,
 	}
 	return generator, nil
 }
@@ -627,7 +629,13 @@ func (g *UnitTestGenerator) getLine(ctx context.Context) (int, error) {
 	return line, nil
 }
 
-func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, noCoverageTest, failedBuild *int, installedPackages []string) (bool, error) {
+func (g *UnitTestGenerator) ValidateTest(
+	generatedTest models.UT,
+	passedTests,
+	noCoverageTest,
+	failedBuild *int,
+	installedPackages []string,
+) (bool, error) {
 	testCode := strings.TrimSpace(generatedTest.TestCode)
 	InsertAfter := g.cur.Line
 	Indent := g.cur.Indentation
@@ -644,7 +652,6 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 		}
 	}
 	testCodeIndented = "\n" + g.injector.addCommentToTest(strings.TrimSpace(testCodeIndented)) + "\n"
-	// Append the generated test to the relevant line in the test file
 	originalContent, err := readFile(g.testPath)
 	if err != nil {
 		return false, fmt.Errorf("failed to read test file: %w", err)
@@ -660,89 +667,103 @@ func (g *UnitTestGenerator) ValidateTest(generatedTest models.UT, passedTests, n
 	if err := os.WriteFile(g.testPath, []byte(processedTest), 0644); err != nil {
 		return false, fmt.Errorf("failed to write test file: %w", err)
 	}
-
+	importLen, err := g.injector.updateImports(g.testPath, generatedTest.NewImportsCode)
+	if err != nil {
+		g.logger.Warn("Error updating imports", zap.Error(err))
+	}
 	newInstalledPackages, err := g.injector.installLibraries(generatedTest.LibraryInstallationCode, installedPackages)
 	if err != nil {
 		g.logger.Debug("Error installing libraries", zap.Error(err))
 	}
 
-	// Run the test using the Runner class
-	g.logger.Info(fmt.Sprintf("Running test 5 times for proper validation with the following command: '%s'", g.cmd))
-
-	var testCommandStartTime int64
-	importLen, err := g.injector.updateImports(g.testPath, generatedTest.NewImportsCode)
-	if err != nil {
-		g.logger.Warn("Error updating imports", zap.Error(err))
-	}
-	for i := 0; i < 5; i++ {
-
-		g.logger.Info(fmt.Sprintf("Iteration no: %d", i+1))
-		stdout, stderr, exitCode, timeOfTestCommand, _ := RunCommand(g.cmd, g.dir, g.logger)
-		if exitCode != 0 {
-			g.logger.Info(fmt.Sprintf("Test failed in %d iteration", i+1))
-			// Test failed, roll back the test file to its original content
-
-			if err := os.Truncate(g.testPath, 0); err != nil {
-				return false, fmt.Errorf("failed to truncate test file: %w", err)
-			}
-
-			if err := os.WriteFile(g.testPath, []byte(originalContent), 0644); err != nil {
-				return false, fmt.Errorf("failed to write test file: %w", err)
-			}
-			err = g.injector.uninstallLibraries(newInstalledPackages)
-
-			if err != nil {
-				g.logger.Warn("Error uninstalling libraries", zap.Error(err))
-			}
-			g.logger.Info("Skipping a generated test that failed")
-			g.failedTests = append(g.failedTests, &models.FailedUT{
-				TestCode:                generatedTest.TestCode,
-				ErrorMsg:                extractErrorMessage(stdout, stderr, g.lang),
-				NewImportsCode:          generatedTest.NewImportsCode,
-				LibraryInstallationCode: generatedTest.LibraryInstallationCode,
-			})
-			g.testCaseFailed++
-			*failedBuild++
-			return false, nil
-		}
-		testCommandStartTime = timeOfTestCommand
-	}
-
-	// Check for coverage increase
-	newCoverageProcessor := NewCoverageProcessor(g.cov.Path, getFilename(g.srcPath), g.cov.Format)
-	covResult, err := newCoverageProcessor.ProcessCoverageReport(testCommandStartTime)
-	if err != nil {
-		return false, fmt.Errorf("error processing coverage report: %w", err)
-	}
-	if covResult.Coverage <= g.cov.Current {
-		g.noCoverageTest++
-		*noCoverageTest++
-		// Test failed to increase coverage, roll back the test file to its original content
-
-		if err := os.Truncate(g.testPath, 0); err != nil {
-			return false, fmt.Errorf("failed to truncate test file: %w", err)
-		}
-
+	g.logger.Info(fmt.Sprintf("Running initial test for validation with command: '%s'", g.cmd))
+	stdout, stderr, exitCode, timeOfTestCommand, _ := RunCommand(g.cmd, g.dir, g.logger)
+	if exitCode != 0 {
+		g.logger.Info("Initial test run failed ,skipping flakiness check")
 		if err := os.WriteFile(g.testPath, []byte(originalContent), 0644); err != nil {
-			return false, fmt.Errorf("failed to write test file: %w", err)
+			return false, fmt.Errorf("failed to revert test file: %w", err)
 		}
-
 		err = g.injector.uninstallLibraries(newInstalledPackages)
-
 		if err != nil {
 			g.logger.Warn("Error uninstalling libraries", zap.Error(err))
 		}
-
-		g.logger.Info("Skipping a generated test that failed to increase coverage")
+		// Mark test as failed
+		g.failedTests = append(g.failedTests, &models.FailedUT{
+			TestCode:                generatedTest.TestCode,
+			ErrorMsg:                extractErrorMessage(stdout, stderr, g.lang),
+			NewImportsCode:          generatedTest.NewImportsCode,
+			LibraryInstallationCode: generatedTest.LibraryInstallationCode,
+		})
+		g.testCaseFailed++
+		*failedBuild++
 		return false, nil
+	}
+
+	coverageProcessor := NewCoverageProcessor(g.cov.Path, getFilename(g.srcPath), g.cov.Format)
+	coverageResult, err := coverageProcessor.ProcessCoverageReport(timeOfTestCommand)
+	if err != nil {
+		utils.LogError(g.logger, err, "Error in coverage processing")
+		return false, fmt.Errorf("error in coverage processing: %w", err)
+	}
+	initialCoverage := g.cov.Current
+	g.cov.Current = coverageResult.Coverage
+	g.cov.Content = coverageResult.ReportContent
+	if g.srcPath == "" {
+		g.Files = coverageResult.Files
+	}
+
+	coverageIncreased := g.cov.Current > initialCoverage
+	if !coverageIncreased {
+		g.logger.Info("No coverage increase detected after initial test run.")
+		// Revert test file to original content
+		if err := os.WriteFile(g.testPath, []byte(originalContent), 0644); err != nil {
+			return false, fmt.Errorf("failed to revert test file: %w", err)
+		}
+		// Uninstall any installed libraries
+		err = g.injector.uninstallLibraries(newInstalledPackages)
+		if err != nil {
+			g.logger.Warn("Error uninstalling libraries", zap.Error(err))
+		}
+		// Mark test as ineffective
+		g.noCoverageTest++
+		*noCoverageTest++
+		return false, nil
+	}
+	
+	if g.flakiness {
+		// Run the Test Five Times to Check for Flakiness
+		g.logger.Info("Coverage increased. Running additional test iterations to check for flakiness.")
+		for i := 0; i < 5; i++ {
+			g.logger.Info(fmt.Sprintf("Flakiness Check - Iteration no: %d", i+1))
+			stdout, stderr, exitCode, _, _ := RunCommand(g.cmd, g.dir, g.logger)
+			if exitCode != 0 {
+				g.logger.Info(fmt.Sprintf("Flaky test detected on iteration %d: %s", i+1, stderr))
+				// Revert test file to original content
+				if err := os.WriteFile(g.testPath, []byte(originalContent), 0644); err != nil {
+					return false, fmt.Errorf("failed to revert test file: %w", err)
+				}
+				// Uninstall any installed libraries
+				err = g.injector.uninstallLibraries(newInstalledPackages)
+				if err != nil {
+					g.logger.Warn("Error uninstalling libraries", zap.Error(err))
+				}
+				g.failedTests = append(g.failedTests, &models.FailedUT{
+					TestCode:                generatedTest.TestCode,
+					ErrorMsg:                extractErrorMessage(stdout, stderr, g.lang),
+					NewImportsCode:          generatedTest.NewImportsCode,
+					LibraryInstallationCode: generatedTest.LibraryInstallationCode,
+				})
+				g.testCaseFailed++
+				*failedBuild++
+				return false,nil
+			}
+		}
 	}
 	g.testCasePassed++
 	*passedTests++
-	g.cov.Current = covResult.Coverage
-
-	g.cur.Line = g.cur.Line + len(testCodeLines) + importLen
-
+	g.cov.Current = coverageResult.Coverage
 	g.logger.Info("Generated test passed and increased coverage")
+	g.cur.Line = g.cur.Line + len(testCodeLines) + importLen 
 	return true, nil
 }
 
