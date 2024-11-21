@@ -676,10 +676,10 @@ func (g *UnitTestGenerator) ValidateTest(
 		g.logger.Debug("Error installing libraries", zap.Error(err))
 	}
 
-	g.logger.Info(fmt.Sprintf("Running initial test for validation with command: '%s'", g.cmd))
+	g.logger.Info(fmt.Sprintf("Running Test with command: '%s'", g.cmd))
 	stdout, stderr, exitCode, timeOfTestCommand, _ := RunCommand(g.cmd, g.dir, g.logger)
 	if exitCode != 0 {
-		g.logger.Info("Initial test run failed ,skipping flakiness check")
+		g.logger.Info("Test Run Failed")
 		if err := os.WriteFile(g.testPath, []byte(originalContent), 0644); err != nil {
 			return false, fmt.Errorf("failed to revert test file: %w", err)
 		}
