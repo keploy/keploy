@@ -203,7 +203,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("coverage-report-path", "coverage.xml", "Path to the code coverage report file.")
 		cmd.Flags().String("test-command", "", "The command to run tests and generate coverage report.")
 		cmd.Flags().String("coverage-format", "cobertura", "Type of coverage report.")
-		cmd.Flags().Int("expected-coverage", 100, "The desired coverage percentage.")
+		cmd.Flags().Int("expected-coverage", 80, "The desired coverage percentage.")
 		cmd.Flags().Int("max-iterations", 5, "The maximum number of iterations.")
 		cmd.Flags().String("test-dir", "", "Path to the test directory.")
 		cmd.Flags().String("llm-base-url", "", "Base URL for the AI model.")
