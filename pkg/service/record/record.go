@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"time"
 
@@ -297,6 +298,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, clientID uint64) (Fr
 
 		defer close(outgoingChan)
 		mockReceived := false
+		var mu sync.Mutex
 		// create a context without cancel
 		// change this name to some mockCtx error group
 		mockErrGrp, _ := errgroup.WithContext(ctx)
@@ -316,6 +318,8 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, clientID uint64) (Fr
 		go func() {
 			select {
 			case <-ctx.Done():
+				mu.Lock()
+				defer mu.Unlock()
 				if !mockReceived {
 					fmt.Println("context cancelled in go routine")
 					mockCtxCancel()
@@ -331,7 +335,9 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, clientID uint64) (Fr
 		}
 
 		for mock := range ch {
+			mu.Lock()
 			mockReceived = true // Set flag if a mock is received
+			mu.Unlock()
 			select {
 			case <-ctx.Done():
 				if mock != nil {
