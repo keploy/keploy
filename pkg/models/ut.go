@@ -12,9 +12,10 @@ type UTResult struct {
 }
 
 type UTDetails struct {
-	Language      string `yaml:"language"`
-	TestSignature string `yaml:"existing_test_function_signature"`
-	NewTests      []UT   `yaml:"new_tests"`
+	Language             string `yaml:"language"`
+	TestSignature        string `yaml:"existing_test_function_signature"`
+	NewTests             []UT   `yaml:"new_tests"`
+	RefactoredSourceCode string `yaml:"refactored_source_code,omitempty"`
 }
 
 type UT struct {
@@ -27,8 +28,10 @@ type UT struct {
 }
 
 type FailedUT struct {
-	TestCode string `yaml:"test_code"`
-	ErrorMsg string `yaml:"error_msg"`
+	TestCode                string `yaml:"test_code"`
+	ErrorMsg                string `yaml:"error_msg"`
+	NewImportsCode          string `yaml:"imports_code"`
+	LibraryInstallationCode string `yaml:"library_installation_code"`
 }
 
 type UTIndentationInfo struct {

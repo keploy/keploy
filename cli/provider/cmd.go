@@ -203,13 +203,15 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("coverage-report-path", "coverage.xml", "Path to the code coverage report file.")
 		cmd.Flags().String("test-command", "", "The command to run tests and generate coverage report.")
 		cmd.Flags().String("coverage-format", "cobertura", "Type of coverage report.")
-		cmd.Flags().Int("expected-coverage", 100, "The desired coverage percentage.")
+		cmd.Flags().Int("expected-coverage", 80, "The desired coverage percentage.")
 		cmd.Flags().Int("max-iterations", 5, "The maximum number of iterations.")
 		cmd.Flags().String("test-dir", "", "Path to the test directory.")
 		cmd.Flags().String("llm-base-url", "", "Base URL for the AI model.")
 		cmd.Flags().String("model", "gpt-4o", "Model to use for the AI.")
 		cmd.Flags().String("llm-api-version", "", "API version of the llm")
 		cmd.Flags().String("additional-prompt", "", "Additional prompt to be used for the AI model.")
+		cmd.Flags().String("function-under-test", "", "The specific function for which tests will be generated.")
+		cmd.Flags().Bool("flakiness", false, "The flakiness check to run the passed tests for flakiness")
 		err := cmd.MarkFlagRequired("test-command")
 		if err != nil {
 			errMsg := "failed to mark testCommand as required flag"
