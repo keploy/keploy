@@ -235,6 +235,8 @@ installKeploy (){
         done
     }
 
+    ARCH=$(uname -m)
+    
     OS_NAME="$(uname -s)"
     if [ "$OS_NAME" = "Darwin" ]; then
         NO_ROOT=true
