@@ -150,7 +150,7 @@ func (i *Injector) extractJavaDependencies(output []byte) map[string]string {
 	lines := strings.Split(string(output), "\n")
 	dependencies := make(map[string]string)
 	inDependencySection := false
-	depRegex := regexp.MustCompile(`^\[INFO\]\s+[\+\|\\\-]{1,2}\s+([\w\.\-]+:[\w\.\-]+):jar:([\w\.\-]+):([\w\.\-]+)`)
+	depRegex := regexp.MustCompile(`^\[INFO\]\s+([\w\.\-]+:[\w\.\-]+):jar:([\w\.\-]+):([\w\.\-]+)`)
 
 	for _, line := range lines {
 		cleanedLine := strings.TrimSpace(line)
@@ -179,27 +179,25 @@ func (i *Injector) extractJavaDependencies(output []byte) map[string]string {
 	return dependencies
 }
 
-// Extract JS/TS dependencies as a map
+// Extract JS/TS dependencies as a map from logs
 func (i *Injector) extractJSDependencies(output []byte) map[string]string {
 	lines := strings.Split(string(output), "\n")
 	dependencies := make(map[string]string)
+
+	// Define regex pattern to match dependencies in format `package@version`
+	reDependency := regexp.MustCompile(`([a-zA-Z0-9\-]+)@([\d\.]+)`)
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		line = strings.TrimPrefix(line, "├──")
-		line = strings.TrimPrefix(line, "└──")
-		line = strings.TrimPrefix(line, "│──")
-		line = strings.TrimPrefix(line, "──")
-		line = strings.TrimSpace(line)
 
-		if line == "" {
-			continue
-		}
+		// Look for matches for dependencies
+		matches := reDependency.FindStringSubmatch(line)
+		if len(matches) > 2 {
+			packageName := matches[1]
+			version := matches[2]
 
-		lastAt := strings.LastIndex(line, "@")
-		if lastAt > 0 {
-			name := line[:lastAt]
-			version := line[lastAt+1:]
-			dependencies[name] = version // Map package name to version
+			// Store the package name and version in the map
+			dependencies[packageName] = version
 		}
 	}
 	return dependencies
