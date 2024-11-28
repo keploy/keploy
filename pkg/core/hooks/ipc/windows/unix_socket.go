@@ -10,14 +10,14 @@ import (
 	"go.uber.org/zap"
 )
 
-type Pipe struct {
-	Name   string
+type UnixSocket struct {
+	Path   string
 	Logger *zap.Logger
 }
 
-func (p *Pipe) NewPipe(name string) *Pipe {
-	return &Pipe{
-		Name: name,
+func (u *UnixSocket) NewUnixSocket(path string) *UnixSocket {
+	return &UnixSocket{
+		Path: path,
 	}
 }
 
@@ -25,8 +25,8 @@ const (
 	IPCBufSize = 4096
 )
 
-func (p *Pipe) Start(ctx context.Context) (net.Conn, error) {
-	socketPath := `C:\my.sock`
+func (u *UnixSocket) Start(ctx context.Context) (net.Conn, error) {
+	socketPath := u.Path
 
 	// Clean up the socket file if it already exists
 	if _, err := os.Stat(socketPath); err == nil {
@@ -42,7 +42,7 @@ func (p *Pipe) Start(ctx context.Context) (net.Conn, error) {
 	defer listener.Close()
 	conn, err := listener.Accept()
 	if err != nil {
-		p.Logger.Error("failed to accept connection")
+		u.Logger.Error("failed to accept connection")
 	}
 	return conn, nil
 }

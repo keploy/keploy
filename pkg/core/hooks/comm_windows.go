@@ -19,6 +19,12 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+type WinDest struct {
+	Host    string
+	Port    uint32
+	Version string
+}
+
 func (h *Hooks) Get(_ context.Context, srcPort uint16) (*core.NetworkAddress, error) {
 	d, err := h.GetDestinationInfo(srcPort)
 	if err != nil {

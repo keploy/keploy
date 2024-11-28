@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package hooks provides functionality for managing hooks.
 package hooks
 
@@ -16,23 +18,19 @@ import (
 	"github.com/cilium/ebpf/link"
 
 	"go.keploy.io/server/v2/pkg/core"
-	"go.keploy.io/server/v2/pkg/core/hooks/conn"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 )
 
 func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 	return &Hooks{
-		logger:         logger,
-		sess:           core.NewSessions(),
-		m:              sync.Mutex{},
-		proxyIP4:       "127.0.0.1",
-		proxyIP6:       [4]uint32{0000, 0000, 0000, 0001},
-		proxyPort:      cfg.ProxyPort,
-		dnsPort:        cfg.DNSPort,
-		openEventChan:  make(chan conn.SocketOpenEvent, 1024),
-		closeEventChan: make(chan conn.SocketCloseEvent, 1024),
-		dataEventChan:  make(chan conn.SocketDataEvent, 1024),
+		logger:    logger,
+		sess:      core.NewSessions(),
+		m:         sync.Mutex{},
+		proxyIP4:  "127.0.0.1",
+		proxyIP6:  [4]uint32{0000, 0000, 0000, 0001},
+		proxyPort: cfg.ProxyPort,
+		dnsPort:   cfg.DNSPort,
 	}
 }
 
@@ -86,22 +84,7 @@ type Hooks struct {
 	writev      link.Link
 	writevRet   link.Link
 	appID       uint64
-
-	// windows destination info map
-	dstMap sync.Map
-
-	// windows incoming streams
-	openEventChan  chan conn.SocketOpenEvent
-	closeEventChan chan conn.SocketCloseEvent
-	dataEventChan  chan conn.SocketDataEvent
-
-	conn net.Conn
-}
-
-type WinDest struct {
-	Host    string
-	Port    uint32
-	Version string
+	conn        net.Conn
 }
 
 func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {

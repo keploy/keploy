@@ -18,12 +18,13 @@ import (
 	"go.keploy.io/server/v2/pkg/core/hooks/structs"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
-	pipe := windows_comm.Pipe{
-		Name:   `\\.\pipe\keploy-windows`,
+	unixSocket := windows_comm.UnixSocket{
+		Path:   `C:\my.sock`,
 		Logger: h.logger,
 	}
 
@@ -31,7 +32,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	errChan := make(chan error, 1)
 
 	go func() {
-		conn, err := pipe.Start(ctx)
+		conn, err := unixSocket.Start(ctx)
 		if err != nil {
 			h.logger.Error("Unable to start commuciation with redirector", zap.Error(err))
 			errChan <- err
@@ -50,11 +51,13 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	exePath := filepath.Join(dirname, "windows", "windows-redirector.exe")
 	exePath = filepath.Clean(exePath)
 
-	cmd := exec.CommandContext(ctx, exePath, `\\.\pipe\keploy-windows`)
+	cmd := exec.CommandContext(ctx, exePath, `C:\my.sock`)
 
 	// Optional: Capture output
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	if h.logger.Level() == zapcore.DebugLevel {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start the executable: %w", err)
@@ -85,8 +88,5 @@ func (h *Hooks) unLoad(_ context.Context) {
 }
 
 func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
-	// TODO use the session to get the app id
-	// and then use the app id to get the test cases chan
-	// and pass that to eBPF consumers/listeners
 	return conn.ListenSocket(ctx, h.logger, h.openEventChan, h.dataEventChan, h.closeEventChan, opts)
 }
