@@ -443,7 +443,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	PrintLogo(disableAnsi)
 	if c.cfg.Debug {
 		logger, err := log.ChangeLogLevel(zap.DebugLevel)
-		c.logger = logger
+		*c.logger = *logger
 		if err != nil {
 			errMsg := "failed to change log level"
 			utils.LogError(c.logger, err, errMsg)
@@ -454,7 +454,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	if c.cfg.EnableTesting {
 		// Add mode to logger to debug the keploy during testing
 		logger, err := log.AddMode(cmd.Name())
-		c.logger = logger
+		*c.logger = *logger
 		if err != nil {
 			errMsg := "failed to add mode to logger"
 			utils.LogError(c.logger, err, errMsg)
@@ -466,7 +466,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	if c.cfg.DisableANSI {
 		logger, err := log.ChangeColorEncoding()
 		models.IsAnsiDisabled = true
-		c.logger = logger
+		*c.logger = *logger
 		if err != nil {
 			errMsg := "failed to change color encoding"
 			utils.LogError(c.logger, err, errMsg)
