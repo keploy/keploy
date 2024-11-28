@@ -5,7 +5,6 @@ package conn
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 	"unsafe"
 
@@ -82,7 +81,6 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m chan SocketOpenEvent
 			for {
 				var event SocketOpenEvent
 				event = <-m
-				event.TimestampNano += getRealTimeOffset()
 				c.GetOrCreate(event.ConnID).AddOpenEvent(event)
 			}
 		}()
@@ -104,11 +102,6 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m chan SocketDataEvent
 			for {
 				var event SocketDataEvent
 				event = <-m
-				event.TimestampNano += getRealTimeOffset()
-				if event.Direction == IngressTraffic {
-					event.EntryTimestampNano += getRealTimeOffset()
-					l.Debug(fmt.Sprintf("Request EntryTimestamp :%v\n", convertUnixNanoToTime(event.EntryTimestampNano)))
-				}
 				c.GetOrCreate(event.ConnID).AddDataEvent(event)
 			}
 		}()
@@ -130,7 +123,6 @@ func exit(ctx context.Context, c *Factory, l *zap.Logger, m chan SocketCloseEven
 			for {
 				var event SocketCloseEvent
 				event = <-m
-				event.TimestampNano += getRealTimeOffset()
 				c.GetOrCreate(event.ConnID).AddCloseEvent(event)
 			}
 		}()
