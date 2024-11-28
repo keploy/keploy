@@ -21,11 +21,6 @@ var eventAttributesSize = int(unsafe.Sizeof(SocketDataEvent{}))
 // ListenSocket starts the socket event listeners
 func ListenSocket(ctx context.Context, l *zap.Logger, openEventChan chan SocketOpenEvent, dataEventChan chan SocketDataEvent, closeEventChan chan SocketCloseEvent, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	t := make(chan *models.TestCase, 500)
-	// err := initRealTimeOffset()
-	// if err != nil {
-	// 	utils.LogError(l, err, "failed to initialize real time offset")
-	// 	return nil, errors.New("failed to start socket listeners")
-	// }
 	c := NewFactory(time.Minute, l)
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
