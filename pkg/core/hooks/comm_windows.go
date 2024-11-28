@@ -19,15 +19,11 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-//TODO: rename this file.
-
-// Get Used by proxy
 func (h *Hooks) Get(_ context.Context, srcPort uint16) (*core.NetworkAddress, error) {
 	d, err := h.GetDestinationInfo(srcPort)
 	if err != nil {
 		return nil, err
 	}
-	// TODO : need to implement eBPF code to differentiate between different apps
 	s, ok := h.sess.Get(0)
 	if !ok {
 		return nil, fmt.Errorf("session not found")
@@ -117,7 +113,6 @@ func (h *Hooks) SendDockerAppInfo(_ uint64, dockerAppInfo structs.DockerAppInfo)
 func (h *Hooks) GetEvents(ctx context.Context) error {
 	for {
 		buf, err := util.ReadBytes(ctx, h.logger, h.conn)
-		fmt.Println("recieved few bytes")
 		if err != nil {
 			if err == io.EOF {
 				h.logger.Error("recieved request buffer is empty from redirector")

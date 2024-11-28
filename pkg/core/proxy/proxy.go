@@ -489,7 +489,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			if err != nil {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("proxy port", p.Port), zap.Any("server address", dstAddr))
 				return err
-			}	
+			}
 		}
 
 		dstCfg.TLSCfg = cfg
