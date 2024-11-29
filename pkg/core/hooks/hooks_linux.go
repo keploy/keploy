@@ -6,7 +6,6 @@ package hooks
 import (
 	"context"
 	"errors"
-	"net"
 	"sync"
 
 	"golang.org/x/sync/errgroup"
@@ -84,7 +83,6 @@ type Hooks struct {
 	writev      link.Link
 	writevRet   link.Link
 	appID       uint64
-	conn        net.Conn
 }
 
 func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {

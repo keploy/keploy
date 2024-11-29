@@ -641,7 +641,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, "error while getting absolute path")
 			return errors.New("failed to get the absolute path")
 		}
-		c.cfg.Path = filepath.Join(absPath,"keploy")
+		c.cfg.Path = filepath.Join(absPath, "keploy")
 
 		bypassPorts, err := cmd.Flags().GetUintSlice("passThroughPorts")
 		if err != nil {
