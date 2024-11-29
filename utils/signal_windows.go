@@ -4,6 +4,7 @@ package utils
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"syscall"
@@ -13,11 +14,24 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// Define Windows API function GenerateConsoleCtrlEvent
+var (
+	kernel32                     = syscall.NewLazyDLL("kernel32.dll")
+	procGenerateConsoleCtrlEvent = kernel32.NewProc("GenerateConsoleCtrlEvent")
+)
+
+func generateConsoleCtrlEvent(ctrlEvent uint32, processGroupID uint32) error {
+	ret, _, err := procGenerateConsoleCtrlEvent.Call(uintptr(ctrlEvent), uintptr(processGroupID))
+	if ret == 0 {
+		return fmt.Errorf("GenerateConsoleCtrlEvent failed: %v", err)
+	}
+	return nil
+}
+
 func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
-	handle, err := syscall.OpenProcess(syscall.PROCESS_TERMINATE, false, uint32(pid))
+	handle, err := syscall.OpenProcess(syscall.PROCESS_TERMINATE, false, uint32(-pid))
 	if err != nil {
 		if errno, ok := err.(syscall.Errno); ok && errno == windows.ERROR_INVALID_PARAMETER {
-			// ERROR_INVALID_PARAMETER means the process does not exist
 			return nil
 		}
 		logger.Error("failed to open process", zap.Int("pid", pid), zap.Error(err))
@@ -25,13 +39,9 @@ func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 	}
 	defer syscall.CloseHandle(handle)
 
-	var retVal int32
-	if sig == syscall.SIGKILL || sig == syscall.SIGTERM {
-		retVal = 1 // Default exit code for termination
-	}
-
-	if err := syscall.TerminateProcess(handle, uint32(retVal)); err != nil {
-		logger.Error("failed to terminate process", zap.Int("pid", pid), zap.Error(err))
+	err = generateConsoleCtrlEvent(syscall.CTRL_BREAK_EVENT, uint32(-pid))
+	if err != nil {
+		logger.Error("Error sending CTRL_BREAK_EVENT:", zap.Error(err))
 		return err
 	}
 
