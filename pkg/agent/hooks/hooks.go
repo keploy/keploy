@@ -521,6 +521,7 @@ func (h *Hooks) SendKeployClientInfo(clientID uint64, clientInfo structs.ClientI
 // SendKeployPids is used to send keploy recordServer(key-0) or testServer(key-1) Pid to the ebpf program
 func (h *Hooks) SendKeployPids(key models.ModeKey, tb structs.TestBenchInfo) error {
 	fmt.Println("Test bench info in SendKeployPids", tb)
+	// send keploy record clinet id too
 	err := h.tbenchFilterPid.Update(key, &tb, ebpf.UpdateAny)
 	if err != nil {
 		return err

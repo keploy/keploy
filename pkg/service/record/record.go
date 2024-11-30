@@ -135,7 +135,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	default:
 	}
 
-	clientID, err = r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType})
+	clientID, err = r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType,EnableTesting: r.config.EnableTesting})
 	if err != nil {
 		stopReason = "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)

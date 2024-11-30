@@ -422,6 +422,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			}
 
 			if opts.Mode == models.MODE_TEST && opts.EnableTesting {
+				clientID = 123456 // hardcode the test clientID to filter out in the record proxy
 				a.SendKtPID(ctx, clientID)
 			}
 			a.logger.Info("keploy agent started", zap.Int("pid", agentCmd.Process.Pid))
