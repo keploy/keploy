@@ -90,7 +90,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 
 		// Dont call the Unregister if there is an error in the running application
 		fmt.Println("app error type", runAppError.AppErrorType)
-		if runAppError.AppErrorType == "" {
+		if runAppError.AppErrorType == ""{
 			err := r.instrumentation.UnregisterClient(ctx, unregister)
 			if err != nil && err != io.EOF {
 				fmt.Println("error in unregistering client record")
@@ -135,7 +135,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	default:
 	}
 
-	clientID, err = r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType})
+	clientID, err = r.instrumentation.Setup(setupCtx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay, Mode: models.MODE_RECORD, CommandType: r.config.CommandType, EnableTesting: r.config.EnableTesting})
 	if err != nil {
 		stopReason = "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
@@ -241,6 +241,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 			stopReason = "keploy test mode binary stopped, hence stopping keploy"
 			return nil
 		default:
+			fmt.Println("app error type", appErr.AppErrorType)
 			stopReason = "unknown error recieved from application, hence stopping keploy"
 		}
 

@@ -65,7 +65,8 @@ func (t *Tester) setupReplay(ctx context.Context) error {
 	t.logger.Info(fmt.Sprintf("keployRecord pid:%v", recordPid))
 
 	err = t.testBenchInfo.SendKeployPids(models.RecordKey, structs.TestBenchInfo{
-		KRecordAgentPID: recordPid,
+		KRecordAgentPID:    recordPid,
+		KTestAgentClientId: 123456,
 	})
 
 	if err != nil {
