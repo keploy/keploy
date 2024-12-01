@@ -496,9 +496,7 @@ func (h *Hooks) Record(ctx context.Context, clientID uint64, opts models.Incomin
 		t, ok := h.TestMap.Load(clientID)
 		if ok {
 			tc, ok = t.(chan *models.TestCase)
-			if ok {
-				// Close the channel when the context is done
-			} else {
+			if !ok {
 				h.logger.Error("Failed to type assert the channel from the test map")
 			}
 		}
@@ -559,7 +557,7 @@ func (h *Hooks) SendClientProxyInfo(clientID uint64, proxyInfo structs.ProxyInfo
 	return nil
 }
 
-func (h *Hooks) SendKtInfo(ctx context.Context, tb structs.TestBenchInfo) error {
+func (h *Hooks) SendKtInfo(_ context.Context, tb structs.TestBenchInfo) error {
 
 	fmt.Println("Test bench info", tb)
 	err := h.SendKeployPids(models.TestKey, tb)

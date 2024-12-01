@@ -442,7 +442,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	c.cfg.ConfigPath = configPath
 	return nil
 }
-func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
+func (c *CmdConfigurator) ValidateFlags(_ context.Context, cmd *cobra.Command) error {
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 	PrintLogo(disableAnsi)
 	if c.cfg.Debug {

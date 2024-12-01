@@ -312,14 +312,12 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, clientID uint64) (Fr
 
 		// listen for ctx canecllation in a go routine
 		go func() {
-			select {
-			case <-ctx.Done():
-				mu.Lock()
-				defer mu.Unlock()
-				if !mockReceived {
-					fmt.Println("context cancelled in go routine")
-					mockCtxCancel()
-				}
+			<-ctx.Done()
+			mu.Lock()
+			defer mu.Unlock()
+			if !mockReceived {
+				fmt.Println("context cancelled in go routine")
+				mockCtxCancel()
 			}
 		}()
 

@@ -15,9 +15,12 @@ type MockResponse struct {
 type ResponseType string
 
 const (
-	EOF    ResponseType = "EOF"
+	// EOF ResponseType
+	EOF ResponseType = "EOF"
+	// PACKET ResponseType
 	PACKET ResponseType = "PACKET"
-	ERROR  ResponseType = "ERROR"
+	// ERROR ResponseType
+	ERROR ResponseType = "ERROR"
 )
 
 type Mock struct {

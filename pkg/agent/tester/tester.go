@@ -67,7 +67,7 @@ func (t *Tester) setupReplay(ctx context.Context) error {
 	err = t.testBenchInfo.SendKeployPids(models.RecordKey, structs.TestBenchInfo{
 		KRecordAgentPID: recordPid,
 	})
-	
+
 	if err != nil {
 		utils.LogError(t.logger, err, fmt.Sprintf("failed to send keploy %v server pid to the epbf program", models.MODE_RECORD), zap.Any("Keploy Pid", recordPid))
 		return setUpErr
