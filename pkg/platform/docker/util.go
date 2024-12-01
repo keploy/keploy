@@ -126,7 +126,7 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 
 	var cmd *exec.Cmd
 
-	// Detect the operating system
+	//nolint:staticcheck // runtime.GOOS lint suppression
 	if runtime.GOOS == "windows" {
 		var args []string
 		args = append(args, "/C")

@@ -17,7 +17,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func (a *AgentClient) SendKtPID(ctx context.Context, id uint64) error {
+func (a *AgentClient) SendKtPID(_ context.Context, id uint64) error {
 	a.logger.Info("Inside SendKtPID of agent binary !!", zap.Uint64("clientID", id))
 	ktPid := uint32(os.Getpid())
 

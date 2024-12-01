@@ -422,8 +422,12 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			}
 
 			if opts.Mode == models.MODE_TEST && opts.EnableTesting {
-				clientID = 123456 // hardcode the test clientID to filter out in the record proxy
-				a.SendKtPID(ctx, clientID)
+			  clientID = 123456 // hardcode the test clientID to filter out in the record proxy
+        err := a.SendKtPID(ctx, clientID)
+				if err != nil {
+					utils.LogError(a.logger, err, "failed to send the keployTest PID")
+					return 0, err
+				}
 			}
 			a.logger.Info("keploy agent started", zap.Int("pid", agentCmd.Process.Pid))
 		}
@@ -586,7 +590,7 @@ func (a *AgentClient) RegisterClient(ctx context.Context, opts models.SetupOptio
 	return nil
 }
 
-func (a *AgentClient) UnregisterClient(ctx context.Context, unregister models.UnregisterReq) error {
+func (a *AgentClient) UnregisterClient(_ context.Context, unregister models.UnregisterReq) error {
 	// Unregister the client with the server
 	isAgentRunning := a.isAgentRunning(context.Background())
 	if !isAgentRunning {

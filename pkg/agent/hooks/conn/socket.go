@@ -144,7 +144,7 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 	return nil
 }
 
-func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, clientID uint64) error {
+func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, _ uint64) error {
 	r, err := ringbuf.NewReader(m)
 	if err != nil {
 		utils.LogError(l, nil, "failed to create ring buffer of socketDataEvent")
@@ -205,7 +205,7 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, clientID 
 				// }
 
 				fmt.Println("SocketDataEvent-1: ", event.ClientID)
-				fmt.Printf("Direction: %v\n", event.Direction, "Actual Message: ", string(event.Msg[:event.MsgSize]))
+				fmt.Printf("Direction: %v, Actual Message: %s\n", event.Direction, string(event.Msg[:event.MsgSize]))
 
 				c.GetOrCreate(event.ConnID).AddDataEvent(event)
 			}
