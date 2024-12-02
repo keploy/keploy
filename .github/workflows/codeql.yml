@@ -72,13 +72,13 @@ jobs:
     - name: Create a folder for security reports
       run: mkdir -p reports
 
-    - name: Generate Security Report
-      uses: peter-murray/github-security-report-action@v2
-      with:
-        token: ${{ secrets.CODEQL_EXPORT_PAT_TOKEN }}
-        outputDir: ./reports
-    - name: Upload artifact
-      uses: actions/upload-artifact@v3
-      with:
-        name: security-report
-        path: /home/runner/work/keploy/results
+    # - name: Generate Security Report
+    #   uses: peter-murray/github-security-report-action@v2
+    #   with:
+    #     token: ${{ secrets.CODEQL_EXPORT_PAT_TOKEN }}
+    #     outputDir: ./reports
+    # - name: Upload artifact
+    #   uses: actions/upload-artifact@v3
+    #   with:
+    #     name: security-report
+    #     path: /home/runner/work/keploy/results
