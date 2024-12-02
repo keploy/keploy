@@ -141,7 +141,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 							}
 							return true, []models.Frontend{ssl}, nil
 						case initMock.Spec.PostgresRequests[requestIndex].Identfier == "StartupRequest" && isStartupPacket(reqBuff) && initMock.Spec.PostgresRequests[requestIndex].Payload != "AAAACATSFi8=" && initMock.Spec.PostgresResponses[requestIndex].AuthType == 10:
-							logger.Info("CHANGING TO MD5 for Response", zap.String("mock", initMock.Name), zap.String("Req", bufStr))
+							logger.Debug("CHANGING TO MD5 for Response", zap.String("mock", initMock.Name), zap.String("Req", bufStr))
 							res := make([]models.Frontend, len(initMock.Spec.PostgresResponses))
 							copy(res, initMock.Spec.PostgresResponses)
 							res[requestIndex].AuthType = 5
