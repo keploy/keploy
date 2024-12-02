@@ -204,8 +204,8 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, _ uint64)
 				// 	continue
 				// }
 
-				fmt.Println("SocketDataEvent-1: ", event.ClientID)
-				fmt.Printf("Direction: %v, Actual Message: %s\n", event.Direction, string(event.Msg[:event.MsgSize]))
+				// fmt.Println("SocketDataEvent-1: ", event.ClientID)
+				// fmt.Printf("Direction: %v, Actual Message: %s\n", event.Direction, string(event.Msg[:event.MsgSize]))
 
 				c.GetOrCreate(event.ConnID).AddDataEvent(event)
 			}
