@@ -6,7 +6,9 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v2
-
+    - name: Enable Debug Logging
+      run: |
+        echo "GITHUB_ACTIONS_DEBUG=true" >> $GITHUB_ENV
     - name: Build binary
       run: |
         go build -race -tags=viper_bind_struct -o keployv2
@@ -17,7 +19,7 @@ jobs:
         path: samples-go
     - name: Verify Admin Access
       run: |
-        whoami
+        whoami /groups
     - name: Run samples-go application
       run: |
         cd samples-go/gin-mongo
