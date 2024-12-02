@@ -81,4 +81,4 @@ jobs:
       uses: actions/upload-artifact@v3
       with:
         name: security-report
-        path: /home/runner/work/keploy/results
+        path: /home/runner/work/keploy/results/go.sarif
