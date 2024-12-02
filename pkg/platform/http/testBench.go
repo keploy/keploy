@@ -28,7 +28,6 @@ func (a *AgentClient) SendKtPID(_ context.Context, id uint64) error {
 		utils.LogError(a.logger, err, "failed to get the keployTest pid")
 		return fmt.Errorf("error getting keployTest pid: %s", err.Error())
 	}
-	fmt.Println("KeployTest PID", pid)
 
 	tb := models.TestBenchReq{
 		KtclientID: id,

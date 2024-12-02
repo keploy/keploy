@@ -4,7 +4,6 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"sync"
 
 	"go.keploy.io/server/v2/config"
@@ -100,7 +99,6 @@ func NewSessions() *Sessions {
 }
 
 func (s *Sessions) Get(id uint64) (*Session, bool) {
-	fmt.Println("Inside Get of Sessions !!", id)
 	v, ok := s.sessions.Load(id)
 	if !ok {
 		return nil, false

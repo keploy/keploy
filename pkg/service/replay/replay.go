@@ -94,16 +94,14 @@ func (r *Replayer) Start(ctx context.Context) error {
 		case <-ctx.Done():
 			break
 		default:
-			fmt.Println("stopping Keploy from test mode")
-			// unregister := models.UnregisterReq{
-			// 	ClientID: r.config.ClientID,
-			// 	Mode:     models.MODE_TEST,
-			// }
-			// err := r.instrumentation.UnregisterClient(ctx, unregister)
-			// if err != nil {
-			// 	fmt.Println("error in unregistering client replay")
-			// 	utils.LogError(r.logger, err, "failed to unregister client")
-			// }
+			unregister := models.UnregisterReq{
+				ClientID: r.config.ClientID,
+				Mode:     models.MODE_TEST,
+			}
+			err := r.instrumentation.UnregisterClient(ctx, unregister)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to unregister client")
+			}
 			time.Sleep(2 * time.Second)
 			r.logger.Info("stopping Keploy", zap.String("reason", stopReason))
 		}
@@ -989,7 +987,6 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 }
 
 func (r *Replayer) RunApplication(ctx context.Context, clientID uint64, opts models.RunOptions) models.AppError {
-	fmt.Println("Running the application with clientID: ", clientID)
 	return r.instrumentation.Run(ctx, clientID, opts)
 }
 

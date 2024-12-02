@@ -486,21 +486,21 @@ func (h *Hooks) Record(ctx context.Context, clientID uint64, opts models.Incomin
 	tc := make(chan *models.TestCase, 1)
 	kctx := context.WithoutCancel(ctx)
 	h.TestMap.Store(clientID, tc)
-	// if !h.isLoaded {
-	err := conn.ListenSocket(kctx, h.logger, clientID, h.TestMap, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
-	if err != nil {
-		return nil, err
+	if !h.isLoaded {
+		err := conn.ListenSocket(kctx, h.logger, clientID, h.TestMap, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
+		if err != nil {
+			return nil, err
+		}
+		h.isLoaded = true
+	} else {
+		t, ok := h.TestMap.Load(clientID)
+		if ok {
+			tc, ok = t.(chan *models.TestCase)
+			if !ok {
+				h.logger.Error("Failed to type assert the channel from the test map")
+			}
+		}
 	}
-	// h.isLoaded = true
-	// } else {
-	// 	t, ok := h.TestMap.Load(clientID)
-	// 	if ok {
-	// 		tc, ok = t.(chan *models.TestCase)
-	// 		if !ok {
-	// 			h.logger.Error("Failed to type assert the channel from the test map")
-	// 		}
-	// 	}
-	// }
 
 	return tc, nil
 }
@@ -518,7 +518,6 @@ func (h *Hooks) SendKeployClientInfo(clientID uint64, clientInfo structs.ClientI
 
 // SendKeployPids is used to send keploy recordServer(key-0) or testServer(key-1) Pid to the ebpf program
 func (h *Hooks) SendKeployPids(key models.ModeKey, tb structs.TestBenchInfo) error {
-	fmt.Println("Test bench info in SendKeployPids", tb)
 	// send keploy record clinet id too
 	err := h.tbenchFilterPid.Update(key, &tb, ebpf.UpdateAny)
 	if err != nil {
@@ -560,7 +559,6 @@ func (h *Hooks) SendClientProxyInfo(clientID uint64, proxyInfo structs.ProxyInfo
 
 func (h *Hooks) SendKtInfo(_ context.Context, tb structs.TestBenchInfo) error {
 
-	fmt.Println("Test bench info", tb)
 	err := h.SendKeployPids(models.TestKey, tb)
 	if err != nil {
 		h.logger.Error("failed to send app info to the ebpf program", zap.Error(err))

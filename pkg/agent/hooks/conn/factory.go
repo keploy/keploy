@@ -54,8 +54,6 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, testMap *sync
 		default:
 			ok, requestBuf, responseBuf, reqTimestampTest, resTimestampTest, clientID := tracker.IsComplete()
 			if ok {
-				fmt.Println("Processing the tracker with key: ", connID)
-				fmt.Println("Request Buffer::::::::: ", string(requestBuf))
 				if len(requestBuf) == 0 || len(responseBuf) == 0 {
 					factory.logger.Warn("failed processing a request due to invalid request or response", zap.Any("Request Size", len(requestBuf)), zap.Any("Response Size", len(responseBuf)))
 					continue
@@ -97,7 +95,6 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, testMap *sync
 
 	// Delete all the processed trackers.
 	for _, key := range trackersToDelete {
-		fmt.Println("Deleting the tracker with key: ", key)
 		delete(factory.connections, key)
 	}
 }
@@ -122,7 +119,6 @@ func capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 		return
 	}
 
-	fmt.Println("Request Body::::::: ", string(reqBody))
 	defer func() {
 		err := resp.Body.Close()
 		if err != nil {

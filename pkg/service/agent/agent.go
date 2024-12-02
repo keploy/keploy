@@ -155,7 +155,6 @@ func (a *Agent) Hook(ctx context.Context, id uint64, opts models.HookOptions) er
 	}
 
 	a.proxyStarted = true
-	fmt.Println("opts.EnableTesting::", opts.EnableTesting)
 	if opts.EnableTesting {
 		// Setting up the test bench
 		err := a.Tester.Setup(ctx, models.TestingOptions{Mode: opts.Mode})
@@ -178,7 +177,6 @@ func (a *Agent) GetConsumedMocks(ctx context.Context, id uint64) ([]string, erro
 }
 
 func (a *Agent) DeRegisterClient(ctx context.Context, unregister models.UnregisterReq) error {
-	fmt.Println("Inside DeRegisterClient of agent binary !!")
 	// send the info of the mode if its test mode we dont need to send the last mock
 
 	if unregister.Mode != models.MODE_TEST {

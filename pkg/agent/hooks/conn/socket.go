@@ -39,7 +39,6 @@ func ListenSocket(ctx context.Context, l *zap.Logger, clientID uint64, testMap *
 	if !ok {
 		return errors.New("failed to get the error group from the context")
 	}
-	fmt.Println("Starting the socket listener", c.connections)
 	g.Go(func() error {
 		defer utils.Recover(l)
 		go func() {
@@ -47,7 +46,6 @@ func ListenSocket(ctx context.Context, l *zap.Logger, clientID uint64, testMap *
 			for {
 				select {
 				case <-ctx.Done():
-					fmt.Println("Context Done in ListenSocket")
 					return
 				default:
 					// TODO refactor this to directly consume the events from the maps

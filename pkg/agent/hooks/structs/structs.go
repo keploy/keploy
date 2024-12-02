@@ -45,6 +45,6 @@ type TestBenchInfo struct {
 	KTestClientPID     uint32
 	KTestAgentPID      uint32
 	KRecordAgentPID    uint32
-	KTestAgentClientId uint64
+	KTestAgentClientID uint64
 	_                  uint32 // Padding to ensure total size is 24 bytes
 }

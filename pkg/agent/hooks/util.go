@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -29,7 +28,6 @@ func IPv4ToUint32(ipStr string) (uint32, error) {
 		}
 		return 0, errors.New("not a valid IPv4 address")
 	}
-	fmt.Println("failed to parse IP address", ipStr)
 	return 0, errors.New("failed to parse IP address")
 }
 

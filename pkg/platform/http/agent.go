@@ -422,8 +422,8 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			}
 
 			if opts.Mode == models.MODE_TEST && opts.EnableTesting {
-			  clientID = 123456 // hardcode the test clientID to filter out in the record proxy
-        err := a.SendKtPID(ctx, clientID)
+				clientID = 123456 // hardcode the test clientID to filter out in the record proxy
+				err := a.SendKtPID(ctx, clientID)
 				if err != nil {
 					utils.LogError(a.logger, err, "failed to send the keployTest PID")
 					return 0, err
@@ -598,7 +598,6 @@ func (a *AgentClient) UnregisterClient(_ context.Context, unregister models.Unre
 		return io.EOF
 	}
 
-	fmt.Println("Unregistering the client with the server")
 	requestJSON, err := json.Marshal(unregister)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to marshal request body for unregister client")

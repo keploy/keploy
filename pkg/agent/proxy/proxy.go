@@ -313,7 +313,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	//get the session rule
-	fmt.Println("destInfo.ClientID:::", destInfo.ClientID)
 	rule, ok := p.sessions.Get(destInfo.ClientID)
 	if !ok {
 		utils.LogError(p.logger, nil, "failed to fetch the session rule", zap.Any("AppID", destInfo.ClientID))
@@ -594,7 +593,6 @@ func (p *Proxy) MakeClientDeRegisterd(_ context.Context) error {
 }
 
 func (p *Proxy) Record(_ context.Context, id uint64, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
-	fmt.Println("Inside Record of proxyServer", id)
 	p.sessions.Set(id, &agent.Session{
 		ID:              id,
 		Mode:            models.MODE_RECORD,

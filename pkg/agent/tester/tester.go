@@ -52,7 +52,6 @@ func (t *Tester) Setup(ctx context.Context, opts models.TestingOptions) error {
 }
 
 func (t *Tester) setupReplay(ctx context.Context) error {
-	fmt.Println("Inside setupReplay")
 	setUpErr := errors.New("failed to setup the keploy replay testing")
 
 	recordPid, err := utils.GetPIDFromPort(ctx, t.logger, recordPort)
@@ -62,11 +61,11 @@ func (t *Tester) setupReplay(ctx context.Context) error {
 		return setUpErr
 	}
 
-	t.logger.Info(fmt.Sprintf("keployRecord pid:%v", recordPid))
+	t.logger.Debug(fmt.Sprintf("keployRecord pid:%v", recordPid))
 
 	err = t.testBenchInfo.SendKeployPids(models.RecordKey, structs.TestBenchInfo{
 		KRecordAgentPID:    recordPid,
-		KTestAgentClientId: 123456,
+		KTestAgentClientID: 123456,
 	})
 
 	if err != nil {
@@ -95,7 +94,6 @@ func (t *Tester) setupReplay(ctx context.Context) error {
 
 func (t *Tester) setupRecord(ctx context.Context) error {
 
-	fmt.Println("Inside setupRecord")
 	go func() {
 		defer utils.Recover(t.logger)
 

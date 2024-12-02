@@ -444,7 +444,6 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 		}
 		return models.AppError{AppErrorType: models.ErrInternal, Err: err}
 	case <-ctx.Done():
-		fmt.Println("ctx.Done called in runDocker")
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: ctx.Err()}
 	}
 }

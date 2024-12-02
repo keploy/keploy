@@ -152,7 +152,6 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 					},
 					ConnectionID: ctx.Value(models.ClientConnectionIDKey).(string),
 				}
-				fmt.Println("Context is done in the postgres encode function", mocks)
 				return ctx.Err()
 			}
 		case buffer := <-clientBuffChan:

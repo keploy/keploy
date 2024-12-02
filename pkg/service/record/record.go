@@ -89,11 +89,9 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		}
 
 		// Dont call the Unregister if there is an error in the running application
-		fmt.Println("app error type", runAppError.AppErrorType)
-		if runAppError.AppErrorType == ""{
+		if runAppError.AppErrorType == "" {
 			err := r.instrumentation.UnregisterClient(ctx, unregister)
 			if err != nil && err != io.EOF {
-				fmt.Println("error in unregistering client record")
 				utils.LogError(r.logger, err, "failed to unregister client")
 			}
 		}
@@ -241,7 +239,6 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 			stopReason = "keploy test mode binary stopped, hence stopping keploy"
 			return nil
 		default:
-			fmt.Println("app error type", appErr.AppErrorType)
 			stopReason = "unknown error recieved from application, hence stopping keploy"
 		}
 
@@ -303,7 +300,6 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, clientID uint64) (Fr
 		mockCtx, mockCtxCancel := context.WithCancel(mockCtx)
 
 		defer func() {
-			fmt.Println("closing reqCtx")
 			mockCtxCancel()
 			err := mockErrGrp.Wait()
 			if err != nil && err != io.EOF {
@@ -317,7 +313,6 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, clientID uint64) (Fr
 			mu.Lock()
 			defer mu.Unlock()
 			if !mockReceived {
-				fmt.Println("context cancelled in go routine")
 				mockCtxCancel()
 			}
 		}()
@@ -336,7 +331,6 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, clientID uint64) (Fr
 			select {
 			case <-ctx.Done():
 				if mock != nil {
-					fmt.Println("mock is not nil")
 					outgoingChan <- mock
 				}
 				return nil

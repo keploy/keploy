@@ -125,7 +125,6 @@ func (a *AgentRequest) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 	for m := range mockChan {
 		select {
 		case <-r.Context().Done():
-			fmt.Println("Context done in HandleOutgoing")
 			if m != nil {
 				render.JSON(w, r, m)
 				flusher.Flush()
