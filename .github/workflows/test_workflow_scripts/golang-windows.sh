@@ -15,65 +15,65 @@ if [ -f "./keploy.yml" ]; then
 fi
 
 # Generate the keploy-config file.
-./../../keployv2 config --generate
+# ./../../keployv2 config --generate
 
-# Update the global noise to ts.
-config_file="./keploy.yml"
-sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
+# # Update the global noise to ts.
+# config_file="./keploy.yml"
+# sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
 
-sed -i 's/ports: 0/ports: 27017/' "$config_file"
+# sed -i 's/ports: 0/ports: 27017/' "$config_file"
 
-# Remove any preexisting keploy tests and mocks.
-rm -rf keploy/
+# # Remove any preexisting keploy tests and mocks.
+# rm -rf keploy/
 
-# Build the binary.
-go build -o ginApp
+# # Build the binary.
+# go build -o ginApp
 
 
-send_request(){
-    sleep 10
-    app_started=false
-    while [ "$app_started" = false ]; do
-        if curl --request POST \
-      --url http://localhost:8080/url \
-      --header 'content-type: application/json' \
-      --data '{
-      "url": "https://facebook.com"
-    }'; then
-            app_started=true
-        fi
-        sleep 3 # wait for 3 seconds before checking again.
-    done
-    echo "App started"      
-    # Start making curl calls to record the testcases and mocks.
-    curl --request POST \
-      --url http://localhost:8080/url \
-      --header 'content-type: application/json' \
-      --data '{
-      "url": "https://google.com"
-    }'
+# send_request(){
+#     sleep 10
+#     app_started=false
+#     while [ "$app_started" = false ]; do
+#         if curl --request POST \
+#       --url http://localhost:8080/url \
+#       --header 'content-type: application/json' \
+#       --data '{
+#       "url": "https://facebook.com"
+#     }'; then
+#             app_started=true
+#         fi
+#         sleep 3 # wait for 3 seconds before checking again.
+#     done
+#     echo "App started"      
+#     # Start making curl calls to record the testcases and mocks.
+#     curl --request POST \
+#       --url http://localhost:8080/url \
+#       --header 'content-type: application/json' \
+#       --data '{
+#       "url": "https://google.com"
+#     }'
 
-    curl --request POST \
-      --url http://localhost:8080/url \
-      --header 'content-type: application/json' \
-      --data '{
-      "url": "https://facebook.com"
-    }'
+#     curl --request POST \
+#       --url http://localhost:8080/url \
+#       --header 'content-type: application/json' \
+#       --data '{
+#       "url": "https://facebook.com"
+#     }'
 
-    curl -X GET http://localhost:8080/CJBKJd92
+#     curl -X GET http://localhost:8080/CJBKJd92
 
-    # Wait for 10 seconds for keploy to record the tcs and mocks.
-    sleep 10
-    pid=$(pgrep keploy)
-    echo "$pid Keploy PID" 
-    echo "Killing keploy"
-    kill $pid
-}
+#     # Wait for 10 seconds for keploy to record the tcs and mocks.
+#     sleep 10
+#     pid=$(pgrep keploy)
+#     echo "$pid Keploy PID" 
+#     echo "Killing keploy"
+#     kill $pid
+# }
 
 
 for i in {1..2}; do
     app_name="javaApp_${i}"
-    ./../../keployv2 record -c "ginApp"
+    ./../../keployv2 record -c "./ginApp"
     # if grep "ERROR" "${app_name}.txt"; then
     #     echo "Error found in pipeline..."
     #     cat "${app_name}.txt"
