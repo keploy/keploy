@@ -1,4 +1,4 @@
-name: Golang On Windows
+name: Golang On Linux
 on: [pull_request]
 jobs:
   golang_linux:
