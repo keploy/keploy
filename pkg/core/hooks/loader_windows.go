@@ -51,7 +51,11 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	exePath := filepath.Join(dirname, "windows", "windows-redirector.exe")
 	exePath = filepath.Clean(exePath)
 
+	fmt.Println("came here")
+
 	cmd := exec.CommandContext(ctx, exePath, `C:\my.sock`)
+
+	fmt.Println("not stuck")
 
 	// Optional: Capture output
 	if h.logger.Level() == zapcore.DebugLevel {
