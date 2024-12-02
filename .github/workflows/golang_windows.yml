@@ -9,6 +9,17 @@ jobs:
     - name: Enable Debug Logging
       run: |
         echo "GITHUB_ACTIONS_DEBUG=true" >> $GITHUB_ENV
+    - name: Disable Windows Firewall
+      shell: pwsh
+      run: |
+        Write-Output "Disabling Windows Firewall..."
+        netsh advfirewall set allprofiles state off
+        Write-Output "Firewall disabled successfully."
+    - name: Verify Firewall Status
+      shell: pwsh
+      run: |
+        Write-Output "Checking Firewall status..."
+        netsh advfirewall show allprofiles
     - name: Build binary
       run: |
         go build -race -tags=viper_bind_struct -o keployv2
