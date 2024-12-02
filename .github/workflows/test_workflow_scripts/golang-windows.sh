@@ -73,7 +73,7 @@ send_request(){
 
 for i in {1..2}; do
     app_name="javaApp_${i}"
-    runas /user:Administrator `./../../keployv2 record -c "./ginApp"`
+    ./../../keployv2 record -c "./ginApp"
     # if grep "ERROR" "${app_name}.txt"; then
     #     echo "Error found in pipeline..."
     #     cat "${app_name}.txt"
