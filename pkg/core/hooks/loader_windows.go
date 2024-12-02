@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/v2/pkg/core/hooks/structs"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
@@ -50,19 +51,17 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	exePath := filepath.Join(dirname, "windows", "windows-redirector.exe")
 	exePath = filepath.Clean(exePath)
 
-	fmt.Println("came here")
-
 	cmd := exec.CommandContext(ctx, exePath, `C:\my.sock`)
 
 	// Optional: Capture output
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start the executable: %w", err)
+	if h.logger.Level() == zapcore.DebugLevel {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
 	}
 
-	fmt.Println("not stuck")
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("failed to start the executable: %w", err)
+	}
 
 	select {
 	case conn := <-connChan:
@@ -82,8 +81,6 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	go func() {
 		h.GetEvents(ctx)
 	}()
-	fmt.Println("not stuck")
-
 	return nil
 }
 
