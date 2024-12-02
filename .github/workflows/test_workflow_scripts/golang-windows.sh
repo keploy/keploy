@@ -15,7 +15,7 @@ if [ -f "./keploy.yml" ]; then
 fi
 
 # Generate the keploy-config file.
-sudo ./../../keployv2 config --generate
+./../../keployv2 config --generate
 
 # Update the global noise to ts.
 config_file="./keploy.yml"
@@ -67,14 +67,14 @@ send_request(){
     pid=$(pgrep keploy)
     echo "$pid Keploy PID" 
     echo "Killing keploy"
-    sudo kill $pid
+    kill $pid
 }
 
 
 for i in {1..2}; do
     app_name="javaApp_${i}"
     send_request &
-    sudo -E env PATH="$PATH" ./../../keployv2 record -c "./ginApp"    &> "${app_name}.txt"
+    ./../../keployv2 record -c "./ginApp"    &> "${app_name}.txt"
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
@@ -91,7 +91,7 @@ for i in {1..2}; do
 done
 
 # Start the gin-mongo app in test mode.
-sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7    &> test_logs.txt
+./../../keployv2 test -c "./ginApp" --delay 7    &> test_logs.txt
 
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."
