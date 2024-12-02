@@ -55,7 +55,6 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
 	cmd := exec.CommandContext(ctx, exePath, `C:\my.sock`)
 
-	fmt.Println("not stuck")
 
 	// Optional: Capture output
 	if h.logger.Level() == zapcore.DebugLevel {
@@ -66,6 +65,8 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start the executable: %w", err)
 	}
+
+	fmt.Println("not stuck")
 
 	select {
 	case conn := <-connChan:
@@ -85,6 +86,8 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	go func() {
 		h.GetEvents(ctx)
 	}()
+	fmt.Println("not stuck")
+
 	return nil
 }
 
