@@ -84,7 +84,7 @@ func (a *AgentRequest) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			return
 		default:
 			// Stream each test case as JSON
-			fmt.Printf("Sending Test case: %v\n", t)
+			a.logger.Debug("Sending test case", zap.Any("test_case", t))
 			render.JSON(w, r, t)
 			flusher.Flush() // Immediately send data to the client
 		}
