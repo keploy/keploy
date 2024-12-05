@@ -973,6 +973,9 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 		copiedExpMap := make(map[string]interface{})
 		copiedActMap := make(map[string]interface{})
 
+		if regexArr, isNoisy := CheckStringExist(key, noiseMap); isNoisy && len(regexArr) == 0 {
+			break
+		}
 		// Copy each key-value pair from expMap to copiedExpMap
 		for key, value := range expMap {
 			copiedExpMap[key] = value
@@ -1016,9 +1019,10 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 		matchJSONComparisonResult.differences = append(matchJSONComparisonResult.differences, differences...)
 		return matchJSONComparisonResult, nil
 	case reflect.Slice:
-		if regexArr, isNoisy := CheckStringExist(key, noiseMap); isNoisy && len(regexArr) != 0 {
+		if regexArr, isNoisy := CheckStringExist(key, noiseMap); isNoisy && len(regexArr) == 0 {
 			break
 		}
+
 		expSlice := reflect.ValueOf(expected)
 		actSlice := reflect.ValueOf(actual)
 		if expSlice.Len() != actSlice.Len() {
