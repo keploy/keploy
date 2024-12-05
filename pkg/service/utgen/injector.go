@@ -3,6 +3,7 @@ package utgen
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -59,12 +60,24 @@ func (i *Injector) libraryInstalled() ([]string, error) {
 		return i.extractPackageNames(out), nil
 
 	case "typescript", "javascript":
-		cmd := exec.Command("sh", "-c", "npm list --depth=0 --parseable | sed 's|.*/||'")
+		cmd := exec.Command("npm", "list", "--depth=0", "--json")
+
 		out, err := cmd.Output()
 		if err != nil {
-			return nil, fmt.Errorf("failed to get JavaScript/TypeScript dependencies: %w", err)
+			return nil, fmt.Errorf("failed to get npm dependencies: %w", err)
 		}
-		return extractString(out), nil
+		// Parse the JSON output.
+		var result struct {
+			Dependencies map[string]interface{} `json:"dependencies"`
+		}
+		if err := json.Unmarshal(out, &result); err != nil {
+			return nil, fmt.Errorf("failed to parse npm output: %w", err)
+		}
+		var deps []string
+		for depName := range result.Dependencies {
+			deps = append(deps, depName)
+		}
+		return deps, nil
 
 	default:
 		return nil, fmt.Errorf("unsupported language: %s", i.language)
