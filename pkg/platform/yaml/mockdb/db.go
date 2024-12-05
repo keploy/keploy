@@ -133,6 +133,14 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	if err != nil {
 		return err
 	}
+
+	if exists, err := yaml.YamlFileExists(ctx, ys.Logger, mockPath, mockFileName); err != nil {
+		utils.LogError(ys.Logger, err, "failed to find yaml file", zap.String("path directory", mockPath), zap.String("yaml", mockFileName))
+		return err
+	} else if !exists {
+		data = append([]byte(utils.GetVersionAsComment()), data...)
+	}
+
 	err = yaml.WriteFile(ctx, ys.Logger, mockPath, mockFileName, data, true)
 	if err != nil {
 		return err
