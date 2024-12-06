@@ -76,7 +76,7 @@ for i in {1..2}; do
 done
 
 # Start keploy in test mode.
-test_container="echoApp_test"
+test_container="echoApp"
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
