@@ -134,7 +134,7 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 		return err
 	}
 
-	if exists, err := yaml.YamlFileExists(ctx, ys.Logger, mockPath, mockFileName); err != nil {
+	if exists, err := yaml.FileExists(ctx, ys.Logger, mockPath, mockFileName); err != nil {
 		utils.LogError(ys.Logger, err, "failed to find yaml file", zap.String("path directory", mockPath), zap.String("yaml", mockFileName))
 		return err
 	} else if !exists {

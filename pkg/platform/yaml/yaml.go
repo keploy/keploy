@@ -158,7 +158,7 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 	return false, nil
 }
 
-func YamlFileExists(_ context.Context, Logger *zap.Logger, path string, fileName string) (bool, error) {
+func FileExists(_ context.Context, Logger *zap.Logger, path string, fileName string) (bool, error) {
 	yamlPath, err := ValidatePath(filepath.Join(path, fileName+".yaml"))
 	if err != nil {
 		utils.LogError(Logger, err, "failed to validate the yaml file path", zap.String("path directory", path), zap.String("yaml", fileName))
@@ -167,10 +167,9 @@ func YamlFileExists(_ context.Context, Logger *zap.Logger, path string, fileName
 	if _, err := os.Stat(yamlPath); err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
-		} else {
-			utils.LogError(Logger, err, "failed to check if the yaml file exists", zap.String("path directory", path), zap.String("yaml", fileName))
-			return false, err
 		}
+		utils.LogError(Logger, err, "failed to check if the yaml file exists", zap.String("path directory", path), zap.String("yaml", fileName))
+		return false, err
 	}
 
 	return true, nil
