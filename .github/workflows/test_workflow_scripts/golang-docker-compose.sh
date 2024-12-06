@@ -76,9 +76,8 @@ for i in {1..2}; do
 done
 
 # Start keploy in test mode.
-test_container="echoApp"
-test_container_logs="echoTest"
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container_logs}.txt"
+test_container="echoApp_test"
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
