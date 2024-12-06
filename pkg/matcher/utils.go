@@ -834,6 +834,9 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 		copiedExpMap := make(map[string]interface{})
 		copiedActMap := make(map[string]interface{})
 
+		if regexArr, isNoisy := CheckStringExist(key, noiseMap); isNoisy && len(regexArr) == 0 {
+			break
+		}
 		// Copy each key-value pair from expMap to copiedExpMap
 		for key, value := range expMap {
 			copiedExpMap[key] = value
@@ -877,7 +880,7 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 		matchJSONComparisonResult.differences = append(matchJSONComparisonResult.differences, differences...)
 		return matchJSONComparisonResult, nil
 	case reflect.Slice:
-		if regexArr, isNoisy := CheckStringExist(key, noiseMap); isNoisy && len(regexArr) != 0 {
+		if regexArr, isNoisy := CheckStringExist(key, noiseMap); isNoisy && len(regexArr) == 0 {
 			break
 		}
 		expSlice := reflect.ValueOf(expected)
@@ -890,7 +893,8 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 		for i := 0; i < expSlice.Len(); i++ {
 			matched := false
 			for j := 0; j < actSlice.Len(); j++ {
-				if valMatchJSONComparisonResult, err := matchJSONWithNoiseHandling(key, expSlice.Index(i).Interface(), actSlice.Index(j).Interface(), noiseMap, ignoreOrdering); err == nil && valMatchJSONComparisonResult.matches {
+				prefixedVal := key + "[" + fmt.Sprint(j) + "]"
+				if valMatchJSONComparisonResult, err := matchJSONWithNoiseHandling(prefixedVal, expSlice.Index(i).Interface(), actSlice.Index(j).Interface(), noiseMap, ignoreOrdering); err == nil && valMatchJSONComparisonResult.matches {
 					if !valMatchJSONComparisonResult.isExact {
 						for _, val := range valMatchJSONComparisonResult.differences {
 							prefixedVal := key + "[" + fmt.Sprint(j) + "]." + val // Prefix the value
