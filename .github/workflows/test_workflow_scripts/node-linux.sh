@@ -143,8 +143,12 @@ if [ "$all_passed" = true ]; then
         cat "test_logs1.txt"
         exit 1
     fi
+    cat "test_logs1.txt"
+    cat "test_logs2.txt"
+    cat "test_logs3.txt"
     echo "All tests passed"
     exit 0
 else
+    echo "Tests failed"
     exit 1
 fi

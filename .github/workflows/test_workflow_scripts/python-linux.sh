@@ -113,11 +113,13 @@ do
     fi
 done
 
+cat "test_logs.txt"
+
 # Check the overall test status and exit accordingly
 if [ "$all_passed" = true ]; then
     echo "All tests passed"
     exit 0
 else
-    cat "test_logs.txt"
+    echo "Tests failed"
     exit 1
 fi

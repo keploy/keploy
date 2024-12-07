@@ -102,11 +102,13 @@ do
     fi
 done
 
+cat "${test_container}.txt"
+
 # Check the overall test status and exit accordingly
 if [ "$all_passed" = true ]; then
     echo "All tests passed"
     exit 0
 else
-    cat "${test_container}.txt"
+    echo "Tests failed"
     exit 1
 fi
