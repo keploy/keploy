@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || windows
 
 // Package util provides utility functions for the integration package.
 package util

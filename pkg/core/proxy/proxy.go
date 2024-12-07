@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || windows
 
 // Package proxy handles all the outgoing network calls and captures/forwards the request and response messages.
 // It also handles the DNS resolution mechanism.
@@ -295,6 +295,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	sourcePort := remoteAddr.Port
 
 	p.logger.Debug("Inside handleConnection of proxyServer", zap.Any("source port", sourcePort), zap.Any("Time", time.Now().Unix()))
+
+	time.Sleep(time.Millisecond * 100)
 
 	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
 	if err != nil {

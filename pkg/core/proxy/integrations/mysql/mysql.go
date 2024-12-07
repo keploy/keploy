@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || windows
 
 // Package mysql provides the MySQL integration.
 package mysql

@@ -45,7 +45,7 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 		return tools.NewTools(n.logger, tel, n.auth), nil
 	case "gen":
 		return utgen.NewUnitTestGenerator(n.cfg, tel, n.auth, n.logger)
-	case "record", "test", "mock", "normalize", "templatize", "rerecord", "contract":
+	case "record", "test", "normalize", "templatize", "rerecord", "contract":
 		return Get(ctx, cmd, n.cfg, n.logger, tel, n.auth)
 	default:
 		return nil, errors.New("invalid command")

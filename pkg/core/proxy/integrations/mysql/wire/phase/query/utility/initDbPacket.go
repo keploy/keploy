@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || windows
 
 // Package utility provides encoding and decoding of utility command packets.
 package utility

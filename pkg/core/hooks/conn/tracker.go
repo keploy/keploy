@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || windows
 
 package conn
 
@@ -365,7 +365,6 @@ func (conn *Tracker) AddDataEvent(event SocketDataEvent) {
 			//Record a test case for the current request/
 			conn.incRecordTestCount()
 		}
-
 	default:
 	}
 }

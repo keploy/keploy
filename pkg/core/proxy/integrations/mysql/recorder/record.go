@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || windows
 
 // Package recorder is used to record the MySQL traffic between the client and the server.
 package recorder

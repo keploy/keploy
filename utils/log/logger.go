@@ -64,7 +64,6 @@ func New() (*zap.Logger, error) {
 	LogCfg.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
 	LogCfg.DisableStacktrace = true
 	LogCfg.EncoderConfig.EncodeCaller = nil
-
 	logger, err := LogCfg.Build()
 	if err != nil {
 		return nil, fmt.Errorf("failed to build config for logger: %v", err)

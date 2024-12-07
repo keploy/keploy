@@ -441,7 +441,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var conf *models.TestSet
 	conf, err = r.testSetConf.Read(runTestSetCtx, testSetID)
 	if err != nil {
-		if strings.Contains(err.Error(), "no such file or directory") {
+		if strings.Contains(err.Error(), "no such file or directory") || strings.Contains(err.Error(), "The system cannot find the file specified") {
 			r.logger.Info("config file not found, continuing execution...", zap.String("test-set", testSetID))
 		} else {
 			return models.TestSetStatusFailed, fmt.Errorf("failed to read test set config: %w", err)
