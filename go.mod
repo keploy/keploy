@@ -4,6 +4,7 @@ go 1.22.0
 
 replace github.com/jackc/pgproto3/v2 => github.com/keploy/pgproto3/v2 v2.0.5
 
+replace github.com/keploy/jsonDiff v1.0.3 => /Users/sarthak_1/Documents/Keploy/Lima-workspace/jsonDiff
 require (
 	github.com/Microsoft/go-winio v0.6.1 // indirect
 	github.com/cilium/ebpf v0.13.2
