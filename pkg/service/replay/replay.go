@@ -811,6 +811,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	timeTakenStr := timeWithUnits(timeTaken)
 
+	if testSetStatus == models.TestSetStatusFailed {
+		failedTests := []string{}
+
+		for _, test := range testReport.Tests {
+			if test.Status == models.TestStatusFailed {
+				failedTests = append(failedTests, test.TestCaseID)
+			}
+		}
+
+		r.logger.Warn(fmt.Sprintf("Schema has been changed for the following tests: %s. Kindly rerecord the test cases", strings.Join(failedTests, ", ")))
+	}
+
 	if testSetStatus == models.TestSetStatusFailed || testSetStatus == models.TestSetStatusPassed {
 		if testSetStatus == models.TestSetStatusFailed {
 			pp.SetColorScheme(models.GetFailingColorScheme())
