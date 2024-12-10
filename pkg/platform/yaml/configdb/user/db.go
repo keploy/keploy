@@ -89,16 +89,13 @@ func New(logger *zap.Logger, cfg *config.Config) *Db {
 func (db *Db) GetInstallationID(_ context.Context) (string, error) {
 	var id string
 	var err error
-	inDocker := os.Getenv("KEPLOY_INDOCKER")
-	if inDocker == "true" {
-		id = os.Getenv("INSTALLATION_ID")
-	} else {
-		id, err = machineid.ID()
-		if err != nil {
-			db.logger.Debug("failed to get machine id", zap.Error(err))
-			return "", nil
-		}
+
+	id, err = machineid.ID()
+	if err != nil {
+		db.logger.Debug("failed to get machine id", zap.Error(err))
+		return "", nil
 	}
+
 	if id == "" {
 		db.logger.Debug("got empty machine id")
 		return "", nil
