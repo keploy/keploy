@@ -62,7 +62,7 @@ type PostmanResponse struct {
 	Header          []map[string]string `json:"header"`
 }
 
-var Schema string = "https://schema.getpostman.com/json/collection/v2.0.0/collection.json"
+const Schema = "https://schema.getpostman.com/json/collection/v2.0.0/collection.json"
 
 func Import(ctx context.Context, logger *zap.Logger, path string) error {
 
@@ -160,10 +160,14 @@ func Import(ctx context.Context, logger *zap.Logger, path string) error {
 					Name:    testItem.Name,
 				}
 
-				testCase.Spec.Encode(&models.HTTPSchema{
+				err := testCase.Spec.Encode(&models.HTTPSchema{
 					Request:  requestSchema,
 					Response: responseSchema,
 				})
+
+				if err != nil {
+					return fmt.Errorf("failed to encode test case: %w", err)
+				}
 
 				testCase.Curl = pkg.MakeCurlCommand(requestSchema)
 
