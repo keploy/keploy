@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v2/pkg/service/export"
+	postmanimport "go.keploy.io/server/v2/pkg/service/import"
 
 	"github.com/charmbracelet/glamour"
 	"go.keploy.io/server/v2/config"
@@ -47,6 +48,10 @@ func (t *Tools) SendTelemetry(event string, output ...map[string]interface{}) {
 
 func (t *Tools) Export(ctx context.Context) error {
 	return export.Export(ctx, t.logger)
+}
+
+func (t *Tools) Import(ctx context.Context, path string) error {
+	return postmanimport.Import(ctx, t.logger, path)
 }
 
 // Update initiates the tools process for the Keploy binary file.
