@@ -185,8 +185,10 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the path to download contracts")
 		}
 
-	case "update", "export":
+	case "update", "export", "import":
 		return nil
+	case "postman":
+		cmd.Flags().StringP("path", "p", "", "Specify the path to the postman collection")
 	case "normalize":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks/reports are stored")
 		cmd.Flags().String("test-run", "", "Test Run to be normalized")
