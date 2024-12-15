@@ -194,7 +194,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	respBody, errReadRespBody := io.ReadAll(httpResp.Body)
 	if errReadRespBody != nil {
 		utils.LogError(logger, errReadRespBody, "failed reading response body")
-		return nil, err
+		return nil, errReadRespBody
 	}
 
 	resp = &models.HTTPResp{
