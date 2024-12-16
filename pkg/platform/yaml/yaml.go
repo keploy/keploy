@@ -158,23 +158,6 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 	return false, nil
 }
 
-func FileExists(_ context.Context, Logger *zap.Logger, path string, fileName string) (bool, error) {
-	yamlPath, err := ValidatePath(filepath.Join(path, fileName+".yaml"))
-	if err != nil {
-		utils.LogError(Logger, err, "failed to validate the yaml file path", zap.String("path directory", path), zap.String("yaml", fileName))
-		return false, err
-	}
-	if _, err := os.Stat(yamlPath); err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		utils.LogError(Logger, err, "failed to check if the yaml file exists", zap.String("path directory", path), zap.String("yaml", fileName))
-		return false, err
-	}
-
-	return true, nil
-}
-
 func ReadSessionIndices(_ context.Context, path string, Logger *zap.Logger) ([]string, error) {
 	var indices []string
 	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
