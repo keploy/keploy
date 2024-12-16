@@ -132,6 +132,11 @@ func (j *Java) GetCoverage() (models.TestCoverage, error) {
 		testCov.TotalCov = fmt.Sprintf("%.2f%%", totalCoverage)
 	}
 
+	testCov.Loc = models.Loc{
+		Total:    totalInstructions,
+		Covered:  coveredInstructions,
+	}
+
 	return testCov, nil
 }
 

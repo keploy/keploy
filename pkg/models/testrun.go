@@ -19,6 +19,12 @@ type TestReport struct {
 type TestCoverage struct {
 	FileCov  map[string]string `json:"fileCoverage" yaml:"file_coverage"`
 	TotalCov string            `json:"totalCoverage" yaml:"total_coverage"`
+	Loc      Loc               `json:"loc" yaml:"loc"`
+}
+
+type Loc struct {
+	Total   int `json:"total" yaml:"total"`
+	Covered int `json:"covered" yaml:"covered"`
 }
 
 func (tr *TestReport) GetKind() string {
