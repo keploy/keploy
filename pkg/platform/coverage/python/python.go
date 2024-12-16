@@ -103,8 +103,8 @@ func (p *Python) GetCoverage() (models.TestCoverage, error) {
 	}
 	testCov.TotalCov = cov.Totals.PercentCoveredDisplay + "%"
 	testCov.Loc = models.Loc{
-		Total:    cov.Totals.NumStatements,
-		Covered:  cov.Totals.CoveredLines,
+		Total:   cov.Totals.NumStatements,
+		Covered: cov.Totals.CoveredLines,
 	}
 
 	return testCov, nil

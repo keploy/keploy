@@ -163,9 +163,9 @@ func (j *Javascript) GetCoverage() (models.TestCoverage, error) {
 	}
 	testCov.TotalCov = strconv.FormatFloat(float64(totalCoveredLines*100)/float64(totalLines), 'f', 2, 64) + "%"
 	testCov.Loc = models.Loc{
-        Total:    totalLines,
-        Covered:  totalCoveredLines,
-    }
+		Total:   totalLines,
+		Covered: totalCoveredLines,
+	}
 	return testCov, nil
 }
 

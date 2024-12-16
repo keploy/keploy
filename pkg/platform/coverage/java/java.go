@@ -133,8 +133,8 @@ func (j *Java) GetCoverage() (models.TestCoverage, error) {
 	}
 
 	testCov.Loc = models.Loc{
-		Total:    totalInstructions,
-		Covered:  coveredInstructions,
+		Total:   totalInstructions,
+		Covered: coveredInstructions,
 	}
 
 	return testCov, nil
