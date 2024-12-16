@@ -277,7 +277,8 @@ func extractURL(url interface{}) string {
 	case string:
 		return v
 	case map[string]interface{}:
-		return v["raw"].(string)
+		url := v["raw"].(string)
+		return url
 	default:
 		return ""
 	}
@@ -380,9 +381,11 @@ type PostmanRequestBody struct {
 	Raw        string                   `json:"raw"`
 	Urlencoded []map[string]interface{} `json:"urlencoded"`
 	Formdata   []map[string]interface{} `json:"formdata"`
+	Options    map[string]interface{}   `json:"options"`
 }
 
 type PostmanResponse struct {
+	Name            string              `json:"name"`
 	Body            string              `json:"body"`
 	Status          string              `json:"status"`
 	Code            int                 `json:"code"`
