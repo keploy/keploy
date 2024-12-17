@@ -190,7 +190,10 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
 	}
-	defer httpResp.Body.Close()
+
+	defer func() {
+		_ = httpResp.Body.Close()
+	}()
 
 	respBody, errReadRespBody := io.ReadAll(httpResp.Body)
 	if errReadRespBody != nil {
