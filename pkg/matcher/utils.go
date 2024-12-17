@@ -2,6 +2,7 @@
 package matcher
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -15,9 +16,8 @@ import (
 
 	"github.com/7sDream/geko"
 	"github.com/fatih/color"
+	jsonDiff "github.com/keploy/jsonDiff"
 	"github.com/olekukonko/tablewriter"
-	"github.com/yudai/gojsondiff"
-	"github.com/yudai/gojsondiff/formatter"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -266,8 +266,12 @@ func UnmarshallJSON(s string, log *zap.Logger) (interface{}, error) {
 	return result, nil
 }
 
-// MAX_LINE_LENGTH is chars PER expected/actual string. Can be changed no problem
-const MAX_LINE_LENGTH = 50
+// maxLineLength is chars PER expected/actual string. Can be changed no problem
+const maxLineLength = 50
+
+var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+var ansiResetCode = "\x1b[0m"
 
 type DiffsPrinter struct {
 	testCase              string
@@ -441,24 +445,12 @@ func (d *DiffsPrinter) RenderAppender() error {
  */
 func sprintDiffHeader(expect, actual map[string]string) string {
 
-	expectAll := ""
-	actualAll := ""
-	for key, expValue := range expect {
-		actValue := key + ": " + actual[key]
-		expValue = key + ": " + expValue
-		// Offset will be where the string start to unmatch
-		offset, _ := diffIndex(expValue, actValue)
+	diff := jsonDiff.CompareHeaders(expect, actual)
 
-		// Color of the unmatch, can be changed
-		cE, cA := color.FgHiRed, color.FgHiGreen
-
-		expectAll += breakWithColor(expValue, &cE, offset)
-		actualAll += breakWithColor(actValue, &cA, offset)
+	if len(expect) > maxLineLength || len(actual) > maxLineLength {
+		return expectActualTable(diff.Actual, diff.Expected, "header", false) // Don't centerize
 	}
-	if len(expect) > MAX_LINE_LENGTH || len(actual) > MAX_LINE_LENGTH {
-		return expectActualTable(expectAll, actualAll, "header", false) // Don't centerize
-	}
-	return expectActualTable(expectAll, actualAll, "header", true)
+	return expectActualTable(diff.Actual, diff.Expected, "header", true)
 }
 
 /*
@@ -468,18 +460,12 @@ func sprintDiffHeader(expect, actual map[string]string) string {
  */
 func sprintDiff(expect, actual, field string) string {
 
-	// Offset will be where the string start to unmatch
-	offset, _ := diffIndex(expect, actual)
+	diff := jsonDiff.Compare(expect, actual)
 
-	// Color of the unmatch, can be changed
-	cE, cA := color.FgHiRed, color.FgHiGreen
-
-	exp := breakWithColor(expect, &cE, offset)
-	act := breakWithColor(actual, &cA, offset)
-	if len(expect) > MAX_LINE_LENGTH || len(actual) > MAX_LINE_LENGTH {
-		return expectActualTable(exp, act, field, false) // Don't centerize
+	if len(expect) > maxLineLength || len(actual) > maxLineLength {
+		return expectActualTable(diff.Expected, diff.Actual, field, false)
 	}
-	return expectActualTable(exp, act, field, true)
+	return expectActualTable(diff.Expected, diff.Actual, field, true)
 }
 
 /* This will return the json diffs in a beautifull way. It will in fact
@@ -490,200 +476,75 @@ func sprintDiff(expect, actual, field string) string {
  * its better to use a generic diff output as the SprintDiff.
  */
 func sprintJSONDiff(json1 []byte, json2 []byte, field string, noise map[string][]string) (string, error) {
-	diffString, err := calculateJSONDiffs(json1, json2)
+	diff, err := jsonDiff.CompareJSON(json1, json2, noise, false)
 	if err != nil {
 		return "", err
 	}
-	expect, actual := separateAndColorize(diffString, noise)
-	result := expectActualTable(expect, actual, field, false)
+	result := expectActualTable(diff.Expected, diff.Actual, field, false)
 	return result, nil
 }
 
-// Find the diff between two strings returning index where
-// the difference begin
-func diffIndex(s1, s2 string) (int, bool) {
-	diff := false
-	i := -1
+func wrapTextWithAnsi(input string) string {
+	scanner := bufio.NewScanner(strings.NewReader(input)) // Create a scanner to read the input string line by line.
+	var wrappedBuilder strings.Builder                    // Builder for the resulting wrapped text.
+	currentAnsiCode := ""                                 // Variable to hold the current ANSI escape sequence.
+	lastAnsiCode := ""                                    // Variable to hold the last ANSI escape sequence.
 
-	// Check if one string is smaller than another, if so theres a diff
-	if len(s1) < len(s2) {
-		i = len(s1)
-		diff = true
-	} else if len(s2) < len(s1) {
-		diff = true
-		i = len(s2)
-	}
+	// Iterate over each line in the input string.
+	for scanner.Scan() {
+		line := scanner.Text() // Get the current line.
 
-	// Check for unmatched characters
-	for i := 0; i < len(s1) && i < len(s2); i++ {
-		if s1[i] != s2[i] {
-			return i, true
-		}
-	}
-
-	return i, diff
-}
-
-/* Will perform the calculation of the diffs, returning a string that
- * containes the lines that does not match represented by either a
- * minus or add symbol followed by the respective line.
- */
-func calculateJSONDiffs(json1 []byte, json2 []byte) (string, error) {
-	var diff = gojsondiff.New()
-	dObj, err := diff.Compare(json1, json2)
-	if err != nil {
-		return "", err
-	}
-
-	var jsonObject map[string]interface{}
-	err = json.Unmarshal([]byte(json1), &jsonObject)
-	if err != nil {
-		return "", err
-	}
-
-	diffString, _ := formatter.NewAsciiFormatter(jsonObject, formatter.AsciiFormatterConfig{
-		ShowArrayIndex: true,
-		Coloring:       false, // We will color our way
-	}).Format(dObj)
-
-	return diffString, nil
-}
-
-// Will receive a string that has the differences represented
-// by a plus or a minus sign and separate it. Just works with json
-// Modified separateAndColorize function to handle nested JSON paths for noise keys
-// Updated separateAndColorize function
-func separateAndColorize(diffStr string, noise map[string][]string) (string, string) {
-	expect, actual := "", ""
-	diffLines := strings.Split(diffStr, "\n")
-	jsonPath := []string{} // Stack to keep track of nested paths
-
-	for i, line := range diffLines {
-		if len(line) > 0 {
-			noised := false
-			lineContent := line[1:] // Remove the diff indicator (+/-)
-			trimmedLine := strings.TrimSpace(lineContent)
-			// Update the JSON path stack based on the line content
-			if strings.HasSuffix(trimmedLine, "{") {
-				key := strings.TrimSpace(trimmedLine[:len(trimmedLine)-1]) // Remove '{'
-				key = strings.Trim(key, `"`)                               // Remove surrounding quotes
-				jsonPath = append(jsonPath, key)
-			} else if trimmedLine == "}," || trimmedLine == "}" {
-				jsonPath = jsonPath[:len(jsonPath)-1] // Pop from stack
-			} else {
-				// For key-value pairs, extract the key
-				if colonIndex := strings.Index(trimmedLine, ":"); colonIndex != -1 {
-					key := strings.TrimSpace(trimmedLine[:colonIndex])
-					key = strings.Trim(key, `"`) // Remove surrounding quotes
-					if len(jsonPath) > 0 {
-						jsonPath = append(jsonPath[:len(jsonPath)-1], key)
-					} else {
-						jsonPath = append(jsonPath, key)
-					}
-				}
-			}
-
-			currentPath := strings.Join(jsonPath, ".")
-
-			// Check for noise based on the current JSON path
-			for noisePath := range noise {
-				if strings.HasPrefix(strings.ToLower(currentPath), noisePath) {
-					line = " " + lineContent
-					if line[0] == '-' {
-						expect += breakWithColor(line, nil, 0)
-					} else if line[0] == '+' {
-						actual += breakWithColor(line, nil, 0)
-					}
-					noised = true
-					break
-				}
-			}
-			if noised {
-				continue
-			}
-
-			// Process lines without noise
-			if line[0] == '-' {
-				c := color.FgRed
-				if i+1 < len(diffLines) && diffLines[i+1][0] == '+' {
-					offset, _ := diffIndex(lineContent, diffLines[i+1][1:])
-					expect += breakWithColor(line, &c, offset+1)
-				} else {
-					expect += breakWithColor(line, &c, 0)
-				}
-			} else if line[0] == '+' {
-				c := color.FgGreen
-				if i > 0 && diffLines[i-1][0] == '-' {
-					offset, _ := diffIndex(lineContent, diffLines[i-1][1:])
-					actual += breakWithColor(line, &c, offset+1)
-				} else {
-					actual += breakWithColor(line, &c, 0)
-				}
-			} else {
-				expect += breakWithColor(line, nil, 0)
-				actual += breakWithColor(line, nil, 0)
-			}
-		}
-	}
-	return expect, actual
-}
-
-// Will colorize the strubg and do the job of break it if it pass MAX_LINE_LENGTH,
-// always respecting the reset of ascii colors before the break line to dont
-func breakWithColor(input string, c *color.Attribute, offset int) string {
-	var output []string
-	var paint func(a ...interface{}) string
-	colorize := false
-
-	if c != nil {
-		colorize = true
-		paint = color.New(*c).SprintFunc()
-	}
-
-	for i := 0; i < len(input); i += MAX_LINE_LENGTH {
-		end := i + MAX_LINE_LENGTH
-
-		if end > len(input) {
-			end = len(input)
+		// If there is a current ANSI code, append it to the builder.
+		if currentAnsiCode != "" {
+			wrappedBuilder.WriteString(currentAnsiCode)
 		}
 
-		// This conditions joins if we are at line where the offset begins
-		if colorize && i+MAX_LINE_LENGTH > offset {
-			paintedStart := i
-			if paintedStart < offset {
-				paintedStart = offset
-			}
+		// Find all ANSI escape sequences in the current line.
+		startAnsiCodes := ansiRegex.FindAllString(line, -1)
+		if len(startAnsiCodes) > 0 {
+			// Update the last ANSI escape sequence to the last one found in the line.
+			lastAnsiCode = startAnsiCodes[len(startAnsiCodes)-1]
+		}
 
-			// Will basically concatenated the non-painted string with the
-			// painted
-			prePaint := input[i:paintedStart]           // Start at i ends at offset
-			postPaint := paint(input[paintedStart:end]) // Starts at offset (diff begins), goes til maxLength
-			substr := prePaint + postPaint + "\n"       // Concatenate
-			output = append(output, substr)
+		// Append the current line to the builder.
+		wrappedBuilder.WriteString(line)
+
+		// Check if the current ANSI code needs to be reset or updated.
+		if (currentAnsiCode != "" && !strings.HasSuffix(line, ansiResetCode)) || len(startAnsiCodes) > 0 {
+			// If the current line does not end with a reset code or if there are ANSI codes, append a reset code.
+			wrappedBuilder.WriteString(ansiResetCode)
+			// Update the current ANSI code to the last one found in the line.
+			currentAnsiCode = lastAnsiCode
 		} else {
-			substr := input[i:end] + "\n"
-			output = append(output, substr)
+			// If no ANSI codes need to be maintained, reset the current ANSI code.
+			currentAnsiCode = ""
 		}
+
+		// Append a newline character to the builder.
+		wrappedBuilder.WriteString("\n")
 	}
-	return strings.Join(output, "")
+
+	// Return the processed string with properly wrapped ANSI escape sequences.
+	return wrappedBuilder.String()
 }
 
-// Will return a string in a two columns table where the left
-// side is the expected string and the right is the actual
-// field: body, header, status...
 func expectActualTable(exp string, act string, field string, centerize bool) string {
 	buf := &bytes.Buffer{}
 	table := tablewriter.NewWriter(buf)
 
 	if centerize {
 		table.SetAlignment(tablewriter.ALIGN_CENTER)
+	} else {
+		table.SetAlignment(tablewriter.ALIGN_LEFT)
 	}
-
+	// jsonDiff.JsonDiff()
+	exp = wrapTextWithAnsi(exp)
+	act = wrapTextWithAnsi(act)
 	table.SetHeader([]string{fmt.Sprintf("Expect %v", field), fmt.Sprintf("Actual %v", field)})
 	table.SetAutoWrapText(false)
 	table.SetBorder(false)
-	table.SetColMinWidth(0, MAX_LINE_LENGTH)
-	table.SetColMinWidth(1, MAX_LINE_LENGTH)
+	table.SetColMinWidth(0, maxLineLength)
+	table.SetColMinWidth(1, maxLineLength)
 	table.Append([]string{exp, act})
 	table.Render()
 	return buf.String()
@@ -973,6 +834,9 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 		copiedExpMap := make(map[string]interface{})
 		copiedActMap := make(map[string]interface{})
 
+		if regexArr, isNoisy := CheckStringExist(key, noiseMap); isNoisy && len(regexArr) == 0 {
+			break
+		}
 		// Copy each key-value pair from expMap to copiedExpMap
 		for key, value := range expMap {
 			copiedExpMap[key] = value
@@ -1016,7 +880,7 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 		matchJSONComparisonResult.differences = append(matchJSONComparisonResult.differences, differences...)
 		return matchJSONComparisonResult, nil
 	case reflect.Slice:
-		if regexArr, isNoisy := CheckStringExist(key, noiseMap); isNoisy && len(regexArr) != 0 {
+		if regexArr, isNoisy := CheckStringExist(key, noiseMap); isNoisy && len(regexArr) == 0 {
 			break
 		}
 		expSlice := reflect.ValueOf(expected)
@@ -1029,7 +893,8 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 		for i := 0; i < expSlice.Len(); i++ {
 			matched := false
 			for j := 0; j < actSlice.Len(); j++ {
-				if valMatchJSONComparisonResult, err := matchJSONWithNoiseHandling(key, expSlice.Index(i).Interface(), actSlice.Index(j).Interface(), noiseMap, ignoreOrdering); err == nil && valMatchJSONComparisonResult.matches {
+				prefixedVal := key + "[" + fmt.Sprint(j) + "]"
+				if valMatchJSONComparisonResult, err := matchJSONWithNoiseHandling(prefixedVal, expSlice.Index(i).Interface(), actSlice.Index(j).Interface(), noiseMap, ignoreOrdering); err == nil && valMatchJSONComparisonResult.matches {
 					if !valMatchJSONComparisonResult.isExact {
 						for _, val := range valMatchJSONComparisonResult.differences {
 							prefixedVal := key + "[" + fmt.Sprint(j) + "]." + val // Prefix the value

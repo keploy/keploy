@@ -3,10 +3,14 @@
 package conn
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -117,6 +121,22 @@ func capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 		logger.Debug("The request is a filtered request")
 		return
 	}
+	var formData []models.FormData
+	if contentType := req.Header.Get("Content-Type"); strings.HasPrefix(contentType, "multipart/form-data") {
+		parts := strings.Split(contentType, ";")
+		if len(parts) > 1 {
+			req.Header.Set("Content-Type", strings.TrimSpace(parts[0]))
+		}
+		formData = extractFormData(logger, reqBody, contentType)
+		reqBody = []byte{}
+	} else if contentType := req.Header.Get("Content-Type"); contentType == "application/x-www-form-urlencoded" {
+		decodedBody, err := url.QueryUnescape(string(reqBody))
+		if err != nil {
+			utils.LogError(logger, err, "failed to decode the url-encoded request body")
+			return
+		}
+		reqBody = []byte(decodedBody)
+	}
 
 	t <- &models.TestCase{
 		Version: models.GetVersion(),
@@ -131,6 +151,7 @@ func capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 			// URL: fmt.Sprintf("%s://%s%s?%s", req.URL.Scheme, req.Host, req.URL.Path, req.URL.RawQuery),
 			URL: fmt.Sprintf("http://%s%s", req.Host, req.URL.RequestURI()),
 			//  URL: string(b),
+			Form:      formData,
 			Header:    pkg.ToYamlHTTPHeader(req.Header),
 			Body:      string(reqBody),
 			URLParams: pkg.URLParams(req),
@@ -146,4 +167,47 @@ func capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 		Noise: map[string][]string{},
 		// Mocks: mocks,
 	}
+}
+
+func extractFormData(logger *zap.Logger, body []byte, contentType string) []models.FormData {
+	boundary := ""
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		parts := strings.Split(contentType, "boundary=")
+		if len(parts) > 1 {
+			boundary = strings.TrimSpace(parts[1])
+		} else {
+			utils.LogError(logger, nil, "Invalid multipart/form-data content type")
+			return nil
+		}
+	}
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	var formData []models.FormData
+
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			utils.LogError(logger, err, "Error reading part")
+			continue
+		}
+		key := part.FormName()
+		if key == "" {
+			continue
+		}
+
+		value, err := io.ReadAll(part)
+		if err != nil {
+			utils.LogError(logger, err, "Error reading part value")
+			continue
+		}
+
+		formData = append(formData, models.FormData{
+			Key:    key,
+			Values: []string{string(value)},
+		})
+	}
+
+	return formData
 }

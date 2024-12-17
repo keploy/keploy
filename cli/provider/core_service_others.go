@@ -39,11 +39,12 @@ func Get(ctx context.Context, cmd string, c *config.Config, logger *zap.Logger, 
 	if (cmd == "test" && c.Test.BasePath != "") || cmd == "normalize" || cmd == "templatize" {
 		return replaySvc, nil
 	}
+
 	if cmd == "contract" {
 		return contractSvc, nil
 	}
 
-	return nil, errors.New("command not supported in non linux os")
+	return nil, errors.New("command not supported in non linux os. if you are on windows or mac, please use the dockerized version of your application")
 }
 
 func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) (*CommonInternalService, error) {

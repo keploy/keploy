@@ -10,6 +10,8 @@ type Service interface {
 	CreateConfig(ctx context.Context, filePath string, config string) error
 	SendTelemetry(event string, output ...map[string]interface{})
 	Login(ctx context.Context) bool
+	Export(ctx context.Context) error
+	Import(ctx context.Context, path string) error
 }
 
 type teleDB interface {
