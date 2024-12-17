@@ -167,3 +167,5 @@ Whether you're a newbie coder or a wizard 🧙‍♀️, your perspective is gol
 ⚙️ [Installation Guide](https://keploy.io/docs/application-development/)
 
 📖 [Contribution Guide](https://keploy.io/docs/keploy-explained/contribution-guide/)
+
+🤖 [Ask Keploy Guru](https://gurubase.io/g/keploy)
