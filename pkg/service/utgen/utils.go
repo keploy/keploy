@@ -241,6 +241,8 @@ func getTestFilePath(sourceFilePath, testDirectory string) (string, error) {
 		testFileIdentifier = "_test"
 	case "javascript":
 		testFileIdentifier = ".test"
+	case "python":
+		testFileIdentifier = "_test"
 	default:
 		return "", fmt.Errorf("unsupported language: %s", language)
 	}
