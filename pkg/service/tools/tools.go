@@ -294,6 +294,7 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 	}
 
 	finalOutput := append(results, []byte(utils.ConfigGuide)...)
+	finalOutput = append([]byte(utils.GetVersionAsComment()), finalOutput...)
 
 	err = os.WriteFile(filePath, finalOutput, fs.ModePerm)
 	if err != nil {
