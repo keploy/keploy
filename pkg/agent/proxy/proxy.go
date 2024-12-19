@@ -298,7 +298,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	remoteAddr := srcConn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
 
-	p.logger.Info("Inside handleConnection of proxyServer", zap.Any("source port", sourcePort), zap.Any("Time", time.Now().Unix()))
+	p.logger.Debug("Inside handleConnection of proxyServer", zap.Any("source port", sourcePort), zap.Any("Time", time.Now().Unix()))
 	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
 	if err != nil {
 		utils.LogError(p.logger, err, "failed to fetch the destination info", zap.Any("Source port", sourcePort))
@@ -587,7 +587,7 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 }
 
 func (p *Proxy) MakeClientDeRegisterd(_ context.Context) error {
-	p.logger.Info("Inside MakeClientDeregisterd of proxyServer")
+	p.logger.Debug("Inside MakeClientDeregisterd of proxyServer")
 	p.clientClose <- true
 	return nil
 }

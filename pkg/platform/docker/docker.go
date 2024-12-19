@@ -359,7 +359,7 @@ func (idc *Impl) GetHostWorkingDirectory() (string, error) {
 	// Loop through container mounts and find the mount for current directory in the container
 	for _, mount := range containerMounts {
 		if mount.Destination == curDir {
-			idc.logger.Info(fmt.Sprintf("found mount for %s in keploy-v2 container", curDir), zap.Any("mount", mount))
+			idc.logger.Debug(fmt.Sprintf("found mount for %s in keploy-v2 container", curDir), zap.Any("mount", mount))
 			return mount.Source, nil
 		}
 	}
