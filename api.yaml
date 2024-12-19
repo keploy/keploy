@@ -1,0 +1,182 @@
+openapi: "3.0.0"
+info:
+  title: "Agent Service API"
+  version: "1.0.0"
+paths:
+  /instrument:
+    post:
+      summary: "Instrument the service"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InstrumentRequest'
+      responses:
+        '200':
+          description: "Success"
+        '400':
+          description: "Invalid request"
+
+  /incoming/{id}:
+    get:
+      summary: "Get incoming test cases"
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+          description: "ID for the incoming request"
+      responses:
+        '200':
+          description: "A stream of incoming test cases"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TestCase'
+        '400':
+          description: "Invalid ID supplied"
+        '404':
+          description: "ID not found"
+
+  /outgoing/{id}:
+    get:
+      summary: "Get outgoing mocks"
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+          description: "ID for the outgoing request"
+      responses:
+        '200':
+          description: "A stream of outgoing mocks"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Mock'
+        '400':
+          description: "Invalid ID supplied"
+        '404':
+          description: "ID not found"
+
+  /outgoing/mock:
+    post:
+      summary: "Mock outgoing requests"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MockOutgoingRequest'
+      responses:
+        '200':
+          description: "Success"
+        '400':
+          description: "Invalid request"
+        '404':
+          description: "ID not found"
+
+  /mocks:
+    post:
+      summary: "Set mocks for a given ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetMocksRequest'
+      responses:
+        '200':
+          description: "Mocks set successfully"
+        '400':
+          description: "Invalid request"
+
+  /consumed/{id}:
+    get:
+      summary: "Get consumed mocks"
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+          description: "ID to fetch consumed mocks"
+      responses:
+        '200':
+          description: "List of consumed mocks"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+        '400':
+          description: "Invalid ID supplied"
+        '404':
+          description: "ID not found"
+
+components:
+  schemas:
+    InstrumentRequest:
+      type: object
+      properties:
+        platform:
+          type: string
+          enum: ["linux", "windows", "mac", "docker"]
+        network:
+          type: string
+        container:
+          type: string
+        selfTesting:
+          type: boolean
+        mode:
+          type: string
+
+    MockOutgoingRequest:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        opts:
+          $ref: '#/components/schemas/OutgoingOptions'
+
+    SetMocksRequest:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        filtered:
+          type: array
+          items:
+            $ref: '#/components/schemas/Mock'
+        unFiltered:
+          type: array
+          items:
+            $ref: '#/components/schemas/Mock'
+
+    TestCase:
+      type: object
+      properties:
+        // Define properties for TestCase model here
+
+    Mock:
+      type: object
+      properties:
+        // Define properties for Mock model here
+
+    OutgoingOptions:
+      type: object
+      properties:
+        // Define properties for OutgoingOptions here
