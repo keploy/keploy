@@ -196,7 +196,8 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 			if err := httpResp.Body.Close(); err != nil {
 				utils.LogError(logger, err, "failed to close response body")
 			}
-		} }()
+		}
+	}()
 
 	respBody, errReadRespBody := io.ReadAll(httpResp.Body)
 	if errReadRespBody != nil {
