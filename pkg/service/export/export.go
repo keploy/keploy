@@ -10,37 +10,25 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
 	yamlLib "gopkg.in/yaml.v3"
 
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
+	postmanimport "go.keploy.io/server/v2/pkg/service/import"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
-func parseCurlCommand(logger *zap.Logger, curlCommand string) map[string]interface{} {
-	// Normalize the curl command by removing newlines and backslashes for easier processing
-	curlCommand = strings.Replace(curlCommand, "\\\n", " ", -1)
-	curlCommand = strings.Replace(curlCommand, "\n", " ", -1)
-	// Regular expressions to capture parts of the curl command
-	reMethodAndURL := regexp.MustCompile(`--request\s+(\w+)\s+--url\s+([^ ]+)`)
-	reHeader := regexp.MustCompile(`--header '([^:]+): ([^']*)'`)
-	reData := regexp.MustCompile(`--data(?:-raw)?\s+['"]([\s\S]*?)['"](?:\s+--|\s*$)`)
+func ConvertKeployHTTPToPostmanCollection(logger *zap.Logger, http *models.HTTPSchema) map[string]interface{} {
+	var request postmanimport.PostmanRequest
+	var response postmanimport.PostmanResponse
 
-	reFormData := regexp.MustCompile(`--form\s+['"]([^=]+)=([^'"]+)['"]`)
-
-	// Extract method and URL
-	matches := reMethodAndURL.FindStringSubmatch(curlCommand)
-	method, extractedURL := "GET", ""
-	if len(matches) > 2 {
-		method = matches[1]
-		extractedURL = matches[2]
-	}
+	// Extract URL from the HTTP schema
+	extractedURL := http.Request.URL
 
 	parsedURL, err := url.Parse(extractedURL)
 	if err != nil || parsedURL.Hostname() == "" {
@@ -48,119 +36,69 @@ func parseCurlCommand(logger *zap.Logger, curlCommand string) map[string]interfa
 		return nil
 	}
 
-	// Extract headers
-	headers := []map[string]string{}
-	for _, match := range reHeader.FindAllStringSubmatch(curlCommand, -1) {
-		headers = append(headers, map[string]string{
-			"key":   match[1],
-			"value": match[2],
+	request.URL = map[string]interface{}{
+		"raw":      parsedURL.String(),
+		"protocol": parsedURL.Scheme,
+		"host":     []string{parsedURL.Hostname()},
+		"port":     parsedURL.Port(),
+		"path":     []string{strings.TrimLeft(parsedURL.Path, "/")},
+		"query":    http.Request.URLParams,
+	}
+	request.Method = string(http.Request.Method)
+
+	for key, header := range http.Request.Header {
+		request.Header = append(request.Header, map[string]interface{}{
+			"key":   key,
+			"value": header,
 		})
 	}
 
-	sort.SliceStable(headers, func(i, j int) bool {
-		return headers[i]["key"] < headers[j]["key"]
-	})
-	// Extract data (JSON body or URL-encoded form data)
-	var jsonData map[string]interface{}
-	var formData url.Values // url.Values is a map[string][]string
-	rawData := ""
-	dataMatch := reData.FindStringSubmatch(curlCommand)
-	if len(dataMatch) > 1 {
-		rawData = dataMatch[1]
-
-		// Check if rawData needs unquoting (e.g., it starts and ends with quotes)
-		if (strings.HasPrefix(rawData, `"`) && strings.HasSuffix(rawData, `"`)) ||
-			(strings.HasPrefix(rawData, `'`) && strings.HasSuffix(rawData, `'`)) {
-			unquotedData, err := strconv.Unquote(rawData)
-			if err != nil {
-				utils.LogError(logger, err, "error unquoting data")
-				return nil
-			}
-			rawData = unquotedData
-		}
-		// Determine if it's JSON or URL-encoded form data
-		if strings.HasPrefix(rawData, "{") && strings.HasSuffix(rawData, "}") {
-			// Try to parse as JSON
-			rawData = strings.ReplaceAll(rawData, `\n`, "\n")
-			rawData = strings.ReplaceAll(rawData, `\"`, `"`)
-
-			if err := json.Unmarshal([]byte(rawData), &jsonData); err != nil {
-				utils.LogError(logger, err, "error parsing JSON data")
-				return nil
-			}
-		} else {
-			// Parse as URL-encoded form data
-			formData, err = url.ParseQuery(rawData)
-			if err != nil {
-				utils.LogError(logger, err, "error parsing URL-encoded data")
-				return nil
-			}
-		}
-	}
-
-	// Extract form data from --form flag
-	formDataFromCurl := map[string]string{}
-	for _, match := range reFormData.FindAllStringSubmatch(curlCommand, -1) {
-		formDataFromCurl[match[1]] = match[2]
-	}
-
-	// Determine the body mode
-	bodyMode := "raw"
-	if len(formDataFromCurl) > 0 {
-		bodyMode = "formdata"
-	} else if len(formData) > 0 {
-		bodyMode = "urlencoded"
-	}
-
-	// Construct the body based on the detected mode
-	var body map[string]interface{}
-	if bodyMode == "raw" && rawData != "" {
-		body = map[string]interface{}{
-			"mode": "raw",
-			"raw":  rawData,
-		}
-	} else if bodyMode == "formdata" {
+	if http.Request.Form != nil {
 		formDataArray := []map[string]interface{}{}
-		for key, value := range formDataFromCurl {
+		for _, form := range http.Request.Form {
 			formDataArray = append(formDataArray, map[string]interface{}{
-				"key":   key,
-				"value": value,
+				"key":    form.Key,
+				"values": form.Values,
 			})
 		}
-		body = map[string]interface{}{
-			"mode":     "formdata",
-			"formdata": formDataArray,
-		}
-	} else if bodyMode == "urlencoded" {
-		urlencodedArray := []map[string]interface{}{}
-		for key, values := range formData {
-			for _, value := range values {
-				urlencodedArray = append(urlencodedArray, map[string]interface{}{
-					"key":   key,
-					"value": value,
-				})
-			}
-		}
-		body = map[string]interface{}{
-			"mode":       "urlencoded",
-			"urlencoded": urlencodedArray,
+
+		request.Body.Mode = "formdata"
+		request.Body.Formdata = formDataArray
+	} else {
+		request.Body.Mode = "raw"
+		request.Body.Raw = http.Request.Body
+	}
+
+	if strings.Contains(http.Request.Header["Content-Type"], "application/json") {
+		request.Body.Options = map[string]interface{}{
+			"raw": map[string]interface{}{
+				"headerFamily": "json",
+				"language":     "json",
+			},
 		}
 	}
 
-	// Extract query parameters from the URL
-	queryParams := []map[string]string{}
-	for key, values := range parsedURL.Query() {
-		for _, value := range values {
-			queryParams = append(queryParams, map[string]string{
-				"key":   key,
-				"value": value,
-			})
-		}
+	// Extract Response Headers
+	for key, header := range http.Response.Header {
+		response.Header = append(response.Header, map[string]string{
+			"key":   key,
+			"value": header,
+		})
 	}
-	// Manually construct the raw URL to avoid escaping
-	rawURL := parsedURL.Scheme + "://" + parsedURL.Host + parsedURL.Path
-	if len(parsedURL.RawQuery) > 0 {
-		rawURL += "?" + parsedURL.RawQuery
+
+	response.Code = http.Response.StatusCode
+	response.Status = http.Response.StatusMessage
+	response.Body = http.Response.Body
+	response.OriginalRequest = &request
+	response.Name = http.Response.StatusMessage
+
+	if strings.Contains(http.Response.Header["Content-Type"], "application/json") {
+		request.Body.Options = map[string]interface{}{
+			"raw": map[string]interface{}{
+				"headerFamily": "json",
+				"language":     "json",
+			},
+		}
 	}
 
 	// Extract the last segment of the path as the name
@@ -168,26 +106,13 @@ func parseCurlCommand(logger *zap.Logger, curlCommand string) map[string]interfa
 	// Create the name by joining segments with dashes
 	name := strings.Join(pathSegments, "-")
 
-	// Constructing the response
 	return map[string]interface{}{
 		"name": name,
 		"protocolProfileBehavior": map[string]interface{}{
 			"disableBodyPruning": true,
 		},
-		"request": map[string]interface{}{
-			"method": method,
-			"header": headers,
-			"body":   body,
-			"url": map[string]interface{}{
-				"raw":      rawURL, // Use manually constructed raw URL
-				"protocol": parsedURL.Scheme,
-				"host":     []string{parsedURL.Hostname()},
-				"port":     parsedURL.Port(),
-				"path":     []string{strings.TrimLeft(parsedURL.Path, "/")},
-				"query":    queryParams,
-			},
-		},
-		"response": []interface{}{},
+		"request":  request,
+		"response": []postmanimport.PostmanResponse{response},
 	}
 }
 
@@ -253,7 +178,7 @@ func Export(_ context.Context, logger *zap.Logger) error {
 				utils.LogError(logger, err, "failed to read the test files", zap.String("path", testsDir))
 				continue
 			}
-			curlRequests := make(map[interface{}]int, 0)
+			keployRequests := make(map[interface{}]int, 0)
 			for _, testFile := range testFiles {
 				if filepath.Ext(testFile.Name()) == ".yaml" {
 					filePath := filepath.Join(testsDir, testFile.Name())
@@ -272,20 +197,26 @@ func Export(_ context.Context, logger *zap.Logger) error {
 						continue
 					}
 
-					if testCase.Curl != "" {
-						requestJSON := parseCurlCommand(logger, testCase.Curl)
-						// Convert the requestJSON to a string (assuming it's a map or complex type)
-						requestJSONString, err := json.Marshal(requestJSON)
-						if err != nil {
-							utils.LogError(logger, err, "failed to marshal requestJSON to string")
-							continue
-						}
-						curlRequests[string(requestJSONString)]++
+					var httpSchema models.HTTPSchema
+
+					err = testCase.Spec.Decode(&httpSchema)
+					if err != nil {
+						utils.LogError(logger, err, "failed to decode the HTTP schema")
+						continue
 					}
+
+					requestJSON := ConvertKeployHTTPToPostmanCollection(logger, &httpSchema)
+					// Convert the requestJSON to a string (assuming it's a map or complex type)
+					requestJSONString, err := json.Marshal(requestJSON)
+					if err != nil {
+						utils.LogError(logger, err, "failed to marshal requestJSON to string")
+						continue
+					}
+					keployRequests[string(requestJSONString)]++
 				}
 			}
 			var uniqueRequests []interface{}
-			for request := range curlRequests {
+			for request := range keployRequests {
 				var curlRequest interface{}
 				err := json.Unmarshal([]byte(request.(string)), &curlRequest)
 				if err != nil {
