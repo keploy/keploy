@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || windows
 
 // Package wire provides encoding and decoding operation of MySQL packets.
 package wire

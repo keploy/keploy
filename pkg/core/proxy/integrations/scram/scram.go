@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || windows
 
 // Package scram provides functionality for SCRAM authentication.
 package scram

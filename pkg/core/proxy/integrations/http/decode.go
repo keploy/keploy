@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || windows
 
 // Package http provides functionality for handling HTTP outgoing calls.
 package http
