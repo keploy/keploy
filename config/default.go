@@ -17,6 +17,7 @@ port: 0
 proxyPort: 16789
 dnsPort: 26789
 debug: false
+disableANSI: false
 disableTele: false
 inDocker: false
 generateGithubActions: false
@@ -25,6 +26,7 @@ networkName: ""
 buildDelay: 30
 test:
   selectedTests: {}
+  ignoredTests: {}
   globalNoise:
     global: {}
     test-sets: {}
