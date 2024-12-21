@@ -191,10 +191,18 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		return nil, errHTTPReq
 	}
 
+	defer func() {
+		if httpResp != nil && httpResp.Body != nil {
+			if err := httpResp.Body.Close(); err != nil {
+				utils.LogError(logger, err, "failed to close response body")
+			}
+		}
+	}()
+
 	respBody, errReadRespBody := io.ReadAll(httpResp.Body)
 	if errReadRespBody != nil {
 		utils.LogError(logger, errReadRespBody, "failed reading response body")
-		return nil, err
+		return nil, errReadRespBody
 	}
 
 	resp = &models.HTTPResp{
