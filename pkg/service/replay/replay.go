@@ -81,7 +81,11 @@ func (r *Replayer) Start(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
 
-	var hookCancel context.CancelFunc
+	setupErrGrp, _ := errgroup.WithContext(ctx)
+	_ = context.WithoutCancel(ctx)
+	setupCtx := context.WithValue(ctx, models.ErrGroupKey, setupErrGrp)
+	setupCtx, setupCtxCancel := context.WithCancel(setupCtx)
+
 	var stopReason = "replay completed successfully"
 
 	// defering the stop function to stop keploy in case of any error in record or in case of context cancellation
@@ -90,12 +94,25 @@ func (r *Replayer) Start(ctx context.Context) error {
 		case <-ctx.Done():
 			break
 		default:
+			unregister := models.UnregisterReq{
+				ClientID: r.config.ClientID,
+				Mode:     models.MODE_TEST,
+			}
+			err := r.instrumentation.UnregisterClient(ctx, unregister)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to unregister client")
+			}
+			time.Sleep(2 * time.Second)
 			r.logger.Info("stopping Keploy", zap.String("reason", stopReason))
 		}
-		if hookCancel != nil {
-			hookCancel()
+
+		setupCtxCancel()
+		err := setupErrGrp.Wait()
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to stop setup execution, that covers init container")
 		}
-		err := g.Wait()
+
+		err = g.Wait()
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop replaying")
 		}
@@ -105,7 +122,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get all test set ids: %v", err)
 		utils.LogError(r.logger, err, stopReason)
-		return fmt.Errorf(stopReason)
+		return errors.New(stopReason)
 	}
 
 	if len(testSetIDs) == 0 {
@@ -119,7 +136,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get next test run id: %v", err)
 		utils.LogError(r.logger, err, stopReason)
-		return fmt.Errorf(stopReason)
+		return errors.New(stopReason)
 	}
 
 	var language config.Language
@@ -171,8 +188,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 	}
 
-	// Instrument will load the hooks and start the proxy
-	inst, err := r.Instrument(ctx)
+	inst, err := r.Instrument(setupCtx)
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to instrument: %v", err)
 		utils.LogError(r.logger, err, stopReason)
@@ -181,8 +197,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 		return fmt.Errorf(stopReason)
 	}
-
-	hookCancel = inst.HookCancel
 
 	var testSetResult bool
 	testRunResult := true
@@ -220,7 +234,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			}
 		}
 
-		testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.AppID, false)
+		testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.ClientID, false)
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run test set: %v", err)
 			utils.LogError(r.logger, err, stopReason)
@@ -331,33 +345,17 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.Any("base path", r.config.Test.BasePath))
 		return &InstrumentState{}, nil
 	}
-	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
+	// Instrument will setup the environment and start the hooks and proxy
+	clientID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, EnableTesting: r.config.EnableTesting})
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return &InstrumentState{}, err
-		}
-		return &InstrumentState{}, fmt.Errorf("failed to setup instrumentation: %w", err)
+		stopReason := "failed setting up the environment"
+		utils.LogError(r.logger, err, stopReason)
+		return &InstrumentState{}, fmt.Errorf(stopReason)
 	}
-	r.config.AppID = appID
 
-	var cancel context.CancelFunc
-	// starting the hooks and proxy
-	select {
-	case <-ctx.Done():
-		return &InstrumentState{}, context.Canceled
-	default:
-		hookCtx := context.WithoutCancel(ctx)
-		hookCtx, cancel = context.WithCancel(hookCtx)
-		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_TEST, EnableTesting: r.config.EnableTesting, Rules: r.config.BypassRules})
-		if err != nil {
-			cancel()
-			if errors.Is(err, context.Canceled) {
-				return &InstrumentState{}, err
-			}
-			return &InstrumentState{}, fmt.Errorf("failed to start the hooks and proxy: %w", err)
-		}
-	}
-	return &InstrumentState{AppID: appID, HookCancel: cancel}, nil
+	r.config.ClientID = clientID
+
+	return &InstrumentState{ClientID: clientID}, nil
 }
 
 func (r *Replayer) GetNextTestRunID(ctx context.Context) (string, error) {
@@ -379,7 +377,7 @@ func (r *Replayer) GetTestCases(ctx context.Context, testID string) ([]*models.T
 	return r.testDB.GetTestCases(ctx, testID)
 }
 
-func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error) {
+func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, clientID uint64, serveTest bool) (models.TestSetStatus, error) {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	runTestSetErrGrp, runTestSetCtx := errgroup.WithContext(ctx)
@@ -475,7 +473,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	cmdType := utils.CmdType(r.config.CommandType)
 	var userIP string
 
-	err = r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, models.BaseTime, time.Now(), Start)
+	err = r.SetupOrUpdateMocks(runTestSetCtx, clientID, testSetID, models.BaseTime, time.Now(), Start)
 	if err != nil {
 		return models.TestSetStatusFailed, err
 	}
@@ -484,7 +482,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if !serveTest {
 			runTestSetErrGrp.Go(func() error {
 				defer utils.Recover(r.logger)
-				appErr = r.RunApplication(runTestSetCtx, appID, models.RunOptions{})
+				appErr = r.RunApplication(runTestSetCtx, clientID, models.RunOptions{})
 				if appErr.AppErrorType == models.ErrCtxCanceled {
 					return nil
 				}
@@ -529,7 +527,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		if utils.IsDockerCmd(cmdType) {
-			userIP, err = r.instrumentation.GetContainerIP(ctx, appID)
+			userIP, err = r.instrumentation.GetContainerIP(ctx, clientID)
 			if err != nil {
 				return models.TestSetStatusFailed, err
 			}
@@ -617,7 +615,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		var loopErr error
 
 		//No need to handle mocking when basepath is provided
-		err := r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp, Update)
+		err := r.SetupOrUpdateMocks(runTestSetCtx, clientID, testSetID, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp, Update)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to update mocks")
 			break
@@ -646,7 +644,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		started := time.Now().UTC()
-		resp, loopErr := HookImpl.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
+		resp, loopErr := HookImpl.SimulateRequest(runTestSetCtx, clientID, testCase, testSetID)
 		if loopErr != nil {
 			utils.LogError(r.logger, err, "failed to simulate request")
 			failure++
@@ -655,7 +653,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		var consumedMocks []string
 		if r.instrument {
-			consumedMocks, err = r.instrumentation.GetConsumedMocks(runTestSetCtx, appID)
+			consumedMocks, err = r.instrumentation.GetConsumedMocks(runTestSetCtx, clientID)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 			}
@@ -889,6 +887,7 @@ func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, testSet
 		}
 	}
 
+	// this will be sent to the proxy
 	err = r.instrumentation.SetMocks(ctx, appID, filteredMocks, unfilteredMocks)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to set mocks")
@@ -987,8 +986,8 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 	}
 }
 
-func (r *Replayer) RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError {
-	return r.instrumentation.Run(ctx, appID, opts)
+func (r *Replayer) RunApplication(ctx context.Context, clientID uint64, opts models.RunOptions) models.AppError {
+	return r.instrumentation.Run(ctx, clientID, opts)
 }
 
 func (r *Replayer) GetTestSetConf(ctx context.Context, testSet string) (*models.TestSet, error) {
@@ -1141,4 +1140,8 @@ func (r *Replayer) DeleteTests(ctx context.Context, testSetID string, testCaseID
 
 func SetTestHooks(testHooks TestHooks) {
 	HookImpl = testHooks
+}
+
+func (r *Replayer) GetContainerIP(ctx context.Context, id uint64) (string, error) {
+	return r.instrumentation.GetContainerIP(ctx, id)
 }
