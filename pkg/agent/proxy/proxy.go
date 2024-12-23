@@ -73,7 +73,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		connMutex:    &sync.Mutex{},
 		DestInfo:     info,
 		sessions:     agent.NewSessions(), // sessions to store the session rules
-		clientClose:  make(chan bool),
+		clientClose:  make(chan bool, 1),
 		MockManagers: sync.Map{},
 		Integrations: make(map[string]integrations.Integrations),
 	}
