@@ -16,10 +16,7 @@ config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
 
 container_kill() {
-    pid=$(pgrep -n keploy)
-    echo "$pid Keploy PID"
-    echo "Killing keploy"
-    sudo kill $pid
+    docker compose down
 }
 
 send_request(){
