@@ -37,7 +37,7 @@ RUN curl -fsSL https://get.docker.com -o get-docker.sh && \
 # Install docker-compose to PATH
 # Install specific version of Docker Compose plugin (v2.29.1)
 RUN mkdir -p /usr/lib/docker/cli-plugins && \
-    curl -SL https://github.com/docker/compose/releases/download/v2.29.1/docker-compose-linux-aarch64 -o /usr/lib/docker/cli-plugins/docker-compose && \
+    curl -SL "https://github.com/docker/compose/releases/download/v2.29.1/docker-compose-linux-$(uname -m)" -o /usr/lib/docker/cli-plugins/docker-compose && \
     chmod +x /usr/lib/docker/cli-plugins/docker-compose
 
 # Copy the keploy binary and the entrypoint script from the build container
