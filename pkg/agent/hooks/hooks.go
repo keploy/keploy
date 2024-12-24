@@ -486,6 +486,9 @@ func (h *Hooks) Record(ctx context.Context, clientID uint64, opts models.Incomin
 	tc := make(chan *models.TestCase, 1)
 	kctx := context.WithoutCancel(ctx)
 	h.TestMap.Store(clientID, tc)
+	h.m.Lock()
+	defer h.m.Unlock()
+
 	if !h.isLoaded {
 		err := conn.ListenSocket(kctx, h.logger, clientID, h.TestMap, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
 		if err != nil {

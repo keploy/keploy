@@ -15,6 +15,7 @@ func (a *AgentRequest) SendKtInfo(w http.ResponseWriter, r *http.Request) {
 	err := json.NewDecoder(r.Body).Decode(&testbenchReq)
 	if err != nil {
 		render.Status(r, http.StatusBadRequest)
+		a.logger.Error("failed to decode kt info", zap.Error(err))
 		return
 	}
 

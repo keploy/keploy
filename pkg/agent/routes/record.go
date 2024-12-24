@@ -119,6 +119,7 @@ func (a *AgentRequest) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		render.JSON(w, r, err)
 		render.Status(r, http.StatusInternalServerError)
+		a.logger.Error("failed to get outgoing", zap.Error(err))
 		return
 	}
 
@@ -127,11 +128,10 @@ func (a *AgentRequest) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			if m != nil {
 				render.JSON(w, r, m)
-				flusher.Flush()
 			} else {
 				render.JSON(w, r, "No more mocks")
-				flusher.Flush()
 			}
+			flusher.Flush()
 			return
 		default:
 			// Stream each mock as JSON
@@ -156,10 +156,9 @@ func (a *AgentRequest) RegisterClients(w http.ResponseWriter, r *http.Request) {
 		register.Error = err
 		render.JSON(w, r, register)
 		render.Status(r, http.StatusBadRequest)
+		a.logger.Error("failed to decode register request", zap.Error(err))
 		return
 	}
-
-	fmt.Printf("SetupRequest: %v\n", registerReq.SetupOptions.ClientNsPid)
 
 	if registerReq.SetupOptions.ClientNsPid == 0 {
 		register.Error = fmt.Errorf("Client pid is required")

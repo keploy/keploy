@@ -325,7 +325,7 @@ func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
 		return false, err
 	}
 
-	a.logger.Info("container started and successfully extracted inode", zap.Any("inode", inode))
+	a.logger.Debug("container started and successfully extracted inode", zap.Any("inode", inode))
 	if info.NetworkSettings == nil || info.NetworkSettings.Networks == nil {
 		a.logger.Debug("container network settings not available", zap.Any("containerDetails.NetworkSettings", info.NetworkSettings))
 		return false, nil
@@ -496,7 +496,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 	cmdCancel := func(cmd *exec.Cmd) func() error {
 		return func() error {
 			if utils.IsDockerCmd(a.kind) {
-				a.logger.Info("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
+				a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
 				err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
 				return err
 			}

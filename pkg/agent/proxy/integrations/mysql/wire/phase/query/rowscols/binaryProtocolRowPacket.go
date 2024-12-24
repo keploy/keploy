@@ -255,10 +255,6 @@ func EncodeBinaryRow(_ context.Context, logger *zap.Logger, row *mysql.BinaryRow
 
 		columnEntry := row.Values[i]
 
-		fmt.Printf("ColumnEntry: %+v\n", columnEntry)
-		fmt.Printf("columnEntry.Value: %+v\n", columnEntry.Value)
-		fmt.Printf("Type of Value: %T\n", columnEntry.Value)
-
 		switch columnEntry.Type {
 		case mysql.FieldTypeLong:
 			var val any
