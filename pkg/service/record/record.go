@@ -222,7 +222,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 			if appErr.Err == nil && appErr.AppErrorType == "" && utils.FindDockerCmd(r.config.Command) == utils.DockerCompose {
 				stopReason = "docker-compose exited successfully, hence stopping keploy"
 				return nil
-			} 
+			}
 			stopReason = "unknown error recieved from application, hence stopping keploy"
 		}
 
