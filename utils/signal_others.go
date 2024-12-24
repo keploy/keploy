@@ -45,10 +45,8 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	// wait after sending the interrupt signal, before sending the kill signal
 	cmd.WaitDelay = waitDelay
 
-	if FindDockerCmd(userCmd) != DockerCompose {
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Setpgid: true,
-		}
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
 	}
 
 	// Set the output of the command
