@@ -465,6 +465,10 @@ func (a *App) run(ctx context.Context) models.AppError {
 		return func() error {
 			if utils.IsDockerCmd(a.kind) {
 				a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
+				if utils.FindDockerCmd(a.cmd) == utils.DockerCompose {
+					err := utils.SendSignal(a.logger, cmd.Process.Pid, syscall.SIGINT)
+					return err
+				}
 				err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
 				return err
 			}
