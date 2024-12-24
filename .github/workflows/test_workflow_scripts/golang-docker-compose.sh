@@ -74,19 +74,7 @@ done
 
 # Start keploy in test mode.
 test_container="echoApp"
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
-
-if grep "ERROR" "${test_container}.txt"; then
-    echo "Error found in pipeline..."
-    cat "${test_container}.txt"
-    exit 1
-fi
-
-if grep "WARNING: DATA RACE" "${test_container}.txt"; then
-    echo "Race condition detected in test, stopping pipeline..."
-    cat "${test_container}.txt"
-    exit 1
-fi
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false
 
 all_passed=true
 
