@@ -16,7 +16,10 @@ config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
 
 container_kill() {
-    docker compose down
+    pid=$(pgrep -n keploy)
+    echo "$pid Keploy PID"
+    echo "Killing keploy"
+    sudo kill $pid
 }
 
 send_request(){
@@ -74,7 +77,19 @@ done
 
 # Start keploy in test mode.
 test_container="echoApp"
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false
+sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
+
+if grep "ERROR" "${test_container}.txt"; then
+    echo "Error found in pipeline..."
+    cat "${test_container}.txt"
+    exit 1
+fi
+
+if grep "WARNING: DATA RACE" "${test_container}.txt"; then
+    echo "Race condition detected in test, stopping pipeline..."
+    cat "${test_container}.txt"
+    exit 1
+fi
 
 all_passed=true
 
