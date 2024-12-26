@@ -243,14 +243,14 @@ func getTestFilePath(sourceFilePath, testDirectory string) (string, error) {
 	var testFileBaseNames []string
 
 	switch language {
-		case "go":
-			testFileBaseNames = []string{baseNameWithoutExt+"_test"+extension}
-		case "javascript":
-			testFileBaseNames = []string{baseNameWithoutExt+".test"+extension}
-		case "python":
-			testFileBaseNames = []string{baseNameWithoutExt+"_test"+extension, "test_"+baseName}
-		default:
-			return "", fmt.Errorf("unsupported language: %s", language)
+	case "go":
+		testFileBaseNames = []string{baseNameWithoutExt + "_test" + extension}
+	case "javascript":
+		testFileBaseNames = []string{baseNameWithoutExt + ".test" + extension}
+	case "python":
+		testFileBaseNames = []string{baseNameWithoutExt + "_test" + extension, "test_" + baseName}
+	default:
+		return "", fmt.Errorf("unsupported language: %s", language)
 	}
 
 	// Find the most specific existing test file
