@@ -81,7 +81,10 @@ func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.In
 	go func() {
 		<-ctx.Done()
 		if res.Body != nil {
-			_ = res.Body.Close()
+			err = res.Body.Close()
+			if err != nil {
+				utils.LogError(a.logger, err, "failed to close response body for incoming request")
+			}
 		}
 	}()
 
