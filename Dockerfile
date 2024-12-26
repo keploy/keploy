@@ -35,7 +35,7 @@ RUN apt-get install -y ca-certificates curl sudo && \
 #     rm get-docker.sh
 
 # Install docker-compose to PATH
-# RUN apt install docker-compose -y
+
 
 # Copy the keploy binary and the entrypoint script from the build container
 COPY --from=build /app/keploy /app/keploy
