@@ -120,7 +120,6 @@ func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.In
 			case tcChan <- &testCase:
 				// fmt.Println("Test case received for client", id, "TESTCASE", testCase)
 				// Send the decoded test case to the channel
-				a.logger.Debug("Test case received for client", zap.Uint64("clientID", id), zap.Any("test_case", testCase))
 			}
 		}
 	}()
