@@ -92,12 +92,12 @@ for i in {1..2}; do
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
         cat "${container_name}.txt"
-        # exit 1
+        exit 1
     fi
     if grep "ERROR" "${container_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${container_name}.txt"
-        # exit 1
+        exit 1
     fi
     sleep 5
 
@@ -120,13 +120,13 @@ sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net ke
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
     cat "${test_container}.txt"
-    # exit 1
+    exit 1
 fi
 
 if grep "WARNING: DATA RACE" "${test_container}.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
     cat "${test_container}.txt"
-    # exit 1
+    exit 1
 fi
 
 all_passed=true

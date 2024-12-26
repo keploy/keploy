@@ -54,12 +54,12 @@ for i in {1..2}; do
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
-        # exit 1
+        exit 1
     fi
     if grep "WARNING: DATA RACE" "${app_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
         cat "${app_name}.txt"
-        # exit 1
+        exit 1
     fi
     sleep 5
     wait
@@ -79,12 +79,12 @@ sudo -E env PATH="$PATH" ./../../keployv2 test -c 'npm start' --delay 10    &> t
 if grep "ERROR" "test_logs1.txt"; then
     echo "Error found in pipeline..."
     cat "test_logs1.txt"
-    # exit 1
+    exit 1
 fi
 if grep "WARNING: DATA RACE" "test_logs1.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
     cat "test_logs1.txt"
-    # exit 1
+    exit 1
 fi
 
 sleep 5
@@ -92,12 +92,12 @@ sudo -E env PATH="$PATH" ./../../keployv2 test -c 'npm start' --delay 10 --tests
 if grep "ERROR" "test_logs2.txt"; then
     echo "Error found in pipeline..."
     cat "test_logs2.txt"
-    # exit 1
+    exit 1
 fi
 if grep "WARNING: DATA RACE" "test_logs2.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
     cat "test_logs2.txt"
-    # exit 1
+    exit 1
 fi
 
 sed -i 's/selectedTests: {}/selectedTests: {"test-set-0": ["test-1", "test-2"]}/' "./keploy.yml"
@@ -107,12 +107,12 @@ sudo -E env PATH="$PATH" ./../../keployv2 test -c 'npm start' --apiTimeout 30 --
 if grep "ERROR" "test_logs3.txt"; then
     echo "Error found in pipeline..."
     cat "test_logs3.txt"
-    # exit 1
+    exit 1
 fi
 if grep "WARNING: DATA RACE" "test_logs3.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
     cat "test_logs3.txt"
-    # exit 1
+    exit 1
 fi
 
 all_passed=true
