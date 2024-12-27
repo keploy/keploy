@@ -94,9 +94,14 @@ installKeploy (){
         fi
         # macOS tar does not support --overwrite option so we need to remove the directory first
         # to avoid the "File exists" error
+        rm -f /tmp/keploy.tar.gz
+        curl --silent --location "$download_url" -o /tmp/keploy.tar.gz
+
         rm -rf /tmp/keploy
         mkdir -p /tmp/keploy
-        curl --silent --location "$download_url" | tar xz -C /tmp/keploy/
+
+        tar xzf /tmp/keploy.tar.gz -C /tmp/keploy
+        rm -f /tmp/keploy.tar.gz
         move_keploy_binary
         delete_keploy_alias
     }
@@ -107,7 +112,12 @@ installKeploy (){
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
         fi
-        curl --silent --location "$download_url" | tar xz --overwrite -C /tmp 
+        rm -f /tmp/keploy.tar.gz
+        curl --silent --location "$download_url" -o /tmp/keploy.tar.gz
+
+        tar xzf /tmp/keploy.tar.gz --overwrite -C /tmp
+        rm -f /tmp/keploy.tar.gz
+
         move_keploy_binary
     }
 
@@ -118,7 +128,11 @@ installKeploy (){
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
         fi
-        curl --silent --location "$download_url" | tar xz --overwrite -C /tmp
+        rm -f /tmp/keploy.tar.gz
+        curl --silent --location "$download_url" -o /tmp/keploy.tar.gz
+
+        tar xzf /tmp/keploy.tar.gz --overwrite -C /tmp
+        rm -f /tmp/keploy.tar.gz
         move_keploy_binary
     }
 
