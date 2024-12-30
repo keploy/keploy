@@ -384,3 +384,20 @@ func generateSchemaName(src string) string {
 	newName := "schema" + filepath.Ext(src)
 	return filepath.Join(dir, newName)
 }
+
+func FileExists(_ context.Context, logger *zap.Logger, path string, fileName string) (bool, error) {
+	yamlPath, err := ValidatePath(filepath.Join(path, fileName+".yaml"))
+	if err != nil {
+		utils.LogError(logger, err, "failed to validate the yaml file path", zap.String("path directory", path), zap.String("yaml", fileName))
+		return false, err
+	}
+	if _, err := os.Stat(yamlPath); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		utils.LogError(logger, err, "failed to check if the yaml file exists", zap.String("path directory", path), zap.String("yaml", fileName))
+		return false, err
+	}
+
+	return true, nil
+}
