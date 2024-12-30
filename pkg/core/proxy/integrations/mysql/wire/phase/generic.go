@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || windows
 
 // Package phase contains the encoding and decoding functions for the different phases of the MySQL protocol. And also contains the same for EOF, ERR, and OK packets.
 package phase

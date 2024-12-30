@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || windows
 
 // Package v1 provides functionality for decoding Postgres requests and responses.
 package v1

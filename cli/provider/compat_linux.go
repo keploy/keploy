@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 )
 
+// check if keploy is compatable with underlying client os
 func isCompatible(logger *zap.Logger) error {
 	//check if the version of the kernel is above 5.15 for eBPF support
 	isValid := kernel.CheckKernelVersion(5, 15, 0)

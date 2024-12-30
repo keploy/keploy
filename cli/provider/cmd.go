@@ -643,7 +643,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, "error while getting absolute path")
 			return errors.New("failed to get the absolute path")
 		}
-		c.cfg.Path = absPath + "/keploy"
+		c.cfg.Path = filepath.Join(absPath, "keploy")
 
 		bypassPorts, err := cmd.Flags().GetUintSlice("passThroughPorts")
 		if err != nil {
@@ -748,7 +748,7 @@ func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg confi
 		utils.LogError(c.logger, err, "failed to marshal config data")
 		return errors.New("failed to marshal config data")
 	}
-	err = toolSvc.CreateConfig(ctx, c.cfg.ConfigPath+"/keploy.yml", string(configDataBytes))
+	err = toolSvc.CreateConfig(ctx, filepath.Join(c.cfg.ConfigPath, "keploy.yml"), string(configDataBytes))
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to create config file")
 		return errors.New("failed to create config file")

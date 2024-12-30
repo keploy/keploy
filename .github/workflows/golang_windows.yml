@@ -1,0 +1,39 @@
+name: Golang On Windows
+on: [pull_request]
+jobs:
+  golang_linux:
+    runs-on: windows-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+    - name: Enable Debug Logging
+      run: |
+        echo "GITHUB_ACTIONS_DEBUG=true" >> $GITHUB_ENV
+    - name: Disable Windows Firewall
+      shell: pwsh
+      run: |
+        Write-Output "Disabling Windows Firewall..."
+        netsh advfirewall set allprofiles state off
+        Write-Output "Firewall disabled successfully."
+    - name: Verify Firewall Status
+      shell: pwsh
+      run: |
+        Write-Output "Checking Firewall status..."
+        netsh advfirewall show allprofiles
+    - name: Build binary
+      run: |
+        go build -race -tags=viper_bind_struct -o keployv2
+    - name: Checkout the samples-go repository
+      uses: actions/checkout@v2
+      with:
+        repository: keploy/samples-go
+        path: samples-go
+    - name: Verify Admin Access
+      run: |
+        whoami /groups
+    - name: Run samples-go application
+      run: |
+        cd samples-go/gin-mongo
+        source ./../../.github/workflows/test_workflow_scripts/golang-windows.sh
+      shell: bash
+

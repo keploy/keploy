@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || windows
 
 // Package integrations provides functionality for integrating different types of services.
 package integrations

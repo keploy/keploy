@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || windows
 
 // Package conn provides functionality for handling connections.
 package conn

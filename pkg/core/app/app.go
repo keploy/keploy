@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || windows
 
 // Package app provides functionality for managing applications.
 package app
