@@ -70,7 +70,7 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 					utils.LogError(factory.logger, err, "failed to parse the http response from byte array", zap.Any("responseBuf", responseBuf))
 					continue
 				}
-				capture(ctx, factory.logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestampTest, resTimestampTest, opts)
+				Capture(ctx, factory.logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestampTest, resTimestampTest, opts)
 
 			} else if tracker.IsInactive(factory.inactivityThreshold) {
 				trackersToDelete = append(trackersToDelete, connID)
@@ -97,7 +97,7 @@ func (factory *Factory) GetOrCreate(connectionID ID) *Tracker {
 	return tracker
 }
 
-func capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions) {
+func Capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions) {
 	reqBody, err := io.ReadAll(req.Body)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the http request body")
