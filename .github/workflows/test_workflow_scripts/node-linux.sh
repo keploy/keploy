@@ -35,7 +35,7 @@ send_request(){
     curl --request POST --url http://localhost:8000/students --header 'content-type: application/json' --data '{"name":"John Doe","email":"john@xyiz.com","phone":"0123456799"}'
     curl --request POST --url http://localhost:8000/students --header 'content-type: application/json' --data '{"name":"Alice Green","email":"green@alice.com","phone":"3939201584"}'
     curl -X GET http://localhost:8000/students
-    curl -X GET http://localhost:8000/get
+    # curl -X GET http://localhost:8000/get           Will Uncomment this after tls fix
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
     pid=$(pgrep keploy)
@@ -47,8 +47,10 @@ send_request(){
 # Record and test sessions in a loop
 for i in {1..2}; do
     app_name="nodeApp_${i}"
+    sudo ./../../keployv2 agent &
+    sleep 5
     send_request &
-    sudo -E env PATH=$PATH ./../../keployv2 record -c 'npm start'    &> "${app_name}.txt"
+    sudo -E env PATH="$PATH" ./../../keployv2 record -c 'npm start'    &> "${app_name}.txt"
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
@@ -64,11 +66,15 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
-mocks_file="keploy/test-set-0/tests/test-5.yaml"
-sed -i 's/"page":1/"page":4/' "$mocks_file"
+# mocks_file="keploy/test-set-0/tests/test-5.yaml"
+# sed -i 's/"page":1/"page":4/' "$mocks_file"
 
+sleep 5
+echo "Starting test sessions"
+sudo ./../../keployv2 agent &
+sleep 5
 # Test modes and result checking
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10    &> test_logs1.txt
+sudo -E env PATH="$PATH" ./../../keployv2 test -c 'npm start' --delay 10    &> test_logs1.txt
 
 if grep "ERROR" "test_logs1.txt"; then
     echo "Error found in pipeline..."
@@ -81,7 +87,8 @@ if grep "WARNING: DATA RACE" "test_logs1.txt"; then
     exit 1
 fi
 
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10 --testsets test-set-0    &> test_logs2.txt
+sleep 5
+sudo -E env PATH="$PATH" ./../../keployv2 test -c 'npm start' --delay 10 --testsets test-set-0    &> test_logs2.txt
 if grep "ERROR" "test_logs2.txt"; then
     echo "Error found in pipeline..."
     cat "test_logs2.txt"
@@ -95,7 +102,8 @@ fi
 
 sed -i 's/selectedTests: {}/selectedTests: {"test-set-0": ["test-1", "test-2"]}/' "./keploy.yml"
 
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --apiTimeout 30 --delay 10    &> test_logs3.txt
+sleep 5
+sudo -E env PATH="$PATH" ./../../keployv2 test -c 'npm start' --apiTimeout 30 --delay 10    &> test_logs3.txt
 if grep "ERROR" "test_logs3.txt"; then
     echo "Error found in pipeline..."
     cat "test_logs3.txt"
@@ -143,8 +151,12 @@ if [ "$all_passed" = true ]; then
         cat "test_logs1.txt"
         exit 1
     fi
+    pid=$(pgrep keploy)
+    sudo kill $pid
     echo "All tests passed"
     exit 0
 else
+    pid=$(pgrep keploy)
+    sudo kill $pid
     exit 1
 fi

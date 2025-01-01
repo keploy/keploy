@@ -171,7 +171,6 @@ func NewSessionIndex(path string, Logger *zap.Logger) (string, error) {
 	}
 
 	for _, v := range files {
-		// fmt.Println("name for the file", v.Name())
 		fileName := filepath.Base(v.Name())
 		fileNamePackets := strings.Split(fileName, "-")
 		if len(fileNamePackets) == 3 {
