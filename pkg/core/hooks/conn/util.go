@@ -1,11 +1,11 @@
-//go:build linux
-
 package conn
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -217,4 +217,47 @@ func Capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 		Noise: map[string][]string{},
 		// Mocks: mocks,
 	}
+}
+
+func extractFormData(logger *zap.Logger, body []byte, contentType string) []models.FormData {
+	boundary := ""
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		parts := strings.Split(contentType, "boundary=")
+		if len(parts) > 1 {
+			boundary = strings.TrimSpace(parts[1])
+		} else {
+			utils.LogError(logger, nil, "Invalid multipart/form-data content type")
+			return nil
+		}
+	}
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	var formData []models.FormData
+
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			utils.LogError(logger, err, "Error reading part")
+			continue
+		}
+		key := part.FormName()
+		if key == "" {
+			continue
+		}
+
+		value, err := io.ReadAll(part)
+		if err != nil {
+			utils.LogError(logger, err, "Error reading part value")
+			continue
+		}
+
+		formData = append(formData, models.FormData{
+			Key:    key,
+			Values: []string{string(value)},
+		})
+	}
+
+	return formData
 }
