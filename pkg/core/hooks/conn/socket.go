@@ -13,6 +13,7 @@ import (
 	"unsafe"
 
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sys/unix"
 
 	"github.com/cilium/ebpf"
 	"go.keploy.io/server/v2/pkg/models"
@@ -240,4 +241,24 @@ func exit(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 		return nil
 	})
 	return nil
+}
+
+// InitRealTimeOffset calculates the offset between the real clock and the monotonic clock used in the BPF.
+func initRealTimeOffset() error {
+	var monotonicTime, realTime unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &monotonicTime); err != nil {
+		return fmt.Errorf("failed getting monotonic clock due to: %v", err)
+	}
+	if err := unix.ClockGettime(unix.CLOCK_REALTIME, &realTime); err != nil {
+		return fmt.Errorf("failed getting real clock time due to: %v", err)
+	}
+	realTimeOffset = uint64(time.Second)*(uint64(realTime.Sec)-uint64(monotonicTime.Sec)) + uint64(realTime.Nsec) - uint64(monotonicTime.Nsec)
+	// realTimeCopy := time.Unix(int64(realTimeOffset/1e9), int64(realTimeOffset%1e9))
+	// log.Debug(fmt.Sprintf("%s real time offset is: %v", Emoji, realTimeCopy))
+	return nil
+}
+
+// GetRealTimeOffset is a getter for the real-time-offset.
+func getRealTimeOffset() uint64 {
+	return realTimeOffset
 }
