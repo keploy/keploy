@@ -14,6 +14,8 @@ jobs:
   cla-assistant:
     runs-on: "ubuntu-latest"
     steps:
+      - uses: actions/checkout@v3
+
       - name: "CLA Assistant"
         if: "(github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'"
         uses: "cla-assistant/github-action@v2.1.3-beta"
@@ -27,3 +29,14 @@ jobs:
           path-to-document: "https://github.com/keploy/keploy/tree/main/.github/CLA.md"
           branch: "cla-signatures"
           allowlist: "keploy-bot,renovate"
+
+      - name: "Post Failure Instructions"
+        if: failure() && github.event_name == 'pull_request_target'
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} --body "**The CLA check failed.** Please ensure you have:
+          - Signed the CLA by commenting **'I have read the CLA Document and I hereby sign the CLA.'**
+          - Used the correct email address in your commits (matches the one you used to sign the CLA).
+          
+          After fixing these issues, comment **'recheck'** to trigger the workflow again."
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
