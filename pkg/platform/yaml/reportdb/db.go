@@ -99,6 +99,7 @@ func (fe *TestReport) InsertReport(ctx context.Context, testRunID string, testSe
 		return fmt.Errorf("%s failed to marshal document to yaml. error: %s", utils.Emoji, err.Error())
 	}
 	data = append(data, d...)
+	data = append([]byte(utils.GetVersionAsComment()), data...)
 
 	err = yaml.WriteFile(ctx, fe.Logger, reportPath, testReport.Name, data, false)
 	if err != nil {
