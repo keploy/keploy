@@ -81,19 +81,6 @@ func (t *Tools) Templatize(ctx context.Context) error {
 			for j := i + 1; j < len(tcs); j++ {
 				addTemplates(t.logger, tcs[j].HTTPReq.Header, &jsonResponse)
 				// check if the tcs[j].HTTPReq.Header is modified that means the template is added log it.
-				if tcs[j].HTTPReq.Header != nil {
-					for key, val := range tcs[j].HTTPReq.Header {
-						if strings.Contains(val, "{{") {
-							// Log the addition of the new template
-							t.logger.Info("New template added for test",
-								zap.String("testcase", tcs[j].Name),
-								zap.String("templateKey", key),
-								zap.String("templateValue", val),
-								zap.String("context", "HTTPReq.Header"),
-							)
-						}
-					}
-				}
 			}
 
 			// Now modify the response body to get templatized body if any.
@@ -108,24 +95,10 @@ func (t *Tools) Templatize(ctx context.Context) error {
 		// CASE:2
 		// Compare the requests headers for the common fields.
 		for i := 0; i < len(tcs)-1; i++ {
-			fmt.Println("Parent: ", tcs[i].Name)
 			// Check for headers first.
 			for j := i + 1; j < len(tcs); j++ {
 				compareReqHeaders(t.logger, tcs[i].HTTPReq.Header, tcs[j].HTTPReq.Header)
 				// check if the tcs[j].HTTPReq.Header is modified that means the template is added log it.
-				if tcs[j].HTTPReq.Header != nil {
-					for key, val := range tcs[j].HTTPReq.Header {
-						if strings.Contains(val, "{{") {
-							// Log the addition of the new template
-							t.logger.Info("New template added for test",
-								zap.String("testcase", tcs[j].Name),
-								zap.String("templateKey", key),
-								zap.String("templateValue", val),
-								zap.String("context", "HTTPReq.Header"),
-							)
-						}
-					}
-				}
 			}
 		}
 
@@ -133,7 +106,6 @@ func (t *Tools) Templatize(ctx context.Context) error {
 		// Check the url of the request for any common fields in the response.
 		// Compare the response of ith testcase with i+1->n reques urls.
 		for i := 0; i < len(tcs)-1; i++ {
-			fmt.Println("Parent: ", tcs[i].Name)
 			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 			if err != nil {
 				t.logger.Debug("failed to parse response into json.  Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
@@ -148,17 +120,6 @@ func (t *Tools) Templatize(ctx context.Context) error {
 			for j := i + 1; j < len(tcs); j++ {
 				addTemplates(t.logger, &tcs[j].HTTPReq.URL, &jsonResponse)
 				// check if the tcs[j].HTTPReq.URL is modified that means the template is added log it.
-				if tcs[j].HTTPReq.URL != "" {
-					if strings.Contains(tcs[j].HTTPReq.URL, "{{") {
-						// Log the addition of the new template
-						t.logger.Info("New template added for test",
-							zap.String("testcase", tcs[j].Name),
-							zap.String("templateKey", "URL"),
-							zap.String("templateValue", tcs[j].HTTPReq.URL),
-							zap.String("context", "HTTPReq.URL"),
-						)
-					}
-				}
 			}
 
 			// Now modify the response body to get templatized body if any.
@@ -201,17 +162,6 @@ func (t *Tools) Templatize(ctx context.Context) error {
 					continue
 				}
 				// check if the tcs[j].HTTPReq.Body is modified that means the template is added log it.
-				if tcs[j].HTTPReq.Body != "" {
-					if strings.Contains(tcs[j].HTTPReq.Body, "{{") {
-						// Log the addition of the new template
-						t.logger.Info("New template added for test",
-							zap.String("testcase", tcs[j].Name),
-							zap.String("templateKey", "Body"),
-							zap.String("templateValue", tcs[j].HTTPReq.Body),
-							zap.String("context", "HTTPReq.Body"),
-						)
-					}
-				}
 				tcs[j].HTTPReq.Body = string(jsonData)
 			}
 			jsonData, err := json.Marshal(jsonResponse)
