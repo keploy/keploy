@@ -12,6 +12,7 @@ type Service interface {
 	Login(ctx context.Context) bool
 	Export(ctx context.Context) error
 	Import(ctx context.Context, path string) error
+	Templatize(ctx context.Context) error
 }
 
 type teleDB interface {

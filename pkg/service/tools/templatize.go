@@ -1,4 +1,4 @@
-package replay
+package tools
 
 import (
 	"bytes"
@@ -20,39 +20,39 @@ import (
 	"go.uber.org/zap"
 )
 
-func (r *Replayer) Templatize(ctx context.Context) error {
-	testSets := r.config.Templatize.TestSets
+func (t *Tools) Templatize(ctx context.Context) error {
+	testSets := t.config.Templatize.TestSets
 
 	if len(testSets) == 0 {
-		all, err := r.GetAllTestSetIDs(ctx)
+		all, err := t.testDB.GetAllTestSetIDs(ctx)
 		if err != nil {
-			utils.LogError(r.logger, err, "failed to get all test sets")
+			utils.LogError(t.logger, err, "failed to get all test sets")
 			return err
 		}
 		testSets = all
 	}
 
 	if len(testSets) == 0 {
-		r.logger.Warn("No test sets found to templatize")
+		t.logger.Warn("No test sets found to templatize")
 		return nil
 	}
 
 	for _, testSetID := range testSets {
 
-		testSet, err := r.testSetConf.Read(ctx, testSetID)
+		testSet, err := t.testSetConf.Read(ctx, testSetID)
 		utils.TemplatizedValues = map[string]interface{}{}
 		if err == nil && (testSet != nil && testSet.Template != nil) {
 			utils.TemplatizedValues = testSet.Template
 		}
 
-		tcs, err := r.testDB.GetTestCases(ctx, testSetID)
+		tcs, err := t.testDB.GetTestCases(ctx, testSetID)
 		if err != nil {
-			utils.LogError(r.logger, err, "failed to get test cases")
+			utils.LogError(t.logger, err, "failed to get test cases")
 			return err
 		}
 
 		if len(tcs) == 0 {
-			r.logger.Warn("The test set is empty. Please record some testcases to templatize.", zap.String("testSet", testSetID))
+			t.logger.Warn("The test set is empty. Please record some testcases to templatize.", zap.String("testSet", testSetID))
 			continue
 		}
 
@@ -66,10 +66,11 @@ func (r *Replayer) Templatize(ctx context.Context) error {
 
 		// CASE:1
 		// Compare the response of ith testcase with i+1->n request headers.
+		// for example: jwt token in the response of login API is used in the header of the next API.
 		for i := 0; i < len(tcs)-1; i++ {
 			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 			if err != nil {
-				r.logger.Debug("failed to parse response into json. Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
+				t.logger.Debug("failed to parse response into json. Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
 				continue
 			}
 			if jsonResponse == nil {
@@ -78,13 +79,27 @@ func (r *Replayer) Templatize(ctx context.Context) error {
 
 			// addTemplates where response key is matched to some header key in the next testcases.
 			for j := i + 1; j < len(tcs); j++ {
-				addTemplates(r.logger, tcs[j].HTTPReq.Header, &jsonResponse)
+				addTemplates(t.logger, tcs[j].HTTPReq.Header, &jsonResponse)
+				// check if the tcs[j].HTTPReq.Header is modified that means the template is added log it.
+				if tcs[j].HTTPReq.Header != nil {
+					for key, val := range tcs[j].HTTPReq.Header {
+						if strings.Contains(val, "{{") {
+							// Log the addition of the new template
+							t.logger.Info("New template added for test",
+								zap.String("testcase", tcs[j].Name),
+								zap.String("templateKey", key),
+								zap.String("templateValue", val),
+								zap.String("context", "HTTPReq.Header"),
+							)
+						}
+					}
+				}
 			}
 
 			// Now modify the response body to get templatized body if any.
 			jsonData, err := json.Marshal(jsonResponse)
 			if err != nil {
-				utils.LogError(r.logger, err, "failed to marshal json data of templatized response")
+				utils.LogError(t.logger, err, "failed to marshal json data of templatized response")
 				return err
 			}
 			tcs[i].HTTPResp.Body = string(jsonData)
@@ -93,9 +108,24 @@ func (r *Replayer) Templatize(ctx context.Context) error {
 		// CASE:2
 		// Compare the requests headers for the common fields.
 		for i := 0; i < len(tcs)-1; i++ {
+			fmt.Println("Parent: ", tcs[i].Name)
 			// Check for headers first.
 			for j := i + 1; j < len(tcs); j++ {
-				compareReqHeaders(r.logger, tcs[i].HTTPReq.Header, tcs[j].HTTPReq.Header)
+				compareReqHeaders(t.logger, tcs[i].HTTPReq.Header, tcs[j].HTTPReq.Header)
+				// check if the tcs[j].HTTPReq.Header is modified that means the template is added log it.
+				if tcs[j].HTTPReq.Header != nil {
+					for key, val := range tcs[j].HTTPReq.Header {
+						if strings.Contains(val, "{{") {
+							// Log the addition of the new template
+							t.logger.Info("New template added for test",
+								zap.String("testcase", tcs[j].Name),
+								zap.String("templateKey", key),
+								zap.String("templateValue", val),
+								zap.String("context", "HTTPReq.Header"),
+							)
+						}
+					}
+				}
 			}
 		}
 
@@ -103,9 +133,10 @@ func (r *Replayer) Templatize(ctx context.Context) error {
 		// Check the url of the request for any common fields in the response.
 		// Compare the response of ith testcase with i+1->n reques urls.
 		for i := 0; i < len(tcs)-1; i++ {
+			fmt.Println("Parent: ", tcs[i].Name)
 			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 			if err != nil {
-				r.logger.Debug("failed to parse response into json.  Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
+				t.logger.Debug("failed to parse response into json.  Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
 				continue
 			}
 
@@ -115,13 +146,25 @@ func (r *Replayer) Templatize(ctx context.Context) error {
 
 			// Add the templates where the response key is matched to some url in the next testcases.
 			for j := i + 1; j < len(tcs); j++ {
-				addTemplates(r.logger, &tcs[j].HTTPReq.URL, &jsonResponse)
+				addTemplates(t.logger, &tcs[j].HTTPReq.URL, &jsonResponse)
+				// check if the tcs[j].HTTPReq.URL is modified that means the template is added log it.
+				if tcs[j].HTTPReq.URL != "" {
+					if strings.Contains(tcs[j].HTTPReq.URL, "{{") {
+						// Log the addition of the new template
+						t.logger.Info("New template added for test",
+							zap.String("testcase", tcs[j].Name),
+							zap.String("templateKey", "URL"),
+							zap.String("templateValue", tcs[j].HTTPReq.URL),
+							zap.String("context", "HTTPReq.URL"),
+						)
+					}
+				}
 			}
 
 			// Now modify the response body to get templatized body if any.
 			jsonData, err := json.Marshal(jsonResponse)
 			if err != nil {
-				utils.LogError(r.logger, err, "failed to marshal json data")
+				utils.LogError(t.logger, err, "failed to marshal json data")
 				return err
 			}
 			tcs[i].HTTPResp.Body = string(jsonData)
@@ -130,9 +173,10 @@ func (r *Replayer) Templatize(ctx context.Context) error {
 		// CASE:4
 		// Compare the req and resp body for any common fields.
 		for i := 0; i < len(tcs)-1; i++ {
+			fmt.Println("Parent: ", tcs[i].Name)
 			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 			if err != nil {
-				r.logger.Debug("failed to parse response into json. Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
+				t.logger.Debug("failed to parse response into json. Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
 				continue
 			}
 
@@ -143,50 +187,63 @@ func (r *Replayer) Templatize(ctx context.Context) error {
 			for j := i + 1; j < len(tcs); j++ {
 				jsonRequest, err := parseIntoJSON(tcs[j].HTTPReq.Body)
 				if err != nil {
-					r.logger.Debug("failed to parse request into json. Not templatizing the request of this test.", zap.Error(err), zap.Any("testcase:", tcs[j].Name))
+					t.logger.Debug("failed to parse request into json. Not templatizing the request of this test.", zap.Error(err), zap.Any("testcase:", tcs[j].Name))
 					continue
 				}
 
 				if jsonRequest == nil {
 					continue
 				}
-				addTemplates(r.logger, jsonRequest, &jsonResponse)
+				addTemplates(t.logger, jsonRequest, &jsonResponse)
 				jsonData, err := json.Marshal(jsonRequest)
 				if err != nil {
-					utils.LogError(r.logger, err, "failed to marshal json data")
+					utils.LogError(t.logger, err, "failed to marshal json data")
 					continue
+				}
+				// check if the tcs[j].HTTPReq.Body is modified that means the template is added log it.
+				if tcs[j].HTTPReq.Body != "" {
+					if strings.Contains(tcs[j].HTTPReq.Body, "{{") {
+						// Log the addition of the new template
+						t.logger.Info("New template added for test",
+							zap.String("testcase", tcs[j].Name),
+							zap.String("templateKey", "Body"),
+							zap.String("templateValue", tcs[j].HTTPReq.Body),
+							zap.String("context", "HTTPReq.Body"),
+						)
+					}
 				}
 				tcs[j].HTTPReq.Body = string(jsonData)
 			}
 			jsonData, err := json.Marshal(jsonResponse)
 			if err != nil {
-				utils.LogError(r.logger, err, "failed to marshal json data")
+				utils.LogError(t.logger, err, "failed to marshal json data")
 				return err
 			}
 			tcs[i].HTTPResp.Body = string(jsonData)
 		}
 
+		// TODO: separate the below code into a function.
 		// Updating all the testcases.
 		for _, tc := range tcs {
 			tc.HTTPReq.Body = removeQuotesInTemplates(tc.HTTPReq.Body)
 			tc.HTTPResp.Body = removeQuotesInTemplates(tc.HTTPResp.Body)
-			err = r.testDB.UpdateTestCase(ctx, tc, testSetID)
+			err = t.testDB.UpdateTestCase(ctx, tc, testSetID)
 			if err != nil {
-				utils.LogError(r.logger, err, "failed to update test case")
+				utils.LogError(t.logger, err, "failed to update test case")
 				return err
 			}
 		}
 
 		// Remove the double quotes from the templatized values in testSet configuration.
-		removeDoubleQuotes(utils.TemplatizedValues)
+		utils.RemoveDoubleQuotes(utils.TemplatizedValues)
 
-		err = r.testSetConf.Write(ctx, testSetID, &models.TestSet{
+		err = t.testSetConf.Write(ctx, testSetID, &models.TestSet{
 			PreScript:  "",
 			PostScript: "",
 			Template:   utils.TemplatizedValues,
 		})
 		if err != nil {
-			utils.LogError(r.logger, err, "failed to write test set")
+			utils.LogError(t.logger, err, "failed to write test set")
 			return err
 		}
 	}
@@ -275,7 +332,7 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 *interf
 			if !ok {
 				continue
 			}
-			// Saving the auth type to add it to the template later.
+			// Saving the auth type to add it to the template latet.
 			authType := ""
 			if key == "Authorization" && len(strings.Split(val, " ")) > 1 {
 				authType = strings.Split(val, " ")[0]
@@ -379,6 +436,14 @@ func addTemplates1(logger *zap.Logger, val1 *string, body *interface{}) bool {
 				// Now change the value of the key in the object.
 				b.SetValueByIndex(i, vals[i])
 				*val1 = fmt.Sprintf("{{%s .%v }}", getType(*val1), newKey)
+
+				// Log the addition of the new template
+				// logger.Info("New template added",
+				// 	zap.String("templateKey", newKey),
+				// 	zap.String("templateValue", *val1),
+				// 	zap.String("context", "ObjectItems"),
+				// )
+
 				return true
 			}
 		}
@@ -404,6 +469,14 @@ func addTemplates1(logger *zap.Logger, val1 *string, body *interface{}) bool {
 				// }
 				b[key] = fmt.Sprintf("{{%s .%v }}", getType(val2), newKey)
 				*val1 = fmt.Sprintf("{{%s .%v }}", getType(*val1), newKey)
+
+				// Log the addition of the new template
+				// logger.Info("New template added",
+				// 	zap.String("templateKey", newKey),
+				// 	zap.String("templateValue", *val1),
+				// 	zap.String("context", "map[string]string"),
+				// )
+
 				return true
 			}
 		}
@@ -437,6 +510,13 @@ func addTemplates1(logger *zap.Logger, val1 *string, body *interface{}) bool {
 				}
 				b[key] = fmt.Sprintf("{{%s .%v}}", getType(b[key]), newKey)
 				*val1 = fmt.Sprintf("{{%s .%v}}", getType(*val1), newKey)
+
+				// Log the addition of the new template
+				// logger.Info("New template added",
+				// 	zap.String("templateKey", newKey),
+				// 	zap.String("templateValue", *val1),
+				// 	zap.String("context", "map[string]interface{}"),
+				// )
 			}
 		}
 	case float64, int64, int, float32:
@@ -462,7 +542,7 @@ func getType(val interface{}) string {
 	case float64, float32:
 		return "float"
 	}
-	//TODO: handle the default case properly, return some error.
+	//TODO: handle the default case properly, return some errot.
 	return ""
 }
 
@@ -602,15 +682,3 @@ func addQuotesInTemplates(jsonStr string) string {
 	return result
 }
 
-// TODO: check why without single quotes values are being passed in the template map.
-// This is used to handle the case where the value gets both single quotes and double quotes and the templating engine is not able to handle it.
-// eg: '"Not/A)Brand";v="8", "Chromium";v="126", "Brave";v="126"' can't be handled by the templating engine.
-// Not/A)Brand;v=8, Chromium;v=126, Brave;v=126 can be handled.
-func removeDoubleQuotes(tempMap map[string]interface{}) {
-	// Remove double quotes
-	for key, val := range tempMap {
-		if str, ok := val.(string); ok {
-			tempMap[key] = strings.ReplaceAll(str, `"`, "")
-		}
-	}
-}
