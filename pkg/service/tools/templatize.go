@@ -80,7 +80,7 @@ func (t *Tools) Templatize(ctx context.Context) error {
 			// addTemplates where response key is matched to some header key in the next testcases.
 			for j := i + 1; j < len(tcs); j++ {
 				addTemplates(t.logger, tcs[j].HTTPReq.Header, &jsonResponse)
-				
+
 			}
 
 			// Now modify the response body to get templatized body if any.
