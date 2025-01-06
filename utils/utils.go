@@ -177,10 +177,11 @@ func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
 	}
 }
 
-// TODO: check why without single quotes values are being passed in the template map.
-// This is used to handle the case where the value gets both single quotes and double quotes and the templating engine is not able to handle it.
-// eg: '"Not/A)Brand";v="8", "Chromium";v="126", "Brave";v="126"' can't be handled by the templating engine.
-// Not/A)Brand;v=8, Chromium;v=126, Brave;v=126 can be handled.
+// RemoveDoubleQuotes removes all double quotes from the values in the provided template map.
+// This function handles cases where the templating engine fails to parse values containing both single and double quotes.
+// For example:
+// Input: '"Not/A)Brand";v="8", "Chromium";v="126", "Brave";v="126"'
+// Output: Not/A)Brand;v=8, Chromium;v=126, Brave;v=126
 func RemoveDoubleQuotes(tempMap map[string]interface{}) {
 	// Remove double quotes
 	for key, val := range tempMap {
