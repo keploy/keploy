@@ -80,7 +80,7 @@ func (t *Tools) Templatize(ctx context.Context) error {
 			// addTemplates where response key is matched to some header key in the next testcases.
 			for j := i + 1; j < len(tcs); j++ {
 				addTemplates(t.logger, tcs[j].HTTPReq.Header, &jsonResponse)
-				// check if the tcs[j].HTTPReq.Header is modified that means the template is added log it.
+				
 			}
 
 			// Now modify the response body to get templatized body if any.
@@ -98,7 +98,6 @@ func (t *Tools) Templatize(ctx context.Context) error {
 			// Check for headers first.
 			for j := i + 1; j < len(tcs); j++ {
 				compareReqHeaders(t.logger, tcs[i].HTTPReq.Header, tcs[j].HTTPReq.Header)
-				// check if the tcs[j].HTTPReq.Header is modified that means the template is added log it.
 			}
 		}
 
@@ -172,7 +171,6 @@ func (t *Tools) Templatize(ctx context.Context) error {
 			tcs[i].HTTPResp.Body = string(jsonData)
 		}
 
-		// TODO: separate the below code into a function.
 		// Updating all the testcases.
 		for _, tc := range tcs {
 			tc.HTTPReq.Body = removeQuotesInTemplates(tc.HTTPReq.Body)
@@ -387,13 +385,6 @@ func addTemplates1(logger *zap.Logger, val1 *string, body *interface{}) bool {
 				b.SetValueByIndex(i, vals[i])
 				*val1 = fmt.Sprintf("{{%s .%v }}", getType(*val1), newKey)
 
-				// Log the addition of the new template
-				// logger.Info("New template added",
-				// 	zap.String("templateKey", newKey),
-				// 	zap.String("templateValue", *val1),
-				// 	zap.String("context", "ObjectItems"),
-				// )
-
 				return true
 			}
 		}
@@ -419,13 +410,6 @@ func addTemplates1(logger *zap.Logger, val1 *string, body *interface{}) bool {
 				// }
 				b[key] = fmt.Sprintf("{{%s .%v }}", getType(val2), newKey)
 				*val1 = fmt.Sprintf("{{%s .%v }}", getType(*val1), newKey)
-
-				// Log the addition of the new template
-				// logger.Info("New template added",
-				// 	zap.String("templateKey", newKey),
-				// 	zap.String("templateValue", *val1),
-				// 	zap.String("context", "map[string]string"),
-				// )
 
 				return true
 			}
@@ -461,12 +445,6 @@ func addTemplates1(logger *zap.Logger, val1 *string, body *interface{}) bool {
 				b[key] = fmt.Sprintf("{{%s .%v}}", getType(b[key]), newKey)
 				*val1 = fmt.Sprintf("{{%s .%v}}", getType(*val1), newKey)
 
-				// Log the addition of the new template
-				// logger.Info("New template added",
-				// 	zap.String("templateKey", newKey),
-				// 	zap.String("templateValue", *val1),
-				// 	zap.String("context", "map[string]interface{}"),
-				// )
 			}
 		}
 	case float64, int64, int, float32:
@@ -631,4 +609,3 @@ func addQuotesInTemplates(jsonStr string) string {
 	})
 	return result
 }
-
