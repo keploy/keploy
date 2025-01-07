@@ -278,6 +278,7 @@ func (pi *PostmanImporter) generateTestSetName() string {
 }
 
 func (pi *PostmanImporter) scanForEmptyResponses(collection *PostmanCollectionStruct) bool {
+
 	for _, item := range collection.Items.PostmanItems {
 		for _, testItem := range item.Item {
 			if len(testItem.Response) == 0 {
@@ -312,7 +313,7 @@ func (pi *PostmanImporter) processEmptyResponse(testItem *TestData, globalVariab
 		return nil
 	}
 
-	if basePath == "" && !pi.toCapture {
+	if !pi.toCapture {
 		pi.logger.Info("Skipping request capture as basePath is not provided")
 		return nil
 	}
