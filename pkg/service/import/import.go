@@ -210,7 +210,7 @@ func (pi *PostmanImporter) writeTestData(testItem TestData, testsPath string, gl
 
 		testCase := &yaml.NetworkTrafficDoc{
 			Version: models.GetVersion(),
-			Kind:    models.Kind("HTTP"),
+			Kind:    models.Kind("Http"),
 			Name:    testItem.Name,
 		}
 
