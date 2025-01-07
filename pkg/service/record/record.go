@@ -276,6 +276,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (Frame
 		MongoPassword:  r.config.Test.MongoPassword,
 		FallBackOnMiss: r.config.Test.FallBackOnMiss,
 	}
+	
 	outgoingChan, err := r.instrumentation.GetOutgoing(ctx, appID, outgoingOpts)
 	if err != nil {
 		return FrameChan{}, fmt.Errorf("failed to get outgoing mocks: %w", err)

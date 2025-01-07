@@ -21,8 +21,9 @@ import (
 )
 
 func (t *Tools) Templatize(ctx context.Context) error {
-	testSets := t.config.Templatize.TestSets
+	fmt.Println("Templatizing the test cases")
 
+	testSets := t.config.Templatize.TestSets
 	if len(testSets) == 0 {
 		all, err := t.testDB.GetAllTestSetIDs(ctx)
 		if err != nil {
@@ -38,13 +39,14 @@ func (t *Tools) Templatize(ctx context.Context) error {
 	}
 
 	for _, testSetID := range testSets {
-
+		// Read test set configuration
 		testSet, err := t.testSetConf.Read(ctx, testSetID)
 		utils.TemplatizedValues = map[string]interface{}{}
 		if err == nil && (testSet != nil && testSet.Template != nil) {
 			utils.TemplatizedValues = testSet.Template
 		}
 
+		// Get test cases from the database
 		tcs, err := t.testDB.GetTestCases(ctx, testSetID)
 		if err != nil {
 			utils.LogError(t.logger, err, "failed to get test cases")
@@ -52,139 +54,19 @@ func (t *Tools) Templatize(ctx context.Context) error {
 		}
 
 		if len(tcs) == 0 {
-			t.logger.Warn("The test set is empty. Please record some testcases to templatize.", zap.String("testSet", testSetID))
+			t.logger.Warn("The test set is empty. Please record some test cases to templatize.", zap.String("testSet", testSetID))
 			continue
 		}
 
-		// Add the quotes back to the templates before using it.
-		// Because the templating engine needs the quotes to properly parse the JSON.
-		// Instead of {{float .key}} it should be "{{float .key}}" but in the response body it is saved as {{float .key}}
-		for _, tc := range tcs {
-			tc.HTTPReq.Body = addQuotesInTemplates(tc.HTTPReq.Body)
-			tc.HTTPResp.Body = addQuotesInTemplates(tc.HTTPResp.Body)
+		// Process test cases
+		err = t.ProcessTestCases(ctx, tcs, testSetID)
+		if err != nil {
+			utils.LogError(t.logger, err, "failed to process test cases")
+			return err
 		}
 
-		// CASE:1
-		// Compare the response of ith testcase with i+1->n request headers.
-		// for example: jwt token in the response of login API is used in the header of the next API.
-		for i := 0; i < len(tcs)-1; i++ {
-			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
-			if err != nil {
-				t.logger.Debug("failed to parse response into json. Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
-				continue
-			}
-			if jsonResponse == nil {
-				continue
-			}
-
-			// addTemplates where response key is matched to some header key in the next testcases.
-			for j := i + 1; j < len(tcs); j++ {
-				addTemplates(t.logger, tcs[j].HTTPReq.Header, &jsonResponse)
-
-			}
-
-			// Now modify the response body to get templatized body if any.
-			jsonData, err := json.Marshal(jsonResponse)
-			if err != nil {
-				utils.LogError(t.logger, err, "failed to marshal json data of templatized response")
-				return err
-			}
-			tcs[i].HTTPResp.Body = string(jsonData)
-		}
-
-		// CASE:2
-		// Compare the requests headers for the common fields.
-		for i := 0; i < len(tcs)-1; i++ {
-			// Check for headers first.
-			for j := i + 1; j < len(tcs); j++ {
-				compareReqHeaders(t.logger, tcs[i].HTTPReq.Header, tcs[j].HTTPReq.Header)
-			}
-		}
-
-		// CASE:3
-		// Check the url of the request for any common fields in the response.
-		// Compare the response of ith testcase with i+1->n reques urls.
-		for i := 0; i < len(tcs)-1; i++ {
-			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
-			if err != nil {
-				t.logger.Debug("failed to parse response into json.  Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
-				continue
-			}
-
-			if jsonResponse == nil {
-				continue
-			}
-
-			// Add the templates where the response key is matched to some url in the next testcases.
-			for j := i + 1; j < len(tcs); j++ {
-				addTemplates(t.logger, &tcs[j].HTTPReq.URL, &jsonResponse)
-				// check if the tcs[j].HTTPReq.URL is modified that means the template is added log it.
-			}
-
-			// Now modify the response body to get templatized body if any.
-			jsonData, err := json.Marshal(jsonResponse)
-			if err != nil {
-				utils.LogError(t.logger, err, "failed to marshal json data")
-				return err
-			}
-			tcs[i].HTTPResp.Body = string(jsonData)
-		}
-
-		// CASE:4
-		// Compare the req and resp body for any common fields.
-		for i := 0; i < len(tcs)-1; i++ {
-			fmt.Println("Parent: ", tcs[i].Name)
-			jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
-			if err != nil {
-				t.logger.Debug("failed to parse response into json. Not templatizing the response of this test.", zap.Error(err), zap.Any("testcase:", tcs[i].Name))
-				continue
-			}
-
-			if jsonResponse == nil {
-				continue
-			}
-
-			for j := i + 1; j < len(tcs); j++ {
-				jsonRequest, err := parseIntoJSON(tcs[j].HTTPReq.Body)
-				if err != nil {
-					t.logger.Debug("failed to parse request into json. Not templatizing the request of this test.", zap.Error(err), zap.Any("testcase:", tcs[j].Name))
-					continue
-				}
-
-				if jsonRequest == nil {
-					continue
-				}
-				addTemplates(t.logger, jsonRequest, &jsonResponse)
-				jsonData, err := json.Marshal(jsonRequest)
-				if err != nil {
-					utils.LogError(t.logger, err, "failed to marshal json data")
-					continue
-				}
-				// check if the tcs[j].HTTPReq.Body is modified that means the template is added log it.
-				tcs[j].HTTPReq.Body = string(jsonData)
-			}
-			jsonData, err := json.Marshal(jsonResponse)
-			if err != nil {
-				utils.LogError(t.logger, err, "failed to marshal json data")
-				return err
-			}
-			tcs[i].HTTPResp.Body = string(jsonData)
-		}
-
-		// Updating all the testcases.
-		for _, tc := range tcs {
-			tc.HTTPReq.Body = removeQuotesInTemplates(tc.HTTPReq.Body)
-			tc.HTTPResp.Body = removeQuotesInTemplates(tc.HTTPResp.Body)
-			err = t.testDB.UpdateTestCase(ctx, tc, testSetID)
-			if err != nil {
-				utils.LogError(t.logger, err, "failed to update test case")
-				return err
-			}
-		}
-
-		// Remove the double quotes from the templatized values in testSet configuration.
+		// Write the updated test set configuration
 		utils.RemoveDoubleQuotes(utils.TemplatizedValues)
-
 		err = t.testSetConf.Write(ctx, testSetID, &models.TestSet{
 			PreScript:  "",
 			PostScript: "",
@@ -197,6 +79,166 @@ func (t *Tools) Templatize(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// Refactored method to process test cases
+func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, testSetID string) error {
+	// Add quotes back to templates
+	for _, tc := range tcs {
+		tc.HTTPReq.Body = addQuotesInTemplates(tc.HTTPReq.Body)
+		tc.HTTPResp.Body = addQuotesInTemplates(tc.HTTPResp.Body)
+	}
+
+	fmt.Println("Processing test cases...")
+	// Process test cases for different scenarios
+	t.processResponseToHeader(ctx, tcs)
+	t.processRequestHeaders(ctx, tcs)
+	t.processResponseToURL(ctx, tcs)
+	t.processRequestResponseBodies(ctx, tcs)
+
+	for _, tc := range tcs {
+		tc.HTTPReq.Body = removeQuotesInTemplates(tc.HTTPReq.Body)
+		tc.HTTPResp.Body = removeQuotesInTemplates(tc.HTTPResp.Body)
+		if testSetID != "" {
+			err := t.testDB.UpdateTestCase(ctx, tc, testSetID)
+			if err != nil {
+				utils.LogError(t.logger, err, "failed to update test case")
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func (t *Tools) processResponseToHeader(ctx context.Context, tcs []*models.TestCase) {
+	for i := 0; i < len(tcs)-1; i++ {
+		fmt.Println("Parent: ", tcs[i].Name)
+		jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
+		if err != nil || jsonResponse == nil {
+			t.logger.Debug("Skipping response to header processing for test case", zap.Any("testcase", tcs[i].Name), zap.Error(err))
+			continue
+		}
+
+		for j := i + 1; j < len(tcs); j++ {
+			addTemplates(t.logger, tcs[j].HTTPReq.Header, &jsonResponse)
+			// check if the tcs[j].HTTPReq.Header is modified that means the template is added log it.
+			if tcs[j].HTTPReq.Header != nil {
+				for key, val := range tcs[j].HTTPReq.Header {
+					if strings.Contains(val, "{{") {
+						// Log the addition of the new template
+						t.logger.Info("New template added for test",
+							zap.String("testcase", tcs[j].Name),
+							zap.String("templateKey", key),
+							zap.String("templateValue", val),
+							zap.String("context", "HTTPReq.Header"),
+						)
+					}
+				}
+			}
+		}
+
+		tcs[i].HTTPResp.Body = marshalJSON(jsonResponse, t.logger)
+	}
+}
+
+func (t *Tools) processRequestHeaders(ctx context.Context, tcs []*models.TestCase) {
+	for i := 0; i < len(tcs)-1; i++ {
+		fmt.Println("Parent: ", tcs[i].Name)
+		for j := i + 1; j < len(tcs); j++ {
+			compareReqHeaders(t.logger, tcs[i].HTTPReq.Header, tcs[j].HTTPReq.Header)
+			// check if the tcs[j].HTTPReq.Header is modified that means the template is added log it.
+			if tcs[j].HTTPReq.Header != nil {
+				for key, val := range tcs[j].HTTPReq.Header {
+					if strings.Contains(val, "{{") {
+						// Log the addition of the new template
+						t.logger.Info("New template added for test",
+							zap.String("testcase", tcs[j].Name),
+							zap.String("templateKey", key),
+							zap.String("templateValue", val),
+							zap.String("context", "HTTPReq.Header"),
+						)
+					}
+				}
+			}
+		}
+	}
+}
+
+func (t *Tools) processResponseToURL(ctx context.Context, tcs []*models.TestCase) {
+	for i := 0; i < len(tcs)-1; i++ {
+		// parent 
+		fmt.Println("Parent: ", tcs[i].Name)
+		jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
+		if err != nil || jsonResponse == nil {
+			t.logger.Debug("Skipping response to URL processing for test case", zap.Any("testcase", tcs[i].Name), zap.Error(err))
+			continue
+		}
+
+		for j := i + 1; j < len(tcs); j++ {
+			addTemplates(t.logger, &tcs[j].HTTPReq.URL, &jsonResponse)
+			// check if the tcs[j].HTTPReq.URL is modified that means the template is added log it.
+			if tcs[j].HTTPReq.URL != "" {
+				if strings.Contains(tcs[j].HTTPReq.URL, "{{") {
+					// Log the addition of the new template
+					t.logger.Info("New template added for test",
+						zap.String("testcase", tcs[j].Name),
+						zap.String("templateKey", "URL"),
+						zap.String("templateValue", tcs[j].HTTPReq.URL),
+						zap.String("context", "HTTPReq.URL"),
+					)
+				}
+			}
+		}
+
+		tcs[i].HTTPResp.Body = marshalJSON(jsonResponse, t.logger)
+	}
+}
+
+func (t *Tools) processRequestResponseBodies(ctx context.Context, tcs []*models.TestCase) {
+	for i := 0; i < len(tcs)-1; i++ {
+		fmt.Println("Parent: ", tcs[i].Name)
+		jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
+		if err != nil || jsonResponse == nil {
+			t.logger.Debug("Skipping response to request body processing for test case", zap.Any("testcase", tcs[i].Name), zap.Error(err))
+			continue
+		}
+
+		for j := i + 1; j < len(tcs); j++ {
+			jsonRequest, err := parseIntoJSON(tcs[j].HTTPReq.Body)
+			if err != nil || jsonRequest == nil {
+				t.logger.Debug("Skipping request body processing for test case", zap.Any("testcase", tcs[j].Name), zap.Error(err))
+				continue
+			}
+
+			addTemplates(t.logger, jsonRequest, &jsonResponse)
+			// check if the tcs[j].HTTPReq.Body is modified that means the template is added log it.
+			if tcs[j].HTTPReq.Body != "" {
+				if strings.Contains(tcs[j].HTTPReq.Body, "{{") {
+					// Log the addition of the new template
+					t.logger.Info("New template added for test",
+						zap.String("testcase", tcs[j].Name),
+						zap.String("templateKey", "Body"),
+						zap.String("templateValue", tcs[j].HTTPReq.Body),
+						zap.String("context", "HTTPReq.Body"),
+					)
+				}
+			}
+			tcs[j].HTTPReq.Body = marshalJSON(jsonRequest, t.logger)
+		}
+
+		tcs[i].HTTPResp.Body = marshalJSON(jsonResponse, t.logger)
+	}
+}
+
+// Utility function to safely marshal JSON and log errors
+func marshalJSON(data interface{}, logger *zap.Logger) string {
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		utils.LogError(logger, err, "failed to marshal JSON data")
+		return ""
+	}
+	return string(jsonData)
 }
 
 // Below are the helper functions for templatize.
