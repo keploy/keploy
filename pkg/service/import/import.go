@@ -61,12 +61,11 @@ func (pi *PostmanImporter) Import(collectionPath, basePath string) error {
 	globalVariables := pi.extractGlobalVariables(postmanCollection.Variables)
 
 	// Check for empty responses if basePath is not provided
-	if basePath == "" {
-		emptyResponsesExist := pi.scanForEmptyResponses(postmanCollection)
-		if emptyResponsesExist {
-			if !pi.promptUserForCapture() {
-				pi.toCapture = false
-			}
+	emptyResponsesExist := pi.scanForEmptyResponses(postmanCollection)
+	if emptyResponsesExist {
+		if !pi.promptUserForCapture() {
+			pi.toCapture = false
+			pi.logger.Warn("Few test cases will be skipped as responses are missing from the collection")
 		}
 	}
 
@@ -298,7 +297,7 @@ func (pi *PostmanImporter) scanForEmptyResponses(collection *PostmanCollectionSt
 
 func (pi *PostmanImporter) promptUserForCapture() bool {
 	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("Some responses are empty. Do you want to capture these responses? (yes/no): ")
+	fmt.Print("Some responses are empty. We need to hit the server to record these responses. Is your server running? (yes/no): ")
 	response, err := reader.ReadString('\n')
 	if err != nil {
 		pi.logger.Error("Failed to read user input", zap.Error(err))
@@ -309,38 +308,44 @@ func (pi *PostmanImporter) promptUserForCapture() bool {
 }
 
 func (pi *PostmanImporter) processEmptyResponse(testItem *TestData, globalVariables map[string]string, basePath string) error {
-	if len(testItem.Response) == 0 {
-		if basePath == "" && !pi.toCapture {
-			pi.logger.Info("Skipping request capture as basePath is not provided")
-			return nil
-		}
-		req := constructRequest(&testItem.Request, globalVariables)
-		if req.URL != "" {
-			resp, err := pi.sendRequest(req, basePath)
-			if err != nil {
-				return fmt.Errorf("failed to send request: %w", err)
-			}
-
-			var result []map[string]string
-			for key, value := range resp.Header {
-				result = append(result, map[string]string{
-					"key":   key,
-					"value": value,
-				})
-			}
-
-			response := PostmanResponse{
-				Name:            "New Request",
-				Body:            resp.Body,
-				Status:          resp.StatusMessage,
-				Code:            resp.StatusCode,
-				OriginalRequest: &testItem.Request,
-				Header:          result,
-			}
-			testItem.Response = append(testItem.Response, response)
-		}
+	if len(testItem.Response) != 0 {
+		return nil
 	}
-	return nil
+
+	if basePath == "" && !pi.toCapture {
+		pi.logger.Info("Skipping request capture as basePath is not provided")
+		return nil
+	}
+
+	req := constructRequest(&testItem.Request, globalVariables)
+	if req.URL != "" {
+		resp, err := pi.sendRequest(req, basePath)
+		if err != nil {
+			return fmt.Errorf("failed to send request: %w", err)
+		}
+
+		var result []map[string]string
+		for key, value := range resp.Header {
+			result = append(result, map[string]string{
+				"key":   key,
+				"value": value,
+			})
+		}
+
+		response := PostmanResponse{
+			Name:            "New Request",
+			Body:            resp.Body,
+			Status:          resp.StatusMessage,
+			Code:            resp.StatusCode,
+			OriginalRequest: &testItem.Request,
+			Header:          result,
+		}
+		testItem.Response = append(testItem.Response, response)
+		return nil
+	} else {
+		pi.logger.Error("URL is empty", zap.String("testItem", testItem.Name))
+		return fmt.Errorf("URL is empty")
+	}
 }
 
 func (pi *PostmanImporter) writeTestData(testItem TestData, testsPath string, globalVariables map[string]string, testCounter *int) error {
