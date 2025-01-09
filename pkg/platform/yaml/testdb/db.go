@@ -34,8 +34,8 @@ type tcsInfo struct {
 	path string
 }
 
-func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string) error {
-	tcsInfo, err := ts.upsert(ctx, testSetID, tc)
+func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, subdir, testSetID string) error {
+	tcsInfo, err := ts.upsert(ctx, subdir, testSetID, tc)
 	if err != nil {
 		return err
 	}
@@ -102,9 +102,9 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 	return tcs, nil
 }
 
-func (ts *TestYaml) UpdateTestCase(ctx context.Context, tc *models.TestCase, testSetID string) error {
+func (ts *TestYaml) UpdateTestCase(ctx context.Context, tc *models.TestCase, subdir, testSetID string) error {
 
-	tcsInfo, err := ts.upsert(ctx, testSetID, tc)
+	tcsInfo, err := ts.upsert(ctx, testSetID, subdir, tc)
 	if err != nil {
 		return err
 	}
@@ -113,8 +113,21 @@ func (ts *TestYaml) UpdateTestCase(ctx context.Context, tc *models.TestCase, tes
 	return nil
 }
 
-func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.TestCase) (tcsInfo, error) {
-	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
+func (ts *TestYaml) upsert(ctx context.Context, subdir, testSetID string, tc *models.TestCase) (tcsInfo, error) {
+	var tcsPath string
+	if subdir != "" {
+		tcsPath = filepath.Join(ts.TcsPath, testSetID, "tests", subdir)
+	} else {
+		tcsPath = filepath.Join(ts.TcsPath, testSetID, "tests")
+	}
+
+	// Ensure the directory exists
+	err := os.MkdirAll(tcsPath, os.ModePerm)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to create subdirectory for test cases", zap.String("subdir", subdir))
+		return tcsInfo{name: "", path: tcsPath}, err
+	}
+
 	var tcsName string
 	if tc.Name == "" {
 		lastIndx, err := yaml.FindLastIndex(tcsPath, ts.logger)

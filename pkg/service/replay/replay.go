@@ -1012,7 +1012,7 @@ func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noise
 					// remove from the original noise map
 					v.Noise = removeFromMap(v.Noise, noiseParam.Assertion)
 				}
-				err = r.testDB.UpdateTestCase(ctx, v, testSetID)
+				err = r.testDB.UpdateTestCase(ctx, v, "", testSetID)
 				if err != nil {
 					return nil, fmt.Errorf("failed to update test case: %w", err)
 				}
@@ -1103,7 +1103,7 @@ func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testS
 			continue
 		}
 		testCase.HTTPResp = testCaseResultMap[testCase.Name].Res
-		err = r.testDB.UpdateTestCase(ctx, testCase, testSetID)
+		err = r.testDB.UpdateTestCase(ctx, testCase, "", testSetID)
 		if err != nil {
 			return fmt.Errorf("failed to update test case: %w", err)
 		}

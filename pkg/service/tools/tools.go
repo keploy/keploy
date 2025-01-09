@@ -17,6 +17,7 @@ import (
 
 	"github.com/charmbracelet/glamour"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/pkg/service/export"
 	postmanimport "go.keploy.io/server/v2/pkg/service/import"
@@ -34,6 +35,7 @@ func NewTools(logger *zap.Logger, testsetConfig replay.TestSetConfig, testDB rep
 		testSetConf: testsetConfig,
 		testDB:      testDB,
 		config:      config,
+		ChainSet:    make(map[string][]models.TestCase),
 	}
 }
 
@@ -44,6 +46,7 @@ type Tools struct {
 	testDB      replay.TestDB
 	config      *config.Config
 	auth        service.Auth
+	ChainSet    map[string][]models.TestCase
 }
 
 var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")

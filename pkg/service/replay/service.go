@@ -44,7 +44,7 @@ type Service interface {
 type TestDB interface {
 	GetAllTestSetIDs(ctx context.Context) ([]string, error)
 	GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error)
-	UpdateTestCase(ctx context.Context, testCase *models.TestCase, testSetID string) error
+	UpdateTestCase(ctx context.Context, testCase *models.TestCase, subdir, testSetID string) error
 	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
 	DeleteTestSet(ctx context.Context, testSetID string) error
 }
