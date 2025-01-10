@@ -201,6 +201,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	// Sort the testsets.
 	natsort.Sort(testSets)
 	for i, testSet := range testSets {
+		// if present then get the testcases from the subdir
 		testSetResult = false
 		err := HookImpl.BeforeTestSetRun(ctx, testSet)
 		if err != nil {
@@ -375,8 +376,8 @@ func (r *Replayer) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
 	return r.testDB.GetAllTestSetIDs(ctx)
 }
 
-func (r *Replayer) GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error) {
-	return r.testDB.GetTestCases(ctx, testID)
+func (r *Replayer) GetTestCases(ctx context.Context, subdir, testID string) ([]*models.TestCase, error) {
+	return r.testDB.GetTestCases(ctx, subdir, testID)
 }
 
 func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error) {
@@ -398,13 +399,31 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		close(exitLoopChan)
 	}()
 
-	testCases, err := r.testDB.GetTestCases(runTestSetCtx, testSetID)
+	subdir, err := r.testDB.GetAllSubDirs(ctx, testSetID)
 	if err != nil {
-		return models.TestSetStatusFailed, fmt.Errorf("failed to get test cases: %w", err)
+		return models.TestSetStatusFailed, fmt.Errorf("failed to get all subdirs: %w", err)
+	}
+
+	var testCases []*models.TestCase
+	if len(subdir) == 0 {
+		testCases, err = r.testDB.GetTestCases(runTestSetCtx, "", testSetID)
+		if err != nil {
+			return models.TestSetStatusFailed, fmt.Errorf("failed to get test cases: %w", err)
+		}
+	} else {
+		for _, sub := range subdir {
+			testCases, err = r.testDB.GetTestCases(runTestSetCtx, sub, testSetID)
+			if err != nil {
+				return models.TestSetStatusFailed, fmt.Errorf("failed to get test cases: %w", err)
+			}
+		}
 	}
 
 	if len(testCases) == 0 {
+		fmt.Println("NO TEST CASES FOUND")
 		return models.TestSetStatusPassed, nil
+	} else {
+		fmt.Println("RUNNNING theses tests", testCases)
 	}
 
 	if _, ok := r.config.Test.IgnoredTests[testSetID]; ok && len(r.config.Test.IgnoredTests[testSetID]) == 0 {
@@ -997,7 +1016,7 @@ func (r *Replayer) GetTestSetConf(ctx context.Context, testSet string) (*models.
 
 func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error) {
 
-	testCases, err := r.testDB.GetTestCases(ctx, testSetID)
+	testCases, err := r.testDB.GetTestCases(ctx, "", testSetID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get test cases: %w", err)
 	}
@@ -1074,7 +1093,7 @@ func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testS
 	}
 
 	testCaseResultMap := make(map[string]models.TestResult)
-	testCases, err := r.testDB.GetTestCases(ctx, testSetID)
+	testCases, err := r.testDB.GetTestCases(ctx, "", testSetID)
 	if err != nil {
 		return fmt.Errorf("failed to get test cases: %w", err)
 	}

@@ -176,6 +176,7 @@ func ReadSessionIndices(_ context.Context, path string, Logger *zap.Logger) ([]s
 			indices = append(indices, v.Name())
 		}
 	}
+	fmt.Println("INDICES", indices)
 	return indices, nil
 }
 

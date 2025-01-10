@@ -16,7 +16,7 @@ type Service interface {
 
 type TestDB interface {
 	GetAllTestSetIDs(ctx context.Context) ([]string, error)
-	GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error)
+	GetTestCases(ctx context.Context, subdir, testSetID string) ([]*models.TestCase, error)
 	ChangePath(path string)
 }
 type MockDB interface {

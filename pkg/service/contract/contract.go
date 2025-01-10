@@ -336,7 +336,7 @@ func (s *contract) GenerateTestsSchemas(ctx context.Context, selectedTests []str
 			continue
 		}
 
-		testCases, err := s.testDB.GetTestCases(ctx, testSetID)
+		testCases, err := s.testDB.GetTestCases(ctx, "", testSetID)
 		if err != nil {
 			utils.LogError(s.logger, err, "failed to get test cases", zap.String("testSetID", testSetID))
 			return err

@@ -143,7 +143,6 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 				}
 				insertTestErrChan <- err
 			} else {
-
 				testCount++
 				r.telemetry.RecordedTestAndMocks()
 			}

@@ -49,8 +49,18 @@ func (ts *TestYaml) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
 	return yaml.ReadSessionIndices(ctx, ts.TcsPath, ts.logger)
 }
 
-func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error) {
+func (ts *TestYaml) GetAllSubDirs(ctx context.Context, testSet string) ([]string, error) {
+	tcsPath := filepath.Join(ts.TcsPath, testSet, "tests")
+	return yaml.ReadSessionIndices(ctx, tcsPath, ts.logger)
+}
+
+func (ts *TestYaml) GetTestCases(ctx context.Context, subdir, testSetID string) ([]*models.TestCase, error) {
 	path := filepath.Join(ts.TcsPath, testSetID, "tests")
+
+	if subdir != "" {
+		path = filepath.Join(path, subdir)
+	}
+
 	tcs := []*models.TestCase{}
 	TestPath, err := yaml.ValidatePath(path)
 	if err != nil {

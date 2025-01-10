@@ -38,6 +38,7 @@ func (t *Tools) Templatize(ctx context.Context) error {
 		return nil
 	}
 
+	// by-default
 	for _, testSetID := range testSets {
 		// Read test set configuration
 		testSet, err := t.testSetConf.Read(ctx, testSetID)
@@ -47,7 +48,7 @@ func (t *Tools) Templatize(ctx context.Context) error {
 		}
 
 		// Get test cases from the database
-		tcs, err := t.testDB.GetTestCases(ctx, testSetID)
+		tcs, err := t.testDB.GetTestCases(ctx, "", testSetID)
 		if err != nil {
 			utils.LogError(t.logger, err, "failed to get test cases")
 			return err
@@ -58,8 +59,7 @@ func (t *Tools) Templatize(ctx context.Context) error {
 			continue
 		}
 
-		// Process test cases
-		err = t.ProcessTestCases(ctx, tcs, testSetID)
+		err = t.ProcessTestCases(ctx, tcs, false, testSetID)
 		if err != nil {
 			utils.LogError(t.logger, err, "failed to process test cases")
 			return err
@@ -70,7 +70,7 @@ func (t *Tools) Templatize(ctx context.Context) error {
 }
 
 // Refactored method to process test cases
-func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, testSetID string) error {
+func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, isChain bool, testSetID string) error {
 	// Add quotes back to templates
 	for _, tc := range tcs {
 		tc.HTTPReq.Body = addQuotesInTemplates(tc.HTTPReq.Body)
@@ -89,7 +89,7 @@ func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, te
 	for _, tc := range tcs {
 		tc.HTTPReq.Body = removeQuotesInTemplates(tc.HTTPReq.Body)
 		tc.HTTPResp.Body = removeQuotesInTemplates(tc.HTTPResp.Body)
-		if testSetID != "" {
+		if !isChain {
 			err := t.testDB.UpdateTestCase(ctx, tc, "", testSetID)
 			if err != nil {
 				utils.LogError(t.logger, err, "failed to update test case")
@@ -102,8 +102,9 @@ func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, te
 	for key, val := range t.ChainSet {
 		fmt.Println("CHAIN: ", key, "-->")
 		for _, v := range val {
-			fmt.Println(v.Name, ", ")
+			fmt.Print(v.Name, ", ")
 		}
+		fmt.Println()
 	}
 
 	fmt.Println("Total Chains: ", len(t.ChainSet))
@@ -188,30 +189,38 @@ func (t *Tools) processRequestHeaders(ctx context.Context, tcs []*models.TestCas
 func (t *Tools) processResponseToURL(ctx context.Context, tcs []*models.TestCase) {
 	for i := 0; i < len(tcs)-1; i++ {
 		// parent
-		fmt.Println("Parent: ", tcs[i].Name)
 		jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 		if err != nil || jsonResponse == nil {
 			t.logger.Debug("Skipping response to URL processing for test case", zap.Any("testcase", tcs[i].Name), zap.Error(err))
 			continue
 		}
+		var tempList []models.TestCase
 		// Add the templates where the response key is matched to some url in the next testcases.
 		for j := i + 1; j < len(tcs); j++ {
-			prev := tcs[j].HTTPReq.URL
-			addTemplates(t.logger, &tcs[j].HTTPReq.URL, &jsonResponse)
+			// prev := tcs[j].HTTPReq.URL
+			isTemplatize := addTemplates(t.logger, &tcs[j].HTTPReq.URL, &jsonResponse)
 			// check if the tcs[j].HTTPReq.URL is modified that means the template is added log it.
 			if tcs[j].HTTPReq.URL != "" {
 				// check the validity if its already templatized by any other test case.
-				if isTemplatized(prev, tcs[j].HTTPReq.URL) {
+				if isTemplatize {
 					t.logger.Info("New template added for test",
 						zap.String("testcase", tcs[j].Name),
 						zap.String("templateKey", "URL"),
 						zap.String("templateValue", tcs[j].HTTPReq.URL),
 						zap.String("context", "HTTPReq.URL"),
 					)
+					tempList = append(tempList, *tcs[j])
 				}
-				t.ChainSet[tcs[i].Name] = append(t.ChainSet[tcs[i].Name], *tcs[j])
+
 			}
 		}
+
+		if len(tempList) != 0 {
+			fmt.Println("Adding parent: ", tcs[i].Name)
+			tempList = append([]models.TestCase{*tcs[i]}, tempList...)
+			t.ChainSet[tcs[i].Name] = tempList
+		}
+
 		// Now modify the response body to get templatized body if any.
 		tcs[i].HTTPResp.Body = marshalJSON(jsonResponse, t.logger)
 	}
@@ -221,36 +230,43 @@ func (t *Tools) processResponseToURL(ctx context.Context, tcs []*models.TestCase
 // Compare the req and resp body for any common fields.
 func (t *Tools) processRequestResponseBodies(ctx context.Context, tcs []*models.TestCase) {
 	for i := 0; i < len(tcs)-1; i++ {
-		fmt.Println("Parent: ", tcs[i].Name)
 		jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 		if err != nil || jsonResponse == nil {
 			t.logger.Debug("Skipping response to request body processing for test case", zap.Any("testcase", tcs[i].Name), zap.Error(err))
 			continue
 		}
 
+		// Add the templates where the response key is matched to some request body in the next testcases.
+		var tempList []models.TestCase
 		for j := i + 1; j < len(tcs); j++ {
 			jsonRequest, err := parseIntoJSON(tcs[j].HTTPReq.Body)
 			if err != nil || jsonRequest == nil {
 				t.logger.Debug("Skipping request body processing for test case", zap.Any("testcase", tcs[j].Name), zap.Error(err))
 				continue
 			}
-			// prev := jsonRequest
 
-			addTemplates(t.logger, jsonRequest, &jsonResponse)
+			isTemplatized := addTemplates(t.logger, jsonRequest, &jsonResponse)
 			// check if the tcs[j].HTTPReq.Body is modified that means the template is added log it.
-			// if tcs[j].HTTPReq.Body != "" {
-			// if isTemplatized(marshalJSON(prev, t.logger), marshalJSON(jsonRequest, t.logger)) {
-			// 	// Log the addition of the new template
-			// 	t.logger.Info("New template added for test",
-			// 		zap.String("testcase", tcs[j].Name),
-			// 		zap.String("templateKey", "Body"),
-			// 		zap.String("templateValue", tcs[j].HTTPReq.Body),
-			// 		zap.String("context", "HTTPReq.Body"),
-			// 	)
-			// }
-			// t.ChainSet[tcs[i].Name] = append(t.ChainSet[tcs[i].Name], tcs[j].Name)
-			// }
+			if tcs[j].HTTPReq.Body != "" {
+				if isTemplatized {
+					// Log the addition of the new template
+					t.logger.Info("New template added for test",
+						zap.String("testcase", tcs[j].Name),
+						zap.String("templateKey", "Body"),
+						zap.String("templateValue", tcs[j].HTTPReq.Body),
+						zap.String("context", "HTTPReq.Body"),
+					)
+					tempList = append(tempList, *tcs[j])
+				}
+			}
 			tcs[j].HTTPReq.Body = marshalJSON(jsonRequest, t.logger)
+		}
+
+		if len(tempList) != 0 {
+			// add the parent testcase at the beginning of the list.
+			fmt.Println("Adding parent: ", tcs[i].Name)
+			tempList = append([]models.TestCase{*tcs[i]}, tempList...)
+			t.ChainSet[tcs[i].Name] = tempList
 		}
 
 		tcs[i].HTTPResp.Body = marshalJSON(jsonResponse, t.logger)
@@ -324,7 +340,8 @@ func isTemplatized(original, templatized interface{}) bool {
 
 // Here we simplify the first interface to a string form and then call the second function to simplify the second interface.
 // TODO: add better comment here. & rename this function
-func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 *interface{}) {
+
+func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 *interface{}) bool {
 	switch v := interface1.(type) {
 	case geko.ObjectItems:
 		keys := v.Keys()
@@ -333,7 +350,7 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 *interf
 			var err error
 			vals[i], err = renderIfTemplatized(vals[i])
 			if err != nil {
-				return
+				return false
 			}
 			addTemplates(logger, vals[i], interface2)
 			// we change the current value also in the interface1
@@ -349,7 +366,7 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 *interf
 			val, err = renderIfTemplatized(val)
 			if err != nil {
 				utils.LogError(logger, err, "failed to render for template")
-				return
+				return false
 			}
 			addTemplates(logger, val, interface2)
 			// we change the current value also in the interface1
@@ -360,7 +377,7 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 *interf
 			val1, err := renderIfTemplatized(val)
 			if err != nil {
 				utils.LogError(logger, err, "failed to render for template")
-				return
+				return false
 			}
 			// just a type assertion check though it should always be string.
 			val, ok := (val1).(string)
@@ -385,32 +402,32 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 *interf
 		tempVal, err := renderIfTemplatized(*v)
 		if err != nil {
 			utils.LogError(logger, err, "failed to render for template")
-			return
+			return false
 		}
 		var ok bool
 		// just a type assertion check though it should always be string.
 		*v, ok = (tempVal).(string)
 		if !ok {
-			return
+			return false
 		}
 
 		// passing this v as reference so that it can be changed in the addTemplates1 function if required.
 		ok = addTemplates1(logger, v, interface2)
 		if ok {
-			return
+			return true
 		}
 
 		url, err := url.Parse(*v)
 		if err != nil {
-			addTemplates1(logger, v, interface2)
-			return
+			ok = addTemplates1(logger, v, interface2)
+			return ok
 		}
 
 		// Checking the special case of the URL for path and query parameters.
 		urlParts := strings.Split(url.Path, "/")
 		// checking if the last part of the URL is a template.
 
-		addTemplates1(logger, &urlParts[len(urlParts)-1], interface2)
+		ok = addTemplates1(logger, &urlParts[len(urlParts)-1], interface2)
 		url.Path = strings.Join(urlParts, "/")
 
 		if url.RawQuery != "" {
@@ -425,11 +442,12 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 *interf
 			// reconstruct the URL with the templatized query parameters.
 			url.RawQuery = strings.Join(queryParams, "&")
 			*v = fmt.Sprintf("%s://%s%s?%s", url.Scheme, url.Host, url.Path, url.RawQuery)
-			return
+			return true
 		}
 		// reconstruct the URL with the templatized path.
 		*v = fmt.Sprintf("%s://%s%s", url.Scheme, url.Host, url.Path)
-
+		fmt.Println("reconsstructed URL:  ", *v, "ok: ", ok)
+		return ok
 	case float64, int64, int, float32:
 		//TODO: inspect this case because it is not being used.
 		val := matcher.ToString(v)
@@ -443,7 +461,9 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 *interf
 				val = parts1[0] + "{{" + getType(v) + " " + parts[1] + "}}"
 			}
 		}
+		return true
 	}
+	return false
 }
 
 // TODO: add better comment here and rename this function.
