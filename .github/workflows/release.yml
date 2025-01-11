@@ -2,56 +2,14 @@ name: Release
 on:
   push:
     tags:
-    - 'v*.*.*'
+      - "v*.*.*"
 
 permissions:
   contents: write
 
 jobs:
-#  build-ui:
-#    runs-on: ubuntu-latest
-#    steps:
-#      - uses: actions/checkout@v2
-#        with:
-#          fetch-depth: 0
-#
-#      - name: Set up Go
-#        uses: actions/setup-go@v2
-#        with:
-#          go-version: "1.20"
-
-#      - name: Checkout UI
-#        uses: actions/checkout@v2
-#        with:
-#          repository: keploy/ui
-#          path: ui
-#
-#      - name: Cache UI
-#        id: cache-ui
-#        uses: actions/cache@v3
-#        with:
-#          path: web
-#          key: ${{ hashFiles('ui/src') }}
-#
-#      - name: Set up Node
-#        if: steps.cache-ui.outputs.cache-hit != 'true'
-#        uses: actions/setup-node@v3
-#        with:
-#          node-version: '14'
-#
-#      - name: Build web app
-#        if: steps.cache-ui.outputs.cache-hit != 'true'
-#        run: |
-#          cd $GITHUB_WORKSPACE/ui
-#          npm install
-#          npm run build
-#          cp -r public $GITHUB_WORKSPACE/web
-#          rm -rf $GITHUB_WORKSPACE/ui
-
   build-go:
     runs-on: macos-latest
-    # runs-on: ubuntu-latest
-#    needs: build-ui
     steps:
       - uses: actions/checkout@v2
         with:
@@ -61,31 +19,24 @@ jobs:
         with:
           go-version: "1.22"
 
-#      - name: Checkout UI
-#        uses: actions/checkout@v2
-#        with:
-#          repository: keploy/ui
-#          path: ui
-#
-#      - name: Cache UI
-#        id: cache-ui
-#        uses: actions/cache@v3
-#        with:
-#          path: web
-#          key: ${{ hashFiles('ui/src') }}
-      - name: Import Code-Signing Certificates
-        uses: Apple-Actions/import-codesign-certs@v1
-        with:
-          # The certificates in a PKCS12 file encoded as a base64 string created with "openssl base64 -in cert.p12 -out cert-base64.txt"
-          p12-file-base64: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_P12_BASE64 }}
-          # The password used to import the PKCS12 file.
-          p12-password: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_PASSWORD }}
-      - name:  Install gon for code signing and app notarization
+      - name: Remove existing assets from the release
+        run: |
+          release_id=$(curl -s -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ github.ref_name }} | jq -r .id)
+          if [ "$release_id" != "null" ]; then
+            assets=$(curl -s -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/repos/${{ github.repository }}/releases/$release_id/assets | jq -r '.[].id')
+            for asset in $assets; do
+              curl -X DELETE -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/repos/${{ github.repository }}/releases/assets/$asset
+            done
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install gon for code signing and app notarization
         run: |
           wget -q https://github.com/Bearer/gon/releases/download/v0.0.37/gon_macos.zip
           unzip gon_macos.zip -d /usr/local/bin
           rm -rf gon_macos.zip
-          
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v2
         with:
