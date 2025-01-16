@@ -14,9 +14,7 @@ import (
 	userDb "go.keploy.io/server/v2/pkg/platform/yaml/configdb/user"
 	"go.keploy.io/server/v2/utils"
 	"go.keploy.io/server/v2/utils/log"
-
 	//pprof for debugging
-	"net/http"
 	// _ "net/http/pprof"
 )
 
