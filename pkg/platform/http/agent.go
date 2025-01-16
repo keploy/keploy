@@ -92,7 +92,10 @@ func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.In
 	tcChan := make(chan *models.TestCase)
 
 	go func() {
-		defer close(tcChan)
+		defer func() {
+			fmt.Println("Closing the test case channel")
+			close(tcChan)
+		}()
 		defer func() {
 			err := res.Body.Close()
 			if err != nil {
@@ -118,7 +121,7 @@ func (a *AgentClient) GetIncoming(ctx context.Context, id uint64, opts models.In
 				// If the context is done, exit the loop
 				return
 			case tcChan <- &testCase:
-				// fmt.Println("Test case received for client", id, "TESTCASE", testCase)
+				a.logger.Debug("sending test case to the channel", zap.Any("testCase", testCase))
 				// Send the decoded test case to the channel
 			}
 		}
@@ -160,7 +163,10 @@ func (a *AgentClient) GetOutgoing(ctx context.Context, id uint64, opts models.Ou
 	}
 
 	grp.Go(func() error {
-		defer close(mockChan)
+		defer func() {
+			fmt.Println("closing the mock channel")
+			close(mockChan)
+		}()
 		defer func() {
 			err := res.Body.Close()
 			if err != nil {
@@ -741,7 +747,7 @@ func (a *AgentClient) Initcontainer(ctx context.Context, opts app.Options) (uint
 	a.logger.Info("Container PID", zap.Int("pid", pid))
 
 	// Extract inode from the PID namespace
-	pidNamespaceInode, err := kdocker.ExtractPidNamespaceInode(pid)
+	pidNamespaceInode, err := kdocker.ExtractInodeByPid(pid)
 	if err != nil {
 		a.logger.Error("failed to extract PID namespace inode", zap.Error(err))
 		return 0, err

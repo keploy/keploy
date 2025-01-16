@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"go.keploy.io/server/v2/pkg/agent"
 	"go.keploy.io/server/v2/pkg/agent/hooks"
@@ -19,12 +20,13 @@ import (
 )
 
 type Agent struct {
-	logger       *zap.Logger
-	agent.Proxy                 // embedding the Proxy interface to transfer the proxy methods to the core object
-	agent.Hooks                 // embedding the Hooks interface to transfer the hooks methods to the core object
-	agent.Tester                // embedding the Tester interface to transfer the tester methods to the core object
-	dockerClient kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
-	proxyStarted bool
+	logger        *zap.Logger
+	agent.Proxy                  // embedding the Proxy interface to transfer the proxy methods to the core object
+	agent.Hooks                  // embedding the Hooks interface to transfer the hooks methods to the core object
+	agent.Tester                 // embedding the Tester interface to transfer the tester methods to the core object
+	dockerClient  kdocker.Client //embedding the docker client to transfer the docker client methods to the core object
+	proxyStarted  bool
+	activeClients sync.Map
 }
 
 func New(logger *zap.Logger, hook agent.Hooks, proxy agent.Proxy, tester agent.Tester, client kdocker.Client) *Agent {
@@ -190,12 +192,26 @@ func (a *Agent) DeRegisterClient(ctx context.Context, unregister models.Unregist
 		return err
 	}
 
+	// Stop the client goroutine
+	if cancel, ok := a.activeClients.Load(unregister.ClientID); ok {
+		cancel.(context.CancelFunc)() // Stop the client goroutine
+		fmt.Println("Client goroutine stopped ........")
+		a.activeClients.Delete(unregister.ClientID)
+	}
+
 	return nil
 }
 
 func (a *Agent) RegisterClient(ctx context.Context, opts models.SetupOptions) error {
 
 	a.logger.Info("Registering the client with the keploy server")
+	ctx, cancel := context.WithCancel(ctx)
+	a.activeClients.Store(opts.ClientID, cancel)
+	// Register the client and start processing
+	go func() {
+		<-ctx.Done()
+		fmt.Printf("Client %d disconnected\n", opts.ClientID)
+	}()
 	// send the network info to the kernel
 	err := a.SendNetworkInfo(ctx, opts)
 	if err != nil {

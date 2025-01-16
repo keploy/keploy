@@ -70,7 +70,6 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, testMap *sync
 					factory.logger.Error("failed to get the channel from the test map")
 					continue
 				}
-
 				// type assert the channel
 				tc, ok := t.(chan *models.TestCase)
 				if !ok {
