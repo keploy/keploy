@@ -399,40 +399,51 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		close(exitLoopChan)
 	}()
 
-	subdir, err := r.testDB.GetAllSubDirs(ctx, testSetID)
+	// Fetch all subdirectories for the test set
+	subdirs, err := r.testDB.GetAllSubDirs(ctx, testSetID)
 	if err != nil {
 		return models.TestSetStatusFailed, fmt.Errorf("failed to get all subdirs: %w", err)
 	}
 
-	var testCases []*models.TestCase
-	if len(subdir) == 0 {
-		testCases, err = r.testDB.GetTestCases(runTestSetCtx, "", testSetID)
-		if err != nil {
-			return models.TestSetStatusFailed, fmt.Errorf("failed to get test cases: %w", err)
-		}
-	} else {
-		for _, sub := range subdir {
-			testCases, err = r.testDB.GetTestCases(runTestSetCtx, sub, testSetID)
+	testCasesChan := make(chan []*models.TestCase, len(subdirs))
+	subdirErrGroup, subdirCtx := errgroup.WithContext(ctx)
+
+	for _, subdir := range subdirs {
+		sub := subdir // Create a local copy to avoid closure issues
+		subdirErrGroup.Go(func() error {
+			testCases, err := r.testDB.GetTestCases(subdirCtx, sub, testSetID)
 			if err != nil {
-				return models.TestSetStatusFailed, fmt.Errorf("failed to get test cases: %w", err)
+				return fmt.Errorf("failed to get test cases for subdir %s: %w", sub, err)
 			}
-		}
+			testCasesChan <- testCases
+			return nil
+		})
 	}
 
-	if len(testCases) == 0 {
-		fmt.Println("NO TEST CASES FOUND")
+	// Wait for all subdirectory goroutines to finish
+	err = subdirErrGroup.Wait()
+	close(testCasesChan) // Close channel to prevent deadlocks
+	if err != nil {
+		return models.TestSetStatusFailed, fmt.Errorf("error processing subdirectories: %w", err)
+	}
+
+	// Collect all test cases from the channel
+	var allTestCases []*models.TestCase
+	for testCases := range testCasesChan {
+		allTestCases = append(allTestCases, testCases...)
+	}
+
+	// If no test cases are found after processing all subdirectories
+	if len(allTestCases) == 0 {
 		return models.TestSetStatusPassed, nil
-	} else {
-		fmt.Println("RUNNNING theses tests", testCases)
 	}
-
 	if _, ok := r.config.Test.IgnoredTests[testSetID]; ok && len(r.config.Test.IgnoredTests[testSetID]) == 0 {
 		testReport := &models.TestReport{
 			Version: models.GetVersion(),
 			TestSet: testSetID,
 			Status:  string(models.TestSetStatusIgnored),
-			Total:   len(testCases),
-			Ignored: len(testCases),
+			Total:   len(allTestCases),
+			Ignored: len(allTestCases),
 		}
 
 		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
@@ -558,7 +569,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	selectedTests := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID])
 	ignoredTests := matcherUtils.ArrayToMap(r.config.Test.IgnoredTests[testSetID])
 
-	testCasesCount := len(testCases)
+	testCasesCount := len(allTestCases)
 
 	if len(selectedTests) != 0 {
 		testCasesCount = len(selectedTests)
@@ -583,7 +594,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var loopErr error
 	utils.TemplatizedValues = conf.Template
 
-	for _, testCase := range testCases {
+	for _, testCase := range allTestCases {
 
 		if _, ok := selectedTests[testCase.Name]; !ok && len(selectedTests) != 0 {
 			continue

@@ -90,6 +90,7 @@ func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, is
 		tc.HTTPReq.Body = removeQuotesInTemplates(tc.HTTPReq.Body)
 		tc.HTTPResp.Body = removeQuotesInTemplates(tc.HTTPResp.Body)
 		if !isChain {
+			fmt.Println("Updating test case: ", tc.Name)
 			err := t.testDB.UpdateTestCase(ctx, tc, "", testSetID)
 			if err != nil {
 				utils.LogError(t.logger, err, "failed to update test case")
@@ -446,7 +447,6 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 *interf
 		}
 		// reconstruct the URL with the templatized path.
 		*v = fmt.Sprintf("%s://%s%s", url.Scheme, url.Host, url.Path)
-		fmt.Println("reconsstructed URL:  ", *v, "ok: ", ok)
 		return ok
 	case float64, int64, int, float32:
 		//TODO: inspect this case because it is not being used.

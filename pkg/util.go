@@ -131,7 +131,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	req.ProtoMinor = tc.HTTPReq.ProtoMinor
 	req.Header.Set("KEPLOY-TEST-ID", tc.Name)
 	req.Header.Set("KEPLOY-TEST-SET-ID", testSet)
-	logger.Debug(fmt.Sprintf("Sending request to user app:%v", req))
+	logger.Info(fmt.Sprintf("Sending request to user app:%v", req))
 
 	// override host header if present in the request
 	hostHeader := tc.HTTPReq.Header["Host"]

@@ -114,7 +114,7 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, subdir, testSetID string) 
 
 func (ts *TestYaml) UpdateTestCase(ctx context.Context, tc *models.TestCase, subdir, testSetID string) error {
 
-	tcsInfo, err := ts.upsert(ctx, testSetID, subdir, tc)
+	tcsInfo, err := ts.upsert(ctx, subdir, testSetID, tc)
 	if err != nil {
 		return err
 	}
