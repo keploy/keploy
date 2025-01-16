@@ -189,6 +189,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		return nil
 	case "postman":
 		cmd.Flags().StringP("path", "p", "", "Specify the path to the postman collection")
+		cmd.Flags().String("base-path", c.cfg.Test.BasePath, "basePath to hit the server while importing keploy tests from postman collection with no response in the collection")
 	case "normalize":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks/reports are stored")
 		cmd.Flags().String("test-run", "", "Test Run to be normalized")
@@ -577,12 +578,14 @@ func (c *CmdConfigurator) ValidateFlags(_ context.Context, cmd *cobra.Command) e
 			c.cfg.Path = utils.ToAbsPath(c.logger, path)
 			return nil
 		}
+
 		// handle the app command
 		if c.cfg.Command == "" {
 			if !alreadyRunning(cmd.Name(), c.cfg.Test.BasePath) {
 				return c.noCommandError()
 			}
 		}
+
 		// set the command type
 		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
 

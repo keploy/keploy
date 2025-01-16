@@ -27,6 +27,7 @@ func Import(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 			return cmd.Help()
 		},
 	}
+
 	var postmanCmd = &cobra.Command{
 		Use:     "postman",
 		Short:   "import postman collection to Keploy tests",
@@ -38,6 +39,7 @@ func Import(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 			if path == "" {
 				path = "output.json"
 			}
+			basePath, _ := cmd.Flags().GetString("base-path")
 			svc, err := serviceFactory.GetService(ctx, "import")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service")
@@ -49,7 +51,7 @@ func Import(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 				utils.LogError(logger, nil, "service doesn't satisfy tools service interface")
 				return nil
 			}
-			err = tools.Import(ctx, path)
+			err = tools.Import(ctx, path, basePath)
 			if err != nil {
 				utils.LogError(logger, err, "failed to import Postman collection")
 			}
