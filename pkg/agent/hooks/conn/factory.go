@@ -78,7 +78,7 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, testMap *sync
 					continue
 				}
 
-				capture(ctx, factory.logger, tc, parsedHTTPReq, parsedHTTPRes, reqTimestampTest, resTimestampTest, opts)
+				Capture(ctx, factory.logger, tc, parsedHTTPReq, parsedHTTPRes, reqTimestampTest, resTimestampTest, opts)
 
 			} else if tracker.IsInactive(factory.inactivityThreshold) {
 				trackersToDelete = append(trackersToDelete, connID)
