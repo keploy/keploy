@@ -373,6 +373,14 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 	}
 	err = c.ValidateFlags(ctx, cmd)
 	if err != nil {
+		if err == c.noCommandError() {
+			utils.LogError(c.logger, nil, "missing required -c flag or appCmd in config file")
+			if c.cfg.InDocker {
+				c.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
+			} else {
+				c.logger.Info(LogExample(RootExamples))
+			}
+		}
 		c.logger.Error("failed to validate flags", zap.Error(err))
 		return err
 	}
