@@ -59,9 +59,9 @@ func (t *Tools) Export(ctx context.Context) error {
 	return export.Export(ctx, t.logger)
 }
 
-func (t *Tools) Import(ctx context.Context, path string) error {
+func (t *Tools) Import(ctx context.Context, path, basePath string) error {
 	postmanImport := postmanimport.NewPostmanImporter(ctx, t.logger)
-	return postmanImport.Import(path)
+	return postmanImport.Import(path, basePath)
 }
 
 // Update initiates the tools process for the Keploy binary file.

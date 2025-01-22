@@ -189,6 +189,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		return nil
 	case "postman":
 		cmd.Flags().StringP("path", "p", "", "Specify the path to the postman collection")
+		cmd.Flags().String("base-path", c.cfg.Test.BasePath, "basePath to hit the server while importing keploy tests from postman collection with no response in the collection")
 	case "normalize":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks/reports are stored")
 		cmd.Flags().String("test-run", "", "Test Run to be normalized")
@@ -372,6 +373,14 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 	}
 	err = c.ValidateFlags(ctx, cmd)
 	if err != nil {
+		if err == c.noCommandError() {
+			utils.LogError(c.logger, nil, "missing required -c flag or appCmd in config file")
+			if c.cfg.InDocker {
+				c.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
+			} else {
+				c.logger.Info(LogExample(RootExamples))
+			}
+		}
 		c.logger.Error("failed to validate flags", zap.Error(err))
 		return err
 	}
@@ -574,13 +583,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil
 		}
 
-		// handle the app command
-		if c.cfg.Command == "" {
-			if !alreadyRunning(cmd.Name(), c.cfg.Test.BasePath) {
-				return c.noCommandError()
-			}
-		}
-
 		// set the command type
 		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
 
@@ -646,6 +648,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New("failed to get the absolute path")
 		}
 		c.cfg.Path = absPath + "/keploy"
+
+		// handle the app command
+		if c.cfg.Command == "" {
+			if !alreadyRunning(cmd.Name(), c.cfg.Test.BasePath) {
+				return c.noCommandError()
+			}
+		}
 
 		bypassPorts, err := cmd.Flags().GetUintSlice("passThroughPorts")
 		if err != nil {
