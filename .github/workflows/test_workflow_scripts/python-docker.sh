@@ -1,5 +1,6 @@
 #!/bin/bash
 
+
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Start mongo before starting keploy.
@@ -16,10 +17,29 @@ sleep 5  # Allow time for configuration to apply
 
 
 container_kill() {
+    echo "Inside container_kill"
     pid=$(pgrep -n keploy)
+
+    if [ -z "$pid" ]; then
+        echo "Keploy process not found. It might have already stopped."
+        return 0 # Process not found isn't a critical failure, so exit with success
+    fi
+
     echo "$pid Keploy PID" 
     echo "Killing keploy"
     sudo kill $pid
+
+    if [ $? -ne 0 ]; then
+        echo "Failed to kill keploy process, but continuing..."
+        return 0 # Avoid exiting with 1 in case kill fails
+    fi
+
+    echo "Keploy process killed"
+    sleep 2
+    sudo docker rm -f keploy-init
+    sleep 2
+    sudo docker rm -f keploy-v2
+    return 0
 }
 
 send_request(){
@@ -66,6 +86,11 @@ for i in {1..2}; do
 
     echo "Recorded test case and mocks for iteration ${i}"
 done
+
+
+sleep 4
+sudo docker rm -f keploy-v2
+sudo docker rm -f keploy-init
 
 # Testing phase
 test_container="flashApp_test"

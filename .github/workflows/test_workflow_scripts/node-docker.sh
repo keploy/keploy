@@ -1,5 +1,6 @@
 #!/bin/bash
 
+
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Start the docker container.
@@ -13,10 +14,29 @@ sudo rm -rf keploy/
 docker build -t node-app:1.0 .
 
 container_kill() {
+    echo "Inside container_kill"
     pid=$(pgrep -n keploy)
+
+    if [ -z "$pid" ]; then
+        echo "Keploy process not found. It might have already stopped."
+        return 0 # Process not found isn't a critical failure, so exit with success
+    fi
+
     echo "$pid Keploy PID" 
     echo "Killing keploy"
     sudo kill $pid
+
+    if [ $? -ne 0 ]; then
+        echo "Failed to kill keploy process, but continuing..."
+        return 0 # Avoid exiting with 1 in case kill fails
+    fi
+
+    echo "Keploy process killed"
+    sleep 2
+    sudo docker rm -f keploy-init
+    sleep 2
+    sudo docker rm -f keploy-v2
+    return 0
 }
 
 send_request(){
@@ -51,7 +71,7 @@ send_request(){
 
     curl -X GET http://localhost:8000/students
     # Wait for 5 seconds for keploy to record the tcs and mocks.
-    sleep 5
+    sleep 10
     container_kill
     wait
 }
@@ -76,9 +96,17 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
+sleep 4
+
+sudo docker rm -f keploy-v2
+sudo docker rm -f keploy-init
+
+echo "Starting the test phase..."
+
 # Start keploy in test mode.
 test_container="nodeApp_test"
 sudo -E env PATH=$PATH ./../../keployv2 test -c "docker run -p8000:8000 --rm --name $test_container --network keploy-network node-app:1.0" --containerName "$test_container" --apiTimeout 30 --delay 30 --generate-github-actions=false &> "${test_container}.txt"
+
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
     cat "${test_container}.txt"

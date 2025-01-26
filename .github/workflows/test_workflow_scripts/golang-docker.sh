@@ -22,10 +22,29 @@ docker build -t gin-mongo .
 docker rm -f ginApp 2>/dev/null || true
 
 container_kill() {
+    echo "Inside container_kill"
     pid=$(pgrep -n keploy)
+
+    if [ -z "$pid" ]; then
+        echo "Keploy process not found. It might have already stopped."
+        return 0 # Process not found isn't a critical failure, so exit with success
+    fi
+
     echo "$pid Keploy PID" 
     echo "Killing keploy"
     sudo kill $pid
+
+    if [ $? -ne 0 ]; then
+        echo "Failed to kill keploy process, but continuing..."
+        return 0 # Avoid exiting with 1 in case kill fails
+    fi
+
+    echo "Keploy process killed"
+    sleep 2
+    sudo docker rm -f keploy-init
+    sleep 2
+    sudo docker rm -f keploy-v2
+    return 0
 }
 
 send_request(){
@@ -57,7 +76,11 @@ send_request(){
 
     # Wait for 5 seconds for keploy to record the tcs and mocks.
     sleep 5
+    # sudo docker rm -f keploy-v2
+    # sleep 5
+    # sudo docker rm -f keploy-init
     container_kill
+    # sleep 5
     wait
 }
 
@@ -81,9 +104,18 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
+sleep 4
+# container_kill
+sudo docker rm -f keploy-v2
+sudo docker rm -f keploy-init
+
+echo "Starting the test phase..."
 # Start the keploy in test mode.
 test_container="ginApp_test"
 sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
+
+# container_kill
+# sudo docker rm -f keploy-v2
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."

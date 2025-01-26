@@ -15,7 +15,6 @@ import (
 
 	"github.com/docker/docker/api/types/network"
 
-	"github.com/docker/docker/api/types"
 	dockerContainerPkg "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/volume"
@@ -154,7 +153,7 @@ func (idc *Impl) StopAndRemoveDockerContainer() error {
 		}
 	}
 
-	removeOptions := types.ContainerRemoveOptions{
+	removeOptions := dockerContainerPkg.RemoveOptions{
 		RemoveVolumes: true,
 		Force:         true,
 	}
@@ -175,7 +174,7 @@ func (idc *Impl) NetworkExists(networkName string) (bool, error) {
 	defer cancel()
 
 	// Retrieve all networks.
-	networks, err := idc.NetworkList(ctx, types.NetworkListOptions{})
+	networks, err := idc.NetworkList(ctx, network.ListOptions{})
 	if err != nil {
 		return false, fmt.Errorf("error retrieving networks: %v", err)
 	}
@@ -195,7 +194,7 @@ func (idc *Impl) CreateNetwork(networkName string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), idc.timeoutForDockerQuery)
 	defer cancel()
 
-	_, err := idc.NetworkCreate(ctx, networkName, types.NetworkCreate{
+	_, err := idc.NetworkCreate(ctx, networkName, network.CreateOptions{
 		Driver: "bridge",
 	})
 
@@ -520,6 +519,42 @@ func (idc *Impl) SetKeployNetwork(c *Compose) (*NetworkInfo, error) {
 		}
 	}
 	return networkInfo, nil
+}
+
+func (idc *Impl) SetInitPid(c *Compose, containerName string) error {
+	for _, service := range c.Services.Content {
+		var containerNameMatch bool
+		var pidFound bool
+
+		for i := 0; i < len(service.Content)-1; i++ {
+			if service.Content[i].Kind == yaml.ScalarNode && service.Content[i].Value == "container_name" &&
+				service.Content[i+1].Kind == yaml.ScalarNode && service.Content[i+1].Value == containerName {
+				containerNameMatch = true
+				break
+			}
+		}
+
+		if containerNameMatch {
+			for _, item := range service.Content {
+				if item.Value == "pid" {
+					pidFound = true
+					break
+				}
+			}
+
+			// Add `pid: container:keploy-init` only if not already present
+			if !pidFound {
+				service.Content = append(service.Content,
+					&yaml.Node{Kind: yaml.ScalarNode, Value: "pid"},
+					&yaml.Node{
+						Kind:  yaml.ScalarNode,
+						Value: "container:keploy-init",
+					},
+				)
+			}
+		}
+	}
+	return nil
 }
 
 // IsContainerRunning check if the container is already running or not, required for docker start command.

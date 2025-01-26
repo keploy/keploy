@@ -69,7 +69,7 @@ Java
 
 Docker
 	Alias:
-	alias keploy='sudo docker run --name keploy-ebpf -p 16789:16789 --privileged --pid=host -it -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup
+	alias keploy='sudo docker run --name keploy-ebpf -p 36789:36789 --privileged --pid=host -it -v $(pwd):$(pwd) -w $(pwd) -v /sys/fs/cgroup:/sys/fs/cgroup
 	-v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock --rm ghcr.io/keploy/keploy'
 
 	Record:
@@ -234,6 +234,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
+		cmd.Flags().Uint32("server-port", c.cfg.ServerPort, "Port used by the Keploy Agent server to intercept traffic")
 		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
 		cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command to start the user application (native/docker/docker-compose)")
@@ -241,13 +242,12 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
 		cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the application's docker network")
 		cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server and ignore the traffic")
-		cmd.Flags().Uint64P("app-id", "a", c.cfg.AppID, "A unique name for the user's application")
+		cmd.Flags().Uint64P("app-id", "a", c.cfg.ClientID, "A unique name for the user's application")
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
 		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
 		//add rest of the uncommon flags for record, test, rerecord commands
 		c.AddUncommonFlags(cmd)
-
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
 		cmd.PersistentFlags().Bool("disable-tele", c.cfg.DisableTele, "Run in telemetry mode")
@@ -265,6 +265,10 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+	case "agent":
+		cmd.Flags().Bool("is-docker", c.cfg.Agent.IsDocker, "Flag to check if the application is running in docker")
+		cmd.Flags().Uint32("port", c.cfg.Agent.Port, "Port used by the Keploy agent to communicate with Keploy's clients")
+		cmd.Flags().Uint32("proxy-port", c.cfg.Agent.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 	default:
 		return errors.New("unknown command name")
 	}
@@ -449,7 +453,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 	c.cfg.ConfigPath = configPath
 	return nil
 }
-func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
+func (c *CmdConfigurator) ValidateFlags(_ context.Context, cmd *cobra.Command) error {
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 	PrintLogo(disableAnsi)
 	if c.cfg.Debug {
@@ -636,10 +640,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					return errors.New("missing required --container-name flag or containerName in config file")
 				}
 			}
-		}
-		err := StartInDocker(ctx, c.logger, c.cfg)
-		if err != nil {
-			return err
 		}
 
 		absPath, err := utils.GetAbsPath(c.cfg.Path)

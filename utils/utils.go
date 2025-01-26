@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"debug/elf"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -26,6 +27,7 @@ import (
 	"golang.org/x/text/language"
 
 	"github.com/getsentry/sentry-go"
+	"github.com/google/uuid"
 	netLib "github.com/shirou/gopsutil/v3/net"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -219,6 +221,16 @@ func DeleteFileIfNotExists(logger *zap.Logger, name string) (err error) {
 	}
 
 	return nil
+}
+
+func GenerateID() uint64 {
+	// Random AppId uint64 will be generated and maintain in a map and return the id to client
+	newUUID := uuid.New()
+
+	// app id will be sent by the client.
+	// Convert the first 8 bytes of the UUID to an int64
+	id := int64(binary.BigEndian.Uint64(newUUID[:8]))
+	return uint64(id)
 }
 
 type GitHubRelease struct {
@@ -941,4 +953,19 @@ func IsFileEmpty(filePath string) (bool, error) {
 		return false, err
 	}
 	return fileInfo.Size() == 0, nil
+}
+
+func GetCurrentBinaryPath() (string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+
+	// Resolve the full path (to avoid issues with symbolic links)
+	executablePath, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		return "", err
+	}
+
+	return executablePath, nil
 }
