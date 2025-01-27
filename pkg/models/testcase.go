@@ -53,6 +53,7 @@ type TestCase struct {
 	Mocks    []*Mock             `json:"mocks" bson:"mocks"`
 	Type     string              `json:"type" bson:"type"`
 	Curl     string              `json:"curl" bson:"curl"`
+	IsLast   bool                `json:"is_last" bson:"is_last"`
 }
 
 func (tc *TestCase) GetKind() string {
