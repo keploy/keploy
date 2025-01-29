@@ -602,10 +602,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var loopErr error
 	utils.TemplatizedValues = conf.Template
 
-	for idx, testCase := range testCases {
-
+	for idx, testCase := range allTestCases {
 		// check if its the last test case running
-		if idx == len(testCases)-1 && r.isLastTestSet {
+		if idx == len(allTestCases)-1 && r.isLastTestSet {
 			r.isLastTestCase = true
 			testCase.IsLast = true
 		}

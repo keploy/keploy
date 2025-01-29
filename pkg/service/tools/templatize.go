@@ -21,7 +21,6 @@ import (
 )
 
 func (t *Tools) Templatize(ctx context.Context) error {
-	fmt.Println("Templatizing the test cases")
 
 	testSets := t.config.Templatize.TestSets
 	if len(testSets) == 0 {
@@ -59,6 +58,7 @@ func (t *Tools) Templatize(ctx context.Context) error {
 			continue
 		}
 
+		// set the isChain to false for cli templatization.
 		err = t.ProcessTestCases(ctx, tcs, false, testSetID)
 		if err != nil {
 			utils.LogError(t.logger, err, "failed to process test cases")
@@ -90,7 +90,6 @@ func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, is
 		tc.HTTPReq.Body = removeQuotesInTemplates(tc.HTTPReq.Body)
 		tc.HTTPResp.Body = removeQuotesInTemplates(tc.HTTPResp.Body)
 		if !isChain {
-			fmt.Println("Updating test case: ", tc.Name)
 			err := t.testDB.UpdateTestCase(ctx, tc, "", testSetID)
 			if err != nil {
 				utils.LogError(t.logger, err, "failed to update test case")
