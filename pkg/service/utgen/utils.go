@@ -233,17 +233,6 @@ func getTestFilePath(sourceFilePath, testDirectory string) (string, error) {
 
 	language := GetCodeLanguage(sourceFilePath)
 
-	var testFileIdentifier string
-
-	switch language {
-
-	case "go":
-		testFileIdentifier = "_test"
-	case "javascript":
-		testFileIdentifier = ".test"
-	default:
-		return "", fmt.Errorf("unsupported language: %s", language)
-	}
 	// Extract the base name and extension of the source file
 	baseName := filepath.Base(sourceFilePath)
 	extension := filepath.Ext(sourceFilePath)
@@ -251,8 +240,21 @@ func getTestFilePath(sourceFilePath, testDirectory string) (string, error) {
 	// Remove the extension from the base name
 	baseNameWithoutExt := strings.TrimSuffix(baseName, extension)
 
+	var testFileBaseNames []string
+
+	switch language {
+	case "go":
+		testFileBaseNames = []string{baseNameWithoutExt + "_test" + extension}
+	case "javascript":
+		testFileBaseNames = []string{baseNameWithoutExt + ".test" + extension}
+	case "python":
+		testFileBaseNames = []string{baseNameWithoutExt + "_test" + extension, "test_" + baseName}
+	default:
+		return "", fmt.Errorf("unsupported language: %s", language)
+	}
+
 	// Find the most specific existing test file
-	testFilePath, err := findTestFile(testDirectory, baseNameWithoutExt, extension)
+	testFilePath, err := findTestFile(testDirectory, testFileBaseNames)
 	if err != nil {
 		return "", err
 	}
@@ -264,12 +266,12 @@ func getTestFilePath(sourceFilePath, testDirectory string) (string, error) {
 
 	// Construct the relative path for the new test file
 	relativeDir := strings.TrimPrefix(filepath.Dir(sourceFilePath), "src")
-	testFilePath = filepath.Join(testDirectory, relativeDir, baseNameWithoutExt+testFileIdentifier+extension)
+	testFilePath = filepath.Join(testDirectory, relativeDir, testFileBaseNames[0])
 
 	return testFilePath, nil
 }
 
-func findTestFile(testDirectory, baseNameWithoutExt, extension string) (string, error) {
+func findTestFile(testDirectory string, testFileBaseNames []string) (string, error) {
 	var bestMatch string
 
 	err := filepath.Walk(testDirectory, func(path string, info os.FileInfo, err error) error {
@@ -277,9 +279,11 @@ func findTestFile(testDirectory, baseNameWithoutExt, extension string) (string, 
 			return err
 		}
 		if !info.IsDir() {
-			if strings.HasSuffix(path, baseNameWithoutExt+".test"+extension) {
-				if bestMatch == "" || len(path) < len(bestMatch) {
-					bestMatch = path
+			for _, testFileBaseName := range testFileBaseNames {
+				if strings.HasSuffix(path, testFileBaseName) {
+					if bestMatch == "" || len(path) < len(bestMatch) {
+						bestMatch = path
+					}
 				}
 			}
 		}

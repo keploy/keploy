@@ -13,6 +13,8 @@ path: ""
 appId: 0
 appName: ""
 command: ""
+templatize:
+  testSets: []
 port: 0
 proxyPort: 16789
 dnsPort: 26789
@@ -31,6 +33,8 @@ test:
     global: {}
     test-sets: {}
   delay: 5
+  host: ""
+  port: 0
   apiTimeout: 5
   coverage: false
   skipCoverage: false
@@ -39,20 +43,30 @@ test:
   mongoPassword: "default@123"
   language: ""
   removeUnusedMocks: false
+  fallBackOnMiss: false
+  jacocoAgentPath: ""
   basePath: ""
   mocking: true
   disableLineCoverage: false
-  fallbackOnMiss: false
   disableMockUpload: true
+  useLocalMock: false
+  updateTemplate: false
 record:
   recordTimer: 0s
   filters: []
-contract:
-  driven: "consumer"
-  servicesMapping: {}
-  self: "s1"
 configPath: ""
 bypassRules: []
+contract:
+  driven: "consumer"
+  mappings:
+    servicesMapping: {}
+    self: "s1"
+  services: []
+  tests: []
+  path: ""
+  download: false
+  generate: false
+inCi: false
 `
 
 func GetDefaultConfig() string {

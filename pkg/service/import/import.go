@@ -2,17 +2,22 @@
 package postmanimport
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -23,18 +28,20 @@ const (
 )
 
 type PostmanImporter struct {
-	logger *zap.Logger
-	ctx    context.Context
+	logger    *zap.Logger
+	ctx       context.Context
+	toCapture bool
 }
 
 func NewPostmanImporter(ctx context.Context, logger *zap.Logger) *PostmanImporter {
 	return &PostmanImporter{
-		logger: logger,
-		ctx:    ctx,
+		logger:    logger,
+		ctx:       ctx,
+		toCapture: true,
 	}
 }
 
-func (pi *PostmanImporter) Import(collectionPath string) error {
+func (pi *PostmanImporter) Import(collectionPath, basePath string) error {
 	if err := pi.validateCollectionPath(collectionPath); err != nil {
 		return err
 	}
@@ -53,7 +60,16 @@ func (pi *PostmanImporter) Import(collectionPath string) error {
 
 	globalVariables := pi.extractGlobalVariables(postmanCollection.Variables)
 
-	if err := pi.importTestSets(postmanCollection, globalVariables); err != nil {
+	// Check for empty responses if basePath is not provided
+	emptyResponsesExist := pi.scanForEmptyResponses(postmanCollection)
+	if emptyResponsesExist {
+		if !pi.promptUserForCapture() {
+			pi.toCapture = false
+			pi.logger.Warn("Few test cases will be skipped as responses are missing from the collection")
+		}
+	}
+
+	if err := pi.importTestSets(postmanCollection, globalVariables, basePath); err != nil {
 		return err
 	}
 
@@ -121,7 +137,72 @@ func (pi *PostmanImporter) extractGlobalVariables(variables []map[string]interfa
 	return globalVariables
 }
 
-func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, globalVariables map[string]string) error {
+func (pi *PostmanImporter) sendRequest(req models.HTTPReq, basePath string) (models.HTTPResp, error) {
+
+	var err error
+	if basePath != "" {
+		req.URL, err = utils.ReplaceBaseURL(req.URL, basePath)
+		if err != nil {
+			pi.logger.Error("failed to replace hostname", zap.Error(err))
+			return models.HTTPResp{}, err
+		}
+	}
+
+	httpReq, err := http.NewRequest(string(req.Method), req.URL, strings.NewReader(req.Body))
+	if err != nil {
+		pi.logger.Error("failed to create HTTP request", zap.Error(err))
+		return models.HTTPResp{}, err
+	}
+
+	for key, value := range req.Header {
+		httpReq.Header.Set(key, value)
+	}
+
+	// add timeout to the request
+	client := &http.Client{
+		Timeout: 60 * time.Second,
+	}
+
+	if req.ProtoMajor != 0 || req.ProtoMinor != 0 {
+		httpReq.ProtoMajor = req.ProtoMajor
+		httpReq.ProtoMinor = req.ProtoMinor
+	}
+
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		pi.logger.Error("failed to send HTTP request", zap.Error(err))
+		return models.HTTPResp{}, err
+	}
+
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			pi.logger.Error("failed to close response body", zap.Error(cerr))
+		}
+	}()
+
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		pi.logger.Error("failed to read response body", zap.Error(err))
+		return models.HTTPResp{}, err
+	}
+
+	response := models.HTTPResp{
+		StatusCode:    resp.StatusCode,
+		StatusMessage: resp.Status,
+		Header:        make(map[string]string),
+		Body:          string(responseBody),
+	}
+
+	for key, value := range resp.Header {
+		response.Header[key] = strings.Join(value, ",")
+	}
+	// Use the response.Body field to avoid unused write error
+	pi.logger.Info("Response Body", zap.String("body", response.Body))
+
+	return response, nil
+}
+
+func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, globalVariables map[string]string, basePath string) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("failed to get current working directory: %w", err)
@@ -137,7 +218,6 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 			}
 
 			testSet := item.Name
-
 			if item.Name == "" {
 				testSet = pi.generateTestSetName()
 			}
@@ -146,8 +226,8 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 			testsPath := filepath.Join(testSetPath, "tests")
 
 			for _, testItem := range item.Item {
-				if len(testItem.Response) == 0 {
-					continue
+				if err := pi.processEmptyResponse(&testItem, globalVariables, basePath); err != nil {
+					return err
 				}
 
 				if err := pi.writeTestData(testItem, testsPath, globalVariables, &testCounter); err != nil {
@@ -166,8 +246,8 @@ func (pi *PostmanImporter) importTestSets(collection *PostmanCollectionStruct, g
 		itemsToProcess = collection.Items.TestDataItems
 
 		for _, testItem := range itemsToProcess {
-			if len(testItem.Response) == 0 {
-				continue
+			if err := pi.processEmptyResponse(&testItem, globalVariables, basePath); err != nil {
+				return err
 			}
 
 			if err := pi.writeTestData(testItem, testsPath, globalVariables, &testCounter); err != nil {
@@ -197,6 +277,77 @@ func (pi *PostmanImporter) generateTestSetName() string {
 	return fmt.Sprintf("%s%d", testSetNamePrefix, maxTestSetNumber+1)
 }
 
+func (pi *PostmanImporter) scanForEmptyResponses(collection *PostmanCollectionStruct) bool {
+
+	for _, item := range collection.Items.PostmanItems {
+		for _, testItem := range item.Item {
+			if len(testItem.Response) == 0 {
+				pi.logger.Warn("Empty response found", zap.String("testItem", testItem.Name))
+				return true
+			}
+		}
+	}
+	for _, testItem := range collection.Items.TestDataItems {
+		if len(testItem.Response) == 0 {
+			pi.logger.Warn("Empty response found", zap.String("testItem", testItem.Name))
+			return true
+		}
+	}
+	return false
+}
+
+func (pi *PostmanImporter) promptUserForCapture() bool {
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Print("Some responses are empty. We need to hit the server to record these responses. Is your server running? (yes/no): ")
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		pi.logger.Error("Failed to read user input", zap.Error(err))
+		return false
+	}
+	response = strings.TrimSpace(strings.ToLower(response))
+	return response == "yes"
+}
+
+func (pi *PostmanImporter) processEmptyResponse(testItem *TestData, globalVariables map[string]string, basePath string) error {
+	if len(testItem.Response) != 0 {
+		return nil
+	}
+
+	if !pi.toCapture {
+		pi.logger.Info("Skipping request capture as basePath is not provided")
+		return nil
+	}
+
+	req := constructRequest(&testItem.Request, globalVariables)
+	if req.URL != "" {
+		resp, err := pi.sendRequest(req, basePath)
+		if err != nil {
+			return fmt.Errorf("failed to send request: %w", err)
+		}
+
+		var result []map[string]string
+		for key, value := range resp.Header {
+			result = append(result, map[string]string{
+				"key":   key,
+				"value": value,
+			})
+		}
+
+		response := PostmanResponse{
+			Name:            "New Request",
+			Body:            resp.Body,
+			Status:          resp.StatusMessage,
+			Code:            resp.StatusCode,
+			OriginalRequest: &testItem.Request,
+			Header:          result,
+		}
+		testItem.Response = append(testItem.Response, response)
+		return nil
+	}
+	pi.logger.Error("URL is empty", zap.String("testItem", testItem.Name))
+	return fmt.Errorf("URL is empty")
+}
+
 func (pi *PostmanImporter) writeTestData(testItem TestData, testsPath string, globalVariables map[string]string, testCounter *int) error {
 	for _, response := range testItem.Response {
 		testName := fmt.Sprintf("test-%d", *testCounter+1)
@@ -210,7 +361,7 @@ func (pi *PostmanImporter) writeTestData(testItem TestData, testsPath string, gl
 
 		testCase := &yaml.NetworkTrafficDoc{
 			Version: models.GetVersion(),
-			Kind:    models.Kind("HTTP"),
+			Kind:    models.HTTP,
 			Name:    testItem.Name,
 		}
 

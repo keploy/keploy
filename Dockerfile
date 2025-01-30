@@ -16,7 +16,9 @@ RUN go mod download
 COPY . /app
 
 # Build the keploy binary
-RUN go build -tags=viper_bind_struct -ldflags="-X main.dsn=$SENTRY_DSN_DOCKER -X main.version=$VERSION -X main.apiServerURI=$SERVER_URL -X main.gitHubClientID=$GITTHUB_APP_CLIENT_ID" -o keploy .
+# setting GOMAXPROCS to avoid crashing qemu while building different arch with docker buildx
+# ref - https://github.com/golang/go/issues/70329#issuecomment-2559049444
+RUN GOMAXPROCS=2 go build -tags=viper_bind_struct -ldflags="-X main.dsn=$SENTRY_DSN_DOCKER -X main.version=$VERSION -X main.apiServerURI=$SERVER_URL -X main.gitHubClientID=$GITTHUB_APP_CLIENT_ID" -o keploy .
 
 # === Runtime Stage ===
 FROM debian:bookworm-slim
@@ -35,7 +37,10 @@ RUN curl -fsSL https://get.docker.com -o get-docker.sh && \
     rm get-docker.sh
 
 # Install docker-compose to PATH
-RUN apt install docker-compose -y
+# Install specific version of Docker Compose plugin (v2.29.1)
+RUN mkdir -p /usr/lib/docker/cli-plugins && \
+    curl -SL "https://github.com/docker/compose/releases/download/v2.29.1/docker-compose-linux-$(uname -m)" -o /usr/lib/docker/cli-plugins/docker-compose && \
+    chmod +x /usr/lib/docker/cli-plugins/docker-compose
 
 # Copy the keploy binary and the entrypoint script from the build container
 COPY --from=build /app/keploy /app/keploy
