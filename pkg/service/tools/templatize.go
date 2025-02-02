@@ -191,12 +191,6 @@ func (t *Tools) processResponseToURL(ctx context.Context, tcs []*models.TestCase
 			if tcs[j].HTTPReq.URL != "" {
 				// check the validity if its already templatized by any other test case.
 				if isTemplatize {
-					t.logger.Info("New template added for test",
-						zap.String("testcase", tcs[j].Name),
-						zap.String("templateKey", "URL"),
-						zap.String("templateValue", tcs[j].HTTPReq.URL),
-						zap.String("context", "HTTPReq.URL"),
-					)
 					tempList = append(tempList, *tcs[j])
 				}
 
@@ -204,7 +198,6 @@ func (t *Tools) processResponseToURL(ctx context.Context, tcs []*models.TestCase
 		}
 
 		if len(tempList) != 0 {
-			fmt.Println("Adding parent: ", tcs[i].Name)
 			tempList = append([]models.TestCase{*tcs[i]}, tempList...)
 			t.ChainSet[tcs[i].Name] = tempList
 		}
@@ -238,12 +231,6 @@ func (t *Tools) processRequestResponseBodies(ctx context.Context, tcs []*models.
 			if tcs[j].HTTPReq.Body != "" {
 				if isTemplatized {
 					// Log the addition of the new template
-					t.logger.Info("New template added for test",
-						zap.String("testcase", tcs[j].Name),
-						zap.String("templateKey", "Body"),
-						zap.String("templateValue", tcs[j].HTTPReq.Body),
-						zap.String("context", "HTTPReq.Body"),
-					)
 					tempList = append(tempList, *tcs[j])
 				}
 			}
@@ -252,7 +239,6 @@ func (t *Tools) processRequestResponseBodies(ctx context.Context, tcs []*models.
 
 		if len(tempList) != 0 {
 			// add the parent testcase at the beginning of the list.
-			fmt.Println("Adding parent: ", tcs[i].Name)
 			tempList = append([]models.TestCase{*tcs[i]}, tempList...)
 			t.ChainSet[tcs[i].Name] = tempList
 		}
@@ -310,8 +296,6 @@ func renderIfTemplatized(val interface{}) (interface{}, error) {
 func isTemplatized(original, templatized interface{}) bool {
 	// Use reflection or go-cmp to compare the structures
 	if !reflect.DeepEqual(original, templatized) {
-		fmt.Println("Original: ", original)
-		fmt.Println("Templatized: ", templatized)
 		return true
 	}
 

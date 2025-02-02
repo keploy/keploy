@@ -3,7 +3,6 @@ package testset
 
 import (
 	"context"
-	"fmt"
 	"path/filepath"
 
 	"go.keploy.io/server/v2/pkg/platform/yaml"
@@ -48,7 +47,6 @@ func (db *Db[T]) Write(ctx context.Context, testSetID string, config T) error {
 		utils.LogError(db.logger, err, "failed to marshal test-set config file", zap.String("testSet", testSetID))
 		return err
 	}
-	fmt.Println("Writing test-set configuration to file", filePath)
 	err = yaml.WriteFile(ctx, db.logger, filePath, "config", data, false)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to write test-set configuration in yaml file", zap.String("testSet", testSetID))
