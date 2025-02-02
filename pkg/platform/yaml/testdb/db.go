@@ -34,13 +34,15 @@ type tcsInfo struct {
 	path string
 }
 
-func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, subdir, testSetID string) error {
-	tcsInfo, err := ts.upsert(ctx, subdir, testSetID, tc)
+func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string, enableLog bool) error {
+	tcsInfo, err := ts.upsert(ctx, testSetID, tc)
 	if err != nil {
 		return err
 	}
 
-	ts.logger.Info("🟠 Keploy has captured test cases for the user's application.", zap.String("path", tcsInfo.path), zap.String("testcase name", tcsInfo.name))
+	if enableLog {
+		ts.logger.Info("🟠 Keploy has captured test cases for the user's application.", zap.String("path", tcsInfo.path), zap.String("testcase name", tcsInfo.name))
+	}
 
 	return nil
 }
@@ -49,17 +51,8 @@ func (ts *TestYaml) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
 	return yaml.ReadSessionIndices(ctx, ts.TcsPath, ts.logger)
 }
 
-func (ts *TestYaml) GetAllSubDirs(ctx context.Context, testSet string) ([]string, error) {
-	tcsPath := filepath.Join(ts.TcsPath, testSet, "tests")
-	return yaml.ReadSessionIndices(ctx, tcsPath, ts.logger)
-}
-
-func (ts *TestYaml) GetTestCases(ctx context.Context, subdir, testSetID string) ([]*models.TestCase, error) {
+func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error) {
 	path := filepath.Join(ts.TcsPath, testSetID, "tests")
-
-	if subdir != "" {
-		path = filepath.Join(path, subdir)
-	}
 
 	tcs := []*models.TestCase{}
 	TestPath, err := yaml.ValidatePath(path)
@@ -112,29 +105,28 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, subdir, testSetID string) 
 	return tcs, nil
 }
 
-func (ts *TestYaml) UpdateTestCase(ctx context.Context, tc *models.TestCase, subdir, testSetID string) error {
+func (ts *TestYaml) UpdateTestCase(ctx context.Context, tc *models.TestCase, testSetID string, enableLog bool) error {
 
-	tcsInfo, err := ts.upsert(ctx, subdir, testSetID, tc)
+	tcsInfo, err := ts.upsert(ctx, testSetID, tc)
 	if err != nil {
 		return err
 	}
 
-	ts.logger.Info("🔄 Keploy has updated the test cases for the user's application.", zap.String("path", tcsInfo.path), zap.String("testcase name", tcsInfo.name))
+	if enableLog {
+		ts.logger.Info("🔄 Keploy has updated the test cases for the user's application.", zap.String("path", tcsInfo.path), zap.String("testcase name", tcsInfo.name))
+	}
 	return nil
 }
 
-func (ts *TestYaml) upsert(ctx context.Context, subdir, testSetID string, tc *models.TestCase) (tcsInfo, error) {
+func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.TestCase) (tcsInfo, error) {
 	var tcsPath string
-	if subdir != "" {
-		tcsPath = filepath.Join(ts.TcsPath, testSetID, "tests", subdir)
-	} else {
-		tcsPath = filepath.Join(ts.TcsPath, testSetID, "tests")
-	}
+
+	tcsPath = filepath.Join(ts.TcsPath, testSetID, "tests")
 
 	// Ensure the directory exists
 	err := os.MkdirAll(tcsPath, os.ModePerm)
 	if err != nil {
-		utils.LogError(ts.logger, err, "failed to create subdirectory for test cases", zap.String("subdir", subdir))
+		utils.LogError(ts.logger, err, "failed to create subdirectory for test cases")
 		return tcsInfo{name: "", path: tcsPath}, err
 	}
 

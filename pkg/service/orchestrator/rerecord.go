@@ -182,7 +182,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, subdir, testSet string) 
 
 	//replay the recorded testcases
 
-	tcs, err := o.replay.GetTestCases(ctx, subdir, testSet)
+	tcs, err := o.replay.GetTestCases(ctx, testSet)
 	if err != nil {
 		errMsg := "failed to get all testcases"
 		utils.LogError(o.logger, err, errMsg, zap.String("testset", testSet))

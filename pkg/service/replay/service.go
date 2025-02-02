@@ -31,7 +31,7 @@ type Service interface {
 	GetAllTestSetIDs(ctx context.Context) ([]string, error)
 	RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error)
 	GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error)
-	GetTestCases(ctx context.Context, subdir, testID string) ([]*models.TestCase, error)
+	GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error)
 	GetTestSetConf(ctx context.Context, testSetID string) (*models.TestSet, error)
 	RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError
 	Normalize(ctx context.Context) error
@@ -43,9 +43,8 @@ type Service interface {
 
 type TestDB interface {
 	GetAllTestSetIDs(ctx context.Context) ([]string, error)
-	GetAllSubDirs(ctx context.Context, testSetID string) ([]string, error)
-	GetTestCases(ctx context.Context, subdir, testSetID string) ([]*models.TestCase, error)
-	UpdateTestCase(ctx context.Context, testCase *models.TestCase, subdir, testSetID string) error
+	GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error)
+	UpdateTestCase(ctx context.Context, testCase *models.TestCase, testSetID string, enableLog bool) error
 	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
 	DeleteTestSet(ctx context.Context, testSetID string) error
 }

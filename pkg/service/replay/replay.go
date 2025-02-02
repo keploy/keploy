@@ -203,7 +203,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 	// Sort the testsets.
 	natsort.Sort(testSets)
 	for i, testSet := range testSets {
-		// if present then get the testcases from the subdir
 		testSetResult = false
 		err := HookImpl.BeforeTestSetRun(ctx, testSet)
 		if err != nil {
@@ -384,8 +383,8 @@ func (r *Replayer) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
 	return r.testDB.GetAllTestSetIDs(ctx)
 }
 
-func (r *Replayer) GetTestCases(ctx context.Context, subdir, testID string) ([]*models.TestCase, error) {
-	return r.testDB.GetTestCases(ctx, subdir, testID)
+func (r *Replayer) GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error) {
+	return r.testDB.GetTestCases(ctx, testID)
 }
 
 func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error) {
@@ -407,51 +406,22 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		close(exitLoopChan)
 	}()
 
-	// Fetch all subdirectories for the test set
-	subdirs, err := r.testDB.GetAllSubDirs(ctx, testSetID)
+	testCases, err := r.testDB.GetTestCases(runTestSetCtx, testSetID)
 	if err != nil {
-		return models.TestSetStatusFailed, fmt.Errorf("failed to get all subdirs: %w", err)
+		return models.TestSetStatusFailed, fmt.Errorf("failed to get test cases: %w", err)
 	}
 
-	testCasesChan := make(chan []*models.TestCase, len(subdirs))
-	subdirErrGroup, subdirCtx := errgroup.WithContext(ctx)
-
-	for _, subdir := range subdirs {
-		sub := subdir // Create a local copy to avoid closure issues
-		subdirErrGroup.Go(func() error {
-			testCases, err := r.testDB.GetTestCases(subdirCtx, sub, testSetID)
-			if err != nil {
-				return fmt.Errorf("failed to get test cases for subdir %s: %w", sub, err)
-			}
-			testCasesChan <- testCases
-			return nil
-		})
-	}
-
-	// Wait for all subdirectory goroutines to finish
-	err = subdirErrGroup.Wait()
-	close(testCasesChan) // Close channel to prevent deadlocks
-	if err != nil {
-		return models.TestSetStatusFailed, fmt.Errorf("error processing subdirectories: %w", err)
-	}
-
-	// Collect all test cases from the channel
-	var allTestCases []*models.TestCase
-	for testCases := range testCasesChan {
-		allTestCases = append(allTestCases, testCases...)
-	}
-
-	// If no test cases are found after processing all subdirectories
-	if len(allTestCases) == 0 {
+	if len(testCases) == 0 {
 		return models.TestSetStatusPassed, nil
 	}
+
 	if _, ok := r.config.Test.IgnoredTests[testSetID]; ok && len(r.config.Test.IgnoredTests[testSetID]) == 0 {
 		testReport := &models.TestReport{
 			Version: models.GetVersion(),
 			TestSet: testSetID,
 			Status:  string(models.TestSetStatusIgnored),
-			Total:   len(allTestCases),
-			Ignored: len(allTestCases),
+			Total:   len(testCases),
+			Ignored: len(testCases),
 		}
 
 		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
@@ -577,7 +547,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	selectedTests := matcherUtils.ArrayToMap(r.config.Test.SelectedTests[testSetID])
 	ignoredTests := matcherUtils.ArrayToMap(r.config.Test.IgnoredTests[testSetID])
 
-	testCasesCount := len(allTestCases)
+	testCasesCount := len(testCases)
 
 	if len(selectedTests) != 0 {
 		testCasesCount = len(selectedTests)
@@ -602,9 +572,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var loopErr error
 	utils.TemplatizedValues = conf.Template
 
-	for idx, testCase := range allTestCases {
+	for idx, testCase := range testCases {
+
 		// check if its the last test case running
-		if idx == len(allTestCases)-1 && r.isLastTestSet {
+		if idx == len(testCases)-1 && r.isLastTestSet {
 			r.isLastTestCase = true
 			testCase.IsLast = true
 		}
@@ -874,8 +845,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	r.telemetry.TestSetRun(testReport.Success, testReport.Failure, testSetID, string(testSetStatus))
 
 	if r.config.Test.UpdateTemplate || r.config.Test.BasePath != "" {
-		utils.RemoveDoubleQuotes(utils.TemplatizedValues)
-		// Write the templatized values to the yaml.
+		utils.RemoveDoubleQuotes(utils.TemplatizedValues) // Write the templatized values to the yaml.
 		if len(utils.TemplatizedValues) > 0 {
 			err = r.testSetConf.Write(ctx, testSetID, &models.TestSet{
 				PreScript:  conf.PreScript,
@@ -1040,7 +1010,7 @@ func (r *Replayer) GetTestSetConf(ctx context.Context, testSet string) (*models.
 
 func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error) {
 
-	testCases, err := r.testDB.GetTestCases(ctx, "", testSetID)
+	testCases, err := r.testDB.GetTestCases(ctx, testSetID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get test cases: %w", err)
 	}
@@ -1055,7 +1025,7 @@ func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noise
 					// remove from the original noise map
 					v.Noise = removeFromMap(v.Noise, noiseParam.Assertion)
 				}
-				err = r.testDB.UpdateTestCase(ctx, v, "", testSetID)
+				err = r.testDB.UpdateTestCase(ctx, v, testSetID, true)
 				if err != nil {
 					return nil, fmt.Errorf("failed to update test case: %w", err)
 				}
@@ -1117,7 +1087,7 @@ func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testS
 	}
 
 	testCaseResultMap := make(map[string]models.TestResult)
-	testCases, err := r.testDB.GetTestCases(ctx, "", testSetID)
+	testCases, err := r.testDB.GetTestCases(ctx, testSetID)
 	if err != nil {
 		return fmt.Errorf("failed to get test cases: %w", err)
 	}
@@ -1146,7 +1116,7 @@ func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testS
 			continue
 		}
 		testCase.HTTPResp = testCaseResultMap[testCase.Name].Res
-		err = r.testDB.UpdateTestCase(ctx, testCase, "", testSetID)
+		err = r.testDB.UpdateTestCase(ctx, testCase, testSetID, true)
 		if err != nil {
 			return fmt.Errorf("failed to update test case: %w", err)
 		}

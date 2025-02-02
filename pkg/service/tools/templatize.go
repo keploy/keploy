@@ -47,7 +47,7 @@ func (t *Tools) Templatize(ctx context.Context) error {
 		}
 
 		// Get test cases from the database
-		tcs, err := t.testDB.GetTestCases(ctx, "", testSetID)
+		tcs, err := t.testDB.GetTestCases(ctx, testSetID)
 		if err != nil {
 			utils.LogError(t.logger, err, "failed to get test cases")
 			return err
@@ -71,11 +71,14 @@ func (t *Tools) Templatize(ctx context.Context) error {
 
 // Refactored method to process test cases
 func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, isChain bool, testSetID string) error {
+	utils.TemplatizedValues = map[string]interface{}{}
 	// Add quotes back to templates
 	for _, tc := range tcs {
 		tc.HTTPReq.Body = addQuotesInTemplates(tc.HTTPReq.Body)
 		tc.HTTPResp.Body = addQuotesInTemplates(tc.HTTPResp.Body)
 	}
+
+	t.ChainSet = make(map[string][]models.TestCase)
 
 	// Process test cases for different scenarios
 	t.processResponseToHeader(ctx, tcs)
@@ -89,25 +92,12 @@ func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, is
 	for _, tc := range tcs {
 		tc.HTTPReq.Body = removeQuotesInTemplates(tc.HTTPReq.Body)
 		tc.HTTPResp.Body = removeQuotesInTemplates(tc.HTTPResp.Body)
-		if !isChain {
-			err := t.testDB.UpdateTestCase(ctx, tc, "", testSetID)
-			if err != nil {
-				utils.LogError(t.logger, err, "failed to update test case")
-				return err
-			}
+		err := t.testDB.UpdateTestCase(ctx, tc, testSetID, false)
+		if err != nil {
+			utils.LogError(t.logger, err, "failed to update test case")
+			return err
 		}
 	}
-
-	// iterate over the ChainSet to find the chain of test cases.
-	for key, val := range t.ChainSet {
-		fmt.Println("CHAIN: ", key, "-->")
-		for _, v := range val {
-			fmt.Print(v.Name, ", ")
-		}
-		fmt.Println()
-	}
-
-	fmt.Println("Total Chains: ", len(t.ChainSet))
 
 	// Write the updated test set configuration
 	utils.RemoveDoubleQuotes(utils.TemplatizedValues)
@@ -127,7 +117,6 @@ func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, is
 // Compare the response of ith testcase with i+1->n request headers.
 func (t *Tools) processResponseToHeader(ctx context.Context, tcs []*models.TestCase) {
 	for i := 0; i < len(tcs)-1; i++ {
-		fmt.Println("Parent: ", tcs[i].Name)
 		jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 		if err != nil || jsonResponse == nil {
 			t.logger.Debug("Skipping response to header processing for test case", zap.Any("testcase", tcs[i].Name), zap.Error(err))
@@ -161,7 +150,6 @@ func (t *Tools) processResponseToHeader(ctx context.Context, tcs []*models.TestC
 // Compare the requests headers for the common fields.
 func (t *Tools) processRequestHeaders(ctx context.Context, tcs []*models.TestCase) {
 	for i := 0; i < len(tcs)-1; i++ {
-		fmt.Println("Parent: ", tcs[i].Name)
 		// Check for headers first.
 		for j := i + 1; j < len(tcs); j++ {
 			compareReqHeaders(t.logger, tcs[i].HTTPReq.Header, tcs[j].HTTPReq.Header)
