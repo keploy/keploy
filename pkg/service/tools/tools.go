@@ -17,17 +17,15 @@ import (
 
 	"github.com/charmbracelet/glamour"
 	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/pkg/service/export"
 	postmanimport "go.keploy.io/server/v2/pkg/service/import"
-	"go.keploy.io/server/v2/pkg/service/replay"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
 
-func NewTools(logger *zap.Logger, testsetConfig replay.TestSetConfig, testDB replay.TestDB, telemetry teleDB, auth service.Auth, config *config.Config) Service {
+func NewTools(logger *zap.Logger, testsetConfig TestSetConfig, testDB TestDB, telemetry teleDB, auth service.Auth, config *config.Config) Service {
 	return &Tools{
 		logger:      logger,
 		telemetry:   telemetry,
@@ -35,18 +33,16 @@ func NewTools(logger *zap.Logger, testsetConfig replay.TestSetConfig, testDB rep
 		testSetConf: testsetConfig,
 		testDB:      testDB,
 		config:      config,
-		ChainSet:    make(map[string][]models.TestCase),
 	}
 }
 
 type Tools struct {
 	logger      *zap.Logger
 	telemetry   teleDB
-	testSetConf replay.TestSetConfig
-	testDB      replay.TestDB
+	testSetConf TestSetConfig
+	testDB      TestDB
 	config      *config.Config
 	auth        service.Auth
-	ChainSet    map[string][]models.TestCase
 }
 
 var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")

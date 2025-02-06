@@ -483,14 +483,21 @@ func ToInt(value interface{}) int {
 	return 0
 }
 
-func ToString(value interface{}) string {
-	switch v := value.(type) {
-	case string:
-		return v
+// ToString remove all types of value to strings for comparison.
+func ToString(val interface{}) string {
+	switch v := val.(type) {
 	case int:
 		return strconv.Itoa(v)
 	case float64:
 		return strconv.FormatFloat(v, 'f', -1, 64)
+	case float32:
+		return strconv.FormatFloat(float64(v), 'f', -1, 32)
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case int32:
+		return strconv.FormatInt(int64(v), 10)
+	case string:
+		return v
 	}
 	return ""
 }
