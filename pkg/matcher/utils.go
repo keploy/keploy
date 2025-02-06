@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"reflect"
@@ -21,6 +22,7 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
+	"golang.org/x/net/html"
 )
 
 type ValidatedJSON struct {
@@ -574,7 +576,15 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 	}
 	match := true
 	_, isHeaderNoisy := noise["header"]
+	ignoreHeaders := map[string]bool{
+		"date":           true,
+		"etag":           true,
+		"content-length": true,
+	}
 	for k, v := range h1 {
+		if ignoreHeaders[strings.ToLower(k)] {
+			continue
+		}
 		regexArr, isNoisy := CheckStringExist(strings.ToLower(k), noise)
 		if isNoisy && len(regexArr) != 0 {
 			isNoisy, _ = MatchesAnyRegex(v[0], regexArr)
@@ -958,4 +968,54 @@ func InterfaceToString(val interface{}) string {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+func CleanHTML(input string) (string, error) {
+	if input == "" {
+		return "", nil
+	}
+	doc, err := html.Parse(strings.NewReader(input))
+	if err != nil {
+		return "", err
+	}
+	removeDynamicElements(doc)
+	var buf bytes.Buffer
+	if err := renderNode(&buf, doc); err != nil {
+		return "", err
+	}
+	cleanedHTML := strings.TrimSpace(buf.String())
+	cleanedHTML = strings.ReplaceAll(cleanedHTML, "\n", "")
+	cleanedHTML = strings.ReplaceAll(cleanedHTML, "\t", " ")
+	return cleanedHTML, nil
+}
+
+func removeDynamicElements(n *html.Node) {
+	if n.Type == html.ElementNode && (n.Data == "script" || n.Data == "style") {
+		if n.Parent != nil {
+			n.Parent.RemoveChild(n)
+		}
+		return
+	}
+	if n.Type == html.ElementNode {
+		var filteredAttrs []html.Attribute
+		for _, attr := range n.Attr {
+			if attr.Key == "id" || attr.Key == "data-timestamp" {
+				continue
+			}
+			filteredAttrs = append(filteredAttrs, attr)
+		}
+		n.Attr = filteredAttrs
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		removeDynamicElements(c)
+	}
+}
+
+func renderNode(w io.Writer, n *html.Node) error {
+	return html.Render(w, n)
+}
+
+func IsHTML(s string) bool {
+	trimmed := strings.TrimSpace(s)
+	return strings.HasPrefix(trimmed, "<!DOCTYPE html") || strings.Contains(trimmed, "<html")
 }
