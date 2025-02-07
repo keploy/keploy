@@ -92,7 +92,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		default:
 			errGrp.Go(func() error {
 				defer utils.Recover(o.logger)
-				allRecorded, err := o.replayTests(recordCtx, "", testSet)
+				allRecorded, err := o.replayTests(recordCtx, testSet)
 
 				if allRecorded && err == nil {
 					o.logger.Info("Re-recorded testcases successfully for the given testset", zap.String("testset", testSet))
@@ -178,7 +178,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 	return nil
 }
 
-func (o *Orchestrator) replayTests(ctx context.Context, subdir, testSet string) (bool, error) {
+func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, error) {
 
 	//replay the recorded testcases
 

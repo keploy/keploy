@@ -63,7 +63,6 @@ func (t *Tools) Templatize(ctx context.Context) error {
 	return nil
 }
 
-// Refactored method to process test cases
 func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, testSetID string) error {
 
 	// In test cases, we often use placeholders like {{float .id}} for templatized variables. Ideally, we should wrap
@@ -197,6 +196,11 @@ func (t *Tools) processRespBodyToReqHeader(ctx context.Context, tcs []*models.Te
 func (t *Tools) processReqHeadersToReqHeader(ctx context.Context, tcs []*models.TestCase) {
 	for i := 0; i < len(tcs)-1; i++ {
 		for j := i + 1; j < len(tcs); j++ {
+			select {
+			case <-ctx.Done():
+				break
+			default:
+			}
 			compareReqHeaders(t.logger, tcs[j].HTTPReq.Header, tcs[i].HTTPReq.Header)
 		}
 	}
@@ -210,6 +214,11 @@ func (t *Tools) processRespBodyToReqURL(ctx context.Context, tcs []*models.TestC
 			continue
 		}
 		for j := i + 1; j < len(tcs); j++ {
+			select {
+			case <-ctx.Done():
+				break
+			default:
+			}
 			addTemplates(t.logger, &tcs[j].HTTPReq.URL, jsonResponse)
 		}
 		tcs[i].HTTPResp.Body = marshalJSON(jsonResponse, t.logger)
@@ -224,6 +233,11 @@ func (t *Tools) processRespBodyToReqBody(ctx context.Context, tcs []*models.Test
 			continue
 		}
 		for j := i + 1; j < len(tcs); j++ {
+			select {
+			case <-ctx.Done():
+				break
+			default:
+			}
 			jsonRequest, err := parseIntoJSON(tcs[j].HTTPReq.Body)
 			if err != nil || jsonRequest == nil {
 				t.logger.Debug("Skipping request body processing for test case", zap.Any("testcase", tcs[j].Name), zap.Error(err))
@@ -238,6 +252,11 @@ func (t *Tools) processRespBodyToReqBody(ctx context.Context, tcs []*models.Test
 
 func (t *Tools) processBody(ctx context.Context, tcs []*models.TestCase) {
 	for i := 0; i < len(tcs); i++ {
+		select {
+		case <-ctx.Done():
+			break
+		default:
+		}
 		jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 		if err != nil || jsonResponse == nil {
 			t.logger.Debug("Skipping response to request body processing for test case", zap.Any("testcase", tcs[i].Name), zap.Error(err))
@@ -256,6 +275,11 @@ func (t *Tools) processBody(ctx context.Context, tcs []*models.TestCase) {
 
 func (t *Tools) processReqURLToRespBodySameTest(ctx context.Context, tcs []*models.TestCase) {
 	for i := 0; i < len(tcs); i++ {
+		select {
+		case <-ctx.Done():
+			break
+		default:
+		}
 		jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 		if err != nil || jsonResponse == nil {
 			t.logger.Debug("Skipping response to URL processing for test case", zap.Any("testcase", tcs[i].Name), zap.Error(err))
@@ -274,6 +298,11 @@ func (t *Tools) processRespBodyToRespBody(ctx context.Context, tcs []*models.Tes
 			continue
 		}
 		for j := i + 1; j < len(tcs); j++ {
+			select {
+			case <-ctx.Done():
+				break
+			default:
+			}
 			jsonResponse2, err := parseIntoJSON(tcs[j].HTTPResp.Body)
 			if err != nil || jsonResponse2 == nil {
 				t.logger.Debug("Skipping request body processing for test case", zap.Any("testcase", tcs[j].Name), zap.Error(err))
@@ -294,6 +323,11 @@ func (t *Tools) processReqBodyToRespBody(ctx context.Context, tcs []*models.Test
 			continue
 		}
 		for j := i + 1; j < len(tcs); j++ {
+			select {
+			case <-ctx.Done():
+				break
+			default:
+			}
 			jsonResponse, err := parseIntoJSON(tcs[j].HTTPResp.Body)
 			if err != nil || jsonResponse == nil {
 				t.logger.Debug("Skipping request body processing for test case", zap.Any("testcase", tcs[j].Name), zap.Error(err))
@@ -314,6 +348,11 @@ func (t *Tools) processReqBodyToReqURL(ctx context.Context, tcs []*models.TestCa
 			continue
 		}
 		for j := i + 1; j < len(tcs); j++ {
+			select {
+			case <-ctx.Done():
+				break
+			default:
+			}
 			addTemplates(t.logger, &tcs[j].HTTPReq.URL, jsonRequest)
 		}
 		tcs[i].HTTPReq.Body = marshalJSON(jsonRequest, t.logger)
@@ -328,6 +367,11 @@ func (t *Tools) processReqBodyToReqBody(ctx context.Context, tcs []*models.TestC
 			continue
 		}
 		for j := i + 1; j < len(tcs); j++ {
+			select {
+			case <-ctx.Done():
+				break
+			default:
+			}
 			jsonRequest2, err := parseIntoJSON(tcs[j].HTTPReq.Body)
 			if err != nil || jsonRequest2 == nil {
 				t.logger.Debug("Skipping request body processing for test case", zap.Any("testcase", tcs[j].Name), zap.Error(err))
@@ -343,6 +387,11 @@ func (t *Tools) processReqBodyToReqBody(ctx context.Context, tcs []*models.TestC
 func (t *Tools) processReqURLToReqBody(ctx context.Context, tcs []*models.TestCase) {
 	for i := 0; i < len(tcs)-1; i++ {
 		for j := i + 1; j < len(tcs); j++ {
+			select {
+			case <-ctx.Done():
+				break
+			default:
+			}
 			jsonRequest, err := parseIntoJSON(tcs[j].HTTPReq.Body)
 			if err != nil || jsonRequest == nil {
 				t.logger.Debug("Skipping request body processing for test case", zap.Any("testcase", tcs[j].Name), zap.Error(err))
@@ -357,6 +406,11 @@ func (t *Tools) processReqURLToReqBody(ctx context.Context, tcs []*models.TestCa
 func (t *Tools) processReqURLToRespBody(ctx context.Context, tcs []*models.TestCase) {
 	for i := 0; i < len(tcs)-1; i++ {
 		for j := 0; j < len(tcs); j++ {
+			select {
+			case <-ctx.Done():
+				break
+			default:
+			}
 			jsonResponse, err := parseIntoJSON(tcs[j].HTTPResp.Body)
 			if err != nil || jsonResponse == nil {
 				t.logger.Debug("Skipping request body processing for test case", zap.Any("testcase", tcs[j].Name), zap.Error(err))
@@ -371,6 +425,11 @@ func (t *Tools) processReqURLToRespBody(ctx context.Context, tcs []*models.TestC
 func (t *Tools) processReqURLToReqURL(ctx context.Context, tcs []*models.TestCase) {
 	for i := 0; i < len(tcs)-1; i++ {
 		for j := i + 1; j < len(tcs); j++ {
+			select {
+			case <-ctx.Done():
+				break
+			default:
+			}
 			addTemplates(t.logger, &tcs[j].HTTPReq.URL, &tcs[i].HTTPReq.URL)
 		}
 	}
@@ -657,11 +716,11 @@ func addTemplates1(logger *zap.Logger, val1 *string, body interface{}) bool {
 				b.SetValueByIndex(i, vals[i])
 				*val1 = fmt.Sprintf("{{%s .%v }}", getType(*val1), newKey)
 				return true
-			} else {
-				if isTemplatized {
-					vals[i] = original
-				}
 			}
+			if isTemplatized {
+				vals[i] = original
+			}
+
 		}
 	case geko.Array:
 		for i, v := range b.List {
@@ -709,11 +768,11 @@ func addTemplates1(logger *zap.Logger, val1 *string, body interface{}) bool {
 				b[key] = fmt.Sprintf("{{%s .%v }}", getType(val2), newKey)
 				*val1 = fmt.Sprintf("{{%s .%v }}", getType(*val1), newKey)
 				return true
-			} else {
-				if isTemplatized {
-					b[key] = original
-				}
 			}
+			if isTemplatized {
+				b[key] = original
+			}
+
 		}
 		return false
 	case *string:
