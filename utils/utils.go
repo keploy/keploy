@@ -205,6 +205,20 @@ func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
 	}
 }
 
+// RemoveDoubleQuotes removes all double quotes from the values in the provided template map.
+// This function handles cases where the templating engine fails to parse values containing both single and double quotes.
+// For example:
+// Input: '"Not/A)Brand";v="8", "Chromium";v="126", "Brave";v="126"'
+// Output: Not/A)Brand;v=8, Chromium;v=126, Brave;v=126
+func RemoveDoubleQuotes(tempMap map[string]interface{}) {
+	// Remove double quotes
+	for key, val := range tempMap {
+		if str, ok := val.(string); ok {
+			tempMap[key] = strings.ReplaceAll(str, `"`, "")
+		}
+	}
+}
+
 func DeleteFileIfNotExists(logger *zap.Logger, name string) (err error) {
 	//Check if file exists
 	_, err = os.Stat(name)

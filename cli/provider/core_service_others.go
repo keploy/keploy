@@ -19,6 +19,7 @@ import (
 	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/pkg/service/contract"
 	"go.keploy.io/server/v2/pkg/service/replay"
+	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.uber.org/zap"
 )
 
@@ -36,8 +37,13 @@ func Get(ctx context.Context, cmd string, c *config.Config, logger *zap.Logger, 
 
 	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, auth, commonServices.Storage, c)
 
-	if (cmd == "test" && c.Test.BasePath != "") || cmd == "normalize" || cmd == "templatize" {
+	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, tel, auth, c)
+	if (cmd == "test" && c.Test.BasePath != "") || cmd == "normalize" {
 		return replaySvc, nil
+	}
+
+	if cmd == "templatize" || cmd == "config" || cmd == "update" || cmd == "login" || cmd == "export" || cmd == "import" {
+		return toolsSvc, nil
 	}
 
 	if cmd == "contract" {
