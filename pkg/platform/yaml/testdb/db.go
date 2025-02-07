@@ -119,16 +119,7 @@ func (ts *TestYaml) UpdateTestCase(ctx context.Context, tc *models.TestCase, tes
 }
 
 func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.TestCase) (tcsInfo, error) {
-
 	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
-
-	// Ensure the directory exists
-	err := os.MkdirAll(tcsPath, os.ModePerm)
-	if err != nil {
-		utils.LogError(ts.logger, err, "failed to create subdirectory for test cases")
-		return tcsInfo{name: "", path: tcsPath}, err
-	}
-
 	var tcsName string
 	if tc.Name == "" {
 		lastIndx, err := yaml.FindLastIndex(tcsPath, ts.logger)

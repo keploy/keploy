@@ -93,7 +93,6 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	res.BodyResult[0].Normal = pass
 
 	if !matcherUtils.CompareHeaders(pkg.ToHTTPHeader(tc.HTTPResp.Header), pkg.ToHTTPHeader(actualResponse.Header), hRes, headerNoise) {
-
 		pass = false
 	}
 
@@ -106,9 +105,9 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 	skipSuccessMsg := false
 	if !pass {
-		isStatusMismatch := true
-		isHeaderMismatch := true
-		isBodyMismatch := true
+		isStatusMismatch := false
+		isHeaderMismatch := false
+		isBodyMismatch := false
 
 		logDiffs := matcherUtils.NewDiffsPrinter(tc.Name)
 		newLogger := pp.New()
@@ -121,6 +120,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		// ------------ DIFFS RELATED CODE -----------
 		if !res.StatusCode.Normal {
 			logDiffs.PushStatusDiff(fmt.Sprint(res.StatusCode.Expected), fmt.Sprint(res.StatusCode.Actual))
+			isStatusMismatch = true
 		} else {
 			isStatusMismatch = false
 		}
@@ -141,7 +141,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 						return false, nil
 					}
 					val, ok := temp.(string)
-					if ok {
+					if !ok {
 						utils.LogError(logger, fmt.Errorf("failed to convert the actual header value to string while templatizing"), "")
 						return false, nil
 					}
@@ -154,7 +154,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 						return false, nil
 					}
 					val, ok := temp.(string)
-					if ok {
+					if !ok {
 						utils.LogError(logger, fmt.Errorf("failed to convert the expected header value to string while templatizing"), "")
 						return false, nil
 					}
@@ -162,8 +162,8 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				}
 			}
 			for i, v := range actualValue {
-
 				if v != expectedValue[i] {
+					fmt.Println(v, expectedValue[i])
 					isHeaderMismatch = true
 					actualHeader[j.Actual.Key] = actualValue
 					expectedHeader[j.Expected.Key] = expectedValue
@@ -214,27 +214,46 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 					if err != nil {
 						return false, nil
 					}
+					actJsonBytes, err := json.Marshal(actResponse)
+					if err != nil {
+						return false, nil
+					}
 					tc.HTTPResp.Body = string(jsonBytes)
+					actualResponse.Body = string(actJsonBytes)
 				}
 
-				// Comparing the body again after updating the expected
-				patch, err = jsondiff.Compare(tc.HTTPResp.Body, actualResponse.Body)
+				validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &tc.HTTPResp.Body, &actualResponse.Body)
 				if err != nil {
-					logger.Warn("failed to compute json diff", zap.Error(err))
+					return false, res
 				}
-				isBodyMismatch = false
-				for _, op := range patch {
-					isBodyMismatch = true
-					if jsonComparisonResult.Matches() {
-						logDiffs.SetHasarrayIndexMismatch(true)
-						logDiffs.PushFooterDiff(strings.Join(jsonComparisonResult.Differences(), ", "))
+				if validatedJSON.IsIdentical() {
+					jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
+					pass = jsonComparisonResult.IsExact()
+					if err != nil {
+						return false, res
 					}
-					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
+				} else {
+					isBodyMismatch = true
+
+					// Comparing the body again after updating the expected
+					patch, err = jsondiff.Compare(tc.HTTPResp.Body, actualResponse.Body)
+					if err != nil {
+						logger.Warn("failed to compute json diff", zap.Error(err))
+					}
+					for _, op := range patch {
+						if jsonComparisonResult.Matches() {
+							logDiffs.SetHasarrayIndexMismatch(true)
+							logDiffs.PushFooterDiff(strings.Join(jsonComparisonResult.Differences(), ", "))
+						}
+						logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
+					}
 				}
 			} else {
 				logDiffs.PushBodyDiff(fmt.Sprint(tc.HTTPResp.Body), fmt.Sprint(actualResponse.Body), bodyNoise)
 			}
 		}
+
+		fmt.Println(isStatusMismatch, isHeaderMismatch, isBodyMismatch)
 
 		if isStatusMismatch || isHeaderMismatch || isBodyMismatch {
 			skipSuccessMsg = true
@@ -250,6 +269,8 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		}
 
 	}
+
+	fmt.Println(skipSuccessMsg)
 
 	if !skipSuccessMsg {
 		newLogger := pp.New()
