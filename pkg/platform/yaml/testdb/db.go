@@ -119,9 +119,8 @@ func (ts *TestYaml) UpdateTestCase(ctx context.Context, tc *models.TestCase, tes
 }
 
 func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.TestCase) (tcsInfo, error) {
-	var tcsPath string
 
-	tcsPath = filepath.Join(ts.TcsPath, testSetID, "tests")
+	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
 
 	// Ensure the directory exists
 	err := os.MkdirAll(tcsPath, os.ModePerm)

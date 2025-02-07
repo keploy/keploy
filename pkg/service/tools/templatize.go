@@ -184,7 +184,7 @@ func (t *Tools) processRespBodyToReqHeader(ctx context.Context, tcs []*models.Te
 		for j := i + 1; j < len(tcs); j++ {
 			select {
 			case <-ctx.Done():
-				break
+				return
 			default:
 			}
 			addTemplates(t.logger, tcs[j].HTTPReq.Header, jsonResponse)
@@ -198,7 +198,7 @@ func (t *Tools) processReqHeadersToReqHeader(ctx context.Context, tcs []*models.
 		for j := i + 1; j < len(tcs); j++ {
 			select {
 			case <-ctx.Done():
-				break
+				return
 			default:
 			}
 			compareReqHeaders(t.logger, tcs[j].HTTPReq.Header, tcs[i].HTTPReq.Header)
@@ -216,7 +216,7 @@ func (t *Tools) processRespBodyToReqURL(ctx context.Context, tcs []*models.TestC
 		for j := i + 1; j < len(tcs); j++ {
 			select {
 			case <-ctx.Done():
-				break
+				return
 			default:
 			}
 			addTemplates(t.logger, &tcs[j].HTTPReq.URL, jsonResponse)
@@ -235,7 +235,7 @@ func (t *Tools) processRespBodyToReqBody(ctx context.Context, tcs []*models.Test
 		for j := i + 1; j < len(tcs); j++ {
 			select {
 			case <-ctx.Done():
-				break
+				return
 			default:
 			}
 			jsonRequest, err := parseIntoJSON(tcs[j].HTTPReq.Body)
@@ -300,7 +300,7 @@ func (t *Tools) processRespBodyToRespBody(ctx context.Context, tcs []*models.Tes
 		for j := i + 1; j < len(tcs); j++ {
 			select {
 			case <-ctx.Done():
-				break
+				return
 			default:
 			}
 			jsonResponse2, err := parseIntoJSON(tcs[j].HTTPResp.Body)
@@ -325,7 +325,7 @@ func (t *Tools) processReqBodyToRespBody(ctx context.Context, tcs []*models.Test
 		for j := i + 1; j < len(tcs); j++ {
 			select {
 			case <-ctx.Done():
-				break
+				return
 			default:
 			}
 			jsonResponse, err := parseIntoJSON(tcs[j].HTTPResp.Body)
@@ -350,7 +350,7 @@ func (t *Tools) processReqBodyToReqURL(ctx context.Context, tcs []*models.TestCa
 		for j := i + 1; j < len(tcs); j++ {
 			select {
 			case <-ctx.Done():
-				break
+				return
 			default:
 			}
 			addTemplates(t.logger, &tcs[j].HTTPReq.URL, jsonRequest)
@@ -369,7 +369,7 @@ func (t *Tools) processReqBodyToReqBody(ctx context.Context, tcs []*models.TestC
 		for j := i + 1; j < len(tcs); j++ {
 			select {
 			case <-ctx.Done():
-				break
+				return
 			default:
 			}
 			jsonRequest2, err := parseIntoJSON(tcs[j].HTTPReq.Body)
@@ -389,7 +389,7 @@ func (t *Tools) processReqURLToReqBody(ctx context.Context, tcs []*models.TestCa
 		for j := i + 1; j < len(tcs); j++ {
 			select {
 			case <-ctx.Done():
-				break
+				return
 			default:
 			}
 			jsonRequest, err := parseIntoJSON(tcs[j].HTTPReq.Body)
@@ -408,7 +408,7 @@ func (t *Tools) processReqURLToRespBody(ctx context.Context, tcs []*models.TestC
 		for j := 0; j < len(tcs); j++ {
 			select {
 			case <-ctx.Done():
-				break
+				return
 			default:
 			}
 			jsonResponse, err := parseIntoJSON(tcs[j].HTTPResp.Body)
@@ -427,7 +427,7 @@ func (t *Tools) processReqURLToReqURL(ctx context.Context, tcs []*models.TestCas
 		for j := i + 1; j < len(tcs); j++ {
 			select {
 			case <-ctx.Done():
-				break
+				return
 			default:
 			}
 			addTemplates(t.logger, &tcs[j].HTTPReq.URL, &tcs[i].HTTPReq.URL)
@@ -477,23 +477,6 @@ func RenderIfTemplatized(val interface{}) (bool, interface{}, error) {
 	return true, val, nil
 }
 
-func isTemplatized(original, templatized interface{}) bool {
-	// Use reflection or go-cmp to compare the structures
-	if !reflect.DeepEqual(original, templatized) {
-		return true
-	}
-
-	// Additional logic to check for template markers like `{{` and `}}`
-	// originalStr, ok1 := original.(string)
-	// templatizedStr, ok2 := templatized.(string)
-	// if ok1 && ok2 && strings.Contains(templatizedStr, "{{") {
-	// 	// Check if the template is derived from the original
-	// 	return strings.Contains(templatizedStr, originalStr)
-	// }
-
-	return false
-}
-
 func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 interface{}) bool {
 	switch v := interface1.(type) {
 	case geko.ObjectItems:
@@ -527,25 +510,12 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 interfa
 		}
 	case geko.Array:
 		for i, val := range v.List {
-			switch val.(type) {
+			switch x := val.(type) {
 			case string:
-				x := val.(string)
 				addTemplates(logger, &x, interface2)
 				v.List[i] = x
-			case float32:
-				x := val.(float32)
-				addTemplates(logger, &x, interface2)
-				v.List[i] = x
-			case int:
-				x := val.(int)
-				addTemplates(logger, &x, interface2)
-				v.List[i] = x
-			case int64:
-				x := val.(int64)
-				addTemplates(logger, &x, interface2)
-				v.List[i] = x
-			case float64:
-				x := val.(float64)
+			case float32, float64, int, int64:
+				x = interface{}(x)
 				addTemplates(logger, &x, interface2)
 				v.List[i] = x
 			default:
@@ -724,25 +694,20 @@ func addTemplates1(logger *zap.Logger, val1 *string, body interface{}) bool {
 		}
 	case geko.Array:
 		for i, v := range b.List {
-			switch v.(type) {
+			switch x := v.(type) {
 			case string:
-				x := v.(string)
 				addTemplates1(logger, val1, &x)
 				b.List[i] = x
 			case float32:
-				x := v.(float32)
 				addTemplates1(logger, val1, &x)
 				b.List[i] = x
 			case int:
-				x := v.(int)
 				addTemplates1(logger, val1, &x)
 				b.List[i] = x
 			case int64:
-				x := v.(int64)
 				addTemplates1(logger, val1, &x)
 				b.List[i] = x
 			case float64:
-				x := v.(float64)
 				addTemplates1(logger, val1, &x)
 				b.List[i] = x
 			default:
@@ -800,25 +765,20 @@ func addTemplates1(logger *zap.Logger, val1 *string, body interface{}) bool {
 				return false
 			}
 			var ok bool
-			switch val2.(type) {
+			switch x := val2.(type) {
 			case string:
-				x := val2.(string)
 				ok = addTemplates1(logger, val1, &x)
 				val2 = x
 			case float32:
-				x := val2.(float32)
 				ok = addTemplates1(logger, val1, &x)
 				val2 = x
 			case int:
-				x := val2.(int)
 				ok = addTemplates1(logger, val1, &x)
 				val2 = x
 			case int64:
-				x := val2.(int64)
 				ok = addTemplates1(logger, val1, &x)
 				val2 = x
 			case float64:
-				x := val2.(float64)
 				ok = addTemplates1(logger, val1, &x)
 				val2 = x
 			default:
@@ -855,25 +815,20 @@ func addTemplates1(logger *zap.Logger, val1 *string, body interface{}) bool {
 		}
 	case []interface{}:
 		for i, val := range b {
-			switch val.(type) {
+			switch x := val.(type) {
 			case string:
-				x := val.(string)
 				addTemplates1(logger, val1, &x)
 				b[i] = x
 			case float32:
-				x := val.(float32)
 				addTemplates1(logger, val1, &x)
 				b[i] = x
 			case int:
-				x := val.(int)
 				addTemplates1(logger, val1, &x)
 				b[i] = x
 			case int64:
-				x := val.(int64)
 				addTemplates1(logger, val1, &x)
 				b[i] = x
 			case float64:
-				x := val.(float64)
 				addTemplates1(logger, val1, &x)
 				b[i] = x
 			default:
