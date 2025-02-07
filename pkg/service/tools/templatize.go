@@ -510,6 +510,13 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 interfa
 		}
 	case geko.Array:
 		for i, val := range v.List {
+			var err error
+			var isTemplatized bool
+			original := val
+			isTemplatized, val, err = RenderIfTemplatized(val)
+			if err != nil {
+				return false
+			}
 			switch x := val.(type) {
 			case string:
 				addTemplates(logger, &x, interface2)
@@ -521,7 +528,11 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 interfa
 			default:
 				addTemplates(logger, v.List[i], interface2)
 			}
-			v.Set(i, v.List[i])
+			if isTemplatized {
+				v.Set(i, original)
+			} else {
+				v.Set(i, v.List[i])
+			}
 		}
 	case map[string]string:
 		for key, val := range v {
@@ -556,7 +567,6 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 interfa
 			}
 		}
 	case *string:
-		// TODO check for isTemplatized case
 		_, tempVal, err := RenderIfTemplatized(*v)
 		if err != nil {
 			utils.LogError(logger, err, "failed to render for template")
@@ -741,7 +751,6 @@ func addTemplates1(logger *zap.Logger, val1 *string, body interface{}) bool {
 		}
 		return false
 	case *string:
-		// TODO check here too
 		_, tempVal, err := RenderIfTemplatized(b)
 		if err != nil {
 			utils.LogError(logger, err, "failed to render for template")
