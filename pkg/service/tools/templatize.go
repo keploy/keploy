@@ -254,7 +254,7 @@ func (t *Tools) processBody(ctx context.Context, tcs []*models.TestCase) {
 	for i := 0; i < len(tcs); i++ {
 		select {
 		case <-ctx.Done():
-			break
+			return
 		default:
 		}
 		jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
@@ -277,7 +277,7 @@ func (t *Tools) processReqURLToRespBodySameTest(ctx context.Context, tcs []*mode
 	for i := 0; i < len(tcs); i++ {
 		select {
 		case <-ctx.Done():
-			break
+			return
 		default:
 		}
 		jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
@@ -768,19 +768,14 @@ func addTemplates1(logger *zap.Logger, val1 *string, body interface{}) bool {
 			switch x := val2.(type) {
 			case string:
 				ok = addTemplates1(logger, val1, &x)
-				val2 = x
 			case float32:
 				ok = addTemplates1(logger, val1, &x)
-				val2 = x
 			case int:
 				ok = addTemplates1(logger, val1, &x)
-				val2 = x
 			case int64:
 				ok = addTemplates1(logger, val1, &x)
-				val2 = x
 			case float64:
 				ok = addTemplates1(logger, val1, &x)
-				val2 = x
 			default:
 				ok = addTemplates1(logger, val1, val2)
 			}
