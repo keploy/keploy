@@ -214,12 +214,12 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 					if err != nil {
 						return false, nil
 					}
-					actJsonBytes, err := json.Marshal(actResponse)
+					actJSonBytes, err := json.Marshal(actResponse)
 					if err != nil {
 						return false, nil
 					}
 					tc.HTTPResp.Body = string(jsonBytes)
-					actualResponse.Body = string(actJsonBytes)
+					actualResponse.Body = string(actJSonBytes)
 				}
 
 				validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &tc.HTTPResp.Body, &actualResponse.Body)
