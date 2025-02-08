@@ -558,8 +558,10 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 interfa
 			if !ok {
 				continue
 			}
-			// Add the authtype to the string.
-			val = authType + " " + val
+			if key == "Authorization" && len(strings.Split(val, " ")) > 1 {
+				val = authType + " " + val
+			}
+
 			if isTemplatized {
 				v[key] = original
 			} else {
@@ -567,7 +569,8 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 interfa
 			}
 		}
 	case *string:
-		_, tempVal, err := RenderIfTemplatized(*v)
+		original := *v
+		isTemplatized, tempVal, err := RenderIfTemplatized(*v)
 		if err != nil {
 			utils.LogError(logger, err, "failed to render for template")
 			return false
@@ -585,17 +588,31 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 interfa
 			return true
 		}
 
+		originalURL, err := url.Parse(original)
+		if err != nil {
+			return false
+		}
+
+		// fmt.Println(*v)
 		url, err := url.Parse(*v)
 		if err != nil {
 			ok = addTemplates1(logger, v, interface2)
+			if isTemplatized {
+				*v = original
+			}
 			return ok
 		}
 
 		// Checking the special case of the URL for path and query parameters.
 		urlParts := strings.Split(url.Path, "/")
+		originalURLParts := strings.Split(originalURL.Path, "/")
 		// checking if the last part of the URL is a template.
-
 		ok = addTemplates1(logger, &urlParts[len(urlParts)-1], interface2)
+		fmt.Println(urlParts[len(urlParts)-1])
+		if isTemplatized {
+			urlParts[len(urlParts)-1] = originalURLParts[len(originalURLParts)-1]
+		}
+
 		url.Path = strings.Join(urlParts, "/")
 
 		if url.RawQuery != "" {
