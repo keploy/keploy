@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
-	replaySvc "go.keploy.io/server/v2/pkg/service/replay"
+	toolsSvc "go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -29,13 +29,13 @@ func Templatize(ctx context.Context, logger *zap.Logger, _ *config.Config, servi
 				utils.LogError(logger, err, "failed to get service")
 				return nil
 			}
-			var replay replaySvc.Service
+			var tools toolsSvc.Service
 			var ok bool
-			if replay, ok = svc.(replaySvc.Service); !ok {
-				utils.LogError(logger, nil, "service doesn't satisfy replay service interface")
+			if tools, ok = svc.(toolsSvc.Service); !ok {
+				utils.LogError(logger, nil, "service doesn't satisfy tools service interface")
 				return nil
 			}
-			if err := replay.Templatize(ctx); err != nil {
+			if err := tools.Templatize(ctx); err != nil {
 				utils.LogError(logger, err, "failed to templatize test cases")
 				return nil
 			}

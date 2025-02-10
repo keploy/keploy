@@ -3,6 +3,7 @@ package replay
 import (
 	"fmt"
 	"net/url"
+	"path"
 	"time"
 
 	// "encoding/json"
@@ -64,14 +65,16 @@ func ReplaceBaseURL(newURL, oldURL string) (string, error) {
 
 	parsedOldURL.Scheme = parsedNewURL.Scheme
 	parsedOldURL.Host = parsedNewURL.Host
-	path, err := url.JoinPath(parsedNewURL.Path, parsedOldURL.Path)
-	if err != nil {
-		return "", fmt.Errorf("failed to join '%v' and '%v' paths: %v", parsedNewURL.Path, parsedOldURL.Path, err)
-	}
-	parsedOldURL.Path = path
+	apiPath := path.Join(parsedNewURL.Path, parsedOldURL.Path)
 
+	parsedOldURL.Path = apiPath
+	parsedOldURL.RawPath = apiPath
 	replacedURL := parsedOldURL.String()
-	return replacedURL, nil
+	decodedURL, err := url.PathUnescape(replacedURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode the URL: %v", err)
+	}
+	return decodedURL, nil
 }
 
 func mergeMaps(map1, map2 map[string][]string) map[string][]string {
