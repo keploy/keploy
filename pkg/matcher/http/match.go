@@ -220,16 +220,12 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 					tc.HTTPResp.Body = string(jsonBytes)
 					actualResponse.Body = string(actJSONBytes)
 				}
-
-				fmt.Println(tc.HTTPResp.Body, actualResponse.Body)
-
 				validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &tc.HTTPResp.Body, &actualResponse.Body)
 				if err != nil {
 					return false, res
 				}
 				isBodyMismatch = false
 				if validatedJSON.IsIdentical() {
-					fmt.Println("hi")
 					jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
 					pass = jsonComparisonResult.IsExact()
 					if err != nil {
@@ -272,8 +268,6 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		}
 
 	}
-
-	fmt.Println(skipSuccessMsg)
 
 	if !skipSuccessMsg {
 		newLogger := pp.New()
