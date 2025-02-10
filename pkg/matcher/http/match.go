@@ -163,7 +163,6 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			}
 			for i, v := range actualValue {
 				if v != expectedValue[i] {
-					fmt.Println(v, expectedValue[i])
 					isHeaderMismatch = true
 					actualHeader[j.Actual.Key] = actualValue
 					expectedHeader[j.Expected.Key] = expectedValue
@@ -222,38 +221,42 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 					actualResponse.Body = string(actJSONBytes)
 				}
 
+				fmt.Println(tc.HTTPResp.Body, actualResponse.Body)
+
 				validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &tc.HTTPResp.Body, &actualResponse.Body)
 				if err != nil {
 					return false, res
 				}
+				isBodyMismatch = false
 				if validatedJSON.IsIdentical() {
+					fmt.Println("hi")
 					jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
 					pass = jsonComparisonResult.IsExact()
 					if err != nil {
 						return false, res
 					}
-				} else {
-					isBodyMismatch = true
-
-					// Comparing the body again after updating the expected
-					patch, err = jsondiff.Compare(tc.HTTPResp.Body, actualResponse.Body)
-					if err != nil {
-						logger.Warn("failed to compute json diff", zap.Error(err))
+					if !pass {
+						isBodyMismatch = true
+					} else {
+						isBodyMismatch = false
 					}
-					for _, op := range patch {
-						if jsonComparisonResult.Matches() {
-							logDiffs.SetHasarrayIndexMismatch(true)
-							logDiffs.PushFooterDiff(strings.Join(jsonComparisonResult.Differences(), ", "))
-						}
-						logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
+				}
+				// Comparing the body again after updating the expected
+				patch, err = jsondiff.Compare(tc.HTTPResp.Body, actualResponse.Body)
+				if err != nil {
+					logger.Warn("failed to compute json diff", zap.Error(err))
+				}
+				for _, op := range patch {
+					if jsonComparisonResult.Matches() {
+						logDiffs.SetHasarrayIndexMismatch(true)
+						logDiffs.PushFooterDiff(strings.Join(jsonComparisonResult.Differences(), ", "))
 					}
+					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
 				}
 			} else {
 				logDiffs.PushBodyDiff(fmt.Sprint(tc.HTTPResp.Body), fmt.Sprint(actualResponse.Body), bodyNoise)
 			}
 		}
-
-		fmt.Println(isStatusMismatch, isHeaderMismatch, isBodyMismatch)
 
 		if isStatusMismatch || isHeaderMismatch || isBodyMismatch {
 			skipSuccessMsg = true

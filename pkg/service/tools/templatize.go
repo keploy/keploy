@@ -40,6 +40,8 @@ func (t *Tools) Templatize(ctx context.Context) error {
 		testSet, err := t.testSetConf.Read(ctx, testSetID)
 		if err == nil && (testSet != nil && testSet.Template != nil) {
 			utils.TemplatizedValues = testSet.Template
+		} else {
+			utils.TemplatizedValues = make(map[string]interface{})
 		}
 
 		// Get test cases from the database
