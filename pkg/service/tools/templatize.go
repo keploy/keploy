@@ -593,14 +593,9 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 interfa
 			return false
 		}
 
-		// fmt.Println(*v)
 		url, err := url.Parse(*v)
-		if err != nil {
-			ok = addTemplates1(logger, v, interface2)
-			if isTemplatized {
-				*v = original
-			}
-			return ok
+		if err != nil || url.Scheme == "" || url.Host == "" {
+			return false
 		}
 
 		// Checking the special case of the URL for path and query parameters.
@@ -608,7 +603,6 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 interfa
 		originalURLParts := strings.Split(originalURL.Path, "/")
 		// checking if the last part of the URL is a template.
 		ok = addTemplates1(logger, &urlParts[len(urlParts)-1], interface2)
-		fmt.Println(urlParts[len(urlParts)-1])
 		if isTemplatized {
 			urlParts[len(urlParts)-1] = originalURLParts[len(originalURLParts)-1]
 		}
