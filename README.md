@@ -1,5 +1,5 @@
 <p align="center">
-  <img align="center" src="https://docs.keploy.io/img/keploy-logo-dark.svg?s=200&v=4" height="40%" width="40%"  alt="keploy logo"/>
+  <img align="center" src="https://docs.keploy.io/img/keploy-logo-dark.svg?s=200&v=4" height="40%" width="40%"  alt="keploy logo"/>  <!-- we can add banner here, maybe a poster or a gif -->
 </p>
 <h3 align="center">
 <b>
@@ -15,8 +15,7 @@
 <h4 align="center">
 
   
-[![Twitter Follow](https://img.shields.io/badge/Follow%20@Keployio-1DA1F2?style=for-the-badge&logo=twitter&logoColor=white)](https://twitter.com/Keploy_io)
-[![GitHub Stars](https://img.shields.io/github/stars/keploy/keploy?style=for-the-badge&logo=github&color=EAC54F&labelColor=000000&label=Help%20us%20reach%2010K%20stars!)](https://github.com/Keploy/Keploy/issues)
+[![GitHub Stars](https://img.shields.io/github/stars/keploy/keploy?style=for-the-badge&logo=github&color=000000&labelColor=000000&label=Help%20us%20reach%2010K%20stars!)](https://github.com/Keploy/Keploy/issues) 
 [![CNCF Landscape](https://img.shields.io/badge/CNCF_Landscape-0078D4?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyTDIgNy4wMDl2OS45ODJMMTIgMjJsMTAtNS4wMDlWNy4wMDlMMTIgMnptMCAxNi41TDQuNSAxNHYtNEwxMiA1LjVsNy41IDQuNXY0TDEyIDE4LjV6Ii8+PC9zdmc+)](https://landscape.cncf.io/?item=app-definition-and-development--continuous-integration-delivery--keploy)
 
 
@@ -35,16 +34,18 @@
 - [🚀 Quick Installation](#-quick-installation)  
 - [📘 Documentation](#-documentation)  
 - [🌐 Language Support](#-language-support)  
-- [🏆 Adopters](#-adopters)  
-- [🛠 Contributing](#-contributing)  
-- [⚠️ Current Limitations](#️-current-limitations)  
+- [🧡 Keploy Adopters](#-keploy-adopters-)
+- [👨🏻‍💻 Contributing](#-lets-build-together-)
+- [🐲 Current Limitations!](#limitations) 
 - [📚 Resources](#-resources)  
 - [❓ Questions](#-questions)  
 ---
 
-[Keploy](https://keploy.io) is a **developer-centric** API testing tool that simplifies and accelerates the testing process by creating **tests with built-in mocks**, making it significantly faster than traditional unit tests.
+  <!-- we can add banner here, maybe a poster or a gif -->
+  
+[Keploy](https://keploy.io) is a **developer-centric** API testing tool designed to simplify and accelerate the testing process. By creating **tests with built-in mocks**, Keploy offers a faster alternative to traditional unit testing—and it keeps getting faster every day!  
 
-In addition to recording API calls, Keploy also captures database interactions and replays them during testing, ensuring a seamless, reliable experience. This makes Keploy **easy to use, powerful, and highly extensible**.
+Beyond recording API calls, Keploy captures database interactions and replays them during testing, ensuring seamless and reliable results. With the recent addition of a **VS Code AI-powered extension**, Keploy is now even more accessible, making it easier than ever to integrate into your workflow. It’s **easy to use, powerful, and highly extensible**, empowering developers to save time and focus on building great software.
 
 
 <!--<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-tc.gif" width="60%" alt="Convert API calls to test cases"/>-->
@@ -55,67 +56,89 @@ In addition to recording API calls, Keploy also captures database interactions a
 <!-- ### 📜 Follow [Unit Test Generator README](README-UnitGen.md)! ✅ -->
 
 
-## 🚀 Quick Installation (API test generator)
+## 🚀 Quick Installation
 
 
-Integrate Keploy seamlessly into your development workflow with no code changes required. Let’s explore its features one by one:
-
----
-
-## 🧪 Unit Test Generator Features  
-
-Keploy’s AI-powered VS Code extension revolutionizes unit testing by automating the generation of test cases directly from your code. This not only improves test coverage but also saves you valuable time and effort. Key benefits include:  
-- **Automatic Test Generation:** Keploy analyzes your code and creates unit tests for enhanced reliability.  
-- **Improved Test Coverage:** Generates detailed test cases that ensure your application meets high-quality standards.  
-- **Ease of Use:** No manual effort is required to write boilerplate tests.  
-
-Elevate your unit testing game with Keploy's VS Code AI Extension today!  
-
-### 📜 Follow [Unit Test Generator AI Extension](https://marketplace.visualstudio.com/items?itemName=Keploy.keployio)! ✅  
+Save time by Integrating Keploy seamlessly into your development workflow with no code changes required. Let's dive into its powerful features and how to use them one by one:
 
 ---
 
-## 🔗 Integration Testing  
+### 🧪 Unit Test Generation
+
+Keploy introduces the world's first **unit test generator (ut-gen)**, based on the [Meta LLM research paper](https://arxiv.org/pdf/2402.09171). It understands code semantics to generate meaningful unit tests automatically, saving time and improving test quality.
+
+#### Core features: 🛠
+
+| **Feature**                  | **Description**                                                                 |
+|------------------------------|---------------------------------------------------------------------------------|
+| **Automate Unit Test Generation (UTG)** | Quickly generates comprehensive unit tests, reducing manual effort.               |
+| **Improve Edge Cases**       | Covers complex scenarios with smarter test generation.                           |
+| **Boost Test Coverage**      | Ensures exhaustive coverage for growing codebases.                               |
+
+#### 🚀 How to Use the Unit Test Generator
+1. **Install Keploy VS Code Extension:**  
+   Get the [Keploy Unit Test Generator AI Extension](https://marketplace.visualstudio.com/items?itemName=Keploy.keployio) and add it to VS Code.
+
+2. **Setup Keploy:**  
+   Use Keploy locally or its cloud-hosted services for quick setup.
+
+3. **Generate Tests:**  
+   - Open a file in VS Code.  
+   - Right-click and choose **"Generate Unit Test with Keploy"**.  
+   - The extension will generate tests for your functions or code.
+
+4. **Run and Validate:**  
+   Execute the tests using your preferred test runner (e.g., Jest, Mocha) and refine edge cases if necessary.
+
+Elevate your unit testing game with Keploy's **AI-powered VS Code Extension**!  
+
+#### 📜 [Install the VS Code AI Extension for Unit Test Generation](https://marketplace.visualstudio.com/items?itemName=Keploy.keployio) and get started today! ✅
+
+---
+
+<!--### 🔗 Integration Testing  
 
 Keploy simplifies integration testing by capturing and replaying **ALL** your app's network interactions, including CRUD operations and non-idempotent APIs. This ensures seamless communication between application components while detecting and addressing compatibility issues early.  
 
-### 🛠 How it Works:  
+#### 🛠 How it Works:  
 Keploy acts as a proxy that records your app's network interactions and replays them during testing to validate behavior. The magic lies in its ability to simulate real-world scenarios effortlessly!  
 
 Take a journey to **[How Keploy Works?](https://keploy.io/docs/keploy-explained/how-keploy-works/)** to discover the tricks behind the curtain!
 
-### Keploy’s Core Features:  
+-->
+
+### 🌐 API Testing  
+
+Keploy automates API testing by recording API requests and responses during runtime. These recordings are transformed into reusable test cases, allowing you to validate your APIs efficiently.
+
+#### Core features: 🛠
+
 | **Feature**                  | **Description**                                                                                                             |
 |------------------------------|-----------------------------------------------------------------------------------------------------------------------------|
 | ♻️ **Combined Test Coverage** | Merge your Keploy Tests with your favorite testing libraries (JUnit, go-test, py-test, jest) to see a combined test coverage. |
 | 🤖 **EBPF Instrumentation**   | Keploy uses EBPF like a secret sauce to make integration code-less, language-agnostic, and lightweight.                      |
 | 🌐 **CI/CD Integration**      | Run tests with mocks locally, in CI pipelines (e.g., Jenkins, GitHub Actions), or across Kubernetes clusters.                |
 | 📽️ **Record-Replay Flows**   | Record and replay distributed API flows as mocks/stubs, like a time machine for your tests.                                  |
-| 🎭 **Multi-Purpose Mocks**    | Use Keploy Mocks as server tests.                                                                                           |
+| 🎭 **Multi-Purpose Mocks**    | Use Keploy Mocks as server tests.  
 
----
-
-## 🌐 API Testing  
-
-Keploy automates API testing by recording API requests and responses during runtime. These recordings are transformed into reusable test cases, allowing you to validate your APIs efficiently.  
-
-### **Steps to Get Started:**  
+#### 🎩 How's the Magic Happen?
+Keploy proxy captures and replays **ALL** (CRUD operations, including non-idempotent APIs) of your app's network interactions.
+You can also take a look at **[How Keploy Works?](https://keploy.io/docs/keploy-explained/how-keploy-works/)** to discover the tricks behind the curtain!
+<!--#### **Steps to Get Started:**  
 1. **Set Up Keploy Locally:** Install Keploy with one-click installation and minimal configuration.  
 2. **Capture API Traffic:** Run your application while Keploy records all API requests and responses.  
 3. **Generate Test Cases:** Use the captured data to create reusable test cases with mock data and stubs for validation.  
-4. **Run Tests Anywhere:** Validate API behavior locally, in CI/CD pipelines, or even across Kubernetes clusters.  
+4. **Run Tests Anywhere:** Validate API behavior locally, in CI/CD pipelines, or even across Kubernetes clusters.-->  
 
 Keploy ensures consistent API behavior, improves API quality, and saves manual testing effort. 🚀  
 
-Ready to dive deeper? Check out Keploy’s [API Testing Documentation](https://keploy.io/docs)!  
+<!--Ready to dive deeper? Check out Keploy’s [API Testing Documentation](https://keploy.io/docs)!  -->
 
-
-<!--
 ```shell
 curl --silent -O -L https://keploy.io/install.sh && source install.sh
 ```
 
-##  🎬 Recording Testcases
+####  🎬 Recording Testcases
 
 Start your app with Keploy to convert API calls as Tests and Mocks/Stubs.
 
@@ -128,32 +151,24 @@ For example, if you're using a simple Python app the `CMD_TO_RUN_APP` would rese
 keploy record -c "python main.py"
 ```
 
-## 🧪 Running Tests
+#### 🧪 Running Tests
 Shut down the databases, redis, kafka or any other services your application uses. Keploy doesn't need those during test.
 ```zsh
 keploy test -c "CMD_TO_RUN_APP" --delay 10
 ```
 
-## ✅ Test Coverage Integration
-To integrate with your unit-testing library and see combine test coverage, follow this [test-coverage guide](https://keploy.io/docs/server/sdk-installation/go/).-->
+#### ✅ Test Coverage Integration
+To integrate with your unit-testing library and see combine test coverage, follow this [test-coverage guide](https://keploy.io/docs/server/sdk-installation/go/).
 
 
 
-## One-Click Setup 🚀
+### One-Click Setup 🚀
 
-Setup and run keploy quickly, with no local machine installation required:
+Save time and effort! Run Keploy instantly without the need for any local installation. Get started in just a few clicks!
 
-[![GitHub Codespace](https://img.shields.io/badge/GH%20codespace-3670A0?style=for-the-badge&logo=github&logoColor=fff)](https://dev.github.com/Sonichigo/mux-sql)
+[![GitHub Codespace](https://img.shields.io/badge/GH%20codespace-3670A0?style=for-the-badge&logo=github&logoColor=fff)](https://github.dev/Sonichigo/mux-sql)
 
-## 🚨 Here for  [Unit Test Generator](README-UnitGen.md) (ut-gen)? 
-Keploy has newly launched the world's first unit test generator(ut-gen) implementation of [Meta LLM research paper](https://arxiv.org/pdf/2402.09171), it understands code semantics and generates meaningful unit tests, aiming to:
-
-| **Feature**                  | **Description**                                                                 |
-|------------------------------|---------------------------------------------------------------------------------|
-| **Automate Unit Test Generation (UTG)** | Quickly generates comprehensive unit tests, reducing redundant manual effort.      |
-| **Improve Edge Cases**       | Extends and enhances the scope of automated tests to cover complex scenarios.   |
-| **Boost Test Coverage**      | Ensures exhaustive test coverage as codebases grow, aligning with Keploy's mission. |
-
+<!--## 🚨 Here for  [Unit Test Generator](README-UnitGen.md) (ut-gen)? -->
 
 
 ## 📘 Documentation!
@@ -181,21 +196,12 @@ So you and your organisation are using Keploy? That’s great. Please add yourse
 
 We are happy and proud to have you all as part of our community! 💖
 
+<!--
 ## 🎩 How's the Magic Happen?
 Keploy proxy captures and replays **ALL** (CRUD operations, including non-idempotent APIs) of your app's network interactions.
 
 
-Take a journey to **[How Keploy Works?](https://keploy.io/docs/keploy-explained/how-keploy-works/)** to discover the tricks behind the curtain!
-
-Here are Keploy's core features: 🛠
-
-| **Feature**                  | **Description**                                                                                                             |
-|------------------------------|-----------------------------------------------------------------------------------------------------------------------------|
-| ♻️ **Combined Test Coverage** | Merge your Keploy Tests with your favorite testing libraries (JUnit, go-test, py-test, jest) to see a combined test coverage. |
-| 🤖 **EBPF Instrumentation**   | Keploy uses EBPF like a secret sauce to make integration code-less, language-agnostic, and lightweight.                      |
-| 🌐 **CI/CD Integration**      | Run tests with mocks locally, in CI pipelines (e.g., Jenkins, GitHub Actions), or across Kubernetes clusters.                |
-| 📽️ **Record-Replay Flows**   | Record and replay distributed API flows as mocks/stubs, like a time machine for your tests.                                  |
-| 🎭 **Multi-Purpose Mocks**    | Use Keploy Mocks as server tests.  
+Take a journey to **[How Keploy Works?](https://keploy.io/docs/keploy-explained/how-keploy-works/)** to discover the tricks behind the curtain!-->
 
 
 ## 👨🏻‍💻 Let's Build Together! 👩🏻‍💻
@@ -206,7 +212,7 @@ Whether you're a newbie coder or a wizard 🧙‍♀️, your perspective is gol
 ❤️ [Code of Conduct](https://github.com/keploy/keploy/blob/main/CODE_OF_CONDUCT.md)
 
 
-## 🐲 Current Limitations!
+## Limitations
 - **Production Lands**: Keploy is currently focused on generating tests for developers. These tests can be captured from any environment, but we have not tested it on high volume production environments. This would need robust deduplication to avoid too many redundant tests being captured. We do have ideas on building a robust deduplication system [#27](https://github.com/keploy/keploy/issues/27)
 
 ## ✨ Resources!
