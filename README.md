@@ -15,15 +15,27 @@
 <h4 align="center">
 
   
-[![GitHub Stars](https://img.shields.io/github/stars/keploy/keploy?style=for-the-badge&logo=github&color=000000&labelColor=000000&label=Help%20us%20reach%2010K%20stars!)](https://github.com/Keploy/Keploy/issues) 
+[![GitHub Stars](https://img.shields.io/github/stars/keploy/keploy?style=for-the-badge&logo=star&logoColor=yellow&color=000000&labelColor=000000&label=Help%20us%20reach%2010K%20stars!)](https://github.com/Keploy/Keploy/issues)
 [![CNCF Landscape](https://img.shields.io/badge/CNCF_Landscape-0078D4?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyTDIgNy4wMDl2OS45ODJMMTIgMjJsMTAtNS4wMDlWNy4wMDlMMTIgMnptMCAxNi41TDQuNSAxNHYtNEwxMiA1LjVsNy41IDQuNXY0TDEyIDE4LjV6Ii8+PC9zdmc+)](https://landscape.cncf.io/?item=app-definition-and-development--continuous-integration-delivery--keploy)
+[![Go Report Card](https://goreportcard.com/badge/go.keploy.io/server?style=for-the-badge)](https://goreportcard.com/report/go.keploy.io/server)
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/keploy/keploy?style=for-the-badge)](https://github.com/keploy/keploy/releases)
+
 
 
 
 [![Slack](https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white)](https://join.slack.com/t/keploy/shared_invite/zt-2poflru6f-_VAuvQfCBT8fDWv1WwSbkw)
 [![LinkedIn](https://img.shields.io/badge/linkedin-%230077B5.svg?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/keploy/)
-[![YouTube](https://img.shields.io/badge/YouTube-%23FF0000.svg?style=for-the-badge&logo=YouTube&logoColor=white)](https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg)
-[![Twitter](https://img.shields.io/badge/Twitter-%231DA1F2.svg?style=for-the-badge&logo=Twitter&logoColor=white)](https://twitter.com/Keployio)
+[![keployio on YouTube](https://img.shields.io/badge/keployio-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg)
+[![@keployio on X](https://img.shields.io/badge/%40keployio-black?style=for-the-badge&logo=x&logoColor=white)](https://x.com/keployio)
+
+
+<!--[![keployio on YouTube](https://img.shields.io/badge/keployio-FF0000?style=flat&logo=youtube)](https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg)
+[![Keploy on LinkedIn](https://img.shields.io/badge/Keploy-0A66C2?style=flat&logo=linkedin)](https://www.linkedin.com/company/keploy/) 
+[![Keploy on Slack](https://img.shields.io/badge/Slack-4A154B?style=flat&logo=slack&logoColor=white)](https://join.slack.com/t/keploy/shared_invite/zt-2poflru6f-_VAuvQfCBT8fDWv1WwSbkw)
+[![@keployio on X](https://img.shields.io/badge/%40keployio-black?style=for-the-badge&logo=x&logoColor=white)](https://x.com/keployio)-->
+
+
+<!--[![Twitter](https://img.shields.io/badge/Twitter-%231DA1F2.svg?style=for-the-badge&logo=Twitter&logoColor=white)](https://twitter.com/Keployio)-->
 
 <a href="https://trendshift.io/repositories/3262" target="_blank"><img src="https://trendshift.io/api/badge/repositories/3262" alt="keploy%2Fkeploy | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 </h4>
@@ -107,9 +119,11 @@ Take a journey to **[How Keploy Works?](https://keploy.io/docs/keploy-explained/
 
 -->
 
-### 🌐 API Testing  
+### 🌐 Integration Testing  
 
 Keploy automates API testing by recording API requests and responses during runtime. These recordings are transformed into reusable test cases, allowing you to validate your APIs efficiently.
+
+<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-replay.gif" width="100%" alt="Record Replay Testing"/>
 
 #### Core features: 🛠
 
@@ -160,6 +174,7 @@ keploy test -c "CMD_TO_RUN_APP" --delay 10
 #### ✅ Test Coverage Integration
 To integrate with your unit-testing library and see combine test coverage, follow this [test-coverage guide](https://keploy.io/docs/server/sdk-installation/go/).
 
+<img src="https://keploy.io/docs/img/oss/keploy-arch.png?raw=true" alt="Keploy Architecture" style="width: 100%;">
 
 
 ### One-Click Setup 🚀
@@ -168,13 +183,30 @@ Save time and effort! Run Keploy instantly without the need for any local instal
 
 [![GitHub Codespace](https://img.shields.io/badge/GH%20codespace-3670A0?style=for-the-badge&logo=github&logoColor=fff)](https://github.dev/Sonichigo/mux-sql)
 
+<!--<table border="0">
+  <tr>
+    <td align="center" width="100" height="100">
+      <a href="https://github.dev/Sonichigo/mux-sql">
+        <img
+          width="50"
+          height="50"
+          src="https://devblogs.microsoft.com/cppblog/wp-content/uploads/sites/9/2022/04/github-vscode-mark.png"
+          alt="GitHub Codespace Logo"
+        />
+        <br /><sub><b>GitHub Codespace</b></sub>
+      </a>
+    </td>
+  </tr>
+</table>-->
+
+
 <!--## 🚨 Here for  [Unit Test Generator](README-UnitGen.md) (ut-gen)? -->
 
 
 ## 📘 Documentation!
-Become a Keploy pro with **[Keploy Documentation](https://keploy.io/docs/)**.
+Want to explore or learn more about Keploy? Become a Keploy pro with **[Keploy Documentation](https://keploy.io/docs/)**.
 
-<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-replay.gif" width="100%" alt="Record Replay Testing"/>
+
 
 
 ## 🌐 Language Support
