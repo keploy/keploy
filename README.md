@@ -41,6 +41,22 @@
 </h4>
 
 
+  <!-- we can add banner here, maybe a poster or a gif -->
+  
+[Keploy](https://keploy.io) is a **developer-centric** API testing tool designed to simplify and accelerate the testing process. By creating **tests with built-in mocks**, Keploy offers a faster alternative to traditional unit testing—and it keeps getting faster every day!  
+
+Beyond recording API calls, Keploy captures database interactions and replays them during testing, ensuring seamless and reliable results. With the recent addition of a **VS Code AI-powered extension**, Keploy is now even more accessible, making it easier than ever to integrate into your workflow. It’s **easy to use, powerful, and highly extensible**, empowering developers to save time and focus on building great software.
+
+
+
+> 🐰 **Fun fact:** Keploy uses itself for testing! Check out our swanky coverage badge: [![Coverage Status](https://coveralls.io/repos/github/keploy/keploy/badge.svg?branch=main&kill_cache=1)](https://coveralls.io/github/keploy/keploy?branch=main&kill_cache=1) &nbsp;
+
+
+
+<!--<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-tc.gif" width="60%" alt="Convert API calls to test cases"/>-->
+
+<!-- ### 📜 Follow [Unit Test Generator README](README-UnitGen.md)! ✅ -->
+
 # 📜 Table of Contents  
 
 - [🚀 Quick Installation](#-quick-installation)  
@@ -52,20 +68,6 @@
 - [📚 Resources](#-resources)  
 - [❓ Questions](#-questions)  
 ---
-
-  <!-- we can add banner here, maybe a poster or a gif -->
-  
-[Keploy](https://keploy.io) is a **developer-centric** API testing tool designed to simplify and accelerate the testing process. By creating **tests with built-in mocks**, Keploy offers a faster alternative to traditional unit testing—and it keeps getting faster every day!  
-
-Beyond recording API calls, Keploy captures database interactions and replays them during testing, ensuring seamless and reliable results. With the recent addition of a **VS Code AI-powered extension**, Keploy is now even more accessible, making it easier than ever to integrate into your workflow. It’s **easy to use, powerful, and highly extensible**, empowering developers to save time and focus on building great software.
-
-
-<!--<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-tc.gif" width="60%" alt="Convert API calls to test cases"/>-->
-
-> 🐰 **Fun fact:** Keploy uses itself for testing! Check out our swanky coverage badge: [![Coverage Status](https://coveralls.io/repos/github/keploy/keploy/badge.svg?branch=main&kill_cache=1)](https://coveralls.io/github/keploy/keploy?branch=main&kill_cache=1) &nbsp;
-
-
-<!-- ### 📜 Follow [Unit Test Generator README](README-UnitGen.md)! ✅ -->
 
 
 ## 🚀 Quick Installation
