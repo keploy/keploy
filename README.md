@@ -52,12 +52,13 @@ Beyond recording API calls, Keploy captures database interactions and replays th
 > 🐰 **Fun fact:** Keploy uses itself for testing! Check out our swanky coverage badge: [![Coverage Status](https://coveralls.io/repos/github/keploy/keploy/badge.svg?branch=main&kill_cache=1)](https://coveralls.io/github/keploy/keploy?branch=main&kill_cache=1) &nbsp;
 
 
-
-<!--<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-tc.gif" width="60%" alt="Convert API calls to test cases"/>-->
+<img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-tc.gif" width="60%" alt="Convert API calls to test cases"/>
 
 <!-- ### 📜 Follow [Unit Test Generator README](README-UnitGen.md)! ✅ -->
 
-# 📜 Table of Contents  
+
+
+<!--# 📜 Table of Contents  
 
 - [🚀 Quick Installation](#-quick-installation)  
 - [📘 Documentation](#-documentation)  
@@ -68,7 +69,7 @@ Beyond recording API calls, Keploy captures database interactions and replays th
 - [📚 Resources](#-resources)  
 - [❓ Questions](#-questions)  
 ---
-
+-->
 
 ## 🚀 Quick Installation
 
