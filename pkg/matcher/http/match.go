@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v2/pkg"
 	matcherUtils "go.keploy.io/server/v2/pkg/matcher"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/utils"
 )
 
@@ -92,7 +93,6 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	res.BodyResult[0].Normal = pass
 
 	if !matcherUtils.CompareHeaders(pkg.ToHTTPHeader(tc.HTTPResp.Header), pkg.ToHTTPHeader(actualResponse.Header), hRes, headerNoise) {
-
 		pass = false
 	}
 
@@ -100,13 +100,16 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	if tc.HTTPResp.StatusCode == actualResponse.StatusCode {
 		res.StatusCode.Normal = true
 	} else {
-
 		pass = false
 	}
 
+	skipSuccessMsg := false
 	if !pass {
-		logDiffs := matcherUtils.NewDiffsPrinter(tc.Name)
+		isStatusMismatch := false
+		isHeaderMismatch := false
+		isBodyMismatch := false
 
+		logDiffs := matcherUtils.NewDiffsPrinter(tc.Name)
 		newLogger := pp.New()
 		newLogger.WithLineInfo = false
 		newLogger.SetColorScheme(models.GetFailingColorScheme())
@@ -117,27 +120,63 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		// ------------ DIFFS RELATED CODE -----------
 		if !res.StatusCode.Normal {
 			logDiffs.PushStatusDiff(fmt.Sprint(res.StatusCode.Expected), fmt.Sprint(res.StatusCode.Actual))
+			isStatusMismatch = true
+		} else {
+			isStatusMismatch = false
 		}
 
 		var (
 			actualHeader   = map[string][]string{}
 			expectedHeader = map[string][]string{}
-			unmatched      = true
 		)
 
 		for _, j := range res.HeadersResult {
+			var actualValue []string
+			var expectedValue []string
 			if !j.Normal {
-				unmatched = false
-				actualHeader[j.Actual.Key] = j.Actual.Value
-				expectedHeader[j.Expected.Key] = j.Expected.Value
+				for _, v := range j.Actual.Value {
+					_, temp, err := tools.RenderIfTemplatized(v)
+					if err != nil {
+						utils.LogError(logger, err, "failed to render the actual header")
+						return false, nil
+					}
+					val, ok := temp.(string)
+					if !ok {
+						utils.LogError(logger, fmt.Errorf("failed to convert the actual header value to string while templatizing"), "")
+						return false, nil
+					}
+					actualValue = append(actualValue, val)
+				}
+				for _, v := range j.Expected.Value {
+					_, temp, err := tools.RenderIfTemplatized(v)
+					if err != nil {
+						utils.LogError(logger, err, "failed to render the expected header")
+						return false, nil
+					}
+					val, ok := temp.(string)
+					if !ok {
+						utils.LogError(logger, fmt.Errorf("failed to convert the expected header value to string while templatizing"), "")
+						return false, nil
+					}
+					expectedValue = append(expectedValue, val)
+				}
+			}
+			for i, v := range actualValue {
+				if v != expectedValue[i] {
+					isHeaderMismatch = true
+					actualHeader[j.Actual.Key] = actualValue
+					expectedHeader[j.Expected.Key] = expectedValue
+					break
+				}
 			}
 		}
 
-		if !unmatched {
+		if isHeaderMismatch {
 			for i, j := range expectedHeader {
 				logDiffs.PushHeaderDiff(fmt.Sprint(j), fmt.Sprint(actualHeader[i]), i, headerNoise)
 			}
 		}
+
 		if !res.BodyResult[0].Normal {
 			if json.Valid([]byte(actualResponse.Body)) {
 				patch, err := jsondiff.Compare(tc.HTTPResp.Body, actualResponse.Body)
@@ -170,8 +209,34 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 						break
 					}
 					matcherUtils.CompareResponses(&expResponse, &actResponse, "")
+					jsonBytes, err := json.Marshal(expResponse)
+					if err != nil {
+						return false, nil
+					}
+					actJSONBytes, err := json.Marshal(actResponse)
+					if err != nil {
+						return false, nil
+					}
+					tc.HTTPResp.Body = string(jsonBytes)
+					actualResponse.Body = string(actJSONBytes)
 				}
-
+				validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &tc.HTTPResp.Body, &actualResponse.Body)
+				if err != nil {
+					return false, res
+				}
+				isBodyMismatch = false
+				if validatedJSON.IsIdentical() {
+					jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
+					pass = jsonComparisonResult.IsExact()
+					if err != nil {
+						return false, res
+					}
+					if !pass {
+						isBodyMismatch = true
+					} else {
+						isBodyMismatch = false
+					}
+				}
 				// Comparing the body again after updating the expected
 				patch, err = jsondiff.Compare(tc.HTTPResp.Body, actualResponse.Body)
 				if err != nil {
@@ -188,16 +253,23 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				logDiffs.PushBodyDiff(fmt.Sprint(tc.HTTPResp.Body), fmt.Sprint(actualResponse.Body), bodyNoise)
 			}
 		}
-		_, err := newLogger.Printf(logs)
-		if err != nil {
-			utils.LogError(logger, err, "failed to print the logs")
+
+		if isStatusMismatch || isHeaderMismatch || isBodyMismatch {
+			skipSuccessMsg = true
+			_, err := newLogger.Printf(logs)
+			if err != nil {
+				utils.LogError(logger, err, "failed to print the logs")
+			}
+
+			err = logDiffs.Render()
+			if err != nil {
+				utils.LogError(logger, err, "failed to render the diffs")
+			}
 		}
 
-		err = logDiffs.Render()
-		if err != nil {
-			utils.LogError(logger, err, "failed to render the diffs")
-		}
-	} else {
+	}
+
+	if !skipSuccessMsg {
 		newLogger := pp.New()
 		newLogger.WithLineInfo = false
 		newLogger.SetColorScheme(models.GetPassingColorScheme())
@@ -208,6 +280,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			utils.LogError(logger, err, "failed to print the logs")
 		}
 	}
+
 	return pass, res
 }
 

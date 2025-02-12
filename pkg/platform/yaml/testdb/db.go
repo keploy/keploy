@@ -34,13 +34,15 @@ type tcsInfo struct {
 	path string
 }
 
-func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string) error {
+func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string, enableLog bool) error {
 	tcsInfo, err := ts.upsert(ctx, testSetID, tc)
 	if err != nil {
 		return err
 	}
 
-	ts.logger.Info("🟠 Keploy has captured test cases for the user's application.", zap.String("path", tcsInfo.path), zap.String("testcase name", tcsInfo.name))
+	if enableLog {
+		ts.logger.Info("🟠 Keploy has captured test cases for the user's application.", zap.String("path", tcsInfo.path), zap.String("testcase name", tcsInfo.name))
+	}
 
 	return nil
 }
@@ -51,6 +53,7 @@ func (ts *TestYaml) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
 
 func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error) {
 	path := filepath.Join(ts.TcsPath, testSetID, "tests")
+
 	tcs := []*models.TestCase{}
 	TestPath, err := yaml.ValidatePath(path)
 	if err != nil {
@@ -102,14 +105,16 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 	return tcs, nil
 }
 
-func (ts *TestYaml) UpdateTestCase(ctx context.Context, tc *models.TestCase, testSetID string) error {
+func (ts *TestYaml) UpdateTestCase(ctx context.Context, tc *models.TestCase, testSetID string, enableLog bool) error {
 
 	tcsInfo, err := ts.upsert(ctx, testSetID, tc)
 	if err != nil {
 		return err
 	}
 
-	ts.logger.Info("🔄 Keploy has updated the test cases for the user's application.", zap.String("path", tcsInfo.path), zap.String("testcase name", tcsInfo.name))
+	if enableLog {
+		ts.logger.Info("🔄 Keploy has updated the test cases for the user's application.", zap.String("path", tcsInfo.path), zap.String("testcase name", tcsInfo.name))
+	}
 	return nil
 }
 
