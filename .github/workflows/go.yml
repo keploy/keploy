@@ -27,6 +27,6 @@ jobs:
         with:
           dry_run: true
           additional_packages: |
-            ['@semantic-release/exec']
+            ['@semantic-release/exec@6.0.3']
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
