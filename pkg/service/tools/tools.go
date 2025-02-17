@@ -15,29 +15,34 @@ import (
 	"runtime"
 	"strings"
 
-	"go.keploy.io/server/v2/pkg/service/export"
-	postmanimport "go.keploy.io/server/v2/pkg/service/import"
-
 	"github.com/charmbracelet/glamour"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/service"
+	"go.keploy.io/server/v2/pkg/service/export"
+	postmanimport "go.keploy.io/server/v2/pkg/service/import"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
 
-func NewTools(logger *zap.Logger, telemetry teleDB, auth service.Auth) Service {
+func NewTools(logger *zap.Logger, testsetConfig TestSetConfig, testDB TestDB, telemetry teleDB, auth service.Auth, config *config.Config) Service {
 	return &Tools{
-		logger:    logger,
-		telemetry: telemetry,
-		auth:      auth,
+		logger:      logger,
+		telemetry:   telemetry,
+		auth:        auth,
+		testSetConf: testsetConfig,
+		testDB:      testDB,
+		config:      config,
 	}
 }
 
 type Tools struct {
-	logger    *zap.Logger
-	telemetry teleDB
-	auth      service.Auth
+	logger      *zap.Logger
+	telemetry   teleDB
+	testSetConf TestSetConfig
+	testDB      TestDB
+	config      *config.Config
+	auth        service.Auth
 }
 
 var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")

@@ -146,9 +146,24 @@ func CompareResponses(response1, response2 *interface{}, key string) {
 		}
 	case string:
 		compareSecondResponse(&v1, response2, key, "")
+		*response1 = v1
 	case float64, int64, int, float32:
-		v1String := ToString(v1)
+		v1String := utils.ToString(v1)
 		compareSecondResponse(&(v1String), response2, key, "")
+		// Retain the original type
+		switch (*response1).(type) {
+		case float64:
+			*response1 = utils.ToFloat(v1String)
+		case int:
+			*response1 = utils.ToInt(v1String)
+		case int64:
+			*response1 = utils.ToInt(v1String)
+		case float32:
+			f := utils.ToFloat(v1String)
+			*response1 = float32(f)
+		default:
+			*response1 = v1 // Keep it unchanged if it’s an unexpected type
+		}
 	}
 }
 
@@ -181,12 +196,11 @@ func compareSecondResponse(val1 *string, response2 *interface{}, key1 string, ke
 			}
 		}
 	case float64, int64, int, float32:
-		if *val1 != ToString(v2) && key1 == key2 {
-			revMap := reverseMap(utils.TemplatizedValues)
-			if _, ok := revMap[*val1]; ok {
-				key := revMap[*val1]
-				utils.TemplatizedValues[key] = v2
-				*val1 = ToString(v2)
+		if *val1 != utils.ToString(v2) && key1 == key2 {
+			valFromTemplate := utils.TemplatizedValues[key1]
+			if valFromTemplate != nil && *val1 == utils.ToString(valFromTemplate) {
+				utils.TemplatizedValues[key1] = v2
+				*val1 = utils.ToString(v2)
 			}
 		}
 	}
@@ -197,25 +211,6 @@ func reverseMap(m map[string]interface{}) map[interface{}]string {
 		reverseMap[val] = key
 	}
 	return reverseMap
-}
-
-// ToString remove all types of value to strings for comparison.
-func ToString(val interface{}) string {
-	switch v := val.(type) {
-	case int:
-		return strconv.Itoa(v)
-	case float64:
-		return strconv.FormatFloat(v, 'f', -1, 64)
-	case float32:
-		return strconv.FormatFloat(float64(v), 'f', -1, 32)
-	case int64:
-		return strconv.FormatInt(v, 10)
-	case int32:
-		return strconv.FormatInt(int64(v), 10)
-	case string:
-		return v
-	}
-	return ""
 }
 
 func ValidateAndMarshalJSON(log *zap.Logger, exp, act *string) (ValidatedJSON, error) {
