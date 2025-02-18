@@ -343,7 +343,6 @@ var (
 	}
 )
 
-
 // ExtractPort extracts the port from a given URL string, defaulting to 80 if no port is specified.
 func ExtractPort(rawURL string) (uint32, error) {
 	parsedURL, err := url.Parse(rawURL)

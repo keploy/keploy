@@ -443,7 +443,10 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 			utils.LogError(h.logger, err, "failed to get the keploy pid from the port in case of e2e")
 			return err
 		}
-		h.SendE2EInfo(pid)
+		err = h.SendE2EInfo(pid)
+		if err != nil {
+			h.logger.Error("failed to send e2e info to the ebpf program", zap.Error(err))
+		}
 	}
 
 	clientInfo.IsKeployClientRegistered = uint32(0)
@@ -504,7 +507,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	return nil
 }
 
-func (h *Hooks) Record(ctx context.Context, appID uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
+func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	// TODO use the session to get the app id
 	// and then use the app id to get the test cases chan
 	// and pass that to eBPF consumers/listeners
