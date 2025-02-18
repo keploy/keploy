@@ -343,6 +343,34 @@ var (
 	}
 )
 
+
+// ExtractPort extracts the port from a given URL string, defaulting to 80 if no port is specified.
+func ExtractPort(rawURL string) (uint32, error) {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return 0, err
+	}
+
+	host := parsedURL.Host
+	if strings.Contains(host, ":") {
+		// Split the host by ":" and return the port part
+		parts := strings.Split(host, ":")
+		port, err := strconv.ParseUint(parts[len(parts)-1], 10, 32)
+		if err != nil {
+			return 0, fmt.Errorf("invalid port in URL: %s", rawURL)
+		}
+		return uint32(port), nil
+	}
+
+	// Default ports based on scheme
+	switch parsedURL.Scheme {
+	case "https":
+		return 443, nil
+	default:
+		return 80, nil
+	}
+}
+
 func ExtractHostAndPort(curlCmd string) (string, string, error) {
 	// Split the command string to find the URL
 	parts := strings.Split(curlCmd, " ")

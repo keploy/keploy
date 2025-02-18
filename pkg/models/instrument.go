@@ -11,6 +11,7 @@ type HookOptions struct {
 	Rules         []config.BypassRule
 	Mode          Mode
 	EnableTesting bool
+	Port          uint32 // used for e2e filtering
 }
 
 type OutgoingOptions struct {

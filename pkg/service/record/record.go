@@ -166,15 +166,17 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		return nil
 	})
 
-	// running the user application
-	runAppErrGrp.Go(func() error {
-		runAppError = r.instrumentation.Run(runAppCtx, appID, models.RunOptions{})
-		if runAppError.AppErrorType == models.ErrCtxCanceled {
+	if r.config.Record.BaseURL == "" {
+		fmt.Println("Base URL not provided, skipping the application run", r.config.Record.BaseURL)
+		runAppErrGrp.Go(func() error {
+			runAppError = r.instrumentation.Run(runAppCtx, appID, models.RunOptions{})
+			if runAppError.AppErrorType == models.ErrCtxCanceled {
+				return nil
+			}
+			appErrChan <- runAppError
 			return nil
-		}
-		appErrChan <- runAppError
-		return nil
-	})
+		})
+	}
 
 	// setting a timer for recording
 	if r.config.Record.RecordTimer != 0 {
@@ -232,7 +234,6 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 
 func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
 	var stopReason string
-
 	// setting up the environment for recording
 	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
 	if err != nil {
@@ -248,6 +249,7 @@ func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
 		return appID, nil
 	default:
 		// Starting the hooks and proxy
+
 		err = r.instrumentation.Hook(ctx, appID, models.HookOptions{Mode: models.MODE_RECORD, EnableTesting: r.config.EnableTesting, Rules: r.config.BypassRules})
 		if err != nil {
 			stopReason = "failed to start the hooks and proxy"

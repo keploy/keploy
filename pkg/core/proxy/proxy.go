@@ -38,6 +38,7 @@ type Proxy struct {
 	IP6     string
 	Port    uint32
 	DNSPort uint32
+	Egress  bool
 
 	DestInfo     core.DestInfo
 	Integrations map[string]integrations.Integrations

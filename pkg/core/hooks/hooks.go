@@ -28,6 +28,10 @@ import (
 )
 
 func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
+	isE2E := false
+	if cfg.Record.BaseURL != "" {
+		isE2E = true
+	}
 	return &Hooks{
 		logger:    logger,
 		sess:      core.NewSessions(),
@@ -36,6 +40,7 @@ func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 		proxyIP6:  [4]uint32{0000, 0000, 0000, 0001},
 		proxyPort: cfg.ProxyPort,
 		dnsPort:   cfg.DNSPort,
+		isE2E:     isE2E,
 	}
 }
 
@@ -46,13 +51,14 @@ type Hooks struct {
 	proxyIP6  [4]uint32
 	proxyPort uint32
 	dnsPort   uint32
-
-	m sync.Mutex
+	isE2E     bool
+	m         sync.Mutex
 	// eBPF C shared maps
 	clientRegistrationMap    *ebpf.Map
 	agentRegistartionMap     *ebpf.Map
 	dockerAppRegistrationMap *ebpf.Map
 	redirectProxyMap         *ebpf.Map
+	e2eAppRegistrationMap    *ebpf.Map
 	//--------------
 
 	// eBPF C shared objectsobjects
@@ -139,9 +145,9 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	}
 
 	//getting all the ebpf maps
-	h.redirectProxyMap = objs.RedirectProxyMap
 	h.clientRegistrationMap = objs.KeployClientRegistrationMap
 	h.agentRegistartionMap = objs.KeployAgentRegistrationMap
+	h.e2eAppRegistrationMap = objs.E2eInfoMap
 	h.dockerAppRegistrationMap = objs.DockerAppRegistrationMap
 	h.objects = objs
 
@@ -155,114 +161,119 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	}
 	h.socket = socket
 
-	// ------------ For Egress -------------
+	if !opts.E2E {
+		h.redirectProxyMap = objs.RedirectProxyMap
+		h.objects = objs
+		// ------------ For Egress -------------
+		udppC4, err := link.Kprobe("udp_pre_connect", objs.SyscallProbeEntryUdpPreConnect, nil)
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to attach the kprobe hook on udp_pre_connect")
+			return err
+		}
+		h.udpp4 = udppC4
 
-	udppC4, err := link.Kprobe("udp_pre_connect", objs.SyscallProbeEntryUdpPreConnect, nil)
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach the kprobe hook on udp_pre_connect")
-		return err
+		// FOR IPV4
+		tcppC4, err := link.Kprobe("tcp_v4_pre_connect", objs.SyscallProbeEntryTcpV4PreConnect, nil)
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to attach the kprobe hook on tcp_v4_pre_connect")
+			return err
+		}
+		h.tcppv4 = tcppC4
+
+		tcpC4, err := link.Kprobe("tcp_v4_connect", objs.SyscallProbeEntryTcpV4Connect, nil)
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to attach the kprobe hook on tcp_v4_connect")
+			return err
+		}
+		h.tcpv4 = tcpC4
+
+		tcpRC4, err := link.Kretprobe("tcp_v4_connect", objs.SyscallProbeRetTcpV4Connect, &link.KprobeOptions{RetprobeMaxActive: 1024})
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to attach the kretprobe hook on tcp_v4_connect")
+			return err
+		}
+		h.tcpv4Ret = tcpRC4
+
+		// Get the first-mounted cgroupv2 path.
+		cGroupPath, err := detectCgroupPath(h.logger)
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to detect the cgroup path")
+			return err
+		}
+
+		c4, err := link.AttachCgroup(link.CgroupOptions{
+			Path:    cGroupPath,
+			Attach:  ebpf.AttachCGroupInet4Connect,
+			Program: objs.K_connect4,
+		})
+
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to attach the connect4 cgroup hook")
+			return err
+		}
+		h.connect4 = c4
+
+		gp4, err := link.AttachCgroup(link.CgroupOptions{
+			Path:    cGroupPath,
+			Attach:  ebpf.AttachCgroupInet4GetPeername,
+			Program: objs.K_getpeername4,
+		})
+
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to attach the GetPeername4 cgroup hook")
+			return err
+		}
+		h.gp4 = gp4
+
+		// FOR IPV6
+
+		tcpPreC6, err := link.Kprobe("tcp_v6_pre_connect", objs.SyscallProbeEntryTcpV6PreConnect, nil)
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to attach the kprobe hook on tcp_v6_pre_connect")
+			return err
+		}
+		h.tcppv6 = tcpPreC6
+
+		tcpC6, err := link.Kprobe("tcp_v6_connect", objs.SyscallProbeEntryTcpV6Connect, nil)
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to attach the kprobe hook on tcp_v6_connect")
+			return err
+		}
+		h.tcpv6 = tcpC6
+
+		tcpRC6, err := link.Kretprobe("tcp_v6_connect", objs.SyscallProbeRetTcpV6Connect, &link.KprobeOptions{RetprobeMaxActive: 1024})
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to attach the kretprobe hook on tcp_v6_connect")
+			return err
+		}
+		h.tcpv6Ret = tcpRC6
+
+		c6, err := link.AttachCgroup(link.CgroupOptions{
+			Path:    cGroupPath,
+			Attach:  ebpf.AttachCGroupInet6Connect,
+			Program: objs.K_connect6,
+		})
+
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to attach the connect6 cgroup hook")
+			return err
+		}
+		h.connect6 = c6
+
+		gp6, err := link.AttachCgroup(link.CgroupOptions{
+			Path:    cGroupPath,
+			Attach:  ebpf.AttachCgroupInet6GetPeername,
+			Program: objs.K_getpeername6,
+		})
+
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to attach the GetPeername6 cgroup hook")
+			return err
+		}
+		h.gp6 = gp6
 	}
-	h.udpp4 = udppC4
 
-	// FOR IPV4
-	tcppC4, err := link.Kprobe("tcp_v4_pre_connect", objs.SyscallProbeEntryTcpV4PreConnect, nil)
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach the kprobe hook on tcp_v4_pre_connect")
-		return err
-	}
-	h.tcppv4 = tcppC4
-
-	tcpC4, err := link.Kprobe("tcp_v4_connect", objs.SyscallProbeEntryTcpV4Connect, nil)
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach the kprobe hook on tcp_v4_connect")
-		return err
-	}
-	h.tcpv4 = tcpC4
-
-	tcpRC4, err := link.Kretprobe("tcp_v4_connect", objs.SyscallProbeRetTcpV4Connect, &link.KprobeOptions{RetprobeMaxActive: 1024})
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on tcp_v4_connect")
-		return err
-	}
-	h.tcpv4Ret = tcpRC4
-
-	// Get the first-mounted cgroupv2 path.
-	cGroupPath, err := detectCgroupPath(h.logger)
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to detect the cgroup path")
-		return err
-	}
-
-	c4, err := link.AttachCgroup(link.CgroupOptions{
-		Path:    cGroupPath,
-		Attach:  ebpf.AttachCGroupInet4Connect,
-		Program: objs.K_connect4,
-	})
-
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach the connect4 cgroup hook")
-		return err
-	}
-	h.connect4 = c4
-
-	gp4, err := link.AttachCgroup(link.CgroupOptions{
-		Path:    cGroupPath,
-		Attach:  ebpf.AttachCgroupInet4GetPeername,
-		Program: objs.K_getpeername4,
-	})
-
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach the GetPeername4 cgroup hook")
-		return err
-	}
-	h.gp4 = gp4
-
-	// FOR IPV6
-
-	tcpPreC6, err := link.Kprobe("tcp_v6_pre_connect", objs.SyscallProbeEntryTcpV6PreConnect, nil)
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach the kprobe hook on tcp_v6_pre_connect")
-		return err
-	}
-	h.tcppv6 = tcpPreC6
-
-	tcpC6, err := link.Kprobe("tcp_v6_connect", objs.SyscallProbeEntryTcpV6Connect, nil)
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach the kprobe hook on tcp_v6_connect")
-		return err
-	}
-	h.tcpv6 = tcpC6
-
-	tcpRC6, err := link.Kretprobe("tcp_v6_connect", objs.SyscallProbeRetTcpV6Connect, &link.KprobeOptions{RetprobeMaxActive: 1024})
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on tcp_v6_connect")
-		return err
-	}
-	h.tcpv6Ret = tcpRC6
-
-	c6, err := link.AttachCgroup(link.CgroupOptions{
-		Path:    cGroupPath,
-		Attach:  ebpf.AttachCGroupInet6Connect,
-		Program: objs.K_connect6,
-	})
-
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach the connect6 cgroup hook")
-		return err
-	}
-	h.connect6 = c6
-
-	gp6, err := link.AttachCgroup(link.CgroupOptions{
-		Path:    cGroupPath,
-		Attach:  ebpf.AttachCgroupInet6GetPeername,
-		Program: objs.K_getpeername6,
-	})
-
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to attach the GetPeername6 cgroup hook")
-		return err
-	}
-	h.gp6 = gp6
+	// ------------ For Ingress using Kprobes --------------
 
 	//Open a kprobe at the entry of sendto syscall
 	snd, err := link.Kprobe("sys_sendto", objs.SyscallProbeEntrySendto, nil)
@@ -279,8 +290,6 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 		return err
 	}
 	h.sendtoRet = sndr
-
-	// ------------ For Ingress using Kprobes --------------
 
 	// Open a Kprobe at the entry point of the kernel function and attach the
 	// pre-compiled program.
@@ -428,8 +437,16 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
 	clientInfo.KeployClientInode = inode
 	clientInfo.KeployClientNsPid = uint32(os.Getpid())
+	if opts.E2E {
+		pid, err := utils.GetPIDFromPort(ctx, h.logger, int(opts.Port))
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to get the keploy pid from the port in case of e2e")
+			return err
+		}
+		h.SendE2EInfo(pid)
+	}
+
 	clientInfo.IsKeployClientRegistered = uint32(0)
-	h.logger.Debug("Keploy Pid sent successfully...")
 
 	if opts.IsDocker {
 		h.proxyIP4 = opts.KeployIPV4
@@ -487,7 +504,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	return nil
 }
 
-func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
+func (h *Hooks) Record(ctx context.Context, appID uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	// TODO use the session to get the app id
 	// and then use the app id to get the test cases chan
 	// and pass that to eBPF consumers/listeners
@@ -501,44 +518,46 @@ func (h *Hooks) unLoad(_ context.Context) {
 		utils.LogError(h.logger, err, "failed to close the socket")
 	}
 
-	if err := h.udpp4.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the udpp4")
-	}
+	if !h.isE2E {
+		if err := h.udpp4.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the udpp4")
+		}
 
-	if err := h.connect4.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the connect4")
-	}
+		if err := h.connect4.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the connect4")
+		}
 
-	if err := h.gp4.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the gp4")
-	}
+		if err := h.gp4.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the gp4")
+		}
 
-	if err := h.tcppv4.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the tcppv4")
-	}
+		if err := h.tcppv4.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the tcppv4")
+		}
 
-	if err := h.tcpv4.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the tcpv4")
-	}
+		if err := h.tcpv4.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the tcpv4")
+		}
 
-	if err := h.tcpv4Ret.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the tcpv4Ret")
-	}
+		if err := h.tcpv4Ret.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the tcpv4Ret")
+		}
 
-	if err := h.connect6.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the connect6")
-	}
-	if err := h.gp6.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the gp6")
-	}
-	if err := h.tcppv6.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the tcppv6")
-	}
-	if err := h.tcpv6.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the tcpv6")
-	}
-	if err := h.tcpv6Ret.Close(); err != nil {
-		utils.LogError(h.logger, err, "failed to close the tcpv6Ret")
+		if err := h.connect6.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the connect6")
+		}
+		if err := h.gp6.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the gp6")
+		}
+		if err := h.tcppv6.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the tcppv6")
+		}
+		if err := h.tcpv6.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the tcpv6")
+		}
+		if err := h.tcpv6Ret.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the tcpv6Ret")
+		}
 	}
 	if err := h.accept.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the accept")
