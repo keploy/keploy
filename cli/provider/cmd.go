@@ -385,14 +385,19 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 		c.logger.Error("failed to validate flags", zap.Error(err))
 		return err
 	}
+	// used to rewritte keploy.yml with <previous values> + <missing values> when true
+	var rewriteConfig = false
 	if c.cfg.AppName == "" {
+		// rewrite keploy.yml since AppName is missing
+		rewriteConfig = true
 		appName, err := utils.GetLastDirectory()
 		if err != nil {
 			return fmt.Errorf("failed to get the last directory: %v", err)
 		}
+		c.logger.Info("Using the last directory name as appName : " + appName)
 		c.cfg.AppName = appName
 	}
-	if !IsConfigFileFound {
+	if !IsConfigFileFound || rewriteConfig {
 		err := c.CreateConfigFile(ctx, defaultCfg)
 		if err != nil {
 			c.logger.Error("failed to create config file", zap.Error(err))
