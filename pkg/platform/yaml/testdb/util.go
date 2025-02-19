@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -50,6 +51,59 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 
 		for _, v := range noiseFieldsFound {
 			noise[v] = []string{}
+		}
+	}
+
+	if tc.HTTPReq.Method == http.MethodGet {
+		var responses []map[string][]string
+		var client = &http.Client{}
+		replayCount := 5
+
+		req, err := http.NewRequest(string(tc.HTTPReq.Method), tc.HTTPReq.URL, strings.NewReader(tc.HTTPReq.Body))
+		if err != nil {
+			utils.LogError(logger, err, "failed to create a new http request")
+			return nil, err
+		}
+
+		// Copy original headers
+		for k, v := range tc.HTTPReq.Header {
+			req.Header[k] = []string{v}
+		}
+
+		// Add special header to prevent recording these replay requests
+		req.Header.Set("X-Keploy-Idempotency-Check", "true")
+
+		// Send replay requests
+		for i := 0; i < replayCount; i++ {
+			res, err := client.Do(req)
+			if err != nil {
+				utils.LogError(logger, err, "failed to send http request during idempotency check")
+				continue
+			}
+			defer res.Body.Close()
+
+			body, err := io.ReadAll(res.Body)
+			if err != nil {
+				utils.LogError(logger, err, "failed to read response body")
+				continue
+			}
+
+			resMap, err := FlattenHTTPResponse(res.Header, string(body))
+			if err != nil {
+				utils.LogError(logger, err, "failed to flatten http response")
+				continue
+			}
+			responses = append(responses, resMap)
+		}
+
+		dynamicFields := identifyDynamicFields(responses, m)
+
+		for field := range dynamicFields {
+			noise[field] = []string{}
+		}
+
+		if !validateResponseConsistency(responses, m, dynamicFields, logger) {
+			utils.LogError(logger, nil, "GET request failed idempotency check")
 		}
 	}
 
@@ -272,4 +326,75 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		return nil, errors.New("yaml doc of unknown type")
 	}
 	return &tc, nil
+}
+
+// identifyDynamicFields compares each response with its previous response to identify dynamic fields
+func identifyDynamicFields(responses []map[string][]string, m map[string][]string) map[string]bool {
+	dynamicFields := make(map[string]bool)
+	changeCount := make(map[string]int)
+
+	if len(responses) <= 1 {
+		return dynamicFields
+	}
+
+	// Compare first response with original response (m)
+	for field, origValue := range m {
+		if val, exists := responses[0][field]; exists {
+			if !reflect.DeepEqual(origValue, val) {
+				changeCount[field] = 1
+			}
+		}
+	}
+
+	// Compare each response with its previous response
+	for i := 1; i < len(responses); i++ {
+		prevResponse := responses[i-1]
+		currResponse := responses[i]
+
+		for field, prevValue := range prevResponse {
+			if val, exists := currResponse[field]; exists {
+				if !reflect.DeepEqual(prevValue, val) {
+					changeCount[field]++
+				}
+			}
+		}
+	}
+
+	// Mark field as dynamic only if it changed in all responses
+	// Total possible changes = number of responses
+	totalPossibleChanges := len(responses)
+	for field, count := range changeCount {
+		if count == totalPossibleChanges {
+			dynamicFields[field] = true
+		}
+	}
+
+	return dynamicFields
+}
+
+// validateResponseConsistency checks if non-dynamic fields remain consistent
+func validateResponseConsistency(responses []map[string][]string, m map[string][]string, dynamicFields map[string]bool, logger *zap.Logger) bool {
+	if len(responses) <= 1 {
+		return true
+	}
+
+	baseline := m
+	for _, resp := range responses {
+		for field, baseValue := range baseline {
+			// Skip dynamic fields and headers
+			if dynamicFields[field] || strings.HasPrefix(field, "header.") {
+				continue
+			}
+
+			if val, exists := resp[field]; exists {
+				if !reflect.DeepEqual(baseValue, val) {
+					utils.LogError(logger, nil, "Inconsistent response body detected",
+						zap.String("field", field),
+						zap.Any("expected", baseValue),
+						zap.Any("got", val))
+				}
+			}
+		}
+	}
+	return true
 }
