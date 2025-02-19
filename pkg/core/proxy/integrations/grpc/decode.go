@@ -9,7 +9,6 @@ import (
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 )
@@ -20,7 +19,7 @@ func decodeGrpc(ctx context.Context, logger *zap.Logger, _ []byte, clientConn ne
 	// fake server in the test mode
 	err := srv.ListenAndServe(ctx)
 	if err != nil {
-		utils.LogError(logger, nil, "could not serve grpc request")
+		logger.Debug("could not serve grpc request")
 		return err
 	}
 	return nil
