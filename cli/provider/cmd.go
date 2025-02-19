@@ -476,7 +476,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		c.cfg.Test.Port = port
+		c.cfg.Port = port
 		c.cfg.E2E = true
 	}
 

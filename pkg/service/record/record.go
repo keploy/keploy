@@ -248,7 +248,14 @@ func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
 		return appID, nil
 	default:
 		// Starting the hooks and proxy
-		err = r.instrumentation.Hook(ctx, appID, models.HookOptions{Mode: models.MODE_RECORD, EnableTesting: r.config.EnableTesting, Rules: r.config.BypassRules, E2E: r.config.E2E, Port: r.config.Port})
+		hooks := models.HookOptions{
+			Mode:          models.MODE_RECORD,
+			EnableTesting: r.config.EnableTesting,
+			Rules:         r.config.BypassRules,
+			E2E:           r.config.E2E,
+			Port:          r.config.Port,
+		}
+		err = r.instrumentation.Hook(ctx, appID, hooks)
 		if err != nil {
 			stopReason = "failed to start the hooks and proxy"
 			utils.LogError(r.logger, err, stopReason)
