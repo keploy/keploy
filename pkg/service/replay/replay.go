@@ -845,8 +845,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	r.telemetry.TestSetRun(testReport.Success, testReport.Failure, testSetID, string(testSetStatus))
 
 	if r.config.Test.UpdateTemplate || r.config.Test.BasePath != "" {
-		removeDoubleQuotes(utils.TemplatizedValues)
-		// Write the templatized values to the yaml.
+		utils.RemoveDoubleQuotes(utils.TemplatizedValues) // Write the templatized values to the yaml.
 		if len(utils.TemplatizedValues) > 0 {
 			err = r.testSetConf.Write(ctx, testSetID, &models.TestSet{
 				PreScript:  conf.PreScript,
@@ -1026,7 +1025,7 @@ func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noise
 					// remove from the original noise map
 					v.Noise = removeFromMap(v.Noise, noiseParam.Assertion)
 				}
-				err = r.testDB.UpdateTestCase(ctx, v, testSetID)
+				err = r.testDB.UpdateTestCase(ctx, v, testSetID, true)
 				if err != nil {
 					return nil, fmt.Errorf("failed to update test case: %w", err)
 				}
@@ -1117,7 +1116,7 @@ func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testS
 			continue
 		}
 		testCase.HTTPResp = testCaseResultMap[testCase.Name].Res
-		err = r.testDB.UpdateTestCase(ctx, testCase, testSetID)
+		err = r.testDB.UpdateTestCase(ctx, testCase, testSetID, true)
 		if err != nil {
 			return fmt.Errorf("failed to update test case: %w", err)
 		}
