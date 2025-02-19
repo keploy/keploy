@@ -15,7 +15,7 @@ import (
 	"go.keploy.io/server/v2/utils"
 	"go.keploy.io/server/v2/utils/log"
 	//pprof for debugging
-	//_ "net/http/pprof"
+	// _ "net/http/pprof"
 )
 
 // version is the version of the server and will be injected during build by ldflags, same with dsn

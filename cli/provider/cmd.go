@@ -18,6 +18,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/utils"
@@ -276,6 +277,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 	switch cmd.Name() {
 	case "record":
 		cmd.Flags().Uint64("record-timer", 0, "User provided time to record its application")
+		cmd.Flags().String("base-url", c.cfg.Record.BaseURL, "Base URL to hit the server while recording the testcases")
 	case "test", "rerecord":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
 		cmd.Flags().String("host", c.cfg.Test.Host, "Custom host to replace the actual host in the testcases")
@@ -465,6 +467,17 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+	}
+
+	if c.cfg.Record.BaseURL != "" {
+		port, err := pkg.ExtractPort(c.cfg.Record.BaseURL)
+		if err != nil {
+			errMsg := "failed to extract port from base URL"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Port = port
+		c.cfg.E2E = true
 	}
 
 	if c.cfg.EnableTesting {
