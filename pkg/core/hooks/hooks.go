@@ -28,10 +28,6 @@ import (
 )
 
 func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
-	isE2E := false
-	if cfg.Record.BaseURL != "" {
-		isE2E = true
-	}
 	return &Hooks{
 		logger:    logger,
 		sess:      core.NewSessions(),
@@ -40,7 +36,6 @@ func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 		proxyIP6:  [4]uint32{0000, 0000, 0000, 0001},
 		proxyPort: cfg.ProxyPort,
 		dnsPort:   cfg.DNSPort,
-		isE2E:     isE2E,
 	}
 }
 
@@ -51,7 +46,6 @@ type Hooks struct {
 	proxyIP6  [4]uint32
 	proxyPort uint32
 	dnsPort   uint32
-	isE2E     bool
 	m         sync.Mutex
 	// eBPF C shared maps
 	clientRegistrationMap    *ebpf.Map
@@ -115,7 +109,7 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 	g.Go(func() error {
 		defer utils.Recover(h.logger)
 		<-ctx.Done()
-		h.unLoad(ctx)
+		h.unLoad(ctx, opts)
 
 		//deleting in order to free the memory in case of rerecord.
 		h.sess.Delete(id)
@@ -514,14 +508,14 @@ func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOption
 	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
 }
 
-func (h *Hooks) unLoad(_ context.Context) {
+func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 	// closing all events
 	//other
 	if err := h.socket.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the socket")
 	}
 
-	if !h.isE2E {
+	if !opts.E2E {
 		if err := h.udpp4.Close(); err != nil {
 			utils.LogError(h.logger, err, "failed to close the udpp4")
 		}

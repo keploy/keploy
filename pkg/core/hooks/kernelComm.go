@@ -86,7 +86,6 @@ func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
 
 func (h *Hooks) SendE2EInfo(pid uint32) error {
 	key := 0
-	fmt.Println("Sending e2e info")
 	err := h.e2eAppRegistrationMap.Update(uint64(key), pid, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the E2E info to the ebpf program")

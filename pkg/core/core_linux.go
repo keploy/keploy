@@ -32,15 +32,13 @@ type Core struct {
 	port         uint32
 }
 
-func New(logger *zap.Logger, hook Hooks, proxy Proxy, tester Tester, client docker.Client, e2e bool, port uint32) *Core {
+func New(logger *zap.Logger, hook Hooks, proxy Proxy, tester Tester, client docker.Client) *Core {
 	return &Core{
 		logger:       logger,
 		Hooks:        hook,
 		Proxy:        proxy,
 		Tester:       tester,
 		dockerClient: client,
-		e2e:          e2e,
-		port:         port,
 	}
 }
 
@@ -140,8 +138,8 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		KeployIPV4: a.KeployIPv4Addr(),
 		Mode:       opts.Mode,
 		Rules:      opts.Rules,
-		E2E:        c.e2e,
-		Port:       c.port,
+		E2E:        opts.E2E,
+		Port:       opts.Port,
 	})
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to load hooks")

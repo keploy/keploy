@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 
 	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/core/proxy"
@@ -100,16 +99,7 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 		}
 	}
 
-	var instrumentation *core.Core
-	if c.Record.BaseURL == "" {
-		instrumentation = core.New(logger, h, p, t, client, false, 0)
-	} else {
-		port, err := pkg.ExtractPort(c.Record.BaseURL)
-		if err != nil {
-			return nil, err
-		}
-		instrumentation = core.New(logger, h, p, t, client, true, port)
-	}
+	instrumentation := core.New(logger, h, p, t, client)
 
 	testDB := testdb.New(logger, c.Path)
 	mockDB := mockdb.New(logger, c.Path, "")
