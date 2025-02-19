@@ -166,7 +166,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		return nil
 	})
 
-	if r.config.Record.BaseURL == "" {
+	if !r.config.E2E {
 		runAppErrGrp.Go(func() error {
 			runAppError = r.instrumentation.Run(runAppCtx, appID, models.RunOptions{})
 			if runAppError.AppErrorType == models.ErrCtxCanceled {
@@ -248,18 +248,7 @@ func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
 		return appID, nil
 	default:
 		// Starting the hooks and proxy
-		e2e := false
-		var port uint32
-		if r.config.Record.BaseURL != "" {
-			e2e = true
-			port, err = pkg.ExtractPort(r.config.Record.BaseURL)
-			if err != nil {
-				stopReason = "failed to extract port from base url"
-				utils.LogError(r.logger, err, stopReason)
-				return appID, fmt.Errorf(stopReason)
-			}
-		}
-		err = r.instrumentation.Hook(ctx, appID, models.HookOptions{Mode: models.MODE_RECORD, EnableTesting: r.config.EnableTesting, Rules: r.config.BypassRules, E2E: e2e, Port: port})
+		err = r.instrumentation.Hook(ctx, appID, models.HookOptions{Mode: models.MODE_RECORD, EnableTesting: r.config.EnableTesting, Rules: r.config.BypassRules, E2E: r.config.E2E, Port: r.config.Port})
 		if err != nil {
 			stopReason = "failed to start the hooks and proxy"
 			utils.LogError(r.logger, err, stopReason)

@@ -18,6 +18,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/utils"
@@ -466,6 +467,17 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+	}
+
+	if c.cfg.Record.BaseURL != "" {
+		port, err := pkg.ExtractPort(c.cfg.Record.BaseURL)
+		if err != nil {
+			errMsg := "failed to extract port from base URL"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Test.Port = port
+		c.cfg.E2E = true
 	}
 
 	if c.cfg.EnableTesting {

@@ -28,8 +28,6 @@ type Core struct {
 	id           utils.AutoInc
 	apps         sync.Map
 	proxyStarted bool
-	e2e          bool
-	port         uint32
 }
 
 func New(logger *zap.Logger, hook Hooks, proxy Proxy, tester Tester, client docker.Client) *Core {
