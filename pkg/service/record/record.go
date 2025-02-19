@@ -167,7 +167,6 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	})
 
 	if r.config.Record.BaseURL == "" {
-		fmt.Println("Base URL not provided, skipping the application run", r.config.Record.BaseURL)
 		runAppErrGrp.Go(func() error {
 			runAppError = r.instrumentation.Run(runAppCtx, appID, models.RunOptions{})
 			if runAppError.AppErrorType == models.ErrCtxCanceled {
