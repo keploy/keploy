@@ -68,7 +68,7 @@ type Templatize struct {
 
 type Record struct {
 	Filters     []Filter      `json:"filters" yaml:"filters" mapstructure:"filters"`
-	BaseURL     string        `json:"baseUrl" yaml:"baseUrl" mapstructure:"baseUrl"`
+	BasePath    string        `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
 	RecordTimer time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
 }
 
