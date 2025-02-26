@@ -26,8 +26,7 @@
 [![Slack](https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white)](https://join.slack.com/t/keploy/shared_invite/zt-2poflru6f-_VAuvQfCBT8fDWv1WwSbkw)
 [![LinkedIn](https://img.shields.io/badge/linkedin-%230077B5.svg?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/keploy/)
 [![keployio on YouTube](https://img.shields.io/badge/keployio-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg)
-[![@keployio on X](https://img.shields.io/badge/%40keployio-black?style=for-the-badge&logo=x&logoColor=white)](https://x.com/keployio)
-
+[![keployio on X](https://img.shields.io/badge/keployio-black?style=for-the-badge&logo=x&logoColor=white)](https://x.com/keployio)
 
 <!--[![keployio on YouTube](https://img.shields.io/badge/keployio-FF0000?style=flat&logo=youtube)](https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg)
 [![Keploy on LinkedIn](https://img.shields.io/badge/Keploy-0A66C2?style=flat&logo=linkedin)](https://www.linkedin.com/company/keploy/) 
@@ -54,8 +53,6 @@ Beyond recording API calls, Keploy captures database interactions and replays th
 
 <img src="https://raw.githubusercontent.com/keploy/docs/main/static/gif/record-tc.gif" width="60%" alt="Convert API calls to test cases"/>
 
-<!-- ### 📜 Follow [Unit Test Generator README](README-UnitGen.md)! ✅ -->
-
 
 
 <!--# 📜 Table of Contents  
@@ -76,7 +73,6 @@ Beyond recording API calls, Keploy captures database interactions and replays th
 
 Save time by Integrating Keploy seamlessly into your development workflow with no code changes required. Let's dive into its powerful features and how to use them one by one:
 
----
 
 ### 🧪 Unit Test Generation
 
@@ -107,7 +103,8 @@ Keploy introduces the world's first **unit test generator (ut-gen)**, based on t
 
 Elevate your unit testing game with Keploy's **AI-powered VS Code Extension**!  
 
-#### 📜 [Install the VS Code AI Extension for Unit Test Generation](https://marketplace.visualstudio.com/items?itemName=Keploy.keployio) and get started today! ✅
+#### 📜 [Install the VS Code AI Extension for Unit Test Generation](https://marketplace.visualstudio.com/items?itemName=Keploy.keployio) and get started today! ✅ 
+📜 Follow [Unit Test Generator README](README-UnitGen.md)! ✅ 
 
 ---
 
