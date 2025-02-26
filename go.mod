@@ -124,12 +124,7 @@ require (
 	sigs.k8s.io/kustomize/kyaml v0.17.2
 )
 
-require (
-	github.com/k0kubun/go-ansi v0.0.0-20180517002512-3bf9e2903213 // indirect
-	github.com/mitchellh/colorstring v0.0.0-20190213212951-d06e56a500db // indirect
-	github.com/perimeterx/marshmallow v1.1.5 // indirect
-	github.com/schollz/progressbar/v3 v3.18.0 // indirect
-)
+require github.com/perimeterx/marshmallow v1.1.5 // indirect
 
 require (
 	github.com/alecthomas/chroma v0.10.0 // indirect
