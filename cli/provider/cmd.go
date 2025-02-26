@@ -201,28 +201,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "templatize":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().StringSliceP("testsets", "t", c.cfg.Templatize.TestSets, "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
-	case "gen":
-		cmd.Flags().String("source-file-path", "", "Path to the source file.")
-		cmd.Flags().String("test-file-path", "", "Path to the input test file.")
-		cmd.Flags().String("coverage-report-path", "coverage.xml", "Path to the code coverage report file.")
-		cmd.Flags().String("test-command", "", "The command to run tests and generate coverage report.")
-		cmd.Flags().String("coverage-format", "cobertura", "Type of coverage report.")
-		cmd.Flags().Int("expected-coverage", 80, "The desired coverage percentage.")
-		cmd.Flags().Int("max-iterations", 5, "The maximum number of iterations.")
-		cmd.Flags().String("test-dir", "", "Path to the test directory.")
-		cmd.Flags().String("llm-base-url", "", "Base URL for the AI model.")
-		cmd.Flags().String("model", "gpt-4o", "Model to use for the AI.")
-		cmd.Flags().String("llm-api-version", "", "API version of the llm")
-		cmd.Flags().String("additional-prompt", "", "Additional prompt to be used for the AI model.")
-		cmd.Flags().String("function-under-test", "", "The specific function for which tests will be generated.")
-		cmd.Flags().Bool("flakiness", false, "The flakiness check to run the passed tests for flakiness")
-		err := cmd.MarkFlagRequired("test-command")
-		if err != nil {
-			errMsg := "failed to mark testCommand as required flag"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-
 	case "record", "test", "rerecord":
 		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
 			cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate contracts")
@@ -749,20 +727,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 	case "templatize":
 		c.cfg.Path = utils.ToAbsPath(c.logger, c.cfg.Path)
-	case "gen":
-		if os.Getenv("API_KEY") == "" {
-			utils.LogError(c.logger, nil, "API_KEY is not set")
-			return errors.New("API_KEY is not set")
-		}
-		if (c.cfg.Gen.SourceFilePath == "" && c.cfg.Gen.TestFilePath != "") || c.cfg.Gen.SourceFilePath != "" && c.cfg.Gen.TestFilePath == "" {
-			utils.LogError(c.logger, nil, "One of the SourceFilePath and TestFilePath is mentioned. Either provide both or neither")
-			return errors.New("sourceFilePath and testFilePath misconfigured")
-		} else if c.cfg.Gen.SourceFilePath == "" && c.cfg.Gen.TestFilePath == "" {
-			if c.cfg.Gen.TestDir == "" {
-				utils.LogError(c.logger, nil, "TestDir is not set, Please specify the test directory")
-				return errors.New("TestDir is not set")
-			}
-		}
 	}
 
 	return nil

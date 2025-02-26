@@ -27,7 +27,6 @@ type Config struct {
 	BuildDelay            uint64       `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
 	Test                  Test         `json:"test" yaml:"test" mapstructure:"test"`
 	Record                Record       `json:"record" yaml:"record" mapstructure:"record"`
-	Gen                   UtGen        `json:"gen" yaml:"-" mapstructure:"gen"`
 	Normalize             Normalize    `json:"normalize" yaml:"-" mapstructure:"normalize"`
 	ReRecord              ReRecord     `json:"rerecord" yaml:"-" mapstructure:"rerecord"`
 	ConfigPath            string       `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
@@ -46,22 +45,6 @@ type Config struct {
 	GitHubClientID string `json:"-" yaml:"-" mapstructure:"-"`
 }
 
-type UtGen struct {
-	SourceFilePath     string  `json:"sourceFilePath" yaml:"sourceFilePath" mapstructure:"sourceFilePath"`
-	TestFilePath       string  `json:"testFilePath" yaml:"testFilePath" mapstructure:"testFilePath"`
-	CoverageReportPath string  `json:"coverageReportPath" yaml:"coverageReportPath" mapstructure:"coverageReportPath"`
-	TestCommand        string  `json:"testCommand" yaml:"testCommand" mapstructure:"testCommand"`
-	CoverageFormat     string  `json:"coverageFormat" yaml:"coverageFormat" mapstructure:"coverageFormat"`
-	DesiredCoverage    float64 `json:"expectedCoverage" yaml:"expectedCoverage" mapstructure:"expectedCoverage"`
-	MaxIterations      int     `json:"maxIterations" yaml:"maxIterations" mapstructure:"maxIterations"`
-	TestDir            string  `json:"testDir" yaml:"testDir" mapstructure:"testDir"`
-	APIBaseURL         string  `json:"llmBaseUrl" yaml:"llmBaseUrl" mapstructure:"llmBaseUrl"`
-	Model              string  `json:"model" yaml:"model" mapstructure:"model"`
-	APIVersion         string  `json:"llmApiVersion" yaml:"llmApiVersion" mapstructure:"llmApiVersion"`
-	AdditionalPrompt   string  `json:"additionalPrompt" yaml:"additionalPrompt" mapstructure:"additionalPrompt"`
-	FunctionUnderTest  string  `json:"functionUnderTest" yaml:"-" mapstructure:"functionUnderTest"`
-	Flakiness          bool    `json:"flakiness" yaml:"flakiness" mapstructure:"flakiness"`
-}
 type Templatize struct {
 	TestSets []string `json:"testSets" yaml:"testSets" mapstructure:"testSets"`
 }
