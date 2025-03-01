@@ -15,6 +15,8 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/service"
+	"go.keploy.io/server/v2/pkg/service/embedding"
+	"go.keploy.io/server/v2/pkg/service/vectorstore"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -55,6 +57,9 @@ type UnitTestGenerator struct {
 	testCaseFailed   int
 	noCoverageTest   int
 	flakiness        bool
+	vectorStore      *vectorstore.MilvusStore
+	embeddingService *embedding.EmbeddingService
+	fileWatcher      *vectorstore.FileWatcher
 }
 
 var discardedTestsFilename = "discardedTests.txt"
@@ -66,6 +71,46 @@ func NewUnitTestGenerator(
 	logger *zap.Logger,
 ) (*UnitTestGenerator, error) {
 	genConfig := cfg.Gen
+
+	// Initialize vector store if enabled
+	var milvusStore *vectorstore.MilvusStore
+	var embeddingService *embedding.EmbeddingService
+	var fileWatcher *vectorstore.FileWatcher
+
+	if cfg.VectorStore.Enabled {
+		// Initialize embedding service
+		embeddingService = embedding.NewEmbeddingService(logger, cfg.Embedding.ApiKey)
+
+		// Initialize vector store
+		milvusConfig := &vectorstore.MilvusConfig{
+			Host:           cfg.VectorStore.Host,
+			Port:           cfg.VectorStore.Port,
+			CollectionName: cfg.VectorStore.CollectionName,
+			Dimension:      embeddingService.GetDimension(),
+			IndexType:      cfg.VectorStore.IndexType,
+			MetricType:     cfg.VectorStore.MetricType,
+		}
+
+		var err error
+		milvusStore, err = vectorstore.NewMilvusStore(context.Background(), logger, milvusConfig)
+		if err != nil {
+			utils.LogError(logger, err, "failed to initialize vector store")
+			// Continue without vector store
+		} else {
+			// Initialize file watcher if vector store is enabled
+			ignorePatterns := strings.Split(cfg.VectorStore.IgnorePatterns, ",")
+			fileWatcher, err = vectorstore.NewFileWatcher(logger, milvusStore, embeddingService, ignorePatterns)
+			if err != nil {
+				utils.LogError(logger, err, "failed to initialize file watcher")
+			} else {
+				// Start watching the current directory
+				err = fileWatcher.WatchDirectory(context.Background(), ".")
+				if err != nil {
+					utils.LogError(logger, err, "failed to start file watcher")
+				}
+			}
+		}
+	}
 
 	generator := &UnitTestGenerator{
 		srcPath:       genConfig.SourceFilePath,
@@ -84,6 +129,9 @@ func NewUnitTestGenerator(
 		additionalPrompt: genConfig.AdditionalPrompt,
 		cur:              &Cursor{},
 		flakiness:        genConfig.Flakiness,
+		vectorStore:      milvusStore,
+		embeddingService: embeddingService,
+		fileWatcher:      fileWatcher,
 	}
 	return generator, nil
 }
@@ -810,4 +858,32 @@ func (g *UnitTestGenerator) saveFailedTestCasesToFile() error {
 		return fmt.Errorf("error writing to discarded tests file: %w", err)
 	}
 	return nil
+}
+
+func (g *UnitTestGenerator) FindSimilarCode(ctx context.Context, codeSnippet string, topK int) ([]vectorstore.CodeSearchResult, error) {
+	if g.vectorStore == nil || g.embeddingService == nil {
+		return nil, fmt.Errorf("vector store or embedding service not initialized")
+	}
+
+	// Generate embedding for the code snippet
+	embedding, err := g.embeddingService.GenerateEmbedding(ctx, codeSnippet)
+	if err != nil {
+		utils.LogError(g.logger, err, "failed to generate embedding for code snippet")
+		return nil, err
+	}
+
+	// Search in vector store
+	results, err := g.vectorStore.SearchSimilarCode(ctx, embedding, topK)
+	if err != nil {
+		utils.LogError(g.logger, err, "failed to search for similar code")
+		return nil, err
+	}
+
+	return results, nil
+}
+
+func (g *UnitTestGenerator) Cleanup() {
+	if g.fileWatcher != nil {
+		g.fileWatcher.Stop()
+	}
 }

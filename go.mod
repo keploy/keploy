@@ -31,7 +31,7 @@ require (
 require (
 	github.com/containerd/log v0.1.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
-	github.com/fsnotify/fsnotify v1.7.0 // indirect
+	github.com/fsnotify/fsnotify v1.7.0
 	github.com/getkin/kin-openapi v0.126.0
 	github.com/go-errors/errors v1.4.2 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
@@ -103,6 +103,7 @@ require (
 require (
 	facette.io/natsort v0.0.0-20181210072756-2cd4dd1e2dcb
 	github.com/7sDream/geko v0.1.1
+	github.com/BurntSushi/toml v1.4.0
 	github.com/agnivade/levenshtein v1.1.1
 	github.com/charmbracelet/glamour v0.6.0
 	github.com/denisbrodbeck/machineid v1.0.1
@@ -112,23 +113,31 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgproto3/v2 v2.3.2
 	github.com/keploy/jsonDiff v1.0.4
+	github.com/milvus-io/milvus-sdk-go/v2 v2.4.2
 	github.com/shirou/gopsutil/v3 v3.24.3
 	github.com/spf13/viper v1.19.0
 	github.com/wI2L/jsondiff v0.5.0
 	github.com/xdg-go/pbkdf2 v1.0.0
 	github.com/xdg-go/scram v1.1.1
 	github.com/xdg-go/stringprep v1.0.4
-	golang.org/x/sync v0.7.0
+	golang.org/x/sync v0.8.0
 	golang.org/x/term v0.28.0
 	gopkg.in/yaml.v2 v2.4.0
 	sigs.k8s.io/kustomize/kyaml v0.17.2
 )
 
 require (
-	github.com/k0kubun/go-ansi v0.0.0-20180517002512-3bf9e2903213 // indirect
-	github.com/mitchellh/colorstring v0.0.0-20190213212951-d06e56a500db // indirect
+	github.com/cockroachdb/errors v1.9.1 // indirect
+	github.com/cockroachdb/logtags v0.0.0-20211118104740-dabe8e521a4f // indirect
+	github.com/cockroachdb/redact v1.1.3 // indirect
+	github.com/grpc-ecosystem/go-grpc-middleware v1.4.0 // indirect
+	github.com/kr/pretty v0.3.1 // indirect
+	github.com/kr/text v0.2.0 // indirect
+	github.com/milvus-io/milvus-proto/go-api/v2 v2.4.10-0.20240819025435-512e3b98866a // indirect
 	github.com/perimeterx/marshmallow v1.1.5 // indirect
-	github.com/schollz/progressbar/v3 v3.18.0 // indirect
+	github.com/rogpeppe/go-internal v1.12.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20240318140521-94a12d6c2237 // indirect
+	google.golang.org/grpc v1.64.0 // indirect
 )
 
 require (
