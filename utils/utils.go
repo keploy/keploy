@@ -26,6 +26,7 @@ import (
 	"golang.org/x/text/language"
 
 	"github.com/getsentry/sentry-go"
+	"github.com/sbabiv/xml2map"
 	netLib "github.com/shirou/gopsutil/v3/net"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -962,4 +963,19 @@ func IsFileEmpty(filePath string) (bool, error) {
 		return false, err
 	}
 	return fileInfo.Size() == 0, nil
+}
+func IsXMLResponse(resp *models.HTTPResp) bool {
+	contentType := resp.Header["Content-Type"]
+	return strings.Contains(contentType, "application/xml") || strings.Contains(contentType, "text/xml")
+}
+
+// XMLToMap converts an XML string into a map[string]interface{}
+func XMLToMap(xmlData string) (map[string]interface{}, error) {
+	// Convert XML to map[string]interface{}
+	m, err := xml2map.NewDecoder(strings.NewReader(xmlData)).Decode()
+	if err != nil {
+		return nil, err
+	}
+
+	return m, nil
 }

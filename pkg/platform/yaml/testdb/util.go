@@ -19,13 +19,18 @@ import (
 )
 
 func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
-
+	respType := models.HTTPResponseJSON
+	isXML := utils.IsXMLResponse(&tc.HTTPResp)
+	if isXML {
+		respType = models.HTTPResponseXML
+	}
 	curl := pkg.MakeCurlCommand(tc.HTTPReq)
 	doc := &yaml.NetworkTrafficDoc{
-		Version: tc.Version,
-		Kind:    tc.Kind,
-		Name:    tc.Name,
-		Curl:    curl,
+		Version:  tc.Version,
+		Kind:     tc.Kind,
+		Name:     tc.Name,
+		Curl:     curl,
+		RespType: respType,
 	}
 	// find noisy fields
 	m, err := FlattenHTTPResponse(pkg.ToHTTPHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)
@@ -55,18 +60,49 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 
 	switch tc.Kind {
 	case models.HTTP:
-		err := doc.Spec.Encode(models.HTTPSchema{
-			Request:  tc.HTTPReq,
-			Response: tc.HTTPResp,
-			Created:  tc.Created,
-			Assertions: map[string]interface{}{
-				"noise": noise,
-			},
-		})
-		if err != nil {
-			utils.LogError(logger, err, "failed to encode testcase into a yaml doc")
-			return nil, err
+		switch respType {
+		case models.HTTPResponseXML:
+			m, err := utils.XMLToMap(tc.HTTPResp.Body)
+			if err != nil {
+				utils.LogError(logger, err, "failed to convert xml to map")
+				return nil, err
+			}
+			err = doc.Spec.Encode(models.XMLSchema{
+				Request: tc.HTTPReq,
+				Response: models.XMLResp{
+					Body:          m,
+					StatusCode:    tc.HTTPResp.StatusCode,
+					Header:        tc.HTTPResp.Header,
+					StatusMessage: tc.HTTPResp.StatusMessage,
+					ProtoMajor:    tc.HTTPResp.ProtoMajor,
+					ProtoMinor:    tc.HTTPResp.ProtoMinor,
+					Binary:        tc.HTTPResp.Binary,
+					Timestamp:     tc.HTTPResp.Timestamp,
+				},
+				Created: tc.Created,
+				Assertions: map[string]interface{}{
+					"noise": noise,
+				},
+			})
+			if err != nil {
+				utils.LogError(logger, err, "failed to encode testcase into a yaml doc")
+				return nil, err
+			}
+		case models.HTTPResponseJSON:
+			err := doc.Spec.Encode(models.HTTPSchema{
+				Request:  tc.HTTPReq,
+				Response: tc.HTTPResp,
+				Created:  tc.Created,
+				Assertions: map[string]interface{}{
+					"noise": noise,
+				},
+			})
+			if err != nil {
+				utils.LogError(logger, err, "failed to encode testcase into a yaml doc")
+				return nil, err
+			}
 		}
+
 	default:
 		utils.LogError(logger, nil, "failed to marshal the testcase into yaml due to invalid kind of testcase")
 		return nil, errors.New("type of testcases is invalid")
@@ -232,29 +268,58 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		Name:    yamlTestcase.Name,
 		Curl:    yamlTestcase.Curl,
 	}
+
 	switch tc.Kind {
 	case models.HTTP:
-		httpSpec := models.HTTPSchema{}
-		err := yamlTestcase.Spec.Decode(&httpSpec)
-		if err != nil {
-			utils.LogError(logger, err, "failed to unmarshal a yaml doc into the http testcase")
-			return nil, err
-		}
-		tc.Created = httpSpec.Created
-		tc.HTTPReq = httpSpec.Request
-		tc.HTTPResp = httpSpec.Response
-		tc.Noise = map[string][]string{}
-		switch reflect.ValueOf(httpSpec.Assertions["noise"]).Kind() {
-		case reflect.Map:
-			for k, v := range httpSpec.Assertions["noise"].(map[string]interface{}) {
-				tc.Noise[k] = []string{}
-				for _, val := range v.([]interface{}) {
-					tc.Noise[k] = append(tc.Noise[k], val.(string))
+		switch yamlTestcase.RespType {
+		case models.HTTPResponseJSON:
+
+			httpSpec := models.HTTPSchema{}
+			err := yamlTestcase.Spec.Decode(&httpSpec)
+			if err != nil {
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into the http testcase")
+				return nil, err
+			}
+			tc.Created = httpSpec.Created
+			tc.HTTPReq = httpSpec.Request
+			tc.HTTPResp = httpSpec.Response
+			tc.Noise = map[string][]string{}
+			switch reflect.ValueOf(httpSpec.Assertions["noise"]).Kind() {
+			case reflect.Map:
+				for k, v := range httpSpec.Assertions["noise"].(map[string]interface{}) {
+					tc.Noise[k] = []string{}
+					for _, val := range v.([]interface{}) {
+						tc.Noise[k] = append(tc.Noise[k], val.(string))
+					}
+				}
+			case reflect.Slice:
+				for _, v := range httpSpec.Assertions["noise"].([]interface{}) {
+					tc.Noise[v.(string)] = []string{}
 				}
 			}
-		case reflect.Slice:
-			for _, v := range httpSpec.Assertions["noise"].([]interface{}) {
-				tc.Noise[v.(string)] = []string{}
+		case models.HTTPResponseXML:
+			xmlSpec := models.XMLSchema{}
+			err := yamlTestcase.Spec.Decode(&xmlSpec)
+			if err != nil {
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into the xml testcase")
+				return nil, err
+			}
+			tc.Created = xmlSpec.Created
+			tc.HTTPReq = xmlSpec.Request
+			tc.XMLResp = xmlSpec.Response
+			tc.Noise = map[string][]string{}
+			switch reflect.ValueOf(xmlSpec.Assertions["noise"]).Kind() {
+			case reflect.Map:
+				for k, v := range xmlSpec.Assertions["noise"].(map[string]interface{}) {
+					tc.Noise[k] = []string{}
+					for _, val := range v.([]interface{}) {
+						tc.Noise[k] = append(tc.Noise[k], val.(string))
+					}
+				}
+			case reflect.Slice:
+				for _, v := range xmlSpec.Assertions["noise"].([]interface{}) {
+					tc.Noise[v.(string)] = []string{}
+				}
 			}
 		}
 	// unmarshal its mocks from yaml docs to go struct
