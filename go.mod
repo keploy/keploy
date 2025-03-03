@@ -125,7 +125,6 @@ require (
 )
 
 require (
-	github.com/clbanning/mxj/v2 v2.7.0 // indirect
 	github.com/k0kubun/go-ansi v0.0.0-20180517002512-3bf9e2903213 // indirect
 	github.com/mitchellh/colorstring v0.0.0-20190213212951-d06e56a500db // indirect
 	github.com/perimeterx/marshmallow v1.1.5 // indirect
