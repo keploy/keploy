@@ -19,13 +19,18 @@ import (
 )
 
 func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
-
+	respType := models.HTTPResponseJSON
+	isXML := utils.IsXMLResponse(&tc.HTTPResp)
+	if isXML {
+		respType = models.HTTPResponseXML
+	}
 	curl := pkg.MakeCurlCommand(tc.HTTPReq)
 	doc := &yaml.NetworkTrafficDoc{
-		Version: tc.Version,
-		Kind:    tc.Kind,
-		Name:    tc.Name,
-		Curl:    curl,
+		Version:  tc.Version,
+		Kind:     tc.Kind,
+		Name:     tc.Name,
+		Curl:     curl,
+		RespType: respType,
 	}
 	// find noisy fields
 	m, err := FlattenHTTPResponse(pkg.ToHTTPHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)
