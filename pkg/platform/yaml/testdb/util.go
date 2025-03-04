@@ -239,27 +239,55 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 	}
 	switch tc.Kind {
 	case models.HTTP:
-		httpSpec := models.HTTPSchema{}
-		err := yamlTestcase.Spec.Decode(&httpSpec)
-		if err != nil {
-			utils.LogError(logger, err, "failed to unmarshal a yaml doc into the http testcase")
-			return nil, err
-		}
-		tc.Created = httpSpec.Created
-		tc.HTTPReq = httpSpec.Request
-		tc.HTTPResp = httpSpec.Response
-		tc.Noise = map[string][]string{}
-		switch reflect.ValueOf(httpSpec.Assertions["noise"]).Kind() {
-		case reflect.Map:
-			for k, v := range httpSpec.Assertions["noise"].(map[string]interface{}) {
-				tc.Noise[k] = []string{}
-				for _, val := range v.([]interface{}) {
-					tc.Noise[k] = append(tc.Noise[k], val.(string))
+		switch yamlTestcase.RespType {
+		case models.HTTPResponseJSON:
+
+			httpSpec := models.HTTPSchema{}
+			err := yamlTestcase.Spec.Decode(&httpSpec)
+			if err != nil {
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into the http testcase")
+				return nil, err
+			}
+			tc.Created = httpSpec.Created
+			tc.HTTPReq = httpSpec.Request
+			tc.HTTPResp = httpSpec.Response
+			tc.Noise = map[string][]string{}
+			switch reflect.ValueOf(httpSpec.Assertions["noise"]).Kind() {
+			case reflect.Map:
+				for k, v := range httpSpec.Assertions["noise"].(map[string]interface{}) {
+					tc.Noise[k] = []string{}
+					for _, val := range v.([]interface{}) {
+						tc.Noise[k] = append(tc.Noise[k], val.(string))
+					}
+				}
+			case reflect.Slice:
+				for _, v := range httpSpec.Assertions["noise"].([]interface{}) {
+					tc.Noise[v.(string)] = []string{}
 				}
 			}
-		case reflect.Slice:
-			for _, v := range httpSpec.Assertions["noise"].([]interface{}) {
-				tc.Noise[v.(string)] = []string{}
+		case models.HTTPResponseXML:
+			xmlSpec := models.XMLSchema{}
+			err := yamlTestcase.Spec.Decode(&xmlSpec)
+			if err != nil {
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into the xml testcase")
+				return nil, err
+			}
+			tc.Created = xmlSpec.Created
+			tc.HTTPReq = xmlSpec.Request
+			tc.XMLResp = xmlSpec.Response
+			tc.Noise = map[string][]string{}
+			switch reflect.ValueOf(xmlSpec.Assertions["noise"]).Kind() {
+			case reflect.Map:
+				for k, v := range xmlSpec.Assertions["noise"].(map[string]interface{}) {
+					tc.Noise[k] = []string{}
+					for _, val := range v.([]interface{}) {
+						tc.Noise[k] = append(tc.Noise[k], val.(string))
+					}
+				}
+			case reflect.Slice:
+				for _, v := range xmlSpec.Assertions["noise"].([]interface{}) {
+					tc.Noise[v.(string)] = []string{}
+				}
 			}
 		}
 	// unmarshal its mocks from yaml docs to go struct
