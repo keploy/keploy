@@ -18,6 +18,12 @@ func GetVersion() (V1 Version) {
 	return currentVersion
 }
 
+// HTTP Response Types
+const (
+	HTTPResponseJSON = "json"
+	HTTPResponseXML  = "xml"
+)
+
 //TODO: Why are we declaring mock types in testcase.go file?
 
 // mocks types
@@ -45,6 +51,7 @@ type TestCase struct {
 	Captured int64               `json:"captured" bson:"captured"`
 	HTTPReq  HTTPReq             `json:"http_req" bson:"http_req"`
 	HTTPResp HTTPResp            `json:"http_resp" bson:"http_resp"`
+	XMLResp  XMLResp             `json:"xml_resp" bson:"xml_resp"`
 	AllKeys  map[string][]string `json:"all_keys" bson:"all_keys"`
 	GrpcResp GrpcResp            `json:"grpcResp" bson:"grpcResp"`
 	GrpcReq  GrpcReq             `json:"grpcReq" bson:"grpcReq"`
