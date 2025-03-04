@@ -28,7 +28,6 @@ import (
 	"go.keploy.io/server/v2/pkg/service/record"
 	"go.keploy.io/server/v2/pkg/service/replay"
 	"go.keploy.io/server/v2/pkg/service/tools"
-
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -101,6 +100,7 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 	}
 
 	instrumentation := core.New(logger, h, p, t, client)
+
 	testDB := testdb.New(logger, c.Path)
 	mockDB := mockdb.New(logger, c.Path, "")
 	openAPIdb := openapidb.New(logger, filepath.Join(c.Path, "schema"))
