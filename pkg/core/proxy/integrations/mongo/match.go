@@ -193,6 +193,9 @@ func compareOpMsgSection(logger *zap.Logger, expectedSection, actualSection stri
 
 func calculateMatchingScore(obj1, obj2 map[string]interface{}) float64 {
 	totalFields := len(obj2)
+	if len(obj1) > totalFields {
+		totalFields = len(obj1)
+	}
 	matchingFields := 0.0
 
 	for key, value := range obj2 {
