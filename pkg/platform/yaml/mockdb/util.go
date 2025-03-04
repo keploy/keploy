@@ -3,6 +3,7 @@ package mockdb
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"go.keploy.io/server/v2/pkg/models"
@@ -18,12 +19,12 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 	if utils.IsXMLResponse(mock.Spec.HTTPResp) {
 		respType = models.HTTPResponseXML
 	}
+	fmt.Println("Response Type", respType)
 	yamlDoc := yaml.NetworkTrafficDoc{
 		Version:      mock.Version,
 		Kind:         mock.Kind,
 		Name:         mock.Name,
 		ConnectionID: mock.ConnectionID,
-		RespType:     respType,
 	}
 	switch mock.Kind {
 	case models.Mongo:
