@@ -2,6 +2,7 @@ package utgen
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"html"
 	"html/template"
@@ -62,6 +63,7 @@ type PromptBuilder struct {
 	FunctionUnderTest      string
 	ImportDetails          string
 	ModuleName             string
+	utg                    *UnitTestGenerator
 }
 
 func NewPromptBuilder(srcPath, testPath, covReportContent, includedFiles, additionalInstructions, language, additionalPrompt, functionUnderTest string, logger *zap.Logger) (*PromptBuilder, error) {
@@ -171,6 +173,35 @@ func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, erro
 	}
 	userPrompt = html.UnescapeString(userPrompt)
 	prompt.User = userPrompt
+
+	// Get similar code examples for context enrichment if vector store is enabled
+	if pb.utg != nil && pb.utg.vectorStore != nil && pb.utg.embeddingService != nil {
+		similarCode, err := pb.utg.FindSimilarCode(context.Background(), pb.Src.Code, 3)
+		if err == nil && len(similarCode) > 0 {
+			var examplesBuilder strings.Builder
+			examplesBuilder.WriteString("Here are some similar code examples from your codebase that might be relevant:\n\n")
+
+			for i, example := range similarCode {
+				// Truncate very long examples
+				content := example.Content
+				if len(content) > 1000 {
+					content = content[:1000] + "...[truncated]"
+				}
+
+				examplesBuilder.WriteString(fmt.Sprintf("Example %d (from %s):\n```%s\n%s\n```\n\n",
+					i+1, example.Path, example.Language, content))
+			}
+
+			// Add the examples to the additional context
+			additionalContext := examplesBuilder.String()
+			if pb.AdditionalPrompt != "" {
+				pb.AdditionalPrompt += "\n\n" + additionalContext
+			} else {
+				pb.AdditionalPrompt = additionalContext
+			}
+		}
+	}
+
 	return prompt, nil
 }
 

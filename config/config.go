@@ -44,6 +44,25 @@ type Config struct {
 	Version        string `json:"-" yaml:"-" mapstructure:"-"`
 	APIServerURL   string `json:"-" yaml:"-" mapstructure:"-"`
 	GitHubClientID string `json:"-" yaml:"-" mapstructure:"-"`
+
+	// Vector store configuration
+	VectorStore struct {
+		Enabled        bool   `yaml:"enabled" mapstructure:"enabled"`
+		Host           string `yaml:"host" mapstructure:"host"`
+		Port           int    `yaml:"port" mapstructure:"port"`
+		CollectionName string `yaml:"collection_name" mapstructure:"collection_name"`
+		IndexType      string `yaml:"index_type" mapstructure:"index_type"`
+		MetricType     string `yaml:"metric_type" mapstructure:"metric_type"`
+		IgnorePatterns string `yaml:"ignore_patterns" mapstructure:"ignore_patterns"`
+		WatchEnabled   bool   `yaml:"watch_enabled" mapstructure:"watch_enabled"`
+	}
+
+	// Embedding service configuration
+	Embedding struct {
+		Provider string `yaml:"provider" mapstructure:"provider"`
+		Model    string `yaml:"model" mapstructure:"model"`
+		ApiKey   string `yaml:"api_key" mapstructure:"api_key"`
+	}
 }
 
 type UtGen struct {
