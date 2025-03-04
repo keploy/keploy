@@ -5,15 +5,16 @@ import (
 )
 
 type TestReport struct {
-	Version Version      `json:"version" yaml:"version"`
-	Name    string       `json:"name" yaml:"name"`
-	Status  string       `json:"status" yaml:"status"`
-	Success int          `json:"success" yaml:"success"`
-	Failure int          `json:"failure" yaml:"failure"`
-	Ignored int          `json:"ignored" yaml:"ignored"`
-	Total   int          `json:"total" yaml:"total"`
-	Tests   []TestResult `json:"tests" yaml:"tests,omitempty"`
-	TestSet string       `json:"testSet" yaml:"test_set"`
+	Version   Version      `json:"version" yaml:"version"`
+	Name      string       `json:"name" yaml:"name"`
+	Status    string       `json:"status" yaml:"status"`
+	Success   int          `json:"success" yaml:"success"`
+	Failure   int          `json:"failure" yaml:"failure"`
+	Ignored   int          `json:"ignored" yaml:"ignored"`
+	Total     int          `json:"total" yaml:"total"`
+	Tests     []TestResult `json:"tests" yaml:"tests,omitempty"`
+	TestSet   string       `json:"testSet" yaml:"test_set"`
+	CreatedAt int64        `json:"created_at" yaml:"created_at"`
 }
 
 type TestCoverage struct {

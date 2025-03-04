@@ -82,12 +82,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		return hookErr
 	}
 
-	isDocker := false
-	appKind := a.Kind(ctx)
-	//check if the app is docker/docker-compose or native
-	if utils.IsDockerCmd(appKind) {
-		isDocker = true
-	}
+	isDocker := utils.IsDockerCmd(a.Kind(ctx))
 
 	select {
 	case <-ctx.Done():
@@ -100,7 +95,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		return errors.New("failed to get the error group from the context")
 	}
 
-	// create a new error group for the hooks
+	// Create a new error group for the hooks (Always required)
 	hookErrGrp, _ := errgroup.WithContext(ctx)
 	hookCtx := context.WithoutCancel(ctx) //so that main context doesn't cancel the hookCtx to control the lifecycle of the hooks
 	hookCtx, hookCtxCancel := context.WithCancel(hookCtx)
@@ -114,7 +109,6 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 
 	g.Go(func() error {
 		<-ctx.Done()
-
 		proxyCtxCancel()
 		err = proxyErrGrp.Wait()
 		if err != nil {
@@ -134,7 +128,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		return nil
 	})
 
-	//load hooks
+	// Load hooks
 	err = c.Hooks.Load(hookCtx, id, HookCfg{
 		AppID:      id,
 		Pid:        0,
@@ -142,6 +136,8 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		KeployIPV4: a.KeployIPv4Addr(),
 		Mode:       opts.Mode,
 		Rules:      opts.Rules,
+		E2E:        opts.E2E,
+		Port:       opts.Port,
 	})
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to load hooks")
