@@ -965,7 +965,14 @@ func IsFileEmpty(filePath string) (bool, error) {
 	return fileInfo.Size() == 0, nil
 }
 func IsXMLResponse(resp *models.HTTPResp) bool {
-	contentType := resp.Header["Content-Type"]
+	if resp == nil || resp.Header == nil {
+		return false
+	}
+
+	contentType, exists := resp.Header["Content-Type"]
+	if !exists || contentType == "" {
+		return false
+	}
 	return strings.Contains(contentType, "application/xml") || strings.Contains(contentType, "text/xml")
 }
 
