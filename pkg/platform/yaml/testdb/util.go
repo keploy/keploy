@@ -60,17 +60,47 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 
 	switch tc.Kind {
 	case models.HTTP:
-		err := doc.Spec.Encode(models.HTTPSchema{
-			Request:  tc.HTTPReq,
-			Response: tc.HTTPResp,
-			Created:  tc.Created,
-			Assertions: map[string]interface{}{
-				"noise": noise,
-			},
-		})
-		if err != nil {
-			utils.LogError(logger, err, "failed to encode testcase into a yaml doc")
-			return nil, err
+		switch respType {
+		case models.HTTPResponseXML:
+			m, err := utils.XMLToMap(tc.HTTPResp.Body)
+			if err != nil {
+				utils.LogError(logger, err, "failed to convert xml to map")
+				return nil, err
+			}
+			err = doc.Spec.Encode(models.XMLSchema{
+				Request: tc.HTTPReq,
+				Response: models.XMLResp{
+					Body:          m,
+					StatusCode:    tc.HTTPResp.StatusCode,
+					Header:        tc.HTTPResp.Header,
+					StatusMessage: tc.HTTPResp.StatusMessage,
+					ProtoMajor:    tc.HTTPResp.ProtoMajor,
+					ProtoMinor:    tc.HTTPResp.ProtoMinor,
+					Binary:        tc.HTTPResp.Binary,
+					Timestamp:     tc.HTTPResp.Timestamp,
+				},
+				Created: tc.Created,
+				Assertions: map[string]interface{}{
+					"noise": noise,
+				},
+			})
+			if err != nil {
+				utils.LogError(logger, err, "failed to encode testcase into a yaml doc")
+				return nil, err
+			}
+		case models.HTTPResponseJSON:
+			err := doc.Spec.Encode(models.HTTPSchema{
+				Request:  tc.HTTPReq,
+				Response: tc.HTTPResp,
+				Created:  tc.Created,
+				Assertions: map[string]interface{}{
+					"noise": noise,
+				},
+			})
+			if err != nil {
+				utils.LogError(logger, err, "failed to encode testcase into a yaml doc")
+				return nil, err
+			}
 		}
 	default:
 		utils.LogError(logger, nil, "failed to marshal the testcase into yaml due to invalid kind of testcase")
@@ -236,6 +266,9 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		Kind:    yamlTestcase.Kind,
 		Name:    yamlTestcase.Name,
 		Curl:    yamlTestcase.Curl,
+	}
+	if yamlTestcase.RespType == "" {
+		yamlTestcase.RespType = models.HTTPResponseJSON
 	}
 	switch tc.Kind {
 	case models.HTTP:
