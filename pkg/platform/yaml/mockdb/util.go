@@ -69,51 +69,19 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		}
 
 	case models.HTTP:
-		switch respType {
-		case models.HTTPResponseXML:
-			mp, err := utils.XMLToMap(mock.Spec.HTTPResp.Body)
-			if err != nil {
-				utils.LogError(logger, err, "failed to convert xml response to map")
-				return nil, err
-			}
-			httpSpec := models.XMLSchema{
-				Metadata: mock.Spec.Metadata,
-				Request:  *mock.Spec.HTTPReq,
-				Response: models.XMLResp{
-					Body:          mp,
-					StatusCode:    mock.Spec.HTTPResp.StatusCode,
-					Header:        mock.Spec.HTTPResp.Header,
-					StatusMessage: mock.Spec.HTTPResp.StatusMessage,
-					ProtoMajor:    mock.Spec.HTTPResp.ProtoMajor,
-					ProtoMinor:    mock.Spec.HTTPResp.ProtoMinor,
-					Binary:        mock.Spec.HTTPResp.Binary,
-					Timestamp:     mock.Spec.HTTPResp.Timestamp,
-				},
-				Created:          mock.Spec.Created,
-				ReqTimestampMock: mock.Spec.ReqTimestampMock,
-				ResTimestampMock: mock.Spec.ResTimestampMock,
-			}
-			err = yamlDoc.Spec.Encode(httpSpec)
-			if err != nil {
-				utils.LogError(logger, err, "failed to marshal the http input-output as yaml")
-				return nil, err
-			}
-		case models.HTTPResponseJSON:
-			httpSpec := models.HTTPSchema{
-				Metadata:         mock.Spec.Metadata,
-				Request:          *mock.Spec.HTTPReq,
-				Response:         *mock.Spec.HTTPResp,
-				Created:          mock.Spec.Created,
-				ReqTimestampMock: mock.Spec.ReqTimestampMock,
-				ResTimestampMock: mock.Spec.ResTimestampMock,
-			}
-			err := yamlDoc.Spec.Encode(httpSpec)
-			if err != nil {
-				utils.LogError(logger, err, "failed to marshal the http input-output as yaml")
-				return nil, err
-			}
+		httpSpec := models.HTTPSchema{
+			Metadata:         mock.Spec.Metadata,
+			Request:          *mock.Spec.HTTPReq,
+			Response:         *mock.Spec.HTTPResp,
+			Created:          mock.Spec.Created,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
 		}
-
+		err := yamlDoc.Spec.Encode(httpSpec)
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal the http input-output as yaml")
+			return nil, err
+		}
 	case models.GENERIC:
 		genericSpec := models.GenericSchema{
 			Metadata:         mock.Spec.Metadata,
