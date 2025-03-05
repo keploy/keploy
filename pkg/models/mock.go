@@ -33,6 +33,7 @@ type MockSpec struct {
 	RedisResponses    []Payload         `json:"redisResponses,omitempty" bson:"redis_responses,omitempty"`
 	HTTPReq           *HTTPReq          `json:"Req,omitempty" bson:"http_req,omitempty"`
 	HTTPResp          *HTTPResp         `json:"Res,omitempty" bson:"http_resp,omitempty"`
+	XMLResp           *XMLResp          `json:"XMLResp,omitempty" bson:"xml_resp,omitempty"`
 	Created           int64             `json:"Created,omitempty" bson:"created,omitempty"`
 	MongoRequests     []MongoRequest    `json:"MongoRequests,omitempty" bson:"mongo_requests,omitempty"`
 	MongoResponses    []MongoResponse   `json:"MongoResponses,omitempty" bson:"mongo_responses,omitempty"`
