@@ -23,6 +23,25 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	if json.Valid([]byte(actualResponse.Body)) {
 		bodyType = models.BodyTypeJSON
 	}
+	if utils.IsXMLResponse(actualResponse) {
+		bodyType = models.BodyTypeJSON
+		actualResp, err := utils.XMLToMap(actualResponse.Body)
+		if err != nil {
+			utils.LogError(logger, err, "failed to convert xml response to map")
+		}
+		actualRespJSONData, err := json.MarshalIndent(actualResp, "", "  ")
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal xml response to json")
+		}
+		actualResponse.Body = string(actualRespJSONData)
+		expectedRespJSONData, err := json.MarshalIndent(tc.XMLResp.Body, "", "  ")
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal xml response to json")
+		}
+		tc.HTTPResp.Body = string(expectedRespJSONData)
+		tc.HTTPResp.Header = tc.XMLResp.Header
+		tc.HTTPResp.StatusCode = tc.XMLResp.StatusCode
+	}
 	pass := true
 	hRes := &[]models.HeaderResult{}
 	res := &models.Result{
