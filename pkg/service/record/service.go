@@ -44,3 +44,8 @@ type FrameChan struct {
 	Incoming <-chan *models.TestCase
 	Outgoing <-chan *models.Mock
 }
+
+type IdempotencyDB interface {
+	CheckReplayHeader(tc *models.TestCase) bool
+	ReplayTestCase(ctx context.Context, tc *models.TestCase, testSetID string, replay int)
+}
