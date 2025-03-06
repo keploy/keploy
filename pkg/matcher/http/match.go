@@ -58,13 +58,17 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		}},
 	}
 	noise := tc.Noise
-
 	var (
 		bodyNoise   = noiseConfig["body"]
 		headerNoise = noiseConfig["header"]
 	)
-
-	if bodyNoise == nil {
+	if bodyNoise != nil {
+		if ignoreFields, ok := bodyNoise["*"]; ok && len(ignoreFields) > 0 && ignoreFields[0] == "*" {
+			if noise["body"] == nil {
+				noise["body"] = make([]string, 0)
+			}
+		}
+	} else {
 		bodyNoise = map[string][]string{}
 	}
 	if headerNoise == nil {
