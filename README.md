@@ -119,7 +119,7 @@ From Go's gopher 🐹 to Python's snake 🐍, we support:
 
 ## 🫰 Keploy Adopters 🧡
 
-So you and your organisation are using Keploy? That’s great. Please add yourselves to [**this list,**](https://github.com/orgs/keploy/discussions/1765) and we'll send you goodies! 💖
+So you and your organisation are using Keploy? That's great. Please add yourselves to [**this list,**](https://github.com/orgs/keploy/discussions/1765) and we'll send you goodies! 💖
 
 
 We are happy and proud to have you all as part of our community! 💖
@@ -167,3 +167,56 @@ Whether you're a newbie coder or a wizard 🧙‍♀️, your perspective is gol
 ⚙️ [Installation Guide](https://keploy.io/docs/application-development/)
 
 📖 [Contribution Guide](https://keploy.io/docs/keploy-explained/contribution-guide/)
+
+## Vector Database Integration for Semantic Search
+
+Keploy now includes integration with vector databases to enhance the existing fuzzy matching system with semantic search capabilities. This allows for more accurate retrieval of mocks based on semantic similarity.
+
+### Features
+
+- Semantic search using modern embedding models
+- Improved similarity matching for complex data structures
+- Dynamic indexing of newly added or modified mocks
+- Efficient retrieval of context snippets
+
+### Supported Vector Databases
+
+- [ChromaDB](https://www.trychroma.com/) - A lightweight, open-source vector database
+
+### Supported Embedding Models
+
+- OpenAI's text-embedding-3-small - High-performance text embeddings from OpenAI
+
+### Configuration
+
+Configure the vector database integration using environment variables:
+
+| Environment Variable | Description | Default |
+| --- | --- | --- |
+| KEPLOY_VECTOR_DB_ENABLED | Enable or disable the vector database integration | false |
+| KEPLOY_VECTOR_DB_TYPE | Type of vector database to use | chroma |
+| KEPLOY_EMBEDDING_MODEL_TYPE | Type of embedding model to use | openai |
+| KEPLOY_VECTOR_DB_MIN_SCORE | Minimum similarity score for a match | 0.6 |
+| KEPLOY_VECTOR_DB_TOP_K | Number of top results to retrieve | 3 |
+| KEPLOY_VECTOR_DB_FALLBACK_TO_FUZZY | Fall back to fuzzy matching if no matches are found | true |
+| OPENAI_API_KEY | API key for OpenAI (required if using OpenAI embeddings) | |
+| CHROMA_URL | URL of the ChromaDB instance | http://localhost:8000 |
+
+### Using ChromaDB
+
+To use ChromaDB:
+
+1. Run ChromaDB as a container:
+   ```
+   docker run -p 8000:8000 chromadb/chroma
+   ```
+
+2. Set the required environment variables:
+   ```
+   KEPLOY_VECTOR_DB_ENABLED=true
+   KEPLOY_VECTOR_DB_TYPE=chroma
+   CHROMA_URL=http://localhost:8000
+   OPENAI_API_KEY=your-openai-api-key
+   ```
+
+For more details, see the [Vector Database Integration README](pkg/service/vector/README.md).
