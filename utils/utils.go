@@ -26,6 +26,7 @@ import (
 	"golang.org/x/text/language"
 
 	"github.com/getsentry/sentry-go"
+	"github.com/sbabiv/xml2map"
 	netLib "github.com/shirou/gopsutil/v3/net"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -202,6 +203,20 @@ func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
 	}
 	if !errors.Is(err, context.Canceled) {
 		logger.Error(msg, append(fields, zap.Error(err))...)
+	}
+}
+
+// RemoveDoubleQuotes removes all double quotes from the values in the provided template map.
+// This function handles cases where the templating engine fails to parse values containing both single and double quotes.
+// For example:
+// Input: '"Not/A)Brand";v="8", "Chromium";v="126", "Brave";v="126"'
+// Output: Not/A)Brand;v=8, Chromium;v=126, Brave;v=126
+func RemoveDoubleQuotes(tempMap map[string]interface{}) {
+	// Remove double quotes
+	for key, val := range tempMap {
+		if str, ok := val.(string); ok {
+			tempMap[key] = strings.ReplaceAll(str, `"`, "")
+		}
 	}
 }
 
@@ -469,14 +484,21 @@ func ToInt(value interface{}) int {
 	return 0
 }
 
-func ToString(value interface{}) string {
-	switch v := value.(type) {
-	case string:
-		return v
+// ToString remove all types of value to strings for comparison.
+func ToString(val interface{}) string {
+	switch v := val.(type) {
 	case int:
 		return strconv.Itoa(v)
 	case float64:
 		return strconv.FormatFloat(v, 'f', -1, 64)
+	case float32:
+		return strconv.FormatFloat(float64(v), 'f', -1, 32)
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case int32:
+		return strconv.FormatInt(int64(v), 10)
+	case string:
+		return v
 	}
 	return ""
 }
@@ -941,4 +963,26 @@ func IsFileEmpty(filePath string) (bool, error) {
 		return false, err
 	}
 	return fileInfo.Size() == 0, nil
+}
+func IsXMLResponse(resp *models.HTTPResp) bool {
+	if resp == nil || resp.Header == nil {
+		return false
+	}
+
+	contentType, exists := resp.Header["Content-Type"]
+	if !exists || contentType == "" {
+		return false
+	}
+	return strings.Contains(contentType, "application/xml") || strings.Contains(contentType, "text/xml")
+}
+
+// XMLToMap converts an XML string into a map[string]interface{}
+func XMLToMap(xmlData string) (map[string]interface{}, error) {
+	// Convert XML to map[string]interface{}
+	m, err := xml2map.NewDecoder(strings.NewReader(xmlData)).Decode()
+	if err != nil {
+		return nil, err
+	}
+
+	return m, nil
 }

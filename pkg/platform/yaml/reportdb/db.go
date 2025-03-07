@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
@@ -92,6 +93,8 @@ func (fe *TestReport) InsertReport(ctx context.Context, testRunID string, testSe
 	if testReport.Name == "" {
 		testReport.Name = testSetID + "-report"
 	}
+
+	testReport.CreatedAt = time.Now().Unix()
 
 	data := []byte{}
 	d, err := yamlLib.Marshal(&testReport)

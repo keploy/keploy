@@ -316,7 +316,7 @@ func (o *Orchestrator) checkForTemplates(ctx context.Context, testSets []string)
 	}
 
 	if input == "y\n" || input == "Y\n" {
-		if err := o.replay.Templatize(ctx); err != nil {
+		if err := o.tools.Templatize(ctx); err != nil {
 			utils.LogError(o.logger, err, "failed to templatize test cases, skipping templatization")
 		}
 	}

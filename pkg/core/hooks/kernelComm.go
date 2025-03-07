@@ -84,6 +84,16 @@ func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
 	return nil
 }
 
+func (h *Hooks) SendE2EInfo(pid uint32) error {
+	key := 0
+	err := h.e2eAppRegistrationMap.Update(uint64(key), pid, ebpf.UpdateAny)
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to send the E2E info to the ebpf program")
+		return err
+	}
+	return nil
+}
+
 func (h *Hooks) SendDockerAppInfo(_ uint64, dockerAppInfo structs.DockerAppInfo) error {
 	if h.appID != 0 {
 		err := h.dockerAppRegistrationMap.Delete(h.appID)
