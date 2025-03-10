@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
@@ -15,7 +16,7 @@ import (
 	yamlLib "gopkg.in/yaml.v3"
 )
 
-var IdempotentMethodMap = map[string]bool{
+var IdempotentMethodsMap = map[string]bool{
 	"GET":     true,
 	"HEAD":    true,
 	"OPTIONS": true,
@@ -26,86 +27,90 @@ var IdempotentMethodMap = map[string]bool{
 	"PATCH":   false,
 }
 
-var IdempotencyTestCases = []IdempotencyTestCase{}
-
-type IRResponse struct {
-	StatusCode int                 `json:"statuscode" bson:"statuscode"`
-	Header     map[string][]string `json:"header" bson:"header"`
-	Body       string              `json:"body" bson:"body"`
+var CommonNoiseFields = []string{
+	"header.Date",
 }
 
-type IdempotencyTestCase struct {
-	TestCase   *models.TestCase `json:"testcase" bson:"testcase"`
-	Replay     int              `json:"replay" bson:"replay"`
-	IRResponse []IRResponse     `json:"irresponse" bson:"irresponse"`
+// type IRRResponse struct {
+// 	StatusCode int                 `json:"statuscode" bson:"statuscode"`
+// 	Header     map[string][]string `json:"header" bson:"header"`
+// 	Body       string              `json:"body" bson:"body"`
+// }
+
+/* IRR stands for Idempontency Request Replayser */
+
+type IRRTestCase struct {
+	TestCase     *models.TestCase  `json:"testcase" bson:"testcase"`
+	Replay       int               `json:"replay" bson:"replay"`
+	IRRResponses []models.HTTPResp `json:"irrresponses" bson:"irrresponses"`
+	IRRNoise     IRRDetectedNoise  `json:"irrnoise" bson:"irrnoise"`
 }
 
-type IdempotencyReportYaml struct {
+type IRRDetectedNoise struct {
+	NoiseFields map[string][]string `json:"noisefields" bson:"noisefields"`
+}
+
+type IRRReportYaml struct {
 	IdemReportPath string
 	IdemReportName string
 	Logger         *zap.Logger
 }
 
-func New(logger *zap.Logger, idemReportPath string, idemReportName string) *IdempotencyReportYaml {
-	return &IdempotencyReportYaml{
+func New(logger *zap.Logger, idemReportPath string, idemReportName string) *IRRReportYaml {
+	return &IRRReportYaml{
 		IdemReportPath: idemReportPath,
 		IdemReportName: idemReportName,
 		Logger:         logger,
 	}
 }
 
-func (ir *IdempotencyReportYaml) StoreReplayResult() {
+var irrTestCases = []IRRTestCase{}
+
+func (irr *IRRReportYaml) StoreReplayResult() {
 }
 
-func (ir *IdempotencyReportYaml) ReplayTestCase(ctx context.Context, tc *models.TestCase, testSetID string, replay int) {
-	tcsPath := filepath.Join(ir.IdemReportPath, testSetID, "tests")
-	lastIndex, err := yaml.FindLastIndex(tcsPath, ir.Logger)
+func (irr *IRRReportYaml) ReplayTestCase(ctx context.Context, tc *models.TestCase, testSetID string, replay int) {
+	tcsPath := filepath.Join(irr.IdemReportPath, testSetID, "tests")
+	lastIndex, err := yaml.FindLastIndex(tcsPath, irr.Logger)
 	if err != nil {
-		ir.Logger.Error("error in finding last index", zap.Error(err))
+		irr.Logger.Error("IRR: error in finding last index", zap.Error(err))
 		return
 	}
 
-	idemReporFiletPath := filepath.Join(ir.IdemReportPath, testSetID, ir.IdemReportName)
+	idemReporFiletPath := filepath.Join(irr.IdemReportPath, testSetID, irr.IdemReportName)
 
 	if lastIndex == 1 {
 		_, err := os.Create(idemReporFiletPath)
 		if err != nil {
-			ir.Logger.Error("error in creating idempotency report file", zap.Error(err))
+			irr.Logger.Error("IRR: error in creating idempotency report file", zap.Error(err))
 			return
 		}
 	}
 
 	f, err := os.OpenFile(idemReporFiletPath, os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
-		ir.Logger.Error("error in opening idempotency report file", zap.Error(err))
+		irr.Logger.Error("IRR: error in opening idempotency report file", zap.Error(err))
 		return
 	}
 	defer f.Close()
 
 	tc.Name = fmt.Sprintf("test-%d", lastIndex)
 
-	irTest := &IdempotencyTestCase{
-		TestCase:   tc,
-		Replay:     replay,
-		IRResponse: []IRResponse{},
+	httpResponses := []models.HTTPResp{}
+	httpResponses = append(httpResponses, tc.HTTPResp)
+
+	irrTestCase := &IRRTestCase{
+		TestCase:     tc,
+		Replay:       replay,
+		IRRResponses: []models.HTTPResp{},
 	}
-
-	// IdempotencyTestCases = append(IdempotencyTestCases, *irTest)
-
-	// data, err := yamlLib.Marshal(&IdempotencyTestCases)
-	// if err != nil {
-	// 	ir.Logger.Error("error in marshalling the testcase", zap.Error(err))
-	// 	return
-	// }
-
-	// f.Write(data)
 
 	//------------------Replay TestCase Request-------------------
 	client := &http.Client{}
 
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, strings.NewReader(tc.HTTPReq.Body))
 	if err != nil {
-		ir.Logger.Error("failed to create HTTP request", zap.Error(err))
+		irr.Logger.Error("IRR: failed to create HTTP request", zap.Error(err))
 		return
 	}
 
@@ -121,59 +126,60 @@ func (ir *IdempotencyReportYaml) ReplayTestCase(ctx context.Context, tc *models.
 	for replay > 0 {
 		resp, err := client.Do(req)
 		if err != nil {
-			ir.Logger.Error("failed to execute HTTP request", zap.Error(err))
+			irr.Logger.Error("IRR: failed to execute HTTP request", zap.Error(err))
 			return
 		}
 		defer resp.Body.Close()
 
 		respBody, err := io.ReadAll(resp.Body)
 		if err != nil {
-			ir.Logger.Error("failed to read response body", zap.Error(err))
+			irr.Logger.Error("IRR: failed to read response body", zap.Error(err))
 			return
 		}
 
-		irResponse := IRResponse{
-			StatusCode: resp.StatusCode,
-			Header:     resp.Header,
-			Body:       string(respBody),
+		headers := make(map[string]string)
+		for k, v := range resp.Header {
+			if len(v) > 0 {
+				headers[k] = v[0]
+			}
 		}
 
-		irTest.IRResponse = append(irTest.IRResponse, irResponse)
+		irResponse := models.HTTPResp{
+			StatusCode:    resp.StatusCode,
+			Header:        headers,
+			Body:          string(respBody),
+			StatusMessage: resp.Status,
+			ProtoMajor:    resp.ProtoMajor,
+			ProtoMinor:    resp.ProtoMinor,
+			Timestamp:     time.Now(),
+		}
 
-		// data, err = yamlLib.Marshal(&IdempotencyTestCases)
-		// if err != nil {
-		// 	ir.Logger.Error("error in marshalling the updated test case", zap.Error(err))
-		// 	return
-		// }
+		httpResponses = append(httpResponses, irResponse)
+		irrTestCase.IRRResponses = append(irrTestCase.IRRResponses, irResponse)
 
-		// f, err = os.OpenFile(idemReporFiletPath, os.O_WRONLY|os.O_TRUNC, 0644)
-		// if err != nil {
-		// 	ir.Logger.Error("error reopening idempotency report file", zap.Error(err))
-		// 	return
-		// }
-
-		// _, err = f.Write(data)
-		// if err != nil {
-		// 	ir.Logger.Error("error writing updated test case", zap.Error(err))
-		// }
 		replay--
 	}
 
-	IdempotencyTestCases = append(IdempotencyTestCases, *irTest)
+	detectedNoise := CompareResponses(httpResponses, irr.Logger)
+	irrTestCase.IRRNoise = detectedNoise
 
-	data, err := yamlLib.Marshal(&IdempotencyTestCases)
+	irrTestCases = append(irrTestCases, *irrTestCase)
+
+	data, err := yamlLib.Marshal(&irrTestCases)
 	if err != nil {
-		ir.Logger.Error("error in marshalling the updated test case", zap.Error(err))
+		irr.Logger.Error("IRR: error in marshalling the updated test case", zap.Error(err))
 		return
 	}
 
 	_, err = f.Write(data)
 	if err != nil {
-		ir.Logger.Error("error writing updated test case", zap.Error(err))
+		irr.Logger.Error("IRR: error writing updated test case", zap.Error(err))
 	}
+
+	tc.Noise = detectedNoise.NoiseFields
 }
 
-func (ir *IdempotencyReportYaml) CheckReplayHeader(tc *models.TestCase) bool {
+func (irr *IRRReportYaml) CheckReplayHeader(tc *models.TestCase) bool {
 	if _, ok := tc.HTTPReq.Header["Idempotency-Replay"]; ok {
 		return true
 	}

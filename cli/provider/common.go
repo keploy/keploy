@@ -13,7 +13,7 @@ import (
 
 type commonPlatformServices struct {
 	YamlTestDB    *testdb.TestYaml
-	YamlIdemDB    *idempotencydb.IdempotencyReportYaml
+	YamlIdemDB    *idempotencydb.IRRReportYaml
 	YamlMockDb    *mockdb.MockYaml
 	YamlOpenAPIDb *openapidb.OpenAPIYaml
 	YamlReportDb  *reportdb.TestReport
