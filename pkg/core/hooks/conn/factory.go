@@ -4,7 +4,6 @@ package conn
 
 import (
 	"context"
-	"log"
 	"net/url"
 	"strings"
 	"sync"
@@ -58,7 +57,6 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 					factory.logger.Warn("failed processing a request due to invalid request or response", zap.Any("Request Size", len(requestBuf)), zap.Any("Response Size", len(responseBuf)))
 					continue
 				}
-
 				parsedHTTPReq, err := pkg.ParseHTTPRequest(requestBuf)
 				if err != nil {
 					utils.LogError(factory.logger, err, "failed to parse the http request from byte array", zap.Any("requestBuf", requestBuf))
@@ -72,30 +70,26 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 				basePath := factory.config.Record.BasePath
 				parsedBaseURL, err := url.Parse(basePath)
 				if err != nil {
-					log.Printf("❌ Error parsing base path: %s\n", err)
-					return
+					factory.logger.Error("Error parsing base path: %s\n", zap.Error(err))
 				}
-
 				baseHost := parsedBaseURL.Host
-				parsedBaseURLScheme := strings.ToUpper(parsedBaseURL.Scheme)
 
-				// Map Go's scheme (http/https) to HTTP protocol versions
-				schemeToProto := map[string]string{
-					"HTTP":  "HTTP/1.1",
-					"HTTPS": "HTTP/2",
-				}
-				expectedProto, exists := schemeToProto[parsedBaseURLScheme]
-
-				if !exists {
-					expectedProto = "HTTP/1.1" // Default to HTTP/1.1 if unknown
-				}
-
-				if parsedHTTPReq.Host == baseHost && strings.HasPrefix(parsedHTTPReq.Proto, expectedProto) {
-					factory.logger.Info("Capturing test cases for request that matched with base path")
+				if basePath == "" {
+					factory.logger.Info("Base path is not set, proceeding with capture")
 					Capture(ctx, factory.logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestampTest, resTimestampTest, opts)
+					continue
+				}
+				if parsedHTTPReq.Host == baseHost {
+					if strings.HasPrefix(parsedHTTPReq.URL.Path, parsedBaseURL.Path) {
+						factory.logger.Info("Capturing test cases for request that matched with base path")
+						Capture(ctx, factory.logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestampTest, resTimestampTest, opts)
+					} else {
+						factory.logger.Info("Skipping capture for request due to mismatch of host from basepath url")
+						continue
+					}
 				} else {
-					factory.logger.Info("Skipping capture for request due to mismatch of host/scheme from basepath url")
-					return
+					factory.logger.Info("Skipping capture for request due to mismatch of host from basepath url")
+					continue
 				}
 			} else if tracker.IsInactive(factory.inactivityThreshold) {
 				trackersToDelete = append(trackersToDelete, connID)
