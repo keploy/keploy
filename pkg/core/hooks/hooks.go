@@ -36,6 +36,7 @@ func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 		proxyIP6:  [4]uint32{0000, 0000, 0000, 0001},
 		proxyPort: cfg.ProxyPort,
 		dnsPort:   cfg.DNSPort,
+		conf: cfg,
 	}
 }
 
@@ -47,6 +48,7 @@ type Hooks struct {
 	proxyPort uint32
 	dnsPort   uint32
 	m         sync.Mutex
+	conf *config.Config
 	// eBPF C shared maps
 	clientRegistrationMap    *ebpf.Map
 	agentRegistartionMap     *ebpf.Map
@@ -505,7 +507,7 @@ func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOption
 	// TODO use the session to get the app id
 	// and then use the app id to get the test cases chan
 	// and pass that to eBPF consumers/listeners
-	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
+	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts , h.conf)
 }
 
 func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
