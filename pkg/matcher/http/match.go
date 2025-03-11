@@ -184,12 +184,18 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 					expectedValue = append(expectedValue, val)
 				}
 			}
-			for i, v := range actualValue {
-				if v != expectedValue[i] {
-					isHeaderMismatch = true
-					actualHeader[j.Actual.Key] = actualValue
-					expectedHeader[j.Expected.Key] = expectedValue
-					break
+			if len(actualValue) != len(expectedValue) {
+				isHeaderMismatch = true
+				actualHeader[j.Actual.Key] = actualValue
+				expectedHeader[j.Expected.Key] = expectedValue
+			} else {
+				for i, v := range actualValue {
+					if v != expectedValue[i] {
+						isHeaderMismatch = true
+						actualHeader[j.Actual.Key] = actualValue
+						expectedHeader[j.Expected.Key] = expectedValue
+						break
+					}
 				}
 			}
 		}
