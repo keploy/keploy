@@ -36,13 +36,22 @@ type Prompt struct {
 }
 
 type CompletionParams struct {
-	Model               string    `json:"model"`
-	Messages            []Message `json:"messages"`
-	MaxTokens           int       `json:"max_tokens,omitempty"`
-	MaxCompletionTokens int       `json:"max_completion_tokens,omitempty"`
-	Stream              *bool     `json:"stream,omitempty"`
-	Temperature         float32   `json:"temperature,omitempty"`
+	Model               string        `json:"model"`
+	Messages            []Message     `json:"messages"`
+	MaxTokens           int           `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int           `json:"max_completion_tokens,omitempty"`
+	Stream              *bool         `json:"stream,omitempty"`
+	Temperature         float32       `json:"temperature,omitempty"`
+	ReasoningEffort     ReasoningType `json:"reasoning_effort,omitempty"`
 }
+
+type ReasoningType string
+
+const (
+	HighReasioning   ReasoningType = "high"
+	LowReasioning    ReasoningType = "low"
+	MediumReasioning ReasoningType = "medium"
+)
 
 type Message struct {
 	Role    string `json:"role"`
