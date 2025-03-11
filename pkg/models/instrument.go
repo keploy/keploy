@@ -33,6 +33,7 @@ type ConditionalDstCfg struct {
 
 type IncomingOptions struct {
 	Filters []config.Filter
+	BasePath string
 }
 
 type SetupOptions struct {

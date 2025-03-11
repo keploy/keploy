@@ -11,7 +11,6 @@ import (
 
 	"go.uber.org/zap"
 
-	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
@@ -25,17 +24,17 @@ type Factory struct {
 	inactivityThreshold time.Duration
 	mutex               *sync.RWMutex
 	logger              *zap.Logger
-	config              *config.Config
+	incomingOpts        models.IncomingOptions
 }
 
 // NewFactory creates a new instance of the factory.
-func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger, config *config.Config) *Factory {
+func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger, opts models.IncomingOptions) *Factory {
 	return &Factory{
 		connections:         make(map[ID]*Tracker),
 		mutex:               &sync.RWMutex{},
 		inactivityThreshold: inactivityThreshold,
 		logger:              logger,
-		config:              config,
+		incomingOpts:        opts,
 	}
 }
 
@@ -67,30 +66,44 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 					utils.LogError(factory.logger, err, "failed to parse the http response from byte array", zap.Any("responseBuf", responseBuf))
 					continue
 				}
-				basePath := factory.config.Record.BasePath
+				basePath := factory.incomingOpts.BasePath
 				parsedBaseURL, err := url.Parse(basePath)
 				if err != nil {
 					factory.logger.Error("Error parsing base path: %s\n", zap.Error(err))
 				}
 				baseHost := parsedBaseURL.Host
 
-				if basePath == "" {
-					factory.logger.Info("Base path is not set, proceeding with capture")
+				if len(strings.TrimSpace(basePath)) == 0 {
+					factory.logger.Debug("Base path is not set, proceeding with request capture",
+						zap.String("basePath", basePath),
+					)
 					Capture(ctx, factory.logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestampTest, resTimestampTest, opts)
 					continue
 				}
-				if parsedHTTPReq.Host == baseHost {
-					if strings.HasPrefix(parsedHTTPReq.URL.Path, parsedBaseURL.Path) {
-						factory.logger.Info("Capturing test cases for request that matched with base path")
-						Capture(ctx, factory.logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestampTest, resTimestampTest, opts)
-					} else {
-						factory.logger.Info("Skipping capture for request due to mismatch of host from basepath url")
-						continue
-					}
-				} else {
-					factory.logger.Info("Skipping capture for request due to mismatch of host from basepath url")
+
+				if parsedHTTPReq.Host != baseHost {
+					factory.logger.Info("Skipping capture due to host mismatch",
+						zap.String("expectedHost", baseHost),
+						zap.String("actualHost", parsedHTTPReq.Host),
+					)
 					continue
 				}
+
+				if !strings.HasPrefix(parsedHTTPReq.URL.Path, parsedBaseURL.Path) {
+					factory.logger.Info("Skipping capture due to base path mismatch",
+						zap.String("expectedBasePath", parsedBaseURL.Path),
+						zap.String("actualPath", parsedHTTPReq.URL.Path),
+					)
+					continue
+				}
+
+				factory.logger.Info("Capturing test case for request matching base path",
+					zap.String("host", parsedHTTPReq.Host),
+					zap.String("path", parsedHTTPReq.URL.Path),
+				)
+
+				Capture(ctx, factory.logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestampTest, resTimestampTest, opts)
+
 			} else if tracker.IsInactive(factory.inactivityThreshold) {
 				trackersToDelete = append(trackersToDelete, connID)
 			}
