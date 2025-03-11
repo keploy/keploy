@@ -20,7 +20,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
+func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
 	pgRequests := [][]byte{reqBuf}
 	errCh := make(chan error, 1)
 
@@ -32,7 +32,7 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 			// Since protocol packets have to be parsed for checking stream end,
 			// clientConnection have deadline for read to determine the end of stream.
 			err := clientConn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
-			if err != nil {
+			if err != nil && err != io.EOF && strings.Contains(err.Error(), "use of closed network connection") {
 				utils.LogError(logger, err, "failed to set the read deadline for the pg client conn")
 				errCh <- err
 			}
@@ -85,7 +85,7 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 					errCh <- err
 				}
 				_, err = clientConn.Write(encoded)
-				if err != nil {
+				if err != nil && err != io.EOF && strings.Contains(err.Error(), "use of closed network connection") {
 					utils.LogError(logger, err, "failed to write the response message to the client application")
 					errCh <- err
 				}

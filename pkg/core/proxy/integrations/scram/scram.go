@@ -12,6 +12,7 @@ import (
 	"github.com/xdg-go/pbkdf2"
 	"github.com/xdg-go/scram"
 	"github.com/xdg-go/stringprep"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -33,10 +34,10 @@ func GenerateServerFinalMessage(authMessage, mechanism, password, salt string, i
 
 	// Switch based on the provided mechanism to determine the hash function to be used.
 	switch mechanism {
-	case "SCRAM-SHA-1":
+	case util.SCRAM_SHA_1:
 		hashGen = scram.SHA1
 		passwordDigest = mongoPasswordDigest(username, password)
-	case "SCRAM-SHA-256":
+	case util.SCRAM_SHA_256:
 		hashGen = scram.SHA256
 		passwordDigest, err = stringprep.SASLprep.Prepare(password)
 		if err != nil {
@@ -92,7 +93,11 @@ func GenerateServerFirstMessage(recordedRequestMsg, recievedRequestMsg, firstRes
 	}
 	// Since, the nonce are randomlly generated string. so, each session have unique nonce.
 	// Thus, the mocked server response should be updated according to the current nonce
-	return strings.Replace(string(firstResponseMsg), expectedNonce, actualNonce, -1), nil
+	updatedResponse := strings.Replace(string(firstResponseMsg), expectedNonce, actualNonce, -1)
+
+	logger.Debug("Updated server first message after nonce substitution", zap.String("updatedResponse", updatedResponse))
+
+	return updatedResponse, nil
 }
 
 // GenerateAuthMessage creates an authentication message based on the initial

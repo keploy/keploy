@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -12,11 +13,15 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+
 	"strconv"
 	"strings"
 	"time"
 
+	"text/template"
+
 	"go.keploy.io/server/v2/pkg/models"
+
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -79,8 +84,41 @@ func IsTime(stringDate string) bool {
 	return false
 }
 
-func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HTTPResp, error) {
+func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HTTPResp, error) {
 	var resp *models.HTTPResp
+
+	//TODO: adjust this logic in the render function in order to remove the redundant code
+	// convert testcase to string and render the template values.
+	if len(utils.TemplatizedValues) > 0 {
+		testCaseStr, err := json.Marshal(tc)
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal the testcase")
+			return nil, err
+		}
+		funcMap := template.FuncMap{
+			"int":    utils.ToInt,
+			"string": utils.ToString,
+			"float":  utils.ToFloat,
+		}
+		tmpl, err := template.New("template").Funcs(funcMap).Parse(string(testCaseStr))
+		if err != nil || tmpl == nil {
+			utils.LogError(logger, err, "failed to parse the template", zap.Any("TestCaseString", string(testCaseStr)), zap.Any("TestCase", tc.Name), zap.Any("TestSet", testSet))
+			return nil, err
+		}
+
+		var output bytes.Buffer
+		err = tmpl.Execute(&output, utils.TemplatizedValues)
+		if err != nil {
+			utils.LogError(logger, err, "failed to execute the template")
+			return nil, err
+		}
+		testCaseStr = output.Bytes()
+		err = json.Unmarshal([]byte(testCaseStr), &tc)
+		if err != nil {
+			utils.LogError(logger, err, "failed to unmarshal the testcase")
+			return nil, err
+		}
+	}
 
 	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, bytes.NewBufferString(tc.HTTPReq.Body))
@@ -93,7 +131,18 @@ func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logge
 	req.ProtoMinor = tc.HTTPReq.ProtoMinor
 	req.Header.Set("KEPLOY-TEST-ID", tc.Name)
 	req.Header.Set("KEPLOY-TEST-SET-ID", testSet)
+	// send if its the last testcase
+	if tc.IsLast {
+		req.Header.Set("KEPLOY-LAST-TESTCASE", "true")
+	}
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", req))
+
+	// override host header if present in the request
+	hostHeader := tc.HTTPReq.Header["Host"]
+	if hostHeader != "" {
+		logger.Debug("overriding host header", zap.String("host", hostHeader))
+		req.Host = hostHeader
+	}
 
 	// Creating the client and disabling redirects
 	var client *http.Client
@@ -146,10 +195,18 @@ func SimulateHTTP(ctx context.Context, tc models.TestCase, testSet string, logge
 		return nil, errHTTPReq
 	}
 
+	defer func() {
+		if httpResp != nil && httpResp.Body != nil {
+			if err := httpResp.Body.Close(); err != nil {
+				utils.LogError(logger, err, "failed to close response body")
+			}
+		}
+	}()
+
 	respBody, errReadRespBody := io.ReadAll(httpResp.Body)
 	if errReadRespBody != nil {
 		utils.LogError(logger, errReadRespBody, "failed reading response body")
-		return nil, err
+		return nil, errReadRespBody
 	}
 
 	resp = &models.HTTPResp{
@@ -182,16 +239,27 @@ func ParseHTTPResponse(data []byte, request *http.Request) (*http.Response, erro
 	return response, nil
 }
 
-func MakeCurlCommand(method string, url string, header map[string]string, body string) string {
-	curl := fmt.Sprintf("curl --request %s \\\n", method)
-	curl = curl + fmt.Sprintf("  --url %s \\\n", url)
-	for k, v := range header {
+func MakeCurlCommand(tc models.HTTPReq) string {
+	curl := fmt.Sprintf("curl --request %s \\\n", string(tc.Method))
+	curl = curl + fmt.Sprintf("  --url %s \\\n", tc.URL)
+	header := ToHTTPHeader(tc.Header)
+
+	for k, v := range ToYamlHTTPHeader(header) {
 		if k != "Content-Length" {
 			curl = curl + fmt.Sprintf("  --header '%s: %s' \\\n", k, v)
 		}
 	}
-	if body != "" {
-		curl = curl + fmt.Sprintf("  --data '%s'", body)
+	if len(tc.Form) > 0 {
+		for _, form := range tc.Form {
+			key := form.Key
+			if len(form.Values) == 0 {
+				continue
+			}
+			value := form.Values[0]
+			curl = curl + fmt.Sprintf("  --form '%s=%s' \\\n", key, value)
+		}
+	} else if tc.Body != "" {
+		curl = curl + fmt.Sprintf("  --data %s", strconv.Quote(tc.Body))
 	}
 	return curl
 }
@@ -274,6 +342,33 @@ var (
 		time.TimeOnly,
 	}
 )
+
+// ExtractPort extracts the port from a given URL string, defaulting to 80 if no port is specified.
+func ExtractPort(rawURL string) (uint32, error) {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return 0, err
+	}
+
+	host := parsedURL.Host
+	if strings.Contains(host, ":") {
+		// Split the host by ":" and return the port part
+		parts := strings.Split(host, ":")
+		port, err := strconv.ParseUint(parts[len(parts)-1], 10, 32)
+		if err != nil {
+			return 0, fmt.Errorf("invalid port in URL: %s", rawURL)
+		}
+		return uint32(port), nil
+	}
+
+	// Default ports based on scheme
+	switch parsedURL.Scheme {
+	case "https":
+		return 443, nil
+	default:
+		return 80, nil
+	}
+}
 
 func ExtractHostAndPort(curlCmd string) (string, string, error) {
 	// Split the command string to find the URL

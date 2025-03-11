@@ -5,20 +5,27 @@ import (
 )
 
 type TestReport struct {
-	Version Version      `json:"version" yaml:"version"`
-	Name    string       `json:"name" yaml:"name"`
-	Status  string       `json:"status" yaml:"status"`
-	Success int          `json:"success" yaml:"success"`
-	Failure int          `json:"failure" yaml:"failure"`
-	Ignored int          `json:"ignored" yaml:"ignored"`
-	Total   int          `json:"total" yaml:"total"`
-	Tests   []TestResult `json:"tests" yaml:"tests,omitempty"`
-	TestSet string       `json:"testSet" yaml:"test_set"`
+	Version   Version      `json:"version" yaml:"version"`
+	Name      string       `json:"name" yaml:"name"`
+	Status    string       `json:"status" yaml:"status"`
+	Success   int          `json:"success" yaml:"success"`
+	Failure   int          `json:"failure" yaml:"failure"`
+	Ignored   int          `json:"ignored" yaml:"ignored"`
+	Total     int          `json:"total" yaml:"total"`
+	Tests     []TestResult `json:"tests" yaml:"tests,omitempty"`
+	TestSet   string       `json:"testSet" yaml:"test_set"`
+	CreatedAt int64        `json:"created_at" yaml:"created_at"`
 }
 
 type TestCoverage struct {
 	FileCov  map[string]string `json:"fileCoverage" yaml:"file_coverage"`
 	TotalCov string            `json:"totalCoverage" yaml:"total_coverage"`
+	Loc      Loc               `json:"loc" yaml:"loc"`
+}
+
+type Loc struct {
+	Total   int `json:"total" yaml:"total"`
+	Covered int `json:"covered" yaml:"covered"`
 }
 
 func (tr *TestReport) GetKind() string {

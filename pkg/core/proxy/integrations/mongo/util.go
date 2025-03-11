@@ -21,10 +21,7 @@ func isHeartBeat(logger *zap.Logger, opReq Operation, requestHeader models.Mongo
 
 	switch requestHeader.Opcode {
 	case wiremessage.OpQuery:
-		val, ok := mongoRequest.(*models.MongoOpQuery)
-		if ok {
-			return val.FullCollectionName == "admin.$cmd" && opReq.IsIsMaster() && strings.Contains(opReq.String(), "helloOk")
-		}
+		return true
 	case wiremessage.OpMsg:
 		_, ok := mongoRequest.(*models.MongoOpMessage)
 		if ok {

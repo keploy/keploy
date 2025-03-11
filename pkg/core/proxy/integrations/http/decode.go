@@ -23,7 +23,7 @@ import (
 )
 
 // Decodes the mocks in test mode so that they can be sent to the user application.
-func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	errCh := make(chan error, 1)
 
 	go func(errCh chan error, reqBuf []byte, opts models.OutgoingOptions) {

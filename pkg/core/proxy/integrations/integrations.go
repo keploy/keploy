@@ -5,7 +5,6 @@ package integrations
 
 import (
 	"context"
-	"crypto/tls"
 	"net"
 
 	"go.keploy.io/server/v2/pkg/models"
@@ -30,16 +29,10 @@ const (
 
 var Registered = make(map[string]Initializer)
 
-type ConditionalDstCfg struct {
-	Addr   string // Destination Addr (ip:port)
-	Port   uint
-	TLSCfg *tls.Config
-}
-
 type Integrations interface {
 	MatchType(ctx context.Context, reqBuf []byte) bool
 	RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error
-	MockOutgoing(ctx context.Context, src net.Conn, dstCfg *ConditionalDstCfg, mockDb MockMemDb, opts models.OutgoingOptions) error
+	MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.ConditionalDstCfg, mockDb MockMemDb, opts models.OutgoingOptions) error
 }
 
 func Register(name string, i Initializer) {

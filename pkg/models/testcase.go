@@ -25,7 +25,7 @@ const (
 	HTTP           Kind     = "Http"
 	GENERIC        Kind     = "Generic"
 	REDIS          Kind     = "Redis"
-	SQL            Kind     = "MySQL"
+	MySQL          Kind     = "MySQL"
 	Postgres       Kind     = "Postgres"
 	GRPC_EXPORT    Kind     = "gRPC"
 	Mongo          Kind     = "Mongo"
@@ -34,6 +34,12 @@ const (
 	BodyTypePlain  BodyType = "PLAIN"
 	BodyTypeJSON   BodyType = "JSON"
 	BodyTypeError  BodyType = "ERROR"
+)
+
+// HTTP Response Types
+const (
+	HTTPResponseJSON = "json"
+	HTTPResponseXML  = "xml"
 )
 
 type TestCase struct {
@@ -45,6 +51,7 @@ type TestCase struct {
 	Captured int64               `json:"captured" bson:"captured"`
 	HTTPReq  HTTPReq             `json:"http_req" bson:"http_req"`
 	HTTPResp HTTPResp            `json:"http_resp" bson:"http_resp"`
+	XMLResp  XMLResp             `json:"xml_resp" bson:"xml_resp"`
 	AllKeys  map[string][]string `json:"all_keys" bson:"all_keys"`
 	GrpcResp GrpcResp            `json:"grpcResp" bson:"grpcResp"`
 	GrpcReq  GrpcReq             `json:"grpcReq" bson:"grpcReq"`
@@ -53,6 +60,7 @@ type TestCase struct {
 	Mocks    []*Mock             `json:"mocks" bson:"mocks"`
 	Type     string              `json:"type" bson:"type"`
 	Curl     string              `json:"curl" bson:"curl"`
+	IsLast   bool                `json:"is_last" bson:"is_last"`
 }
 
 func (tc *TestCase) GetKind() string {

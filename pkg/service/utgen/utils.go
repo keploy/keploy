@@ -1,6 +1,7 @@
 package utgen
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"log"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -107,24 +109,83 @@ func convertToInt(value interface{}) (int, error) {
 	}
 }
 
-func extractErrorMessage(failMessage string) string {
-	const MAX_LINES = 15
-	pattern := `={3,} FAILURES ={3,}(.*?)(={3,}|$)`
-	re := regexp.MustCompile(pattern)
-	match := re.FindStringSubmatch(failMessage)
-	if len(match) > 1 {
-		errStr := strings.TrimSpace(match[1])
-		errStrLines := strings.Split(errStr, "\n")
-		if len(errStrLines) > MAX_LINES {
-			errStr = "...\n" + strings.Join(errStrLines[len(errStrLines)-MAX_LINES:], "\n")
-		}
-		return errStr
+func extractErrorMessage(outputMessage, failMessage, language string) string {
+	const maxLines = 15
+	var pattern string
+	message := failMessage
+	switch language {
+	case "python":
+		pattern = `^=+ ERRORS =+$`
+		message = outputMessage
+	case "java":
+		pattern = `^\[ERROR\].*`
+		message = outputMessage
+	case "go":
+		pattern = `(?i)(^FAIL|panic:|undefined:)`
+	case "javascript":
+		pattern = `(?i)● .*`
 	}
-	return ""
+	re := regexp.MustCompile(pattern)
+	scanner := bufio.NewScanner(strings.NewReader(message))
+	var result []string
+	matching := false
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if re.MatchString(line) {
+			matching = true
+		}
+		if matching {
+			result = append(result, line)
+			if len(result) >= maxLines {
+				break
+			}
+		}
+	}
+	return strings.Join(result, "\n")
 }
 
 func getFilename(filePath string) string {
 	return filepath.Base(filePath)
+}
+
+func formatDuration(duration time.Duration) string {
+	if duration >= time.Minute {
+		minutes := int(duration.Minutes())
+		seconds := duration.Seconds() - float64(minutes*60)
+		return fmt.Sprintf("%dm%.2fs", minutes, seconds)
+	}
+	return fmt.Sprintf("%.2fs", duration.Seconds())
+}
+
+func extractString(output []byte) []string {
+	lines := strings.Split(string(output), "\n")
+	var dependencies []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			dependencies = append(dependencies, trimmed)
+		}
+	}
+	return dependencies
+}
+
+func isStringInarray(array []string, text string) bool {
+	for _, elem := range array {
+		if strings.EqualFold(elem, text) {
+			return true
+		}
+	}
+	return false
+}
+
+func mapKeysToSortedSlice(itemsMap map[string]bool) []string {
+	items := []string{}
+	for item := range itemsMap {
+		items = append(items, item)
+	}
+	sort.Strings(items)
+	return items
 }
 
 func RunCommand(command string, cwd string, logger *zap.Logger) (stdout string, stderr string, exitCode int, commandStartTime int64, err error) {
@@ -172,17 +233,6 @@ func getTestFilePath(sourceFilePath, testDirectory string) (string, error) {
 
 	language := GetCodeLanguage(sourceFilePath)
 
-	var testFileIdentifier string
-
-	switch language {
-
-	case "go":
-		testFileIdentifier = "_test"
-	case "javascript":
-		testFileIdentifier = ".test"
-	default:
-		return "", fmt.Errorf("unsupported language: %s", language)
-	}
 	// Extract the base name and extension of the source file
 	baseName := filepath.Base(sourceFilePath)
 	extension := filepath.Ext(sourceFilePath)
@@ -190,8 +240,21 @@ func getTestFilePath(sourceFilePath, testDirectory string) (string, error) {
 	// Remove the extension from the base name
 	baseNameWithoutExt := strings.TrimSuffix(baseName, extension)
 
+	var testFileBaseNames []string
+
+	switch language {
+	case "go":
+		testFileBaseNames = []string{baseNameWithoutExt + "_test" + extension}
+	case "javascript":
+		testFileBaseNames = []string{baseNameWithoutExt + ".test" + extension}
+	case "python":
+		testFileBaseNames = []string{baseNameWithoutExt + "_test" + extension, "test_" + baseName}
+	default:
+		return "", fmt.Errorf("unsupported language: %s", language)
+	}
+
 	// Find the most specific existing test file
-	testFilePath, err := findTestFile(testDirectory, baseNameWithoutExt, extension)
+	testFilePath, err := findTestFile(testDirectory, testFileBaseNames)
 	if err != nil {
 		return "", err
 	}
@@ -203,12 +266,12 @@ func getTestFilePath(sourceFilePath, testDirectory string) (string, error) {
 
 	// Construct the relative path for the new test file
 	relativeDir := strings.TrimPrefix(filepath.Dir(sourceFilePath), "src")
-	testFilePath = filepath.Join(testDirectory, relativeDir, baseNameWithoutExt+testFileIdentifier+extension)
+	testFilePath = filepath.Join(testDirectory, relativeDir, testFileBaseNames[0])
 
 	return testFilePath, nil
 }
 
-func findTestFile(testDirectory, baseNameWithoutExt, extension string) (string, error) {
+func findTestFile(testDirectory string, testFileBaseNames []string) (string, error) {
 	var bestMatch string
 
 	err := filepath.Walk(testDirectory, func(path string, info os.FileInfo, err error) error {
@@ -216,9 +279,11 @@ func findTestFile(testDirectory, baseNameWithoutExt, extension string) (string, 
 			return err
 		}
 		if !info.IsDir() {
-			if strings.HasSuffix(path, baseNameWithoutExt+".test"+extension) {
-				if bestMatch == "" || len(path) < len(bestMatch) {
-					bestMatch = path
+			for _, testFileBaseName := range testFileBaseNames {
+				if strings.HasSuffix(path, testFileBaseName) {
+					if bestMatch == "" || len(path) < len(bestMatch) {
+						bestMatch = path
+					}
 				}
 			}
 		}
