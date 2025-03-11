@@ -48,9 +48,9 @@ type CompletionParams struct {
 type ReasoningType string
 
 const (
-	HighReasioning   ReasoningType = "high"
-	LowReasioning    ReasoningType = "low"
-	MediumReasioning ReasoningType = "medium"
+	HighReasioning   ReasoningType = "high"   // HighReasioning represents high reasoning effort.
+	LowReasioning    ReasoningType = "low"    // LowReasioning represents low reasoning effort.
+	MediumReasioning ReasoningType = "medium" // MediumReasioning represents medium reasoning effort.
 )
 
 type Message struct {
