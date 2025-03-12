@@ -13,7 +13,6 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.uber.org/zap"
-	yamlLib "gopkg.in/yaml.v3"
 )
 
 var IdempotentMethodsMap = map[string]bool{
@@ -27,17 +26,13 @@ var IdempotentMethodsMap = map[string]bool{
 	"PATCH":   false,
 }
 
-var CommonNoiseFields = []string{
-	"header.Date",
-}
-
 // type IRRResponse struct {
 // 	StatusCode int                 `json:"statuscode" bson:"statuscode"`
 // 	Header     map[string][]string `json:"header" bson:"header"`
 // 	Body       string              `json:"body" bson:"body"`
 // }
 
-/* IRR stands for Idempontency Request Replayser */
+/* IRR stands for Idempontency Request Replayer */
 
 type IRRTestCase struct {
 	TestCase     *models.TestCase  `json:"testcase" bson:"testcase"`
@@ -64,7 +59,7 @@ func New(logger *zap.Logger, idemReportPath string, idemReportName string) *IRRR
 	}
 }
 
-var irrTestCases = []IRRTestCase{}
+var irrReport = []IRRTestCase{}
 
 func (irr *IRRReportYaml) StoreReplayResult() {
 }
@@ -87,13 +82,6 @@ func (irr *IRRReportYaml) ReplayTestCase(ctx context.Context, tc *models.TestCas
 		}
 	}
 
-	f, err := os.OpenFile(idemReporFiletPath, os.O_WRONLY|os.O_TRUNC, 0644)
-	if err != nil {
-		irr.Logger.Error("IRR: error in opening idempotency report file", zap.Error(err))
-		return
-	}
-	defer f.Close()
-
 	tc.Name = fmt.Sprintf("test-%d", lastIndex)
 
 	httpResponses := []models.HTTPResp{}
@@ -105,7 +93,7 @@ func (irr *IRRReportYaml) ReplayTestCase(ctx context.Context, tc *models.TestCas
 		IRRResponses: []models.HTTPResp{},
 	}
 
-	//------------------Replay TestCase Request-------------------
+	/* ------------------Replay TestCase Request------------------- */
 	client := &http.Client{}
 
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, strings.NewReader(tc.HTTPReq.Body))
@@ -114,10 +102,8 @@ func (irr *IRRReportYaml) ReplayTestCase(ctx context.Context, tc *models.TestCas
 		return
 	}
 
-	for key, values := range tc.HTTPReq.Header {
-		for _, value := range values {
-			req.Header.Add(key, string(value))
-		}
+	for key, value := range tc.HTTPReq.Header {
+		req.Header.Add(key, value)
 	}
 
 	// Add special header to indicate with value of the test number.
@@ -163,18 +149,9 @@ func (irr *IRRReportYaml) ReplayTestCase(ctx context.Context, tc *models.TestCas
 	detectedNoise := CompareResponses(httpResponses, irr.Logger)
 	irrTestCase.IRRNoise = detectedNoise
 
-	irrTestCases = append(irrTestCases, *irrTestCase)
+	irrReport = append(irrReport, *irrTestCase)
 
-	data, err := yamlLib.Marshal(&irrTestCases)
-	if err != nil {
-		irr.Logger.Error("IRR: error in marshalling the updated test case", zap.Error(err))
-		return
-	}
-
-	_, err = f.Write(data)
-	if err != nil {
-		irr.Logger.Error("IRR: error writing updated test case", zap.Error(err))
-	}
+	SaveIRRReport(&irrReport, idemReporFiletPath, irr.Logger)
 
 	tc.Noise = detectedNoise.NoiseFields
 }
@@ -185,3 +162,66 @@ func (irr *IRRReportYaml) CheckReplayHeader(tc *models.TestCase) bool {
 	}
 	return false
 }
+
+//--------------------------------------------------------------------------------------------------------------------------------------
+
+// A list of dynamic header to be configured.
+// allow the user to modify/update or add new of these tokens/headers in the config file.
+var DynamicHeaders = []string{
+	"Date",
+	"X-Request-ID",
+	"X-Forwarded-For",
+	"User-Agent",
+}
+
+// A list of session related tokens to be configured.
+// allow the user to modify/update or add new of these tokens/headers in the config file.
+var SessionTokensHeaders = []string{
+	// request headers
+	"Authorization",
+	"Cookie",
+}
+
+type IRRConfig struct {
+	DynamicHeaders       map[string]string `json:"dynamicHeaders" bson:"dynamicHeaders"`
+	SessionTokensHeaders map[string]string `json:"sessionTokens" bson:"sessionTokens"`
+}
+
+var irrconfig = IRRConfig{
+	DynamicHeaders:       make(map[string]string),
+	SessionTokensHeaders: make(map[string]string),
+}
+
+func (irr *IRRReportYaml) StoreDynamicHeaders(ctx context.Context, tc *models.TestCase, testSetID string) {
+	configPath := filepath.Join(irr.IdemReportPath, testSetID, "irrconfig.yaml")
+
+	for _, header := range DynamicHeaders {
+		if _, ok := tc.HTTPReq.Header[header]; ok {
+			irr.Logger.Warn("IRR: dynamic header detected, make sure to update/ignore it through test-set config file before testing.", zap.String("header", header))
+			irrconfig.DynamicHeaders[header] = tc.HTTPReq.Header[header]
+		}
+	}
+
+	for _, token := range SessionTokensHeaders {
+		if _, ok := tc.HTTPReq.Header[token]; ok {
+			irr.Logger.Warn("IRR: session token detected, make sure to update/ignore it through test-set config file before testing.", zap.String("token", token))
+			irrconfig.SessionTokensHeaders[token] = tc.HTTPReq.Header[token]
+		}
+	}
+
+	SaveConfig(irrconfig, configPath, irr.Logger)
+}
+
+/*
+- Implement a way to store dynamic headers along side every test-set as a config file.
+- Make it easy for the user to update/ignore certain dynamic headers which may lead to flaky testing.
+- When recording give a warning about give the user the option to ignore/update these dynamic headers in the config file or leave them as it is.
+- Also this can work for session related tokens as well, but will put more work on the user to update these tokens.
+*/
+
+/*
+- Implement a way to store session related tokens/headers along side every test-set.
+- To avoid failed tests when these session related tokens/headers expires,
+	-- we can have a way to update these tokens/headers by running the test-case responsible of these tokens/headers.
+	-- this will make it easier for the user to avoid making changes in his api development enviroment only for testing purposes.
+*/

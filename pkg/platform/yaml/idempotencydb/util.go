@@ -2,13 +2,14 @@ package idempotencydb
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/yaml/testdb"
-	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
+	yamlLib "gopkg.in/yaml.v3"
 )
 
 func CompareResponses(httpResponses []models.HTTPResp, logger *zap.Logger) IRRDetectedNoise {
@@ -22,7 +23,7 @@ func CompareResponses(httpResponses []models.HTTPResp, logger *zap.Logger) IRRDe
 		m, err := testdb.FlattenHTTPResponse(pkg.ToHTTPHeader(resp.Header), resp.Body)
 		if err != nil {
 			msg := "error in flattening http response"
-			utils.LogError(logger, err, msg)
+			logger.Error(msg, zap.Error(err))
 		}
 		responsesMapList = append(responsesMapList, m)
 	}
@@ -54,19 +55,35 @@ func CompareResponses(httpResponses []models.HTTPResp, logger *zap.Logger) IRRDe
 			if strings.Contains(key, "body") {
 				irrDetectedNoise.NoiseFields["header.Content-Length"] = []string{}
 			}
-		} else if IsInCommonNoiseFields(key) {
+		} else if key == "header.Date" {
 			irrDetectedNoise.NoiseFields[key] = []string{}
-			if strings.Contains(key, "body") {
-				irrDetectedNoise.NoiseFields["header.Content-Length"] = []string{}
-			}
 		} else {
 			if key != "header.Content-Length" {
 				logger.Warn("Inconsistancy detected in IRR, you may consider marking them as noise.", zap.String("field", key), zap.String("count", fmt.Sprint(value)))
 			}
 		}
 	}
-
 	return irrDetectedNoise
+}
+
+func SaveIRRReport(irrReport *[]IRRTestCase, idemReporFiletPath string, logger *zap.Logger) {
+	f, err := os.OpenFile(idemReporFiletPath, os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		logger.Error("IRR: error in opening idempotency report file", zap.Error(err))
+		return
+	}
+	defer f.Close()
+
+	data, err := yamlLib.Marshal(&irrReport)
+	if err != nil {
+		logger.Error("IRR: error in marshalling the updated test case", zap.Error(err))
+		return
+	}
+
+	_, err = f.Write(data)
+	if err != nil {
+		logger.Error("IRR: error writing updated test case", zap.Error(err))
+	}
 }
 
 func compareSlices(slice1, slice2 []string) bool {
@@ -81,11 +98,43 @@ func compareSlices(slice1, slice2 []string) bool {
 	return true
 }
 
-func IsInCommonNoiseFields(key string) bool {
-	for _, field := range CommonNoiseFields {
-		if key == field {
-			return true
+//--------------------------------------------------------------------------------------------------------------------------------------
+
+func SaveConfig(irrconfig IRRConfig, configPath string, logger *zap.Logger) {
+	// make a one config file for IgnoredFields, SessionTokens and DynamicHeaders
+	// where every field has a value, these values can be "headers-values" or "ignored".
+
+	_, err := os.Stat(configPath)
+	if os.IsNotExist(err) {
+		_, err = os.Create(configPath)
+		if err != nil {
+			logger.Error("IRR: error in creating irrconfig file", zap.Error(err))
+			return
 		}
+	} else if err != nil {
+		logger.Error("IRR: error checking if irrconfig file exists", zap.Error(err))
+		return
 	}
-	return false
+
+	f, err := os.OpenFile(configPath, os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		logger.Error("IRR: error in opening irrconfig file", zap.Error(err))
+		return
+	}
+	defer f.Close()
+
+	data, err := yamlLib.Marshal(&irrconfig)
+	if err != nil {
+		logger.Error("IRR: error in marshalling irrconfig", zap.Error(err))
+		return
+	}
+
+	_, err = f.Write(data)
+	if err != nil {
+		logger.Error("IRR: error writing irrconfig", zap.Error(err))
+	}
+}
+
+func LoadConfig(irrconfig IRRConfig, configPath string, logger *zap.Logger) {
+	// load the config file into IgnoredFields, SessionTokens and DynamicHeaders.
 }

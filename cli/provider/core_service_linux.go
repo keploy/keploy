@@ -103,7 +103,7 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 	instrumentation := core.New(logger, h, p, t, client)
 
 	testDB := testdb.New(logger, c.Path)
-	idempotencydb := idempotencydb.New(logger, c.Path, "idemReport.yaml")
+	idempotencydb := idempotencydb.New(logger, c.Path, "irrreport.yaml")
 	mockDB := mockdb.New(logger, c.Path, "")
 	openAPIdb := openapidb.New(logger, filepath.Join(c.Path, "schema"))
 	reportDB := reportdb.New(logger, c.Path+"/reports")

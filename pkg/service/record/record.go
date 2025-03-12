@@ -144,6 +144,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 				continue
 			} else {
 				r.IdempotencyDB.ReplayTestCase(ctx, testCase, newTestSetID, 3)
+				r.IdempotencyDB.StoreDynamicHeaders(ctx, testCase, newTestSetID)
 			}
 			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
 			if err != nil {
