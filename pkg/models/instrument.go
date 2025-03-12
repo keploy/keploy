@@ -32,7 +32,7 @@ type ConditionalDstCfg struct {
 }
 
 type IncomingOptions struct {
-	Filters []config.Filter
+	Filters  []config.Filter
 	BasePath string
 }
 
