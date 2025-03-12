@@ -28,7 +28,7 @@ const (
 )
 
 var Registered = make(map[string]Initializer)
-
+var RegistrationOrder []string
 type Integrations interface {
 	MatchType(ctx context.Context, reqBuf []byte) bool
 	RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error
@@ -36,6 +36,9 @@ type Integrations interface {
 }
 
 func Register(name string, i Initializer) {
+	if _, exists := Registered[name]; !exists {
+		RegistrationOrder = append(RegistrationOrder, name) // Track order only if first time
+	}
 	Registered[name] = i
 }
 

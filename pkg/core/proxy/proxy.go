@@ -82,6 +82,12 @@ func (p *Proxy) InitIntegrations(_ context.Context) error {
 		p.Integrations[parserType] = prs
 	}
 	return nil
+	// for _, parserType := range integrations.RegistrationOrder {
+	// 	parser := integrations.Registered[parserType]
+	// 	prs := parser(p.logger)
+	// 	p.Integrations[parserType] = prs
+	// }
+	// return nil
 }
 
 func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
@@ -514,7 +520,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	generic := true
 
 	//Checking for all the parsers.
-	for _, parser := range p.Integrations {
+	// Iterate in reverse order to check the last registered parser first
+	for i := len(integrations.RegistrationOrder) - 1; i >= 0; i-- {
+		parserName := integrations.RegistrationOrder[i] // Get parser name
+		parser, exists := p.Integrations[parserName]
+		if !exists {
+			continue // Skip if parser does not exist
+		}
 		if parser.MatchType(parserCtx, initialBuf) {
 			if rule.Mode == models.MODE_RECORD {
 				err := parser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)

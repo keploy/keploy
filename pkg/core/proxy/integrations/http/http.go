@@ -24,6 +24,7 @@ import (
 )
 
 func init() {
+	fmt.Println("executed now")
 	integrations.Register("http", NewHTTP)
 }
 
@@ -37,12 +38,17 @@ func NewHTTP(logger *zap.Logger) integrations.Integrations {
 		logger: logger,
 	}
 }
+func New(logger *zap.Logger) *HTTP {
+	return &HTTP{
+		logger: logger,
+	}
+}
 
-type finalHTTP struct {
-	req              []byte
-	resp             []byte
-	reqTimestampMock time.Time
-	resTimestampMock time.Time
+type FinalHTTP struct {
+	Req              []byte
+	Resp             []byte
+	ReqTimestampMock time.Time
+	ResTimestampMock time.Time
 }
 
 // MatchType function determines if the outgoing network call is HTTP by comparing the
@@ -70,7 +76,7 @@ func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, m
 		utils.LogError(logger, err, "failed to read the initial http message")
 		return err
 	}
-	err = encodeHTTP(ctx, logger, reqBuf, src, dst, mocks, opts)
+	err = h.encodeHTTP(ctx, logger, reqBuf, src, dst, mocks, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the http message into the yaml")
 		return err
@@ -88,7 +94,7 @@ func (h *HTTP) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.Co
 		return err
 	}
 
-	err = decodeHTTP(ctx, logger, reqBuf, src, dstCfg, mockDb, opts)
+	err = h.decodeHTTP(ctx, logger, reqBuf, src, dstCfg, mockDb, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to decode the http message from the yaml")
 		return err
@@ -97,30 +103,32 @@ func (h *HTTP) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.Co
 }
 
 // ParseFinalHTTP is used to parse the final http request and response and save it in a yaml file
-func ParseFinalHTTP(_ context.Context, logger *zap.Logger, mock *finalHTTP, destPort uint, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func (h *HTTP) parseFinalHTTP(_ context.Context, logger *zap.Logger, mock *FinalHTTP, destPort uint, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	var req *http.Request
 	// converts the request message buffer to http request
-	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(mock.req)))
+	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(mock.Req)))
 	if err != nil {
 		utils.LogError(logger, err, "failed to parse the http request message")
 		return err
 	}
 
+	// setting up host header of request
+	req.Header.Set("Host", req.Host)
 	var reqBody []byte
 	if req.Body != nil { // Read
 		var err error
 		reqBody, err = io.ReadAll(req.Body)
 		if err != nil {
 			// TODO right way to log errors
-			utils.LogError(logger, err, "failed to read the http request body", zap.Any("metadata", getReqMeta(req)))
+			utils.LogError(logger, err, "failed to read the http request body", zap.Any("metadata", GetReqMeta(req)))
 			return err
 		}
 	}
 
 	// converts the response message buffer to http response
-	respParsed, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(mock.resp)), req)
+	respParsed, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(mock.Resp)), req)
 	if err != nil {
-		utils.LogError(logger, err, "failed to parse the http response message", zap.Any("metadata", getReqMeta(req)))
+		utils.LogError(logger, err, "failed to parse the http response message", zap.Any("metadata", GetReqMeta(req)))
 		return err
 	}
 
@@ -136,7 +144,7 @@ func ParseFinalHTTP(_ context.Context, logger *zap.Logger, mock *finalHTTP, dest
 			if ok {
 				gzipReader, err := gzip.NewReader(reader)
 				if err != nil {
-					utils.LogError(logger, err, "failed to create a gzip reader", zap.Any("metadata", getReqMeta(req)))
+					utils.LogError(logger, err, "failed to create a gzip reader", zap.Any("metadata", GetReqMeta(req)))
 					return err
 				}
 				respParsed.Body = gzipReader
@@ -144,7 +152,7 @@ func ParseFinalHTTP(_ context.Context, logger *zap.Logger, mock *finalHTTP, dest
 		}
 		respBody, err = io.ReadAll(respParsed.Body)
 		if err != nil {
-			utils.LogError(logger, err, "failed to read the the http response body", zap.Any("metadata", getReqMeta(req)))
+			utils.LogError(logger, err, "failed to read the the http response body", zap.Any("metadata", GetReqMeta(req)))
 			return err
 		}
 		logger.Debug("This is the response body: " + string(respBody))
@@ -161,7 +169,7 @@ func ParseFinalHTTP(_ context.Context, logger *zap.Logger, mock *finalHTTP, dest
 
 	// Check if the request is a passThrough request
 	if IsPassThrough(logger, req, destPort, opts) {
-		logger.Debug("The request is a passThrough request", zap.Any("metadata", getReqMeta(req)))
+		logger.Debug("The request is a passThrough request", zap.Any("metadata", GetReqMeta(req)))
 		return nil
 	}
 
@@ -186,8 +194,8 @@ func ParseFinalHTTP(_ context.Context, logger *zap.Logger, mock *finalHTTP, dest
 				Body:       string(respBody),
 			},
 			Created:          time.Now().Unix(),
-			ReqTimestampMock: mock.resTimestampMock,
-			ResTimestampMock: mock.resTimestampMock,
+			ReqTimestampMock: mock.ReqTimestampMock,
+			ResTimestampMock: mock.ResTimestampMock,
 		},
 	}
 	return nil

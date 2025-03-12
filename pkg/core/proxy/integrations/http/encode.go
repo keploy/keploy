@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,7 +21,7 @@ import (
 )
 
 // encodeHTTP function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
-func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func (h *HTTP) encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 
 	remoteAddr := destConn.RemoteAddr().(*net.TCPAddr)
 	destPort := uint(remoteAddr.Port)
@@ -112,7 +113,7 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			// Capture the request timestamp
 			reqTimestampMock := time.Now()
 
-			err := handleChunkedRequests(ctx, logger, &finalReq, clientConn, destConn)
+			err := h.HandleChunkedRequests(ctx, logger, &finalReq, clientConn, destConn)
 			if err != nil {
 				utils.LogError(logger, err, "failed to handle chunked requests")
 				errCh <- err
@@ -127,7 +128,6 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 					logger.Debug("Response complete, exiting the loop.")
 					// if there is any buffer left before EOF, we must send it to the client and save this as mock
 					if len(resp) != 0 {
-
 						// Capturing the response timestamp
 						resTimestampMock := time.Now()
 						// write the response message to the user client
@@ -142,13 +142,13 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 						}
 
 						// saving last request/response on this conn.
-						m := &finalHTTP{
-							req:              finalReq,
-							resp:             resp,
-							reqTimestampMock: reqTimestampMock,
-							resTimestampMock: resTimestampMock,
+						m := &FinalHTTP{
+							Req:              finalReq,
+							Resp:             resp,
+							ReqTimestampMock: reqTimestampMock,
+							ResTimestampMock: resTimestampMock,
 						}
-						err := ParseFinalHTTP(ctx, logger, m, destPort, mocks, opts)
+						err := h.parseFinalHTTP(ctx, logger, m, destPort, mocks, opts)
 						if err != nil {
 							utils.LogError(logger, err, "failed to parse the final http request and response")
 							errCh <- err
@@ -179,18 +179,18 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			finalResp = append(finalResp, resp...)
 			logger.Debug("This is the initial response: " + string(resp))
 
-			err = handleChunkedResponses(ctx, logger, &finalResp, clientConn, destConn, resp)
+			err = h.handleChunkedResponses(ctx, logger, &finalResp, clientConn, destConn, resp)
 			if err != nil {
 				if err == io.EOF {
 					logger.Debug("conn closed by the server", zap.Error(err))
 					//check if before EOF complete response came, and try to parse it.
-					m := &finalHTTP{
-						req:              finalReq,
-						resp:             finalResp,
-						reqTimestampMock: reqTimestampMock,
-						resTimestampMock: resTimestampMock,
+					m := &FinalHTTP{
+						Req:              finalReq,
+						Resp:             finalResp,
+						ReqTimestampMock: reqTimestampMock,
+						ResTimestampMock: resTimestampMock,
 					}
-					parseErr := ParseFinalHTTP(ctx, logger, m, destPort, mocks, opts)
+					parseErr := h.parseFinalHTTP(ctx, logger, m, destPort, mocks, opts)
 					if parseErr != nil {
 						utils.LogError(logger, parseErr, "failed to parse the final http request and response")
 						errCh <- parseErr
@@ -205,14 +205,14 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 
 			logger.Debug("This is the final response: " + string(finalResp))
 
-			m := &finalHTTP{
-				req:              finalReq,
-				resp:             finalResp,
-				reqTimestampMock: reqTimestampMock,
-				resTimestampMock: resTimestampMock,
+			m := &FinalHTTP{
+				Req:              finalReq,
+				Resp:             finalResp,
+				ReqTimestampMock: reqTimestampMock,
+				ResTimestampMock: resTimestampMock,
 			}
 
-			err = ParseFinalHTTP(ctx, logger, m, destPort, mocks, opts)
+			err = h.parseFinalHTTP(ctx, logger, m, destPort, mocks, opts)
 			if err != nil {
 				utils.LogError(logger, err, "failed to parse the final http request and response")
 				errCh <- err
@@ -257,4 +257,90 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 		}
 		return err
 	}
+}
+
+func (h *HTTP) handleChunkedResponses(ctx context.Context, logger *zap.Logger, finalResp *[]byte, clientConn, destConn net.Conn, resp []byte) error {
+
+	if hasCompleteHeaders(*finalResp) {
+		logger.Debug("this response has complete headers in the first chunk itself.")
+	}
+
+	for !hasCompleteHeaders(resp) {
+		logger.Debug("couldn't get complete headers in first chunk so reading more chunks")
+		respHeader, err := pUtil.ReadBytes(ctx, logger, destConn)
+		if err != nil {
+			if err == io.EOF {
+				logger.Debug("received EOF from the server")
+				// if there is any buffer left before EOF, we must send it to the client and save this as mock
+				if len(respHeader) != 0 {
+					// write the response message to the user client
+					_, err = clientConn.Write(resp)
+					if err != nil {
+						if ctx.Err() != nil {
+							return ctx.Err()
+						}
+						utils.LogError(logger, nil, "failed to write response message to the user client")
+						return err
+					}
+					*finalResp = append(*finalResp, respHeader...)
+				}
+				return err
+			}
+			utils.LogError(logger, nil, "failed to read the response message from the destination server")
+			return err
+		}
+		// write the response message to the user client
+		_, err = clientConn.Write(respHeader)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			utils.LogError(logger, nil, "failed to write response message to the user client")
+			return err
+		}
+
+		*finalResp = append(*finalResp, respHeader...)
+		resp = append(resp, respHeader...)
+	}
+
+	//Getting the content-length or the transfer-encoding header
+	var contentLengthHeader, transferEncodingHeader string
+	lines := strings.Split(string(resp), "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Content-Length:") {
+			contentLengthHeader = strings.TrimSpace(strings.TrimPrefix(line, "Content-Length:"))
+			break
+		} else if strings.HasPrefix(line, "Transfer-Encoding:") {
+			transferEncodingHeader = strings.TrimSpace(strings.TrimPrefix(line, "Transfer-Encoding:"))
+			break
+		}
+	}
+	//Handle chunked responses
+	if contentLengthHeader != "" {
+		contentLength, err := strconv.Atoi(contentLengthHeader)
+		if err != nil {
+			utils.LogError(logger, err, "failed to get the content-length header")
+			return fmt.Errorf("failed to handle chunked response")
+		}
+		bodyLength := len(resp) - strings.Index(string(resp), "\r\n\r\n") - 4
+		contentLength -= bodyLength
+		if contentLength > 0 {
+			err := h.contentLengthResponse(ctx, logger, finalResp, clientConn, destConn, contentLength)
+			if err != nil {
+				return err
+			}
+		}
+	} else if transferEncodingHeader != "" {
+		//check if the initial response is the complete response.
+		if strings.HasSuffix(string(*finalResp), "0\r\n\r\n") {
+			return nil
+		}
+		if transferEncodingHeader == "chunked" {
+			err := h.chunkedResponse(ctx, logger, finalResp, clientConn, destConn)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

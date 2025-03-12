@@ -11,4 +11,5 @@ import (
 	_ "go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql"
 	_ "go.keploy.io/server/v2/pkg/core/proxy/integrations/postgres/v1"
 	_ "go.keploy.io/server/v2/pkg/core/proxy/integrations/redis"
+	// _ "go.keploy.io/server/v2/pkg/core/proxy/integrations/sqs"
 )
