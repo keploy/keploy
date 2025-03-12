@@ -36,6 +36,7 @@ func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 		proxyIP6:  [4]uint32{0000, 0000, 0000, 0001},
 		proxyPort: cfg.ProxyPort,
 		dnsPort:   cfg.DNSPort,
+		conf:      cfg,
 	}
 }
 
@@ -47,6 +48,7 @@ type Hooks struct {
 	proxyPort uint32
 	dnsPort   uint32
 	m         sync.Mutex
+	conf      *config.Config
 	// eBPF C shared maps
 	clientRegistrationMap    *ebpf.Map
 	agentRegistartionMap     *ebpf.Map
