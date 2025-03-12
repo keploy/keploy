@@ -270,7 +270,7 @@ func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
 
 func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (FrameChan, error) {
 	incomingOpts := models.IncomingOptions{
-		Filters: r.config.Record.Filters,
+		Filters:  r.config.Record.Filters,
 		BasePath: r.config.Record.BasePath,
 	}
 	incomingChan, err := r.instrumentation.GetIncoming(ctx, appID, incomingOpts)
