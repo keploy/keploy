@@ -143,8 +143,10 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 				// r.IdempotencyDB.StoreReplayResult()
 				continue
 			} else {
-				r.IdempotencyDB.ReplayTestCase(ctx, testCase, newTestSetID, 3)
-				r.IdempotencyDB.StoreDynamicHeaders(ctx, testCase, newTestSetID)
+				if r.config.ContainerName == "" || r.config.NetworkName == "" {
+					r.IdempotencyDB.ReplayTestCase(ctx, testCase, newTestSetID, 3)
+					r.IdempotencyDB.StoreDynamicHeaders(ctx, testCase, newTestSetID)
+				}
 			}
 			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
 			if err != nil {
