@@ -74,17 +74,17 @@ send_request(){
 for i in {1..2}; do
     app_name="javaApp_${i}"
     send_request &
-    sudo -E env PATH="$PATH" ./../../keployv2 record -c "./ginApp"
-    # if grep "ERROR" "${app_name}.txt"; then
-    #     echo "Error found in pipeline..."
-    #     cat "${app_name}.txt"
-    #     exit 1
-    # fi
-    # if grep "WARNING: DATA RACE" "${app_name}.txt"; then
-    #   echo "Race condition detected in recording, stopping pipeline..."
-    #   cat "${app_name}.txt"
-    #   exit 1
-    # fi
+    sudo -E env PATH="$PATH" ./../../keployv2 record -c "./ginApp"    &> "${app_name}.txt"
+    if grep "ERROR" "${app_name}.txt"; then
+        echo "Error found in pipeline..."
+        cat "${app_name}.txt"
+        exit 1
+    fi
+    if grep "WARNING: DATA RACE" "${app_name}.txt"; then
+      echo "Race condition detected in recording, stopping pipeline..."
+      cat "${app_name}.txt"
+      exit 1
+    fi
     sleep 5
     wait
     echo "Recorded test case and mocks for iteration ${i}"
