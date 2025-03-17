@@ -3,17 +3,35 @@
 package conn
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
+	"golang.org/x/net/http2"
 	// "log"
 )
+
+// Protocol represents the type of protocol being used
+type Protocol int
+
+const (
+	HTTP1 Protocol = iota
+	HTTP2
+)
+
+// StreamManager interface for managing protocol streams
+type StreamManager interface {
+	HandleFrame(frame http2.Frame, isOutgoing bool) error
+	GetCompleteStreams() []*pkg.HTTP2Stream
+	CleanupStream(streamID uint32)
+}
 
 // Tracker is a routine-safe container that holds a conn with unique ID, and able to create new conn.
 type Tracker struct {
@@ -22,55 +40,43 @@ type Tracker struct {
 	openTimestamp  uint64
 	closeTimestamp uint64
 
-	// Indicates the tracker stopped tracking due to closing the session.
+	// Protocol specific fields
+	protocol         Protocol
+	streamMgr        StreamManager
+	protocolDetected bool
+
+	// Common fields for both protocols
 	lastActivityTimestamp uint64
+	mutex                 sync.RWMutex
+	logger                *zap.Logger
+	reqTimestamps         []time.Time
 
-	// Queues to handle multiple ingress traffic on the same conn (keep-alive)
-
-	// kernelRespSizes is a slice of the total number of Response bytes received in the kernel side
-	kernelRespSizes []uint64
-
-	// kernelReqSizes is a slice of the total number of Request bytes received in the kernel side
-	kernelReqSizes []uint64
-
-	// userRespSizes is a slice of the total number of Response bytes received in the user side
-	userRespSizes []uint64
-
-	// userReqSizes is a slice of the total number of Request bytes received in the user side
-	userReqSizes []uint64
-	// userRespBufs is a slice of the Response data received in the user side on this conn
-	userResps [][]byte
-	// userReqBufs is a slice of the Request data received in the user side on this conn
-	userReqs [][]byte
-
-	// req and resp are the buffers to store the request and response data for the current request
-	// reset after 2 seconds of inactivity
-	respSize uint64
-	reqSize  uint64
-	resp     []byte
-	req      []byte
-
-	// Additional fields to know when to capture request or response info
-	// reset after 2 seconds of inactivity
+	// HTTP/1 specific fields (kept for backward compatibility)
+	kernelRespSizes  []uint64
+	kernelReqSizes   []uint64
+	userRespSizes    []uint64
+	userReqSizes     []uint64
+	userResps        [][]byte
+	userReqs         [][]byte
+	respSize         uint64
+	reqSize          uint64
+	resp             []byte
+	req              []byte
 	lastChunkWasResp bool
 	lastChunkWasReq  bool
-	recTestCounter   int32 //atomic counter
-	// firstRequest is used to indicate if the current request is the first request on the conn
-	// reset after 2 seconds of inactivity
-	// Note: This is used to handle multiple requests on the same conn (keep-alive)
-	// Its different from isNewRequest which is used to indicate if the current request chunk is the first chunk of the request
-	firstRequest bool
-
-	mutex  sync.RWMutex
-	logger *zap.Logger
-
-	reqTimestamps []time.Time
-	isNewRequest  bool
+	recTestCounter   int32
+	firstRequest     bool
+	isNewRequest     bool
+	buffer           []byte
 }
 
+// NewTracker creates a new connection tracker
 func NewTracker(connID ID, logger *zap.Logger) *Tracker {
-	return &Tracker{
-		connID:          connID,
+	t := &Tracker{
+		connID: connID,
+		logger: logger,
+		mutex:  sync.RWMutex{},
+		// Initialize HTTP/1 fields
 		req:             []byte{},
 		resp:            []byte{},
 		kernelRespSizes: []uint64{},
@@ -79,11 +85,24 @@ func NewTracker(connID ID, logger *zap.Logger) *Tracker {
 		userReqSizes:    []uint64{},
 		userResps:       [][]byte{},
 		userReqs:        [][]byte{},
-		mutex:           sync.RWMutex{},
-		logger:          logger,
 		firstRequest:    true,
 		isNewRequest:    true,
+		buffer:          make([]byte, 0, pkg.DefaultMaxFrameSize),
 	}
+
+	// Always start with HTTP/1
+	t.protocol = HTTP1
+	t.protocolDetected = false // Allow protocol detection
+
+	return t
+}
+
+// isInternalConnection checks if the connection is between local services
+func isInternalConnection(connID ID) bool {
+	// We identify internal connections by checking the ClientID:
+	// - ClientID == 0: External request (from outside the service)
+	// - ClientID > 0: Internal request (between gateway and gRPC service)
+	return connID.ClientID > 0 // This is an internal request
 }
 
 func (conn *Tracker) ToBytes() ([]byte, []byte) {
@@ -106,11 +125,153 @@ func (conn *Tracker) decRecordTestCount() {
 	atomic.AddInt32(&conn.recTestCounter, -1)
 }
 
-// IsComplete checks if the current conn has valid request & response info to capture and also returns the request and response data buffer.
-func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
+// reset resets the conn's request and response data buffers.
+func (conn *Tracker) reset() {
+	conn.firstRequest = true
+	conn.lastChunkWasResp = false
+	conn.lastChunkWasReq = false
+	conn.reqSize = 0
+	conn.respSize = 0
+	conn.resp = []byte{}
+	conn.req = []byte{}
+}
+
+func (conn *Tracker) verifyRequestData(expectedRecvBytes, actualRecvBytes uint64) bool {
+	return expectedRecvBytes == actualRecvBytes
+}
+
+func (conn *Tracker) verifyResponseData(expectedSentBytes, actualSentBytes uint64) bool {
+	return expectedSentBytes == actualSentBytes
+}
+
+// func (conn *Tracker) Malformed() bool {
+// 	conn.mutex.RLock()
+// 	defer conn.mutex.RUnlock()
+// 	// conn.log.Debug("data loss of ingress request message", zap.Any("bytes read in ebpf", conn.totalReadBytes), zap.Any("bytes received in userspace", conn.reqSize))
+// 	// conn.log.Debug("data loss of ingress response message", zap.Any("bytes written in ebpf", conn.totalWrittenBytes), zap.Any("bytes sent to user", conn.respSize))
+// 	// conn.log.Debug("", zap.Any("Request buffer", string(conn.req)))
+// 	// conn.log.Debug("", zap.Any("Response buffer", string(conn.resp)))
+// 	return conn.closeTimestamp != 0 &&
+// 		conn.totalReadBytes != conn.reqSize &&
+// 		conn.totalWrittenBytes != conn.respSize
+// }
+
+func (conn *Tracker) AddOpenEvent(event SocketOpenEvent) {
 	conn.mutex.Lock()
 	defer conn.mutex.Unlock()
+	conn.UpdateTimestamps()
+	conn.addr = event.Addr
+	if conn.openTimestamp != 0 && conn.openTimestamp != event.TimestampNano {
+		conn.logger.Debug("Changed open info timestamp due to new request", zap.Any("from", conn.openTimestamp), zap.Any("to", event.TimestampNano))
+	}
+	conn.openTimestamp = event.TimestampNano
+}
 
+func (conn *Tracker) AddDataEvent(event SocketDataEvent) {
+	conn.mutex.Lock()
+	defer conn.mutex.Unlock()
+	conn.UpdateTimestamps()
+
+	data := event.Msg[:event.MsgSize]
+
+	// Check for HTTP/2 preface if we haven't detected protocol yet
+	if !conn.protocolDetected {
+		conn.logger.Debug("Connection check")
+		if len(data) >= 24 && bytes.Equal(data[:24], []byte(pkg.HTTP2Preface)) {
+			// Create HTTP/2 parser and stream manager
+			conn.protocol = HTTP2
+			conn.streamMgr = pkg.NewStreamManager(conn.logger)
+			conn.protocolDetected = true
+			conn.logger.Debug("Detected HTTP/2 protocol (preface received)")
+
+			// If there's more data after preface, process it as HTTP/2
+			if len(data) > 24 {
+				// Create new event with remaining data
+				newEvent := event
+				copy(newEvent.Msg[:], data[24:])
+				newEvent.MsgSize = uint32(len(data) - 24)
+				conn.handleHTTP2Data(newEvent)
+			}
+			return
+		}
+
+		// If we see a valid HTTP/1 request line, mark as HTTP/1
+		if isHTTP1Request(data) {
+			conn.protocolDetected = true
+			conn.logger.Debug("Detected HTTP/1.x protocol")
+		}
+	}
+
+	// Process based on current protocol
+	switch conn.protocol {
+	case HTTP2:
+		conn.handleHTTP2Data(event)
+	default:
+		conn.handleHTTP1Data(event)
+	}
+}
+
+// isHTTP1Request checks if the data starts with a valid HTTP/1 request line
+func isHTTP1Request(data []byte) bool {
+	// Convert to string for easier checking
+	s := string(data)
+
+	// Check for common HTTP methods
+	return strings.HasPrefix(s, "GET ") ||
+		strings.HasPrefix(s, "POST ") ||
+		strings.HasPrefix(s, "PUT ") ||
+		strings.HasPrefix(s, "DELETE ") ||
+		strings.HasPrefix(s, "HEAD ") ||
+		strings.HasPrefix(s, "OPTIONS ") ||
+		strings.HasPrefix(s, "PATCH ")
+}
+
+func (conn *Tracker) AddCloseEvent(event SocketCloseEvent) {
+	conn.mutex.Lock()
+	defer conn.mutex.Unlock()
+	conn.UpdateTimestamps()
+	if conn.closeTimestamp != 0 && conn.closeTimestamp != event.TimestampNano {
+		conn.logger.Debug("Changed close info timestamp due to new request", zap.Any("from", conn.closeTimestamp), zap.Any("to", event.TimestampNano))
+	}
+	conn.closeTimestamp = event.TimestampNano
+	conn.logger.Debug(fmt.Sprintf("Got a close event from eBPF on connectionId:%v\n", event.ConnID))
+}
+
+func (conn *Tracker) UpdateTimestamps() {
+	conn.lastActivityTimestamp = uint64(time.Now().UnixNano())
+}
+
+// ConvertUnixNanoToTime takes a Unix timestamp in nanoseconds as a uint64 and returns the corresponding time.Time
+func ConvertUnixNanoToTime(unixNano uint64) time.Time {
+	// Unix time is the number of seconds since January 1, 1970 UTC,
+	// so convert nanoseconds to seconds for time.Unix function
+	seconds := int64(unixNano / uint64(time.Second))
+	nanoRemainder := int64(unixNano % uint64(time.Second))
+	return time.Unix(seconds, nanoRemainder)
+}
+
+// getHTTP2CompletedStream returns a completed HTTP2/gRPC stream if available
+func (conn *Tracker) getHTTP2CompletedStream() *pkg.HTTP2Stream {
+	if conn.streamMgr == nil {
+		return nil
+	}
+
+	streams := conn.streamMgr.GetCompleteStreams()
+	if len(streams) == 0 {
+		return nil
+	}
+
+	// Return the first completed stream
+	stream := streams[0]
+
+	// Cleanup the processed stream
+	conn.streamMgr.CleanupStream(stream.ID)
+
+	return stream
+}
+
+// Existing HTTP/1 completion check
+func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Time) {
 	// Get the current timestamp in nanoseconds.
 	currentTimestamp := uint64(time.Now().UnixNano())
 
@@ -231,6 +392,8 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 		conn.reset()
 
 		conn.logger.Debug("unverified recording", zap.Any("recordTraffic", recordTraffic))
+	} else {
+		conn.logger.Debug("no traffic to record")
 	}
 
 	// Checking if record traffic is recorded and request & response timestamp is captured or not.
@@ -257,42 +420,50 @@ func (conn *Tracker) IsComplete() (bool, []byte, []byte, time.Time, time.Time) {
 	return recordTraffic, requestBuf, responseBuf, reqTimestamps, respTimestamp
 }
 
-// reset resets the conn's request and response data buffers.
-func (conn *Tracker) reset() {
-	conn.firstRequest = true
-	conn.lastChunkWasResp = false
-	conn.lastChunkWasReq = false
-	conn.reqSize = 0
-	conn.respSize = 0
-	conn.resp = []byte{}
-	conn.req = []byte{}
+// Add HTTP/2 specific handling
+func (conn *Tracker) handleHTTP2Data(event SocketDataEvent) {
+	// Convert fixed-size array to slice
+	data := event.Msg[:event.MsgSize]
+
+	// Append new data to the buffer
+	conn.buffer = append(conn.buffer, data...)
+
+	// Process as many complete frames as possible
+	for len(conn.buffer) >= 9 { // Minimum frame size
+		frame, consumed, err := pkg.ExtractHTTP2Frame(conn.buffer)
+		if err != nil {
+			if strings.Contains(err.Error(), "incomplete frame") {
+				// Not enough data yet, wait for more
+				break
+			}
+			// Real error, log and remove the problematic data
+			conn.logger.Error("Failed to extract HTTP/2 frame", zap.Error(err))
+			if len(conn.buffer) > 9 {
+				// Try to recover by removing the first byte and trying again next time
+				conn.buffer = conn.buffer[1:]
+			} else {
+				conn.buffer = nil
+			}
+			break
+		}
+
+		// Handle the frame
+		if err := conn.streamMgr.HandleFrame(frame, event.Direction == EgressTraffic); err != nil {
+			conn.logger.Error("Failed to handle HTTP/2 frame", zap.Error(err))
+		}
+
+		// Remove processed data from buffer
+		conn.buffer = conn.buffer[consumed:]
+	}
+
+	// Store timestamps for requests
+	if event.Direction == IngressTraffic {
+		conn.reqTimestamps = append(conn.reqTimestamps, ConvertUnixNanoToTime(event.EntryTimestampNano))
+	}
 }
 
-func (conn *Tracker) verifyRequestData(expectedRecvBytes, actualRecvBytes uint64) bool {
-	return expectedRecvBytes == actualRecvBytes
-}
-
-func (conn *Tracker) verifyResponseData(expectedSentBytes, actualSentBytes uint64) bool {
-	return expectedSentBytes == actualSentBytes
-}
-
-// func (conn *Tracker) Malformed() bool {
-// 	conn.mutex.RLock()
-// 	defer conn.mutex.RUnlock()
-// 	// conn.log.Debug("data loss of ingress request message", zap.Any("bytes read in ebpf", conn.totalReadBytes), zap.Any("bytes received in userspace", conn.reqSize))
-// 	// conn.log.Debug("data loss of ingress response message", zap.Any("bytes written in ebpf", conn.totalWrittenBytes), zap.Any("bytes sent to user", conn.respSize))
-// 	// conn.log.Debug("", zap.Any("Request buffer", string(conn.req)))
-// 	// conn.log.Debug("", zap.Any("Response buffer", string(conn.resp)))
-// 	return conn.closeTimestamp != 0 &&
-// 		conn.totalReadBytes != conn.reqSize &&
-// 		conn.totalWrittenBytes != conn.respSize
-// }
-
-func (conn *Tracker) AddDataEvent(event SocketDataEvent) {
-	conn.mutex.Lock()
-	defer conn.mutex.Unlock()
-	conn.UpdateTimestamps()
-
+// Existing HTTP/1 handling
+func (conn *Tracker) handleHTTP1Data(event SocketDataEvent) {
 	conn.logger.Debug(fmt.Sprintf("Got a data event from eBPF, Direction:%v || current Event Size:%v || ConnectionID:%v\n", event.Direction, event.MsgSize, event.ConnID))
 
 	switch event.Direction {
@@ -303,7 +474,7 @@ func (conn *Tracker) AddDataEvent(event SocketDataEvent) {
 			conn.isNewRequest = true
 		}
 
-		// Assign the size of the message to the variable msgLengt
+		// Assign the size of the message to the variable msgLength
 		msgLength := event.MsgSize
 		// If the size of the message exceeds the maximum allowed size,
 		// set msgLength to the maximum allowed size instead
@@ -330,6 +501,7 @@ func (conn *Tracker) AddDataEvent(event SocketDataEvent) {
 		}
 
 	case IngressTraffic:
+		conn.logger.Info("isNewRequest", zap.Any("isNewRequest", conn.isNewRequest), zap.Any("connID", conn.connID))
 		// Capturing the timestamp of request as the request just started to come.
 		if conn.isNewRequest {
 			conn.reqTimestamps = append(conn.reqTimestamps, ConvertUnixNanoToTime(event.EntryTimestampNano))
@@ -368,40 +540,4 @@ func (conn *Tracker) AddDataEvent(event SocketDataEvent) {
 
 	default:
 	}
-}
-
-func (conn *Tracker) AddOpenEvent(event SocketOpenEvent) {
-	conn.mutex.Lock()
-	defer conn.mutex.Unlock()
-	conn.UpdateTimestamps()
-	conn.addr = event.Addr
-	if conn.openTimestamp != 0 && conn.openTimestamp != event.TimestampNano {
-		conn.logger.Debug("Changed open info timestamp due to new request", zap.Any("from", conn.openTimestamp), zap.Any("to", event.TimestampNano))
-	}
-	// conn.log.Debug("Got an open event from eBPF", zap.Any("File Descriptor", event.ConnID.FD))
-	conn.openTimestamp = event.TimestampNano
-}
-
-func (conn *Tracker) AddCloseEvent(event SocketCloseEvent) {
-	conn.mutex.Lock()
-	defer conn.mutex.Unlock()
-	conn.UpdateTimestamps()
-	if conn.closeTimestamp != 0 && conn.closeTimestamp != event.TimestampNano {
-		conn.logger.Debug("Changed close info timestamp due to new request", zap.Any("from", conn.closeTimestamp), zap.Any("to", event.TimestampNano))
-	}
-	conn.closeTimestamp = event.TimestampNano
-	conn.logger.Debug(fmt.Sprintf("Got a close event from eBPF on connectionId:%v\n", event.ConnID))
-}
-
-func (conn *Tracker) UpdateTimestamps() {
-	conn.lastActivityTimestamp = uint64(time.Now().UnixNano())
-}
-
-// ConvertUnixNanoToTime takes a Unix timestamp in nanoseconds as a uint64 and returns the corresponding time.Time
-func ConvertUnixNanoToTime(unixNano uint64) time.Time {
-	// Unix time is the number of seconds since January 1, 1970 UTC,
-	// so convert nanoseconds to seconds for time.Unix function
-	seconds := int64(unixNano / uint64(time.Second))
-	nanoRemainder := int64(unixNano % uint64(time.Second))
-	return time.Unix(seconds, nanoRemainder)
 }
