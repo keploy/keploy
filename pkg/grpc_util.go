@@ -115,6 +115,10 @@ type DefaultStreamManager struct {
 	buffer    []byte
 	logger    *zap.Logger
 	decoder   *hpack.Decoder
+	// Context-aware header tables
+	requestHeaders  map[string]string // For request headers
+	responseHeaders map[string]string // For response headers
+	trailerHeaders  map[string]string // For trailer headers
 }
 
 // NewStreamManager creates a new stream manager
@@ -124,6 +128,77 @@ func NewStreamManager(logger *zap.Logger) *DefaultStreamManager {
 		buffer:  make([]byte, 0, DefaultMaxFrameSize),
 		logger:  logger,
 		decoder: hpack.NewDecoder(4096, nil),
+		// Initialize separate header tables
+		requestHeaders:  make(map[string]string),
+		responseHeaders: make(map[string]string),
+		trailerHeaders:  make(map[string]string),
+	}
+}
+
+// storeHeaders stores headers in the appropriate connection header table based on context
+func (sm *DefaultStreamManager) storeHeaders(headers *models.GrpcHeaders, isRequest bool, isTrailer bool) {
+	if headers == nil {
+		return
+	}
+
+	// Select the appropriate header table
+	var headerTable map[string]string
+	if isTrailer {
+		headerTable = sm.trailerHeaders
+	} else if isRequest {
+		headerTable = sm.requestHeaders
+	} else {
+		headerTable = sm.responseHeaders
+	}
+
+	// Store pseudo headers
+	for k, v := range headers.PseudoHeaders {
+		headerTable[k] = v
+	}
+
+	// Store ordinary headers
+	for k, v := range headers.OrdinaryHeaders {
+		headerTable[k] = v
+	}
+}
+
+// rehydrateHeaders adds missing headers from the appropriate connection header table
+func (sm *DefaultStreamManager) rehydrateHeaders(headers *models.GrpcHeaders, isRequest bool, isTrailer bool) {
+	if headers == nil {
+		return
+	}
+
+	// Select the appropriate header table
+	var headerTable map[string]string
+	if isTrailer {
+		headerTable = sm.trailerHeaders
+	} else if isRequest {
+		headerTable = sm.requestHeaders
+	} else {
+		headerTable = sm.responseHeaders
+	}
+
+	// Initialize maps if nil
+	if headers.PseudoHeaders == nil {
+		headers.PseudoHeaders = make(map[string]string)
+	}
+	if headers.OrdinaryHeaders == nil {
+		headers.OrdinaryHeaders = make(map[string]string)
+	}
+
+	// Add missing headers from the connection's header table
+	for k, v := range headerTable {
+		if strings.HasPrefix(k, ":") {
+			// This is a pseudo-header
+			if _, exists := headers.PseudoHeaders[k]; !exists {
+				headers.PseudoHeaders[k] = v
+			}
+		} else {
+			// This is an ordinary header
+			if _, exists := headers.OrdinaryHeaders[k]; !exists {
+				headers.OrdinaryHeaders[k] = v
+			}
+		}
 	}
 }
 
@@ -189,19 +264,34 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool) 
 			if !stream.headersReceived {
 				// These are initial headers
 				if stream.isRequest {
+					// Rehydrate from request headers
+					sm.rehydrateHeaders(headers, true, false)
+
 					stream.grpcReq = &models.GrpcReq{
 						Headers: *headers,
 					}
+					// Store headers for future requests
+					sm.storeHeaders(headers, true, false)
 				} else {
+					// Rehydrate from response headers
+					sm.rehydrateHeaders(headers, false, false)
+
 					stream.grpcResp = &models.GrpcResp{
 						Headers: *headers,
 					}
+					// Store headers for future responses
+					sm.storeHeaders(headers, false, false)
 				}
 				stream.headersReceived = true
 			} else if !stream.trailersReceived && !stream.isRequest {
 				// These are trailers (only for responses)
+				// Rehydrate from trailer headers
+				sm.rehydrateHeaders(headers, false, true)
+
 				if stream.grpcResp != nil {
 					stream.grpcResp.Trailers = *headers
+					// Store headers for future trailers
+					sm.storeHeaders(headers, false, true)
 				}
 				stream.trailersReceived = true
 			}
@@ -553,7 +643,8 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	}
 
 	// Read frames until we get the end of stream
-	for {
+	streamEnded := false
+	for !streamEnded {
 		frame, err := framer.ReadFrame()
 		if err != nil {
 			if err == io.EOF {
@@ -589,6 +680,9 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 					return nil, fmt.Errorf("failed to decode headers: %w", err)
 				}
 			}
+			if f.StreamEnded() {
+				streamEnded = true
+			}
 
 		case *http2.DataFrame:
 			frame, err := ReadGRPCFrame(bytes.NewReader(f.Data()))
@@ -597,6 +691,17 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 			}
 
 			grpcResp.Body = CreateLengthPrefixedMessageFromPayload(frame)
+			if f.StreamEnded() {
+				streamEnded = true
+			}
+
+		case *http2.RSTStreamFrame:
+			// Stream was reset by peer
+			streamEnded = true
+
+		case *http2.GoAwayFrame:
+			// Connection is being closed
+			streamEnded = true
 		}
 	}
 

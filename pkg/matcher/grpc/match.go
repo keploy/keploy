@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/k0kubun/pp/v3"
+	"go.keploy.io/server/v2/pkg/matcher"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
@@ -444,8 +447,71 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	// Log for debugging
 	if !matched {
 		logger.Debug("gRPC response matching failed", zap.Int("difference_count", len(differences)))
+
+		// Display differences to the user, similar to HTTP matcher
+		logDiffs := matcher.NewDiffsPrinter(tc.Name)
+		newLogger := pp.New()
+		newLogger.WithLineInfo = false
+		newLogger.SetColorScheme(models.GetFailingColorScheme())
+		var logs = ""
+
+		logs = logs + newLogger.Sprintf("Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
+
+		// Display gRPC differences
+		if len(differences) > 0 {
+			for path, diff := range differences {
+				if strings.HasPrefix(path, "headers.") {
+					// Header differences - Keep expected first, actual second as the natural order
+					// Note: internally the renderer will swap these parameters for headers only,
+					// but we maintain consistent parameter order in our code
+					header := strings.TrimPrefix(path, "headers.")
+					logDiffs.PushHeaderDiff(diff.Expected, diff.Actual, header, headerNoise)
+				} else if strings.HasPrefix(path, "trailers.") {
+					// Trailer differences (display as headers)
+					trailer := strings.TrimPrefix(path, "trailers.")
+					logDiffs.PushHeaderDiff(diff.Expected, diff.Actual, "trailer."+trailer, trailerNoise)
+				} else if strings.HasPrefix(path, "body.") {
+					bodyPart := strings.TrimPrefix(path, "body.")
+					if bodyPart == "message_length" {
+						// Message length is a good indicator of difference for gRPC
+						logDiffs.PushHeaderDiff(diff.Expected, diff.Actual, "message_length (body)", bodyNoise)
+					} else if bodyPart == "compression_flag" {
+						// Compression flag
+						logDiffs.PushHeaderDiff(diff.Expected, diff.Actual, "compression_flag (body)", bodyNoise)
+					} else {
+						// Body differences
+						logDiffs.PushBodyDiff(diff.Expected, diff.Actual, bodyNoise)
+					}
+				}
+			}
+		} else {
+			// If there are no specific differences but match still failed, show a generic message
+			logDiffs.PushHeaderDiff("See logs for details", "Matching failed", "gRPC", nil)
+		}
+
+		// Print the differences
+		_, err := newLogger.Printf(logs)
+		if err != nil {
+			utils.LogError(logger, err, "failed to print the logs")
+		}
+
+		err = logDiffs.Render()
+		if err != nil {
+			utils.LogError(logger, err, "failed to render the diffs")
+		}
 	} else {
 		logger.Debug("gRPC response matched successfully")
+
+		// Display success message
+		newLogger := pp.New()
+		newLogger.WithLineInfo = false
+		newLogger.SetColorScheme(models.GetPassingColorScheme())
+		var log2 = ""
+		log2 += newLogger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
+		_, err := newLogger.Printf(log2)
+		if err != nil {
+			utils.LogError(logger, err, "failed to print the logs")
+		}
 	}
 
 	return matched, result
