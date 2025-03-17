@@ -270,7 +270,6 @@ func (sm *DefaultStreamManager) GetCompleteStreams() []*HTTP2Stream {
 				IsOutgoing: stream.isOutgoing,
 			}
 			completed = append(completed, http2Stream)
-			delete(sm.streams, id)
 		}
 	}
 
