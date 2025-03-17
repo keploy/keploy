@@ -106,6 +106,8 @@ func ParseFinalHTTP(_ context.Context, logger *zap.Logger, mock *finalHTTP, dest
 		return err
 	}
 
+	req.Header.Set("Host", req.Host)
+
 	var reqBody []byte
 	if req.Body != nil { // Read
 		var err error

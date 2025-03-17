@@ -16,50 +16,59 @@ import (
 	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
+	yamlLib "gopkg.in/yaml.v3"
 )
 
 func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
-	respType := models.HTTPResponseJSON
-	isXML := utils.IsXMLResponse(&tc.HTTPResp)
-	if isXML {
-		respType = models.HTTPResponseXML
-	}
-	curl := pkg.MakeCurlCommand(tc.HTTPReq)
+	logger.Info("Starting test case encoding",
+		zap.String("kind", string(tc.Kind)),
+		zap.String("name", tc.Name))
+
 	doc := &yaml.NetworkTrafficDoc{
-		Version:  tc.Version,
-		Kind:     tc.Kind,
-		Name:     tc.Name,
-		Curl:     curl,
-		RespType: respType,
-	}
-	// find noisy fields
-	m, err := FlattenHTTPResponse(pkg.ToHTTPHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)
-	if err != nil {
-		msg := "error in flattening http response"
-		utils.LogError(logger, err, msg)
-	}
-	noise := tc.Noise
-
-	if tc.Name == "" {
-		noiseFieldsFound := FindNoisyFields(m, func(_ string, vals []string) bool {
-			// check if k is date
-			for _, v := range vals {
-				if pkg.IsTime(v) {
-					return true
-				}
-			}
-
-			// maybe we need to concatenate the values
-			return pkg.IsTime(strings.Join(vals, ", "))
-		})
-
-		for _, v := range noiseFieldsFound {
-			noise[v] = []string{}
-		}
+		Version: tc.Version,
+		Kind:    tc.Kind,
+		Name:    tc.Name,
 	}
 
+	var noise map[string][]string
 	switch tc.Kind {
 	case models.HTTP:
+		respType := models.HTTPResponseJSON
+		isXML := utils.IsXMLResponse(&tc.HTTPResp)
+		if isXML {
+			respType = models.HTTPResponseXML
+		}
+		doc.RespType = respType
+
+		logger.Debug("Encoding HTTP test case")
+		doc.Curl = pkg.MakeCurlCommand(tc.HTTPReq)
+
+		// find noisy fields only for HTTP responses
+		m, err := FlattenHTTPResponse(pkg.ToHTTPHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)
+		if err != nil {
+			msg := "error in flattening http response"
+			utils.LogError(logger, err, msg)
+		}
+		noise = tc.Noise
+
+		if tc.Name == "" {
+			noiseFieldsFound := FindNoisyFields(m, func(_ string, vals []string) bool {
+				// check if k is date
+				for _, v := range vals {
+					if pkg.IsTime(v) {
+						return true
+					}
+				}
+
+				// maybe we need to concatenate the values
+				return pkg.IsTime(strings.Join(vals, ", "))
+			})
+
+			for _, v := range noiseFieldsFound {
+				noise[v] = []string{}
+			}
+		}
+
 		switch respType {
 		case models.HTTPResponseXML:
 			m, err := utils.XMLToMap(tc.HTTPResp.Body)
@@ -102,7 +111,38 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 				return nil, err
 			}
 		}
+	case models.GRPC_EXPORT:
+		logger.Debug("Encoding gRPC test case")
+		// For gRPC, use the noise directly from the test case
+		noise = tc.Noise
 
+		// Create a YAML node for the gRPC schema
+		grpcSpec := models.GrpcSpec{
+			GrpcReq:  tc.GrpcReq,
+			GrpcResp: tc.GrpcResp,
+			Created:  tc.Created,
+			Assertions: map[string]interface{}{
+				"noise": noise,
+			},
+		}
+
+		logger.Debug("gRPC schema created",
+			zap.Any("request_headers", grpcSpec.GrpcReq.Headers),
+			zap.Any("response_headers", grpcSpec.GrpcResp.Headers),
+			zap.Int("request_body_length", len(grpcSpec.GrpcReq.Body.DecodedData)),
+			zap.Int("response_body_length", len(grpcSpec.GrpcResp.Body.DecodedData)))
+
+		// Create a new YAML node and encode the gRPC schema
+		var node yamlLib.Node
+		err := node.Encode(grpcSpec)
+		if err != nil {
+			utils.LogError(logger, err, "failed to encode gRPC schema to YAML node")
+			return nil, err
+		}
+
+		// Set the node as the spec
+		doc.Spec = node
+		logger.Info("Successfully encoded gRPC test case")
 	default:
 		utils.LogError(logger, nil, "failed to marshal the testcase into yaml due to invalid kind of testcase")
 		return nil, errors.New("type of testcases is invalid")
@@ -322,7 +362,6 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 				}
 			}
 		}
-	// unmarshal its mocks from yaml docs to go struct
 	case models.GRPC_EXPORT:
 		grpcSpec := models.GrpcSpec{}
 		err := yamlTestcase.Spec.Decode(&grpcSpec)
@@ -330,11 +369,24 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 			utils.LogError(logger, err, "failed to unmarshal a yaml doc into the gRPC testcase")
 			return nil, err
 		}
+		tc.Created = grpcSpec.Created
 		tc.GrpcReq = grpcSpec.GrpcReq
 		tc.GrpcResp = grpcSpec.GrpcResp
+		tc.Noise = map[string][]string{}
+		switch reflect.ValueOf(grpcSpec.Assertions["noise"]).Kind() {
+		case reflect.Map:
+			for k, v := range grpcSpec.Assertions["noise"].(map[string]interface{}) {
+				tc.Noise[k] = []string{}
+				if reflect.TypeOf(v) == reflect.TypeOf([]interface{}{}) {
+					for _, val := range v.([]interface{}) {
+						tc.Noise[k] = append(tc.Noise[k], fmt.Sprint(val))
+					}
+				}
+			}
+		}
 	default:
-		utils.LogError(logger, nil, "failed to unmarshal yaml doc of unknown type", zap.Any("type of yaml doc", tc.Kind))
-		return nil, errors.New("yaml doc of unknown type")
+		utils.LogError(logger, nil, "failed to unmarshal the testcase into yaml due to invalid kind of testcase")
+		return nil, errors.New("type of testcases is invalid")
 	}
 	return &tc, nil
 }

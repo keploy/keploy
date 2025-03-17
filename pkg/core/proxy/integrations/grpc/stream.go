@@ -11,6 +11,7 @@ import (
 
 	"github.com/protocolbuffers/protoscope"
 
+	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
 )
 
@@ -88,7 +89,7 @@ func (sic *StreamInfoCollection) AddPayloadForRequest(streamID uint32, payload [
 	// We cannot modify non pointer values in nested entries in map.
 	// Create a copy and overwrite it.
 	info := sic.StreamInfo[streamID]
-	info.GrpcReq.Body = createLengthPrefixedMessageFromPayload(payload)
+	info.GrpcReq.Body = pkg.CreateLengthPrefixedMessageFromPayload(payload)
 	sic.StreamInfo[streamID] = info
 }
 
@@ -102,7 +103,7 @@ func (sic *StreamInfoCollection) AddPayloadForResponse(streamID uint32, payload 
 	// We cannot modify non pointer values in nested entries in map.
 	// Create a copy and overwrite it.
 	info := sic.StreamInfo[streamID]
-	info.GrpcResp.Body = createLengthPrefixedMessageFromPayload(payload)
+	info.GrpcResp.Body = pkg.CreateLengthPrefixedMessageFromPayload(payload)
 	sic.StreamInfo[streamID] = info
 }
 

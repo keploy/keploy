@@ -239,3 +239,45 @@ func extractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 
 	return formData
 }
+
+// CaptureGRPC captures a gRPC request/response pair and sends it to the test case channel
+func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, stream interface{}, reqTimestamp time.Time, resTimestamp time.Time) {
+	if stream == nil {
+		logger.Error("Stream is nil")
+		return
+	}
+
+	// Convert stream to HTTP2Stream
+	http2Stream, ok := stream.(*pkg.HTTP2Stream)
+	if !ok {
+		logger.Error("Invalid stream type",
+			zap.String("expected", "HTTP2Stream"),
+			zap.String("actual", fmt.Sprintf("%T", stream)),
+			zap.Any("stream_value", stream)) // Log the actual stream value
+		return
+	}
+
+	if http2Stream.GRPCReq == nil || http2Stream.GRPCResp == nil {
+		logger.Error("gRPC request or response is nil")
+		return
+	}
+
+	// Create test case from stream data
+	testCase := &models.TestCase{
+		Version:  models.GetVersion(),
+		Name:     http2Stream.GRPCReq.Headers.OrdinaryHeaders["Keploy-Test-Name"],
+		Kind:     models.GRPC_EXPORT,
+		Created:  time.Now().Unix(),
+		GrpcReq:  *http2Stream.GRPCReq,
+		GrpcResp: *http2Stream.GRPCResp,
+		Noise:    map[string][]string{},
+	}
+
+	select {
+	case <-ctx.Done():
+		return
+	case t <- testCase:
+		logger.Info("Captured gRPC test case",
+			zap.String("path", http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]))
+	}
+}
