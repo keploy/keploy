@@ -72,7 +72,11 @@ func SaveIRRReport(irrReport *[]IRRTestCase, idemReporFiletPath string, logger *
 		logger.Error("IRR: error in opening idempotency report file", zap.Error(err))
 		return
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			logger.Error("IRR: error closing idempotency report file", zap.Error(err))
+		}
+	}()
 
 	data, err := yamlLib.Marshal(&irrReport)
 	if err != nil {
@@ -121,7 +125,11 @@ func SaveConfig(irrconfig IRRConfig, configPath string, logger *zap.Logger) {
 		logger.Error("IRR: error in opening irrconfig file", zap.Error(err))
 		return
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			logger.Error("IRR: error closing irrconfig file", zap.Error(err))
+		}
+	}()
 
 	data, err := yamlLib.Marshal(&irrconfig)
 	if err != nil {
@@ -135,6 +143,6 @@ func SaveConfig(irrconfig IRRConfig, configPath string, logger *zap.Logger) {
 	}
 }
 
-func LoadConfig(irrconfig IRRConfig, configPath string, logger *zap.Logger) {
-	// load the config file into IgnoredFields, SessionTokens and DynamicHeaders.
-}
+// func LoadConfig(irrconfig IRRConfig, configPath string, logger *zap.Logger) {
+// 	// load the config file into IgnoredFields, SessionTokens and DynamicHeaders.
+// }

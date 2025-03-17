@@ -1,3 +1,4 @@
+// Package idempotencydb provides functionality for testing idempotency of API endpoints
 package idempotencydb
 
 import (
@@ -115,7 +116,11 @@ func (irr *IRRReportYaml) ReplayTestCase(ctx context.Context, tc *models.TestCas
 			irr.Logger.Error("IRR: failed to execute HTTP request", zap.Error(err))
 			return
 		}
-		defer resp.Body.Close()
+		defer func() {
+			if err := resp.Body.Close(); err != nil {
+				irr.Logger.Error("IRR: failed to close response body", zap.Error(err))
+			}
+		}()
 
 		respBody, err := io.ReadAll(resp.Body)
 		if err != nil {
@@ -165,8 +170,8 @@ func (irr *IRRReportYaml) CheckReplayHeader(tc *models.TestCase) bool {
 
 //--------------------------------------------------------------------------------------------------------------------------------------
 
-// A list of dynamic header to be configured.
-// allow the user to modify/update or add new of these tokens/headers in the config file.
+// DynamicHeaders is a list of dynamic headers to be configured.
+// Users can modify/update or add new of these tokens/headers in the config file.
 var DynamicHeaders = []string{
 	"Date",
 	"X-Request-ID",
@@ -174,8 +179,8 @@ var DynamicHeaders = []string{
 	"User-Agent",
 }
 
-// A list of session related tokens to be configured.
-// allow the user to modify/update or add new of these tokens/headers in the config file.
+// SessionTokensHeaders is a list of session related tokens to be configured.
+// Users can modify/update or add new of these tokens/headers in the config file.
 var SessionTokensHeaders = []string{
 	// request headers
 	"Authorization",
@@ -192,7 +197,7 @@ var irrconfig = IRRConfig{
 	SessionTokensHeaders: make(map[string]string),
 }
 
-func (irr *IRRReportYaml) StoreDynamicHeaders(ctx context.Context, tc *models.TestCase, testSetID string) {
+func (irr *IRRReportYaml) StoreDynamicHeaders(_ context.Context, tc *models.TestCase, testSetID string) {
 	configPath := filepath.Join(irr.IdemReportPath, testSetID, "irrconfig.yaml")
 
 	for _, header := range DynamicHeaders {
