@@ -687,22 +687,22 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		switch testCase.Kind {
 		case models.HTTP:
-			httpResp, ok := resp.(models.HTTPResp)
+			httpResp, ok := resp.(*models.HTTPResp)
 			if !ok {
 				r.logger.Error("invalid response type for HTTP test case")
 				failure++
 				continue
 			}
-			testPass, testResult = r.compareHTTPResp(testCase, &httpResp, testSetID)
+			testPass, testResult = r.compareHTTPResp(testCase, httpResp, testSetID)
 
 		case models.GRPC_EXPORT:
-			grpcResp, ok := resp.(models.GrpcResp)
+			grpcResp, ok := resp.(*models.GrpcResp)
 			if !ok {
 				r.logger.Error("invalid response type for gRPC test case")
 				failure++
 				continue
 			}
-			testPass, testResult = r.compareGRPCResp(testCase, &grpcResp, testSetID)
+			testPass, testResult = r.compareGRPCResp(testCase, grpcResp, testSetID)
 		}
 
 		if !testPass {
@@ -725,7 +725,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			switch testCase.Kind {
 			case models.HTTP:
-				httpResp, ok := resp.(models.HTTPResp)
+				httpResp, ok := resp.(*models.HTTPResp)
 				if !ok {
 					utils.LogError(r.logger, nil, "invalid response type for HTTP test case")
 					testStatus = models.TestStatusFailed
@@ -763,7 +763,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							Form:       testCase.HTTPReq.Form,
 							Timestamp:  testCase.HTTPReq.Timestamp,
 						},
-						Res:          httpResp,
+						Res:          *httpResp,
 						TestCasePath: filepath.Join(r.config.Path, testSetID),
 						MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
 						Noise:        testCase.Noise,
@@ -771,7 +771,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					}
 				}
 			case models.GRPC_EXPORT:
-				grpcResp, ok := resp.(models.GrpcResp)
+				grpcResp, ok := resp.(*models.GrpcResp)
 				if !ok {
 					utils.LogError(r.logger, nil, "invalid response type for gRPC test case")
 					testStatus = models.TestStatusFailed
@@ -798,7 +798,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						Completed:    time.Now().UTC().Unix(),
 						TestCaseID:   testCase.Name,
 						GrpcReq:      testCase.GrpcReq,
-						GrpcRes:      grpcResp,
+						GrpcRes:      *grpcResp,
 						TestCasePath: filepath.Join(r.config.Path, testSetID),
 						MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
 						Noise:        testCase.Noise,
