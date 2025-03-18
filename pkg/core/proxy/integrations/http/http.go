@@ -124,6 +124,9 @@ func ParseFinalHTTP(_ context.Context, logger *zap.Logger, mock *finalHTTP, dest
 		return err
 	}
 
+	// setting up host header of request
+	req.Header.Set("Host", req.Host)
+
 	//Add the content length to the headers.
 	var respBody []byte
 	//Checking if the body of the response is empty or does not exist.
@@ -186,7 +189,7 @@ func ParseFinalHTTP(_ context.Context, logger *zap.Logger, mock *finalHTTP, dest
 				Body:       string(respBody),
 			},
 			Created:          time.Now().Unix(),
-			ReqTimestampMock: mock.resTimestampMock,
+			ReqTimestampMock: mock.reqTimestampMock,
 			ResTimestampMock: mock.resTimestampMock,
 		},
 	}
