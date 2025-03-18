@@ -112,8 +112,8 @@ func (h *HTTP) parseFinalHTTP(_ context.Context, logger *zap.Logger, mock *Final
 		return err
 	}
 
-	// setting up host header of request
 	req.Header.Set("Host", req.Host)
+
 	var reqBody []byte
 	if req.Body != nil { // Read
 		var err error
@@ -194,8 +194,10 @@ func (h *HTTP) parseFinalHTTP(_ context.Context, logger *zap.Logger, mock *Final
 				Body:       string(respBody),
 			},
 			Created:          time.Now().Unix(),
+
 			ReqTimestampMock: mock.ReqTimestampMock,
 			ResTimestampMock: mock.ResTimestampMock,
+
 		},
 	}
 	return nil

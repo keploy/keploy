@@ -481,13 +481,27 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	//make new connection to the destination server
 	if isTLS {
+
+		// get the destinationUrl from the map for the tls connection
+		url, ok := pTls.SrcPortToDstURL.Load(sourcePort)
+		if !ok {
+			utils.LogError(logger, err, "failed to fetch the destination url")
+			return err
+		}
+		//type case the dstUrl to string
+		dstURL, ok := url.(string)
+		if !ok {
+			utils.LogError(logger, err, "failed to type cast the destination url")
+			return err
+		}
+
 		logger.Debug("the external call is tls-encrypted", zap.Any("isTLS", isTLS))
 		cfg := &tls.Config{
 			InsecureSkipVerify: true,
-			ServerName:         pTls.DstURL,
+			ServerName:         dstURL,
 		}
 
-		addr := fmt.Sprintf("%v:%v", pTls.DstURL, destInfo.Port)
+		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = tls.Dial("tcp", addr, cfg)
 			if err != nil {

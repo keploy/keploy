@@ -97,9 +97,6 @@ func (h *HTTP) match(ctx context.Context, logger *zap.Logger, input *req, mockDb
 		if isMatched {
 			return h.handleMatchedMock(ctx, logger, bestMatch, mockDb)
 		}
-
-		// If no match was found, loop again and try different options or data
-		// The loop will continue if no match was found and no error occurred.
 	}
 }
 

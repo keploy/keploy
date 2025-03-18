@@ -73,7 +73,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte
 				errCh <- err
 				return
 			}
-			request.Header.Set("Host", request.Host) // setting the host header of the request
+			request.Header.Set("Host", request.Host)
 
 			reqBody, err := io.ReadAll(request.Body)
 			if err != nil {
@@ -342,94 +342,6 @@ func (h *HTTP) chunkedRequest(ctx context.Context, logger *zap.Logger, finalReq 
 
 			//check if the initial request is completed
 			if strings.HasSuffix(string(requestChunked), "0\r\n\r\n") {
-				return nil
-			}
-		}
-	}
-}
-
-// Handled chunked responses when content-length is given.
-func (h *HTTP) contentLengthResponse(ctx context.Context, logger *zap.Logger, finalResp *[]byte, clientConn, destConn net.Conn, contentLength int) error {
-	isEOF := false
-	for contentLength > 0 {
-		resp, err := pUtil.ReadBytes(ctx, logger, destConn)
-		if err != nil {
-			if err == io.EOF {
-				isEOF = true
-				logger.Debug("received EOF, conn closed by the destination server")
-				if len(resp) == 0 {
-					break
-				}
-			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				logger.Info("Stopped getting data from the conn", zap.Error(err))
-				break
-			} else {
-				utils.LogError(logger, nil, "failed to read the response message from the destination server")
-				return err
-			}
-		}
-
-		logger.Debug("This is a chunk of response[content-length]: " + string(resp))
-		*finalResp = append(*finalResp, resp...)
-		contentLength -= len(resp)
-
-		// write the response message to the user client
-		_, err = clientConn.Write(resp)
-		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			utils.LogError(logger, nil, "failed to write response message to the user client")
-			return err
-		}
-
-		if isEOF {
-			break
-		}
-	}
-	return nil
-}
-
-// Handled chunked responses when transfer-encoding is given.
-func (h *HTTP) chunkedResponse(ctx context.Context, logger *zap.Logger, finalResp *[]byte, clientConn, destConn net.Conn) error {
-	isEOF := false
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-			resp, err := pUtil.ReadBytes(ctx, logger, destConn)
-			if err != nil {
-				if err != io.EOF {
-					utils.LogError(logger, err, "failed to read the response message from the destination server")
-					return err
-				}
-				isEOF = true
-				logger.Debug("received EOF", zap.Error(err))
-				if len(resp) == 0 {
-					logger.Debug("exiting loop as response is complete")
-					break
-				}
-			}
-
-			*finalResp = append(*finalResp, resp...)
-			// write the response message to the user client
-			_, err = clientConn.Write(resp)
-			if err != nil {
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				utils.LogError(logger, nil, "failed to write response message to the user client")
-				return err
-			}
-
-			//In some cases need to write the response to the client
-			// where there is some response before getting the true EOF
-			if isEOF {
-				break
-			}
-
-			if string(resp) == "0\r\n\r\n" {
 				return nil
 			}
 		}
