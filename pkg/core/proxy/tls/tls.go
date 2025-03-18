@@ -22,13 +22,12 @@ func IsTLSHandshake(data []byte) bool {
 func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn) (net.Conn, error) {
 	//Load the CA certificate and private key
 
-	var err error
-	caPrivKey, err = helpers.ParsePrivateKeyPEM(caPKey)
+	caPrivKey, err := helpers.ParsePrivateKeyPEM(caPKey)
 	if err != nil {
 		utils.LogError(logger, err, "Failed to parse CA private key")
 		return nil, err
 	}
-	caCertParsed, err = helpers.ParseCertificatePEM(caCrt)
+	caCertParsed, err := helpers.ParseCertificatePEM(caCrt)
 	if err != nil {
 		utils.LogError(logger, err, "Failed to parse CA certificate")
 		return nil, err
@@ -36,7 +35,9 @@ func HandleTLSConnection(_ context.Context, logger *zap.Logger, conn net.Conn) (
 
 	// Create a TLS configuration
 	config := &tls.Config{
-		GetCertificate: CertForClient,
+		GetCertificate: func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return CertForClient(clientHello, caPrivKey, caCertParsed)
+		},
 	}
 
 	// Wrap the TCP conn with TLS

@@ -198,7 +198,8 @@ func contentLengthRequest(ctx context.Context, logger *zap.Logger, finalReq *[]b
 			utils.LogError(logger, nil, "failed to read the response message from the destination server")
 			return err
 		}
-		logger.Debug("This is a chunk of request[content-length]: " + string(requestChunked))
+		logger.Debug(fmt.Sprintf("This is a chunk of request[content-length]: %v", len(requestChunked)))
+		logger.Debug(fmt.Sprintf("This is the request chunk in contentLengthRequest: %v", string(requestChunked)))
 		*finalReq = append(*finalReq, requestChunked...)
 		contentLength -= len(requestChunked)
 
@@ -289,7 +290,7 @@ func contentLengthResponse(ctx context.Context, logger *zap.Logger, finalResp *[
 			}
 		}
 
-		logger.Debug("This is a chunk of response[content-length]: " + string(resp))
+		logger.Debug(fmt.Sprintf("This is a chunk of response[content-length]: %v", len(resp)))
 		*finalResp = append(*finalResp, resp...)
 		contentLength -= len(resp)
 
