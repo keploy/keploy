@@ -38,7 +38,7 @@ func match(ctx context.Context, logger *zap.Logger, input *req, mockDb integrati
 		mocks, err := mockDb.GetUnFilteredMocks()
 		var unfilteredMocks []*models.Mock
 		for _, mock := range mocks {
-			if mock.Kind != "Http" {
+			if mock.Kind != models.HTTP {
 				continue
 			}
 			unfilteredMocks = append(unfilteredMocks, mock)
@@ -55,9 +55,6 @@ func match(ctx context.Context, logger *zap.Logger, input *req, mockDb integrati
 		for _, mock := range unfilteredMocks {
 			if ctx.Err() != nil {
 				return false, nil, ctx.Err()
-			}
-			if mock.Kind != models.HTTP {
-				continue
 			}
 
 			//if the content type is present in http request then we need to check for the same type in the mock
