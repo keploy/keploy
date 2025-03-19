@@ -10,9 +10,11 @@ import (
 	"crypto/x509"
 	"embed"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 
 	"github.com/cloudflare/cfssl/csr"
 	cfsslLog "github.com/cloudflare/cfssl/log"
@@ -248,17 +250,40 @@ func SetupCA(ctx context.Context, logger *zap.Logger) error {
 	return nil
 }
 
-var (
-	caPrivKey    interface{}
-	caCertParsed *x509.Certificate
-	DstURL       string
-)
+// SrcPortToDstURL map is used to store the mapping between source port and DstURL for the TLS connection
+var SrcPortToDstURL = sync.Map{}
 
-func CertForClient(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+var setLogLevelOnce sync.Once
+
+func CertForClient(clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate) (*tls.Certificate, error) {
+
+	// Ensure log level is set only once
+
+	/*
+	* Since multiple goroutines can call this function concurrently, we need to ensure that the log level is set only once.
+	 */
+	setLogLevelOnce.Do(func() {
+
+		// * Set the log level to error to avoid unnecessary logs. like below...
+
+		// 2025/03/18 20:54:25 [INFO] received CSR
+		// 2025/03/18 20:54:25 [INFO] generating key: ecdsa-256
+		// 2025/03/18 20:54:25 [INFO] received CSR
+		// 2025/03/18 20:54:25 [INFO] generating key: ecdsa-256
+		// 2025/03/18 20:54:25 [INFO] encoded CSR
+		// 2025/03/18 20:54:25 [INFO] encoded CSR
+		// 2025/03/18 20:54:25 [INFO] signed certificate with serial number 435398774381835435678674951099961010543769077102
+
+		cfsslLog.Level = cfsslLog.LevelError
+	})
+
 	// Generate a new server certificate and private key for the given hostname
-	DstURL = clientHello.ServerName
+	dstURL := clientHello.ServerName
 
-	cfsslLog.Level = cfsslLog.LevelError
+	remoteAddr := clientHello.Conn.RemoteAddr().(*net.TCPAddr)
+	sourcePort := remoteAddr.Port
+
+	SrcPortToDstURL.Store(sourcePort, dstURL)
 
 	serverReq := &csr.CertificateRequest{
 		//Make the name accordng to the ip of the request

@@ -73,6 +73,19 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				return
 			}
 
+			// Set the host header explicitely because the `http.ReadRequest`` trim the host header
+			// func ReadRequest(b *bufio.Reader) (*Request, error) {
+			// 	req, err := readRequest(b)
+			// 	if err != nil {
+			// 		return nil, err
+			// 	}
+
+			// 	delete(req.Header, "Host")
+			// 	return req, err
+			// }
+
+			request.Header.Set("Host", request.Host)
+
 			reqBody, err := io.ReadAll(request.Body)
 			if err != nil {
 				utils.LogError(logger, err, "failed to read from request body", zap.Any("metadata", getReqMeta(request)))

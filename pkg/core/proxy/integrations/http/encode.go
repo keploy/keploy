@@ -223,6 +223,9 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			finalReq = []byte("")
 			finalResp = []byte("")
 
+			// read the request from the same connection
+			logger.Debug("Reading the request from the user client again from the same connection")
+
 			finalReq, err = pUtil.ReadBytes(ctx, logger, clientConn)
 			if err != nil {
 				if err != io.EOF {
