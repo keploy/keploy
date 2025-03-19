@@ -72,7 +72,7 @@ func (h *HTTP) match(ctx context.Context, logger *zap.Logger, input *req, mockDb
 
 		// Schema match for JSON bodies
 		if h.IsJSON(input.body) {
-			bodyMatched, err := h.PerformBodyMatch(logger, schemaMatched, input.body, ctx)
+			bodyMatched, err := h.PerformBodyMatch(ctx, logger, schemaMatched, input.body)
 			if err != nil {
 				return false, nil, err
 			}
@@ -100,7 +100,7 @@ func (h *HTTP) match(ctx context.Context, logger *zap.Logger, input *req, mockDb
 	}
 }
 
-// Filter mocks to only HTTP mocks
+// FilterHTTPMocks Filter mocks to only HTTP mocks
 func FilterHTTPMocks(mocks []*models.Mock) []*models.Mock {
 	var unfilteredMocks []*models.Mock
 	for _, mock := range mocks {
@@ -260,7 +260,7 @@ func (h *HTTP) decode(encoded string) ([]byte, error) {
 	return data, nil
 }
 
-// Exact body match
+// ExactBodyMatch Exact body match
 func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, *models.Mock) {
 	for _, mock := range schemaMatched {
 		if mock.Spec.HTTPReq.Body == string(body) {
@@ -278,8 +278,8 @@ func (h *HTTP) handleMatchedMock(ctx context.Context, logger *zap.Logger, bestMa
 	return true, bestMatch, nil
 }
 
-// Perform body match for JSON data
-func (h *HTTP) PerformBodyMatch(logger *zap.Logger, schemaMatched []*models.Mock, reqBody []byte, ctx context.Context) ([]*models.Mock, error) {
+// PerformBodyMatch Perform body match for JSON data
+func (h *HTTP) PerformBodyMatch(ctx context.Context, logger *zap.Logger, schemaMatched []*models.Mock, reqBody []byte) ([]*models.Mock, error) {
 	var bodyMatched []*models.Mock
 	for _, mock := range schemaMatched {
 		if ctx.Err() != nil {
@@ -299,7 +299,7 @@ func (h *HTTP) PerformBodyMatch(logger *zap.Logger, schemaMatched []*models.Mock
 	return bodyMatched, nil
 }
 
-// Perform fuzzy match on the request buffer
+// PerformFuzzyMatch Perform fuzzy match on the request buffer
 func (h *HTTP) PerformFuzzyMatch(ctx context.Context, logger *zap.Logger, schemaMatched []*models.Mock, reqBuff []byte, mockDb integrations.MockMemDb) (bool, *models.Mock, error) {
 	isMatched, bestMatch := h.fuzzyMatch(schemaMatched, reqBuff)
 	if isMatched {
@@ -308,7 +308,7 @@ func (h *HTTP) PerformFuzzyMatch(ctx context.Context, logger *zap.Logger, schema
 	return false, nil, nil
 }
 
-// Body type match check (content type matching)
+// MatchBodyType Body type match check (content type matching)
 func (h *HTTP) MatchBodyType(mockBody string, reqBody []byte) bool {
 	if mockBody == "" && string(reqBody) == "" {
 		return true
@@ -416,4 +416,8 @@ func (h *HTTP) updateMock(_ context.Context, logger *zap.Logger, matchedMock *mo
 		logger.Error("failed to flag mock as used", zap.Error(err))
 	}
 	return true
+}
+func (h *HTTP) IsJSON(body []byte) bool {
+	var js interface{}
+	return json.Unmarshal(body, &js) == nil
 }

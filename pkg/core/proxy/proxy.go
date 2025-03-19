@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +32,11 @@ import (
 	"go.uber.org/zap"
 )
 
+type ParserPriority struct {
+	Priority   int
+	ParserType integrations.IntegrationType
+}
+
 type Proxy struct {
 	logger *zap.Logger
 
@@ -40,9 +46,10 @@ type Proxy struct {
 	DNSPort uint32
 
 	DestInfo     core.DestInfo
-	Integrations map[string]integrations.Integrations
+	Integrations map[integrations.IntegrationType]integrations.Integrations
 
-	MockManagers sync.Map
+	MockManagers         sync.Map
+	integrationsPrioroty []ParserPriority
 
 	sessions *core.Sessions
 
@@ -71,16 +78,20 @@ func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
 		DestInfo:     info,
 		sessions:     core.NewSessions(),
 		MockManagers: sync.Map{},
-		Integrations: make(map[string]integrations.Integrations),
+		Integrations: make(map[integrations.IntegrationType]integrations.Integrations),
 	}
 }
 
 func (p *Proxy) InitIntegrations(_ context.Context) error {
 	// initialize the integrations
 	for parserType, parser := range integrations.Registered {
-		prs := parser(p.logger)
+		prs := parser.Initializer(p.logger)
 		p.Integrations[parserType] = prs
+		p.integrationsPrioroty = append(p.integrationsPrioroty, ParserPriority{Priority: parser.Priority, ParserType: parserType})
 	}
+	sort.Slice(p.integrationsPrioroty, func(i, j int) bool {
+		return p.integrationsPrioroty[i].Priority > p.integrationsPrioroty[j].Priority
+	})
 	return nil
 }
 
@@ -526,15 +537,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	generic := true
-
-	//Checking for all the parsers.
-	// Iterate in reverse order to check the last registered parser first
-	for i := len(integrations.RegistrationOrder) - 1; i >= 0; i-- {
-		parserName := integrations.RegistrationOrder[i] // Get parser name
-		parser, exists := p.Integrations[parserName]
+	
+	//Checking for all the parsers according to their priority.
+	for _, parserPair := range p.integrationsPrioroty { // Iterate over ordered priority list
+		parser, exists := p.Integrations[parserPair.ParserType]
 		if !exists {
-			continue // Skip if parser does not exist
+			continue // Skip if parser not found
 		}
+
 		if parser.MatchType(parserCtx, initialBuf) {
 			if rule.Mode == models.MODE_RECORD {
 				err := parser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)

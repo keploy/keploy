@@ -17,7 +17,7 @@ import (
 )
 
 func init() {
-	integrations.Register("postgres_v1", NewPostgresV1)
+	integrations.Register(integrations.POSTGRES_V1, &integrations.Parsers{NewPostgresV1, 100})
 }
 
 type PostgresV1 struct {

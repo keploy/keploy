@@ -3,7 +3,6 @@ package http
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"io"
 	"net/http"
 	"regexp"
@@ -51,11 +50,6 @@ func GetReqMeta(req *http.Request) map[string]string {
 		}
 	}
 	return reqMeta
-}
-
-func (h *HTTP) IsJSON(body []byte) bool {
-	var js interface{}
-	return json.Unmarshal(body, &js) == nil
 }
 
 func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts models.OutgoingOptions) bool {

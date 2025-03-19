@@ -15,8 +15,7 @@ import (
 )
 
 func init() {
-	// Register the parser with the proxy.
-	integrations.Register("grpc", NewGrpc)
+	integrations.Register(integrations.GRPC, &integrations.Parsers{NewGrpc, 100})
 }
 
 type Grpc struct {

@@ -13,35 +13,36 @@ import (
 
 type Initializer func(logger *zap.Logger) Integrations
 
-type integrationType string
+type IntegrationType string
 
 // constants for different types of integrations
 const (
-	HTTP        integrationType = "http"
-	GRPC        integrationType = "grpc"
-	GENERIC     integrationType = "generic"
-	MYSQL       integrationType = "mysql"
-	POSTGRES_V1 integrationType = "postgres_v1"
-	POSTGRES_V2 integrationType = "postgres_v2"
-	MONGO       integrationType = "mongo"
-	REDIS       integrationType = "redis"
+	HTTP        IntegrationType = "http"
+	GRPC        IntegrationType = "grpc"
+	GENERIC     IntegrationType = "generic"
+	MYSQL       IntegrationType = "mysql"
+	POSTGRES_V1 IntegrationType = "postgres_v1"
+	POSTGRES_V2 IntegrationType = "postgres_v2"
+	MONGO       IntegrationType = "mongo"
+	REDIS       IntegrationType = "redis"
 )
 
-var Registered = make(map[string]Initializer)
-var RegistrationOrder []string
+type Parsers struct {
+	Initializer
+	Priority int
+}
+
+var Registered = make(map[IntegrationType]*Parsers)
+
 type Integrations interface {
 	MatchType(ctx context.Context, reqBuf []byte) bool
 	RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error
 	MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.ConditionalDstCfg, mockDb MockMemDb, opts models.OutgoingOptions) error
 }
 
-func Register(name string, i Initializer) {
-	if _, exists := Registered[name]; !exists {
-		RegistrationOrder = append(RegistrationOrder, name) // Track order only if first time
-	}
-	Registered[name] = i
+func Register(name IntegrationType, p *Parsers) {
+	Registered[name] = p
 }
-
 type MockMemDb interface {
 	GetFilteredMocks() ([]*models.Mock, error)
 	GetUnFilteredMocks() ([]*models.Mock, error)

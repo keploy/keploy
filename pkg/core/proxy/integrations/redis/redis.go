@@ -14,7 +14,7 @@ import (
 )
 
 func init() {
-	integrations.Register("redis", NewRedis)
+	integrations.Register(integrations.REDIS, &integrations.Parsers{NewRedis, 100})
 }
 
 type Redis struct {

@@ -24,23 +24,17 @@ import (
 )
 
 func init() {
-	fmt.Println("executed now")
-	integrations.Register("http", NewHTTP)
+	integrations.Register(integrations.HTTP, &integrations.Parsers{New, 100})
 }
 
 type HTTP struct {
-	logger *zap.Logger
+	Logger *zap.Logger
 	//opts  globalOptions //other global options set by the proxy
 }
 
-func NewHTTP(logger *zap.Logger) integrations.Integrations {
+func New(logger *zap.Logger) integrations.Integrations {
 	return &HTTP{
-		logger: logger,
-	}
-}
-func New(logger *zap.Logger) *HTTP {
-	return &HTTP{
-		logger: logger,
+		Logger: logger,
 	}
 }
 
@@ -62,14 +56,14 @@ func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
 		bytes.HasPrefix(buf[:], []byte("DELETE ")) ||
 		bytes.HasPrefix(buf[:], []byte("OPTIONS ")) ||
 		bytes.HasPrefix(buf[:], []byte("HEAD "))
-	h.logger.Debug(fmt.Sprintf("is Http Protocol?: %v ", isHTTP))
+	h.Logger.Debug(fmt.Sprintf("is Http Protocol?: %v ", isHTTP))
 	return isHTTP
 }
 
 func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
-	logger := h.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)))
+	logger := h.Logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)))
 
-	h.logger.Debug("Recording the outgoing http call in record mode")
+	h.Logger.Debug("Recording the outgoing http call in record mode")
 
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
@@ -85,8 +79,8 @@ func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, m
 }
 
 func (h *HTTP) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
-	logger := h.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)))
-	h.logger.Debug("Mocking the outgoing http call in test mode")
+	logger := h.Logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)))
+	h.Logger.Debug("Mocking the outgoing http call in test mode")
 
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
@@ -203,7 +197,7 @@ func (h *HTTP) parseFinalHTTP(_ context.Context, logger *zap.Logger, mock *Final
 				Header:     pkg.ToYamlHTTPHeader(respParsed.Header),
 				Body:       string(respBody),
 			},
-			Created:          time.Now().Unix(),
+			Created: time.Now().Unix(),
 
 			ReqTimestampMock: mock.ReqTimestampMock,
 			ResTimestampMock: mock.ResTimestampMock,
