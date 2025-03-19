@@ -38,7 +38,7 @@ func match(ctx context.Context, logger *zap.Logger, input *req, mockDb integrati
 		mocks, err := mockDb.GetUnFilteredMocks()
 		var unfilteredMocks []*models.Mock
 		for _, mock := range mocks {
-			if mock.Kind != "Http" {
+			if mock.Kind != models.HTTP {
 				continue
 			}
 			unfilteredMocks = append(unfilteredMocks, mock)
