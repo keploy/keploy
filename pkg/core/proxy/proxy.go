@@ -82,12 +82,6 @@ func (p *Proxy) InitIntegrations(_ context.Context) error {
 		p.Integrations[parserType] = prs
 	}
 	return nil
-	// for _, parserType := range integrations.RegistrationOrder {
-	// 	parser := integrations.Registered[parserType]
-	// 	prs := parser(p.logger)
-	// 	p.Integrations[parserType] = prs
-	// }
-	// return nil
 }
 
 func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
