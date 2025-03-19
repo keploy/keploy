@@ -351,7 +351,7 @@ func NewNoiseyParameters(tc *models.TestCase, actualResponse *models.HTTPResp, n
 		tc.HTTPResp.StatusCode = tc.XMLResp.StatusCode
 	}
 	if bodyType == models.BodyTypePlain {
-		return []string{}, errors.New("The body type is not json")
+		return []string{}, errors.New("the body type is not json")
 	}
 
 	noise := tc.Noise
@@ -390,7 +390,7 @@ func NewNoiseyParameters(tc *models.TestCase, actualResponse *models.HTTPResp, n
 				return []string{}, err
 			}
 			if pass {
-				return []string{}, errors.New("The test passed this time!!")
+				return []string{}, errors.New("the test passed this time")
 			}
 		}
 		jsonFieldDiff, _ := matcherUtils.GetJSONFieldDifferences(validatedJSON, bodyNoise, ignoreOrdering)
@@ -408,5 +408,5 @@ func NewNoiseyParameters(tc *models.TestCase, actualResponse *models.HTTPResp, n
 		}
 		return jsonFieldDiff.DynamicFields(), nil
 	}
-	return []string{}, errors.New("Unkown Error")
+	return []string{}, errors.New("unkown error")
 }
