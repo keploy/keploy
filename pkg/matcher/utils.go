@@ -45,6 +45,54 @@ type JSONComparisonResult struct {
 	differences []string // Lists the keys or indices of values that are not the same
 }
 
+type JSONFieldDiff struct {
+	dynamicFields    []string // Fields that are dynamic (i.e. their values can change)
+	missingFields    []string // Fields expected in the test case but absent in the replay
+	unexpectedFields []string // Fields present in the replay but not defined in the test case
+}
+
+func (v *JSONFieldDiff) DynamicFields() []string {
+	return v.dynamicFields
+}
+func (v *JSONFieldDiff) MissingFields() []string {
+	return v.missingFields
+}
+func (v *JSONFieldDiff) UnexpectedFields() []string {
+	return v.unexpectedFields
+}
+
+func FormatJSONDiffForLogging(diff *JSONFieldDiff) string {
+	var sb strings.Builder
+	sb.WriteString("\n=== JSON COMPARISON RESULTS ===\n\n")
+	if len(diff.DynamicFields()) > 0 {
+		sb.WriteString("🔄 DYNAMIC FIELDS (values changed):\n")
+		for _, field := range diff.DynamicFields() {
+			sb.WriteString(fmt.Sprintf("   • %s\n", field))
+		}
+		sb.WriteString("\n")
+	}
+	if len(diff.MissingFields()) > 0 {
+		sb.WriteString("❌ MISSING FIELDS (expected but not found):\n")
+		for _, field := range diff.MissingFields() {
+			sb.WriteString(fmt.Sprintf("   • %s\n", field))
+		}
+		sb.WriteString("\n")
+	}
+	if len(diff.UnexpectedFields()) > 0 {
+		sb.WriteString("➕ UNEXPECTED FIELDS (found but not expected):\n")
+		for _, field := range diff.UnexpectedFields() {
+			sb.WriteString(fmt.Sprintf("   • %s\n", field))
+		}
+		sb.WriteString("\n")
+	}
+	// Summary
+	total := len(diff.DynamicFields()) + len(diff.MissingFields()) + len(diff.UnexpectedFields())
+	sb.WriteString(fmt.Sprintf("Total differences: %d\n", total))
+	sb.WriteString("===============================\n")
+
+	return sb.String()
+}
+
 func (v *JSONComparisonResult) IsExact() bool {
 	return v.isExact
 }
