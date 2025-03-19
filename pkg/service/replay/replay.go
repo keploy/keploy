@@ -685,6 +685,29 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// log the consumed mocks during the test run of the test case for test set
 			r.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(testCase.Name)), zap.Any("testset id", models.HighlightFailingString(testSetID)), zap.Any("passed", models.HighlightFailingString(testPass)))
 			r.logger.Debug("Consumed Mocks", zap.Any("mocks", consumedMocks))
+			if strings.ToUpper(string(testCase.HTTPReq.Method)) == "GET" {
+				newNoise, err := r.newNoiseyParameters(testCase, resp, testSetID)
+				if err == nil {
+					noiseParams := models.NoiseParams{
+						Assertion: make(map[string][]string),
+					}
+					noiseParams.TestCaseID = testCase.Name
+					for _, val := range newNoise {
+						prefix := "body."
+						prefix += val
+						noiseParams.Assertion[prefix] = []string{}
+					}
+					noiseParams.Ops = models.OpsAdd
+					var noiseParamSlice = []*models.NoiseParams{}
+					noiseParamSlice = append(noiseParamSlice, &noiseParams)
+					_, err = r.DenoiseTestCases(ctx, testSetID, noiseParamSlice)
+					if err == nil {
+						r.logger.Info("Dynamic fields identified and will be ignored in future test runs",
+							zap.Any("testcase", testCase.Name),
+							zap.String("message", "This GET request failed due to non-deterministic values. The detected dynamic fields have been added to noise parameters and will be ignored in subsequent test executions. Please review your API for non-idempotent behavior in this GET endpoint: "+testCase.HTTPReq.URL))
+					}
+				}
+			}
 		} else {
 			r.logger.Info("result", zap.Any("testcase id", models.HighlightPassingString(testCase.Name)), zap.Any("testset id", models.HighlightPassingString(testSetID)), zap.Any("passed", models.HighlightPassingString(testPass)))
 		}
@@ -929,6 +952,15 @@ func (r *Replayer) compareResp(tc *models.TestCase, actualResponse *models.HTTPR
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
 	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
+}
+
+func (r *Replayer) newNoiseyParameters(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string) ([]string, error) {
+
+	noiseConfig := r.config.Test.GlobalNoise.Global
+	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
+		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
+	}
+	return httpMatcher.NewNoiseyParameters(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
 }
 
 func (r *Replayer) printSummary(_ context.Context, _ bool) {
