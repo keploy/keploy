@@ -3,6 +3,7 @@ package http
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -323,4 +324,89 @@ func FlattenHTTPResponse(h http.Header, body string) (map[string][]string, error
 		return m, err
 	}
 	return m, nil
+}
+
+func NewNoiseyParameters(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger) ([]string, error) {
+	bodyType := models.BodyTypePlain
+	if json.Valid([]byte(actualResponse.Body)) {
+		bodyType = models.BodyTypeJSON
+	}
+	if utils.IsXMLResponse(actualResponse) {
+		bodyType = models.BodyTypeJSON
+		actualResp, err := utils.XMLToMap(actualResponse.Body)
+		if err != nil {
+			utils.LogError(logger, err, "failed to convert xml response to map")
+		}
+		actualRespJSONData, err := json.MarshalIndent(actualResp, "", "  ")
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal xml response to json")
+		}
+		actualResponse.Body = string(actualRespJSONData)
+		expectedRespJSONData, err := json.MarshalIndent(tc.XMLResp.Body, "", "  ")
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal xml response to json")
+		}
+		tc.HTTPResp.Body = string(expectedRespJSONData)
+		tc.HTTPResp.Header = tc.XMLResp.Header
+		tc.HTTPResp.StatusCode = tc.XMLResp.StatusCode
+	}
+	if bodyType == models.BodyTypePlain {
+		return []string{}, errors.New("The body type is not json")
+	}
+
+	noise := tc.Noise
+	bodyNoise := noiseConfig["body"]
+	if bodyNoise != nil {
+		if ignoreFields, ok := bodyNoise["*"]; ok && len(ignoreFields) > 0 && ignoreFields[0] == "*" {
+			if noise["body"] == nil {
+				noise["body"] = make([]string, 0)
+			}
+		}
+	} else {
+		bodyNoise = map[string][]string{}
+	}
+
+	for field, regexArr := range noise {
+		a := strings.Split(field, ".")
+		if len(a) > 1 && a[0] == "body" {
+			x := strings.Join(a[1:], ".")
+			bodyNoise[strings.ToLower(x)] = regexArr
+		}
+	}
+
+	// stores the json body after removing the noise
+	cleanExp, cleanAct := tc.HTTPResp.Body, actualResponse.Body
+	var jsonComparisonResult matcherUtils.JSONComparisonResult
+	if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") {
+		//validate the stored json
+		validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
+		if err != nil {
+			return []string{}, err
+		}
+		if validatedJSON.IsIdentical() {
+			jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
+			pass := jsonComparisonResult.IsExact()
+			if err != nil {
+				return []string{}, err
+			}
+			if pass {
+				return []string{}, errors.New("The test passed this time!!")
+			}
+		}
+		jsonFieldDiff, _ := matcherUtils.GetJSONFieldDifferences(validatedJSON, bodyNoise, ignoreOrdering)
+		formattedDiff := matcherUtils.FormatJSONDiffForLogging(&jsonFieldDiff)
+		newLogger := pp.New()
+		newLogger.WithLineInfo = false
+		if len(jsonFieldDiff.DynamicFields()) > 0 ||
+			len(jsonFieldDiff.MissingFields()) > 0 ||
+			len(jsonFieldDiff.UnexpectedFields()) > 0 {
+			newLogger.SetColorScheme(models.GetFailingColorScheme())
+		}
+		_, er := newLogger.Printf(formattedDiff)
+		if er != nil {
+			utils.LogError(logger, err, "failed to print formatted JSON differences")
+		}
+		return jsonFieldDiff.DynamicFields(), nil
+	}
+	return []string{}, errors.New("Unkown Error")
 }
