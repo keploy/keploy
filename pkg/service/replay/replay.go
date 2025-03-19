@@ -687,7 +687,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.logger.Debug("Consumed Mocks", zap.Any("mocks", consumedMocks))
 			if strings.ToUpper(string(testCase.HTTPReq.Method)) == "GET" {
 				newNoise, err := r.newNoiseyParameters(testCase, resp, testSetID)
-				if err == nil {
+				if err == nil && len(newNoise) != 0 {
 					noiseParams := models.NoiseParams{
 						Assertion: make(map[string][]string),
 					}
@@ -700,7 +700,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					noiseParams.Ops = models.OpsAdd
 					var noiseParamSlice = []*models.NoiseParams{}
 					noiseParamSlice = append(noiseParamSlice, &noiseParams)
-					_, err = r.DenoiseTestCases(ctx, testSetID, noiseParamSlice)
+					_, err := r.DenoiseTestCases(ctx, testSetID, noiseParamSlice)
 					if err == nil {
 						r.logger.Info("Dynamic fields identified and will be ignored in future test runs",
 							zap.Any("testcase", testCase.Name),
