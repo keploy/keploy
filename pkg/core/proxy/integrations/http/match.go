@@ -56,9 +56,6 @@ func match(ctx context.Context, logger *zap.Logger, input *req, mockDb integrati
 			if ctx.Err() != nil {
 				return false, nil, ctx.Err()
 			}
-			if mock.Kind != models.HTTP {
-				continue
-			}
 
 			//if the content type is present in http request then we need to check for the same type in the mock
 			if input.header.Get("Content-Type") != "" {
