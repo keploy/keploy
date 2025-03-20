@@ -3,9 +3,12 @@ package http
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
+	"encoding/xml"
 	"io"
 	"net/http"
 	"regexp"
+	"strings"
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
@@ -88,4 +91,24 @@ func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 	}
 
 	return passThrough
+}
+
+func IsJSON(body []byte) bool {
+	var js interface{}
+	return json.Unmarshal(body, &js) == nil
+}
+
+func IsXML(data []byte) bool {
+	var xm xml.Name
+	return xml.Unmarshal(data, &xm) == nil
+}
+
+// IsCSV checks if data can be parsed as CSV by looking for common characteristics
+func IsCSV(data []byte) bool {
+	// Very simple CSV check: look for commas in the first line
+	content := string(data)
+	if lines := strings.Split(content, "\n"); len(lines) > 0 {
+		return strings.Contains(lines[0], ",")
+	}
+	return false
 }

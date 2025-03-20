@@ -5,7 +5,6 @@ package http
 import (
 	"context"
 	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"math"
 	"net/http"
@@ -40,7 +39,7 @@ type req struct {
 	raw    []byte
 }
 
-func (h *HTTP) match(ctx context.Context, logger *zap.Logger, input *req, mockDb integrations.MockMemDb) (bool, *models.Mock, error) {
+func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb) (bool, *models.Mock, error) {
 	for {
 		if ctx.Err() != nil {
 			return false, nil, ctx.Err()
@@ -50,13 +49,13 @@ func (h *HTTP) match(ctx context.Context, logger *zap.Logger, input *req, mockDb
 		mocks, err := mockDb.GetUnFilteredMocks()
 
 		if err != nil {
-			utils.LogError(logger, err, "failed to get unfilteredMocks mocks")
+			utils.LogError(h.Logger, err, "failed to get unfilteredMocks mocks")
 			return false, nil, errors.New("error while matching the request with the mocks")
 		}
 		unfilteredMocks := FilterHTTPMocks(mocks)
 
 		// Matching process
-		schemaMatched, err := h.filterAndMatchMocks(ctx, logger, input, unfilteredMocks)
+		schemaMatched, err := h.SchemaMatch(ctx, input, unfilteredMocks)
 		if err != nil {
 			return false, nil, err
 		}
@@ -68,36 +67,48 @@ func (h *HTTP) match(ctx context.Context, logger *zap.Logger, input *req, mockDb
 		// Exact body match
 		ok, bestMatch := h.ExactBodyMatch(input.body, schemaMatched)
 		if ok {
-			return h.handleMatchedMock(ctx, logger, bestMatch, mockDb)
+			ok := h.handleMatchedMock(ctx, bestMatch, mockDb)
+			if !ok {
+				continue
+			}
+			return ok, bestMatch, nil
 		}
 
+		shortListed := schemaMatched
 		// Schema match for JSON bodies
-		if h.IsJSON(input.body) {
-			bodyMatched, err := h.PerformBodyMatch(ctx, logger, schemaMatched, input.body)
+		if IsJSON(input.body) {
+			bodyMatched, err := h.PerformBodyMatch(ctx, schemaMatched, input.body)
 			if err != nil {
 				return false, nil, err
 			}
 
 			if len(bodyMatched) == 0 {
+				h.Logger.Debug("No mock found with body schema match")
 				return false, nil, nil
 			}
 
 			if len(bodyMatched) == 1 {
-				return h.handleMatchedMock(ctx, logger, bodyMatched[0], mockDb)
+				ok := h.handleMatchedMock(ctx, bodyMatched[0], mockDb)
+				if !ok {
+					continue
+				}
+				return ok, bodyMatched[0], nil
 			}
 
 			// More than one match, perform fuzzy match
-			schemaMatched = bodyMatched
+			shortListed = bodyMatched
 		}
 
 		// Perform fuzzy match on the request
-		isMatched, bestMatch, err := h.PerformFuzzyMatch(ctx, logger, schemaMatched, input.raw, mockDb)
-		if err != nil {
-			logger.Error("failed to perform fuzzy match", zap.Error(err))
-		}
+		isMatched, bestMatch := h.PerformFuzzyMatch(shortListed, input.raw)
 		if isMatched {
-			return h.handleMatchedMock(ctx, logger, bestMatch, mockDb)
+			ok := h.handleMatchedMock(ctx, bestMatch, mockDb)
+			if !ok {
+				continue
+			}
+			return ok, bestMatch, nil
 		}
+		return false, nil, nil
 	}
 }
 
@@ -105,7 +116,7 @@ func (h *HTTP) match(ctx context.Context, logger *zap.Logger, input *req, mockDb
 func FilterHTTPMocks(mocks []*models.Mock) []*models.Mock {
 	var unfilteredMocks []*models.Mock
 	for _, mock := range mocks {
-		if mock.Kind == "Http" {
+		if mock.Kind == models.Kind(integrations.HTTP) {
 			unfilteredMocks = append(unfilteredMocks, mock)
 		}
 	}
@@ -120,8 +131,8 @@ func (h *HTTP) MatchURLPath(mockURL, reqPath string) bool {
 	return parsedURL.Path == reqPath
 }
 
-// Filter and match mocks
-func (h *HTTP) filterAndMatchMocks(ctx context.Context, logger *zap.Logger, input *req, unfilteredMocks []*models.Mock) ([]*models.Mock, error) {
+// match mocks
+func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*models.Mock) ([]*models.Mock, error) {
 	var schemaMatched []*models.Mock
 
 	for _, mock := range unfilteredMocks {
@@ -129,44 +140,40 @@ func (h *HTTP) filterAndMatchMocks(ctx context.Context, logger *zap.Logger, inpu
 			return nil, ctx.Err()
 		}
 
-		if mock.Kind != models.HTTP {
-			continue
-		}
-
 		// Content type check
 		if input.header.Get("Content-Type") != "" {
 			if input.header.Get("Content-Type") != mock.Spec.HTTPReq.Header["Content-Type"] {
-				logger.Debug("The content type of mock and request aren't the same")
+				h.Logger.Debug("The content type of mock and request aren't the same")
 				continue
 			}
 		}
 		// Body type check
 		if !h.MatchBodyType(mock.Spec.HTTPReq.Body, input.body) {
-			logger.Debug("The body of mock and request aren't of same type")
+			h.Logger.Debug("The body of mock and request aren't of same type")
 			continue
 		}
 
 		// URL path match
 		if !h.MatchURLPath(mock.Spec.HTTPReq.URL, input.url.Path) {
-			logger.Debug("The url path of mock and request aren't the same")
+			h.Logger.Debug("The url path of mock and request aren't the same")
 			continue
 		}
 
 		// HTTP method match
 		if mock.Spec.HTTPReq.Method != models.Method(input.method) {
-			logger.Debug("The method of mock and request aren't the same")
+			h.Logger.Debug("The method of mock and request aren't the same")
 			continue
 		}
 
 		// Header key match
 		if !h.MapsHaveSameKeys(mock.Spec.HTTPReq.Header, input.header) {
-			logger.Debug("The header keys of mock and request aren't the same")
+			h.Logger.Debug("The header keys of mock and request aren't the same")
 			continue
 		}
 
 		// Query parameter match
 		if !h.MapsHaveSameKeys(mock.Spec.HTTPReq.URLParams, input.url.Query()) {
-			logger.Debug("The query params of mock and request aren't the same")
+			h.Logger.Debug("The query params of mock and request aren't the same")
 			continue
 		}
 
@@ -175,18 +182,18 @@ func (h *HTTP) filterAndMatchMocks(ctx context.Context, logger *zap.Logger, inpu
 
 	return schemaMatched, nil
 }
-func (h *HTTP) bodyMatch(logger *zap.Logger, mockBody, reqBody []byte) (bool, error) {
+func (h *HTTP) bodyMatch(mockBody, reqBody []byte) (bool, error) {
 
 	var mockData map[string]interface{}
 	var reqData map[string]interface{}
 	err := json.Unmarshal(mockBody, &mockData)
 	if err != nil {
-		utils.LogError(logger, err, "failed to unmarshal the mock request body", zap.String("Req", string(mockBody)))
+		utils.LogError(h.Logger, err, "failed to unmarshal the mock request body", zap.String("Req", string(mockBody)))
 		return false, err
 	}
 	err = json.Unmarshal(reqBody, &reqData)
 	if err != nil {
-		utils.LogError(logger, err, "failed to unmarshal the request body", zap.String("Req", string(reqBody)))
+		utils.LogError(h.Logger, err, "failed to unmarshal the request body", zap.String("Req", string(reqBody)))
 		return false, err
 	}
 
@@ -272,41 +279,35 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 }
 
 // Handle matched mock: update mock or delete based on SQS request type
-func (h *HTTP) handleMatchedMock(ctx context.Context, logger *zap.Logger, bestMatch *models.Mock, mockDb integrations.MockMemDb) (bool, *models.Mock, error) {
-	if !h.updateMock(ctx, logger, bestMatch, mockDb) {
-		return false, nil, nil
+func (h *HTTP) handleMatchedMock(ctx context.Context, bestMatch *models.Mock, mockDb integrations.MockMemDb) bool {
+	if !h.updateMock(ctx, bestMatch, mockDb) {
+		return false
 	}
-	return true, bestMatch, nil
+	return true
 }
 
 // PerformBodyMatch Perform body match for JSON data
-func (h *HTTP) PerformBodyMatch(ctx context.Context, logger *zap.Logger, schemaMatched []*models.Mock, reqBody []byte) ([]*models.Mock, error) {
+func (h *HTTP) PerformBodyMatch(ctx context.Context, schemaMatched []*models.Mock, reqBody []byte) ([]*models.Mock, error) {
+	h.Logger.Debug("Performing schema match for body")
+
 	var bodyMatched []*models.Mock
 	for _, mock := range schemaMatched {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 
-		ok, err := h.bodyMatch(logger, []byte(mock.Spec.HTTPReq.Body), reqBody)
+		ok, err := h.bodyMatch([]byte(mock.Spec.HTTPReq.Body), reqBody)
 		if err != nil {
-			return nil, err
+			h.Logger.Error("failed to do schema matching on request body", zap.Error(err))
+			break
 		}
 
 		if ok {
 			bodyMatched = append(bodyMatched, mock)
-			logger.Debug("found a mock with body schema match")
+			h.Logger.Debug("found a mock with body schema match")
 		}
 	}
 	return bodyMatched, nil
-}
-
-// PerformFuzzyMatch Perform fuzzy match on the request buffer
-func (h *HTTP) PerformFuzzyMatch(ctx context.Context, logger *zap.Logger, schemaMatched []*models.Mock, reqBuff []byte, mockDb integrations.MockMemDb) (bool, *models.Mock, error) {
-	isMatched, bestMatch := h.fuzzyMatch(schemaMatched, reqBuff)
-	if isMatched {
-		return h.handleMatchedMock(ctx, logger, bestMatch, mockDb)
-	}
-	return false, nil, nil
 }
 
 // MatchBodyType Body type match check (content type matching)
@@ -340,7 +341,7 @@ func (h *HTTP) findStringMatch(req string, mockStrings []string) int {
 }
 
 // Fuzzy matching function
-func (h *HTTP) fuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
+func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
 	encodedReq := h.encode(reqBuff)
 	for _, mock := range tcsMocks {
 		encodedMock, _ := h.decode(mock.Spec.HTTPReq.Body)
@@ -366,35 +367,20 @@ func (h *HTTP) fuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *model
 	return false, nil
 }
 
-func (h *HTTP) isXML(data []byte) bool {
-	var xm xml.Name
-	return xml.Unmarshal(data, &xm) == nil
-}
-
-// isCSV checks if data can be parsed as CSV by looking for common characteristics
-func (h *HTTP) isCSV(data []byte) bool {
-	// Very simple CSV check: look for commas in the first line
-	content := string(data)
-	if lines := strings.Split(content, "\n"); len(lines) > 0 {
-		return strings.Contains(lines[0], ",")
-	}
-	return false
-}
-
 func (h *HTTP) guessContentType(data []byte) ContentType {
 	// Use net/http library's DetectContentType for basic MIME type detection
 	mimeType := http.DetectContentType(data)
 
 	// Additional checks to further specify the content type
 	switch {
-	case h.IsJSON(data):
+	case IsJSON(data):
 		return JSON
-	case h.isXML(data):
+	case IsXML(data):
 		return XML
 	case strings.Contains(mimeType, "text/html"):
 		return HTML
 	case strings.Contains(mimeType, "text/plain"):
-		if h.isCSV(data) {
+		if IsCSV(data) {
 			return CSV
 		}
 		return TextPlain
@@ -404,7 +390,7 @@ func (h *HTTP) guessContentType(data []byte) ContentType {
 }
 
 // Update the matched mock (delete or update)
-func (h *HTTP) updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock, mockDb integrations.MockMemDb) bool {
+func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb integrations.MockMemDb) bool {
 	if matchedMock.TestModeInfo.IsFiltered {
 		originalMatchedMock := *matchedMock
 		matchedMock.TestModeInfo.IsFiltered = false
@@ -414,11 +400,7 @@ func (h *HTTP) updateMock(_ context.Context, logger *zap.Logger, matchedMock *mo
 	}
 	err := mockDb.FlagMockAsUsed(*matchedMock)
 	if err != nil {
-		logger.Error("failed to flag mock as used", zap.Error(err))
+		h.Logger.Error("failed to flag mock as used", zap.Error(err))
 	}
 	return true
-}
-func (h *HTTP) IsJSON(body []byte) bool {
-	var js interface{}
-	return json.Unmarshal(body, &js) == nil
 }

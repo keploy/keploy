@@ -81,18 +81,18 @@ func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, m
 }
 
 func (h *HTTP) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
-	logger := h.Logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)))
+	h.Logger = h.Logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)))
 	h.Logger.Debug("Mocking the outgoing http call in test mode")
 
-	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
+	reqBuf, err := util.ReadInitialBuf(ctx, h.Logger, src)
 	if err != nil {
-		utils.LogError(logger, err, "failed to read the initial http message")
+		utils.LogError(h.Logger, err, "failed to read the initial http message")
 		return err
 	}
 
-	err = h.decodeHTTP(ctx, logger, reqBuf, src, dstCfg, mockDb, opts)
+	err = h.decodeHTTP(ctx, reqBuf, src, dstCfg, mockDb, opts)
 	if err != nil {
-		utils.LogError(logger, err, "failed to decode the http message from the yaml")
+		utils.LogError(h.Logger, err, "failed to decode the http message from the yaml")
 		return err
 	}
 	return nil
