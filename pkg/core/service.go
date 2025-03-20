@@ -29,6 +29,8 @@ type HookCfg struct {
 	KeployIPV4 string
 	Mode       models.Mode
 	Rules      []config.BypassRule
+	E2E        bool
+	Port       uint32
 }
 
 type App interface {

@@ -11,6 +11,8 @@ type HookOptions struct {
 	Rules         []config.BypassRule
 	Mode          Mode
 	EnableTesting bool
+	E2E           bool
+	Port          uint32 // used for e2e filtering
 }
 
 type OutgoingOptions struct {
@@ -30,7 +32,8 @@ type ConditionalDstCfg struct {
 }
 
 type IncomingOptions struct {
-	Filters []config.Filter
+	Filters  []config.Filter
+	BasePath string
 }
 
 type SetupOptions struct {
