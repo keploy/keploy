@@ -13,7 +13,6 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
@@ -65,7 +64,7 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			}
 			if expectHeader == "100-continue" {
 				//Read if the response from the server is 100-continue
-				resp, err := util.ReadBytes(ctx, logger, destConn)
+				resp, err := pUtil.ReadBytes(ctx, logger, destConn)
 				if err != nil {
 					utils.LogError(logger, err, "failed to read the response message from the server after 100-continue request")
 					errCh <- err
@@ -91,7 +90,7 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 					return nil
 				}
 				//Reading the request buffer again
-				reqBuf, err = util.ReadBytes(ctx, logger, clientConn)
+				reqBuf, err = pUtil.ReadBytes(ctx, logger, clientConn)
 				if err != nil {
 					utils.LogError(logger, err, "failed to read the request buffer from the user client")
 					errCh <- err
@@ -122,7 +121,7 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 
 			logger.Debug(fmt.Sprintf("This is the complete request:\n%v", string(finalReq)))
 			// read the response from the actual server
-			resp, err := util.ReadBytes(ctx, logger, destConn)
+			resp, err := pUtil.ReadBytes(ctx, logger, destConn)
 			if err != nil {
 				if err == io.EOF {
 					logger.Debug("Response complete, exiting the loop.")
@@ -224,7 +223,10 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			finalReq = []byte("")
 			finalResp = []byte("")
 
-			finalReq, err = util.ReadBytes(ctx, logger, clientConn)
+			// read the request from the same connection
+			logger.Debug("Reading the request from the user client again from the same connection")
+
+			finalReq, err = pUtil.ReadBytes(ctx, logger, clientConn)
 			if err != nil {
 				if err != io.EOF {
 					logger.Debug("failed to read the request message from the user client", zap.Error(err))

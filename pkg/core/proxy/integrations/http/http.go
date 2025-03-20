@@ -106,6 +106,18 @@ func ParseFinalHTTP(_ context.Context, logger *zap.Logger, mock *finalHTTP, dest
 		return err
 	}
 
+	// Set the host header explicitely because the `http.ReadRequest`` trim the host header
+	// func ReadRequest(b *bufio.Reader) (*Request, error) {
+	// 	req, err := readRequest(b)
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+
+	// 	delete(req.Header, "Host")
+	// 	return req, err
+	// }
+	req.Header.Set("Host", req.Host)
+
 	var reqBody []byte
 	if req.Body != nil { // Read
 		var err error
@@ -186,7 +198,7 @@ func ParseFinalHTTP(_ context.Context, logger *zap.Logger, mock *finalHTTP, dest
 				Body:       string(respBody),
 			},
 			Created:          time.Now().Unix(),
-			ReqTimestampMock: mock.resTimestampMock,
+			ReqTimestampMock: mock.reqTimestampMock,
 			ResTimestampMock: mock.resTimestampMock,
 		},
 	}
