@@ -16,7 +16,7 @@ import (
 
 func init() {
 	integrations.Register(integrations.GRPC, &integrations.Parsers{
-		Initializer: NewGrpc,
+		Initializer: New,
 		Priority:    100,
 	})
 }
@@ -25,7 +25,7 @@ type Grpc struct {
 	logger *zap.Logger
 }
 
-func NewGrpc(logger *zap.Logger) integrations.Integrations {
+func New(logger *zap.Logger) integrations.Integrations {
 	return &Grpc{
 		logger: logger,
 	}

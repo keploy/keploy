@@ -15,7 +15,7 @@ import (
 
 func init() {
 	integrations.Register(integrations.REDIS, &integrations.Parsers{
-		Initializer: NewRedis,
+		Initializer: New,
 		Priority:    100,
 	})
 }
@@ -24,7 +24,7 @@ type Redis struct {
 	logger *zap.Logger
 }
 
-func NewRedis(logger *zap.Logger) integrations.Integrations {
+func New(logger *zap.Logger) integrations.Integrations {
 	return &Redis{
 		logger: logger,
 	}
