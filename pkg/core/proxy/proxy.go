@@ -346,10 +346,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	defer func() {
 		parserCtxCancel()
 
-		err := srcConn.Close()
-		if err != nil {
-			utils.LogError(p.logger, err, "failed to close the source connection", zap.Any("clientConnID", clientConnID))
-			return
+		if srcConn != nil {
+			err := srcConn.Close()
+			if err != nil {
+				utils.LogError(p.logger, err, "failed to close the source connection", zap.Any("clientConnID", clientConnID))
+				return
+			}
 		}
 
 		if dstConn != nil {
