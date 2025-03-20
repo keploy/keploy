@@ -55,7 +55,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte
 			}
 
 			logger.Debug("handling the chunked requests to read the complete request")
-			err := h.HandleChunkedRequests(ctx, logger, &reqBuf, clientConn, nil)
+			err := h.HandleChunkedRequests(ctx, &reqBuf, clientConn, nil)
 			if err != nil {
 				utils.LogError(logger, err, "failed to handle chunked requests")
 				errCh <- err
