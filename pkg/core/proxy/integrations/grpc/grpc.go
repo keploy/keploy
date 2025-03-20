@@ -15,7 +15,10 @@ import (
 )
 
 func init() {
-	integrations.Register(integrations.GRPC, &integrations.Parsers{NewGrpc, 100})
+	integrations.Register(integrations.GRPC, &integrations.Parsers{
+		Initializer: NewGrpc,
+		Priority:    100,
+	})
 }
 
 type Grpc struct {

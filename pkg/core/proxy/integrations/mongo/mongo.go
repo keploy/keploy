@@ -18,9 +18,11 @@ import (
 )
 
 func init() {
-	integrations.Register(integrations.MONGO, &integrations.Parsers{NewMongo, 100})
+	integrations.Register(integrations.MONGO, &integrations.Parsers{
+		Initializer: NewMongo,
+		Priority:    100,
+	})
 }
-
 
 type Mongo struct {
 	logger                 *zap.Logger

@@ -24,7 +24,9 @@ import (
 )
 
 func init() {
-	integrations.Register(integrations.HTTP, &integrations.Parsers{New, 100})
+	integrations.Register(integrations.HTTP, &integrations.Parsers{
+		Initializer: New, Priority: 100,
+	})
 }
 
 type HTTP struct {

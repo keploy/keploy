@@ -14,7 +14,10 @@ import (
 )
 
 func init() {
-	integrations.Register(integrations.GENERIC, &integrations.Parsers{NewGeneric, 100})
+	integrations.Register(integrations.GENERIC, &integrations.Parsers{
+		Initializer: NewGeneric,
+		Priority:    100,
+	})
 }
 
 type Generic struct {

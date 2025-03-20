@@ -28,8 +28,8 @@ const (
 )
 
 type Parsers struct {
-	Initializer
-	Priority int
+	Initializer Initializer
+	Priority    int
 }
 
 var Registered = make(map[IntegrationType]*Parsers)
@@ -43,6 +43,7 @@ type Integrations interface {
 func Register(name IntegrationType, p *Parsers) {
 	Registered[name] = p
 }
+
 type MockMemDb interface {
 	GetFilteredMocks() ([]*models.Mock, error)
 	GetUnFilteredMocks() ([]*models.Mock, error)

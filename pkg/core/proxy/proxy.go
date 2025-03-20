@@ -537,7 +537,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	generic := true
-	
+
 	//Checking for all the parsers according to their priority.
 	for _, parserPair := range p.integrationsPrioroty { // Iterate over ordered priority list
 		parser, exists := p.Integrations[parserPair.ParserType]
