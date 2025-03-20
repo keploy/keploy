@@ -49,7 +49,7 @@ type Proxy struct {
 	Integrations map[integrations.IntegrationType]integrations.Integrations
 
 	MockManagers         sync.Map
-	integrationsPrioroty []ParserPriority
+	integrationsPriority []ParserPriority
 
 	sessions *core.Sessions
 
@@ -87,10 +87,10 @@ func (p *Proxy) InitIntegrations(_ context.Context) error {
 	for parserType, parser := range integrations.Registered {
 		prs := parser.Initializer(p.logger)
 		p.Integrations[parserType] = prs
-		p.integrationsPrioroty = append(p.integrationsPrioroty, ParserPriority{Priority: parser.Priority, ParserType: parserType})
+		p.integrationsPriority = append(p.integrationsPriority, ParserPriority{Priority: parser.Priority, ParserType: parserType})
 	}
-	sort.Slice(p.integrationsPrioroty, func(i, j int) bool {
-		return p.integrationsPrioroty[i].Priority > p.integrationsPrioroty[j].Priority
+	sort.Slice(p.integrationsPriority, func(i, j int) bool {
+		return p.integrationsPriority[i].Priority > p.integrationsPriority[j].Priority
 	})
 	return nil
 }
@@ -404,7 +404,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			rule.OutgoingOptions.DstCfg = dstCfg
 
 			// Record the outgoing message into a mock
-			err := p.Integrations["mysql"].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+			err := p.Integrations[integrations.MYSQL].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil {
 				utils.LogError(p.logger, err, "failed to record the outgoing message")
 				return err
@@ -419,7 +419,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 
 		//mock the outgoing message
-		err := p.Integrations["mysql"].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), rule.OutgoingOptions)
+		err := p.Integrations[integrations.MYSQL].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), rule.OutgoingOptions)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to mock the outgoing message")
 			return err
@@ -541,7 +541,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	generic := true
 
 	//Checking for all the parsers according to their priority.
-	for _, parserPair := range p.integrationsPrioroty { // Iterate over ordered priority list
+	for _, parserPair := range p.integrationsPriority { // Iterate over ordered priority list
 		parser, exists := p.Integrations[parserPair.ParserType]
 		if !exists {
 			continue // Skip if parser not found
@@ -568,13 +568,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if generic {
 		logger.Debug("The external dependency is not supported. Hence using generic parser")
 		if rule.Mode == models.MODE_RECORD {
-			err := p.Integrations["generic"].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+			err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil {
 				utils.LogError(logger, err, "failed to record the outgoing message")
 				return err
 			}
 		} else {
-			err := p.Integrations["generic"].MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
+			err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
 			if err != nil {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				return err
