@@ -85,7 +85,8 @@ func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
 func (p *Proxy) InitIntegrations(_ context.Context) error {
 	// initialize the integrations
 	for parserType, parser := range integrations.Registered {
-		prs := parser.Initializer(p.logger)
+		logger := p.logger.With(zap.Any("Type", parserType))
+		prs := parser.Initializer(logger)
 		p.Integrations[parserType] = prs
 		p.integrationsPriority = append(p.integrationsPriority, ParserPriority{Priority: parser.Priority, ParserType: parserType})
 	}
@@ -547,8 +548,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			continue // Skip if parser not found
 		}
 
+		p.logger.Debug("Checking for the parser", zap.Any("ParserType", parserPair.ParserType))
+
 		if parser.MatchType(parserCtx, initialBuf) {
 			if rule.Mode == models.MODE_RECORD {
+				p.logger.Debug("The external dependency is supported. Hence using the parser in record mode", zap.Any("ParserType", parserPair.ParserType))
 				err := parser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 				if err != nil {
 					utils.LogError(logger, err, "failed to record the outgoing message")
