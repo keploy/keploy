@@ -5,6 +5,7 @@ package hooks
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"math/rand"
 
@@ -102,8 +103,9 @@ func (h *Hooks) SendDockerAppInfo(_ uint64, dockerAppInfo structs.DockerAppInfo)
 			return err
 		}
 	}
-	r := rand.New(rand.NewSource(rand.Int63()))
-	randomNum := r.Uint64()
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	randomNum := r.Uint64() % 10
+
 	h.appID = randomNum
 	err := h.dockerAppRegistrationMap.Update(h.appID, dockerAppInfo, ebpf.UpdateAny)
 	if err != nil {
