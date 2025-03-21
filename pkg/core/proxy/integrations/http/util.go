@@ -113,6 +113,18 @@ func IsCSV(data []byte) bool {
 	return false
 }
 
+type ContentType string
+
+// Constants for different content types.
+const (
+	Unknown   ContentType = "Unknown"
+	JSON      ContentType = "JSON"
+	XML       ContentType = "XML"
+	CSV       ContentType = "CSV"
+	HTML      ContentType = "HTML"
+	TextPlain ContentType = "TextPlain"
+)
+
 func guessContentType(data []byte) ContentType {
 	// Use net/http library's DetectContentType for basic MIME type detection
 	mimeType := http.DetectContentType(data)

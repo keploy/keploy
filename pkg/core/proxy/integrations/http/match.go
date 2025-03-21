@@ -20,17 +20,7 @@ import (
 	"go.uber.org/zap"
 )
 
-type ContentType string
 
-// Constants for different content types.
-const (
-	Unknown   ContentType = "Unknown"
-	JSON      ContentType = "JSON"
-	XML       ContentType = "XML"
-	CSV       ContentType = "CSV"
-	HTML      ContentType = "HTML"
-	TextPlain ContentType = "TextPlain"
-)
 
 type req struct {
 	method string
