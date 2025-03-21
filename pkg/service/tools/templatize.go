@@ -931,9 +931,17 @@ func getType(val interface{}) string {
 		return "int"
 	case float64, float32, *float64, *float32:
 		return "float"
+	case bool, *bool:
+		return "bool"
+	case []interface{}, map[string]interface{}, geko.ObjectItems, geko.Array:
+		return "object"
+	case nil:
+		return ""
+	default:
+		// Log the unknown type to help with future type additions
+		typeName := fmt.Sprintf("%T", val)
+		return fmt.Sprintf("unknown-%s", typeName)
 	}
-	//TODO: handle the default case properly, return some errot.
-	return ""
 }
 
 // This function returns a unique key for each value, for instance if id already exists, it will return id1.
