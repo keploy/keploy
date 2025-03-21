@@ -39,7 +39,6 @@ var caStorePath = []string{
 	"/etc/pki/ca-trust/source/anchors/",
 	"/etc/ca-certificates/trust-source/anchors/",
 	"/etc/pki/trust/anchors/",
-	"/etc/pki/ca-trust/source/anchors/",
 	"/usr/local/share/certs/",
 	"/etc/ssl/certs/",
 }
