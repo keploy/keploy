@@ -23,4 +23,3 @@ jobs:
       run: |
         cd samples-go/http-pokeapi
         source ./../../.github/workflows/test_workflow_scripts/golang-http-linux.sh
-        

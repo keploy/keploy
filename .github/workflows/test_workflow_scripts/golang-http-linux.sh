@@ -58,7 +58,7 @@ send_request() {
 
 for i in {1..2}; do
     app_name="http-pokeapi_${i}"
-    send_request i &
+    send_request $i &
     sudo -E env PATH="$PATH" ./../../keployv2 record -c "./http-pokeapi" --generateGithubActions=false &> "${app_name}.txt"
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
