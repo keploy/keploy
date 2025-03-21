@@ -1,5 +1,7 @@
 name: Golang-http On Linux
-on: [pull_request]
+on:
+    pull_request:
+        branches: [main]
 jobs:
   mysql_golang_linux:
     runs-on: ubuntu-latest
