@@ -986,3 +986,8 @@ func XMLToMap(xmlData string) (map[string]interface{}, error) {
 
 	return m, nil
 }
+
+func IsValidJSON(data string) bool {
+	var js interface{}
+	return json.Unmarshal([]byte(data), &js) == nil
+}
