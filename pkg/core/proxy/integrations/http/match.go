@@ -105,7 +105,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 func FilterHTTPMocks(mocks []*models.Mock) []*models.Mock {
 	var httpMocks []*models.Mock
 	for _, mock := range mocks {
-		if mock.Kind != models.Kind(integrations.HTTP) {
+		if mock.Kind != models.Kind(models.HTTP) {
 			continue
 		}
 		httpMocks = append(httpMocks, mock)
