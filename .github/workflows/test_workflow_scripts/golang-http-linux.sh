@@ -39,12 +39,12 @@ send_request() {
     response=$(curl -s -X GET http://localhost:8080/api/locations)
 
     # Extract any location from the reponse
-    location=$(echo "$response" | jq -r '.location[$index]')
+    location=$(echo "$response" | jq -r ".location[$index]")
 
     response=$(curl -s -X GET http://localhost:8080/api/locations/$location)
 
     # Extract any pokemon from the response
-    pokemon=$(echo "$response" | jq -r '.[$index]')
+    pokemon=$(echo "$response" | jq -r ".[$index]")
 
     curl -s -X GET http://localhost:8080/api/locations/pokemon/$pokemon
 
