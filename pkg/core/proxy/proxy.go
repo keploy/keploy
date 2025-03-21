@@ -541,6 +541,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	generic := true
 
+	var matchedParser integrations.Integrations
+	var parserType integrations.IntegrationType
+
 	//Checking for all the parsers according to their priority.
 	for _, parserPair := range p.integrationsPriority { // Iterate over ordered priority list
 		parser, exists := p.Integrations[parserPair.ParserType]
@@ -549,23 +552,29 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 
 		p.logger.Debug("Checking for the parser", zap.Any("ParserType", parserPair.ParserType))
-
 		if parser.MatchType(parserCtx, initialBuf) {
-			if rule.Mode == models.MODE_RECORD {
-				p.logger.Debug("The external dependency is supported. Hence using the parser in record mode", zap.Any("ParserType", parserPair.ParserType))
-				err := parser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
-				if err != nil {
-					utils.LogError(logger, err, "failed to record the outgoing message")
-					return err
-				}
-			} else {
-				err := parser.MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
-				if err != nil && err != io.EOF {
-					utils.LogError(logger, err, "failed to mock the outgoing message")
-					return err
-				}
-			}
+			matchedParser = parser
+			parserType = parserPair.ParserType
 			generic = false
+			break
+		}
+	}
+
+	if !generic {
+		p.logger.Debug("The external dependency is supported. Hence using the parser", zap.Any("ParserType", parserType))
+		switch rule.Mode {
+		case models.MODE_RECORD:
+			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
+			if err != nil {
+				utils.LogError(logger, err, "failed to record the outgoing message")
+				return err
+			}
+		case models.MODE_TEST:
+			err := matchedParser.MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
+			if err != nil && err != io.EOF {
+				utils.LogError(logger, err, "failed to mock the outgoing message")
+				return err
+			}
 		}
 	}
 
