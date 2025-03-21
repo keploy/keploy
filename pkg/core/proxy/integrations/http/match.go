@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"net/url"
@@ -54,6 +55,8 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		}
 		unfilteredMocks := FilterHTTPMocks(mocks)
 
+		h.Logger.Debug(fmt.Sprintf("Length of unfilteredMocks:%v", len(unfilteredMocks)))
+
 		// Matching process
 		schemaMatched, err := h.SchemaMatch(ctx, input, unfilteredMocks)
 		if err != nil {
@@ -67,11 +70,10 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		// Exact body match
 		ok, bestMatch := h.ExactBodyMatch(input.body, schemaMatched)
 		if ok {
-			ok := h.handleMatchedMock(ctx, bestMatch, mockDb)
-			if !ok {
+			if !h.updateMock(ctx, bestMatch, mockDb) {
 				continue
 			}
-			return ok, bestMatch, nil
+			return true, bestMatch, nil
 		}
 
 		shortListed := schemaMatched
@@ -88,25 +90,24 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			}
 
 			if len(bodyMatched) == 1 {
-				ok := h.handleMatchedMock(ctx, bodyMatched[0], mockDb)
-				if !ok {
+				if !h.updateMock(ctx, bodyMatched[0], mockDb) {
 					continue
 				}
-				return ok, bodyMatched[0], nil
+				return true, bodyMatched[0], nil
 			}
 
 			// More than one match, perform fuzzy match
 			shortListed = bodyMatched
 		}
 
+		h.Logger.Debug("Performing fuzzy match for req buffer")
 		// Perform fuzzy match on the request
 		isMatched, bestMatch := h.PerformFuzzyMatch(shortListed, input.raw)
 		if isMatched {
-			ok := h.handleMatchedMock(ctx, bestMatch, mockDb)
-			if !ok {
+			if !h.updateMock(ctx, bestMatch, mockDb) {
 				continue
 			}
-			return ok, bestMatch, nil
+			return true, bestMatch, nil
 		}
 		return false, nil, nil
 	}
@@ -114,13 +115,24 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 
 // FilterHTTPMocks Filter mocks to only HTTP mocks
 func FilterHTTPMocks(mocks []*models.Mock) []*models.Mock {
-	var unfilteredMocks []*models.Mock
+	var httpMocks []*models.Mock
 	for _, mock := range mocks {
-		if mock.Kind == models.Kind(integrations.HTTP) {
-			unfilteredMocks = append(unfilteredMocks, mock)
+		if mock.Kind != models.Kind(integrations.HTTP) {
+			continue
 		}
+		httpMocks = append(httpMocks, mock)
 	}
-	return unfilteredMocks
+	return httpMocks
+}
+
+// MatchBodyType Body type match check (content type matching)
+func (h *HTTP) MatchBodyType(mockBody string, reqBody []byte) bool {
+	if mockBody == "" && string(reqBody) == "" {
+		return true
+	}
+	mockBodyType := guessContentType([]byte(mockBody))
+	reqBodyType := guessContentType(reqBody)
+	return mockBodyType == reqBodyType
 }
 
 func (h *HTTP) MatchURLPath(mockURL, reqPath string) bool {
@@ -129,6 +141,34 @@ func (h *HTTP) MatchURLPath(mockURL, reqPath string) bool {
 		return false
 	}
 	return parsedURL.Path == reqPath
+}
+
+func (h *HTTP) MapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
+	if len(map1) != len(map2) {
+		return false
+	}
+
+	for key := range map1 {
+		lkey := strings.ToLower(key)
+		if lkey == "keploy-test-id" || lkey == "keploy-test-set-id" {
+			continue
+		}
+		if _, exists := map2[key]; !exists {
+			return false
+		}
+	}
+
+	for key := range map2 {
+		lkey := strings.ToLower(key)
+		if lkey == "keploy-test-id" || lkey == "keploy-test-set-id" {
+			continue
+		}
+		if _, exists := map1[key]; !exists {
+			return false
+		}
+	}
+
+	return true
 }
 
 // match mocks
@@ -182,10 +222,21 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 
 	return schemaMatched, nil
 }
+
+// ExactBodyMatch Exact body match
+func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, *models.Mock) {
+	for _, mock := range schemaMatched {
+		if mock.Spec.HTTPReq.Body == string(body) {
+			return true, mock
+		}
+	}
+	return false, nil
+}
+
 func (h *HTTP) bodyMatch(mockBody, reqBody []byte) (bool, error) {
 
-	var mockData map[string]interface{}
-	var reqData map[string]interface{}
+	var mockData map[string]any
+	var reqData map[string]any
 	err := json.Unmarshal(mockBody, &mockData)
 	if err != nil {
 		utils.LogError(h.Logger, err, "failed to unmarshal the mock request body", zap.String("Req", string(mockBody)))
@@ -204,75 +255,6 @@ func (h *HTTP) bodyMatch(mockBody, reqBody []byte) (bool, error) {
 		}
 	}
 	return true, nil
-}
-
-func (h *HTTP) MapsHaveSameKeys(map1 map[string]string, map2 map[string][]string) bool {
-	if len(map1) != len(map2) {
-		return false
-	}
-
-	for key := range map1 {
-		lkey := strings.ToLower(key)
-		if lkey == "keploy-test-id" || lkey == "keploy-test-set-id" {
-			continue
-		}
-		if _, exists := map2[key]; !exists {
-			return false
-		}
-	}
-
-	for key := range map2 {
-		lkey := strings.ToLower(key)
-		if lkey == "keploy-test-id" || lkey == "keploy-test-set-id" {
-			continue
-		}
-		if _, exists := map1[key]; !exists {
-			return false
-		}
-	}
-
-	return true
-}
-
-// TODO: generalize the function to work with any type of integration
-func (h *HTTP) findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
-
-	mxSim := -1.0
-	mxIdx := -1
-	// find the fuzzy hash of the mocks
-	for idx, mock := range mocks {
-		encoded, _ := decode(mock.Spec.HTTPReq.Body)
-		k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
-		shingles1 := util.CreateShingles(encoded, k)
-		shingles2 := util.CreateShingles(reqBuff, k)
-		similarity := util.JaccardSimilarity(shingles1, shingles2)
-
-		// log.Debugf("Jaccard Similarity:%f\n", similarity)
-
-		if mxSim < similarity {
-			mxSim = similarity
-			mxIdx = idx
-		}
-	}
-	return mxIdx
-}
-
-// ExactBodyMatch Exact body match
-func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, *models.Mock) {
-	for _, mock := range schemaMatched {
-		if mock.Spec.HTTPReq.Body == string(body) {
-			return true, mock
-		}
-	}
-	return false, nil
-}
-
-// Handle matched mock: update mock or delete based on SQS request type
-func (h *HTTP) handleMatchedMock(ctx context.Context, bestMatch *models.Mock, mockDb integrations.MockMemDb) bool {
-	if !h.updateMock(ctx, bestMatch, mockDb) {
-		return false
-	}
-	return true
 }
 
 // PerformBodyMatch Perform body match for JSON data
@@ -299,16 +281,6 @@ func (h *HTTP) PerformBodyMatch(ctx context.Context, schemaMatched []*models.Moc
 	return bodyMatched, nil
 }
 
-// MatchBodyType Body type match check (content type matching)
-func (h *HTTP) MatchBodyType(mockBody string, reqBody []byte) bool {
-	if mockBody == "" && string(reqBody) == "" {
-		return true
-	}
-	mockBodyType := h.guessContentType([]byte(mockBody))
-	reqBodyType := h.guessContentType(reqBody)
-	return mockBodyType == reqBodyType
-}
-
 // Fuzzy match helper for string matching
 func (h *HTTP) findStringMatch(req string, mockStrings []string) int {
 	minDist := int(^uint(0) >> 1)
@@ -329,6 +301,29 @@ func (h *HTTP) findStringMatch(req string, mockStrings []string) int {
 	return bestMatch
 }
 
+// TODO: generalize the function to work with any type of integration
+func (h *HTTP) findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
+
+	mxSim := -1.0
+	mxIdx := -1
+	// find the fuzzy hash of the mocks
+	for idx, mock := range mocks {
+		encoded, _ := decode(mock.Spec.HTTPReq.Body)
+		k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
+		shingles1 := util.CreateShingles(encoded, k)
+		shingles2 := util.CreateShingles(reqBuff, k)
+		similarity := util.JaccardSimilarity(shingles1, shingles2)
+
+		// log.Debugf("Jaccard Similarity:%f\n", similarity)
+
+		if mxSim < similarity {
+			mxSim = similarity
+			mxIdx = idx
+		}
+	}
+	return mxIdx
+}
+
 // Fuzzy matching function
 func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
 	encodedReq := encode(reqBuff)
@@ -340,7 +335,7 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 	}
 	// String-based fuzzy matching
 	mockStrings := make([]string, len(tcsMocks))
-	for i := 0; i < len(tcsMocks); i++ {
+	for i := range tcsMocks {
 		mockStrings[i] = tcsMocks[i].Spec.HTTPReq.Body
 	}
 	if util.IsASCII(string(reqBuff)) {
@@ -354,28 +349,6 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 		return true, tcsMocks[idx]
 	}
 	return false, nil
-}
-
-func (h *HTTP) guessContentType(data []byte) ContentType {
-	// Use net/http library's DetectContentType for basic MIME type detection
-	mimeType := http.DetectContentType(data)
-
-	// Additional checks to further specify the content type
-	switch {
-	case IsJSON(data):
-		return JSON
-	case IsXML(data):
-		return XML
-	case strings.Contains(mimeType, "text/html"):
-		return HTML
-	case strings.Contains(mimeType, "text/plain"):
-		if IsCSV(data) {
-			return CSV
-		}
-		return TextPlain
-	}
-
-	return Unknown
 }
 
 // Update the matched mock (delete or update)

@@ -113,6 +113,28 @@ func IsCSV(data []byte) bool {
 	return false
 }
 
+func guessContentType(data []byte) ContentType {
+	// Use net/http library's DetectContentType for basic MIME type detection
+	mimeType := http.DetectContentType(data)
+
+	// Additional checks to further specify the content type
+	switch {
+	case IsJSON(data):
+		return JSON
+	case IsXML(data):
+		return XML
+	case strings.Contains(mimeType, "text/html"):
+		return HTML
+	case strings.Contains(mimeType, "text/plain"):
+		if IsCSV(data) {
+			return CSV
+		}
+		return TextPlain
+	}
+
+	return Unknown
+}
+
 func encode(buffer []byte) string {
 	//Encode the buffer to string
 	encoded := string(buffer)
