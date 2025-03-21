@@ -20,8 +20,6 @@ import (
 	"go.uber.org/zap"
 )
 
-
-
 type req struct {
 	method string
 	url    *url.URL
@@ -161,7 +159,7 @@ func (h *HTTP) MapsHaveSameKeys(map1 map[string]string, map2 map[string][]string
 	return true
 }
 
-// match mocks
+// SchemaMatch match the schema of the request with the mocks
 func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*models.Mock) ([]*models.Mock, error) {
 	var schemaMatched []*models.Mock
 
@@ -314,7 +312,7 @@ func (h *HTTP) findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 	return mxIdx
 }
 
-// Fuzzy matching function
+// PerformFuzzyMatch Perform fuzzy match on the request
 func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
 	encodedReq := encode(reqBuff)
 	for _, mock := range tcsMocks {
