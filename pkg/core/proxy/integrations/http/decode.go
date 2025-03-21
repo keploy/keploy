@@ -23,31 +23,30 @@ import (
 )
 
 // Decodes the mocks in test mode so that they can be sent to the user application.
-func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	errCh := make(chan error, 1)
-
 	go func(errCh chan error, reqBuf []byte, opts models.OutgoingOptions) {
-		defer pUtil.Recover(logger, clientConn, nil)
+		defer pUtil.Recover(h.Logger, clientConn, nil)
 		defer close(errCh)
 		for {
 			//Check if the expected header is present
 			if bytes.Contains(reqBuf, []byte("Expect: 100-continue")) {
-				logger.Debug("The expect header is present in the request buffer and writing the 100 continue response to the client")
+				h.Logger.Debug("The expect header is present in the request buffer and writing the 100 continue response to the client")
 				//Send the 100 continue response
 				_, err := clientConn.Write([]byte("HTTP/1.1 100 Continue\r\n\r\n"))
 				if err != nil {
 					if ctx.Err() != nil {
 						return
 					}
-					utils.LogError(logger, err, "failed to write the 100 continue response to the user application")
+					utils.LogError(h.Logger, err, "failed to write the 100 continue response to the user application")
 					errCh <- err
 					return
 				}
-				logger.Debug("The 100 continue response has been sent to the user application")
+				h.Logger.Debug("The 100 continue response has been sent to the user application")
 				//Read the request buffer again
-				newRequest, err := pUtil.ReadBytes(ctx, logger, clientConn)
+				newRequest, err := pUtil.ReadBytes(ctx, h.Logger, clientConn)
 				if err != nil {
-					utils.LogError(logger, err, "failed to read the request buffer from the user application")
+					utils.LogError(h.Logger, err, "failed to read the request buffer from the user application")
 					errCh <- err
 					return
 				}
@@ -55,24 +54,23 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				reqBuf = append(reqBuf, newRequest...)
 			}
 
-			logger.Debug("handling the chunked requests to read the complete request")
-			err := handleChunkedRequests(ctx, logger, &reqBuf, clientConn, nil)
+			h.Logger.Debug("handling the chunked requests to read the complete request")
+			err := h.HandleChunkedRequests(ctx, &reqBuf, clientConn, nil)
 			if err != nil {
-				utils.LogError(logger, err, "failed to handle chunked requests")
+				utils.LogError(h.Logger, err, "failed to handle chunked requests")
 				errCh <- err
 				return
 			}
 
-			logger.Debug(fmt.Sprintf("This is the complete request:\n%v", string(reqBuf)))
+			h.Logger.Debug(fmt.Sprintf("This is the complete request:\n%v", string(reqBuf)))
 
 			//Parse the request buffer
 			request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(reqBuf)))
 			if err != nil {
-				utils.LogError(logger, err, "failed to parse the http request message")
+				utils.LogError(h.Logger, err, "failed to parse the http request message")
 				errCh <- err
 				return
 			}
-
 			// Set the host header explicitely because the `http.ReadRequest`` trim the host header
 			// func ReadRequest(b *bufio.Reader) (*Request, error) {
 			// 	req, err := readRequest(b)
@@ -83,12 +81,11 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			// 	delete(req.Header, "Host")
 			// 	return req, err
 			// }
-
 			request.Header.Set("Host", request.Host)
 
 			reqBody, err := io.ReadAll(request.Body)
 			if err != nil {
-				utils.LogError(logger, err, "failed to read from request body", zap.Any("metadata", getReqMeta(request)))
+				utils.LogError(h.Logger, err, "failed to read from request body", zap.Any("metadata", GetReqMeta(request)))
 				errCh <- err
 				return
 			}
@@ -100,22 +97,23 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				body:   reqBody,
 				raw:    reqBuf,
 			}
-			ok, stub, err := match(ctx, logger, input, mockDb)
+
+			ok, stub, err := h.match(ctx, input, mockDb) // calling match function to match mocks
 			if err != nil {
-				utils.LogError(logger, err, "error while matching http mocks", zap.Any("metadata", getReqMeta(request)))
+				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", GetReqMeta(request)))
 				errCh <- err
 				return
 			}
-			logger.Debug("after matching the http request", zap.Any("isMatched", ok), zap.Any("stub", stub), zap.Error(err))
+			h.Logger.Debug("after matching the http request", zap.Any("isMatched", ok), zap.Any("stub", stub), zap.Error(err))
 
 			if !ok {
-				if !IsPassThrough(logger, request, dstCfg.Port, opts) {
-					utils.LogError(logger, nil, "Didn't match any preExisting http mock", zap.Any("metadata", getReqMeta(request)))
+				if !IsPassThrough(h.Logger, request, dstCfg.Port, opts) {
+					utils.LogError(h.Logger, nil, "Didn't match any preExisting http mock", zap.Any("metadata", GetReqMeta(request)))
 				}
 				if opts.FallBackOnMiss {
-					_, err = pUtil.PassThrough(ctx, logger, clientConn, dstCfg, [][]byte{reqBuf})
+					_, err = pUtil.PassThrough(ctx, h.Logger, clientConn, dstCfg, [][]byte{reqBuf})
 					if err != nil {
-						utils.LogError(logger, err, "failed to passThrough http request", zap.Any("metadata", getReqMeta(request)))
+						utils.LogError(h.Logger, err, "failed to passThrough http request", zap.Any("metadata", GetReqMeta(request)))
 						errCh <- err
 						return
 					}
@@ -139,17 +137,17 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				gw := gzip.NewWriter(&compressedBuffer)
 				_, err := gw.Write([]byte(body))
 				if err != nil {
-					utils.LogError(logger, err, "failed to compress the response body", zap.Any("metadata", getReqMeta(request)))
+					utils.LogError(h.Logger, err, "failed to compress the response body", zap.Any("metadata", GetReqMeta(request)))
 					errCh <- err
 					return
 				}
 				err = gw.Close()
 				if err != nil {
-					utils.LogError(logger, err, "failed to close the gzip writer", zap.Any("metadata", getReqMeta(request)))
+					utils.LogError(h.Logger, err, "failed to close the gzip writer", zap.Any("metadata", GetReqMeta(request)))
 					errCh <- err
 					return
 				}
-				logger.Debug("the length of the response body: " + strconv.Itoa(len(compressedBuffer.String())))
+				h.Logger.Debug("the length of the response body: " + strconv.Itoa(len(compressedBuffer.String())))
 				respBody = compressedBuffer.String()
 				// responseString = statusLine + headers + "\r\n" + compressedBuffer.String()
 			} else {
@@ -169,22 +167,22 @@ func decodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			}
 			responseString = statusLine + headers + "\r\n" + "" + respBody
 
-			logger.Debug(fmt.Sprintf("Mock Response sending back to client:\n%v", responseString))
+			h.Logger.Debug(fmt.Sprintf("Mock Response sending back to client:\n%v", responseString))
 
 			_, err = clientConn.Write([]byte(responseString))
 			if err != nil {
 				if ctx.Err() != nil {
 					return
 				}
-				utils.LogError(logger, err, "failed to write the mock output to the user application", zap.Any("metadata", getReqMeta(request)))
+				utils.LogError(h.Logger, err, "failed to write the mock output to the user application", zap.Any("metadata", GetReqMeta(request)))
 				errCh <- err
 				return
 			}
 
-			reqBuf, err = pUtil.ReadBytes(ctx, logger, clientConn)
+			reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
 			if err != nil {
-				logger.Debug("failed to read the request buffer from the client", zap.Error(err))
-				logger.Debug("This was the last response from the server:\n" + string(responseString))
+				h.Logger.Debug("failed to read the request buffer from the client", zap.Error(err))
+				h.Logger.Debug("This was the last response from the server:\n" + string(responseString))
 				errCh <- nil
 				return
 			}
