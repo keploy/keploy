@@ -17,14 +17,17 @@ import (
 )
 
 func init() {
-	integrations.Register("postgres_v1", NewPostgresV1)
+	integrations.Register(integrations.POSTGRES_V1, &integrations.Parsers{
+		Initializer: New,
+		Priority:    100,
+	})
 }
 
 type PostgresV1 struct {
 	logger *zap.Logger
 }
 
-func NewPostgresV1(logger *zap.Logger) integrations.Integrations {
+func New(logger *zap.Logger) integrations.Integrations {
 	return &PostgresV1{
 		logger: logger,
 	}
