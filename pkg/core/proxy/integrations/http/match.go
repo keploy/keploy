@@ -241,7 +241,7 @@ func (h *HTTP) findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 	mxIdx := -1
 	// find the fuzzy hash of the mocks
 	for idx, mock := range mocks {
-		encoded, _ := h.decode(mock.Spec.HTTPReq.Body)
+		encoded, _ := decode(mock.Spec.HTTPReq.Body)
 		k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
 		shingles1 := util.CreateShingles(encoded, k)
 		shingles2 := util.CreateShingles(reqBuff, k)
@@ -255,17 +255,6 @@ func (h *HTTP) findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 		}
 	}
 	return mxIdx
-}
-
-func (h *HTTP) encode(buffer []byte) string {
-	//Encode the buffer to string
-	encoded := string(buffer)
-	return encoded
-}
-func (h *HTTP) decode(encoded string) ([]byte, error) {
-	// decode the string to a buffer.
-	data := []byte(encoded)
-	return data, nil
 }
 
 // ExactBodyMatch Exact body match
@@ -342,9 +331,9 @@ func (h *HTTP) findStringMatch(req string, mockStrings []string) int {
 
 // Fuzzy matching function
 func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
-	encodedReq := h.encode(reqBuff)
+	encodedReq := encode(reqBuff)
 	for _, mock := range tcsMocks {
-		encodedMock, _ := h.decode(mock.Spec.HTTPReq.Body)
+		encodedMock, _ := decode(mock.Spec.HTTPReq.Body)
 		if string(encodedMock) == string(reqBuff) || mock.Spec.HTTPReq.Body == encodedReq {
 			return true, mock
 		}
