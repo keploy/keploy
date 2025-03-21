@@ -41,7 +41,7 @@ func hasCompleteHeaders(httpChunk []byte) bool {
 	return bytes.Contains(httpChunk, headerEndSequence)
 }
 
-// extract the request metadata from the request
+// GetReqMeta returns the metadata of the request
 func GetReqMeta(req *http.Request) map[string]string {
 	reqMeta := map[string]string{}
 	if req != nil {
