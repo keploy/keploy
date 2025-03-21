@@ -18,7 +18,10 @@ import (
 )
 
 func init() {
-	integrations.Register("mongo", NewMongo)
+	integrations.Register(integrations.MONGO, &integrations.Parsers{
+		Initializer: New,
+		Priority:    100,
+	})
 }
 
 type Mongo struct {
@@ -26,7 +29,7 @@ type Mongo struct {
 	recordedConfigRequests sync.Map
 }
 
-func NewMongo(logger *zap.Logger) integrations.Integrations {
+func New(logger *zap.Logger) integrations.Integrations {
 	return &Mongo{
 		logger:                 logger,
 		recordedConfigRequests: sync.Map{},
