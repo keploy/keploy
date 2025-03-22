@@ -22,4 +22,5 @@ jobs:
     - name: Run go-http application
       run: |
         cd samples-go/http-pokeapi
+        chmod +x ./../../.github/workflows/test_workflow_scripts/golang-http-linux.sh
         source ./../../.github/workflows/test_workflow_scripts/golang-http-linux.sh
