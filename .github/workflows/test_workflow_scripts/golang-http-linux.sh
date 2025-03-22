@@ -1,10 +1,11 @@
 #!/bin/bash
 
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
+echo "iid.sh executed"
 
 # Checkout a different branch
 git fetch origin
-git checkout native-linux
+#git checkout native-linux
 
 # Check if there is a keploy-config file, if there is, delete it.
 if [ -f "./keploy.yml" ]; then
@@ -13,15 +14,16 @@ fi
 
 rm -rf keploy/
 
+# Build go binary
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o http-pokeapi
+echo "go binary built"
+
 # Generate the keploy-config file.
 sudo ./../../keployv2 config --generate
 
 # Update the global noise to updated_at.
 config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"body": {"updated_at":[]}}/' "$config_file"
-
-# Build go binary
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o http-pokeapi
 
 send_request() {
     local index=$1  
@@ -36,17 +38,18 @@ send_request() {
     done
     
     echo "App started"
+    
     response=$(curl -s -X GET http://localhost:8080/api/locations)
 
     # Extract any location from the reponse
     location=$(echo "$response" | jq -r ".location[$index]")
-
+    
     response=$(curl -s -X GET http://localhost:8080/api/locations/$location)
 
     # Extract any pokemon from the response
     pokemon=$(echo "$response" | jq -r ".[$index]")
-
-    curl -s -X GET http://localhost:8080/api/locations/pokemon/$pokemon
+    
+    curl -s -X GET http://localhost:8080/api/pokemon/$pokemon
 
     # Wait for 10 seconds for Keploy to record the tcs and mocks.
     sleep 10
