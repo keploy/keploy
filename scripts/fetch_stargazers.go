@@ -1,3 +1,4 @@
+// Package main fetches stargazers from a GitHub repository and saves them to a file.
 package main
 
 import (
@@ -9,14 +10,18 @@ import (
 	"time"
 )
 
+// RepoOwner defines the owner of the repository.
 const RepoOwner = "keploy"
 
+// RepoName defines the name of the repository.
 const RepoName = "keploy"
 
+// Stargazer represents a GitHub user who has starred the repository.
 type Stargazer struct {
 	Login string `json:"login"`
 }
 
+// fetchStargazers fetches all stargazers from GitHub API using pagination.
 func fetchStargazers(token string) ([]Stargazer, error) {
 	var stargazers []Stargazer
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -37,13 +42,15 @@ func fetchStargazers(token string) ([]Stargazer, error) {
 			return nil, err
 		}
 
+		// Ensure response body is closed properly
 		defer func() {
-			if err := resp.Body.Close(); err != nil {
-				fmt.Println("Error closing response body:", err)
+			closeErr := resp.Body.Close()
+			if closeErr != nil {
+				fmt.Println("Error closing response body:", closeErr)
 			}
 		}()
 
-		if resp.StatusCode != 200 {
+		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
 			return nil, fmt.Errorf("error fetching stargazers: %s", string(body))
 		}
@@ -64,6 +71,7 @@ func fetchStargazers(token string) ([]Stargazer, error) {
 	return stargazers, nil
 }
 
+// saveToFile saves the list of stargazers to a JSON file.
 func saveToFile(filename string, data []Stargazer) error {
 	file, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
@@ -77,6 +85,7 @@ func saveToFile(filename string, data []Stargazer) error {
 	return os.WriteFile(filename, file, 0644)
 }
 
+// main function retrieves GitHub stargazers and saves them to a file.
 func main() {
 	token := os.Getenv("PRO_ACCESS_TOKEN")
 	if token == "" {

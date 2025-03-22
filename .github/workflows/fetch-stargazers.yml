@@ -2,8 +2,8 @@ name: Fetch Stargazers
 
 on:
   schedule:
-    - cron: "0 0 * * *" 
-  workflow_dispatch: 
+    - cron: "0 0 * * *"  # Runs daily at midnight UTC
+  workflow_dispatch:  # Allows manual triggering
 
 jobs:
   fetch-stargazers:
@@ -17,15 +17,17 @@ jobs:
         uses: actions/setup-go@v4
         with:
           go-version: '1.21'  
+
       - name: Fetch Stargazers
         env:
-          GITHUB_TOKEN: ${{secrets.PRO_ACCESS_TOKEN }}
+          PRO_ACCESS_TOKEN: ${{ secrets.PRO_ACCESS_TOKEN }}
         run: go run scripts/fetch_stargazers.go  
 
       - name: Commit and Push Changes
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Check for changes before committing
           git add data/stargazers.json
-          git commit -m "Update stargazers data [CI Skip]" || exit 0
-          git push
+          git diff --cached --exit-code || (git commit -m "Update stargazers data [CI Skip]" && git push)
