@@ -19,7 +19,7 @@ jobs:
           go-version: '1.21'  
       - name: Fetch Stargazers
         env:
-          GITHUB_TOKEN: ${{  secrets.PRO_ACCESS_TOKEN }}
+          GITHUB_TOKEN: ${{secrets.PRO_ACCESS_TOKEN }}
         run: go run scripts/fetch_stargazers.go  
 
       - name: Commit and Push Changes

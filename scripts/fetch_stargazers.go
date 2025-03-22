@@ -1,3 +1,4 @@
+
 package main
 
 import (
@@ -10,15 +11,14 @@ import (
 )
 
 
-const (
-	RepoOwner = "keploy"
-	RepoName  = "keploy"
-)
+const RepoOwner = "keploy"
+
+
+const RepoName = "keploy"
 
 type Stargazer struct {
 	Login string `json:"login"`
 }
-
 
 func fetchStargazers(token string) ([]Stargazer, error) {
 	var stargazers []Stargazer
@@ -32,23 +32,21 @@ func fetchStargazers(token string) ([]Stargazer, error) {
 			return nil, err
 		}
 
-		
 		req.Header.Set("Authorization", "token "+token)
 		req.Header.Set("Accept", "application/vnd.github.v3+json")
 
 		resp, err := client.Do(req)
-		if resp.StatusCode == 403 {
-			resetTime := resp.Header.Get("X-RateLimit-Reset")
-			fmt.Println("Rate limit exceeded. Try again after:", resetTime)
-			return nil, fmt.Errorf("rate limit exceeded")
-		}
-		
 		if err != nil {
 			return nil, err
 		}
-		defer resp.Body.Close()
 
 		
+		defer func() {
+			if err := resp.Body.Close(); err != nil {
+				fmt.Println("Error closing response body:", err)
+			}
+		}()
+
 		if resp.StatusCode != 200 {
 			body, _ := io.ReadAll(resp.Body)
 			return nil, fmt.Errorf("error fetching stargazers: %s", string(body))
@@ -60,7 +58,7 @@ func fetchStargazers(token string) ([]Stargazer, error) {
 		}
 
 		if len(data) == 0 {
-			break 
+			break
 		}
 
 		stargazers = append(stargazers, data...)
@@ -75,7 +73,6 @@ func saveToFile(filename string, data []Stargazer) error {
 	if err != nil {
 		return err
 	}
-
 
 	if err := os.MkdirAll("data", os.ModePerm); err != nil {
 		return err
