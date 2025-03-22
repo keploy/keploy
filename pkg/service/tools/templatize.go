@@ -969,10 +969,8 @@ func insertUnique(baseKey, value string, myMap map[string]interface{}) string {
 	return key
 }
 
-// TODO: Make this function generic for one value of string containing more than one template value.
-// Duplicate function is being used in Simulate function as well.
-
-// render function gives the value of the templatized field.
+// render function processes template strings containing one or more template expressions.
+// It handles various data types (string, int, float) and returns the appropriate Go type.
 func render(val string) (interface{}, error) {
 	// This is a map of helper functions that is used to convert the values to their appropriate types.
 	funcMap := template.FuncMap{
@@ -981,33 +979,55 @@ func render(val string) (interface{}, error) {
 		"float":  utils.ToFloat,
 	}
 
+	// Extract all template expressions using regex
+	re := regexp.MustCompile(`\{\{[^{}]*\}\}`)
+	matches := re.FindAllString(val, -1)
+
+	// If there are multiple template expressions, process each one separately
+	if len(matches) > 1 {
+		result := val
+		for _, match := range matches {
+			processed, err := processSingleTemplate(match, funcMap)
+			if err != nil {
+				return val, err
+			}
+			result = strings.Replace(result, match, fmt.Sprintf("%v", processed), 1)
+		}
+		return result, nil
+	}
+
+	// For a single template or no templates, use the standard processing
+	return processSingleTemplate(val, funcMap)
+}
+
+// processSingleTemplate handles a single template expression
+func processSingleTemplate(val string, funcMap template.FuncMap) (interface{}, error) {
 	tmpl, err := template.New("template").Funcs(funcMap).Parse(val)
 	if err != nil {
 		return val, fmt.Errorf("failed to parse the testcase using template %v", zap.Error(err))
 	}
+
 	var output bytes.Buffer
 	err = tmpl.Execute(&output, utils.TemplatizedValues)
 	if err != nil {
 		return val, fmt.Errorf("failed to execute the template %v", zap.Error(err))
 	}
 
-	if strings.Contains(val, "string") {
-		return output.String(), nil
-	}
+	/*
+		Determine the appropriate return type based on the template directive
+		The type conversion is already handled by the template functions in funcMap,
+		so we don't need an additional switch statement
+	*/
+	// if strings.Contains(val, "string") {
+	// 	return output.String(), nil
+	// } else if strings.Contains(val, "int") {
+	// 	return utils.ToInt(output.String()), nil
+	// } else if strings.Contains(val, "float") {
+	// 	return utils.ToFloat(output.String()), nil
+	// }
 
-	// Remove the double quotes from the output for rest of the values. (int, float)
-	outputString := strings.Trim(output.String(), `"`)
-
-	// TODO: why do we need this when we have already declared the funcMap.
-	// Convert this to the appropriate type and return.
-	switch {
-	case strings.Contains(val, "int"):
-		return utils.ToInt(output.String()), nil
-	case strings.Contains(val, "float"):
-		return utils.ToFloat(output.String()), nil
-	}
-
-	return outputString, nil
+	// Remove quotes for non-string values
+	return strings.Trim(output.String(), `"`), nil
 }
 
 // Compare the headers of 2 requests and add the templates.
