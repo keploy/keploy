@@ -41,8 +41,13 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 	}
 	g.Go(func() error {
 		defer utils.Recover(l)
+
+		// Create a channel to signal when inner goroutine is done
+		innerDone := make(chan struct{})
+
 		go func() {
 			defer utils.Recover(l)
+			defer close(innerDone) // Signal completion when this goroutine exits
 			for {
 				select {
 				case <-ctx.Done():
@@ -55,6 +60,7 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 			}
 		}()
 		<-ctx.Done()
+		<-innerDone // Wait for the inner goroutine to finish
 		close(t)
 		return nil
 	})
