@@ -1,0 +1,31 @@
+name: Fetch Stargazers
+
+on:
+  schedule:
+    - cron: "0 0 * * *" 
+  workflow_dispatch: 
+
+jobs:
+  fetch-stargazers:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'  
+      - name: Fetch Stargazers
+        env:
+          GITHUB_TOKEN: ${{  secrets.PRO_ACCESS_TOKEN }}
+        run: go run scripts/fetch_stargazers.go  
+
+      - name: Commit and Push Changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/stargazers.json
+          git commit -m "Update stargazers data [CI Skip]" || exit 0
+          git push
