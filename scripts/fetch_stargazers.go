@@ -1,4 +1,3 @@
-
 package main
 
 import (
@@ -10,9 +9,7 @@ import (
 	"time"
 )
 
-
 const RepoOwner = "keploy"
-
 
 const RepoName = "keploy"
 
@@ -40,7 +37,6 @@ func fetchStargazers(token string) ([]Stargazer, error) {
 			return nil, err
 		}
 
-		
 		defer func() {
 			if err := resp.Body.Close(); err != nil {
 				fmt.Println("Error closing response body:", err)
