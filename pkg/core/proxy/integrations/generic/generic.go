@@ -14,14 +14,17 @@ import (
 )
 
 func init() {
-	integrations.Register("generic", NewGeneric)
+	integrations.Register(integrations.GENERIC, &integrations.Parsers{
+		Initializer: New,
+		Priority:    100,
+	})
 }
 
 type Generic struct {
 	logger *zap.Logger
 }
 
-func NewGeneric(logger *zap.Logger) integrations.Integrations {
+func New(logger *zap.Logger) integrations.Integrations {
 	return &Generic{
 		logger: logger,
 	}
