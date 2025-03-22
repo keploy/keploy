@@ -15,15 +15,17 @@ import (
 )
 
 func init() {
-	// Register the parser with the proxy.
-	integrations.Register("grpc", NewGrpc)
+	integrations.Register(integrations.GRPC, &integrations.Parsers{
+		Initializer: New,
+		Priority:    100,
+	})
 }
 
 type Grpc struct {
 	logger *zap.Logger
 }
 
-func NewGrpc(logger *zap.Logger) integrations.Integrations {
+func New(logger *zap.Logger) integrations.Integrations {
 	return &Grpc{
 		logger: logger,
 	}
