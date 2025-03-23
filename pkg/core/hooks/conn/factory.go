@@ -47,7 +47,11 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 		default:
 			ok, requestBuf, responseBuf, reqTimestampTest, resTimestampTest := tracker.IsComplete()
 			if ok {
-
+				// Skip if this is an idempotency check request
+				if isIdempotencyCheck(requestBuf) {
+					trackersToDelete = append(trackersToDelete, connID)
+					continue
+				}
 				if len(requestBuf) == 0 || len(responseBuf) == 0 {
 					factory.logger.Warn("failed processing a request due to invalid request or response", zap.Any("Request Size", len(requestBuf)), zap.Any("Response Size", len(responseBuf)))
 					continue
@@ -88,4 +92,13 @@ func (factory *Factory) GetOrCreate(connectionID ID) *Tracker {
 		return factory.connections[connectionID]
 	}
 	return tracker
+}
+
+// Helper function to check if a request is an idempotency check
+func isIdempotencyCheck(requestBuf []byte) bool {
+	req, err := pkg.ParseHTTPRequest(requestBuf)
+	if err != nil {
+		return false
+	}
+	return req.Header.Get("X-Keploy-Idempotency-Check") == "true"
 }
