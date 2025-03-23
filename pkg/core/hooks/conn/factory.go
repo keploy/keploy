@@ -100,5 +100,5 @@ func isIdempotencyCheck(requestBuf []byte) bool {
 	if err != nil {
 		return false
 	}
-	return req.Header.Get("X-Keploy-Idempotency-Check") == "true"
+	return req.Header.Get("Idempotency-Check") == "true"
 }
