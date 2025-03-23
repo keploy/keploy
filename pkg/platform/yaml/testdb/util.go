@@ -92,10 +92,12 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 			}
 			responses = append(responses, resMap)
 		}
-		var dynamicfield map[string]bool
-		dynamicfield = DynamicFields(responses, m)
+		dynamicfield := DynamicFields(responses, m)
 		for field := range dynamicfield {
 			noise[field] = []string{}
+		}
+		if !Verifyresponses(responses, m, dynamicfield, logger) {
+			utils.LogError(logger, nil, "GET request failed idempotency check")
 		}
 
 	}
