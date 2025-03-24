@@ -15,7 +15,7 @@ fi
 rm -rf keploy/
 
 # Build go binary
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o http-pokeapi
+go build -o http-pokeapi
 echo "go binary built"
 
 # Generate the keploy-config file.
