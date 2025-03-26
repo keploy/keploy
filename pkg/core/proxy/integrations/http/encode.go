@@ -20,7 +20,7 @@ import (
 )
 
 // encodeHTTP function parses the HTTP request and response text messages to capture outgoing network calls as mocks.
-func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 
 	remoteAddr := destConn.RemoteAddr().(*net.TCPAddr)
 	destPort := uint(remoteAddr.Port)
@@ -28,7 +28,7 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 	//Writing the request to the server.
 	_, err := destConn.Write(reqBuf)
 	if err != nil {
-		utils.LogError(logger, err, "failed to write request message to the destination server")
+		h.Logger.Error("failed to write request message to the destination server", zap.Error(err))
 		return err
 	}
 
@@ -36,7 +36,7 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 		return ctx.Err()
 	}
 
-	logger.Debug("This is the initial request: " + string(reqBuf))
+	h.Logger.Debug("This is the initial request: " + string(reqBuf))
 	var finalReq []byte
 	errCh := make(chan error, 1)
 
@@ -50,7 +50,7 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 
 	//for keeping conn alive
 	g.Go(func() error {
-		defer pUtil.Recover(logger, clientConn, destConn)
+		defer pUtil.Recover(h.Logger, clientConn, destConn)
 		defer close(errCh)
 		for {
 			//check if expect : 100-continue header is present
@@ -64,9 +64,9 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			}
 			if expectHeader == "100-continue" {
 				//Read if the response from the server is 100-continue
-				resp, err := pUtil.ReadBytes(ctx, logger, destConn)
+				resp, err := pUtil.ReadBytes(ctx, h.Logger, destConn)
 				if err != nil {
-					utils.LogError(logger, err, "failed to read the response message from the server after 100-continue request")
+					utils.LogError(h.Logger, err, "failed to read the response message from the server after 100-continue request")
 					errCh <- err
 					return nil
 				}
@@ -77,22 +77,22 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 					if ctx.Err() != nil {
 						return ctx.Err()
 					}
-					utils.LogError(logger, err, "failed to write response message to the user client")
+					utils.LogError(h.Logger, err, "failed to write response message to the user client")
 					errCh <- err
 					return nil
 				}
 
-				logger.Debug("This is the response from the server after the expect header" + string(resp))
+				h.Logger.Debug("This is the response from the server after the expect header" + string(resp))
 
 				if string(resp) != "HTTP/1.1 100 Continue\r\n\r\n" {
-					utils.LogError(logger, nil, "failed to get the 100 continue response from the user client")
+					utils.LogError(h.Logger, nil, "failed to get the 100 continue response from the user client")
 					errCh <- err
 					return nil
 				}
 				//Reading the request buffer again
-				reqBuf, err = pUtil.ReadBytes(ctx, logger, clientConn)
+				reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
 				if err != nil {
-					utils.LogError(logger, err, "failed to read the request buffer from the user client")
+					utils.LogError(h.Logger, err, "failed to read the request buffer from the user client")
 					errCh <- err
 					return nil
 				}
@@ -102,7 +102,7 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 					if ctx.Err() != nil {
 						return ctx.Err()
 					}
-					utils.LogError(logger, err, "failed to write request message to the destination server")
+					utils.LogError(h.Logger, err, "failed to write request message to the destination server")
 					errCh <- err
 					return nil
 				}
@@ -112,22 +112,21 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			// Capture the request timestamp
 			reqTimestampMock := time.Now()
 
-			err := handleChunkedRequests(ctx, logger, &finalReq, clientConn, destConn)
+			err := h.HandleChunkedRequests(ctx, &finalReq, clientConn, destConn)
 			if err != nil {
-				utils.LogError(logger, err, "failed to handle chunked requests")
+				utils.LogError(h.Logger, err, "failed to handle chunked requests")
 				errCh <- err
 				return nil
 			}
 
-			logger.Debug(fmt.Sprintf("This is the complete request:\n%v", string(finalReq)))
+			h.Logger.Debug(fmt.Sprintf("This is the complete request:\n%v", string(finalReq)))
 			// read the response from the actual server
-			resp, err := pUtil.ReadBytes(ctx, logger, destConn)
+			resp, err := pUtil.ReadBytes(ctx, h.Logger, destConn)
 			if err != nil {
 				if err == io.EOF {
-					logger.Debug("Response complete, exiting the loop.")
+					h.Logger.Debug("Response complete, exiting the loop.")
 					// if there is any buffer left before EOF, we must send it to the client and save this as mock
 					if len(resp) != 0 {
-
 						// Capturing the response timestamp
 						resTimestampMock := time.Now()
 						// write the response message to the user client
@@ -136,28 +135,28 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 							if ctx.Err() != nil {
 								return ctx.Err()
 							}
-							utils.LogError(logger, err, "failed to write response message to the user client")
+							utils.LogError(h.Logger, err, "failed to write response message to the user client")
 							errCh <- err
 							return nil
 						}
 
 						// saving last request/response on this conn.
-						m := &finalHTTP{
-							req:              finalReq,
-							resp:             resp,
-							reqTimestampMock: reqTimestampMock,
-							resTimestampMock: resTimestampMock,
+						m := &FinalHTTP{
+							Req:              finalReq,
+							Resp:             resp,
+							ReqTimestampMock: reqTimestampMock,
+							ResTimestampMock: resTimestampMock,
 						}
-						err := ParseFinalHTTP(ctx, logger, m, destPort, mocks, opts)
+						err := h.parseFinalHTTP(ctx, m, destPort, mocks, opts)
 						if err != nil {
-							utils.LogError(logger, err, "failed to parse the final http request and response")
+							utils.LogError(h.Logger, err, "failed to parse the final http request and response")
 							errCh <- err
 							return nil
 						}
 					}
 					break
 				}
-				utils.LogError(logger, err, "failed to read the response message from the destination server")
+				utils.LogError(h.Logger, err, "failed to read the response message from the destination server")
 				errCh <- err
 				return nil
 			}
@@ -171,50 +170,50 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
-				utils.LogError(logger, err, "failed to write response message to the user client")
+				utils.LogError(h.Logger, err, "failed to write response message to the user client")
 				errCh <- err
 				return nil
 			}
 			var finalResp []byte
 			finalResp = append(finalResp, resp...)
-			logger.Debug("This is the initial response: " + string(resp))
+			h.Logger.Debug("This is the initial response: " + string(resp))
 
-			err = handleChunkedResponses(ctx, logger, &finalResp, clientConn, destConn, resp)
+			err = h.handleChunkedResponses(ctx, &finalResp, clientConn, destConn, resp)
 			if err != nil {
 				if err == io.EOF {
-					logger.Debug("conn closed by the server", zap.Error(err))
+					h.Logger.Debug("conn closed by the server", zap.Error(err))
 					//check if before EOF complete response came, and try to parse it.
-					m := &finalHTTP{
-						req:              finalReq,
-						resp:             finalResp,
-						reqTimestampMock: reqTimestampMock,
-						resTimestampMock: resTimestampMock,
+					m := &FinalHTTP{
+						Req:              finalReq,
+						Resp:             finalResp,
+						ReqTimestampMock: reqTimestampMock,
+						ResTimestampMock: resTimestampMock,
 					}
-					parseErr := ParseFinalHTTP(ctx, logger, m, destPort, mocks, opts)
+					parseErr := h.parseFinalHTTP(ctx, m, destPort, mocks, opts)
 					if parseErr != nil {
-						utils.LogError(logger, parseErr, "failed to parse the final http request and response")
+						utils.LogError(h.Logger, parseErr, "failed to parse the final http request and response")
 						errCh <- parseErr
 					}
 					errCh <- nil
 					return nil
 				}
-				utils.LogError(logger, err, "failed to handle chunk response")
+				utils.LogError(h.Logger, err, "failed to handle chunk response")
 				errCh <- err
 				return nil
 			}
 
-			logger.Debug("This is the final response: " + string(finalResp))
+			h.Logger.Debug("This is the final response: " + string(finalResp))
 
-			m := &finalHTTP{
-				req:              finalReq,
-				resp:             finalResp,
-				reqTimestampMock: reqTimestampMock,
-				resTimestampMock: resTimestampMock,
+			m := &FinalHTTP{
+				Req:              finalReq,
+				Resp:             finalResp,
+				ReqTimestampMock: reqTimestampMock,
+				ResTimestampMock: resTimestampMock,
 			}
 
-			err = ParseFinalHTTP(ctx, logger, m, destPort, mocks, opts)
+			err = h.parseFinalHTTP(ctx, m, destPort, mocks, opts)
 			if err != nil {
-				utils.LogError(logger, err, "failed to parse the final http request and response")
+				utils.LogError(h.Logger, err, "failed to parse the final http request and response")
 				errCh <- err
 				return nil
 			}
@@ -223,11 +222,14 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 			finalReq = []byte("")
 			finalResp = []byte("")
 
-			finalReq, err = pUtil.ReadBytes(ctx, logger, clientConn)
+			// read the request from the same connection
+			h.Logger.Debug("Reading the request from the user client again from the same connection")
+
+			finalReq, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
 			if err != nil {
 				if err != io.EOF {
-					logger.Debug("failed to read the request message from the user client", zap.Error(err))
-					logger.Debug("This was the last response from the server: " + string(resp))
+					h.Logger.Debug("failed to read the request message from the user client", zap.Error(err))
+					h.Logger.Debug("This was the last response from the server: " + string(resp))
 					errCh <- nil
 					return nil
 				}
@@ -240,7 +242,7 @@ func encodeHTTP(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
-				utils.LogError(logger, err, "failed to write request message to the destination server")
+				utils.LogError(h.Logger, err, "failed to write request message to the destination server")
 				errCh <- err
 				return nil
 			}

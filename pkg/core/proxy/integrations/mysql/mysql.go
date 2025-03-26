@@ -19,7 +19,10 @@ import (
 )
 
 func init() {
-	integrations.Register("mysql", New)
+	integrations.Register(integrations.MYSQL, &integrations.Parsers{
+		Initializer: New,
+		Priority:    100,
+	})
 }
 
 type MySQL struct {

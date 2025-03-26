@@ -311,6 +311,12 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 
 	switch tc.Kind {
 	case models.HTTP:
+
+		// added this condition for backward compatibility
+		if yamlTestcase.RespType == "" {
+			yamlTestcase.RespType = models.HTTPResponseJSON
+		}
+
 		switch yamlTestcase.RespType {
 		case models.HTTPResponseJSON:
 
