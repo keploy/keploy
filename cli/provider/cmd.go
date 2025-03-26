@@ -211,6 +211,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Int("max-iterations", 5, "The maximum number of iterations.")
 		cmd.Flags().String("test-dir", "", "Path to the test directory.")
 		cmd.Flags().String("llm-base-url", "", "Base URL for the AI model.")
+		cmd.Flags().String("provider", "openai", "AI provider to use.")
 		cmd.Flags().String("model", "gpt-4o", "Model to use for the AI.")
 		cmd.Flags().String("llm-api-version", "", "API version of the llm")
 		cmd.Flags().String("additional-prompt", "", "Additional prompt to be used for the AI model.")

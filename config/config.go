@@ -56,6 +56,7 @@ type UtGen struct {
 	MaxIterations      int     `json:"maxIterations" yaml:"maxIterations" mapstructure:"maxIterations"`
 	TestDir            string  `json:"testDir" yaml:"testDir" mapstructure:"testDir"`
 	APIBaseURL         string  `json:"llmBaseUrl" yaml:"llmBaseUrl" mapstructure:"llmBaseUrl"`
+	Provider         string  `json:"provider" yaml:"provider" mapstructure:"provider"`
 	Model              string  `json:"model" yaml:"model" mapstructure:"model"`
 	APIVersion         string  `json:"llmApiVersion" yaml:"llmApiVersion" mapstructure:"llmApiVersion"`
 	AdditionalPrompt   string  `json:"additionalPrompt" yaml:"additionalPrompt" mapstructure:"additionalPrompt"`
