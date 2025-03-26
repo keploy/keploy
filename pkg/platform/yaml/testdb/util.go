@@ -33,15 +33,35 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		RespType: respType,
 	}
 	// find noisy fields
-	m, err := FlattenHTTPResponse(pkg.ToHTTPHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)
-	if err != nil {
+	respBody, err2 := flattenHTTPResponseBody(tc.HTTPResp.Body)
+	respHeaders, err1 := flattenHTTPResponseHeaders(pkg.ToHTTPHeader(tc.HTTPResp.Header))
+	if err1 != nil {
 		msg := "error in flattening http response"
-		utils.LogError(logger, err, msg)
+		utils.LogError(logger, err1, msg)
+	}
+	if err2 != nil {
+		msg := "error in flattening http response"
+		utils.LogError(logger, err2, msg)
 	}
 	noise := tc.Noise
 
 	if tc.Name == "" {
-		noiseFieldsFound := FindNoisyFields(m, func(_ string, vals []string) bool {
+		noiseFieldsFound := []string{}
+		// handle the noise fields if the body
+		noiseFieldsFound = append(noiseFieldsFound, FindNoisyFields(respBody, func(k string, vals []string) bool {
+			// check if k is date
+			for _, v := range vals {
+				if pkg.IsTime(v) || pkg.IsUUID(v) || pkg.IsJWT(v) {
+					return true
+				}
+			}
+
+			// maybe we need to concatenate the values
+			return pkg.IsTime(strings.Join(vals, ", "))
+		})...)
+
+		// handle the time and date and for the headers
+		noiseFieldsFound = append(noiseFieldsFound, FindNoisyFields(respHeaders, func(k string, vals []string) bool {
 			// check if k is date
 			for _, v := range vals {
 				if pkg.IsTime(v) {
@@ -51,8 +71,31 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 
 			// maybe we need to concatenate the values
 			return pkg.IsTime(strings.Join(vals, ", "))
-		})
+		})...)
 
+		// handl dynimac headers
+		dynamicHeaders := map[string]bool{
+			"header.etag":         true,
+			"header.x-request-id": true,
+			"header.x-csrf-token": true,
+		}
+		noiseFieldsFound = append(noiseFieldsFound, FindNoisyFields(respHeaders, func(k string, vals []string) bool {
+			lowerK := strings.ToLower(k)
+			if _, found := dynamicHeaders[lowerK]; found {
+				return true
+			}
+			// handle if the set-cookie has expires field
+			if lowerK == "header.set-cookie" {
+				for _, cookie := range vals {
+					lowerCookie := strings.ToLower(cookie)
+					if strings.Contains(lowerCookie, "expires") {
+						return true
+					}
+				}
+			}
+			return false
+		})...)
+		// handle noise fields found
 		for _, v := range noiseFieldsFound {
 			noise[v] = []string{}
 		}
@@ -125,6 +168,23 @@ func FlattenHTTPResponse(h http.Header, body string) (map[string][]string, error
 	for k, v := range h {
 		m["header."+k] = []string{strings.Join(v, "")}
 	}
+	err := AddHTTPBodyToMap(body, m)
+	if err != nil {
+		return m, err
+	}
+	return m, nil
+}
+
+func flattenHTTPResponseHeaders(h http.Header) (map[string][]string, error) {
+	m := map[string][]string{}
+	for k, v := range h {
+		m["header."+k] = []string{strings.Join(v, "")}
+	}
+	return m, nil
+}
+
+func flattenHTTPResponseBody(body string) (map[string][]string, error) {
+	m := map[string][]string{}
 	err := AddHTTPBodyToMap(body, m)
 	if err != nil {
 		return m, err
