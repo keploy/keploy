@@ -42,7 +42,7 @@ type UnitTestGenerator struct {
 	cur              *Cursor
 	failedTests      []*models.FailedUT
 	prompt           *Prompt
-	ai               *AIClient
+	ai               AIClientInterface
 	logger           *zap.Logger
 	promptBuilder    *PromptBuilder
 	injector         *Injector
@@ -158,7 +158,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 
 		iterationCount := 1
 		g.lang = GetCodeLanguage(g.srcPath)
-		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt, g.ai.FunctionUnderTest, g.logger)
+		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt, g.ai.GetFunctionUnderTest(), g.logger)
 		g.injector = NewInjectorBuilder(g.logger, g.lang)
 
 		if err != nil {
@@ -328,7 +328,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			fmt.Print(addHeightPadding(paddingHeight, 2, columnWidths2))
 			fmt.Printf("+------------------------------------------+------------------------------------------+\n")
 			fmt.Printf("<=========================================>\n")
-			err = g.ai.SendCoverageUpdate(ctx, g.ai.SessionID, initialCoverage, g.cov.Current, iterationCount)
+			err = g.ai.SendCoverageUpdate(ctx, g.ai.GetSessionID(), initialCoverage, g.cov.Current, iterationCount)
 			if err != nil {
 				utils.LogError(g.logger, err, "Error sending coverage update")
 			}
@@ -498,7 +498,7 @@ func (g *UnitTestGenerator) GenerateTests(ctx context.Context, iterationCount in
 	}
 
 	requestPurpose := TestForFile
-	if len(g.ai.FunctionUnderTest) > 0 {
+	if len(g.ai.GetFunctionUnderTest()) > 0 {
 		requestPurpose = TestForFunction
 	}
 
@@ -518,7 +518,7 @@ func (g *UnitTestGenerator) GenerateTests(ctx context.Context, iterationCount in
 	aiRequest := AIRequest{
 		MaxTokens:      4096,
 		Prompt:         *g.prompt,
-		SessionID:      g.ai.SessionID,
+		SessionID:      g.ai.GetSessionID(),
 		Iteration:      iterationCount,
 		RequestPurpose: requestPurpose,
 	}
@@ -566,7 +566,7 @@ func (g *UnitTestGenerator) getIndentation(ctx context.Context) (int, error) {
 		aiRequest := AIRequest{
 			MaxTokens: 4096,
 			Prompt:    *prompt,
-			SessionID: g.ai.SessionID,
+			SessionID: g.ai.GetSessionID(),
 		}
 		response, err := g.ai.Call(ctx, CompletionParams{}, aiRequest, false)
 		if err != nil {
@@ -604,7 +604,7 @@ func (g *UnitTestGenerator) getLine(ctx context.Context) (int, error) {
 		aiRequest := AIRequest{
 			MaxTokens: 4096,
 			Prompt:    *prompt,
-			SessionID: g.ai.SessionID,
+			SessionID: g.ai.GetSessionID(),
 		}
 		response, err := g.ai.Call(ctx, CompletionParams{}, aiRequest, false)
 		if err != nil {
