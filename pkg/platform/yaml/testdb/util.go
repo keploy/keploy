@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -21,6 +22,7 @@ import (
 
 func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
 	respType := models.HTTPResponseJSON
+	var idempotentoperations = []string{"GET", "PUT", "DELETE", "POST"}
 	isXML := utils.IsXMLResponse(&tc.HTTPResp)
 	if isXML {
 		respType = models.HTTPResponseXML
@@ -58,10 +60,10 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 			noise[v] = []string{}
 		}
 	}
-	if tc.HTTPReq.Method == http.MethodGet {
+	if slices.Contains(idempotentoperations, string(tc.HTTPReq.Method)) {
 		var responses []map[string][]string
 		client := &http.Client{}
-		req, err := http.NewRequest(string(http.MethodGet), string(tc.HTTPReq.URL), strings.NewReader(tc.HTTPReq.Body))
+		req, err := http.NewRequest(string(tc.HTTPReq.Method), string(tc.HTTPReq.URL), strings.NewReader(tc.HTTPReq.Body))
 		if err != nil {
 			utils.LogError(logger, err, "failed to create new http request")
 			return nil, err
@@ -97,7 +99,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 			noise[field] = []string{}
 		}
 		if !Verifyresponses(responses, m, dynamicfield, logger) {
-			utils.LogError(logger, nil, "GET request failed idempotency check")
+			utils.LogError(logger, nil, "request failed idempotency check")
 		}
 
 	}
