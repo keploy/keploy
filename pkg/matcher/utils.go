@@ -45,6 +45,54 @@ type JSONComparisonResult struct {
 	differences []string // Lists the keys or indices of values that are not the same
 }
 
+type JSONFieldDiff struct {
+	dynamicFields    []string // Fields that are dynamic (i.e. their values can change)
+	missingFields    []string // Fields expected in the test case but absent in the replay
+	unexpectedFields []string // Fields present in the replay but not defined in the test case
+}
+
+func (v *JSONFieldDiff) DynamicFields() []string {
+	return v.dynamicFields
+}
+func (v *JSONFieldDiff) MissingFields() []string {
+	return v.missingFields
+}
+func (v *JSONFieldDiff) UnexpectedFields() []string {
+	return v.unexpectedFields
+}
+
+func FormatJSONDiffForLogging(diff *JSONFieldDiff) string {
+	var sb strings.Builder
+	sb.WriteString("\n=== JSON COMPARISON RESULTS ===\n\n")
+	if len(diff.DynamicFields()) > 0 {
+		sb.WriteString("🔄 DYNAMIC FIELDS (values changed):\n")
+		for _, field := range diff.DynamicFields() {
+			sb.WriteString(fmt.Sprintf("   • %s\n", field))
+		}
+		sb.WriteString("\n")
+	}
+	if len(diff.MissingFields()) > 0 {
+		sb.WriteString("❌ MISSING FIELDS (expected but not found):\n")
+		for _, field := range diff.MissingFields() {
+			sb.WriteString(fmt.Sprintf("   • %s\n", field))
+		}
+		sb.WriteString("\n")
+	}
+	if len(diff.UnexpectedFields()) > 0 {
+		sb.WriteString("➕ UNEXPECTED FIELDS (found but not expected):\n")
+		for _, field := range diff.UnexpectedFields() {
+			sb.WriteString(fmt.Sprintf("   • %s\n", field))
+		}
+		sb.WriteString("\n")
+	}
+	// Summary
+	total := len(diff.DynamicFields()) + len(diff.MissingFields()) + len(diff.UnexpectedFields())
+	sb.WriteString(fmt.Sprintf("Total differences: %d\n", total))
+	sb.WriteString("===============================\n")
+
+	return sb.String()
+}
+
 func (v *JSONComparisonResult) IsExact() bool {
 	return v.isExact
 }
@@ -930,6 +978,150 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 	matchJSONComparisonResult.matches = true
 	matchJSONComparisonResult.isExact = true
 	return matchJSONComparisonResult, nil
+}
+
+func GetJSONFieldDifferences(validatedJSON ValidatedJSON, noise map[string][]string, ignoreOrdering bool) (JSONFieldDiff, error) {
+	var jsonFieldDiff JSONFieldDiff
+	expected := validatedJSON.expected
+	actual := validatedJSON.actual
+	if reflect.TypeOf(expected) != reflect.TypeOf(actual) {
+		return jsonFieldDiff, errors.New("type not matched")
+	}
+	if expected == nil && actual == nil {
+		return jsonFieldDiff, nil
+	}
+	x := reflect.ValueOf(expected)
+	if x.Kind() != reflect.Map {
+		return jsonFieldDiff, errors.New("type is not JSON")
+	}
+	expMap := validatedJSON.expected.(map[string]interface{})
+	actMap := validatedJSON.actual.(map[string]interface{})
+
+	for k, v := range expMap {
+		// check if the key is noise
+		if regexArr, isNoisy := CheckStringExist(k, noise); isNoisy && len(regexArr) == 0 {
+			continue
+		}
+		val, ok := actMap[k]
+		if !ok {
+			jsonFieldDiff.missingFields = append(jsonFieldDiff.missingFields, k)
+			continue
+		}
+		isMatch, er := CompareJSONFields(strings.ToLower(k), v, val, noise, ignoreOrdering)
+		if er != nil {
+			return jsonFieldDiff, er
+		}
+		if !isMatch {
+			jsonFieldDiff.dynamicFields = append(jsonFieldDiff.dynamicFields, k)
+		}
+	}
+	for k, _ := range actMap {
+		_, ok := expMap[k]
+		if !ok {
+			jsonFieldDiff.unexpectedFields = append(jsonFieldDiff.unexpectedFields, k)
+		}
+	}
+	return jsonFieldDiff, nil
+}
+
+func CompareJSONFields(key string, expected, actual interface{}, noiseMap map[string][]string, ignoreOrdering bool) (bool, error) {
+	if reflect.TypeOf(expected) != reflect.TypeOf(actual) {
+		return false, nil
+	}
+	if expected == nil && actual == nil {
+		return true, nil
+	}
+	x := reflect.ValueOf(expected)
+	prefix := ""
+	if key != "" {
+		prefix = key + "."
+	}
+	switch x.Kind() {
+	case reflect.Float64, reflect.String, reflect.Bool:
+		regexArr, isNoisy := CheckStringExist(key, noiseMap)
+		if isNoisy && len(regexArr) != 0 {
+			isNoisy, _ = MatchesAnyRegex(InterfaceToString(expected), regexArr)
+		}
+		return (expected == actual || isNoisy), nil
+	case reflect.Map:
+		if regexArr, isNoisy := CheckStringExist(key, noiseMap); isNoisy && len(regexArr) == 0 {
+			return true, nil
+		}
+		expMap := expected.(map[string]interface{})
+		actMap := actual.(map[string]interface{})
+		for k, v := range expMap {
+			val, ok := actMap[k]
+			if !ok {
+				return false, nil
+			}
+			fieldMatch, err := CompareJSONFields(strings.ToLower(prefix+k), v, val, noiseMap, ignoreOrdering)
+			if err != nil {
+				return false, err
+			}
+			if !fieldMatch {
+				return false, nil
+			}
+		}
+		for k := range actMap {
+			_, ok := expMap[k]
+			if !ok {
+				return false, nil
+			}
+		}
+		return true, nil
+	case reflect.Slice:
+		if regexArr, isNoisy := CheckStringExist(key, noiseMap); isNoisy && len(regexArr) == 0 {
+			return true, nil
+		}
+		expSlice := reflect.ValueOf(expected)
+		actSlice := reflect.ValueOf(actual)
+		if expSlice.Len() != actSlice.Len() {
+			return false, nil
+		}
+
+		if ignoreOrdering {
+			visited := make([]bool, actSlice.Len())
+			for i := 0; i < expSlice.Len(); i++ {
+				matched := false
+				expItem := expSlice.Index(i).Interface()
+				for j := 0; j < actSlice.Len(); j++ {
+					if visited[j] {
+						continue
+					}
+					prefixedVal := key + "[" + fmt.Sprint(j) + "]"
+					actItem := actSlice.Index(j).Interface()
+					itemMatch, err := CompareJSONFields(prefixedVal, expItem, actItem, noiseMap, ignoreOrdering)
+					if err != nil {
+						return false, err
+					}
+					if itemMatch {
+						matched = true
+						visited[j] = true
+						break
+					}
+				}
+				if !matched {
+					return false, nil
+				}
+			}
+			return true, nil
+
+		} else {
+			for i := 0; i < expSlice.Len(); i++ {
+				prefixedVal := key + "[" + fmt.Sprint(i) + "]"
+				itemMatch, err := CompareJSONFields(prefixedVal, expSlice.Index(i).Interface(), actSlice.Index(i).Interface(), noiseMap, ignoreOrdering)
+				if err != nil {
+					return false, err
+				}
+				if !itemMatch {
+					return false, nil
+				}
+			}
+			return true, nil
+		}
+	default:
+		return false, errors.New("type not registered for json")
+	}
 }
 
 func ArrayToMap(arr []string) map[string]bool {
