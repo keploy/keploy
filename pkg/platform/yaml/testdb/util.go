@@ -22,7 +22,7 @@ import (
 
 func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
 	respType := models.HTTPResponseJSON
-	var idempotentoperations = []string{"GET", "PUT", "DELETE", "POST"}
+	var idempotentoperations = []string{"GET", "PUT", "DELETE"}
 	isXML := utils.IsXMLResponse(&tc.HTTPResp)
 	if isXML {
 		respType = models.HTTPResponseXML
