@@ -17,24 +17,37 @@ import (
 )
 
 func findComposeFile(cmd string) string {
+	return findComposeFiles(cmd)[0]
+}
 
+// New function to extract multiple compose files
+func findComposeFiles(cmd string) []string {
 	cmdArgs := strings.Fields(cmd)
+	foundFiles := []string{}
 
+	// Check for -f/--file flags in command
 	for i := 0; i < len(cmdArgs); i++ {
-		if cmdArgs[i] == "-f" && i+1 < len(cmdArgs) {
-			return cmdArgs[i+1]
+		if (cmdArgs[i] == "-f" || cmdArgs[i] == "--file") && i+1 < len(cmdArgs) {
+			foundFiles = append(foundFiles, cmdArgs[i+1])
+			i++ // Skip the next argument as it's the filename
 		}
 	}
 
-	filenames := []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}
-
-	for _, filename := range filenames {
-		if _, err := os.Stat(filename); !os.IsNotExist(err) {
-			return filename
+	// If no files found via flags, look for default files
+	if len(foundFiles) == 0 {
+		defaultFiles := []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}
+		for _, filename := range defaultFiles {
+			if _, err := os.Stat(filename); !os.IsNotExist(err) {
+				foundFiles = append(foundFiles, filename)
+			}
 		}
 	}
 
-	return ""
+	if len(foundFiles) == 0 {
+		return []string{""}
+	}
+
+	return foundFiles
 }
 
 func modifyDockerComposeCommand(appCmd, newComposeFile string) string {

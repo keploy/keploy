@@ -126,22 +126,24 @@ func (a *App) SetupCompose() error {
 		return errors.New("container name not found")
 	}
 	a.logger.Info("keploy requires docker compose containers to be run with external network")
-	//finding the user docker-compose file in the current directory.
-	// TODO currently we just return the first default docker-compose file found in the current directory
-	// we should add support for multiple docker-compose files by either parsing cmd for path
-	// or by asking the user to provide the path
-	// kdocker-compose.yaml file will be run instead of the user docker-compose.yaml file acc to below cases
 
-	path := findComposeFile(a.cmd)
-	if path == "" {
-		return errors.New("can't find the docker compose file of user. Are you in the right directory? ")
+	// TODO - HOW TO USE OTHER DOCKER-COMPOSE FILES ???
+	// Find all compose files in the command
+	paths := findComposeFiles(a.cmd)
+	if len(paths) == 0 || paths[0] == "" {
+		return errors.New("can't find the docker compose file of user. Are you in the right directory?")
 	}
 
-	a.logger.Info(fmt.Sprintf("Found docker compose file path: %s", path))
+	// Log all found compose files
+	for _, path := range paths {
+		a.logger.Info(fmt.Sprintf("Found docker compose file path: %s", path))
+	}
 
+	// Use the first file as the primary one to modify
+	primaryPath := paths[0]
 	newPath := "docker-compose-tmp.yaml"
 
-	compose, err := a.docker.ReadComposeFile(path)
+	compose, err := a.docker.ReadComposeFile(primaryPath)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to read the compose file")
 		return err
@@ -151,7 +153,7 @@ func (a *App) SetupCompose() error {
 	// Check if docker compose file uses relative file names for bind mounts
 	ok := a.docker.HasRelativePath(compose)
 	if ok {
-		err = a.docker.ForceAbsolutePath(compose, path)
+		err = a.docker.ForceAbsolutePath(compose, primaryPath)
 		if err != nil {
 			utils.LogError(a.logger, nil, "failed to convert relative paths to absolute paths in volume mounts in docker compose file")
 			return err
