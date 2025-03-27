@@ -80,6 +80,8 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				return nil
 			}
 
+			logger.Debug("Read response from the destination server", zap.ByteString("response", resp))
+
 			// Write the response message to the client
 			_, err = clientConn.Write(resp)
 			if err != nil {
@@ -110,6 +112,7 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				return nil
 			}
 
+			logger.Debug("Read request from the client", zap.ByteString("request", reqBuf))
 			bufStr := string(reqBuf)
 			dataType := models.String
 
