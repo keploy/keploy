@@ -19,6 +19,24 @@ import (
 )
 
 func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
+
+	contentType, exists := tc.HTTPResp.Header["Content-Type"]
+	if exists {
+		switch {
+		case strings.Contains(contentType, "application/json"):
+			if !utils.IsValidJSON(tc.HTTPResp.Body) {
+				err := errors.New("invalid JSON response body")
+				utils.LogError(logger, err, "testcase response body is not valid JSON")
+				return nil, err
+			}
+		case strings.Contains(contentType, "application/xml"), strings.Contains(contentType, "text/xml"):
+			if _, err := utils.XMLToMap(tc.HTTPResp.Body); err != nil {
+				utils.LogError(logger, err, "testcase response body is not valid XML")
+				return nil, err
+			}
+		}
+	}
+
 	respType := models.HTTPResponseJSON
 	isXML := utils.IsXMLResponse(&tc.HTTPResp)
 	if isXML {
