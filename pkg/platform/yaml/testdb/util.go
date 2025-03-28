@@ -96,10 +96,10 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		}
 		dynamicfield := DynamicFields(responses, m)
 		missingfield := Missingfields(responses, m)
-		fmt.Sprintf("Missing fields are : \n")
+		fmt.Println("Missing fields are : \n")
 		for k, v := range missingfield {
 			if v == true {
-				fmt.Sprintf(k)
+				fmt.Println(k)
 			}
 		}
 		for field := range dynamicfield {
