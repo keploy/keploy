@@ -130,7 +130,7 @@ func (a *App) SetupCompose() error {
 	// TODO - HOW TO USE OTHER DOCKER-COMPOSE FILES ???
 	// Find all compose files in the command
 	paths := findComposeFiles(a.cmd)
-	if len(paths) == 0 || paths[0] == "" {
+	if len(paths) == 0 {
 		return errors.New("can't find the docker compose file of user. Are you in the right directory?")
 	}
 

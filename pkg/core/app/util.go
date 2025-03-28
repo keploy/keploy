@@ -16,9 +16,9 @@ import (
 	"go.uber.org/zap"
 )
 
-func findComposeFile(cmd string) string {
-	return findComposeFiles(cmd)[0]
-}
+// func findComposeFile(cmd string) string {
+// 	return findComposeFiles(cmd)[0]
+// }
 
 // New function to extract multiple compose files
 func findComposeFiles(cmd string) []string {
@@ -44,7 +44,7 @@ func findComposeFiles(cmd string) []string {
 	}
 
 	if len(foundFiles) == 0 {
-		return []string{""}
+		return []string{}
 	}
 
 	return foundFiles
