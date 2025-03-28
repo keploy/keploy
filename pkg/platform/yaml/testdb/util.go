@@ -95,6 +95,13 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 			responses = append(responses, resMap)
 		}
 		dynamicfield := DynamicFields(responses, m)
+		missingfield := Missingfields(responses, m)
+		fmt.Sprintf("Missing fields are : \n")
+		for k, v := range missingfield {
+			if v == true {
+				fmt.Sprintf(k)
+			}
+		}
 		for field := range dynamicfield {
 			noise[field] = []string{}
 		}
@@ -304,6 +311,33 @@ func HasBannedHeaders(object map[string]string, bannedHeaders map[string]string)
 		}
 	}
 	return false, nil
+}
+func Missingfields(responses []map[string][]string, m map[string][]string) map[string]bool {
+	missingfields := make(map[string]bool)
+	if len(responses) <= 1 {
+		return missingfields
+	}
+	fieldcount := []string{}
+	fieldcountresp := make(map[string]int)
+	for field := range m {
+		fieldcount = append(fieldcount, field)
+
+		//count the no of times each field occurs in the replays to find any missing fields
+
+		for _, resp := range responses {
+			for k := range resp {
+				fieldcountresp[k]++
+			}
+		}
+	}
+	for field := range m {
+		if fieldcountresp[field] == 0 {
+			missingfields[field] = true
+		} else {
+			missingfields[field] = false
+		}
+	}
+	return missingfields
 }
 func DynamicFields(responses []map[string][]string, m map[string][]string) map[string]bool {
 	dynamicfields := make(map[string]bool)
