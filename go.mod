@@ -13,6 +13,7 @@ require (
 	github.com/docker/go-connections v0.4.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/fatih/color v1.17.0
+	github.com/google/uuid v1.6.0
 	github.com/k0kubun/pp/v3 v3.2.0
 	github.com/miekg/dns v1.1.55
 	github.com/moby/term v0.5.0 // indirect
@@ -21,6 +22,7 @@ require (
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.0.2 // indirect
 	github.com/spf13/cobra v1.8.0
+	github.com/stretchr/testify v1.9.0
 	go.mongodb.org/mongo-driver v1.11.6
 	go.uber.org/zap v1.26.0
 	golang.org/x/crypto v0.24.0 // indirect
@@ -109,7 +111,6 @@ require (
 	github.com/emirpasic/gods v1.18.1
 	github.com/getsentry/sentry-go v0.28.1
 	github.com/golang-jwt/jwt/v4 v4.5.0
-	github.com/google/uuid v1.6.0
 	github.com/jackc/pgproto3/v2 v2.3.2
 	github.com/keploy/jsonDiff v1.0.5
 	github.com/sbabiv/xml2map v1.2.1
