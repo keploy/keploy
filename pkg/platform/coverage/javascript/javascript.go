@@ -4,7 +4,7 @@ package javascript
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -103,7 +103,7 @@ func (j *Javascript) GetCoverage() (models.TestCoverage, error) {
 		return testCov, err
 	}
 	if len(coverageFilePaths) == 0 {
-		return testCov, fmt.Errorf("no coverage files found")
+		return testCov, errors.New("no coverage files found")
 	}
 
 	// coverage is calculated as: (no of statements covered / total no of statements) * 100

@@ -80,7 +80,7 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 				if ctx.Err() != nil { // to avoid sending buffer to closed channel if the context is cancelled
 					return
 				}
-				if err != io.EOF {
+				if !errors.Is(err, io.EOF) {
 					utils.LogError(logger, err, "failed to read the packet message in proxy")
 				}
 				errChannel <- err
@@ -98,12 +98,12 @@ func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]b
 	readErr := errors.New("failed to read the initial request buffer")
 
 	initialBuf, err := ReadBytes(ctx, logger, conn)
-	if err != nil && err != io.EOF {
+	if err != nil && !errors.Is(err, io.EOF) {
 		utils.LogError(logger, err, "failed to read the request message in proxy")
 		return nil, readErr
 	}
 
-	if err == io.EOF && len(initialBuf) == 0 {
+	if errors.Is(err, io.EOF) && len(initialBuf) == 0 {
 		logger.Debug("received EOF, closing conn", zap.Error(err))
 		return nil, readErr
 	}
@@ -168,7 +168,7 @@ func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byt
 			}
 
 			if result.err != nil {
-				if result.err == io.EOF {
+				if errors.Is(result.err, io.EOF) {
 					emptyReads++
 					if emptyReads >= maxEmptyReads {
 						return buffer, result.err // Multiple EOFs in a row, probably a true EOF
@@ -241,7 +241,7 @@ func ReadRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader
 			}
 
 			if result.err != nil {
-				if result.err == io.EOF {
+				if errors.Is(result.err, io.EOF) {
 					emptyReads++
 					if emptyReads >= maxEmptyReads {
 						return buffer, result.err // Multiple EOFs in a row, probably a true EOF
@@ -354,10 +354,13 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 
 		logger.Debug("the iteration for the generic response ends with responses:"+strconv.Itoa(len(buffer)), zap.Any("buffer", buffer))
 	case err := <-errChannel:
-		if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
+		if err != nil {
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				return nil, nil
+			}
 			return nil, err
 		}
-		return nil, nil
 
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -416,7 +419,7 @@ func GetLocalIPv4() (net.IP, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("no valid IP address found")
+	return nil, errors.New("no valid IP address found")
 }
 
 func ToIPV4(ip net.IP) (uint32, bool) {
@@ -448,7 +451,7 @@ func GetLocalIPv6() (net.IP, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("no valid IPv6 address found")
+	return nil, errors.New("no valid IPv6 address found")
 }
 
 func IPv6ToUint32Array(ip net.IP) ([4]uint32, error) {
@@ -522,7 +525,7 @@ func GetJavaHome(ctx context.Context) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("java.home not found in command output")
+	return "", errors.New("java.home not found in command output")
 }
 
 // Recover recovers from a panic in any parser and logs the stack trace to Sentry.

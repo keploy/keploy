@@ -61,13 +61,13 @@ func MarshalRequestBodies(mockOperation, testOperation *models.Operation) (strin
 	if mockOperation.RequestBody != nil {
 		mockRequestBody, err = json.Marshal(mockOperation.RequestBody.Content["application/json"].Schema.Properties)
 		if err != nil {
-			return "", "", fmt.Errorf("error marshalling mock RequestBody: %v", err)
+			return "", "", fmt.Errorf("error marshalling mock RequestBody: %w", err)
 		}
 	}
 	if testOperation.RequestBody != nil {
 		testRequestBody, err = json.Marshal(testOperation.RequestBody.Content["application/json"].Schema.Properties)
 		if err != nil {
-			return "", "", fmt.Errorf("error marshalling test RequestBody: %v", err)
+			return "", "", fmt.Errorf("error marshalling test RequestBody: %w", err)
 		}
 	}
 	return string(mockRequestBody), string(testRequestBody), nil
@@ -80,13 +80,13 @@ func MarshalResponseBodies(status string, mockOperation, testOperation *models.O
 	if mockOperation.Responses[status].Content != nil {
 		mockResponseBody, err = json.Marshal(mockOperation.Responses[status].Content["application/json"].Schema.Properties)
 		if err != nil {
-			return "", "", fmt.Errorf("error marshalling mock ResponseBody: %v", err)
+			return "", "", fmt.Errorf("error marshalling mock ResponseBody: %w", err)
 		}
 	}
 	if testOperation.Responses[status].Content != nil {
 		testResponseBody, err = json.Marshal(testOperation.Responses[status].Content["application/json"].Schema.Properties)
 		if err != nil {
-			return "", "", fmt.Errorf("error marshalling test ResponseBody: %v", err)
+			return "", "", fmt.Errorf("error marshalling test ResponseBody: %w", err)
 		}
 	}
 	return string(mockResponseBody), string(testResponseBody), nil
@@ -116,7 +116,7 @@ func ParseIntoJSON(response string) (interface{}, error) {
 	}
 	result, err := geko.JSONUnmarshal([]byte(response))
 	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal the response: %v", err)
+		return nil, fmt.Errorf("failed to unmarshal the response: %w", err)
 	}
 	return result, nil
 }

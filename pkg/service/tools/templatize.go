@@ -454,7 +454,7 @@ func parseIntoJSON(response string) (interface{}, error) {
 	// geko lib will maintain the order of the keys in the json.
 	result, err := geko.JSONUnmarshal([]byte(response))
 	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal the response: %v", err)
+		return nil, fmt.Errorf("failed to unmarshal the response: %w", err)
 	}
 	return result, nil
 }
@@ -466,7 +466,7 @@ func RenderIfTemplatized(val interface{}) (bool, interface{}, error) {
 	}
 
 	// Check if the value is a template.
-	if !(strings.Contains(stringVal, "{{") && strings.Contains(stringVal, "}}")) {
+	if !strings.Contains(stringVal, "{{") || !strings.Contains(stringVal, "}}") {
 		return false, val, nil
 	}
 
@@ -881,10 +881,7 @@ func insertUnique(baseKey, value string, myMap map[string]interface{}) string {
 	}
 	key := baseKey
 	i := 0
-	for {
-		if myMap[key] == value {
-			break
-		}
+	for myMap[key] != value {
 		if _, exists := myMap[key]; !exists {
 			myMap[key] = value
 			break

@@ -262,7 +262,7 @@ func ReadYAMLFile(ctx context.Context, logger *zap.Logger, filePath string, file
 	}
 	file, err := os.Open(filePath)
 	if err != nil {
-		return fmt.Errorf("failed to read the file: %v", err)
+		return fmt.Errorf("failed to read the file: %w", err)
 	}
 
 	defer func() {
@@ -278,10 +278,10 @@ func ReadYAMLFile(ctx context.Context, logger *zap.Logger, filePath string, file
 
 	configData, err := io.ReadAll(cr)
 	if err != nil {
-		if err == ctx.Err() {
+		if errors.Is(err, ctx.Err()) {
 			return err // Ignore context cancellation error
 		}
-		return fmt.Errorf("failed to read the file: %v", err)
+		return fmt.Errorf("failed to read the file: %w", err)
 	}
 
 	err = yaml.Unmarshal(configData, v)

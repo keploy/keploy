@@ -3,6 +3,7 @@ package conn
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -21,11 +22,9 @@ import (
 	"go.uber.org/zap"
 )
 
-var (
-	realTimeOffset uint64
-)
-
 // convertUnixNanoToTime takes a Unix timestamp in nanoseconds as a uint64 and returns the corresponding time.Time
+//
+//nolint:unused // might be used in the future
 func convertUnixNanoToTime(unixNano uint64) time.Time {
 	// Unix time is the number of seconds since January 1, 1970 UTC,
 	// so convert nanoseconds to seconds for time.Unix function
@@ -60,7 +59,7 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 	passThrough := proxyHttp.IsPassThrough(logger, req, uint(dstPort), headerOpts)
 
 	for _, filter := range opts.Filters {
-		if filter.URLMethods != nil && len(filter.URLMethods) != 0 {
+		if len(filter.URLMethods) != 0 {
 			urlMethodMatch := false
 			for _, method := range filter.URLMethods {
 				if method == req.Method {
@@ -73,7 +72,7 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 				continue
 			}
 		}
-		if filter.Headers != nil && len(filter.Headers) != 0 {
+		if len(filter.Headers) != 0 {
 			headerMatch := false
 			for filterHeaderKey, filterHeaderValue := range filter.Headers {
 				regex, err := regexp.Compile(filterHeaderValue)
@@ -213,7 +212,7 @@ func extractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 
 	for {
 		part, err := reader.NextPart()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {

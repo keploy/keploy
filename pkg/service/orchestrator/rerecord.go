@@ -5,7 +5,7 @@ package orchestrator
 import (
 	"bufio"
 	"context"
-	"fmt"
+	"errors"
 	"os"
 	"sort"
 	"strconv"
@@ -143,7 +143,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 
 	if stopReason != "" {
 		utils.LogError(o.logger, err, stopReason)
-		return fmt.Errorf(stopReason)
+		return errors.New(stopReason)
 	}
 
 	if ctx.Err() != nil {
@@ -186,7 +186,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 	if err != nil {
 		errMsg := "failed to get all testcases"
 		utils.LogError(o.logger, err, errMsg, zap.String("testset", testSet))
-		return false, fmt.Errorf(errMsg)
+		return false, errors.New(errMsg)
 	}
 
 	if len(tcs) == 0 {
@@ -199,7 +199,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 		errMsg := "failed to extract host and port"
 		utils.LogError(o.logger, err, "")
 		o.logger.Debug("", zap.String("curl", tcs[0].Curl))
-		return false, fmt.Errorf(errMsg)
+		return false, errors.New(errMsg)
 	}
 	cmdType := utils.CmdType(o.config.CommandType)
 
@@ -278,7 +278,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 	}
 
 	if simErr {
-		return allTcRecorded, fmt.Errorf("got error while simulating HTTP request. Please make sure the related services are up and running")
+		return allTcRecorded, errors.New("got error while simulating HTTP request. Please make sure the related services are up and running")
 	}
 
 	return allTcRecorded, nil

@@ -3,6 +3,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -72,7 +73,7 @@ func getInode(pid int) (uint64, error) {
 	// Dev := (f.Sys().(*syscall.Stat_t)).Dev
 	i := (f.Sys().(*syscall.Stat_t)).Ino
 	if i == 0 {
-		return 0, fmt.Errorf("failed to get the inode of the process")
+		return 0, errors.New("failed to get the inode of the process")
 	}
 	return i, nil
 }
@@ -88,13 +89,13 @@ func isDetachMode(logger *zap.Logger, command string, kind utils.CmdType) bool {
 				return false
 			}
 		}
-		utils.LogError(logger, fmt.Errorf("docker start require --attach/-a or --interactive/-i flag"), "failed to start command")
+		utils.LogError(logger, errors.New("docker start require --attach/-a or --interactive/-i flag"), "failed to start command")
 		return true
 	}
 
 	for _, arg := range args {
 		if arg == "-d" || arg == "--detach" {
-			utils.LogError(logger, fmt.Errorf("detach mode is not allowed in Keploy command"), "failed to start command")
+			utils.LogError(logger, errors.New("detach mode is not allowed in Keploy command"), "failed to start command")
 			return true
 		}
 	}

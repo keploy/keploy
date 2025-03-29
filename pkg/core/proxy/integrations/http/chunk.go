@@ -5,7 +5,7 @@ package http
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"io"
 	"net"
 	"strconv"
@@ -63,7 +63,7 @@ func (h *HTTP) HandleChunkedRequests(ctx context.Context, finalReq *[]byte, clie
 		contentLength, err := strconv.Atoi(contentLengthHeader)
 		if err != nil {
 			utils.LogError(h.Logger, err, "failed to get the content-length header")
-			return fmt.Errorf("failed to handle chunked request")
+			return errors.New("failed to handle chunked request")
 		}
 		//Get the length of the body in the request.
 		bodyLength := len(*finalReq) - strings.Index(string(*finalReq), "\r\n\r\n") - 4
@@ -234,7 +234,7 @@ func (h *HTTP) handleChunkedResponses(ctx context.Context, finalResp *[]byte, cl
 		contentLength, err := strconv.Atoi(contentLengthHeader)
 		if err != nil {
 			utils.LogError(h.Logger, err, "failed to get the content-length header")
-			return fmt.Errorf("failed to handle chunked response")
+			return errors.New("failed to handle chunked response")
 		}
 		bodyLength := len(resp) - strings.Index(string(resp), "\r\n\r\n") - 4
 		contentLength -= bodyLength

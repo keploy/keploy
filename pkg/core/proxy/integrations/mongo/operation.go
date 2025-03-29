@@ -454,7 +454,7 @@ func extractSectionSingle(data string) (string, error) {
 	prefix := "{ SectionSingle msg: "
 	startIndex := strings.Index(data, prefix)
 	if startIndex == -1 {
-		return "", fmt.Errorf("start not found")
+		return "", errors.New("start not found")
 	}
 
 	// Adjust the start index to skip the prefix
@@ -463,7 +463,7 @@ func extractSectionSingle(data string) (string, error) {
 	// We'll assume the content ends with " }" that closes the sectionSingle
 	endIndex := strings.LastIndex(data[startIndex:], " }")
 	if endIndex == -1 {
-		return "", fmt.Errorf("end not found")
+		return "", errors.New("end not found")
 	}
 
 	// Adjust the end index relative to the entire string

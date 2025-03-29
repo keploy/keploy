@@ -1,3 +1,4 @@
+// Package v1 provides functionality for decoding Postgres requests and responses.
 package v1
 
 import (
@@ -29,6 +30,8 @@ func NewFrontend() *FrontendWrapper {
 }
 
 // PG Response Packet Transcoder
+//
+//nolint:unused // might be used in the future
 func (b *BackendWrapper) translateToReadableBackend(msgBody []byte) (pgproto3.FrontendMessage, error) {
 	// fmt.Println("msgType", b.BackendWrapper.MsgType)
 	var msg pgproto3.FrontendMessage
@@ -86,6 +89,7 @@ func (b *BackendWrapper) translateToReadableBackend(msgBody []byte) (pgproto3.Fr
 	return msg, err
 }
 
+//nolint:unused // might be used in the future
 func (f *FrontendWrapper) translateToReadableResponse(logger *zap.Logger, msgBody []byte) (pgproto3.BackendMessage, error) {
 	f.FrontendWrapper.BodyLen = int(binary.BigEndian.Uint32(msgBody[1:])) - 4
 	f.FrontendWrapper.MsgType = msgBody[0]
@@ -162,18 +166,18 @@ func (f *FrontendWrapper) translateToReadableResponse(logger *zap.Logger, msgBod
 	return msg, err
 }
 
-const (
-	minStartupPacketLen = 4     // minStartupPacketLen is a single 32-bit int version or code.
-	maxStartupPacketLen = 10000 // maxStartupPacketLen is MAX_STARTUP_PACKET_LENGTH from PG source.
-	sslRequestNumber    = 80877103
-	cancelRequestCode   = 80877102
-	gssEncReqNumber     = 80877104
-)
-
 // ProtocolVersionNumber Replace with actual version number if different
 const ProtocolVersionNumber uint32 = 196608
 
+//nolint:unused // might be used in the future
 func (b *BackendWrapper) decodeStartupMessage(buf []byte) (pgproto3.FrontendMessage, error) {
+	const (
+		minStartupPacketLen = 4     // minStartupPacketLen is a single 32-bit int version or code.
+		maxStartupPacketLen = 10000 // maxStartupPacketLen is MAX_STARTUP_PACKET_LENGTH from PG source.
+		sslRequestNumber    = 80877103
+		cancelRequestCode   = 80877102
+		gssEncReqNumber     = 80877104
+	)
 
 	reader := pgproto3.NewByteReader(buf)
 	buf, err := reader.Next(4)
@@ -238,6 +242,7 @@ const (
 	AuthTypeSASLFinal         = 12
 )
 
+//nolint:unused // might be used in the future
 func (f *FrontendWrapper) findAuthMsgType(src []byte) (pgproto3.BackendMessage, error) {
 	if len(src) < 4 {
 		return nil, errors.New("authentication message too short")
@@ -279,6 +284,8 @@ func (f *FrontendWrapper) findAuthMsgType(src []byte) (pgproto3.BackendMessage, 
 
 // GetAuthType returns the authType used in the current state of the frontend.
 // See SetAuthType for more information.
+//
+//nolint:unused // might be used in the future
 func parseAuthType(buffer []byte) (int32, error) {
 	// Create a bytes reader from the buffer
 	reader := bytes.NewReader(buffer)
@@ -306,6 +313,7 @@ func parseAuthType(buffer []byte) (int32, error) {
 	return authType, nil
 }
 
+//nolint:unused // might be used in the future
 func isStartupPacket(packet []byte) bool {
 	protocolVersion := binary.BigEndian.Uint32(packet[4:8])
 	// printStartupPacketDetails(packet)

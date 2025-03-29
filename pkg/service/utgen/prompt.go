@@ -103,7 +103,7 @@ func NewPromptBuilder(srcPath, testPath, covReportContent, includedFiles, additi
 func readFile(filePath string) (string, error) {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
-		return "", fmt.Errorf("Error reading %s: %v", filePath, err)
+		return "", fmt.Errorf("error reading %s: %w", filePath, err)
 	}
 	return string(content), nil
 }
@@ -114,7 +114,7 @@ func formatSection(content, templateText string) (string, error) {
 	}
 	tmpl, err := template.New("section").Parse(templateText)
 	if err != nil {
-		return "", fmt.Errorf("Error parsing section template: %v", err)
+		return "", fmt.Errorf("error parsing section template: %w", err)
 	}
 	var buffer bytes.Buffer
 	err = tmpl.Execute(&buffer, map[string]string{
@@ -123,7 +123,7 @@ func formatSection(content, templateText string) (string, error) {
 		"FailedTestRuns":         content,
 	})
 	if err != nil {
-		return "", fmt.Errorf("Error executing section template: %v", err)
+		return "", fmt.Errorf("error executing section template: %w", err)
 	}
 	return buffer.String(), nil
 }
@@ -159,7 +159,7 @@ func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, erro
 	if err != nil {
 		prompt.System = ""
 		prompt.User = ""
-		return prompt, fmt.Errorf("Error rendering system prompt: %v", err)
+		return prompt, fmt.Errorf("error rendering system prompt: %w", err)
 	}
 	prompt.System = systemPrompt
 
@@ -167,7 +167,7 @@ func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, erro
 	if err != nil {
 		prompt.System = ""
 		prompt.User = ""
-		return prompt, fmt.Errorf("Error rendering user prompt: %v", err)
+		return prompt, fmt.Errorf("error rendering user prompt: %w", err)
 	}
 	userPrompt = html.UnescapeString(userPrompt)
 	prompt.User = userPrompt

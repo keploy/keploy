@@ -1,3 +1,4 @@
+// Package http provides functionality for handling HTTP outgoing calls.
 package http
 
 import (
@@ -16,6 +17,8 @@ import (
 )
 
 // Checks if the response is gzipped
+//
+//nolint:unused // might be used in the future
 func isGZipped(check io.ReadCloser, l *zap.Logger) (bool, *bufio.Reader) {
 	bufReader := bufio.NewReader(check)
 	peekedBytes, err := bufReader.Peek(2)
@@ -33,6 +36,8 @@ func isGZipped(check io.ReadCloser, l *zap.Logger) (bool, *bufio.Reader) {
 }
 
 // hasCompleteHeaders checks if the given byte slice contains the complete HTTP headers
+//
+//nolint:unused // might be used in the future
 func hasCompleteHeaders(httpChunk []byte) bool {
 	// Define the sequence for header end: "\r\n\r\n"
 	headerEndSequence := []byte{'\r', '\n', '\r', '\n'}
@@ -125,6 +130,7 @@ const (
 	TextPlain ContentType = "TextPlain"
 )
 
+//nolint:unused // might be used in the future
 func guessContentType(data []byte) ContentType {
 	// Use net/http library's DetectContentType for basic MIME type detection
 	mimeType := http.DetectContentType(data)
@@ -147,11 +153,14 @@ func guessContentType(data []byte) ContentType {
 	return Unknown
 }
 
+//nolint:unused // might be used in the future
 func encode(buffer []byte) string {
 	//Encode the buffer to string
 	encoded := string(buffer)
 	return encoded
 }
+
+//nolint:unused // might be used in the future
 func decode(encoded string) ([]byte, error) {
 	// decode the string to a buffer.
 	data := []byte(encoded)

@@ -3,6 +3,7 @@
 package proxy
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -90,7 +91,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 
 func (m *MockManager) FlagMockAsUsed(mock models.Mock) error {
 	if mock.Name == "" {
-		return fmt.Errorf("mock is empty")
+		return errors.New("mock is empty")
 	}
 	m.consumedMocks.Store(mock.Name, true)
 	return nil

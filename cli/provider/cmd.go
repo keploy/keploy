@@ -375,7 +375,7 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 	}
 	err = c.ValidateFlags(ctx, cmd)
 	if err != nil {
-		if err == c.noCommandError() {
+		if errors.Is(err, c.noCommandError()) {
 			utils.LogError(c.logger, nil, "missing required -c flag or appCmd in config file")
 			if c.cfg.InDocker {
 				c.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
@@ -393,7 +393,7 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 		rewriteConfig = true
 		appName, err := utils.GetLastDirectory()
 		if err != nil {
-			return fmt.Errorf("failed to get the last directory: %v", err)
+			return fmt.Errorf("failed to get the last directory: %w", err)
 		}
 		c.logger.Info("Using the last directory name as appName : " + appName)
 		c.cfg.AppName = appName

@@ -66,7 +66,7 @@ func unmarshalYamlTestDetails(yamlStr string) (*models.UTDetails, error) {
 	var data *models.UTDetails
 	err := yaml.Unmarshal([]byte(yamlStr), &data)
 	if err != nil {
-		return nil, fmt.Errorf("error unmarshaling yaml: %s", err)
+		return nil, fmt.Errorf("error unmarshaling yaml: %w", err)
 	}
 	return data, nil
 }
@@ -79,7 +79,7 @@ func unmarshalYamlTestHeaders(yamlStr string) (*models.UTIndentationInfo, error)
 	var data *models.UTIndentationInfo
 	err := yaml.Unmarshal([]byte(yamlStr), &data)
 	if err != nil {
-		return nil, fmt.Errorf("error unmarshaling yaml: %s", err)
+		return nil, fmt.Errorf("error unmarshaling yaml: %w", err)
 	}
 	return data, nil
 }
@@ -91,7 +91,7 @@ func unmarshalYamlTestLine(yamlStr string) (*models.UTInsertionInfo, error) {
 	var data *models.UTInsertionInfo
 	err := yaml.Unmarshal([]byte(yamlStr), &data)
 	if err != nil {
-		return nil, fmt.Errorf("error unmarshaling yaml: %s", err)
+		return nil, fmt.Errorf("error unmarshaling yaml: %w", err)
 	}
 	return data, nil
 }
@@ -318,7 +318,7 @@ func createTestFile(testFilePath string, sourceFilePath string) (bool, error) {
 		}()
 
 		// Write initial content to the test file
-		_, err = file.WriteString(fmt.Sprintf("// Unit test for %s\n", filepath.Base(sourceFilePath)))
+		_, err = fmt.Fprintf(file, "// Unit test for %s\n", filepath.Base(sourceFilePath))
 		if err != nil {
 			return false, err
 		}

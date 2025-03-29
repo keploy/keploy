@@ -4,6 +4,7 @@ package utils
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"syscall"
@@ -16,7 +17,8 @@ func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 	err := syscall.Kill(pid, sig)
 	if err != nil {
 		// ignore the ESRCH error as it means the process is already dead
-		if errno, ok := err.(syscall.Errno); ok && errno == syscall.ESRCH {
+		var errno syscall.Errno
+		if errors.As(err, &errno) && errno == syscall.ESRCH {
 			return nil
 		}
 		logger.Error("failed to send signal to process", zap.Int("pid", pid), zap.Error(err))

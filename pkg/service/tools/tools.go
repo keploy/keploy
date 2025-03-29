@@ -78,7 +78,7 @@ func (t *Tools) Update(ctx context.Context) error {
 		if errors.Is(err, ErrGitHubAPIUnresponsive) {
 			return errors.New("gitHub API is unresponsive. Update process cannot continue")
 		}
-		return fmt.Errorf("failed to fetch latest GitHub release version: %v", err)
+		return fmt.Errorf("failed to fetch latest GitHub release version: %w", err)
 	}
 
 	latestVersion := releaseInfo.TagName
@@ -136,14 +136,14 @@ func (t *Tools) downloadAndUpdate(ctx context.Context, logger *zap.Logger, downl
 	// Create a new request with context
 	req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create request: %v", err)
+		return fmt.Errorf("failed to create request: %w", err)
 	}
 
 	// Create a HTTP client and execute the request
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to download file: %v", err)
+		return fmt.Errorf("failed to download file: %w", err)
 	}
 	defer func() {
 		if cerr := resp.Body.Close(); cerr != nil {
@@ -154,7 +154,7 @@ func (t *Tools) downloadAndUpdate(ctx context.Context, logger *zap.Logger, downl
 	// Create a temporary file to store the downloaded tar.gz
 	tmpFile, err := os.CreateTemp("", "keploy-download-*.tar.gz")
 	if err != nil {
-		return fmt.Errorf("failed to create temporary file: %v", err)
+		return fmt.Errorf("failed to create temporary file: %w", err)
 	}
 	defer func() {
 		if err := tmpFile.Close(); err != nil {
@@ -168,12 +168,12 @@ func (t *Tools) downloadAndUpdate(ctx context.Context, logger *zap.Logger, downl
 	// Write the downloaded content to the temporary file
 	_, err = io.Copy(tmpFile, resp.Body)
 	if err != nil {
-		return fmt.Errorf("failed to write to temporary file: %v", err)
+		return fmt.Errorf("failed to write to temporary file: %w", err)
 	}
 
 	// Extract the tar.gz file
 	if err := extractTarGz(tmpFile.Name(), "/tmp"); err != nil {
-		return fmt.Errorf("failed to extract tar.gz file: %v", err)
+		return fmt.Errorf("failed to extract tar.gz file: %w", err)
 	}
 
 	// Determine the path based on the alias "keploy"
@@ -197,11 +197,11 @@ func (t *Tools) downloadAndUpdate(ctx context.Context, logger *zap.Logger, downl
 
 	// Move the extracted binary to the alias path
 	if err := os.Rename("/tmp/keploy", aliasPath); err != nil {
-		return fmt.Errorf("failed to move keploy binary to %s: %v", aliasPath, err)
+		return fmt.Errorf("failed to move keploy binary to %s: %w", aliasPath, err)
 	}
 
 	if err := os.Chmod(aliasPath, 0777); err != nil {
-		return fmt.Errorf("failed to set execute permission on %s: %v", aliasPath, err)
+		return fmt.Errorf("failed to set execute permission on %s: %w", aliasPath, err)
 	}
 
 	return nil

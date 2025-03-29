@@ -3,6 +3,7 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -75,12 +76,12 @@ func (idc *Impl) ExtractNetworksForContainer(containerName string) (map[string]*
 	// If the network list is empty, the docker daemon is possibly misbehaving,
 	// or the container is in a bad state.
 	utils.LogError(idc.logger, nil, "The network list for the given container is empty. This is unexpected.", zap.String("containerName", containerName))
-	return nil, fmt.Errorf("the container is not attached to any network")
+	return nil, errors.New("the container is not attached to any network")
 }
 
 func (idc *Impl) ConnectContainerToNetworks(containerName string, settings map[string]*network.EndpointSettings) error {
 	if settings == nil {
-		return fmt.Errorf("provided network settings is empty")
+		return errors.New("provided network settings is empty")
 	}
 
 	existingNetworks, err := idc.ExtractNetworksForContainer(containerName)
@@ -109,7 +110,7 @@ func (idc *Impl) ConnectContainerToNetworks(containerName string, settings map[s
 
 func (idc *Impl) AttachNetwork(containerName string, networkNames []string) error {
 	if len(networkNames) == 0 {
-		return fmt.Errorf("provided network names list is empty")
+		return errors.New("provided network names list is empty")
 	}
 
 	existingNetworks, err := idc.ExtractNetworksForContainer(containerName)
@@ -177,7 +178,7 @@ func (idc *Impl) NetworkExists(networkName string) (bool, error) {
 	// Retrieve all networks.
 	networks, err := idc.NetworkList(ctx, types.NetworkListOptions{})
 	if err != nil {
-		return false, fmt.Errorf("error retrieving networks: %v", err)
+		return false, fmt.Errorf("error retrieving networks: %w", err)
 	}
 
 	// Check if the specified network is in the list.
@@ -364,7 +365,7 @@ func (idc *Impl) GetHostWorkingDirectory() (string, error) {
 			return mount.Source, nil
 		}
 	}
-	return "", fmt.Errorf(fmt.Sprintf("could not find mount for %s in keploy-v2 container", curDir))
+	return "", fmt.Errorf("could not find mount for %s in keploy-v2 container", curDir)
 }
 
 // ForceAbsolutePath replaces relative paths in bind mounts with absolute paths
