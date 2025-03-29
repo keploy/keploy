@@ -4,7 +4,7 @@ package replayer
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"io"
 	"net"
 	"time"
@@ -77,7 +77,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 
 			if !ok {
 				utils.LogError(logger, nil, "No matching mock found for the command", zap.Any("command", command))
-				return fmt.Errorf("error while simulating the command phase due to no matching mock found")
+				return errors.New("error while simulating the command phase due to no matching mock found")
 			}
 
 			logger.Debug("Matched the command with the mock", zap.Any("mock", resp))

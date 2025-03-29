@@ -3,6 +3,7 @@ package utgen
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -94,7 +95,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 	// Check for context cancellation before proceeding
 	select {
 	case <-ctx.Done():
-		return fmt.Errorf("process cancelled by user")
+		return errors.New("process cancelled by user")
 	default:
 		// Continue if no cancellation
 	}
@@ -105,7 +106,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			return err
 		}
 		if len(g.Files) == 0 {
-			return fmt.Errorf("couldn't identify the source files. Please mention source file and test file using flags")
+			return errors.New("couldn't identify the source files. Please mention source file and test file using flags")
 		}
 	}
 	const paddingHeight = 1
@@ -119,7 +120,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 		// Respect context cancellation in each iteration
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("process cancelled by user")
+			return errors.New("process cancelled by user")
 		default:
 		}
 
@@ -177,7 +178,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			passedTests, noCoverageTest, failedBuild, totalTest := 0, 0, 0, 0
 			select {
 			case <-ctx.Done():
-				return fmt.Errorf("process cancelled by user")
+				return errors.New("process cancelled by user")
 			default:
 			}
 
@@ -259,7 +260,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				}
 				select {
 				case <-ctx.Done():
-					return fmt.Errorf("process cancelled by user")
+					return errors.New("process cancelled by user")
 				default:
 				}
 				coverageInc, err := g.ValidateTest(generatedTest, &passedTests, &noCoverageTest, &failedBuild, installedPackages)
@@ -586,7 +587,7 @@ func (g *UnitTestGenerator) getIndentation(ctx context.Context) (int, error) {
 		counterAttempts++
 	}
 	if indentation == -1 {
-		return 0, fmt.Errorf("failed to analyze the test headers indentation")
+		return 0, errors.New("failed to analyze the test headers indentation")
 	}
 	return indentation, nil
 }
@@ -624,7 +625,7 @@ func (g *UnitTestGenerator) getLine(ctx context.Context) (int, error) {
 		counterAttempts++
 	}
 	if line == -1 {
-		return 0, fmt.Errorf("failed to analyze the relevant line number to insert new tests")
+		return 0, errors.New("failed to analyze the relevant line number to insert new tests")
 	}
 	return line, nil
 }

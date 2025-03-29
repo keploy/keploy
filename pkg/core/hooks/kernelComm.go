@@ -4,7 +4,7 @@ package hooks
 
 import (
 	"context"
-	"fmt"
+	"errors"
 
 	"math/rand"
 
@@ -26,7 +26,7 @@ func (h *Hooks) Get(_ context.Context, srcPort uint16) (*core.NetworkAddress, er
 	// TODO : need to implement eBPF code to differentiate between different apps
 	s, ok := h.sess.Get(0)
 	if !ok {
-		return nil, fmt.Errorf("session not found")
+		return nil, errors.New("session not found")
 	}
 
 	return &core.NetworkAddress{

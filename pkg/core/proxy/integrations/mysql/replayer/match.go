@@ -5,6 +5,7 @@ package replayer
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -36,7 +37,7 @@ func matchHeader(expected, actual mysql.Header) bool {
 func matchSSLRequest(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) error {
 	// Match the type
 	if expected.Header.Type != actual.Header.Type {
-		return fmt.Errorf("type mismatch for ssl request")
+		return errors.New("type mismatch for ssl request")
 	}
 
 	//Don't match the header, because the payload length can be different.
@@ -66,7 +67,7 @@ func matchSSLRequest(_ context.Context, _ *zap.Logger, expected, actual mysql.Pa
 func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) error {
 	// Match the type
 	if expected.Header.Type != actual.Header.Type {
-		return fmt.Errorf("type mismatch for handshake response")
+		return errors.New("type mismatch for handshake response")
 	}
 
 	//Don't match the header, because the payload length can be different.
@@ -132,7 +133,7 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 
 	// Match the ZstdCompressionLevel
 	if exp.ZstdCompressionLevel != act.ZstdCompressionLevel {
-		return fmt.Errorf("zstd compression level mismatch for handshake response")
+		return errors.New("zstd compression level mismatch for handshake response")
 	}
 
 	return nil
@@ -164,7 +165,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 				return nil, false, ctx.Err()
 			}
 			utils.LogError(logger, nil, "no mysql mocks found")
-			return nil, false, fmt.Errorf("no mysql mocks found")
+			return nil, false, errors.New("no mysql mocks found")
 		}
 
 		var tcsMocks []*models.Mock
@@ -188,7 +189,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			}
 
 			utils.LogError(logger, nil, "no mysql mocks found for handling command phase")
-			return nil, false, fmt.Errorf("no mysql mocks found for handling command phase")
+			return nil, false, errors.New("no mysql mocks found for handling command phase")
 		}
 
 		var maxMatchedCount int
@@ -311,7 +312,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			prepareOkResp, ok := matchedResp.Message.(*mysql.StmtPrepareOkPacket)
 			if !ok {
 				logger.Error("failed to type assert the StmtPrepareOkPacket")
-				return nil, false, fmt.Errorf("failed to type assert the StmtPrepareOkPacket")
+				return nil, false, errors.New("failed to type assert the StmtPrepareOkPacket")
 			}
 			// This prepared statement will be used in the further execute statement packets
 			decodeCtx.PreparedStatements[prepareOkResp.StatementID] = prepareOkResp

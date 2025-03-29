@@ -4,6 +4,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -56,14 +57,14 @@ func (p *Proxy) globalPassThrough(ctx context.Context, client, dest net.Conn) er
 			_, err := dest.Write(buffer)
 			if err != nil {
 				utils.LogError(logger, err, "failed to write request message to the destination server")
-				return fmt.Errorf("error writing to destination")
+				return errors.New("error writing to destination")
 			}
 		case buffer := <-destBuffChan:
 			// Write the response message to the client
 			_, err := client.Write(buffer)
 			if err != nil {
 				utils.LogError(logger, err, "failed to write response message to the client")
-				return fmt.Errorf("error writing to client")
+				return errors.New("error writing to client")
 			}
 		case err := <-errChan:
 			if err == io.EOF {

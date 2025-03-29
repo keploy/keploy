@@ -107,21 +107,21 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get all test set ids: %v", err)
 		utils.LogError(r.logger, err, stopReason)
-		return fmt.Errorf(stopReason)
+		return errors.New(stopReason)
 	}
 
 	if len(testSetIDs) == 0 {
 		recordCmd := models.HighlightGrayString("keploy record")
 		errMsg := fmt.Sprintf("No test sets found in the keploy folder. Please record testcases using %s command", recordCmd)
 		utils.LogError(r.logger, err, errMsg)
-		return fmt.Errorf(errMsg)
+		return errors.New(errMsg)
 	}
 
 	testRunID, err := r.GetNextTestRunID(ctx)
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get next test run id: %v", err)
 		utils.LogError(r.logger, err, stopReason)
-		return fmt.Errorf(stopReason)
+		return errors.New(stopReason)
 	}
 
 	var language config.Language
@@ -181,7 +181,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if ctx.Err() == context.Canceled {
 			return err
 		}
-		return fmt.Errorf(stopReason)
+		return errors.New(stopReason)
 	}
 
 	hookCancel = inst.HookCancel
@@ -211,7 +211,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			if ctx.Err() == context.Canceled {
 				return err
 			}
-			return fmt.Errorf(stopReason)
+			return errors.New(stopReason)
 		}
 
 		if !r.config.Test.SkipCoverage {
@@ -235,7 +235,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			if ctx.Err() == context.Canceled {
 				return err
 			}
-			return fmt.Errorf(stopReason)
+			return errors.New(stopReason)
 		}
 		switch testSetStatus {
 		case models.TestSetStatusAppHalted:
@@ -788,7 +788,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	err = r.reportDB.InsertReport(reportCtx, testRunID, testSetID, testReport)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to insert report")
-		return models.TestSetStatusInternalErr, fmt.Errorf("failed to insert report")
+		return models.TestSetStatusInternalErr, errors.New("failed to insert report")
 	}
 
 	err = utils.AddToGitIgnore(r.logger, r.config.Path, "/reports/")

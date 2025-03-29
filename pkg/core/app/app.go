@@ -68,7 +68,7 @@ type Options struct {
 func (a *App) Setup(_ context.Context) error {
 
 	if utils.IsDockerCmd(a.kind) && isDetachMode(a.logger, a.cmd, a.kind) {
-		return fmt.Errorf("application could not be started in detached mode")
+		return errors.New("application could not be started in detached mode")
 	}
 
 	switch a.kind {
@@ -107,7 +107,7 @@ func (a *App) SetupDocker() error {
 			return err
 		}
 		if running {
-			return fmt.Errorf("docker container is already in running state")
+			return errors.New("docker container is already in running state")
 		}
 	}
 

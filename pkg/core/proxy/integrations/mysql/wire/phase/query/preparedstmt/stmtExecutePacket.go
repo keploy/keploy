@@ -5,6 +5,7 @@ package preparedstmt
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 
@@ -17,7 +18,7 @@ import (
 
 func DecodeStmtExecute(_ context.Context, _ *zap.Logger, data []byte, preparedStmts map[uint32]*mysql.StmtPrepareOkPacket) (*mysql.StmtExecutePacket, error) {
 	if len(data) < 10 {
-		return &mysql.StmtExecutePacket{}, fmt.Errorf("packet length too short for COM_STMT_EXECUTE")
+		return &mysql.StmtExecutePacket{}, errors.New("packet length too short for COM_STMT_EXECUTE")
 	}
 
 	pos := 0

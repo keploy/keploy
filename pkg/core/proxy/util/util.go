@@ -416,7 +416,7 @@ func GetLocalIPv4() (net.IP, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("no valid IP address found")
+	return nil, errors.New("no valid IP address found")
 }
 
 func ToIPV4(ip net.IP) (uint32, bool) {
@@ -448,7 +448,7 @@ func GetLocalIPv6() (net.IP, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("no valid IPv6 address found")
+	return nil, errors.New("no valid IPv6 address found")
 }
 
 func IPv6ToUint32Array(ip net.IP) ([4]uint32, error) {
@@ -522,7 +522,7 @@ func GetJavaHome(ctx context.Context) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("java.home not found in command output")
+	return "", errors.New("java.home not found in command output")
 }
 
 // Recover recovers from a panic in any parser and logs the stack trace to Sentry.

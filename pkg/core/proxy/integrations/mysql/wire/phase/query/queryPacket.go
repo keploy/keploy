@@ -5,7 +5,7 @@ package query
 
 import (
 	"context"
-	"fmt"
+	"errors"
 
 	"go.keploy.io/server/v2/pkg/models/mysql"
 )
@@ -14,7 +14,7 @@ import (
 
 func DecodeQuery(_ context.Context, data []byte) (*mysql.QueryPacket, error) {
 	if len(data) < 2 {
-		return nil, fmt.Errorf("query packet too short")
+		return nil, errors.New("query packet too short")
 	}
 
 	packet := &mysql.QueryPacket{
