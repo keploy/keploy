@@ -5,7 +5,7 @@ package preparedstmt
 import (
 	"context"
 	"encoding/binary"
-	"fmt"
+	"errors"
 
 	"go.keploy.io/server/v2/pkg/models/mysql"
 )
@@ -14,7 +14,7 @@ import (
 
 func DecodeStmtSendLongData(_ context.Context, data []byte) (*mysql.StmtSendLongDataPacket, error) {
 	if len(data) < 7 || data[0] != 0x18 {
-		return &mysql.StmtSendLongDataPacket{}, fmt.Errorf("invalid COM_STMT_SEND_LONG_DATA packet")
+		return &mysql.StmtSendLongDataPacket{}, errors.New("invalid COM_STMT_SEND_LONG_DATA packet")
 	}
 
 	packet := &mysql.StmtSendLongDataPacket{

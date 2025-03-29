@@ -4,6 +4,7 @@ package replay
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -263,5 +264,5 @@ func extractClaimsWithoutVerification(tokenString string) (jwt.MapClaims, error)
 	if claims, ok := token.Claims.(jwt.MapClaims); ok {
 		return claims, nil
 	}
-	return nil, fmt.Errorf("unable to parse claims")
+	return nil, errors.New("unable to parse claims")
 }

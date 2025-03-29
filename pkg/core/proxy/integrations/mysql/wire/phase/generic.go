@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
@@ -19,7 +20,7 @@ import (
 
 func DecodeEOF(_ context.Context, data []byte, capabilities uint32) (*mysql.EOFPacket, error) {
 	if len(data) > 5 {
-		return nil, fmt.Errorf("EOF packet too long for EOF")
+		return nil, errors.New("EOF packet too long for EOF")
 	}
 
 	packet := &mysql.EOFPacket{
@@ -62,7 +63,7 @@ func EncodeEOF(_ context.Context, packet *mysql.EOFPacket, capabilities uint32) 
 
 func DecodeERR(_ context.Context, data []byte, capabilities uint32) (*mysql.ERRPacket, error) {
 	if len(data) < 9 {
-		return nil, fmt.Errorf("ERR packet too short")
+		return nil, errors.New("ERR packet too short")
 	}
 
 	packet := &mysql.ERRPacket{
@@ -104,7 +105,7 @@ func EncodeErr(_ context.Context, packet *mysql.ERRPacket, capabilities uint32) 
 	// Write the SQL state marker and SQL state if CLIENT_PROTOCOL_41 is set
 	if capabilities&uint32(mysql.CLIENT_PROTOCOL_41) > 0 {
 		if len(packet.SQLStateMarker) != 1 || len(packet.SQLState) != 5 {
-			return nil, fmt.Errorf("invalid SQL state marker or SQL state length")
+			return nil, errors.New("invalid SQL state marker or SQL state length")
 		}
 
 		if err := buf.WriteByte(packet.SQLStateMarker[0]); err != nil {
@@ -128,7 +129,7 @@ func EncodeErr(_ context.Context, packet *mysql.ERRPacket, capabilities uint32) 
 
 func DecodeOk(_ context.Context, data []byte, capabilities uint32) (*mysql.OKPacket, error) {
 	if len(data) < 7 {
-		return nil, fmt.Errorf("OK packet too short")
+		return nil, errors.New("OK packet too short")
 	}
 
 	packet := &mysql.OKPacket{

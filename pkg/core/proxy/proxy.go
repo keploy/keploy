@@ -680,7 +680,7 @@ func (p *Proxy) Mock(_ context.Context, id uint64, opts models.OutgoingOptions) 
 func (p *Proxy) SetMocks(_ context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error {
 	//session, ok := p.sessions.Get(id)
 	//if !ok {
-	//	return fmt.Errorf("session not found")
+	//	return errors.New("session not found")
 	//}
 	m, ok := p.MockManagers.Load(id)
 	if ok {
@@ -695,7 +695,7 @@ func (p *Proxy) SetMocks(_ context.Context, id uint64, filtered []*models.Mock, 
 func (p *Proxy) GetConsumedMocks(_ context.Context, id uint64) ([]string, error) {
 	m, ok := p.MockManagers.Load(id)
 	if !ok {
-		return nil, fmt.Errorf("mock manager not found to get consumed filtered mocks")
+		return nil, errors.New("mock manager not found to get consumed filtered mocks")
 	}
 	return m.(*MockManager).GetConsumedMocks(), nil
 }
