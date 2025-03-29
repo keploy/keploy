@@ -914,10 +914,13 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 		isMatched := true
 		isExact := true
 		// To exclude matched elements from further comparisons during list matching
-		visited := make([]bool, expSlice.Len())
+		visited := make([]bool, actSlice.Len())
 		for i := 0; i < expSlice.Len(); i++ {
 			matched := false
-			for j := 0; j < actSlice.Len() && !visited[j]; j++ {
+			for j := 0; j < actSlice.Len(); j++ {
+				if visited[j] {
+					continue
+				}
 				prefixedVal := key + "[" + fmt.Sprint(j) + "]"
 				if valMatchJSONComparisonResult, err := matchJSONWithNoiseHandling(prefixedVal, expSlice.Index(i).Interface(), actSlice.Index(j).Interface(), noiseMap, ignoreOrdering); err == nil && valMatchJSONComparisonResult.matches {
 					if !valMatchJSONComparisonResult.isExact {
