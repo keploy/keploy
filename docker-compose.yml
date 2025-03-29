@@ -1,0 +1,16 @@
+version: "3.8"
+
+services:
+  flask-app:
+    build: .
+    ports:
+      - "5000:5000"
+    depends_on:
+      - mongo
+    environment:
+      MONGO_URI: "mongodb://mongo:27017/mydatabase"
+
+  mongo:
+    image: mongo
+    ports:
+      - "27017:27017"
