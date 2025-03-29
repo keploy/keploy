@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -239,7 +240,7 @@ func generateUniqueID() string {
 func checkConfigFile(servicesMapping map[string][]string) error {
 	// Check if the size of servicesMapping is less than 1
 	if len(servicesMapping) < 1 {
-		return fmt.Errorf("services mapping must contain at least 1 services")
+		return errors.New("services mapping must contain at least 1 services")
 	}
 	return nil
 }

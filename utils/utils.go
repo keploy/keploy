@@ -52,7 +52,7 @@ func ReplaceHost(currentURL string, ipAddress string) (string, error) {
 	}
 
 	if ipAddress == "" {
-		return currentURL, fmt.Errorf("failed to replace url in case of docker env")
+		return currentURL, errors.New("failed to replace url in case of docker env")
 	}
 
 	// Replace hostname with the IP address
@@ -72,7 +72,7 @@ func ReplaceBaseURL(currentURL string, baseURL string) (string, error) {
 
 	// Check if baseURL is valid
 	if baseURL == "" {
-		return currentURL, fmt.Errorf("failed to replace baseURL: baseURL is empty")
+		return currentURL, errors.New("failed to replace baseURL: baseURL is empty")
 	}
 
 	// Parse the new baseURL
@@ -91,7 +91,7 @@ func ReplaceBaseURL(currentURL string, baseURL string) (string, error) {
 
 func ReplacePort(currentURL string, port string) (string, error) {
 	if port == "" {
-		return currentURL, fmt.Errorf("failed to replace port in case of docker env")
+		return currentURL, errors.New("failed to replace port in case of docker env")
 	}
 
 	parsedURL, err := url.Parse(currentURL)

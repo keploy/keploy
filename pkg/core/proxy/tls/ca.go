@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"embed"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -74,7 +75,7 @@ func updateCaStore(ctx context.Context) error {
 		}
 	}
 	if !commandRun {
-		return fmt.Errorf("no valid CA store tools command found")
+		return errors.New("no valid CA store tools command found")
 	}
 	return nil
 }
@@ -87,7 +88,7 @@ func getCaPaths() ([]string, error) {
 		}
 	}
 	if len(caPaths) == 0 {
-		return nil, fmt.Errorf("no valid CA store path found")
+		return nil, errors.New("no valid CA store path found")
 	}
 	return caPaths, nil
 }
@@ -299,7 +300,7 @@ func CertForClient(clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed
 	}
 	cryptoSigner, ok := caPrivKey.(crypto.Signer)
 	if !ok {
-		return nil, fmt.Errorf("failed to typecast the caPrivKey")
+		return nil, errors.New("failed to typecast the caPrivKey")
 	}
 	signerd, err := local.NewSigner(cryptoSigner, caCertParsed, signer.DefaultSigAlgo(cryptoSigner), nil)
 	if err != nil {

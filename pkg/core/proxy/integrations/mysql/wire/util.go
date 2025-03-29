@@ -4,6 +4,7 @@ package wire
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -92,7 +93,7 @@ func GetPluginName(buf interface{}) (string, error) {
 	case *mysql.AuthSwitchRequestPacket:
 		return v.PluginName, nil
 	default:
-		return "", fmt.Errorf("invalid packet type to get plugin name")
+		return "", errors.New("invalid packet type to get plugin name")
 	}
 }
 
