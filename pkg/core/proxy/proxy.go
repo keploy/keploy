@@ -11,25 +11,30 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"golang.org/x/sync/errgroup"
 	"io"
+	"math/rand"
 	"net"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"golang.org/x/sync/errgroup"
-
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/pcap"
+	"github.com/google/gopacket/pcapgo"
 	pTls "go.keploy.io/server/v2/pkg/core/proxy/tls"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
+	"log"
+	"os"
 )
 
 type ParserPriority struct {
@@ -40,11 +45,11 @@ type ParserPriority struct {
 type Proxy struct {
 	logger *zap.Logger
 
-	IP4     string
-	IP6     string
-	Port    uint32
-	DNSPort uint32
-
+	IP4          string
+	IP6          string
+	Port         uint32
+	DNSPort      uint32
+	Debug        bool
 	DestInfo     core.DestInfo
 	Integrations map[integrations.IntegrationType]integrations.Integrations
 
@@ -71,8 +76,9 @@ func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
 		logger:       logger,
 		Port:         opts.ProxyPort, // default: 16789
 		DNSPort:      opts.DNSPort,   // default: 26789
-		IP4:          "127.0.0.1",    // default: "127.0.0.1" <-> (2130706433)
-		IP6:          "::1",          //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
+		Debug:        opts.Debug,
+		IP4:          "127.0.0.1", // default: "127.0.0.1" <-> (2130706433)
+		IP6:          "::1",       //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
 		ipMutex:      &sync.Mutex{},
 		connMutex:    &sync.Mutex{},
 		DestInfo:     info,
@@ -225,6 +231,45 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		p.logger.Info("proxy stopped...")
 	}(listener)
 
+	// Start Packet Capture if debug mode
+	if p.Debug {
+		randomID := generateRandomID()
+		go func() {
+			pcapFileName := fmt.Sprintf("capture_%s.pcap", randomID)
+
+			// Create a new PCAP file
+			pcapFile, err := os.Create(pcapFileName)
+			if err != nil {
+				log.Fatal("Error creating PCAP file:", err)
+			}
+			defer pcapFile.Close()
+
+			// Create a new PCAP writer
+			iface := "any"
+			handle, err := pcap.OpenLive(iface, 65536, true, pcap.BlockForever)
+			if err != nil {
+				log.Fatal("Error opening interface:", err)
+			}
+			defer handle.Close()
+
+			pcapWriter := pcapgo.NewWriter(pcapFile)
+			err = pcapWriter.WriteFileHeader(65536, handle.LinkType())
+			if err != nil {
+				log.Fatal("Error writing PCAP file header:", err)
+			}
+
+			// Start capturing packets
+			packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
+			for packet := range packetSource.Packets() {
+				// Write packet data to the PCAP file
+				err = pcapWriter.WritePacket(packet.Metadata().CaptureInfo, packet.Data())
+				if err != nil {
+					log.Println("Error writing packet data:", err)
+				}
+			}
+			log.Println("Packet capture complete")
+		}()
+	}
 	clientConnCtx, clientConnCancel := context.WithCancel(ctx)
 	clientConnErrGrp, _ := errgroup.WithContext(clientConnCtx)
 	defer func() {
@@ -233,7 +278,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		if err != nil {
 			p.logger.Debug("failed to handle the client connection", zap.Error(err))
 		}
-		//closing all the mock channels (if any in record mode)
+		// Closing all the mock channels (if any in record mode)
 		for _, mc := range p.sessions.GetAllMC() {
 			if mc != nil {
 				close(mc)
@@ -241,7 +286,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		}
 
 		if string(p.nsswitchData) != "" {
-			// reset the hosts config in nsswitch.conf of the system (in test mode)
+			// Reset the hosts config in nsswitch.conf of the system (in test mode)
 			err = p.resetNsSwitchConfig()
 			if err != nil {
 				utils.LogError(p.logger, err, "failed to reset the nsswitch config")
@@ -271,7 +316,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			return nil
 		case <-errCh:
 			return err
-		// handle the client connection
+		// Handle the client connection
 		case clientConn := <-clientConnCh:
 			clientConnErrGrp.Go(func() error {
 				defer util.Recover(p.logger, clientConn, nil)
@@ -283,6 +328,12 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 			})
 		}
 	}
+}
+
+func generateRandomID() string {
+	rand.Seed(time.Now().UnixNano())
+	id := rand.Intn(100000) // Adjust the range as needed
+	return fmt.Sprintf("%d", id)
 }
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
