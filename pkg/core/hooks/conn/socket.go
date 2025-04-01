@@ -34,7 +34,7 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 		utils.LogError(l, err, "failed to initialize real time offset")
 		return nil, errors.New("failed to start socket listeners")
 	}
-	c := NewFactory(time.Minute, l)
+	c := NewFactory(time.Minute, l, opts)
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
 		return nil, errors.New("failed to get the error group from the context")

@@ -235,6 +235,12 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 		}
 		switch m.Kind {
 		case models.HTTP:
+
+			// added this condition for backward compatibility
+			if m.RespType == "" {
+				m.RespType = models.HTTPResponseJSON
+			}
+
 			switch m.RespType {
 			case models.HTTPResponseXML:
 				httpSpec := models.XMLSchema{}
