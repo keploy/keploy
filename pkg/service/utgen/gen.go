@@ -12,11 +12,12 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/k0kubun/pp/v3"
+	"go.uber.org/zap"
+
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/utils"
-	"go.uber.org/zap"
 )
 
 type Coverage struct {
@@ -42,7 +43,7 @@ type UnitTestGenerator struct {
 	cur              *Cursor
 	failedTests      []*models.FailedUT
 	prompt           *Prompt
-	ai               AIClientInterface
+	ai               AIModelClient
 	logger           *zap.Logger
 	promptBuilder    *PromptBuilder
 	injector         *Injector
@@ -105,7 +106,9 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			return err
 		}
 		if len(g.Files) == 0 {
-			return fmt.Errorf("couldn't identify the source files. Please mention source file and test file using flags")
+			return fmt.Errorf(
+				"couldn't identify the source files. Please mention source file and test file using flags",
+			)
 		}
 	}
 	const paddingHeight = 1
@@ -158,7 +161,17 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 
 		iterationCount := 1
 		g.lang = GetCodeLanguage(g.srcPath)
-		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt, g.ai.GetFunctionUnderTest(), g.logger)
+		g.promptBuilder, err = NewPromptBuilder(
+			g.srcPath,
+			g.testPath,
+			g.cov.Content,
+			"",
+			"",
+			g.lang,
+			g.additionalPrompt,
+			g.ai.GetFunctionUnderTest(),
+			g.logger,
+		)
 		g.injector = NewInjectorBuilder(g.logger, g.lang)
 
 		if err != nil {
@@ -197,7 +210,10 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 					errorMessage := failedTest.ErrorMsg
 					failedTestRunsValue += fmt.Sprintf("Failed Test:\n\n%s\n\n", code)
 					if errorMessage != "" {
-						failedTestRunsValue += fmt.Sprintf("Error message for test above:\n%s\n\n\n", errorMessage)
+						failedTestRunsValue += fmt.Sprintf(
+							"Error message for test above:\n%s\n\n\n",
+							errorMessage,
+						)
 					} else {
 						failedTestRunsValue += "\n\n"
 					}
@@ -246,7 +262,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				}
 			}
 
-			var overallCovInc = false
+			overallCovInc := false
 
 			g.logger.Info("Validating new generated tests one by one")
 			g.totalTestCase += len(testsDetails.NewTests)
@@ -262,7 +278,13 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 					return fmt.Errorf("process cancelled by user")
 				default:
 				}
-				coverageInc, err := g.ValidateTest(generatedTest, &passedTests, &noCoverageTest, &failedBuild, installedPackages)
+				coverageInc, err := g.ValidateTest(
+					generatedTest,
+					&passedTests,
+					&noCoverageTest,
+					&failedBuild,
+					installedPackages,
+				)
 				if err != nil {
 					utils.LogError(g.logger, err, "Error validating test")
 
@@ -302,33 +324,51 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 
 			fmt.Printf("\n<=========================================>\n")
 			fmt.Printf(("Tests generated in Session") + "\n")
-			fmt.Printf("+-------------------------------+-------------------------------+-------------------------------+\n")
+			fmt.Printf(
+				"+-------------------------------+-------------------------------+-------------------------------+\n",
+			)
 			fmt.Printf("| %s | %s | %s |\n",
 				centerAlignText("Total Test Cases", 29),
 				centerAlignText("Test Cases Passed", 29),
 				centerAlignText("Test Cases Failed", 29))
-			fmt.Printf("+-------------------------------+-------------------------------+-------------------------------+\n")
+			fmt.Printf(
+				"+-------------------------------+-------------------------------+-------------------------------+\n",
+			)
 			fmt.Print(addHeightPadding(paddingHeight, 3, columnWidths3))
 			fmt.Printf("| \033[33m%s\033[0m | \033[32m%s\033[0m | \033[33m%s\033[0m |\n",
 				centerAlignText(fmt.Sprintf("%d", totalTest), 29),
 				centerAlignText(fmt.Sprintf("%d", passedTests), 29),
 				centerAlignText(fmt.Sprintf("%d", failedBuild+noCoverageTest), 29))
 			fmt.Print(addHeightPadding(paddingHeight, 3, columnWidths3))
-			fmt.Printf("+-------------------------------+-------------------------------+-------------------------------+\n")
+			fmt.Printf(
+				"+-------------------------------+-------------------------------+-------------------------------+\n",
+			)
 			fmt.Printf(("Discarded tests in session") + "\n")
-			fmt.Printf("+------------------------------------------+------------------------------------------+\n")
+			fmt.Printf(
+				"+------------------------------------------+------------------------------------------+\n",
+			)
 			fmt.Printf("| %s | %s |\n",
 				centerAlignText("Build failures", 40),
 				centerAlignText("No Coverage output", 40))
-			fmt.Printf("+------------------------------------------+------------------------------------------+\n")
+			fmt.Printf(
+				"+------------------------------------------+------------------------------------------+\n",
+			)
 			fmt.Print(addHeightPadding(paddingHeight, 2, columnWidths2))
 			fmt.Printf("| \033[35m%s\033[0m | \033[92m%s\033[0m |\n",
 				centerAlignText(fmt.Sprintf("%d", failedBuild), 40),
 				centerAlignText(fmt.Sprintf("%d", noCoverageTest), 40))
 			fmt.Print(addHeightPadding(paddingHeight, 2, columnWidths2))
-			fmt.Printf("+------------------------------------------+------------------------------------------+\n")
+			fmt.Printf(
+				"+------------------------------------------+------------------------------------------+\n",
+			)
 			fmt.Printf("<=========================================>\n")
-			err = g.ai.SendCoverageUpdate(ctx, g.ai.GetSessionID(), initialCoverage, g.cov.Current, iterationCount)
+			err = g.ai.SendCoverageUpdate(
+				ctx,
+				g.ai.GetSessionID(),
+				initialCoverage,
+				g.cov.Current,
+				iterationCount,
+			)
 			if err != nil {
 				utils.LogError(g.logger, err, "Error sending coverage update")
 			}
@@ -358,34 +398,46 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 	fmt.Printf(("COMPLETE TEST GENERATE SUMMARY") + "\n")
 	fmt.Printf(("Total Test Summary") + "\n")
 
-	fmt.Printf("+-------------------------------+-------------------------------+-------------------------------+\n")
+	fmt.Printf(
+		"+-------------------------------+-------------------------------+-------------------------------+\n",
+	)
 	fmt.Printf("| %s | %s | %s |\n",
 		centerAlignText("Total Test Cases", 29),
 		centerAlignText("Test Cases Passed", 29),
 		centerAlignText("Test Cases Failed", 29))
 
-	fmt.Printf("+-------------------------------+-------------------------------+-------------------------------+\n")
+	fmt.Printf(
+		"+-------------------------------+-------------------------------+-------------------------------+\n",
+	)
 	fmt.Print(addHeightPadding(paddingHeight, 3, columnWidths3))
 	fmt.Printf("| \033[33m%s\033[0m | \033[32m%s\033[0m | \033[33m%s\033[0m |\n",
 		centerAlignText(fmt.Sprintf("%d", g.totalTestCase), 29),
 		centerAlignText(fmt.Sprintf("%d", g.testCasePassed), 29),
 		centerAlignText(fmt.Sprintf("%d", g.testCaseFailed+g.noCoverageTest), 29))
 	fmt.Print(addHeightPadding(paddingHeight, 3, columnWidths3))
-	fmt.Printf("+-------------------------------+-------------------------------+-------------------------------+\n")
+	fmt.Printf(
+		"+-------------------------------+-------------------------------+-------------------------------+\n",
+	)
 
 	fmt.Printf(("Discarded Cases Summary") + "\n")
-	fmt.Printf("+------------------------------------------+------------------------------------------+\n")
+	fmt.Printf(
+		"+------------------------------------------+------------------------------------------+\n",
+	)
 	fmt.Printf("| %s | %s |\n",
 		centerAlignText("Build failures", 40),
 		centerAlignText("No Coverage output", 40))
 
-	fmt.Printf("+------------------------------------------+------------------------------------------+\n")
+	fmt.Printf(
+		"+------------------------------------------+------------------------------------------+\n",
+	)
 	fmt.Print(addHeightPadding(paddingHeight, 2, columnWidths2))
 	fmt.Printf("| \033[35m%s\033[0m | \033[92m%s\033[0m |\n",
 		centerAlignText(fmt.Sprintf("%d", g.testCaseFailed), 40),
 		centerAlignText(fmt.Sprintf("%d", g.noCoverageTest), 40))
 	fmt.Print(addHeightPadding(paddingHeight, 2, columnWidths2))
-	fmt.Printf("+------------------------------------------+------------------------------------------+\n")
+	fmt.Printf(
+		"+------------------------------------------+------------------------------------------+\n",
+	)
 
 	fmt.Printf("<=========================================>\n")
 	return nil
@@ -413,7 +465,12 @@ func centerAlignText(text string, width int) string {
 	leftPadding := (width - textLen) / 2
 	rightPadding := width - textLen - leftPadding
 
-	return fmt.Sprintf("%s%s%s", strings.Repeat(" ", leftPadding), text, strings.Repeat(" ", rightPadding))
+	return fmt.Sprintf(
+		"%s%s%s",
+		strings.Repeat(" ", leftPadding),
+		text,
+		strings.Repeat(" ", rightPadding),
+	)
 }
 
 func addHeightPadding(rows int, columns int, columnWidths []int) string {
@@ -487,7 +544,10 @@ func (g *UnitTestGenerator) runCoverage() error {
 	return nil
 }
 
-func (g *UnitTestGenerator) GenerateTests(ctx context.Context, iterationCount int) (*models.UTDetails, error) {
+func (g *UnitTestGenerator) GenerateTests(
+	ctx context.Context,
+	iterationCount int,
+) (*models.UTDetails, error) {
 	fmt.Println("Generating Tests...")
 
 	select {
@@ -515,15 +575,16 @@ func (g *UnitTestGenerator) GenerateTests(ctx context.Context, iterationCount in
 		return &models.UTDetails{}, err
 	}
 
-	aiRequest := AIRequest{
+	callOptions := CallOptions{
 		MaxTokens:      4096,
 		Prompt:         *g.prompt,
 		SessionID:      g.ai.GetSessionID(),
 		Iteration:      iterationCount,
 		RequestPurpose: requestPurpose,
+		Stream:         false,
 	}
 
-	response, err := g.ai.Call(ctx, CompletionParams{}, aiRequest, false)
+	response, err := g.ai.Call(ctx, callOptions)
 	if err != nil {
 		return &models.UTDetails{}, err
 	}
@@ -563,12 +624,13 @@ func (g *UnitTestGenerator) getIndentation(ctx context.Context) (int, error) {
 			return 0, fmt.Errorf("error building prompt: %w", err)
 		}
 
-		aiRequest := AIRequest{
+		callOptions := CallOptions{
 			MaxTokens: 4096,
 			Prompt:    *prompt,
 			SessionID: g.ai.GetSessionID(),
+			Stream:    false,
 		}
-		response, err := g.ai.Call(ctx, CompletionParams{}, aiRequest, false)
+		response, err := g.ai.Call(ctx, callOptions)
 		if err != nil {
 			utils.LogError(g.logger, err, "Error calling AI model")
 			return 0, err
@@ -601,12 +663,13 @@ func (g *UnitTestGenerator) getLine(ctx context.Context) (int, error) {
 			return 0, fmt.Errorf("error building prompt: %w", err)
 		}
 
-		aiRequest := AIRequest{
+		callOptions := CallOptions{
 			MaxTokens: 4096,
 			Prompt:    *prompt,
 			SessionID: g.ai.GetSessionID(),
+			Stream:    false,
 		}
-		response, err := g.ai.Call(ctx, CompletionParams{}, aiRequest, false)
+		response, err := g.ai.Call(ctx, callOptions)
 		if err != nil {
 			utils.LogError(g.logger, err, "Error calling AI model")
 			return 0, err
@@ -619,7 +682,10 @@ func (g *UnitTestGenerator) getLine(ctx context.Context) (int, error) {
 
 		line, err = convertToInt(testsDetails.Line)
 		if err != nil {
-			return 0, fmt.Errorf("error converting relevant_line_number_to_insert_after to int: %w", err)
+			return 0, fmt.Errorf(
+				"error converting relevant_line_number_to_insert_after to int: %w",
+				err,
+			)
 		}
 		counterAttempts++
 	}
@@ -651,7 +717,9 @@ func (g *UnitTestGenerator) ValidateTest(
 			testCodeIndented = strings.Join(lines, "\n")
 		}
 	}
-	testCodeIndented = "\n" + g.injector.addCommentToTest(strings.TrimSpace(testCodeIndented)) + "\n"
+	testCodeIndented = "\n" + g.injector.addCommentToTest(
+		strings.TrimSpace(testCodeIndented),
+	) + "\n"
 	originalContent, err := readFile(g.testPath)
 	if err != nil {
 		return false, fmt.Errorf("failed to read test file: %w", err)
@@ -671,7 +739,10 @@ func (g *UnitTestGenerator) ValidateTest(
 	if err != nil {
 		g.logger.Warn("Error updating imports", zap.Error(err))
 	}
-	newInstalledPackages, err := g.injector.installLibraries(generatedTest.LibraryInstallationCode, installedPackages)
+	newInstalledPackages, err := g.injector.installLibraries(
+		generatedTest.LibraryInstallationCode,
+		installedPackages,
+	)
 	if err != nil {
 		g.logger.Debug("Error installing libraries", zap.Error(err))
 	}
@@ -732,7 +803,9 @@ func (g *UnitTestGenerator) ValidateTest(
 
 	if g.flakiness {
 		// Run the Test Five Times to Check for Flakiness
-		g.logger.Info("Coverage increased. Running additional test iterations to check for flakiness.")
+		g.logger.Info(
+			"Coverage increased. Running additional test iterations to check for flakiness.",
+		)
 		for i := 0; i < 5; i++ {
 			g.logger.Info(fmt.Sprintf("Flakiness Check - Iteration no: %d", i+1))
 			stdout, stderr, exitCode, _, _ := RunCommand(g.cmd, g.dir, g.logger)
@@ -791,12 +864,19 @@ func (g *UnitTestGenerator) saveFailedTestCasesToFile() error {
 
 	// Writing Test Cases To File
 	for _, failedTest := range g.failedTests {
-		builder.WriteString("\n" + strings.Repeat("-", 20) + "Test Case" + strings.Repeat("-", 20) + "\n")
+		builder.WriteString(
+			"\n" + strings.Repeat("-", 20) + "Test Case" + strings.Repeat("-", 20) + "\n",
+		)
 		if len(failedTest.NewImportsCode) > 0 {
 			builder.WriteString(fmt.Sprintf("Import Statements:\n%s\n", failedTest.NewImportsCode))
 		}
 		if len(failedTest.LibraryInstallationCode) > 0 {
-			builder.WriteString(fmt.Sprintf("Required Library Installation\n%s\n", failedTest.LibraryInstallationCode))
+			builder.WriteString(
+				fmt.Sprintf(
+					"Required Library Installation\n%s\n",
+					failedTest.LibraryInstallationCode,
+				),
+			)
 		}
 		builder.WriteString(fmt.Sprintf("Test Implementation:\n%s\n\n", failedTest.TestCode))
 		if len(failedTest.ErrorMsg) > 0 {

@@ -9,13 +9,39 @@ import (
 	"go.keploy.io/server/v2/pkg/service"
 )
 
-type AIClientInterface interface {
-	Call(
-		ctx context.Context,
-		config CompletionParams,
-		request AIRequest,
-		stream bool,
-	) (string, error)
+type CallOptions struct {
+	Prompt         Prompt
+	SessionID      string
+	Iteration      int
+	RequestPurpose PurposeType
+	MaxTokens      int
+	Stream         bool
+	Temperature    float32
+	TopP           float32
+}
+
+type Prompt struct {
+	System string `json:"system"`
+	User   string `json:"user"`
+}
+
+type Message struct {
+	Role    string
+	Content string
+}
+
+type PurposeType string
+
+const (
+	// TestForFunction represents a purpose type where the request is to test a function.
+	TestForFunction PurposeType = "TestForFunction"
+
+	// TestForFile represents a purpose type where the request is to test a file.
+	TestForFile PurposeType = "TestForFile"
+)
+
+type AIModelClient interface {
+	Call(ctx context.Context, opts CallOptions) (string, error)
 	SendCoverageUpdate(
 		ctx context.Context,
 		sessionID string,
@@ -32,7 +58,7 @@ func NewAIClient(
 	auth service.Auth,
 	sessionID string,
 	logger *zap.Logger,
-) AIClientInterface {
+) AIModelClient {
 	if genConfig.Provider == "gemini" {
 		return NewGeminiClient(genConfig, apiKey, apiServerURL, auth, sessionID, logger)
 	}
