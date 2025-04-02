@@ -55,7 +55,7 @@ func NewGeminiClient(
 		options = append(options, option.WithEndpoint(genConfig.APIBaseURL))
 	}
 
-	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
+	client, err := genai.NewClient(ctx, options...)
 	if err != nil {
 		logger.Error("error creating google gemini ai client. calls will fail", zap.Error(err))
 	}
