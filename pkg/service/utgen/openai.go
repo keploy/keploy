@@ -174,7 +174,7 @@ func (c *OpenAIClient) callOpenAI(ctx context.Context, opts CallOptions) (string
 	}
 
 	if opts.Stream {
-		return c.streamOpenAI(ctx, params)
+		return c.stream(ctx, params)
 	}
 
 	resp, err := c.client.Chat.Completions.New(ctx, params)
@@ -190,7 +190,7 @@ func (c *OpenAIClient) callOpenAI(ctx context.Context, opts CallOptions) (string
 	return resp.Choices[0].Message.Content, nil
 }
 
-func (c *OpenAIClient) streamOpenAI(
+func (c *OpenAIClient) stream(
 	ctx context.Context,
 	params openai.ChatCompletionNewParams,
 ) (string, error) {

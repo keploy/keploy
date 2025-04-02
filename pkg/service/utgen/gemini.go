@@ -102,7 +102,7 @@ func (c *GeminiClient) Call(
 	}
 
 	if opts.Stream {
-		return c.streamGemini(ctx, model, parts)
+		return c.stream(ctx, model, parts)
 	}
 
 	resp, err := model.GenerateContent(ctx, parts...)
@@ -116,7 +116,7 @@ func (c *GeminiClient) Call(
 	return fmt.Sprint(resp.Candidates[0].Content.Parts[0]), nil
 }
 
-func (c *GeminiClient) streamGemini(
+func (c *GeminiClient) stream(
 	ctx context.Context,
 	model *genai.GenerativeModel,
 	parts []genai.Part,
