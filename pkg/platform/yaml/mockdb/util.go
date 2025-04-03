@@ -14,11 +14,17 @@ import (
 )
 
 func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
+
+	respType := models.HTTPResponseJSON
+	if utils.IsXMLResponse(mock.Spec.HTTPResp) {
+		respType = models.HTTPResponseXML
+	}
 	yamlDoc := yaml.NetworkTrafficDoc{
 		Version:      mock.Version,
 		Kind:         mock.Kind,
 		Name:         mock.Name,
 		ConnectionID: mock.ConnectionID,
+		RespType:     respType,
 	}
 	switch mock.Kind {
 	case models.Mongo:
@@ -64,18 +70,49 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		}
 
 	case models.HTTP:
-		httpSpec := models.HTTPSchema{
-			Metadata:         mock.Spec.Metadata,
-			Request:          *mock.Spec.HTTPReq,
-			Response:         *mock.Spec.HTTPResp,
-			Created:          mock.Spec.Created,
-			ReqTimestampMock: mock.Spec.ReqTimestampMock,
-			ResTimestampMock: mock.Spec.ResTimestampMock,
-		}
-		err := yamlDoc.Spec.Encode(httpSpec)
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the http input-output as yaml")
-			return nil, err
+		switch respType {
+		case models.HTTPResponseXML:
+			mp, err := utils.XMLToMap(mock.Spec.HTTPResp.Body)
+			if err != nil {
+				utils.LogError(logger, err, "failed to convert xml response to map")
+				return nil, err
+			}
+			httpSpec := models.XMLSchema{
+				Metadata: mock.Spec.Metadata,
+				Request:  *mock.Spec.HTTPReq,
+				Response: models.XMLResp{
+					Body:          mp,
+					StatusCode:    mock.Spec.HTTPResp.StatusCode,
+					Header:        mock.Spec.HTTPResp.Header,
+					StatusMessage: mock.Spec.HTTPResp.StatusMessage,
+					ProtoMajor:    mock.Spec.HTTPResp.ProtoMajor,
+					ProtoMinor:    mock.Spec.HTTPResp.ProtoMinor,
+					Binary:        mock.Spec.HTTPResp.Binary,
+					Timestamp:     mock.Spec.HTTPResp.Timestamp,
+				},
+				Created:          mock.Spec.Created,
+				ReqTimestampMock: mock.Spec.ReqTimestampMock,
+				ResTimestampMock: mock.Spec.ResTimestampMock,
+			}
+			err = yamlDoc.Spec.Encode(httpSpec)
+			if err != nil {
+				utils.LogError(logger, err, "failed to marshal the http input-output as yaml")
+				return nil, err
+			}
+		case models.HTTPResponseJSON:
+			httpSpec := models.HTTPSchema{
+				Metadata:         mock.Spec.Metadata,
+				Request:          *mock.Spec.HTTPReq,
+				Response:         *mock.Spec.HTTPResp,
+				Created:          mock.Spec.Created,
+				ReqTimestampMock: mock.Spec.ReqTimestampMock,
+				ResTimestampMock: mock.Spec.ResTimestampMock,
+			}
+			err := yamlDoc.Spec.Encode(httpSpec)
+			if err != nil {
+				utils.LogError(logger, err, "failed to marshal the http input-output as yaml")
+				return nil, err
+			}
 		}
 	case models.GENERIC:
 		genericSpec := models.GenericSchema{
@@ -198,20 +235,43 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 		}
 		switch m.Kind {
 		case models.HTTP:
-			httpSpec := models.HTTPSchema{}
-			err := m.Spec.Decode(&httpSpec)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal a yaml doc into http mock", zap.Any("mock name", m.Name))
-				return nil, err
-			}
-			mock.Spec = models.MockSpec{
-				Metadata: httpSpec.Metadata,
-				HTTPReq:  &httpSpec.Request,
-				HTTPResp: &httpSpec.Response,
 
-				Created:          httpSpec.Created,
-				ReqTimestampMock: httpSpec.ReqTimestampMock,
-				ResTimestampMock: httpSpec.ResTimestampMock,
+			// added this condition for backward compatibility
+			if m.RespType == "" {
+				m.RespType = models.HTTPResponseJSON
+			}
+
+			switch m.RespType {
+			case models.HTTPResponseXML:
+				httpSpec := models.XMLSchema{}
+				err := m.Spec.Decode(&httpSpec)
+				if err != nil {
+					utils.LogError(logger, err, "failed to unmarshal a yaml doc into http mock", zap.Any("mock name", m.Name))
+					return nil, err
+				}
+				mock.Spec = models.MockSpec{
+					Metadata:         httpSpec.Metadata,
+					HTTPReq:          &httpSpec.Request,
+					XMLResp:          &httpSpec.Response,
+					Created:          httpSpec.Created,
+					ReqTimestampMock: httpSpec.ReqTimestampMock,
+					ResTimestampMock: httpSpec.ResTimestampMock,
+				}
+			case models.HTTPResponseJSON:
+				httpSpec := models.HTTPSchema{}
+				err := m.Spec.Decode(&httpSpec)
+				if err != nil {
+					utils.LogError(logger, err, "failed to unmarshal a yaml doc into http mock", zap.Any("mock name", m.Name))
+					return nil, err
+				}
+				mock.Spec = models.MockSpec{
+					Metadata:         httpSpec.Metadata,
+					HTTPReq:          &httpSpec.Request,
+					HTTPResp:         &httpSpec.Response,
+					Created:          httpSpec.Created,
+					ReqTimestampMock: httpSpec.ReqTimestampMock,
+					ResTimestampMock: httpSpec.ResTimestampMock,
+				}
 			}
 		case models.Mongo:
 			mongoSpec := models.MongoSpec{}

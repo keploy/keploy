@@ -37,6 +37,12 @@ const (
 	BodyTypeError  BodyType = "ERROR"
 )
 
+// HTTP Response Types
+const (
+	HTTPResponseJSON = "json"
+	HTTPResponseXML  = "xml"
+)
+
 type TestCase struct {
 	Version  Version             `json:"version" bson:"version"`
 	Kind     Kind                `json:"kind" bson:"kind"`
@@ -46,6 +52,7 @@ type TestCase struct {
 	Captured int64               `json:"captured" bson:"captured"`
 	HTTPReq  HTTPReq             `json:"http_req" bson:"http_req"`
 	HTTPResp HTTPResp            `json:"http_resp" bson:"http_resp"`
+	XMLResp  XMLResp             `json:"xml_resp" bson:"xml_resp"`
 	AllKeys  map[string][]string `json:"all_keys" bson:"all_keys"`
 	GrpcResp GrpcResp            `json:"grpcResp" bson:"grpcResp"`
 	GrpcReq  GrpcReq             `json:"grpcReq" bson:"grpcReq"`
