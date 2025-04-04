@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -21,6 +23,7 @@ import (
 func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
 	respType := models.HTTPResponseJSON
 	isXML := utils.IsXMLResponse(&tc.HTTPResp)
+	var idempotentoperations = []string{"GET", "PUT", "DELETE", "HEAD", "OPTIONS", "TRACE"}
 	if isXML {
 		respType = models.HTTPResponseXML
 	}
@@ -56,6 +59,49 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		for _, v := range noiseFieldsFound {
 			noise[v] = []string{}
 		}
+	}
+	if slices.Contains(idempotentoperations, string(tc.HTTPReq.Method)) {
+		var responses []map[string][]string
+		client := &http.Client{}
+		req, err := http.NewRequest(string(tc.HTTPReq.Method), string(tc.HTTPReq.URL), strings.NewReader(tc.HTTPReq.Body))
+		if err != nil {
+			utils.LogError(logger, err, "failed to create new http request")
+			return nil, err
+		}
+		//inheriting the headers to new request
+		for k, v := range tc.HTTPReq.Header {
+			req.Header.Set(k, v)
+		}
+		// Add special header to prevent recording these replay requests
+		req.Header.Set("Idempotency-Check", "true")
+		replays := 8
+		for i := 0; i < replays; i++ {
+			resp, err := client.Do(req)
+			if err != nil {
+				utils.LogError(logger, err, "failed to execute http req")
+			}
+			defer resp.Body.Close()
+
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				utils.LogError(logger, err, "failed to read response body")
+				continue
+			}
+			resMap, err := FlattenHTTPResponse(resp.Header, string(body))
+			if err != nil {
+				utils.LogError(logger, err, "failed to flatten http response")
+				continue
+			}
+			responses = append(responses, resMap)
+		}
+		dynamicfield := DynamicFields(responses, m)
+		for field := range dynamicfield {
+			noise[field] = []string{}
+		}
+		if !Verifyresponses(responses, m, dynamicfield, logger) {
+			utils.LogError(logger, nil, "request failed idempotency check")
+		}
+
 	}
 
 	switch tc.Kind {
@@ -343,4 +389,67 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		return nil, errors.New("yaml doc of unknown type")
 	}
 	return &tc, nil
+}
+func DynamicFields(responses []map[string][]string, m map[string][]string) map[string]bool {
+	dynamicfields := make(map[string]bool)
+	if len(responses) <= 1 {
+		return dynamicfields
+	}
+	for field := range m {
+		uniquevals := make(map[string]bool)
+		validfield := true
+		// check if field exists for each response
+		for _, resp := range responses {
+			val, exists := resp[field]
+			if !exists {
+				validfield = false
+				break
+			}
+			b, err := json.Marshal(val)
+			if err != nil {
+				validfield = false
+				break
+			}
+			uniquevals[string(b)] = true
+		}
+		if validfield && len(uniquevals) == len(responses) {
+			dynamicfields[field] = true
+		}
+	}
+	return dynamicfields
+}
+
+func Verifyresponses(responses []map[string][]string, m map[string][]string, dynamicfield map[string]bool, logger *zap.Logger) bool {
+	if len(responses) <= 1 {
+		return true
+	}
+	consistent := true
+	// Extract only non-dynamic fields from the baseline response
+	nonDynamicFields := make(map[string][]string)
+	for field, value := range m {
+		if !dynamicfield[field] && !strings.HasPrefix(field, "header.") {
+			nonDynamicFields[field] = value
+		}
+	}
+	// Validate consistency of non-dynamic fields
+	for _, resp := range responses {
+		for field, expectedValue := range nonDynamicFields {
+			val, exists := resp[field]
+
+			// Ignore missing fields
+			if !exists {
+				continue
+			}
+
+			if !reflect.DeepEqual(expectedValue, val) {
+				utils.LogError(logger, nil, "Inconsistent response body detected",
+					zap.String("field", field),
+					zap.Any("expected", expectedValue),
+					zap.Any("got", val))
+				consistent = false
+			}
+		}
+	}
+
+	return consistent
 }
