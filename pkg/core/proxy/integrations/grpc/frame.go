@@ -165,7 +165,7 @@ func transferFrame(ctx context.Context, lhs net.Conn, rhs net.Conn, sic *StreamI
 
 // constants for dynamic table size
 const (
-	KmaxDynamicTableSize = 2048
+	KmaxDynamicTableSize = 4096
 )
 
 func extractHeaders(frame *http2.HeadersFrame, decoder *hpack.Decoder) (pseudoHeaders, ordinaryHeaders map[string]string, err error) {
