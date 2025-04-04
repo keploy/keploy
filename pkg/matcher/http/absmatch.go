@@ -308,11 +308,15 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 	bodyType1 := models.BodyTypePlain
 	if json.Valid([]byte(tcs1.HTTPResp.Body)) {
 		bodyType1 = models.BodyTypeJSON
+	} else if matcher.IsHTML(tcs1.HTTPResp.Body) {
+		bodyType1 = models.BodyTypeHTML
 	}
 
 	bodyType2 := models.BodyTypePlain
 	if json.Valid([]byte(tcs2.HTTPResp.Body)) {
 		bodyType2 = models.BodyTypeJSON
+	} else if matcher.IsHTML(tcs2.HTTPResp.Body) {
+		bodyType2 = models.BodyTypeHTML
 	}
 
 	if bodyType1 != bodyType2 {
@@ -327,29 +331,46 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := tcs1.HTTPResp.Body, tcs2.HTTPResp.Body
 	var jsonComparisonResult matcher.JSONComparisonResult
-	if !matcher.Contains(matcher.MapToArray(noise), "body") && bodyType1 == models.BodyTypeJSON {
-		//validate the stored json
-		validatedJSON, err := matcher.ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
-		if err != nil {
-			logger.Error("failed to validate and marshal json", zap.Error(err))
-			respCompare.BodyResult.Normal = false
-			return false, respCompare
-		}
-		if validatedJSON.IsIdentical() {
-			jsonComparisonResult, err = matcher.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
-			exact := jsonComparisonResult.IsExact()
+	if !matcher.Contains(matcher.MapToArray(noise), "body") {
+		if bodyType1 == models.BodyTypeJSON {
+			validatedJSON, err := matcher.ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
 			if err != nil {
-				logger.Error("failed to compare json", zap.Error(err))
+				logger.Error("failed to validate and marshal json", zap.Error(err))
 				respCompare.BodyResult.Normal = false
 				return false, respCompare
 			}
-			if !exact {
+			if validatedJSON.IsIdentical() {
+				jsonComparisonResult, err = matcher.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
+				exact := jsonComparisonResult.IsExact()
+				if err != nil {
+					logger.Error("failed to compare json", zap.Error(err))
+					respCompare.BodyResult.Normal = false
+					return false, respCompare
+				}
+				if !exact {
+					pass = false
+					bodyRes = false
+				}
+			} else {
 				pass = false
 				bodyRes = false
 			}
-		} else {
-			pass = false
-			bodyRes = false
+		} else if bodyType1 == models.BodyTypeHTML {
+			cleanExp, err := matcher.CleanHTML(tcs1.HTTPResp.Body)
+			if err != nil {
+				logger.Warn("failed to clean expected HTML response", zap.Error(err))
+				return false, respCompare
+			}
+			cleanAct, err := matcher.CleanHTML(tcs2.HTTPResp.Body)
+			if err != nil {
+				logger.Warn("failed to clean actual HTML response", zap.Error(err))
+				return false, respCompare
+			}
+			if cleanExp != cleanAct {
+				pass = false
+				respCompare.BodyResult.Normal = false
+				bodyRes = false
+			}
 		}
 
 		// debug log for cleanExp and cleanAct

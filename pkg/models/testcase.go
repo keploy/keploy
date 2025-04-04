@@ -33,6 +33,7 @@ const (
 	BodyTypeBinary BodyType = "binary"
 	BodyTypePlain  BodyType = "PLAIN"
 	BodyTypeJSON   BodyType = "JSON"
+	BodyTypeHTML   BodyType = "HTML"
 	BodyTypeError  BodyType = "ERROR"
 )
 
