@@ -241,19 +241,9 @@ func extractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 }
 
 // CaptureGRPC captures a gRPC request/response pair and sends it to the test case channel
-func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, stream interface{}, reqTimestamp time.Time, resTimestamp time.Time) {
-	if stream == nil {
+func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream) {
+	if http2Stream == nil {
 		logger.Error("Stream is nil")
-		return
-	}
-
-	// Convert stream to HTTP2Stream
-	http2Stream, ok := stream.(*pkg.HTTP2Stream)
-	if !ok {
-		logger.Error("Invalid stream type",
-			zap.String("expected", "HTTP2Stream"),
-			zap.String("actual", fmt.Sprintf("%T", stream)),
-			zap.Any("stream_value", stream)) // Log the actual stream value
 		return
 	}
 

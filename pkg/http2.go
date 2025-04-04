@@ -66,12 +66,10 @@ func ExtractHTTP2Frame(data []byte) (http2.Frame, int, error) {
 // HTTP2StreamState represents the state of an HTTP/2 stream
 type HTTP2StreamState struct {
 	// Stream identification
-	ID         uint32
-	RequestID  string
-	ParentID   string
-	isRequest  bool
-	isGRPC     bool
-	isOutgoing bool
+	ID        uint32
+	RequestID string
+	ParentID  string
+	isRequest bool
 
 	// Timing
 	startTime time.Time
@@ -96,25 +94,19 @@ type HTTP2StreamState struct {
 
 // HTTP2Stream represents a complete HTTP/2 stream
 type HTTP2Stream struct {
-	ID         uint32
-	Request    *models.HTTPReq
-	Response   *models.HTTPResp
-	GRPCReq    *models.GrpcReq
-	GRPCResp   *models.GrpcResp
-	StartTime  time.Time
-	EndTime    time.Time
-	IsGRPC     bool
-	IsOutgoing bool
+	ID       uint32
+	GRPCReq  *models.GrpcReq
+	GRPCResp *models.GrpcResp
 }
 
 // DefaultStreamManager implements stream management
 type DefaultStreamManager struct {
-	mutex     sync.RWMutex
-	streams   map[uint32]*HTTP2StreamState
-	completed []*HTTP2Stream
-	buffer    []byte
-	logger    *zap.Logger
-	decoder   *hpack.Decoder
+	mutex   sync.RWMutex
+	streams map[uint32]*HTTP2StreamState
+	// completed []*HTTP2Stream
+	buffer  []byte
+	logger  *zap.Logger
+	decoder *hpack.Decoder
 	// Context-aware header tables
 	requestHeaders  map[string]string // For request headers
 	responseHeaders map[string]string // For response headers
@@ -203,7 +195,7 @@ func (sm *DefaultStreamManager) rehydrateHeaders(headers *models.GrpcHeaders, is
 }
 
 // HandleFrame processes an HTTP/2 frame
-func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool) error {
+func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, frameTime time.Time) error {
 	sm.mutex.Lock()
 	defer sm.mutex.Unlock()
 
@@ -217,11 +209,10 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool) 
 		}
 		requestID := fmt.Sprintf(prefix+"%d", streamID)
 		sm.streams[streamID] = &HTTP2StreamState{
-			ID:         streamID,
-			RequestID:  requestID,
-			isRequest:  streamID != 0, // Stream 0 is for connection control
-			startTime:  time.Now(),
-			isOutgoing: isOutgoing,
+			ID:        streamID,
+			RequestID: requestID,
+			isRequest: streamID != 0, // Stream 0 is for connection control
+			startTime: frameTime,
 		}
 	}
 
@@ -241,22 +232,10 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool) 
 				return fmt.Errorf("failed to decode headers: %v", err)
 			}
 
-			// Check if this is a gRPC request/response
-			var _ string
-			isResponse := false
 			for _, field := range fields {
-				if !stream.isGRPC && field.Name == "content-type" && strings.Contains(field.Value, "application/grpc") {
-					stream.isGRPC = true
-				} else if field.Name == ":path" {
-					_ = field.Value
-				} else if field.Name == ":status" {
-					isResponse = true
+				if field.Name == ":status" {
+					stream.isRequest = false
 				}
-			}
-
-			// Update stream type based on headers
-			if isResponse {
-				stream.isRequest = false
 			}
 
 			headers := ProcessHeaders(fields)
@@ -312,6 +291,7 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool) 
 				stream.headersReceived = false
 				stream.trailersReceived = false
 			} else {
+				stream.endTime = frameTime
 			}
 		}
 
@@ -334,6 +314,7 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool) 
 				stream.headersReceived = false
 				stream.trailersReceived = false
 			} else {
+				stream.endTime = frameTime
 			}
 		}
 	}
@@ -350,14 +331,12 @@ func (sm *DefaultStreamManager) GetCompleteStreams() []*HTTP2Stream {
 
 	for id, stream := range sm.streams {
 		if stream.isComplete {
+			stream.grpcReq.Timestamp = stream.startTime
+			stream.grpcResp.Timestamp = stream.endTime
 			http2Stream := &HTTP2Stream{
-				ID:         id,
-				GRPCReq:    stream.grpcReq,
-				GRPCResp:   stream.grpcResp,
-				StartTime:  stream.startTime,
-				EndTime:    time.Now(),
-				IsGRPC:     stream.isGRPC,
-				IsOutgoing: stream.isOutgoing,
+				ID:       id,
+				GRPCReq:  stream.grpcReq,
+				GRPCResp: stream.grpcResp,
 			}
 			completed = append(completed, http2Stream)
 		}
@@ -386,21 +365,19 @@ func (sm *DefaultStreamManager) processCompleteMessage(stream *HTTP2StreamState)
 	// Combine all data frame fragments
 	data := bytes.Join(stream.dataFrames, nil)
 
-	if stream.isGRPC {
-		// Process the complete gRPC message
-		msg := CreateLengthPrefixedMessageFromPayload(data)
+	// Process the complete gRPC message
+	msg := CreateLengthPrefixedMessageFromPayload(data)
 
-		if stream.isRequest {
-			if stream.grpcReq == nil {
-				stream.grpcReq = &models.GrpcReq{}
-			}
-			stream.grpcReq.Body = msg
-		} else {
-			if stream.grpcResp == nil {
-				stream.grpcResp = &models.GrpcResp{}
-			}
-			stream.grpcResp.Body = msg
+	if stream.isRequest {
+		if stream.grpcReq == nil {
+			stream.grpcReq = &models.GrpcReq{}
 		}
+		stream.grpcReq.Body = msg
+	} else {
+		if stream.grpcResp == nil {
+			stream.grpcResp = &models.GrpcResp{}
+		}
+		stream.grpcResp.Body = msg
 	}
 
 	// Clear the data frames after processing
@@ -423,29 +400,11 @@ func (sm *DefaultStreamManager) checkStreamCompletion(streamID uint32) {
 
 	// For responses: check if both request and response are complete
 	if !stream.isRequest && stream.requestComplete {
-		if stream.endStreamReceived && stream.headersReceived &&
-			((!stream.isGRPC) || stream.trailersReceived) { // For gRPC, ensure trailers are received
+		if stream.endStreamReceived && stream.headersReceived && stream.trailersReceived { // For gRPC, ensure trailers are received
 
 			sm.logger.Info("Stream completed", zap.Any("stream", stream))
 
 			stream.isComplete = true
-			stream.endTime = time.Now()
-
-			// Create completed stream record
-			completedStream := &HTTP2Stream{
-				ID:         streamID,
-				StartTime:  stream.startTime,
-				EndTime:    stream.endTime,
-				IsGRPC:     stream.isGRPC,
-				IsOutgoing: stream.isOutgoing,
-			}
-
-			if stream.isGRPC {
-				completedStream.GRPCReq = stream.grpcReq
-				completedStream.GRPCResp = stream.grpcResp
-			}
-
-			sm.completed = append(sm.completed, completedStream)
 		}
 	}
 }
@@ -468,8 +427,8 @@ func ProcessHeaders(fields []hpack.HeaderField) *models.GrpcHeaders {
 	return headers
 }
 
-// IsHTTPGatewayRequest checks if the stream appears to be from an HTTP Gateway
-func IsHTTPGatewayRequest(stream *HTTP2Stream) bool {
+// IsGRPCGatewayRequest checks if the stream appears to be from gRPC-gateway that proxies http requests to grpc services
+func IsGRPCGatewayRequest(stream *HTTP2Stream) bool {
 	if stream == nil || stream.GRPCReq == nil {
 		return false
 	}
@@ -477,11 +436,7 @@ func IsHTTPGatewayRequest(stream *HTTP2Stream) bool {
 	// Check for HTTP gateway specific headers
 	headers := stream.GRPCReq.Headers.OrdinaryHeaders
 	gatewayHeaders := []string{
-		"x-forwarded-for",
-		"x-forwarded-host",
-		"x-forwarded-proto",
 		"grpc-gateway-user-agent",
-		"x-grpc-web",
 	}
 
 	for _, header := range gatewayHeaders {
@@ -579,17 +534,11 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// Write regular headers in a specific order
 	orderedHeaders := []struct {
 		name, value string
-	}{
-		{"content-type", "application/grpc"},
-		{"user-agent", "grpc-go/1.62.0"},
-		{"te", "trailers"},
-	}
+	}{}
 
 	// Add any remaining headers from the request
 	for k, v := range grpcReq.Headers.OrdinaryHeaders {
-		if k != "content-type" && k != "user-agent" && k != "te" {
-			orderedHeaders = append(orderedHeaders, struct{ name, value string }{k, v})
-		}
+		orderedHeaders = append(orderedHeaders, struct{ name, value string }{k, v})
 	}
 
 	for _, h := range orderedHeaders {

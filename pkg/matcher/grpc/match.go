@@ -30,165 +30,57 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		Message  string
 	})
 
-	logger.Debug("comparing gRPC headers")
-	// Compare pseudo headers
-	for k, expectedVal := range expectedResp.Headers.PseudoHeaders {
-		actualVal, exists := actualResp.Headers.PseudoHeaders[k]
+	// Only compare :status in pseudo headers
+	if expectedStatus, ok := expectedResp.Headers.PseudoHeaders[":status"]; ok {
+		actualStatus, exists := actualResp.Headers.PseudoHeaders[":status"]
+		headerResult := models.HeaderResult{
+			Expected: models.Header{
+				Key:   ":status",
+				Value: []string{expectedStatus},
+			},
+			Actual: models.Header{
+				Key:   ":status",
+				Value: []string{},
+			},
+		}
+
 		if !exists {
-			logger.Debug("missing pseudo header in response",
-				zap.String("header", k),
-				zap.String("expected", expectedVal))
 			matched = false
-			differences[fmt.Sprintf("headers.pseudo_headers.%s", k)] = struct {
+			differences["headers.pseudo_headers.:status"] = struct {
 				Expected string
 				Actual   string
 				Message  string
 			}{
-				Expected: expectedVal,
+				Expected: expectedStatus,
 				Actual:   "",
-				Message:  "missing pseudo header in response",
+				Message:  "missing status header in response",
 			}
-			result.HeadersResult = append(result.HeadersResult, models.HeaderResult{
-				Normal: false,
-				Expected: models.Header{
-					Key:   k,
-					Value: []string{expectedVal},
-				},
-				Actual: models.Header{
-					Key:   k,
-					Value: []string{},
-				},
-			})
-			continue
-		}
-		if expectedVal != actualVal {
-			logger.Debug("pseudo header value mismatch",
-				zap.String("header", k),
-				zap.String("expected", expectedVal),
-				zap.String("actual", actualVal))
-			matched = false
-			differences[fmt.Sprintf("headers.pseudo_headers.%s", k)] = struct {
-				Expected string
-				Actual   string
-				Message  string
-			}{
-				Expected: expectedVal,
-				Actual:   actualVal,
-				Message:  "pseudo header value mismatch",
-			}
-			result.HeadersResult = append(result.HeadersResult, models.HeaderResult{
-				Normal: false,
-				Expected: models.Header{
-					Key:   k,
-					Value: []string{expectedVal},
-				},
-				Actual: models.Header{
-					Key:   k,
-					Value: []string{actualVal},
-				},
-			})
+			headerResult.Normal = false
 		} else {
-			logger.Debug("pseudo header matched",
-				zap.String("header", k),
-				zap.String("value", expectedVal))
-			result.HeadersResult = append(result.HeadersResult, models.HeaderResult{
-				Normal: true,
-				Expected: models.Header{
-					Key:   k,
-					Value: []string{expectedVal},
-				},
-				Actual: models.Header{
-					Key:   k,
-					Value: []string{actualVal},
-				},
-			})
+			headerResult.Actual.Value = []string{actualStatus}
+			headerResult.Normal = expectedStatus == actualStatus
+
+			if !headerResult.Normal {
+				matched = false
+				differences["headers.pseudo_headers.:status"] = struct {
+					Expected string
+					Actual   string
+					Message  string
+				}{
+					Expected: expectedStatus,
+					Actual:   actualStatus,
+					Message:  "status header value mismatch",
+				}
+			}
 		}
+
+		result.HeadersResult = append(result.HeadersResult, headerResult)
 	}
 
-	logger.Debug("comparing gRPC ordinary headers")
-	// Compare ordinary headers
-	for k, expectedVal := range expectedResp.Headers.OrdinaryHeaders {
-		actualVal, exists := actualResp.Headers.OrdinaryHeaders[k]
-		if !exists {
-			logger.Debug("missing ordinary header in response",
-				zap.String("header", k),
-				zap.String("expected", expectedVal))
-			matched = false
-			differences[fmt.Sprintf("headers.ordinary_headers.%s", k)] = struct {
-				Expected string
-				Actual   string
-				Message  string
-			}{
-				Expected: expectedVal,
-				Actual:   "",
-				Message:  "missing ordinary header in response",
-			}
-			result.HeadersResult = append(result.HeadersResult, models.HeaderResult{
-				Normal: false,
-				Expected: models.Header{
-					Key:   k,
-					Value: []string{expectedVal},
-				},
-				Actual: models.Header{
-					Key:   k,
-					Value: []string{},
-				},
-			})
-			continue
-		}
-		if expectedVal != actualVal {
-			logger.Debug("ordinary header value mismatch",
-				zap.String("header", k),
-				zap.String("expected", expectedVal),
-				zap.String("actual", actualVal))
-			matched = false
-			differences[fmt.Sprintf("headers.ordinary_headers.%s", k)] = struct {
-				Expected string
-				Actual   string
-				Message  string
-			}{
-				Expected: expectedVal,
-				Actual:   actualVal,
-				Message:  "ordinary header value mismatch",
-			}
-			result.HeadersResult = append(result.HeadersResult, models.HeaderResult{
-				Normal: false,
-				Expected: models.Header{
-					Key:   k,
-					Value: []string{expectedVal},
-				},
-				Actual: models.Header{
-					Key:   k,
-					Value: []string{actualVal},
-				},
-			})
-		} else {
-			logger.Debug("ordinary header matched",
-				zap.String("header", k),
-				zap.String("value", expectedVal))
-			result.HeadersResult = append(result.HeadersResult, models.HeaderResult{
-				Normal: true,
-				Expected: models.Header{
-					Key:   k,
-					Value: []string{expectedVal},
-				},
-				Actual: models.Header{
-					Key:   k,
-					Value: []string{actualVal},
-				},
-			})
-		}
-	}
-
-	logger.Debug("comparing gRPC body")
 	// Compare Body - using specialized body types for gRPC
-
 	// Compare compression flag
 	compressionFlagNormal := expectedResp.Body.CompressionFlag == actualResp.Body.CompressionFlag
 	if !compressionFlagNormal {
-		logger.Debug("compression flag mismatch",
-			zap.Uint("expected", expectedResp.Body.CompressionFlag),
-			zap.Uint("actual", actualResp.Body.CompressionFlag))
 		matched = false
 		differences["body.compression_flag"] = struct {
 			Expected string
@@ -210,9 +102,6 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	// Compare message length
 	messageLengthNormal := expectedResp.Body.MessageLength == actualResp.Body.MessageLength
 	if !messageLengthNormal {
-		logger.Debug("message length mismatch",
-			zap.Uint32("expected", expectedResp.Body.MessageLength),
-			zap.Uint32("actual", actualResp.Body.MessageLength))
 		matched = false
 		differences["body.message_length"] = struct {
 			Expected string
@@ -234,9 +123,6 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	// Compare decoded data
 	decodedDataNormal := expectedResp.Body.DecodedData == actualResp.Body.DecodedData
 	if !decodedDataNormal {
-		logger.Debug("decoded data mismatch",
-			zap.String("expected", expectedResp.Body.DecodedData),
-			zap.String("actual", actualResp.Body.DecodedData))
 		matched = false
 		differences["body.decoded_data"] = struct {
 			Expected string
@@ -255,160 +141,10 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		Actual:   actualResp.Body.DecodedData,
 	})
 
-	logger.Debug("comparing gRPC trailers")
-	// Compare trailers - using the new TrailerResult field
-	for k, expectedVal := range expectedResp.Trailers.PseudoHeaders {
-		actualVal, exists := actualResp.Trailers.PseudoHeaders[k]
-		if !exists {
-			logger.Debug("missing pseudo trailer in response",
-				zap.String("trailer", k),
-				zap.String("expected", expectedVal))
-			matched = false
-			differences[fmt.Sprintf("trailers.pseudo_headers.%s", k)] = struct {
-				Expected string
-				Actual   string
-				Message  string
-			}{
-				Expected: expectedVal,
-				Actual:   "",
-				Message:  "missing pseudo trailer in response",
-			}
-			result.TrailerResult = append(result.TrailerResult, models.HeaderResult{
-				Normal: false,
-				Expected: models.Header{
-					Key:   k,
-					Value: []string{expectedVal},
-				},
-				Actual: models.Header{
-					Key:   k,
-					Value: []string{},
-				},
-			})
-			continue
-		}
-		if expectedVal != actualVal {
-			logger.Debug("pseudo trailer value mismatch",
-				zap.String("trailer", k),
-				zap.String("expected", expectedVal),
-				zap.String("actual", actualVal))
-			matched = false
-			differences[fmt.Sprintf("trailers.pseudo_headers.%s", k)] = struct {
-				Expected string
-				Actual   string
-				Message  string
-			}{
-				Expected: expectedVal,
-				Actual:   actualVal,
-				Message:  "pseudo trailer value mismatch",
-			}
-			result.TrailerResult = append(result.TrailerResult, models.HeaderResult{
-				Normal: false,
-				Expected: models.Header{
-					Key:   k,
-					Value: []string{expectedVal},
-				},
-				Actual: models.Header{
-					Key:   k,
-					Value: []string{actualVal},
-				},
-			})
-		} else {
-			logger.Debug("pseudo trailer matched",
-				zap.String("trailer", k),
-				zap.String("value", expectedVal))
-			result.TrailerResult = append(result.TrailerResult, models.HeaderResult{
-				Normal: true,
-				Expected: models.Header{
-					Key:   k,
-					Value: []string{expectedVal},
-				},
-				Actual: models.Header{
-					Key:   k,
-					Value: []string{actualVal},
-				},
-			})
-		}
-	}
-
-	// Compare ordinary trailers
-	for k, expectedVal := range expectedResp.Trailers.OrdinaryHeaders {
-		actualVal, exists := actualResp.Trailers.OrdinaryHeaders[k]
-		if !exists {
-			logger.Debug("missing ordinary trailer in response",
-				zap.String("trailer", k),
-				zap.String("expected", expectedVal))
-			matched = false
-			differences[fmt.Sprintf("trailers.ordinary_headers.%s", k)] = struct {
-				Expected string
-				Actual   string
-				Message  string
-			}{
-				Expected: expectedVal,
-				Actual:   "",
-				Message:  "missing ordinary trailer in response",
-			}
-			result.TrailerResult = append(result.TrailerResult, models.HeaderResult{
-				Normal: false,
-				Expected: models.Header{
-					Key:   k,
-					Value: []string{expectedVal},
-				},
-				Actual: models.Header{
-					Key:   k,
-					Value: []string{},
-				},
-			})
-			continue
-		}
-		if expectedVal != actualVal {
-			logger.Debug("ordinary trailer value mismatch",
-				zap.String("trailer", k),
-				zap.String("expected", expectedVal),
-				zap.String("actual", actualVal))
-			matched = false
-			differences[fmt.Sprintf("trailers.ordinary_headers.%s", k)] = struct {
-				Expected string
-				Actual   string
-				Message  string
-			}{
-				Expected: expectedVal,
-				Actual:   actualVal,
-				Message:  "ordinary trailer value mismatch",
-			}
-			result.TrailerResult = append(result.TrailerResult, models.HeaderResult{
-				Normal: false,
-				Expected: models.Header{
-					Key:   k,
-					Value: []string{expectedVal},
-				},
-				Actual: models.Header{
-					Key:   k,
-					Value: []string{actualVal},
-				},
-			})
-		} else {
-			logger.Debug("ordinary trailer matched",
-				zap.String("trailer", k),
-				zap.String("value", expectedVal))
-			result.TrailerResult = append(result.TrailerResult, models.HeaderResult{
-				Normal: true,
-				Expected: models.Header{
-					Key:   k,
-					Value: []string{expectedVal},
-				},
-				Actual: models.Header{
-					Key:   k,
-					Value: []string{actualVal},
-				},
-			})
-		}
-	}
-
 	// Handle noise configuration
 	var (
-		bodyNoise    = noiseConfig["body"]
-		headerNoise  = noiseConfig["header"]
-		trailerNoise = noiseConfig["trailer"]
+		bodyNoise   = noiseConfig["body"]
+		headerNoise = noiseConfig["header"]
 	)
 
 	if bodyNoise == nil {
@@ -416,9 +152,6 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	}
 	if headerNoise == nil {
 		headerNoise = map[string][]string{}
-	}
-	if trailerNoise == nil {
-		trailerNoise = map[string][]string{}
 	}
 
 	// Apply noise configuration to ignore specified differences
@@ -433,10 +166,6 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 				if _, found := headerNoise[pathParts[len(pathParts)-1]]; found {
 					delete(differences, path)
 				}
-			} else if pathParts[0] == "trailers" && len(trailerNoise) > 0 {
-				if _, found := trailerNoise[pathParts[len(pathParts)-1]]; found {
-					delete(differences, path)
-				}
 			}
 		}
 	}
@@ -444,10 +173,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	// Recalculate match status after applying noise
 	matched = len(differences) == 0
 
-	// Log for debugging
 	if !matched {
-		logger.Debug("gRPC response matching failed", zap.Int("difference_count", len(differences)))
-
 		// Display differences to the user, similar to HTTP matcher
 		logDiffs := matcher.NewDiffsPrinter(tc.Name)
 		newLogger := pp.New()
@@ -461,15 +187,9 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		if len(differences) > 0 {
 			for path, diff := range differences {
 				if strings.HasPrefix(path, "headers.") {
-					// Header differences - Keep expected first, actual second as the natural order
-					// Note: internally the renderer will swap these parameters for headers only,
-					// but we maintain consistent parameter order in our code
+					// Header differences
 					header := strings.TrimPrefix(path, "headers.")
 					logDiffs.PushHeaderDiff(diff.Expected, diff.Actual, header, headerNoise)
-				} else if strings.HasPrefix(path, "trailers.") {
-					// Trailer differences (display as headers)
-					trailer := strings.TrimPrefix(path, "trailers.")
-					logDiffs.PushHeaderDiff(diff.Expected, diff.Actual, "trailer."+trailer, trailerNoise)
 				} else if strings.HasPrefix(path, "body.") {
 					bodyPart := strings.TrimPrefix(path, "body.")
 					if bodyPart == "message_length" {
@@ -500,8 +220,6 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 			utils.LogError(logger, err, "failed to render the diffs")
 		}
 	} else {
-		logger.Debug("gRPC response matched successfully")
-
 		// Display success message
 		newLogger := pp.New()
 		newLogger.WithLineInfo = false

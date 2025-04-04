@@ -717,6 +717,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			success++
 		} else {
 			testStatus = models.TestStatusFailed
+			failure++
 			testSetStatus = models.TestSetStatusFailed
 		}
 
@@ -725,85 +726,49 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			switch testCase.Kind {
 			case models.HTTP:
-				httpResp, ok := resp.(*models.HTTPResp)
-				if !ok {
-					utils.LogError(r.logger, nil, "invalid response type for HTTP test case")
-					testStatus = models.TestStatusFailed
-					testSetStatus = models.TestSetStatusFailed
-					failure++
-					testCaseResult = &models.TestResult{
-						Kind:         models.HTTP,
-						Name:         testSetID,
-						Status:       testStatus,
-						Started:      started.Unix(),
-						Completed:    time.Now().UTC().Unix(),
-						TestCaseID:   testCase.Name,
-						TestCasePath: filepath.Join(r.config.Path, testSetID),
-						MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
-						Noise:        testCase.Noise,
-						Result:       *testResult,
-					}
-				} else {
-					testCaseResult = &models.TestResult{
-						Kind:       models.HTTP,
-						Name:       testSetID,
-						Status:     testStatus,
-						Started:    started.Unix(),
-						Completed:  time.Now().UTC().Unix(),
-						TestCaseID: testCase.Name,
-						Req: models.HTTPReq{
-							Method:     testCase.HTTPReq.Method,
-							ProtoMajor: testCase.HTTPReq.ProtoMajor,
-							ProtoMinor: testCase.HTTPReq.ProtoMinor,
-							URL:        testCase.HTTPReq.URL,
-							URLParams:  testCase.HTTPReq.URLParams,
-							Header:     testCase.HTTPReq.Header,
-							Body:       testCase.HTTPReq.Body,
-							Binary:     testCase.HTTPReq.Binary,
-							Form:       testCase.HTTPReq.Form,
-							Timestamp:  testCase.HTTPReq.Timestamp,
-						},
-						Res:          *httpResp,
-						TestCasePath: filepath.Join(r.config.Path, testSetID),
-						MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
-						Noise:        testCase.Noise,
-						Result:       *testResult,
-					}
+				httpResp := resp.(*models.HTTPResp)
+
+				testCaseResult = &models.TestResult{
+					Kind:       models.HTTP,
+					Name:       testSetID,
+					Status:     testStatus,
+					Started:    started.Unix(),
+					Completed:  time.Now().UTC().Unix(),
+					TestCaseID: testCase.Name,
+					Req: models.HTTPReq{
+						Method:     testCase.HTTPReq.Method,
+						ProtoMajor: testCase.HTTPReq.ProtoMajor,
+						ProtoMinor: testCase.HTTPReq.ProtoMinor,
+						URL:        testCase.HTTPReq.URL,
+						URLParams:  testCase.HTTPReq.URLParams,
+						Header:     testCase.HTTPReq.Header,
+						Body:       testCase.HTTPReq.Body,
+						Binary:     testCase.HTTPReq.Binary,
+						Form:       testCase.HTTPReq.Form,
+						Timestamp:  testCase.HTTPReq.Timestamp,
+					},
+					Res:          *httpResp,
+					TestCasePath: filepath.Join(r.config.Path, testSetID),
+					MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
+					Noise:        testCase.Noise,
+					Result:       *testResult,
 				}
 			case models.GRPC_EXPORT:
-				grpcResp, ok := resp.(*models.GrpcResp)
-				if !ok {
-					utils.LogError(r.logger, nil, "invalid response type for gRPC test case")
-					testStatus = models.TestStatusFailed
-					testSetStatus = models.TestSetStatusFailed
-					failure++
-					testCaseResult = &models.TestResult{
-						Kind:         models.GRPC_EXPORT,
-						Name:         testSetID,
-						Status:       testStatus,
-						Started:      started.Unix(),
-						Completed:    time.Now().UTC().Unix(),
-						TestCaseID:   testCase.Name,
-						TestCasePath: filepath.Join(r.config.Path, testSetID),
-						MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
-						Noise:        testCase.Noise,
-						Result:       *testResult,
-					}
-				} else {
-					testCaseResult = &models.TestResult{
-						Kind:         models.GRPC_EXPORT,
-						Name:         testSetID,
-						Status:       testStatus,
-						Started:      started.Unix(),
-						Completed:    time.Now().UTC().Unix(),
-						TestCaseID:   testCase.Name,
-						GrpcReq:      testCase.GrpcReq,
-						GrpcRes:      *grpcResp,
-						TestCasePath: filepath.Join(r.config.Path, testSetID),
-						MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
-						Noise:        testCase.Noise,
-						Result:       *testResult,
-					}
+				grpcResp := resp.(*models.GrpcResp)
+
+				testCaseResult = &models.TestResult{
+					Kind:         models.GRPC_EXPORT,
+					Name:         testSetID,
+					Status:       testStatus,
+					Started:      started.Unix(),
+					Completed:    time.Now().UTC().Unix(),
+					TestCaseID:   testCase.Name,
+					GrpcReq:      testCase.GrpcReq,
+					GrpcRes:      *grpcResp,
+					TestCasePath: filepath.Join(r.config.Path, testSetID),
+					MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
+					Noise:        testCase.Noise,
+					Result:       *testResult,
 				}
 			}
 

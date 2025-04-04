@@ -45,9 +45,6 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 	defer factory.mutex.Unlock()
 	var trackersToDelete []ID
 
-	factory.logger.Debug("Processing active trackers",
-		zap.Int("number_of_connections", len(factory.connections)))
-
 	for connID, tracker := range factory.connections {
 		select {
 		case <-ctx.Done():
@@ -58,9 +55,9 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 				// Get the completed stream
 				stream := tracker.getHTTP2CompletedStream()
 				if stream != nil {
-					// Skip outgoing requests (internal service-to-service calls) and HTTP gateway requests
-					if isInternalConnection(connID) || stream.IsOutgoing || pkg.IsHTTPGatewayRequest(stream) {
-						factory.logger.Debug("Skipping internal/outgoing/gateway gRPC connection", zap.Any("stream", stream))
+					// Skip HTTP gateway requests
+					if pkg.IsGRPCGatewayRequest(stream) {
+						factory.logger.Debug("Skipping internal gRPC request proxied by gRPC-gateway", zap.Any("stream", stream))
 						continue
 					}
 
@@ -68,23 +65,12 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 						zap.Any("connection_id", connID))
 
 					// Get timestamps from the stream
-					CaptureGRPC(ctx, factory.logger, t, stream, stream.StartTime, stream.EndTime)
+					CaptureGRPC(ctx, factory.logger, t, stream)
 				}
 			} else {
 				// Handle HTTP1 requests
 				ok, requestBuf, responseBuf, reqTimestampTest, resTimestampTest := tracker.isHTTP1Complete()
 				if ok {
-					factory.logger.Debug("Found complete HTTP request/response",
-						zap.Any("connection_id", connID),
-						zap.String("protocol", string(tracker.protocol)),
-						zap.Int("request_buffer_size", len(requestBuf)),
-						zap.Int("response_buffer_size", len(responseBuf)))
-
-					// Skip outgoing requests (internal service-to-service calls)
-					if isInternalConnection(connID) {
-						factory.logger.Debug("Skipping internal connection")
-						continue
-					}
 
 					if len(requestBuf) == 0 || len(responseBuf) == 0 {
 						factory.logger.Warn("failed processing a request due to invalid request or response", zap.Any("Request Size", len(requestBuf)), zap.Any("Response Size", len(responseBuf)))

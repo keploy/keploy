@@ -21,14 +21,17 @@ import (
 // Protocol represents the type of protocol being used
 type Protocol int
 
+// Protocol constants for supported HTTP protocol versions
 const (
-	HTTP1 Protocol = iota
-	HTTP2
+	// HTTP1 represents HTTP/1.x protocol
+	HTTP1 Protocol = 1
+	// HTTP2 represents HTTP/2 protocol
+	HTTP2 Protocol = 2
 )
 
 // StreamManager interface for managing protocol streams
 type StreamManager interface {
-	HandleFrame(frame http2.Frame, isOutgoing bool) error
+	HandleFrame(frame http2.Frame, isOutgoing bool, timestamp time.Time) error
 	GetCompleteStreams() []*pkg.HTTP2Stream
 	CleanupStream(streamID uint32)
 }
@@ -40,33 +43,56 @@ type Tracker struct {
 	openTimestamp  uint64
 	closeTimestamp uint64
 
-	// Protocol specific fields
+	// Indicates the tracker stopped tracking due to closing the session.
+	lastActivityTimestamp uint64
+
+	// Queues to handle multiple ingress traffic on the same conn (keep-alive)
+
+	// kernelRespSizes is a slice of the total number of Response bytes received in the kernel side
+	kernelRespSizes []uint64
+
+	// kernelReqSizes is a slice of the total number of Request bytes received in the kernel side
+	kernelReqSizes []uint64
+
+	// userRespSizes is a slice of the total number of Response bytes received in the user side
+	userRespSizes []uint64
+
+	// userReqSizes is a slice of the total number of Request bytes received in the user side
+	userReqSizes []uint64
+	// userRespBufs is a slice of the Response data received in the user side on this conn
+	userResps [][]byte
+	// userReqBufs is a slice of the Request data received in the user side on this conn
+	userReqs [][]byte
+
+	// req and resp are the buffers to store the request and response data for the current request
+	// reset after 2 seconds of inactivity
+	respSize uint64
+	reqSize  uint64
+	resp     []byte
+	req      []byte
+
+	// Additional fields to know when to capture request or response info
+	// reset after 2 seconds of inactivity
+
+	lastChunkWasResp bool
+	lastChunkWasReq  bool
+	recTestCounter   int32 //atomic counter
+	// firstRequest is used to indicate if the current request is the first request on the conn
+	// reset after 2 seconds of inactivity
+	// Note: This is used to handle multiple requests on the same conn (keep-alive)
+	// Its different from isNewRequest which is used to indicate if the current request chunk is the first chunk of the request
+	firstRequest bool
+
+	mutex  sync.RWMutex
+	logger *zap.Logger
+
+	reqTimestamps []time.Time
+	isNewRequest  bool
+
+	// New fields to support protocol detection and http2 stream management
 	protocol         Protocol
 	streamMgr        StreamManager
 	protocolDetected bool
-
-	// Common fields for both protocols
-	lastActivityTimestamp uint64
-	mutex                 sync.RWMutex
-	logger                *zap.Logger
-	reqTimestamps         []time.Time
-
-	// HTTP/1 specific fields (kept for backward compatibility)
-	kernelRespSizes  []uint64
-	kernelReqSizes   []uint64
-	userRespSizes    []uint64
-	userReqSizes     []uint64
-	userResps        [][]byte
-	userReqs         [][]byte
-	respSize         uint64
-	reqSize          uint64
-	resp             []byte
-	req              []byte
-	lastChunkWasResp bool
-	lastChunkWasReq  bool
-	recTestCounter   int32
-	firstRequest     bool
-	isNewRequest     bool
 	buffer           []byte
 }
 
@@ -95,14 +121,6 @@ func NewTracker(connID ID, logger *zap.Logger) *Tracker {
 	t.protocolDetected = false // Allow protocol detection
 
 	return t
-}
-
-// isInternalConnection checks if the connection is between local services
-func isInternalConnection(connID ID) bool {
-	// We identify internal connections by checking the ClientID:
-	// - ClientID == 0: External request (from outside the service)
-	// - ClientID > 0: Internal request (between gateway and gRPC service)
-	return connID.ClientID > 0 // This is an internal request
 }
 
 func (conn *Tracker) ToBytes() ([]byte, []byte) {
@@ -177,7 +195,7 @@ func (conn *Tracker) AddDataEvent(event SocketDataEvent) {
 	// Check for HTTP/2 preface if we haven't detected protocol yet
 	if !conn.protocolDetected {
 		conn.logger.Debug("Connection check")
-		if len(data) >= 24 && bytes.Equal(data[:24], []byte(pkg.HTTP2Preface)) {
+		if isHTTP2Request(data) {
 			// Create HTTP/2 parser and stream manager
 			conn.protocol = HTTP2
 			conn.streamMgr = pkg.NewStreamManager(conn.logger)
@@ -224,6 +242,11 @@ func isHTTP1Request(data []byte) bool {
 		strings.HasPrefix(s, "HEAD ") ||
 		strings.HasPrefix(s, "OPTIONS ") ||
 		strings.HasPrefix(s, "PATCH ")
+}
+
+// isHTTP2Request checks if the data starts with the HTTP/2 connection preface
+func isHTTP2Request(data []byte) bool {
+	return len(data) >= 24 && bytes.Equal(data[:24], []byte(pkg.HTTP2Preface))
 }
 
 func (conn *Tracker) AddCloseEvent(event SocketCloseEvent) {
@@ -392,8 +415,6 @@ func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Ti
 		conn.reset()
 
 		conn.logger.Debug("unverified recording", zap.Any("recordTraffic", recordTraffic))
-	} else {
-		conn.logger.Debug("no traffic to record")
 	}
 
 	// Checking if record traffic is recorded and request & response timestamp is captured or not.
@@ -433,6 +454,7 @@ func (conn *Tracker) handleHTTP2Data(event SocketDataEvent) {
 		frame, consumed, err := pkg.ExtractHTTP2Frame(conn.buffer)
 		if err != nil {
 			if strings.Contains(err.Error(), "incomplete frame") {
+				conn.logger.Debug("Incomplete frame", zap.Any("error", err))
 				// Not enough data yet, wait for more
 				break
 			}
@@ -448,7 +470,7 @@ func (conn *Tracker) handleHTTP2Data(event SocketDataEvent) {
 		}
 
 		// Handle the frame
-		if err := conn.streamMgr.HandleFrame(frame, event.Direction == EgressTraffic); err != nil {
+		if err := conn.streamMgr.HandleFrame(frame, event.Direction == EgressTraffic, ConvertUnixNanoToTime(event.TimestampNano)); err != nil {
 			conn.logger.Error("Failed to handle HTTP/2 frame", zap.Error(err))
 		}
 

@@ -25,14 +25,16 @@ type GrpcLengthPrefixedMessage struct {
 }
 
 type GrpcReq struct {
-	Headers GrpcHeaders               `json:"headers" yaml:"headers"`
-	Body    GrpcLengthPrefixedMessage `json:"body" yaml:"body"`
+	Headers   GrpcHeaders               `json:"headers" yaml:"headers"`
+	Body      GrpcLengthPrefixedMessage `json:"body" yaml:"body"`
+	Timestamp time.Time                 `json:"timestamp" yaml:"timestamp"`
 }
 
 type GrpcResp struct {
-	Headers  GrpcHeaders               `json:"headers" yaml:"headers"`
-	Body     GrpcLengthPrefixedMessage `json:"body" yaml:"body"`
-	Trailers GrpcHeaders               `json:"trailers" yaml:"trailers"`
+	Headers   GrpcHeaders               `json:"headers" yaml:"headers"`
+	Body      GrpcLengthPrefixedMessage `json:"body" yaml:"body"`
+	Trailers  GrpcHeaders               `json:"trailers" yaml:"trailers"`
+	Timestamp time.Time                 `json:"timestamp" yaml:"timestamp"`
 }
 
 // GrpcStream is a helper function to combine the request-response model in a single struct.
