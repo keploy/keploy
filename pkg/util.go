@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 
 	"strconv"
 	"strings"
@@ -82,6 +84,66 @@ func IsTime(stringDate string) bool {
 		}
 	}
 	return false
+}
+
+// IsUUID verfies whether a given string represents a valid UUID or not.
+func IsUUID(str string) bool {
+	// UUID format: 8-4-4-4-12 (total 36 characters including hyphens)
+	if len(str) != 36 {
+		return false
+	}
+	const uuidPattern = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+	regex, err := regexp.Compile(uuidPattern)
+	if err != nil {
+		return false
+	}
+	return regex.MatchString(str)
+}
+
+// IsUUID verfies whether a given string represents a valid JWT token or not.
+func IsJWT(str string) bool {
+	// check if the three parts seprated by .
+	parts := strings.Split(str, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	// check if the header and payload is valid base64url
+	for _, part := range parts[:2] {
+		if !isBase64URL(part) {
+			return false
+		}
+	}
+	// check if the signature if empty, otherwise it should be base64url
+	if parts[2] != "" && !isBase64URL(parts[2]) {
+		return false
+	}
+	// decode the header and parse it to JSON
+	headerJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return false
+	}
+	var header struct {
+		Typ string `json:"typ"`
+		Alg string `json:"alg"`
+	}
+	if err := json.Unmarshal(headerJSON, &header); err != nil {
+		return false
+	}
+	// check if typ is "JWT" or ends with "+JWT" with case sensitive handling
+	headerType := strings.ToUpper(header.Typ)
+	return headerType == "JWT" || strings.HasSuffix(headerType, "+JWT")
+}
+
+// isBase64URL checks if a string is a valid base64url encoded string
+func isBase64URL(str string) bool {
+	for _, c := range str {
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+			return false
+		}
+	}
+	// decode
+	_, err := base64.RawURLEncoding.DecodeString(str)
+	return err == nil
 }
 
 func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HTTPResp, error) {
