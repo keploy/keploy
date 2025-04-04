@@ -13,12 +13,12 @@ import (
 	"go.uber.org/zap"
 )
 
-func init() {
-	integrations.Register(integrations.REDIS, &integrations.Parsers{
-		Initializer: New,
-		Priority:    100,
-	})
-}
+// func init() {
+// 	integrations.Register(integrations.REDIS, &integrations.Parsers{
+// 		Initializer: New,
+// 		Priority:    100,
+// 	})
+// }
 
 type Redis struct {
 	logger *zap.Logger
