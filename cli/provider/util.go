@@ -31,7 +31,7 @@ var Logo = `
 `
 
 func PrintLogo(disableANSI bool) {
-	fmt.Printf("Enterprise binary sync testing")
+	fmt.Printf("Enterprise binary sync")
 	if binaryToDocker := os.Getenv("BINARY_TO_DOCKER"); binaryToDocker != "true" {
 		printKeployLogo(disableANSI, Logo)
 		fmt.Printf("%s: %v\n\n", utils.VersionIdenitfier, utils.Version)
