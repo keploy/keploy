@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"fmt"
 
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.uber.org/zap"
@@ -19,7 +18,7 @@ import (
 func DecodeHandshakeV10(_ context.Context, _ *zap.Logger, data []byte) (*mysql.HandshakeV10Packet, error) {
 
 	if len(data) < 4 {
-		return nil, fmt.Errorf("handshake packet too short")
+		return nil, errors.New("handshake packet too short")
 	}
 
 	packet := &mysql.HandshakeV10Packet{}
@@ -27,21 +26,21 @@ func DecodeHandshakeV10(_ context.Context, _ *zap.Logger, data []byte) (*mysql.H
 
 	idx := bytes.IndexByte(data[1:], 0x00)
 	if idx == -1 {
-		return nil, fmt.Errorf("malformed handshake packet: missing null terminator for ServerVersion")
+		return nil, errors.New("malformed handshake packet: missing null terminator for ServerVersion")
 	}
 
 	packet.ServerVersion = string(data[1 : 1+idx])
 	data = data[1+idx+1:]
 
 	if len(data) < 4 {
-		return nil, fmt.Errorf("handshake packet too short for ConnectionID")
+		return nil, errors.New("handshake packet too short for ConnectionID")
 	}
 
 	packet.ConnectionID = binary.LittleEndian.Uint32(data[:4])
 	data = data[4:]
 
 	if len(data) < 9 { // 8 bytes of AuthPluginData + 1 byte filler
-		return nil, fmt.Errorf("handshake packet too short for AuthPluginData")
+		return nil, errors.New("handshake packet too short for AuthPluginData")
 	}
 	packet.AuthPluginData = append([]byte{}, data[:8]...)
 
@@ -50,7 +49,7 @@ func DecodeHandshakeV10(_ context.Context, _ *zap.Logger, data []byte) (*mysql.H
 	data = data[9:] // Skip 8 bytes of AuthPluginData and 1 byte filler
 
 	if len(data) < 5 { // Capability flags (2 bytes), character set (1 byte), status flags (2 bytes)
-		return nil, fmt.Errorf("handshake packet too short for flags")
+		return nil, errors.New("handshake packet too short for flags")
 	}
 
 	capabilityFlagsLower := binary.LittleEndian.Uint16(data[:2])
@@ -86,13 +85,13 @@ func DecodeHandshakeV10(_ context.Context, _ *zap.Logger, data []byte) (*mysql.H
 	}
 
 	if len(data) == 0 {
-		return nil, fmt.Errorf("handshake packet too short for AuthPluginName")
+		return nil, errors.New("handshake packet too short for AuthPluginName")
 	}
 
 	if packet.CapabilityFlags&mysql.CLIENT_PLUGIN_AUTH != 0 {
 		idx = bytes.IndexByte(data, 0x00)
 		if idx == -1 {
-			return nil, fmt.Errorf("malformed handshake packet: missing null terminator for AuthPluginName")
+			return nil, errors.New("malformed handshake packet: missing null terminator for AuthPluginName")
 		}
 		packet.AuthPluginName = string(data[:idx])
 	}

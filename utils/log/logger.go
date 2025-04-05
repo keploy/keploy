@@ -42,7 +42,7 @@ func New() (*zap.Logger, error) {
 	if os.IsNotExist(err) {
 		_, err := os.Create("keploy-logs.txt")
 		if err != nil {
-			return nil, fmt.Errorf("failed to create the log file: %v", err)
+			return nil, fmt.Errorf("failed to create the log file: %w", err)
 		}
 	}
 
@@ -50,14 +50,14 @@ func New() (*zap.Logger, error) {
 	fileInfo, err := os.Stat("keploy-logs.txt")
 	if err != nil {
 		log.Println(Emoji, "failed to get the log file info", err)
-		return nil, fmt.Errorf("failed to get the log file info: %v", err)
+		return nil, fmt.Errorf("failed to get the log file info: %w", err)
 	}
 	if fileInfo.Mode().Perm() != 0777 {
 		// Set the permissions of the log file to 777.
 		err = os.Chmod("keploy-logs.txt", 0777)
 		if err != nil {
 			log.Println(Emoji, "failed to set the log file permission to 777", err)
-			return nil, fmt.Errorf("failed to set the log file permission to 777: %v", err)
+			return nil, fmt.Errorf("failed to set the log file permission to 777: %w", err)
 		}
 	}
 
@@ -67,7 +67,7 @@ func New() (*zap.Logger, error) {
 
 	logger, err := LogCfg.Build()
 	if err != nil {
-		return nil, fmt.Errorf("failed to build config for logger: %v", err)
+		return nil, fmt.Errorf("failed to build config for logger: %w", err)
 	}
 	return logger, nil
 }
@@ -81,7 +81,7 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 
 	logger, err := LogCfg.Build()
 	if err != nil {
-		return nil, fmt.Errorf("failed to build config for logger: %v", err)
+		return nil, fmt.Errorf("failed to build config for logger: %w", err)
 	}
 	return logger, nil
 }
@@ -98,7 +98,7 @@ func AddMode(mode string) (*zap.Logger, error) {
 	// Rebuild the logger with the updated configuration
 	newLogger, err := cfg.Build()
 	if err != nil {
-		return nil, fmt.Errorf("failed to add mode to logger: %v", err)
+		return nil, fmt.Errorf("failed to add mode to logger: %w", err)
 	}
 	return newLogger, nil
 }
@@ -107,7 +107,7 @@ func ChangeColorEncoding() (*zap.Logger, error) {
 	LogCfg.Encoding = "nonColorConsole"
 	logger, err := LogCfg.Build()
 	if err != nil {
-		return nil, fmt.Errorf("failed to build config for logger: %v", err)
+		return nil, fmt.Errorf("failed to build config for logger: %w", err)
 	}
 	return logger, nil
 }

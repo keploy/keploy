@@ -103,7 +103,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	if err != nil {
 		stopReason = "failed to get new test-set id"
 		utils.LogError(r.logger, err, stopReason)
-		return fmt.Errorf(stopReason)
+		return errors.New(stopReason)
 	}
 
 	//checking for context cancellation as we don't want to start the instrumentation if the context is cancelled
@@ -118,7 +118,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	if err != nil {
 		stopReason = "failed to instrument the application"
 		utils.LogError(r.logger, err, stopReason)
-		return fmt.Errorf(stopReason)
+		return errors.New(stopReason)
 	}
 
 	r.config.AppID = appID
@@ -131,7 +131,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		if ctx.Err() == context.Canceled {
 			return err
 		}
-		return fmt.Errorf(stopReason)
+		return errors.New(stopReason)
 	}
 
 	errGrp.Go(func() error {
@@ -228,7 +228,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		return nil
 	}
 	utils.LogError(r.logger, err, stopReason)
-	return fmt.Errorf(stopReason)
+	return errors.New(stopReason)
 }
 
 func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
@@ -238,7 +238,7 @@ func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
 	if err != nil {
 		stopReason = "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
-		return 0, fmt.Errorf(stopReason)
+		return 0, errors.New(stopReason)
 	}
 	r.config.AppID = appID
 
@@ -262,7 +262,7 @@ func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
 			if ctx.Err() == context.Canceled {
 				return appID, err
 			}
-			return appID, fmt.Errorf(stopReason)
+			return appID, errors.New(stopReason)
 		}
 	}
 	return appID, nil

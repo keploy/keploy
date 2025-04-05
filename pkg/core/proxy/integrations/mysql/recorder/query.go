@@ -4,6 +4,7 @@ package recorder
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -127,7 +128,7 @@ func handleQueryResponse(ctx context.Context, logger *zap.Logger, clientConn, de
 	// Get the last operation in order to handle current packet if it is not an error or ok packet
 	lastOp, ok := decodeCtx.LastOp.Load(clientConn)
 	if !ok {
-		return nil, fmt.Errorf("failed to get the last operation from the context while handling the query response")
+		return nil, errors.New("failed to get the last operation from the context while handling the query response")
 	}
 
 	var queryResponsePkt *mysql.PacketBundle

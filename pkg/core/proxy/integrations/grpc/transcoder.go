@@ -5,6 +5,7 @@ package grpc
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
@@ -85,7 +86,7 @@ func (srv *Transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 		return fmt.Errorf("failed match mocks: %v", err)
 	}
 	if mock == nil {
-		return fmt.Errorf("failed to mock the output for unrecorded outgoing grpc call")
+		return errors.New("failed to mock the output for unrecorded outgoing grpc call")
 	}
 
 	grpcMockResp := mock.Spec.GRPCResp
@@ -250,7 +251,7 @@ func (srv *Transcoder) ProcessContinuationFrame(_ *http2.ContinuationFrame) erro
 	// used by our mock server.
 	// However, if we really need this feature, we can implement it later.
 	utils.LogError(srv.logger, nil, "Continuation Frame received. This is unsupported currently")
-	return fmt.Errorf("continuation frame is unsupported in the current implementation")
+	return errors.New("continuation frame is unsupported in the current implementation")
 }
 
 func (srv *Transcoder) ProcessGenericFrame(ctx context.Context, frame http2.Frame) error {
@@ -277,7 +278,7 @@ func (srv *Transcoder) ProcessGenericFrame(ctx context.Context, frame http2.Fram
 	case *http2.ContinuationFrame:
 		err = srv.ProcessContinuationFrame(frame)
 	default:
-		err = fmt.Errorf("unknown frame received from the client")
+		err = errors.New("unknown frame received from the client")
 	}
 
 	return err

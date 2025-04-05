@@ -5,6 +5,7 @@ package rowscols
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -42,13 +43,13 @@ func DecodeTextRow(_ context.Context, _ *zap.Logger, data []byte, columns []*mys
 		case mysql.FieldTypeDate:
 			data := data[offset+1:]
 			if dataLength < 10 || len(data) < int(dataLength) {
-				return nil, 0, fmt.Errorf("invalid date data length")
+				return nil, 0, errors.New("invalid date data length")
 			}
 			dateStr := string(data[:dataLength])
 			layout := "2006-01-02"
 			t, err := time.Parse(layout, dateStr)
 			if err != nil {
-				return nil, 0, fmt.Errorf("failed to parse the date string")
+				return nil, 0, errors.New("failed to parse the date string")
 			}
 
 			year, month, day := t.Date()
@@ -63,13 +64,13 @@ func DecodeTextRow(_ context.Context, _ *zap.Logger, data []byte, columns []*mys
 		case mysql.FieldTypeTime:
 			data := data[offset+1:]
 			if dataLength < 8 || len(data) < int(dataLength) {
-				return nil, 0, fmt.Errorf("invalid time data length")
+				return nil, 0, errors.New("invalid time data length")
 			}
 			timeStr := string(data[:dataLength])
 			layout := "15:04:05"
 			t, err := time.Parse(layout, timeStr)
 			if err != nil {
-				return nil, 0, fmt.Errorf("failed to parse the time string")
+				return nil, 0, errors.New("failed to parse the time string")
 			}
 
 			hour, minute, second := t.Clock()
@@ -84,13 +85,13 @@ func DecodeTextRow(_ context.Context, _ *zap.Logger, data []byte, columns []*mys
 		case mysql.FieldTypeDateTime, mysql.FieldTypeTimestamp:
 			data := data[offset+1:]
 			if dataLength < 19 || len(data) < int(dataLength) {
-				return nil, 0, fmt.Errorf("invalid datetime/timestamp data length")
+				return nil, 0, errors.New("invalid datetime/timestamp data length")
 			}
 			dateTimeStr := string(data[:dataLength])
 			layout := "2006-01-02 15:04:05"
 			t, err := time.Parse(layout, dateTimeStr)
 			if err != nil {
-				return nil, 0, fmt.Errorf("failed to parse the datetime/timestamp string")
+				return nil, 0, errors.New("failed to parse the datetime/timestamp string")
 			}
 
 			year, month, day := t.Date()
@@ -145,7 +146,7 @@ func EncodeTextRow(_ context.Context, _ *zap.Logger, row *mysql.TextRow, columns
 		case mysql.FieldTypeDate:
 			dateValue, ok := value.(string)
 			if !ok {
-				return nil, fmt.Errorf("invalid value type for date field")
+				return nil, errors.New("invalid value type for date field")
 			}
 
 			// Write the length of the date value
@@ -161,7 +162,7 @@ func EncodeTextRow(_ context.Context, _ *zap.Logger, row *mysql.TextRow, columns
 		case mysql.FieldTypeTime:
 			timeValue, ok := value.(string)
 			if !ok {
-				return nil, fmt.Errorf("invalid value type for time field")
+				return nil, errors.New("invalid value type for time field")
 			}
 
 			// Write the length of the time value
@@ -177,7 +178,7 @@ func EncodeTextRow(_ context.Context, _ *zap.Logger, row *mysql.TextRow, columns
 		case mysql.FieldTypeDateTime, mysql.FieldTypeTimestamp:
 			dateTimeValue, ok := value.(string)
 			if !ok {
-				return nil, fmt.Errorf("invalid value type for datetime/timestamp field")
+				return nil, errors.New("invalid value type for datetime/timestamp field")
 			}
 
 			// Write the length of the datetime/timestamp value

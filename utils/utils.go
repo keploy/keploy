@@ -52,7 +52,7 @@ func ReplaceHost(currentURL string, ipAddress string) (string, error) {
 	}
 
 	if ipAddress == "" {
-		return currentURL, fmt.Errorf("failed to replace url in case of docker env")
+		return currentURL, errors.New("failed to replace url in case of docker env")
 	}
 
 	// Replace hostname with the IP address
@@ -72,7 +72,7 @@ func ReplaceBaseURL(currentURL string, baseURL string) (string, error) {
 
 	// Check if baseURL is valid
 	if baseURL == "" {
-		return currentURL, fmt.Errorf("failed to replace baseURL: baseURL is empty")
+		return currentURL, errors.New("failed to replace baseURL: baseURL is empty")
 	}
 
 	// Parse the new baseURL
@@ -91,7 +91,7 @@ func ReplaceBaseURL(currentURL string, baseURL string) (string, error) {
 
 func ReplacePort(currentURL string, port string) (string, error) {
 	if port == "" {
-		return currentURL, fmt.Errorf("failed to replace port in case of docker env")
+		return currentURL, errors.New("failed to replace port in case of docker env")
 	}
 
 	parsedURL, err := url.Parse(currentURL)
@@ -265,10 +265,13 @@ func AskForConfirmation(s string) (bool, error) {
 
 		response = strings.ToLower(strings.TrimSpace(response))
 
-		if response == "y" || response == "yes" {
+		switch response {
+		case "y", "yes":
 			return true, nil
-		} else if response == "n" || response == "no" {
+		case "n", "no":
 			return false, nil
+		default:
+			fmt.Println("Invalid input. Please enter 'y' or 'n'.")
 		}
 	}
 }
@@ -911,7 +914,7 @@ func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error 
 
 	file, err := os.OpenFile(gitignorePath, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
-		return fmt.Errorf("error opening or creating .gitignore file: %v", err)
+		return fmt.Errorf("error opening or creating .gitignore file: %w", err)
 	}
 
 	defer func() {
@@ -931,7 +934,7 @@ func AddToGitIgnore(logger *zap.Logger, path string, ignoreString string) error 
 
 	if !found {
 		if _, err := file.WriteString("\n" + ignoreString + "\n"); err != nil {
-			return fmt.Errorf("error writing to .gitignore file: %v", err)
+			return fmt.Errorf("error writing to .gitignore file: %w", err)
 		}
 		return nil
 	}

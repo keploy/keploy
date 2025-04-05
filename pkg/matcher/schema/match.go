@@ -109,16 +109,19 @@ func compareResponseBodies(status string, mockOperation, testOperation *models.O
 		}
 
 		if validatedJSON.IsIdentical() {
-			if mode == models.CompareMode {
-				if _, matched, err = handleJSONDiff(validatedJSON, logDiffs, newLogger, logger, testName, mockName, testSetID, mockSetID, mockResponseBodyStr, testResponseBodyStr, "response", mode); err != nil {
+			switch mode {
+			case models.CompareMode:
+				_, matched, err = handleJSONDiff(validatedJSON, logDiffs, newLogger, logger, testName, mockName, testSetID, mockSetID, mockResponseBodyStr, testResponseBodyStr, "response", mode)
+				if err != nil {
 					return differencesCount, false, false, err
 				}
-			} else if mode == models.IdentifyMode {
+			case models.IdentifyMode:
 				differencesCount, err = calculateSimilarityScore(mockOperation, testOperation, status)
 				if err != nil {
 					return differencesCount, false, false, err
 				}
-
+			default:
+				return differencesCount, false, false, fmt.Errorf("invalid mode: %s", mode)
 			}
 		} else {
 			differencesCount = overallScore
@@ -139,6 +142,7 @@ func compareResponseBodies(status string, mockOperation, testOperation *models.O
 	}
 	return differencesCount / overallScore, pass, matched, nil
 }
+
 func Match(mock, test models.OpenAPI, testSetID string, mockSetID string, logger *zap.Logger, mode models.SchemaMatchMode) (float64, bool, error) {
 	pass := false
 

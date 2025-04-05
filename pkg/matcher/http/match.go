@@ -3,6 +3,7 @@ package http
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -165,7 +166,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 					}
 					val, ok := temp.(string)
 					if !ok {
-						utils.LogError(logger, fmt.Errorf("failed to convert the actual header value to string while templatizing"), "")
+						utils.LogError(logger, errors.New("failed to convert the actual header value to string while templatizing"), "")
 						return false, nil
 					}
 					actualValue = append(actualValue, val)
@@ -178,7 +179,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 					}
 					val, ok := temp.(string)
 					if !ok {
-						utils.LogError(logger, fmt.Errorf("failed to convert the expected header value to string while templatizing"), "")
+						utils.LogError(logger, errors.New("failed to convert the expected header value to string while templatizing"), "")
 						return false, nil
 					}
 					expectedValue = append(expectedValue, val)
