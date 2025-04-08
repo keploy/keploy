@@ -36,7 +36,7 @@ func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, 
 	}
 }
 
-func (h *Hooks) SimulateRequest(ctx context.Context, appID uint64, tc *models.TestCase, testSetID string) (interface{}, error) {
+func (h *Hooks) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCase, testSetID string) (interface{}, error) {
 	switch tc.Kind {
 	case models.HTTP:
 		h.logger.Debug("Simulating HTTP request", zap.Any("Test case", tc))

@@ -23,7 +23,6 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	}
 
 	// Local variables to track overall match status
-	matched := true
 	differences := make(map[string]struct {
 		Expected string
 		Actual   string
@@ -45,7 +44,6 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		}
 
 		if !exists {
-			matched = false
 			differences["headers.pseudo_headers.:status"] = struct {
 				Expected string
 				Actual   string
@@ -61,7 +59,6 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 			headerResult.Normal = expectedStatus == actualStatus
 
 			if !headerResult.Normal {
-				matched = false
 				differences["headers.pseudo_headers.:status"] = struct {
 					Expected string
 					Actual   string
@@ -81,7 +78,6 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	// Compare compression flag
 	compressionFlagNormal := expectedResp.Body.CompressionFlag == actualResp.Body.CompressionFlag
 	if !compressionFlagNormal {
-		matched = false
 		differences["body.compression_flag"] = struct {
 			Expected string
 			Actual   string
@@ -102,7 +98,6 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	// Compare message length
 	messageLengthNormal := expectedResp.Body.MessageLength == actualResp.Body.MessageLength
 	if !messageLengthNormal {
-		matched = false
 		differences["body.message_length"] = struct {
 			Expected string
 			Actual   string
@@ -123,7 +118,6 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	// Compare decoded data
 	decodedDataNormal := expectedResp.Body.DecodedData == actualResp.Body.DecodedData
 	if !decodedDataNormal {
-		matched = false
 		differences["body.decoded_data"] = struct {
 			Expected string
 			Actual   string
@@ -170,8 +164,8 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		}
 	}
 
-	// Recalculate match status after applying noise
-	matched = len(differences) == 0
+	// Calculate final match status based on remaining differences
+	matched := len(differences) == 0
 
 	if !matched {
 		// Display differences to the user, similar to HTTP matcher

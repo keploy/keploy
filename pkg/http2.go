@@ -87,9 +87,8 @@ type HTTP2StreamState struct {
 	grpcResp *models.GrpcResp
 
 	// Header state
-	headersReceived     bool
-	trailersReceived    bool
-	continuationPending bool
+	headersReceived  bool
+	trailersReceived bool
 }
 
 // HTTP2Stream represents a complete HTTP/2 stream
@@ -450,15 +449,21 @@ func IsGRPCGatewayRequest(stream *HTTP2Stream) bool {
 
 // SimulateGRPC simulates a gRPC call and returns the response
 // This is a standalone version of the simulateGRPC method from Hooks
-func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, logger *zap.Logger) (*models.GrpcResp, error) {
+func SimulateGRPC(_ context.Context, tc *models.TestCase, testSetID string, logger *zap.Logger) (*models.GrpcResp, error) {
 	grpcReq := tc.GrpcReq
+
+	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSetID)))
 
 	// Create a TCP connection
 	conn, err := net.Dial("tcp", grpcReq.Headers.PseudoHeaders[":authority"])
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial: %w", err)
 	}
-	defer conn.Close()
+	defer func() {
+		if cerr := conn.Close(); cerr != nil {
+			logger.Error("failed to close connection", zap.Error(cerr))
+		}
+	}()
 
 	// Write HTTP/2 connection preface
 	if _, err := conn.Write([]byte(http2.ClientPreface)); err != nil {
@@ -657,16 +662,6 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	return grpcResp, nil
 }
 
-// CreateGRPCPayload creates a gRPC message frame with the given compression flag and message data
-func CreateGRPCPayload(compressionFlag uint, msgData []byte) []byte {
-	// Create the gRPC message frame: compression flag (1 byte) + length (4 bytes) + data
-	payload := make([]byte, 5+len(msgData))
-	payload[0] = byte(compressionFlag)
-	binary.BigEndian.PutUint32(payload[1:5], uint32(len(msgData)))
-	copy(payload[5:], msgData)
-	return payload
-}
-
 // CreateLengthPrefixedMessageFromPayload creates a GrpcLengthPrefixedMessage from raw payload data
 func CreateLengthPrefixedMessageFromPayload(data []byte) models.GrpcLengthPrefixedMessage {
 	msg := models.GrpcLengthPrefixedMessage{}
@@ -709,22 +704,6 @@ func CreatePayloadFromLengthPrefixedMessage(msg models.GrpcLengthPrefixedMessage
 	payload = append(payload, encodedData...)
 
 	return payload, nil
-}
-
-// CreateGRPCFrame creates a buffer with a complete gRPC frame from a message
-func CreateGRPCFrame(msg *models.GrpcLengthPrefixedMessage) *bytes.Buffer {
-	buf := new(bytes.Buffer)
-
-	// Write compression flag (1 byte)
-	buf.WriteByte(byte(msg.CompressionFlag))
-
-	// Write actual message length (don't trust recorded length)
-	binary.Write(buf, binary.BigEndian, msg.MessageLength)
-
-	// Write raw bytes
-	buf.Write([]byte(msg.DecodedData))
-
-	return buf
 }
 
 // ReadGRPCFrame reads a gRPC frame from the given reader and returns it as a byte array
