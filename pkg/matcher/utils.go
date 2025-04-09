@@ -443,9 +443,9 @@ func sprintDiffHeader(expect, actual map[string]string) string {
 	diff := jsonDiff.CompareHeaders(expect, actual)
 
 	if len(expect) > maxLineLength || len(actual) > maxLineLength {
-		return expectActualTable(diff.Actual, diff.Expected, "header", false) // Don't centerize
+		return expectActualTable(diff.Expected, diff.Actual, "header", false) // Don't centerize
 	}
-	return expectActualTable(diff.Actual, diff.Expected, "header", true)
+	return expectActualTable(diff.Expected, diff.Actual, "header", true)
 }
 
 /*
