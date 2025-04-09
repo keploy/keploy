@@ -20,7 +20,7 @@ import (
 )
 
 func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
-	logger.Info("Starting test case encoding",
+	logger.Debug("Starting test case encoding",
 		zap.String("kind", string(tc.Kind)),
 		zap.String("name", tc.Name))
 

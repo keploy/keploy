@@ -529,7 +529,7 @@ func (conn *Tracker) handleHTTP1Data(event SocketDataEvent) {
 		}
 
 	case IngressTraffic:
-		conn.logger.Info("isNewRequest", zap.Any("isNewRequest", conn.isNewRequest), zap.Any("connID", conn.connID))
+		conn.logger.Debug("isNewRequest", zap.Any("isNewRequest", conn.isNewRequest), zap.Any("connID", conn.connID))
 		// Capturing the timestamp of request as the request just started to come.
 		if conn.isNewRequest {
 			conn.reqTimestamps = append(conn.reqTimestamps, ConvertUnixNanoToTime(event.EntryTimestampNano))
