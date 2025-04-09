@@ -61,6 +61,43 @@ func ReplaceHost(currentURL string, ipAddress string) (string, error) {
 	return parsedURL.String(), nil
 }
 
+func ReplaceGrpcHost(authority string, ipAddress string) (string, error) {
+	// Check if ipAddress is empty
+	if ipAddress == "" {
+		return authority, fmt.Errorf("failed to replace authority in case of docker env: empty IP address")
+	}
+
+	// Split authority into host and port
+	parts := strings.Split(authority, ":")
+	if len(parts) != 2 {
+		return authority, fmt.Errorf("invalid authority format, expected host:port but got %s", authority)
+	}
+
+	// Replace the host part with ipAddress, keeping the port
+	return ipAddress + ":" + parts[1], nil
+}
+
+func ReplaceGrpcPort(authority string, port string) (string, error) {
+	// Check if port is empty
+	if port == "" {
+		return authority, fmt.Errorf("failed to replace port in case of docker env: empty port")
+	}
+
+	// Split authority into host and port
+	parts := strings.Split(authority, ":")
+	if len(parts) == 0 {
+		return authority, fmt.Errorf("invalid authority format, got empty string")
+	}
+
+	// If there's no port in the authority, append the new port
+	if len(parts) == 1 {
+		return parts[0] + ":" + port, nil
+	}
+
+	// Replace the port part, keeping the host
+	return parts[0] + ":" + port, nil
+}
+
 // ReplaceBaseURL replaces the base URL (scheme + host) of the given URL with the provided baseURL.
 // It returns the updated URL as a string or an error if the operation fails.
 func ReplaceBaseURL(currentURL string, baseURL string) (string, error) {

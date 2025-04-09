@@ -5,10 +5,12 @@ import (
 )
 
 type GrpcSpec struct {
-	GrpcReq          GrpcReq   `json:"grpcReq" yaml:"grpcReq"`
-	GrpcResp         GrpcResp  `json:"grpcResp" yaml:"grpcResp"`
-	ReqTimestampMock time.Time `json:"reqTimestampMock" yaml:"reqTimestampMock,omitempty"`
-	ResTimestampMock time.Time `json:"resTimestampMock" yaml:"resTimestampMock,omitempty"`
+	GrpcReq          GrpcReq                `json:"grpcReq" yaml:"grpcReq"`
+	GrpcResp         GrpcResp               `json:"grpcResp" yaml:"grpcResp"`
+	Created          int64                  `json:"created" yaml:"created"`
+	Assertions       map[string]interface{} `json:"assertions" yaml:"assertions"`
+	ReqTimestampMock time.Time              `json:"reqTimestampMock" yaml:"reqTimestampMock,omitempty"`
+	ResTimestampMock time.Time              `json:"resTimestampMock" yaml:"resTimestampMock,omitempty"`
 }
 
 type GrpcHeaders struct {
@@ -23,14 +25,16 @@ type GrpcLengthPrefixedMessage struct {
 }
 
 type GrpcReq struct {
-	Headers GrpcHeaders               `json:"headers" yaml:"headers"`
-	Body    GrpcLengthPrefixedMessage `json:"body" yaml:"body"`
+	Headers   GrpcHeaders               `json:"headers" yaml:"headers"`
+	Body      GrpcLengthPrefixedMessage `json:"body" yaml:"body"`
+	Timestamp time.Time                 `json:"timestamp" yaml:"timestamp"`
 }
 
 type GrpcResp struct {
-	Headers  GrpcHeaders               `json:"headers" yaml:"headers"`
-	Body     GrpcLengthPrefixedMessage `json:"body" yaml:"body"`
-	Trailers GrpcHeaders               `json:"trailers" yaml:"trailers"`
+	Headers   GrpcHeaders               `json:"headers" yaml:"headers"`
+	Body      GrpcLengthPrefixedMessage `json:"body" yaml:"body"`
+	Trailers  GrpcHeaders               `json:"trailers" yaml:"trailers"`
+	Timestamp time.Time                 `json:"timestamp" yaml:"timestamp"`
 }
 
 // GrpcStream is a helper function to combine the request-response model in a single struct.

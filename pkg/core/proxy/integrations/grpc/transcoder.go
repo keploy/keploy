@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 
+	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/utils"
 
@@ -129,7 +130,7 @@ func (srv *Transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 		return err
 	}
 
-	payload, err := createPayloadFromLengthPrefixedMessage(grpcMockResp.Body)
+	payload, err := pkg.CreatePayloadFromLengthPrefixedMessage(grpcMockResp.Body)
 	if err != nil {
 		utils.LogError(srv.logger, err, "could not create grpc payload from mocks")
 		return err

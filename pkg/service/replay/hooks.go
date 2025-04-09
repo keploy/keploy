@@ -36,15 +36,19 @@ func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, 
 	}
 }
 
-func (h *Hooks) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error) {
+func (h *Hooks) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCase, testSetID string) (interface{}, error) {
 	switch tc.Kind {
 	case models.HTTP:
-		h.logger.Debug("Before simulating the request", zap.Any("Test case", tc))
-		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, h.cfg.Test.APITimeout)
-		h.logger.Debug("After simulating the request", zap.Any("test case id", tc.Name))
-		return resp, err
+		h.logger.Debug("Simulating HTTP request", zap.Any("Test case", tc))
+		return pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, h.cfg.Test.APITimeout)
+
+	case models.GRPC_EXPORT:
+		h.logger.Debug("Simulating gRPC request", zap.Any("Test case", tc))
+		return pkg.SimulateGRPC(ctx, tc, testSetID, h.logger)
+
+	default:
+		return nil, fmt.Errorf("unsupported test case kind: %s", tc.Kind)
 	}
-	return nil, nil
 }
 
 func (h *Hooks) AfterTestSetRun(ctx context.Context, testSetID string, status bool) error {
