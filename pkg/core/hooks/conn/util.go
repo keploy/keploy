@@ -267,7 +267,7 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	case <-ctx.Done():
 		return
 	case t <- testCase:
-		logger.Info("Captured gRPC test case",
+		logger.Debug("Captured gRPC test case",
 			zap.String("path", http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]))
 	}
 }
