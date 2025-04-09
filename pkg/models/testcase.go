@@ -6,6 +6,16 @@ type Version string
 
 const V1Beta1 = Version("api.keploy.io/v1beta1")
 
+// BodyType constants for HTTP and gRPC
+const (
+	BodyTypeJSON            BodyType = "JSON"
+	BodyTypeText            BodyType = "TEXT"
+	BodyTypeBinary          BodyType = "BINARY"
+	BodyTypeGrpcCompression BodyType = "GRPC_COMPRESSION"
+	BodyTypeGrpcLength      BodyType = "GRPC_LENGTH"
+	BodyTypeGrpcData        BodyType = "GRPC_DATA"
+)
+
 var (
 	currentVersion = V1Beta1
 )
@@ -22,18 +32,16 @@ func GetVersion() (V1 Version) {
 
 // mocks types
 const (
-	HTTP           Kind     = "Http"
-	GENERIC        Kind     = "Generic"
-	REDIS          Kind     = "Redis"
-	MySQL          Kind     = "MySQL"
-	Postgres       Kind     = "Postgres"
-	GRPC_EXPORT    Kind     = "gRPC"
-	Mongo          Kind     = "Mongo"
-	BodyTypeUtf8   BodyType = "utf-8"
-	BodyTypeBinary BodyType = "binary"
-	BodyTypePlain  BodyType = "PLAIN"
-	BodyTypeJSON   BodyType = "JSON"
-	BodyTypeError  BodyType = "ERROR"
+	HTTP          Kind     = "Http"
+	GENERIC       Kind     = "Generic"
+	REDIS         Kind     = "Redis"
+	MySQL         Kind     = "MySQL"
+	Postgres      Kind     = "Postgres"
+	GRPC_EXPORT   Kind     = "gRPC"
+	Mongo         Kind     = "Mongo"
+	BodyTypeUtf8  BodyType = "utf-8"
+	BodyTypePlain BodyType = "PLAIN"
+	BodyTypeError BodyType = "ERROR"
 )
 
 // HTTP Response Types
