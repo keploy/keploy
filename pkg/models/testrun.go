@@ -43,6 +43,8 @@ type TestResult struct {
 	TestCaseID   string     `json:"testCaseID" yaml:"test_case_id"`
 	Req          HTTPReq    `json:"req" yaml:"req,omitempty"`
 	Res          HTTPResp   `json:"resp" yaml:"resp,omitempty"`
+	GrpcReq      GrpcReq    `json:"grpcReq,omitempty" yaml:"grpcReq,omitempty"`
+	GrpcRes      GrpcResp   `json:"grpcRes,omitempty" yaml:"grpcRes,omitempty"`
 	Noise        Noise      `json:"noise" yaml:"noise,omitempty"`
 	Result       Result     `json:"result" yaml:"result"`
 }
@@ -92,6 +94,7 @@ type Result struct {
 	HeadersResult []HeaderResult `json:"headers_result" bson:"headers_result" yaml:"headers_result"`
 	BodyResult    []BodyResult   `json:"body_result" bson:"body_result" yaml:"body_result"`
 	DepResult     []DepResult    `json:"dep_result" bson:"dep_result" yaml:"dep_result"`
+	TrailerResult []HeaderResult `json:"trailer_result,omitempty" bson:"trailer_result,omitempty" yaml:"trailer_result,omitempty"`
 }
 
 type DepResult struct {
