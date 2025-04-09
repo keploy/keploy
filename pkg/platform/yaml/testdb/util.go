@@ -142,7 +142,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 
 		// Set the node as the spec
 		doc.Spec = node
-		logger.Info("Successfully encoded gRPC test case")
+		logger.Debug("Successfully encoded gRPC test case")
 	default:
 		utils.LogError(logger, nil, "failed to marshal the testcase into yaml due to invalid kind of testcase")
 		return nil, errors.New("type of testcases is invalid")
