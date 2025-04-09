@@ -17,11 +17,6 @@ fi
 # Generate the keploy-config file.
 sudo ./../../keployv2 config --generate
 
-
-echo "Keploy config file generated"
-echo "listing the files in the current directory"
-ls -l
-
 # Update the global noise to ts.
 config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"body": {"ts":[]}}/' "$config_file"
@@ -34,8 +29,6 @@ rm -rf keploy/
 # Build the binary.
 go build -o ginApp
 
-echo "Binary built successfully and now checking its existence"
-ls -l
 
 send_request(){
     sleep 10
@@ -81,36 +74,36 @@ send_request(){
 for i in {1..2}; do
     app_name="javaApp_${i}"
     send_request &
-    sudo -E env PATH="$PATH" ./../../keployv2 record -c "./ginApp"   
-    # if grep "ERROR" "${app_name}.txt"; then
-    #     echo "Error found in pipeline..."
-    #     cat "${app_name}.txt"
-    #     exit 1
-    # fi
-    # if grep "WARNING: DATA RACE" "${app_name}.txt"; then
-    #   echo "Race condition detected in recording, stopping pipeline..."
-    #   cat "${app_name}.txt"
-    #   exit 1
-    # fi
+    sudo -E env PATH="$PATH" ./../../keployv2 record -c "./ginApp"    &> "${app_name}.txt"
+    if grep "ERROR" "${app_name}.txt"; then
+        echo "Error found in pipeline..."
+        cat "${app_name}.txt"
+        exit 1
+    fi
+    if grep "WARNING: DATA RACE" "${app_name}.txt"; then
+      echo "Race condition detected in recording, stopping pipeline..."
+      cat "${app_name}.txt"
+      exit 1
+    fi
     sleep 5
     wait
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
 # Start the gin-mongo app in test mode.
-sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7   
+sudo -E env PATH="$PATH" ./../../keployv2 test -c "./ginApp" --delay 7    &> test_logs.txt
 
-# if grep "ERROR" "test_logs.txt"; then
-#     echo "Error found in pipeline..."
-#     cat "test_logs.txt"
-#     exit 1
-# fi
+if grep "ERROR" "test_logs.txt"; then
+    echo "Error found in pipeline..."
+    cat "test_logs.txt"
+    exit 1
+fi
 
-# if grep "WARNING: DATA RACE" "test_logs.txt"; then
-#     echo "Race condition detected in test, stopping pipeline..."
-#     cat "test_logs.txt"
-#     exit 1
-# fi
+if grep "WARNING: DATA RACE" "test_logs.txt"; then
+    echo "Race condition detected in test, stopping pipeline..."
+    cat "test_logs.txt"
+    exit 1
+fi
 
 all_passed=true
 
