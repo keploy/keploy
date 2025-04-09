@@ -275,6 +275,9 @@ func ConvertUnixNanoToTime(unixNano uint64) time.Time {
 
 // getHTTP2CompletedStream returns a completed HTTP2/gRPC stream if available
 func (conn *Tracker) getHTTP2CompletedStream() *pkg.HTTP2Stream {
+	conn.mutex.RLock()
+	defer conn.mutex.RUnlock()
+
 	if conn.streamMgr == nil {
 		return nil
 	}
@@ -295,6 +298,9 @@ func (conn *Tracker) getHTTP2CompletedStream() *pkg.HTTP2Stream {
 
 // Existing HTTP/1 completion check
 func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Time) {
+	conn.mutex.RLock()
+	defer conn.mutex.RUnlock()
+
 	// Get the current timestamp in nanoseconds.
 	currentTimestamp := uint64(time.Now().UnixNano())
 
