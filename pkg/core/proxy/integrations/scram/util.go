@@ -77,7 +77,7 @@ func extractUsername(authMessage string) (string, error) {
 			return nValue, nil
 		}
 	}
-	return "", fmt.Errorf("no username found in the auth message")
+	return "", errors.New("no username found in the auth message")
 }
 
 func extractAuthID(input string) (string, error) {
@@ -86,5 +86,5 @@ func extractAuthID(input string) (string, error) {
 	if len(matches) >= 2 {
 		return "n," + matches[1] + ",", nil
 	}
-	return "", fmt.Errorf("no match found")
+	return "", errors.New("no match found")
 }

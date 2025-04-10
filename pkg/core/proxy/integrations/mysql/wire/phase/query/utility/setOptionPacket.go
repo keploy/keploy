@@ -5,7 +5,7 @@ package utility
 import (
 	"context"
 	"encoding/binary"
-	"fmt"
+	"errors"
 
 	"go.keploy.io/server/v2/pkg/models/mysql"
 )
@@ -14,7 +14,7 @@ import (
 
 func DecodeSetOption(_ context.Context, data []byte) (*mysql.SetOptionPacket, error) {
 	if len(data) < 3 {
-		return nil, fmt.Errorf("set option packet too short")
+		return nil, errors.New("set option packet too short")
 	}
 
 	packet := &mysql.SetOptionPacket{

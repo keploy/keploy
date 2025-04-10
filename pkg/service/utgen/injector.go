@@ -3,6 +3,7 @@ package utgen
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -272,7 +273,7 @@ func (i *Injector) updateGoImports(codeBlock string, newImports []string) (strin
 
 	pkgMatch := packageRegex.FindStringIndex(codeBlock)
 	if pkgMatch == nil {
-		return "", 0, fmt.Errorf("could not find package declaration")
+		return "", 0, errors.New("could not find package declaration")
 	}
 	newImports = i.extractGoImports(newImports, false)
 	importBlock := i.createGoImportBlock(newImports)

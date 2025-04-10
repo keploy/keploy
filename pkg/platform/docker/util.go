@@ -3,7 +3,7 @@
 package docker
 
 import (
-	"fmt"
+	"errors"
 	"regexp"
 
 	"go.keploy.io/server/v2/utils"
@@ -26,7 +26,7 @@ func ParseDockerCmd(cmd string, kind utils.CmdType, idc Client) (string, string,
 	containerNameRegex := regexp.MustCompile(containerNamePattern)
 	containerNameMatches := containerNameRegex.FindStringSubmatch(cmd)
 	if len(containerNameMatches) < 2 {
-		return "", "", fmt.Errorf("failed to parse container name")
+		return "", "", errors.New("failed to parse container name")
 	}
 	containerName := containerNameMatches[1]
 
@@ -38,14 +38,14 @@ func ParseDockerCmd(cmd string, kind utils.CmdType, idc Client) (string, string,
 		for i := range networks {
 			return containerName, i, nil
 		}
-		return containerName, "", fmt.Errorf("failed to parse network name")
+		return containerName, "", errors.New("failed to parse network name")
 	}
 
 	// Extract network name
 	networkNameRegex := regexp.MustCompile(networkNamePattern)
 	networkNameMatches := networkNameRegex.FindStringSubmatch(cmd)
 	if len(networkNameMatches) < 3 {
-		return containerName, "", fmt.Errorf("failed to parse network name")
+		return containerName, "", errors.New("failed to parse network name")
 	}
 	networkName := networkNameMatches[2]
 

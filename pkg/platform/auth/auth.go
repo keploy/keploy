@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -129,7 +130,7 @@ func (a *Auth) GetToken(ctx context.Context) (string, error) {
 		a.logger.Warn("Please follow the instructions to login.")
 		isSuccessful := a.Login(ctx)
 		if !isSuccessful {
-			return "", fmt.Errorf("failed to login")
+			return "", errors.New("failed to login")
 		}
 	}
 
