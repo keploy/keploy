@@ -20,6 +20,7 @@ import (
 	cfsslLog "github.com/cloudflare/cfssl/log"
 	"github.com/cloudflare/cfssl/signer"
 	"github.com/cloudflare/cfssl/signer/local"
+	"github.com/davecgh/go-spew/spew"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -273,13 +274,16 @@ func CertForClient(clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed
 		// 2025/03/18 20:54:25 [INFO] encoded CSR
 		// 2025/03/18 20:54:25 [INFO] signed certificate with serial number 435398774381835435678674951099961010543769077102
 
-		cfsslLog.Level = cfsslLog.LevelError
+		cfsslLog.Level = cfsslLog.LevelDebug
 	})
 
 	// Generate a new server certificate and private key for the given hostname
 	dstURL := clientHello.ServerName
 
+	println("destination url: ", dstURL)
+
 	remoteAddr := clientHello.Conn.RemoteAddr().(*net.TCPAddr)
+
 	sourcePort := remoteAddr.Port
 
 	SrcPortToDstURL.Store(sourcePort, dstURL)
@@ -320,6 +324,8 @@ func CertForClient(clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed
 	if err != nil {
 		return nil, fmt.Errorf("failed to load server certificate and key: %v", err)
 	}
+
+	spew.Dump(serverTLSCert)
 
 	return &serverTLSCert, nil
 }
