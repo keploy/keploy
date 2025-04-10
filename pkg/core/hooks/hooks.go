@@ -137,7 +137,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 		var ve *ebpf.VerifierError
 		if errors.As(err, &ve) {
 			errString := strings.Join(ve.Log, "\n")
-			h.logger.Info("verifier logs: ", zap.String("err", errString))
+			h.logger.Info("verifier logs here: ", zap.String("err", errString))
 		}
 		utils.LogError(h.logger, err, "failed to load eBPF objects")
 		return err
