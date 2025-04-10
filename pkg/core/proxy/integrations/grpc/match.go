@@ -32,7 +32,7 @@ func FilterMocksRelatedToGrpc(mocks []*models.Mock) []*models.Mock {
 	return res
 }
 
-func FilterMocksBasedOnGrpcRequest(ctx context.Context, _ *zap.Logger, grpcReq models.GrpcReq, mockDb integrations.MockMemDb) (*models.Mock, error) {
+func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpcReq models.GrpcReq, mockDb integrations.MockMemDb) (*models.Mock, error) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -47,6 +47,9 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, _ *zap.Logger, grpcReq m
 			var isMatched bool
 
 			grpcMocks := FilterMocksRelatedToGrpc(mocks)
+
+			logger.Debug("Here are the grpc mocks in the db", zap.Int("len", len(grpcMocks)), zap.Any("grpcMocks", grpcMocks))
+
 			for _, mock := range grpcMocks {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
@@ -75,6 +78,10 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, _ *zap.Logger, grpcReq m
 				if have.Body.CompressionFlag != grpcReq.Body.CompressionFlag {
 					continue
 				}
+
+				logger.Debug("Going to match body because all other headers matched",
+					zap.Any("have", have),
+					zap.Any("grpcReq", grpcReq))
 
 				// Investigate the body.
 				if have.Body.DecodedData != grpcReq.Body.DecodedData {
