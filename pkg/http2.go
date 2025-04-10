@@ -118,7 +118,7 @@ func NewStreamManager(logger *zap.Logger) *DefaultStreamManager {
 		streams: make(map[uint32]*HTTP2StreamState),
 		buffer:  make([]byte, 0, DefaultMaxFrameSize),
 		logger:  logger,
-		decoder: hpack.NewDecoder(4096, nil),
+		decoder: hpack.NewDecoder(8192, nil),
 		// Initialize separate header tables
 		requestHeaders:  make(map[string]string),
 		responseHeaders: make(map[string]string),
