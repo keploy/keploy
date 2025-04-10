@@ -123,14 +123,14 @@ func schemaMatch(ctx context.Context, req models.GrpcReq, mocks []*models.Mock) 
 // Check if two maps have the same keys
 func compareMapKeys(m1, m2 map[string]string) bool {
 	if len(m1) > len(m2) {
-		for k := range m1 {
-			if _, ok := m2[k]; !ok {
+		for k := range m2 {
+			if _, ok := m1[k]; !ok {
 				return false
 			}
 		}
 	} else {
-		for k := range m2 {
-			if _, ok := m1[k]; !ok {
+		for k := range m1 {
+			if _, ok := m2[k]; !ok {
 				return false
 			}
 		}

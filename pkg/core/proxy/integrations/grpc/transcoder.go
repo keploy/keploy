@@ -91,6 +91,8 @@ func (srv *Transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 		return fmt.Errorf("failed to mock the output for unrecorded outgoing grpc call")
 	}
 
+	srv.logger.Debug("Found a mock for the request", zap.Any("mock", mock))
+
 	grpcMockResp := mock.Spec.GRPCResp
 
 	// First, send the headers frame.
