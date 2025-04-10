@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v2/pkg/models"
@@ -75,16 +76,27 @@ func transferFrame(ctx context.Context, lhs net.Conn, rhs net.Conn, sic *StreamI
 				if reqFromClient {
 					sic.AddHeadersForRequest(streamID, pseudoHeaders, true)
 					sic.AddHeadersForRequest(streamID, ordinaryHeaders, false)
-				} else if respFromServer {
-					// If this is the last fragment of a stream from the server, it has to be a trailer.
-					isTrailer := false
-					if headersFrame.StreamEnded() {
-						isTrailer = true
-					}
-					sic.AddHeadersForResponse(streamID, pseudoHeaders, true, isTrailer)
-					sic.AddHeadersForResponse(streamID, ordinaryHeaders, false, isTrailer)
-				}
 
+				} else if respFromServer {
+					if headersFrame.StreamEnded() {
+						// Trailers — filter grpc-* as trailer, rest as normal headers
+						pseudoNormal, pseudoTrailer := splitGrpcTrailerHeaders(pseudoHeaders)
+						ordinaryNormal, ordinaryTrailer := splitGrpcTrailerHeaders(ordinaryHeaders)
+
+						// Add "normal" parts as headers (still appears in trailers, but your system might need this distinction)
+						sic.AddHeadersForResponse(streamID, pseudoNormal, true, false)
+						sic.AddHeadersForResponse(streamID, ordinaryNormal, false, false)
+
+						// Add "grpc-" keys as actual trailers
+						sic.AddHeadersForResponse(streamID, pseudoTrailer, true, true)
+						sic.AddHeadersForResponse(streamID, ordinaryTrailer, false, true)
+
+					} else {
+						// Just regular headers
+						sic.AddHeadersForResponse(streamID, pseudoHeaders, true, false)
+						sic.AddHeadersForResponse(streamID, ordinaryHeaders, false, false)
+					}
+				}
 				// The trailers frame has been received. The stream has been closed by the server.
 				// Capture the mock and clear the map, as the stream ID can be reused by client.
 				if respFromServer && headersFrame.StreamEnded() {
@@ -161,6 +173,19 @@ func transferFrame(ctx context.Context, lhs net.Conn, rhs net.Conn, sic *StreamI
 			}
 		}
 	}
+}
+
+func splitGrpcTrailerHeaders(headers map[string]string) (normal map[string]string, trailer map[string]string) {
+	normal = make(map[string]string)
+	trailer = make(map[string]string)
+	for k, v := range headers {
+		if strings.HasPrefix(k, "grpc-") {
+			trailer[k] = v
+		} else {
+			normal[k] = v
+		}
+	}
+	return
 }
 
 // constants for dynamic table size
