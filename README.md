@@ -20,8 +20,8 @@
   </a>
 
 <a href="https://github.com/Keploy/Keploy/issues">
-    <img src="https://img.shields.io/github/stars/keploy/keploy?color=%23EAC54F&logo=github&label=Help us reach 10K stars! Now at:" alt="Help us reach 10k stars!" />
-  </a>
+  <img src="https://img.shields.io/github/stars/keploy/keploy?color=%23EAC54F&logo=github&label=Help%20us%20reach%2010K%20stars!%20Now%20at:" alt="Help us reach 10k stars!" />
+</a>
 
   <a href="https://landscape.cncf.io/?item=app-definition-and-development--continuous-integration-delivery--keploy">
     <img src="https://img.shields.io/badge/CNCF%20Landscape-5699C6?logo=cncf&style=social" alt="Keploy CNCF Landscape" />
