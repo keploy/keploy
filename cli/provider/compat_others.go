@@ -6,6 +6,6 @@ package provider
 
 import "go.uber.org/zap"
 
-func isCompatible(logger *zap.Logger) error {
+func isCompatible(_ *zap.Logger) error {
 	return nil
 }

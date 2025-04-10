@@ -5,7 +5,7 @@ package preparedstmt
 import (
 	"context"
 	"encoding/binary"
-	"fmt"
+	"errors"
 
 	"go.keploy.io/server/v2/pkg/models/mysql"
 )
@@ -14,7 +14,7 @@ import (
 
 func DecodeStmtReset(_ context.Context, data []byte) (*mysql.StmtResetPacket, error) {
 	if len(data) != 5 {
-		return nil, fmt.Errorf("invalid COM_STMT_RESET packet")
+		return nil, errors.New("invalid COM_STMT_RESET packet")
 	}
 
 	packet := &mysql.StmtResetPacket{

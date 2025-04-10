@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -47,6 +48,7 @@ type CompletionParams struct {
 
 type ReasoningType string
 
+// constants for reasoning effort
 const (
 	HighReasioning   ReasoningType = "high"   // HighReasioning represents high reasoning effort.
 	LowReasioning    ReasoningType = "low"    // LowReasioning represents low reasoning effort.
@@ -155,33 +157,33 @@ func (ai *AIClient) Call(ctx context.Context, completionParams CompletionParams,
 
 		token, err := ai.Auth.GetToken(ctx)
 		if err != nil {
-			return "", fmt.Errorf("error getting token: %v", err)
+			return "", fmt.Errorf("error getting token: %w", err)
 		}
 
 		ai.Logger.Debug("Making AI request to API server", zap.String("api_server_url", ai.APIServerURL), zap.String("token", token))
 		httpClient := &http.Client{}
 		aiRequestBytes, err := json.Marshal(aiRequest)
 		if err != nil {
-			return "", fmt.Errorf("error marshalling AI request: %v", err)
+			return "", fmt.Errorf("error marshalling AI request: %w", err)
 		}
 
 		req, err := http.NewRequest("POST", fmt.Sprintf("%s/ai/call", ai.APIServerURL), bytes.NewBuffer(aiRequestBytes))
 		if err != nil {
-			return "", fmt.Errorf("error creating request: %v", err)
+			return "", fmt.Errorf("error creating request: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+token)
 
 		resp, err := httpClient.Do(req)
 		if err != nil {
-			return "", fmt.Errorf("error making request: %v", err)
+			return "", fmt.Errorf("error making request: %w", err)
 		}
 
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		var aiResponse AIResponse
 		err = json.Unmarshal(bodyBytes, &aiResponse)
 		if err != nil {
-			return "", fmt.Errorf("error unmarshalling response body: %v", err)
+			return "", fmt.Errorf("error unmarshalling response body: %w", err)
 		}
 
 		if resp.StatusCode != http.StatusOK {
@@ -226,7 +228,7 @@ func (ai *AIClient) Call(ctx context.Context, completionParams CompletionParams,
 
 	requestBody, err := json.Marshal(completionParams)
 	if err != nil {
-		return "", fmt.Errorf("error marshalling request body: %v", err)
+		return "", fmt.Errorf("error marshalling request body: %w", err)
 	}
 
 	queryParams := ""
@@ -236,7 +238,7 @@ func (ai *AIClient) Call(ctx context.Context, completionParams CompletionParams,
 
 	req, err := http.NewRequestWithContext(ctx, "POST", apiBaseURL+"/chat/completions"+queryParams, bytes.NewBuffer(requestBody))
 	if err != nil {
-		return "", fmt.Errorf("error creating request: %v", err)
+		return "", fmt.Errorf("error creating request: %w", err)
 	}
 
 	if ai.APIKey == "" {
@@ -252,7 +254,7 @@ func (ai *AIClient) Call(ctx context.Context, completionParams CompletionParams,
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("error making request: %v", err)
+		return "", fmt.Errorf("error making request: %w", err)
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
@@ -277,7 +279,7 @@ func (ai *AIClient) Call(ctx context.Context, completionParams CompletionParams,
 	if stream {
 		for {
 			line, err := reader.ReadString('\n')
-			if err != nil && err != io.EOF {
+			if err != nil && !errors.Is(err, io.EOF) {
 				utils.LogError(ai.Logger, err, "Error reading stream")
 				return "", err
 			}
@@ -306,7 +308,7 @@ func (ai *AIClient) Call(ctx context.Context, completionParams CompletionParams,
 				}
 			}
 
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 			time.Sleep(10 * time.Millisecond)
@@ -314,12 +316,12 @@ func (ai *AIClient) Call(ctx context.Context, completionParams CompletionParams,
 	} else {
 		responseData, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return "", fmt.Errorf("error reading response: %v", err)
+			return "", fmt.Errorf("error reading response: %w", err)
 		}
 		var completionResponse CompletionResponse
 		err = json.Unmarshal(responseData, &completionResponse)
 		if err != nil {
-			return "", fmt.Errorf("error unmarshalling response: %v", err)
+			return "", fmt.Errorf("error unmarshalling response: %w", err)
 		}
 		if len(completionResponse.Choices) > 0 {
 			finalContent := completionResponse.Choices[0].Message.Content
@@ -345,7 +347,7 @@ func (ai *AIClient) SendCoverageUpdate(ctx context.Context, sessionID string, ol
 		"requestPurpose": requestPurpose,
 	})
 	if err != nil {
-		return fmt.Errorf("error marshalling request body: %v", err)
+		return fmt.Errorf("error marshalling request body: %w", err)
 	}
 
 	// Determine the base URL
@@ -356,13 +358,13 @@ func (ai *AIClient) SendCoverageUpdate(ctx context.Context, sessionID string, ol
 	// Create a POST request
 	req, err := http.NewRequestWithContext(ctx, "POST", apiBaseURL+"/ai/coverage/update", bytes.NewBuffer(requestBody))
 	if err != nil {
-		return fmt.Errorf("error creating request: %v", err)
+		return fmt.Errorf("error creating request: %w", err)
 	}
 
 	token, err := ai.Auth.GetToken(ctx)
 
 	if err != nil {
-		return fmt.Errorf("error getting token: %v", err)
+		return fmt.Errorf("error getting token: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -371,7 +373,7 @@ func (ai *AIClient) SendCoverageUpdate(ctx context.Context, sessionID string, ol
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("error making request: %v", err)
+		return fmt.Errorf("error making request: %w", err)
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {

@@ -47,19 +47,19 @@ func LeftJoinNoise(globalNoise config.GlobalNoise, tsNoise config.GlobalNoise) c
 func ReplaceBaseURL(newURL, oldURL string) (string, error) {
 	parsedOldURL, err := url.Parse(oldURL)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse the old URL: %v", err)
+		return "", fmt.Errorf("failed to parse the old URL: %w", err)
 	}
 
 	parsedNewURL, err := url.Parse(newURL)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse the new URL: %v", err)
+		return "", fmt.Errorf("failed to parse the new URL: %w", err)
 	}
 	// if scheme is empty, then add the scheme from the old URL in order to parse it correctly
 	if parsedNewURL.Scheme == "" {
 		parsedNewURL.Scheme = parsedOldURL.Scheme
 		parsedNewURL, err = url.Parse(parsedNewURL.String())
 		if err != nil {
-			return "", fmt.Errorf("failed to parse the scheme added new URL: %v", err)
+			return "", fmt.Errorf("failed to parse the scheme added new URL: %w", err)
 		}
 	}
 
@@ -72,7 +72,7 @@ func ReplaceBaseURL(newURL, oldURL string) (string, error) {
 	replacedURL := parsedOldURL.String()
 	decodedURL, err := url.PathUnescape(replacedURL)
 	if err != nil {
-		return "", fmt.Errorf("failed to decode the URL: %v", err)
+		return "", fmt.Errorf("failed to decode the URL: %w", err)
 	}
 	return decodedURL, nil
 }

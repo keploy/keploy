@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
@@ -20,7 +21,7 @@ func DecodeColumn(_ context.Context, _ *zap.Logger, b []byte) (*mysql.ColumnDefi
 		Header: mysql.Header{},
 	}
 	if len(b) < 4 {
-		return nil, 0, fmt.Errorf("invalid column definition packet")
+		return nil, 0, errors.New("invalid column definition packet")
 	}
 	var pos = 0
 

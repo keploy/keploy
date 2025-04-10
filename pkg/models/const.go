@@ -20,6 +20,7 @@ const (
 	TestRunTemplateName string = "test-run-"
 )
 
+// constants for different languages
 const (
 	Unknown    config.Language = "Unknown"    // Unknown language
 	Go         config.Language = "go"         // Go language

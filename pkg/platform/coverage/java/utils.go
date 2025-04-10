@@ -79,7 +79,7 @@ func downloadAndExtractJaCoCoCli(logger *zap.Logger, version, dir string) error 
 	cliStat, err := os.Stat(cliPath)
 
 	if os.IsNotExist(err) || cliStat != nil {
-		return fmt.Errorf("failed to find JaCoCo binaries in the distribution")
+		return errors.New("failed to find JaCoCo binaries in the distribution")
 	}
 
 	return nil

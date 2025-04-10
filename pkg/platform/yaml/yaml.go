@@ -2,6 +2,7 @@ package yaml
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -93,7 +94,7 @@ func WriteFile(ctx context.Context, logger *zap.Logger, path, fileName string, d
 
 	_, err = cw.Write(docData)
 	if err != nil {
-		if err == ctx.Err() {
+		if errors.Is(err, ctx.Err()) {
 			return nil // Ignore context cancellation error
 		}
 		utils.LogError(logger, err, "failed to write the yaml document", zap.String("yaml file name", fileName))
@@ -106,7 +107,7 @@ func ReadFile(ctx context.Context, logger *zap.Logger, path, name string) ([]byt
 	filePath := filepath.Join(path, name+".yaml")
 	file, err := os.Open(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read the file: %v", err)
+		return nil, fmt.Errorf("failed to read the file: %w", err)
 	}
 
 	defer func() {
@@ -122,10 +123,10 @@ func ReadFile(ctx context.Context, logger *zap.Logger, path, name string) ([]byt
 
 	data, err := io.ReadAll(cr)
 	if err != nil {
-		if err == ctx.Err() {
+		if errors.Is(err, ctx.Err()) {
 			return nil, err // Ignore context cancellation error
 		}
-		return nil, fmt.Errorf("failed to read the file: %v", err)
+		return nil, fmt.Errorf("failed to read the file: %w", err)
 	}
 	return data, nil
 }
@@ -187,7 +188,7 @@ func DeleteFile(_ context.Context, logger *zap.Logger, path, name string) error 
 	err := os.Remove(filePath)
 	if err != nil {
 		utils.LogError(logger, err, "failed to delete the file", zap.String("file", filePath))
-		return fmt.Errorf("failed to delete the file: %v", err)
+		return fmt.Errorf("failed to delete the file: %w", err)
 	}
 	return nil
 }
@@ -196,7 +197,7 @@ func DeleteDir(_ context.Context, logger *zap.Logger, path string) error {
 	err := os.RemoveAll(path)
 	if err != nil {
 		utils.LogError(logger, err, "failed to delete the directory", zap.String("path", path))
-		return fmt.Errorf("failed to delete the directory: %v", err)
+		return fmt.Errorf("failed to delete the directory: %w", err)
 	}
 	return nil
 }

@@ -5,6 +5,7 @@ package replayer
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -255,7 +256,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 
 		if len(req) < reqIdx+1 {
 			utils.LogError(logger, nil, "no mysql mocks found for auth switch response")
-			return res, fmt.Errorf("no mysql mocks found for auth switch response")
+			return res, errors.New("no mysql mocks found for auth switch response")
 		}
 
 		// Get the auth switch response from the mock
@@ -269,7 +270,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 		// Since auth switch response data can be different, we should just check the sequence number
 		if authSwitchRespMock.Header.Header.SequenceID != authSwitchRespPkt.Header.SequenceID {
 			utils.LogError(logger, nil, "sequence number mismatch for auth switch response", zap.Any("expected", authSwitchRespMock.Header.Header.SequenceID), zap.Any("actual", authSwitchRespPkt.Header.SequenceID))
-			return res, fmt.Errorf("sequence number mismatch for auth switch response")
+			return res, errors.New("sequence number mismatch for auth switch response")
 		}
 
 		logger.Debug("auth mechanism switched successfully")
@@ -386,7 +387,7 @@ func simulateCacheSha2Password(ctx context.Context, logger *zap.Logger, clientCo
 
 	if len(cacheSha2PassMock.resp) < 2 {
 		utils.LogError(logger, nil, "response mock not found for caching_sha2_password after auth more data")
-		return fmt.Errorf("response mock not found for caching_sha2_password after auth more data")
+		return errors.New("response mock not found for caching_sha2_password after auth more data")
 	}
 
 	//update the cacheSha2PassMock resp
@@ -415,7 +416,7 @@ func simulateFastAuthSuccess(ctx context.Context, logger *zap.Logger, clientConn
 
 	if len(resp) < 1 {
 		utils.LogError(logger, nil, "final response mock not found for fast auth success")
-		return fmt.Errorf("final response mock not found for fast auth success")
+		return errors.New("final response mock not found for fast auth success")
 	}
 
 	logger.Debug("final response for fast auth success", zap.Any("response", resp[0].PacketBundle.Header.Type))
@@ -476,7 +477,7 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 	// Get the public key response from the mock
 	if len(req) < 1 {
 		utils.LogError(logger, nil, "no mysql mocks found for public key response")
-		return fmt.Errorf("no mysql mocks found for public key response")
+		return errors.New("no mysql mocks found for public key response")
 	}
 
 	publicKeyMock, ok := req[0].Message.(string)
@@ -495,13 +496,13 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 	// Match the public key response from the client with the mock
 	if publicKey != publicKeyMock {
 		utils.LogError(logger, nil, "public key mismatch", zap.Any("actual", publicKey), zap.Any("expected", publicKeyMock))
-		return fmt.Errorf("public key mismatch")
+		return errors.New("public key mismatch")
 	}
 
 	// Get the AuthMoreData for sending the public key
 	if len(resp) < 1 {
 		utils.LogError(logger, nil, "no mysql mocks found for auth more data (public key)")
-		return fmt.Errorf("no mysql mocks found for auth more data (public key)")
+		return errors.New("no mysql mocks found for auth more data (public key)")
 	}
 
 	// Get the AuthMoreData packet
@@ -545,7 +546,7 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 
 	if len(req) < 2 {
 		utils.LogError(logger, nil, "no mysql mocks found for encrypted password during full auth")
-		return fmt.Errorf("no mysql mocks found for encrypted password during full auth")
+		return errors.New("no mysql mocks found for encrypted password during full auth")
 	}
 
 	// Get the encrypted password from the mock
@@ -559,13 +560,13 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 	// Since encrypted password can be different, we should just check the sequence number
 	if encryptedPassMock.Header.Header.SequenceID != encryptedPassPkt.Header.SequenceID {
 		utils.LogError(logger, nil, "sequence number mismatch for encrypted password", zap.Any("expected", encryptedPassMock.Header.Header.SequenceID), zap.Any("actual", encryptedPassPkt.Header.SequenceID))
-		return fmt.Errorf("sequence number mismatch for encrypted password")
+		return errors.New("sequence number mismatch for encrypted password")
 	}
 
 	//Now send the final response (OK/Err) to the client
 	if len(resp) < 2 {
 		utils.LogError(logger, nil, "final response mock not found for full auth")
-		return fmt.Errorf("final response mock not found for full auth")
+		return errors.New("final response mock not found for full auth")
 	}
 
 	logger.Debug("final response for full auth", zap.Any("response", resp[1].PacketBundle.Header.Type))
