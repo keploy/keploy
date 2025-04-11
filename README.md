@@ -18,8 +18,8 @@
    <a href="https://twitter.com/Keploy_io">
     <img src="https://img.shields.io/badge/follow-%40keployio-1DA1F2?logo=twitter&style=social" alt="Keploy Twitter" />
   </a>
-
-<a href="https://github.com/Keploy/Keploy/issues">
+  
+  <a href="https://github.com/Keploy/Keploy/">
   <img src="https://img.shields.io/github/stars/keploy/keploy?color=%23EAC54F&logo=github&label=Help%20us%20reach%2010K%20stars!%20Now%20at:" alt="Help us reach 10k stars!" />
 </a>
 
