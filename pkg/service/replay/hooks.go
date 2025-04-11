@@ -123,12 +123,12 @@ func (h *Hooks) AfterTestSetRun(ctx context.Context, testSetID string, status bo
 				App:  h.cfg.AppName,
 			},
 		}
-		if role == "OSS" {
-			if username == "" {
-				fmt.Println("Username not found in the token, skipping mock upload")
-			}
-			tsConfig.MockRegistry.User = username
+
+		if username == "" {
+			fmt.Println("Username not found in the token, skipping mock upload")
+			return nil
 		}
+		tsConfig.MockRegistry.User = username
 
 		err := h.tsConfigDB.Write(ctx, testSetID, tsConfig)
 		if err != nil {
