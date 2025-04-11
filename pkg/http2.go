@@ -27,6 +27,8 @@ const (
 	MaxFrameSize = 16777215 // 2^24 - 1
 	// HTTP2Preface is the HTTP/2 connection preface
 	HTTP2Preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+	// MaxDynamicTableSize is the maximum size of the HPACK dynamic table
+	MaxDynamicTableSize = 8192
 )
 
 // ExtractHTTP2Frame attempts to extract an HTTP/2 frame from raw bytes
@@ -118,7 +120,7 @@ func NewStreamManager(logger *zap.Logger) *DefaultStreamManager {
 		streams: make(map[uint32]*HTTP2StreamState),
 		buffer:  make([]byte, 0, DefaultMaxFrameSize),
 		logger:  logger,
-		decoder: hpack.NewDecoder(4096, nil),
+		decoder: hpack.NewDecoder(MaxDynamicTableSize, nil),
 		// Initialize separate header tables
 		requestHeaders:  make(map[string]string),
 		responseHeaders: make(map[string]string),
@@ -611,7 +613,7 @@ func SimulateGRPC(_ context.Context, tc *models.TestCase, testSetID string, logg
 		case *http2.HeadersFrame:
 			// If we already have headers, this must be trailers
 			if len(grpcResp.Headers.OrdinaryHeaders) > 0 || len(grpcResp.Headers.PseudoHeaders) > 0 {
-				decoder := hpack.NewDecoder(4096, func(f hpack.HeaderField) {
+				decoder := hpack.NewDecoder(MaxDynamicTableSize, func(f hpack.HeaderField) {
 					if strings.HasPrefix(f.Name, ":") {
 						grpcResp.Trailers.PseudoHeaders[f.Name] = f.Value
 					} else {
@@ -623,7 +625,7 @@ func SimulateGRPC(_ context.Context, tc *models.TestCase, testSetID string, logg
 				}
 			} else {
 				// These are headers
-				decoder := hpack.NewDecoder(4096, func(f hpack.HeaderField) {
+				decoder := hpack.NewDecoder(MaxDynamicTableSize, func(f hpack.HeaderField) {
 					if strings.HasPrefix(f.Name, ":") {
 						grpcResp.Headers.PseudoHeaders[f.Name] = f.Value
 					} else {

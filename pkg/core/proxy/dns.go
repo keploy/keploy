@@ -69,6 +69,10 @@ var cache = struct {
 }{m: make(map[string][]dns.RR)}
 
 func generateCacheKey(name string, qtype uint16) string {
+	// For MongoDB SRV queries, include "mongodb" in the cache key to differentiate from other SRV queries
+	if strings.HasPrefix(name, "_mongodb._tcp.") {
+		return fmt.Sprintf("mongodb-%s-%s", name, dns.TypeToString[qtype])
+	}
 	return fmt.Sprintf("%s-%s", name, dns.TypeToString[qtype])
 }
 
@@ -83,6 +87,13 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		p.logger.Debug("", zap.Any("Record Type", question.Qtype), zap.Any("Received Query", question.Name))
 
 		key := generateCacheKey(question.Name, question.Qtype)
+
+		// Clear cache for MongoDB SRV queries to ensure fresh resolution
+		if strings.HasPrefix(question.Name, "_mongodb._tcp.") {
+			cache.Lock()
+			delete(cache.m, key)
+			cache.Unlock()
+		}
 
 		// Check if the answer is cached
 		cache.RLock()
@@ -110,7 +121,27 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 						AAAA: net.ParseIP(p.IP6),
 					}}
 					p.logger.Debug("failed to resolve dns query hence sending proxy ip6", zap.Any("proxy Ip", p.IP6))
-
+				} else if question.Qtype == dns.TypeSRV {
+					// Special handling for MongoDB SRV queries
+					if strings.HasPrefix(question.Name, "_mongodb._tcp.") {
+						baseDomain := strings.TrimPrefix(question.Name, "_mongodb._tcp.")
+						answers = []dns.RR{&dns.SRV{
+							Hdr:      dns.RR_Header{Name: dns.Fqdn(question.Name), Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 3600},
+							Priority: 0,
+							Weight:   0,
+							Port:     27017,
+							Target:   dns.Fqdn("mongodb." + baseDomain),
+						}}
+					} else {
+						answers = []dns.RR{&dns.SRV{
+							Hdr:      dns.RR_Header{Name: question.Name, Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 3600},
+							Priority: 0,
+							Weight:   0,
+							Port:     8080,
+							Target:   dns.Fqdn("keploy.proxy"),
+						}}
+					}
+					p.logger.Debug("sending default SRV record response")
 				}
 
 				p.logger.Debug(fmt.Sprintf("Answers[when resolution failed for query:%v]:\n%v\n", question.Qtype, answers))
@@ -144,16 +175,56 @@ func resolveDNSQuery(logger *zap.Logger, domain string) []dns.RR {
 
 	// Use the default system resolver
 	resolver := net.DefaultResolver
+	ctx := context.Background()
 
-	// Perform the lookup with the context
-	ips, err := resolver.LookupIPAddr(context.Background(), domain)
+	var answers []dns.RR
+
+	// For SRV records, handle MongoDB specific queries
+	if strings.HasPrefix(domain, "_mongodb._tcp.") {
+		baseDomain := strings.TrimPrefix(domain, "_mongodb._tcp.")
+		_, addrs, err := resolver.LookupSRV(ctx, "mongodb", "tcp", baseDomain)
+		if err == nil && len(addrs) > 0 {
+			for _, addr := range addrs {
+				answers = append(answers, &dns.SRV{
+					Hdr:      dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 3600},
+					Priority: addr.Priority,
+					Weight:   addr.Weight,
+					Port:     addr.Port,
+					Target:   dns.Fqdn(addr.Target),
+				})
+			}
+			return answers
+		}
+		// If resolution fails, return a default SRV record with a target that matches the domain suffix
+		return []dns.RR{&dns.SRV{
+			Hdr:      dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 3600},
+			Priority: 0,
+			Weight:   0,
+			Port:     27017, // Default MongoDB port
+			Target:   dns.Fqdn("mongodb." + baseDomain),
+		}}
+	}
+
+	// For TXT records, try to resolve them directly
+	txtRecords, err := resolver.LookupTXT(ctx, domain)
+	if err == nil && len(txtRecords) > 0 {
+		for _, txt := range txtRecords {
+			answers = append(answers, &dns.TXT{
+				Hdr: dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600},
+				Txt: []string{txt},
+			})
+		}
+		return answers
+	}
+
+	// For A/AAAA records
+	ips, err := resolver.LookupIPAddr(ctx, domain)
 	if err != nil {
 		logger.Debug(fmt.Sprintf("failed to resolve the dns query for:%v", domain), zap.Error(err))
 		return nil
 	}
 
 	// Convert the resolved IPs to dns.RR
-	var answers []dns.RR
 	for _, ip := range ips {
 		if ipv4 := ip.IP.To4(); ipv4 != nil {
 			answers = append(answers, &dns.A{
@@ -169,7 +240,7 @@ func resolveDNSQuery(logger *zap.Logger, domain string) []dns.RR {
 	}
 
 	if len(answers) > 0 {
-		logger.Debug("net.LookupIP resolved the ip address...")
+		logger.Debug("resolved the dns records successfully")
 	}
 
 	return answers
