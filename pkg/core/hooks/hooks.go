@@ -72,6 +72,9 @@ type Hooks struct {
 	tcpv6    link.Link
 	tcpv6Ret link.Link
 
+	connect    link.Link
+	connectRet link.Link
+
 	accept      link.Link
 	acceptRet   link.Link
 	accept4     link.Link
@@ -268,6 +271,25 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 		}
 		h.gp6 = gp6
 	}
+
+	// The hook sys_connect is used to identify outgoing connections to avoid misclassifying reused FDs
+	//  as incoming, especially when analyzing `write` syscalls.
+
+	//Open a kprobe at the entry of connect syscall
+	cnt, err := link.Kprobe("sys_connect", objs.SyscallProbeEntryConnect, nil)
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to attach the kprobe hook on sys_connect")
+		return err
+	}
+	h.connect = cnt
+
+	//Opening a kretprobe at the exit of connect syscall
+	cntr, err := link.Kretprobe("sys_connect", objs.SyscallProbeRetConnect, &link.KprobeOptions{RetprobeMaxActive: 1024})
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on sys_connect")
+		return err
+	}
+	h.connectRet = cntr
 
 	// ------------ For Ingress using Kprobes --------------
 
@@ -609,5 +631,14 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 	if err := h.objects.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the objects")
 	}
+
+	if err := h.connect.Close(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the connect")
+	}
+
+	if err := h.connectRet.Close(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the connectRet")
+	}
+
 	h.logger.Info("eBPF resources released successfully...")
 }
