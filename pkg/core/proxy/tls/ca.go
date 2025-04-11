@@ -20,7 +20,6 @@ import (
 	cfsslLog "github.com/cloudflare/cfssl/log"
 	"github.com/cloudflare/cfssl/signer"
 	"github.com/cloudflare/cfssl/signer/local"
-	"github.com/davecgh/go-spew/spew"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -325,7 +324,7 @@ func CertForClient(clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed
 		return nil, fmt.Errorf("failed to load server certificate and key: %v", err)
 	}
 
-	spew.Dump(serverTLSCert)
+	// spew.Dump(serverTLSCert)
 
 	return &serverTLSCert, nil
 }
