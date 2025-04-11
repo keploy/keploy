@@ -273,7 +273,7 @@ func CertForClient(clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed
 		// 2025/03/18 20:54:25 [INFO] encoded CSR
 		// 2025/03/18 20:54:25 [INFO] signed certificate with serial number 435398774381835435678674951099961010543769077102
 
-		cfsslLog.Level = cfsslLog.LevelDebug
+		cfsslLog.Level = cfsslLog.LevelInfo
 	})
 
 	// Generate a new server certificate and private key for the given hostname
