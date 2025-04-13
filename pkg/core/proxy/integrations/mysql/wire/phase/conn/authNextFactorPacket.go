@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v2/pkg/models/mysql"
@@ -22,7 +21,7 @@ func DecodeAuthNextFactor(_ context.Context, data []byte) (*mysql.AuthNextFactor
 
 	data, idx, err := utils.ReadNullTerminatedString(data[1:])
 	if err != nil {
-		return nil, fmt.Errorf("malformed handshake response packet: missing null terminator for PluginName")
+		return nil, errors.New("malformed handshake response packet: missing null terminator for PluginName")
 	}
 	packet.PluginName = string(data)
 	packet.PluginData = string(data[idx:])

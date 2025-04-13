@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -201,7 +202,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		// Store the server greeting packet for the upgraded client connection
 		sg, ok := handshakePkt.Message.(*mysql.HandshakeV10Packet)
 		if !ok {
-			return res, fmt.Errorf("failed to type assert handshake packet")
+			return res, errors.New("failed to type assert handshake packet")
 		}
 		decodeCtx.ServerGreetings.Store(clientConn, sg)
 
@@ -407,7 +408,7 @@ func handleAuth(ctx context.Context, logger *zap.Logger, authPkt *mysql.PacketBu
 		logger.Debug("caching sha2 password authentication is handled successfully")
 		setHandshakeResult(&res, result)
 	case mysql.Sha256:
-		return res, fmt.Errorf("Sha256 Password authentication is not supported")
+		return res, errors.New("Sha256 Password authentication is not supported")
 	default:
 		return res, fmt.Errorf("unsupported authentication plugin: %s", decodeCtx.PluginName)
 	}

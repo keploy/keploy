@@ -269,7 +269,7 @@ func EncodeBinaryRow(_ context.Context, logger *zap.Logger, row *mysql.BinaryRow
 		case mysql.FieldTypeString, mysql.FieldTypeVarString, mysql.FieldTypeVarChar, mysql.FieldTypeBLOB, mysql.FieldTypeTinyBLOB, mysql.FieldTypeMediumBLOB, mysql.FieldTypeLongBLOB, mysql.FieldTypeJSON:
 			strValue, ok := columnEntry.Value.(string)
 			if !ok {
-				return nil, fmt.Errorf("invalid value type for string field")
+				return nil, errors.New("invalid value type for string field")
 			}
 			if err := utils.WriteLengthEncodedString(buf, strValue); err != nil {
 				return nil, fmt.Errorf("failed to write length-encoded string: %w", err)
@@ -309,7 +309,7 @@ func EncodeBinaryRow(_ context.Context, logger *zap.Logger, row *mysql.BinaryRow
 		case mysql.FieldTypeFloat:
 			floatValue, ok := columnEntry.Value.(float32)
 			if !ok {
-				return nil, fmt.Errorf("invalid value type for float field")
+				return nil, errors.New("invalid value type for float field")
 			}
 			if err := binary.Write(buf, binary.LittleEndian, floatValue); err != nil {
 				return nil, fmt.Errorf("failed to write float32 value: %w", err)
@@ -317,7 +317,7 @@ func EncodeBinaryRow(_ context.Context, logger *zap.Logger, row *mysql.BinaryRow
 		case mysql.FieldTypeDouble:
 			doubleValue, ok := columnEntry.Value.(float64)
 			if !ok {
-				return nil, fmt.Errorf("invalid value type for double field")
+				return nil, errors.New("invalid value type for double field")
 			}
 			if err := binary.Write(buf, binary.LittleEndian, doubleValue); err != nil {
 				return nil, fmt.Errorf("failed to write float64 value: %w", err)
@@ -357,7 +357,7 @@ func encodeBinaryDateTime(fieldType mysql.FieldType, value interface{}) ([]byte,
 func encodeDate(value interface{}) ([]byte, error) {
 	dateStr, ok := value.(string)
 	if !ok {
-		return nil, fmt.Errorf("invalid value type for date field")
+		return nil, errors.New("invalid value type for date field")
 	}
 	var year, month, day int
 	_, err := fmt.Sscanf(dateStr, "%04d-%02d-%02d", &year, &month, &day)
@@ -387,7 +387,7 @@ func encodeDate(value interface{}) ([]byte, error) {
 func encodeDateTime(value interface{}) ([]byte, error) {
 	dateTimeStr, ok := value.(string)
 	if !ok {
-		return nil, fmt.Errorf("invalid value type for datetime field")
+		return nil, errors.New("invalid value type for datetime field")
 	}
 	var (
 		year, month, day, hour, minute, second, microsecond int
@@ -449,7 +449,7 @@ func encodeDateTime(value interface{}) ([]byte, error) {
 func encodeTime(value interface{}) ([]byte, error) {
 	timeStr, ok := value.(string)
 	if !ok {
-		return nil, fmt.Errorf("invalid value type for time field")
+		return nil, errors.New("invalid value type for time field")
 	}
 	var (
 		isNegative                                  bool

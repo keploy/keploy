@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -391,7 +392,7 @@ func ExtractHostAndPort(curlCmd string) (string, string, error) {
 			return host, port, nil
 		}
 	}
-	return "", "", fmt.Errorf("no URL found in CURL command")
+	return "", "", errors.New("no URL found in CURL command")
 }
 
 func WaitForPort(ctx context.Context, host string, port string, timeout time.Duration) error {

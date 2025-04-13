@@ -5,6 +5,7 @@ package wire
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 
@@ -43,7 +44,7 @@ func DecodePayload(ctx context.Context, logger *zap.Logger, data []byte, clientC
 	}
 
 	if len(packet.Payload) < 1 {
-		return &mysql.PacketBundle{}, fmt.Errorf("invalid packet, payload is empty")
+		return &mysql.PacketBundle{}, errors.New("invalid packet, payload is empty")
 	}
 
 	lastOp, ok := decodeCtx.LastOp.Load(clientConn)
@@ -82,7 +83,7 @@ func handleQueryStmtResponse(ctx context.Context, logger *zap.Logger, packet mys
 
 	sg, ok := decodeCtx.ServerGreetings.Load(clientConn)
 	if !ok {
-		return parsedPacket, fmt.Errorf("Server Greetings not found")
+		return parsedPacket, errors.New("Server Greetings not found")
 	}
 
 	logger.Debug("Last operation when handling client query", zap.Any("last operation", mysql.CommandStatusToString(lastOp)))
@@ -116,7 +117,7 @@ func handleQueryStmtResponse(ctx context.Context, logger *zap.Logger, packet mys
 	case mysql.LocalInFile:
 		parsedPacket.Header.Type = "LocalInFile"
 		decodeCtx.LastOp.Store(clientConn, RESET) //reset the last operation
-		return parsedPacket, fmt.Errorf("LocalInFile not supported")
+		return parsedPacket, errors.New("LocalInFile not supported")
 	default:
 		//If the packet is not OK, ERR, EOF or LocalInFile, then it is a result set
 		var pktType string
@@ -160,7 +161,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 	if payloadType != mysql.HandshakeV10 {
 		sg, ok = decodeCtx.ServerGreetings.Load(clientConn)
 		if !ok {
-			return parsedPacket, fmt.Errorf("Server Greetings not found")
+			return parsedPacket, errors.New("Server Greetings not found")
 		}
 	}
 

@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -79,11 +80,11 @@ func (pi *PostmanImporter) Import(collectionPath, basePath string) error {
 
 func (pi *PostmanImporter) validateCollectionPath(path string) error {
 	if path == "" {
-		return fmt.Errorf("path to Postman collection cannot be empty")
+		return errors.New("path to Postman collection cannot be empty")
 	}
 
 	if !strings.HasSuffix(path, ".json") {
-		return fmt.Errorf("invalid file type: expected .json Postman collection")
+		return errors.New("invalid file type: expected .json Postman collection")
 	}
 
 	return nil
@@ -345,7 +346,7 @@ func (pi *PostmanImporter) processEmptyResponse(testItem *TestData, globalVariab
 		return nil
 	}
 	pi.logger.Error("URL is empty", zap.String("testItem", testItem.Name))
-	return fmt.Errorf("URL is empty")
+	return errors.New("URL is empty")
 }
 
 func (pi *PostmanImporter) writeTestData(testItem TestData, testsPath string, globalVariables map[string]string, testCounter *int) error {

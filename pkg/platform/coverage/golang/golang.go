@@ -76,7 +76,7 @@ func (g *Golang) GetCoverage() (models.TestCoverage, error) {
 	}()
 
 	_, err = f.Readdirnames(1) // Or f.Readdir(1)
-	if err == io.EOF {
+	if errors.Is(err, io.EOF) {
 		utils.LogError(g.logger, err, fmt.Sprintf("no coverage files found in %s, skipping coverage calculation", coverageDir))
 		return testCov, err
 	}

@@ -24,32 +24,32 @@ func New(logger *zap.Logger) *Core {
 	}
 }
 
-func (c *Core) Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error) {
+func (c *Core) Setup(_ context.Context, _ string, _ models.SetupOptions) (uint64, error) {
 	return 0, errUnsupported
 }
 
-func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) error {
+func (c *Core) Hook(_ context.Context, _ uint64, _ models.HookOptions) error {
 	return errUnsupported
 }
 
-func (c *Core) MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error {
+func (c *Core) MockOutgoing(_ context.Context, _ uint64, _ models.OutgoingOptions) error {
 	return errUnsupported
 }
 
-func (c *Core) SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error {
+func (c *Core) SetMocks(_ context.Context, _ uint64, _ []*models.Mock, _ []*models.Mock) error {
 	return errUnsupported
 }
 
-func (c *Core) GetConsumedMocks(ctx context.Context, id uint64) ([]string, error) {
+func (c *Core) GetConsumedMocks(_ context.Context, _ uint64) ([]string, error) {
 	return nil, errUnsupported
 }
 
-func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.AppError {
+func (c *Core) Run(_ context.Context, _ uint64, _ models.RunOptions) models.AppError {
 	return models.AppError{
 		Err: errUnsupported,
 	}
 }
 
-func (c *Core) GetContainerIP(_ context.Context, id uint64) (string, error) {
+func (c *Core) GetContainerIP(_ context.Context, _ uint64) (string, error) {
 	return "", errUnsupported
 }
