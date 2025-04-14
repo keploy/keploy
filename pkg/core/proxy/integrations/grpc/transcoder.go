@@ -80,6 +80,8 @@ func (srv *Transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 
 	grpcReq := srv.sic.FetchRequestForStream(id)
 
+	srv.logger.Debug("Getting mock for request from the mock database", zap.Any("request", grpcReq))
+
 	// Fetch all the mocks. We can't assume that the grpc calls are made in a certain order.
 	mock, err := FilterMocksBasedOnGrpcRequest(ctx, srv.logger, grpcReq, srv.mockDb)
 	if err != nil {
@@ -88,6 +90,8 @@ func (srv *Transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 	if mock == nil {
 		return fmt.Errorf("failed to mock the output for unrecorded outgoing grpc call")
 	}
+
+	srv.logger.Debug("Found a mock for the request", zap.Any("mock", mock))
 
 	grpcMockResp := mock.Spec.GRPCResp
 
