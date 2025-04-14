@@ -72,7 +72,7 @@ func match(ctx context.Context, logger *zap.Logger, mongoRequests []models.Mongo
 								bestMatchIndex = tcsIndx
 							}
 						default:
-							utils.LogError(logger, nil, "the OpCode of the mongo wiremessage is invalid.")
+							utils.LogError(logger, nil, "the OpCode of the mongo wiremessage is invalid.", zap.Any("OpCode", req.Header.Opcode))
 						}
 					}
 				}

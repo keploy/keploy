@@ -3,6 +3,7 @@
 package mongo
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -478,10 +479,11 @@ func extractSectionSingle(data string) (string, error) {
 	return content, nil
 }
 
-func processOpReply(expectedRequest, actualRequest models.MongoRequest, expectedResponse *models.MongoOpReply, mongoPassword string, logger *zap.Logger) (string, bool) {
+func processOpReply(ctx context.Context, expectedRequest, actualRequest models.MongoRequest, expectedResponse *models.MongoOpReply, mongoPassword string, logger *zap.Logger) (string, bool) {
 	if len(expectedResponse.Documents) == 0 {
 		return "", false
 	}
+
 	for _, document := range expectedResponse.Documents {
 		var responseMsg map[string]interface{}
 		err := json.Unmarshal([]byte(document), &responseMsg)
@@ -536,6 +538,8 @@ func processOpReply(expectedRequest, actualRequest models.MongoRequest, expected
 			}
 			actualRequest = actualRequestPayloadMap
 		}
+
+		// TODO should move this to scram related file
 
 		_, ok = actualRequest["saslStart"]
 		if !ok {
@@ -593,7 +597,6 @@ func processOpReply(expectedRequest, actualRequest models.MongoRequest, expected
 				logger.Error("Failed to fetch the conversationId for the SCRAM auth from the recorded first response", zap.Error(err))
 				return "", false
 			}
-
 			// Generate the auth message from the received first request and recorded first response
 			authMessage := scram.GenerateAuthMessage(string(decodedReqPayload), newFirstAuthResponse, logger)
 			if authMessage == "" {
@@ -611,7 +614,10 @@ func processOpReply(expectedRequest, actualRequest models.MongoRequest, expected
 				return "", false
 			}
 			authMessage = authMessage + ",auth=" + authMechanism
-			authMessageMap.Store(conversationID, authMessage)
+			logger.Debug("the auth message for the SCRAM saslstart authentication", zap.String("conversation-id", conversationID), zap.String("authMessage", authMessage))
+
+			connID := ctx.Value(models.ClientConnectionIDKey).(string)
+			authMessageMap.Store(connID+"+"+conversationID, authMessage)
 			// Marshal the new first response for the SCRAM authentication
 			authResponse := base64.StdEncoding.EncodeToString([]byte(newFirstAuthResponse))
 			if authResponse != "" {
@@ -714,7 +720,7 @@ func processOpReply(expectedRequest, actualRequest models.MongoRequest, expected
 }
 
 // encodeOpMsg encodes the OpMsg value into a mongo wire message.
-func encodeOpMsg(responseOpMsg *models.MongoOpMessage, actualRequestMsgSections []string, expectedRequestMsgSections []string, mongoPassword string, logger *zap.Logger) (*opMsg, error) {
+func encodeOpMsg(ctx context.Context, responseOpMsg *models.MongoOpMessage, actualRequestMsgSections []string, expectedRequestMsgSections []string, mongoPassword string, logger *zap.Logger) (*opMsg, error) {
 	message := &opMsg{
 		flags:    wiremessage.MsgFlag(responseOpMsg.FlagBits),
 		checksum: uint32(responseOpMsg.Checksum),
@@ -750,7 +756,7 @@ func encodeOpMsg(responseOpMsg *models.MongoOpMessage, actualRequestMsgSections 
 				utils.LogError(logger, err, "failed to extract the msg section from recorded message single section")
 				return nil, err
 			}
-			resultStr, ok, err := handleScramAuth(actualRequestMsgSections, expectedRequestMsgSections, sectionStr, mongoPassword, logger)
+			resultStr, ok, err := handleScramAuth(ctx, actualRequestMsgSections, expectedRequestMsgSections, sectionStr, mongoPassword, logger)
 			if err != nil {
 				return nil, err
 			}
@@ -972,10 +978,10 @@ func (r *opReply) TransactionDetails() *TransactionDetails {
 	return nil
 }
 
-func encodeOpReply(actualRequest models.MongoRequest, expectedRequest models.MongoRequest, expectedResponse *models.MongoOpReply, mongoPassword string, logger *zap.Logger) (*opReply, error) {
+func encodeOpReply(ctx context.Context, actualRequest models.MongoRequest, expectedRequest models.MongoRequest, expectedResponse *models.MongoOpReply, mongoPassword string, logger *zap.Logger) (*opReply, error) {
 
 	replyDocs := []bsoncore.Document{}
-	updatedFirstResponse, isResponseUpdated := processOpReply(expectedRequest, actualRequest, expectedResponse, mongoPassword, logger)
+	updatedFirstResponse, isResponseUpdated := processOpReply(ctx, expectedRequest, actualRequest, expectedResponse, mongoPassword, logger)
 	for _, v := range expectedResponse.Documents {
 		var unmarshaledDoc bsoncore.Document
 		logger.Debug(fmt.Sprintf("the document string is: %v", string(v)))
@@ -1022,6 +1028,7 @@ func encodeOpReply(actualRequest models.MongoRequest, expectedRequest models.Mon
 		replyDocs = append(replyDocs, unmarshaledDoc)
 
 	}
+
 	return &opReply{
 		flags:        wiremessage.ReplyFlag(expectedResponse.ResponseFlags),
 		cursorID:     expectedResponse.CursorID,

@@ -3,6 +3,7 @@
 package mongo
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -12,12 +13,35 @@ import (
 	"sync"
 
 	scramUtil "go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
+	"go.keploy.io/server/v2/pkg/models"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/scram"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
+
+// // scramauth.go (or util.go)
+// func isScramAuth(logger *zap.Logger, mongoReq interface{}) bool {
+// 	switch r := mongoReq.(type) {
+
+// 	case *models.MongoOpMessage:
+// 		// Reuse the old isScramAuthRequest that checks if the sections
+// 		// have "saslStart"/"saslContinue".
+// 		return isScramAuthRequest(r.Sections, logger)
+
+// 	case *models.MongoOpQuery:
+// 		// If your driver is sending legacy OpQuery handshake,
+// 		// you can parse r.Query (the JSON) to see if there's a "saslStart" or "saslContinue".
+// 		if strings.Contains(r.Query, "saslStart") || strings.Contains(r.Query, "saslContinue") {
+// 			logger.Info("the recieved request is saslStart or saslContinue",
+// 				zap.Any("OpQuery", r.Query))
+// 			return true
+// 		}
+
+// 	}
+// 	return false
+// }
 
 func isScramAuthRequest(actualRequestSections []string, logger *zap.Logger) bool {
 	// Iterate over each section in the actual request sections
@@ -66,7 +90,7 @@ var authMessageMap = sync.Map{}
 //   - The generated response string.
 //   - A boolean indicating if the processing was successful.
 //   - An error, if any, that occurred during processing.
-func handleScramAuth(actualRequestSections, expectedRequestSections []string, responseSection, mongoPassword string, logger *zap.Logger) (string, bool, error) {
+func handleScramAuth(ctx context.Context, actualRequestSections, expectedRequestSections []string, responseSection, mongoPassword string, logger *zap.Logger) (string, bool, error) {
 	// Iterate over each section in the actual request sections
 	for i, v := range actualRequestSections {
 		// single document do not uses section sequence for SCRAM auth
@@ -87,13 +111,13 @@ func handleScramAuth(actualRequestSections, expectedRequestSections []string, re
 			// Check the authentication mechanism used and ensure it contains "SCRAM"
 			if mechanism, ok := mechanism.(string); exists && ok && strings.Contains(mechanism, "SCRAM") {
 				if _, exists := actualMsg["payload"]; exists {
-					return handleSaslStart(i, actualMsg, expectedRequestSections, responseSection, logger)
+					return handleSaslStart(ctx, i, actualMsg, expectedRequestSections, responseSection, logger)
 				}
 			}
 			// Check if the message is for final request of the SASL (authentication) process
 		} else if _, exists := actualMsg["saslContinue"]; exists {
 			if _, exists := actualMsg["payload"]; exists {
-				return handleSaslContinue(actualMsg, responseSection, mongoPassword, logger)
+				return handleSaslContinue(ctx, actualMsg, responseSection, mongoPassword, logger)
 			}
 		}
 	}
@@ -221,12 +245,16 @@ func extractMsgFromSection(section string) (map[string]interface{}, error) {
 		if err != nil {
 			return nil, err
 		}
+		return result, nil
+	} else if strings.HasPrefix(section, "{ SectionSingle identifier:") {
+		// Handle sequence sections if needed, though SCRAM typically uses SectionSingle
+		return nil, fmt.Errorf("sequence sections not currently handled for message extraction")
 	}
 
-	return result, nil
+	return nil, fmt.Errorf("unknown or unhandled section format")
 }
 
-func handleSaslStart(i int, actualMsg map[string]interface{}, expectedRequestSections []string, responseSection string, logger *zap.Logger) (string, bool, error) {
+func handleSaslStart(ctx context.Context, i int, actualMsg map[string]interface{}, expectedRequestSections []string, responseSection string, logger *zap.Logger) (string, bool, error) {
 	actualReqPayload, err := extractAuthPayload(actualMsg)
 	if err != nil {
 		utils.LogError(logger, err, "failed to fetch the payload from the recieved mongo request")
@@ -297,6 +325,7 @@ func handleSaslStart(i int, actualMsg map[string]interface{}, expectedRequestSec
 	// replacing the old client nonce with new client nonce
 	newFirstAuthResponse, err := scram.GenerateServerFirstMessage(decodedExpectedReqPayload, decodedActualReqPayload, decodedResponsePayload, logger)
 	if err != nil {
+		utils.LogError(logger, err, "failed to generate the new first response for the SCRAM authentication")
 		return "", false, err
 	}
 	logger.Debug("after replacing the new client nonce in auth response", zap.String("first response", newFirstAuthResponse))
@@ -329,10 +358,10 @@ func handleSaslStart(i int, actualMsg map[string]interface{}, expectedRequestSec
 		authMessage = authMessage + ",auth=" + authMechanism
 		// store the auth message in the global map for the conversationId
 	}
+	connID := ctx.Value(models.ClientConnectionIDKey).(string)
+	authMessageMap.Store(connID+"+"+conversationID, authMessage)
 
-	authMessageMap.Store(conversationID, authMessage)
-
-	logger.Debug("genrate the new auth message for the recieved auth request", zap.String("msg", authMessage))
+	logger.Debug("generate the new auth message for the recieved auth request", zap.String("msg", authMessage))
 
 	// marshal the new first response for the SCRAM authentication
 	newAuthResponse, err := json.Marshal(responseMsg)
@@ -355,7 +384,7 @@ func handleSaslStart(i int, actualMsg map[string]interface{}, expectedRequestSec
 //   - The updated response section string.
 //   - A boolean indicating if the processing was successful.
 //   - An error, if any, that occurred during processing.
-func handleSaslContinue(actualMsg map[string]interface{}, responseSection, mongoPassword string, logger *zap.Logger) (string, bool, error) {
+func handleSaslContinue(ctx context.Context, actualMsg map[string]interface{}, responseSection, mongoPassword string, logger *zap.Logger) (string, bool, error) {
 	var responseMsg map[string]interface{}
 
 	err := json.Unmarshal([]byte(responseSection), &responseMsg)
@@ -393,18 +422,21 @@ func handleSaslContinue(actualMsg map[string]interface{}, responseSection, mongo
 		utils.LogError(logger, err, "failed to fetch the conversationId for the SCRAM auth from the recieved final response")
 		return "", false, err
 	}
-	logger.Debug("fetched conversationId for the SCRAM authentication", zap.String("cid", conversationID))
+	logger.Debug("fetched conversationId for the SCRAM authentication", zap.String("cid", conversationID), zap.String("verifier", string(verifier)))
 
 	salt := ""
 	itr := 0
 	authType := ""
 	// get the authMessage from the saslStart conversation. Since, saslContinue have the same conversationId
 	// authMsg := authMessageMap[conversationID]
-	authMessage, ok := authMessageMap.Load(conversationID)
+	connID := ctx.Value(models.ClientConnectionIDKey).(string)
+	authMessage, ok := authMessageMap.Load(connID + "+" + conversationID)
 	authMessageStr := ""
 	if ok {
 		authMessageStr = authMessage.(string)
 	}
+
+	logger.Debug("fetch the auth message for the SCRAM authentication", zap.String("cid", conversationID), zap.String("authMessage", authMessageStr))
 
 	// get the salt and iteration from the authMessage to generate salted password
 	fields = strings.Split(authMessageStr, ",")
