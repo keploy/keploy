@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/cloudflare/cfssl/csr"
 	cfsslLog "github.com/cloudflare/cfssl/log"
@@ -254,7 +255,7 @@ var SrcPortToDstURL = sync.Map{}
 
 var setLogLevelOnce sync.Once
 
-func CertForClient(clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate) (*tls.Certificate, error) {
+func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time) (*tls.Certificate, error) {
 
 	// Ensure log level is set only once
 
@@ -306,14 +307,33 @@ func CertForClient(clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed
 		return nil, fmt.Errorf("failed to create signer: %v", err)
 	}
 
-	serverCert, err := signerd.Sign(signer.SignRequest{
-		Hosts:   serverReq.Hosts,
-		Request: string(serverCsr),
-		Profile: "web",
-	})
+	if backdate.IsZero() {
+		logger.Debug("backdate is zero, using current time")
+		backdate = time.Now()
+	}
+
+	// Case: time freezing (an Ent. feature) is enabled,
+	// If application time is frozen in past, and the certificate is signed today, then the certificate will be invalid.
+	// This results in a certificate error during tls handshake.
+	// To avoid this, we set the certificate’s validity period (NotBefore and NotAfter)
+	// by referencing the testcase request time of the application (backdate) instead of the current real time.
+	//
+	// Note: If you have recorded test cases before April 20, 2024 (http://www.sslchecker.com/certdecoder?su=269725513dfeb137f6f29b8488f17ca9)
+	// and are using time freezing, please reach out to us if you get tls handshake error.
+	signReq := signer.SignRequest{
+		Hosts:     serverReq.Hosts,
+		Request:   string(serverCsr),
+		Profile:   "web",
+		NotBefore: backdate.AddDate(-1, 0, 0),
+		NotAfter:  time.Now().AddDate(1, 0, 0),
+	}
+
+	serverCert, err := signerd.Sign(signReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign server certificate: %v", err)
 	}
+
+	logger.Debug("signed the certificate for a duration of 2 years", zap.Any("notBefore", signReq.NotBefore.String()), zap.Any("notAfter", signReq.NotAfter.String()))
 
 	// Load the server certificate and private key
 	serverTLSCert, err := tls.X509KeyPair(serverCert, serverKey)

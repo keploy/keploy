@@ -30,7 +30,7 @@ type handshakeRes struct {
 }
 
 // Replay mode
-func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mocks []*models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) (handshakeRes, error) {
+func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mocks []*models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) (handshakeRes, error) {
 	// Get the mock for initial handshake
 	initialHandshakeMock := mocks[0]
 
@@ -140,7 +140,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 		// handle the TLS connection and get the upgraded client connection
 		isTLS := pTls.IsTLSHandshake(testBuffer)
 		if isTLS {
-			clientConn, err = pTls.HandleTLSConnection(ctx, logger, clientConn)
+			clientConn, err = pTls.HandleTLSConnection(ctx, logger, clientConn, opts.Backdate)
 			if err != nil {
 				utils.LogError(logger, err, "failed to handle TLS conn")
 				return res, err
