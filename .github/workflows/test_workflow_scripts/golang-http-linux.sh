@@ -62,7 +62,7 @@ send_request() {
 for i in {1..2}; do
     app_name="http-pokeapi_${i}"
     send_request $i &
-    sudo -E env PATH="$PATH" ./../../keployv2 record -c "./http-pokeapi" --generateGithubActions=false &> "${app_name}.txt"
+    sudo -E env PATH="$PATH" ./../../keployv2 record -c "./http-pokeapi" --generateGithubActions=false --debug &> "${app_name}.txt"
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
@@ -79,7 +79,7 @@ for i in {1..2}; do
 done
 
 # Start the go-http app in test mode.
-sudo -E env PATH="$PATH" ./../../keployv2 test -c "./http-pokeapi" --delay 7 --generateGithubActions=false &> test_logs.txt
+sudo -E env PATH="$PATH" ./../../keployv2 test -c "./http-pokeapi" --delay 7 --generateGithubActions=false --debug &> test_logs.txt
 
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."
