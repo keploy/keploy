@@ -46,6 +46,7 @@ func ReplaceHost(currentURL string, ipAddress string) (string, error) {
 	// Parse the current URL
 	parsedURL, err := url.Parse(currentURL)
 
+	
 	if err != nil {
 		// Return the original URL if parsing fails
 		return currentURL, err
