@@ -46,7 +46,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				reqBuf, err = util.ReadBytes(ctx, logger, clientConn)
 				if err != nil {
 					if err == io.EOF {
-						logger.Debug("recieved request buffer is empty in test mode for mongo calls")
+						logger.Debug("received request buffer is empty in test mode for mongo calls")
 						errCh <- err
 						return
 					}
@@ -85,7 +85,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					requestBuffer1, err := util.ReadBytes(ctx, logger, clientConn)
 					if err != nil {
 						if err == io.EOF {
-							logger.Debug("recieved request buffer is empty for streaming mongo request call")
+							logger.Debug("received request buffer is empty for streaming mongo request call")
 							errCh <- err
 							return
 						}

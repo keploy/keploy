@@ -34,7 +34,7 @@ import (
 // 		// If your driver is sending legacy OpQuery handshake,
 // 		// you can parse r.Query (the JSON) to see if there's a "saslStart" or "saslContinue".
 // 		if strings.Contains(r.Query, "saslStart") || strings.Contains(r.Query, "saslContinue") {
-// 			logger.Info("the recieved request is saslStart or saslContinue",
+// 			logger.Info("the received request is saslStart or saslContinue",
 // 				zap.Any("OpQuery", r.Query))
 // 			return true
 // 		}
@@ -49,20 +49,20 @@ func isScramAuthRequest(actualRequestSections []string, logger *zap.Logger) bool
 		// Extract the message from the section
 		actualMsg, err := extractMsgFromSection(v)
 		if err != nil {
-			utils.LogError(logger, err, "failed to extract the section of the recieved mongo request message", zap.Any("the section", v))
+			utils.LogError(logger, err, "failed to extract the section of the received mongo request message", zap.Any("the section", v))
 			return false
 		}
 
 		conversationID, _ := extractConversationID(actualMsg)
 		// Check if the message is for starting the SASL (authentication) process
 		if _, exists := actualMsg["saslStart"]; exists {
-			logger.Debug("the recieved request is saslStart",
+			logger.Debug("the received request is saslStart",
 				zap.Any("OpMsg", actualMsg),
 				zap.Any("conversationId", conversationID))
 			return true
 			// Check if the message is for final request of the SASL (authentication) process
 		} else if _, exists := actualMsg["saslContinue"]; exists {
-			logger.Debug("the recieved request is saslContinue",
+			logger.Debug("the received request is saslContinue",
 				zap.Any("OpMsg", actualMsg),
 				zap.Any("conversationId", conversationID),
 			)
@@ -81,7 +81,7 @@ var authMessageMap = sync.Map{}
 // appropriate response string.
 //
 // Parameters:
-//   - actualRequestSections: The sections from the recieved request received.
+//   - actualRequestSections: The sections from the received request received.
 //   - expectedRequestSections: The sections that are recorded in the auth request.
 //   - responseSection: The section to be used for the response.
 //   - log: The logging instance for recording activities and errors.
@@ -101,7 +101,7 @@ func handleScramAuth(ctx context.Context, actualRequestSections, expectedRequest
 		// Extract the message from the section
 		actualMsg, err := extractMsgFromSection(v)
 		if err != nil {
-			utils.LogError(logger, err, "failed to extract the section of the recieved mongo request message")
+			utils.LogError(logger, err, "failed to extract the section of the received mongo request message")
 			return "", false, err
 		}
 
@@ -257,22 +257,22 @@ func extractMsgFromSection(section string) (map[string]interface{}, error) {
 func handleSaslStart(ctx context.Context, i int, actualMsg map[string]interface{}, expectedRequestSections []string, responseSection string, logger *zap.Logger) (string, bool, error) {
 	actualReqPayload, err := extractAuthPayload(actualMsg)
 	if err != nil {
-		utils.LogError(logger, err, "failed to fetch the payload from the recieved mongo request")
+		utils.LogError(logger, err, "failed to fetch the payload from the received mongo request")
 		return "", false, err
 	}
-	logger.Debug(fmt.Sprint("the payload of the recieved request: ", actualReqPayload))
+	logger.Debug(fmt.Sprint("the payload of the received request: ", actualReqPayload))
 
-	// Decode the base64 encoded payload of the recieved mongo request
+	// Decode the base64 encoded payload of the received mongo request
 	decodedActualReqPayload, err := decodeBase64Str(actualReqPayload)
 	if err != nil {
-		utils.LogError(logger, err, "Error decoding the recieved payload base64 string")
+		utils.LogError(logger, err, "Error decoding the received payload base64 string")
 		return "", false, err
 	}
 	logger.Debug(fmt.Sprint("the decoded payload of the actual for the saslstart: ", (string)(decodedActualReqPayload)))
 
 	// check to ensure that the matched recorded mongo request contains the auth payload for SCRAM
 	if len(expectedRequestSections) < i+1 {
-		err = errors.New("unrecorded message sections for the recieved auth request")
+		err = errors.New("unrecorded message sections for the received auth request")
 		utils.LogError(logger, err, "failed to match the message section payload")
 		return "", false, err
 	}
@@ -344,7 +344,7 @@ func handleSaslStart(ctx context.Context, i int, actualMsg map[string]interface{
 		return "", false, err
 	}
 	logger.Debug("fetch the conversationId for the SCRAM authentication", zap.String("cid", conversationID))
-	// generate the auth message from the recieved first request and recorded first response
+	// generate the auth message from the received first request and recorded first response
 	authMessage := scram.GenerateAuthMessage(string(decodedActualReqPayload), newFirstAuthResponse, logger)
 	authMechanism, ok := actualMsg["mechanism"].(string)
 	if !ok {
@@ -361,7 +361,7 @@ func handleSaslStart(ctx context.Context, i int, actualMsg map[string]interface{
 	connID := ctx.Value(models.ClientConnectionIDKey).(string)
 	authMessageMap.Store(connID+"+"+conversationID, authMessage)
 
-	logger.Debug("generate the new auth message for the recieved auth request", zap.String("msg", authMessage))
+	logger.Debug("generate the new auth message for the received auth request", zap.String("msg", authMessage))
 
 	// marshal the new first response for the SCRAM authentication
 	newAuthResponse, err := json.Marshal(responseMsg)
@@ -419,7 +419,7 @@ func handleSaslContinue(ctx context.Context, actualMsg map[string]interface{}, r
 	// fetch the conversation id
 	conversationID, err := extractConversationID(actualMsg)
 	if err != nil {
-		utils.LogError(logger, err, "failed to fetch the conversationId for the SCRAM auth from the recieved final response")
+		utils.LogError(logger, err, "failed to fetch the conversationId for the SCRAM auth from the received final response")
 		return "", false, err
 	}
 	logger.Debug("fetched conversationId for the SCRAM authentication", zap.String("cid", conversationID), zap.String("verifier", string(verifier)))

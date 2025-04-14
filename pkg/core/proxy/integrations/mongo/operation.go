@@ -655,7 +655,7 @@ func processOpReply(ctx context.Context, expectedRequest, actualRequest models.M
 			// fetch the conversation id
 			conversationID, err := extractConversationID(actualRequest)
 			if err != nil {
-				utils.LogError(logger, err, "failed to fetch the conversationId for the SCRAM auth from the recieved final response")
+				utils.LogError(logger, err, "failed to fetch the conversationId for the SCRAM auth from the received final response")
 				return "", false
 			}
 			logger.Debug("fetched conversationId for the SCRAM authentication", zap.String("cid", conversationID))
