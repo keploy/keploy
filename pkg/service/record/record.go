@@ -217,7 +217,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 			stopReason = "keploy test mode binary stopped, hence stopping keploy"
 			return nil
 		default:
-			stopReason = "unknown error recieved from application, hence stopping keploy"
+			stopReason = "unknown error received from application, hence stopping keploy"
 		}
 
 	case err = <-insertTestErrChan:

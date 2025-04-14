@@ -50,13 +50,13 @@ func match(ctx context.Context, logger *zap.Logger, mongoRequests []models.Mongo
 						}
 						// check for the opcode of the incoming mongo requests and the recorded mongo requests.
 						if len(tcsMock.Spec.MongoRequests) != len(mongoRequests) || req.Header.Opcode != mongoRequests[i].Header.Opcode {
-							logger.Debug("the recieved request is not of same type with the tcmocks", zap.Any("at index", tcsIndx))
+							logger.Debug("the received request is not of same type with the tcmocks", zap.Any("at index", tcsIndx))
 							continue
 						}
 						switch req.Header.Opcode {
 						case wiremessage.OpMsg:
 							if req.Message.(*models.MongoOpMessage).FlagBits != mongoRequests[i].Message.(*models.MongoOpMessage).FlagBits {
-								logger.Debug("the recieved request is not of same flagbit with the tcmocks", zap.Any("at index", tcsIndx))
+								logger.Debug("the received request is not of same flagbit with the tcmocks", zap.Any("at index", tcsIndx))
 								continue
 							}
 							scoreSum := 0.0
@@ -72,7 +72,7 @@ func match(ctx context.Context, logger *zap.Logger, mongoRequests []models.Mongo
 								bestMatchIndex = tcsIndx
 							}
 						default:
-							utils.LogError(logger, nil, "the OpCode of the mongo wiremessage is invalid.")
+							utils.LogError(logger, nil, "the OpCode of the mongo wiremessage is invalid.", zap.Any("OpCode", req.Header.Opcode))
 						}
 					}
 				}
