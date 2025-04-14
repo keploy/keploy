@@ -245,13 +245,9 @@ func extractMsgFromSection(section string) (map[string]interface{}, error) {
 		if err != nil {
 			return nil, err
 		}
-		return result, nil
-	} else if strings.HasPrefix(section, "{ SectionSingle identifier:") {
-		// Handle sequence sections if needed, though SCRAM typically uses SectionSingle
-		return nil, fmt.Errorf("sequence sections not currently handled for message extraction")
 	}
 
-	return nil, fmt.Errorf("unknown or unhandled section format")
+	return result, nil
 }
 
 func handleSaslStart(ctx context.Context, i int, actualMsg map[string]interface{}, expectedRequestSections []string, responseSection string, logger *zap.Logger) (string, bool, error) {
