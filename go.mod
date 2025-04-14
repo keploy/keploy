@@ -1,6 +1,8 @@
 module go.keploy.io/server/v2
 
-go 1.22.0
+go 1.23.0
+
+toolchain go1.24.0
 
 replace github.com/jackc/pgproto3/v2 => github.com/keploy/pgproto3/v2 v2.0.5
 
@@ -23,8 +25,8 @@ require (
 	github.com/spf13/cobra v1.8.0
 	go.mongodb.org/mongo-driver v1.11.6
 	go.uber.org/zap v1.26.0
-	golang.org/x/crypto v0.24.0 // indirect
-	golang.org/x/sys v0.29.0
+	golang.org/x/crypto v0.37.0 // indirect
+	golang.org/x/sys v0.32.0
 	google.golang.org/protobuf v1.34.1 // indirect
 )
 
@@ -94,8 +96,8 @@ require (
 	github.com/zmap/zlint/v3 v3.1.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/mod v0.17.0 // indirect
-	golang.org/x/net v0.26.0
-	golang.org/x/text v0.16.0
+	golang.org/x/net v0.39.0
+	golang.org/x/text v0.24.0
 	golang.org/x/tools v0.21.1-0.20240508182429-e35e4ccd0d2d // indirect
 	k8s.io/klog/v2 v2.120.1 // indirect
 )
@@ -115,17 +117,21 @@ require (
 	github.com/sbabiv/xml2map v1.2.1
 	github.com/shirou/gopsutil/v3 v3.24.3
 	github.com/spf13/viper v1.19.0
+	github.com/stretchr/testify v1.9.0
 	github.com/wI2L/jsondiff v0.5.0
 	github.com/xdg-go/pbkdf2 v1.0.0
 	github.com/xdg-go/scram v1.1.1
 	github.com/xdg-go/stringprep v1.0.4
-	golang.org/x/sync v0.7.0
-	golang.org/x/term v0.28.0
+	golang.org/x/sync v0.13.0
+	golang.org/x/term v0.31.0
 	gopkg.in/yaml.v2 v2.4.0
 	sigs.k8s.io/kustomize/kyaml v0.17.2
 )
 
-require github.com/perimeterx/marshmallow v1.1.5 // indirect
+require (
+	github.com/perimeterx/marshmallow v1.1.5 // indirect
+	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
+)
 
 require (
 	github.com/alecthomas/chroma v0.10.0 // indirect
