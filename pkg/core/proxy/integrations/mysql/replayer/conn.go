@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"time"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	mysqlUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
@@ -140,7 +141,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 		// handle the TLS connection and get the upgraded client connection
 		isTLS := pTls.IsTLSHandshake(testBuffer)
 		if isTLS {
-			clientConn, err = pTls.HandleTLSConnection(ctx, logger, clientConn)
+			clientConn, err = pTls.HandleTLSConnection(ctx, logger, clientConn, time.Now())
 			if err != nil {
 				utils.LogError(logger, err, "failed to handle TLS conn")
 				return res, err

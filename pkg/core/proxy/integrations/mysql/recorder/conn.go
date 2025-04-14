@@ -144,7 +144,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		// handle the TLS connection and get the upgraded client connection
 		isTLS := pTls.IsTLSHandshake(testBuffer)
 		if isTLS {
-			clientConn, err = pTls.HandleTLSConnection(ctx, logger, clientConn)
+			clientConn, err = pTls.HandleTLSConnection(ctx, logger, clientConn, time.Now())
 			if err != nil {
 				utils.LogError(logger, err, "failed to handle TLS conn")
 				return res, err
