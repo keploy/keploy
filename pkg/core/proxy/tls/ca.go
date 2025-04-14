@@ -307,6 +307,11 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 		return nil, fmt.Errorf("failed to create signer: %v", err)
 	}
 
+	if backdate.IsZero() {
+		logger.Debug("backdate is zero, using current time")
+		backdate = time.Now()
+	}
+
 	// Case: time freezing (an Ent. feature) is enabled,
 	// If application time is frozen in past, and the certificate is signed today, then the certificate will be invalid.
 	// This results in a certificate error during tls handshake.
@@ -320,7 +325,7 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 		Request:   string(serverCsr),
 		Profile:   "web",
 		NotBefore: backdate.AddDate(-1, 0, 0),
-		NotAfter:  backdate.AddDate(1, 0, 0),
+		NotAfter:  time.Now().AddDate(1, 0, 0),
 	}
 
 	serverCert, err := signerd.Sign(signReq)
