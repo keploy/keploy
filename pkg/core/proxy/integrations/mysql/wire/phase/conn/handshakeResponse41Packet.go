@@ -55,7 +55,7 @@ func DecodeHandshakeResponse(_ context.Context, logger *zap.Logger, data []byte)
 			}, nil
 		}
 	}
-
+	fmt.Errorf("Raw Handshake Packet: %x\n", data)
 	idx := bytes.IndexByte(data, 0x00)
 	if idx == -1 {
 		return nil, errors.New("malformed handshake response packet: missing null terminator for Username")
