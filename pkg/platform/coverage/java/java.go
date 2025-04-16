@@ -46,6 +46,7 @@ func (j *Java) PreProcess(_ bool) (string, error) {
 	}
 	if utils.CmdType(j.commandType) == utils.DockerRun {
 		index := strings.Index(j.cmd, "docker run")
+		// for each testset, different raw coverage file(.exec) would be created
 		return j.cmd[:index+len("docker run")] +
 			" -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") +
 			" -w " + os.Getenv("PWD") +

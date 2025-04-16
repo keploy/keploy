@@ -42,10 +42,12 @@ RUN mkdir -p /usr/lib/docker/cli-plugins && \
     curl -SL "https://github.com/docker/compose/releases/download/v2.29.1/docker-compose-linux-$(uname -m)" -o /usr/lib/docker/cli-plugins/docker-compose && \
     chmod +x /usr/lib/docker/cli-plugins/docker-compose
 
+# Copy Go binaries from official image and set ENV
 COPY --from=golang:1.22 /usr/local/go /usr/local/go
 ENV GOROOT=/usr/local/go
 ENV PATH="$PATH:$GOROOT/bin"
 
+# Allows 'sudo go' commands
 RUN sed -i 's/\(Defaults\s*secure_path="[^"]*\)/\1:\/usr\/local\/go\/bin/' /etc/sudoers
 
 # Copy the keploy binary and the entrypoint script from the build container
