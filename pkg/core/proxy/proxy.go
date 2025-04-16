@@ -269,7 +269,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case err:= <-errCh:
+		case err := <-errCh:
 			return err
 		// handle the client connection
 		case clientConn := <-clientConnCh:
