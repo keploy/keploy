@@ -29,8 +29,8 @@ type MockSpec struct {
 	Metadata          map[string]string `json:"Metadata,omitempty" bson:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
 	GenericRequests   []Payload         `json:"RequestBin,omitempty" bson:"generic_requests,omitempty"`
 	GenericResponses  []Payload         `json:"ResponseBin,omitempty" bson:"generic_responses,omitempty"`
-	RedisRequests     []Payload         `json:"redisRequests,omitempty" bson:"redis_requests,omitempty"`
-	RedisResponses    []Payload         `json:"redisResponses,omitempty" bson:"redis_responses,omitempty"`
+	RedisRequests     []RedisRequests         `json:"redisRequests,omitempty" bson:"redis_requests,omitempty"`
+	RedisResponses    []RedisResponses         `json:"redisResponses,omitempty" bson:"redis_responses,omitempty"`
 	HTTPReq           *HTTPReq          `json:"Req,omitempty" bson:"http_req,omitempty"`
 	HTTPResp          *HTTPResp         `json:"Res,omitempty" bson:"http_resp,omitempty"`
 	XMLResp           *XMLResp          `json:"XMLResp,omitempty" bson:"xml_resp,omitempty"`

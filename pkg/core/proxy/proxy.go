@@ -554,6 +554,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		p.logger.Debug("Checking for the parser", zap.Any("ParserType", parserPair.ParserType))
 		if parser.MatchType(parserCtx, initialBuf) {
 			matchedParser = parser
+			p.logger.Debug("here is matched parser", zap.Any("ParserType", parserPair.ParserType))
 			parserType = parserPair.ParserType
 			generic = false
 			break

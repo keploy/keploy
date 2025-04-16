@@ -172,16 +172,16 @@ func saveMock(requests, responses []models.Payload, reqTimestampMock, resTimesta
 	metadata := make(map[string]string)
 	metadata["type"] = "config"
 
-	mocks <- &models.Mock{
-		Version: models.GetVersion(),
-		Name:    "mocks",
-		Kind:    models.REDIS,
-		Spec: models.MockSpec{
-			RedisRequests:    redisRequestsCopy,
-			RedisResponses:   redisResponsesCopy,
-			ReqTimestampMock: reqTimestampMock,
-			ResTimestampMock: resTimestampMock,
-			Metadata:         metadata,
-		},
-	}
+	// mocks <- &models.Mock{
+	// 	Version: models.GetVersion(),
+	// 	Name:    "mocks",
+	// 	Kind:    models.REDIS,
+	// 	Spec: models.MockSpec{
+	// 		RedisRequests:    redisRequestsCopy,
+	// 		RedisResponses:   redisResponsesCopy,
+	// 		ReqTimestampMock: reqTimestampMock,
+	// 		ResTimestampMock: resTimestampMock,
+	// 		Metadata:         metadata,
+	// 	},
+	// }
 }
