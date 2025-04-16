@@ -60,7 +60,7 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 	passThrough := proxyHttp.IsPassThrough(logger, req, uint(dstPort), headerOpts)
 
 	for _, filter := range opts.Filters {
-		if filter.URLMethods != nil && len(filter.URLMethods) != 0 {
+		if len(filter.URLMethods) > 0 {
 			urlMethodMatch := false
 			for _, method := range filter.URLMethods {
 				if method == req.Method {
@@ -73,7 +73,7 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 				continue
 			}
 		}
-		if filter.Headers != nil && len(filter.Headers) != 0 {
+		if len(filter.Headers) > 0 {
 			headerMatch := false
 			for filterHeaderKey, filterHeaderValue := range filter.Headers {
 				regex, err := regexp.Compile(filterHeaderValue)
