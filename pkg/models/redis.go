@@ -28,5 +28,10 @@ type RedisBodyType struct {
 	Data interface{}  
 }
 
+type RedisArrayBody struct{
+	Length int
+	Value interface{}
+}
+
 
 

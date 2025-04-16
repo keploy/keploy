@@ -246,7 +246,7 @@ func processBufferRequests(buffer []byte, origin models.OriginType, payloads *[]
 				{
 					Type: buffDataType,
 					Size: size,
-					Data: dataFromBuf,
+					Data: handleDataByType(buffDataType,dataFromBuf),
 				},
 			},
 		})
@@ -317,7 +317,7 @@ func processBufferResponses(buffer []byte, origin models.OriginType, payloads *[
 				{
 					Type: buffDataType,
 					Size: size,
-					Data: dataFromBuf,
+					Data: handleDataByType(buffDataType,dataFromBuf),
 				},
 			},
 		})

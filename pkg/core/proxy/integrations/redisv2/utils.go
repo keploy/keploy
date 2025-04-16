@@ -2,9 +2,11 @@ package redisv2
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/davecgh/go-spew/spew"
 	"go.keploy.io/server/v2/pkg/models"
 )
 
@@ -41,38 +43,53 @@ func removeCRLF(data string) string {
 }
 
 // Process an array type
-func processArray(bufStr string) string {
+func processArray(bufStr string) []models.RedisArrayBody {
 	// Remove CRLF characters first
-	bufStr = removeCRLF(bufStr)
+	// bufStr = removeCRLF(bufStr)
 
 	// Slice the string from index 2 (remove the first two characters, e.g. "*2\r\n")
-	bufStr = bufStr[2:]
+	// bufStr = bufStr[2:]
 
 	// Initialize a slice to store the result
-	var result []string
+	var result []models.RedisArrayBody
 
 	// Split the array by "$" to process each element
 	dataParts := strings.Split(bufStr, "$")
-	for i := 1; i < len(dataParts); i += 2 {
+	spew.Dump("first datapaerts",dataParts)
+	for i := 1; i < len(dataParts); i += 1 {
 		// Extract the size from the first part, e.g., "$3" means size 3
 		if len(dataParts[i]) > 0 {
-			sizeStr := dataParts[i][:strings.Index(dataParts[i], "\r\n")] // Extract the size part, e.g., "$3"
-			size, err := strconv.Atoi(sizeStr)
-			if err != nil {
-				fmt.Println("Error parsing size:", err)
-				continue
-			}
+			var newArrayEntry models.RedisArrayBody
+			// fmt.Println(dataParts[i],"kkllllll")
+			// sizeStr := dataParts[i][:strings.Index(dataParts[i], "\r\n")] // Extract the size part, e.g., "$3"
+			re := regexp.MustCompile(`\d+`)
+			loc := re.FindString(dataParts[i])
+			fmt.Println("here is loc",loc)
+			// size, err := strconv.Atoi(sizeStr)
+			// if err != nil {
+			// 	fmt.Println("Error parsing size:", err)
+			// 	continue
+			// }
 			
 			// Extract the value (skip CRLF) and get the element
-			element := dataParts[i+1] // The actual data part after '$'
-			
+			// fmt.Println(dataParts)
+			// fmt.Println(dataParts[i])
+			element := dataParts[i:] // The actual data part after '$'
+			arrayEntryLength,err := strconv.Atoi(loc)
+			if err !=nil{
+				return nil
+			}
+			// fmt.Println("element",element[0])
+			newArrayEntry.Length = arrayEntryLength
+			// removeBeforeFirstCRLF(element[0])
+			newArrayEntry.Value = removeCRLF(removeBeforeFirstCRLF(element[0]))
 			// Format the result as YAML
-			result = append(result, fmt.Sprintf("- size: %d\n  data: \"%s\"", size, element))
+			result = append(result, newArrayEntry)
 		}
 	}
 
 	// Join and return the formatted YAML string
-	return strings.Join(result, "\n")
+	return result
 }
 
 // Process a map type
