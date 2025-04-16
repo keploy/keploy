@@ -261,7 +261,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 					return
 				}
 				utils.LogError(p.logger, err, "failed to accept connection to the proxy")
-				errCh <- nil
+				errCh <- err
 				return
 			}
 			clientConnCh <- conn
@@ -269,7 +269,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-errCh:
+		case err := <-errCh:
 			return err
 		// handle the client connection
 		case clientConn := <-clientConnCh:
@@ -450,7 +450,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	isTLS := pTls.IsTLSHandshake(testBuffer)
 	if isTLS {
-		srcConn, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn)
+		srcConn, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to handle TLS conn")
 			return err

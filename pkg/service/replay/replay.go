@@ -484,7 +484,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	cmdType := utils.CmdType(r.config.CommandType)
 	var userIP string
 
-	err = r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, models.BaseTime, time.Now(), Start)
+	err = r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, models.BaseTime, time.Now(), Start, models.OutgoingOptions{
+		Backdate: testCases[0].HTTPReq.Timestamp,
+	})
 	if err != nil {
 		return models.TestSetStatusFailed, err
 	}
@@ -632,7 +634,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		var loopErr error
 
 		//No need to handle mocking when basepath is provided
-		err := r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp, Update)
+		err := r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp, Update, models.OutgoingOptions{
+			Backdate: testCase.HTTPReq.Timestamp,
+		})
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to update mocks")
 			break
@@ -930,7 +934,7 @@ func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime tim
 	return filtered, unfiltered, err
 }
 
-func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, testSetID string, afterTime, beforeTime time.Time, action MockAction) error {
+func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, testSetID string, afterTime, beforeTime time.Time, action MockAction, outgoingOpts models.OutgoingOptions) error {
 
 	if !r.instrument {
 		r.logger.Debug("Keploy will not setup or update the mocks when base path is provided", zap.Any("base path", r.config.Test.BasePath))
@@ -943,13 +947,13 @@ func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, testSet
 	}
 
 	if action == Start {
-		err = r.instrumentation.MockOutgoing(ctx, appID, models.OutgoingOptions{
-			Rules:          r.config.BypassRules,
-			MongoPassword:  r.config.Test.MongoPassword,
-			SQLDelay:       time.Duration(r.config.Test.Delay),
-			FallBackOnMiss: r.config.Test.FallBackOnMiss,
-			Mocking:        r.config.Test.Mocking,
-		})
+		outgoingOpts.Rules = r.config.BypassRules
+		outgoingOpts.MongoPassword = r.config.Test.MongoPassword
+		outgoingOpts.SQLDelay = time.Duration(r.config.Test.Delay)
+		outgoingOpts.FallBackOnMiss = r.config.Test.FallBackOnMiss
+		outgoingOpts.Mocking = r.config.Test.Mocking
+
+		err = r.instrumentation.MockOutgoing(ctx, appID, outgoingOpts)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to mock outgoing")
 			return err
