@@ -491,12 +491,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		logger.Debug("Partial HTTP headers detected, reading more data to get complete headers")
 
 		// Read more data from the TCP connection to get the complete HTTP headers.
-		initialBuf, err = util.ReadHTTPHeadersUntilEnd(parserCtx, p.logger, srcConn)
+		headerBuf, err := util.ReadHTTPHeadersUntilEnd(parserCtx, p.logger, srcConn)
 		if err != nil {
 			// Log the error if we fail to read the complete HTTP headers.
 			utils.LogError(logger, err, "failed to read the complete HTTP headers from client")
 			return err
 		}
+		// Append the additional data to the initial buffer.
+		initialBuf = append(initialBuf, headerBuf...)
 	}
 
 	//update the src connection to have the initial buffer
