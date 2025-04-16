@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"strconv"
 	"time"
@@ -22,7 +23,7 @@ import (
 
 // decodeMongo decodes the mongo wire message from the client connection
 // and sends the response back to the client.
-func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	startedDecoding := time.Now()
 	requestBuffers := [][]byte{reqBuf}
 
@@ -32,25 +33,20 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 		defer util.Recover(logger, clientConn, nil)
 		defer close(errCh)
 		var readRequestDelay time.Duration
+		var err error
 		for {
-			// get the config mocks from the mockDb for responding to heartbeat calls
-			configMocks, err := mockDb.GetUnFilteredMocks()
-			if err != nil {
-				utils.LogError(logger, err, "error while getting config mock")
-			}
-			logger.Debug(fmt.Sprintf("the config mocks are: %v", configMocks))
 
 			var (
 				mongoRequests []models.MongoRequest // stores the request packet
 			)
-			// check to read the request buffer from the client connection after the initial packeyt
+			// check to read the request buffer from the client connection after the initial packet
 			if string(reqBuf) == "read form client conn" {
 				started := time.Now()
 				// reads the first chunk of the mongo request
 				reqBuf, err = util.ReadBytes(ctx, logger, clientConn)
 				if err != nil {
 					if err == io.EOF {
-						logger.Debug("recieved request buffer is empty in test mode for mongo calls")
+						logger.Debug("received request buffer is empty in test mode for mongo calls")
 						errCh <- err
 						return
 					}
@@ -89,7 +85,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					requestBuffer1, err := util.ReadBytes(ctx, logger, clientConn)
 					if err != nil {
 						if err == io.EOF {
-							logger.Debug("recieved request buffer is empty for streaming mongo request call")
+							logger.Debug("received request buffer is empty for streaming mongo request call")
 							errCh <- err
 							return
 						}
@@ -124,14 +120,26 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			}
 			// check for the heartbeat request from client and use the config mocks to respond
 			if isHeartBeat(logger, opReq, *mongoRequests[0].Header, mongoRequests[0].Message) {
-				logger.Debug("recieved a heartbeat request for mongo", zap.Any("config mocks", len(configMocks)))
-				maxMatchScore := 0.0
-				bestMatchIndex := -1
-				// loop over the recorded config mocks to match with the incoming request
-				for configIndex, configMock := range configMocks {
-					logger.Debug("the config mock is: ", zap.Any("config mock", configMock), zap.Any("actual request", mongoRequests))
-					// checking the number of chunks for recorded config mocks and the incoming request
-					if len(configMock.Spec.MongoRequests) == len(mongoRequests) {
+				// isScramAuth(logger, opReq) {
+				var bestMatchIndex = -1
+				var maxMatchScore = 0.0
+				var configMocks []*models.Mock
+				for {
+					configMocks, err = mockDb.GetUnFilteredMocks()
+					if err != nil {
+						utils.LogError(logger, err, "error while getting config mock")
+					}
+					logger.Debug(fmt.Sprintf("the config mocks are: %v", configMocks))
+					maxMatchScore = 0.0
+					bestMatchIndex = -1
+					// loop over the recorded config mocks to match with the incoming request
+					for configIndex, configMock := range configMocks {
+						logger.Debug("the config mock is: ", zap.Any("config mock", configMock), zap.Any("actual request", mongoRequests))
+						// checking the number of chunks for recorded config mocks and the incoming request
+						if len(configMock.Spec.MongoRequests) != len(mongoRequests) {
+							continue
+						}
+
 						for i, req := range configMock.Spec.MongoRequests {
 							// check the opcode of the incoming request and the recorded config mocks
 							if len(configMock.Spec.MongoRequests) != len(mongoRequests) || req.Header.Opcode != mongoRequests[i].Header.Opcode {
@@ -193,11 +201,22 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 									bestMatchIndex = configIndex
 								}
 							default:
-								utils.LogError(logger, err, "the OpCode of the mongo wiremessage is invalid.")
+								utils.LogError(logger, err, "the OpCode of the mongo wiremessage is invalid.", zap.Any("opcode", req.Header.Opcode))
 							}
 						}
 					}
+
+					if bestMatchIndex != -1 && maxMatchScore != 0.0 {
+						matchedMock := *configMocks[bestMatchIndex]
+						matchedMock.TestModeInfo.SortOrder = math.MaxInt
+						isUpdated := mockDb.UpdateUnFilteredMock(configMocks[bestMatchIndex], &matchedMock)
+						if !isUpdated {
+							continue
+						}
+					}
+					break
 				}
+
 				responseTo := mongoRequests[0].Header.RequestID
 				if bestMatchIndex == -1 || maxMatchScore == 0.0 {
 					logger.Debug("the mongo request do not matches with any config mocks", zap.Any("request", mongoRequests))
@@ -215,7 +234,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					switch mongoResponse.Header.Opcode {
 					case wiremessage.OpReply:
 						replySpec := mongoResponse.Message.(*models.MongoOpReply)
-						replyMessage, err := encodeOpReply(replySpec, logger)
+						replyMessage, err := encodeOpReply(ctx, mongoRequests[0], configMocks[bestMatchIndex].Spec.MongoRequests[0], replySpec, opts.MongoPassword, logger)
 						if err != nil {
 							utils.LogError(logger, err, "failed to encode the recorded OpReply yaml", zap.Any("for request with id", responseTo))
 							errCh <- err
@@ -225,6 +244,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 						heathCheckReplyBuffer := replyMessage.Encode(responseTo, requestID)
 						responseTo = requestID
 						logger.Debug(fmt.Sprintf("the bufffer response is: %v", string(heathCheckReplyBuffer)))
+						// handle scram auth request
 						_, err = clientConn.Write(heathCheckReplyBuffer)
 						if err != nil {
 							if ctx.Err() != nil {
@@ -241,7 +261,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 						if len(configMocks[bestMatchIndex].Spec.MongoRequests) > 0 {
 							expectedRequestSections = configMocks[bestMatchIndex].Spec.MongoRequests[0].Message.(*models.MongoOpMessage).Sections
 						}
-						message, err := encodeOpMsg(respMessage, mongoRequest.(*models.MongoOpMessage).Sections, expectedRequestSections, opts.MongoPassword, logger)
+						message, err := encodeOpMsg(ctx, respMessage, mongoRequest.(*models.MongoOpMessage).Sections, expectedRequestSections, opts.MongoPassword, logger)
 						if err != nil {
 							utils.LogError(logger, err, "failed to encode the recorded OpMsg response", zap.Any("for request with id", responseTo))
 							errCh <- err
@@ -289,7 +309,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					if len(matchedMock.Spec.MongoRequests) > 0 {
 						expectedRequestSections = matchedMock.Spec.MongoRequests[0].Message.(*models.MongoOpMessage).Sections
 					}
-					message, err := encodeOpMsg(respMessage, mongoRequest.(*models.MongoOpMessage).Sections, expectedRequestSections, opts.MongoPassword, logger)
+					message, err := encodeOpMsg(ctx, respMessage, mongoRequest.(*models.MongoOpMessage).Sections, expectedRequestSections, opts.MongoPassword, logger)
 					if err != nil {
 						utils.LogError(logger, err, "failed to encode the recorded OpMsg response", zap.Any("for request with id", responseTo))
 						errCh <- err

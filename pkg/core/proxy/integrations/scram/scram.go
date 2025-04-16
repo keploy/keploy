@@ -12,6 +12,7 @@ import (
 	"github.com/xdg-go/pbkdf2"
 	"github.com/xdg-go/scram"
 	"github.com/xdg-go/stringprep"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -33,10 +34,10 @@ func GenerateServerFinalMessage(authMessage, mechanism, password, salt string, i
 
 	// Switch based on the provided mechanism to determine the hash function to be used.
 	switch mechanism {
-	case "SCRAM-SHA-1":
+	case util.SCRAM_SHA_1:
 		hashGen = scram.SHA1
 		passwordDigest = mongoPasswordDigest(username, password)
-	case "SCRAM-SHA-256":
+	case util.SCRAM_SHA_256:
 		hashGen = scram.SHA256
 		passwordDigest, err = stringprep.SASLprep.Prepare(password)
 		if err != nil {
@@ -72,27 +73,31 @@ func GenerateServerFinalMessage(authMessage, mechanism, password, salt string, i
 //
 // Parameters:
 // - recordedRequestMsg: The byte slice containing the recorded client's first message.
-// - recievedRequestMsg: The byte slice containing the received client's first message.
+// - receivedRequestMsg: The byte slice containing the received client's first message.
 // - firstResponseMsg: The byte slice containing the server's initial response message.
 // - log: An instance of a log from the zap package.
 //
 // Returns:
 // - A modified server's first response message with the nonce replaced.
 // - An error if nonce extraction or replacement fails.
-func GenerateServerFirstMessage(recordedRequestMsg, recievedRequestMsg, firstResponseMsg []byte, logger *zap.Logger) (string, error) {
+func GenerateServerFirstMessage(recordedRequestMsg, receivedRequestMsg, firstResponseMsg []byte, logger *zap.Logger) (string, error) {
 	expectedNonce, err := extractClientNonce(string(recordedRequestMsg))
 	if err != nil {
 		utils.LogError(logger, err, "failed to extract the client nonce from the recorded first message")
 		return "", err
 	}
-	actualNonce, err := extractClientNonce(string(recievedRequestMsg))
+	actualNonce, err := extractClientNonce(string(receivedRequestMsg))
 	if err != nil {
-		utils.LogError(logger, err, "failed to extract the client nonce from the recieved first message")
+		utils.LogError(logger, err, "failed to extract the client nonce from the received first message")
 		return "", err
 	}
 	// Since, the nonce are randomlly generated string. so, each session have unique nonce.
 	// Thus, the mocked server response should be updated according to the current nonce
-	return strings.Replace(string(firstResponseMsg), expectedNonce, actualNonce, -1), nil
+	updatedResponse := strings.Replace(string(firstResponseMsg), expectedNonce, actualNonce, -1)
+
+	logger.Debug("Updated server first message after nonce substitution", zap.String("updatedResponse", updatedResponse))
+
+	return updatedResponse, nil
 }
 
 // GenerateAuthMessage creates an authentication message based on the initial
@@ -112,7 +117,7 @@ func GenerateServerFirstMessage(recordedRequestMsg, recievedRequestMsg, firstRes
 func GenerateAuthMessage(firstRequest, firstResponse string, logger *zap.Logger) string {
 	gs2, err := extractAuthID(firstRequest)
 	if err != nil {
-		utils.LogError(logger, err, "failed to extract the client gs2 header from the recieved first message")
+		utils.LogError(logger, err, "failed to extract the client gs2 header from the received first message")
 		return ""
 	}
 	authMsg := firstRequest[len(gs2):] + "," + firstResponse + ","

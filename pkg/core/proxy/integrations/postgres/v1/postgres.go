@@ -17,14 +17,17 @@ import (
 )
 
 func init() {
-	integrations.Register("postgres_v1", NewPostgresV1)
+	integrations.Register(integrations.POSTGRES_V1, &integrations.Parsers{
+		Initializer: New,
+		Priority:    100,
+	})
 }
 
 type PostgresV1 struct {
 	logger *zap.Logger
 }
 
-func NewPostgresV1(logger *zap.Logger) integrations.Integrations {
+func New(logger *zap.Logger) integrations.Integrations {
 	return &PostgresV1{
 		logger: logger,
 	}
@@ -67,7 +70,7 @@ func (p *PostgresV1) RecordOutgoing(ctx context.Context, src net.Conn, dst net.C
 
 }
 
-func (p *PostgresV1) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+func (p *PostgresV1) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	logger := p.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)))
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {

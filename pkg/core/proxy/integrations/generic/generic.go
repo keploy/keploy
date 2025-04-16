@@ -14,14 +14,17 @@ import (
 )
 
 func init() {
-	integrations.Register("generic", NewGeneric)
+	integrations.Register(integrations.GENERIC, &integrations.Parsers{
+		Initializer: New,
+		Priority:    100,
+	})
 }
 
 type Generic struct {
 	logger *zap.Logger
 }
 
-func NewGeneric(logger *zap.Logger) integrations.Integrations {
+func New(logger *zap.Logger) integrations.Integrations {
 	return &Generic{
 		logger: logger,
 	}
@@ -49,7 +52,7 @@ func (g *Generic) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn
 	return nil
 }
 
-func (g *Generic) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+func (g *Generic) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	logger := g.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)))
 	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {

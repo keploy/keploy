@@ -22,6 +22,7 @@ type NetworkTrafficDoc struct {
 	Spec         yamlLib.Node   `json:"spec" yaml:"spec"`
 	Curl         string         `json:"curl" yaml:"curl,omitempty"`
 	ConnectionID string         `json:"connectionId" yaml:"connectionId,omitempty"`
+	RespType     string         `json:"respType" yaml:"respType,omitempty"`
 }
 
 // ctxReader wraps an io.Reader with a context for cancellation support
@@ -61,6 +62,7 @@ func (cw *ctxWriter) Write(p []byte) (n int, err error) {
 func WriteFile(ctx context.Context, logger *zap.Logger, path, fileName string, docData []byte, isAppend bool) error {
 	isFileEmpty, err := CreateYamlFile(ctx, logger, path, fileName)
 	if err != nil {
+		utils.LogError(logger, err, "failed to create a yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
 		return err
 	}
 	flag := os.O_WRONLY | os.O_TRUNC
@@ -134,8 +136,9 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 		utils.LogError(Logger, err, "failed to validate the yaml file path", zap.String("path directory", path), zap.String("yaml", fileName))
 		return false, err
 	}
+
 	if _, err := os.Stat(yamlPath); err != nil {
-		if ctx.Err() == nil {
+		if ctx.Err() == nil || ctx.Err() == context.Canceled {
 			err = os.MkdirAll(filepath.Join(path), 0777)
 			if err != nil {
 				utils.LogError(Logger, err, "failed to create a directory for the yaml file", zap.String("path directory", path), zap.String("yaml", fileName))
@@ -172,7 +175,7 @@ func ReadSessionIndices(_ context.Context, path string, Logger *zap.Logger) ([]s
 	}
 
 	for _, v := range files {
-		if v.Name() != "reports" && v.Name() != "testReports" && v.IsDir() {
+		if v.Name() != "reports" && v.Name() != "testReports" && v.Name() != "schema" && v.IsDir() {
 			indices = append(indices, v.Name())
 		}
 	}

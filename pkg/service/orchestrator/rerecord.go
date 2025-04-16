@@ -42,6 +42,9 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		return err
 	}
 
+	// Check for templates
+	o.checkForTemplates(ctx, testSets)
+
 	// Sort the testsets to ensure that the testcases are re-recorded in the same order
 	sort.SliceStable(testSets, func(i, j int) bool {
 		return testSets[i] < testSets[j]
@@ -181,7 +184,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 
 	tcs, err := o.replay.GetTestCases(ctx, testSet)
 	if err != nil {
-		errMsg := "Failed to get all testcases"
+		errMsg := "failed to get all testcases"
 		utils.LogError(o.logger, err, errMsg, zap.String("testset", testSet))
 		return false, fmt.Errorf(errMsg)
 	}
@@ -235,6 +238,16 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 			}
 			o.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HTTPReq.URL))
 		}
+		// Read the template values.
+		testSetConf, err := o.replay.GetTestSetConf(ctx, testSet)
+		if err != nil {
+			o.logger.Debug("failed to read template values")
+		}
+		if testSetConf == nil {
+			utils.TemplatizedValues = map[string]interface{}{}
+		} else {
+			utils.TemplatizedValues = testSetConf.Template
+		}
 
 		if o.config.ReRecord.Host != "" {
 			tc.HTTPReq.URL, err = utils.ReplaceHost(tc.HTTPReq.URL, o.config.ReRecord.Host)
@@ -251,7 +264,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 				break
 			}
 		}
-		resp, err := pkg.SimulateHTTP(ctx, *tc, testSet, o.logger, o.config.Test.APITimeout)
+		resp, err := pkg.SimulateHTTP(ctx, tc, testSet, o.logger, o.config.Test.APITimeout)
 		if err != nil {
 			utils.LogError(o.logger, err, "failed to simulate HTTP request")
 			if resp == nil {
@@ -269,4 +282,42 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 	}
 
 	return allTcRecorded, nil
+}
+
+// checkForTemplates checks if the testcases are already templatized. If not, it asks the user if they want to templatize the testcases before re-recording
+func (o *Orchestrator) checkForTemplates(ctx context.Context, testSets []string) {
+	// Check if the testcases are already templatized.
+	var nonTemplatized []string
+	for _, testSet := range testSets {
+		if _, ok := o.config.Test.SelectedTests[testSet]; !ok && len(o.config.Test.SelectedTests) != 0 {
+			continue
+		}
+
+		conf, err := o.replay.GetTestSetConf(ctx, testSet)
+		if err != nil || conf == nil || conf.Template == nil {
+			nonTemplatized = append(nonTemplatized, testSet)
+		}
+	}
+
+	if len(nonTemplatized) == 0 {
+		return
+	}
+
+	o.config.Templatize.TestSets = nonTemplatized
+	o.logger.Warn("The following testSets are not templatized. Do you want to templatize them to handle noisy fields?(y/n)", zap.Any("testSets:", nonTemplatized))
+	reader := bufio.NewReader(os.Stdin)
+	input, err := reader.ReadString('\n')
+	if err != nil {
+		o.logger.Warn("failed to read input. Skipping templatization")
+	}
+	if input == "n\n" || input == "N\n" {
+		o.logger.Info("skipping templatization")
+		return
+	}
+
+	if input == "y\n" || input == "Y\n" {
+		if err := o.tools.Templatize(ctx); err != nil {
+			utils.LogError(o.logger, err, "failed to templatize test cases, skipping templatization")
+		}
+	}
 }

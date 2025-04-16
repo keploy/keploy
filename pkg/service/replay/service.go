@@ -2,6 +2,7 @@ package replay
 
 import (
 	"context"
+	"io"
 	"time"
 
 	"go.keploy.io/server/v2/pkg/models"
@@ -31,6 +32,7 @@ type Service interface {
 	RunTestSet(ctx context.Context, testSetID string, testRunID string, appID uint64, serveTest bool) (models.TestSetStatus, error)
 	GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error)
 	GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error)
+	GetTestSetConf(ctx context.Context, testSetID string) (*models.TestSet, error)
 	RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError
 	Normalize(ctx context.Context) error
 	DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error)
@@ -42,7 +44,7 @@ type Service interface {
 type TestDB interface {
 	GetAllTestSetIDs(ctx context.Context) ([]string, error)
 	GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error)
-	UpdateTestCase(ctx context.Context, testCase *models.TestCase, testSetID string) error
+	UpdateTestCase(ctx context.Context, testCase *models.TestCase, testSetID string, enableLog bool) error
 	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
 	DeleteTestSet(ctx context.Context, testSetID string) error
 }
@@ -62,7 +64,7 @@ type ReportDB interface {
 	UpdateReport(ctx context.Context, testRunID string, testCoverage any) error
 }
 
-type Config interface {
+type TestSetConfig interface {
 	Read(ctx context.Context, testSetID string) (*models.TestSet, error)
 	Write(ctx context.Context, testSetID string, testSet *models.TestSet) error
 }
@@ -73,16 +75,16 @@ type Telemetry interface {
 	MockTestRun(utilizedMocks int)
 }
 
-// RequestMockHandler defines an interface for implementing hooks that extend and customize
-// the behavior of request simulations and test workflows. This interface allows for
-// detailed control over various stages of the testing process, including request simulation,
-// test status processing, and post-test actions.
-type RequestMockHandler interface {
-	SimulateRequest(ctx context.Context, appID uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error)
-	ProcessTestRunStatus(ctx context.Context, status bool, testSetID string)
-	FetchMockName() string
-	ProcessMockFile(ctx context.Context, testSetID string)
-	AfterTestHook(ctx context.Context, testRunID, testSetID string, coverage models.TestCoverage, totalTestSets int) (*models.TestReport, error)
+type TestHooks interface {
+	SimulateRequest(ctx context.Context, appID uint64, tc *models.TestCase, testSetID string) (interface{}, error)
+	BeforeTestSetRun(ctx context.Context, testSetID string) error
+	AfterTestSetRun(ctx context.Context, testSetID string, status bool) error
+	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error // hook executed after running all the test-sets
+}
+
+type Storage interface {
+	Upload(ctx context.Context, file io.Reader, mockName string, appName string, jwtToken string) error
+	Download(ctx context.Context, mockName string, appName string, userName string, jwtToken string) (io.Reader, error)
 }
 
 type InstrumentState struct {

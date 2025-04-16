@@ -461,6 +461,7 @@ func (idc *Impl) MakeNetworkExternal(c *Compose) error {
 // SetKeployNetwork adds the keploy-network network to the new docker compose file and copy rest of the contents from
 // existing user docker compose file
 func (idc *Impl) SetKeployNetwork(c *Compose) (*NetworkInfo, error) {
+
 	// Ensure that the top-level networks mapping exists.
 	if c.Networks.Content == nil {
 		c.Networks.Kind = yaml.MappingNode

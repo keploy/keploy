@@ -17,27 +17,47 @@ import (
 
 	"github.com/charmbracelet/glamour"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/service"
+	"go.keploy.io/server/v2/pkg/service/export"
+	postmanimport "go.keploy.io/server/v2/pkg/service/import"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
-	"gopkg.in/yaml.v3"
+	yamlLib "gopkg.in/yaml.v3"
 )
 
-func NewTools(logger *zap.Logger, telemetry teleDB) Service {
+func NewTools(logger *zap.Logger, testsetConfig TestSetConfig, testDB TestDB, telemetry teleDB, auth service.Auth, config *config.Config) Service {
 	return &Tools{
-		logger:    logger,
-		telemetry: telemetry,
+		logger:      logger,
+		telemetry:   telemetry,
+		auth:        auth,
+		testSetConf: testsetConfig,
+		testDB:      testDB,
+		config:      config,
 	}
 }
 
 type Tools struct {
-	logger    *zap.Logger
-	telemetry teleDB
+	logger      *zap.Logger
+	telemetry   teleDB
+	testSetConf TestSetConfig
+	testDB      TestDB
+	config      *config.Config
+	auth        service.Auth
 }
 
 var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
 
 func (t *Tools) SendTelemetry(event string, output ...map[string]interface{}) {
 	t.telemetry.SendTelemetry(event, output...)
+}
+
+func (t *Tools) Export(ctx context.Context) error {
+	return export.Export(ctx, t.logger)
+}
+
+func (t *Tools) Import(ctx context.Context, path, basePath string) error {
+	postmanImport := postmanimport.NewPostmanImporter(ctx, t.logger)
+	return postmanImport.Import(path, basePath)
 }
 
 // Update initiates the tools process for the Keploy binary file.
@@ -72,11 +92,19 @@ func (t *Tools) Update(ctx context.Context) error {
 	t.logger.Info("Updating to Version: " + latestVersion)
 
 	downloadURL := ""
-	if runtime.GOARCH == "amd64" {
-		downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
-	} else {
-		downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
+
+	if runtime.GOOS == "linux" {
+		if runtime.GOARCH == "amd64" {
+			downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz"
+		} else {
+			downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_arm64.tar.gz"
+		}
 	}
+
+	if runtime.GOOS == "darwin" {
+		downloadURL = "https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_all.tar.gz"
+	}
+
 	err = t.downloadAndUpdate(ctx, t.logger, downloadURL)
 	if err != nil {
 		return err
@@ -245,7 +273,7 @@ func extractTarGz(gzipPath, destDir string) error {
 }
 
 func (t *Tools) CreateConfig(_ context.Context, filePath string, configData string) error {
-	var node yaml.Node
+	var node yamlLib.Node
 	var data []byte
 	var err error
 
@@ -260,17 +288,18 @@ func (t *Tools) CreateConfig(_ context.Context, filePath string, configData stri
 		data = []byte(configData)
 	}
 
-	if err := yaml.Unmarshal(data, &node); err != nil {
+	if err := yamlLib.Unmarshal(data, &node); err != nil {
 		utils.LogError(t.logger, err, "failed to unmarshal the config")
 		return nil
 	}
-	results, err := yaml.Marshal(node.Content[0])
+	results, err := yamlLib.Marshal(node.Content[0])
 	if err != nil {
 		utils.LogError(t.logger, err, "failed to marshal the config")
 		return nil
 	}
 
 	finalOutput := append(results, []byte(utils.ConfigGuide)...)
+	finalOutput = append([]byte(utils.GetVersionAsComment()), finalOutput...)
 
 	err = os.WriteFile(filePath, finalOutput, fs.ModePerm)
 	if err != nil {
@@ -293,4 +322,8 @@ func (t *Tools) IgnoreTests(_ context.Context, _ string, _ []string) error {
 
 func (t *Tools) IgnoreTestSet(_ context.Context, _ string) error {
 	return nil
+}
+
+func (t *Tools) Login(ctx context.Context) bool {
+	return t.auth.Login(ctx)
 }

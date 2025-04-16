@@ -34,7 +34,7 @@ func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cm
 	}
 }
 
-func (p *Python) PreProcess() (string, error) {
+func (p *Python) PreProcess(_ bool) (string, error) {
 	createPyCoverageConfig(p.logger)
 	if utils.CmdType(p.commandType) == utils.DockerRun {
 		index := strings.Index(p.cmd, "docker run")
@@ -114,6 +114,11 @@ func (p *Python) GetCoverage() (models.TestCoverage, error) {
 		testCov.FileCov[filename] = file.Summary.PercentCoveredDisplay + "%"
 	}
 	testCov.TotalCov = cov.Totals.PercentCoveredDisplay + "%"
+	testCov.Loc = models.Loc{
+		Total:   cov.Totals.NumStatements,
+		Covered: cov.Totals.CoveredLines,
+	}
+
 	return testCov, nil
 }
 

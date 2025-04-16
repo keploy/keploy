@@ -4,9 +4,8 @@ package conn
 
 import (
 	"context"
-	"fmt"
-	"io"
-	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,15 +24,17 @@ type Factory struct {
 	inactivityThreshold time.Duration
 	mutex               *sync.RWMutex
 	logger              *zap.Logger
+	incomingOpts        models.IncomingOptions
 }
 
 // NewFactory creates a new instance of the factory.
-func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger) *Factory {
+func NewFactory(inactivityThreshold time.Duration, logger *zap.Logger, opts models.IncomingOptions) *Factory {
 	return &Factory{
 		connections:         make(map[ID]*Tracker),
 		mutex:               &sync.RWMutex{},
 		inactivityThreshold: inactivityThreshold,
 		logger:              logger,
+		incomingOpts:        opts,
 	}
 }
 
@@ -43,38 +44,97 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 	factory.mutex.Lock()
 	defer factory.mutex.Unlock()
 	var trackersToDelete []ID
+
 	for connID, tracker := range factory.connections {
 		select {
 		case <-ctx.Done():
 			return
 		default:
-			ok, requestBuf, responseBuf, reqTimestampTest, resTimestampTest := tracker.IsComplete()
-			if ok {
+			// For gRPC (HTTP2) requests, handle them natively
+			if tracker.protocol == HTTP2 {
+				// Get the completed stream
+				stream := tracker.getHTTP2CompletedStream()
+				if stream != nil {
+					// Skip HTTP gateway requests
+					if pkg.IsGRPCGatewayRequest(stream) {
+						factory.logger.Debug("Skipping internal gRPC request proxied by gRPC-gateway", zap.Any("stream", stream))
+						continue
+					}
 
-				if len(requestBuf) == 0 || len(responseBuf) == 0 {
-					factory.logger.Warn("failed processing a request due to invalid request or response", zap.Any("Request Size", len(requestBuf)), zap.Any("Response Size", len(responseBuf)))
-					continue
-				}
+					factory.logger.Debug("Processing HTTP2/gRPC request",
+						zap.Any("connection_id", connID))
 
-				parsedHTTPReq, err := pkg.ParseHTTPRequest(requestBuf)
-				if err != nil {
-					utils.LogError(factory.logger, err, "failed to parse the http request from byte array", zap.Any("requestBuf", requestBuf))
-					continue
+					// Get timestamps from the stream
+					CaptureGRPC(ctx, factory.logger, t, stream)
 				}
-				parsedHTTPRes, err := pkg.ParseHTTPResponse(responseBuf, parsedHTTPReq)
-				if err != nil {
-					utils.LogError(factory.logger, err, "failed to parse the http response from byte array", zap.Any("responseBuf", responseBuf))
-					continue
-				}
-				capture(ctx, factory.logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestampTest, resTimestampTest, opts)
+			} else {
+				// Handle HTTP1 requests
+				ok, requestBuf, responseBuf, reqTimestampTest, resTimestampTest := tracker.isHTTP1Complete()
+				if ok {
 
-			} else if tracker.IsInactive(factory.inactivityThreshold) {
-				trackersToDelete = append(trackersToDelete, connID)
+					if len(requestBuf) == 0 || len(responseBuf) == 0 {
+						factory.logger.Warn("failed processing a request due to invalid request or response", zap.Any("Request Size", len(requestBuf)), zap.Any("Response Size", len(responseBuf)))
+						continue
+					}
+					parsedHTTPReq, err := pkg.ParseHTTPRequest(requestBuf)
+					if err != nil {
+						utils.LogError(factory.logger, err, "failed to parse the http request from byte array", zap.Any("requestBuf", requestBuf))
+						continue
+					}
+					parsedHTTPRes, err := pkg.ParseHTTPResponse(responseBuf, parsedHTTPReq)
+					if err != nil {
+						utils.LogError(factory.logger, err, "failed to parse the http response from byte array", zap.Any("responseBuf", responseBuf))
+						continue
+					}
+					basePath := factory.incomingOpts.BasePath
+					parsedBaseURL, err := url.Parse(basePath)
+					if err != nil {
+						factory.logger.Error("Error parsing base path: %s\n", zap.Error(err))
+					}
+					baseHost := parsedBaseURL.Host
+
+					if len(strings.TrimSpace(basePath)) == 0 {
+						factory.logger.Debug("Base path is not set, proceeding with request capture",
+							zap.String("basePath", basePath),
+						)
+						Capture(ctx, factory.logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestampTest, resTimestampTest, opts)
+						continue
+					}
+
+					if parsedHTTPReq.Host != baseHost {
+						factory.logger.Info("Skipping capture due to host mismatch",
+							zap.String("expectedHost", baseHost),
+							zap.String("actualHost", parsedHTTPReq.Host),
+						)
+						continue
+					}
+
+					if !strings.HasPrefix(parsedHTTPReq.URL.Path, parsedBaseURL.Path) {
+						factory.logger.Info("Skipping capture due to base path mismatch",
+							zap.String("expectedBasePath", parsedBaseURL.Path),
+							zap.String("actualPath", parsedHTTPReq.URL.Path),
+						)
+						continue
+					}
+
+					factory.logger.Info("Capturing test case for request matching base path",
+						zap.String("host", parsedHTTPReq.Host),
+						zap.String("path", parsedHTTPReq.URL.Path),
+					)
+
+					Capture(ctx, factory.logger, t, parsedHTTPReq, parsedHTTPRes, reqTimestampTest, resTimestampTest, opts)
+				} else if tracker.IsInactive(factory.inactivityThreshold) {
+					trackersToDelete = append(trackersToDelete, connID)
+				}
 			}
 		}
 	}
 
 	// Delete all the processed trackers.
+	if len(trackersToDelete) > 0 {
+		factory.logger.Debug("Deleting inactive trackers",
+			zap.Int("count", len(trackersToDelete)))
+	}
 	for _, key := range trackersToDelete {
 		delete(factory.connections, key)
 	}
@@ -87,63 +147,8 @@ func (factory *Factory) GetOrCreate(connectionID ID) *Tracker {
 	defer factory.mutex.Unlock()
 	tracker, ok := factory.connections[connectionID]
 	if !ok {
-		factory.connections[connectionID] = NewTracker(connectionID, factory.logger)
-		return factory.connections[connectionID]
+		tracker = NewTracker(connectionID, factory.logger)
+		factory.connections[connectionID] = tracker
 	}
 	return tracker
-}
-
-func capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions) {
-	reqBody, err := io.ReadAll(req.Body)
-	if err != nil {
-		utils.LogError(logger, err, "failed to read the http request body")
-		return
-	}
-
-	defer func() {
-		err := resp.Body.Close()
-		if err != nil {
-			utils.LogError(logger, err, "failed to close the http response body")
-		}
-	}()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		utils.LogError(logger, err, "failed to read the http response body")
-		return
-	}
-
-	if isFiltered(logger, req, opts) {
-		logger.Debug("The request is a filtered request")
-		return
-	}
-
-	t <- &models.TestCase{
-		Version: models.GetVersion(),
-		Name:    pkg.ToYamlHTTPHeader(req.Header)["Keploy-Test-Name"],
-		Kind:    models.HTTP,
-		Created: time.Now().Unix(),
-		HTTPReq: models.HTTPReq{
-			Method:     models.Method(req.Method),
-			ProtoMajor: req.ProtoMajor,
-			ProtoMinor: req.ProtoMinor,
-			// URL:        req.URL.String(),
-			// URL: fmt.Sprintf("%s://%s%s?%s", req.URL.Scheme, req.Host, req.URL.Path, req.URL.RawQuery),
-			URL: fmt.Sprintf("http://%s%s", req.Host, req.URL.RequestURI()),
-			//  URL: string(b),
-			Header:    pkg.ToYamlHTTPHeader(req.Header),
-			Body:      string(reqBody),
-			URLParams: pkg.URLParams(req),
-			Timestamp: reqTimeTest,
-		},
-		HTTPResp: models.HTTPResp{
-			StatusCode:    resp.StatusCode,
-			Header:        pkg.ToYamlHTTPHeader(resp.Header),
-			Body:          string(respBody),
-			Timestamp:     resTimeTest,
-			StatusMessage: http.StatusText(resp.StatusCode),
-		},
-		Noise: map[string][]string{},
-		// Mocks: mocks,
-	}
 }

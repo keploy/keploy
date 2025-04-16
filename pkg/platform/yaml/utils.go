@@ -2,8 +2,10 @@
 package yaml
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -13,7 +15,9 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
+	"sigs.k8s.io/kustomize/kyaml/yaml"
 )
 
 func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, noise map[string]string) bool {
@@ -234,4 +238,166 @@ func ReadDir(path string, fileMode fs.FileMode) (*os.File, error) {
 		return nil, err
 	}
 	return dir, nil
+}
+
+// CreateDir to create a directory if it doesn't exist
+func CreateDir(path string, logger *zap.Logger) error {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		err := os.MkdirAll(path, os.ModePerm)
+		if err != nil {
+			utils.LogError(logger, err, "failed to create directory", zap.String("directory", path))
+			return err
+		}
+	}
+	return nil
+}
+
+// ReadYAMLFile to read and parse YAML file
+func ReadYAMLFile(ctx context.Context, logger *zap.Logger, filePath string, fileName string, v interface{}, extType bool) error {
+	if !extType {
+		filePath = filepath.Join(filePath, fileName+".yml")
+
+	} else {
+		filePath = filepath.Join(filePath, fileName+".yaml")
+	}
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to read the file: %v", err)
+	}
+
+	defer func() {
+		if err := file.Close(); err != nil {
+			utils.LogError(logger, err, "failed to close file", zap.String("file", filePath))
+		}
+	}()
+
+	cr := &ctxReader{
+		ctx: ctx,
+		r:   file,
+	}
+
+	configData, err := io.ReadAll(cr)
+	if err != nil {
+		if err == ctx.Err() {
+			return err // Ignore context cancellation error
+		}
+		return fmt.Errorf("failed to read the file: %v", err)
+	}
+
+	err = yaml.Unmarshal(configData, v)
+	if err != nil {
+		utils.LogError(logger, err, "failed to unmarshal YAML", zap.String("file", filePath))
+		return err
+	}
+	return nil
+}
+
+// CopyFile copies a single file from src to dst
+func CopyFile(src, dst string, rename bool, logger *zap.Logger) error {
+	srcFile, err := os.Open(src)
+
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := srcFile.Close(); err != nil {
+			utils.LogError(logger, err, "failed to close file", zap.String("file", srcFile.Name()))
+		}
+	}()
+	// If rename is true, generate a new name for the destination file
+	if rename {
+		dst = generateSchemaName(dst)
+	}
+	dstFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := dstFile.Close(); err != nil {
+			utils.LogError(logger, err, "failed to close file", zap.String("file", dstFile.Name()))
+		}
+	}()
+
+	_, err = io.Copy(dstFile, srcFile)
+	if err != nil {
+		return err
+	}
+
+	// Ensure the copied file has the same permissions as the original file
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	err = os.Chmod(dst, srcInfo.Mode())
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// CopyDir recursively copies a directory tree, attempting to preserve permissions
+func CopyDir(srcDir, destDir string, rename bool, logger *zap.Logger) error {
+	// Ensure the destination directory exists
+	if _, err := os.Stat(destDir); os.IsNotExist(err) {
+		err := os.MkdirAll(destDir, os.ModePerm)
+		if err != nil {
+			return err
+		}
+	}
+	entries, err := os.ReadDir(srcDir)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		srcPath := filepath.Join(srcDir, entry.Name())
+		destPath := filepath.Join(destDir, entry.Name())
+
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+
+		if info.IsDir() {
+			err = os.MkdirAll(destPath, info.Mode())
+			if err != nil {
+				return err
+			}
+			err = CopyDir(srcPath, destPath, rename, logger)
+			if err != nil {
+				return err
+			}
+		} else {
+			err = CopyFile(srcPath, destPath, rename, logger)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// generateSchemaName generates a new schema name
+func generateSchemaName(src string) string {
+	dir := filepath.Dir(src)
+	newName := "schema" + filepath.Ext(src)
+	return filepath.Join(dir, newName)
+}
+
+func FileExists(_ context.Context, logger *zap.Logger, path string, fileName string) (bool, error) {
+	yamlPath, err := ValidatePath(filepath.Join(path, fileName+".yaml"))
+	if err != nil {
+		utils.LogError(logger, err, "failed to validate the yaml file path", zap.String("path directory", path), zap.String("yaml", fileName))
+		return false, err
+	}
+	if _, err := os.Stat(yamlPath); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		utils.LogError(logger, err, "failed to check if the yaml file exists", zap.String("path directory", path), zap.String("yaml", fileName))
+		return false, err
+	}
+
+	return true, nil
 }

@@ -38,7 +38,7 @@ func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cm
 	}
 }
 
-func (j *Java) PreProcess() (string, error) {
+func (j *Java) PreProcess(_ bool) (string, error) {
 	err := DownloadAndExtractJaCoCoCli(j.logger)
 	if err != nil {
 		j.logger.Warn("failed to download and extract JaCoCo cli, skipping coverage calculation", zap.Error(err))
@@ -135,6 +135,11 @@ func (j *Java) GetCoverage() (models.TestCoverage, error) {
 	if totalInstructions > 0 {
 		totalCoverage := float64(coveredInstructions) / float64(totalInstructions) * 100
 		testCov.TotalCov = fmt.Sprintf("%.2f%%", totalCoverage)
+	}
+
+	testCov.Loc = models.Loc{
+		Total:   totalInstructions,
+		Covered: coveredInstructions,
 	}
 
 	return testCov, nil

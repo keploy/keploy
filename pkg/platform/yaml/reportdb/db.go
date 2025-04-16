@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
@@ -93,12 +94,15 @@ func (fe *TestReport) InsertReport(ctx context.Context, testRunID string, testSe
 		testReport.Name = testSetID + "-report"
 	}
 
+	testReport.CreatedAt = time.Now().Unix()
+
 	data := []byte{}
 	d, err := yamlLib.Marshal(&testReport)
 	if err != nil {
 		return fmt.Errorf("%s failed to marshal document to yaml. error: %s", utils.Emoji, err.Error())
 	}
 	data = append(data, d...)
+	data = append([]byte(utils.GetVersionAsComment()), data...)
 
 	err = yaml.WriteFile(ctx, fe.Logger, reportPath, testReport.Name, data, false)
 	if err != nil {

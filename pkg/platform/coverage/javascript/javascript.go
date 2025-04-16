@@ -35,7 +35,7 @@ func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cm
 	}
 }
 
-func (j *Javascript) PreProcess() (string, error) {
+func (j *Javascript) PreProcess(disableLineCoverage bool) (string, error) {
 	err := os.Setenv("CLEAN", "true")
 	if err != nil {
 		j.logger.Warn("failed to set CLEAN env variable, skipping coverage caluclation", zap.Error(err))
@@ -58,7 +58,11 @@ func (j *Javascript) PreProcess() (string, error) {
 		j.logger.Warn("coverage tool not found, skipping coverage caluclation. please install coverage tool using 'npm install -g nyc'")
 		return j.cmd, err
 	}
-	return "nyc --clean=$CLEAN " + j.cmd, nil
+	nycCmd := "nyc --clean=$CLEAN "
+	if disableLineCoverage {
+		nycCmd += "--reporter=none "
+	}
+	return nycCmd + j.cmd, nil
 }
 
 type StartTy struct {
@@ -178,6 +182,10 @@ func (j *Javascript) GetCoverage() (models.TestCoverage, error) {
 		testCov.FileCov[filename] = strconv.FormatFloat(float64(coveredLinesPerFile[filename]*100)/float64(len(lines)), 'f', 2, 64) + "%"
 	}
 	testCov.TotalCov = strconv.FormatFloat(float64(totalCoveredLines*100)/float64(totalLines), 'f', 2, 64) + "%"
+	testCov.Loc = models.Loc{
+		Total:   totalLines,
+		Covered: totalCoveredLines,
+	}
 	return testCov, nil
 }
 

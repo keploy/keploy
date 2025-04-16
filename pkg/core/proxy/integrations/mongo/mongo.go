@@ -14,12 +14,14 @@ import (
 
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
-	"go.mongodb.org/mongo-driver/x/mongo/driver/wiremessage"
 	"go.uber.org/zap"
 )
 
 func init() {
-	integrations.Register("mongo", NewMongo)
+	integrations.Register(integrations.MONGO, &integrations.Parsers{
+		Initializer: New,
+		Priority:    100,
+	})
 }
 
 type Mongo struct {
@@ -27,7 +29,7 @@ type Mongo struct {
 	recordedConfigRequests sync.Map
 }
 
-func NewMongo(logger *zap.Logger) integrations.Integrations {
+func New(logger *zap.Logger) integrations.Integrations {
 	return &Mongo{
 		logger:                 logger,
 		recordedConfigRequests: sync.Map{},
@@ -71,7 +73,7 @@ func (m *Mongo) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, 
 
 // MockOutgoing reads the outgoing mongo requests of the client connection and
 // mocks the responses from the yaml file. The database connection is keep-alive
-func (m *Mongo) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *integrations.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+func (m *Mongo) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	// read the initial buffer from the client connection. Initially the
 	// reqBuf contains the first network packet from the client connection
 	// which is used to determine the packet type in MatchType.
@@ -103,33 +105,6 @@ func (m *Mongo) recordMessage(_ context.Context, logger *zap.Logger, mongoReques
 	// See: https://github.com/mongodb/mongo-go-driver/blob/8489898c64a2d8c2e2160006eb851a11a9db9e9d/x/mongo/driver/operation/hello.go#L503
 	if isHeartBeat(logger, opReq, *mongoRequests[0].Header, mongoRequests[0].Message) {
 		meta1["type"] = "config"
-
-		for _, req := range mongoRequests {
-
-			switch req.Header.Opcode {
-			case wiremessage.OpQuery:
-				// check the opReq in the recorded config requests. if present then, skip recording
-				if _, ok := m.recordedConfigRequests.Load(req.Message.(*models.MongoOpQuery).Query); ok {
-					shouldRecordCalls = false
-					break
-				}
-				m.recordedConfigRequests.Store(req.Message.(*models.MongoOpQuery).Query, true)
-			case wiremessage.OpMsg:
-				// check the opReq in the recorded config requests. if present then, skip recording
-				if _, ok := m.recordedConfigRequests.Load(req.Message.(*models.MongoOpMessage).Sections[0]); ok {
-					shouldRecordCalls = false
-					break
-				}
-				m.recordedConfigRequests.Store(req.Message.(*models.MongoOpMessage).Sections[0], true)
-			default:
-				// check the opReq in the recorded config requests. if present then, skip recording
-				if _, ok := m.recordedConfigRequests.Load(opReq.String()); ok {
-					shouldRecordCalls = false
-					break
-				}
-				m.recordedConfigRequests.Store(opReq.String(), true)
-			}
-		}
 	}
 	// record the mongo messages
 	if shouldRecordCalls {

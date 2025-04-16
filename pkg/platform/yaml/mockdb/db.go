@@ -133,6 +133,17 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	if err != nil {
 		return err
 	}
+
+	exists, err := yaml.FileExists(ctx, ys.Logger, mockPath, mockFileName)
+	if err != nil {
+		utils.LogError(ys.Logger, err, "failed to find yaml file", zap.String("path directory", mockPath), zap.String("yaml", mockFileName))
+		return err
+	}
+
+	if !exists {
+		data = append([]byte(utils.GetVersionAsComment()), data...)
+	}
+
 	err = yaml.WriteFile(ctx, ys.Logger, mockPath, mockFileName, data, true)
 	if err != nil {
 		return err
@@ -190,6 +201,8 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 			case "Http":
 				isFilteredMock = false
 			case "Redis":
+				isFilteredMock = false
+			case "MySQL":
 				isFilteredMock = false
 			}
 			if mock.Spec.Metadata["type"] != "config" && isFilteredMock {
@@ -256,6 +269,8 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 			case "Http":
 				isUnFilteredMock = true
 			case "Redis":
+				isUnFilteredMock = true
+			case "MySQL":
 				isUnFilteredMock = true
 			}
 			if mock.Spec.Metadata["type"] == "config" || isUnFilteredMock {
@@ -325,4 +340,33 @@ func (ys *MockYaml) filterByTimeStamp(_ context.Context, m []*models.Mock, after
 		ys.Logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
 	}
 	return filteredMocks, unfilteredMocks
+}
+func (ys *MockYaml) GetHTTPMocks(ctx context.Context, testSetID string, mockPath string, mockFileName string) ([]*models.HTTPDoc, error) {
+
+	if ys.MockName != "" {
+		ys.MockName = mockFileName
+	}
+	ys.MockPath = mockPath
+
+	tcsMocks, err := ys.GetUnFilteredMocks(ctx, testSetID, time.Time{}, time.Time{})
+	if err != nil {
+		return nil, err
+	}
+
+	var httpMocks []*models.HTTPDoc
+	for _, mock := range tcsMocks {
+		if mock.Kind != "Http" {
+			continue
+		}
+		var httpMock models.HTTPDoc
+		httpMock.Kind = mock.GetKind()
+		httpMock.Name = mock.Name
+		httpMock.Spec.Request = *mock.Spec.HTTPReq
+		httpMock.Spec.Response = *mock.Spec.HTTPResp
+		httpMock.Spec.Metadata = mock.Spec.Metadata
+		httpMock.Version = string(mock.Version)
+		httpMocks = append(httpMocks, &httpMock)
+	}
+
+	return httpMocks, nil
 }
