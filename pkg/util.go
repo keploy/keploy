@@ -52,7 +52,7 @@ func ToYamlHTTPHeader(httpHeader http.Header) map[string]string {
 func ToHTTPHeader(mockHeader map[string]string) http.Header {
 	header := http.Header{}
 
-	// headers that should not be split 
+	// headers that should not be split
 	specialHeaders := map[string]bool{
 		"set-cookie":                    true,
 		"cookie":                        true,
