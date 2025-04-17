@@ -5,30 +5,9 @@
 version: "2"
 
 linters:
-  enable:
-    # enable all linters
-    - govet 
   exclusions:
     rules: []
     paths-except:
       - pkg/core/hooks/bpf_arm64_bpfel.go
       - pkg/core/hooks/bpf_x86_bpfel.go
       - pkg/service/utgen
-
-
-linters-settings:
-  govet:
-    enable:
-      - printf
-
-issues:
-  # don't use the default exclude rules, this hides (among others) ignored
-  # errors from Close() calls
-  exclude-use-default: false
-
-  # list of things to not warn about
-  exclude:
-    # revive: do not warn about missing comments for exported stuff
-    - exported (function|method|var|type|const) .* should have comment or be unexported
-    # revive: ignore constants in all caps
-    - don't use ALL_CAPS in Go names; use CamelCase
