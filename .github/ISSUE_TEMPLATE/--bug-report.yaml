@@ -68,7 +68,7 @@ body:
   id: uname
   attributes:
     label: 🧾 System Info (`uname -a`)
-    description: Run `uname -a` on your terminal and paste the output (macOS/Linux only).
+    description: Run "uname -a" on your terminal and paste the output (macOS/Linux only).
     placeholder: |
       Darwin MacBook-Pro.local 22.6.0 Darwin Kernel Version ...
   validations:
@@ -78,7 +78,7 @@ body:
   id: os-release
   attributes:
     label: 📦 OS Release Info (`cat /etc/os-release`)
-    description: Run `cat /etc/os-release` (Linux only) and paste the full output here.
+    description: Run "cat /etc/os-release" (Linux only) and paste the full output here.
     placeholder: |
       NAME="Ubuntu"
       VERSION="22.04.4 LTS (Jammy Jellyfish)"
@@ -121,7 +121,7 @@ body:
   attributes:
     label: 🎲 Version
     description: |
-      You can find your current Keploy version by running `keploy -v` or `keploy --version` in your terminal.
+      You can find your current Keploy version by running "keploy -v" or "keploy --version" in your terminal.
     placeholder: |
       I am using latest version v2.5.2
   validations:
