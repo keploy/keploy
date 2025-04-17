@@ -269,11 +269,13 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
 	if err != nil {
 		Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
-		return indices, nil
+		return indices, err
 	}
+	defer dir.Close()
 
 	files, err := dir.ReadDir(0)
 	if err != nil {
+		Logger.Debug("failed to read directory contents", zap.Error(err))
 		return indices, err
 	}
 
