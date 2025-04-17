@@ -32,7 +32,7 @@ func (c color) EncodeEntry(ent zapcore.Entry, fields []zapcore.Field) (buf *buff
 		return nil, err
 	}
 
-	bytesArr := bytes.Replace(buff.Bytes(), []byte("\\u001b"), []byte("\u001b"), -1)
+	bytesArr := bytes.ReplaceAll(buff.Bytes(), []byte("\\u001b"), []byte("\u001b"))
 	buff.Reset()
 	buff.AppendString(string(bytesArr))
 	return buff, err

@@ -186,14 +186,18 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 					logDiffs.PushHeaderDiff(diff.Expected, diff.Actual, header, headerNoise)
 				} else if strings.HasPrefix(path, "body.") {
 					bodyPart := strings.TrimPrefix(path, "body.")
-					if bodyPart == "message_length" {
+					switch bodyPart {
+					case "message_length":
 						// Message length is a good indicator of difference for gRPC
 						logDiffs.PushHeaderDiff(diff.Expected, diff.Actual, "message_length (body)", bodyNoise)
-					} else if bodyPart == "compression_flag" {
+					case "compression_flag":
 						// Compression flag
 						logDiffs.PushHeaderDiff(diff.Expected, diff.Actual, "compression_flag (body)", bodyNoise)
-					} else {
+					case "decoded_data":
 						// Body differences
+						logDiffs.PushBodyDiff(diff.Expected, diff.Actual, bodyNoise)
+					default:
+						// Any other body differences
 						logDiffs.PushBodyDiff(diff.Expected, diff.Actual, bodyNoise)
 					}
 				}

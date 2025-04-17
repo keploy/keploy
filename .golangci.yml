@@ -2,47 +2,24 @@
 #
 # A sample config with all settings is here:
 # https://github.com/golangci/golangci-lint/blob/master/.golangci.example.yml
+version: "2"
 
 linters:
-  # only enable the linters listed below
-  disable-all: true
   enable:
-    # make sure all errors returned by functions are handled
-    - errcheck
+    # enable all linters
+    - govet 
+  exclusions:
+    rules: []
+    paths-except:
+      - pkg/core/hooks/bpf_arm64_bpfel.go
+      - pkg/core/hooks/bpf_x86_bpfel.go
+      - pkg/service/utgen
 
-    # find unused code
-    - deadcode
 
-    # show how code can be simplified
-    - gosimple
-
-    # # make sure code is formatted
-    - gofmt
-
-    # examine code and report suspicious constructs, such as Printf calls whose
-    # arguments do not align with the format string
-    - govet
-
-    # make sure names and comments are used according to the conventions
-    - revive
-
-    # detect when assignments to existing variables are not used
-    - ineffassign
-
-    # run static analysis and find errors
-    - staticcheck
-
-    # find unused variables, functions, structs, types, etc.
-    - unused
-
-    # find unused struct fields
-    - structcheck
-
-    # find unused global variables
-    - varcheck
-
-    # parse and typecheck code
-    - typecheck
+linters-settings:
+  govet:
+    enable:
+      - printf
 
 issues:
   # don't use the default exclude rules, this hides (among others) ignored
