@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math/big"
 	"strconv"
 
 	"go.keploy.io/server/v2/pkg/models"
@@ -26,7 +27,6 @@ func (p *parser) ParseEntry() (RespValue, error) {
 	if p.pos >= len(p.data) {
 		return nil, errors.New("no more data")
 	}
-
 	switch p.data[p.pos] {
 	case '*':
 		return p.parseArray()
@@ -36,8 +36,22 @@ func (p *parser) ParseEntry() (RespValue, error) {
 		return p.parseBulkString()
 	case ':':
 		return p.parseInteger()
-	case '+':
+	case '+', '-':
 		return p.parseSimpleString()
+	case '#':
+		return p.parseBoolean()
+	case ',':
+		return p.parseDouble()
+	case '(':
+		return p.parseBigNumber()
+	case '!':
+		return p.parseBulkError()
+	case '=':
+		return p.parseVerbatimString()
+	case '~':
+		return p.parseSet()
+	case '>':
+		return p.parsePush()
 	default:
 		return nil, fmt.Errorf("unexpected prefix '%c' at pos %d", p.data[p.pos], p.pos)
 	}
@@ -55,7 +69,7 @@ func (p *parser) readLine() ([]byte, error) {
 }
 
 func (p *parser) parseInteger() (RespValue, error) {
-	p.pos++ // skip ':'
+	p.pos++
 	line, err := p.readLine()
 	if err != nil {
 		return nil, err
@@ -68,7 +82,7 @@ func (p *parser) parseInteger() (RespValue, error) {
 }
 
 func (p *parser) parseBulkString() (RespValue, error) {
-	p.pos++ // skip '$'
+	p.pos++
 	line, err := p.readLine()
 	if err != nil {
 		return nil, err
@@ -78,23 +92,146 @@ func (p *parser) parseBulkString() (RespValue, error) {
 		return nil, fmt.Errorf("invalid bulk length %q: %w", line, err)
 	}
 	if n < 0 {
-		return nil, nil // nil bulk string
+		return nil, nil
 	}
 	if p.pos+n+2 > len(p.data) {
 		return nil, errors.New("bulk string length exceeds data")
 	}
 	str := string(p.data[p.pos : p.pos+n])
-	p.pos += n + 2 // skip string + CRLF
+	p.pos += n + 2
 	return str, nil
 }
 
 func (p *parser) parseSimpleString() (RespValue, error) {
-	p.pos++ // skip '+'
+	// includes '+' or '-' for errors
+	start := p.pos
+	idx := bytes.Index(p.data[p.pos:], []byte("\r\n"))
+	if idx < 0 {
+		return nil, errors.New("CRLF not found")
+	}
+	raw := string(p.data[start : p.pos+idx])
+	p.pos += idx + 2
+	return raw, nil
+}
+
+func (p *parser) parseBoolean() (RespValue, error) {
+	p.pos++
+	if p.pos >= len(p.data) {
+		return nil, errors.New("no boolean value")
+	}
+	val := p.data[p.pos]
+	p.pos += 2 // skip value + CRLF
+	switch val {
+	case 't':
+		return true, nil
+	case 'f':
+		return false, nil
+	}
+	return nil, fmt.Errorf("invalid boolean %c", val)
+}
+
+func (p *parser) parseDouble() (RespValue, error) {
+	p.pos++
 	line, err := p.readLine()
 	if err != nil {
 		return nil, err
 	}
-	return string(line), nil
+	d, err := strconv.ParseFloat(string(line), 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid double %q: %w", line, err)
+	}
+	return d, nil
+}
+
+func (p *parser) parseBigNumber() (RespValue, error) {
+	p.pos++
+	line, err := p.readLine()
+	if err != nil {
+		return nil, err
+	}
+	bn, ok := new(big.Int).SetString(string(line), 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid big number %q", line)
+	}
+	return bn, nil
+}
+
+func (p *parser) parseBulkError() (RespValue, error) {
+	p.pos++
+	line, err := p.readLine()
+	if err != nil {
+		return nil, err
+	}
+	n, err := strconv.Atoi(string(line))
+	if err != nil {
+		return nil, fmt.Errorf("invalid bulk error length %q: %w", line, err)
+	}
+	if p.pos+n+2 > len(p.data) {
+		return nil, errors.New("bulk error length exceeds data")
+	}
+	errMsg := string(p.data[p.pos : p.pos+n])
+	p.pos += n + 2
+	return fmt.Errorf("bulk error: %s", errMsg), nil
+}
+
+func (p *parser) parseVerbatimString() (RespValue, error) {
+	p.pos++
+	line, err := p.readLine()
+	if err != nil {
+		return nil, err
+	}
+	n, err := strconv.Atoi(string(line))
+	if err != nil {
+		return nil, fmt.Errorf("invalid verbatim length %q: %w", line, err)
+	}
+	if p.pos+n+2 > len(p.data) {
+		return nil, errors.New("verbatim string length exceeds data")
+	}
+	data := string(p.data[p.pos : p.pos+n])
+	p.pos += n + 2
+	return data, nil
+}
+
+func (p *parser) parseSet() (RespValue, error) {
+	p.pos++
+	line, err := p.readLine()
+	if err != nil {
+		return nil, err
+	}
+	count, err := strconv.Atoi(string(line))
+	if err != nil {
+		return nil, fmt.Errorf("invalid set size %q: %w", line, err)
+	}
+	set := make([]interface{}, count)
+	for i := 0; i < count; i++ {
+		v, err := p.ParseEntry()
+		if err != nil {
+			return nil, err
+		}
+		set[i] = v
+	}
+	return set, nil
+}
+
+func (p *parser) parsePush() (RespValue, error) {
+	p.pos++
+	line, err := p.readLine()
+	if err != nil {
+		return nil, err
+	}
+	count, err := strconv.Atoi(string(line))
+	if err != nil {
+		return nil, fmt.Errorf("invalid push size %q: %w", line, err)
+	}
+	push := make([]interface{}, count)
+	for i := 0; i < count; i++ {
+		v, err := p.ParseEntry()
+		if err != nil {
+			return nil, err
+		}
+		push[i] = v
+	}
+	return push, nil
 }
 
 func (p *parser) parseArray() (RespValue, error) {
