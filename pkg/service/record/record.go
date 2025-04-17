@@ -262,7 +262,7 @@ func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
 			if ctx.Err() == context.Canceled {
 				return appID, err
 			}
-			return appID, fmt.Errorf("%s", stopReason)
+			  return appID, fmt.Errorf("%s", stopReason)
 		}
 	}
 	return appID, nil
