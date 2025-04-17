@@ -96,11 +96,8 @@ func processArray(bufStr string) ([]models.RedisElement, error) {
 	return result, nil
 }
 
-// Process a map type
+// Process a map type(RESP3 special types)
 func processMap(bufStr string) []models.RedisMapBody {
-	// Remove CRLF characters first
-	// bufStr = removeCRLF(bufStr)
-
 	// Initialize a slice to store the result
 	var result []models.RedisMapBody
 
@@ -113,7 +110,6 @@ func processMap(bufStr string) []models.RedisMapBody {
 			// Using regex to capture the size part (the number before \r\n)
 			re := regexp.MustCompile(`\d+`)
 			loc := re.FindString(dataParts[i]) // Extract the size from "$n"
-			fmt.Println("Extracted Size:", loc)
 
 			// Convert the size to an integer
 			keyLength, err := strconv.Atoi(loc)
@@ -122,16 +118,8 @@ func processMap(bufStr string) []models.RedisMapBody {
 				continue
 			}
 
-			// fmt.Println("check1")
-			// spew.Dump(dataParts[i])
-			// fmt.Println("check2")
-			// spew.Dump(dataParts[i+1])
-			// fmt.Println("check3")
-
 			// Extract the key (skip CRLF) and get the actual data part after '$'
-			// TODO: work for numbers also and those that do not have $ for size
 			key := dataParts[i] // The actual key part after "$n"
-			fmt.Println("to check number", key)
 			// for numbers we do not do the below we just remove :
 			if key[0] == ':' {
 				key = key[1:] // Remove the colon if it exists at the beginning
@@ -151,7 +139,6 @@ func processMap(bufStr string) []models.RedisMapBody {
 
 			// Extract the value
 			if i+1 < len(dataParts) {
-				fmt.Println("to check number of value", dataParts[i])
 				var valueSizeStr string
 				if dataParts[i][0] == ':' {
 					valueSizeStr = dataParts[i][1:]
@@ -159,15 +146,6 @@ func processMap(bufStr string) []models.RedisMapBody {
 					valueSizeStr = removeBeforeFirstCRLF(dataParts[i]) // This is the size of the value
 				}
 				valueSizeStr = removeCRLF(valueSizeStr)
-				// valueSize, err := strconv.Atoi(valueSizeStr)
-				// if err != nil {
-				// 	fmt.Println("Error parsing value size:", err)
-				// 	continue
-				// }
-
-				// Extract the actual value
-				// value := dataParts[i] // The value part after "$n"
-				// value = removeCRLF(value)
 
 				// Assign the value to the map entry
 				newMapEntry.Value = models.RedisElement{
