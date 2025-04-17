@@ -129,7 +129,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 	})
 
 	// Load hooks
-	err = c.Hooks.Load(hookCtx, id, HookCfg{
+	err = c.Load(hookCtx, id, HookCfg{
 		AppID:      id,
 		Pid:        0,
 		IsDocker:   isDocker,
@@ -159,7 +159,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 	// if there is another containerized app, then we need to pass new (ip:port) of proxy to the eBPF
 	// as the network namespace is different for each container and so is the keploy/proxy IP to communicate with the app.
 	// start proxy
-	err = c.Proxy.StartProxy(proxyCtx, ProxyOptions{
+	err = c.StartProxy(proxyCtx, ProxyOptions{
 		DNSIPv4Addr: a.KeployIPv4Addr(),
 		//DnsIPv6Addr: ""
 	})
@@ -217,7 +217,7 @@ func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.A
 		}
 		select {
 		case inode := <-inodeChan:
-			err := c.Hooks.SendDockerAppInfo(id, structs.DockerAppInfo{AppInode: inode, ClientID: id})
+			err := c.SendDockerAppInfo(id, structs.DockerAppInfo{AppInode: inode, ClientID: id})
 			if err != nil {
 				utils.LogError(c.logger, err, "")
 

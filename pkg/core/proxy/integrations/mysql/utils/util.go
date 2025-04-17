@@ -103,7 +103,7 @@ func ReadPacketBuffer(ctx context.Context, logger *zap.Logger, conn net.Conn) ([
 
 // BytesToMySQLPacket converts a byte slice to a MySQL packet
 func BytesToMySQLPacket(buffer []byte) (mysql.Packet, error) {
-	if buffer == nil || len(buffer) < 4 {
+	if len(buffer) < 4 {
 		return mysql.Packet{}, errors.New("buffer is nil or too short to be a valid MySQL packet")
 	}
 

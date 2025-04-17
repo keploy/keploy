@@ -74,7 +74,7 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		if decodeCtx.UseSSL {
 			if result.tlsClientConn == nil || result.tlsDestConn == nil {
 				utils.LogError(logger, err, "Expected Tls connections are nil", zap.Any("tlsClientConn", result.tlsClientConn), zap.Any("tlsDestConn", result.tlsDestConn))
-				errCh <- errors.New("Tls connection is not established")
+				errCh <- errors.New("tls connection is not established")
 				return nil
 			}
 			clientConn = result.tlsClientConn

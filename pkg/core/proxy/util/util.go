@@ -354,6 +354,8 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 
 		logger.Debug("the iteration for the generic response ends with responses:"+strconv.Itoa(len(buffer)), zap.Any("buffer", buffer))
 	case err := <-errChannel:
+		// Applied this nolint to ignore the staticcheck error here because of readability
+		// nolint:staticcheck
 		if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
 			return nil, err
 		}

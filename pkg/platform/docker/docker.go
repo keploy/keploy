@@ -364,7 +364,7 @@ func (idc *Impl) GetHostWorkingDirectory() (string, error) {
 			return mount.Source, nil
 		}
 	}
-	return "", fmt.Errorf(fmt.Sprintf("could not find mount for %s in keploy-v2 container", curDir))
+	return "", fmt.Errorf("%s", fmt.Sprintf("could not find mount for %s in keploy-v2 container", curDir))
 }
 
 // ForceAbsolutePath replaces relative paths in bind mounts with absolute paths

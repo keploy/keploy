@@ -5,7 +5,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
 
     - name: Run build script
       run: |
@@ -16,7 +16,7 @@ jobs:
         go build -race -tags=viper_bind_struct -o keployv2
 
     - name: Checkout the samples-go repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
       with:
         repository: keploy/samples-go
         path: samples-go

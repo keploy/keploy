@@ -41,6 +41,8 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 			for {
 				buffer, err := pUtil.ReadBytes(ctx, logger, clientConn)
 				if err != nil {
+					// Applied this nolint to ignore the staticcheck error here because of readability
+					// nolint:staticcheck
 					if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) {
 						if err == io.EOF {
 							logger.Debug("EOF error received from client. Closing conn in postgres !!")
