@@ -114,7 +114,6 @@ require (
 	github.com/shirou/gopsutil/v3 v3.24.3
 	github.com/spf13/viper v1.20.0
 	github.com/stretchr/testify v1.10.0
-	github.com/tidwall/resp v0.1.1
 	github.com/wI2L/jsondiff v0.5.0
 	github.com/xdg-go/pbkdf2 v1.0.0
 	github.com/xdg-go/scram v1.1.1
