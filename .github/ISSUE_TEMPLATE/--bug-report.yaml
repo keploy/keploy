@@ -113,7 +113,6 @@ body:
     placeholder: |
       - Running on Kubernetes (GKE)
       - 3-node cluster
-      - Istio enabled
   validations:
     required: false
 
@@ -121,6 +120,8 @@ body:
   id: version
   attributes:
     label: 🎲 Version
+    description: |
+      You can find your current Keploy version by running `keploy -v` or `keploy --version` in your terminal.
     placeholder: |
       I am using latest version v2.5.2
   validations:
