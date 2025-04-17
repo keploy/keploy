@@ -193,9 +193,6 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 					case "compression_flag":
 						// Compression flag
 						logDiffs.PushHeaderDiff(diff.Expected, diff.Actual, "compression_flag (body)", bodyNoise)
-					case "decoded_data":
-						// Body differences
-						logDiffs.PushBodyDiff(diff.Expected, diff.Actual, bodyNoise)
 					default:
 						// Any other body differences
 						logDiffs.PushBodyDiff(diff.Expected, diff.Actual, bodyNoise)
