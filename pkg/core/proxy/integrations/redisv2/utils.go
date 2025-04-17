@@ -1,237 +1,230 @@
 package redisv2
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
-	"regexp"
 	"strconv"
-	"strings"
 
-	"github.com/tidwall/resp"
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-func findProtocolVersion(reqBuf []byte) (int, error) {
-	var redisProtocolVersion int
-	bufStr := string(reqBuf)
-	if len(bufStr) > 0 {
-		// Check if 'ping' is in the buffer, version 2
-		if strings.Contains(bufStr, "ping") {
-			redisProtocolVersion = 2
-		} else if strings.Contains(bufStr, "hello") {
-			// If "hello" is found, extract the next value after it to determine the version
-			// Find the start of the next value (after "hello" and CRLF characters)
-			startIndex := strings.Index(bufStr, "hello") + len("hello") + 6 // Skip "hello" and CRLF
-			if startIndex < len(bufStr) {
-				// Extract the value after "hello" to determine the protocol version
-				version, err := strconv.Atoi(bufStr[startIndex : startIndex+1]) // Adjust depending on the expected protocol version format
-				redisProtocolVersion = version
-				if err != nil {
-					// Handle error if conversion fails
-					return 0, fmt.Errorf("failed to convert protocol version to int: %w", err)
-				}
-			} else {
-				// Handle case where version after "hello" is not found
-				return 0, fmt.Errorf("no protocol version found after hello")
-			}
-		}
-	}
-	return redisProtocolVersion, nil
+type RespValue interface{}
+
+type parser struct {
+	data []byte
+	pos  int
 }
 
-func removeCRLF(data string) string {
-	return strings.ReplaceAll(data, "\r\n", "")
+// NewParser creates a parser for the given string
+func NewParser(s string) *parser {
+	return &parser{data: []byte(s)}
 }
 
-// Process an array type
-func processArray(bufStr string) ([]models.RedisElement, error) {
-	// Initialize a slice to store the result
-	var result []models.RedisElement
-
-	// Create a reader for the RESP data
-	reader := resp.NewReader(strings.NewReader(bufStr))
-
-	// Read the value from the RESP data
-	v, _, err := reader.ReadValue()
-	if err != nil {
-		return nil, fmt.Errorf("error reading RESP value: %w", err)
+// ParseEntry parses a single RESP3 value
+func (p *parser) ParseEntry() (RespValue, error) {
+	if p.pos >= len(p.data) {
+		return nil, errors.New("no more data")
 	}
 
-	// Check if the value is an array
-	if v.Type() == resp.Array {
-		// Iterate over each element in the array
-		for _, elem := range v.Array() {
-			var newArrayEntry models.RedisElement
-
-			// Handle different types of elements in the array (strings, integers, etc.)
-			switch elem.Type() {
-			case resp.BulkString:
-				newArrayEntry.Length = len(elem.String())
-				newArrayEntry.Value = elem.String()
-			case resp.Integer:
-				newArrayEntry.Length = len(fmt.Sprintf("%d", elem.Integer()))
-				newArrayEntry.Value = elem.Integer()
-			case resp.SimpleString:
-				newArrayEntry.Length = 1
-				newArrayEntry.Value = elem.String()
-			case resp.Array:
-				// Recursively process nested arrays
-				nestedArray, err := processArray(elem.String()) // Call processArray recursively
-				if err != nil {
-					return nil, err
-				}
-				newArrayEntry.Length = len(nestedArray)
-				newArrayEntry.Value = nestedArray
-			default:
-				newArrayEntry.Length = 0
-				newArrayEntry.Value = nil
-			}
-
-			// Append the processed entry to the result
-			result = append(result, newArrayEntry)
-		}
-	} else {
-		return nil, fmt.Errorf("expected RESP Array, but got %s", v.Type())
-	}
-
-	return result, nil
-}
-
-// Process a map type(RESP3 special types)
-func processMap(bufStr string) []models.RedisMapBody {
-	// Initialize a slice to store the result
-	var result []models.RedisMapBody
-
-	dataParts := splitByMultipleDelimiters(bufStr)
-	for i := 1; i < len(dataParts); i += 1 { // Move in steps of 2 (key, then value)
-		// Extract the size from the first part, e.g., "$3" means size 3
-		if len(dataParts[i]) > 0 {
-			var newMapEntry models.RedisMapBody
-
-			// Using regex to capture the size part (the number before \r\n)
-			re := regexp.MustCompile(`\d+`)
-			loc := re.FindString(dataParts[i]) // Extract the size from "$n"
-
-			// Convert the size to an integer
-			keyLength, err := strconv.Atoi(loc)
-			if err != nil {
-				fmt.Println("Error parsing size:", err)
-				continue
-			}
-
-			// Extract the key (skip CRLF) and get the actual data part after '$'
-			key := dataParts[i] // The actual key part after "$n"
-			// for numbers we do not do the below we just remove :
-			if key[0] == ':' {
-				key = key[1:] // Remove the colon if it exists at the beginning
-			} else {
-				key = removeBeforeFirstCRLF(key) // Remove CRLF from the key
-			}
-			key = removeCRLF(key)
-
-			// Assign the key to the map entry
-			newMapEntry.Key = models.RedisElement{
-				Length: keyLength,
-				Value:  key,
-			}
-
-			// Move to the next data part (which will be the value)
-			i++
-
-			// Extract the value
-			if i+1 < len(dataParts) {
-				var valueSizeStr string
-				if dataParts[i][0] == ':' {
-					valueSizeStr = dataParts[i][1:]
-				} else {
-					valueSizeStr = removeBeforeFirstCRLF(dataParts[i]) // This is the size of the value
-				}
-				valueSizeStr = removeCRLF(valueSizeStr)
-
-				// Assign the value to the map entry
-				newMapEntry.Value = models.RedisElement{
-					Length: len(valueSizeStr),
-					Value:  valueSizeStr,
-				}
-			}
-
-			// Append the map entry to the result
-			result = append(result, newMapEntry)
-		}
-	}
-	// Return the result
-	return result
-}
-
-// Handle data by type (array, map, or string)
-func handleDataByType(dataType, data string) interface{} {
-	switch dataType {
-	case "array":
-		// Process array data and convert it into a readable format (e.g., split by $n and data)
-		val, err := processArray(data)
-		if err != nil {
-			return fmt.Errorf("invalid array processing")
-		}
-		return val
-	case "map":
-		// Process map data and extract key-value pairs
-		return processMap(data)
-		// return data
+	switch p.data[p.pos] {
+	case '*':
+		return p.parseArray()
+	case '%':
+		return p.parseMap()
+	case '$':
+		return p.parseBulkString()
+	case ':':
+		return p.parseInteger()
+	case '+':
+		return p.parseSimpleString()
 	default:
-		return data
+		return nil, fmt.Errorf("unexpected prefix '%c' at pos %d", p.data[p.pos], p.pos)
 	}
 }
 
-func removeBeforeFirstCRLF(data string) string {
-	// Find the index of the first occurrence of CRLF ("\r\n")
-	crlfIndex := strings.Index(data, "\r\n")
-	if crlfIndex == -1 {
-		// If no CRLF is found, return the original data (no change)
-		return data
+// readLine reads until the next "\r\n" (not including it) and advances pos past it.
+func (p *parser) readLine() ([]byte, error) {
+	idx := bytes.Index(p.data[p.pos:], []byte("\r\n"))
+	if idx < 0 {
+		return nil, errors.New("CRLF not found")
 	}
-	// Slice the string starting from the position after the CRLF
-	return data[crlfIndex+2:] // +2 to skip over the CRLF characters
+	line := p.data[p.pos : p.pos+idx]
+	p.pos += idx + 2
+	return line, nil
 }
 
-func getBeforeFirstCRLF(data string) string {
-	// Find the index of the first occurrence of CRLF ("\r\n")
-	crlfIndex := strings.Index(data, "\r\n")
-	if crlfIndex == -1 {
-		// If no CRLF is found, return the original data (no change)
-		return data
+func (p *parser) parseInteger() (RespValue, error) {
+	p.pos++ // skip ':'
+	line, err := p.readLine()
+	if err != nil {
+		return nil, err
 	}
-	// Slice the string up to the position before the CRLF
-	return data[:crlfIndex]
+	i, err := strconv.ParseInt(string(line), 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid integer %q: %w", line, err)
+	}
+	return i, nil
 }
 
-func splitByMultipleDelimiters(input string) []string {
-	// Initialize a slice to hold the result
-	var result []string
+func (p *parser) parseBulkString() (RespValue, error) {
+	p.pos++ // skip '$'
+	line, err := p.readLine()
+	if err != nil {
+		return nil, err
+	}
+	n, err := strconv.Atoi(string(line))
+	if err != nil {
+		return nil, fmt.Errorf("invalid bulk length %q: %w", line, err)
+	}
+	if n < 0 {
+		return nil, nil // nil bulk string
+	}
+	if p.pos+n+2 > len(p.data) {
+		return nil, errors.New("bulk string length exceeds data")
+	}
+	str := string(p.data[p.pos : p.pos+n])
+	p.pos += n + 2 // skip string + CRLF
+	return str, nil
+}
 
-	// Initialize a temporary string to accumulate data before the delimiter
-	var currentString string
+func (p *parser) parseSimpleString() (RespValue, error) {
+	p.pos++ // skip '+'
+	line, err := p.readLine()
+	if err != nil {
+		return nil, err
+	}
+	return string(line), nil
+}
 
-	// Iterate through the string and find delimiters
-	for _, r := range input {
-		// If a delimiter is found, we add the delimiter to the current string
-		if r == '$' || r == ':' || r == '*' || r == '%' {
-			// If there's any accumulated string, add it first
-			if len(currentString) > 0 {
-				result = append(result, currentString)
-				currentString = "" // Reset the current string
-			}
-			// Add the delimiter to the current string
-			currentString += string(r)
-
-		} else {
-			// Otherwise, accumulate the characters
-			currentString += string(r)
+func (p *parser) parseArray() (RespValue, error) {
+	p.pos++ // skip '*'
+	line, err := p.readLine()
+	if err != nil {
+		return nil, err
+	}
+	count, err := strconv.Atoi(string(line))
+	if err != nil {
+		return nil, fmt.Errorf("invalid array size %q: %w", line, err)
+	}
+	arr := make([]interface{}, count)
+	for i := 0; i < count; i++ {
+		elem, err := p.ParseEntry()
+		if err != nil {
+			return nil, err
 		}
+		arr[i] = elem
 	}
+	return arr, nil
+}
 
-	// If there's any remaining data after the last delimiter, add it
-	if len(currentString) > 0 {
-		result = append(result, currentString)
+func (p *parser) parseMap() (RespValue, error) {
+	p.pos++ // skip '%'
+	line, err := p.readLine()
+	if err != nil {
+		return nil, err
 	}
+	count, err := strconv.Atoi(string(line))
+	if err != nil {
+		return nil, fmt.Errorf("invalid map size %q: %w", line, err)
+	}
+	m := make(map[string]interface{}, count)
+	for i := 0; i < count; i++ {
+		keyRaw, err := p.ParseEntry()
+		if err != nil {
+			return nil, fmt.Errorf("reading map key: %w", err)
+		}
+		key, ok := keyRaw.(string)
+		if !ok {
+			return nil, fmt.Errorf("map key is not a string: %T", keyRaw)
+		}
+		val, err := p.ParseEntry()
+		if err != nil {
+			return nil, fmt.Errorf("reading map value for key %q: %w", key, err)
+		}
+		m[key] = val
+	}
+	return m, nil
+}
 
-	return result
+// ParseAll reads entries until data is exhausted.
+func (p *parser) ParseAll() ([]RespValue, error) {
+	var vals []RespValue
+	for p.pos < len(p.data) {
+		// skip stray CRLFs
+		if p.data[p.pos] == '\r' || p.data[p.pos] == '\n' {
+			p.pos++
+			continue
+		}
+		v, err := p.ParseEntry()
+		if err != nil {
+			return nil, err
+		}
+		vals = append(vals, v)
+	}
+	return vals, nil
+}
+
+func parseRedis(buf []byte) ([]models.RedisBodyType, error) {
+	prs := NewParser(string(buf))
+	vals, err := prs.ParseAll()
+	if err != nil {
+		return nil, err
+	}
+	bodies := make([]models.RedisBodyType, len(vals))
+	for i, v := range vals {
+		b, err := toRedisBody(v)
+		if err != nil {
+			return nil, err
+		}
+		bodies[i] = b
+	}
+	return bodies, nil
+}
+
+func toRedisBody(v RespValue) (models.RedisBodyType, error) {
+	switch t := v.(type) {
+	case []interface{}:
+		elems := make([]models.RedisBodyType, len(t))
+		for i, e := range t {
+			b, err := toRedisBody(e)
+			if err != nil {
+				return models.RedisBodyType{}, err
+			}
+			elems[i] = b
+		}
+		return models.RedisBodyType{Type: "array", Size: len(elems), Data: elems}, nil
+
+	case map[string]interface{}:
+		entries := make([]models.RedisMapBody, 0, len(t))
+		for k, v2 := range t {
+			keyElem := models.RedisElement{Length: len(k), Value: k}
+			valElem := models.RedisElement{}
+			switch v3 := v2.(type) {
+			case string:
+				valElem = models.RedisElement{Length: len(v3), Value: v3}
+			case int64:
+				s := strconv.FormatInt(v3, 10)
+				valElem = models.RedisElement{Length: len(s), Value: v3}
+			default:
+				nested, err := toRedisBody(v3)
+				if err != nil {
+					return models.RedisBodyType{}, err
+				}
+				valElem = models.RedisElement{Length: 0, Value: nested}
+			}
+			entries = append(entries, models.RedisMapBody{Key: keyElem, Value: valElem})
+		}
+		return models.RedisBodyType{Type: "map", Size: len(entries), Data: entries}, nil
+
+	case string:
+		return models.RedisBodyType{Type: "string", Size: len(t), Data: t}, nil
+
+	case int64:
+		s := strconv.FormatInt(t, 10)
+		return models.RedisBodyType{Type: "integer", Size: len(s), Data: t}, nil
+
+	default:
+		return models.RedisBodyType{}, fmt.Errorf("unsupported type %T", v)
+	}
 }
