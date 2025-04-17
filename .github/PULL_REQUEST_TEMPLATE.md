@@ -1,28 +1,53 @@
-## What does this PR do?
+## Describe the changes that are made
+- 
 
-(Provide a description of what this PR does and why it's needed.)
+## Links & References
 
-## Related PRs and Issues
+**Fixes:** #123  <!-- Replace with actual issue number -->
 
-- (Info about Related PR or issue)
+### 🔗 Related PRs
+- NA
+### 🐞 Related Issues
+- NA
+### 📄 Related Documents
+- NA
 
-Closes: #[issue number that will be closed through this PR]
+## What type of PR is this? (check all applicable)
+- [ ] 📦 Chore
+- [ ] 🍕 Feature
+- [ ] 🐞 Bug Fix
+- [ ] 📝 Documentation Update
+- [ ] 🎨 Style
+- [ ] 🧑‍💻 Code Refactor
+- [ ] 🔥 Performance Improvements
+- [ ] ✅ Test
+- [ ] 🔁 CI
+- [ ] ⏩ Revert
 
-## Type of change
+## Added e2e test pipeline?
+- [ ] 👍 yes
+- [ ] 🙅 no, because they aren't needed
+- [ ] 🙋 no, because I need help
 
-- [ ] Bug fix (non-breaking change which fixes an issue)
-- [ ] New feature (non-breaking change which adds functionality)
-- [ ] Code style update (formatting, local variables)
-- [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
-- [ ] This change requires a documentation update
+## Added comments for hard-to-understand areas?
+- [ ] 👍 yes
+- [ ] 🙅 no, because the code is self-explanatory
 
-## Please let us know test plan followed
+## Added to documentation?
+- [ ] 📜 README.md
+- [ ] 📓 Wiki
+- [ ] 🙅 no documentation needed
 
-Please describe the tests(if any). Provide instructions how its affecting the coverage.
+## Are there any sample code to test the changes?
+- [ ] 👍 yes, mentioned below
+- [ ] 🙅 no, because it is not needed
 
-## Checklist:
+## Self Review done?
+- [ ] ✅ yes
+- [ ] ❌ no, because I need help
+
+## Any relevant screenshots, recordings or logs?
+- NA
+
+## Additional checklist:
 - [ ] Have you read the [Contributing Guidelines on issues](https://keploy.io/docs/keploy-explained/contribution-guide/)?
-- [ ] My code follows the style guidelines of this project.
-- [ ] I have commented my code, particularly in hard-to-understand areas.
-- [ ] I have made corresponding changes to the documentation.
-- [ ] New and existing unit tests pass locally with my changes.
