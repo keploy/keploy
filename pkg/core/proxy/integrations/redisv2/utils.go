@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/davecgh/go-spew/spew"
+	"github.com/tidwall/resp"
 	"go.keploy.io/server/v2/pkg/models"
 )
 
@@ -43,71 +43,144 @@ func removeCRLF(data string) string {
 }
 
 // Process an array type
-func processArray(bufStr string) []models.RedisArrayBody {
-	// Remove CRLF characters first
-	// bufStr = removeCRLF(bufStr)
-
-	// Slice the string from index 2 (remove the first two characters, e.g. "*2\r\n")
-	// bufStr = bufStr[2:]
-
+func processArray(bufStr string) ([]models.RedisElement, error) {
 	// Initialize a slice to store the result
-	var result []models.RedisArrayBody
+	var result []models.RedisElement
 
-	// Split the array by "$" to process each element
-	dataParts := strings.Split(bufStr, "$")
-	spew.Dump("first datapaerts",dataParts)
-	for i := 1; i < len(dataParts); i += 1 {
-		// Extract the size from the first part, e.g., "$3" means size 3
-		if len(dataParts[i]) > 0 {
-			var newArrayEntry models.RedisArrayBody
-			// fmt.Println(dataParts[i],"kkllllll")
-			// sizeStr := dataParts[i][:strings.Index(dataParts[i], "\r\n")] // Extract the size part, e.g., "$3"
-			re := regexp.MustCompile(`\d+`)
-			loc := re.FindString(dataParts[i])
-			fmt.Println("here is loc",loc)
-			// size, err := strconv.Atoi(sizeStr)
-			// if err != nil {
-			// 	fmt.Println("Error parsing size:", err)
-			// 	continue
-			// }
-			
-			// Extract the value (skip CRLF) and get the element
-			// fmt.Println(dataParts)
-			// fmt.Println(dataParts[i])
-			element := dataParts[i:] // The actual data part after '$'
-			arrayEntryLength,err := strconv.Atoi(loc)
-			if err !=nil{
-				return nil
-			}
-			// fmt.Println("element",element[0])
-			newArrayEntry.Length = arrayEntryLength
-			// removeBeforeFirstCRLF(element[0])
-			newArrayEntry.Value = removeCRLF(removeBeforeFirstCRLF(element[0]))
-			// Format the result as YAML
-			result = append(result, newArrayEntry)
-		}
+	// Create a reader for the RESP data
+	reader := resp.NewReader(strings.NewReader(bufStr))
+
+	// Read the value from the RESP data
+	v, _, err := reader.ReadValue()
+	if err != nil {
+		return nil, fmt.Errorf("error reading RESP value: %w", err)
 	}
 
-	// Join and return the formatted YAML string
-	return result
+	// Check if the value is an array
+	if v.Type() == resp.Array {
+		// Iterate over each element in the array
+		for _, elem := range v.Array() {
+			var newArrayEntry models.RedisElement
+
+			// Handle different types of elements in the array (strings, integers, etc.)
+			switch elem.Type() {
+			case resp.BulkString:
+				newArrayEntry.Length = len(elem.String())
+				newArrayEntry.Value = elem.String()
+			case resp.Integer:
+				newArrayEntry.Length = len(fmt.Sprintf("%d", elem.Integer()))
+				newArrayEntry.Value = elem.Integer()
+			case resp.SimpleString:
+				newArrayEntry.Length = 1
+				newArrayEntry.Value = elem.String()
+			case resp.Array:
+				// Recursively process nested arrays
+				nestedArray, err := processArray(elem.String()) // Call processArray recursively
+				if err != nil {
+					return nil, err
+				}
+				newArrayEntry.Length = len(nestedArray)
+				newArrayEntry.Value = nestedArray
+			default:
+				newArrayEntry.Length = 0
+				newArrayEntry.Value = nil
+			}
+
+			// Append the processed entry to the result
+			result = append(result, newArrayEntry)
+		}
+	} else {
+		return nil, fmt.Errorf("expected RESP Array, but got %s", v.Type())
+	}
+
+	return result, nil
 }
 
 // Process a map type
-func processMap(bufStr string) map[string]models.RedisBodyType {
-	fmt.Println("here is bufStr in map",bufStr)
-	result := make(map[string]models.RedisBodyType)
-	// Example: "%2\r\n$3\r\nkey\r\n$5\r\nvalue\r\n"
+func processMap(bufStr string) []models.RedisMapBody {
+	// Remove CRLF characters first
+	// bufStr = removeCRLF(bufStr)
 
-	dataParts := strings.Split(bufStr, "$")
-	for i := 1; i < len(dataParts)-1; i += 2 {
-		// Skip the size part (e.g., "$3" or "$5")
-		key := dataParts[i][1:]     // The actual key after '$'
-		value := dataParts[i+1][1:] // The actual value after '$'
-		result[key] = models.RedisBodyType{
-			Type: "string",
-			Data: value,
+	// Initialize a slice to store the result
+	var result []models.RedisMapBody
+
+	dataParts := splitByMultipleDelimiters(bufStr)
+	for i := 1; i < len(dataParts); i += 1 { // Move in steps of 2 (key, then value)
+		// Extract the size from the first part, e.g., "$3" means size 3
+		if len(dataParts[i]) > 0 {
+			var newMapEntry models.RedisMapBody
+
+			// Using regex to capture the size part (the number before \r\n)
+			re := regexp.MustCompile(`\d+`)
+			loc := re.FindString(dataParts[i]) // Extract the size from "$n"
+			fmt.Println("Extracted Size:", loc)
+
+			// Convert the size to an integer
+			keyLength, err := strconv.Atoi(loc)
+			if err != nil {
+				fmt.Println("Error parsing size:", err)
+				continue
+			}
+
+			// fmt.Println("check1")
+			// spew.Dump(dataParts[i])
+			// fmt.Println("check2")
+			// spew.Dump(dataParts[i+1])
+			// fmt.Println("check3")
+
+			// Extract the key (skip CRLF) and get the actual data part after '$'
+			// TODO: work for numbers also and those that do not have $ for size
+			key := dataParts[i] // The actual key part after "$n"
+			fmt.Println("to check number", key)
+			// for numbers we do not do the below we just remove :
+			if key[0] == ':' {
+				key = key[1:] // Remove the colon if it exists at the beginning
+			} else {
+				key = removeBeforeFirstCRLF(key) // Remove CRLF from the key
+			}
+			key = removeCRLF(key)
+
+			// Assign the key to the map entry
+			newMapEntry.Key = models.RedisElement{
+				Length: keyLength,
+				Value:  key,
+			}
+
+			// Move to the next data part (which will be the value)
+			i++
+
+			// Extract the value
+			if i+1 < len(dataParts) {
+				fmt.Println("to check number of value", dataParts[i])
+				var valueSizeStr string
+				if dataParts[i][0] == ':' {
+					valueSizeStr = dataParts[i][1:]
+				} else {
+					valueSizeStr = removeBeforeFirstCRLF(dataParts[i]) // This is the size of the value
+				}
+				valueSizeStr = removeCRLF(valueSizeStr)
+				// valueSize, err := strconv.Atoi(valueSizeStr)
+				// if err != nil {
+				// 	fmt.Println("Error parsing value size:", err)
+				// 	continue
+				// }
+
+				// Extract the actual value
+				// value := dataParts[i] // The value part after "$n"
+				// value = removeCRLF(value)
+
+				// Assign the value to the map entry
+				newMapEntry.Value = models.RedisElement{
+					Length: len(valueSizeStr),
+					Value:  valueSizeStr,
+				}
+			}
+
+			// Append the map entry to the result
+			result = append(result, newMapEntry)
 		}
 	}
+	// Return the result
 	return result
 }
 
@@ -116,15 +189,15 @@ func handleDataByType(dataType, data string) interface{} {
 	switch dataType {
 	case "array":
 		// Process array data and convert it into a readable format (e.g., split by $n and data)
-		return processArray(data)
-		// return data
+		val, err := processArray(data)
+		if err != nil {
+			return fmt.Errorf("invalid array processing")
+		}
+		return val
 	case "map":
 		// Process map data and extract key-value pairs
-		// return processMap(data)
-		return data
-	case "string":
-		// Just return the cleaned string
-		return data
+		return processMap(data)
+		// return data
 	default:
 		return data
 	}
@@ -150,4 +223,37 @@ func getBeforeFirstCRLF(data string) string {
 	}
 	// Slice the string up to the position before the CRLF
 	return data[:crlfIndex]
+}
+
+func splitByMultipleDelimiters(input string) []string {
+	// Initialize a slice to hold the result
+	var result []string
+
+	// Initialize a temporary string to accumulate data before the delimiter
+	var currentString string
+
+	// Iterate through the string and find delimiters
+	for _, r := range input {
+		// If a delimiter is found, we add the delimiter to the current string
+		if r == '$' || r == ':' || r == '*' || r == '%' {
+			// If there's any accumulated string, add it first
+			if len(currentString) > 0 {
+				result = append(result, currentString)
+				currentString = "" // Reset the current string
+			}
+			// Add the delimiter to the current string
+			currentString += string(r)
+
+		} else {
+			// Otherwise, accumulate the characters
+			currentString += string(r)
+		}
+	}
+
+	// If there's any remaining data after the last delimiter, add it
+	if len(currentString) > 0 {
+		result = append(result, currentString)
+	}
+
+	return result
 }

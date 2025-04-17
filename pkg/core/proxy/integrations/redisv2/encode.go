@@ -44,7 +44,7 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				{
 					Type: "array",
 					Size: size,
-					Data: bufStr[4:],
+					Data: handleDataByType("array",bufStr),
 				},
 			},
 		})
@@ -183,6 +183,7 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 
 }
 
+// TODO: process more than one type of data in the byte, maybe iterate over the size and send only the it to handleDataByType
 func processBufferRequests(buffer []byte, origin models.OriginType, payloads *[]models.RedisRequests) {
 	bufStr := string(buffer)
 	var buffDataType string
@@ -207,8 +208,6 @@ func processBufferRequests(buffer []byte, origin models.OriginType, payloads *[]
 			buffDataType = "boolean"
 		case bufStr[0] == ':':
 			buffDataType = "integer"
-		case bufStr[0] == '~':
-			buffDataType = "set"
 		case bufStr[0] == '$':
 			buffDataType = "BulkString"
 		default:
@@ -226,10 +225,10 @@ func processBufferRequests(buffer []byte, origin models.OriginType, payloads *[]
 
 	dataFromBuf := bufStr
 	// if the type is simple string we do not get it size, so we pass in 1
-	if buffDataType !="SimpleString"{
-		// dataFromBuf = dataFromBuf[4:]
-		dataFromBuf = removeBeforeFirstCRLF(dataFromBuf)
-	}
+	// if buffDataType !="SimpleString"{
+	// 	// dataFromBuf = dataFromBuf[4:]
+	// 	dataFromBuf = removeBeforeFirstCRLF(dataFromBuf)
+	// }
 	if buffDataType == "SimpleString"{
 		size = 1
 		dataFromBuf = removeCRLF(dataFromBuf)
@@ -277,11 +276,8 @@ func processBufferResponses(buffer []byte, origin models.OriginType, payloads *[
 			buffDataType = "boolean"
 		case bufStr[0] == ':':
 			buffDataType = "integer"
-		case bufStr[0] == '~':
-			buffDataType = "set"
 		case bufStr[0] == '$':
 			buffDataType = "BulkString"
-
 		default:
 			// If it starts with anything else, default to string type
 			buffDataType = "string"
@@ -297,10 +293,10 @@ func processBufferResponses(buffer []byte, origin models.OriginType, payloads *[
 
 	// if the type is simple string we do not get it size, so we pass in 1
 	dataFromBuf := bufStr
-	if buffDataType !="SimpleString"{
-		// dataFromBuf = dataFromBuf[4:]
-		dataFromBuf = removeBeforeFirstCRLF(dataFromBuf)
-	}
+	// if buffDataType !="SimpleString"{
+	// 	// dataFromBuf = dataFromBuf[4:]
+	// 	dataFromBuf = removeBeforeFirstCRLF(dataFromBuf)
+	// }
 	if buffDataType == "SimpleString"{
 		size = 1
 		dataFromBuf = removeCRLF(dataFromBuf)
