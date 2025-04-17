@@ -161,6 +161,11 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 			o.logger.Warn("Failed to read input. The older testsets will be kept.")
 			return nil
 		}
+
+		if len(input) == 0 {
+			o.logger.Warn("Empty input. The older testsets will be kept.")
+			return nil
+		}
 		// Trimming the newline character for cleaner switch statement
 		input = input[:len(input)-1]
 		switch input {
