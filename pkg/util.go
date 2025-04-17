@@ -293,7 +293,6 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 	return indices, nil
 }
 
-
 func NextID(IDs []string, identifier string) string {
 	latestIndx := 0
 	for _, ID := range IDs {
