@@ -5,6 +5,7 @@ package generic
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"time"
@@ -52,11 +53,24 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				continue
 			}
 
+			logger.Debug("Getting mock for the generic request", zap.Any("length", len(genericRequests)))
+			for i, genReq := range genericRequests {
+				logger.Debug("The genericRequests to find mock for :", zap.Any(fmt.Sprintf("h[%d]", i), string(genReq)))
+			}
+
 			// bestMatchedIndx := 0
 			// fuzzy match gives the index for the best matched generic mock
-			matched, genericResponses, err := fuzzyMatch(ctx, genericRequests, mockDb)
+			matched, genericResponses, err := fuzzyMatch(ctx, logger, genericRequests, mockDb)
 			if err != nil {
 				utils.LogError(logger, err, "error while matching generic mocks")
+			}
+			if !matched {
+				logger.Debug("No generic mock found for the request")
+			} else {
+				logger.Debug("Found generic mock for the request")
+				for i, genRes := range genericResponses {
+					logger.Debug("(Found mock) The genericResponses are:", zap.Any(fmt.Sprintf("h[%d]", i), string(genRes.Message[0].Data)))
+				}
 			}
 
 			if !matched {

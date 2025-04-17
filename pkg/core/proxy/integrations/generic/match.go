@@ -9,6 +9,7 @@ import (
 	"math"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
+	"go.uber.org/zap"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models"
@@ -20,7 +21,7 @@ import (
 // If a match is found, it returns the corresponding response mock and a boolean value indicating success.
 // If no match is found, it returns false and a nil response.
 // If an error occurs during the matching process, it returns an error.
-func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockMemDb) (bool, []models.Payload, error) {
+func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockDb integrations.MockMemDb) (bool, []models.Payload, error) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -45,6 +46,14 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 				}
 			}
 
+			logger.Debug("List of mocks in the database", zap.Any("Filtered Mocks", len(filteredMocks)), zap.Any("Unfiltered Mocks", len(unfilteredMocks)))
+			for i, mock := range filteredMocks {
+				logger.Debug("Filtered Mocks", zap.Any(fmt.Sprintf("Mock[%d]", i), mock))
+			}
+			for i, mock := range unfilteredMocks {
+				logger.Debug("Unfiltered Mocks", zap.Any(fmt.Sprintf("Mock[%d]", i), mock))
+			}
+
 			index := findExactMatch(filteredMocks, reqBuff)
 
 			if index == -1 {
@@ -61,6 +70,7 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 				if isUpdated {
 					continue
 				}
+				logger.Debug("Filtered mock found for generic request", zap.Any("Mock", filteredMocks[index]))
 				return true, responseMock, nil
 			}
 
@@ -69,6 +79,7 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 			if index != -1 {
 				responseMock := make([]models.Payload, len(unfilteredMocks[index].Spec.GenericResponses))
 				copy(responseMock, unfilteredMocks[index].Spec.GenericResponses)
+				logger.Debug("Unfiltered mock found for generic request", zap.Any("Mock", unfilteredMocks[index]))
 				return true, responseMock, nil
 			}
 
@@ -87,6 +98,7 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 						continue
 					}
 				}
+				logger.Debug("From total, mock found for generic request", zap.Any("Mock", totalMocks[index]))
 				return true, responseMock, nil
 			}
 			return false, nil, nil
