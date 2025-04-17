@@ -104,7 +104,7 @@ func GetCachingSha2PasswordMechanism(data byte) (string, error) {
 		return mysql.CachingSha2PasswordToString(mysql.FastAuthSuccess), nil
 	default:
 		einval := fmt.Sprintf("invalid caching_sha2_password mechanism, found:%02x ", data)
-		return "", fmt.Errorf(einval)
+		return "", fmt.Errorf("%s", einval)
 	}
 }
 
@@ -116,7 +116,7 @@ func StringToCachingSha2PasswordMechanism(data string) (mysql.CachingSha2Passwor
 		return mysql.FastAuthSuccess, nil
 	default:
 		einval := fmt.Sprintf("invalid caching_sha2_password mechanism, found:%s ", data)
-		return 0, fmt.Errorf(einval)
+		return 0, fmt.Errorf("%s", einval)
 	}
 }
 

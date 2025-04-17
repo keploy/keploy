@@ -109,16 +109,16 @@ func compareResponseBodies(status string, mockOperation, testOperation *models.O
 		}
 
 		if validatedJSON.IsIdentical() {
-			if mode == models.CompareMode {
+			switch mode {
+			case models.CompareMode:
 				if _, matched, err = handleJSONDiff(validatedJSON, logDiffs, newLogger, logger, testName, mockName, testSetID, mockSetID, mockResponseBodyStr, testResponseBodyStr, "response", mode); err != nil {
 					return differencesCount, false, false, err
 				}
-			} else if mode == models.IdentifyMode {
+			case models.IdentifyMode:
 				differencesCount, err = calculateSimilarityScore(mockOperation, testOperation, status)
 				if err != nil {
 					return differencesCount, false, false, err
 				}
-
 			}
 		} else {
 			differencesCount = overallScore
