@@ -32,7 +32,7 @@ jobs:
         uses: golangci/golangci-lint-action@v7
         with:
           only-new-issues: true
-          args: --out-format=colored-line-number --timeout=5m
+          args: --timeout=5m
 
       - name: Check gofmt (diff with line numbers)
         run: |
