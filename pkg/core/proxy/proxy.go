@@ -261,7 +261,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 					return
 				}
 				utils.LogError(p.logger, err, "failed to accept connection to the proxy")
-				errCh <- nil
+				errCh <- err
 				return
 			}
 			clientConnCh <- conn
@@ -269,7 +269,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-errCh:
+		case err := <-errCh:
 			return err
 		// handle the client connection
 		case clientConn := <-clientConnCh:
@@ -330,10 +330,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	var dstAddr string
 
-	if destInfo.Version == 4 {
+	switch destInfo.Version {
+	case 4:
+		p.logger.Debug("the destination is ipv4")
 		dstAddr = fmt.Sprintf("%v:%v", util.ToIP4AddressStr(destInfo.IPv4Addr), destInfo.Port)
 		p.logger.Debug("", zap.Any("DestIp4", destInfo.IPv4Addr), zap.Any("DestPort", destInfo.Port))
-	} else if destInfo.Version == 6 {
+	case 6:
+		p.logger.Debug("the destination is ipv6")
 		dstAddr = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.IPv6Addr), destInfo.Port)
 		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Any("DestPort", destInfo.Port))
 	}
@@ -374,7 +377,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}()
 
 	//check for global passthrough in test mode
-	if !rule.OutgoingOptions.Mocking && rule.Mode == models.MODE_TEST {
+	if !rule.Mocking && rule.Mode == models.MODE_TEST {
 
 		dstConn, err = net.Dial("tcp", dstAddr)
 		if err != nil {
@@ -402,7 +405,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			dstCfg := &models.ConditionalDstCfg{
 				Port: uint(destInfo.Port),
 			}
-			rule.OutgoingOptions.DstCfg = dstCfg
+			rule.DstCfg = dstCfg
 
 			// Record the outgoing message into a mock
 			err := p.Integrations[integrations.MYSQL].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)

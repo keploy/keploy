@@ -28,16 +28,15 @@ func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 		for {
 
 			// Read the stream of request packets from the client
-			for {
-				if len(redisRequests) > 0 {
-					break
-				}
+			for len(redisRequests) == 0 {
 				err := clientConn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
 				if err != nil {
 					utils.LogError(logger, err, "failed to set the read deadline for the client conn")
 					return
 				}
 				buffer, err := pUtil.ReadBytes(ctx, logger, clientConn)
+				// Applied this nolint to ignore the staticcheck error here because of readability
+				// nolint:staticcheck
 				if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil && err.Error() != "EOF" {
 					logger.Debug("failed to read the request message in proxy for redis dependency")
 					return

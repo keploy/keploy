@@ -307,11 +307,11 @@ func (ys *MockYaml) filterByTimeStamp(_ context.Context, m []*models.Mock, after
 	filteredMocks := make([]*models.Mock, 0)
 	unfilteredMocks := make([]*models.Mock, 0)
 
-	if afterTime == (time.Time{}) {
+	if afterTime.Equal(time.Time{}) {
 		return m, unfilteredMocks
 	}
 
-	if beforeTime == (time.Time{}) {
+	if beforeTime.Equal(time.Time{}) {
 		return m, unfilteredMocks
 	}
 
@@ -321,7 +321,7 @@ func (ys *MockYaml) filterByTimeStamp(_ context.Context, m []*models.Mock, after
 		if mock.Version != "api.keploy.io/v1beta1" && mock.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
 		}
-		if mock.Spec.ReqTimestampMock == (time.Time{}) || mock.Spec.ResTimestampMock == (time.Time{}) {
+		if mock.Spec.ReqTimestampMock.Equal(time.Time{}) || mock.Spec.ResTimestampMock.Equal(time.Time{}) {
 			logger.Debug("request or response timestamp of mock is missing")
 			mock.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, mock)

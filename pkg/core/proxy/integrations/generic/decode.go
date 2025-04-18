@@ -36,6 +36,8 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			// To read the stream of request packets from the client
 			for {
 				buffer, err := pUtil.ReadBytes(ctx, logger, clientConn)
+				// Applied this nolint to ignore the staticcheck error here because of readability
+				// nolint:staticcheck
 				if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil && err.Error() != "EOF" {
 					utils.LogError(logger, err, "failed to read the request message in proxy for generic dependency")
 					return

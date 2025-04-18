@@ -10,7 +10,7 @@ import (
 
 func (c *Core) MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error {
 
-	err := c.Proxy.Mock(ctx, id, opts)
+	err := c.Mock(ctx, id, opts)
 	if err != nil {
 		return err
 	}

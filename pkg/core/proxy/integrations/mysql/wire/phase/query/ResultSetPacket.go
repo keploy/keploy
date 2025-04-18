@@ -8,7 +8,6 @@ import (
 	"fmt"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
-	mysqlUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire/phase/query/rowscols"
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.uber.org/zap"
@@ -80,7 +79,7 @@ func EncodeTextResultSet(ctx context.Context, logger *zap.Logger, resultSet *mys
 		}
 	}
 	// Write the final EOF packet if present
-	if resultSet.FinalResponse != nil && mysqlUtils.IsEOFPacket(resultSet.FinalResponse.Data) {
+	if resultSet.FinalResponse != nil && utils.IsEOFPacket(resultSet.FinalResponse.Data) {
 		if _, err := buf.Write(resultSet.FinalResponse.Data); err != nil {
 			return nil, fmt.Errorf("failed to write final EOF packet: %w", err)
 		}
@@ -125,7 +124,7 @@ func EncodeBinaryResultSet(ctx context.Context, logger *zap.Logger, resultSet *m
 	}
 
 	// Write the final EOF packet if present
-	if resultSet.FinalResponse != nil && mysqlUtils.IsEOFPacket(resultSet.FinalResponse.Data) {
+	if resultSet.FinalResponse != nil && utils.IsEOFPacket(resultSet.FinalResponse.Data) {
 		if _, err := buf.Write(resultSet.FinalResponse.Data); err != nil {
 			return nil, fmt.Errorf("failed to write final EOF packet: %w", err)
 		}
