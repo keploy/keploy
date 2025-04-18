@@ -40,6 +40,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			},
 		})
 	}
+
 	_, err := destConn.Write(reqBuf)
 	if err != nil {
 		utils.LogError(logger, err, "failed to write request message to the destination server")
@@ -50,8 +51,6 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	clientBuffChan := make(chan []byte)
 	destBuffChan := make(chan []byte)
 	errChan := make(chan error)
-	//TODO: where to close the error channel since it is used in both the go routines
-	//close(errChan)
 
 	// read requests from client
 	err = pUtil.ReadFromPeer(ctx, logger, clientConn, clientBuffChan, errChan, pUtil.Client)
@@ -71,6 +70,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 
 	// ticker := time.NewTicker(1 * time.Second)
 	logger.Debug("the iteration for the generic request starts", zap.Any("genericReqs", len(genericRequests)), zap.Any("genericResps", len(genericResponses)))
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -82,6 +82,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 
 				metadata := make(map[string]string)
 				metadata["type"] = "config"
+
 				// Save the mock
 				mocks <- &models.Mock{
 					Version: models.GetVersion(),
@@ -106,6 +107,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			}
 
 			logger.Debug("the iteration for the generic request ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
+
 			if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {
 				genericRequestsCopy := make([]models.Payload, len(genericRequests))
 				genericResponseCopy := make([]models.Payload, len(genericResponses))
@@ -114,6 +116,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				go func(reqs []models.Payload, resps []models.Payload) {
 					metadata := make(map[string]string)
 					metadata["type"] = "config"
+
 					// Save the mock
 					mocks <- &models.Mock{
 						Version: models.GetVersion(),
@@ -158,6 +161,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				// store the request timestamp
 				reqTimestampMock = time.Now()
 			}
+
 			// Write the response message to the client
 			_, err := clientConn.Write(buffer)
 			if err != nil {
