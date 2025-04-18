@@ -2,7 +2,6 @@ package redisv2
 
 import (
 	"context"
-	"fmt"
 	"net"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
@@ -73,6 +72,5 @@ func (r *Redis) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.C
 		utils.LogError(logger, err, "failed to decode the redis message")
 		return err
 	}
-	fmt.Println("did mockoutgoing went good")
 	return nil
 }

@@ -705,7 +705,14 @@ func CheckStringExist(s string, mp map[string][]string) ([]string, bool) {
 
 func MatchesAnyRegex(str string, regexArray []string) (bool, string) {
 	for _, pattern := range regexArray {
-		re := regexp.MustCompile(pattern)
+		if pattern == "*" {
+			pattern = ".*"
+		}
+		re, err := regexp.Compile("^" + pattern + "$")
+		if err != nil {
+			fmt.Printf("skipping invalid regex %q: %v\n", pattern, err)
+			continue
+		}
 		if re.MatchString(str) {
 			return true, pattern
 		}

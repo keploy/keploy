@@ -1,17 +1,12 @@
 package redisv2
 
 import (
-	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"net"
-	"strconv"
 	"time"
 
-	"github.com/davecgh/go-spew/spew"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
@@ -31,7 +26,7 @@ func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				if len(redisRequests) > 0 {
 					break
 				}
-				err := clientConn.SetReadDeadline(time.Now().Add(30 * time.Millisecond))
+				err := clientConn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
 				if err != nil {
 					utils.LogError(logger, err, "failed to set the read deadline for the client conn")
 					return
@@ -57,9 +52,9 @@ func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			if err != nil {
 				utils.LogError(logger, err, "error while matching redis mocks")
 			}
-			fmt.Println("chekc1")
-			spew.Dump(redisResponses)
-			fmt.Println("chekc2")
+			// fmt.Println("chekc1")
+			// spew.Dump(redisResponses)
+			// fmt.Println("chekc2")
 
 			if !matched {
 				err := clientConn.SetReadDeadline(time.Time{})
@@ -87,55 +82,31 @@ func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 				logger.Debug("length of redisRequests after passThrough:", zap.Any("length", len(redisRequests)))
 				continue
 			}
-			for _, redisResponse := range redisResponses {
-				var (
-					encoded []byte
-					err     error
-				)
-
-				// Data comes back as interface{} (always a string for Redis payloads)
-				switch raw := redisResponse.Message[0].Data.(type) {
-				case string:
-					if redisResponse.Message[0].Type != models.String {
-						// binary path: decode base64 into bytes
-						encoded, err = util.DecodeBase64(raw)
-						if err != nil {
-							utils.LogError(logger, err, "failed to decode the base64 response")
-							return
-						}
-					} else {
-						// simple string path
-						encoded = []byte(raw)
-					}
-				case []interface{}:
-					encoded, err = serializeArray(raw)
-				default:
-					utils.LogError(logger, fmt.Errorf("unexpected data type %T", raw),
-						"cannot cast RedisBodyType.Data to []byte or string")
-					return
-				}
-				fmt.Println("sofkdkjf")
-
-				if _, err := clientConn.Write(encoded); err != nil {
-					if ctx.Err() != nil {
-						fmt.Println("dsknfsnkjgnf")
+			for _, resp := range redisResponses {
+				normBodies := make([]models.RedisBodyType, len(resp.Message))
+				for i, b := range resp.Message {
+					nb, err := normalizeBody(b)
+					if err != nil {
+						logger.Error("error normalizing mock data", zap.Error(err))
 						return
 					}
-					fmt.Println("nkfnkjgnjkjkhkn gkmhg")
-					utils.LogError(logger, err, "failed to write the response message to the client application")
+					normBodies[i] = nb
+				}
+
+				encoded, err := SerializeAll(normBodies)
+				if err != nil {
+					logger.Error("error marshalling mock data", zap.Error(err))
 					return
 				}
-				fmt.Println("after client conn write")
-				// reqBuf, err = pUtil.ReadBytes(ctx, logger, clientConn)
-				// if err != nil {
-				// 	logger.Debug("failed to read the request buffer from the client", zap.Error(err))
-				// 	logger.Debug("This was the last response from the server:\n" + string(encoded))
-				// 	errCh <- nil
-				// 	return
-				// }
-				// fmt.Println(reqBuf)
-				fmt.Println(redisRequests)
-				logger.Info("redisRequests after the iteration check ", zap.Any("length", len(redisRequests)))
+				logger.Debug("serialized RESP3 bytes", zap.ByteString("resp", encoded))
+				
+				if _, err := clientConn.Write(encoded); err != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					utils.LogError(logger, err, "failed to write the response message to the client")
+					return
+				}
 			}
 
 			// Clear the redisRequests buffer for the next dependency call
@@ -151,47 +122,84 @@ func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 		if err == io.EOF {
 			return nil
 		}
-		fmt.Println("inside error select")
 		return err
 	}
 }
 
-func serializeArray(elems []interface{}) ([]byte, error) {
-	var buf bytes.Buffer
-	// array header
-	buf.WriteString(fmt.Sprintf("*%d\r\n", len(elems)))
+// func serializeArray(elems []interface{}) ([]byte, error) {
+// 	var buf bytes.Buffer
+// 	// array header
+// 	buf.WriteString(fmt.Sprintf("*%d\r\n", len(elems)))
 
-	for _, el := range elems {
-		// each el should be a map[string]interface{} describing one RedisBodyType
-		m, ok := el.(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("array element is %T, want map[string]interface{}", el)
-		}
-		t, _ := m["type"].(string)
-		sizeF, _ := m["size"].(int)
-		rawData := m["data"]
+// 	for _, el := range elems {
+// 		m, ok := el.(map[string]interface{})
+// 		if !ok {
+// 			fmt.Println("chck here1")
+// 			return nil, fmt.Errorf("array element is %T, want map[string]interface{}", el)
+// 		}
+// 		t, _ := m["type"].(string)
+// 		rawData := m["data"]
 
-		switch t {
-		case "string":
-			s, _ := rawData.(string)
-			buf.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(s), s))
-		case "integer":
-			// JSON numeric fields come in as float64
-			num := strconv.FormatInt(int64(sizeF), 10)
-			buf.WriteString(":" + num + "\r\n")
-		case "array":
-			// nested array: rawData is again []interface{}
-			nested, _ := rawData.([]interface{})
-			nestedBytes, err := serializeArray(nested)
-			if err != nil {
-				return nil, err
-			}
-			buf.Write(nestedBytes)
-		default:
-			// TODO: handle other types as needed...
-			return nil, fmt.Errorf("unsupported nested type %q", t)
-		}
-	}
+// 		switch t {
+// 		case "string":
+// 			s, _ := rawData.(string)
+// 			buf.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(s), s))
 
-	return buf.Bytes(), nil
-}
+// 		case "integer":
+// 			// sizeF might be float64 if coming from JSON
+// 			sizeF, _ := m["size"].(int)
+// 			num := strconv.FormatInt(int64(sizeF), 10)
+// 			buf.WriteString(":" + num + "\r\n")
+
+// 		case "array":
+// 			nested, _ := rawData.([]interface{})
+// 			nestedBytes, err := serializeArray(nested)
+// 			if err != nil {
+// 				return nil, err
+// 			}
+// 			buf.Write(nestedBytes)
+
+// 		case "map":
+// 			// rawData is []interface{} of map entries
+// 			entries, ok := rawData.([]interface{})
+// 			if !ok {
+// 				return nil, fmt.Errorf("map data is %T, want []interface{}", rawData)
+// 			}
+// 			// map header
+// 			buf.WriteString(fmt.Sprintf("%%%d\r\n", len(entries)))
+// 			for _, entry := range entries {
+// 				em, ok := entry.(map[string]interface{})
+// 				if !ok {
+// 					return nil, fmt.Errorf("map element is %T, want map[string]interface{}", entry)
+// 				}
+// 				// ---- key ----
+// 				keyRaw, _ := em["Key"].(map[string]interface{})
+// 				keyVal, _ := keyRaw["Value"].(string)
+// 				buf.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(keyVal), keyVal))
+
+// 				// ---- value ----
+// 				valRaw, _ := em["Value"].(map[string]interface{})
+// 				v := valRaw["Value"]
+// 				switch vv := v.(type) {
+// 				case string:
+// 					buf.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(vv), vv))
+// 				case int:
+// 					buf.WriteString(fmt.Sprintf(":%d\r\n", int64(vv)))
+// 				case []interface{}:
+// 					nestedBytes, err := serializeArray(vv)
+// 					if err != nil {
+// 						return nil, err
+// 					}
+// 					buf.Write(nestedBytes)
+// 				default:
+// 					return nil, fmt.Errorf("unsupported map value type %T", vv)
+// 				}
+// 			}
+
+// 		default:
+// 			return nil, fmt.Errorf("unsupported nested type %q", t)
+// 		}
+// 	}
+
+// 	return buf.Bytes(), nil
+// }
