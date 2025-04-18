@@ -1,3 +1,5 @@
+//go:build linux
+
 package redisv2
 
 import (
@@ -336,21 +338,22 @@ func toRedisBody(v RespValue) (models.RedisBodyType, error) {
 		entries := make([]models.RedisMapBody, 0, len(t))
 		for k, v2 := range t {
 			keyElem := models.RedisElement{Length: len(k), Value: k}
-			valElem := models.RedisElement{}
 			switch v3 := v2.(type) {
 			case string:
-				valElem = models.RedisElement{Length: len(v3), Value: v3}
+				valElem := models.RedisElement{Length: len(v3), Value: v3}
+				entries = append(entries, models.RedisMapBody{Key: keyElem, Value: valElem})
 			case int64:
 				s := strconv.FormatInt(v3, 10)
-				valElem = models.RedisElement{Length: len(s), Value: v3}
+				valElem := models.RedisElement{Length: len(s), Value: v3}
+				entries = append(entries, models.RedisMapBody{Key: keyElem, Value: valElem})
 			default:
 				nested, err := toRedisBody(v3)
 				if err != nil {
 					return models.RedisBodyType{}, err
 				}
-				valElem = models.RedisElement{Length: 0, Value: nested}
+				valElem := models.RedisElement{Length: 0, Value: nested}
+				entries = append(entries, models.RedisMapBody{Key: keyElem, Value: valElem})
 			}
-			entries = append(entries, models.RedisMapBody{Key: keyElem, Value: valElem})
 		}
 		return models.RedisBodyType{Type: "map", Size: len(entries), Data: entries}, nil
 

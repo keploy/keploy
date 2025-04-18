@@ -1,3 +1,5 @@
+//go:build linux
+
 package redisv2
 
 import (
@@ -79,12 +81,16 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte,
 
 		for {
 			resp, err := pUtil.ReadBytes(ctx, logger, destConn)
-			logger.Info("received response", zap.ByteString("resp", resp))
 			if err != nil {
 				if err == io.EOF {
 					if len(resp) != 0 {
 						ts := time.Now()
-						clientConn.Write(resp)
+						_, err := clientConn.Write(resp)
+						if err != nil {
+							utils.LogError(logger, err, "failed writing response to client")
+							errCh <- err
+							return nil
+						}
 						processBufferResponses(resp, models.FromServer, &redisResponses)
 						saveMock(redisRequests, redisResponses, reqTimestamp, ts, mocks)
 					}
@@ -95,7 +101,12 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte,
 				return nil
 			}
 
-			clientConn.Write(resp)
+			_, err = clientConn.Write(resp)
+			if err != nil {
+				utils.LogError(logger, err, "failed writing response to client")
+				errCh <- err
+				return nil
+			}
 			ts := time.Now()
 			processBufferResponses(resp, models.FromServer, &redisResponses)
 			if len(redisRequests) > 0 && len(redisResponses) > 0 {
@@ -116,7 +127,12 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte,
 				return nil
 			}
 			processBufferRequests(reqBuf, models.FromClient, &redisRequests)
-			destConn.Write(reqBuf)
+			_, err = destConn.Write(reqBuf)
+			if err != nil {
+				utils.LogError(logger, err, "failed writing request to destination")
+				errCh <- err
+				return nil
+			}
 			reqTimestamp = time.Now()
 		}
 		return nil

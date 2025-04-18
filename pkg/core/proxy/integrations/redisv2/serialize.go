@@ -1,96 +1,96 @@
+//go:build linux
+
 package redisv2
 
 import (
 	"bytes"
 	"fmt"
-	"strconv"
 
 	"go.keploy.io/server/v2/pkg/models"
 )
 
 // SerializeRedisBodyType emits the RESP3 encoding for a single RedisBodyType.
 func SerializeRedisBodyType(b models.RedisBodyType) ([]byte, error) {
-    var buf bytes.Buffer
+	var buf bytes.Buffer
 
-    switch b.Type {
-    case "string":
-        s, ok := b.Data.(string)
-        if !ok {
-            return nil, fmt.Errorf("expected string, got %T", b.Data)
-        }
-        buf.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(s), s))
+	switch b.Type {
+	case "string":
+		s, ok := b.Data.(string)
+		if !ok {
+			return nil, fmt.Errorf("expected string, got %T", b.Data)
+		}
+		buf.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(s), s))
 
-    case "integer":
-        // accept int64, int, or float64
-        var i64 int64
-        switch v := b.Data.(type) {
-        case int64:
-            i64 = v
-        case int:
-            i64 = int64(v)
-        case float64:
-            i64 = int64(v)
-        default:
-            return nil, fmt.Errorf("expected integer type, got %T", b.Data)
-        }
-        buf.WriteString(fmt.Sprintf(":%d\r\n", i64))
+	case "integer":
+		// accept int64, int, or float64
+		var i64 int64
+		switch v := b.Data.(type) {
+		case int64:
+			i64 = v
+		case int:
+			i64 = int64(v)
+		case float64:
+			i64 = int64(v)
+		default:
+			return nil, fmt.Errorf("expected integer type, got %T", b.Data)
+		}
+		buf.WriteString(fmt.Sprintf(":%d\r\n", i64))
 
-    case "array":
-        elems, ok := b.Data.([]models.RedisBodyType)
-        if !ok {
-            return nil, fmt.Errorf("expected []RedisBodyType, got %T", b.Data)
-        }
-        buf.WriteString(fmt.Sprintf("*%d\r\n", len(elems)))
-        for _, e := range elems {
-            eb, err := SerializeRedisBodyType(e)
-            if err != nil {
-                return nil, err
-            }
-            buf.Write(eb)
-        }
+	case "array":
+		elems, ok := b.Data.([]models.RedisBodyType)
+		if !ok {
+			return nil, fmt.Errorf("expected []RedisBodyType, got %T", b.Data)
+		}
+		buf.WriteString(fmt.Sprintf("*%d\r\n", len(elems)))
+		for _, e := range elems {
+			eb, err := SerializeRedisBodyType(e)
+			if err != nil {
+				return nil, err
+			}
+			buf.Write(eb)
+		}
 
-    case "map":
-        entries, ok := b.Data.([]models.RedisMapBody)
-        if !ok {
-            return nil, fmt.Errorf("expected []RedisMapBody, got %T", b.Data)
-        }
-        buf.WriteString(fmt.Sprintf("%%%d\r\n", len(entries)))
-        for _, ent := range entries {
-            // Key (always string)
-            keyStr, ok := ent.Key.Value.(string)
-            if !ok {
-                return nil, fmt.Errorf("map key is %T, want string", ent.Key.Value)
-            }
-            buf.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(keyStr), keyStr))
+	case "map":
+		entries, ok := b.Data.([]models.RedisMapBody)
+		if !ok {
+			return nil, fmt.Errorf("expected []RedisMapBody, got %T", b.Data)
+		}
+		buf.WriteString(fmt.Sprintf("%%%d\r\n", len(entries)))
+		for _, ent := range entries {
+			// Key (always string)
+			keyStr, ok := ent.Key.Value.(string)
+			if !ok {
+				return nil, fmt.Errorf("map key is %T, want string", ent.Key.Value)
+			}
+			buf.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(keyStr), keyStr))
 
-            // Value (could be string, integer, nested BodyType)
-            switch v := ent.Value.Value.(type) {
-            case string:
-                buf.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(v), v))
-            case int64:
-                buf.WriteString(fmt.Sprintf(":%d\r\n", v))
-            case int:
-                buf.WriteString(fmt.Sprintf(":%d\r\n", int64(v)))
-            case float64:
-                buf.WriteString(fmt.Sprintf(":%d\r\n", int64(v)))
-            case models.RedisBodyType:
-                vb, err := SerializeRedisBodyType(v)
-                if err != nil {
-                    return nil, err
-                }
-                buf.Write(vb)
-            default:
-                return nil, fmt.Errorf("unsupported map value type %T", v)
-            }
-        }
+			// Value (could be string, integer, nested BodyType)
+			switch v := ent.Value.Value.(type) {
+			case string:
+				buf.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(v), v))
+			case int64:
+				buf.WriteString(fmt.Sprintf(":%d\r\n", v))
+			case int:
+				buf.WriteString(fmt.Sprintf(":%d\r\n", int64(v)))
+			case float64:
+				buf.WriteString(fmt.Sprintf(":%d\r\n", int64(v)))
+			case models.RedisBodyType:
+				vb, err := SerializeRedisBodyType(v)
+				if err != nil {
+					return nil, err
+				}
+				buf.Write(vb)
+			default:
+				return nil, fmt.Errorf("unsupported map value type %T", v)
+			}
+		}
 
-    default:
-        return nil, fmt.Errorf("unsupported type %q", b.Type)
-    }
+	default:
+		return nil, fmt.Errorf("unsupported type %q", b.Type)
+	}
 
-    return buf.Bytes(), nil
+	return buf.Bytes(), nil
 }
-
 
 // SerializeAll concatenates the RESP3 encodings of a slice of RedisBodyType.
 func SerializeAll(bodies []models.RedisBodyType) ([]byte, error) {
@@ -103,129 +103,6 @@ func SerializeAll(bodies []models.RedisBodyType) ([]byte, error) {
 		out.Write(bb)
 	}
 	return out.Bytes(), nil
-}
-
-// serializeArray handles a raw []interface{} (from generic Data) as an RESP array.
-func serializeArray(elems []interface{}) ([]byte, error) {
-	var buf bytes.Buffer
-	buf.WriteString(fmt.Sprintf("*%d\r\n", len(elems)))
-
-	for _, el := range elems {
-		m, ok := el.(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("array element is %T", el)
-		}
-		t, _ := m["type"].(string)
-		raw := m["data"]
-
-		switch t {
-		case "string":
-			s, _ := raw.(string)
-			buf.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(s), s))
-
-		case "integer":
-			numF, _ := m["size"].(float64)
-			buf.WriteString(fmt.Sprintf(":%d\r\n", int64(numF)))
-
-		case "array":
-			nested, _ := raw.([]interface{})
-			b, err := serializeArray(nested)
-			if err != nil {
-				return nil, err
-			}
-			buf.Write(b)
-
-		case "map":
-			nestedMap, _ := raw.([]interface{})
-			b, err := serializeMap(nestedMap)
-			if err != nil {
-				return nil, err
-			}
-			buf.Write(b)
-
-		default:
-			return nil, fmt.Errorf("unsupported array type %q", t)
-		}
-	}
-	return buf.Bytes(), nil
-}
-
-// serializeMap handles a raw []interface{} (from generic Data) as an RESP map.
-func serializeMap(entries []interface{}) ([]byte, error) {
-	var buf bytes.Buffer
-	buf.WriteString(fmt.Sprintf("%%%d\r\n", len(entries)))
-
-	for _, entry := range entries {
-		em, ok := entry.(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("map element is %T", entry)
-		}
-		keyRaw, _ := em["key"].(map[string]interface{})
-		keyStr, _ := keyRaw["value"].(string)
-		buf.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(keyStr), keyStr))
-
-		valRaw, _ := em["value"].(map[string]interface{})
-		val := valRaw["value"]
-
-		switch v := val.(type) {
-		case string:
-			buf.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(v), v))
-		case float64:
-			buf.WriteString(fmt.Sprintf(":%d\r\n", int64(v)))
-		case []interface{}:
-			b, err := serializeArray(v)
-			if err != nil {
-				return nil, err
-			}
-			buf.Write(b)
-		case map[string]interface{}:
-			// nested single RedisBodyType
-			nt, _ := v["type"].(string)
-			nsF, _ := v["size"].(float64)
-			nd := v["data"]
-			inner := models.RedisBodyType{
-				Type: nt,
-				Size: int(nsF),
-				Data: nd,
-			}
-			bb, err := SerializeRedisBodyType(inner)
-			if err != nil {
-				return nil, err
-			}
-			buf.Write(bb)
-		default:
-			return nil, fmt.Errorf("unsupported map value type %T", v)
-		}
-	}
-	return buf.Bytes(), nil
-}
-
-// convertDataToBytes picks the right path for your RESP type + Data field.
-func convertDataToBytes(tp string, raw interface{}) ([]byte, error) {
-	switch tp {
-	case "string", "integer":
-		// wrap it in a one‑element RedisBodyType and serialize
-		size := 0
-		switch v := raw.(type) {
-		case string:
-			size = len(v)
-		case int64:
-			size = len(strconv.FormatInt(v, 10))
-		}
-		b := models.RedisBodyType{Type: tp, Size: size, Data: raw}
-		return SerializeRedisBodyType(b)
-
-	case "array":
-		// raw is []interface{} of map[string]interface{}
-		return serializeArray(raw.([]interface{}))
-
-	case "map":
-		// raw is []interface{} of map entries
-		return serializeMap(raw.([]interface{}))
-
-	default:
-		return nil, fmt.Errorf("unsupported top‑level type %q", tp)
-	}
 }
 
 // normalizeBody rewrites b.Data from generic interface{} into
