@@ -53,7 +53,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				continue
 			}
 
-			logger.Debug("Getting mock for the generic request", zap.Any("length", len(genericRequests)))
+			logger.Info("Getting mock for the generic request", zap.Any("length", len(genericRequests)))
 			for i, genReq := range genericRequests {
 				logger.Debug("The genericRequests to find mock for :", zap.Any(fmt.Sprintf("h[%d]", i), string(genReq)))
 			}
@@ -65,9 +65,9 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				utils.LogError(logger, err, "error while matching generic mocks")
 			}
 			if !matched {
-				logger.Debug("No generic mock found for the request")
+				logger.Info("No generic mock found for the request")
 			} else {
-				logger.Debug("Found generic mock for the request")
+				logger.Info("Found generic mock for the request")
 				for i, genRes := range genericResponses {
 					logger.Debug("(Found mock) The genericResponses are:", zap.Any(fmt.Sprintf("h[%d]", i), string(genRes.Message[0].Data)))
 				}

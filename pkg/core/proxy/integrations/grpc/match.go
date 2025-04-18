@@ -53,7 +53,7 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 			}
 
 			if len(schemaMatched) == 0 {
-				logger.Debug("No mock found with schema match")
+				logger.Info("No mock found with schema match")
 				return nil, nil
 			}
 
