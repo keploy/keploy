@@ -40,10 +40,6 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 		})
 	}
 
-	// Debug: Log the initial buffer and data type
-	logger.Debug("Encoding generic request", zap.String("dataType", dataType), zap.String("bufStr", bufStr))
-	// bufStr gives me all the buffer from request
-
 	_, err := destConn.Write(reqBuf)
 	if err != nil {
 		utils.LogError(logger, err, "failed to write request message to the destination server")
@@ -54,9 +50,6 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	clientBuffChan := make(chan []byte)
 	destBuffChan := make(chan []byte)
 	errChan := make(chan error)
-
-	// Debug: Log that channels are initialized
-	logger.Debug("Channels initialized for reading from peers")
 
 	// read requests from client
 	err = pUtil.ReadFromPeer(ctx, logger, clientConn, clientBuffChan, errChan, pUtil.Client)
@@ -74,8 +67,8 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	var reqTimestampMock = time.Now()
 	var resTimestampMock time.Time
 
-	// Debug: Log the start of the iteration
-	logger.Debug("Starting iteration for generic requests and responses", zap.Int("genericRequestsLength", len(genericRequests)), zap.Int("genericResponsesLength", len(genericResponses)))
+	//TODO: where to close the error channel since it is used in both the go routines
+	//close(errChan)
 
 	for {
 		select {
@@ -88,9 +81,6 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 
 				metadata := make(map[string]string)
 				metadata["type"] = "config"
-
-				// Debug: Log mock data being saved
-				logger.Debug("Saving mock data", zap.Int("genericRequestsLength", len(genericRequestsCopy)), zap.Int("genericResponsesLength", len(genericResponsesCopy)))
 
 				// Save the mock
 				mocks <- &models.Mock{
@@ -115,9 +105,6 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				return err
 			}
 
-			// Debug: Log request data being written
-			logger.Debug("Writing client request to destination", zap.Int("bufferLength", len(buffer)))
-
 			if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {
 				genericRequestsCopy := make([]models.Payload, len(genericRequests))
 				genericResponseCopy := make([]models.Payload, len(genericResponses))
@@ -126,9 +113,6 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				go func(reqs []models.Payload, resps []models.Payload) {
 					metadata := make(map[string]string)
 					metadata["type"] = "config"
-
-					// Debug: Log saving the mock data in goroutine
-					logger.Debug("Saving mock data in goroutine", zap.Int("genericRequestsLength", len(reqs)), zap.Int("genericResponsesLength", len(resps)))
 
 					// Save the mock
 					mocks <- &models.Mock{
@@ -156,9 +140,6 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				buffDataType = "binary"
 			}
 
-			// Debug: Log the buffer content being encoded
-			logger.Debug("Encoding request buffer", zap.String("buffDataType", buffDataType), zap.String("bufStr", bufStr))
-
 			if bufStr != "" {
 				genericRequests = append(genericRequests, models.Payload{
 					Origin: models.FromClient,
@@ -178,9 +159,6 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				reqTimestampMock = time.Now()
 			}
 
-			// Debug: Log response data being written
-			logger.Debug("Writing server response to client", zap.Int("bufferLength", len(buffer)))
-
 			// Write the response message to the client
 			_, err := clientConn.Write(buffer)
 			if err != nil {
@@ -195,9 +173,6 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				buffDataType = "binary"
 			}
 
-			// Debug: Log the buffer content being encoded for response
-			logger.Debug("Encoding response buffer", zap.String("buffDataType", buffDataType), zap.String("bufStr", bufStr))
-
 			if bufStr != "" {
 				genericResponses = append(genericResponses, models.Payload{
 					Origin: models.FromServer,
@@ -211,9 +186,6 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			}
 
 			resTimestampMock = time.Now()
-
-			// Debug: Log the end of the iteration
-			logger.Debug("Iteration ends for generic response", zap.Int("genericRequestsLength", len(genericRequests)), zap.Int("genericResponsesLength", len(genericResponses)))
 
 			prevChunkWasReq = false
 		case err := <-errChan:

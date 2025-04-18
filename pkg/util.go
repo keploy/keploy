@@ -189,11 +189,8 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}
 
-	// fmt.Println("here is req")
-	// spew.Dump(req)
 	httpResp, errHTTPReq := client.Do(req)
 	if errHTTPReq != nil {
-		fmt.Println("here is httpresp", httpResp)
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
 	}
