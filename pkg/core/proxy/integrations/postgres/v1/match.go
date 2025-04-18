@@ -646,7 +646,7 @@ func compareExactMatch(mock *models.Mock, actualPgReq *models.Backend, logger *z
 
 	// this will give me the
 	var (
-		p, b, e int = 0, 0, 0
+		p, b, e = 0, 0, 0
 	)
 	for i := 0; i < len(actualPgReq.PacketTypes); i++ {
 		switch actualPgReq.PacketTypes[i] {

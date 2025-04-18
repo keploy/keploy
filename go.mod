@@ -1,6 +1,6 @@
 module go.keploy.io/server/v2
 
-go 1.22.0
+go 1.24.1
 
 replace github.com/jackc/pgproto3/v2 => github.com/keploy/pgproto3/v2 v2.0.5
 
