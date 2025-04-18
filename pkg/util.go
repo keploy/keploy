@@ -51,15 +51,50 @@ func ToYamlHTTPHeader(httpHeader http.Header) map[string]string {
 
 func ToHTTPHeader(mockHeader map[string]string) http.Header {
 	header := http.Header{}
-	for i, j := range mockHeader {
-		match := IsTime(j)
-		if match {
-			//Values like "Tue, 17 Jan 2023 16:34:58 IST" should be considered as single element
-			header[i] = []string{j}
+
+	// headers that should not be split
+	specialHeaders := map[string]bool{
+		"set-cookie":                    true,
+		"cookie":                        true,
+		"www-authenticate":              true,
+		"proxy-authenticate":            true,
+		"content-disposition":           true,
+		"link":                          true,
+		"strict-transport-security":     true,
+		"content-security-policy":       true,
+		"access-control-allow-headers":  true,
+		"access-control-allow-methods":  true,
+		"access-control-expose-headers": true,
+		"alt-svc":                       true,
+		"authorization":                 true,
+		"date":                          true,
+		"etag":                          true,
+		"if-match":                      true,
+		"if-none-match":                 true,
+		"last-modified":                 true,
+		"retry-after":                   true,
+	}
+
+	for name, value := range mockHeader {
+		if specialHeaders[strings.ToLower(name)] {
+			header[name] = []string{value}
 			continue
 		}
-		header[i] = strings.Split(j, ",")
+
+		match := IsTime(value)
+		if match {
+			// Values like "Tue, 17 Jan 2023 16:34:58 IST" should be considered as single element
+			header[name] = []string{value}
+			continue
+		}
+
+		values := strings.Split(value, ",")
+		for i, v := range values {
+			values[i] = strings.TrimSpace(v)
+		}
+		header[name] = values
 	}
+
 	return header
 }
 
