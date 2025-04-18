@@ -189,8 +189,13 @@ func (conn *Tracker) AddDataEvent(event SocketDataEvent) {
 	conn.mutex.Lock()
 	defer conn.mutex.Unlock()
 	conn.UpdateTimestamps()
-
-	data := event.Msg[:event.MsgSize]
+	msgLength := event.MsgSize
+	// If the size of the message exceeds the maximum allowed size,
+	// set msgLength to the maximum allowed size instead
+	if event.MsgSize > EventBodyMaxSize {
+		msgLength = EventBodyMaxSize
+	}
+	data := event.Msg[:msgLength]
 
 	// Check for HTTP/2 preface if we haven't detected protocol yet
 	if !conn.protocolDetected {
@@ -450,10 +455,16 @@ func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Ti
 // Add HTTP/2 specific handling
 func (conn *Tracker) handleHTTP2Data(event SocketDataEvent) {
 	// Convert fixed-size array to slice
-	data := event.Msg[:event.MsgSize]
+	msgLength := event.MsgSize
+	// If the size of the message exceeds the maximum allowed size,
+	// set msgLength to the maximum allowed size instead
+	if event.MsgSize > EventBodyMaxSize {
+		msgLength = EventBodyMaxSize
+	}
+	// data := event.Msg[:event.MsgSize]
 
 	// Append new data to the buffer
-	conn.buffer = append(conn.buffer, data...)
+	conn.buffer = append(conn.buffer, event.Msg[:msgLength]...)
 
 	// Process as many complete frames as possible
 	for len(conn.buffer) >= 9 { // Minimum frame size

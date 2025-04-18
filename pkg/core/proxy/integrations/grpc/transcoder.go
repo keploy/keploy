@@ -5,7 +5,9 @@ package grpc
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
@@ -302,7 +304,11 @@ func (srv *Transcoder) ListenAndServe(ctx context.Context) error {
 			return ctx.Err()
 		default:
 			frame, err := srv.framer.ReadFrame()
+
 			if err != nil {
+				if errors.Is(err, io.EOF) {
+					return nil
+				}
 				utils.LogError(srv.logger, err, "Failed to read frame")
 				return err
 			}
