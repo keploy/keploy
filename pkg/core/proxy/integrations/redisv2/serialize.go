@@ -14,24 +14,28 @@ func SerializeRedisBodyType(b models.RedisBodyType) ([]byte, error) {
 
     switch b.Type {
     case "string":
-        // b.Data must be a Go string
         s, ok := b.Data.(string)
         if !ok {
             return nil, fmt.Errorf("expected string, got %T", b.Data)
         }
-        // **recompute** the length
         buf.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(s), s))
 
     case "integer":
-        // b.Data must be int64
-        i, ok := b.Data.(int64)
-        if !ok {
-            return nil, fmt.Errorf("expected int64, got %T", b.Data)
+        // accept int64, int, or float64
+        var i64 int64
+        switch v := b.Data.(type) {
+        case int64:
+            i64 = v
+        case int:
+            i64 = int64(v)
+        case float64:
+            i64 = int64(v)
+        default:
+            return nil, fmt.Errorf("expected integer type, got %T", b.Data)
         }
-        buf.WriteString(fmt.Sprintf(":%d\r\n", i))
+        buf.WriteString(fmt.Sprintf(":%d\r\n", i64))
 
     case "array":
-        // b.Data must be []RedisBodyType
         elems, ok := b.Data.([]models.RedisBodyType)
         if !ok {
             return nil, fmt.Errorf("expected []RedisBodyType, got %T", b.Data)
@@ -46,33 +50,35 @@ func SerializeRedisBodyType(b models.RedisBodyType) ([]byte, error) {
         }
 
     case "map":
-        // b.Data must be []RedisMapBody
         entries, ok := b.Data.([]models.RedisMapBody)
         if !ok {
             return nil, fmt.Errorf("expected []RedisMapBody, got %T", b.Data)
         }
         buf.WriteString(fmt.Sprintf("%%%d\r\n", len(entries)))
         for _, ent := range entries {
-            // **key** is always a string
+            // Key (always string)
             keyStr, ok := ent.Key.Value.(string)
             if !ok {
-                return nil, fmt.Errorf("expected map key string, got %T", ent.Key.Value)
+                return nil, fmt.Errorf("map key is %T, want string", ent.Key.Value)
             }
             buf.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(keyStr), keyStr))
 
-            // **value** can be string, integer, array, map, etc.
+            // Value (could be string, integer, nested BodyType)
             switch v := ent.Value.Value.(type) {
             case string:
                 buf.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(v), v))
             case int64:
                 buf.WriteString(fmt.Sprintf(":%d\r\n", v))
+            case int:
+                buf.WriteString(fmt.Sprintf(":%d\r\n", int64(v)))
+            case float64:
+                buf.WriteString(fmt.Sprintf(":%d\r\n", int64(v)))
             case models.RedisBodyType:
-                // nested single element (array or map)
-                nb, err := SerializeRedisBodyType(v)
+                vb, err := SerializeRedisBodyType(v)
                 if err != nil {
                     return nil, err
                 }
-                buf.Write(nb)
+                buf.Write(vb)
             default:
                 return nil, fmt.Errorf("unsupported map value type %T", v)
             }
