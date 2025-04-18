@@ -484,7 +484,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	cmdType := utils.CmdType(r.config.CommandType)
 	var userIP string
 
-	err = r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, models.BaseTime, time.Now(), Start, models.OutgoingOptions{
+	err = r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, models.BaseTime, time.Now(), totalConsumedMocks, Start, models.OutgoingOptions{
 		Backdate: testCases[0].HTTPReq.Timestamp,
 	})
 	if err != nil {
@@ -634,7 +634,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		var loopErr error
 
 		//No need to handle mocking when basepath is provided
-		err := r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp, Update, models.OutgoingOptions{
+		err := r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp, totalConsumedMocks, Update, models.OutgoingOptions{
 			Backdate: testCase.HTTPReq.Timestamp,
 		})
 		if err != nil {
@@ -680,10 +680,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 			}
-			if r.config.Test.RemoveUnusedMocks {
-				for _, mockName := range consumedMocks {
-					totalConsumedMocks[mockName] = true
-				}
+			for _, mockName := range consumedMocks {
+				totalConsumedMocks[mockName] = true
 			}
 		}
 
@@ -934,7 +932,7 @@ func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime tim
 	return filtered, unfiltered, err
 }
 
-func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, testSetID string, afterTime, beforeTime time.Time, action MockAction, outgoingOpts models.OutgoingOptions) error {
+func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, testSetID string, afterTime, beforeTime time.Time, consumedMocks map[string]bool, action MockAction, outgoingOpts models.OutgoingOptions) error {
 
 	if !r.instrument {
 		r.logger.Debug("Keploy will not setup or update the mocks when base path is provided", zap.Any("base path", r.config.Test.BasePath))
@@ -945,6 +943,24 @@ func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, testSet
 	if err != nil {
 		return err
 	}
+
+	filterOutConsumed := func(in []*models.Mock) []*models.Mock {
+		out := make([]*models.Mock, 0, len(in))
+		for _, m := range in {
+			// treat empty/missing names as never consumed
+			if m == nil || m.Name == "" {
+				out = append(out, m)
+				continue
+			}
+			if _, ok := consumedMocks[m.Name]; !ok {
+				out = append(out, m)
+			}
+		}
+		return out
+	}
+
+	filteredMocks = filterOutConsumed(filteredMocks)
+	unfilteredMocks = filterOutConsumed(unfilteredMocks)
 
 	if action == Start {
 		outgoingOpts.Rules = r.config.BypassRules
