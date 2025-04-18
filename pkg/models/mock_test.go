@@ -19,4 +19,3 @@ func TestGetKind_ReturnsKindAsString_001(t *testing.T) {
 	// Assert
 	assert.Equal(t, "test-kind", result, "Expected GetKind to return the correct Kind as a string")
 }
-

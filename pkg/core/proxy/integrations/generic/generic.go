@@ -44,7 +44,7 @@ func (g *Generic) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn
 		return err
 	}
 
-	g.logger.Info("here is reqbuf",zap.Any("here",reqBuf))
+	g.logger.Info("here is reqbuf", zap.Any("here", reqBuf))
 
 	err = encodeGeneric(ctx, logger, reqBuf, src, dst, mocks, opts)
 	if err != nil {

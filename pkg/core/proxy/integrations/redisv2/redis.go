@@ -1,4 +1,5 @@
 //go:build linux
+
 package redisv2
 
 import (

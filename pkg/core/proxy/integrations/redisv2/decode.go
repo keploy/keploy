@@ -1,4 +1,5 @@
 //go:build linux
+
 package redisv2
 
 import (
@@ -29,13 +30,13 @@ func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					utils.LogError(logger, err, "failed to set the read deadline for the client conn")
 					return
 				}
-			
+
 				buffer, err := pUtil.ReadBytes(ctx, logger, clientConn)
 				if netErr, ok := err.(net.Error); (!ok || !netErr.Timeout()) && err != nil && err.Error() != "EOF" {
 					logger.Debug("failed to read the request message in proxy for redis dependency")
 					return
 				}
-			
+
 				if len(buffer) > 0 {
 					redisRequests = append(redisRequests, buffer)
 				}
@@ -98,7 +99,7 @@ func decodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					return
 				}
 				logger.Debug("serialized RESP3 bytes", zap.ByteString("resp", encoded))
-				
+
 				if _, err := clientConn.Write(encoded); err != nil {
 					if ctx.Err() != nil {
 						return
