@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"time"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
@@ -67,8 +68,8 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	var reqTimestampMock = time.Now()
 	var resTimestampMock time.Time
 
-	//TODO: where to close the error channel since it is used in both the go routines
-	//close(errChan)
+	// ticker := time.NewTicker(1 * time.Second)
+	logger.Debug("the iteration for the generic request starts", zap.Any("genericReqs", len(genericRequests)), zap.Any("genericResps", len(genericResponses)))
 
 	for {
 		select {
@@ -104,6 +105,8 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				utils.LogError(logger, err, "failed to write request message to the destination server")
 				return err
 			}
+
+			logger.Debug("the iteration for the generic request ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
 
 			if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {
 				genericRequestsCopy := make([]models.Payload, len(genericRequests))
@@ -187,6 +190,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 
 			resTimestampMock = time.Now()
 
+			logger.Debug("the iteration for the generic response ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
 			prevChunkWasReq = false
 		case err := <-errChan:
 			if err == io.EOF {
