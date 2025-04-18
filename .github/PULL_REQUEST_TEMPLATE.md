@@ -49,5 +49,21 @@
 ## Any relevant screenshots, recordings or logs?
 - NA
 
+## 🧠 Semantics for PR Title & Branch Name
+
+Please ensure your PR title and branch name follow the Keploy semantics:
+
+📌 [PR Semantics Guide](https://github.com/keploy/keploy/wiki/PR-Semantics)  
+📌 [Branch Semantics Guide](https://github.com/keploy/keploy/wiki/Branch-Semantics)
+
+**Examples:**
+
+- **PR Title**: `fix: patch MongoDB document update bug`  
+- **Branch Name**: `feature/#1-login-flow`
+
+---
+
 ## Additional checklist:
 - [ ] Have you read the [Contributing Guidelines on issues](https://keploy.io/docs/keploy-explained/contribution-guide/)?
+- [ ] Have you followed the [PR Semantics guide](https://github.com/keploy/keploy/wiki/PR-Semantics) for naming this PR?
+- [ ] Have you followed the [Branch Semantics guide](https://github.com/keploy/keploy/wiki/Branch-Semantics) for naming your branch?

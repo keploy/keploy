@@ -302,9 +302,10 @@ func AskForConfirmation(s string) (bool, error) {
 
 		response = strings.ToLower(strings.TrimSpace(response))
 
-		if response == "y" || response == "yes" {
+		switch response {
+		case "y", "yes":
 			return true, nil
-		} else if response == "n" || response == "no" {
+		case "n", "no":
 			return false, nil
 		}
 	}
@@ -394,7 +395,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
       - name: Test-Report
         uses: keploy/testgpt@main
         with:

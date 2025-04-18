@@ -97,24 +97,29 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 			}
 
 			if len(answers) == 0 {
+
+				switch question.Qtype {
 				// If the resolution failed, return a default A record with Proxy IP
-				if question.Qtype == dns.TypeA {
+				// or AAAA record with Proxy IP6
+				case dns.TypeA:
 					answers = []dns.RR{&dns.A{
 						Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
 						A:   net.ParseIP(p.IP4),
 					}}
 					p.logger.Debug("failed to resolve dns query hence sending proxy ip4", zap.Any("proxy Ip", p.IP4))
-				} else if question.Qtype == dns.TypeAAAA {
+				case dns.TypeAAAA:
 					answers = []dns.RR{&dns.AAAA{
 						Hdr:  dns.RR_Header{Name: question.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
 						AAAA: net.ParseIP(p.IP6),
 					}}
 					p.logger.Debug("failed to resolve dns query hence sending proxy ip6", zap.Any("proxy Ip", p.IP6))
 
+				default:
+					p.logger.Error("Unsupported DNS query type", zap.Any("query type", question.Qtype))
 				}
 
-				p.logger.Debug(fmt.Sprintf("Answers[when resolution failed for query:%v]:\n%v\n", question.Qtype, answers))
 			}
+			p.logger.Debug(fmt.Sprintf("Answers[when resolution failed for query:%v]:\n%v\n", question.Qtype, answers))
 
 			// Cache the answer
 			cache.Lock()
