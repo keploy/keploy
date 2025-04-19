@@ -4,9 +4,9 @@ package provider
 
 import (
 	"errors"
-	"os"
 	"github.com/moby/moby/pkg/parsers/kernel"
 	"go.uber.org/zap"
+	"os"
 )
 
 func isCompatible(logger *zap.Logger) error {
