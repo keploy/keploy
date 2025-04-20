@@ -472,6 +472,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var failure int
 	var ignored int
 	var totalConsumedMocks = map[string]bool{}
+	var totalDeletedMocks = map[string]bool{}
 
 	testSetStatus := models.TestSetStatusPassed
 	testSetStatusByErrChan := models.TestSetStatusRunning
@@ -481,12 +482,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	cmdType := utils.CmdType(r.config.CommandType)
 	var userIP string
 
-	filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now())
-	if err != nil {
-		return models.TestSetStatusFailed, err
-	}
-
-	filteredMocks, unfilteredMocks, err = r.SetupOrUpdateMocks(runTestSetCtx, appID, filteredMocks, unfilteredMocks, totalConsumedMocks, Start, models.OutgoingOptions{
+	err = r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, models.BaseTime, time.Now(), totalDeletedMocks, Start, models.OutgoingOptions{
 		Backdate: testCases[0].HTTPReq.Timestamp,
 	})
 	if err != nil {
@@ -578,7 +574,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	utils.TemplatizedValues = conf.Template
 
 	for idx, testCase := range testCases {
-
 		// check if its the last test case running
 		if idx == len(testCases)-1 && r.isLastTestSet {
 			r.isLastTestCase = true
@@ -636,7 +631,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		var loopErr error
 
 		//No need to handle mocking when basepath is provided
-		filteredMocks, unfilteredMocks, err = r.SetupOrUpdateMocks(runTestSetCtx, appID, filteredMocks, unfilteredMocks, totalConsumedMocks, Update, models.OutgoingOptions{
+		err = r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp, totalDeletedMocks, Update, models.OutgoingOptions{
 			Backdate: testCase.HTTPReq.Timestamp,
 		})
 		if err != nil {
@@ -684,6 +679,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 			for _, mockName := range consumedMocks {
 				totalConsumedMocks[mockName] = true
+			}
+			deletedMocks, err := r.instrumentation.GetDeletedMocks(runTestSetCtx, appID)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to get deleted filtered mocks")
+			}
+			for _, mockName := range deletedMocks {
+				totalDeletedMocks[mockName] = true
 			}
 		}
 
@@ -934,13 +936,18 @@ func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime tim
 	return filtered, unfiltered, err
 }
 
-func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, filtered, unfiltered []*models.Mock, consumedMocks map[string]bool, action MockAction, outgoingOpts models.OutgoingOptions) (filter []*models.Mock, unfilter []*models.Mock, err error) {
+func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, testSetID string, afterTime, beforeTime time.Time, deletedMocks map[string]bool, action MockAction, outgoingOpts models.OutgoingOptions) error {
 	if !r.instrument {
 		r.logger.Debug("Keploy will not setup or update the mocks when base path is provided", zap.Any("base path", r.config.Test.BasePath))
-		return nil, nil, nil
+		return nil
 	}
 
-	filterOutConsumed := func(in []*models.Mock) []*models.Mock {
+	filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, afterTime, beforeTime)
+	if err != nil {
+		return err
+	}
+
+	filterOutDeleted := func(in []*models.Mock) []*models.Mock {
 		out := make([]*models.Mock, 0, len(in))
 		for _, m := range in {
 			// treat empty/missing names as never consumed
@@ -948,15 +955,15 @@ func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, filtere
 				out = append(out, m)
 				continue
 			}
-			if _, ok := consumedMocks[m.Name]; !ok {
+			if _, ok := deletedMocks[m.Name]; !ok {
 				out = append(out, m)
 			}
 		}
 		return out
 	}
 
-	filtered = filterOutConsumed(filtered)
-	unfiltered = filterOutConsumed(unfiltered)
+	filteredMocks = filterOutDeleted(filteredMocks)
+	unfilteredMocks = filterOutDeleted(unfilteredMocks)
 
 	if action == Start {
 		outgoingOpts.Rules = r.config.BypassRules
@@ -968,17 +975,17 @@ func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, filtere
 		err := r.instrumentation.MockOutgoing(ctx, appID, outgoingOpts)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to mock outgoing")
-			return nil, nil, err
+			return err
 		}
 	}
 
-	err = r.instrumentation.SetMocks(ctx, appID, filtered, unfiltered)
+	err = r.instrumentation.SetMocks(ctx, appID, filteredMocks, unfilteredMocks)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to set mocks")
-		return nil, nil, err
+		return err
 	}
 
-	return filtered, unfiltered, nil
+	return nil
 }
 
 func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error) {

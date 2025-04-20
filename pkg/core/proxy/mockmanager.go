@@ -18,6 +18,7 @@ type MockManager struct {
 	unfiltered    *TreeDb
 	logger        *zap.Logger
 	consumedMocks sync.Map
+	deletedMocks  sync.Map
 }
 
 func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManager {
@@ -26,6 +27,7 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 		unfiltered:    unfiltered,
 		logger:        logger,
 		consumedMocks: sync.Map{},
+		deletedMocks:  sync.Map{},
 	}
 }
 
@@ -96,10 +98,21 @@ func (m *MockManager) FlagMockAsUsed(mock models.Mock) error {
 	return nil
 }
 
+func (m *MockManager) FlagMockAsDeleted(mock models.Mock) error {
+	if mock.Name == "" {
+		return fmt.Errorf("mock is empty")
+	}
+	m.deletedMocks.Store(mock.Name, true)
+	return nil
+}
+
 func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	isDeleted := m.filtered.delete(mock.TestModeInfo)
 	if isDeleted {
 		go func() {
+			if err := m.FlagMockAsDeleted(mock); err != nil {
+				m.logger.Error("failed to flag mock as deleted", zap.Error(err))
+			}
 			if err := m.FlagMockAsUsed(mock); err != nil {
 				m.logger.Error("failed to flag mock as used", zap.Error(err))
 			}
@@ -112,6 +125,9 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 	isDeleted := m.unfiltered.delete(mock.TestModeInfo)
 	if isDeleted {
 		go func() {
+			if err := m.FlagMockAsDeleted(mock); err != nil {
+				m.logger.Error("failed to flag mock as deleted", zap.Error(err))
+			}
 			if err := m.FlagMockAsUsed(mock); err != nil {
 				m.logger.Error("failed to flag mock as used", zap.Error(err))
 			}
@@ -136,6 +152,26 @@ func (m *MockManager) GetConsumedMocks() []string {
 	})
 	for key := range keys {
 		m.consumedMocks.Delete(key)
+	}
+	return keys
+}
+
+func (m *MockManager) GetDeletedMocks() []string {
+	var keys []string
+	m.deletedMocks.Range(func(key, _ interface{}) bool {
+		if _, ok := key.(string); ok {
+			keys = append(keys, key.(string))
+			m.deletedMocks.Delete(key)
+		}
+		return true
+	})
+	sort.Slice(keys, func(i, j int) bool {
+		numI, _ := strconv.Atoi(strings.Split(keys[i], "-")[1])
+		numJ, _ := strconv.Atoi(strings.Split(keys[j], "-")[1])
+		return numI < numJ
+	})
+	for key := range keys {
+		m.deletedMocks.Delete(key)
 	}
 	return keys
 }

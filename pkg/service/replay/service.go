@@ -18,6 +18,8 @@ type Instrumentation interface {
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
 	// GetConsumedMocks to log the names of the mocks that were consumed during the test run of failed test cases
 	GetConsumedMocks(ctx context.Context, id uint64) ([]string, error)
+	// GetDeletedMocks to log the names of the mocks that were deleted during the test run of failed test cases
+	GetDeletedMocks(ctx context.Context, id uint64) ([]string, error)
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
 

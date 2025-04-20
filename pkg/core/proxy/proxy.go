@@ -702,3 +702,11 @@ func (p *Proxy) GetConsumedMocks(_ context.Context, id uint64) ([]string, error)
 	}
 	return m.(*MockManager).GetConsumedMocks(), nil
 }
+
+func (p *Proxy) GetDeletedMocks(_ context.Context, id uint64) ([]string, error) {
+	m, ok := p.MockManagers.Load(id)
+	if !ok {
+		return nil, fmt.Errorf("mock manager not found to get deleted filtered mocks")
+	}
+	return m.(*MockManager).GetDeletedMocks(), nil
+}
