@@ -44,6 +44,10 @@ func (c *Core) GetConsumedMocks(ctx context.Context, id uint64) ([]string, error
 	return nil, errUnsupported
 }
 
+func (c *Core) GetDeletedMocks(ctx context.Context, id uint64) ([]string, error) {
+	return nil, errUnsupported
+}
+
 func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.AppError {
 	return models.AppError{
 		Err: errUnsupported,
