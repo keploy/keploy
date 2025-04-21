@@ -45,7 +45,7 @@ type App struct {
 	id               uint64
 	cmd              string
 	kind             utils.CmdType
-	containerDelay   uint64
+	containerDelay   time.Duration
 	container        string
 	containerNetwork string
 	containerIPv4    chan string
@@ -61,7 +61,7 @@ type Options struct {
 	// canExit disables any error returned if the app exits by itself.
 	//CanExit       bool
 	Container     string
-	DockerDelay   uint64
+	DockerDelay   time.Duration
 	DockerNetwork string
 }
 

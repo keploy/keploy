@@ -11,8 +11,12 @@ import (
 )
 
 func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
-	conf := config.New()
+	conf, err := config.New()
 
+	if err != nil {
+		utils.LogError(logger, err, "failed to load default configuration")
+		return nil
+	}
 	var rootCmd = &cobra.Command{
 		Use:     "keploy",
 		Short:   "Keploy CLI",
@@ -40,7 +44,7 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 
 	rootCmd.SetVersionTemplate(provider.VersionTemplate)
 
-	err := cmdConfigurator.AddFlags(rootCmd)
+	err = cmdConfigurator.AddFlags(rootCmd)
 	if err != nil {
 		utils.LogError(logger, err, "failed to set flags")
 		return nil
