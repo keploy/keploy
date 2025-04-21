@@ -61,6 +61,13 @@ const (
 	FromClient OriginType = "client"
 )
 
+type MockStatus string
+
+const (
+	Consumed MockStatus = "consumed"
+	Deleted  MockStatus = "deleted"
+)
+
 type Payload struct {
 	Origin  OriginType     `json:"Origin,omitempty" yaml:"origin" bson:"origin,omitempty"`
 	Message []OutputBinary `json:"Message,omitempty" yaml:"message" bson:"message,omitempty"`

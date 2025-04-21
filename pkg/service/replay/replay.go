@@ -471,8 +471,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var success int
 	var failure int
 	var ignored int
-	var totalConsumedMocks = map[string]bool{}
-	var totalDeletedMocks = map[string]bool{}
+	var totalMocks = map[string]models.MockStatus{}
 
 	testSetStatus := models.TestSetStatusPassed
 	testSetStatusByErrChan := models.TestSetStatusRunning
@@ -482,7 +481,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	cmdType := utils.CmdType(r.config.CommandType)
 	var userIP string
 
-	err = r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, models.BaseTime, time.Now(), totalDeletedMocks, Start, models.OutgoingOptions{
+	err = r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, models.BaseTime, time.Now(), totalMocks, Start, models.OutgoingOptions{
 		Backdate: testCases[0].HTTPReq.Timestamp,
 	})
 	if err != nil {
@@ -631,7 +630,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		var loopErr error
 
 		//No need to handle mocking when basepath is provided
-		err = r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp, totalDeletedMocks, Update, models.OutgoingOptions{
+		err = r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp, totalMocks, Update, models.OutgoingOptions{
 			Backdate: testCase.HTTPReq.Timestamp,
 		})
 		if err != nil {
@@ -673,19 +672,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		var consumedMocks []string
 		if r.instrument {
-			consumedMocks, err = r.instrumentation.GetConsumedMocks(runTestSetCtx, appID)
+			consumedMocks, err = r.instrumentation.GetMocks(runTestSetCtx, appID, models.Consumed)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 			}
 			for _, mockName := range consumedMocks {
-				totalConsumedMocks[mockName] = true
+				totalMocks[mockName] = models.Consumed
 			}
-			deletedMocks, err := r.instrumentation.GetDeletedMocks(runTestSetCtx, appID)
+			deletedMocks, err := r.instrumentation.GetMocks(runTestSetCtx, appID, models.Deleted)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get deleted filtered mocks")
 			}
 			for _, mockName := range deletedMocks {
-				totalDeletedMocks[mockName] = true
+				totalMocks[mockName] = models.Deleted
 			}
 		}
 
@@ -858,9 +857,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	// remove the unused mocks by the test cases of a testset (if the base path is not provided )
 	if r.config.Test.RemoveUnusedMocks && testSetStatus == models.TestSetStatusPassed && r.instrument {
-		r.logger.Debug("consumed mocks from the completed testset", zap.Any("for test-set", testSetID), zap.Any("consumed mocks", totalConsumedMocks))
+		r.logger.Debug("consumed mocks from the completed testset", zap.Any("for test-set", testSetID), zap.Any("consumed mocks", totalMocks))
 		// delete the unused mocks from the data store
-		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, totalConsumedMocks)
+		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, totalMocks)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
 		}
@@ -936,7 +935,7 @@ func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime tim
 	return filtered, unfiltered, err
 }
 
-func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, testSetID string, afterTime, beforeTime time.Time, deletedMocks map[string]bool, action MockAction, outgoingOpts models.OutgoingOptions) error {
+func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, testSetID string, afterTime, beforeTime time.Time, totalMocks map[string]models.MockStatus, action MockAction, outgoingOpts models.OutgoingOptions) error {
 	if !r.instrument {
 		r.logger.Debug("Keploy will not setup or update the mocks when base path is provided", zap.Any("base path", r.config.Test.BasePath))
 		return nil
@@ -955,7 +954,7 @@ func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, testSet
 				out = append(out, m)
 				continue
 			}
-			if _, ok := deletedMocks[m.Name]; !ok {
+			if k, ok := totalMocks[m.Name]; !ok || k != models.Deleted {
 				out = append(out, m)
 			}
 		}

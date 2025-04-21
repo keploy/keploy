@@ -39,7 +39,7 @@ func New(Logger *zap.Logger, mockPath string, mockName string) *MockYaml {
 // UpdateMocks deletes the mocks from the mock file with given names
 //
 // mockNames is a map which contains the name of the mocks as key and a isConfig boolean as value
-func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]bool) error {
+func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockStatus) error {
 	mockFileName := "mocks"
 	if ys.MockName != "" {
 		mockFileName = ys.MockName
