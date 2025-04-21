@@ -102,7 +102,6 @@ func (h *HTTP) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.Co
 	}
 	return nil
 }
-
 // ParseFinalHTTP is used to parse the final http request and response and save it in a yaml file
 func (h *HTTP) parseFinalHTTP(_ context.Context, mock *FinalHTTP, destPort uint, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	var req *http.Request
@@ -183,7 +182,6 @@ func (h *HTTP) parseFinalHTTP(_ context.Context, mock *FinalHTTP, destPort uint,
 		h.Logger.Debug("The request is a passThrough request", zap.Any("metadata", GetReqMeta(req)))
 		return nil
 	}
-
 	mocks <- &models.Mock{
 		Version: models.GetVersion(),
 		Name:    "mocks",
@@ -212,6 +210,3 @@ func (h *HTTP) parseFinalHTTP(_ context.Context, mock *FinalHTTP, destPort uint,
 	}
 	return nil
 }
-
-
-
