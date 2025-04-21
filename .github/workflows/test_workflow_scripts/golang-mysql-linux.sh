@@ -65,7 +65,7 @@ for i in {1..2}; do
 done
 
 # Start the gin-mongo app in test mode.
-sudo -E env PATH="$PATH" ./../../keployv2 test -c "./urlShort" --delay 7 --generateGithubActions=false &> test_logs.txt
+sudo -E env PATH="$PATH" ./../../keployv2 test -c "./urlShort" --delay 7 --generateGithubActions=false
 
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."
