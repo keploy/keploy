@@ -4,6 +4,7 @@
 ## Links & References
 
 **Fixes:** #123  <!-- Replace with actual issue number -->
+- NA (if very small change like typo, linting, etc.)
 
 ### 🔗 Related PRs
 - NA
@@ -59,7 +60,7 @@ Please ensure your PR title and branch name follow the Keploy semantics:
 **Examples:**
 
 - **PR Title**: `fix: patch MongoDB document update bug`  
-- **Branch Name**: `feature/#1-login-flow`
+- **Branch Name**: `feat/#1-login-flow`
 
 ---
 
