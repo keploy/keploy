@@ -146,7 +146,12 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 							res := make([]models.Frontend, len(initMock.Spec.PostgresResponses))
 							copy(res, initMock.Spec.PostgresResponses)
 							res[requestIndex].AuthType = 5
-							err := mockDb.FlagMockAsUsed(initMock, models.Updated)
+							err := mockDb.FlagMockAsUsed(models.MockState{
+								Name:       initMock.Name,
+								Usage:      models.Updated,
+								IsFiltered: initMock.TestModeInfo.IsFiltered,
+								SortOrder:  initMock.TestModeInfo.SortOrder,
+							})
 							if err != nil {
 								logger.Error("failed to flag mock as used", zap.Error(err))
 							}
@@ -209,7 +214,12 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 									Value: "Etc/UTC",
 								},
 							}
-							err := mockDb.FlagMockAsUsed(initMock, models.Updated)
+							err := mockDb.FlagMockAsUsed(models.MockState{
+								Name:       initMock.Name,
+								Usage:      models.Updated,
+								IsFiltered: initMock.TestModeInfo.IsFiltered,
+								SortOrder:  initMock.TestModeInfo.SortOrder,
+							})
 							if err != nil {
 								logger.Error("failed to flag mock as used", zap.Error(err))
 							}
@@ -289,7 +299,12 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 						continue
 					}
 				} else {
-					err := mockDb.FlagMockAsUsed(*matchedMock, models.Updated)
+					err := mockDb.FlagMockAsUsed(models.MockState{
+						Name:       matchedMock.Name,
+						Usage:      models.Updated,
+						IsFiltered: matchedMock.TestModeInfo.IsFiltered,
+						SortOrder:  matchedMock.TestModeInfo.SortOrder,
+					})
 					if err != nil {
 						logger.Error("failed to flag mock as used", zap.Error(err))
 					}

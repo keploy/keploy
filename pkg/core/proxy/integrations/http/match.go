@@ -348,7 +348,12 @@ func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb in
 		updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
 		return updated
 	}
-	err := mockDb.FlagMockAsUsed(*matchedMock, models.Updated)
+	err := mockDb.FlagMockAsUsed(models.MockState{
+		Name:       matchedMock.Name,
+		Usage:      models.Updated,
+		IsFiltered: matchedMock.TestModeInfo.IsFiltered,
+		SortOrder:  matchedMock.TestModeInfo.SortOrder,
+	})
 	if err != nil {
 		h.Logger.Error("failed to flag mock as used", zap.Error(err))
 	}

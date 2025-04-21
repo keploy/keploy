@@ -578,7 +578,12 @@ func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock,
 	}
 
 	// we don't update the mock if the IsFiltered is false
-	err := mockDb.FlagMockAsUsed(*matchedMock, models.Updated)
+	err := mockDb.FlagMockAsUsed(models.MockState{
+		Name:       matchedMock.Name,
+		Usage:      models.Updated,
+		IsFiltered: matchedMock.TestModeInfo.IsFiltered,
+		SortOrder:  matchedMock.TestModeInfo.SortOrder,
+	})
 	if err != nil {
 		logger.Error("failed to flag mock as used", zap.Error(err))
 	}
