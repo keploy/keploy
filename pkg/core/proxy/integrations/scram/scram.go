@@ -93,7 +93,7 @@ func GenerateServerFirstMessage(recordedRequestMsg, receivedRequestMsg, firstRes
 	}
 	// Since, the nonce are randomlly generated string. so, each session have unique nonce.
 	// Thus, the mocked server response should be updated according to the current nonce
-	updatedResponse := strings.Replace(string(firstResponseMsg), expectedNonce, actualNonce, -1)
+	updatedResponse := strings.ReplaceAll(string(firstResponseMsg), expectedNonce, actualNonce)
 
 	logger.Debug("Updated server first message after nonce substitution", zap.String("updatedResponse", updatedResponse))
 

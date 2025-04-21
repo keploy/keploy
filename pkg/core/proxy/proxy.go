@@ -330,10 +330,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	var dstAddr string
 
-	if destInfo.Version == 4 {
+	switch destInfo.Version {
+	case 4:
+		p.logger.Debug("the destination is ipv4")
 		dstAddr = fmt.Sprintf("%v:%v", util.ToIP4AddressStr(destInfo.IPv4Addr), destInfo.Port)
 		p.logger.Debug("", zap.Any("DestIp4", destInfo.IPv4Addr), zap.Any("DestPort", destInfo.Port))
-	} else if destInfo.Version == 6 {
+	case 6:
+		p.logger.Debug("the destination is ipv6")
 		dstAddr = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.IPv6Addr), destInfo.Port)
 		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Any("DestPort", destInfo.Port))
 	}
@@ -374,7 +377,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}()
 
 	//check for global passthrough in test mode
-	if !rule.OutgoingOptions.Mocking && rule.Mode == models.MODE_TEST {
+	if !rule.Mocking && rule.Mode == models.MODE_TEST {
 
 		dstConn, err = net.Dial("tcp", dstAddr)
 		if err != nil {
@@ -402,7 +405,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			dstCfg := &models.ConditionalDstCfg{
 				Port: uint(destInfo.Port),
 			}
-			rule.OutgoingOptions.DstCfg = dstCfg
+			rule.DstCfg = dstCfg
 
 			// Record the outgoing message into a mock
 			err := p.Integrations[integrations.MYSQL].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
@@ -457,20 +460,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}
 
-	// attempt to read conn until buffer is either filled or conn is closed
-	initialBuf, err := util.ReadInitialBuf(parserCtx, p.logger, srcConn)
-	if err != nil {
-		utils.LogError(p.logger, err, "failed to read the initial buffer")
-		return err
-	}
-
-	//update the src connection to have the initial buffer
-	srcConn = &util.Conn{
-		Conn:   srcConn,
-		Reader: io.MultiReader(bytes.NewReader(initialBuf), srcConn),
-		Logger: p.logger,
-	}
-
 	clientID, ok := parserCtx.Value(models.ClientConnectionIDKey).(string)
 	if !ok {
 		utils.LogError(p.logger, err, "failed to fetch the client connection id")
@@ -483,6 +472,45 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	logger := p.logger.With(zap.Any("Client IP Address", srcConn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientID), zap.Any("Destination IP Address", dstAddr), zap.Any("Destination ConnectionID", destID))
+
+	var initialBuf []byte
+	// attempt to read conn until buffer is either filled or conn is closed
+	initialBuf, err = util.ReadInitialBuf(parserCtx, p.logger, srcConn)
+	if err != nil {
+		utils.LogError(logger, err, "failed to read the initial buffer")
+		return err
+	}
+
+	if util.IsHTTPReq(initialBuf) && !util.HasCompleteHTTPHeaders(initialBuf) {
+		// HTTP headers are never chunked according to the HTTP protocol,
+		// but at the TCP layer, we cannot be sure if we have received the entire
+		// header in the first buffer chunk. This is why we check if the headers are complete
+		// and read more data if needed.
+
+		// Some HTTP requests, like AWS SQS, may require special handling in Keploy Enterprise.
+		// These cases may send partial headers in multiple chunks, so we need to read until
+		// we get the complete headers.
+
+		logger.Debug("Partial HTTP headers detected, reading more data to get complete headers")
+
+		// Read more data from the TCP connection to get the complete HTTP headers.
+		headerBuf, err := util.ReadHTTPHeadersUntilEnd(parserCtx, p.logger, srcConn)
+		if err != nil {
+			// Log the error if we fail to read the complete HTTP headers.
+			utils.LogError(logger, err, "failed to read the complete HTTP headers from client")
+			return err
+		}
+		// Append the additional data to the initial buffer.
+		initialBuf = append(initialBuf, headerBuf...)
+	}
+
+	//update the src connection to have the initial buffer
+	srcConn = &util.Conn{
+		Conn:   srcConn,
+		Reader: io.MultiReader(bytes.NewReader(initialBuf), srcConn),
+		Logger: p.logger,
+	}
+
 	dstCfg := &models.ConditionalDstCfg{
 		Port: uint(destInfo.Port),
 	}
