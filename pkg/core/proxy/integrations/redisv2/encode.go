@@ -4,7 +4,6 @@ package redisv2
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -17,19 +16,16 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
-	"golang.org/x/sync/errgroup"
 )
 
-func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte,
-	clientConn, destConn net.Conn, mocks chan<- *models.Mock,
-	_ models.OutgoingOptions) error {
-
-	var redisProtocolVersion int
+func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
 	var redisRequests []models.RedisRequests
 	var redisResponses []models.RedisResponses
+	var reqAccumBuf []byte
+	var respAccumBuf []byte
 
-	// parse initial client request
-	processBufferRequests(reqBuf, models.FromClient, &redisRequests)
+	// accumulate the first request
+	reqAccumBuf = append(reqAccumBuf, reqBuf...)
 
 	dataType := models.String
 	if !util.IsASCII(string(reqBuf)) {
@@ -40,7 +36,7 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte,
 		logger.Debug("Encoding redis request", zap.String("dataType", dataType), zap.ByteString("buf", reqBuf))
 	}
 
-	// determine protocol version
+	var redisProtocolVersion int
 	bufStr := string(reqBuf)
 	if len(bufStr) > 0 {
 		if strings.Contains(bufStr, "ping") {
@@ -62,90 +58,130 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte,
 	}
 	logger.Debug("redisProtocolVersion", zap.Int("version", redisProtocolVersion))
 
-	// send to server
-	if _, err := destConn.Write(reqBuf); err != nil {
-		utils.LogError(logger, err, "failed to write request to destination server")
+	_, err := destConn.Write(reqBuf)
+	if err != nil {
+		utils.LogError(logger, err, "failed to write request message to the destination server")
 		return err
 	}
 
-	errCh := make(chan error, 1)
-	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
-	if !ok {
-		return errors.New("failed to get error group from context")
+	clientBuffChan := make(chan []byte)
+	destBuffChan := make(chan []byte)
+	errChan := make(chan error)
+
+	err = pUtil.ReadFromPeer(ctx, logger, clientConn, clientBuffChan, errChan, pUtil.Client)
+	if err != nil {
+		return fmt.Errorf("error reading from client:%v", err)
 	}
-	reqTimestamp := time.Now()
+	err = pUtil.ReadFromPeer(ctx, logger, destConn, destBuffChan, errChan, pUtil.Destination)
+	if err != nil {
+		return fmt.Errorf("error reading from destination:%v", err)
+	}
 
-	g.Go(func() error {
-		defer pUtil.Recover(logger, clientConn, destConn)
-		defer close(errCh)
+	prevChunkWasReq := false
+	reqTimestampMock := time.Now()
+	var resTimestampMock time.Time
 
-		for {
-			resp, err := pUtil.ReadBytes(ctx, logger, destConn)
-			if err != nil {
-				if err == io.EOF {
-					if len(resp) != 0 {
-						ts := time.Now()
-						_, err := clientConn.Write(resp)
-						if err != nil {
-							utils.LogError(logger, err, "failed writing response to client")
-							errCh <- err
-							return nil
-						}
-						processBufferResponses(resp, models.FromServer, &redisResponses)
-						saveMock(redisRequests, redisResponses, reqTimestamp, ts, mocks)
-					}
-					break
-				}
-				utils.LogError(logger, err, "failed reading response from server")
-				errCh <- err
-				return nil
+	for {
+		select {
+		case <-ctx.Done():
+			if len(respAccumBuf) > 0 {
+				processBufferResponses(respAccumBuf, models.FromServer, &redisResponses)
+				respAccumBuf = nil
 			}
-
-			_, err = clientConn.Write(resp)
-			if err != nil {
-				utils.LogError(logger, err, "failed writing response to client")
-				errCh <- err
-				return nil
+			if len(reqAccumBuf) > 0 {
+				processBufferRequests(reqAccumBuf, models.FromClient, &redisRequests)
+				reqAccumBuf = nil
 			}
-			ts := time.Now()
-			processBufferResponses(resp, models.FromServer, &redisResponses)
 			if len(redisRequests) > 0 && len(redisResponses) > 0 {
-				saveMock(redisRequests, redisResponses, reqTimestamp, ts, mocks)
+				metadata := map[string]string{"type": "config"}
+				mocks <- &models.Mock{
+					Version: models.GetVersion(),
+					Name:    "mocks",
+					Kind:    models.REDIS,
+					Spec: models.MockSpec{
+						RedisRequests:    redisRequests,
+						RedisResponses:   redisResponses,
+						ReqTimestampMock: reqTimestampMock,
+						ResTimestampMock: resTimestampMock,
+						Metadata:         metadata,
+					},
+				}
+			}
+			return ctx.Err()
+
+		case buffer := <-clientBuffChan:
+			if len(respAccumBuf) > 0 {
+				processBufferResponses(respAccumBuf, models.FromServer, &redisResponses)
+				respAccumBuf = nil
+			}
+
+			_, err := destConn.Write(buffer)
+			if err != nil {
+				utils.LogError(logger, err, "failed to write request message to the destination server")
+				return err
+			}
+
+			if !prevChunkWasReq && len(redisRequests) > 0 && len(redisResponses) > 0 {
+				reqs := append([]models.RedisRequests(nil), redisRequests...)
+				resps := append([]models.RedisResponses(nil), redisResponses...)
+				go func(reqs []models.RedisRequests, resps []models.RedisResponses) {
+					metadata := map[string]string{"type": "config"}
+					mocks <- &models.Mock{
+						Version: models.GetVersion(),
+						Name:    "mocks",
+						Kind:    models.REDIS,
+						Spec: models.MockSpec{
+							RedisRequests:    reqs,
+							RedisResponses:   resps,
+							ReqTimestampMock: reqTimestampMock,
+							ResTimestampMock: resTimestampMock,
+							Metadata:         metadata,
+						},
+					}
+				}(reqs, resps)
 				redisRequests = nil
 				redisResponses = nil
 			}
 
-			// next client request
-			reqBuf, err = pUtil.ReadBytes(ctx, logger, clientConn)
-			if err != nil {
-				if err != io.EOF {
-					utils.LogError(logger, err, "failed reading request from client")
-					errCh <- err
-					return nil
-				}
-				errCh <- err
-				return nil
-			}
-			processBufferRequests(reqBuf, models.FromClient, &redisRequests)
-			_, err = destConn.Write(reqBuf)
-			if err != nil {
-				utils.LogError(logger, err, "failed writing request to destination")
-				errCh <- err
-				return nil
-			}
-			reqTimestamp = time.Now()
-		}
-		return nil
-	})
+			reqAccumBuf = append(reqAccumBuf, buffer...)
+			prevChunkWasReq = true
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-errCh:
-		if err == io.EOF {
-			return nil
+		case buffer := <-destBuffChan:
+			if prevChunkWasReq {
+				if len(reqAccumBuf) > 0 {
+					processBufferRequests(reqAccumBuf, models.FromClient, &redisRequests)
+					reqAccumBuf = nil
+				}
+				reqTimestampMock = time.Now()
+				respAccumBuf = nil
+			}
+
+			respAccumBuf = append(respAccumBuf, buffer...)
+			_, err := clientConn.Write(buffer)
+			if err != nil {
+				utils.LogError(logger, err, "failed to write response message to the client")
+				return err
+			}
+			resTimestampMock = time.Now()
+			prevChunkWasReq = false
+
+		case err := <-errChan:
+			if err == io.EOF {
+				if len(respAccumBuf) > 0 {
+					processBufferResponses(respAccumBuf, models.FromServer, &redisResponses)
+					respAccumBuf = nil
+				}
+				if len(reqAccumBuf) > 0 {
+					processBufferRequests(reqAccumBuf, models.FromClient, &redisRequests)
+					reqAccumBuf = nil
+				}
+				if len(redisRequests) > 0 && len(redisResponses) > 0 {
+					saveMock(redisRequests, redisResponses, reqTimestampMock, resTimestampMock, mocks)
+				}
+				return nil
+			}
+			return err
 		}
-		return err
 	}
 }
 

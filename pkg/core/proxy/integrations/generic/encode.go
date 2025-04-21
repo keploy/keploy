@@ -4,11 +4,9 @@ package generic
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
-	"strconv"
 	"time"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
@@ -21,24 +19,20 @@ import (
 func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn, destConn net.Conn, mocks chan<- *models.Mock, _ models.OutgoingOptions) error {
 
 	var genericRequests []models.Payload
+	var genericResponses []models.Payload
+	var currRespChunks []models.OutputBinary
+	var respAccumBuf []byte
+	var reqAccumBuf []byte
 
 	bufStr := string(reqBuf)
-	dataType := models.String
+	// dataType := models.String
 	if !util.IsASCII(string(reqBuf)) {
 		bufStr = util.EncodeBase64(reqBuf)
-		dataType = "binary"
+		// dataType = "binary"
 	}
 
 	if bufStr != "" {
-		genericRequests = append(genericRequests, models.Payload{
-			Origin: models.FromClient,
-			Message: []models.OutputBinary{
-				{
-					Type: dataType,
-					Data: bufStr,
-				},
-			},
-		})
+		reqAccumBuf = append(reqAccumBuf, reqBuf...)
 	}
 
 	_, err := destConn.Write(reqBuf)
@@ -46,78 +40,89 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 		utils.LogError(logger, err, "failed to write request message to the destination server")
 		return err
 	}
-	var genericResponses []models.Payload
 
 	clientBuffChan := make(chan []byte)
 	destBuffChan := make(chan []byte)
 	errChan := make(chan error)
 
-	// read requests from client
 	err = pUtil.ReadFromPeer(ctx, logger, clientConn, clientBuffChan, errChan, pUtil.Client)
 	if err != nil {
 		return fmt.Errorf("error reading from client:%v", err)
 	}
 
-	// read responses from destination
 	err = pUtil.ReadFromPeer(ctx, logger, destConn, destBuffChan, errChan, pUtil.Destination)
 	if err != nil {
 		return fmt.Errorf("error reading from destination:%v", err)
 	}
 
 	prevChunkWasReq := false
-	var reqTimestampMock = time.Now()
+	reqTimestampMock := time.Now()
 	var resTimestampMock time.Time
-
-	// ticker := time.NewTicker(1 * time.Second)
-	logger.Debug("the iteration for the generic request starts", zap.Any("genericReqs", len(genericRequests)), zap.Any("genericResps", len(genericResponses)))
 
 	for {
 		select {
 		case <-ctx.Done():
-			if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {
-				genericRequestsCopy := make([]models.Payload, len(genericRequests))
-				genericResponsesCopy := make([]models.Payload, len(genericResponses))
-				copy(genericResponsesCopy, genericResponses)
-				copy(genericRequestsCopy, genericRequests)
-
-				metadata := make(map[string]string)
-				metadata["type"] = "config"
-
-				// Save the mock
+			if len(respAccumBuf) > 0 {
+				dataStr := string(respAccumBuf)
+				typeVal := models.String
+				if !util.IsASCII(string(respAccumBuf)) {
+					dataStr = util.EncodeBase64(respAccumBuf)
+					typeVal = "binary"
+				}
+				currRespChunks = append(currRespChunks, models.OutputBinary{Type: typeVal, Data: dataStr})
+				genericResponses = append(genericResponses, models.Payload{Origin: models.FromServer, Message: currRespChunks})
+			}
+			if len(reqAccumBuf) > 0 {
+				dataStr := string(reqAccumBuf)
+				typeVal := models.String
+				if !util.IsASCII(string(reqAccumBuf)) {
+					dataStr = util.EncodeBase64(reqAccumBuf)
+					typeVal = "binary"
+				}
+				genericRequests = append(genericRequests, models.Payload{Origin: models.FromClient, Message: []models.OutputBinary{{Type: typeVal, Data: dataStr}}})
+			}
+			if len(genericRequests) > 0 && len(genericResponses) > 0 {
+				metadata := map[string]string{"type": "config"}
 				mocks <- &models.Mock{
 					Version: models.GetVersion(),
 					Name:    "mocks",
 					Kind:    models.GENERIC,
 					Spec: models.MockSpec{
-						GenericRequests:  genericRequestsCopy,
-						GenericResponses: genericResponsesCopy,
+						GenericRequests:  genericRequests,
+						GenericResponses: genericResponses,
 						ReqTimestampMock: reqTimestampMock,
 						ResTimestampMock: resTimestampMock,
 						Metadata:         metadata,
 					},
 				}
-				return ctx.Err()
 			}
+			return ctx.Err()
+
 		case buffer := <-clientBuffChan:
-			// Write the request message to the destination
+			if len(respAccumBuf) > 0 {
+				dataStr := string(respAccumBuf)
+				typeVal := models.String
+				if !util.IsASCII(string(respAccumBuf)) {
+					dataStr = util.EncodeBase64(respAccumBuf)
+					typeVal = "binary"
+				}
+				currRespChunks = append(currRespChunks, models.OutputBinary{Type: typeVal, Data: dataStr})
+				genericResponses = append(genericResponses, models.Payload{Origin: models.FromServer, Message: currRespChunks})
+				currRespChunks = nil
+				respAccumBuf = nil
+			}
+
 			_, err := destConn.Write(buffer)
 			if err != nil {
 				utils.LogError(logger, err, "failed to write request message to the destination server")
 				return err
 			}
 
-			logger.Debug("the iteration for the generic request ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
-
 			if !prevChunkWasReq && len(genericRequests) > 0 && len(genericResponses) > 0 {
-				genericRequestsCopy := make([]models.Payload, len(genericRequests))
-				genericResponseCopy := make([]models.Payload, len(genericResponses))
-				copy(genericResponseCopy, genericResponses)
-				copy(genericRequestsCopy, genericRequests)
-				go func(reqs []models.Payload, resps []models.Payload) {
-					metadata := make(map[string]string)
-					metadata["type"] = "config"
-
-					// Save the mock
+				reqs := append([]models.Payload(nil), genericRequests...)
+				resps := append([]models.Payload(nil), genericResponses...)
+				go func(reqs, resps []models.Payload) {
+					metadata := map[string]string{"type": "config"}
 					mocks <- &models.Mock{
 						Version: models.GetVersion(),
 						Name:    "mocks",
@@ -130,68 +135,40 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 							Metadata:         metadata,
 						},
 					}
-
-				}(genericRequestsCopy, genericResponseCopy)
-				genericRequests = []models.Payload{}
-				genericResponses = []models.Payload{}
+				}(reqs, resps)
+				genericRequests = nil
+				genericResponses = nil
 			}
 
-			bufStr := string(buffer)
-			buffDataType := models.String
-			if !util.IsASCII(string(buffer)) {
-				bufStr = util.EncodeBase64(buffer)
-				buffDataType = "binary"
-			}
-
-			if bufStr != "" {
-				genericRequests = append(genericRequests, models.Payload{
-					Origin: models.FromClient,
-					Message: []models.OutputBinary{
-						{
-							Type: buffDataType,
-							Data: bufStr,
-						},
-					},
-				})
-			}
-
+			reqAccumBuf = append(reqAccumBuf, buffer...)
 			prevChunkWasReq = true
+
 		case buffer := <-destBuffChan:
 			if prevChunkWasReq {
-				// store the request timestamp
 				reqTimestampMock = time.Now()
+				respAccumBuf = nil
+				if len(reqAccumBuf) > 0 {
+					dataStr := string(reqAccumBuf)
+					typeVal := models.String
+					if !util.IsASCII(string(reqAccumBuf)) {
+						dataStr = util.EncodeBase64(reqAccumBuf)
+						typeVal = "binary"
+					}
+					genericRequests = append(genericRequests, models.Payload{Origin: models.FromClient, Message: []models.OutputBinary{{Type: typeVal, Data: dataStr}}})
+					reqAccumBuf = nil
+				}
 			}
 
-			// Write the response message to the client
+			respAccumBuf = append(respAccumBuf, buffer...)
+
 			_, err := clientConn.Write(buffer)
 			if err != nil {
 				utils.LogError(logger, err, "failed to write response message to the client")
 				return err
 			}
-
-			bufStr := string(buffer)
-			buffDataType := models.String
-			if !util.IsASCII(string(buffer)) {
-				bufStr = base64.StdEncoding.EncodeToString(buffer)
-				buffDataType = "binary"
-			}
-
-			if bufStr != "" {
-				genericResponses = append(genericResponses, models.Payload{
-					Origin: models.FromServer,
-					Message: []models.OutputBinary{
-						{
-							Type: buffDataType,
-							Data: bufStr,
-						},
-					},
-				})
-			}
-
 			resTimestampMock = time.Now()
-
-			logger.Debug("the iteration for the generic response ends with no of genericReqs:" + strconv.Itoa(len(genericRequests)) + " and genericResps: " + strconv.Itoa(len(genericResponses)))
 			prevChunkWasReq = false
+
 		case err := <-errChan:
 			if err == io.EOF {
 				return nil
