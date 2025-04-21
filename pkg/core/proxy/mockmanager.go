@@ -31,19 +31,33 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 
 func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	m.filtered.deleteAll()
+	var mk models.Mock
 	for index, mock := range mocks {
-		mock.TestModeInfo.SortOrder = index
-		mock.TestModeInfo.ID = index
-		m.filtered.insert(mock.TestModeInfo, mock)
+		mk.ConnectionID = (*mock).ConnectionID
+		mk.Kind = (*mock).Kind
+		mk.Name = (*mock).Name
+		mk.TestModeInfo = (*mock).TestModeInfo
+		mk.Version = (*mock).Version
+		mk.Spec = (*mock).Spec
+		mk.TestModeInfo.ID = index
+		mk.TestModeInfo.SortOrder = index
+		m.filtered.insert(mk.TestModeInfo, mk)
 	}
 }
 
 func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 	m.unfiltered.deleteAll()
+	var mk models.Mock
 	for index, mock := range mocks {
-		mock.TestModeInfo.SortOrder = index
-		mock.TestModeInfo.ID = index
-		m.unfiltered.insert(mock.TestModeInfo, mock)
+		mk.ConnectionID = (*mock).ConnectionID
+		mk.Kind = (*mock).Kind
+		mk.Name = (*mock).Name
+		mk.TestModeInfo = (*mock).TestModeInfo
+		mk.Version = (*mock).Version
+		mk.Spec = (*mock).Spec
+		mk.TestModeInfo.ID = index
+		mk.TestModeInfo.SortOrder = index
+		m.unfiltered.insert(mk.TestModeInfo, mk)
 	}
 }
 
