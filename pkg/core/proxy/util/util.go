@@ -149,27 +149,35 @@ func ReadHTTPHeadersUntilEnd(ctx context.Context, logger *zap.Logger, conn net.C
 	buffer = append(buffer, initialBuf...)
 
 	for {
-		// Read more data until we find the header end sequence
-		part, err := ReadBytes(ctx, logger, conn)
-		if err != nil {
-			if err == io.EOF && len(part) == 0 {
-				break // EOF reached, but nothing more to read
+		select {
+		case <-ctx.Done():
+			return buffer, ctx.Err()
+		default:
+			// Check if the connection is nil
+			if conn == nil {
+				logger.Debug("the conn is nil")
+				return nil, readErr
 			}
-			utils.LogError(logger, err, "error while reading HTTP headers")
-			return nil, readErr
-		}
+			// Read more data until we find the header end sequence
+			part, err := ReadBytes(ctx, logger, conn)
+			if err != nil {
+				if err == io.EOF && len(part) == 0 {
+					break // EOF reached, but nothing more to read
+				}
+				utils.LogError(logger, err, "error while reading HTTP headers")
+				return nil, readErr
+			}
 
-		// Append the new data to the buffer
-		buffer = append(buffer, part...)
+			// Append the new data to the buffer
+			buffer = append(buffer, part...)
 
-		// Check if we reached the end of headers
-		if HasCompleteHTTPHeaders(buffer) {
-			logger.Debug("received complete HTTP headers", zap.Any("size", len(buffer)), zap.Any("headers", string(buffer)))
-			return buffer, nil
+			// Check if we reached the end of headers
+			if HasCompleteHTTPHeaders(buffer) {
+				logger.Debug("received complete HTTP headers", zap.Any("size", len(buffer)), zap.Any("headers", string(buffer)))
+				return buffer, nil
+			}
 		}
 	}
-
-	return buffer, nil
 }
 
 func ReadInitialBuf(ctx context.Context, logger *zap.Logger, conn net.Conn) ([]byte, error) {
