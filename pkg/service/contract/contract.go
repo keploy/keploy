@@ -375,8 +375,8 @@ func (s *contract) GenerateTestsSchemas(ctx context.Context, selectedTests []str
 
 func (s *contract) Generate(ctx context.Context, checkConfig bool) error {
 	if checkConfig && checkConfigFile(s.config.Contract.Mappings.ServicesMapping) != nil {
-		utils.LogError(s.logger, fmt.Errorf("Unable to find services mappings in the config file"), "Unable to find services mappings in the config file")
-		return fmt.Errorf("Unable to find services mappings in the config file")
+		utils.LogError(s.logger, fmt.Errorf("unable to find services mappings in the config file"), "Unable to find services mappings in the config file")
+		return fmt.Errorf("unable to find services mappings in the config file")
 	}
 
 	mappings := s.config.Contract.Mappings.ServicesMapping
@@ -603,15 +603,15 @@ func (s *contract) DownloadMocks(ctx context.Context, _ string) error {
 func (s *contract) Download(ctx context.Context, checkConfig bool) error {
 
 	if checkConfig && checkConfigFile(s.config.Contract.Mappings.ServicesMapping) != nil {
-		utils.LogError(s.logger, fmt.Errorf("Unable to find services mappings in the config file"), "Unable to find services mappings in the config file")
-		return fmt.Errorf("Unable to find services mappings in the config file")
+		utils.LogError(s.logger, fmt.Errorf("unable to find services mappings in the config file"), "Unable to find services mappings in the config file")
+		return fmt.Errorf("unable to find services mappings in the config file")
 	}
 	path := s.config.Contract.Path
 	// Validate the path
 	path, err := yaml.ValidatePath(path)
 	if err != nil {
 		utils.LogError(s.logger, err, "failed to validate path")
-		return fmt.Errorf("Error in validating path")
+		return fmt.Errorf("error in validating path")
 	}
 	driven := s.config.Contract.Driven
 	if driven == models.ProviderMode.String() {
@@ -635,8 +635,8 @@ func (s *contract) Download(ctx context.Context, checkConfig bool) error {
 
 func (s *contract) Validate(ctx context.Context) error {
 	if s.config.Contract.Mappings.Self == "" {
-		utils.LogError(s.logger, fmt.Errorf("Self service is not defined in the config file"), "Self service is not defined in the config file")
-		return fmt.Errorf("Self service is not defined in the config file")
+		utils.LogError(s.logger, fmt.Errorf("self service is not defined in the config file"), "Self service is not defined in the config file")
+		return fmt.Errorf("self service is not defined in the config file")
 	}
 
 	if s.config.Contract.Generate {
