@@ -14,18 +14,18 @@ import (
 )
 
 type MockManager struct {
-	filtered   *TreeDb
-	unfiltered *TreeDb
-	logger     *zap.Logger
-	usedMocks  sync.Map
+	filtered      *TreeDb
+	unfiltered    *TreeDb
+	logger        *zap.Logger
+	consumedMocks sync.Map
 }
 
 func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManager {
 	return &MockManager{
-		filtered:   filtered,
-		unfiltered: unfiltered,
-		logger:     logger,
-		usedMocks:  sync.Map{},
+		filtered:      filtered,
+		unfiltered:    unfiltered,
+		logger:        logger,
+		consumedMocks: sync.Map{},
 	}
 }
 
@@ -80,7 +80,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	if updated {
 		// mark the unfiltered mock as used for the current simulated test-case
 		go func() {
-			if err := m.FlagMockAsUsed(*old, models.Deleted); err != nil {
+			if err := m.FlagMockAsUsed(*old, models.Updated); err != nil {
 				m.logger.Error("failed to flag mock as used", zap.Error(err))
 			}
 		}()
@@ -88,11 +88,11 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	return updated
 }
 
-func (m *MockManager) FlagMockAsUsed(mock models.Mock, status models.MockStatus) error {
+func (m *MockManager) FlagMockAsUsed(mock models.Mock, status models.MockUsage) error {
 	if mock.Name == "" {
 		return fmt.Errorf("mock is empty")
 	}
-	m.usedMocks.Store(mock.Name, status)
+	m.consumedMocks.Store(mock.Name, status)
 	return nil
 }
 
@@ -120,22 +120,25 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 	return isDeleted
 }
 
-func (m *MockManager) GetMocks(status models.MockStatus) []string {
-	var keys []string
-	m.usedMocks.Range(func(key, val interface{}) bool {
-		if _, ok := key.(string); ok && val.(models.MockStatus) == status {
-			keys = append(keys, key.(string))
-			m.usedMocks.Delete(key)
+func (m *MockManager) GetConsumedMocks() []models.MockState {
+	var keys []models.MockState
+	m.consumedMocks.Range(func(key, val interface{}) bool {
+		if _, ok := key.(string); ok {
+			keys = append(keys, models.MockState{
+				Name:  key.(string),
+				Usage: val.(models.MockUsage),
+			})
+			m.consumedMocks.Delete(key)
 		}
 		return true
 	})
 	sort.Slice(keys, func(i, j int) bool {
-		numI, _ := strconv.Atoi(strings.Split(keys[i], "-")[1])
-		numJ, _ := strconv.Atoi(strings.Split(keys[j], "-")[1])
+		numI, _ := strconv.Atoi(strings.Split(keys[i].Name, "-")[1])
+		numJ, _ := strconv.Atoi(strings.Split(keys[j].Name, "-")[1])
 		return numI < numJ
 	})
 	for key := range keys {
-		m.usedMocks.Delete(key)
+		m.consumedMocks.Delete(key)
 	}
 	return keys
 }

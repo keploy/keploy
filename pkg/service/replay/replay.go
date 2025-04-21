@@ -471,7 +471,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var success int
 	var failure int
 	var ignored int
-	var totalMocks = map[string]models.MockStatus{}
+	var totalMocks = map[string]models.MockUsage{}
 
 	testSetStatus := models.TestSetStatusPassed
 	testSetStatusByErrChan := models.TestSetStatusRunning
@@ -670,21 +670,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			continue
 		}
 
-		var consumedMocks []string
+		var consumedMocks []models.MockState
 		if r.instrument {
-			consumedMocks, err = r.instrumentation.GetMocks(runTestSetCtx, appID, models.Consumed)
+			consumedMocks, err = r.instrumentation.GetConsumedMocks(runTestSetCtx, appID)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 			}
-			for _, mockName := range consumedMocks {
-				totalMocks[mockName] = models.Consumed
-			}
-			deletedMocks, err := r.instrumentation.GetMocks(runTestSetCtx, appID, models.Deleted)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to get deleted filtered mocks")
-			}
-			for _, mockName := range deletedMocks {
-				totalMocks[mockName] = models.Deleted
+			for _, m := range consumedMocks {
+				totalMocks[m.Name] = m.Usage
 			}
 		}
 
@@ -935,7 +928,7 @@ func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime tim
 	return filtered, unfiltered, err
 }
 
-func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, testSetID string, afterTime, beforeTime time.Time, totalMocks map[string]models.MockStatus, action MockAction, outgoingOpts models.OutgoingOptions) error {
+func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, testSetID string, afterTime, beforeTime time.Time, totalMocks map[string]models.MockUsage, action MockAction, outgoingOpts models.OutgoingOptions) error {
 	if !r.instrument {
 		r.logger.Debug("Keploy will not setup or update the mocks when base path is provided", zap.Any("base path", r.config.Test.BasePath))
 		return nil

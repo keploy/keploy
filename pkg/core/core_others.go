@@ -40,7 +40,7 @@ func (c *Core) SetMocks(ctx context.Context, id uint64, filtered []*models.Mock,
 	return errUnsupported
 }
 
-func (c *Core) GetMocks(ctx context.Context, id uint64, status models.MockStatus) ([]string, error) {
+func (c *Core) GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error) {
 	return nil, errUnsupported
 }
 
