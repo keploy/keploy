@@ -40,13 +40,14 @@ func (g *Grpc) MatchType(_ context.Context, reqBuf []byte) bool {
 func (g *Grpc) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	logger := g.logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)))
 
-	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
+	fullReqBuf, err := util.ReadBytes(ctx, logger, src)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial grpc message")
 		return err
 	}
+	logger.Debug("Complete request received of GRPC", zap.Int("size", len(fullReqBuf)))
 
-	err = encodeGrpc(ctx, logger, reqBuf, src, dst, mocks, opts)
+	err = encodeGrpc(ctx, logger, fullReqBuf, src, dst, mocks, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode the grpc message into the yaml")
 		return err
