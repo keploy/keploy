@@ -67,18 +67,23 @@ func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, m
 
 	h.Logger.Debug("Recording the outgoing http call in record mode")
 
-	reqBuf, err := util.ReadInitialBuf(ctx, logger, src)
-	if err != nil {
-		utils.LogError(logger, err, "failed to read the initial http message")
+	// Read full request including large payloads
+	fullReqBuf, err := util.ReadBytes(ctx, logger, src)
+	if err != nil && err != io.EOF {
+		utils.LogError(logger, err, "failed to read complete HTTP request")
 		return err
 	}
-	err = h.encodeHTTP(ctx, reqBuf, src, dst, mocks, opts)
+
+	logger.Debug("Complete request received", zap.Int("size", len(fullReqBuf)))
+
+	// Process the complete request
+	err = h.encodeHTTP(ctx, fullReqBuf, src, dst, mocks, opts)
 	if err != nil {
-		utils.LogError(logger, err, "failed to encode the http message into the yaml")
+		utils.LogError(logger, err, "failed to encode the http message")
 		return err
 	}
 	return nil
-}
+	}
 
 func (h *HTTP) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	h.Logger = h.Logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)))
@@ -207,3 +212,6 @@ func (h *HTTP) parseFinalHTTP(_ context.Context, mock *FinalHTTP, destPort uint,
 	}
 	return nil
 }
+
+
+
