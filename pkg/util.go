@@ -328,14 +328,21 @@ func MakeCurlCommand(tc models.HTTPReq) string {
 
 func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 	indices := []string{}
+
 	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
 	if err != nil {
-		Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
-		return indices, nil
+		Logger.Debug("creating a folder for the keploy  generated testcases", zap.Error(err))
+		return indices, err
 	}
+	defer func() {
+		if closeErr := dir.Close(); closeErr != nil {
+			Logger.Debug("failed to close directory", zap.Error(closeErr))
+		}
+	}()
 
 	files, err := dir.ReadDir(0)
 	if err != nil {
+		Logger.Debug("failed to read directory contents", zap.Error(err))
 		return indices, err
 	}
 
@@ -344,6 +351,7 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 			indices = append(indices, v.Name())
 		}
 	}
+
 	return indices, nil
 }
 

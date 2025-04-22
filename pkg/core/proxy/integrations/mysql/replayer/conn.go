@@ -30,7 +30,7 @@ type handshakeRes struct {
 }
 
 // Replay mode
-func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mocks []*models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) (handshakeRes, error) {
+func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mocks []*models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) (handshakeRes, error) {
 	// Get the mock for initial handshake
 	initialHandshakeMock := mocks[0]
 
@@ -104,7 +104,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 		// Get the SSL request from the mock
 		_, ok = req[reqIdx].Message.(*mysql.SSLRequestPacket)
 		if !ok {
-			utils.LogError(logger, nil, "failed to assert mock SSL request packet", zap.Any("expected", req[reqIdx].PacketBundle.Header.Type))
+			utils.LogError(logger, nil, "failed to assert mock SSL request packet", zap.Any("expected", req[reqIdx].Header.Type))
 			return res, nil
 		}
 
@@ -140,7 +140,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 		// handle the TLS connection and get the upgraded client connection
 		isTLS := pTls.IsTLSHandshake(testBuffer)
 		if isTLS {
-			clientConn, err = pTls.HandleTLSConnection(ctx, logger, clientConn)
+			clientConn, err = pTls.HandleTLSConnection(ctx, logger, clientConn, opts.Backdate)
 			if err != nil {
 				utils.LogError(logger, err, "failed to handle TLS conn")
 				return res, err
@@ -203,7 +203,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 	// For Native password: next packet is Ok/Err
 	// For CachingSha2 password: next packet is AuthMoreData
 
-	authDecider := resp[respIdx].PacketBundle.Header.Type
+	authDecider := resp[respIdx].Header.Type
 
 	// Check if the next packet is AuthSwitchRequest
 	// Server sends AuthSwitchRequest when it wants to switch the auth mechanism
@@ -282,7 +282,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 			return res, nil
 		}
 
-		authDecider = resp[respIdx].PacketBundle.Header.Type
+		authDecider = resp[respIdx].Header.Type
 	}
 
 	switch authDecider {
@@ -316,7 +316,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 
 func simulateNativePassword(ctx context.Context, logger *zap.Logger, clientConn net.Conn, nativePassMocks reqResp, initialHandshakeMock *models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) error {
 
-	logger.Debug("final response for native password", zap.Any("response", nativePassMocks.resp[0].PacketBundle.Header.Type))
+	logger.Debug("final response for native password", zap.Any("response", nativePassMocks.resp[0].Header.Type))
 
 	// Send the final response (OK/Err) to the client
 	buf, err := wire.EncodeToBinary(ctx, logger, &nativePassMocks.resp[0].PacketBundle, clientConn, decodeCtx)
@@ -418,7 +418,7 @@ func simulateFastAuthSuccess(ctx context.Context, logger *zap.Logger, clientConn
 		return fmt.Errorf("final response mock not found for fast auth success")
 	}
 
-	logger.Debug("final response for fast auth success", zap.Any("response", resp[0].PacketBundle.Header.Type))
+	logger.Debug("final response for fast auth success", zap.Any("response", resp[0].Header.Type))
 
 	// Send the final response (OK/Err) to the client
 	buf, err := wire.EncodeToBinary(ctx, logger, &resp[0].PacketBundle, clientConn, decodeCtx)
@@ -486,9 +486,9 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 	}
 
 	// Match the header of the public key request
-	ok = matchHeader(*req[0].PacketBundle.Header.Header, *pkt.Header.Header)
+	ok = matchHeader(*req[0].Header.Header, *pkt.Header.Header)
 	if !ok {
-		utils.LogError(logger, nil, "header mismatch for public key request", zap.Any("expected", req[0].PacketBundle.Header.Header), zap.Any("actual", pkt.Header.Header))
+		utils.LogError(logger, nil, "header mismatch for public key request", zap.Any("expected", req[0].Header.Header), zap.Any("actual", pkt.Header.Header))
 		return nil
 	}
 
@@ -505,7 +505,7 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 	}
 
 	// Get the AuthMoreData packet
-	_, ok = resp[0].PacketBundle.Message.(*mysql.AuthMoreDataPacket)
+	_, ok = resp[0].Message.(*mysql.AuthMoreDataPacket)
 	if !ok {
 		utils.LogError(logger, nil, "failed to assert auth more data packet (public key)")
 		return nil
@@ -568,7 +568,7 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 		return fmt.Errorf("final response mock not found for full auth")
 	}
 
-	logger.Debug("final response for full auth", zap.Any("response", resp[1].PacketBundle.Header.Type))
+	logger.Debug("final response for full auth", zap.Any("response", resp[1].Header.Type))
 
 	// Get the final response (OK/Err) from the mock
 	// Send the final response (OK/Err) to the client

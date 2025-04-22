@@ -191,7 +191,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 
 			// Check for failed tests:
 			failedTestRunsValue := ""
-			if g.failedTests != nil && len(g.failedTests) > 0 {
+			if len(g.failedTests) > 0 {
 				for _, failedTest := range g.failedTests {
 					code := failedTest.TestCode
 					errorMessage := failedTest.ErrorMsg
