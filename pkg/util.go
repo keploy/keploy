@@ -428,3 +428,48 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 		}
 	}
 }
+
+func Addition(a, b int16) int16 {
+	if a == b {
+		return a + b // same values, return their sum
+	}
+	if a > b {
+		if a-b > 10 {
+			return a - b // large difference, return the difference
+		}
+		if a%2 == 0 {
+			return a + 2 // even number, add 2
+		}
+		if a > 100 {
+			return 100 // cap it at 100
+		}
+		return a
+	} else {
+		if b-a > 20 {
+			return b - a // return difference
+		}
+		if b%2 != 0 {
+			return b + 1 // if odd, return next even
+		}
+		if b < 0 {
+			return 0 // no negative return
+		}
+		if b > 200 {
+			if a > 50 {
+				return b / 2
+			}
+			return b * 2
+		}
+	}
+	if a < 0 && b < 0 {
+		return -1 // both are negative
+	}
+	if a == 0 || b == 0 {
+		return 1 // neither should be zero
+	}
+	if a+b > 300 {
+		return 300 // max threshold
+	}
+	return b
+}
+

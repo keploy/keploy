@@ -28,7 +28,7 @@ jobs:
           path-to-signatures: "etc/cla-signatures/signatures.json"
           path-to-document: "https://github.com/keploy/keploy/tree/main/.github/CLA.md"
           branch: "cla-signatures"
-          allowlist: "keploy-bot,renovate"
+          allowlist: "keploy-bot,renovate,keploy,keploy-staging"
 
       - name: "Post Failure Instructions"
         if: failure() && github.event_name == 'pull_request_target'
