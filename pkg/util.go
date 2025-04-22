@@ -470,23 +470,25 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 	isNonKeploy := false
 
 	for _, mock := range m {
-		if mock.Version != "api.keploy.io/v1beta1" && mock.Version != "api.keploy.io/v1beta2" {
+		tmp := *mock
+		p := &tmp
+		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
 		}
-		if mock.Spec.ReqTimestampMock.Equal(time.Time{}) || mock.Spec.ResTimestampMock.Equal(time.Time{}) {
+		if p.Spec.ReqTimestampMock.Equal(time.Time{}) || p.Spec.ResTimestampMock.Equal(time.Time{}) {
 			logger.Debug("request or response timestamp of mock is missing")
-			mock.TestModeInfo.IsFiltered = true
-			filteredMocks = append(filteredMocks, mock)
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, p)
 			continue
 		}
 
-		if mock.Spec.ReqTimestampMock.After(afterTime) && mock.Spec.ResTimestampMock.Before(beforeTime) {
-			mock.TestModeInfo.IsFiltered = true
-			filteredMocks = append(filteredMocks, mock)
+		if p.Spec.ReqTimestampMock.After(afterTime) && p.Spec.ResTimestampMock.Before(beforeTime) {
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, p)
 			continue
 		}
-		mock.TestModeInfo.IsFiltered = false
-		unfilteredMocks = append(unfilteredMocks, mock)
+		p.TestModeInfo.IsFiltered = false
+		unfilteredMocks = append(unfilteredMocks, p)
 	}
 	if isNonKeploy {
 		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")

@@ -994,11 +994,6 @@ func (r *Replayer) FilterAndSetMocks(ctx context.Context, appID uint64, filtered
 	filtered = filterOutDeleted(filtered)
 	unfiltered = filterOutDeleted(unfiltered)
 
-	filteredCpy := make([]*models.Mock, len(filtered))
-	copy(filteredCpy, filtered)
-	unfilteredCpy := make([]*models.Mock, len(unfiltered))
-	copy(unfilteredCpy, unfiltered)
-
 	err := r.instrumentation.SetMocks(ctx, appID, filtered, unfiltered)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to set mocks")
