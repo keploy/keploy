@@ -494,15 +494,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		Mocking:        r.config.Test.Mocking,
 		Backdate:       testCases[0].HTTPReq.Timestamp,
 	})
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to mock outgoing")
+		return models.TestSetStatusFailed, err
+	}
 
 	// filtering is redundant, but we need to set the mocks
 	err = r.FilterAndSetMocks(ctx, appID, filteredMocks, unfilteredMocks, models.BaseTime, time.Now(), totalConsumedMocks)
 	if err != nil {
-		return models.TestSetStatusFailed, err
-	}
-	
-	if err != nil {
-		utils.LogError(r.logger, err, "failed to mock outgoing")
 		return models.TestSetStatusFailed, err
 	}
 
