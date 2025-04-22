@@ -4,8 +4,6 @@ package redis
 
 import (
 	"context"
-	"fmt"
-	"math"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 
@@ -20,101 +18,102 @@ import (
 // If no match is found, it returns false and a nil response.
 // If an error occurs during the matching process, it returns an error.
 func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockMemDb) (bool, []models.Payload, error) {
-	for {
-		select {
-		case <-ctx.Done():
-			return false, nil, ctx.Err()
-		default:
-			mocks, err := mockDb.GetUnFilteredMocks()
-			if err != nil {
-				return false, nil, fmt.Errorf("error while getting unfiltered mocks %v", err)
-			}
+	// for {
+	// 	select {
+	// 	case <-ctx.Done():
+	// 		return false, nil, ctx.Err()
+	// 	default:
+	// 		mocks, err := mockDb.GetUnFilteredMocks()
+	// 		if err != nil {
+	// 			return false, nil, fmt.Errorf("error while getting unfiltered mocks %v", err)
+	// 		}
 
-			var filteredMocks []*models.Mock
-			var unfilteredMocks []*models.Mock
+	// 		var filteredMocks []*models.Mock
+	// 		var unfilteredMocks []*models.Mock
 
-			for _, mock := range mocks {
-				if mock.Kind != "Redis" {
-					continue
-				}
-				if mock.TestModeInfo.IsFiltered {
-					filteredMocks = append(filteredMocks, mock)
-				} else {
-					unfilteredMocks = append(unfilteredMocks, mock)
-				}
-			}
+	// 		for _, mock := range mocks {
+	// 			if mock.Kind != "Redis" {
+	// 				continue
+	// 			}
+	// 			if mock.TestModeInfo.IsFiltered {
+	// 				filteredMocks = append(filteredMocks, mock)
+	// 			} else {
+	// 				unfilteredMocks = append(unfilteredMocks, mock)
+	// 			}
+	// 		}
 
-			index := findExactMatch(filteredMocks, reqBuff)
+	// 		index := findExactMatch(filteredMocks, reqBuff)
 
-			if index == -1 {
-				index = findBinaryMatch(filteredMocks, reqBuff, 0.9)
-			}
+	// 		if index == -1 {
+	// 			index = findBinaryMatch(filteredMocks, reqBuff, 0.9)
+	// 		}
 
-			if index != -1 {
-				responseMock := make([]models.Payload, len(filteredMocks[index].Spec.RedisResponses))
-				copy(responseMock, filteredMocks[index].Spec.RedisResponses)
-				originalFilteredMock := *filteredMocks[index]
-				filteredMocks[index].TestModeInfo.IsFiltered = false
-				filteredMocks[index].TestModeInfo.SortOrder = math.MaxInt64
-				isUpdated := mockDb.UpdateUnFilteredMock(&originalFilteredMock, filteredMocks[index])
-				if !isUpdated {
-					continue
-				}
-				return true, responseMock, nil
-			}
+	// 		if index != -1 {
+	// 			responseMock := make([]models.Payload, len(filteredMocks[index].Spec.RedisResponses))
+	// 			copy(responseMock, filteredMocks[index].Spec.RedisResponses)
+	// 			originalFilteredMock := *filteredMocks[index]
+	// 			filteredMocks[index].TestModeInfo.IsFiltered = false
+	// 			filteredMocks[index].TestModeInfo.SortOrder = math.MaxInt64
+	// 			isUpdated := mockDb.UpdateUnFilteredMock(&originalFilteredMock, filteredMocks[index])
+	// 			if !isUpdated {
+	// 				continue
+	// 			}
+	// 			return true, responseMock, nil
+	// 		}
 
-			index = findExactMatch(unfilteredMocks, reqBuff)
+	// 		index = findExactMatch(unfilteredMocks, reqBuff)
 
-			if index != -1 {
-				responseMock := make([]models.Payload, len(unfilteredMocks[index].Spec.RedisResponses))
-				copy(responseMock, unfilteredMocks[index].Spec.RedisResponses)
-				return true, responseMock, nil
-			}
+	// 		if index != -1 {
+	// 			responseMock := make([]models.Payload, len(unfilteredMocks[index].Spec.RedisResponses))
+	// 			copy(responseMock, unfilteredMocks[index].Spec.RedisResponses)
+	// 			return true, responseMock, nil
+	// 		}
 
-			totalMocks := append(filteredMocks, unfilteredMocks...)
-			index = findBinaryMatch(totalMocks, reqBuff, 0.4)
+	// 		totalMocks := append(filteredMocks, unfilteredMocks...)
+	// 		index = findBinaryMatch(totalMocks, reqBuff, 0.4)
 
-			if index != -1 {
-				responseMock := make([]models.Payload, len(totalMocks[index].Spec.RedisResponses))
-				copy(responseMock, totalMocks[index].Spec.RedisResponses)
-				originalFilteredMock := *totalMocks[index]
-				if totalMocks[index].TestModeInfo.IsFiltered {
-					totalMocks[index].TestModeInfo.IsFiltered = false
-					totalMocks[index].TestModeInfo.SortOrder = math.MaxInt64
-					isUpdated := mockDb.UpdateUnFilteredMock(&originalFilteredMock, totalMocks[index])
-					if !isUpdated {
-						continue
-					}
-				}
-				return true, responseMock, nil
-			}
+	// 		if index != -1 {
+	// 			responseMock := make([]models.Payload, len(totalMocks[index].Spec.RedisResponses))
+	// 			copy(responseMock, totalMocks[index].Spec.RedisResponses)
+	// 			originalFilteredMock := *totalMocks[index]
+	// 			if totalMocks[index].TestModeInfo.IsFiltered {
+	// 				totalMocks[index].TestModeInfo.IsFiltered = false
+	// 				totalMocks[index].TestModeInfo.SortOrder = math.MaxInt64
+	// 				isUpdated := mockDb.UpdateUnFilteredMock(&originalFilteredMock, totalMocks[index])
+	// 				if !isUpdated {
+	// 					continue
+	// 				}
+	// 			}
+	// 			return true, responseMock, nil
+	// 		}
 
-			return false, nil, nil
-		}
-	}
+	// 		return false, nil, nil
+	// 	}
+	// }
+	return false, nil, nil
 }
 
 // TODO: need to generalize this function for different types of integrations.
 func findBinaryMatch(tcsMocks []*models.Mock, reqBuffs [][]byte, mxSim float64) int {
 	// TODO: need find a proper similarity index to set a benchmark for matching or need to find another way to do approximate matching
 	mxIdx := -1
-	for idx, mock := range tcsMocks {
-		if len(mock.Spec.RedisRequests) == len(reqBuffs) {
-			for requestIndex, reqBuff := range reqBuffs {
-				mockReq, err := util.DecodeBase64(mock.Spec.RedisRequests[requestIndex].Message[0].Data)
-				if err != nil {
-					mockReq = []byte(mock.Spec.RedisRequests[requestIndex].Message[0].Data)
-				}
+	// for idx, mock := range tcsMocks {
+	// 	if len(mock.Spec.RedisRequests) == len(reqBuffs) {
+	// 		for requestIndex, reqBuff := range reqBuffs {
+	// 			mockReq, err := util.DecodeBase64(mock.Spec.RedisRequests[requestIndex].Message[0].Data)
+	// 			if err != nil {
+	// 				mockReq = []byte(mock.Spec.RedisRequests[requestIndex].Message[0].Data)
+	// 			}
 
-				similarity := fuzzyCheck(mockReq, reqBuff)
-				if mxSim < similarity {
-					mxSim = similarity
-					mxIdx = idx
-				}
-			}
+	// 			similarity := fuzzyCheck(mockReq, reqBuff)
+	// 			if mxSim < similarity {
+	// 				mxSim = similarity
+	// 				mxIdx = idx
+	// 			}
+	// 		}
 
-		}
-	}
+	// 	}
+	// }
 	return mxIdx
 }
 
