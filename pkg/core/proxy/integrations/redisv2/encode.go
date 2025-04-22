@@ -86,11 +86,11 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 		case <-ctx.Done():
 			if len(respAccumBuf) > 0 {
 				processBufferResponses(respAccumBuf, models.FromServer, &redisResponses)
-				respAccumBuf = nil
+				// respAccumBuf = nil
 			}
 			if len(reqAccumBuf) > 0 {
 				processBufferRequests(reqAccumBuf, models.FromClient, &redisRequests)
-				reqAccumBuf = nil
+				// reqAccumBuf = nil
 			}
 			if len(redisRequests) > 0 && len(redisResponses) > 0 {
 				metadata := map[string]string{"type": "config"}
@@ -169,11 +169,11 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			if err == io.EOF {
 				if len(respAccumBuf) > 0 {
 					processBufferResponses(respAccumBuf, models.FromServer, &redisResponses)
-					respAccumBuf = nil
+					// respAccumBuf = nil
 				}
 				if len(reqAccumBuf) > 0 {
 					processBufferRequests(reqAccumBuf, models.FromClient, &redisRequests)
-					reqAccumBuf = nil
+					// reqAccumBuf = nil
 				}
 				if len(redisRequests) > 0 && len(redisResponses) > 0 {
 					saveMock(redisRequests, redisResponses, reqTimestampMock, resTimestampMock, mocks)
