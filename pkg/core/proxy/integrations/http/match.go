@@ -7,12 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/agnivade/levenshtein"
+	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models"
@@ -344,7 +344,7 @@ func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb in
 	if matchedMock.TestModeInfo.IsFiltered {
 		originalMatchedMock := *matchedMock
 		matchedMock.TestModeInfo.IsFiltered = false
-		matchedMock.TestModeInfo.SortOrder = math.MaxInt
+		matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
 		updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
 		return updated
 	}

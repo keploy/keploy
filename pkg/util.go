@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"sync/atomic"
 
 	"strconv"
 	"strings"
@@ -28,6 +29,16 @@ import (
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
+
+var SortCounter int64 = -1
+
+func InitSortCounter(counter int64) {
+	atomic.StoreInt64(&SortCounter, counter)
+}
+
+func GetNextSortNum() int64 {
+	return atomic.AddInt64(&SortCounter, 1)
+}
 
 // URLParams returns the Url and Query parameters from the request url.
 func URLParams(r *http.Request) map[string]string {

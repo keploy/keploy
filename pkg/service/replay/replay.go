@@ -2,6 +2,7 @@ package replay
 
 import (
 	// "bytes"
+
 	"context"
 	"errors"
 	"fmt"
@@ -485,6 +486,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if err != nil {
 		return models.TestSetStatusFailed, err
 	}
+
+	pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
 
 	err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{
 		Rules:          r.config.BypassRules,

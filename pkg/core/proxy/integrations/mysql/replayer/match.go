@@ -7,8 +7,8 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"math"
 
+	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire"
 	intgUtil "go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
@@ -571,7 +571,7 @@ func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock,
 	if matchedMock.TestModeInfo.IsFiltered {
 		originalMatchedMock := *matchedMock
 		matchedMock.TestModeInfo.IsFiltered = false
-		matchedMock.TestModeInfo.SortOrder = math.MaxInt
+		matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
 		//UpdateUnFilteredMock also marks the mock as used
 		updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
 		return updated

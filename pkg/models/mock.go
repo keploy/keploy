@@ -18,7 +18,7 @@ type Mock struct {
 type TestModeInfo struct {
 	ID         int  `json:"Id,omitempty" bson:"Id,omitempty"`
 	IsFiltered bool `json:"isFiltered,omitempty" bson:"isFiltered,omitempty"`
-	SortOrder  int  `json:"sortOrder,omitempty" bson:"SortOrder,omitempty"`
+	SortOrder  int64  `json:"sortOrder,omitempty" bson:"SortOrder,omitempty"`
 }
 
 func (m *Mock) GetKind() string {
@@ -77,5 +77,5 @@ type MockState struct {
 	Name       string    `json:"name"`
 	Usage      MockUsage `json:"usage"`
 	IsFiltered bool      `json:"isFiltered"`
-	SortOrder  int       `json:"sortOrder"`
+	SortOrder  int64       `json:"sortOrder"`
 }

@@ -14,6 +14,7 @@ import (
 
 	"github.com/agnivade/levenshtein"
 	"github.com/jackc/pgproto3/v2"
+	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models"
@@ -292,7 +293,7 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 				if matchedMock.TestModeInfo.IsFiltered {
 					originalMatchedMock := *matchedMock
 					matchedMock.TestModeInfo.IsFiltered = false
-					matchedMock.TestModeInfo.SortOrder = math.MaxInt
+					matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
 					//UpdateUnFilteredMock also marks the mock as used
 					updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
 					if !updated {

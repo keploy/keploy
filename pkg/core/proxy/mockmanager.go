@@ -36,7 +36,7 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 		// as this would be a consequence of the mock being matched in previous testcases,
 		// which is done to put the mock in the last when we are processing the mock list for getting a match.
 		if mock.TestModeInfo.SortOrder == 0 {
-			mock.TestModeInfo.SortOrder = index
+			mock.TestModeInfo.SortOrder = int64(index)
 		}
 		mock.TestModeInfo.ID = index
 		m.filtered.insert(mock.TestModeInfo, mock)
@@ -50,7 +50,7 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 		// as this would be a consequence of the mock being matched in previous testcases,
 		// which is done to put the mock in the last when we are processing the mock list for getting a match.
 		if mock.TestModeInfo.SortOrder == 0 {
-			mock.TestModeInfo.SortOrder = index
+			mock.TestModeInfo.SortOrder = int64(index)
 		}
 		mock.TestModeInfo.ID = index
 		m.unfiltered.insert(mock.TestModeInfo, mock)

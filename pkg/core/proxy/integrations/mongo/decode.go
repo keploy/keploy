@@ -7,11 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net"
 	"strconv"
 	"time"
 
+	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
@@ -208,7 +208,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 
 					if bestMatchIndex != -1 && maxMatchScore != 0.0 {
 						matchedMock := *configMocks[bestMatchIndex]
-						matchedMock.TestModeInfo.SortOrder = math.MaxInt
+						matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
 						isUpdated := mockDb.UpdateUnFilteredMock(configMocks[bestMatchIndex], &matchedMock)
 						if !isUpdated {
 							continue
