@@ -32,6 +32,9 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	m.filtered.deleteAll()
 	for index, mock := range mocks {
+		// if the sortOrder is already set (!= 0) then we shouldn't override it,
+		// as this would be a consequence of the mock being matched in previous testcases,
+		// which is done to put the mock in the last when we are processing the mock list for getting a match.
 		if mock.TestModeInfo.SortOrder == 0 {
 			mock.TestModeInfo.SortOrder = index
 		}
@@ -43,6 +46,9 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 	m.unfiltered.deleteAll()
 	for index, mock := range mocks {
+		// if the sortOrder is already set (!= 0) then we shouldn't override it,
+		// as this would be a consequence of the mock being matched in previous testcases,
+		// which is done to put the mock in the last when we are processing the mock list for getting a match.
 		if mock.TestModeInfo.SortOrder == 0 {
 			mock.TestModeInfo.SortOrder = index
 		}

@@ -91,11 +91,3 @@ type InstrumentState struct {
 	AppID      uint64
 	HookCancel context.CancelFunc
 }
-
-type MockAction string
-
-// MockAction constants define the possible actions that can be taken on a mocking.
-const (
-	Start  MockAction = "start"
-	Update MockAction = "update"
-)

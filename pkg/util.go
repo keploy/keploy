@@ -470,6 +470,8 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 	isNonKeploy := false
 
 	for _, mock := range m {
+		// doing deep copy to prevent data race, which was happening due to the write to isFiltered
+		// field in this for loop, and write in mockmanager functions.
 		tmp := *mock
 		p := &tmp
 		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {

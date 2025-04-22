@@ -486,15 +486,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusFailed, err
 	}
 
-	err = r.SetupMocking(runTestSetCtx, appID, Start, models.OutgoingOptions{
-		Backdate: testCases[0].HTTPReq.Timestamp,
+	err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{
+		Rules:          r.config.BypassRules,
+		MongoPassword:  r.config.Test.MongoPassword,
+		SQLDelay:       time.Duration(r.config.Test.Delay),
+		FallBackOnMiss: r.config.Test.FallBackOnMiss,
+		Mocking:        r.config.Test.Mocking,
+		Backdate:       testCases[0].HTTPReq.Timestamp,
 	})
+
+	// filtering is redundant, but we need to set the mocks
+	err = r.FilterAndSetMocks(ctx, appID, filteredMocks, unfilteredMocks, models.BaseTime, time.Now(), totalConsumedMocks)
 	if err != nil {
 		return models.TestSetStatusFailed, err
 	}
-
-	err = r.FilterAndSetMocks(ctx, appID, filteredMocks, unfilteredMocks, models.BaseTime, time.Now(), totalConsumedMocks)
+	
 	if err != nil {
+		utils.LogError(r.logger, err, "failed to mock outgoing")
 		return models.TestSetStatusFailed, err
 	}
 
@@ -638,15 +646,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		var testResult *models.Result
 		var testPass bool
 		var loopErr error
-
-		//No need to handle mocking when basepath is provided
-		err = r.SetupMocking(runTestSetCtx, appID, Update, models.OutgoingOptions{
-			Backdate: testCase.HTTPReq.Timestamp,
-		})
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to setup mocking")
-			break
-		}
 
 		err = r.FilterAndSetMocks(runTestSetCtx, appID, filteredMocks, unfilteredMocks, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp, totalConsumedMocks)
 		if err != nil {
@@ -944,25 +943,6 @@ func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime tim
 	return filtered, unfiltered, err
 }
 
-func (r *Replayer) SetupMocking(ctx context.Context, appID uint64, action MockAction, outgoingOpts models.OutgoingOptions) error {
-	if action != Start {
-		return nil
-	}
-
-	outgoingOpts.Rules = r.config.BypassRules
-	outgoingOpts.MongoPassword = r.config.Test.MongoPassword
-	outgoingOpts.SQLDelay = time.Duration(r.config.Test.Delay)
-	outgoingOpts.FallBackOnMiss = r.config.Test.FallBackOnMiss
-	outgoingOpts.Mocking = r.config.Test.Mocking
-
-	err := r.instrumentation.MockOutgoing(ctx, appID, outgoingOpts)
-	if err != nil {
-		utils.LogError(r.logger, err, "failed to mock outgoing")
-		return err
-	}
-	return nil
-}
-
 func (r *Replayer) FilterAndSetMocks(ctx context.Context, appID uint64, filtered, unfiltered []*models.Mock, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState) error {
 	if !r.instrument {
 		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.Any("base path", r.config.Test.BasePath))
@@ -980,6 +960,8 @@ func (r *Replayer) FilterAndSetMocks(ctx context.Context, appID uint64, filtered
 				out = append(out, m)
 				continue
 			}
+			// we are picking mocks that are not consumed till now (not present in map),
+			// and, mocks that are updated.
 			if k, ok := totalConsumedMocks[m.Name]; !ok || k.Usage != models.Deleted {
 				if ok {
 					m.TestModeInfo.IsFiltered = k.IsFiltered
