@@ -4,6 +4,7 @@ import (
     "encoding/json"
     "fmt"
     "strconv"
+    "math"
     "strings"
 )
 
@@ -18,7 +19,13 @@ func toInt(v interface{}) (int, error) {
         return int(i64), err
     case string:
         i64, err := strconv.ParseInt(x, 10, 64)
-        return int(i64), err
+        if err != nil {
+            return 0, err
+        }
+        if i64 > int64(math.MaxInt) || i64 < int64(math.MinInt) {
+            return 0, fmt.Errorf("value out of range for int: %d", i64)
+        }
+        return int(i64), nil
     default:
         return 0, fmt.Errorf("cannot convert %T to int", v)
     }
