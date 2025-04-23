@@ -1,0 +1,22 @@
+name: Print GitHub Actor
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  print-actor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show GitHub Actor
+        run: echo "Triggered by actor: ${{ github.actor }}"
+
+      - name: Show GitHub Sender Login from event payload
+        run: |
+          echo "Sender login:"
+          cat "$GITHUB_EVENT_PATH" | jq '.sender.login'
+
+      - name: Dump full GitHub event payload (optional)
+        run: cat "$GITHUB_EVENT_PATH"
