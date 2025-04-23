@@ -19,20 +19,22 @@ import (
 )
 
 type Hooks struct {
-	logger     *zap.Logger
-	cfg        *config.Config
-	tsConfigDB TestSetConfig
-	storage    Storage
-	auth       service.Auth
+	logger          *zap.Logger
+	cfg             *config.Config
+	tsConfigDB      TestSetConfig
+	storage         Storage
+	auth            service.Auth
+	instrumentation Instrumentation
 }
 
-func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, storage Storage, auth service.Auth) TestHooks {
+func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, storage Storage, auth service.Auth, instrumentation Instrumentation) TestHooks {
 	return &Hooks{
-		cfg:        cfg,
-		logger:     logger,
-		tsConfigDB: tsConfigDB,
-		storage:    storage,
-		auth:       auth,
+		cfg:             cfg,
+		logger:          logger,
+		tsConfigDB:      tsConfigDB,
+		storage:         storage,
+		auth:            auth,
+		instrumentation: instrumentation,
 	}
 }
 
@@ -254,6 +256,20 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 
 func (h *Hooks) AfterTestRun(_ context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error {
 	h.logger.Debug("AfterTestRun hook executed", zap.String("testRunID", testRunID), zap.Any("testSetIDs", testSetIDs), zap.Any("coverage", coverage))
+	return nil
+}
+
+func (h *Hooks) GetConsumedMocks(ctx context.Context, id uint64) ([]string, error) {
+	consumedMocks, err := h.instrumentation.GetConsumedMocks(ctx, id)
+	if err != nil {
+		h.logger.Error("failed to get consumed mocks", zap.Error(err))
+		return nil, err
+	}
+	return consumedMocks, nil
+}
+
+func (h *Hooks) BeforeStop(_ context.Context, appID uint64) error {
+	h.logger.Debug("BeforeStop hook executed", zap.Uint64("appID", appID))
 	return nil
 }
 

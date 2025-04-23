@@ -59,7 +59,7 @@ type Replayer struct {
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
 	// set the request emulator for simulating test case requests, if not set
 	if HookImpl == nil {
-		SetTestHooks(NewHooks(logger, config, testSetConf, storage, auth))
+		SetTestHooks(NewHooks(logger, config, testSetConf, storage, auth, instrumentation))
 	}
 	instrument := config.Command != ""
 	return &Replayer{
@@ -91,6 +91,10 @@ func (r *Replayer) Start(ctx context.Context) error {
 			break
 		default:
 			r.logger.Info("stopping Keploy", zap.String("reason", stopReason))
+			err := HookImpl.BeforeStop(ctx, r.config.AppID)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to execute before stop hook")
+			}
 		}
 		if hookCancel != nil {
 			hookCancel()
@@ -673,7 +677,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		var consumedMocks []string
 		if r.instrument {
-			consumedMocks, err = r.instrumentation.GetConsumedMocks(runTestSetCtx, appID)
+			consumedMocks, err = HookImpl.GetConsumedMocks(runTestSetCtx, appID)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 			}
