@@ -4,7 +4,7 @@ import (
     "encoding/json"
     "fmt"
     "strconv"
-    "math"
+
     "strings"
 )
 
@@ -22,7 +22,9 @@ func toInt(v interface{}) (int, error) {
         if err != nil {
             return 0, err
         }
-        if i64 > int64(math.MaxInt) || i64 < int64(math.MinInt) {
+        const maxInt = int64(^uint(0) >> 1) // Maximum value for int
+        const minInt = -maxInt - 1          // Minimum value for int
+        if i64 > maxInt || i64 < minInt {
             return 0, fmt.Errorf("value out of range for int: %d", i64)
         }
         return int(i64), nil
