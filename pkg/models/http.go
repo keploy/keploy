@@ -24,7 +24,7 @@ type XMLSchema struct {
 	Request          HTTPReq                `json:"req" yaml:"req"`
 	Response         XMLResp                `json:"resp" yaml:"resp"`
 	Objects          []*OutputBinary        `json:"objects" yaml:"objects"`
-	Assertions       map[string]interface{} `json:"assertions" yaml:"assertions,omitempty"`
+	Assertions       []Assertion `json:"assertions" yaml:"assertions,omitempty"`
 	Created          int64                  `json:"created" yaml:"created,omitempty"`
 	ReqTimestampMock time.Time              `json:"reqTimestampMock" yaml:"reqTimestampMock,omitempty"`
 	ResTimestampMock time.Time              `json:"resTimestampMock" yaml:"resTimestampMock,omitempty"`
@@ -44,7 +44,7 @@ type HTTPSchema struct {
 	Request          HTTPReq                `json:"req" yaml:"req"`
 	Response         HTTPResp               `json:"resp" yaml:"resp"`
 	Objects          []*OutputBinary        `json:"objects" yaml:"objects"`
-	Assertions       map[string]interface{} `json:"assertions" yaml:"assertions,omitempty"`
+	Assertions       []Assertion `json:"assertions" yaml:"assertions,omitempty"`
 	Created          int64                  `json:"created" yaml:"created,omitempty"`
 	ReqTimestampMock time.Time              `json:"reqTimestampMock" yaml:"reqTimestampMock,omitempty"`
 	ResTimestampMock time.Time              `json:"resTimestampMock" yaml:"resTimestampMock,omitempty"`

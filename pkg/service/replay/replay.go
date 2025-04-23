@@ -981,10 +981,17 @@ func (r *Replayer) compareHTTPResp(tc *models.TestCase, actualResponse *models.H
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
-	// if tc.assertion ==1 check if Assertion has noise as key
-	if len(tc.Assertion) == 1 && tc.Assertion["noise"] != nil {
-		return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
+
+	// Check if Assertions has exactly one assertion and it has "noise" as a Name
+	if len(tc.Assertion) == 1 {
+		for _, assertion := range tc.Assertion {
+			// If the assertion is "noise", proceed with the Match function
+			if assertion.Name == models.NoiseAssertion {
+				return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
+			}
+		}
 	}
+
 	return httpMatcher.AssertionMatch(tc, actualResponse, r.logger)
 }
 
@@ -993,8 +1000,15 @@ func (r *Replayer) compareGRPCResp(tc *models.TestCase, actualResp *models.GrpcR
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
-	if len(tc.Assertion) == 1 && tc.Assertion["noise"] != nil {
-		return grpcMatcher.Match(tc, actualResp, noiseConfig, r.logger)
+
+	// Check if Assertions has exactly one assertion and it has "noise" as a Name
+	if len(tc.Assertion) == 1  {
+		for _,assertion := range tc.Assertion{
+			// If the assertion is "noise", proceed with the Match function
+			if assertion.Name == models.NoiseAssertion{
+				return grpcMatcher.Match(tc, actualResp, noiseConfig, r.logger)
+			}
+		}
 	}
 	return grpcMatcher.AssertionMatch(tc, actualResp, r.logger)
 }

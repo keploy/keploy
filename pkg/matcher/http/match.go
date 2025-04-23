@@ -333,12 +333,11 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 	for _, assertion := range tc.Assertion {
 		switch assertion.Name {
 		case models.StatusCode:
-			// Check if the status code matches
-			logger.Info("Checking status_code assertion", zap.Int("expected", tc.HTTPResp.StatusCode), zap.Int("actual", actualResponse.StatusCode))
-			if assertion.Value != float64(actualResponse.StatusCode) {
+			fmt.Println("here is assertionValue",assertion.Value)
+			if assertion.Value != actualResponse.StatusCode {
 				pass = false
 				res.StatusCode.Normal = false
-				logger.Info("Status code assertion failed", zap.Int("expected", tc.HTTPResp.StatusCode), zap.Int("actual", actualResponse.StatusCode))
+				logger.Error("Status code assertion failed", zap.Any("expected", assertion.Value), zap.Int("actual", actualResponse.StatusCode))
 			} else {
 				res.StatusCode.Normal = true
 				logger.Info("Status code assertion passed", zap.Int("expected", tc.HTTPResp.StatusCode), zap.Int("actual", actualResponse.StatusCode))
@@ -351,7 +350,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			logger.Info("Checking status_code_class assertion", zap.String("expectedClass", class), zap.String("actualClass", statusCodeClass))
 			if statusCodeClass != class {
 				pass = false
-				logger.Info("Status code class assertion failed", zap.String("expectedClass", class), zap.String("actualClass", statusCodeClass))
+				logger.Error("Status code class assertion failed", zap.String("expectedClass", class), zap.String("actualClass", statusCodeClass))
 			} else {
 				logger.Info("Status code class assertion passed", zap.String("expectedClass", class), zap.String("actualClass", statusCodeClass))
 			}
@@ -360,18 +359,33 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			// Check if the status code is in the list (e.g., "200, 204")
 			codeList := assertion.Value.([]interface{})
 			validCode := false
+			var expectedCodes []int
+
 			for _, code := range codeList {
-				if code.(float64) == float64(actualResponse.StatusCode) {
+				switch v := code.(type) {
+				case float64:
+					expectedCodes = append(expectedCodes, int(v))
+				case int:
+					expectedCodes = append(expectedCodes, v)
+				default:
+					logger.Warn("Invalid type in status_code_in assertion", zap.Any("value", v))
+				}
+			}
+
+			for _, code := range expectedCodes {
+				if code == actualResponse.StatusCode {
 					validCode = true
 					break
 				}
 			}
-			logger.Info("Checking status_code_in assertion", zap.Int("actual", actualResponse.StatusCode), zap.Any("expectedCodes", codeList))
+
+			// Log the result
+			logger.Info("Checking status_code_in assertion", zap.Int("actual", actualResponse.StatusCode), zap.Any("expectedCodes", expectedCodes))
 			if !validCode {
 				pass = false
-				logger.Info("Status code in assertion failed", zap.Int("expectedCodes", codeList), zap.Int("actual", actualResponse.StatusCode))
+				logger.Error("Status code in assertion failed", zap.Int("actual", actualResponse.StatusCode), zap.Any("expectedCodes", expectedCodes))
 			} else {
-				logger.Info("Status code in assertion passed", zap.Int("expectedCodes", codeList), zap.Int("actual", actualResponse.StatusCode))
+				logger.Info("Status code in assertion passed", zap.Int("actual", actualResponse.StatusCode), zap.Any("expectedCodes", expectedCodes))
 			}
 
 		case models.HeaderEqual:
@@ -382,7 +396,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			logger.Info("Checking header_equal assertion", zap.String("header", headerName), zap.String("expected", expectedValue), zap.String("actual", actualHeader))
 			if actualHeader != expectedValue {
 				pass = false
-				logger.Info("Header equal assertion failed", zap.String("header", headerName), zap.String("expected", expectedValue), zap.String("actual", actualHeader))
+				logger.Error("Header equal assertion failed", zap.String("header", headerName), zap.String("expected", expectedValue), zap.String("actual", actualHeader))
 			} else {
 				logger.Info("Header equal assertion passed", zap.String("header", headerName), zap.String("expected", expectedValue), zap.String("actual", actualHeader))
 			}
@@ -395,7 +409,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			logger.Info("Checking header_contains assertion", zap.String("header", headerName), zap.String("expected", expectedValue), zap.String("actual", actualHeader))
 			if !strings.Contains(actualHeader, expectedValue) {
 				pass = false
-				logger.Info("Header contains assertion failed", zap.String("header", headerName), zap.String("expected", expectedValue), zap.String("actual", actualHeader))
+				logger.Error("Header contains assertion failed", zap.String("header", headerName), zap.String("expected", expectedValue), zap.String("actual", actualHeader))
 			} else {
 				logger.Info("Header contains assertion passed", zap.String("header", headerName), zap.String("expected", expectedValue), zap.String("actual", actualHeader))
 			}
@@ -406,7 +420,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			logger.Info("Checking header_exists assertion", zap.String("header", headerName))
 			if _, exists := actualResponse.Header[headerName]; !exists {
 				pass = false
-				logger.Info("Header exists assertion failed", zap.String("header", headerName))
+				logger.Error("Header exists assertion failed", zap.String("header", headerName))
 			} else {
 				logger.Info("Header exists assertion passed", zap.String("header", headerName))
 			}
@@ -420,7 +434,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			logger.Info("Checking header_matches assertion", zap.String("header", headerName), zap.String("regexPattern", regexPattern), zap.String("actual", actualHeader))
 			if err != nil || !matched {
 				pass = false
-				logger.Info("Header matches assertion failed", zap.String("header", headerName), zap.String("regexPattern", regexPattern), zap.String("actual", actualHeader))
+				logger.Error("Header matches assertion failed", zap.String("header", headerName), zap.String("regexPattern", regexPattern), zap.String("actual", actualHeader))
 			} else {
 				logger.Info("Header matches assertion passed", zap.String("header", headerName), zap.String("regexPattern", regexPattern), zap.String("actual", actualHeader))
 			}
@@ -432,7 +446,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			logger.Info("Checking json_equal assertion", zap.String("expectedBody", expectedBody), zap.String("actualBody", actualBody))
 			if !strings.EqualFold(expectedBody, actualBody) {
 				pass = false
-				logger.Info("Json equal assertion failed", zap.String("expectedBody", expectedBody), zap.String("actualBody", actualBody))
+				logger.Error("Json equal assertion failed", zap.String("expectedBody", expectedBody), zap.String("actualBody", actualBody))
 			} else {
 				logger.Info("Json equal assertion passed", zap.String("expectedBody", expectedBody), zap.String("actualBody", actualBody))
 			}
@@ -445,18 +459,17 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			logger.Info("Checking json_contains assertion", zap.Any("expectedJSON", expectedJSON), zap.String("actualBody", actualJSON))
 			if err != nil || !matches {
 				pass = false
-				logger.Info("Json contains assertion failed", zap.Any("expectedJSON", expectedJSON), zap.String("actualBody", actualJSON))
+				logger.Error("Json contains assertion failed", zap.Any("expectedJSON", expectedJSON), zap.String("actualBody", actualJSON))
 			} else {
 				logger.Info("Json contains assertion passed", zap.Any("expectedJSON", expectedJSON), zap.String("actualBody", actualJSON))
 			}
 
 		default:
 			// Handle any other assertion types
-			logger.Warn("Unknown assertion type", zap.String("assertion", string(assertion.Name)))
+			logger.Error("Unknown assertion type", zap.String("assertion", string(assertion.Name)))
 		}
 	}
 
-	// Update the result object based on the pass/fail status of the assertions
 	res.StatusCode.Normal = pass
 
 	if pass {

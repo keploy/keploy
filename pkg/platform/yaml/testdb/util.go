@@ -89,8 +89,12 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 					Timestamp:     tc.HTTPResp.Timestamp,
 				},
 				Created: tc.Created,
-				Assertions: map[string]interface{}{
-					"noise": noise,
+				// add custom assertions here as well for encode
+				Assertions:[]models.Assertion{
+					{
+						Name: models.NoiseAssertion,
+						Value:noise,
+					},
 				},
 			})
 			if err != nil {
@@ -102,8 +106,12 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 				Request:  tc.HTTPReq,
 				Response: tc.HTTPResp,
 				Created:  tc.Created,
-				Assertions: map[string]interface{}{
-					"noise": noise,
+				// add custom assertions here as well for encode
+				Assertions:[]models.Assertion{
+					{
+						Name: models.NoiseAssertion,
+						Value:noise,
+					},
 				},
 			})
 			if err != nil {
@@ -121,8 +129,12 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 			GrpcReq:  tc.GrpcReq,
 			GrpcResp: tc.GrpcResp,
 			Created:  tc.Created,
-			Assertions: map[string]interface{}{
-				"noise": noise,
+			// add custom assertions here as well for encode
+			Assertions:[]models.Assertion{
+				{
+					Name: models.NoiseAssertion,
+					Value:noise,
+				},
 			},
 		}
 
@@ -331,20 +343,25 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 			tc.HTTPResp = httpSpec.Response
 			tc.Noise = map[string][]string{}
 			tc.Assertion = httpSpec.Assertions
-			switch reflect.ValueOf(httpSpec.Assertions["noise"]).Kind() {
-			case reflect.Map:
-				for k, v := range httpSpec.Assertions["noise"].(map[string]interface{}) {
-					tc.Noise[k] = []string{}
-					for _, val := range v.([]interface{}) {
-						tc.Noise[k] = append(tc.Noise[k], val.(string))
+			for _, assertion := range httpSpec.Assertions {
+				if assertion.Name == models.NoiseAssertion {
+					switch v := assertion.Value.(type) {
+					case map[string]interface{}:
+						// Iterate over the map and append values to tc.Noise
+						for k, val := range v {
+							tc.Noise[k] = []string{}
+							for _, valItem := range val.([]interface{}) {
+								tc.Noise[k] = append(tc.Noise[k], valItem.(string))
+							}
+						}
+					case []interface{}:
+						// Iterate over the slice and append values to tc.Noise
+						for _, val := range v {
+							tc.Noise[val.(string)] = []string{}
+						}
 					}
 				}
-			case reflect.Slice:
-				for _, v := range httpSpec.Assertions["noise"].([]interface{}) {
-					tc.Noise[v.(string)] = []string{}
-				}
 			}
-			tc.Assertion = httpSpec.Assertions
 		case models.HTTPResponseXML:
 			xmlSpec := models.XMLSchema{}
 			err := yamlTestcase.Spec.Decode(&xmlSpec)
@@ -357,17 +374,23 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 			tc.XMLResp = xmlSpec.Response
 			tc.Assertion = xmlSpec.Assertions
 			tc.Noise = map[string][]string{}
-			switch reflect.ValueOf(xmlSpec.Assertions["noise"]).Kind() {
-			case reflect.Map:
-				for k, v := range xmlSpec.Assertions["noise"].(map[string]interface{}) {
-					tc.Noise[k] = []string{}
-					for _, val := range v.([]interface{}) {
-						tc.Noise[k] = append(tc.Noise[k], val.(string))
+			for _, assertion := range xmlSpec.Assertions {
+				if assertion.Name == models.NoiseAssertion {
+					switch v := assertion.Value.(type) {
+					case map[string]interface{}:
+						// Iterate over the map and append values to tc.Noise
+						for k, val := range v {
+							tc.Noise[k] = []string{}
+							for _, valItem := range val.([]interface{}) {
+								tc.Noise[k] = append(tc.Noise[k], valItem.(string))
+							}
+						}
+					case []interface{}:
+						// Iterate over the slice and append values to tc.Noise
+						for _, val := range v {
+							tc.Noise[val.(string)] = []string{}
+						}
 					}
-				}
-			case reflect.Slice:
-				for _, v := range xmlSpec.Assertions["noise"].([]interface{}) {
-					tc.Noise[v.(string)] = []string{}
 				}
 			}
 		}
@@ -383,13 +406,21 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		tc.GrpcResp = grpcSpec.GrpcResp
 		tc.Assertion = grpcSpec.Assertions
 		tc.Noise = map[string][]string{}
-		switch reflect.ValueOf(grpcSpec.Assertions["noise"]).Kind() {
-		case reflect.Map:
-			for k, v := range grpcSpec.Assertions["noise"].(map[string]interface{}) {
-				tc.Noise[k] = []string{}
-				if reflect.TypeOf(v) == reflect.TypeOf([]interface{}{}) {
-					for _, val := range v.([]interface{}) {
-						tc.Noise[k] = append(tc.Noise[k], fmt.Sprint(val))
+		for _, assertion := range grpcSpec.Assertions {
+			if assertion.Name == models.NoiseAssertion {
+				switch v := assertion.Value.(type) {
+				case map[string]interface{}:
+					// Iterate over the map and append values to tc.Noise
+					for k, val := range v {
+						tc.Noise[k] = []string{}
+						for _, valItem := range val.([]interface{}) {
+							tc.Noise[k] = append(tc.Noise[k], valItem.(string))
+						}
+					}
+				case []interface{}:
+					// Iterate over the slice and append values to tc.Noise
+					for _, val := range v {
+						tc.Noise[val.(string)] = []string{}
 					}
 				}
 			}
