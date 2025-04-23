@@ -471,7 +471,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
-	logger := p.logger.With(zap.Any("Client ConnectionID", clientID), zap.Any("Destination ConnectionID", destID),  zap.Any("Destination IP Address", dstAddr), zap.Any("Client IP Address", srcConn.RemoteAddr().String()))
+	logger := p.logger.With(zap.Any("Client ConnectionID", clientID), zap.Any("Destination ConnectionID", destID), zap.Any("Destination IP Address", dstAddr), zap.Any("Client IP Address", srcConn.RemoteAddr().String()))
 
 	var initialBuf []byte
 	// attempt to read conn until buffer is either filled or conn is closed

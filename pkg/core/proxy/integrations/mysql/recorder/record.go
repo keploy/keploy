@@ -107,11 +107,12 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 	}
 }
 
-func recordMock(_ context.Context, requests []mysql.Request, responses []mysql.Response, mockType, requestOperation, responseOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time) {
+func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql.Response, mockType, requestOperation, responseOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time) {
 	meta := map[string]string{
 		"type":              mockType,
 		"requestOperation":  requestOperation,
 		"responseOperation": responseOperation,
+		"connID":            ctx.Value(models.ClientConnectionIDKey).(string),
 	}
 	mysqlMock := &models.Mock{
 		Version: models.GetVersion(),

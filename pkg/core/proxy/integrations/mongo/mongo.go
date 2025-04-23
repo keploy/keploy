@@ -94,11 +94,12 @@ func (m *Mongo) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.C
 }
 
 // recordMessage records the mongo messages into the yaml file.
-func (m *Mongo) recordMessage(_ context.Context, logger *zap.Logger, mongoRequests []models.MongoRequest, mongoResponses []models.MongoResponse, opReq Operation, reqTimestampMock time.Time, mocks chan<- *models.Mock) {
+func (m *Mongo) recordMessage(ctx context.Context, logger *zap.Logger, mongoRequests []models.MongoRequest, mongoResponses []models.MongoResponse, opReq Operation, reqTimestampMock time.Time, mocks chan<- *models.Mock) {
 	shouldRecordCalls := true // boolean to check for already saved config mocks
 	name := "mocks"
 	meta1 := map[string]string{
 		"operation": opReq.String(),
+		"connID":    ctx.Value(models.ClientConnectionIDKey).(string),
 	}
 
 	// check that the packet is heartbeat or not.
