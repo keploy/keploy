@@ -16,6 +16,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: "Print GitHub event details for debugging"
+        run: |
+          echo "Event Name: ${{ github.event_name }}"
+          echo "Actor: ${{ github.actor }}"
+          echo "Comment Body: ${{ github.event.comment.body }}"
+          
+      # Clear cache if caching is suspected to cause issues
+      - name: "Clear GitHub Actions cache (if caching suspected)"
+        run: |
+          echo "Clearing cache to ensure the latest configuration is applied."
+          rm -rf ${{ github.workspace }}/.github/cache/*
+        
       - name: "CLA Assistant"
         if: "(github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'"
         uses: "cla-assistant/github-action@v2.1.3-beta"
@@ -28,8 +40,14 @@ jobs:
           path-to-signatures: "etc/cla-signatures/signatures.json"
           path-to-document: "https://github.com/keploy/keploy/tree/main/.github/CLA.md"
           branch: "cla-signatures"
-          allowlist: "renovate,bot*"
+          allowlist: "keploy-bot,renovate,keploy,keploy-staging,bot*"
 
+      # Additional debugging step to verify the allowlist being used
+      - name: "Debug allowlist configuration"
+        run: |
+          echo "Allowlist used: keploy-bot,renovate,keploy,keploy-staging,bot*"
+
+      # Post Failure Instructions
       - name: "Post Failure Instructions"
         if: failure() && github.event_name == 'pull_request_target'
         run: |
