@@ -330,6 +330,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 			tc.HTTPReq = httpSpec.Request
 			tc.HTTPResp = httpSpec.Response
 			tc.Noise = map[string][]string{}
+			tc.Assertion = httpSpec.Assertions
 			switch reflect.ValueOf(httpSpec.Assertions["noise"]).Kind() {
 			case reflect.Map:
 				for k, v := range httpSpec.Assertions["noise"].(map[string]interface{}) {
@@ -343,6 +344,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 					tc.Noise[v.(string)] = []string{}
 				}
 			}
+			tc.Assertion = httpSpec.Assertions
 		case models.HTTPResponseXML:
 			xmlSpec := models.XMLSchema{}
 			err := yamlTestcase.Spec.Decode(&xmlSpec)
@@ -353,6 +355,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 			tc.Created = xmlSpec.Created
 			tc.HTTPReq = xmlSpec.Request
 			tc.XMLResp = xmlSpec.Response
+			tc.Assertion = xmlSpec.Assertions
 			tc.Noise = map[string][]string{}
 			switch reflect.ValueOf(xmlSpec.Assertions["noise"]).Kind() {
 			case reflect.Map:
@@ -378,6 +381,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		tc.Created = grpcSpec.Created
 		tc.GrpcReq = grpcSpec.GrpcReq
 		tc.GrpcResp = grpcSpec.GrpcResp
+		tc.Assertion = grpcSpec.Assertions
 		tc.Noise = map[string][]string{}
 		switch reflect.ValueOf(grpcSpec.Assertions["noise"]).Kind() {
 		case reflect.Map:

@@ -453,7 +453,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, fmt.Errorf("failed to read test set config: %w", err)
 		}
 	}
-
 	if conf == nil {
 		conf = &models.TestSet{}
 	}
@@ -982,7 +981,11 @@ func (r *Replayer) compareHTTPResp(tc *models.TestCase, actualResponse *models.H
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
-	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
+	// if tc.assertion ==1 check if Assertion has noise as key
+	if len(tc.Assertion) == 1 && tc.Assertion["noise"] != nil {
+		return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
+	}
+	return httpMatcher.AssertionMatch(tc, actualResponse, r.logger)
 }
 
 func (r *Replayer) compareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string) (bool, *models.Result) {
@@ -990,7 +993,10 @@ func (r *Replayer) compareGRPCResp(tc *models.TestCase, actualResp *models.GrpcR
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
-	return grpcMatcher.Match(tc, actualResp, noiseConfig, r.logger)
+	if len(tc.Assertion) == 1 && tc.Assertion["noise"] != nil {
+		return grpcMatcher.Match(tc, actualResp, noiseConfig, r.logger)
+	}
+	return grpcMatcher.AssertionMatch(tc, actualResp, r.logger)
 }
 
 func (r *Replayer) printSummary(_ context.Context, _ bool) {
