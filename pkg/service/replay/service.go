@@ -81,7 +81,7 @@ type TestHooks interface {
 	BeforeTestSetRun(ctx context.Context, testSetID string) error
 	AfterTestSetRun(ctx context.Context, testSetID string, status bool) error
 	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error // hook executed after running all the test-sets
-	BeforeStop(ctx context.Context, appID uint64) error
+	BeforeStop(ctx context.Context) error
 }
 
 type Storage interface {

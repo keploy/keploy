@@ -268,8 +268,8 @@ func (h *Hooks) GetConsumedMocks(ctx context.Context, id uint64) ([]string, erro
 	return consumedMocks, nil
 }
 
-func (h *Hooks) BeforeStop(_ context.Context, appID uint64) error {
-	h.logger.Debug("BeforeStop hook executed", zap.Uint64("appID", appID))
+func (h *Hooks) BeforeStop(_ context.Context) error {
+	h.logger.Debug("BeforeStop hook executed")
 	return nil
 }
 
