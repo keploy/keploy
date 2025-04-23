@@ -1,9 +1,0 @@
-name: Print GitHub Actor
-on: [push]
-jobs:
-  print-actor:
-    runs-on: ubuntu-latest
-    steps:
-    - name: Print Actor
-      run: |
-        echo "Actor: ${{ github.actor }}"
