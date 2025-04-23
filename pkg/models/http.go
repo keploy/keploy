@@ -20,14 +20,14 @@ type HTTPReq struct {
 }
 
 type XMLSchema struct {
-	Metadata         map[string]string      `json:"metadata" yaml:"metadata"`
-	Request          HTTPReq                `json:"req" yaml:"req"`
-	Response         XMLResp                `json:"resp" yaml:"resp"`
-	Objects          []*OutputBinary        `json:"objects" yaml:"objects"`
-	Assertions       []Assertion `json:"assertions" yaml:"assertions,omitempty"`
-	Created          int64                  `json:"created" yaml:"created,omitempty"`
-	ReqTimestampMock time.Time              `json:"reqTimestampMock" yaml:"reqTimestampMock,omitempty"`
-	ResTimestampMock time.Time              `json:"resTimestampMock" yaml:"resTimestampMock,omitempty"`
+	Metadata         map[string]string `json:"metadata" yaml:"metadata"`
+	Request          HTTPReq           `json:"req" yaml:"req"`
+	Response         XMLResp           `json:"resp" yaml:"resp"`
+	Objects          []*OutputBinary   `json:"objects" yaml:"objects"`
+	Assertions       []Assertion       `json:"assertions" yaml:"assertions,omitempty"`
+	Created          int64             `json:"created" yaml:"created,omitempty"`
+	ReqTimestampMock time.Time         `json:"reqTimestampMock" yaml:"reqTimestampMock,omitempty"`
+	ResTimestampMock time.Time         `json:"resTimestampMock" yaml:"resTimestampMock,omitempty"`
 }
 type XMLResp struct {
 	Body          map[string]interface{} `json:"body" yaml:"body"`
@@ -40,14 +40,14 @@ type XMLResp struct {
 	Timestamp     time.Time              `json:"timestamp" yaml:"timestamp"`
 }
 type HTTPSchema struct {
-	Metadata         map[string]string      `json:"metadata" yaml:"metadata"`
-	Request          HTTPReq                `json:"req" yaml:"req"`
-	Response         HTTPResp               `json:"resp" yaml:"resp"`
-	Objects          []*OutputBinary        `json:"objects" yaml:"objects"`
-	Assertions       []Assertion `json:"assertions" yaml:"assertions,omitempty"`
-	Created          int64                  `json:"created" yaml:"created,omitempty"`
-	ReqTimestampMock time.Time              `json:"reqTimestampMock" yaml:"reqTimestampMock,omitempty"`
-	ResTimestampMock time.Time              `json:"resTimestampMock" yaml:"resTimestampMock,omitempty"`
+	Metadata         map[string]string `json:"metadata" yaml:"metadata"`
+	Request          HTTPReq           `json:"req" yaml:"req"`
+	Response         HTTPResp          `json:"resp" yaml:"resp"`
+	Objects          []*OutputBinary   `json:"objects" yaml:"objects"`
+	Assertions       []Assertion       `json:"assertions" yaml:"assertions,omitempty"`
+	Created          int64             `json:"created" yaml:"created,omitempty"`
+	ReqTimestampMock time.Time         `json:"reqTimestampMock" yaml:"reqTimestampMock,omitempty"`
+	ResTimestampMock time.Time         `json:"resTimestampMock" yaml:"resTimestampMock,omitempty"`
 }
 
 type FormData struct {

@@ -1002,10 +1002,10 @@ func (r *Replayer) compareGRPCResp(tc *models.TestCase, actualResp *models.GrpcR
 	}
 
 	// Check if Assertions has exactly one assertion and it has "noise" as a Name
-	if len(tc.Assertion) == 1  {
-		for _,assertion := range tc.Assertion{
+	if len(tc.Assertion) == 1 {
+		for _, assertion := range tc.Assertion {
 			// If the assertion is "noise", proceed with the Match function
-			if assertion.Name == models.NoiseAssertion{
+			if assertion.Name == models.NoiseAssertion {
 				return grpcMatcher.Match(tc, actualResp, noiseConfig, r.logger)
 			}
 		}

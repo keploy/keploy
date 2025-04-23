@@ -90,10 +90,10 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 				},
 				Created: tc.Created,
 				// add custom assertions here as well for encode
-				Assertions:[]models.Assertion{
+				Assertions: []models.Assertion{
 					{
-						Name: models.NoiseAssertion,
-						Value:noise,
+						Name:  models.NoiseAssertion,
+						Value: noise,
 					},
 				},
 			})
@@ -107,10 +107,10 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 				Response: tc.HTTPResp,
 				Created:  tc.Created,
 				// add custom assertions here as well for encode
-				Assertions:[]models.Assertion{
+				Assertions: []models.Assertion{
 					{
-						Name: models.NoiseAssertion,
-						Value:noise,
+						Name:  models.NoiseAssertion,
+						Value: noise,
 					},
 				},
 			})
@@ -130,10 +130,10 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 			GrpcResp: tc.GrpcResp,
 			Created:  tc.Created,
 			// add custom assertions here as well for encode
-			Assertions:[]models.Assertion{
+			Assertions: []models.Assertion{
 				{
-					Name: models.NoiseAssertion,
-					Value:noise,
+					Name:  models.NoiseAssertion,
+					Value: noise,
 				},
 			},
 		}
