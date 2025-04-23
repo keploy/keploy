@@ -16,6 +16,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Debug GitHub Actor
+        run: echo "Actor: ${{ github.actor }}"
+
       - name: "CLA Assistant"
         if: "(github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'"
         uses: "cla-assistant/github-action@v2.1.3-beta"
