@@ -1,4 +1,4 @@
-name: "CLA Assistant"
+name: "CLA Assistant Check"
 
 on:
   issue_comment:
@@ -11,7 +11,7 @@ on:
       - "synchronize"
 
 jobs:
-  cla-assistant:
+  cla-assistant-check:
     runs-on: "ubuntu-latest"
     steps:
       - uses: actions/checkout@v4
