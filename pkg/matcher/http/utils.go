@@ -6,6 +6,8 @@ import (
 	"strconv"
 
 	"strings"
+
+	"go.keploy.io/server/v2/pkg/models"
 )
 
 func toInt(v interface{}) (int, error) {
@@ -63,17 +65,39 @@ func toStringSlice(v interface{}) []string {
 	return out
 }
 
-func toStringMap(v interface{}) map[string]string {
+func toStringMap(val interface{}) map[string]string {
 	out := make(map[string]string)
-	switch m := v.(type) {
+	switch m := val.(type) {
 	case map[string]interface{}:
-		for k, iv := range m {
-			out[k] = toString(iv)
+		for k, v := range m {
+			out[k] = fmt.Sprint(v)
 		}
+
 	case map[string]string:
-		for k, s := range m {
-			out[k] = s
+		// already the right shape
+		for k, v := range m {
+			out[k] = v
 		}
+
+	case map[models.AssertionType]interface{}:
+		for kType, v := range m {
+			out[string(kType)] = fmt.Sprint(v)
+		}
+
+	case map[models.AssertionType]string:
+		for kType, v := range m {
+			out[string(kType)] = v
+		}
+
+	case map[interface{}]interface{}:
+		// sometimes YAML v3 gives you this
+		for ki, vi := range m {
+			key := fmt.Sprint(ki)
+			out[key] = fmt.Sprint(vi)
+		}
+
+	default:
+		// not a map we know—return empty
 	}
 	return out
 }

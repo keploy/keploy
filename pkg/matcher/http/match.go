@@ -371,13 +371,27 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			}
 
 		case models.HeaderEqual:
+			// value should be a map[string]interface{} → we convert to map[string]string
+			fmt.Println("here is the value", value)
 			hm := toStringMap(value)
+			fmt.Println("here is hm", hm)
 			for header, exp := range hm {
+				fmt.Println("actualResponse", actualResponse.Header)
 				act, ok := actualResponse.Header[header]
+				fmt.Println("here is the act", act)
 				if !ok || act != exp {
 					pass = false
-					logger.Error("header_equal assertion failed", zap.String("header", header), zap.String("expected", exp), zap.String("actual", act))
+					logger.Error("header_equal assertion failed",
+						zap.String("header", header),
+						zap.String("expected", exp),
+						zap.String("actual", act),
+					)
 				}
+				logger.Info("header_equal assertion failed",
+					zap.String("header", header),
+					zap.String("expected", exp),
+					zap.String("actual", act),
+				)
 			}
 
 		case models.HeaderContains:
@@ -386,36 +400,68 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 				act, ok := actualResponse.Header[header]
 				if !ok || !strings.Contains(act, exp) {
 					pass = false
-					logger.Error("header_contains assertion failed", zap.String("header", header), zap.String("expected", exp), zap.String("actual", act))
+					logger.Error("header_contains assertion failed",
+						zap.String("header", header),
+						zap.String("expected_substr", exp),
+						zap.String("actual", act),
+					)
 				}
 			}
 
 		case models.HeaderExists:
-			hm, ok := value.(map[string]interface{})
-			if !ok {
-				pass = false
-				logger.Error("header_exists: expected map[string]interface{}", zap.Any("value", value))
-				continue
-			}
-			for header := range hm {
-				if _, ok := actualResponse.Header[header]; !ok {
-					pass = false
-					logger.Error("header_exists assertion failed", zap.String("header", header))
+			switch v := value.(type) {
+
+			// a flat slice of header names
+			case []interface{}:
+				for _, item := range v {
+					hdr := fmt.Sprint(item)
+					if _, ok := actualResponse.Header[hdr]; !ok {
+						pass = false
+						logger.Error("header_exists assertion failed", zap.String("header", hdr))
+					}
 				}
+
+			// a map[string]… where the keys are header names
+			case map[string]interface{}:
+				for hdr := range v {
+					if _, ok := actualResponse.Header[hdr]; !ok {
+						pass = false
+						logger.Error("header_exists assertion failed", zap.String("header", hdr))
+					}
+				}
+
+			case map[models.AssertionType]interface{}:
+				for kt := range v {
+					hdr := string(kt)
+					if _, ok := actualResponse.Header[hdr]; !ok {
+						pass = false
+						logger.Error("header_exists assertion failed", zap.String("header", hdr))
+					}
+				}
+
+			default:
+				pass = false
+				logger.Error("header_exists: unsupported format, expected slice or map", zap.Any("value", value))
 			}
 
 		case models.HeaderMatches:
+			// value should be a map[string]interface{} → convert to map[string]string
 			hm := toStringMap(value)
 			for header, pattern := range hm {
 				act, ok := actualResponse.Header[header]
 				if !ok {
 					pass = false
-					logger.Error("header not found for matches", zap.String("header", header))
+					logger.Error("header_matches: header not found", zap.String("header", header))
 					continue
 				}
-				if matched, _ := regexp.MatchString(pattern, act); !matched {
+				if matched, err := regexp.MatchString(pattern, act); err != nil || !matched {
 					pass = false
-					logger.Error("header_matches assertion failed", zap.String("header", header), zap.String("regex", pattern), zap.String("actual", act))
+					logger.Error("header_matches assertion failed",
+						zap.String("header", header),
+						zap.String("pattern", pattern),
+						zap.String("actual", act),
+						zap.Error(err),
+					)
 				}
 			}
 
@@ -445,7 +491,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			}
 
 		default:
-			if(assertionName != models.NoiseAssertion){
+			if assertionName != models.NoiseAssertion {
 				logger.Warn("unhandled assertion type", zap.String("name", string(assertionName)))
 			}
 		}
