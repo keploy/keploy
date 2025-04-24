@@ -95,10 +95,9 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 					if len(noise) > 0 {
 						a[models.NoiseAssertion] = noise
 					}
-					// Optionally add other custom assertions if needed here
-					// Example:
-					// a[models.StatusCode] = tc.HTTPResp.StatusCode
-
+					for k, v := range tc.Assertions {
+						a[k] = v
+					}
 					return a
 				}(),
 			})
@@ -117,6 +116,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 					if len(noise) > 0 {
 						a[models.NoiseAssertion] = noise
 					}
+
 					// Optionally add other custom assertions if needed here
 					// Example:
 					// a[models.StatusCode] = tc.HTTPResp.StatusCode

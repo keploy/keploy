@@ -194,12 +194,40 @@ func compareSecondResponse(val1 *string, response2 *interface{}, key1 string, ke
 			}
 		}
 	case float64, int64, int, float32:
-		if *val1 != utils.ToString(v2) && key1 == key2 {
-			valFromTemplate := utils.TemplatizedValues[key1]
-			if valFromTemplate != nil && *val1 == utils.ToString(valFromTemplate) {
-				utils.TemplatizedValues[key1] = v2
+		if *val1 != v2 {
+
+			// Reverse the templatized values map.
+			revMap := reverseMap(utils.TemplatizedValues)
+			if _, ok := revMap[*val1]; ok && key1 == key2 {
+				key := revMap[*val1]
+				utils.TemplatizedValues[key] = v2
 				*val1 = utils.ToString(v2)
+				return
 			}
+			// 1) try integer parse
+			if i, err := strconv.Atoi(*val1); err == nil {
+				if _, ok := revMap[i]; ok && key1 == key2 {
+					key := revMap[i]
+					utils.TemplatizedValues[key] = v2
+					*val1 = utils.ToString(v2)
+				}
+			}
+			if f, err := strconv.ParseFloat(*val1, 32); err == nil {
+				if _, ok := revMap[f]; ok && key1 == key2 {
+					key := revMap[f]
+					utils.TemplatizedValues[key] = v2
+					*val1 = utils.ToString(v2)
+				}
+			}
+			if f, err := strconv.ParseFloat(*val1, 64); err == nil {
+				if _, ok := revMap[f]; ok && key1 == key2 {
+
+					key := revMap[*val1]
+					utils.TemplatizedValues[key] = v2
+					*val1 = utils.ToString(v2)
+				}
+			}
+
 		}
 	}
 }
