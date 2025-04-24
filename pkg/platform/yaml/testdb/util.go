@@ -59,7 +59,6 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 						return true
 					}
 				}
-
 				// maybe we need to concatenate the values
 				return pkg.IsTime(strings.Join(vals, ", "))
 			})
@@ -95,9 +94,6 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 					if len(noise) > 0 {
 						a[models.NoiseAssertion] = noise
 					}
-					for k, v := range tc.Assertions {
-						a[k] = v
-					}
 					return a
 				}(),
 			})
@@ -115,6 +111,9 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 					a := map[models.AssertionType]interface{}{}
 					if len(noise) > 0 {
 						a[models.NoiseAssertion] = noise
+					}
+					for k, v := range tc.Assertions {
+						a[k] = v
 					}
 
 					// Optionally add other custom assertions if needed here

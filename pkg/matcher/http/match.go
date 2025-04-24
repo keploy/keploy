@@ -258,7 +258,6 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				isBodyMismatch = false
 				if validatedJSON.IsIdentical() {
 					jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
-					pass = jsonComparisonResult.IsExact()
 					if err != nil {
 						return false, res
 					}
@@ -296,8 +295,9 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			if err != nil {
 				utils.LogError(logger, err, "failed to render the diffs")
 			}
+		} else {
+			pass = true
 		}
-
 	}
 
 	if !skipSuccessMsg {
@@ -310,6 +310,10 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		if err != nil {
 			utils.LogError(logger, err, "failed to print the logs")
 		}
+	}
+
+	if !(len(tc.Assertions) == 0 || (len(tc.Assertions) == 1 && tc.Assertions[models.NoiseAssertion] != nil)) {
+		return AssertionMatch(tc, actualResponse, logger)
 	}
 
 	return pass, res

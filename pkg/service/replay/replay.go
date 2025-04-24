@@ -983,13 +983,12 @@ func (r *Replayer) compareHTTPResp(tc *models.TestCase, actualResponse *models.H
 	}
 
 	// Check if Assertions has exactly one assertion and it has "noise" as a Name
-	if len(tc.Assertions) == 1 {
-		if _, isNoise := tc.Assertions[models.NoiseAssertion]; isNoise {
-			return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
-		}
-	}
+	// if len(tc.Assertions) == 0 || (len(tc.Assertions) == 1 && tc.Assertions[models.NoiseAssertion] != nil) {
+	pass, res := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
+	return pass, res
+	// }
 
-	return httpMatcher.AssertionMatch(tc, actualResponse, r.logger)
+	// return httpMatcher.AssertionMatch(tc, actualResponse, r.logger)
 }
 
 func (r *Replayer) compareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string) (bool, *models.Result) {
