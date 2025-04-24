@@ -116,6 +116,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 			if !prevChunkWasReq && len(pgRequests) > 0 && len(pgResponses) > 0 {
 				metadata := make(map[string]string)
 				metadata["type"] = "config"
+				metadata["connID"] = ctx.Value(models.ClientConnectionIDKey).(string)
 				// Save the mock
 				mocks <- &models.Mock{
 					Version: models.GetVersion(),
@@ -145,6 +146,7 @@ func encodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 			if !prevChunkWasReq && len(pgRequests) > 0 && len(pgResponses) > 0 {
 				metadata := make(map[string]string)
 				metadata["type"] = "config"
+				metadata["connID"] = ctx.Value(models.ClientConnectionIDKey).(string)
 				// Save the mock
 				mocks <- &models.Mock{
 					Version: models.GetVersion(),

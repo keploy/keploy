@@ -103,17 +103,20 @@ func (sic *StreamInfoCollection) AddPayloadForResponse(streamID uint32, payload 
 	sic.StreamInfo[streamID] = info
 }
 
-func (sic *StreamInfoCollection) PersistMockForStream(_ context.Context, streamID uint32, mocks chan<- *models.Mock) {
+func (sic *StreamInfoCollection) PersistMockForStream(ctx context.Context, streamID uint32, mocks chan<- *models.Mock) {
 	sic.mutex.Lock()
 	defer sic.mutex.Unlock()
 	grpcReq := sic.StreamInfo[streamID].GrpcReq
 	grpcResp := sic.StreamInfo[streamID].GrpcResp
+	metadata := make(map[string]string)
+	metadata["connID"] = ctx.Value(models.ClientConnectionIDKey).(string)
 	// save the mock
 	mocks <- &models.Mock{
 		Version: models.GetVersion(),
 		Name:    "mocks",
 		Kind:    models.GRPC_EXPORT,
 		Spec: models.MockSpec{
+			Metadata:         metadata,
 			GRPCReq:          &grpcReq,
 			GRPCResp:         &grpcResp,
 			ReqTimestampMock: sic.ReqTimestampMock,
