@@ -5,12 +5,12 @@ import (
 )
 
 type GrpcSpec struct {
-	GrpcReq          GrpcReq     `json:"grpcReq" yaml:"grpcReq"`
-	GrpcResp         GrpcResp    `json:"grpcResp" yaml:"grpcResp"`
-	Created          int64       `json:"created" yaml:"created"`
-	Assertions       []Assertion `json:"assertions" yaml:"assertions"`
-	ReqTimestampMock time.Time   `json:"reqTimestampMock" yaml:"reqTimestampMock,omitempty"`
-	ResTimestampMock time.Time   `json:"resTimestampMock" yaml:"resTimestampMock,omitempty"`
+	GrpcReq          GrpcReq                       `json:"grpcReq" yaml:"grpcReq"`
+	GrpcResp         GrpcResp                      `json:"grpcResp" yaml:"grpcResp"`
+	Created          int64                         `json:"created" yaml:"created"`
+	Assertions       map[AssertionType]interface{} `json:"assertions" yaml:"assertions"`
+	ReqTimestampMock time.Time                     `json:"reqTimestampMock" yaml:"reqTimestampMock,omitempty"`
+	ResTimestampMock time.Time                     `json:"resTimestampMock" yaml:"resTimestampMock,omitempty"`
 }
 
 type GrpcHeaders struct {

@@ -983,12 +983,9 @@ func (r *Replayer) compareHTTPResp(tc *models.TestCase, actualResponse *models.H
 	}
 
 	// Check if Assertions has exactly one assertion and it has "noise" as a Name
-	if len(tc.Assertion) == 1 {
-		for _, assertion := range tc.Assertion {
-			// If the assertion is "noise", proceed with the Match function
-			if assertion.Name == models.NoiseAssertion {
-				return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
-			}
+	if len(tc.Assertions) == 1 {
+		if _, isNoise := tc.Assertions[models.NoiseAssertion]; isNoise {
+			return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
 		}
 	}
 
@@ -1001,15 +998,14 @@ func (r *Replayer) compareGRPCResp(tc *models.TestCase, actualResp *models.GrpcR
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
 
-	// Check if Assertions has exactly one assertion and it has "noise" as a Name
-	if len(tc.Assertion) == 1 {
-		for _, assertion := range tc.Assertion {
-			// If the assertion is "noise", proceed with the Match function
-			if assertion.Name == models.NoiseAssertion {
-				return grpcMatcher.Match(tc, actualResp, noiseConfig, r.logger)
-			}
+	// If Assertions contains only a noise block, use Match()
+	if len(tc.Assertions) == 1 {
+		if _, isNoise := tc.Assertions[models.NoiseAssertion]; isNoise {
+			return grpcMatcher.Match(tc, actualResp, noiseConfig, r.logger)
 		}
 	}
+
+	// Otherwise, run all assertions
 	return grpcMatcher.AssertionMatch(tc, actualResp, r.logger)
 }
 

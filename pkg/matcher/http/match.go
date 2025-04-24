@@ -330,21 +330,20 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 		}},
 	}
 
-	for _, assertion := range tc.Assertion {
-		switch assertion.Name {
+	for assertionName, value := range tc.Assertions {
+		switch assertionName {
 
 		case models.StatusCode:
-			expected, err := toInt(assertion.Value)
+			expected, err := toInt(value)
 			if err != nil || expected != actualResponse.StatusCode {
 				pass = false
-				res.StatusCode.Normal = false
 				logger.Error("status_code assertion failed", zap.Int("expected", expected), zap.Int("actual", actualResponse.StatusCode))
 			} else {
 				res.StatusCode.Normal = true
 			}
 
 		case models.StatusCodeClass:
-			class := toString(assertion.Value)
+			class := toString(value)
 			actualClass := fmt.Sprintf("%dxx", actualResponse.StatusCode/100)
 			if class != actualClass {
 				pass = false
@@ -352,7 +351,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			}
 
 		case models.StatusCodeIn:
-			codes := toStringSlice(assertion.Value)
+			codes := toStringSlice(value)
 			var ints []int
 			for _, s := range codes {
 				if i, err := strconv.Atoi(s); err == nil {
@@ -372,7 +371,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			}
 
 		case models.HeaderEqual:
-			hm := toStringMap(assertion.Value)
+			hm := toStringMap(value)
 			for header, exp := range hm {
 				act, ok := actualResponse.Header[header]
 				if !ok || act != exp {
@@ -382,7 +381,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			}
 
 		case models.HeaderContains:
-			hm := toStringMap(assertion.Value)
+			hm := toStringMap(value)
 			for header, exp := range hm {
 				act, ok := actualResponse.Header[header]
 				if !ok || !strings.Contains(act, exp) {
@@ -392,17 +391,21 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			}
 
 		case models.HeaderExists:
-			hm := assertion.Value.(map[string]interface{})
+			hm, ok := value.(map[string]interface{})
+			if !ok {
+				pass = false
+				logger.Error("header_exists: expected map[string]interface{}", zap.Any("value", value))
+				continue
+			}
 			for header := range hm {
-				_, ok := actualResponse.Header[header]
-				if !ok {
+				if _, ok := actualResponse.Header[header]; !ok {
 					pass = false
 					logger.Error("header_exists assertion failed", zap.String("header", header))
 				}
 			}
 
 		case models.HeaderMatches:
-			hm := toStringMap(assertion.Value) 
+			hm := toStringMap(value)
 			for header, pattern := range hm {
 				act, ok := actualResponse.Header[header]
 				if !ok {
@@ -426,11 +429,15 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 
 		case models.JsonContains:
 			var expectedMap map[string]interface{}
-			switch v := assertion.Value.(type) {
+			switch v := value.(type) {
 			case map[string]interface{}:
 				expectedMap = v
 			case string:
 				_ = json.Unmarshal([]byte(v), &expectedMap)
+			default:
+				pass = false
+				logger.Error("json_contains: unexpected format", zap.Any("value", value))
+				continue
 			}
 			if ok, _ := matcherUtils.JsonContains(actualResponse.Body, expectedMap); !ok {
 				pass = false
@@ -438,15 +445,14 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			}
 
 		default:
-			if assertion.Name != models.NoiseAssertion {
-				logger.Warn("unhandled assertion type", zap.String("name", string(assertion.Name)))
+			if(assertionName != models.NoiseAssertion){
+				logger.Warn("unhandled assertion type", zap.String("name", string(assertionName)))
 			}
 		}
 	}
 
-	res.StatusCode.Normal = pass
-
 	if pass {
+		res.StatusCode.Normal = true
 		res.BodyResult[0].Normal = true
 	}
 

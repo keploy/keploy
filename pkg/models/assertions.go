@@ -1,12 +1,6 @@
 package models
 
-// Assertion represents a custom assertion.
-type Assertion struct {
-	Name  AssertionType `json:"name"`
-	Value any           `json:"value"` // The value type depends on the assertion type.
-}
-
-// AssertionType defines a custom type for assertion types.
+// AssertionType defines a custom type for supported assertion keys.
 type AssertionType string
 
 const (
