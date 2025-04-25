@@ -996,16 +996,9 @@ func (r *Replayer) compareGRPCResp(tc *models.TestCase, actualResp *models.GrpcR
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
+	
+	return grpcMatcher.Match(tc, actualResp, noiseConfig, r.logger)
 
-	// If Assertions contains only a noise block, use Match()
-	if len(tc.Assertions) == 1 {
-		if _, isNoise := tc.Assertions[models.NoiseAssertion]; isNoise {
-			return grpcMatcher.Match(tc, actualResp, noiseConfig, r.logger)
-		}
-	}
-
-	// Otherwise, run all assertions
-	return grpcMatcher.AssertionMatch(tc, actualResp, r.logger)
 }
 
 func (r *Replayer) printSummary(_ context.Context, _ bool) {
