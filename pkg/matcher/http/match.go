@@ -312,7 +312,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		}
 	}
 
-	if !(len(tc.Assertions) == 0 || (len(tc.Assertions) == 1 && tc.Assertions[models.NoiseAssertion] != nil)) {
+	if len(tc.Assertions) > 1 || (len(tc.Assertions) == 1 && tc.Assertions[models.NoiseAssertion] == nil) {
 		return AssertionMatch(tc, actualResponse, logger)
 	}
 
