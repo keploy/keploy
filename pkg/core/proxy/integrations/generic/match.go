@@ -9,6 +9,7 @@ import (
 
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
+	"go.uber.org/zap"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models"
@@ -20,7 +21,7 @@ import (
 // If a match is found, it returns the corresponding response mock and a boolean value indicating success.
 // If no match is found, it returns false and a nil response.
 // If an error occurs during the matching process, it returns an error.
-func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockMemDb) (bool, []models.Payload, error) {
+func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockDb integrations.MockMemDb) (bool, []models.Payload, error) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -45,6 +46,14 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 				}
 			}
 
+			logger.Debug("List of mocks in the database", zap.Any("Filtered Mocks", len(filteredMocks)), zap.Any("Unfiltered Mocks", len(unfilteredMocks)))
+			for i, mock := range filteredMocks {
+				logger.Debug("Filtered Mocks", zap.Any(fmt.Sprintf("Mock[%d]", i), mock.Name), zap.Any("sortOrder", mock.TestModeInfo.SortOrder))
+			}
+			for i, mock := range unfilteredMocks {
+				logger.Debug("Unfiltered Mocks", zap.Any(fmt.Sprintf("Mock[%d]", i), mock.Name), zap.Any("sortOrder", mock.TestModeInfo.SortOrder))
+			}
+
 			index := findExactMatch(filteredMocks, reqBuff)
 
 			if index == -1 {
@@ -58,35 +67,29 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 				filteredMocks[index].TestModeInfo.IsFiltered = false
 				filteredMocks[index].TestModeInfo.SortOrder = pkg.GetNextSortNum()
 				isUpdated := mockDb.UpdateUnFilteredMock(&originalFilteredMock, filteredMocks[index])
-				if isUpdated {
+				if !isUpdated {
 					continue
 				}
+				logger.Debug("Filtered mock found for generic request", zap.Any("Mock", filteredMocks[index].Name), zap.Any("sortOrder", filteredMocks[index].TestModeInfo.SortOrder))
 				return true, responseMock, nil
 			}
 
 			index = findExactMatch(unfilteredMocks, reqBuff)
 
+			if index == -1 {
+				index = findBinaryMatch(unfilteredMocks, reqBuff, 0.4)
+			}
 			if index != -1 {
 				responseMock := make([]models.Payload, len(unfilteredMocks[index].Spec.GenericResponses))
 				copy(responseMock, unfilteredMocks[index].Spec.GenericResponses)
-				return true, responseMock, nil
-			}
-
-			totalMocks := append(filteredMocks, unfilteredMocks...)
-			index = findBinaryMatch(totalMocks, reqBuff, 0.4)
-
-			if index != -1 {
-				responseMock := make([]models.Payload, len(totalMocks[index].Spec.GenericResponses))
-				copy(responseMock, totalMocks[index].Spec.GenericResponses)
-				originalFilteredMock := *totalMocks[index]
-				if totalMocks[index].TestModeInfo.IsFiltered {
-					totalMocks[index].TestModeInfo.IsFiltered = false
-					totalMocks[index].TestModeInfo.SortOrder = pkg.GetNextSortNum()
-					isUpdated := mockDb.UpdateUnFilteredMock(&originalFilteredMock, totalMocks[index])
-					if isUpdated {
-						continue
-					}
+				originalFilteredMock := *unfilteredMocks[index]
+				unfilteredMocks[index].TestModeInfo.IsFiltered = false
+				unfilteredMocks[index].TestModeInfo.SortOrder = pkg.GetNextSortNum()
+				isUpdated := mockDb.UpdateUnFilteredMock(&originalFilteredMock, unfilteredMocks[index])
+				if !isUpdated {
+					continue
 				}
+				logger.Debug("Unfiltered mock found for generic request", zap.Any("Mock", unfilteredMocks[index].Name), zap.Any("sortOrder", unfilteredMocks[index].TestModeInfo.SortOrder))
 				return true, responseMock, nil
 			}
 			return false, nil, nil
