@@ -115,16 +115,14 @@ func (m *MockManager) FlagMockAsUsed(mock models.MockState) error {
 func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	isDeleted := m.filtered.delete(mock.TestModeInfo)
 	if isDeleted {
-		go func() {
-			if err := m.FlagMockAsUsed(models.MockState{
-				Name:       mock.Name,
-				Usage:      models.Deleted,
-				IsFiltered: mock.TestModeInfo.IsFiltered,
-				SortOrder:  mock.TestModeInfo.SortOrder,
-			}); err != nil {
-				m.logger.Error("failed to flag mock as used", zap.Error(err))
-			}
-		}()
+		if err := m.FlagMockAsUsed(models.MockState{
+			Name:       mock.Name,
+			Usage:      models.Deleted,
+			IsFiltered: mock.TestModeInfo.IsFiltered,
+			SortOrder:  mock.TestModeInfo.SortOrder,
+		}); err != nil {
+			m.logger.Error("failed to flag mock as used", zap.Error(err))
+		}
 	}
 	return isDeleted
 }
@@ -132,16 +130,14 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 	isDeleted := m.unfiltered.delete(mock.TestModeInfo)
 	if isDeleted {
-		go func() {
-			if err := m.FlagMockAsUsed(models.MockState{
-				Name:       mock.Name,
-				Usage:      models.Deleted,
-				IsFiltered: mock.TestModeInfo.IsFiltered,
-				SortOrder:  mock.TestModeInfo.SortOrder,
-			}); err != nil {
-				m.logger.Error("failed to flag mock as used", zap.Error(err))
-			}
-		}()
+		if err := m.FlagMockAsUsed(models.MockState{
+			Name:       mock.Name,
+			Usage:      models.Deleted,
+			IsFiltered: mock.TestModeInfo.IsFiltered,
+			SortOrder:  mock.TestModeInfo.SortOrder,
+		}); err != nil {
+			m.logger.Error("failed to flag mock as used", zap.Error(err))
+		}
 	}
 	return isDeleted
 }
