@@ -13,9 +13,6 @@ import (
 	"go.uber.org/zap"
 )
 
-var initFilterSortOrder sync.Once
-var initUnfilterSortOrder sync.Once
-
 type MockManager struct {
 	filtered      *TreeDb
 	unfiltered    *TreeDb
@@ -35,12 +32,9 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	m.filtered.deleteAll()
 	for index, mock := range mocks {
-		// Initialize the sort order for the first time only, this is done
-		// to avoid collisions in the sort order when sortorder gets changed
-		// when mocks are used/updated.
-		initFilterSortOrder.Do(func() {
-			mock.TestModeInfo.SortOrder = int64(index)
-		})
+		if mock.TestModeInfo.SortOrder == 0 {
+			mock.TestModeInfo.SortOrder = int64(index) + 1
+		}
 		mock.TestModeInfo.ID = index
 		m.filtered.insert(mock.TestModeInfo, mock)
 	}
@@ -49,12 +43,9 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 	m.unfiltered.deleteAll()
 	for index, mock := range mocks {
-		// Initialize the sort order for the first time only, this is done
-		// to avoid collisions in the sort order when sortorder gets changed
-		// when mocks are used/updated.
-		initUnfilterSortOrder.Do(func() {
-			mock.TestModeInfo.SortOrder = int64(index)
-		})
+		if mock.TestModeInfo.SortOrder == 0 {
+			mock.TestModeInfo.SortOrder = int64(index) + 1
+		}
 		mock.TestModeInfo.ID = index
 		m.unfiltered.insert(mock.TestModeInfo, mock)
 	}
