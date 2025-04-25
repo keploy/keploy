@@ -460,20 +460,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}
 
-	// attempt to read conn until buffer is either filled or conn is closed
-	initialBuf, err := util.ReadInitialBuf(parserCtx, p.logger, srcConn)
-	if err != nil {
-		utils.LogError(p.logger, err, "failed to read the initial buffer")
-		return err
-	}
-
-	//update the src connection to have the initial buffer
-	srcConn = &util.Conn{
-		Conn:   srcConn,
-		Reader: io.MultiReader(bytes.NewReader(initialBuf), srcConn),
-		Logger: p.logger,
-	}
-
 	clientID, ok := parserCtx.Value(models.ClientConnectionIDKey).(string)
 	if !ok {
 		utils.LogError(p.logger, err, "failed to fetch the client connection id")
@@ -485,7 +471,46 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		return err
 	}
 
-	logger := p.logger.With(zap.Any("Client IP Address", srcConn.RemoteAddr().String()), zap.Any("Client ConnectionID", clientID), zap.Any("Destination IP Address", dstAddr), zap.Any("Destination ConnectionID", destID))
+	logger := p.logger.With(zap.Any("Client ConnectionID", clientID), zap.Any("Destination ConnectionID", destID), zap.Any("Destination IP Address", dstAddr), zap.Any("Client IP Address", srcConn.RemoteAddr().String()))
+
+	var initialBuf []byte
+	// attempt to read conn until buffer is either filled or conn is closed
+	initialBuf, err = util.ReadInitialBuf(parserCtx, p.logger, srcConn)
+	if err != nil {
+		utils.LogError(logger, err, "failed to read the initial buffer")
+		return err
+	}
+
+	if util.IsHTTPReq(initialBuf) && !util.HasCompleteHTTPHeaders(initialBuf) {
+		// HTTP headers are never chunked according to the HTTP protocol,
+		// but at the TCP layer, we cannot be sure if we have received the entire
+		// header in the first buffer chunk. This is why we check if the headers are complete
+		// and read more data if needed.
+
+		// Some HTTP requests, like AWS SQS, may require special handling in Keploy Enterprise.
+		// These cases may send partial headers in multiple chunks, so we need to read until
+		// we get the complete headers.
+
+		logger.Debug("Partial HTTP headers detected, reading more data to get complete headers")
+
+		// Read more data from the TCP connection to get the complete HTTP headers.
+		headerBuf, err := util.ReadHTTPHeadersUntilEnd(parserCtx, p.logger, srcConn)
+		if err != nil {
+			// Log the error if we fail to read the complete HTTP headers.
+			utils.LogError(logger, err, "failed to read the complete HTTP headers from client")
+			return err
+		}
+		// Append the additional data to the initial buffer.
+		initialBuf = append(initialBuf, headerBuf...)
+	}
+
+	//update the src connection to have the initial buffer
+	srcConn = &util.Conn{
+		Conn:   srcConn,
+		Reader: io.MultiReader(bytes.NewReader(initialBuf), srcConn),
+		Logger: p.logger,
+	}
+
 	dstCfg := &models.ConditionalDstCfg{
 		Port: uint(destInfo.Port),
 	}
