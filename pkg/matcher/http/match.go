@@ -376,13 +376,9 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 
 		case models.HeaderEqual:
 			// value should be a map[string]interface{} → we convert to map[string]string
-			fmt.Println("here is the value", value)
 			hm := toStringMap(value)
-			fmt.Println("here is hm", hm)
 			for header, exp := range hm {
-				fmt.Println("actualResponse", actualResponse.Header)
 				act, ok := actualResponse.Header[header]
-				fmt.Println("here is the act", act)
 				if !ok || act != exp {
 					pass = false
 					logger.Error("header_equal assertion failed",
