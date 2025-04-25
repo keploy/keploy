@@ -223,13 +223,11 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					continue
 				}
 				// set the config as used in the mockManager
-				err = mockDb.FlagMockAsUsed(models.MockState{
-					Name:       (*configMocks[bestMatchIndex]).Name,
-					Usage:      models.Updated,
-					IsFiltered: (*configMocks[bestMatchIndex]).TestModeInfo.IsFiltered,
-					SortOrder:  (*configMocks[bestMatchIndex]).TestModeInfo.SortOrder,
-				})
-				if err != nil {
+				newMock := *configMocks[bestMatchIndex]
+				newMock.TestModeInfo.IsFiltered = false
+				newMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+				isUpdated := mockDb.UpdateUnFilteredMock(configMocks[bestMatchIndex], &newMock)
+				if !isUpdated {
 					utils.LogError(logger, err, "failed to flag mock as used in mongo parser", zap.Any("for mock", configMocks[bestMatchIndex].Name))
 					errCh <- err
 					return

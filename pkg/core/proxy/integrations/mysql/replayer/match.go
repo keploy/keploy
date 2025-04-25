@@ -568,25 +568,12 @@ func matchResetConnectionPacket(_ context.Context, _ *zap.Logger, expected, actu
 // and delete the duplicate code.
 // updateMock processes the matched mock based on its filtered status.
 func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock, mockDb integrations.MockMemDb) bool {
-	if matchedMock.TestModeInfo.IsFiltered {
-		originalMatchedMock := *matchedMock
-		matchedMock.TestModeInfo.IsFiltered = false
-		matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
-		//UpdateUnFilteredMock also marks the mock as used
-		updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
-		return updated
+	originalMatchedMock := *matchedMock
+	matchedMock.TestModeInfo.IsFiltered = false
+	matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+	updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
+	if !updated {
+		logger.Error("failed to update matched mock")
 	}
-
-	// we don't update the mock if the IsFiltered is false
-	err := mockDb.FlagMockAsUsed(models.MockState{
-		Name:       matchedMock.Name,
-		Usage:      models.Updated,
-		IsFiltered: matchedMock.TestModeInfo.IsFiltered,
-		SortOrder:  matchedMock.TestModeInfo.SortOrder,
-	})
-	if err != nil {
-		logger.Error("failed to flag mock as used", zap.Error(err))
-	}
-
-	return true
+	return updated
 }

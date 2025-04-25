@@ -69,6 +69,7 @@ func IsValuePresent(connectionid string, value string) bool {
 }
 
 func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mutex, requestBuffers [][]byte, mockDb integrations.MockMemDb) (bool, []models.Frontend, error) {
+OuterLoop:
 	for {
 		select {
 		case <-ctx.Done():
@@ -147,14 +148,13 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 							res := make([]models.Frontend, len(initMock.Spec.PostgresResponses))
 							copy(res, initMock.Spec.PostgresResponses)
 							res[requestIndex].AuthType = 5
-							err := mockDb.FlagMockAsUsed(models.MockState{
-								Name:       initMock.Name,
-								Usage:      models.Updated,
-								IsFiltered: initMock.TestModeInfo.IsFiltered,
-								SortOrder:  initMock.TestModeInfo.SortOrder,
-							})
-							if err != nil {
-								logger.Error("failed to flag mock as used", zap.Error(err))
+							newInitMock := initMock
+							newInitMock.TestModeInfo.IsFiltered = false
+							newInitMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+							isUpdated := mockDb.UpdateUnFilteredMock(&initMock, &newInitMock)
+							if !isUpdated {
+								logger.Error("failed to update matched mock", zap.Error(err))
+								continue OuterLoop
 							}
 							return true, res, nil
 						case len(encodedMock) > 0 && encodedMock[0] == 'p' && initMock.Spec.PostgresRequests[requestIndex].PacketTypes[0] == "p" && reqBuff[0] == 'p':
@@ -215,14 +215,13 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 									Value: "Etc/UTC",
 								},
 							}
-							err := mockDb.FlagMockAsUsed(models.MockState{
-								Name:       initMock.Name,
-								Usage:      models.Updated,
-								IsFiltered: initMock.TestModeInfo.IsFiltered,
-								SortOrder:  initMock.TestModeInfo.SortOrder,
-							})
-							if err != nil {
-								logger.Error("failed to flag mock as used", zap.Error(err))
+							newInitMock := initMock
+							newInitMock.TestModeInfo.IsFiltered = false
+							newInitMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+							isUpdated := mockDb.UpdateUnFilteredMock(&initMock, &newInitMock)
+							if !isUpdated {
+								logger.Error("failed to update matched mock", zap.Error(err))
+								continue OuterLoop
 							}
 							return true, res, nil
 						}
@@ -290,28 +289,12 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 
 			if matched {
 				logger.Debug("Matched mock", zap.String("mock", matchedMock.Name))
-				if matchedMock.TestModeInfo.IsFiltered {
-					originalMatchedMock := *matchedMock
-					matchedMock.TestModeInfo.IsFiltered = false
-					matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
-					//UpdateUnFilteredMock also marks the mock as used
-					updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
-					if !updated {
-						continue
-					}
-				} else {
-					err := mockDb.FlagMockAsUsed(models.MockState{
-						Name:       matchedMock.Name,
-						Usage:      models.Updated,
-						IsFiltered: matchedMock.TestModeInfo.IsFiltered,
-						SortOrder:  matchedMock.TestModeInfo.SortOrder,
-					})
-					if err != nil {
-						logger.Error("failed to flag mock as used", zap.Error(err))
-					}
-				}
-				if err != nil {
-					logger.Error("failed to flag mock as used", zap.Error(err))
+				originalMatchedMock := *matchedMock
+				matchedMock.TestModeInfo.IsFiltered = false
+				matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+				updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
+				if !updated {
+					logger.Error("failed to update matched mock", zap.Error(err))
 				}
 				return true, matchedMock.Spec.PostgresResponses, nil
 			}

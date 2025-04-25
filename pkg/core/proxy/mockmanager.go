@@ -89,7 +89,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	updated := m.unfiltered.update(old.TestModeInfo, new.TestModeInfo, new)
 	if updated {
 		// mark the unfiltered mock as used for the current simulated test-case
-		if err := m.FlagMockAsUsed(models.MockState{
+		if err := m.flagMockAsUsed(models.MockState{
 			Name:       (*new).Name,
 			Usage:      models.Updated,
 			IsFiltered: (*new).TestModeInfo.IsFiltered,
@@ -101,7 +101,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	return updated
 }
 
-func (m *MockManager) FlagMockAsUsed(mock models.MockState) error {
+func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 	if mock.Name == "" {
 		return fmt.Errorf("mock is empty")
 	}
@@ -112,7 +112,7 @@ func (m *MockManager) FlagMockAsUsed(mock models.MockState) error {
 func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	isDeleted := m.filtered.delete(mock.TestModeInfo)
 	if isDeleted {
-		if err := m.FlagMockAsUsed(models.MockState{
+		if err := m.flagMockAsUsed(models.MockState{
 			Name:       mock.Name,
 			Usage:      models.Deleted,
 			IsFiltered: mock.TestModeInfo.IsFiltered,
@@ -127,7 +127,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 	isDeleted := m.unfiltered.delete(mock.TestModeInfo)
 	if isDeleted {
-		if err := m.FlagMockAsUsed(models.MockState{
+		if err := m.flagMockAsUsed(models.MockState{
 			Name:       mock.Name,
 			Usage:      models.Deleted,
 			IsFiltered: mock.TestModeInfo.IsFiltered,
