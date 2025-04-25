@@ -981,14 +981,7 @@ func (r *Replayer) compareHTTPResp(tc *models.TestCase, actualResponse *models.H
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
-
-	// Check if Assertions has exactly one assertion and it has "noise" as a Name
-	// if len(tc.Assertions) == 0 || (len(tc.Assertions) == 1 && tc.Assertions[models.NoiseAssertion] != nil) {
-	pass, res := httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
-	return pass, res
-	// }
-
-	// return httpMatcher.AssertionMatch(tc, actualResponse, r.logger)
+	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
 }
 
 func (r *Replayer) compareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string) (bool, *models.Result) {
@@ -996,7 +989,7 @@ func (r *Replayer) compareGRPCResp(tc *models.TestCase, actualResp *models.GrpcR
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
-	
+
 	return grpcMatcher.Match(tc, actualResp, noiseConfig, r.logger)
 
 }
