@@ -13,6 +13,9 @@ import (
 	"go.uber.org/zap"
 )
 
+var initFilterSortOrder sync.Once
+var initUnfilterSortOrder sync.Once
+
 type MockManager struct {
 	filtered      *TreeDb
 	unfiltered    *TreeDb
@@ -32,12 +35,12 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	m.filtered.deleteAll()
 	for index, mock := range mocks {
-		// if the sortOrder is already set (!= 0) then we shouldn't override it,
-		// as this would be a consequence of the mock being matched in previous testcases,
-		// which is done to put the mock in the last when we are processing the mock list for getting a match.
-		if mock.TestModeInfo.SortOrder == 0 {
+		// Initialize the sort order for the first time only, this is done
+		// to avoid collisions in the sort order when sortorder gets changed
+		// when mocks are used/updated.
+		initFilterSortOrder.Do(func() {
 			mock.TestModeInfo.SortOrder = int64(index)
-		}
+		})
 		mock.TestModeInfo.ID = index
 		m.filtered.insert(mock.TestModeInfo, mock)
 	}
@@ -46,12 +49,12 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 	m.unfiltered.deleteAll()
 	for index, mock := range mocks {
-		// if the sortOrder is already set (!= 0) then we shouldn't override it,
-		// as this would be a consequence of the mock being matched in previous testcases,
-		// which is done to put the mock in the last when we are processing the mock list for getting a match.
-		if mock.TestModeInfo.SortOrder == 0 {
+		// Initialize the sort order for the first time only, this is done
+		// to avoid collisions in the sort order when sortorder gets changed
+		// when mocks are used/updated.
+		initUnfilterSortOrder.Do(func() {
 			mock.TestModeInfo.SortOrder = int64(index)
-		}
+		})
 		mock.TestModeInfo.ID = index
 		m.unfiltered.insert(mock.TestModeInfo, mock)
 	}
@@ -89,16 +92,14 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	updated := m.unfiltered.update(old.TestModeInfo, new.TestModeInfo, new)
 	if updated {
 		// mark the unfiltered mock as used for the current simulated test-case
-		go func() {
-			if err := m.FlagMockAsUsed(models.MockState{
-				Name:       (*new).Name,
-				Usage:      models.Updated,
-				IsFiltered: (*new).TestModeInfo.IsFiltered,
-				SortOrder:  (*new).TestModeInfo.SortOrder,
-			}); err != nil {
-				m.logger.Error("failed to flag mock as used", zap.Error(err))
-			}
-		}()
+		if err := m.FlagMockAsUsed(models.MockState{
+			Name:       (*new).Name,
+			Usage:      models.Updated,
+			IsFiltered: (*new).TestModeInfo.IsFiltered,
+			SortOrder:  (*new).TestModeInfo.SortOrder,
+		}); err != nil {
+			m.logger.Error("failed to flag mock as used", zap.Error(err))
+		}
 	}
 	return updated
 }
