@@ -229,7 +229,3 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 
 	return matched, result
 }
-
-func AssertionMatch(tc *models.TestCase, actualResponse *models.GrpcResp, logger *zap.Logger) (bool, *models.Result) {
-	return true, nil
-}
