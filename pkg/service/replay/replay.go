@@ -91,10 +91,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 			break
 		default:
 			r.logger.Info("stopping Keploy", zap.String("reason", stopReason))
-			err := HookImpl.BeforeStop(ctx)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to execute before stop hook")
-			}
 		}
 		if hookCancel != nil {
 			hookCancel()

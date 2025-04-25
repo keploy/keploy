@@ -268,11 +268,6 @@ func (h *Hooks) GetConsumedMocks(ctx context.Context, id uint64) ([]string, erro
 	return consumedMocks, nil
 }
 
-func (h *Hooks) BeforeStop(_ context.Context) error {
-	h.logger.Debug("BeforeStop hook executed")
-	return nil
-}
-
 // Function to parse and extract claims from a JWT token without verification
 func extractClaimsWithoutVerification(tokenString string) (jwt.MapClaims, error) {
 	token, _, err := new(jwt.Parser).ParseUnverified(tokenString, jwt.MapClaims{})
