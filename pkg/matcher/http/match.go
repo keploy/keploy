@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"go.uber.org/zap"
@@ -256,7 +258,6 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				isBodyMismatch = false
 				if validatedJSON.IsIdentical() {
 					jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
-					pass = jsonComparisonResult.IsExact()
 					if err != nil {
 						return false, res
 					}
@@ -294,8 +295,9 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			if err != nil {
 				utils.LogError(logger, err, "failed to render the diffs")
 			}
+		} else {
+			pass = true
 		}
-
 	}
 
 	if !skipSuccessMsg {
@@ -308,6 +310,196 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		if err != nil {
 			utils.LogError(logger, err, "failed to print the logs")
 		}
+	}
+
+	if len(tc.Assertions) > 1 || (len(tc.Assertions) == 1 && tc.Assertions[models.NoiseAssertion] == nil) {
+		return AssertionMatch(tc, actualResponse, logger)
+	}
+
+	return pass, res
+}
+
+func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger *zap.Logger) (bool, *models.Result) {
+	pass := true
+	res := &models.Result{
+		StatusCode: models.IntResult{
+			Normal:   false,
+			Expected: tc.HTTPResp.StatusCode,
+			Actual:   actualResponse.StatusCode,
+		},
+		BodyResult: []models.BodyResult{{
+			Normal:   false,
+			Expected: tc.HTTPResp.Body,
+			Actual:   actualResponse.Body,
+		}},
+	}
+
+	for assertionName, value := range tc.Assertions {
+		switch assertionName {
+
+		case models.StatusCode:
+			expected, err := toInt(value)
+			if err != nil || expected != actualResponse.StatusCode {
+				pass = false
+				logger.Error("status_code assertion failed", zap.Int("expected", expected), zap.Int("actual", actualResponse.StatusCode))
+			} else {
+				res.StatusCode.Normal = true
+			}
+
+		case models.StatusCodeClass:
+			class := toString(value)
+			actualClass := fmt.Sprintf("%dxx", actualResponse.StatusCode/100)
+			if class != actualClass {
+				pass = false
+				logger.Error("status_code_class assertion failed", zap.String("expected", class), zap.String("actual", actualClass))
+			}
+
+		case models.StatusCodeIn:
+			codes := toStringSlice(value)
+			var ints []int
+			for _, s := range codes {
+				if i, err := strconv.Atoi(s); err == nil {
+					ints = append(ints, i)
+				}
+			}
+			found := false
+			for _, c := range ints {
+				if c == actualResponse.StatusCode {
+					found = true
+					break
+				}
+			}
+			if !found {
+				pass = false
+				logger.Error("status_code_in assertion failed", zap.Any("expectedCodes", ints), zap.Int("actual", actualResponse.StatusCode))
+			}
+
+		case models.HeaderEqual:
+			// value should be a map[string]interface{} → we convert to map[string]string
+			hm := toStringMap(value)
+			for header, exp := range hm {
+				act, ok := actualResponse.Header[header]
+				if !ok || act != exp {
+					pass = false
+					logger.Error("header_equal assertion failed",
+						zap.String("header", header),
+						zap.String("expected", exp),
+						zap.String("actual", act),
+					)
+				}
+				logger.Info("header_equal assertion failed",
+					zap.String("header", header),
+					zap.String("expected", exp),
+					zap.String("actual", act),
+				)
+			}
+
+		case models.HeaderContains:
+			hm := toStringMap(value)
+			for header, exp := range hm {
+				act, ok := actualResponse.Header[header]
+				if !ok || !strings.Contains(act, exp) {
+					pass = false
+					logger.Error("header_contains assertion failed",
+						zap.String("header", header),
+						zap.String("expected_substr", exp),
+						zap.String("actual", act),
+					)
+				}
+			}
+
+		case models.HeaderExists:
+			switch v := value.(type) {
+
+			// a flat slice of header names
+			case []interface{}:
+				for _, item := range v {
+					hdr := fmt.Sprint(item)
+					if _, ok := actualResponse.Header[hdr]; !ok {
+						pass = false
+						logger.Error("header_exists assertion failed", zap.String("header", hdr))
+					}
+				}
+
+			// a map[string]… where the keys are header names
+			case map[string]interface{}:
+				for hdr := range v {
+					if _, ok := actualResponse.Header[hdr]; !ok {
+						pass = false
+						logger.Error("header_exists assertion failed", zap.String("header", hdr))
+					}
+				}
+
+			case map[models.AssertionType]interface{}:
+				for kt := range v {
+					hdr := string(kt)
+					if _, ok := actualResponse.Header[hdr]; !ok {
+						pass = false
+						logger.Error("header_exists assertion failed", zap.String("header", hdr))
+					}
+				}
+
+			default:
+				pass = false
+				logger.Error("header_exists: unsupported format, expected slice or map", zap.Any("value", value))
+			}
+
+		case models.HeaderMatches:
+			// value should be a map[string]interface{} → convert to map[string]string
+			hm := toStringMap(value)
+			for header, pattern := range hm {
+				act, ok := actualResponse.Header[header]
+				if !ok {
+					pass = false
+					logger.Error("header_matches: header not found", zap.String("header", header))
+					continue
+				}
+				if matched, err := regexp.MatchString(pattern, act); err != nil || !matched {
+					pass = false
+					logger.Error("header_matches assertion failed",
+						zap.String("header", header),
+						zap.String("pattern", pattern),
+						zap.String("actual", act),
+						zap.Error(err),
+					)
+				}
+			}
+
+		case models.JsonEqual:
+			expJSON := tc.HTTPResp.Body
+			actJSON := actualResponse.Body
+			if expJSON != actJSON {
+				pass = false
+				logger.Error("json_equal assertion failed", zap.String("expected", expJSON), zap.String("actual", actJSON))
+			}
+
+		case models.JsonContains:
+			var expectedMap map[string]interface{}
+			switch v := value.(type) {
+			case map[string]interface{}:
+				expectedMap = v
+			case string:
+				_ = json.Unmarshal([]byte(v), &expectedMap)
+			default:
+				pass = false
+				logger.Error("json_contains: unexpected format", zap.Any("value", value))
+				continue
+			}
+			if ok, _ := matcherUtils.JsonContains(actualResponse.Body, expectedMap); !ok {
+				pass = false
+				logger.Error("json_contains assertion failed", zap.Any("expected", expectedMap))
+			}
+
+		default:
+			if assertionName != models.NoiseAssertion {
+				logger.Warn("unhandled assertion type", zap.String("name", string(assertionName)))
+			}
+		}
+	}
+
+	if pass {
+		res.StatusCode.Normal = true
+		res.BodyResult[0].Normal = true
 	}
 
 	return pass, res
