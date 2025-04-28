@@ -75,7 +75,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 				utils.LogError(logger, err, "failed to convert xml to map")
 				return nil, err
 			}
-			err = doc.Spec.Encode(models.XMLSchema{
+			xmlSchema := models.XMLSchema{
 				Request: tc.HTTPReq,
 				Response: models.XMLResp{
 					Body:          m,
@@ -96,13 +96,19 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 					}
 					return a
 				}(),
-			})
+			}
+			if tc.Description != "" {
+				xmlSchema.Metadata = map[string]string{
+					"description": tc.Description,
+				}
+			}
+			err = doc.Spec.Encode(xmlSchema)
 			if err != nil {
 				utils.LogError(logger, err, "failed to encode testcase into a yaml doc")
 				return nil, err
 			}
 		case models.HTTPResponseJSON:
-			err := doc.Spec.Encode(models.HTTPSchema{
+			httpSchema := models.HTTPSchema{
 				Request:  tc.HTTPReq,
 				Response: tc.HTTPResp,
 				Created:  tc.Created,
@@ -122,7 +128,13 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 
 					return a
 				}(),
-			})
+			}
+			if tc.Description != "" {
+				httpSchema.Metadata = map[string]string{
+					"description": tc.Description,
+				}
+			}
+			err := doc.Spec.Encode(httpSchema)
 			if err != nil {
 				utils.LogError(logger, err, "failed to encode testcase into a yaml doc")
 				return nil, err
