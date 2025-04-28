@@ -126,6 +126,7 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 //}
 
 func Capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions) {
+	// spew.Dump(req.Body)
 	reqBody, err := io.ReadAll(req.Body)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the http request body")

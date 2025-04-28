@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"os"
 	"time"
-	"unsafe"
 
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
@@ -24,7 +23,7 @@ import (
 	"go.uber.org/zap"
 )
 
-var eventAttributesSize = int(unsafe.Sizeof(SocketDataEvent{}))
+// var eventAttributesSize = int(unsafe.Sizeof(SocketDataEvent{}))
 
 // ListenSocket starts the socket event listeners
 func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap *ebpf.Map, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
@@ -153,30 +152,33 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 					}
 					continue
 				}
+				// trim the data over here such that empty spaces are not considered
 
 				bin := record.RawSample
-				if len(bin) < eventAttributesSize {
-					l.Debug(fmt.Sprintf("Buffer's for SocketDataEvent is smaller (%d) than the minimum required (%d)", len(bin), eventAttributesSize))
-					continue
-				} else if len(bin) > EventBodyMaxSize+eventAttributesSize {
-					l.Debug(fmt.Sprintf("Buffer's for SocketDataEvent is bigger (%d) than the maximum for the struct (%d)", len(bin), EventBodyMaxSize+eventAttributesSize))
-					continue
-				}
+				// if len(bin) < eventAttributesSize {
+				// 	l.Debug(fmt.Sprintf("Buffer's for SocketDataEvent is smaller (%d) than the minimum required (%d)", len(bin), eventAttributesSize))
+				// 	continue
+				// }
+				// } else if len(bin) > EventBodyMaxSize+eventAttributesSize {
+				// 	l.Debug(fmt.Sprintf("Buffer's for SocketDataEvent is bigger (%d) than the maximum for the struct (%d)", len(bin), EventBodyMaxSize+eventAttributesSize))
+				// 	continue
+				// }
 
 				var event SocketDataEvent
-
+				// fmt.Println("here is the data length", len(bin))
 				if err := binary.Read(bytes.NewReader(bin), binary.LittleEndian, &event); err != nil {
 					utils.LogError(l, err, "failed to decode the received data from ringbuf socketDataEvent reader")
 					continue
 				}
-
 				event.TimestampNano += getRealTimeOffset()
 
 				if event.Direction == IngressTraffic {
+					// fmt.Println("INGRESS", len(bin))
 					event.EntryTimestampNano += getRealTimeOffset()
 					l.Debug(fmt.Sprintf("Request EntryTimestamp :%v\n", convertUnixNanoToTime(event.EntryTimestampNano)))
+				} else {
+					// fmt.Println("EGRESS", len(bin))
 				}
-
 				c.GetOrCreate(event.ConnID).AddDataEvent(event)
 			}
 		}()
