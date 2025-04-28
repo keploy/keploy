@@ -365,6 +365,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 			tc.Created = httpSpec.Created
 			tc.HTTPReq = httpSpec.Request
 			tc.HTTPResp = httpSpec.Response
+			tc.Description = httpSpec.Metadata["description"]
 
 			// single map-based loop for all assertions
 			for key, raw := range httpSpec.Assertions {
@@ -401,6 +402,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 			tc.Created = xmlSpec.Created
 			tc.HTTPReq = xmlSpec.Request
 			tc.XMLResp = xmlSpec.Response
+			tc.Description = xmlSpec.Metadata["description"]
 
 			for key, raw := range xmlSpec.Assertions {
 				tc.Assertions[key] = raw
