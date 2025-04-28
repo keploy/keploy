@@ -75,7 +75,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 				utils.LogError(logger, err, "failed to convert xml to map")
 				return nil, err
 			}
-			err = doc.Spec.Encode(models.XMLSchema{
+			xmlSchema := models.XMLSchema{
 				Request: tc.HTTPReq,
 				Response: models.XMLResp{
 					Body:          m,
@@ -96,13 +96,19 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 					}
 					return a
 				}(),
-			})
+			}
+			if tc.Description != "" {
+				xmlSchema.Metadata = map[string]string{
+					"description": tc.Description,
+				}
+			}
+			err = doc.Spec.Encode(xmlSchema)
 			if err != nil {
 				utils.LogError(logger, err, "failed to encode testcase into a yaml doc")
 				return nil, err
 			}
 		case models.HTTPResponseJSON:
-			err := doc.Spec.Encode(models.HTTPSchema{
+			httpSchema := models.HTTPSchema{
 				Request:  tc.HTTPReq,
 				Response: tc.HTTPResp,
 				Created:  tc.Created,
@@ -122,7 +128,13 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 
 					return a
 				}(),
-			})
+			}
+			if tc.Description != "" {
+				httpSchema.Metadata = map[string]string{
+					"description": tc.Description,
+				}
+			}
+			err := doc.Spec.Encode(httpSchema)
 			if err != nil {
 				utils.LogError(logger, err, "failed to encode testcase into a yaml doc")
 				return nil, err
@@ -353,6 +365,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 			tc.Created = httpSpec.Created
 			tc.HTTPReq = httpSpec.Request
 			tc.HTTPResp = httpSpec.Response
+			tc.Description = httpSpec.Metadata["description"]
 
 			// single map-based loop for all assertions
 			for key, raw := range httpSpec.Assertions {
@@ -389,6 +402,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 			tc.Created = xmlSpec.Created
 			tc.HTTPReq = xmlSpec.Request
 			tc.XMLResp = xmlSpec.Response
+			tc.Description = xmlSpec.Metadata["description"]
 
 			for key, raw := range xmlSpec.Assertions {
 				tc.Assertions[key] = raw
