@@ -222,16 +222,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					logger.Debug("the mongo request do not matches with any config mocks", zap.Any("request", mongoRequests))
 					continue
 				}
-				// set the config as used in the mockManager
-				newMock := *configMocks[bestMatchIndex]
-				newMock.TestModeInfo.IsFiltered = false
-				newMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
-				isUpdated := mockDb.UpdateUnFilteredMock(configMocks[bestMatchIndex], &newMock)
-				if !isUpdated {
-					utils.LogError(logger, err, "failed to flag mock as used in mongo parser", zap.Any("for mock", configMocks[bestMatchIndex].Name))
-					errCh <- err
-					return
-				}
+
 				// write the mongo response to the client connection from the recorded config mocks that most matches the incoming request
 				for _, mongoResponse := range configMocks[bestMatchIndex].Spec.MongoResponses {
 					switch mongoResponse.Header.Opcode {
