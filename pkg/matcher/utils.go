@@ -1010,14 +1010,14 @@ func containsRecursive(actual interface{}, expected map[string]interface{}) bool
 			if actualMapVal, ok := actualValue.(map[string]interface{}); ok {
 				if !containsRecursive(actualMapVal, v) {
 					return false
-				} 
+				}
 			} else {
 				return false
 			}
 		default:
 			if !reflect.DeepEqual(actualValue, expectedValue) {
-                return false
-            }
+				return false
+			}
 		}
 	}
 	return true
