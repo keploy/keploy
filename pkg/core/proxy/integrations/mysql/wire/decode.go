@@ -21,19 +21,6 @@ import (
 	"go.uber.org/zap"
 )
 
-/*
-    1.  BytesToMySQLStruct
-	2.	DecodeMySQLBytes
-	3.	ParseMySQLPacket
-	4.	MySQLBytesToStruct
-	5.	UnmarshalMySQLPacket
-	6.	ConvertBytesToMySQL
-	7.	DeserializeMySQLPacket
-	8.	DecodeMySQLData
-	9.	BytesToMySQLData
-	10.	UnpackMySQLBytes
-*/
-
 // DecodePayload is used to decode mysql packets that don't consist of multiple packets within them, because we are reading per packet.
 func DecodePayload(ctx context.Context, logger *zap.Logger, data []byte, clientConn net.Conn, decodeCtx *DecodeContext) (*mysql.PacketBundle, error) {
 	//Parse the data into mysql header and payload
@@ -82,7 +69,7 @@ func handleQueryStmtResponse(ctx context.Context, logger *zap.Logger, packet mys
 
 	sg, ok := decodeCtx.ServerGreetings.Load(clientConn)
 	if !ok {
-		return parsedPacket, fmt.Errorf("Server Greetings not found")
+		return parsedPacket, fmt.Errorf("server Greetings not found")
 	}
 
 	logger.Debug("Last operation when handling client query", zap.Any("last operation", mysql.CommandStatusToString(lastOp)))
@@ -160,7 +147,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 	if payloadType != mysql.HandshakeV10 {
 		sg, ok = decodeCtx.ServerGreetings.Load(clientConn)
 		if !ok {
-			return parsedPacket, fmt.Errorf("Server Greetings not found")
+			return parsedPacket, fmt.Errorf("server Greetings not found")
 		}
 	}
 

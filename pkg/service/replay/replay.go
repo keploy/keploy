@@ -61,10 +61,7 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 	if HookImpl == nil {
 		SetTestHooks(NewHooks(logger, config, testSetConf, storage, auth))
 	}
-	instrument := false
-	if config.Command != "" {
-		instrument = true
-	}
+	instrument := config.Command != ""
 	return &Replayer{
 		logger:          logger,
 		testDB:          testDB,
@@ -108,21 +105,21 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get all test set ids: %v", err)
 		utils.LogError(r.logger, err, stopReason)
-		return fmt.Errorf(stopReason)
+		return fmt.Errorf("%s", stopReason)
 	}
 
 	if len(testSetIDs) == 0 {
 		recordCmd := models.HighlightGrayString("keploy record")
 		errMsg := fmt.Sprintf("No test sets found in the keploy folder. Please record testcases using %s command", recordCmd)
 		utils.LogError(r.logger, err, errMsg)
-		return fmt.Errorf(errMsg)
+		return fmt.Errorf("%s", errMsg)
 	}
 
 	testRunID, err := r.GetNextTestRunID(ctx)
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get next test run id: %v", err)
 		utils.LogError(r.logger, err, stopReason)
-		return fmt.Errorf(stopReason)
+		return fmt.Errorf("%s", stopReason)
 	}
 
 	var language config.Language
@@ -182,7 +179,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if ctx.Err() == context.Canceled {
 			return err
 		}
-		return fmt.Errorf(stopReason)
+		return fmt.Errorf("%s", stopReason)
 	}
 
 	hookCancel = inst.HookCancel
@@ -212,7 +209,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			if ctx.Err() == context.Canceled {
 				return err
 			}
-			return fmt.Errorf(stopReason)
+			return fmt.Errorf("%s", stopReason)
 		}
 
 		if !r.config.Test.SkipCoverage {
@@ -236,7 +233,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			if ctx.Err() == context.Canceled {
 				return err
 			}
-			return fmt.Errorf(stopReason)
+			return fmt.Errorf("%s", stopReason)
 		}
 		switch testSetStatus {
 		case models.TestSetStatusAppHalted:
@@ -456,7 +453,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, fmt.Errorf("failed to read test set config: %w", err)
 		}
 	}
-
 	if conf == nil {
 		conf = &models.TestSet{}
 	}
@@ -993,7 +989,9 @@ func (r *Replayer) compareGRPCResp(tc *models.TestCase, actualResp *models.GrpcR
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
+
 	return grpcMatcher.Match(tc, actualResp, noiseConfig, r.logger)
+
 }
 
 func (r *Replayer) printSummary(_ context.Context, _ bool) {

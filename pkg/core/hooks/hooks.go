@@ -449,7 +449,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
 	h.logger.Info("keploy initialized and probes added to the kernel.")
 
-	var clientInfo structs.ClientInfo = structs.ClientInfo{}
+	var clientInfo = structs.ClientInfo{}
 
 	switch opts.Mode {
 	case models.MODE_RECORD:
@@ -500,7 +500,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 		return fmt.Errorf("failed to convert ip string:[%v] to 32-bit integer", opts.KeployIPV4)
 	}
 
-	var agentInfo structs.AgentInfo = structs.AgentInfo{}
+	var agentInfo = structs.AgentInfo{}
 
 	agentInfo.ProxyInfo = structs.ProxyInfo{
 		IP4:  proxyIP,

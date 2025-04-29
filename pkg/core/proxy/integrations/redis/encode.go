@@ -71,7 +71,7 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 							return nil
 						}
 						processBuffer(resp, models.FromServer, &redisResponses)
-						saveMock(redisRequests, redisResponses, reqTimestampMock, resTimestampMock, mocks)
+						saveMock(ctx, redisRequests, redisResponses, reqTimestampMock, resTimestampMock, mocks)
 					}
 					break
 				}
@@ -93,7 +93,7 @@ func encodeRedis(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 
 			// Save the mock with both request and response
 			if len(redisRequests) > 0 && len(redisResponses) > 0 {
-				saveMock(redisRequests, redisResponses, reqTimestampMock, resTimestampMock, mocks)
+				saveMock(ctx, redisRequests, redisResponses, reqTimestampMock, resTimestampMock, mocks)
 				redisRequests = []models.Payload{}
 				redisResponses = []models.Payload{}
 			}
@@ -163,7 +163,7 @@ func processBuffer(buffer []byte, origin models.OriginType, payloads *[]models.P
 	}
 }
 
-func saveMock(requests, responses []models.Payload, reqTimestampMock, resTimestampMock time.Time, mocks chan<- *models.Mock) {
+func saveMock(ctx context.Context, requests, responses []models.Payload, reqTimestampMock, resTimestampMock time.Time, mocks chan<- *models.Mock) {
 	redisRequestsCopy := make([]models.Payload, len(requests))
 	redisResponsesCopy := make([]models.Payload, len(responses))
 	copy(redisResponsesCopy, responses)
@@ -171,6 +171,7 @@ func saveMock(requests, responses []models.Payload, reqTimestampMock, resTimesta
 
 	metadata := make(map[string]string)
 	metadata["type"] = "config"
+	metadata["connID"] = ctx.Value(models.ClientConnectionIDKey).(string)
 
 	mocks <- &models.Mock{
 		Version: models.GetVersion(),
