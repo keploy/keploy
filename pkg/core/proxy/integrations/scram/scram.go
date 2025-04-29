@@ -73,27 +73,27 @@ func GenerateServerFinalMessage(authMessage, mechanism, password, salt string, i
 //
 // Parameters:
 // - recordedRequestMsg: The byte slice containing the recorded client's first message.
-// - recievedRequestMsg: The byte slice containing the received client's first message.
+// - receivedRequestMsg: The byte slice containing the received client's first message.
 // - firstResponseMsg: The byte slice containing the server's initial response message.
 // - log: An instance of a log from the zap package.
 //
 // Returns:
 // - A modified server's first response message with the nonce replaced.
 // - An error if nonce extraction or replacement fails.
-func GenerateServerFirstMessage(recordedRequestMsg, recievedRequestMsg, firstResponseMsg []byte, logger *zap.Logger) (string, error) {
+func GenerateServerFirstMessage(recordedRequestMsg, receivedRequestMsg, firstResponseMsg []byte, logger *zap.Logger) (string, error) {
 	expectedNonce, err := extractClientNonce(string(recordedRequestMsg))
 	if err != nil {
 		utils.LogError(logger, err, "failed to extract the client nonce from the recorded first message")
 		return "", err
 	}
-	actualNonce, err := extractClientNonce(string(recievedRequestMsg))
+	actualNonce, err := extractClientNonce(string(receivedRequestMsg))
 	if err != nil {
-		utils.LogError(logger, err, "failed to extract the client nonce from the recieved first message")
+		utils.LogError(logger, err, "failed to extract the client nonce from the received first message")
 		return "", err
 	}
 	// Since, the nonce are randomlly generated string. so, each session have unique nonce.
 	// Thus, the mocked server response should be updated according to the current nonce
-	updatedResponse := strings.Replace(string(firstResponseMsg), expectedNonce, actualNonce, -1)
+	updatedResponse := strings.ReplaceAll(string(firstResponseMsg), expectedNonce, actualNonce)
 
 	logger.Debug("Updated server first message after nonce substitution", zap.String("updatedResponse", updatedResponse))
 
@@ -117,7 +117,7 @@ func GenerateServerFirstMessage(recordedRequestMsg, recievedRequestMsg, firstRes
 func GenerateAuthMessage(firstRequest, firstResponse string, logger *zap.Logger) string {
 	gs2, err := extractAuthID(firstRequest)
 	if err != nil {
-		utils.LogError(logger, err, "failed to extract the client gs2 header from the recieved first message")
+		utils.LogError(logger, err, "failed to extract the client gs2 header from the received first message")
 		return ""
 	}
 	authMsg := firstRequest[len(gs2):] + "," + firstResponse + ","

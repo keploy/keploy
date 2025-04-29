@@ -236,6 +236,11 @@ installKeploy (){
     }
 
     ARCH=$(uname -m)
+    
+    OS_NAME="$(uname -s)"
+    if [ "$OS_NAME" = "Darwin" ]; then
+        NO_ROOT=true
+    fi
 
     if [ "$IS_CI" = false ]; then
         OS_NAME="$(uname -s)"

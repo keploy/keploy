@@ -74,7 +74,7 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 		if decodeCtx.UseSSL {
 			if result.tlsClientConn == nil || result.tlsDestConn == nil {
 				utils.LogError(logger, err, "Expected Tls connections are nil", zap.Any("tlsClientConn", result.tlsClientConn), zap.Any("tlsDestConn", result.tlsDestConn))
-				errCh <- errors.New("Tls connection is not established")
+				errCh <- errors.New("tls connection is not established")
 				return nil
 			}
 			clientConn = result.tlsClientConn
@@ -107,11 +107,12 @@ func Record(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Co
 	}
 }
 
-func recordMock(_ context.Context, requests []mysql.Request, responses []mysql.Response, mockType, requestOperation, responseOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time) {
+func recordMock(ctx context.Context, requests []mysql.Request, responses []mysql.Response, mockType, requestOperation, responseOperation string, mocks chan<- *models.Mock, reqTimestampMock time.Time) {
 	meta := map[string]string{
 		"type":              mockType,
 		"requestOperation":  requestOperation,
 		"responseOperation": responseOperation,
+		"connID":            ctx.Value(models.ClientConnectionIDKey).(string),
 	}
 	mysqlMock := &models.Mock{
 		Version: models.GetVersion(),

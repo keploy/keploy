@@ -68,7 +68,7 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *mod
 
 		// Simulate the initial client-server handshake (connection phase)
 
-		res, err := simulateInitialHandshake(ctx, logger, clientConn, configMocks, mockDb, decodeCtx)
+		res, err := simulateInitialHandshake(ctx, logger, clientConn, configMocks, mockDb, decodeCtx, opts)
 		if err != nil {
 			utils.LogError(logger, err, "failed to simulate initial handshake")
 			errCh <- err

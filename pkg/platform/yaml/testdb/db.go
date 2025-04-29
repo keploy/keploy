@@ -34,13 +34,15 @@ type tcsInfo struct {
 	path string
 }
 
-func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string) error {
+func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string, enableLog bool) error {
 	tcsInfo, err := ts.upsert(ctx, testSetID, tc)
 	if err != nil {
 		return err
 	}
 
-	ts.logger.Info("🟠 Keploy has captured test cases for the user's application.", zap.String("path", tcsInfo.path), zap.String("testcase name", tcsInfo.name))
+	if enableLog {
+		ts.logger.Info("🟠 Keploy has captured test cases for the user's application.", zap.String("path", tcsInfo.path), zap.String("testcase name", tcsInfo.name))
+	}
 
 	return nil
 }
@@ -51,6 +53,7 @@ func (ts *TestYaml) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
 
 func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error) {
 	path := filepath.Join(ts.TcsPath, testSetID, "tests")
+
 	tcs := []*models.TestCase{}
 	TestPath, err := yaml.ValidatePath(path)
 	if err != nil {
@@ -102,14 +105,16 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 	return tcs, nil
 }
 
-func (ts *TestYaml) UpdateTestCase(ctx context.Context, tc *models.TestCase, testSetID string) error {
+func (ts *TestYaml) UpdateTestCase(ctx context.Context, tc *models.TestCase, testSetID string, enableLog bool) error {
 
 	tcsInfo, err := ts.upsert(ctx, testSetID, tc)
 	if err != nil {
 		return err
 	}
 
-	ts.logger.Info("🔄 Keploy has updated the test cases for the user's application.", zap.String("path", tcsInfo.path), zap.String("testcase name", tcsInfo.name))
+	if enableLog {
+		ts.logger.Info("🔄 Keploy has updated the test cases for the user's application.", zap.String("path", tcsInfo.path), zap.String("testcase name", tcsInfo.name))
+	}
 	return nil
 }
 
@@ -134,6 +139,17 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	if err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, err
 	}
+
+	exists, err := yaml.FileExists(ctx, ts.logger, tcsPath, tcsName)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to find yaml file", zap.String("path directory", tcsPath), zap.String("yaml", tcsName))
+		return tcsInfo{name: tcsName, path: tcsPath}, err
+	}
+
+	if !exists {
+		data = append([]byte(utils.GetVersionAsComment()), data...)
+	}
+
 	err = yaml.WriteFile(ctx, ts.logger, tcsPath, tcsName, data, false)
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to write testcase yaml file")
@@ -167,4 +183,43 @@ func (ts *TestYaml) DeleteTestSet(ctx context.Context, testSetID string) error {
 func (ts *TestYaml) ChangePath(path string) {
 
 	ts.TcsPath = path
+}
+
+func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, testSetID string, assertions map[models.AssertionType]interface{}) error {
+	// get the test case and fill the assertion and update the test case
+	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
+	data, err := yaml.ReadFile(ctx, ts.logger, tcsPath, testCaseID)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to read the testcase from yaml")
+		return err
+	}
+	var testCase *yaml.NetworkTrafficDoc
+
+	err = yamlLib.Unmarshal(data, &testCase)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to unmarshall YAML data")
+	}
+	tc, err := Decode(testCase, ts.logger)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to decode the testcase")
+		return err
+	}
+	tc.Assertions = assertions
+	yamlTc, err := EncodeTestcase(*tc, ts.logger)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to encode the testcase")
+		return err
+	}
+	yamlTc.Name = testCaseID
+	data, err = yamlLib.Marshal(&yamlTc)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to marshall the testcase")
+		return err
+	}
+	err = yaml.WriteFile(ctx, ts.logger, tcsPath, testCaseID, data, false)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to write testcase yaml file")
+		return err
+	}
+	return nil
 }

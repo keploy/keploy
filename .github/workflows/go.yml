@@ -9,13 +9,13 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Set up Go
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: ">=1.23"
 
       - name: Build
         run: go build -v ./...
@@ -23,10 +23,9 @@ jobs:
       - name: Build arm
         run: GOOS=linux GOARCH=arm64 go build -v ./...
 
-      - uses: codfish/semantic-release-action@v1
+      - uses: codfish/semantic-release-action@v3
         with:
-          dry_run: true
-          additional_packages: |
-            ['@semantic-release/exec']
+          dry-run: true
+          additional-packages: '["@semantic-release/exec@7.0.3"]'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

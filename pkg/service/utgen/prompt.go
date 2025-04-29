@@ -3,6 +3,7 @@ package utgen
 import (
 	"bytes"
 	"fmt"
+	"html"
 	"html/template"
 	"os"
 	"strings"
@@ -11,7 +12,7 @@ import (
 	"go.uber.org/zap"
 )
 
-const MAX_TESTS_PER_RUN = 4
+const MAX_TESTS_PER_RUN = 6
 
 const ADDITIONAL_INCLUDES_TEXT = `
 ## Additional Includes
@@ -59,6 +60,8 @@ type PromptBuilder struct {
 	AdditionalPrompt       string
 	InstalledPackages      []string
 	FunctionUnderTest      string
+	ImportDetails          string
+	ModuleName             string
 }
 
 func NewPromptBuilder(srcPath, testPath, covReportContent, includedFiles, additionalInstructions, language, additionalPrompt, functionUnderTest string, logger *zap.Logger) (*PromptBuilder, error) {
@@ -100,7 +103,7 @@ func NewPromptBuilder(srcPath, testPath, covReportContent, includedFiles, additi
 func readFile(filePath string) (string, error) {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
-		return "", fmt.Errorf("Error reading %s: %v", filePath, err)
+		return "", fmt.Errorf("error reading %s: %v", filePath, err)
 	}
 	return string(content), nil
 }
@@ -128,7 +131,6 @@ func formatSection(content, templateText string) (string, error) {
 func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, error) {
 	pb.Src.CodeNumbered = numberLines(pb.Src.Code)
 	pb.Test.CodeNumbered = numberLines(pb.Test.Code)
-
 	variables := map[string]interface{}{
 		"source_file_name":             pb.Src.Name,
 		"test_file_name":               pb.Test.Name,
@@ -145,6 +147,8 @@ func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, erro
 		"additional_command":           pb.AdditionalPrompt,
 		"function_under_test":          pb.FunctionUnderTest,
 		"installed_packages":           formatInstalledPackages(pb.InstalledPackages),
+		"import_details":               pb.ImportDetails,
+		"module_name":                  pb.ModuleName,
 	}
 
 	settings := settings.GetSettings()
@@ -157,6 +161,7 @@ func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, erro
 		prompt.User = ""
 		return prompt, fmt.Errorf("Error rendering system prompt: %v", err)
 	}
+	prompt.System = systemPrompt
 
 	userPrompt, err := renderTemplate(settings.GetString(file+".user"), variables)
 	if err != nil {
@@ -164,7 +169,7 @@ func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, erro
 		prompt.User = ""
 		return prompt, fmt.Errorf("Error rendering user prompt: %v", err)
 	}
-	prompt.System = systemPrompt
+	userPrompt = html.UnescapeString(userPrompt)
 	prompt.User = userPrompt
 	return prompt, nil
 }

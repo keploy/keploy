@@ -144,7 +144,7 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		// handle the TLS connection and get the upgraded client connection
 		isTLS := pTls.IsTLSHandshake(testBuffer)
 		if isTLS {
-			clientConn, err = pTls.HandleTLSConnection(ctx, logger, clientConn)
+			clientConn, err = pTls.HandleTLSConnection(ctx, logger, clientConn, opts.Backdate)
 			if err != nil {
 				utils.LogError(logger, err, "failed to handle TLS conn")
 				return res, err
@@ -154,10 +154,27 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		// upgrade the destConn to TLS if the client connection is upgraded to TLS
 		var tlsDestConn *tls.Conn
 		if isTLS {
-			addr := fmt.Sprintf("%v:%v", pTls.DstURL, opts.DstCfg.Port)
+
+			remoteAddr := clientConn.RemoteAddr().(*net.TCPAddr)
+			sourcePort := remoteAddr.Port
+
+			url, ok := pTls.SrcPortToDstURL.Load(sourcePort)
+			if !ok {
+				utils.LogError(logger, err, "failed to fetch the destination url")
+				return res, err
+			}
+
+			//type case the dstUrl to string
+			dstURL, ok := url.(string)
+			if !ok {
+				utils.LogError(logger, err, "failed to type cast the destination url")
+				return res, err
+			}
+
+			addr := fmt.Sprintf("%v:%v", dstURL, opts.DstCfg.Port)
 			tlsConfig := &tls.Config{
 				InsecureSkipVerify: true,
-				ServerName:         pTls.DstURL,
+				ServerName:         dstURL,
 			}
 
 			logger.Debug("Upgrading the destination connection to TLS", zap.String("Destination Addr", addr), zap.String("ServerName", tlsConfig.ServerName))

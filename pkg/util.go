@@ -131,6 +131,10 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	req.ProtoMinor = tc.HTTPReq.ProtoMinor
 	req.Header.Set("KEPLOY-TEST-ID", tc.Name)
 	req.Header.Set("KEPLOY-TEST-SET-ID", testSet)
+	// send if its the last testcase
+	if tc.IsLast {
+		req.Header.Set("KEPLOY-LAST-TESTCASE", "true")
+	}
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", req))
 
 	// override host header if present in the request
@@ -191,10 +195,18 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		return nil, errHTTPReq
 	}
 
+	defer func() {
+		if httpResp != nil && httpResp.Body != nil {
+			if err := httpResp.Body.Close(); err != nil {
+				utils.LogError(logger, err, "failed to close response body")
+			}
+		}
+	}()
+
 	respBody, errReadRespBody := io.ReadAll(httpResp.Body)
 	if errReadRespBody != nil {
 		utils.LogError(logger, errReadRespBody, "failed reading response body")
-		return nil, err
+		return nil, errReadRespBody
 	}
 
 	resp = &models.HTTPResp{
@@ -254,14 +266,21 @@ func MakeCurlCommand(tc models.HTTPReq) string {
 
 func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 	indices := []string{}
+
 	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
 	if err != nil {
-		Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
-		return indices, nil
+		Logger.Debug("creating a folder for the keploy  generated testcases", zap.Error(err))
+		return indices, err
 	}
+	defer func() {
+		if closeErr := dir.Close(); closeErr != nil {
+			Logger.Debug("failed to close directory", zap.Error(closeErr))
+		}
+	}()
 
 	files, err := dir.ReadDir(0)
 	if err != nil {
+		Logger.Debug("failed to read directory contents", zap.Error(err))
 		return indices, err
 	}
 
@@ -270,6 +289,7 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 			indices = append(indices, v.Name())
 		}
 	}
+
 	return indices, nil
 }
 
@@ -330,6 +350,33 @@ var (
 		time.TimeOnly,
 	}
 )
+
+// ExtractPort extracts the port from a given URL string, defaulting to 80 if no port is specified.
+func ExtractPort(rawURL string) (uint32, error) {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return 0, err
+	}
+
+	host := parsedURL.Host
+	if strings.Contains(host, ":") {
+		// Split the host by ":" and return the port part
+		parts := strings.Split(host, ":")
+		port, err := strconv.ParseUint(parts[len(parts)-1], 10, 32)
+		if err != nil {
+			return 0, fmt.Errorf("invalid port in URL: %s", rawURL)
+		}
+		return uint32(port), nil
+	}
+
+	// Default ports based on scheme
+	switch parsedURL.Scheme {
+	case "https":
+		return 443, nil
+	default:
+		return 80, nil
+	}
+}
 
 func ExtractHostAndPort(curlCmd string) (string, string, error) {
 	// Split the command string to find the URL

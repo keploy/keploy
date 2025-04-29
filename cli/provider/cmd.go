@@ -18,6 +18,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/utils"
@@ -185,8 +186,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the path to download contracts")
 		}
 
-	case "update", "export":
+	case "update", "export", "import":
 		return nil
+	case "postman":
+		cmd.Flags().StringP("path", "p", "", "Specify the path to the postman collection")
+		cmd.Flags().String("base-path", c.cfg.Test.BasePath, "basePath to hit the server while importing keploy tests from postman collection with no response in the collection")
 	case "normalize":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks/reports are stored")
 		cmd.Flags().String("test-run", "", "Test Run to be normalized")
@@ -203,7 +207,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("coverage-report-path", "coverage.xml", "Path to the code coverage report file.")
 		cmd.Flags().String("test-command", "", "The command to run tests and generate coverage report.")
 		cmd.Flags().String("coverage-format", "cobertura", "Type of coverage report.")
-		cmd.Flags().Int("expected-coverage", 100, "The desired coverage percentage.")
+		cmd.Flags().Int("expected-coverage", 80, "The desired coverage percentage.")
 		cmd.Flags().Int("max-iterations", 5, "The maximum number of iterations.")
 		cmd.Flags().String("test-dir", "", "Path to the test directory.")
 		cmd.Flags().String("llm-base-url", "", "Base URL for the AI model.")
@@ -211,6 +215,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("llm-api-version", "", "API version of the llm")
 		cmd.Flags().String("additional-prompt", "", "Additional prompt to be used for the AI model.")
 		cmd.Flags().String("function-under-test", "", "The specific function for which tests will be generated.")
+		cmd.Flags().Bool("flakiness", false, "The flakiness check to run the passed tests for flakiness")
 		err := cmd.MarkFlagRequired("test-command")
 		if err != nil {
 			errMsg := "failed to mark testCommand as required flag"
@@ -271,7 +276,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 	switch cmd.Name() {
 	case "record":
-		cmd.Flags().Uint64("record-timer", 0, "User provided time to record its application")
+		cmd.Flags().Duration("record-timer", 0, "User provided time to record its application (e.g., \"5s\" for 5 seconds, \"1m\" for 1 minute)")
+		cmd.Flags().String("base-path", c.cfg.Record.BasePath, "Base URL to hit the server while recording the testcases")
 	case "test", "rerecord":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
 		cmd.Flags().String("host", c.cfg.Test.Host, "Custom host to replace the actual host in the testcases")
@@ -288,7 +294,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 			cmd.Flags().Bool("fallBack-on-miss", c.cfg.Test.FallBackOnMiss, "Enable connecting to actual service if mock not found during test mode")
 			cmd.Flags().String("jacoco-agent-path", c.cfg.Test.JacocoAgentPath, "Only applicable for test coverage for Java projects. You can override the jacoco agent jar by proving its path")
 			cmd.Flags().String("base-path", c.cfg.Test.BasePath, "Custom api basePath/origin to replace the actual basePath/origin in the testcases; App flag is ignored and app will not be started & instrumented when this is set since the application running on a different machine")
-			cmd.Flags().Bool("update-temp", c.cfg.Test.UpdateTemplate, "Update the template with the result of the testcases.")
+			cmd.Flags().Bool("update-template", c.cfg.Test.UpdateTemplate, "Update the template with the result of the testcases.")
 			cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
 			cmd.Flags().Bool("disableMockUpload", c.cfg.Test.DisableMockUpload, "Store/Fetch mocks locally")
 			cmd.Flags().Bool("useLocalMock", false, "Use local mocks instead of fetching from the cloud")
@@ -369,17 +375,30 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 	}
 	err = c.ValidateFlags(ctx, cmd)
 	if err != nil {
+		if err == c.noCommandError() {
+			utils.LogError(c.logger, nil, "missing required -c flag or appCmd in config file")
+			if c.cfg.InDocker {
+				c.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
+			} else {
+				c.logger.Info(LogExample(RootExamples))
+			}
+		}
 		c.logger.Error("failed to validate flags", zap.Error(err))
 		return err
 	}
+	// used to rewritte keploy.yml with <previous values> + <missing values> when true
+	var rewriteConfig = false
 	if c.cfg.AppName == "" {
+		// rewrite keploy.yml since AppName is missing
+		rewriteConfig = true
 		appName, err := utils.GetLastDirectory()
 		if err != nil {
 			return fmt.Errorf("failed to get the last directory: %v", err)
 		}
+		c.logger.Info("Using the last directory name as appName : " + appName)
 		c.cfg.AppName = appName
 	}
-	if !IsConfigFileFound {
+	if !IsConfigFileFound || rewriteConfig {
 		err := c.CreateConfigFile(ctx, defaultCfg)
 		if err != nil {
 			c.logger.Error("failed to create config file", zap.Error(err))
@@ -448,6 +467,17 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+	}
+
+	if c.cfg.Record.BasePath != "" {
+		port, err := pkg.ExtractPort(c.cfg.Record.BasePath)
+		if err != nil {
+			errMsg := "failed to extract port from base URL"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Port = port
+		c.cfg.E2E = true
 	}
 
 	if c.cfg.EnableTesting {
@@ -570,12 +600,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			c.cfg.Path = utils.ToAbsPath(c.logger, path)
 			return nil
 		}
-		// handle the app command
-		if c.cfg.Command == "" {
-			if !alreadyRunning(cmd.Name(), c.cfg.Test.BasePath) {
-				return c.noCommandError()
-			}
-		}
+
 		// set the command type
 		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
 
@@ -641,6 +666,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New("failed to get the absolute path")
 		}
 		c.cfg.Path = absPath + "/keploy"
+
+		// handle the app command
+		if c.cfg.Command == "" {
+			if !alreadyRunning(cmd.Name(), c.cfg.Test.BasePath) {
+				return c.noCommandError()
+			}
+		}
 
 		bypassPorts, err := cmd.Flags().GetUintSlice("passThroughPorts")
 		if err != nil {
@@ -738,7 +770,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 func (c *CmdConfigurator) CreateConfigFile(ctx context.Context, defaultCfg config.Config) error {
 	defaultCfg = c.UpdateConfigData(defaultCfg)
-	toolSvc := tools.NewTools(c.logger, nil, nil)
+	toolSvc := tools.NewTools(c.logger, nil, nil, nil, nil, nil)
 	configData := defaultCfg
 	configDataBytes, err := yaml.Marshal(configData)
 	if err != nil {

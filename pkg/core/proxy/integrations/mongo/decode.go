@@ -39,14 +39,14 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			var (
 				mongoRequests []models.MongoRequest // stores the request packet
 			)
-			// check to read the request buffer from the client connection after the initial packeyt
+			// check to read the request buffer from the client connection after the initial packet
 			if string(reqBuf) == "read form client conn" {
 				started := time.Now()
 				// reads the first chunk of the mongo request
 				reqBuf, err = util.ReadBytes(ctx, logger, clientConn)
 				if err != nil {
 					if err == io.EOF {
-						logger.Debug("recieved request buffer is empty in test mode for mongo calls")
+						logger.Debug("received request buffer is empty in test mode for mongo calls")
 						errCh <- err
 						return
 					}
@@ -85,7 +85,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					requestBuffer1, err := util.ReadBytes(ctx, logger, clientConn)
 					if err != nil {
 						if err == io.EOF {
-							logger.Debug("recieved request buffer is empty for streaming mongo request call")
+							logger.Debug("received request buffer is empty for streaming mongo request call")
 							errCh <- err
 							return
 						}
@@ -120,6 +120,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 			}
 			// check for the heartbeat request from client and use the config mocks to respond
 			if isHeartBeat(logger, opReq, *mongoRequests[0].Header, mongoRequests[0].Message) {
+				// isScramAuth(logger, opReq) {
 				var bestMatchIndex = -1
 				var maxMatchScore = 0.0
 				var configMocks []*models.Mock
@@ -135,70 +136,72 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					for configIndex, configMock := range configMocks {
 						logger.Debug("the config mock is: ", zap.Any("config mock", configMock), zap.Any("actual request", mongoRequests))
 						// checking the number of chunks for recorded config mocks and the incoming request
-						if len(configMock.Spec.MongoRequests) == len(mongoRequests) {
-							for i, req := range configMock.Spec.MongoRequests {
-								// check the opcode of the incoming request and the recorded config mocks
-								if len(configMock.Spec.MongoRequests) != len(mongoRequests) || req.Header.Opcode != mongoRequests[i].Header.Opcode {
+						if len(configMock.Spec.MongoRequests) != len(mongoRequests) {
+							continue
+						}
+
+						for i, req := range configMock.Spec.MongoRequests {
+							// check the opcode of the incoming request and the recorded config mocks
+							if len(configMock.Spec.MongoRequests) != len(mongoRequests) || req.Header.Opcode != mongoRequests[i].Header.Opcode {
+								continue
+							}
+							switch req.Header.Opcode {
+							case wiremessage.OpQuery:
+								// check the query fields of the incoming request and the recorded config mocks
+								expectedQuery := req.Message.(*models.MongoOpQuery)
+								actualQuery := mongoRequests[i].Message.(*models.MongoOpQuery)
+								if actualQuery.FullCollectionName != expectedQuery.FullCollectionName ||
+									actualQuery.ReturnFieldsSelector != expectedQuery.ReturnFieldsSelector ||
+									actualQuery.Flags != expectedQuery.Flags ||
+									actualQuery.NumberToReturn != expectedQuery.NumberToReturn ||
+									actualQuery.NumberToSkip != expectedQuery.NumberToSkip {
 									continue
 								}
-								switch req.Header.Opcode {
-								case wiremessage.OpQuery:
-									// check the query fields of the incoming request and the recorded config mocks
-									expectedQuery := req.Message.(*models.MongoOpQuery)
-									actualQuery := mongoRequests[i].Message.(*models.MongoOpQuery)
-									if actualQuery.FullCollectionName != expectedQuery.FullCollectionName ||
-										actualQuery.ReturnFieldsSelector != expectedQuery.ReturnFieldsSelector ||
-										actualQuery.Flags != expectedQuery.Flags ||
-										actualQuery.NumberToReturn != expectedQuery.NumberToReturn ||
-										actualQuery.NumberToSkip != expectedQuery.NumberToSkip {
-										continue
-									}
 
-									// calculate the matching score for query bson dcouments of the incoming request and the recorded config mocks
-									expected := map[string]interface{}{}
-									actual := map[string]interface{}{}
-									err = bson.UnmarshalExtJSON([]byte(expectedQuery.Query), true, &expected)
-									if err != nil {
-										utils.LogError(logger, err, "failed to unmarshal the section of recorded request to bson document")
-										continue
-									}
-									err = bson.UnmarshalExtJSON([]byte(actualQuery.Query), true, &actual)
-									if err != nil {
-										utils.LogError(logger, err, "failed to unmarshal the section of incoming request to bson document")
-										continue
-									}
-									score := calculateMatchingScore(expected, actual)
-									logger.Debug("the expected and actual msg in the heartbeat OpQuery query.", zap.Any("expected", expected), zap.Any("actual", actual), zap.Any("score", score))
-									if score > maxMatchScore {
-										maxMatchScore = score
-										bestMatchIndex = configIndex
-									}
-
-								case wiremessage.OpMsg:
-									// check the OpMsg sections of the incoming request and the recorded config mocks
-									if req.Message.(*models.MongoOpMessage).FlagBits != mongoRequests[i].Message.(*models.MongoOpMessage).FlagBits {
-										continue
-									}
-									scoreSum := 0.0
-									if len(req.Message.(*models.MongoOpMessage).Sections) != len(mongoRequests[i].Message.(*models.MongoOpMessage).Sections) {
-										continue
-									}
-									// calculate the matching score for each section of the incoming request and the recorded config mocks
-									for sectionIndx, section := range req.Message.(*models.MongoOpMessage).Sections {
-										if len(req.Message.(*models.MongoOpMessage).Sections) == len(mongoRequests[i].Message.(*models.MongoOpMessage).Sections) {
-											score := compareOpMsgSection(logger, section, mongoRequests[i].Message.(*models.MongoOpMessage).Sections[sectionIndx])
-											scoreSum += score
-										}
-									}
-									currentScore := scoreSum / float64(len(mongoRequests))
-									logger.Debug("the expected and actual msg in the heartbeat OpMsg single section.", zap.Any("expected", req.Message.(*models.MongoOpMessage).Sections), zap.Any("actual", mongoRequests[i].Message.(*models.MongoOpMessage).Sections), zap.Any("score", currentScore))
-									if currentScore > maxMatchScore {
-										maxMatchScore = currentScore
-										bestMatchIndex = configIndex
-									}
-								default:
-									utils.LogError(logger, err, "the OpCode of the mongo wiremessage is invalid.")
+								// calculate the matching score for query bson dcouments of the incoming request and the recorded config mocks
+								expected := map[string]interface{}{}
+								actual := map[string]interface{}{}
+								err = bson.UnmarshalExtJSON([]byte(expectedQuery.Query), true, &expected)
+								if err != nil {
+									utils.LogError(logger, err, "failed to unmarshal the section of recorded request to bson document")
+									continue
 								}
+								err = bson.UnmarshalExtJSON([]byte(actualQuery.Query), true, &actual)
+								if err != nil {
+									utils.LogError(logger, err, "failed to unmarshal the section of incoming request to bson document")
+									continue
+								}
+								score := calculateMatchingScore(expected, actual)
+								logger.Debug("the expected and actual msg in the heartbeat OpQuery query.", zap.Any("expected", expected), zap.Any("actual", actual), zap.Any("score", score))
+								if score > maxMatchScore {
+									maxMatchScore = score
+									bestMatchIndex = configIndex
+								}
+
+							case wiremessage.OpMsg:
+								// check the OpMsg sections of the incoming request and the recorded config mocks
+								if req.Message.(*models.MongoOpMessage).FlagBits != mongoRequests[i].Message.(*models.MongoOpMessage).FlagBits {
+									continue
+								}
+								scoreSum := 0.0
+								if len(req.Message.(*models.MongoOpMessage).Sections) != len(mongoRequests[i].Message.(*models.MongoOpMessage).Sections) {
+									continue
+								}
+								// calculate the matching score for each section of the incoming request and the recorded config mocks
+								for sectionIndx, section := range req.Message.(*models.MongoOpMessage).Sections {
+									if len(req.Message.(*models.MongoOpMessage).Sections) == len(mongoRequests[i].Message.(*models.MongoOpMessage).Sections) {
+										score := compareOpMsgSection(logger, section, mongoRequests[i].Message.(*models.MongoOpMessage).Sections[sectionIndx])
+										scoreSum += score
+									}
+								}
+								currentScore := scoreSum / float64(len(mongoRequests))
+								logger.Debug("the expected and actual msg in the heartbeat OpMsg single section.", zap.Any("expected", req.Message.(*models.MongoOpMessage).Sections), zap.Any("actual", mongoRequests[i].Message.(*models.MongoOpMessage).Sections), zap.Any("score", currentScore))
+								if currentScore > maxMatchScore {
+									maxMatchScore = currentScore
+									bestMatchIndex = configIndex
+								}
+							default:
+								utils.LogError(logger, err, "the OpCode of the mongo wiremessage is invalid.", zap.Any("opcode", req.Header.Opcode))
 							}
 						}
 					}
@@ -231,7 +234,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					switch mongoResponse.Header.Opcode {
 					case wiremessage.OpReply:
 						replySpec := mongoResponse.Message.(*models.MongoOpReply)
-						replyMessage, err := encodeOpReply(mongoRequests[0], configMocks[bestMatchIndex].Spec.MongoRequests[0], replySpec, opts.MongoPassword, logger)
+						replyMessage, err := encodeOpReply(ctx, mongoRequests[0], configMocks[bestMatchIndex].Spec.MongoRequests[0], replySpec, opts.MongoPassword, logger)
 						if err != nil {
 							utils.LogError(logger, err, "failed to encode the recorded OpReply yaml", zap.Any("for request with id", responseTo))
 							errCh <- err
@@ -241,6 +244,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 						heathCheckReplyBuffer := replyMessage.Encode(responseTo, requestID)
 						responseTo = requestID
 						logger.Debug(fmt.Sprintf("the bufffer response is: %v", string(heathCheckReplyBuffer)))
+						// handle scram auth request
 						_, err = clientConn.Write(heathCheckReplyBuffer)
 						if err != nil {
 							if ctx.Err() != nil {
@@ -257,7 +261,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 						if len(configMocks[bestMatchIndex].Spec.MongoRequests) > 0 {
 							expectedRequestSections = configMocks[bestMatchIndex].Spec.MongoRequests[0].Message.(*models.MongoOpMessage).Sections
 						}
-						message, err := encodeOpMsg(respMessage, mongoRequest.(*models.MongoOpMessage).Sections, expectedRequestSections, opts.MongoPassword, logger)
+						message, err := encodeOpMsg(ctx, respMessage, mongoRequest.(*models.MongoOpMessage).Sections, expectedRequestSections, opts.MongoPassword, logger)
 						if err != nil {
 							utils.LogError(logger, err, "failed to encode the recorded OpMsg response", zap.Any("for request with id", responseTo))
 							errCh <- err
@@ -305,7 +309,7 @@ func decodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientC
 					if len(matchedMock.Spec.MongoRequests) > 0 {
 						expectedRequestSections = matchedMock.Spec.MongoRequests[0].Message.(*models.MongoOpMessage).Sections
 					}
-					message, err := encodeOpMsg(respMessage, mongoRequest.(*models.MongoOpMessage).Sections, expectedRequestSections, opts.MongoPassword, logger)
+					message, err := encodeOpMsg(ctx, respMessage, mongoRequest.(*models.MongoOpMessage).Sections, expectedRequestSections, opts.MongoPassword, logger)
 					if err != nil {
 						utils.LogError(logger, err, "failed to encode the recorded OpMsg response", zap.Any("for request with id", responseTo))
 						errCh <- err

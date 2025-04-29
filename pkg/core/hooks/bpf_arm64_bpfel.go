@@ -73,6 +73,7 @@ type bpfProgramSpecs struct {
 	SyscallProbeRetAccept            *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_accept"`
 	SyscallProbeRetAccept4           *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_accept4"`
 	SyscallProbeRetClose             *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_close"`
+	SyscallProbeRetConnect           *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_connect"`
 	SyscallProbeRetRead              *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_read"`
 	SyscallProbeRetRecvfrom          *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_recvfrom"`
 	SyscallProbeRetSendto            *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_sendto"`
@@ -80,6 +81,7 @@ type bpfProgramSpecs struct {
 	SyscallProbeRetTcpV6Connect      *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_tcp_v6_connect"`
 	SyscallProbeRetWrite             *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_write"`
 	SyscallProbeRetWritev            *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_writev"`
+	SyscallProbeEntryConnect         *ebpf.ProgramSpec `ebpf:"syscall_probe_entry_connect"`
 	SyscallProbeEntrySocket          *ebpf.ProgramSpec `ebpf:"syscall_probe_entry_socket"`
 }
 
@@ -96,10 +98,13 @@ type bpfMapSpecs struct {
 	CurrentSockMap              *ebpf.MapSpec `ebpf:"current_sock_map"`
 	DestInfoMap                 *ebpf.MapSpec `ebpf:"dest_info_map"`
 	DockerAppRegistrationMap    *ebpf.MapSpec `ebpf:"docker_app_registration_map"`
+	E2eInfoMap                  *ebpf.MapSpec `ebpf:"e2e_info_map"`
 	KeployAgentKernelPidMap     *ebpf.MapSpec `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.MapSpec `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.MapSpec `ebpf:"keploy_client_kernel_pid_map"`
 	KeployClientRegistrationMap *ebpf.MapSpec `ebpf:"keploy_client_registration_map"`
+	OutgoingConnCheckMap        *ebpf.MapSpec `ebpf:"outgoing_conn_check_map"`
+	OutgoingConnectArgsMap      *ebpf.MapSpec `ebpf:"outgoing_connect_args_map"`
 	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
 	SocketCloseEvents           *ebpf.MapSpec `ebpf:"socket_close_events"`
 	SocketDataEventBufferHeap   *ebpf.MapSpec `ebpf:"socket_data_event_buffer_heap"`
@@ -136,10 +141,13 @@ type bpfMaps struct {
 	CurrentSockMap              *ebpf.Map `ebpf:"current_sock_map"`
 	DestInfoMap                 *ebpf.Map `ebpf:"dest_info_map"`
 	DockerAppRegistrationMap    *ebpf.Map `ebpf:"docker_app_registration_map"`
+	E2eInfoMap                  *ebpf.Map `ebpf:"e2e_info_map"`
 	KeployAgentKernelPidMap     *ebpf.Map `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.Map `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.Map `ebpf:"keploy_client_kernel_pid_map"`
 	KeployClientRegistrationMap *ebpf.Map `ebpf:"keploy_client_registration_map"`
+	OutgoingConnCheckMap        *ebpf.Map `ebpf:"outgoing_conn_check_map"`
+	OutgoingConnectArgsMap      *ebpf.Map `ebpf:"outgoing_connect_args_map"`
 	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
 	SocketCloseEvents           *ebpf.Map `ebpf:"socket_close_events"`
 	SocketDataEventBufferHeap   *ebpf.Map `ebpf:"socket_data_event_buffer_heap"`
@@ -159,10 +167,13 @@ func (m *bpfMaps) Close() error {
 		m.CurrentSockMap,
 		m.DestInfoMap,
 		m.DockerAppRegistrationMap,
+		m.E2eInfoMap,
 		m.KeployAgentKernelPidMap,
 		m.KeployAgentRegistrationMap,
 		m.KeployClientKernelPidMap,
 		m.KeployClientRegistrationMap,
+		m.OutgoingConnCheckMap,
+		m.OutgoingConnectArgsMap,
 		m.RedirectProxyMap,
 		m.SocketCloseEvents,
 		m.SocketDataEventBufferHeap,
@@ -196,6 +207,7 @@ type bpfPrograms struct {
 	SyscallProbeRetAccept            *ebpf.Program `ebpf:"syscall__probe_ret_accept"`
 	SyscallProbeRetAccept4           *ebpf.Program `ebpf:"syscall__probe_ret_accept4"`
 	SyscallProbeRetClose             *ebpf.Program `ebpf:"syscall__probe_ret_close"`
+	SyscallProbeRetConnect           *ebpf.Program `ebpf:"syscall__probe_ret_connect"`
 	SyscallProbeRetRead              *ebpf.Program `ebpf:"syscall__probe_ret_read"`
 	SyscallProbeRetRecvfrom          *ebpf.Program `ebpf:"syscall__probe_ret_recvfrom"`
 	SyscallProbeRetSendto            *ebpf.Program `ebpf:"syscall__probe_ret_sendto"`
@@ -203,6 +215,7 @@ type bpfPrograms struct {
 	SyscallProbeRetTcpV6Connect      *ebpf.Program `ebpf:"syscall__probe_ret_tcp_v6_connect"`
 	SyscallProbeRetWrite             *ebpf.Program `ebpf:"syscall__probe_ret_write"`
 	SyscallProbeRetWritev            *ebpf.Program `ebpf:"syscall__probe_ret_writev"`
+	SyscallProbeEntryConnect         *ebpf.Program `ebpf:"syscall_probe_entry_connect"`
 	SyscallProbeEntrySocket          *ebpf.Program `ebpf:"syscall_probe_entry_socket"`
 }
 
@@ -228,6 +241,7 @@ func (p *bpfPrograms) Close() error {
 		p.SyscallProbeRetAccept,
 		p.SyscallProbeRetAccept4,
 		p.SyscallProbeRetClose,
+		p.SyscallProbeRetConnect,
 		p.SyscallProbeRetRead,
 		p.SyscallProbeRetRecvfrom,
 		p.SyscallProbeRetSendto,
@@ -235,6 +249,7 @@ func (p *bpfPrograms) Close() error {
 		p.SyscallProbeRetTcpV6Connect,
 		p.SyscallProbeRetWrite,
 		p.SyscallProbeRetWritev,
+		p.SyscallProbeEntryConnect,
 		p.SyscallProbeEntrySocket,
 	)
 }

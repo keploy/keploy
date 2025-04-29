@@ -5,6 +5,7 @@ package hooks
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"math/rand"
 
@@ -84,6 +85,16 @@ func (h *Hooks) SendAgentInfo(agentInfo structs.AgentInfo) error {
 	return nil
 }
 
+func (h *Hooks) SendE2EInfo(pid uint32) error {
+	key := 0
+	err := h.e2eAppRegistrationMap.Update(uint64(key), pid, ebpf.UpdateAny)
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to send the E2E info to the ebpf program")
+		return err
+	}
+	return nil
+}
+
 func (h *Hooks) SendDockerAppInfo(_ uint64, dockerAppInfo structs.DockerAppInfo) error {
 	if h.appID != 0 {
 		err := h.dockerAppRegistrationMap.Delete(h.appID)
@@ -92,8 +103,8 @@ func (h *Hooks) SendDockerAppInfo(_ uint64, dockerAppInfo structs.DockerAppInfo)
 			return err
 		}
 	}
-	r := rand.New(rand.NewSource(rand.Int63()))
-	randomNum := r.Uint64()
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	randomNum := r.Uint64() % 10
 	h.appID = randomNum
 	err := h.dockerAppRegistrationMap.Update(h.appID, dockerAppInfo, ebpf.UpdateAny)
 	if err != nil {

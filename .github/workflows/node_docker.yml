@@ -6,7 +6,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
 
     - name: Run build script
       run: |
@@ -14,10 +14,10 @@ jobs:
 
     - name: Build binary
       run: |
-        go build  -tags=viper_bind_struct -o keployv2
+        go build -race -tags=viper_bind_struct -o keployv2
 
     - name: Checkout samples-typescript repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
       with:
         repository: keploy/samples-typescript
         path: samples-typescript

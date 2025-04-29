@@ -143,7 +143,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 
 	if stopReason != "" {
 		utils.LogError(o.logger, err, stopReason)
-		return fmt.Errorf(stopReason)
+		return fmt.Errorf("%s", stopReason)
 	}
 
 	if ctx.Err() != nil {
@@ -161,7 +161,15 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 			o.logger.Warn("Failed to read input. The older testsets will be kept.")
 			return nil
 		}
-		if input == "y\n" || input == "Y\n" {
+
+		if len(input) == 0 {
+			o.logger.Warn("Empty input. The older testsets will be kept.")
+			return nil
+		}
+		// Trimming the newline character for cleaner switch statement
+		input = input[:len(input)-1]
+		switch input {
+		case "y", "Y":
 			for _, testSet := range SelectedTests {
 				err := o.replay.DeleteTestSet(ctx, testSet)
 				if err != nil {
@@ -169,9 +177,9 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 				}
 			}
 			o.logger.Info("Deleted the older testsets successfully")
-		} else if input == "n\n" || input == "N\n" {
+		case "n", "N":
 			o.logger.Info("skipping the deletion of older testsets")
-		} else {
+		default:
 			o.logger.Warn("Invalid input. The older testsets will be kept.")
 		}
 	}
@@ -186,7 +194,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 	if err != nil {
 		errMsg := "failed to get all testcases"
 		utils.LogError(o.logger, err, errMsg, zap.String("testset", testSet))
-		return false, fmt.Errorf(errMsg)
+		return false, fmt.Errorf("%s", errMsg)
 	}
 
 	if len(tcs) == 0 {
@@ -199,7 +207,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 		errMsg := "failed to extract host and port"
 		utils.LogError(o.logger, err, "")
 		o.logger.Debug("", zap.String("curl", tcs[0].Curl))
-		return false, fmt.Errorf(errMsg)
+		return false, fmt.Errorf("%s", errMsg)
 	}
 	cmdType := utils.CmdType(o.config.CommandType)
 
@@ -316,7 +324,7 @@ func (o *Orchestrator) checkForTemplates(ctx context.Context, testSets []string)
 	}
 
 	if input == "y\n" || input == "Y\n" {
-		if err := o.replay.Templatize(ctx); err != nil {
+		if err := o.tools.Templatize(ctx); err != nil {
 			utils.LogError(o.logger, err, "failed to templatize test cases, skipping templatization")
 		}
 	}
