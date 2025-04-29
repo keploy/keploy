@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"sync"
@@ -55,6 +56,7 @@ type Hooks struct {
 	dockerAppRegistrationMap *ebpf.Map
 	redirectProxyMap         *ebpf.Map
 	e2eAppRegistrationMap    *ebpf.Map
+	flagMap                  *ebpf.Map
 	//--------------
 
 	// eBPF C shared objectsobjects
@@ -347,6 +349,18 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
 	// Open a Kprobe at the entry point of the kernel function and attach the
 	// pre-compiled program.
+	h.flagMap = objs.FlagMap
+	if utils.BigReq {
+		err = h.UpdateFlagMap(0, 1)
+	} else {
+		err = h.UpdateFlagMap(0, 0)
+	}
+
+	if err != nil {
+		log.Fatalf("Error setting flag in map: %v", err)
+	} else {
+		fmt.Println("flagmep set successfully")
+	}
 	rd, err := link.Kprobe("sys_read", objs.SyscallProbeEntryRead, nil)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to attach the kprobe hook on sys_read")
@@ -529,7 +543,13 @@ func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOption
 	// TODO use the session to get the app id
 	// and then use the app id to get the test cases chan
 	// and pass that to eBPF consumers/listeners
-	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
+	// if utils.BigReq {
+	// 	fmt.Println("big request")
+	// 	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
+	// }
+	// fmt.Println("small request")
+	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEventsSmall , h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
+
 }
 
 func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
@@ -641,4 +661,22 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 	}
 
 	h.logger.Info("eBPF resources released successfully...")
+}
+
+func (h *Hooks) UpdateFlagMap(key uint64, value uint64) error {
+	if h.flagMap == nil {
+		return fmt.Errorf("flag map not initialized")
+	}
+
+	// Key and value must be pointers
+	err := h.flagMap.Update(
+		&key,           // Map key (pointer)
+		&value,         // New value (pointer)
+		ebpf.UpdateAny, // Update flags
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to update flag map: %w", err)
+	}
+	return nil
 }

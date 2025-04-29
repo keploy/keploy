@@ -26,7 +26,7 @@ import (
 // var eventAttributesSize = int(unsafe.Sizeof(SocketDataEvent{}))
 
 // ListenSocket starts the socket event listeners
-func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap *ebpf.Map, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
+func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMapSmall, dataMapBig, closeMap *ebpf.Map, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	t := make(chan *models.TestCase, 500)
 	err := initRealTimeOffset()
 	if err != nil {
@@ -63,16 +63,19 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 		utils.LogError(l, err, "failed to start open socket listener")
 		return nil, errors.New("failed to start socket listeners")
 	}
-	err = data(ctx, c, l, dataMap)
+	fmt.Println("OPENED")
+	err = data(ctx, c, l, dataMapSmall, dataMapBig)
 	if err != nil {
 		utils.LogError(l, err, "failed to start data socket listener")
 		return nil, errors.New("failed to start socket listeners")
 	}
+	fmt.Println("DATA")
 	err = exit(ctx, c, l, closeMap)
 	if err != nil {
 		utils.LogError(l, err, "failed to start close socket listener")
 		return nil, errors.New("failed to start socket listeners")
 	}
+	fmt.Println("EXIT")
 	return t, err
 }
 
@@ -94,6 +97,7 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 			defer utils.Recover(l)
 			for {
 				rec, err := r.Read()
+				fmt.Println("Opened again")
 				if err != nil {
 					if errors.Is(err, perf.ErrClosed) {
 						return
@@ -128,13 +132,21 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 	return nil
 }
 
-func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
-	r, err := ringbuf.NewReader(m)
+func data(ctx context.Context, c *Factory, l *zap.Logger, ms *ebpf.Map, mb *ebpf.Map) error {
+	r, err := ringbuf.NewReader(mb)
 	if err != nil {
 		utils.LogError(l, nil, "failed to create ring buffer of socketDataEvent")
 		return err
 	}
+	if !utils.BigReq {
+		r, err = ringbuf.NewReader(ms)
+	}
 
+	if err != nil {
+		utils.LogError(l, nil, "failed to create ring buffer of socketDataEvent")
+		return err
+	}
+	// fmt.Println("ringbuf reader created")
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
 		return errors.New("failed to get the error group from the context")
@@ -144,42 +156,76 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 		go func() {
 			defer utils.Recover(l)
 			for {
+				// spew.Dump(m)
+				// recordS, err := rs.Read()
+				// if err != nil {
+				// 	if !errors.Is(err, ringbuf.ErrClosed) {
+				// 		utils.LogError(l, err, "failed to receive signal from ringbuf socketDataEvent reader")
+				// 		return
+				// 	}
+				// 	// fmt.Println("ringbuf closed")
+				// 	continue
+				// }
 				record, err := r.Read()
+				// fmt.Println("reading from ringbuf")
 				if err != nil {
 					if !errors.Is(err, ringbuf.ErrClosed) {
 						utils.LogError(l, err, "failed to receive signal from ringbuf socketDataEvent reader")
 						return
 					}
+					// fmt.Println("ringbuf closed")
 					continue
 				}
+				// fmt.Println("here is the data length", len(record.RawSample))
+				// spew.Dump(record)
 				// trim the data over here such that empty spaces are not considered
 
 				bin := record.RawSample
-				// if len(bin) < eventAttributesSize {
-				// 	l.Debug(fmt.Sprintf("Buffer's for SocketDataEvent is smaller (%d) than the minimum required (%d)", len(bin), eventAttributesSize))
-				// 	continue
-				// }
-				// } else if len(bin) > EventBodyMaxSize+eventAttributesSize {
-				// 	l.Debug(fmt.Sprintf("Buffer's for SocketDataEvent is bigger (%d) than the maximum for the struct (%d)", len(bin), EventBodyMaxSize+eventAttributesSize))
-				// 	continue
-				// }
 
-				var event SocketDataEvent
-				// fmt.Println("here is the data length", len(bin))
-				if err := binary.Read(bytes.NewReader(bin), binary.LittleEndian, &event); err != nil {
-					utils.LogError(l, err, "failed to decode the received data from ringbuf socketDataEvent reader")
-					continue
-				}
-				event.TimestampNano += getRealTimeOffset()
+				// check flag here
+				if utils.BigReq {
+					fmt.Println("BIGDATA")
+					var event SocketDataEventBig
 
-				if event.Direction == IngressTraffic {
-					// fmt.Println("INGRESS", len(bin))
-					event.EntryTimestampNano += getRealTimeOffset()
-					l.Debug(fmt.Sprintf("Request EntryTimestamp :%v\n", convertUnixNanoToTime(event.EntryTimestampNano)))
+					if err := binary.Read(bytes.NewReader(bin), binary.LittleEndian, &event); err != nil {
+						utils.LogError(l, err, "failed to decode the received data from ringbuf socketDataEvent reader")
+						continue
+					}
+					fmt.Println("here is the data length", event.MsgSize)
+					fmt.Println("validatereadbytes", event.ValidateReadBytes)
+					event.TimestampNano += getRealTimeOffset()
+
+					if event.Direction == IngressTraffic {
+						// fmt.Println("INGRESS", len(bin))
+						event.EntryTimestampNano += getRealTimeOffset()
+						l.Debug(fmt.Sprintf("Request EntryTimestamp :%v\n", convertUnixNanoToTime(event.EntryTimestampNano)))
+					} else {
+						// fmt.Println("EGRESS", len(bin))
+					}
+					c.GetOrCreate(event.ConnID).AddDataEventBig(event)
 				} else {
-					// fmt.Println("EGRESS", len(bin))
+					fmt.Println("SMALLDATA")
+					var event SocketDataEventSmall
+
+					if err := binary.Read(bytes.NewReader(bin), binary.LittleEndian, &event); err != nil {
+						utils.LogError(l, err, "failed to decode the received data from ringbuf socketDataEvent reader")
+						continue
+					}
+					// spew.Dump(event)
+					fmt.Println("here is the data length", event.MsgSize)
+					fmt.Println("validatereadbytes", event.ValidateReadBytes)
+					event.TimestampNano += getRealTimeOffset()
+
+					if event.Direction == IngressTraffic {
+						// fmt.Println("INGRESS", len(bin))
+						event.EntryTimestampNano += getRealTimeOffset()
+						l.Debug(fmt.Sprintf("Request EntryTimestamp :%v\n", convertUnixNanoToTime(event.EntryTimestampNano)))
+					} else {
+						// fmt.Println("EGRESS", len(bin))
+					}
+					c.GetOrCreate(event.ConnID).AddDataEventSmall(event)
 				}
-				c.GetOrCreate(event.ConnID).AddDataEvent(event)
+
 			}
 		}()
 		<-ctx.Done() // Check for context cancellation

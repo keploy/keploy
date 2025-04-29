@@ -75,10 +75,10 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 				// spew.Dump(requestBuf, responseBuf)
 				if ok {
 
-					if len(requestBuf) == 0 || len(responseBuf) == 0 {
-						factory.logger.Warn("failed processing a request due to invalid request or response", zap.Any("Request Size", len(requestBuf)), zap.Any("Response Size", len(responseBuf)))
-						continue
-					}
+					// if len(requestBuf) == 0 || len(responseBuf) == 0 {
+					// 	factory.logger.Warn("failed processing a request due to invalid request or response", zap.Any("Request Size", len(requestBuf)), zap.Any("Response Size", len(responseBuf)))
+					// 	continue
+					// }
 					parsedHTTPReq, err := pkg.ParseHTTPRequest(requestBuf)
 					if err != nil {
 						utils.LogError(factory.logger, err, "failed to parse the http request from byte array", zap.Any("requestBuf", requestBuf))
@@ -94,6 +94,10 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 					if err != nil {
 						utils.LogError(factory.logger, err, "failed to parse the http response from byte array", zap.Any("responseBuf", responseBuf))
 						continue
+					}
+					if parsedHTTPRes.Body != nil {
+						respBodyBytes, _ := io.ReadAll(parsedHTTPRes.Body)
+						parsedHTTPRes.Body = io.NopCloser(bytes.NewReader(respBodyBytes))
 					}
 					////////////////////////////////////////////
 
