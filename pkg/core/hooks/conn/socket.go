@@ -23,7 +23,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// var eventAttributesSize = int(unsafe.Sizeof(SocketDataEvent{}))
 
 // ListenSocket starts the socket event listeners
 func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMapSmall, dataMapBig, closeMap *ebpf.Map, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
@@ -63,19 +62,16 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMapSmall, dat
 		utils.LogError(l, err, "failed to start open socket listener")
 		return nil, errors.New("failed to start socket listeners")
 	}
-	fmt.Println("OPENED")
 	err = data(ctx, c, l, dataMapSmall, dataMapBig)
 	if err != nil {
 		utils.LogError(l, err, "failed to start data socket listener")
 		return nil, errors.New("failed to start socket listeners")
 	}
-	fmt.Println("DATA")
 	err = exit(ctx, c, l, closeMap)
 	if err != nil {
 		utils.LogError(l, err, "failed to start close socket listener")
 		return nil, errors.New("failed to start socket listeners")
 	}
-	fmt.Println("EXIT")
 	return t, err
 }
 
@@ -97,7 +93,6 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 			defer utils.Recover(l)
 			for {
 				rec, err := r.Read()
-				fmt.Println("Opened again")
 				if err != nil {
 					if errors.Is(err, perf.ErrClosed) {
 						return
@@ -141,12 +136,10 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, ms *ebpf.Map, mb *ebpf
 	if !utils.BigReq {
 		r, err = ringbuf.NewReader(ms)
 	}
-
 	if err != nil {
 		utils.LogError(l, nil, "failed to create ring buffer of socketDataEvent")
 		return err
 	}
-	// fmt.Println("ringbuf reader created")
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
 		return errors.New("failed to get the error group from the context")
@@ -156,72 +149,45 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, ms *ebpf.Map, mb *ebpf
 		go func() {
 			defer utils.Recover(l)
 			for {
-				// spew.Dump(m)
-				// recordS, err := rs.Read()
-				// if err != nil {
-				// 	if !errors.Is(err, ringbuf.ErrClosed) {
-				// 		utils.LogError(l, err, "failed to receive signal from ringbuf socketDataEvent reader")
-				// 		return
-				// 	}
-				// 	// fmt.Println("ringbuf closed")
-				// 	continue
-				// }
 				record, err := r.Read()
-				// fmt.Println("reading from ringbuf")
 				if err != nil {
 					if !errors.Is(err, ringbuf.ErrClosed) {
 						utils.LogError(l, err, "failed to receive signal from ringbuf socketDataEvent reader")
 						return
 					}
-					// fmt.Println("ringbuf closed")
 					continue
 				}
-				// fmt.Println("here is the data length", len(record.RawSample))
-				// spew.Dump(record)
-				// trim the data over here such that empty spaces are not considered
 
 				bin := record.RawSample
 
-				// check flag here
 				if utils.BigReq {
-					fmt.Println("BIGDATA")
+					l.Debug(fmt.Sprintf("Using Bigger Request Map"))
 					var event SocketDataEventBig
 
 					if err := binary.Read(bytes.NewReader(bin), binary.LittleEndian, &event); err != nil {
 						utils.LogError(l, err, "failed to decode the received data from ringbuf socketDataEvent reader")
 						continue
 					}
-					fmt.Println("here is the data length", event.MsgSize)
-					fmt.Println("validatereadbytes", event.ValidateReadBytes)
 					event.TimestampNano += getRealTimeOffset()
 
 					if event.Direction == IngressTraffic {
-						// fmt.Println("INGRESS", len(bin))
 						event.EntryTimestampNano += getRealTimeOffset()
 						l.Debug(fmt.Sprintf("Request EntryTimestamp :%v\n", convertUnixNanoToTime(event.EntryTimestampNano)))
-					} else {
-						// fmt.Println("EGRESS", len(bin))
 					}
 					c.GetOrCreate(event.ConnID).AddDataEventBig(event)
 				} else {
-					fmt.Println("SMALLDATA")
+					l.Debug(fmt.Sprintf("Using Smaller Request Map"))
 					var event SocketDataEventSmall
 
 					if err := binary.Read(bytes.NewReader(bin), binary.LittleEndian, &event); err != nil {
 						utils.LogError(l, err, "failed to decode the received data from ringbuf socketDataEvent reader")
 						continue
 					}
-					// spew.Dump(event)
-					fmt.Println("here is the data length", event.MsgSize)
-					fmt.Println("validatereadbytes", event.ValidateReadBytes)
 					event.TimestampNano += getRealTimeOffset()
 
 					if event.Direction == IngressTraffic {
-						// fmt.Println("INGRESS", len(bin))
 						event.EntryTimestampNano += getRealTimeOffset()
 						l.Debug(fmt.Sprintf("Request EntryTimestamp :%v\n", convertUnixNanoToTime(event.EntryTimestampNano)))
-					} else {
-						// fmt.Println("EGRESS", len(bin))
 					}
 					c.GetOrCreate(event.ConnID).AddDataEventSmall(event)
 				}

@@ -72,13 +72,12 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 			} else {
 				// Handle HTTP1 requests
 				ok, requestBuf, responseBuf, reqTimestampTest, resTimestampTest := tracker.isHTTP1Complete()
-				// spew.Dump(requestBuf, responseBuf)
 				if ok {
 
-					// if len(requestBuf) == 0 || len(responseBuf) == 0 {
-					// 	factory.logger.Warn("failed processing a request due to invalid request or response", zap.Any("Request Size", len(requestBuf)), zap.Any("Response Size", len(responseBuf)))
-					// 	continue
-					// }
+					if len(requestBuf) == 0 || len(responseBuf) == 0 {
+						factory.logger.Warn("failed processing a request due to invalid request or response", zap.Any("Request Size", len(requestBuf)), zap.Any("Response Size", len(responseBuf)))
+						continue
+					}
 					parsedHTTPReq, err := pkg.ParseHTTPRequest(requestBuf)
 					if err != nil {
 						utils.LogError(factory.logger, err, "failed to parse the http request from byte array", zap.Any("requestBuf", requestBuf))
@@ -99,22 +98,7 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 						respBodyBytes, _ := io.ReadAll(parsedHTTPRes.Body)
 						parsedHTTPRes.Body = io.NopCloser(bytes.NewReader(respBodyBytes))
 					}
-					////////////////////////////////////////////
-
-					// if len(requestBuf) == 0 || len(responseBuf) == 0 {
-					// 	factory.logger.Warn("failed processing a request due to invalid request or response", zap.Any("Request Size", len(requestBuf)), zap.Any("Response Size", len(responseBuf)))
-					// 	continue
-					// }
-					// parsedHTTPReq, err = pkg.ParseHTTPRequest(requestBuf)
-					// if err != nil {
-					// 	utils.LogError(factory.logger, err, "failed to parse the http request from byte array", zap.Any("requestBuf", requestBuf))
-					// 	continue
-					// }
-					// parsedHTTPRes, err = pkg.ParseHTTPResponse(responseBuf, parsedHTTPReq)
-					// if err != nil {
-					// 	utils.LogError(factory.logger, err, "failed to parse the http response from byte array", zap.Any("responseBuf", responseBuf))
-					// 	continue
-					// }
+					
 					basePath := factory.incomingOpts.BasePath
 					parsedBaseURL, err := url.Parse(basePath)
 					if err != nil {

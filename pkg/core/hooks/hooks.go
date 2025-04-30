@@ -358,8 +358,6 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
 	if err != nil {
 		log.Fatalf("Error setting flag in map: %v", err)
-	} else {
-		fmt.Println("flagmep set successfully")
 	}
 	rd, err := link.Kprobe("sys_read", objs.SyscallProbeEntryRead, nil)
 	if err != nil {
@@ -543,12 +541,7 @@ func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOption
 	// TODO use the session to get the app id
 	// and then use the app id to get the test cases chan
 	// and pass that to eBPF consumers/listeners
-	// if utils.BigReq {
-	// 	fmt.Println("big request")
-	// 	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
-	// }
-	// fmt.Println("small request")
-	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEventsSmall , h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
+	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEventsSmall, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
 
 }
 

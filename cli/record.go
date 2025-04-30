@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
@@ -22,11 +21,6 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 		Example: `keploy record -c "/path/to/user/app"`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			bigReq, _ := cmd.Flags().GetBool("bigRequest")
-			if bigReq {
-				fmt.Println(" IT IS TRUE !!!")
-			} else {
-				fmt.Println("NOY TRUE")
-			}
 			utils.BigReq = bigReq
 			return cmdConfigurator.Validate(ctx, cmd)
 		},

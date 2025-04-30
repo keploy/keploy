@@ -190,11 +190,7 @@ func (conn *Tracker) AddDataEventBig(event SocketDataEventBig) {
 	defer conn.mutex.Unlock()
 	conn.UpdateTimestamps()
 	msgLength := event.MsgSize
-	// If the size of the message exceeds the maximum allowed size,
-	// set msgLength to the maximum allowed size instead
-	// if event.MsgSize > EventBodyMaxSize {
-	// 	msgLength = EventBodyMaxSize
-	// }
+
 	// Trim leading zeros from the data
 	start := 3
 	for ; start < len(event.Msg)-1; start++ {
@@ -202,11 +198,10 @@ func (conn *Tracker) AddDataEventBig(event SocketDataEventBig) {
 			break
 		}
 	}
-	fmt.Println("Start index:", start)
-	fmt.Println("Length of data:", event.Msg[start])
-	data := event.Msg[start:]
-	data = data[:msgLength]
-	// spew.Dump(data)
+
+	data := event.Msg[start:] // trimming leading zeros
+	data = data[:msgLength]   // trimming trailing zeros
+
 	// Check for HTTP/2 preface if we haven't detected protocol yet
 	if !conn.protocolDetected {
 		conn.logger.Debug("Connection check")
@@ -261,11 +256,9 @@ func (conn *Tracker) AddDataEventSmall(event SocketDataEventSmall) {
 			break
 		}
 	}
-	fmt.Println("Start index:", start)
-	fmt.Println("Length of data:", event.Msg[start])
-	data := event.Msg[start:]
-	data = data[:msgLength]
-	// spew.Dump(data)
+	data := event.Msg[start:] // trimming leading zeros
+	data = data[:msgLength]   // trimming trailing zeros
+
 	// Check for HTTP/2 preface if we haven't detected protocol yet
 	if !conn.protocolDetected {
 		conn.logger.Debug("Connection check")
@@ -302,6 +295,7 @@ func (conn *Tracker) AddDataEventSmall(event SocketDataEventSmall) {
 		conn.handleHTTP1DataSmall(event)
 	}
 }
+
 // isHTTP1Request checks if the data starts with a valid HTTP/1 request line
 func isHTTP1Request(data []byte) bool {
 	// Convert to string for easier checking
@@ -397,8 +391,6 @@ func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Ti
 
 			expectedRecvBytes := conn.userReqSizes[0]
 			actualRecvBytes := conn.kernelReqSizes[0]
-			// fmt.Println("expectedRecvBytes", expectedRecvBytes)
-			// fmt.Println("actualRecvBytes", actualRecvBytes)
 			if expectedRecvBytes == 0 || actualRecvBytes == 0 {
 				conn.logger.Warn("Malformed request", zap.Any("ExpectedRecvBytes", expectedRecvBytes), zap.Any("ActualRecvBytes", actualRecvBytes))
 			}
@@ -460,10 +452,6 @@ func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Ti
 			//popping out the current request info
 			conn.userReqSizes = conn.userReqSizes[1:]
 			conn.kernelReqSizes = conn.kernelReqSizes[1:]
-			// fmt.Println("wanted this :")
-			// spew.Dump(conn)
-			// fmt.Println("expectedRecvBytes", expectedRecvBytes)
-			// fmt.Println("actualRecvBytes", actualRecvBytes)
 
 			if expectedRecvBytes == 0 || actualRecvBytes == 0 {
 				conn.logger.Warn("Malformed request", zap.Any("ExpectedRecvBytes", expectedRecvBytes), zap.Any("ActualRecvBytes", actualRecvBytes))
@@ -520,8 +508,6 @@ func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Ti
 		}
 		conn.logger.Debug(fmt.Sprintf("TestRequestTimestamp:%v || TestResponseTimestamp:%v", reqTimestamps, respTimestamp))
 	}
-	// spew.Dump("requestbuff :", requestBuf)
-	// spew.Dump("responsebuf :", responseBuf)
 	return recordTraffic, requestBuf, responseBuf, reqTimestamps, respTimestamp
 }
 
@@ -529,12 +515,6 @@ func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Ti
 func (conn *Tracker) handleHTTP2DataBig(event SocketDataEventBig) {
 	// Convert fixed-size array to slice
 	msgLength := event.MsgSize
-	// If the size of the message exceeds the maximum allowed size,
-	// set msgLength to the maximum allowed size instead
-	// if event.MsgSize > EventBodyMaxSize {
-	// 	msgLength = EventBodyMaxSize
-	// }
-	// data := event.Msg[:event.MsgSize]
 
 	// Append new data to the buffer
 	conn.buffer = append(conn.buffer, event.Msg[:msgLength]...)
@@ -573,6 +553,7 @@ func (conn *Tracker) handleHTTP2DataBig(event SocketDataEventBig) {
 		conn.reqTimestamps = append(conn.reqTimestamps, ConvertUnixNanoToTime(event.EntryTimestampNano))
 	}
 }
+
 // Add HTTP/2 specific handling
 func (conn *Tracker) handleHTTP2DataSmall(event SocketDataEventSmall) {
 	// Convert fixed-size array to slice
@@ -621,16 +602,10 @@ func (conn *Tracker) handleHTTP2DataSmall(event SocketDataEventSmall) {
 		conn.reqTimestamps = append(conn.reqTimestamps, ConvertUnixNanoToTime(event.EntryTimestampNano))
 	}
 }
+
 // Existing HTTP/1 handling
 func (conn *Tracker) handleHTTP1DataBig(event SocketDataEventBig) {
 	conn.logger.Debug(fmt.Sprintf("Got a data event from eBPF, Direction:%v || current Event Size:%v || ConnectionID:%v\n", event.Direction, event.MsgSize, event.ConnID))
-	// fmt.Println("here is the event")
-	// spew.Dump(event)
-	// fmt.Println("here is the msg length :", event.MsgSize)
-	// if event.MsgSize == 0 {
-	// 	conn.logger.Debug("Received empty message, skipping")
-	// 	return
-	// }
 	switch event.Direction {
 	case EgressTraffic:
 		// Capturing the timestamp of response as the response just started to come.
@@ -641,27 +616,16 @@ func (conn *Tracker) handleHTTP1DataBig(event SocketDataEventBig) {
 
 		// Assign the size of the message to the variable msgLength
 		msgLength := event.MsgSize
-		// If the size of the message exceeds the maximum allowed size,
-		// set msgLength to the maximum allowed size instead
-		// if event.MsgSize > EventBodyMaxSize {
-		// 	msgLength = EventBodyMaxSize
-		// }
-
 		start := 3
 		for ; start < len(event.Msg)-1; start++ {
 			if event.Msg[start] != 0 {
 				break
 			}
 		}
-		fmt.Println("Start index:", start)
-		// fmt.Println("Length of data:", event.Msg[start])
 		data := event.Msg[start:]
 		data = data[:msgLength]
 		// Append the message (up to msgLength) to the conn's sent buffer
-		// fmt.Println("here is the connreps :")
 		conn.resp = append(conn.resp, data...)
-		// spew.Dump(conn.resp)
-		// spew.Dump(event.Msg)
 		conn.respSize += uint64(event.MsgSize)
 
 		//Handling multiple request on same conn to support conn:keep-alive
@@ -673,7 +637,6 @@ func (conn *Tracker) handleHTTP1DataBig(event SocketDataEventBig) {
 
 			conn.lastChunkWasReq = false
 			conn.lastChunkWasResp = true
-			fmt.Println("here is the validate read bytes :", event.ValidateReadBytes)
 			conn.kernelReqSizes = append(conn.kernelReqSizes, uint64(conn.reqSize))
 			conn.reqSize = 0
 			conn.firstRequest = false
@@ -689,11 +652,6 @@ func (conn *Tracker) handleHTTP1DataBig(event SocketDataEventBig) {
 
 		// Assign the size of the message to the variable msgLength
 		msgLength := event.MsgSize
-		// If the size of the message exceeds the maximum allowed size,
-		// set msgLength to the maximum allowed size instead
-		// if event.MsgSize > EventBodyMaxSize {
-		// 	msgLength = EventBodyMaxSize
-		// }
 
 		start := 3
 		for ; start < len(event.Msg)-1; start++ {
@@ -701,14 +659,10 @@ func (conn *Tracker) handleHTTP1DataBig(event SocketDataEventBig) {
 				break
 			}
 		}
-		// fmt.Println("Start index:", start)
-		// spew.Dump(event.Msg)
-		// fmt.Println("Length of data:", event.Msg[start])
 		data := event.Msg[start:]
 		data = data[:msgLength]
 		// Append the message (up to msgLength) to the conn's receive buffer
 		conn.req = append(conn.req, data...)
-		// spew.Dump(conn.req)
 		conn.reqSize += uint64(event.MsgSize)
 
 		//Handling multiple request on same conn to support conn:keep-alive
@@ -733,16 +687,10 @@ func (conn *Tracker) handleHTTP1DataBig(event SocketDataEventBig) {
 	default:
 	}
 }
+
 // Existing HTTP/1 handling
 func (conn *Tracker) handleHTTP1DataSmall(event SocketDataEventSmall) {
 	conn.logger.Debug(fmt.Sprintf("Got a data event from eBPF, Direction:%v || current Event Size:%v || ConnectionID:%v\n", event.Direction, event.MsgSize, event.ConnID))
-	// fmt.Println("here is the event")
-	// spew.Dump(event)
-	// fmt.Println("here is the msg length :", event.MsgSize)
-	// if event.MsgSize == 0 {
-	// 	conn.logger.Debug("Received empty message, skipping")
-	// 	return
-	// }
 	switch event.Direction {
 	case EgressTraffic:
 		// Capturing the timestamp of response as the response just started to come.
@@ -765,15 +713,10 @@ func (conn *Tracker) handleHTTP1DataSmall(event SocketDataEventSmall) {
 				break
 			}
 		}
-		fmt.Println("Start index:", start)
-		// fmt.Println("Length of data:", event.Msg[start])
 		data := event.Msg[start:]
 		data = data[:msgLength]
 		// Append the message (up to msgLength) to the conn's sent buffer
-		// fmt.Println("here is the connreps :")
 		conn.resp = append(conn.resp, data...)
-		// spew.Dump(conn.resp)
-		// spew.Dump(event.Msg)
 		conn.respSize += uint64(event.MsgSize)
 
 		//Handling multiple request on same conn to support conn:keep-alive
@@ -785,7 +728,6 @@ func (conn *Tracker) handleHTTP1DataSmall(event SocketDataEventSmall) {
 
 			conn.lastChunkWasReq = false
 			conn.lastChunkWasResp = true
-			fmt.Println("here is the validate read bytes :", event.ValidateReadBytes)
 			conn.kernelReqSizes = append(conn.kernelReqSizes, uint64(conn.reqSize))
 			conn.reqSize = 0
 			conn.firstRequest = false
@@ -813,14 +755,11 @@ func (conn *Tracker) handleHTTP1DataSmall(event SocketDataEventSmall) {
 				break
 			}
 		}
-		// fmt.Println("Start index:", start)
-		// spew.Dump(event.Msg)
-		// fmt.Println("Length of data:", event.Msg[start])
+		
 		data := event.Msg[start:]
 		data = data[:msgLength]
 		// Append the message (up to msgLength) to the conn's receive buffer
 		conn.req = append(conn.req, data...)
-		// spew.Dump(conn.req)
 		conn.reqSize += uint64(event.MsgSize)
 
 		//Handling multiple request on same conn to support conn:keep-alive
@@ -828,7 +767,7 @@ func (conn *Tracker) handleHTTP1DataSmall(event SocketDataEventSmall) {
 			// conn.userRespSizes is the total numner of bytes received in the user side
 			// consumer for the last response.
 			conn.userRespSizes = append(conn.userRespSizes, conn.respSize)
-			conn.respSize = 0
+			
 
 			conn.userResps = append(conn.userResps, conn.resp)
 			conn.resp = []byte{}
@@ -836,8 +775,8 @@ func (conn *Tracker) handleHTTP1DataSmall(event SocketDataEventSmall) {
 			conn.lastChunkWasReq = true
 			conn.lastChunkWasResp = false
 
-			conn.kernelRespSizes = append(conn.kernelRespSizes, uint64(event.ValidateWrittenBytes))
-
+			conn.kernelRespSizes = append(conn.kernelRespSizes, uint64(conn.respSize))
+			conn.respSize = 0
 			//Record a test case for the current request/
 			conn.incRecordTestCount()
 		}
