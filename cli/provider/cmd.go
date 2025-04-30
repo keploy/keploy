@@ -433,18 +433,18 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 		utils.LogError(c.logger, nil, "failed to read the config path")
 		return err
 	}
-	viper.SetConfigName("keploy")
-	viper.SetConfigType("yml")
+	path := filepath.Join(configPath, "keploy.yml")
+	viper.SetConfigFile(path)
 	viper.AddConfigPath(configPath)
 	if err := viper.ReadInConfig(); err != nil {
-		var configFileNotFoundError viper.ConfigFileNotFoundError
-		if !errors.As(err, &configFileNotFoundError) {
+		if os.IsNotExist(err) {
+			IsConfigFileFound = false
+			c.logger.Info("config file not found; proceeding with flags only")
+		} else {
 			errMsg := "failed to read config file"
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		IsConfigFileFound = false
-		c.logger.Info("config file not found; proceeding with flags only")
 	}
 
 	if err := viper.Unmarshal(c.cfg); err != nil {
