@@ -161,7 +161,7 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, ms *ebpf.Map, mb *ebpf
 				bin := record.RawSample
 
 				if utils.BigReq {
-					l.Debug(fmt.Sprintf("Using Bigger Request Map"))
+					l.Debug("Using Bigger Request Map")
 					var event SocketDataEventBig
 
 					if err := binary.Read(bytes.NewReader(bin), binary.LittleEndian, &event); err != nil {
@@ -176,7 +176,7 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, ms *ebpf.Map, mb *ebpf
 					}
 					c.GetOrCreate(event.ConnID).AddDataEventBig(event)
 				} else {
-					l.Debug(fmt.Sprintf("Using Smaller Request Map"))
+					l.Debug("Using Smaller Request Map")
 					var event SocketDataEventSmall
 
 					if err := binary.Read(bytes.NewReader(bin), binary.LittleEndian, &event); err != nil {
