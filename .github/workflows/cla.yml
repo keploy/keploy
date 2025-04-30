@@ -18,7 +18,7 @@ jobs:
 
       - name: "CLA Assistant"
         if: "(github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'"
-        uses: "cla-assistant/github-action@v2.1.3-beta"
+        uses: contributor-assistant/github-action@v2.6.1
         env:
           GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
           PERSONAL_ACCESS_TOKEN: "${{ secrets.PRO_ACCESS_TOKEN }}"
@@ -28,7 +28,7 @@ jobs:
           path-to-signatures: "etc/cla-signatures/signatures.json"
           path-to-document: "https://github.com/keploy/keploy/tree/main/.github/CLA.md"
           branch: "cla-signatures"
-          allowlist: "keploy-bot,renovate"
+          allowlist: "keploy-bot,renovate,keploy,keploy-staging,bot*"
 
       - name: "Post Failure Instructions"
         if: failure() && github.event_name == 'pull_request_target'

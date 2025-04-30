@@ -115,6 +115,7 @@ require (
 	github.com/sbabiv/xml2map v1.2.1
 	github.com/shirou/gopsutil/v3 v3.24.3
 	github.com/spf13/viper v1.19.0
+	github.com/stretchr/testify v1.9.0
 	github.com/wI2L/jsondiff v0.5.0
 	github.com/xdg-go/pbkdf2 v1.0.0
 	github.com/xdg-go/scram v1.1.1
@@ -125,7 +126,10 @@ require (
 	sigs.k8s.io/kustomize/kyaml v0.17.2
 )
 
-require github.com/perimeterx/marshmallow v1.1.5 // indirect
+require (
+	github.com/perimeterx/marshmallow v1.1.5 // indirect
+	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
+)
 
 require (
 	github.com/alecthomas/chroma v0.10.0 // indirect
