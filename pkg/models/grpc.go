@@ -37,7 +37,7 @@ type GrpcResp struct {
 	Timestamp time.Time                 `json:"timestamp" yaml:"timestamp"`
 }
 
-// GrpcStream is a helper function to combine the request-response model in a single struct.type GrpcStream struct {
+// GrpcStream is a helper function to combine the request-response model in a single struct
 type GrpcStream struct {
 	StreamID uint32
 	GrpcReq  GrpcReq
