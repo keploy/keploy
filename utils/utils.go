@@ -42,6 +42,8 @@ var TemplatizedValues = map[string]interface{}{}
 
 var ErrCode = 0
 
+var BigReq = false
+
 func ReplaceHost(currentURL string, ipAddress string) (string, error) {
 	// Parse the current URL
 	parsedURL, err := url.Parse(currentURL)
