@@ -755,7 +755,7 @@ func (conn *Tracker) handleHTTP1DataSmall(event SocketDataEventSmall) {
 				break
 			}
 		}
-		
+
 		data := event.Msg[start:]
 		data = data[:msgLength]
 		// Append the message (up to msgLength) to the conn's receive buffer
@@ -767,7 +767,6 @@ func (conn *Tracker) handleHTTP1DataSmall(event SocketDataEventSmall) {
 			// conn.userRespSizes is the total numner of bytes received in the user side
 			// consumer for the last response.
 			conn.userRespSizes = append(conn.userRespSizes, conn.respSize)
-			
 
 			conn.userResps = append(conn.userResps, conn.resp)
 			conn.resp = []byte{}

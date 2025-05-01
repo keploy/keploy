@@ -98,7 +98,7 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 						respBodyBytes, _ := io.ReadAll(parsedHTTPRes.Body)
 						parsedHTTPRes.Body = io.NopCloser(bytes.NewReader(respBodyBytes))
 					}
-					
+
 					basePath := factory.incomingOpts.BasePath
 					parsedBaseURL, err := url.Parse(basePath)
 					if err != nil {

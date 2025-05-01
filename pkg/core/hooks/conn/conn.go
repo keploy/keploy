@@ -3,7 +3,7 @@ package conn
 
 // constant for the maximum size of the event body
 const (
-	EventBodyMaxSize    = 16384   // 16 KB
+	EventBodyMaxSize    = 16384    // 16 KB
 	EventBodyMaxSizeBig = 10485760 // 5 MB
 )
 

@@ -23,7 +23,6 @@ import (
 	"go.uber.org/zap"
 )
 
-
 // ListenSocket starts the socket event listeners
 func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMapSmall, dataMapBig, closeMap *ebpf.Map, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	t := make(chan *models.TestCase, 500)
