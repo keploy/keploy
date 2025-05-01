@@ -112,7 +112,7 @@ type Filter struct {
 type Test struct {
 	SelectedTests       map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
 	GlobalNoise         Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
-	Delay               uint64              `json:"delay" yaml:"delay" mapstructure:"delay"`
+	Delay               time.Duration       `json:"delay" yaml:"delay" mapstructure:"delay"`
 	Host                string              `json:"host" yaml:"host" mapstructure:"host"`
 	Port                uint32              `json:"port" yaml:"port" mapstructure:"port"`
 	APITimeout          uint64              `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`

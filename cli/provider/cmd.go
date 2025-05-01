@@ -283,7 +283,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().String("host", c.cfg.Test.Host, "Custom host to replace the actual host in the testcases")
 		cmd.Flags().Uint32("port", c.cfg.Test.Port, "Custom port to replace the actual port in the testcases")
 		if cmd.Name() == "test" {
-			cmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
+			cmd.Flags().DurationP("delay", "d", 5*time.Second, "User provided time to run its application")
 			cmd.Flags().Uint64("api-timeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
 			cmd.Flags().String("mongo-password", c.cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")
 			cmd.Flags().String("coverage-report-path", c.cfg.Test.CoverageReportPath, "Write a go coverage profile to the file in the given directory.")
