@@ -45,23 +45,49 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 
 		// find noisy fields only for HTTP responses
 		m, err := FlattenHTTPResponse(pkg.ToHTTPHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)
-		if err != nil {
+		respHeaders, headerErr := flattenHTTPResponseHeaders(pkg.ToHTTPHeader(tc.HTTPResp.Header))
+		if err != nil || headerErr != nil {
 			msg := "error in flattening http response"
 			utils.LogError(logger, err, msg)
 		}
-		noise = tc.Noise
+		noise := tc.Noise
 
 		if tc.Name == "" {
-			noiseFieldsFound := FindNoisyFields(m, func(_ string, vals []string) bool {
-				// check if k is date
+			// noise detection for Time, UUID, JWT
+			noiseFieldsFound := FindNoisyFields(m, func(k string, vals []string) bool {
+				// check for time, UUID, or JWT in values
 				for _, v := range vals {
-					if pkg.IsTime(v) {
+					if pkg.IsTime(v) || pkg.IsUUID(v) || pkg.IsJWT(v) {
 						return true
 					}
 				}
 				// maybe we need to concatenate the values
 				return pkg.IsTime(strings.Join(vals, ", "))
 			})
+
+			// Add dynamic header detection
+			dynamicHeaders := map[string]bool{
+				"header.etag":         true,
+				"header.x-request-id": true,
+				"header.x-csrf-token": true,
+			}
+
+			noiseFieldsFound = append(noiseFieldsFound, FindNoisyFields(respHeaders, func(k string, vals []string) bool {
+				lowerK := strings.ToLower(k)
+				if _, found := dynamicHeaders[lowerK]; found {
+					return true
+				}
+				// handle if the set-cookie has expires field
+				if lowerK == "header.set-cookie" {
+					for _, cookie := range vals {
+						lowerCookie := strings.ToLower(cookie)
+						if strings.Contains(lowerCookie, "expires") {
+							return true
+						}
+					}
+				}
+				return false
+			})...)
 
 			for _, v := range noiseFieldsFound {
 				noise[v] = []string{}
@@ -206,6 +232,14 @@ func FlattenHTTPResponse(h http.Header, body string) (map[string][]string, error
 	err := AddHTTPBodyToMap(body, m)
 	if err != nil {
 		return m, err
+	}
+	return m, nil
+}
+
+func flattenHTTPResponseHeaders(h http.Header) (map[string][]string, error) {
+	m := map[string][]string{}
+	for k, v := range h {
+		m["header."+k] = []string{strings.Join(v, "")}
 	}
 	return m, nil
 }
