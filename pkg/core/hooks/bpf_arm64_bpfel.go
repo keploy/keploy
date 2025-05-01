@@ -110,7 +110,6 @@ type bpfMapSpecs struct {
 	SocketCloseEvents           *ebpf.MapSpec `ebpf:"socket_close_events"`
 	SocketDataEventBufferHeap   *ebpf.MapSpec `ebpf:"socket_data_event_buffer_heap"`
 	SocketDataEvents            *ebpf.MapSpec `ebpf:"socket_data_events"`
-	SocketDataEventsSmall       *ebpf.MapSpec `ebpf:"socket_data_events_small"`
 	SocketOpenEvents            *ebpf.MapSpec `ebpf:"socket_open_events"`
 	TaskStructMap               *ebpf.MapSpec `ebpf:"task_struct_map"`
 }
@@ -155,7 +154,6 @@ type bpfMaps struct {
 	SocketCloseEvents           *ebpf.Map `ebpf:"socket_close_events"`
 	SocketDataEventBufferHeap   *ebpf.Map `ebpf:"socket_data_event_buffer_heap"`
 	SocketDataEvents            *ebpf.Map `ebpf:"socket_data_events"`
-	SocketDataEventsSmall       *ebpf.Map `ebpf:"socket_data_events_small"`
 	SocketOpenEvents            *ebpf.Map `ebpf:"socket_open_events"`
 	TaskStructMap               *ebpf.Map `ebpf:"task_struct_map"`
 }
@@ -183,7 +181,6 @@ func (m *bpfMaps) Close() error {
 		m.SocketCloseEvents,
 		m.SocketDataEventBufferHeap,
 		m.SocketDataEvents,
-		m.SocketDataEventsSmall,
 		m.SocketOpenEvents,
 		m.TaskStructMap,
 	)

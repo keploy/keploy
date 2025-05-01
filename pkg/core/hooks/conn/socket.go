@@ -24,7 +24,7 @@ import (
 )
 
 // ListenSocket starts the socket event listeners
-func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMapSmall, dataMapBig, closeMap *ebpf.Map, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
+func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap *ebpf.Map, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	t := make(chan *models.TestCase, 500)
 	err := initRealTimeOffset()
 	if err != nil {
@@ -61,7 +61,7 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMapSmall, dat
 		utils.LogError(l, err, "failed to start open socket listener")
 		return nil, errors.New("failed to start socket listeners")
 	}
-	err = data(ctx, c, l, dataMapSmall, dataMapBig)
+	err = data(ctx, c, l, dataMap)
 	if err != nil {
 		utils.LogError(l, err, "failed to start data socket listener")
 		return nil, errors.New("failed to start socket listeners")
@@ -126,15 +126,8 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 	return nil
 }
 
-func data(ctx context.Context, c *Factory, l *zap.Logger, ms *ebpf.Map, mb *ebpf.Map) error {
-	r, err := ringbuf.NewReader(mb)
-	if err != nil {
-		utils.LogError(l, nil, "failed to create ring buffer of socketDataEvent")
-		return err
-	}
-	if !utils.BigReq {
-		r, err = ringbuf.NewReader(ms)
-	}
+func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
+	r, err := ringbuf.NewReader(m)
 	if err != nil {
 		utils.LogError(l, nil, "failed to create ring buffer of socketDataEvent")
 		return err

@@ -541,7 +541,7 @@ func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOption
 	// TODO use the session to get the app id
 	// and then use the app id to get the test cases chan
 	// and pass that to eBPF consumers/listeners
-	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEventsSmall, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
+	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
 
 }
 
