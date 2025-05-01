@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
@@ -34,12 +35,15 @@ func NewTranscoder(logger *zap.Logger, framer *http2.Framer, mockDb integrations
 	}
 }
 
+// TODO: (add reason for not using the default value i.e. 16384 // 16KB)
+const MAX_FRAME_SIZE = 8192 // 8KB
+
 func (srv *Transcoder) WriteInitialSettingsFrame() error {
 	var settings []http2.Setting
 	// TODO : Get Settings from config file.
 	settings = append(settings, http2.Setting{
 		ID:  http2.SettingMaxFrameSize,
-		Val: 16384,
+		Val: MAX_FRAME_SIZE,
 	})
 	return srv.framer.WriteSettings(settings...)
 }
@@ -122,7 +126,7 @@ func (srv *Transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 	}
 
 	// The headers are prepared. Write the frame.
-	srv.logger.Info("Writing the first set of headers in a new HEADER frame.")
+	srv.logger.Debug("Writing the first set of headers in a new HEADER frame.")
 	err = srv.framer.WriteHeaders(http2.HeadersFrameParam{
 		StreamID:      id,
 		BlockFragment: buf.Bytes(),
@@ -140,17 +144,18 @@ func (srv *Transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 		return err
 	}
 
+	srv.logger.Debug("Writing the payload in a DATA frame", zap.Int("payload length", len(payload)))
 	// Write the DATA frame with the payload.
-	err = srv.framer.WriteData(id, false, payload)
+	err = srv.WriteData(ctx, id, payload)
 	if err != nil {
 		utils.LogError(srv.logger, err, "could not write the data frame onto the client")
 		return err
 	}
-
 	// Reset the buffer and start with a new encoding.
 	buf = new(bytes.Buffer)
 	encoder = hpack.NewEncoder(buf)
 
+	srv.logger.Debug("preparing the trailers in a different HEADER frame")
 	//Prepare the trailers.
 	//The pseudo headers should be written before ordinary ones.
 	for key, value := range grpcMockResp.Trailers.PseudoHeaders {
@@ -175,7 +180,7 @@ func (srv *Transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 	}
 
 	// The trailer is prepared. Write the frame.
-	srv.logger.Info("Writing the trailers in a different HEADER frame")
+	srv.logger.Debug("Writing the trailers in a different HEADER frame")
 	err = srv.framer.WriteHeaders(http2.HeadersFrameParam{
 		StreamID:      id,
 		BlockFragment: buf.Bytes(),
@@ -190,9 +195,61 @@ func (srv *Transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 	return nil
 }
 
+func (srv *Transcoder) WriteData(ctx context.Context, streamID uint32, payload []byte) error {
+	totalLen := len(payload)
+
+	// Fast path: if payload fits in one frame
+	if totalLen <= MAX_FRAME_SIZE {
+		select {
+		case <-ctx.Done():
+			srv.logger.Warn("context cancelled before writing single frame")
+			return ctx.Err()
+		default:
+			err := srv.framer.WriteData(streamID, false, payload)
+			if err != nil {
+				utils.LogError(srv.logger, err, "could not write data frame")
+				return err
+			}
+			return nil
+		}
+	}
+
+	// Chunked path
+	offset := 0
+	for offset < totalLen {
+		// Check for context cancellation before each write
+		select {
+		case <-ctx.Done():
+			srv.logger.Warn("context cancelled during chunked frame write")
+			return ctx.Err()
+		default:
+		}
+
+		remaining := totalLen - offset
+		chunkSize := min(remaining, MAX_FRAME_SIZE)
+
+		end := offset + chunkSize
+		data := payload[offset:end]
+
+		srv.logger.Debug("Writing chunked data frame", zap.Int("chunk size", chunkSize), zap.Int("offset", offset), zap.Int("end", end))
+		err := srv.framer.WriteData(streamID, false, data)
+		if err != nil {
+			utils.LogError(srv.logger, err, "could not write chunked data frame")
+			return err
+		}
+
+		offset = end
+		if offset == totalLen {
+			srv.logger.Debug("the offset is equal to the total length of the payload", zap.Int("offset", offset))
+		}
+	}
+
+	return nil
+}
+
 func (srv *Transcoder) ProcessWindowUpdateFrame(_ *http2.WindowUpdateFrame) error {
 	// Silently ignore Window tools frames, as we already know the mock payloads that we would send.
-	srv.logger.Info("Received Window Update Frame. Skipping it...")
+	srv.logger.Debug("Received Window Update Frame. Skipping it...")
 	return nil
 }
 
@@ -221,7 +278,7 @@ func (srv *Transcoder) ProcessGoAwayFrame(_ *http2.GoAwayFrame) error {
 func (srv *Transcoder) ProcessPriorityFrame(_ *http2.PriorityFrame) error {
 	// We do not support reordering of frames based on priority, because we flush after each response.
 	// Silently skip it.
-	srv.logger.Info("Received PRIORITY frame, Skipping it...")
+	srv.logger.Debug("Received PRIORITY frame, Skipping it...")
 	return nil
 }
 
@@ -303,6 +360,10 @@ func (srv *Transcoder) ListenAndServe(ctx context.Context) error {
 		default:
 			frame, err := srv.framer.ReadFrame()
 			if err != nil {
+				if err == io.EOF {
+					srv.logger.Debug("EOF reached. Closing the connection.")
+					return io.EOF
+				}
 				utils.LogError(srv.logger, err, "Failed to read frame")
 				return err
 			}
