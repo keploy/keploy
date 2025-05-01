@@ -4,6 +4,7 @@ package grpc
 
 import (
 	"context"
+	"encoding/binary"
 	"sync"
 	"time"
 
@@ -82,10 +83,20 @@ func (sic *StreamInfoCollection) AddPayloadForRequest(streamID uint32, payload [
 	sic.mutex.Lock()
 	defer sic.mutex.Unlock()
 
-	// We cannot modify non pointer values in nested entries in map.
-	// Create a copy and overwrite it.
 	info := sic.StreamInfo[streamID]
-	info.GrpcReq.Body = pkg.CreateLengthPrefixedMessageFromPayload(payload)
+
+	info.ReqRawData = append(info.ReqRawData, payload...)
+
+	if !info.ReqPrefixParsed && len(info.ReqRawData) >= 5 {
+		info.ReqExpectedLength = binary.BigEndian.Uint32(info.ReqRawData[1:5])
+		info.ReqPrefixParsed = true
+	}
+
+	totalLen := 5 + int(info.ReqExpectedLength)
+	if info.ReqPrefixParsed && len(info.ReqRawData) >= totalLen {
+		info.GrpcReq.Body = pkg.CreateLengthPrefixedMessageFromPayload(info.ReqRawData[:totalLen])
+	}
+
 	sic.StreamInfo[streamID] = info
 }
 
@@ -96,13 +107,22 @@ func (sic *StreamInfoCollection) AddPayloadForResponse(streamID uint32, payload 
 	sic.mutex.Lock()
 	defer sic.mutex.Unlock()
 
-	// We cannot modify non pointer values in nested entries in map.
-	// Create a copy and overwrite it.
 	info := sic.StreamInfo[streamID]
-	info.GrpcResp.Body = pkg.CreateLengthPrefixedMessageFromPayload(payload)
+
+	info.RespRawData = append(info.RespRawData, payload...)
+
+	if !info.RespPrefixParsed && len(info.RespRawData) >= 5 {
+		info.RespExpectedLength = binary.BigEndian.Uint32(info.RespRawData[1:5])
+		info.RespPrefixParsed = true
+	}
+
+	totalLen := 5 + int(info.RespExpectedLength)
+	if info.RespPrefixParsed && len(info.RespRawData) >= totalLen {
+		info.GrpcResp.Body = pkg.CreateLengthPrefixedMessageFromPayload(info.RespRawData[:totalLen])
+	}
+
 	sic.StreamInfo[streamID] = info
 }
-
 func (sic *StreamInfoCollection) PersistMockForStream(ctx context.Context, streamID uint32, mocks chan<- *models.Mock) {
 	sic.mutex.Lock()
 	defer sic.mutex.Unlock()
