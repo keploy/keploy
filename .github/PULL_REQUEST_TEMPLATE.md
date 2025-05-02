@@ -39,7 +39,7 @@
 - [ ] 📓 Wiki
 - [ ] 🙅 no documentation needed
 
-## Are there any sample code to test the changes?
+## Are there any sample code or steps to test the changes?
 - [ ] 👍 yes, mentioned below
 - [ ] 🙅 no, because it is not needed
 

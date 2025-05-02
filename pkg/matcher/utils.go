@@ -995,19 +995,16 @@ func JsonContains(actualJSON string, expectedJSON map[string]interface{}) (bool,
 
 // containsRecursive recursively checks if the expected data is in the actual data.
 func containsRecursive(actual interface{}, expected map[string]interface{}) bool {
+	actualMap, ok := actual.(map[string]interface{})
+	if !ok {
+		return false
+	}
 	for key, expectedValue := range expected {
-		// Check if the key exists in the actual data
-		actualMap, ok := actual.(map[string]interface{})
-		if !ok {
-			return false
-		}
-
 		actualValue, exists := actualMap[key]
 		if !exists {
 			return false
 		}
 
-		// If expected value is a map, recursively check for nested maps
 		switch v := expectedValue.(type) {
 		case map[string]interface{}:
 			if actualMapVal, ok := actualValue.(map[string]interface{}); ok {
@@ -1018,8 +1015,7 @@ func containsRecursive(actual interface{}, expected map[string]interface{}) bool
 				return false
 			}
 		default:
-			// Otherwise, directly compare values
-			if actualValue != v {
+			if !reflect.DeepEqual(actualValue, expectedValue) {
 				return false
 			}
 		}
