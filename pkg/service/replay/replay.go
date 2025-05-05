@@ -60,7 +60,7 @@ type Replayer struct {
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
 	// set the request emulator for simulating test case requests, if not set
 	if HookImpl == nil {
-		SetTestHooks(NewHooks(logger, config, testSetConf, storage, auth))
+		SetTestHooks(NewHooks(logger, config, testSetConf, storage, auth, instrumentation))
 	}
 	instrument := config.Command != ""
 	return &Replayer{
@@ -688,7 +688,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		var consumedMocks []models.MockState
 		if r.instrument {
-			consumedMocks, err = r.instrumentation.GetConsumedMocks(runTestSetCtx, appID)
+			consumedMocks, err = HookImpl.GetConsumedMocks(runTestSetCtx, appID)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 			}
