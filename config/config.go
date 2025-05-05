@@ -131,6 +131,7 @@ type Test struct {
 	DisableMockUpload   bool                `json:"disableMockUpload" yaml:"disableMockUpload" mapstructure:"disableMockUpload"`
 	UseLocalMock        bool                `json:"useLocalMock" yaml:"useLocalMock" mapstructure:"useLocalMock"`
 	UpdateTemplate      bool                `json:"updateTemplate" yaml:"updateTemplate" mapstructure:"updateTemplate"`
+	MustPass            bool                `json:"mustPass" yaml:"mustPass" mapstructure:"mustPass"`
 }
 
 type Language string

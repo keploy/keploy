@@ -59,8 +59,9 @@ type ReportDB interface {
 	GetAllTestRunIDs(ctx context.Context) ([]string, error)
 	GetTestCaseResults(ctx context.Context, testRunID string, testSetID string) ([]models.TestResult, error)
 	GetReport(ctx context.Context, testRunID string, testSetID string) (*models.TestReport, error)
-	InsertTestCaseResult(ctx context.Context, testRunID string, testSetID string, result *models.TestResult) error
-	InsertReport(ctx context.Context, testRunID string, testSetID string, testReport *models.TestReport) error
+	ClearTestCaseResults(_ context.Context, testRunID string, testSetID string)
+	InsertTestCaseResult(ctx context.Context, testRunID string, testSetID string, result *models.TestResult) error // 1
+	InsertReport(ctx context.Context, testRunID string, testSetID string, testReport *models.TestReport) error // 2
 	UpdateReport(ctx context.Context, testRunID string, testCoverage any) error
 }
 
@@ -83,7 +84,7 @@ type TestHooks interface {
 }
 
 type Storage interface {
-	Upload(ctx context.Context, file io.Reader, mockName string, appName string, jwtToken string) error
+	Upload(ctx context.Context, file io.Reader, mockName string, appName string, jwtToken string) error // 3
 	Download(ctx context.Context, mockName string, appName string, userName string, jwtToken string) (io.Reader, error)
 }
 

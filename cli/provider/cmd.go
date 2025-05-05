@@ -299,6 +299,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 			cmd.Flags().Bool("disableMockUpload", c.cfg.Test.DisableMockUpload, "Store/Fetch mocks locally")
 			cmd.Flags().Bool("useLocalMock", false, "Use local mocks instead of fetching from the cloud")
 			cmd.Flags().Bool("disable-line-coverage", c.cfg.Test.DisableLineCoverage, "Disable line coverage generation.")
+			cmd.Flags().Bool("must-pass", c.cfg.Test.MustPass, "enforces that the tests must pass, if it doesn't remove failing testcases")
 		}
 	}
 }
@@ -715,6 +716,20 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 				c.cfg.ReRecord.Port = port
 				return nil
+			}
+
+			// enforce that the test-sets are provided when --must-pass is set to true
+			// to prevent accidentel deletion of failed testcases in testsets which was due to application changes
+			// and not due to flakiness or our internal issue.
+			mustPass, err := cmd.Flags().GetBool("must-pass")
+			if err != nil {
+				errMsg := "failed to get the must-pass flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+
+			if mustPass && !cmd.Flags().Changed("test-sets") {
+				return fmt.Errorf("--test-sets flag must be set to use --must-pass=true")
 			}
 
 			// skip coverage by default if command is of type docker

@@ -188,6 +188,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	var testSetResult bool
 	testRunResult := true
 	abortTestRun := false
+	var flakyTestSets []string
 	var testSets []string
 	for _, testSetID := range testSetIDs {
 		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
@@ -227,40 +228,111 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.isLastTestSet = true
 		}
 
-		testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.AppID, false)
-		if err != nil {
-			stopReason = fmt.Sprintf("failed to run test set: %v", err)
-			utils.LogError(r.logger, err, stopReason)
-			if ctx.Err() == context.Canceled {
-				return err
+		runsLeft := 5
+		if r.config.Test.MustPass {
+			r.config.Test.SkipCoverage = true
+		}
+		maxFailureAttempts := 5
+		var initialFailedTCs map[string]bool
+		flaky := false // only be changed during replay with --must-pass flag set
+		for attempt := 1; attempt <= runsLeft; attempt++ {
+			r.reportDB.ClearTestCaseResults(ctx, testRunID, testSet)
+			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
+			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.AppID, false)
+			if err != nil {
+				stopReason = fmt.Sprintf("failed to run test set: %v", err)
+				utils.LogError(r.logger, err, stopReason)
+				if ctx.Err() == context.Canceled {
+					return err
+				}
+				return fmt.Errorf("%s", stopReason)
 			}
-			return fmt.Errorf("%s", stopReason)
-		}
-		switch testSetStatus {
-		case models.TestSetStatusAppHalted:
-			testSetResult = false
-			abortTestRun = true
-		case models.TestSetStatusInternalErr:
-			testSetResult = false
-			abortTestRun = true
-		case models.TestSetStatusFaultUserApp:
-			testSetResult = false
-			abortTestRun = true
-		case models.TestSetStatusUserAbort:
-			return nil
-		case models.TestSetStatusFailed:
-			testSetResult = false
-		case models.TestSetStatusPassed:
-			testSetResult = true
-		case models.TestSetStatusIgnored:
-			testSetResult = false
-		}
+			switch testSetStatus {
+			case models.TestSetStatusAppHalted:
+				testSetResult = false
+				abortTestRun = true
+			case models.TestSetStatusInternalErr:
+				testSetResult = false
+				abortTestRun = true
+			case models.TestSetStatusFaultUserApp:
+				testSetResult = false
+				abortTestRun = true
+			case models.TestSetStatusUserAbort:
+				return nil
+			case models.TestSetStatusFailed:
+				testSetResult = false
+			case models.TestSetStatusPassed:
+				testSetResult = true
+			case models.TestSetStatusIgnored:
+				testSetResult = false
+			}
 
-		if testSetStatus != models.TestSetStatusIgnored {
-			testRunResult = testRunResult && testSetResult
-			if abortTestRun {
+			if testSetStatus != models.TestSetStatusIgnored {
+				testRunResult = testRunResult && testSetResult
+				if abortTestRun {
+					break
+				}
+			}
+
+			tcResults, _ := r.reportDB.GetTestCaseResults(ctx, testRunID, testSet)
+			failedTcIDs := getFailedTCs(tcResults)
+
+			// checking for flakiness when --must-pass flag is not set
+			// else delete the failed testcases and reattempt 3 times
+			if !r.config.Test.MustPass {
+				// populate the map only once at first iteration for flakiness test
+				if attempt == 1 {
+					initialFailedTCs = make(map[string]bool)
+					for _, id := range failedTcIDs {
+						initialFailedTCs[id] = true
+					}
+					continue
+				}
+				// checking if there is no mismatch in failed testcases across max retries
+				// check both length and value
+				if len(failedTcIDs) != len(initialFailedTCs) {
+					utils.LogError(r.logger, nil, "the testset is flaky, rerun the testset with --must-pass flag to remove flaky testcases")
+					// don't run more attempts if the testset is flaky
+					flakyTestSets = append(flakyTestSets, testSet)
+					break
+				}
+				for _, id := range failedTcIDs {
+					if _, ok := initialFailedTCs[id]; !ok {
+						flaky = true
+						utils.LogError(r.logger, nil, "the testset is flaky, rerun the testset with --must-pass flag to remove flaky testcases")
+						break
+					}
+				}
+				if flaky {
+					// don't run more attempts if the testset is flaky
+					flakyTestSets = append(flakyTestSets, testSet)
+					break
+				}
+				continue
+			}
+
+			// this would be executed only when --must-pass flag is set
+			// we would be removing failed testcases
+			// TODO: do not upload report, pass the mustpass boolean down the line
+			if maxFailureAttempts == 0 {
+				utils.LogError(r.logger, nil, "no. of testset failure occured during rerun reached maximum limit, testset still failing, increase count of maxFailureAttempts", zap.String("testSet", testSet))
 				break
 			}
+			r.logger.Info("deleting failing testcases", zap.String("testSet", testSet), zap.Any("testCaseIDs", failedTcIDs))
+
+			if err := r.testDB.DeleteTests(ctx, testSet, failedTcIDs); err != nil {
+				utils.LogError(r.logger, err, "failed to delete failing testcases", zap.String("testSet", testSet), zap.Any("testCaseIDs", failedTcIDs))
+			}
+			if err == nil {
+				// after deleting rerun it 3 times to be sure that no further testcase fails
+				// and if it does then delete those failing testcases and rerun it again 3 times
+				maxFailureAttempts--
+				attempt = 1
+			}
+		}
+
+		if abortTestRun {
+			break
 		}
 
 		err = HookImpl.AfterTestSetRun(ctx, testSet, testSetResult)
@@ -286,6 +358,10 @@ func (r *Replayer) Start(ctx context.Context) error {
 		if err != nil {
 			r.config.Test.SkipCoverage = true
 		}
+	}
+
+	if len(flakyTestSets) > 0 {
+		r.logger.Warn("flaky testsets detected, please rerun the specific testsets with --must-pass flag to remove flaky testcases", zap.Any("testSets", flakyTestSets))
 	}
 
 	testRunStatus := "fail"
@@ -475,8 +551,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	testSetStatus := models.TestSetStatusPassed
 	testSetStatusByErrChan := models.TestSetStatusRunning
-
-	r.logger.Info("running", zap.Any("test-set", models.HighlightString(testSetID)))
 
 	cmdType := utils.CmdType(r.config.CommandType)
 	var userIP string
