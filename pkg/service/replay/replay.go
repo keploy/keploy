@@ -2,6 +2,7 @@ package replay
 
 import (
 	// "bytes"
+
 	"context"
 	"errors"
 	"fmt"
@@ -470,7 +471,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var success int
 	var failure int
 	var ignored int
-	var totalConsumedMocks = map[string]bool{}
+	var totalConsumedMocks = map[string]models.MockState{}
 
 	testSetStatus := models.TestSetStatusPassed
 	testSetStatusByErrChan := models.TestSetStatusRunning
@@ -480,9 +481,28 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	cmdType := utils.CmdType(r.config.CommandType)
 	var userIP string
 
-	err = r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, models.BaseTime, time.Now(), Start, models.OutgoingOptions{
-		Backdate: testCases[0].HTTPReq.Timestamp,
+	filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now())
+	if err != nil {
+		return models.TestSetStatusFailed, err
+	}
+
+	pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
+
+	err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{
+		Rules:          r.config.BypassRules,
+		MongoPassword:  r.config.Test.MongoPassword,
+		SQLDelay:       time.Duration(r.config.Test.Delay),
+		FallBackOnMiss: r.config.Test.FallBackOnMiss,
+		Mocking:        r.config.Test.Mocking,
+		Backdate:       testCases[0].HTTPReq.Timestamp,
 	})
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to mock outgoing")
+		return models.TestSetStatusFailed, err
+	}
+
+	// filtering is redundant, but we need to set the mocks
+	err = r.FilterAndSetMocks(ctx, appID, filteredMocks, unfilteredMocks, models.BaseTime, time.Now(), totalConsumedMocks)
 	if err != nil {
 		return models.TestSetStatusFailed, err
 	}
@@ -572,7 +592,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	utils.TemplatizedValues = conf.Template
 
 	for idx, testCase := range testCases {
-
 		// check if its the last test case running
 		if idx == len(testCases)-1 && r.isLastTestSet {
 			r.isLastTestCase = true
@@ -629,12 +648,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		var testPass bool
 		var loopErr error
 
-		//No need to handle mocking when basepath is provided
-		err := r.SetupOrUpdateMocks(runTestSetCtx, appID, testSetID, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp, Update, models.OutgoingOptions{
-			Backdate: testCase.HTTPReq.Timestamp,
-		})
+		err = r.FilterAndSetMocks(runTestSetCtx, appID, filteredMocks, unfilteredMocks, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp, totalConsumedMocks)
 		if err != nil {
-			utils.LogError(r.logger, err, "failed to update mocks")
+			utils.LogError(r.logger, err, "failed to filter and set mocks")
 			break
 		}
 
@@ -670,16 +686,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			continue
 		}
 
-		var consumedMocks []string
+		var consumedMocks []models.MockState
 		if r.instrument {
 			consumedMocks, err = HookImpl.GetConsumedMocks(runTestSetCtx, appID)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
 			}
-			if r.config.Test.RemoveUnusedMocks {
-				for _, mockName := range consumedMocks {
-					totalConsumedMocks[mockName] = true
-				}
+			for _, m := range consumedMocks {
+				totalConsumedMocks[m.Name] = m
 			}
 		}
 
@@ -930,37 +944,45 @@ func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime tim
 	return filtered, unfiltered, err
 }
 
-func (r *Replayer) SetupOrUpdateMocks(ctx context.Context, appID uint64, testSetID string, afterTime, beforeTime time.Time, action MockAction, outgoingOpts models.OutgoingOptions) error {
-
+func (r *Replayer) FilterAndSetMocks(ctx context.Context, appID uint64, filtered, unfiltered []*models.Mock, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState) error {
 	if !r.instrument {
-		r.logger.Debug("Keploy will not setup or update the mocks when base path is provided", zap.Any("base path", r.config.Test.BasePath))
+		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.Any("base path", r.config.Test.BasePath))
 		return nil
 	}
 
-	filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, afterTime, beforeTime)
-	if err != nil {
-		return err
-	}
+	filtered = pkg.FilterTcsMocks(ctx, r.logger, filtered, afterTime, beforeTime)
+	unfiltered = pkg.FilterConfigMocks(ctx, r.logger, unfiltered, afterTime, beforeTime)
 
-	if action == Start {
-		outgoingOpts.Rules = r.config.BypassRules
-		outgoingOpts.MongoPassword = r.config.Test.MongoPassword
-		outgoingOpts.SQLDelay = time.Duration(r.config.Test.Delay)
-		outgoingOpts.FallBackOnMiss = r.config.Test.FallBackOnMiss
-		outgoingOpts.Mocking = r.config.Test.Mocking
-
-		err = r.instrumentation.MockOutgoing(ctx, appID, outgoingOpts)
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to mock outgoing")
-			return err
+	filterOutDeleted := func(in []*models.Mock) []*models.Mock {
+		out := make([]*models.Mock, 0, len(in))
+		for _, m := range in {
+			// treat empty/missing names as never consumed
+			if m == nil || m.Name == "" {
+				out = append(out, m)
+				continue
+			}
+			// we are picking mocks that are not consumed till now (not present in map),
+			// and, mocks that are updated.
+			if k, ok := totalConsumedMocks[m.Name]; !ok || k.Usage != models.Deleted {
+				if ok {
+					m.TestModeInfo.IsFiltered = k.IsFiltered
+					m.TestModeInfo.SortOrder = k.SortOrder
+				}
+				out = append(out, m)
+			}
 		}
+		return out
 	}
 
-	err = r.instrumentation.SetMocks(ctx, appID, filteredMocks, unfilteredMocks)
+	filtered = filterOutDeleted(filtered)
+	unfiltered = filterOutDeleted(unfiltered)
+
+	err := r.instrumentation.SetMocks(ctx, appID, filtered, unfiltered)
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to set mocks")
 		return err
 	}
+
 	return nil
 }
 

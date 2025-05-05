@@ -11,3 +11,8 @@ linters:
       - pkg/core/hooks/bpf_arm64_bpfel.go
       - pkg/core/hooks/bpf_x86_bpfel.go
       - pkg/service/utgen
+
+formatters:
+  enable:
+    # make sure code is formatted
+    - gofmt
