@@ -16,9 +16,9 @@ type Mock struct {
 }
 
 type TestModeInfo struct {
-	ID         int  `json:"Id,omitempty" bson:"Id,omitempty"`
-	IsFiltered bool `json:"isFiltered,omitempty" bson:"isFiltered,omitempty"`
-	SortOrder  int  `json:"sortOrder,omitempty" bson:"SortOrder,omitempty"`
+	ID         int   `json:"Id,omitempty" bson:"Id,omitempty"`
+	IsFiltered bool  `json:"isFiltered,omitempty" bson:"isFiltered,omitempty"`
+	SortOrder  int64 `json:"sortOrder,omitempty" bson:"SortOrder,omitempty"`
 }
 
 func (m *Mock) GetKind() string {
@@ -61,7 +61,21 @@ const (
 	FromClient OriginType = "client"
 )
 
+type MockUsage string
+
+const (
+	Updated MockUsage = "updated"
+	Deleted MockUsage = "deleted"
+)
+
 type Payload struct {
 	Origin  OriginType     `json:"Origin,omitempty" yaml:"origin" bson:"origin,omitempty"`
 	Message []OutputBinary `json:"Message,omitempty" yaml:"message" bson:"message,omitempty"`
+}
+
+type MockState struct {
+	Name       string    `json:"name"`
+	Usage      MockUsage `json:"usage"`
+	IsFiltered bool      `json:"isFiltered"`
+	SortOrder  int64     `json:"sortOrder"`
 }
