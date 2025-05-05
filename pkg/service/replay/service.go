@@ -17,7 +17,7 @@ type Instrumentation interface {
 	// SetMocks Allows for setting mocks between test runs for better filtering and matching
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
 	// GetConsumedMocks to log the names of the mocks that were consumed during the test run of failed test cases
-	GetConsumedMocks(ctx context.Context, id uint64) ([]string, error)
+	GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error)
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
 
@@ -52,7 +52,7 @@ type TestDB interface {
 type MockDB interface {
 	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
 	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
-	UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]bool) error
+	UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState) error
 }
 
 type ReportDB interface {
@@ -91,11 +91,3 @@ type InstrumentState struct {
 	AppID      uint64
 	HookCancel context.CancelFunc
 }
-
-type MockAction string
-
-// MockAction constants define the possible actions that can be taken on a mocking.
-const (
-	Start  MockAction = "start"
-	Update MockAction = "update"
-)

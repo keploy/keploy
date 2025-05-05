@@ -7,12 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/agnivade/levenshtein"
+	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models"
@@ -341,16 +341,9 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 
 // Update the matched mock (delete or update)
 func (h *HTTP) updateMock(_ context.Context, matchedMock *models.Mock, mockDb integrations.MockMemDb) bool {
-	if matchedMock.TestModeInfo.IsFiltered {
-		originalMatchedMock := *matchedMock
-		matchedMock.TestModeInfo.IsFiltered = false
-		matchedMock.TestModeInfo.SortOrder = math.MaxInt
-		updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
-		return updated
-	}
-	err := mockDb.FlagMockAsUsed(*matchedMock)
-	if err != nil {
-		h.Logger.Error("failed to flag mock as used", zap.Error(err))
-	}
-	return true
+	originalMatchedMock := *matchedMock
+	matchedMock.TestModeInfo.IsFiltered = false
+	matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+	updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
+	return updated
 }

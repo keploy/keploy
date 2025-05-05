@@ -32,7 +32,12 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	m.filtered.deleteAll()
 	for index, mock := range mocks {
-		mock.TestModeInfo.SortOrder = index
+		// if the sortOrder is already set (!= 0) then we shouldn't override it,
+		// as this would be a consequence of the mock being matched in previous testcases,
+		// which is done to put the mock in the last when we are processing the mock list for getting a match.
+		if mock.TestModeInfo.SortOrder == 0 {
+			mock.TestModeInfo.SortOrder = int64(index) + 1
+		}
 		mock.TestModeInfo.ID = index
 		m.filtered.insert(mock.TestModeInfo, mock)
 	}
@@ -41,7 +46,12 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 	m.unfiltered.deleteAll()
 	for index, mock := range mocks {
-		mock.TestModeInfo.SortOrder = index
+		// if the sortOrder is already set (!= 0) then we shouldn't override it,
+		// as this would be a consequence of the mock being matched in previous testcases,
+		// which is done to put the mock in the last when we are processing the mock list for getting a match.
+		if mock.TestModeInfo.SortOrder == 0 {
+			mock.TestModeInfo.SortOrder = int64(index) + 1
+		}
 		mock.TestModeInfo.ID = index
 		m.unfiltered.insert(mock.TestModeInfo, mock)
 	}
@@ -79,31 +89,37 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	updated := m.unfiltered.update(old.TestModeInfo, new.TestModeInfo, new)
 	if updated {
 		// mark the unfiltered mock as used for the current simulated test-case
-		go func() {
-			if err := m.FlagMockAsUsed(*old); err != nil {
-				m.logger.Error("failed to flag mock as used", zap.Error(err))
-			}
-		}()
+		if err := m.flagMockAsUsed(models.MockState{
+			Name:       (*new).Name,
+			Usage:      models.Updated,
+			IsFiltered: (*new).TestModeInfo.IsFiltered,
+			SortOrder:  (*new).TestModeInfo.SortOrder,
+		}); err != nil {
+			m.logger.Error("failed to flag mock as used", zap.Error(err))
+		}
 	}
 	return updated
 }
 
-func (m *MockManager) FlagMockAsUsed(mock models.Mock) error {
+func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 	if mock.Name == "" {
 		return fmt.Errorf("mock is empty")
 	}
-	m.consumedMocks.Store(mock.Name, true)
+	m.consumedMocks.Store(mock.Name, mock)
 	return nil
 }
 
 func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	isDeleted := m.filtered.delete(mock.TestModeInfo)
 	if isDeleted {
-		go func() {
-			if err := m.FlagMockAsUsed(mock); err != nil {
-				m.logger.Error("failed to flag mock as used", zap.Error(err))
-			}
-		}()
+		if err := m.flagMockAsUsed(models.MockState{
+			Name:       mock.Name,
+			Usage:      models.Deleted,
+			IsFiltered: mock.TestModeInfo.IsFiltered,
+			SortOrder:  mock.TestModeInfo.SortOrder,
+		}); err != nil {
+			m.logger.Error("failed to flag mock as used", zap.Error(err))
+		}
 	}
 	return isDeleted
 }
@@ -111,27 +127,30 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 	isDeleted := m.unfiltered.delete(mock.TestModeInfo)
 	if isDeleted {
-		go func() {
-			if err := m.FlagMockAsUsed(mock); err != nil {
-				m.logger.Error("failed to flag mock as used", zap.Error(err))
-			}
-		}()
+		if err := m.flagMockAsUsed(models.MockState{
+			Name:       mock.Name,
+			Usage:      models.Deleted,
+			IsFiltered: mock.TestModeInfo.IsFiltered,
+			SortOrder:  mock.TestModeInfo.SortOrder,
+		}); err != nil {
+			m.logger.Error("failed to flag mock as used", zap.Error(err))
+		}
 	}
 	return isDeleted
 }
 
-func (m *MockManager) GetConsumedMocks() []string {
-	var keys []string
-	m.consumedMocks.Range(func(key, _ interface{}) bool {
+func (m *MockManager) GetConsumedMocks() []models.MockState {
+	var keys []models.MockState
+	m.consumedMocks.Range(func(key, val interface{}) bool {
 		if _, ok := key.(string); ok {
-			keys = append(keys, key.(string))
+			keys = append(keys, val.(models.MockState))
 			m.consumedMocks.Delete(key)
 		}
 		return true
 	})
 	sort.Slice(keys, func(i, j int) bool {
-		numI, _ := strconv.Atoi(strings.Split(keys[i], "-")[1])
-		numJ, _ := strconv.Atoi(strings.Split(keys[j], "-")[1])
+		numI, _ := strconv.Atoi(strings.Split(keys[i].Name, "-")[1])
+		numJ, _ := strconv.Atoi(strings.Split(keys[j].Name, "-")[1])
 		return numI < numJ
 	})
 	for key := range keys {

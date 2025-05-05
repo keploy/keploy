@@ -5,8 +5,8 @@ package redis
 import (
 	"context"
 	"fmt"
-	"math"
 
+	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
@@ -55,7 +55,7 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 				copy(responseMock, filteredMocks[index].Spec.RedisResponses)
 				originalFilteredMock := *filteredMocks[index]
 				filteredMocks[index].TestModeInfo.IsFiltered = false
-				filteredMocks[index].TestModeInfo.SortOrder = math.MaxInt64
+				filteredMocks[index].TestModeInfo.SortOrder = pkg.GetNextSortNum()
 				isUpdated := mockDb.UpdateUnFilteredMock(&originalFilteredMock, filteredMocks[index])
 				if !isUpdated {
 					continue
@@ -80,7 +80,7 @@ func fuzzyMatch(ctx context.Context, reqBuff [][]byte, mockDb integrations.MockM
 				originalFilteredMock := *totalMocks[index]
 				if totalMocks[index].TestModeInfo.IsFiltered {
 					totalMocks[index].TestModeInfo.IsFiltered = false
-					totalMocks[index].TestModeInfo.SortOrder = math.MaxInt64
+					totalMocks[index].TestModeInfo.SortOrder = pkg.GetNextSortNum()
 					isUpdated := mockDb.UpdateUnFilteredMock(&originalFilteredMock, totalMocks[index])
 					if !isUpdated {
 						continue
