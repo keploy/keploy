@@ -573,7 +573,7 @@ func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock,
 	matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
 	updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
 	if !updated {
-		logger.Error("failed to update matched mock")
+		logger.Debug("failed to update matched mock")
 	}
 	return updated
 }
