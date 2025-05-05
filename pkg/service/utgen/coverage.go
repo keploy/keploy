@@ -2,14 +2,22 @@ package utgen
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
+
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/service"
+	"go.keploy.io/server/v2/utils"
 )
 
 // CoverageProcessor handles the processing of coverage reports
@@ -29,7 +37,9 @@ func NewCoverageProcessor(reportPath, srcpath, format string) *CoverageProcessor
 }
 
 // ProcessCoverageReport verifies the report and parses it based on its type
-func (cp *CoverageProcessor) ProcessCoverageReport(latestTime int64) (*models.CoverageResult, error) {
+func (cp *CoverageProcessor) ProcessCoverageReport(
+	latestTime int64,
+) (*models.CoverageResult, error) {
 	err := cp.VerifyReportUpdate(latestTime)
 	if err != nil {
 		return nil, err
@@ -57,7 +67,11 @@ func (cp *CoverageProcessor) VerifyReportUpdate(latestTime int64) error {
 		}
 		fileModTimeMs = fileInfo.ModTime().UnixNano() / int64(time.Millisecond)
 		if fileModTimeMs < latestTime {
-			return fmt.Errorf("fatal: the coverage report file was not updated after the test command. file_mod_time_ms: %d, time_of_test_command: %d", fileModTimeMs, latestTime)
+			return fmt.Errorf(
+				"fatal: the coverage report file was not updated after the test command. file_mod_time_ms: %d, time_of_test_command: %d",
+				fileModTimeMs,
+				latestTime,
+			)
 		}
 	}
 	return nil
@@ -78,7 +92,6 @@ func (cp *CoverageProcessor) ParseCoverageReport() (*models.CoverageResult, erro
 }
 
 func (cp *CoverageProcessor) ParseCoverageReportCobertura() (*models.CoverageResult, error) {
-
 	filesToCover := make([]string, 0)
 	// Open the XML file
 	xmlFile, err := os.Open(cp.ReportPath)
@@ -157,7 +170,6 @@ func (cp *CoverageProcessor) ParseCoverageReportCobertura() (*models.CoverageRes
 }
 
 func (cp *CoverageProcessor) ParseCoverageReportJacoco() (*models.CoverageResult, error) {
-
 	filesToCover := make([]string, 0)
 	// Open the XML file
 	xmlFile, err := os.Open(cp.ReportPath)
@@ -246,4 +258,71 @@ func (cp *CoverageProcessor) ParseCoverageReportJacoco() (*models.CoverageResult
 	}
 
 	return coverageResult, nil
+}
+
+func sendCoverageUpdate(
+	ctx context.Context,
+	auth service.Auth,
+	apiBase string,
+	logger *zap.Logger,
+	sessionID string,
+	oldCoverage, newCoverage float64,
+	iterationCount int,
+	functionUnderTest string,
+) error {
+	purpose := TestForFile
+	if functionUnderTest != "" {
+		purpose = TestForFunction
+	}
+
+	body, err := json.Marshal(map[string]interface{}{
+		"sessionId":      sessionID,
+		"initalCoverage": oldCoverage,
+		"finalCoverage":  newCoverage,
+		"iteration":      iterationCount,
+		"requestPurpose": purpose,
+	})
+	if err != nil {
+		return fmt.Errorf("error marshalling request body: %v", err)
+	}
+
+	req, err := http.NewRequestWithContext(
+		ctx,
+		"POST",
+		apiBase+"/ai/coverage/update",
+		bytes.NewBuffer(body),
+	)
+	if err != nil {
+		return fmt.Errorf("error creating request: %v", err)
+	}
+
+	token, err := auth.GetToken(ctx)
+	if err != nil {
+		return fmt.Errorf("error getting token: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("error making request: %v", err)
+	}
+
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			utils.LogError(logger, err, "Error closing response body")
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf(
+			"unexpected status code: %v, response body: %s",
+			resp.StatusCode,
+			string(bodyBytes),
+		)
+	}
+
+	logger.Debug("Coverage update sent successfully", zap.String("session_id", sessionID))
+	return nil
 }

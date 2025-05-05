@@ -199,6 +199,7 @@ Configure Keploy using command-line flags:
   --maxIterations 5
   --testDir ""
   --llmBaseUrl "https://api.openai.com/v1"
+  --provider "openai"
   --model "gpt-4o"
   --llmApiVersion "
 ```
@@ -213,6 +214,7 @@ Configure Keploy using command-line flags:
 - `testDir`: Directory where tests will be written.
 - `llmBaseUrl`: Base url of the llm.
 - `model`: Specifies the AI model to use (default "gpt-4o").
+- `provider`: Specifies the AI provider to use (default "openai").
 - `llmApiVersion`: API version of the llm if any (default "")
 
 # Frequently Asked Questions
