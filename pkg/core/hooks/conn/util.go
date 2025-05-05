@@ -60,7 +60,7 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 	passThrough := proxyHttp.IsPassThrough(logger, req, uint(dstPort), headerOpts)
 
 	for _, filter := range opts.Filters {
-		if filter.URLMethods != nil && len(filter.URLMethods) != 0 {
+		if len(filter.URLMethods) > 0 {
 			urlMethodMatch := false
 			for _, method := range filter.URLMethods {
 				if method == req.Method {
@@ -73,7 +73,7 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 				continue
 			}
 		}
-		if filter.Headers != nil && len(filter.Headers) != 0 {
+		if len(filter.Headers) > 0 {
 			headerMatch := false
 			for filterHeaderKey, filterHeaderValue := range filter.Headers {
 				regex, err := regexp.Compile(filterHeaderValue)
@@ -238,4 +238,36 @@ func extractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 	}
 
 	return formData
+}
+
+// CaptureGRPC captures a gRPC request/response pair and sends it to the test case channel
+func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream) {
+	if http2Stream == nil {
+		logger.Error("Stream is nil")
+		return
+	}
+
+	if http2Stream.GRPCReq == nil || http2Stream.GRPCResp == nil {
+		logger.Error("gRPC request or response is nil")
+		return
+	}
+
+	// Create test case from stream data
+	testCase := &models.TestCase{
+		Version:  models.GetVersion(),
+		Name:     http2Stream.GRPCReq.Headers.OrdinaryHeaders["Keploy-Test-Name"],
+		Kind:     models.GRPC_EXPORT,
+		Created:  time.Now().Unix(),
+		GrpcReq:  *http2Stream.GRPCReq,
+		GrpcResp: *http2Stream.GRPCResp,
+		Noise:    map[string][]string{},
+	}
+
+	select {
+	case <-ctx.Done():
+		return
+	case t <- testCase:
+		logger.Debug("Captured gRPC test case",
+			zap.String("path", http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]))
+	}
 }

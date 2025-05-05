@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
+	"sync/atomic"
 
 	"strconv"
 	"strings"
@@ -27,6 +29,16 @@ import (
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
+
+var SortCounter int64 = -1
+
+func InitSortCounter(counter int64) {
+	atomic.StoreInt64(&SortCounter, counter)
+}
+
+func GetNextSortNum() int64 {
+	return atomic.AddInt64(&SortCounter, 1)
+}
 
 // URLParams returns the Url and Query parameters from the request url.
 func URLParams(r *http.Request) map[string]string {
@@ -266,14 +278,21 @@ func MakeCurlCommand(tc models.HTTPReq) string {
 
 func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 	indices := []string{}
+
 	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
 	if err != nil {
-		Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
-		return indices, nil
+		Logger.Debug("creating a folder for the keploy  generated testcases", zap.Error(err))
+		return indices, err
 	}
+	defer func() {
+		if closeErr := dir.Close(); closeErr != nil {
+			Logger.Debug("failed to close directory", zap.Error(closeErr))
+		}
+	}()
 
 	files, err := dir.ReadDir(0)
 	if err != nil {
+		Logger.Debug("failed to read directory contents", zap.Error(err))
 		return indices, err
 	}
 
@@ -282,6 +301,7 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 			indices = append(indices, v.Name())
 		}
 	}
+
 	return indices, nil
 }
 
@@ -419,4 +439,72 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 			return fmt.Errorf("timeout after %v waiting for port %s:%s, %s", timeout, host, port, msg)
 		}
 	}
+}
+
+func FilterTcsMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time) []*models.Mock {
+	filteredMocks, _ := filterByTimeStamp(ctx, logger, m, afterTime, beforeTime)
+
+	sort.SliceStable(filteredMocks, func(i, j int) bool {
+		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
+	})
+
+	return filteredMocks
+}
+
+func FilterConfigMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time) []*models.Mock {
+	filteredMocks, unfilteredMocks := filterByTimeStamp(ctx, logger, m, afterTime, beforeTime)
+
+	sort.SliceStable(filteredMocks, func(i, j int) bool {
+		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
+	})
+
+	sort.SliceStable(unfilteredMocks, func(i, j int) bool {
+		return unfilteredMocks[i].Spec.ReqTimestampMock.Before(unfilteredMocks[j].Spec.ReqTimestampMock)
+	})
+
+	return append(filteredMocks, unfilteredMocks...)
+}
+
+func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, []*models.Mock) {
+
+	filteredMocks := make([]*models.Mock, 0)
+	unfilteredMocks := make([]*models.Mock, 0)
+
+	if afterTime.Equal(time.Time{}) {
+		return m, unfilteredMocks
+	}
+
+	if beforeTime.Equal(time.Time{}) {
+		return m, unfilteredMocks
+	}
+
+	isNonKeploy := false
+
+	for _, mock := range m {
+		// doing deep copy to prevent data race, which was happening due to the write to isFiltered
+		// field in this for loop, and write in mockmanager functions.
+		tmp := *mock
+		p := &tmp
+		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
+			isNonKeploy = true
+		}
+		if p.Spec.ReqTimestampMock.Equal(time.Time{}) || p.Spec.ResTimestampMock.Equal(time.Time{}) {
+			logger.Debug("request or response timestamp of mock is missing")
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, p)
+			continue
+		}
+
+		if p.Spec.ReqTimestampMock.After(afterTime) && p.Spec.ResTimestampMock.Before(beforeTime) {
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, p)
+			continue
+		}
+		p.TestModeInfo.IsFiltered = false
+		unfilteredMocks = append(unfilteredMocks, p)
+	}
+	if isNonKeploy {
+		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
+	}
+	return filteredMocks, unfilteredMocks
 }

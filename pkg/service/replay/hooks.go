@@ -19,32 +19,38 @@ import (
 )
 
 type Hooks struct {
-	logger     *zap.Logger
-	cfg        *config.Config
-	tsConfigDB TestSetConfig
-	storage    Storage
-	auth       service.Auth
+	logger          *zap.Logger
+	cfg             *config.Config
+	tsConfigDB      TestSetConfig
+	storage         Storage
+	auth            service.Auth
+	instrumentation Instrumentation
 }
 
-func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, storage Storage, auth service.Auth) TestHooks {
+func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, storage Storage, auth service.Auth, instrumentation Instrumentation) TestHooks {
 	return &Hooks{
-		cfg:        cfg,
-		logger:     logger,
-		tsConfigDB: tsConfigDB,
-		storage:    storage,
-		auth:       auth,
+		cfg:             cfg,
+		logger:          logger,
+		tsConfigDB:      tsConfigDB,
+		storage:         storage,
+		auth:            auth,
+		instrumentation: instrumentation,
 	}
 }
 
-func (h *Hooks) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCase, testSetID string) (*models.HTTPResp, error) {
+func (h *Hooks) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCase, testSetID string) (interface{}, error) {
 	switch tc.Kind {
 	case models.HTTP:
-		h.logger.Debug("Before simulating the request", zap.Any("Test case", tc))
-		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, h.cfg.Test.APITimeout)
-		h.logger.Debug("After simulating the request", zap.Any("test case id", tc.Name))
-		return resp, err
+		h.logger.Debug("Simulating HTTP request", zap.Any("Test case", tc))
+		return pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, h.cfg.Test.APITimeout)
+
+	case models.GRPC_EXPORT:
+		h.logger.Debug("Simulating gRPC request", zap.Any("Test case", tc))
+		return pkg.SimulateGRPC(ctx, tc, testSetID, h.logger)
+
+	default:
+		return nil, fmt.Errorf("unsupported test case kind: %s", tc.Kind)
 	}
-	return nil, nil
 }
 
 func (h *Hooks) AfterTestSetRun(ctx context.Context, testSetID string, status bool) error {
@@ -123,12 +129,12 @@ func (h *Hooks) AfterTestSetRun(ctx context.Context, testSetID string, status bo
 				App:  h.cfg.AppName,
 			},
 		}
-		if role == "OSS" {
-			if username == "" {
-				fmt.Println("Username not found in the token, skipping mock upload")
-			}
-			tsConfig.MockRegistry.User = username
+
+		if username == "" {
+			fmt.Println("Username not found in the token, skipping mock upload")
+			return nil
 		}
+		tsConfig.MockRegistry.User = username
 
 		err := h.tsConfigDB.Write(ctx, testSetID, tsConfig)
 		if err != nil {
@@ -251,6 +257,15 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 func (h *Hooks) AfterTestRun(_ context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error {
 	h.logger.Debug("AfterTestRun hook executed", zap.String("testRunID", testRunID), zap.Any("testSetIDs", testSetIDs), zap.Any("coverage", coverage))
 	return nil
+}
+
+func (h *Hooks) GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error) {
+	consumedMocks, err := h.instrumentation.GetConsumedMocks(ctx, id)
+	if err != nil {
+		h.logger.Error("failed to get consumed mocks", zap.Error(err))
+		return nil, err
+	}
+	return consumedMocks, nil
 }
 
 // Function to parse and extract claims from a JWT token without verification

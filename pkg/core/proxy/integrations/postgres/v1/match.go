@@ -14,6 +14,7 @@ import (
 
 	"github.com/agnivade/levenshtein"
 	"github.com/jackc/pgproto3/v2"
+	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models"
@@ -68,6 +69,7 @@ func IsValuePresent(connectionid string, value string) bool {
 }
 
 func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mutex, requestBuffers [][]byte, mockDb integrations.MockMemDb) (bool, []models.Frontend, error) {
+OuterLoop:
 	for {
 		select {
 		case <-ctx.Done():
@@ -146,9 +148,13 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 							res := make([]models.Frontend, len(initMock.Spec.PostgresResponses))
 							copy(res, initMock.Spec.PostgresResponses)
 							res[requestIndex].AuthType = 5
-							err := mockDb.FlagMockAsUsed(initMock)
-							if err != nil {
-								logger.Error("failed to flag mock as used", zap.Error(err))
+							newInitMock := initMock
+							newInitMock.TestModeInfo.IsFiltered = false
+							newInitMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+							isUpdated := mockDb.UpdateUnFilteredMock(&initMock, &newInitMock)
+							if !isUpdated {
+								logger.Error("failed to update matched mock", zap.Error(err))
+								continue OuterLoop
 							}
 							return true, res, nil
 						case len(encodedMock) > 0 && encodedMock[0] == 'p' && initMock.Spec.PostgresRequests[requestIndex].PacketTypes[0] == "p" && reqBuff[0] == 'p':
@@ -209,9 +215,13 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 									Value: "Etc/UTC",
 								},
 							}
-							err := mockDb.FlagMockAsUsed(initMock)
-							if err != nil {
-								logger.Error("failed to flag mock as used", zap.Error(err))
+							newInitMock := initMock
+							newInitMock.TestModeInfo.IsFiltered = false
+							newInitMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+							isUpdated := mockDb.UpdateUnFilteredMock(&initMock, &newInitMock)
+							if !isUpdated {
+								logger.Error("failed to update matched mock", zap.Error(err))
+								continue OuterLoop
 							}
 							return true, res, nil
 						}
@@ -241,10 +251,12 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 					logger.Debug("Matched In Sorted PG Matching Stream", zap.String("mock", matchedMock.Name))
 				}
 
-				idx = findBinaryStreamMatch(logger, sortedTcsMocks, requestBuffers, sorted)
-				if idx != -1 && !matched {
-					matched = true
-					matchedMock = tcsMocks[idx]
+				if !matched {
+					idx = findBinaryStreamMatch(logger, sortedTcsMocks, requestBuffers, sorted)
+					if idx != -1 {
+						matched = true
+						matchedMock = tcsMocks[idx]
+					}
 				}
 			}
 
@@ -259,43 +271,35 @@ func matchingReadablePG(ctx context.Context, logger *zap.Logger, mutex *sync.Mut
 					}
 					logger.Debug("Matched In Unsorted PG Matching Stream", zap.String("mock", matchedMock.Name))
 				}
-				idx = findBinaryStreamMatch(logger, tcsMocks, requestBuffers, sorted)
-				// check if the validate the query with the matched mock
-				// if the query is same then return the response of that mock
-				var isValid = true
-				if idx != -1 && len(sortedTcsMocks) != 0 {
-					isValid, newMock = validateMock(tcsMocks, idx, requestBuffers, logger)
-					logger.Debug("Is Valid", zap.Bool("Is Valid", isValid))
-				}
-				if idx != -1 && !matched {
-					matched = true
-					matchedMock = tcsMocks[idx]
-					if newMock != nil && !isValid {
-						matchedMock = newMock
+				if !matched {
+					idx = findBinaryStreamMatch(logger, tcsMocks, requestBuffers, sorted)
+					// check if the validate the query with the matched mock
+					// if the query is same then return the response of that mock
+					var isValid = true
+					if idx != -1 && len(sortedTcsMocks) != 0 {
+						isValid, newMock = validateMock(tcsMocks, idx, requestBuffers, logger)
+						logger.Debug("Is Valid", zap.Bool("Is Valid", isValid))
 					}
-					logger.Debug("Matched In Binary Matching for Unsorted", zap.String("mock", matchedMock.Name))
+					if idx != -1 {
+						matched = true
+						matchedMock = tcsMocks[idx]
+						if newMock != nil && !isValid {
+							matchedMock = newMock
+						}
+						logger.Debug("Matched In Binary Matching for Unsorted", zap.String("mock", matchedMock.Name))
+					}
+
 				}
 			}
 
 			if matched {
 				logger.Debug("Matched mock", zap.String("mock", matchedMock.Name))
-				if matchedMock.TestModeInfo.IsFiltered {
-					originalMatchedMock := *matchedMock
-					matchedMock.TestModeInfo.IsFiltered = false
-					matchedMock.TestModeInfo.SortOrder = math.MaxInt
-					//UpdateUnFilteredMock also marks the mock as used
-					updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
-					if !updated {
-						continue
-					}
-				} else {
-					err := mockDb.FlagMockAsUsed(*matchedMock)
-					if err != nil {
-						logger.Error("failed to flag mock as used", zap.Error(err))
-					}
-				}
-				if err != nil {
-					logger.Error("failed to flag mock as used", zap.Error(err))
+				originalMatchedMock := *matchedMock
+				matchedMock.TestModeInfo.IsFiltered = false
+				matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+				updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
+				if !updated {
+					logger.Error("failed to update matched mock", zap.Error(err))
 				}
 				return true, matchedMock.Spec.PostgresResponses, nil
 			}
@@ -574,18 +578,9 @@ func changeResToPS(mock *models.Mock, actualPgReq *models.Backend, logger *zap.L
 
 func PreparedStatementMatch(mock *models.Mock, actualPgReq *models.Backend, logger *zap.Logger, ConnectionID string, recordedPrep PrepMap) (bool, []string, error) {
 	// logger.Debug("Inside PreparedStatementMatch")
-	// check the current Query associated with the connection id and Identifier
-	ifps := checkIfps(actualPgReq.PacketTypes)
-	if !ifps {
-		return false, nil, nil
-	}
-	// check if given mock is a prepared statement
-	ifpsMock := checkIfps(mock.Spec.PostgresRequests[0].PacketTypes)
-	if !ifpsMock {
-		return false, nil, nil
-	}
 
-	if len(mock.Spec.PostgresRequests[0].PacketTypes) != len(actualPgReq.PacketTypes) {
+	if !reflect.DeepEqual(mock.Spec.PostgresRequests[0].PacketTypes, actualPgReq.PacketTypes) {
+		logger.Debug("mock and actual packet types are unequal", zap.Any("mock name", mock.Name))
 		return false, nil, nil
 	}
 
@@ -593,6 +588,13 @@ func PreparedStatementMatch(mock *models.Mock, actualPgReq *models.Backend, logg
 	binds := actualPgReq.Binds
 	newBinPreparedStatement := make([]string, 0)
 	mockBinds := mock.Spec.PostgresRequests[0].Binds
+	// If the client sent a different number of Bind messages than the mock
+	// recorded, the two batches can’t possibly align, so we can return early
+	// instead of walking the loop and risking panic due to out‑of‑bounds.
+	if len(binds) != len(mockBinds) {
+		logger.Debug("len of binds in actual request is not equal to len of binds in mock", zap.String("mock name", mock.Name))
+		return false, nil, nil
+	}
 	mockConn := mock.ConnectionID
 	var foo = false
 	for idx, bind := range binds {
@@ -608,6 +610,14 @@ func PreparedStatementMatch(mock *models.Mock, actualPgReq *models.Backend, logg
 				break
 			}
 		}
+
+		// this means that the bind is preceeded by a parse with name field empty
+		// we can say that the name field (identifier) was empty that's why it didn't get inserted in testMap.
+		// skip it, as it doesn't use already cached query, instead parsing followed by binding is done in the same query.
+		if currentQuery == "" {
+			continue
+		}
+
 		logger.Debug("Current Query for this prepared statement", zap.String("Query", currentQuery), zap.String("Identifier", currentPs))
 		foo = false
 
@@ -619,6 +629,33 @@ func PreparedStatementMatch(mock *models.Mock, actualPgReq *models.Backend, logg
 				break
 			}
 
+		}
+		// this means we are unable to find the query in recordedPrep or the prepared statement is not same
+		if !foo {
+			break
+		}
+	}
+	if !foo {
+		return false, nil, nil
+	}
+
+	parses := actualPgReq.Parses
+	mockParses := mock.Spec.PostgresRequests[0].Parses
+	// If the client sent a different number of Parse messages than the mock
+	// recorded, the two batches can’t possibly align, so we can return early
+	// instead of walking the loop and risking panic due to out‑of‑bounds.
+	if len(parses) != len(mockParses) {
+		logger.Debug("len of parse in actual request is not equal to len of parse in mock", zap.String("mock name", mock.Name))
+		return false, nil, nil
+	}
+
+	foo = true
+	// check if all parse queries in pg request is same for the corresponding query in mock
+	for idx, parse := range parses {
+		if parse.Query != mockParses[idx].Query {
+			logger.Debug(fmt.Sprintf("parse query for actual request is not equal to parse query for mock name: %s, at index: %d", mock.Name, idx))
+			foo = false // if any parse query is not same then break, mock didn't match
+			break
 		}
 	}
 	if foo {
@@ -646,7 +683,7 @@ func compareExactMatch(mock *models.Mock, actualPgReq *models.Backend, logger *z
 
 	// this will give me the
 	var (
-		p, b, e int = 0, 0, 0
+		p, b, e = 0, 0, 0
 	)
 	for i := 0; i < len(actualPgReq.PacketTypes); i++ {
 		switch actualPgReq.PacketTypes[i] {

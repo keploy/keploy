@@ -270,7 +270,7 @@ func addKeployNetwork(ctx context.Context, logger *zap.Logger, client docker.Cli
 
 func convertPathToUnixStyle(path string) string {
 	// Replace backslashes with forward slashes
-	unixPath := strings.Replace(path, "\\", "/", -1)
+	unixPath := strings.ReplaceAll(path, "\\", "/")
 	// Remove 'C:'
 	if len(unixPath) > 1 && unixPath[1] == ':' {
 		unixPath = unixPath[2:]

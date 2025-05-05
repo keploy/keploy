@@ -16,50 +16,58 @@ import (
 	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
+	yamlLib "gopkg.in/yaml.v3"
 )
 
 func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTrafficDoc, error) {
-	respType := models.HTTPResponseJSON
-	isXML := utils.IsXMLResponse(&tc.HTTPResp)
-	if isXML {
-		respType = models.HTTPResponseXML
-	}
-	curl := pkg.MakeCurlCommand(tc.HTTPReq)
+	logger.Debug("Starting test case encoding",
+		zap.String("kind", string(tc.Kind)),
+		zap.String("name", tc.Name))
+
 	doc := &yaml.NetworkTrafficDoc{
-		Version:  tc.Version,
-		Kind:     tc.Kind,
-		Name:     tc.Name,
-		Curl:     curl,
-		RespType: respType,
-	}
-	// find noisy fields
-	m, err := FlattenHTTPResponse(pkg.ToHTTPHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)
-	if err != nil {
-		msg := "error in flattening http response"
-		utils.LogError(logger, err, msg)
-	}
-	noise := tc.Noise
-
-	if tc.Name == "" {
-		noiseFieldsFound := FindNoisyFields(m, func(_ string, vals []string) bool {
-			// check if k is date
-			for _, v := range vals {
-				if pkg.IsTime(v) {
-					return true
-				}
-			}
-
-			// maybe we need to concatenate the values
-			return pkg.IsTime(strings.Join(vals, ", "))
-		})
-
-		for _, v := range noiseFieldsFound {
-			noise[v] = []string{}
-		}
+		Version: tc.Version,
+		Kind:    tc.Kind,
+		Name:    tc.Name,
 	}
 
+	var noise map[string][]string
 	switch tc.Kind {
 	case models.HTTP:
+		respType := models.HTTPResponseJSON
+		isXML := utils.IsXMLResponse(&tc.HTTPResp)
+		if isXML {
+			respType = models.HTTPResponseXML
+		}
+		doc.RespType = respType
+
+		logger.Debug("Encoding HTTP test case")
+		doc.Curl = pkg.MakeCurlCommand(tc.HTTPReq)
+
+		// find noisy fields only for HTTP responses
+		m, err := FlattenHTTPResponse(pkg.ToHTTPHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)
+		if err != nil {
+			msg := "error in flattening http response"
+			utils.LogError(logger, err, msg)
+		}
+		noise = tc.Noise
+
+		if tc.Name == "" {
+			noiseFieldsFound := FindNoisyFields(m, func(_ string, vals []string) bool {
+				// check if k is date
+				for _, v := range vals {
+					if pkg.IsTime(v) {
+						return true
+					}
+				}
+				// maybe we need to concatenate the values
+				return pkg.IsTime(strings.Join(vals, ", "))
+			})
+
+			for _, v := range noiseFieldsFound {
+				noise[v] = []string{}
+			}
+		}
+
 		switch respType {
 		case models.HTTPResponseXML:
 			m, err := utils.XMLToMap(tc.HTTPResp.Body)
@@ -67,7 +75,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 				utils.LogError(logger, err, "failed to convert xml to map")
 				return nil, err
 			}
-			err = doc.Spec.Encode(models.XMLSchema{
+			xmlSchema := models.XMLSchema{
 				Request: tc.HTTPReq,
 				Response: models.XMLResp{
 					Body:          m,
@@ -80,29 +88,99 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 					Timestamp:     tc.HTTPResp.Timestamp,
 				},
 				Created: tc.Created,
-				Assertions: map[string]interface{}{
-					"noise": noise,
-				},
-			})
+				// need to check here for type here as well as push in other custom assertions
+				Assertions: func() map[models.AssertionType]interface{} {
+					a := map[models.AssertionType]interface{}{}
+					if len(noise) > 0 {
+						a[models.NoiseAssertion] = noise
+					}
+					return a
+				}(),
+			}
+			if tc.Description != "" {
+				xmlSchema.Metadata = map[string]string{
+					"description": tc.Description,
+				}
+			}
+			err = doc.Spec.Encode(xmlSchema)
 			if err != nil {
 				utils.LogError(logger, err, "failed to encode testcase into a yaml doc")
 				return nil, err
 			}
 		case models.HTTPResponseJSON:
-			err := doc.Spec.Encode(models.HTTPSchema{
+			httpSchema := models.HTTPSchema{
 				Request:  tc.HTTPReq,
 				Response: tc.HTTPResp,
 				Created:  tc.Created,
-				Assertions: map[string]interface{}{
-					"noise": noise,
-				},
-			})
+				// need to check here for type here as well as push in other custom assertions
+				Assertions: func() map[models.AssertionType]interface{} {
+					a := map[models.AssertionType]interface{}{}
+					if len(noise) > 0 {
+						a[models.NoiseAssertion] = noise
+					}
+					for k, v := range tc.Assertions {
+						a[k] = v
+					}
+
+					// Optionally add other custom assertions if needed here
+					// Example:
+					// a[models.StatusCode] = tc.HTTPResp.StatusCode
+
+					return a
+				}(),
+			}
+			if tc.Description != "" {
+				httpSchema.Metadata = map[string]string{
+					"description": tc.Description,
+				}
+			}
+			err := doc.Spec.Encode(httpSchema)
 			if err != nil {
 				utils.LogError(logger, err, "failed to encode testcase into a yaml doc")
 				return nil, err
 			}
 		}
+	case models.GRPC_EXPORT:
+		logger.Debug("Encoding gRPC test case")
+		// For gRPC, use the noise directly from the test case
+		noise = tc.Noise
 
+		// Create a YAML node for the gRPC schema
+		grpcSpec := models.GrpcSpec{
+			GrpcReq:  tc.GrpcReq,
+			GrpcResp: tc.GrpcResp,
+			Created:  tc.Created,
+			// need to check here for type here as well as push in other custom assertions
+			Assertions: func() map[models.AssertionType]interface{} {
+				a := map[models.AssertionType]interface{}{}
+				if len(noise) > 0 {
+					a[models.NoiseAssertion] = noise
+				}
+				// Optionally add other custom assertions if needed here
+				// Example:
+				// a[models.StatusCode] = tc.HTTPResp.StatusCode
+
+				return a
+			}(),
+		}
+
+		logger.Debug("gRPC schema created",
+			zap.Any("request_headers", grpcSpec.GrpcReq.Headers),
+			zap.Any("response_headers", grpcSpec.GrpcResp.Headers),
+			zap.Int("request_body_length", len(grpcSpec.GrpcReq.Body.DecodedData)),
+			zap.Int("response_body_length", len(grpcSpec.GrpcResp.Body.DecodedData)))
+
+		// Create a new YAML node and encode the gRPC schema
+		var node yamlLib.Node
+		err := node.Encode(grpcSpec)
+		if err != nil {
+			utils.LogError(logger, err, "failed to encode gRPC schema to YAML node")
+			return nil, err
+		}
+
+		// Set the node as the spec
+		doc.Spec = node
+		logger.Debug("Successfully encoded gRPC test case")
 	default:
 		utils.LogError(logger, nil, "failed to marshal the testcase into yaml due to invalid kind of testcase")
 		return nil, errors.New("type of testcases is invalid")
@@ -262,85 +340,134 @@ func HasBannedHeaders(object map[string]string, bannedHeaders map[string]string)
 }
 
 func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.TestCase, error) {
-	tc := models.TestCase{
-		Version: yamlTestcase.Version,
-		Kind:    yamlTestcase.Kind,
-		Name:    yamlTestcase.Name,
-		Curl:    yamlTestcase.Curl,
+	tc := &models.TestCase{
+		Version:    yamlTestcase.Version,
+		Kind:       yamlTestcase.Kind,
+		Name:       yamlTestcase.Name,
+		Curl:       yamlTestcase.Curl,
+		Noise:      make(map[string][]string),
+		Assertions: make(map[models.AssertionType]interface{}),
 	}
 
 	switch tc.Kind {
 	case models.HTTP:
-
-		// added this condition for backward compatibility
 		if yamlTestcase.RespType == "" {
 			yamlTestcase.RespType = models.HTTPResponseJSON
 		}
-
 		switch yamlTestcase.RespType {
-		case models.HTTPResponseJSON:
 
-			httpSpec := models.HTTPSchema{}
-			err := yamlTestcase.Spec.Decode(&httpSpec)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal a yaml doc into the http testcase")
+		case models.HTTPResponseJSON:
+			var httpSpec models.HTTPSchema
+			if err := yamlTestcase.Spec.Decode(&httpSpec); err != nil {
+				utils.LogError(logger, err, "failed to decode HTTP JSON spec")
 				return nil, err
 			}
 			tc.Created = httpSpec.Created
 			tc.HTTPReq = httpSpec.Request
 			tc.HTTPResp = httpSpec.Response
-			tc.Noise = map[string][]string{}
-			switch reflect.ValueOf(httpSpec.Assertions["noise"]).Kind() {
-			case reflect.Map:
-				for k, v := range httpSpec.Assertions["noise"].(map[string]interface{}) {
-					tc.Noise[k] = []string{}
-					for _, val := range v.([]interface{}) {
-						tc.Noise[k] = append(tc.Noise[k], val.(string))
+			tc.Description = httpSpec.Metadata["description"]
+
+			// single map-based loop for all assertions
+			for key, raw := range httpSpec.Assertions {
+				tc.Assertions[key] = raw
+				if key == models.NoiseAssertion {
+					noiseMap, ok := raw.(map[models.AssertionType]interface{})
+					if !ok {
+						logger.Warn("noise assertion not in expected map[AssertionType]interface{}", zap.Any("raw", raw))
+						continue
+					}
+					for kt, inner := range noiseMap {
+						field := string(kt)
+						// initialize slice
+						tc.Noise[field] = []string{}
+						arr, ok := inner.([]interface{})
+						if !ok {
+							continue
+						}
+						for _, item := range arr {
+							if s, ok2 := item.(string); ok2 && s != "" {
+								tc.Noise[field] = append(tc.Noise[field], s)
+							}
+						}
 					}
 				}
-			case reflect.Slice:
-				for _, v := range httpSpec.Assertions["noise"].([]interface{}) {
-					tc.Noise[v.(string)] = []string{}
-				}
 			}
+
 		case models.HTTPResponseXML:
-			xmlSpec := models.XMLSchema{}
-			err := yamlTestcase.Spec.Decode(&xmlSpec)
-			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal a yaml doc into the xml testcase")
+			var xmlSpec models.XMLSchema
+			if err := yamlTestcase.Spec.Decode(&xmlSpec); err != nil {
+				utils.LogError(logger, err, "failed to decode HTTP XML spec")
 				return nil, err
 			}
 			tc.Created = xmlSpec.Created
 			tc.HTTPReq = xmlSpec.Request
 			tc.XMLResp = xmlSpec.Response
-			tc.Noise = map[string][]string{}
-			switch reflect.ValueOf(xmlSpec.Assertions["noise"]).Kind() {
-			case reflect.Map:
-				for k, v := range xmlSpec.Assertions["noise"].(map[string]interface{}) {
-					tc.Noise[k] = []string{}
-					for _, val := range v.([]interface{}) {
-						tc.Noise[k] = append(tc.Noise[k], val.(string))
+			tc.Description = xmlSpec.Metadata["description"]
+
+			for key, raw := range xmlSpec.Assertions {
+				tc.Assertions[key] = raw
+				if key == models.NoiseAssertion {
+					noiseMap, ok := raw.(map[models.AssertionType]interface{})
+					if !ok {
+						logger.Warn("noise assertion not in expected map[AssertionType]interface{}", zap.Any("raw", raw))
+						continue
+					}
+					for kt, inner := range noiseMap {
+						field := string(kt)
+						tc.Noise[field] = []string{}
+						arr, ok := inner.([]interface{})
+						if !ok {
+							continue
+						}
+						for _, item := range arr {
+							if s, ok2 := item.(string); ok2 && s != "" {
+								tc.Noise[field] = append(tc.Noise[field], s)
+							}
+						}
 					}
 				}
-			case reflect.Slice:
-				for _, v := range xmlSpec.Assertions["noise"].([]interface{}) {
-					tc.Noise[v.(string)] = []string{}
+			}
+
+		}
+
+	case models.GRPC_EXPORT:
+		var grpcSpec models.GrpcSpec
+		if err := yamlTestcase.Spec.Decode(&grpcSpec); err != nil {
+			utils.LogError(logger, err, "failed to decode gRPC spec")
+			return nil, err
+		}
+		tc.Created = grpcSpec.Created
+		tc.GrpcReq = grpcSpec.GrpcReq
+		tc.GrpcResp = grpcSpec.GrpcResp
+
+		for key, raw := range grpcSpec.Assertions {
+			tc.Assertions[key] = raw
+			if key == models.NoiseAssertion {
+				noiseMap, ok := raw.(map[models.AssertionType]interface{})
+				if !ok {
+					logger.Warn("noise assertion not in expected map[AssertionType]interface{}", zap.Any("raw", raw))
+					continue
+				}
+				for kt, inner := range noiseMap {
+					field := string(kt)
+					tc.Noise[field] = []string{}
+					arr, ok := inner.([]interface{})
+					if !ok {
+						continue
+					}
+					for _, item := range arr {
+						if s, ok2 := item.(string); ok2 && s != "" {
+							tc.Noise[field] = append(tc.Noise[field], s)
+						}
+					}
 				}
 			}
 		}
-	// unmarshal its mocks from yaml docs to go struct
-	case models.GRPC_EXPORT:
-		grpcSpec := models.GrpcSpec{}
-		err := yamlTestcase.Spec.Decode(&grpcSpec)
-		if err != nil {
-			utils.LogError(logger, err, "failed to unmarshal a yaml doc into the gRPC testcase")
-			return nil, err
-		}
-		tc.GrpcReq = grpcSpec.GrpcReq
-		tc.GrpcResp = grpcSpec.GrpcResp
+
 	default:
-		utils.LogError(logger, nil, "failed to unmarshal yaml doc of unknown type", zap.Any("type of yaml doc", tc.Kind))
-		return nil, errors.New("yaml doc of unknown type")
+		utils.LogError(logger, nil, "invalid testcase kind", zap.String("kind", string(tc.Kind)))
+		return nil, errors.New("invalid testcase kind")
 	}
-	return &tc, nil
+
+	return tc, nil
 }

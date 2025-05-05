@@ -15,7 +15,7 @@ import (
 
 func DecodeStmtFetch(_ context.Context, _ *zap.Logger, data []byte) (*mysql.StmtFetchPacket, error) {
 	if len(data) < 9 {
-		return &mysql.StmtFetchPacket{}, errors.New("Data too short for COM_STMT_FETCH")
+		return &mysql.StmtFetchPacket{}, errors.New("data too short for COM_STMT_FETCH")
 	}
 
 	packet := &mysql.StmtFetchPacket{
