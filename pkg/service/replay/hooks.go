@@ -259,7 +259,7 @@ func (h *Hooks) AfterTestRun(_ context.Context, testRunID string, testSetIDs []s
 	return nil
 }
 
-func (h *Hooks) GetConsumedMocks(ctx context.Context, id uint64) ([]string, error) {
+func (h *Hooks) GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error) {
 	consumedMocks, err := h.instrumentation.GetConsumedMocks(ctx, id)
 	if err != nil {
 		h.logger.Error("failed to get consumed mocks", zap.Error(err))
