@@ -32,6 +32,8 @@ var (
 	PassThroughHosts = []string{"^dc\\.services\\.visualstudio\\.com$"}
 )
 
+const MaxFlakinessChecks int = 3
+
 var orangeColorSGR = []color.Attribute{38, 5, 208}
 
 var BaseTime = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)

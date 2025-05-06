@@ -228,14 +228,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.isLastTestSet = true
 		}
 
-		runsLeft := 5
 		if r.config.Test.MustPass {
 			r.config.Test.SkipCoverage = true
 		}
-		maxFailureAttempts := 5
 		var initialFailedTCs map[string]bool
 		flaky := false // only be changed during replay with --must-pass flag set
-		for attempt := 1; attempt <= runsLeft; attempt++ {
+		for attempt := 1; attempt <= models.MaxFlakinessChecks; attempt++ {
 			r.reportDB.ClearTestCaseResults(ctx, testRunID, testSet)
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.AppID, false)
@@ -278,7 +276,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			failedTcIDs := getFailedTCs(tcResults)
 
 			// checking for flakiness when --must-pass flag is not set
-			// else delete the failed testcases and reattempt 3 times
+			// else if --must-pass is set, delete the failed testcases and reattempt 3 times
 			if !r.config.Test.MustPass {
 				// populate the map only once at first iteration for flakiness test
 				if attempt == 1 {
@@ -314,7 +312,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			// this would be executed only when --must-pass flag is set
 			// we would be removing failed testcases
 			// TODO: do not upload report, pass the mustpass boolean down the line
-			if maxFailureAttempts == 0 {
+			if r.config.Test.MaxFailAttempts == 0 {
 				utils.LogError(r.logger, nil, "no. of testset failure occured during rerun reached maximum limit, testset still failing, increase count of maxFailureAttempts", zap.String("testSet", testSet))
 				break
 			}
@@ -326,7 +324,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			if err == nil {
 				// after deleting rerun it 3 times to be sure that no further testcase fails
 				// and if it does then delete those failing testcases and rerun it again 3 times
-				maxFailureAttempts--
+				r.config.Test.MaxFailAttempts--
 				attempt = 1
 			}
 		}
