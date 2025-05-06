@@ -33,13 +33,6 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 	var noise map[string][]string
 	switch tc.Kind {
 	case models.HTTP:
-		respType := models.HTTPResponseJSON
-		isXML := utils.IsXMLResponse(&tc.HTTPResp)
-		if isXML {
-			respType = models.HTTPResponseXML
-		}
-		doc.RespType = respType
-
 		logger.Debug("Encoding HTTP test case")
 		doc.Curl = pkg.MakeCurlCommand(tc.HTTPReq)
 
@@ -68,77 +61,36 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 			}
 		}
 
-		switch respType {
-		case models.HTTPResponseXML:
-			m, err := utils.XMLToMap(tc.HTTPResp.Body)
-			if err != nil {
-				utils.LogError(logger, err, "failed to convert xml to map")
-				return nil, err
-			}
-			xmlSchema := models.XMLSchema{
-				Request: tc.HTTPReq,
-				Response: models.XMLResp{
-					Body:          m,
-					StatusCode:    tc.HTTPResp.StatusCode,
-					Header:        tc.HTTPResp.Header,
-					StatusMessage: tc.HTTPResp.StatusMessage,
-					ProtoMajor:    tc.HTTPResp.ProtoMajor,
-					ProtoMinor:    tc.HTTPResp.ProtoMinor,
-					Binary:        tc.HTTPResp.Binary,
-					Timestamp:     tc.HTTPResp.Timestamp,
-				},
-				Created: tc.Created,
-				// need to check here for type here as well as push in other custom assertions
-				Assertions: func() map[models.AssertionType]interface{} {
-					a := map[models.AssertionType]interface{}{}
-					if len(noise) > 0 {
-						a[models.NoiseAssertion] = noise
-					}
-					return a
-				}(),
-			}
-			if tc.Description != "" {
-				xmlSchema.Metadata = map[string]string{
-					"description": tc.Description,
+		httpSchema := models.HTTPSchema{
+			Request:  tc.HTTPReq,
+			Response: tc.HTTPResp,
+			Created:  tc.Created,
+			// need to check here for type here as well as push in other custom assertions
+			Assertions: func() map[models.AssertionType]interface{} {
+				a := map[models.AssertionType]interface{}{}
+				if len(noise) > 0 {
+					a[models.NoiseAssertion] = noise
 				}
-			}
-			err = doc.Spec.Encode(xmlSchema)
-			if err != nil {
-				utils.LogError(logger, err, "failed to encode testcase into a yaml doc")
-				return nil, err
-			}
-		case models.HTTPResponseJSON:
-			httpSchema := models.HTTPSchema{
-				Request:  tc.HTTPReq,
-				Response: tc.HTTPResp,
-				Created:  tc.Created,
-				// need to check here for type here as well as push in other custom assertions
-				Assertions: func() map[models.AssertionType]interface{} {
-					a := map[models.AssertionType]interface{}{}
-					if len(noise) > 0 {
-						a[models.NoiseAssertion] = noise
-					}
-					for k, v := range tc.Assertions {
-						a[k] = v
-					}
-
-					// Optionally add other custom assertions if needed here
-					// Example:
-					// a[models.StatusCode] = tc.HTTPResp.StatusCode
-
-					return a
-				}(),
-			}
-			if tc.Description != "" {
-				httpSchema.Metadata = map[string]string{
-					"description": tc.Description,
+				for k, v := range tc.Assertions {
+					a[k] = v
 				}
+
+				// Optionally add other custom assertions if needed here
+				// Example:
+				// a[models.StatusCode] = tc.HTTPResp.StatusCode
+
+				return a
+			}(),
+		}
+		if tc.Description != "" {
+			httpSchema.Metadata = map[string]string{
+				"description": tc.Description,
 			}
-			err := doc.Spec.Encode(httpSchema)
-			if err != nil {
-				utils.LogError(logger, err, "failed to encode testcase into a yaml doc")
-				return nil, err
-			}
+		}
+		err = doc.Spec.Encode(httpSchema)
+		if err != nil {
+			utils.LogError(logger, err, "failed to encode testcase into a yaml doc")
+			return nil, err
 		}
 	case models.GRPC_EXPORT:
 		logger.Debug("Encoding gRPC test case")
@@ -351,83 +303,41 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 
 	switch tc.Kind {
 	case models.HTTP:
-		if yamlTestcase.RespType == "" {
-			yamlTestcase.RespType = models.HTTPResponseJSON
+
+		var httpSpec models.HTTPSchema
+		if err := yamlTestcase.Spec.Decode(&httpSpec); err != nil {
+			utils.LogError(logger, err, "failed to decode HTTP JSON spec")
+			return nil, err
 		}
-		switch yamlTestcase.RespType {
+		tc.Created = httpSpec.Created
+		tc.HTTPReq = httpSpec.Request
+		tc.HTTPResp = httpSpec.Response
+		tc.Description = httpSpec.Metadata["description"]
 
-		case models.HTTPResponseJSON:
-			var httpSpec models.HTTPSchema
-			if err := yamlTestcase.Spec.Decode(&httpSpec); err != nil {
-				utils.LogError(logger, err, "failed to decode HTTP JSON spec")
-				return nil, err
-			}
-			tc.Created = httpSpec.Created
-			tc.HTTPReq = httpSpec.Request
-			tc.HTTPResp = httpSpec.Response
-			tc.Description = httpSpec.Metadata["description"]
-
-			// single map-based loop for all assertions
-			for key, raw := range httpSpec.Assertions {
-				tc.Assertions[key] = raw
-				if key == models.NoiseAssertion {
-					noiseMap, ok := raw.(map[models.AssertionType]interface{})
+		// single map-based loop for all assertions
+		for key, raw := range httpSpec.Assertions {
+			tc.Assertions[key] = raw
+			if key == models.NoiseAssertion {
+				noiseMap, ok := raw.(map[models.AssertionType]interface{})
+				if !ok {
+					logger.Warn("noise assertion not in expected map[AssertionType]interface{}", zap.Any("raw", raw))
+					continue
+				}
+				for kt, inner := range noiseMap {
+					field := string(kt)
+					// initialize slice
+					tc.Noise[field] = []string{}
+					arr, ok := inner.([]interface{})
 					if !ok {
-						logger.Warn("noise assertion not in expected map[AssertionType]interface{}", zap.Any("raw", raw))
 						continue
 					}
-					for kt, inner := range noiseMap {
-						field := string(kt)
-						// initialize slice
-						tc.Noise[field] = []string{}
-						arr, ok := inner.([]interface{})
-						if !ok {
-							continue
-						}
-						for _, item := range arr {
-							if s, ok2 := item.(string); ok2 && s != "" {
-								tc.Noise[field] = append(tc.Noise[field], s)
-							}
+					for _, item := range arr {
+						if s, ok2 := item.(string); ok2 && s != "" {
+							tc.Noise[field] = append(tc.Noise[field], s)
 						}
 					}
 				}
 			}
-
-		case models.HTTPResponseXML:
-			var xmlSpec models.XMLSchema
-			if err := yamlTestcase.Spec.Decode(&xmlSpec); err != nil {
-				utils.LogError(logger, err, "failed to decode HTTP XML spec")
-				return nil, err
-			}
-			tc.Created = xmlSpec.Created
-			tc.HTTPReq = xmlSpec.Request
-			tc.XMLResp = xmlSpec.Response
-			tc.Description = xmlSpec.Metadata["description"]
-
-			for key, raw := range xmlSpec.Assertions {
-				tc.Assertions[key] = raw
-				if key == models.NoiseAssertion {
-					noiseMap, ok := raw.(map[models.AssertionType]interface{})
-					if !ok {
-						logger.Warn("noise assertion not in expected map[AssertionType]interface{}", zap.Any("raw", raw))
-						continue
-					}
-					for kt, inner := range noiseMap {
-						field := string(kt)
-						tc.Noise[field] = []string{}
-						arr, ok := inner.([]interface{})
-						if !ok {
-							continue
-						}
-						for _, item := range arr {
-							if s, ok2 := item.(string); ok2 && s != "" {
-								tc.Noise[field] = append(tc.Noise[field], s)
-							}
-						}
-					}
-				}
-			}
-
 		}
 
 	case models.GRPC_EXPORT:
