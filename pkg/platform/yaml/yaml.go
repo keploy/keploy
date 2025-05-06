@@ -22,7 +22,6 @@ type NetworkTrafficDoc struct {
 	Spec         yamlLib.Node   `json:"spec" yaml:"spec"`
 	Curl         string         `json:"curl" yaml:"curl,omitempty"`
 	ConnectionID string         `json:"connectionId" yaml:"connectionId,omitempty"`
-	RespType     string         `json:"respType" yaml:"respType,omitempty"`
 }
 
 // ctxReader wraps an io.Reader with a context for cancellation support

@@ -21,29 +21,11 @@ import (
 )
 
 func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger) (bool, *models.Result) {
-	bodyType := models.BodyTypePlain
+	bodyType := models.Plain
 	if json.Valid([]byte(actualResponse.Body)) {
-		bodyType = models.BodyTypeJSON
+		bodyType = models.JSON
 	}
-	if utils.IsXMLResponse(actualResponse) {
-		bodyType = models.BodyTypeJSON
-		actualResp, err := utils.XMLToMap(actualResponse.Body)
-		if err != nil {
-			utils.LogError(logger, err, "failed to convert xml response to map")
-		}
-		actualRespJSONData, err := json.MarshalIndent(actualResp, "", "  ")
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal xml response to json")
-		}
-		actualResponse.Body = string(actualRespJSONData)
-		expectedRespJSONData, err := json.MarshalIndent(tc.XMLResp.Body, "", "  ")
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal xml response to json")
-		}
-		tc.HTTPResp.Body = string(expectedRespJSONData)
-		tc.HTTPResp.Header = tc.XMLResp.Header
-		tc.HTTPResp.StatusCode = tc.XMLResp.StatusCode
-	}
+
 	pass := true
 	hRes := &[]models.HeaderResult{}
 	res := &models.Result{
@@ -90,7 +72,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := tc.HTTPResp.Body, actualResponse.Body
 	var jsonComparisonResult matcherUtils.JSONComparisonResult
-	if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && bodyType == models.BodyTypeJSON {
+	if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && bodyType == models.JSON {
 		//validate the stored json
 		validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
 		if err != nil {
@@ -318,6 +300,9 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 	return pass, res
 }
+
+// AssertionMatch checks the assertions in the test case against the actual response, if all of the assertions pass, it returns true, it doesn't care about other parameters of the response,
+// and make the test case pass.
 
 func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger *zap.Logger) (bool, *models.Result) {
 	pass := true

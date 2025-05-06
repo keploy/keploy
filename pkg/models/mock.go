@@ -6,6 +6,18 @@ import (
 	"go.keploy.io/server/v2/pkg/models/mysql"
 )
 
+type Kind string
+
+const (
+	HTTP        Kind = "Http"
+	GENERIC     Kind = "Generic"
+	REDIS       Kind = "Redis"
+	MySQL       Kind = "MySQL"
+	Postgres    Kind = "Postgres"
+	GRPC_EXPORT Kind = "gRPC"
+	Mongo       Kind = "Mongo"
+)
+
 type Mock struct {
 	Version      Version      `json:"Version,omitempty" bson:"Version,omitempty"`
 	Name         string       `json:"Name,omitempty" bson:"Name,omitempty"`
@@ -33,7 +45,6 @@ type MockSpec struct {
 	RedisResponses    []Payload         `json:"redisResponses,omitempty" bson:"redis_responses,omitempty"`
 	HTTPReq           *HTTPReq          `json:"Req,omitempty" bson:"http_req,omitempty"`
 	HTTPResp          *HTTPResp         `json:"Res,omitempty" bson:"http_resp,omitempty"`
-	XMLResp           *XMLResp          `json:"XMLResp,omitempty" bson:"xml_resp,omitempty"`
 	Created           int64             `json:"Created,omitempty" bson:"created,omitempty"`
 	MongoRequests     []MongoRequest    `json:"MongoRequests,omitempty" bson:"mongo_requests,omitempty"`
 	MongoResponses    []MongoResponse   `json:"MongoResponses,omitempty" bson:"mongo_responses,omitempty"`
