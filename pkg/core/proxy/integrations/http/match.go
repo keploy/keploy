@@ -66,7 +66,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 
 		shortListed := schemaMatched
 		// Schema match for JSON bodies
-		if IsJSON(input.body) {
+		if pkg.IsJSON(input.body) {
 			bodyMatched, err := h.PerformBodyMatch(ctx, schemaMatched, input.body)
 			if err != nil {
 				return false, nil, err
@@ -118,8 +118,8 @@ func (h *HTTP) MatchBodyType(mockBody string, reqBody []byte) bool {
 	if mockBody == "" && string(reqBody) == "" {
 		return true
 	}
-	mockBodyType := guessContentType([]byte(mockBody))
-	reqBodyType := guessContentType(reqBody)
+	mockBodyType := pkg.GuessContentType([]byte(mockBody))
+	reqBodyType := pkg.GuessContentType(reqBody)
 	return mockBodyType == reqBodyType
 }
 

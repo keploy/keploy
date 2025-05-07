@@ -190,8 +190,16 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			}
 		}
 
+		actRespBodyType := pkg.GuessContentType([]byte(actualResponse.Body))
+		expRespBodyType := pkg.GuessContentType([]byte(tc.HTTPResp.Body))
+
 		if !res.BodyResult[0].Normal {
-			if json.Valid([]byte(actualResponse.Body)) {
+			if actRespBodyType != expRespBodyType {
+				actRespBodyType = models.UnknownType
+			}
+
+			switch actRespBodyType {
+			case models.JSONType:
 				patch, err := jsondiff.Compare(tc.HTTPResp.Body, actualResponse.Body)
 				if err != nil {
 					logger.Warn("failed to compute json diff", zap.Error(err))
@@ -261,7 +269,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 					}
 					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
 				}
-			} else {
+			default: // right now for every other type we would do a simple comparison, till we don't have dedicated logic for other types.
 				if tc.HTTPResp.Body != actualResponse.Body {
 					isBodyMismatch = true
 				}

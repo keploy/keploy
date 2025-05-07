@@ -46,3 +46,15 @@ type HTTPResp struct {
 	Binary        string            `json:"binary" yaml:"binary,omitempty"`
 	Timestamp     time.Time         `json:"timestamp" yaml:"timestamp"`
 }
+
+type ContentType string
+
+// Constants for different content types.
+const (
+	UnknownType ContentType = "Unknown"
+	JSONType    ContentType = "JSON"
+	XMLType     ContentType = "XML"
+	CSVType     ContentType = "CSV"
+	HTMLType    ContentType = "HTML"
+	TextPlain   ContentType = "TextPlain"
+)
