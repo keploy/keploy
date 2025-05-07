@@ -199,7 +199,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			}
 
 			switch actRespBodyType {
-			case models.JSONType:
+			case models.JSON:
 				patch, err := jsondiff.Compare(tc.HTTPResp.Body, actualResponse.Body)
 				if err != nil {
 					logger.Warn("failed to compute json diff", zap.Error(err))

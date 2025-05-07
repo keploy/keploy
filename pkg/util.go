@@ -510,23 +510,23 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 	return filteredMocks, unfilteredMocks
 }
 
-func GuessContentType(data []byte) models.ContentType {
+func GuessContentType(data []byte) models.BodyType {
 	// Use net/http library's DetectContentType for basic MIME type detection
 	mimeType := http.DetectContentType(data)
 
 	// Additional checks to further specify the content type
 	switch {
 	case IsJSON(data):
-		return models.JSONType
+		return models.JSON
 	case IsXML(data):
-		return models.XMLType
+		return models.XML
 	case strings.Contains(mimeType, "text/html"):
-		return models.HTMLType
+		return models.HTML
 	case strings.Contains(mimeType, "text/plain"):
 		if IsCSV(data) {
-			return models.CSVType
+			return models.CSV
 		}
-		return models.TextPlain
+		return models.Plain
 	}
 
 	return models.UnknownType
