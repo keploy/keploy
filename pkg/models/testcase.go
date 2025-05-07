@@ -9,13 +9,15 @@ const V1Beta1 = Version("api.keploy.io/v1beta1")
 const (
 	JSON            BodyType = "JSON"
 	XML             BodyType = "XML"
-	Text            BodyType = "TEXT"
+	HTML            BodyType = "HTML"
+	CSV             BodyType = "CSV"
 	Plain           BodyType = "PLAIN"
 	Utf8            BodyType = "utf-8"
 	Binary          BodyType = "BINARY"
 	GrpcCompression BodyType = "GRPC_COMPRESSION"
 	GrpcLength      BodyType = "GRPC_LENGTH"
 	GrpcData        BodyType = "GRPC_DATA"
+	UnknownType     BodyType = "UNKNOWN"
 )
 
 var (
