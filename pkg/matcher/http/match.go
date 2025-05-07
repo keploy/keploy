@@ -262,6 +262,9 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
 				}
 			} else {
+				if tc.HTTPResp.Body != actualResponse.Body {
+					isBodyMismatch = true
+				}
 				logDiffs.PushBodyDiff(fmt.Sprint(tc.HTTPResp.Body), fmt.Sprint(actualResponse.Body), bodyNoise)
 			}
 		}
