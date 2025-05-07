@@ -11,7 +11,6 @@ const (
 	XML             BodyType = "XML"
 	HTML            BodyType = "HTML"
 	CSV             BodyType = "CSV"
-	Text            BodyType = "TEXT"
 	Plain           BodyType = "PLAIN"
 	Utf8            BodyType = "utf-8"
 	Binary          BodyType = "BINARY"
