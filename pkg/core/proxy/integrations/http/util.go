@@ -3,12 +3,9 @@ package http
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
-	"encoding/xml"
 	"io"
 	"net/http"
 	"regexp"
-	"strings"
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
@@ -91,60 +88,6 @@ func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 	}
 
 	return passThrough
-}
-
-func IsJSON(body []byte) bool {
-	var js interface{}
-	return json.Unmarshal(body, &js) == nil
-}
-
-func IsXML(data []byte) bool {
-	var xm xml.Name
-	return xml.Unmarshal(data, &xm) == nil
-}
-
-// IsCSV checks if data can be parsed as CSV by looking for common characteristics
-func IsCSV(data []byte) bool {
-	// Very simple CSV check: look for commas in the first line
-	content := string(data)
-	if lines := strings.Split(content, "\n"); len(lines) > 0 {
-		return strings.Contains(lines[0], ",")
-	}
-	return false
-}
-
-type ContentType string
-
-// Constants for different content types.
-const (
-	Unknown   ContentType = "Unknown"
-	JSON      ContentType = "JSON"
-	XML       ContentType = "XML"
-	CSV       ContentType = "CSV"
-	HTML      ContentType = "HTML"
-	TextPlain ContentType = "TextPlain"
-)
-
-func guessContentType(data []byte) ContentType {
-	// Use net/http library's DetectContentType for basic MIME type detection
-	mimeType := http.DetectContentType(data)
-
-	// Additional checks to further specify the content type
-	switch {
-	case IsJSON(data):
-		return JSON
-	case IsXML(data):
-		return XML
-	case strings.Contains(mimeType, "text/html"):
-		return HTML
-	case strings.Contains(mimeType, "text/plain"):
-		if IsCSV(data) {
-			return CSV
-		}
-		return TextPlain
-	}
-
-	return Unknown
 }
 
 func encode(buffer []byte) string {

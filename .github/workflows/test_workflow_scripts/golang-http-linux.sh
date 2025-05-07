@@ -51,6 +51,12 @@ send_request() {
     
     curl -s -X GET http://localhost:8080/api/pokemon/$pokemon
 
+    curl -s -X GET http://localhost:8080/api/greet
+
+    curl -s -X GET http://localhost:8080/api/greet?format=html
+
+    curl -s -X GET http://localhost:8080/api/greet?format=xml
+
     # Wait for 10 seconds for Keploy to record the tcs and mocks.
     sleep 10
     pid=$(pgrep keploy)
