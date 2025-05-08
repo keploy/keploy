@@ -133,6 +133,7 @@ type Test struct {
 	UpdateTemplate      bool                `json:"updateTemplate" yaml:"updateTemplate" mapstructure:"updateTemplate"`
 	MustPass            bool                `json:"mustPass" yaml:"mustPass" mapstructure:"mustPass"`
 	MaxFailAttempts     uint32              `json:"maxFailAttempts" yaml:"maxFailAttempts" mapstructure:"maxFailAttempts"`
+	MaxFlakyChecks      uint32              `json:"maxFlakyChecks" yaml:"maxFlakyChecks" mapstructure:"maxFlakyChecks"`
 }
 
 type Language string

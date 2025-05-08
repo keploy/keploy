@@ -300,7 +300,8 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 			cmd.Flags().Bool("useLocalMock", false, "Use local mocks instead of fetching from the cloud")
 			cmd.Flags().Bool("disable-line-coverage", c.cfg.Test.DisableLineCoverage, "Disable line coverage generation.")
 			cmd.Flags().Bool("must-pass", c.cfg.Test.MustPass, "enforces that the tests must pass, if it doesn't remove failing testcases")
-			cmd.Flags().Uint32("max-fail-attempts", c.cfg.Test.MaxFailAttempts, "maximum number of testset failure that can occur during rerun")
+			cmd.Flags().Uint32Var(&c.cfg.Test.MaxFailAttempts, "max-fail-attempts", 5, "maximum number of testset failure that can occur during rerun")
+			cmd.Flags().Uint32Var(&c.cfg.Test.MaxFlakyChecks, "flaky-check-attempts", 3, "maximum number of retries to check for flakiness")
 		}
 	}
 }
