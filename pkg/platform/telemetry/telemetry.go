@@ -97,7 +97,7 @@ func (tel *Telemetry) RecordedTestSuite(testSet string, testsTotal int, mockTota
 func (tel *Telemetry) RecordedTestAndMocks() {
 	dataMap := &sync.Map{}
 	mapcheck := make(map[string]int)
-	dataMap.Store("mocks", mapcheck) // Storing 0 instead of an empty map
+	dataMap.Store("mocks", mapcheck)
 	go tel.SendTelemetry("RecordedTestAndMocks", dataMap)
 }
 
@@ -136,12 +136,12 @@ func (tel *Telemetry) SendTelemetry(eventType string, output ...*sync.Map) {
 		}
 
 		hasGlobalMap := false
-        tel.GlobalMap.Range(func(key, value interface{}) bool {
-            hasGlobalMap = true
-            return false // Stop iteration after finding the first element
-        })
+		tel.GlobalMap.Range(func(key, value interface{}) bool {
+			hasGlobalMap = true
+			return false // Stop iteration after finding the first element
+		})
 
-        if hasGlobalMap {
+		if hasGlobalMap {
 			// event.Meta["global-map"] = syncMapToMap(tel.GlobalMap)
 			// If you want to nest the global map, you can do this (but the telemetry
 			// endpoint needs to support nested sync.Maps):

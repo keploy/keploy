@@ -3,7 +3,6 @@ package provider
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 
 	"go.keploy.io/server/v2/config"
@@ -39,7 +38,6 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 		GlobalMap:      TeleGlobalMap,
 		InstallationID: n.cfg.InstallationID,
 	})
-	fmt.Println("here is global map", TeleGlobalMap)
 	tel.Ping()
 
 	switch cmd {
