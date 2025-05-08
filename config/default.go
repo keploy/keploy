@@ -1,7 +1,10 @@
 package config
 
 import (
-	yaml3 "gopkg.in/yaml.v3"
+	"fmt"
+	"time"
+
+	"github.com/spf13/viper"
 	"sigs.k8s.io/kustomize/kyaml/yaml"
 	"sigs.k8s.io/kustomize/kyaml/yaml/merge2"
 	"sigs.k8s.io/kustomize/kyaml/yaml/walk"
@@ -24,17 +27,17 @@ disableTele: false
 generateGithubActions: false
 containerName: ""
 networkName: ""
-buildDelay: 30
+buildDelay: 30s
 test:
   selectedTests: {}
   ignoredTests: {}
   globalNoise:
     global: {}
     test-sets: {}
-  delay: 5
+  delay: 5s
   host: ""
   port: 0
-  apiTimeout: 5
+  apiTimeout: 5s
   skipCoverage: false
   coverageReportPath: ""
   ignoreOrdering: true
@@ -85,17 +88,36 @@ cmdType: "native"
 
 var config = &Config{}
 
-func New() *Config {
-	// merge default config with internal config
-	mergedConfig, err := Merge(defaultConfig, InternalConfig)
-	if err != nil {
-		panic(err)
+func New() (*Config, error) {
+	defaultCfg := &Config{
+		BuildDelay: 30 * time.Second,
+		Record:     Record{},
+		Test: Test{
+			Delay:      5 * time.Second,
+			APITimeout: 5 * time.Second,
+		},
 	}
-	err = yaml3.Unmarshal([]byte(mergedConfig), config)
-	if err != nil {
-		panic(err)
+
+	v := viper.New()
+	v.SetConfigType("yaml")
+
+	if err := v.MergeConfigMap(map[string]any{
+		"record": map[string]any{},
+		"test": map[string]any{
+			"delay":      defaultCfg.Test.Delay.String(),
+			"apiTimeout": defaultCfg.Test.APITimeout.String(),
+		},
+		"buildDelay": defaultCfg.BuildDelay.String(),
+	}); err != nil {
+		return nil, fmt.Errorf("failed to merge default config map: %w", err)
 	}
-	return config
+
+	var finalCfg Config
+	if err := v.Unmarshal(&finalCfg); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+	}
+
+	return &finalCfg, nil
 }
 
 func Merge(srcStr, destStr string) (string, error) {

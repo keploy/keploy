@@ -238,7 +238,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
 		cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command to start the user application (native/docker/docker-compose)")
-		cmd.Flags().Uint64P("build-delay", "b", c.cfg.BuildDelay, "User provided time to wait docker container build")
+		cmd.Flags().DurationP("build-delay", "b", c.cfg.BuildDelay, "User provided time to wait for docker container build (e.g., \"30s\", \"2m\")")
 		cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
 		cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the application's docker network")
 		cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server and ignore the traffic")
@@ -283,8 +283,8 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().String("host", c.cfg.Test.Host, "Custom host to replace the actual host in the testcases")
 		cmd.Flags().Uint32("port", c.cfg.Test.Port, "Custom port to replace the actual port in the testcases")
 		if cmd.Name() == "test" {
-			cmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
-			cmd.Flags().Uint64("api-timeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
+			cmd.Flags().DurationP("delay", "d", c.cfg.Test.Delay, "User provided time to run its application (e.g., \"10s\", \"1m\")")
+			cmd.Flags().Duration("api-timeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application (e.g., \"30s\", \"2m\")")
 			cmd.Flags().String("mongo-password", c.cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")
 			cmd.Flags().String("coverage-report-path", c.cfg.Test.CoverageReportPath, "Write a go coverage profile to the file in the given directory.")
 			cmd.Flags().VarP(&c.cfg.Test.Language, "language", "l", "Application programming language")
@@ -601,6 +601,19 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil
 		}
 
+		delay, err := cmd.Flags().GetDuration("delay")
+		if err == nil && cmd.Flags().Changed("delay") {
+			c.cfg.Test.Delay = delay
+		}
+		buildDelay, err := cmd.Flags().GetDuration("build-delay")
+		if err == nil && cmd.Flags().Changed("build-delay") {
+			c.cfg.BuildDelay = buildDelay
+		}
+		apiTimeout, err := cmd.Flags().GetDuration("api-timeout")
+		if err == nil && cmd.Flags().Changed("api-timeout") {
+			c.cfg.Test.APITimeout = apiTimeout
+		}
+
 		// set the command type
 		c.cfg.CommandType = string(utils.FindDockerCmd(c.cfg.Command))
 
@@ -643,9 +656,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 			// check if the buildDelay is less than 30 seconds
-			if time.Duration(c.cfg.BuildDelay)*time.Second <= 30*time.Second {
+			if c.cfg.BuildDelay <= 30*time.Second {
 				c.logger.Warn(fmt.Sprintf("buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay", c.cfg.BuildDelay))
-				c.logger.Info(`Example usage: keploy record -c "docker-compose up --build" --buildDelay 35`)
+				c.logger.Info(`Example usage: keploy record -c "docker-compose up --build" --buildDelay 35s`)
 			}
 			if utils.CmdType(c.cfg.Command) == utils.DockerCompose {
 				if c.cfg.ContainerName == "" {
@@ -655,7 +668,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 		}
-		err := StartInDocker(ctx, c.logger, c.cfg)
+		err = StartInDocker(ctx, c.logger, c.cfg)
 		if err != nil {
 			return err
 		}
@@ -722,10 +735,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				c.cfg.Test.SkipCoverage = true
 			}
 
-			if c.cfg.Test.Delay <= 5 {
-				c.logger.Warn(fmt.Sprintf("Delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay", c.cfg.Test.Delay))
+			if c.cfg.Test.Delay <= 5*time.Second {
+				c.logger.Warn(fmt.Sprintf("Delay is set to %v, incase your app takes more time to start use --delay to set custom delay", c.cfg.Test.Delay))
 				if c.cfg.InDocker {
-					c.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
+					c.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6s`)
 				} else {
 					c.logger.Info("Example usage: " + cmd.Example)
 				}
