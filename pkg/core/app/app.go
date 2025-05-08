@@ -477,8 +477,10 @@ func (a *App) run(ctx context.Context) models.AppError {
 	if cmdErr.Err != nil {
 		switch cmdErr.Type {
 		case utils.Init:
+			a.logger.Error("command initialization error", zap.Error(cmdErr.Err), zap.String("command", userCmd))
 			return models.AppError{AppErrorType: models.ErrCommandError, Err: cmdErr.Err}
 		case utils.Runtime:
+			a.logger.Warn("runtime error occurred", zap.Error(cmdErr.Err), zap.String("command", userCmd))
 			err = cmdErr.Err
 		}
 	}
