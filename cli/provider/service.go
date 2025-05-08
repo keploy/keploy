@@ -3,6 +3,8 @@ package provider
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
@@ -13,7 +15,7 @@ import (
 	"go.uber.org/zap"
 )
 
-var TeleGlobalMap = make(map[string]interface{})
+var TeleGlobalMap sync.Map
 
 type ServiceProvider struct {
 	logger *zap.Logger
@@ -37,6 +39,7 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 		GlobalMap:      TeleGlobalMap,
 		InstallationID: n.cfg.InstallationID,
 	})
+	fmt.Println("here is global map", TeleGlobalMap)
 	tel.Ping()
 
 	switch cmd {

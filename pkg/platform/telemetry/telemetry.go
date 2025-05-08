@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"net/http"
 	"runtime"
+	"sync"
 	"time"
 
 	"go.keploy.io/server/v2/pkg/models"
@@ -19,14 +20,14 @@ type Telemetry struct {
 	logger         *zap.Logger
 	InstallationID string
 	KeployVersion  string
-	GlobalMap      map[string]interface{}
+	GlobalMap      sync.Map
 	client         *http.Client
 }
 
 type Options struct {
 	Enabled        bool
 	Version        string
-	GlobalMap      map[string]interface{}
+	GlobalMap      sync.Map
 	InstallationID string
 }
 
@@ -54,53 +55,102 @@ func (tel *Telemetry) Ping() {
 }
 
 func (tel *Telemetry) TestSetRun(success int, failure int, testSet string, runStatus string) {
-	go tel.SendTelemetry("TestSetRun", map[string]interface{}{"Passed-Tests": success, "Failed-Tests": failure, "Test-Set": testSet, "Run-Status": runStatus})
+	dataMap := &sync.Map{}
+	dataMap.Store("Passed-Tests", success)
+	dataMap.Store("Failed-Tests", failure)
+	dataMap.Store("Test-Set", testSet)
+	dataMap.Store("Run-Status", runStatus)
+	go tel.SendTelemetry("TestSetRun", dataMap)
 }
 
 func (tel *Telemetry) TestRun(success int, failure int, testSets int, runStatus string) {
-	go tel.SendTelemetry("TestRun", map[string]interface{}{"Passed-Tests": success, "Failed-Tests": failure, "Test-Sets": testSets, "Run-Status": runStatus})
+	dataMap := &sync.Map{}
+	dataMap.Store("Passed-Tests", success)
+	dataMap.Store("Failed-Tests", failure)
+	dataMap.Store("Test-Sets", testSets)
+	dataMap.Store("Run-Status", runStatus)
+	go tel.SendTelemetry("TestRun", dataMap)
 }
 
 // MockTestRun is Telemetry event for the Mocking feature test run
 func (tel *Telemetry) MockTestRun(utilizedMocks int) {
-	go tel.SendTelemetry("MockTestRun", map[string]interface{}{"Utilized-Mocks": utilizedMocks})
+	dataMap := &sync.Map{}
+	dataMap.Store("Utilized-Mocks", utilizedMocks)
+	go tel.SendTelemetry("MockTestRun", dataMap)
 }
 
 // RecordedTestSuite is Telemetry event for the tests and mocks that are recorded
 func (tel *Telemetry) RecordedTestSuite(testSet string, testsTotal int, mockTotal map[string]int) {
-	go tel.SendTelemetry("RecordedTestSuite", map[string]interface{}{"test-set": testSet, "tests": testsTotal, "mocks": mockTotal})
+	dataMap := &sync.Map{}
+	dataMap.Store("test-set", testSet)
+	dataMap.Store("tests", testsTotal)
+
+	mockMap := &sync.Map{}
+	for k, v := range mockTotal {
+		mockMap.Store(k, v)
+	}
+	dataMap.Store("mocks", mockMap)
+
+	go tel.SendTelemetry("RecordedTestSuite", dataMap)
 }
 
 func (tel *Telemetry) RecordedTestAndMocks() {
-	go tel.SendTelemetry("RecordedTestAndMocks", map[string]interface{}{"mocks": make(map[string]int)})
+	dataMap := &sync.Map{}
+	mapcheck := make(map[string]int)
+	dataMap.Store("mocks", mapcheck) // Storing 0 instead of an empty map
+	go tel.SendTelemetry("RecordedTestAndMocks", dataMap)
 }
 
 func (tel *Telemetry) GenerateUT() {
-	go tel.SendTelemetry("GenerateUT")
+	dataMap := &sync.Map{}
+	go tel.SendTelemetry("GenerateUT", dataMap)
 }
 
 // RecordedMocks is Telemetry event for the mocks that are recorded in the mocking feature
 func (tel *Telemetry) RecordedMocks(mockTotal map[string]int) {
-	go tel.SendTelemetry("RecordedMocks", map[string]interface{}{"mocks": mockTotal})
+	mockMap := &sync.Map{}
+	for k, v := range mockTotal {
+		mockMap.Store(k, v)
+	}
+	dataMap := &sync.Map{}
+	dataMap.Store("mocks", mockMap)
+	go tel.SendTelemetry("RecordedMocks", dataMap)
 }
 
 func (tel *Telemetry) RecordedTestCaseMock(mockType string) {
-	go tel.SendTelemetry("RecordedTestCaseMock", map[string]interface{}{"mock": mockType})
+	dataMap := &sync.Map{}
+	dataMap.Store("mock", mockType)
+	go tel.SendTelemetry("RecordedTestCaseMock", dataMap)
 }
 
-func (tel *Telemetry) SendTelemetry(eventType string, output ...map[string]interface{}) {
+func (tel *Telemetry) SendTelemetry(eventType string, output ...*sync.Map) {
 	if tel.Enabled {
 		event := models.TeleEvent{
 			EventType: eventType,
 			CreatedAt: time.Now().Unix(),
 		}
-		event.Meta = make(map[string]interface{})
-		if len(output) != 0 {
+		if len(output) > 0 {
 			event.Meta = output[0]
+		} else {
+			event.Meta = &sync.Map{}
 		}
 
-		if tel.GlobalMap != nil {
-			event.Meta["global-map"] = tel.GlobalMap
+		hasGlobalMap := false
+        tel.GlobalMap.Range(func(key, value interface{}) bool {
+            hasGlobalMap = true
+            return false // Stop iteration after finding the first element
+        })
+
+        if hasGlobalMap {
+			// event.Meta["global-map"] = syncMapToMap(tel.GlobalMap)
+			// If you want to nest the global map, you can do this (but the telemetry
+			// endpoint needs to support nested sync.Maps):
+			// event.Meta.Store("global-map", tel.GlobalMap)
+			// Otherwise, merge the global map into the event's meta map
+			tel.GlobalMap.Range(func(key, value interface{}) bool {
+				event.Meta.Store(key, value)
+				return true
+			})
 		}
 
 		event.InstallationID = tel.InstallationID
