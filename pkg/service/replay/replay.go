@@ -234,6 +234,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 		var initialFailedTCs map[string]bool
 		flaky := false // only be changed during replay with --must-pass flag set
 		for attempt := 1; attempt <= int(r.config.Test.MaxFlakyChecks); attempt++ {
+			// clearing testcase from map is required for 2 reasons:
+			// 1st: in next attempt, we need to append results in a fresh array,
+			// rather than appending in the old array which would contain outdated tc results.
+			// 2nd: in must-pass mode, we delete the failed testcases from the map
+			// if the array has some failed testcases, which has already been removed, then not cleaning
+			// the array would mean deleting the already deleted failed testcases again (error).
 			r.reportDB.ClearTestCaseResults(ctx, testRunID, testSet)
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.AppID, false)
@@ -289,7 +295,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 				// checking if there is no mismatch in failed testcases across max retries
 				// check both length and value
 				if len(failedTcIDs) != len(initialFailedTCs) {
-					utils.LogError(r.logger, nil, "the testset is flaky, rerun the testset with --must-pass flag to remove flaky testcases")
+					utils.LogError(r.logger, nil, "the testset is flaky, rerun the testset with --must-pass flag to remove flaky testcases", zap.String("testSet", testSet))
 					// don't run more attempts if the testset is flaky
 					flakyTestSets = append(flakyTestSets, testSet)
 					break
@@ -297,7 +303,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 				for _, id := range failedTcIDs {
 					if _, ok := initialFailedTCs[id]; !ok {
 						flaky = true
-						utils.LogError(r.logger, nil, "the testset is flaky, rerun the testset with --must-pass flag to remove flaky testcases")
+						utils.LogError(r.logger, nil, "the testset is flaky, rerun the testset with --must-pass flag to remove flaky testcases", zap.String("testSet", testSet))
 						break
 					}
 				}
