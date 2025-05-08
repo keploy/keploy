@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"io/fs"
@@ -507,4 +508,46 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
 	}
 	return filteredMocks, unfilteredMocks
+}
+
+func GuessContentType(data []byte) models.BodyType {
+	// Use net/http library's DetectContentType for basic MIME type detection
+	mimeType := http.DetectContentType(data)
+
+	// Additional checks to further specify the content type
+	switch {
+	case IsJSON(data):
+		return models.JSON
+	case IsXML(data):
+		return models.XML
+	case strings.Contains(mimeType, "text/html"):
+		return models.HTML
+	case strings.Contains(mimeType, "text/plain"):
+		if IsCSV(data) {
+			return models.CSV
+		}
+		return models.Plain
+	}
+
+	return models.UnknownType
+}
+
+func IsJSON(body []byte) bool {
+	var js interface{}
+	return json.Unmarshal(body, &js) == nil
+}
+
+func IsXML(data []byte) bool {
+	var xm xml.Name
+	return xml.Unmarshal(data, &xm) == nil
+}
+
+// IsCSV checks if data can be parsed as CSV by looking for common characteristics
+func IsCSV(data []byte) bool {
+	// Very simple CSV check: look for commas in the first line
+	content := string(data)
+	if lines := strings.Split(content, "\n"); len(lines) > 0 {
+		return strings.Contains(lines[0], ",")
+	}
+	return false
 }

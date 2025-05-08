@@ -26,7 +26,6 @@ import (
 	"golang.org/x/text/language"
 
 	"github.com/getsentry/sentry-go"
-	"github.com/sbabiv/xml2map"
 	netLib "github.com/shirou/gopsutil/v3/net"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -1014,13 +1013,21 @@ func IsXMLResponse(resp *models.HTTPResp) bool {
 	return strings.Contains(contentType, "application/xml") || strings.Contains(contentType, "text/xml")
 }
 
-// XMLToMap converts an XML string into a map[string]interface{}
-func XMLToMap(xmlData string) (map[string]interface{}, error) {
-	// Convert XML to map[string]interface{}
-	m, err := xml2map.NewDecoder(strings.NewReader(xmlData)).Decode()
-	if err != nil {
-		return nil, err
-	}
+// // XMLToMap converts an XML string into a map[string]interface{}
+// func XMLToMap(data string) (map[string]any, error) {
+// 	mv, err := mxj.NewMapXml([]byte(data))
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	return mv, nil
+// }
 
-	return m, nil
-}
+// // MapToXML converts a map[string]interface{} into an XML string
+// func MapToXML(data map[string]any) (string, error) {
+// 	mv := mxj.Map(data)
+// 	xmlBytes, err := mv.Xml()
+// 	if err != nil {
+// 		return "", err
+// 	}
+// 	return string(xmlBytes), nil
+// }
