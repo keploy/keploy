@@ -323,6 +323,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 			if err := r.testDB.DeleteTests(ctx, testSet, failedTcIDs); err != nil {
 				utils.LogError(r.logger, err, "failed to delete failing testcases", zap.String("testSet", testSet), zap.Any("testCaseIDs", failedTcIDs))
+				break
 			}
 			if err == nil {
 				// after deleting rerun it maxFlakyChecks times to be sure that no further testcase fails
