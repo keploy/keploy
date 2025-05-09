@@ -344,12 +344,10 @@ func (r *Replayer) Start(ctx context.Context) error {
 				utils.LogError(r.logger, err, "failed to delete failing testcases", zap.String("testSet", testSet), zap.Any("testCaseIDs", failedTcIDs))
 				break
 			}
-			if err == nil {
-				// after deleting rerun it maxFlakyChecks times to be sure that no further testcase fails
-				// and if it does then delete those failing testcases and rerun it again maxFlakyChecks times
-				r.config.Test.MaxFailAttempts--
-				attempt = 0
-			}
+			// after deleting rerun it maxFlakyChecks times to be sure that no further testcase fails
+			// and if it does then delete those failing testcases and rerun it again maxFlakyChecks times
+			r.config.Test.MaxFailAttempts--
+			attempt = 0
 		}
 
 		if abortTestRun {
