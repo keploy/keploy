@@ -228,9 +228,15 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.isLastTestSet = true
 		}
 
+		var (
+			initTotal, initPassed, initFailed, initIgnored int
+			initTimeTaken                                  time.Duration
+		)
+
 		var initialFailedTCs map[string]bool
 		flaky := false // only be changed during replay with --must-pass flag set
 		for attempt := 1; attempt <= int(r.config.Test.MaxFlakyChecks); attempt++ {
+
 			// clearing testcase from map is required for 2 reasons:
 			// 1st: in next attempt, we need to append results in a fresh array,
 			// rather than appending in the old array which would contain outdated tc results.
@@ -238,6 +244,15 @@ func (r *Replayer) Start(ctx context.Context) error {
 			// if the array has some failed testcases, which has already been removed, then not cleaning
 			// the array would mean deleting the already deleted failed testcases again (error).
 			r.reportDB.ClearTestCaseResults(ctx, testRunID, testSet)
+
+			// overwrite with values before testset run, so after all reruns we don't get a cummulative value
+			// gathered from reruning, instead only metrics from the last rerun would get added to the varaibles.
+			totalTests = initTotal
+			totalTestPassed = initPassed
+			totalTestFailed = initFailed
+			totalTestIgnored = initIgnored
+			totalTestTimeTaken = initTimeTaken
+
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.AppID, false)
 			if err != nil {
@@ -314,11 +329,15 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 			// this would be executed only when --must-pass flag is set
 			// we would be removing failed testcases
-			// TODO: do not upload report, pass the mustpass boolean down the line
 			if r.config.Test.MaxFailAttempts == 0 {
 				utils.LogError(r.logger, nil, "no. of testset failure occured during rerun reached maximum limit, testset still failing, increase count of maxFailureAttempts", zap.String("testSet", testSet))
 				break
 			}
+			if len(failedTcIDs) == 0 {
+				// if no testcase failed in this attempt move to next attempt
+				continue
+			}
+
 			r.logger.Info("deleting failing testcases", zap.String("testSet", testSet), zap.Any("testCaseIDs", failedTcIDs))
 
 			if err := r.testDB.DeleteTests(ctx, testSet, failedTcIDs); err != nil {
