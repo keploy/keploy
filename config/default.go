@@ -49,6 +49,9 @@ test:
   disableMockUpload: true
   useLocalMock: false
   updateTemplate: false
+  mustPass: false
+  maxFailAttempts: 5
+  maxFlakyChecks: 1
 record:
   recordTimer: 0s
   filters: []

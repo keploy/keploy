@@ -8,6 +8,7 @@ import (
 
 	// "encoding/json"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/models"
 )
 
 type TestReportVerdict struct {
@@ -104,4 +105,14 @@ func timeWithUnits(duration time.Duration) string {
 		return fmt.Sprintf("%.2f min", duration.Minutes())
 	}
 	return fmt.Sprintf("%.2f hr", duration.Hours())
+}
+
+func getFailedTCs(results []models.TestResult) []string {
+	ids := make([]string, 0, len(results))
+	for _, r := range results {
+		if r.Status == models.TestStatusFailed {
+			ids = append(ids, r.TestCaseID)
+		}
+	}
+	return ids
 }
