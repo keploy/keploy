@@ -301,7 +301,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 			cmd.Flags().Bool("disable-line-coverage", c.cfg.Test.DisableLineCoverage, "Disable line coverage generation.")
 			cmd.Flags().Bool("must-pass", c.cfg.Test.MustPass, "enforces that the tests must pass, if it doesn't, remove failing testcases")
 			cmd.Flags().Uint32Var(&c.cfg.Test.MaxFailAttempts, "max-fail-attempts", 5, "maximum number of testset failure that can be allowed during must-pass mode")
-			cmd.Flags().Uint32Var(&c.cfg.Test.MaxFlakyChecks, "flaky-check-attempts", 3, "maximum number of retries to check for flakiness")
+			cmd.Flags().Uint32Var(&c.cfg.Test.MaxFlakyChecks, "flaky-check-retry", 1, "maximum number of retries to check for flakiness")
 		}
 	}
 }
@@ -733,6 +733,40 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			if mustPass {
 				c.cfg.Test.SkipCoverage = true
 				c.cfg.Test.DisableMockUpload = true
+			}
+
+			// in mustpass mode, set the maxFlakyChecks count to 3 explicitly,
+			// if it is not set through cmd flag.
+			if mustPass && !cmd.Flags().Changed("flaky-check-retry") {
+				c.cfg.Test.MaxFlakyChecks = 3
+			}
+
+			// if the user passes a value for this field, store it
+			if cmd.Flags().Changed("flaky-check-retry") {
+				c.cfg.Test.MaxFlakyChecks, err = cmd.Flags().GetUint32("flaky-check-retry")
+				if err != nil {
+					errMsg := "failed to get the provided flaky-check-retry count"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+			}
+
+			// if the user passes a value for this field, store it
+			if cmd.Flags().Changed("max-fail-attempts") {
+				c.cfg.Test.MaxFailAttempts, err = cmd.Flags().GetUint32("max-fail-attempts")
+				if err != nil {
+					errMsg := "failed to get the provided max-fail-attempts count"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+			}
+
+			// don't allow zero maxFlakyChecks and if must pass mode is enabled, then maxFailAttempts can't be zero.
+			if c.cfg.Test.MaxFlakyChecks == 0 {
+				return fmt.Errorf("value for maxFlakyChecks cannot be zero")
+			}
+			if mustPass && c.cfg.Test.MaxFailAttempts == 0 {
+				return fmt.Errorf("in must pass mode, value for maxFailAttempts cannot be zero")
 			}
 
 			if mustPass && !cmd.Flags().Changed("test-sets") {

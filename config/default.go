@@ -51,7 +51,7 @@ test:
   updateTemplate: false
   mustPass: false
   maxFailAttempts: 5
-  maxFlakyChecks: 3
+  maxFlakyChecks: 1
 record:
   recordTimer: 0s
   filters: []
