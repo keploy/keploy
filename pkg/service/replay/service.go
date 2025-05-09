@@ -61,7 +61,7 @@ type ReportDB interface {
 	GetReport(ctx context.Context, testRunID string, testSetID string) (*models.TestReport, error)
 	ClearTestCaseResults(_ context.Context, testRunID string, testSetID string)
 	InsertTestCaseResult(ctx context.Context, testRunID string, testSetID string, result *models.TestResult) error // 1
-	InsertReport(ctx context.Context, testRunID string, testSetID string, testReport *models.TestReport) error // 2
+	InsertReport(ctx context.Context, testRunID string, testSetID string, testReport *models.TestReport) error     // 2
 	UpdateReport(ctx context.Context, testRunID string, testCoverage any) error
 }
 
