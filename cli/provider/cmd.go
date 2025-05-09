@@ -299,8 +299,8 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 			cmd.Flags().Bool("disableMockUpload", c.cfg.Test.DisableMockUpload, "Store/Fetch mocks locally")
 			cmd.Flags().Bool("useLocalMock", false, "Use local mocks instead of fetching from the cloud")
 			cmd.Flags().Bool("disable-line-coverage", c.cfg.Test.DisableLineCoverage, "Disable line coverage generation.")
-			cmd.Flags().Bool("must-pass", c.cfg.Test.MustPass, "enforces that the tests must pass, if it doesn't remove failing testcases")
-			cmd.Flags().Uint32Var(&c.cfg.Test.MaxFailAttempts, "max-fail-attempts", 5, "maximum number of testset failure that can occur during rerun")
+			cmd.Flags().Bool("must-pass", c.cfg.Test.MustPass, "enforces that the tests must pass, if it doesn't, remove failing testcases")
+			cmd.Flags().Uint32Var(&c.cfg.Test.MaxFailAttempts, "max-fail-attempts", 5, "maximum number of testset failure that can be allowed during must-pass mode")
 			cmd.Flags().Uint32Var(&c.cfg.Test.MaxFlakyChecks, "flaky-check-attempts", 3, "maximum number of retries to check for flakiness")
 		}
 	}
@@ -721,13 +721,18 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 
 			// enforce that the test-sets are provided when --must-pass is set to true
-			// to prevent accidentel deletion of failed testcases in testsets which was due to application changes
+			// to prevent accidental deletion of failed testcases in testsets which was due to application changes
 			// and not due to flakiness or our internal issue.
 			mustPass, err := cmd.Flags().GetBool("must-pass")
 			if err != nil {
 				errMsg := "failed to get the must-pass flag"
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
+			}
+
+			if mustPass {
+				c.cfg.Test.SkipCoverage = true
+				c.cfg.Test.DisableMockUpload = true
 			}
 
 			if mustPass && !cmd.Flags().Changed("test-sets") {

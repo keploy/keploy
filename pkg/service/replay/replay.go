@@ -228,9 +228,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.isLastTestSet = true
 		}
 
-		if r.config.Test.MustPass {
-			r.config.Test.SkipCoverage = true
-		}
 		var initialFailedTCs map[string]bool
 		flaky := false // only be changed during replay with --must-pass flag set
 		for attempt := 1; attempt <= int(r.config.Test.MaxFlakyChecks); attempt++ {
