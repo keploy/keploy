@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"sync"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
@@ -13,7 +14,7 @@ import (
 	"go.uber.org/zap"
 )
 
-var TeleGlobalMap = make(map[string]interface{})
+var TeleGlobalMap sync.Map
 
 type ServiceProvider struct {
 	logger *zap.Logger

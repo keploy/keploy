@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/charmbracelet/glamour"
 	"go.keploy.io/server/v2/config"
@@ -47,7 +48,7 @@ type Tools struct {
 
 var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
 
-func (t *Tools) SendTelemetry(event string, output ...map[string]interface{}) {
+func (t *Tools) SendTelemetry(event string, output ...*sync.Map) {
 	t.telemetry.SendTelemetry(event, output...)
 }
 
