@@ -348,7 +348,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 				// after deleting rerun it maxFlakyChecks times to be sure that no further testcase fails
 				// and if it does then delete those failing testcases and rerun it again maxFlakyChecks times
 				r.config.Test.MaxFailAttempts--
-				attempt = 1
+				attempt = 0
 			}
 		}
 
