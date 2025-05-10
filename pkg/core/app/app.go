@@ -243,21 +243,36 @@ func (a *App) injectNetwork(network string) error {
 	}
 
 	keployNetworks := inspect.NetworkSettings.Networks
-	//Here we considering that the application would use only one custom network.
-	//TODO: handle for application having multiple custom networks
-	//TODO: check the logic for correctness
-	for n, settings := range keployNetworks {
-		if n == network {
-			a.keployIPv4 = settings.IPAddress
-			a.logger.Info("Successfully injected network to the keploy container", zap.Any("Keploy container", a.keployContainer), zap.Any("appNetwork", network), zap.String("keploy container ip", a.keployIPv4))
-			return nil
-		}
-		//if networkName != "bridge" {
-		//	network = networkName
-		//	newProxyIpString = networkSettings.IPAddress
-		//	a.logger.Debug(fmt.Sprintf("Network Name: %s, New Proxy IP: %s\n", networkName, networkSettings.IPAddress))
-		//}
+	if keployNetworks == nil {
+		return fmt.Errorf("no networks found for the keploy container")
 	}
+
+	// Find the specified network in the container's networks
+	n, ok := keployNetworks[network]
+	if ok && n != nil {
+		a.keployIPv4 = n.IPAddress
+		a.logger.Info("Successfully injected network to the keploy container",
+			zap.String("container", a.keployContainer),
+			zap.String("network", network),
+			zap.String("ip", a.keployIPv4))
+		return nil
+	}
+	/* TODO
+	handle for application having multiple custom networks -> Done
+	check the logic for correctness
+	Change the containerNetwork field to be a slice of strings
+	Modify the keployIPv4 to be a map of network names to IP addresses
+	Update the network-related methods to handle multiple networks
+	*/
+
+	// Log all available networks for debugging
+	availableNetworks := make([]string, 0, len(keployNetworks))
+	for netName := range keployNetworks {
+		availableNetworks = append(availableNetworks, netName)
+	}
+	a.logger.Debug("available networks for keploy container",
+		zap.Strings("networks", availableNetworks))
+
 	return fmt.Errorf("failed to find the network:%v in the keploy container", network)
 }
 
