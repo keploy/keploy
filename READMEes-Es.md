@@ -40,13 +40,14 @@
     <img title="Pull Requests" src="https://img.shields.io/github/issues-pr-closed/Keploy/Keploy?logo=github"/>
   </a>
   <a href="https://github.com/Keploy/Keploy/pulls?q=is%3Apr+is%3Aclosed">
-    <img title="Release Build" src="https://img.shields.io/github/actions/workflow/status/Keploy/Keploy/release.yml?logo=github&label=Release Build"/>
+    <img title="Release Build" src="https://img.shields.io/github/actions/workflow/status/Keploy/Keploy/release.yml?logo=github&label=Release%20Build" />
+</a>
   </a>
   <a href="https://github.com/Keploy/Keploy/blob/main/CONTRIBUTING.md">
     <img src="https://img.shields.io/badge/PRs-Welcome-brightgreen?logo=github" alt="PRs welcome!" />
   </a>
-  <a href="https://github.com/Keploy/Keploy/issues">
-    <img src="https://img.shields.io/github/stars/keploy/keploy?color=%23EAC54F&logo=github&label=Help us reach 4k stars! Now at:" alt="Help us reach 1k stars!" />
+  <a href="https://github.com/Keploy/Keploy/">
+   <img src="https://img.shields.io/github/stars/keploy/keploy?color=%23EAC54F&logo=github&label=Help%20us%20reach%2010K%20stars!%20Now%20at:" alt="Help us reach 10k stars!" />
   </a>
   <a href="https://Keploy.io/docs">
     <img src="https://img.shields.io/badge/Join-Community!-orange" alt="Join our Community!" />
