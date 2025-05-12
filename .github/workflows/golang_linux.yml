@@ -1,14 +1,9 @@
 name: Golang On Linux
 on:
-  workflow_run:
-    workflows: [Prepare Binary]
-    branches: ["**"]
-    types:
-      - completed  
+  workflow_call:
 jobs:
   golang_linux:
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     strategy:
       matrix:
         include:
@@ -25,7 +20,7 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-  
+
     - id: record
       uses: ./.github/actions/download-binary
       with:
@@ -51,4 +46,3 @@ jobs:
       run: |
         cd samples-go/gin-mongo
         source ./../../.github/workflows/test_workflow_scripts/golang-linux.sh
-

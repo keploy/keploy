@@ -3,19 +3,17 @@ on:
   pull_request:
     branches: [main]
 jobs:
-  build-and-download:
+  build-and-upload:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # PR build → artifact
       - name: Build Keploy (PR)
         run: go build -race -tags=viper_bind_struct -o keploy
       - uses: actions/upload-artifact@v4
         with: { name: build, path: keploy }
 
-      # Latest release → artifact (download only once)
-      - name: Fetch latest release
+      - name: Upload latest release
         run: |
           LATEST=$(curl -s https://api.github.com/repos/keploy/keploy/releases/latest | jq -r .tag_name)
           URL="https://github.com/keploy/keploy/releases/download/${LATEST}/keploy_linux_amd64.tar.gz"
@@ -24,3 +22,9 @@ jobs:
           chmod +x keploy
       - uses: actions/upload-artifact@v4
         with: { name: latest, path: keploy }
+  run-workflow-1:
+    needs: build-and-upload
+    uses: ./.github/workflows/golang_linux.yml
+  run-workflow-2:
+    needs: build-and-upload
+    uses: ./.github/workflows/node_linux.yml  

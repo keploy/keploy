@@ -1,14 +1,9 @@
 name: Node on Linux
 on:
-  workflow_run:
-    workflows: [Prepare Binary]
-    branches: ["**"]  
-    types:
-      - completed  
+  workflow_call:
 jobs:
   node_linux:
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     strategy:
       matrix:
         include:
@@ -50,6 +45,6 @@ jobs:
       env:
         RECORD_BIN: ${{ steps.record.outputs.path }}
         REPLAY_BIN: ${{ steps.replay.outputs.path }}
-    run: |
-        cd samples-typescript/express-mongoose
-        source ./../../.github/workflows/test_workflow_scripts/node-linux.sh
+      run: |
+          cd samples-typescript/express-mongoose
+          source ./../../.github/workflows/test_workflow_scripts/node-linux.sh
