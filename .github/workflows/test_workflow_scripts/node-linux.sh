@@ -15,7 +15,7 @@ if [ -f "./keploy.yml" ]; then
 fi
 
 # Generate the keploy-config file.
-sudo ./../../keployv2 config --generate
+sudo $RECORD_BIN config --generate
 
 # Update the global noise to ts.
 config_file="./keploy.yml"
@@ -48,7 +48,7 @@ send_request(){
 for i in {1..2}; do
     app_name="nodeApp_${i}"
     send_request &
-    sudo -E env PATH=$PATH ./../../keployv2 record -c 'npm start'    &> "${app_name}.txt"
+    sudo -E env PATH=$PATH $RECORD_BIN record -c 'npm start'    &> "${app_name}.txt"
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
@@ -68,7 +68,7 @@ mocks_file="keploy/test-set-0/tests/test-5.yaml"
 sed -i 's/"page":1/"page":4/' "$mocks_file"
 
 # Test modes and result checking
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'npm start' --delay 10    &> test_logs1.txt
+sudo -E env PATH=$PATH $REPLAY_BIN test -c 'npm start' --delay 10    &> test_logs1.txt
 
 if grep "ERROR" "test_logs1.txt"; then
     echo "Error found in pipeline..."
