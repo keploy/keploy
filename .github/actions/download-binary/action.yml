@@ -9,6 +9,7 @@ inputs:
 outputs:
   path:
     description: "binary path"
+    value: ${{ steps.set-path.outputs.path }}
 
 runs:
   using: composite
@@ -17,8 +18,10 @@ runs:
       with:
         name: ${{ inputs.src }}
 
-    - shell: bash
+    - name: Set binary path
+      id: set-path
+      shell: bash
       run: |
         ls -l
-        chmod +x ${{ inputs.src }}
-        echo "path=$PWD/${{ inputs.src }}" >> "$GITHUB_OUTPUT"
+        chmod +x keploy
+        echo "path=$PWD/keploy" >> $GITHUB_OUTPUT

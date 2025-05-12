@@ -15,7 +15,7 @@ jobs:
       - name: Build Keploy (PR)
         run: go build -race -tags=viper_bind_struct -o keploy
       - uses: actions/upload-artifact@v4
-        with: { name: build, path: bin/build }
+        with: { name: build, path: keploy }
 
       # Latest release → artifact (download only once)
       - name: Fetch latest release
@@ -26,4 +26,4 @@ jobs:
           tar -xzf keploy.tar.gz
           chmod +x keploy
       - uses: actions/upload-artifact@v4
-        with: { name: latest, path: bin/latest }
+        with: { name: latest, path: keploy }

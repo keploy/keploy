@@ -26,13 +26,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: list directory
+        run: |
+          echo "Listing the current directory"
+          tree ./.github
+
       - id: record
-        uses: ./.github/actions/download-binary/action.yml
+        uses: ./.github/actions/download-binary
         with:
           src: ${{ matrix.record_src }}
 
       - id: replay
-        uses: ./.github/actions/download-binary/action.yml
+        uses: ./.github/actions/download-binary
         with:
           src: ${{ matrix.replay_src }}
 
@@ -41,6 +46,11 @@ jobs:
         with:
           repository: keploy/samples-go
           path: samples-go
+
+      - name: echo record and replay binary
+        run: |
+          echo "Record binary path: ${{ steps.record.outputs.path }}"
+          echo "Replay binary path: ${{ steps.replay.outputs.path }}"
 
       - name: Run go-http application
         env:
