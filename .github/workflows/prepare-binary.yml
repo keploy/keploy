@@ -1,10 +1,7 @@
-name: prepare-binary
+name: Prepare Binary
 on:
-  workflow_call: # other workflows will 'use:' this
-    outputs: # ▶ strings are enough; artifact names never change
-      build: { value: "build" }
-      latest: { value: "latest" }
-
+  pull_request:
+    branches: [main]
 jobs:
   build-and-download:
     runs-on: ubuntu-latest

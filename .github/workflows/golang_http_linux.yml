@@ -1,14 +1,17 @@
 name: Golang(http) On Linux
 on:
-  pull_request:
-    branches: [main]
+  workflow_run:
+    workflows: [Prepare Binary]
+    types:
+      - completed
 jobs:
-  prepare:
-    uses: ./.github/workflows/prepare-binary.yml
+  # prepare:
+  #   uses: ./.github/workflows/prepare-binary.yml
 
   http_golang_linux:
     runs-on: ubuntu-latest
-    needs: prepare
+    # if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # needs: prepare
     strategy:
       matrix:
         include:
@@ -25,11 +28,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: list directory
-        run: |
-          echo "Listing the current directory"
-          tree ./.github
 
       - id: record
         uses: ./.github/actions/download-binary

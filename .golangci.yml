@@ -5,6 +5,12 @@
 version: "2"
 
 linters:
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - unused
   exclusions:
     rules: []
     paths-except:
@@ -14,5 +20,5 @@ linters:
 
 formatters:
   enable:
-    # make sure code is formatted
     - gofmt
+    - goimports

@@ -1,11 +1,40 @@
 name: Golang On Linux
-on: [pull_request]
+on:
+  workflow_run:
+    workflows: [Prepare Binary]
+    branches: ["**"]
+    types:
+      - completed  
 jobs:
   golang_linux:
     runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    strategy:
+      matrix:
+        include:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_latest
+            record_src: build
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: ${{ matrix.job }}
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+  
+    - id: record
+      uses: ./.github/actions/download-binary
+      with:
+        src: ${{ matrix.record_src }}
+
+    - id: replay
+      uses: ./.github/actions/download-binary
+      with:
+        src: ${{ matrix.replay_src }}
 
     - name: Build binary
       run: |
@@ -16,6 +45,9 @@ jobs:
         repository: keploy/samples-go
         path: samples-go
     - name: Run samples-go application
+      env:
+        RECORD_BIN: ${{ steps.record.outputs.path }}
+        REPLAY_BIN: ${{ steps.replay.outputs.path }}
       run: |
         cd samples-go/gin-mongo
         source ./../../.github/workflows/test_workflow_scripts/golang-linux.sh
