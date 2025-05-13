@@ -7,13 +7,13 @@ This document explains:
 3.  **How to create a new sample workflow** that plugs into the system.
 
 ---
-## 1. Why one‑time *build + download*
+## 1. Why one‑time *build + download*
 
 * **Speed** – compile and fetch just once, then every job reuses the two artifacts
-* **Consistency** – all jobs get the exact same *PR binary* and the same *latest release* (avoid “new patch went live mid‑run”).
+* **Consistency** – all jobs get the exact same *PR binary* and the same *latest release* (avoid "new patch went live mid‑run").
 * **Flexibility** – lets the matrix try the two new flows
-  *record latest → replay build*, and, *record build → replay latest* —
-  whereas before we only had, *record build → replay build*.
+  *record latest → replay build*, and, *record build → replay latest* —
+  whereas before we only had, *record build → replay build*.
 
 
 ## 2. Key files
@@ -27,7 +27,7 @@ This document explains:
 
 ---
 
-## 3. Adding a new workflow (check‑list)
+## 3. Adding a new workflow (check‑list)
 
 1. **Copy a sibling sample** (e.g. `golang_linux.yml`) and rename it.
 2. Keep the **matrix** block; change nothing unless you truly need fewer rows.
@@ -41,9 +41,8 @@ This document explains:
    - id: replay
      uses: ./.github/actions/download-binary
      with: { src: ${{ matrix.replay_src }} }
-  ```
+   ```
 5. Pass the paths into your run step:
-
    ```yaml
    env:
      RECORD_BIN: ${{ steps.record.outputs.path }}
@@ -51,7 +50,6 @@ This document explains:
    ```
 6. In the **helper script** you invoke, make sure every `keploy record|test` call uses the 2 env variables passed to it.
 7. Finally, **wire the new workflow** into `prepare_and_run.yml` by adding one line:
-
    ```yaml
    run_my_new_workflow:
      needs: [build-and-upload, upload-latest]
@@ -59,3 +57,9 @@ This document explains:
    ```
 
 ---
+
+## TROUBLESHOOTING
+
+### Analyze github workflow logs:
+
+when a workflow fails, and keploy logs isn't visible, then it might be due to the error happening not in record/replay step, but somewhere else, could be that some referenced binary was not found (exit code 127), could be some permission issues, could be file not found. Look for the exit code to determine what failed, and check the previous successful step to pipe out the line in bash script related to the workflow run.
