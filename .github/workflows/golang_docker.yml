@@ -1,27 +1,50 @@
 name: Golang On Docker
-on: [pull_request]
+on:
+  workflow_call:
 jobs:
   golang_docker:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_latest
+            record_src: build
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: ${{ matrix.job }}
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Run build script
-      run: |
-         source ./.github/workflows/test_workflow_scripts/update-docker.sh
+      - name: Run build script
+        run: |
+          source ./.github/workflows/test_workflow_scripts/update-docker.sh
 
-    - name: Build binary
-      run: |
-        go build -race -tags=viper_bind_struct -o keployv2
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.record_src }}
 
-    - name: Checkout the samples-go repository
-      uses: actions/checkout@v4
-      with:
-        repository: keploy/samples-go
-        path: samples-go
-    - name: Run gin-mongo application
-      run: |
-        cd samples-go/gin-mongo
-        source ./../../.github/workflows/test_workflow_scripts/golang-docker.sh
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.replay_src }}
 
+      - name: Checkout the samples-go repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          path: samples-go
+      - name: Run gin-mongo application
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          cd samples-go/gin-mongo
+          source ./../../.github/workflows/test_workflow_scripts/golang-docker.sh

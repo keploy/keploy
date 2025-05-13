@@ -5,6 +5,7 @@ jobs:
   node_linux:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           - job: record_latest_replay_build
@@ -18,33 +19,29 @@ jobs:
             replay_src: build
     name: ${{ matrix.job }}
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - id: record
-      uses: ./.github/actions/download-binary
-      with:
-        src: ${{ matrix.record_src }}
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.record_src }}
 
-    - id: replay
-      uses: ./.github/actions/download-binary
-      with:
-        src: ${{ matrix.replay_src }}
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.replay_src }}
 
-    - name: Build Keploy binary
-      run: |
-        go build -race -tags=viper_bind_struct -o keployv2
+      - name: Checkout samples-typescript repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-typescript
+          path: samples-typescript
 
-    - name: Checkout samples-typescript repository
-      uses: actions/checkout@v4
-      with:
-        repository: keploy/samples-typescript
-        path: samples-typescript
-
-    - name: Run the express-mongoose app
-      env:
-        RECORD_BIN: ${{ steps.record.outputs.path }}
-        REPLAY_BIN: ${{ steps.replay.outputs.path }}
-      run: |
+      - name: Run the express-mongoose app
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
           cd samples-typescript/express-mongoose
           source ./../../.github/workflows/test_workflow_scripts/node-linux.sh

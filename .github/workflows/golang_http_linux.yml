@@ -1,18 +1,11 @@
 name: Golang(http) On Linux
 on:
-  workflow_run:
-    workflows: [Prepare Binary]
-    types:
-      - completed
+  workflow_call:
 jobs:
-  # prepare:
-  #   uses: ./.github/workflows/prepare-binary.yml
-
   http_golang_linux:
     runs-on: ubuntu-latest
-    # if: ${{ github.event.workflow_run.conclusion == 'success' }}
-    # needs: prepare
     strategy:
+      fail-fast: false
       matrix:
         include:
           - job: record_latest_replay_build
