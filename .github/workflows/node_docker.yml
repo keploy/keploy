@@ -22,9 +22,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Run build script
-        run: |
-          source ./.github/workflows/test_workflow_scripts/update-docker.sh
+      - id: image
+        uses: ./.github/actions/download-image
 
       - id: record
         uses: ./.github/actions/download-binary

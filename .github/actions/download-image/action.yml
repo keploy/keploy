@@ -1,0 +1,12 @@
+name: get-image
+description: "Download image artifact and load it"
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@v4
+      with: { name: keploy-image }
+
+    - id: load
+      shell: bash
+      run: |
+        docker load -i keploy.tar

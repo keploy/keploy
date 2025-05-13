@@ -12,7 +12,7 @@ jobs:
         run: go build -race -tags=viper_bind_struct -o keploy
       - uses: actions/upload-artifact@v4
         with: { name: build, path: keploy }
-  
+
   upload-latest:
     runs-on: ubuntu-latest
     steps:
@@ -26,6 +26,18 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: latest, path: keploy }
 
+  build-docker-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Keploy image
+        run: |
+          source ./.github/workflows/test_workflow_scripts/update-docker.sh
+          docker save ghcr.io/keploy/keploy:v2-dev -o keploy.tar
+      - uses: actions/upload-artifact@v4
+        with: { name: keploy-image, path: keploy.tar }
+
   run_golang_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/golang_linux.yml
@@ -36,10 +48,10 @@ jobs:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/golang_mysql_linux.yml
   run_golang_docker:
-    needs: [build-and-upload, upload-latest]
+    needs: [build-and-upload, upload-latest, build-docker-image]
     uses: ./.github/workflows/golang_docker.yml
   run_golang_docker-compose:
-    needs: [build-and-upload, upload-latest]
+    needs: [build-and-upload, upload-latest, build-docker-image]
     uses: ./.github/workflows/golang_docker-compose.yml
   run_java_linux:
     needs: [build-and-upload, upload-latest]
@@ -48,10 +60,10 @@ jobs:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/node_linux.yml  
   run_node_docker:
-    needs: [build-and-upload, upload-latest]
+    needs: [build-and-upload, upload-latest, build-docker-image]
     uses: ./.github/workflows/node_docker.yml
   run_python_docker:
-    needs: [build-and-upload, upload-latest]
+    needs: [build-and-upload, upload-latest, build-docker-image]
     uses: ./.github/workflows/python_docker.yml
   run_python_linux:
     needs: [build-and-upload, upload-latest]

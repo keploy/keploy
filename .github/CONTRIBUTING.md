@@ -62,4 +62,4 @@ This document explains:
 
 ### Analyze github workflow logs:
 
-when a workflow fails, and keploy logs isn't visible, then it might be due to the error happening not in record/replay step, but somewhere else, could be that some referenced binary was not found (exit code 127), could be some permission issues, could be file not found. Look for the exit code to determine what failed, and check the previous successful step to pipe out the line in bash script related to the workflow run.
+when a workflow fails, and keploy logs isn't visible, then it might be due to the error happening not in record/replay step, but somewhere else, could be that some referenced binary was not found (exit code 127), could be some permission issues, could be file not found. Look for the exit code to determine what failed (https://tldp.org/LDP/abs/html/exitcodes.html), and check the previous successful step to pipe out the line in bash script related to the workflow run.
