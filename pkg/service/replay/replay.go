@@ -253,7 +253,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			totalTestIgnored = initIgnored
 			totalTestTimeTaken = initTimeTaken
 
-			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
+			r.logger.Error("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
 			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.AppID, false)
 			if err != nil {
 				stopReason = fmt.Sprintf("failed to run test set: %v", err)
