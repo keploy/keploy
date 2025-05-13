@@ -22,8 +22,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # - id: image
-      #   uses: ./.github/actions/download-image
+      - id: image
+        uses: ./.github/actions/download-image
 
       - id: record
         uses: ./.github/actions/download-binary

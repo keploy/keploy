@@ -38,33 +38,30 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: keploy-image, path: keploy.tar }
 
-  run_golang_linux:
+  # Run test workflows without Docker dependencies
+  run_tests:
+    name: Run ${{ matrix.test.name }}
+    strategy:
+      matrix:
+        test:
+          - { name: "golang_linux", workflow: "golang_linux.yml" }
+          - { name: "golang_http_linux", workflow: "golang_http_linux.yml" }
+          - { name: "golang_mysql_linux", workflow: "golang_mysql_linux.yml" }
+          - { name: "java_linux", workflow: "java_linux.yml" }
+          - { name: "node_linux", workflow: "node_linux.yml" }
+          - { name: "python_linux", workflow: "python_linux.yml" }
     needs: [build-and-upload, upload-latest]
-    uses: ./.github/workflows/golang_linux.yml
-  run_golang_http_linux:
-    needs: [build-and-upload, upload-latest]
-    uses: ./.github/workflows/golang_http_linux.yml
-  run_golang_mysql_linux:
-    needs: [build-and-upload, upload-latest]
-    uses: ./.github/workflows/golang_mysql_linux.yml
-  run_golang_docker:
+    uses: "./.github/workflows/${{ matrix.test.workflow }}"  # 👈 Encapsulate in quotes
+
+  # Run test workflows with Docker dependencies
+  run_tests_with_docker:
+    name: Run ${{ matrix.test.name }}
+    strategy:
+      matrix:
+        test:
+          - { name: "golang_docker", workflow: "golang_docker.yml" }
+          - { name: "golang_docker-compose", workflow: "golang_docker-compose.yml" }
+          - { name: "node_docker", workflow: "node_docker.yml" }
+          - { name: "python_docker", workflow: "python_docker.yml" }
     needs: [build-and-upload, upload-latest, build-docker-image]
-    uses: ./.github/workflows/golang_docker.yml
-  run_golang_docker-compose:
-    needs: [build-and-upload, upload-latest, build-docker-image]
-    uses: ./.github/workflows/golang_docker-compose.yml
-  run_java_linux:
-    needs: [build-and-upload, upload-latest]
-    uses: ./.github/workflows/java_linux.yml
-  run_node_linux:
-    needs: [build-and-upload, upload-latest]
-    uses: ./.github/workflows/node_linux.yml  
-  run_node_docker:
-    needs: [build-and-upload, upload-latest, build-docker-image]
-    uses: ./.github/workflows/node_docker.yml
-  run_python_docker:
-    needs: [build-and-upload, upload-latest, build-docker-image]
-    uses: ./.github/workflows/python_docker.yml
-  run_python_linux:
-    needs: [build-and-upload, upload-latest]
-    uses: ./.github/workflows/python_linux.yml
+    uses: "./.github/workflows/${{ matrix.test.workflow }}"  # 👈 Encapsulate in quotes
