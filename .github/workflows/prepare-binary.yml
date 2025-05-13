@@ -22,9 +22,12 @@ jobs:
           chmod +x keploy
       - uses: actions/upload-artifact@v4
         with: { name: latest, path: keploy }
-  run-workflow-1:
+  call-workflows:
     needs: build-and-upload
-    uses: ./.github/workflows/golang_linux.yml
-  run-workflow-2:
-    needs: build-and-upload
-    uses: ./.github/workflows/node_linux.yml  
+    strategy:
+      fail-fast: false
+      matrix:
+        workflow: 
+          - ./.github/workflows/golang_linux.yml
+          - ./.github/workflows/node_linux.yml
+    uses: ${{ matrix.workflow }}
