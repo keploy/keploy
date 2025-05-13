@@ -31,12 +31,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build Keploy image
+      - name: Build image
         run: |
           source ./.github/workflows/test_workflow_scripts/update-docker.sh
-          docker save ghcr.io/keploy/keploy:v2-dev -o keploy.tar
-      - uses: actions/upload-artifact@v4
-        with: { name: keploy-image, path: keploy.tar }
+
+      - name: Push image
+        run: |
+          docker push ttl.sh/keploy/keploy:1h
 
   run_golang_linux:
     needs: [build-and-upload, upload-latest]

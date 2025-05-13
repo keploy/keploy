@@ -1,12 +1,10 @@
-name: get-image
-description: "Download image artifact and load it"
+name: pull-image
+description: "Pull Image"
 runs:
   using: composite
   steps:
-    - uses: actions/download-artifact@v4
-      with: { name: keploy-image }
-
-    - id: load
+    - name: Pull Image
       shell: bash
       run: |
-        docker load -i keploy.tar
+        docker pull ttl.sh/keploy/keploy:1h
+        docker tag ttl.sh/keploy/keploy:1h ghcr.io/keploy/keploy:v2-dev
