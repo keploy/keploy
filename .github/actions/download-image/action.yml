@@ -7,4 +7,6 @@ runs:
       shell: bash
       run: |
         docker pull ttl.sh/keploy/keploy:1h
+        # since keploy expects the image to be tagged as ghcr.io/keploy/keploy:v2-dev so we need to rename it
+        # https://stackoverflow.com/questions/70531871/how-pull-a-docker-image-and-give-it-a-diferente-name
         docker tag ttl.sh/keploy/keploy:1h ghcr.io/keploy/keploy:v2-dev
