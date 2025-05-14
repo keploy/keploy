@@ -153,7 +153,7 @@ OuterLoop:
 							newInitMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
 							isUpdated := mockDb.UpdateUnFilteredMock(&initMock, &newInitMock)
 							if !isUpdated {
-								logger.Error("failed to update matched mock", zap.Error(err))
+								logger.Debug("failed to update matched mock", zap.Error(err))
 								continue OuterLoop
 							}
 							return true, res, nil
@@ -220,7 +220,7 @@ OuterLoop:
 							newInitMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
 							isUpdated := mockDb.UpdateUnFilteredMock(&initMock, &newInitMock)
 							if !isUpdated {
-								logger.Error("failed to update matched mock", zap.Error(err))
+								logger.Debug("failed to update matched mock", zap.Error(err))
 								continue OuterLoop
 							}
 							return true, res, nil
@@ -299,7 +299,7 @@ OuterLoop:
 				matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
 				updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
 				if !updated {
-					logger.Error("failed to update matched mock", zap.Error(err))
+					logger.Debug("failed to update matched mock", zap.Error(err))
 				}
 				return true, matchedMock.Spec.PostgresResponses, nil
 			}

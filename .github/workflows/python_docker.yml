@@ -1,25 +1,49 @@
 name: Python On Docker
-on: [pull_request]
+on:
+  workflow_call:
 jobs:
   python_docker:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_latest
+            record_src: build
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: ${{ matrix.job }}
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Run build script
-      run: |
-         source ./.github/workflows/test_workflow_scripts/update-docker.sh
+      - id: image
+        uses: ./.github/actions/download-image
 
-    - name: Build binary
-      run: |
-        go build -race -tags=viper_bind_struct -o keployv2
-    - name: Checkout the samples-python repository
-      uses: actions/checkout@v4
-      with:
-        repository: keploy/samples-python
-        path: samples-python
-    - name: Run the flask-mongo application
-      run: |
-        cd samples-python/flask-mongo
-        source ./../../.github/workflows/test_workflow_scripts/python-docker.sh
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.replay_src }}
+
+      - name: Checkout the samples-python repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-python
+          path: samples-python
+      - name: Run the flask-mongo application
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          cd samples-python/flask-mongo
+          source ./../../.github/workflows/test_workflow_scripts/python-docker.sh
