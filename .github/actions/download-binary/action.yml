@@ -1,0 +1,27 @@
+name: get-binary
+description: "Download build or latest Keploy and expose its absolute path"
+
+inputs:
+  src:
+    required: true
+    description: "build | latest"
+
+outputs:
+  path:
+    description: "binary path"
+    value: ${{ steps.set-path.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.src }}
+
+    - name: Set binary path
+      id: set-path
+      shell: bash
+      run: |
+        ls -l
+        chmod +x keploy
+        echo "path=$PWD/keploy" >> $GITHUB_OUTPUT

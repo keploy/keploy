@@ -66,7 +66,7 @@ for i in {1..2}; do
     mvn clean install -Dmaven.test.skip=true
     app_name="javaApp_${i}"
     send_request &
-    sudo -E env PATH=$PATH ./../../../keployv2 record -c 'java -jar target/spring-petclinic-rest-3.0.2.jar'    &> "${app_name}.txt"
+    sudo -E env PATH=$PATH $RECORD_BIN record -c 'java -jar target/spring-petclinic-rest-3.0.2.jar'    &> "${app_name}.txt"
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
@@ -83,7 +83,7 @@ for i in {1..2}; do
 done
 
 # Start keploy in test mode.
-sudo -E env PATH=$PATH ./../../../keployv2 test -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --delay 20    &> test_logs.txt
+sudo -E env PATH=$PATH $REPLAY_BIN test -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --delay 20    &> test_logs.txt
 if grep "ERROR" "test_logs.txt"; then
     echo "Error found in pipeline..."
     cat "test_logs.txt"
