@@ -88,7 +88,7 @@ func (s *Storage) Upload(ctx context.Context, file io.Reader, mockName string, a
 	}
 
 	// Print raw body
-	s.logger.Info("Raw response body", zap.String("body", string(bodyBytes)))
+	s.logger.Info("Response", zap.Any("Respose", resp), zap.String("body", string(bodyBytes)))
 
 	// Decode into struct from the raw bytes
 	var mockUploadResponse MockUploadResponse
