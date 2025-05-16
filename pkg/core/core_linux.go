@@ -212,6 +212,7 @@ func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.A
 	runAppErrGrp.Go(func() error {
 		defer utils.Recover(c.logger)
 		if a.Kind(ctx) == utils.Native {
+			close(inodeChan) // since we are not using inode in native mode
 			return nil
 		}
 		select {
