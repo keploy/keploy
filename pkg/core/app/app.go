@@ -263,7 +263,7 @@ func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
 	var channelsUsed bool
 
 	defer func() {
-		if channelsUsed || ctx.Err() == context.Canceled {
+		if channelsUsed || ctx.Err() != nil {
 			a.logger.Debug("closing the inode and containerIPv4 channels")
 			close(a.inodeChan)
 			close(a.containerIPv4)
@@ -310,7 +310,7 @@ func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
 		a.logger.Debug("container network not found", zap.Any("containerDetails.NetworkSettings.Networks", info.NetworkSettings.Networks))
 		return false, fmt.Errorf("container network not found: %s", fmt.Sprintf("%+v", info.NetworkSettings.Networks))
 	}
-	
+
 	a.SetContainerIPv4Addr(n.IPAddress)
 
 	channelsUsed = true
