@@ -390,8 +390,8 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 
 	g, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
-	dockerMetaCtx := context.WithoutCancel(ctx)
-	dockerMetaCtx, cancel := context.WithCancel(dockerMetaCtx)
+
+	dockerMetaCtx, cancel := context.WithCancel(ctx)
 
 	defer func() {
 		cancel()
