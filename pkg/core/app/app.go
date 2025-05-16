@@ -260,15 +260,6 @@ func (a *App) injectNetwork(network string) error {
 	return fmt.Errorf("failed to find the network:%v in the keploy container", network)
 }
 func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
-	var channelsUsed bool
-
-	defer func() {
-		if channelsUsed || ctx.Err() != nil {
-			a.logger.Debug("closing the inode and containerIPv4 channels")
-			close(a.inodeChan)
-			close(a.containerIPv4)
-		}
-	}()
 
 	if e.Action != "start" {
 		return false, nil
@@ -312,8 +303,6 @@ func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
 	}
 
 	a.SetContainerIPv4Addr(n.IPAddress)
-
-	channelsUsed = true
 	return inode != 0 && n.IPAddress != "", nil
 }
 
@@ -343,9 +332,16 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 		errCh <- errors.New("failed to get the error group from the context")
 		return errCh
 	}
+
 	g.Go(func() error {
 		defer utils.Recover(a.logger)
-		defer close(errCh)
+		// closing the channels in any case when returning.
+		defer func() {
+			a.logger.Debug("closing err, containerIPv4 and inode channels ")
+			close(errCh)
+			close(a.containerIPv4)
+			close(a.inodeChan)
+		}()
 		for {
 			select {
 			case <-timer.C:
@@ -353,9 +349,6 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 				return nil
 			case <-ctx.Done():
 				a.logger.Debug("context cancelled, stopping the listener for container creation event.")
-				a.logger.Debug("closing the inode and containerIPv4 channels")
-				close(a.inodeChan)
-				close(a.containerIPv4)
 				errCh <- ctx.Err()
 				return nil
 			case e := <-messages:
