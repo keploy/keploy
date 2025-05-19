@@ -204,7 +204,6 @@ func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.A
 	defer func() {
 		err := runAppErrGrp.Wait()
 		defer close(inodeErrCh)
-		defer close(inodeChan)
 		if err != nil {
 			utils.LogError(c.logger, err, "failed to stop the app")
 		}
@@ -213,6 +212,7 @@ func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.A
 	runAppErrGrp.Go(func() error {
 		defer utils.Recover(c.logger)
 		if a.Kind(ctx) == utils.Native {
+			close(inodeChan) // since we are not using inode in native mode
 			return nil
 		}
 		select {

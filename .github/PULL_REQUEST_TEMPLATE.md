@@ -3,7 +3,7 @@
 
 ## Links & References
 
-**Fixes:** #[issue number that will be closed through this PR]
+**Closes:** #[issue number that will be closed through this PR]
 - NA (if very small change like typo, linting, etc.)
 
 ### 🔗 Related PRs
