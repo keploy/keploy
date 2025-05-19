@@ -558,7 +558,7 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 interfa
 				authType = strings.Split(val, " ")[0]
 				val = strings.Split(val, " ")[1]
 			}
-			ok = addTemplates1(logger, &val, interface2)
+			ok = valueMatchAndTemplatize(logger, &val, interface2)
 			if !ok {
 				continue
 			}
@@ -586,8 +586,8 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 interfa
 			return false
 		}
 
-		// passing this v as reference so that it can be changed in the addTemplates1 function if required.
-		ok = addTemplates1(logger, v, interface2)
+		// passing this v as reference so that it can be changed in the valueMatchAndTemplatize function if required.
+		ok = valueMatchAndTemplatize(logger, v, interface2)
 		if ok {
 			return true
 		}
@@ -606,7 +606,7 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 interfa
 		urlParts := strings.Split(url.Path, "/")
 		originalURLParts := strings.Split(originalURL.Path, "/")
 		// checking if the last part of the URL is a template.
-		ok = addTemplates1(logger, &urlParts[len(urlParts)-1], interface2)
+		ok = valueMatchAndTemplatize(logger, &urlParts[len(urlParts)-1], interface2)
 		if isTemplatized {
 			urlParts[len(urlParts)-1] = originalURLParts[len(originalURLParts)-1]
 		}
@@ -614,11 +614,11 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 interfa
 		url.Path = strings.Join(urlParts, "/")
 
 		if url.RawQuery != "" {
-			// Only pass the values of the query parameters to the addTemplates1 function.
+			// Only pass the values of the query parameters to the valueMatchAndTemplatize function.
 			queryParams := strings.Split(url.RawQuery, "&")
 			for i, param := range queryParams {
 				param = strings.Split(param, "=")[1]
-				addTemplates1(logger, &param, interface2)
+				valueMatchAndTemplatize(logger, &param, interface2)
 				// reconstruct the query parameter with the templatized value if any.
 				queryParams[i] = strings.Split(queryParams[i], "=")[0] + "=" + param
 			}
@@ -644,7 +644,7 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 interfa
 			case float32:
 				val = utils.ToString(x)
 			}
-			addTemplates1(logger, &val, interface2)
+			valueMatchAndTemplatize(logger, &val, interface2)
 			parts := strings.Split(val, " ")
 			if len(parts) > 1 { // if the value is a template.
 				parts1 := strings.Split(parts[0], "{{")
@@ -662,14 +662,28 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 interfa
 	return false
 }
 
-// TODO: add better comment here and rename this function.
-// Here we simplify the second interface and finally add the templates.
-func addTemplates1(logger *zap.Logger, val1 *string, body interface{}) bool {
+// valueMatchAndTemplatize performs a recursive deep comparison between a target value and a JSON structure
+// to identify matching values that should be templatized. It works by:
+//  1. Taking a target string value (val1) to compare against values in the JSON structure (body)
+//  2. Recursively traversing the JSON structure (body), handling all nested object types
+//  3. When a matching value is found, it creates a template variable in utils.TemplatizedValues
+//  4. It replaces both the original value and the matching value with template expressions
+//  5. It handles various data types (string, float, int) and ensures proper template formatting
+//
+// This function is a core part of the templatization process that identifies common values
+// across different parts of requests and responses, allowing dynamic values to be consistently
+// replaced during test replay.
+//
+// Returns true if a match was found and templatization was performed.
+func valueMatchAndTemplatize(logger *zap.Logger, val1 *string, body interface{}) bool {
+	// Handle different types of JSON structures with type switching
 	switch b := body.(type) {
 	case geko.ObjectItems:
+		// Process key-value pairs in JSON objects
 		keys := b.Keys()
 		vals := b.Values()
 		for i, key := range keys {
+			// Check if the value is already templatized
 			var err error
 			var isTemplatized bool
 			original := vals[i]
@@ -678,70 +692,90 @@ func addTemplates1(logger *zap.Logger, val1 *string, body interface{}) bool {
 				utils.LogError(logger, err, "failed to render for template")
 				return false
 			}
+
+			// Recursively process different value types
 			var ok bool
 			switch vals[i].(type) {
 			case string:
 				x := vals[i].(string)
-				ok = addTemplates1(logger, val1, &x)
+				ok = valueMatchAndTemplatize(logger, val1, &x)
 				vals[i] = x
 			case float32:
 				x := vals[i].(float32)
-				ok = addTemplates1(logger, val1, &x)
+				ok = valueMatchAndTemplatize(logger, val1, &x)
 				vals[i] = x
 			case int:
 				x := vals[i].(int)
-				ok = addTemplates1(logger, val1, &x)
+				ok = valueMatchAndTemplatize(logger, val1, &x)
 				vals[i] = x
 			case int64:
 				x := vals[i].(int64)
-				ok = addTemplates1(logger, val1, &x)
+				ok = valueMatchAndTemplatize(logger, val1, &x)
 				vals[i] = x
 			case float64:
 				x := vals[i].(float64)
-				ok = addTemplates1(logger, val1, &x)
+				ok = valueMatchAndTemplatize(logger, val1, &x)
 				vals[i] = x
 			default:
-				ok = addTemplates1(logger, val1, vals[i])
+				// Handle other types recursively
+				ok = valueMatchAndTemplatize(logger, val1, vals[i])
 			}
-			// we can't change if the type of vals[i] is also object item.
+
+			// If a match was found and the value type isn't another object, templatize it
 			if ok && reflect.TypeOf(vals[i]) != reflect.TypeOf(b) {
+				// Create a unique key for this value in the template map
 				newKey := insertUnique(key, *val1, utils.TemplatizedValues)
+
+				// Format the value as a template expression
 				vals[i] = fmt.Sprintf("{{%s .%v }}", getType(vals[i]), newKey)
-				// Now change the value of the key in the object.
+
+				// Update the object with the templatized value
 				b.SetValueByIndex(i, vals[i])
+
+				// Also templatize the target value
 				*val1 = fmt.Sprintf("{{%s .%v }}", getType(*val1), newKey)
 				return true
 			}
+
+			// Restore original value if it was already templatized
 			if isTemplatized {
 				vals[i] = original
 			}
 
 		}
+
 	case geko.Array:
+		// Process array elements
 		for i, v := range b.List {
+			// Handle different element types
 			switch x := v.(type) {
 			case string:
-				addTemplates1(logger, val1, &x)
+				valueMatchAndTemplatize(logger, val1, &x)
 				b.List[i] = x
 			case float32:
-				addTemplates1(logger, val1, &x)
+				valueMatchAndTemplatize(logger, val1, &x)
 				b.List[i] = x
 			case int:
-				addTemplates1(logger, val1, &x)
+				valueMatchAndTemplatize(logger, val1, &x)
 				b.List[i] = x
 			case int64:
-				addTemplates1(logger, val1, &x)
+				valueMatchAndTemplatize(logger, val1, &x)
 				b.List[i] = x
 			case float64:
-				addTemplates1(logger, val1, &x)
+				valueMatchAndTemplatize(logger, val1, &x)
 				b.List[i] = x
 			default:
-				addTemplates1(logger, val1, b.List[i])
+				// Process other array element types
+				valueMatchAndTemplatize(logger, val1, b.List[i])
 			}
+			// Update the array with processed values
 			b.Set(i, b.List[i])
 		}
+
 	case map[string]string:
+		// Process string map entries
 		for key, val2 := range b {
+			// Check if value is already templatized
 			var isTemplatized bool
 			original := val2
 			isTemplatized, tempVal, err := RenderIfTemplatized(val2)
@@ -749,37 +783,53 @@ func addTemplates1(logger *zap.Logger, val1 *string, body interface{}) bool {
 				utils.LogError(logger, err, "failed to render for template")
 				return false
 			}
+
+			// Type assertion to string
 			val2, ok := (tempVal).(string)
 			if !ok {
 				continue
 			}
+
+			// Direct value comparison for string maps
 			if *val1 == val2 {
+				// Values match - create template variable and update both
 				newKey := insertUnique(key, val2, utils.TemplatizedValues)
 				b[key] = fmt.Sprintf("{{%s .%v }}", getType(val2), newKey)
 				*val1 = fmt.Sprintf("{{%s .%v }}", getType(*val1), newKey)
 				return true
 			}
+
+			// Restore original if templatized
 			if isTemplatized {
 				b[key] = original
 			}
 
 		}
 		return false
+
 	case *string:
+		// Direct string comparison
 		_, tempVal, err := RenderIfTemplatized(b)
 		if err != nil {
 			utils.LogError(logger, err, "failed to render for template")
 			return false
 		}
+
+		// Type assertion
 		b, ok := (tempVal).(*string)
 		if !ok {
 			return false
 		}
+
+		// Check if strings match exactly
 		if *val1 == *b {
 			return true
 		}
+
 	case map[string]interface{}:
+		// Process generic map entries
 		for key, val2 := range b {
+			// Check if already templatized
 			var err error
 			var isTemplatized bool
 			original := val2
@@ -788,36 +838,43 @@ func addTemplates1(logger *zap.Logger, val1 *string, body interface{}) bool {
 				utils.LogError(logger, err, "failed to render for template")
 				return false
 			}
+
+			// Process different value types
 			var ok bool
 			switch x := val2.(type) {
 			case string:
-				ok = addTemplates1(logger, val1, &x)
+				ok = valueMatchAndTemplatize(logger, val1, &x)
 			case float32:
-				ok = addTemplates1(logger, val1, &x)
+				ok = valueMatchAndTemplatize(logger, val1, &x)
 			case int:
-				ok = addTemplates1(logger, val1, &x)
+				ok = valueMatchAndTemplatize(logger, val1, &x)
 			case int64:
-				ok = addTemplates1(logger, val1, &x)
+				ok = valueMatchAndTemplatize(logger, val1, &x)
 			case float64:
-				ok = addTemplates1(logger, val1, &x)
+				ok = valueMatchAndTemplatize(logger, val1, &x)
 			default:
-				ok = addTemplates1(logger, val1, val2)
+				// Handle other map value types
+				ok = valueMatchAndTemplatize(logger, val1, val2)
 			}
 
+			// If match found, templatize both values
 			if ok {
+				// Create unique template key
 				newKey := insertUnique(key, *val1, utils.TemplatizedValues)
 				if newKey == "" {
 					newKey = key
 				}
+
+				// Format as templates
 				b[key] = fmt.Sprintf("{{%s .%v}}", getType(b[key]), newKey)
 				*val1 = fmt.Sprintf("{{%s .%v}}", getType(*val1), newKey)
-			} else {
-				if isTemplatized {
-					b[key] = original
-				}
+			} else if isTemplatized {
+				// Restore original if no match but was templatized
+				b[key] = original
 			}
 		}
 	case *float64, *int64, *int, *float32:
+		// Compare numeric pointers by converting to string
 		var val string
 		switch x := b.(type) {
 		case *float64:
@@ -829,33 +886,42 @@ func addTemplates1(logger *zap.Logger, val1 *string, body interface{}) bool {
 		case *float32:
 			val = utils.ToString(*x)
 		}
+
+		// Direct string comparison with numeric value
 		if *val1 == val {
 			return true
 		}
+
 	case []interface{}:
+		// Process slice elements
 		for i, val := range b {
+			// Process different element types
 			switch x := val.(type) {
 			case string:
-				addTemplates1(logger, val1, &x)
+				valueMatchAndTemplatize(logger, val1, &x)
 				b[i] = x
 			case float32:
-				addTemplates1(logger, val1, &x)
+				valueMatchAndTemplatize(logger, val1, &x)
 				b[i] = x
 			case int:
-				addTemplates1(logger, val1, &x)
+				valueMatchAndTemplatize(logger, val1, &x)
 				b[i] = x
 			case int64:
-				addTemplates1(logger, val1, &x)
+				valueMatchAndTemplatize(logger, val1, &x)
 				b[i] = x
 			case float64:
-				addTemplates1(logger, val1, &x)
+				valueMatchAndTemplatize(logger, val1, &x)
 				b[i] = x
 			default:
-				addTemplates1(logger, val1, b[i])
+				// Handle other slice element types
+				valueMatchAndTemplatize(logger, val1, b[i])
 			}
+			// Update the slice with processed values
 			b[i] = val
 		}
 	}
+
+	// No match found
 	return false
 }
 
@@ -867,9 +933,17 @@ func getType(val interface{}) string {
 		return "int"
 	case float64, float32, *float64, *float32:
 		return "float"
+	case bool, *bool:
+		return "bool"
+	case []interface{}, map[string]interface{}, geko.ObjectItems, geko.Array:
+		return "object"
+	case nil:
+		return ""
+	default:
+		// Log the unknown type to help with future type additions
+		typeName := fmt.Sprintf("%T", val)
+		return fmt.Sprintf("unknown-%s", typeName)
 	}
-	//TODO: handle the default case properly, return some errot.
-	return ""
 }
 
 // This function returns a unique key for each value, for instance if id already exists, it will return id1.
@@ -894,10 +968,8 @@ func insertUnique(baseKey, value string, myMap map[string]interface{}) string {
 	return key
 }
 
-// TODO: Make this function generic for one value of string containing more than one template value.
-// Duplicate function is being used in Simulate function as well.
-
-// render function gives the value of the templatized field.
+// render function processes template strings containing one or more template expressions.
+// It handles various data types (string, int, float) and returns the appropriate Go type.
 func render(val string) (interface{}, error) {
 	// This is a map of helper functions that is used to convert the values to their appropriate types.
 	funcMap := template.FuncMap{
@@ -906,33 +978,55 @@ func render(val string) (interface{}, error) {
 		"float":  utils.ToFloat,
 	}
 
+	// Extract all template expressions using regex
+	re := regexp.MustCompile(`\{\{[^{}]*\}\}`)
+	matches := re.FindAllString(val, -1)
+
+	// If there are multiple template expressions, process each one separately
+	if len(matches) > 1 {
+		result := val
+		for _, match := range matches {
+			processed, err := processSingleTemplate(match, funcMap)
+			if err != nil {
+				return val, err
+			}
+			result = strings.Replace(result, match, fmt.Sprintf("%v", processed), 1)
+		}
+		return result, nil
+	}
+
+	// For a single template or no templates, use the standard processing
+	return processSingleTemplate(val, funcMap)
+}
+
+// processSingleTemplate handles a single template expression
+func processSingleTemplate(val string, funcMap template.FuncMap) (interface{}, error) {
 	tmpl, err := template.New("template").Funcs(funcMap).Parse(val)
 	if err != nil {
 		return val, fmt.Errorf("failed to parse the testcase using template %v", zap.Error(err))
 	}
+
 	var output bytes.Buffer
 	err = tmpl.Execute(&output, utils.TemplatizedValues)
 	if err != nil {
 		return val, fmt.Errorf("failed to execute the template %v", zap.Error(err))
 	}
 
-	if strings.Contains(val, "string") {
-		return output.String(), nil
-	}
+	/*
+		Determine the appropriate return type based on the template directive
+		The type conversion is already handled by the template functions in funcMap,
+		so we don't need an additional switch statement
+	*/
+	// if strings.Contains(val, "string") {
+	// 	return output.String(), nil
+	// } else if strings.Contains(val, "int") {
+	// 	return utils.ToInt(output.String()), nil
+	// } else if strings.Contains(val, "float") {
+	// 	return utils.ToFloat(output.String()), nil
+	// }
 
-	// Remove the double quotes from the output for rest of the values. (int, float)
-	outputString := strings.Trim(output.String(), `"`)
-
-	// TODO: why do we need this when we have already declared the funcMap.
-	// Convert this to the appropriate type and return.
-	switch {
-	case strings.Contains(val, "int"):
-		return utils.ToInt(output.String()), nil
-	case strings.Contains(val, "float"):
-		return utils.ToFloat(output.String()), nil
-	}
-
-	return outputString, nil
+	// Remove quotes for non-string values
+	return strings.Trim(output.String(), `"`), nil
 }
 
 // Compare the headers of 2 utils.TemplatizedValues requests and add the templates.
