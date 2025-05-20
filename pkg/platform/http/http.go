@@ -19,18 +19,14 @@ type HTTP struct {
 	client *http.Client
 }
 
-func New(logger *zap.Logger) *HTTP {
+func New(logger *zap.Logger, client *http.Client) *HTTP {
+	if client == nil {
+		client = &http.Client{}
+	}
 	return &HTTP{
 		logger: logger,
-		lock:   &sync.Mutex{},
-		client: &http.Client{},
+		client: client,
 	}
-}
-
-func (h *HTTP) ModifyClient(client *http.Client) {
-	h.lock.Lock()
-	defer h.lock.Unlock()
-	h.client = client
 }
 
 func (h *HTTP) GetLatestPlan(ctx context.Context, serverUrl, token string) (string, error) {

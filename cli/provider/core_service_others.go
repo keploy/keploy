@@ -61,7 +61,7 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 	openAPIdb := openapidb.New(logger, c.Path)
 	reportDB := reportdb.New(logger, c.Path+"/reports")
 	testSetDb := testset.New[*models.TestSet](logger, c.Path)
-	http := http.New(logger)
+	http := http.New(logger, nil)
 	return &CommonInternalService{
 		commonPlatformServices{
 			YamlTestDB:    testDB,
