@@ -13,3 +13,9 @@ type MockRegistry struct {
 	App  string `json:"app" bson:"app" yaml:"app,omitempty"`
 	User string `json:"user" bson:"user" yaml:"user,omitempty"`
 }
+
+type Plan struct {
+	Type   string `json:"type"`
+	Status string `json:"status"`
+	KUnits int    `json:"kunits,omitempty"`
+}
