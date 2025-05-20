@@ -111,7 +111,7 @@ func (h *Hooks) AfterTestSetRun(ctx context.Context, testSetID string, status bo
 		return err
 	}
 
-	h.logger.Info("The latest plan", zap.Any("Plan", plan))
+	h.logger.Debug("The latest plan", zap.Any("Plan", plan))
 
 	// Cross verify the local mock file with the test-set config
 	tsConfig, err := h.tsConfigDB.Read(ctx, testSetID)
@@ -296,7 +296,7 @@ func extractClaimsWithoutVerification(tokenString string) (jwt.MapClaims, error)
 }
 
 func getLatestPlan(ctx context.Context, logger *zap.Logger, serverUrl, token string) (string, error) {
-	logger.Info("Getting the latest plan", zap.String("serverUrl", serverUrl), zap.String("token", token))
+	logger.Debug("Getting the latest plan", zap.String("serverUrl", serverUrl), zap.String("token", token))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/subscription/plan", serverUrl), nil)
 	if err != nil {
