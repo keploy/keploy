@@ -19,7 +19,7 @@
   <a href="https://github.com/keploy/keploy/actions" alt="Tests">
   <a href="https://goreportcard.com/report/github.com/keploy/keploy" alt="Go Report Card">
     <img src="https://goreportcard.com/badge/github.com/keploy/keploy" /></a>
-  <a href="https://join.slack.com/t/keploy/shared_invite/zt-2poflru6f-_VAuvQfCBT8fDWv1WwSbkw" alt="Slack">
+  <a href="https://join.slack.com/t/keploy/shared_invite/zt-357qqm9b5-PbZRVu3Yt2rJIa6ofrwWNg" alt="Slack">
     <img src=".github/slack.svg" /></a>
   <a href="https://keploy.io/docs" alt="Docs">
     <img src=".github/docs.svg" /></a>
@@ -40,13 +40,14 @@
     <img title="Pull Requests" src="https://img.shields.io/github/issues-pr-closed/Keploy/Keploy?logo=github"/>
   </a>
   <a href="https://github.com/Keploy/Keploy/pulls?q=is%3Apr+is%3Aclosed">
-    <img title="Release Build" src="https://img.shields.io/github/actions/workflow/status/Keploy/Keploy/release.yml?logo=github&label=Release Build"/>
+    <img title="Release Build" src="https://img.shields.io/github/actions/workflow/status/Keploy/Keploy/release.yml?logo=github&label=Release%20Build" />
+</a>
   </a>
   <a href="https://github.com/Keploy/Keploy/blob/main/CONTRIBUTING.md">
     <img src="https://img.shields.io/badge/PRs-Welcome-brightgreen?logo=github" alt="PRs welcome!" />
   </a>
-  <a href="https://github.com/Keploy/Keploy/issues">
-    <img src="https://img.shields.io/github/stars/keploy/keploy?color=%23EAC54F&logo=github&label=Help us reach 4k stars! Now at:" alt="Help us reach 1k stars!" />
+  <a href="https://github.com/Keploy/Keploy/">
+   <img src="https://img.shields.io/github/stars/keploy/keploy?color=%23EAC54F&logo=github&label=Help%20us%20reach%2010K%20stars!%20Now%20at:" alt="Help us reach 10k stars!" />
   </a>
   <a href="https://Keploy.io/docs">
     <img src="https://img.shields.io/badge/Join-Community!-orange" alt="Join our Community!" />
@@ -186,7 +187,7 @@ keploy test -c "Docker_CMD_to_run_user_container --network <network_name>" --con
 ## 🤔 Preguntas?
 ¡Contáctanos! Estamos aquí para ayudarte.
 
-[![Slack](https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white)](https://join.slack.com/t/keploy/shared_invite/zt-2poflru6f-_VAuvQfCBT8fDWv1WwSbkw)
+[![Slack](https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white)](https://join.slack.com/t/keploy/shared_invite/zt-357qqm9b5-PbZRVu3Yt2rJIa6ofrwWNg)
 [![LinkedIn](https://img.shields.io/badge/linkedin-%230077B5.svg?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/keploy/)
 [![YouTube](https://img.shields.io/badge/YouTube-%23FF0000.svg?style=for-the-badge&logo=YouTube&logoColor=white)](https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg)
 [![Twitter](https://img.shields.io/badge/Twitter-%231DA1F2.svg?style=for-the-badge&logo=Twitter&logoColor=white)](https://twitter.com/Keployio)

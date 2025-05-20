@@ -7,6 +7,7 @@ WORKDIR /app
 # Define build arguments for ldflags
 ARG SENTRY_DSN_DOCKER
 ARG VERSION
+ARG SERVER_URL
 
 # Copy the Go module files and download dependencies
 COPY go.mod go.sum /app/

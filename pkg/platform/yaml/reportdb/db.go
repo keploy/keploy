@@ -33,6 +33,13 @@ func New(logger *zap.Logger, reportPath string) *TestReport {
 	}
 }
 
+func (fe *TestReport) ClearTestCaseResults(_ context.Context, testRunID string, testSetID string) {
+	fe.m.Lock()
+	defer fe.m.Unlock()
+
+	fe.tests[testRunID] = make(map[string][]models.TestResult)
+}
+
 func (fe *TestReport) GetAllTestRunIDs(ctx context.Context) ([]string, error) {
 	return yaml.ReadSessionIndices(ctx, fe.Path, fe.Logger)
 }

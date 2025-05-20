@@ -173,14 +173,14 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 	reqBodyNoise := map[string][]string{}
 
 	// compare http req body
-	bodyType1 := models.BodyTypePlain
+	bodyType1 := models.Plain
 	if json.Valid([]byte(tcs1.HTTPReq.Body)) {
-		bodyType1 = models.BodyTypeJSON
+		bodyType1 = models.JSON
 	}
 
-	bodyType2 := models.BodyTypePlain
+	bodyType2 := models.Plain
 	if json.Valid([]byte(tcs2.HTTPReq.Body)) {
-		bodyType2 = models.BodyTypeJSON
+		bodyType2 = models.JSON
 	}
 
 	if bodyType1 != bodyType2 {
@@ -194,7 +194,7 @@ func CompareHTTPReq(tcs1, tcs2 *models.TestCase, _ models.GlobalNoise, ignoreOrd
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := tcs1.HTTPReq.Body, tcs2.HTTPReq.Body
 	var jsonComparisonResult matcher.JSONComparisonResult
-	if !matcher.Contains(matcher.MapToArray(reqBodyNoise), "body") && bodyType1 == models.BodyTypeJSON {
+	if !matcher.Contains(matcher.MapToArray(reqBodyNoise), "body") && bodyType1 == models.JSON {
 		//validate the stored json
 		validatedJSON, err := matcher.ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
 		if err != nil {
@@ -305,14 +305,14 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 	}
 
 	// compare http resp body
-	bodyType1 := models.BodyTypePlain
+	bodyType1 := models.Plain
 	if json.Valid([]byte(tcs1.HTTPResp.Body)) {
-		bodyType1 = models.BodyTypeJSON
+		bodyType1 = models.JSON
 	}
 
-	bodyType2 := models.BodyTypePlain
+	bodyType2 := models.Plain
 	if json.Valid([]byte(tcs2.HTTPResp.Body)) {
-		bodyType2 = models.BodyTypeJSON
+		bodyType2 = models.JSON
 	}
 
 	if bodyType1 != bodyType2 {
@@ -327,7 +327,7 @@ func CompareHTTPResp(tcs1, tcs2 *models.TestCase, noiseConfig models.GlobalNoise
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := tcs1.HTTPResp.Body, tcs2.HTTPResp.Body
 	var jsonComparisonResult matcher.JSONComparisonResult
-	if !matcher.Contains(matcher.MapToArray(noise), "body") && bodyType1 == models.BodyTypeJSON {
+	if !matcher.Contains(matcher.MapToArray(noise), "body") && bodyType1 == models.JSON {
 		//validate the stored json
 		validatedJSON, err := matcher.ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
 		if err != nil {

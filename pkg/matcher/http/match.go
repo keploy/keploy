@@ -21,29 +21,11 @@ import (
 )
 
 func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger) (bool, *models.Result) {
-	bodyType := models.BodyTypePlain
+	bodyType := models.Plain
 	if json.Valid([]byte(actualResponse.Body)) {
-		bodyType = models.BodyTypeJSON
+		bodyType = models.JSON
 	}
-	if utils.IsXMLResponse(actualResponse) {
-		bodyType = models.BodyTypeJSON
-		actualResp, err := utils.XMLToMap(actualResponse.Body)
-		if err != nil {
-			utils.LogError(logger, err, "failed to convert xml response to map")
-		}
-		actualRespJSONData, err := json.MarshalIndent(actualResp, "", "  ")
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal xml response to json")
-		}
-		actualResponse.Body = string(actualRespJSONData)
-		expectedRespJSONData, err := json.MarshalIndent(tc.XMLResp.Body, "", "  ")
-		if err != nil {
-			utils.LogError(logger, err, "failed to marshal xml response to json")
-		}
-		tc.HTTPResp.Body = string(expectedRespJSONData)
-		tc.HTTPResp.Header = tc.XMLResp.Header
-		tc.HTTPResp.StatusCode = tc.XMLResp.StatusCode
-	}
+
 	pass := true
 	hRes := &[]models.HeaderResult{}
 	res := &models.Result{
@@ -90,7 +72,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := tc.HTTPResp.Body, actualResponse.Body
 	var jsonComparisonResult matcherUtils.JSONComparisonResult
-	if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && bodyType == models.BodyTypeJSON {
+	if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && bodyType == models.JSON {
 		//validate the stored json
 		validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
 		if err != nil {
@@ -208,8 +190,16 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			}
 		}
 
+		actRespBodyType := pkg.GuessContentType([]byte(actualResponse.Body))
+		expRespBodyType := pkg.GuessContentType([]byte(tc.HTTPResp.Body))
+
 		if !res.BodyResult[0].Normal {
-			if json.Valid([]byte(actualResponse.Body)) {
+			if actRespBodyType != expRespBodyType {
+				actRespBodyType = models.UnknownType
+			}
+
+			switch actRespBodyType {
+			case models.JSON:
 				patch, err := jsondiff.Compare(tc.HTTPResp.Body, actualResponse.Body)
 				if err != nil {
 					logger.Warn("failed to compute json diff", zap.Error(err))
@@ -279,7 +269,10 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 					}
 					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
 				}
-			} else {
+			default: // right now for every other type we would do a simple comparison, till we don't have dedicated logic for other types.
+				if tc.HTTPResp.Body != actualResponse.Body {
+					isBodyMismatch = true
+				}
 				logDiffs.PushBodyDiff(fmt.Sprint(tc.HTTPResp.Body), fmt.Sprint(actualResponse.Body), bodyNoise)
 			}
 		}
@@ -318,6 +311,9 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 	return pass, res
 }
+
+// AssertionMatch checks the assertions in the test case against the actual response, if all of the assertions pass, it returns true, it doesn't care about other parameters of the response,
+// and make the test case pass.
 
 func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger *zap.Logger) (bool, *models.Result) {
 	pass := true
