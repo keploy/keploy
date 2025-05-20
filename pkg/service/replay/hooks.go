@@ -295,6 +295,11 @@ func extractClaimsWithoutVerification(tokenString string) (jwt.MapClaims, error)
 	return nil, fmt.Errorf("unable to parse claims")
 }
 
+type getPlanRes struct {
+	Plan  models.Plan `json:"plan"`
+	Error string      `json:"error"`
+}
+
 func getLatestPlan(ctx context.Context, logger *zap.Logger, serverUrl, token string) (string, error) {
 	logger.Debug("Getting the latest plan", zap.String("serverUrl", serverUrl), zap.String("token", token))
 
@@ -307,16 +312,14 @@ func getLatestPlan(ctx context.Context, logger *zap.Logger, serverUrl, token str
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{}
-
 	resp, err := client.Do(req)
 	if err != nil {
 		logger.Error("http request failed", zap.Error(err))
 		return "", fmt.Errorf("failed to get plan")
 	}
 	defer func() {
-		err := resp.Body.Close()
-		if err != nil {
-			logger.Error("failed to close response body", zap.Error(err))
+		if cerr := resp.Body.Close(); cerr != nil {
+			logger.Error("failed to close response body", zap.Error(cerr))
 		}
 	}()
 
@@ -326,28 +329,24 @@ func getLatestPlan(ctx context.Context, logger *zap.Logger, serverUrl, token str
 		return "", fmt.Errorf("failed to get plan")
 	}
 
-	var raw map[string]any
-	if err := json.Unmarshal(body, &raw); err != nil {
-		logger.Error("failed to unmarshal plan response", zap.Error(err))
+	var res getPlanRes
+	if err := json.Unmarshal(body, &res); err != nil {
+		logger.Error("failed to unmarshal response", zap.Error(err))
 		return "", fmt.Errorf("failed to get plan")
 	}
 
-	if errMsg, ok := raw["error"].(string); ok && errMsg != "" {
-		logger.Error("error from subscription/plan API", zap.String("api_error", errMsg))
+	if resp.StatusCode != http.StatusOK {
+		logger.Error("non-200 response from subscription/plan", zap.Int("status", resp.StatusCode), zap.String("api_error", res.Error))
+		if res.Error != "" {
+			return "", fmt.Errorf("%s", res.Error)
+		}
 		return "", fmt.Errorf("failed to get plan")
 	}
 
-	plan, ok := raw["plan"].(map[string]any)
-	if !ok {
-		logger.Error("plan field not found or invalid", zap.Any("raw", raw))
+	if res.Plan.Type == "" {
+		logger.Error("plan type missing in successful response", zap.Any("plan", res.Plan))
 		return "", fmt.Errorf("plan not found")
 	}
 
-	planType, ok := plan["type"].(string)
-	if !ok || planType == "" {
-		logger.Error("plan type missing or not a string", zap.Any("plan", plan))
-		return "", fmt.Errorf("plan not found")
-	}
-
-	return planType, nil
+	return res.Plan.Type, nil
 }
