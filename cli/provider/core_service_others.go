@@ -9,7 +9,6 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/platform/http"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb/testset"
 	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
@@ -36,7 +35,7 @@ func Get(ctx context.Context, cmd string, c *config.Config, logger *zap.Logger, 
 	}
 	contractSvc := contract.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlOpenAPIDb, c)
 
-	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, auth, commonServices.Storage, commonServices.HttpClient, c)
+	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, auth, commonServices.Storage, c)
 
 	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, tel, auth, c)
 	if (cmd == "test" && c.Test.BasePath != "") || cmd == "normalize" {
@@ -61,7 +60,6 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 	openAPIdb := openapidb.New(logger, c.Path)
 	reportDB := reportdb.New(logger, c.Path+"/reports")
 	testSetDb := testset.New[*models.TestSet](logger, c.Path)
-	http := http.New(logger, nil)
 	return &CommonInternalService{
 		commonPlatformServices{
 			YamlTestDB:    testDB,
@@ -69,7 +67,6 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 			YamlOpenAPIDb: openAPIdb,
 			YamlReportDb:  reportDB,
 			YamlTestSetDB: testSetDb,
-			HttpClient:    http,
 		},
 		instrumentation,
 	}, nil

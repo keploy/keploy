@@ -4,8 +4,10 @@ package replay
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 
@@ -13,7 +15,6 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/platform/http"
 	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -25,18 +26,16 @@ type Hooks struct {
 	tsConfigDB      TestSetConfig
 	storage         Storage
 	auth            service.Auth
-	http            *http.HTTP
 	instrumentation Instrumentation
 }
 
-func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, storage Storage, auth service.Auth, http *http.HTTP, instrumentation Instrumentation) TestHooks {
+func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, storage Storage, auth service.Auth, instrumentation Instrumentation) TestHooks {
 	return &Hooks{
 		cfg:             cfg,
 		logger:          logger,
 		tsConfigDB:      tsConfigDB,
 		storage:         storage,
 		auth:            auth,
-		http:            http,
 		instrumentation: instrumentation,
 	}
 }
@@ -106,7 +105,7 @@ func (h *Hooks) AfterTestSetRun(ctx context.Context, testSetID string, status bo
 
 	// get the plan of the current user
 
-	plan, err := h.http.GetLatestPlan(ctx, h.cfg.APIServerURL, token)
+	plan, err := getLatestPlan(ctx, h.logger, h.cfg.APIServerURL, token)
 	if err != nil {
 		h.logger.Error("Failed to get latest plan of the user", zap.Error(err))
 		return err
@@ -294,4 +293,61 @@ func extractClaimsWithoutVerification(tokenString string) (jwt.MapClaims, error)
 		return claims, nil
 	}
 	return nil, fmt.Errorf("unable to parse claims")
+}
+
+func getLatestPlan(ctx context.Context, logger *zap.Logger, serverUrl, token string) (string, error) {
+	logger.Info("Getting the latest plan", zap.String("serverUrl", serverUrl), zap.String("token", token))
+
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/subscription/plan", serverUrl), nil)
+	if err != nil {
+		logger.Error("failed to create request", zap.Error(err))
+		return "", fmt.Errorf("failed to get plan")
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		logger.Error("http request failed", zap.Error(err))
+		return "", fmt.Errorf("failed to get plan")
+	}
+	defer func() {
+		err := resp.Body.Close()
+		if err != nil {
+			logger.Error("failed to close response body", zap.Error(err))
+		}
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		logger.Error("failed to read response body", zap.Error(err))
+		return "", fmt.Errorf("failed to get plan")
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		logger.Error("failed to unmarshal plan response", zap.Error(err))
+		return "", fmt.Errorf("failed to get plan")
+	}
+
+	if errMsg, ok := raw["error"].(string); ok && errMsg != "" {
+		logger.Error("error from subscription/plan API", zap.String("api_error", errMsg))
+		return "", fmt.Errorf("failed to get plan")
+	}
+
+	plan, ok := raw["plan"].(map[string]any)
+	if !ok {
+		logger.Error("plan field not found or invalid", zap.Any("raw", raw))
+		return "", fmt.Errorf("plan not found")
+	}
+
+	planType, ok := plan["type"].(string)
+	if !ok || planType == "" {
+		logger.Error("plan type missing or not a string", zap.Any("plan", plan))
+		return "", fmt.Errorf("plan not found")
+	}
+
+	return planType, nil
 }

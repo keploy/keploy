@@ -2,7 +2,6 @@ package provider
 
 import (
 	"go.keploy.io/server/v2/pkg/models"
-	HTTP "go.keploy.io/server/v2/pkg/platform/http"
 	"go.keploy.io/server/v2/pkg/platform/storage"
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb/testset"
 	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
@@ -17,6 +16,5 @@ type commonPlatformServices struct {
 	YamlOpenAPIDb *openapidb.OpenAPIYaml
 	YamlReportDb  *reportdb.TestReport
 	YamlTestSetDB *testset.Db[*models.TestSet]
-	HttpClient    *HTTP.HTTP
 	Storage       *storage.Storage
 }
