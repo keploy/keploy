@@ -29,6 +29,7 @@ import (
 	"go.keploy.io/server/v2/pkg/platform/coverage/java"
 	"go.keploy.io/server/v2/pkg/platform/coverage/javascript"
 	"go.keploy.io/server/v2/pkg/platform/coverage/python"
+	"go.keploy.io/server/v2/pkg/platform/http"
 	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -57,10 +58,10 @@ type Replayer struct {
 	isLastTestCase  bool
 }
 
-func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
+func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, httpClient *http.HTTP, config *config.Config) Service {
 	// set the request emulator for simulating test case requests, if not set
 	if HookImpl == nil {
-		SetTestHooks(NewHooks(logger, config, testSetConf, storage, auth, instrumentation))
+		SetTestHooks(NewHooks(logger, config, testSetConf, storage, auth, httpClient, instrumentation))
 	}
 	instrument := config.Command != ""
 	return &Replayer{

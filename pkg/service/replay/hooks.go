@@ -13,6 +13,7 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/platform/http"
 	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -24,16 +25,18 @@ type Hooks struct {
 	tsConfigDB      TestSetConfig
 	storage         Storage
 	auth            service.Auth
+	http            *http.HTTP
 	instrumentation Instrumentation
 }
 
-func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, storage Storage, auth service.Auth, instrumentation Instrumentation) TestHooks {
+func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, storage Storage, auth service.Auth, http *http.HTTP, instrumentation Instrumentation) TestHooks {
 	return &Hooks{
 		cfg:             cfg,
 		logger:          logger,
 		tsConfigDB:      tsConfigDB,
 		storage:         storage,
 		auth:            auth,
+		http:            http,
 		instrumentation: instrumentation,
 	}
 }
@@ -101,17 +104,20 @@ func (h *Hooks) AfterTestSetRun(ctx context.Context, testSetID string, status bo
 		return nil
 	}
 
+	// get the plan of the current user
+
+	plan, err := h.http.GetLatestPlan(ctx, h.cfg.APIServerURL, token)
+	if err != nil {
+		h.logger.Error("Failed to get latest plan of the user", zap.Error(err))
+		return err
+	}
+
+	h.logger.Info("The latest plan", zap.Any("Plan", plan))
+
 	// Cross verify the local mock file with the test-set config
 	tsConfig, err := h.tsConfigDB.Read(ctx, testSetID)
 	// If test-set config is not found, upload the mock file
 	if err != nil || tsConfig == nil || tsConfig.MockRegistry == nil {
-		h.logger.Info("uploading mock file...")
-		err = h.storage.Upload(ctx, mockFileReader, mockHash, h.cfg.AppName, token)
-		if err != nil {
-			h.logger.Error("Failed to upload mock file", zap.Error(err))
-			return err
-		}
-
 		// create ts config
 		var prescript, postscript string
 		var template map[string]interface{}
@@ -130,11 +136,20 @@ func (h *Hooks) AfterTestSetRun(ctx context.Context, testSetID string, status bo
 			},
 		}
 
-		if username == "" {
-			fmt.Println("Username not found in the token, skipping mock upload")
-			return nil
+		if plan == "Free" {
+			if username == "" {
+				h.logger.Warn("Username not found in the token, skipping mock upload")
+				return nil
+			}
+			tsConfig.MockRegistry.User = username
 		}
-		tsConfig.MockRegistry.User = username
+
+		h.logger.Info("uploading mock file...")
+		err = h.storage.Upload(ctx, mockFileReader, mockHash, h.cfg.AppName, token)
+		if err != nil {
+			h.logger.Error("Failed to upload mock file", zap.Error(err))
+			return err
+		}
 
 		err := h.tsConfigDB.Write(ctx, testSetID, tsConfig)
 		if err != nil {
