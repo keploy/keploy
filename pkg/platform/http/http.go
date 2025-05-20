@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sync"
 
 	"go.uber.org/zap"
 )
@@ -15,7 +14,6 @@ import (
 
 type HTTP struct {
 	logger *zap.Logger
-	lock   *sync.Mutex
 	client *http.Client
 }
 
