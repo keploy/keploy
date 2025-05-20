@@ -45,7 +45,12 @@ func (h *HTTP) GetLatestPlan(ctx context.Context, serverUrl, token string) (stri
 		h.logger.Error("http request failed", zap.Error(err))
 		return "", fmt.Errorf("failed to get plan")
 	}
-	defer resp.Body.Close()
+	defer func() {
+		err := resp.Body.Close()
+		if err != nil {
+			h.logger.Error("failed to close response body", zap.Error(err))
+		}
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
