@@ -5,6 +5,7 @@ import (
 )
 
 type GrpcSpec struct {
+	Metadata         map[string]string             `json:"metadata" yaml:"metadata"`
 	GrpcReq          GrpcReq                       `json:"grpcReq" yaml:"grpcReq"`
 	GrpcResp         GrpcResp                      `json:"grpcResp" yaml:"grpcResp"`
 	Created          int64                         `json:"created" yaml:"created"`
