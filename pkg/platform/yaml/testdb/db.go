@@ -204,12 +204,23 @@ func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, tes
 		utils.LogError(ts.logger, err, "failed to read the testcase from yaml")
 		return err
 	}
+	if len(data) == 0 {
+		ts.logger.Warn("skipping empty testcase", zap.String("testcase name", testCaseID))
+		return nil
+	}
 	var testCase *yaml.NetworkTrafficDoc
 
 	err = yamlLib.Unmarshal(data, &testCase)
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to unmarshall YAML data")
+		return err
 	}
+
+	if testCase == nil {
+		ts.logger.Warn("skipping invalid testCase yaml", zap.String("testcase name", testCaseID))
+		return nil
+	}
+
 	tc, err := Decode(testCase, ts.logger)
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to decode the testcase")
