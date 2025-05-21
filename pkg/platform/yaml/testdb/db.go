@@ -85,11 +85,22 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 			utils.LogError(ts.logger, err, "failed to read the testcase from yaml")
 			return nil, err
 		}
+
+		if len(data) == 0 {
+			ts.logger.Warn("skipping empty testcase", zap.String("testcase name", name))
+			continue
+		}
+
 		var testCase *yaml.NetworkTrafficDoc
 		err = yamlLib.Unmarshal(data, &testCase)
 		if err != nil {
 			utils.LogError(ts.logger, err, "failed to unmarshall YAML data")
 			return nil, err
+		}
+
+		if testCase == nil {
+			ts.logger.Warn("skipping invalid testCase yaml", zap.String("testcase name", name))
+			continue
 		}
 
 		tc, err := Decode(testCase, ts.logger)
