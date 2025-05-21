@@ -28,7 +28,7 @@ ENV KEPLOY_INDOCKER=true
 
 # Update the package lists and install required packages
 RUN apt-get update
-RUN apt-get install -y ca-certificates curl sudo && \
+RUN apt-get install -y ca-certificates curl sudo default-jdk python3-coverage && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -42,6 +42,14 @@ RUN curl -fsSL https://get.docker.com -o get-docker.sh && \
 RUN mkdir -p /usr/lib/docker/cli-plugins && \
     curl -SL "https://github.com/docker/compose/releases/download/v2.29.1/docker-compose-linux-$(uname -m)" -o /usr/lib/docker/cli-plugins/docker-compose && \
     chmod +x /usr/lib/docker/cli-plugins/docker-compose
+
+# Copy Go binaries from official image and set ENV
+COPY --from=golang:1.22 /usr/local/go /usr/local/go
+ENV GOROOT=/usr/local/go
+ENV PATH="$PATH:$GOROOT/bin"
+
+# Allows 'sudo go' commands
+RUN sed -i 's/\(Defaults\s*secure_path="[^"]*\)/\1:\/usr\/local\/go\/bin/' /etc/sudoers
 
 # Copy the keploy binary and the entrypoint script from the build container
 COPY --from=build /app/keploy /app/keploy
