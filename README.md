@@ -130,7 +130,7 @@ Keploy proxy captures and replays **ALL** (CRUD operations, including non-idempo
 
 Take a journey to **[How Keploy Works?](https://keploy.io/docs/keploy-explained/how-keploy-works/)** to discover the tricks behind the curtain!
 
-Here are Keploy's core features: 🛠
+  ## 🔧 Core Features
 
 - ♻️ **Combined Test Coverage:** Merge your Keploy Tests with your fave testing libraries(JUnit, go-test, py-test, jest) to see a combined test coverage.
 
@@ -144,7 +144,10 @@ Here are Keploy's core features: 🛠
 - 📽️ **Record-Replay Complex Flows:** Keploy can record and replay complex, distributed API flows as mocks and stubs. It's like having a time machine for your tests—saving you tons of time!
 
 
-- 🎭 **Multi-Purpose Mocks:** You can also use keploy Mocks, as server Tests!
+- 🎭 **Multi-Purpose Mocks:** You can also use Keploy-generated Mocks, as server Tests!
+
+
+👉 **Explore the code on GitHub**: [github.com/keploy/keploy](https://github.com/keploy/keploy)
 
 
 ## 👨🏻‍💻 Let's Build Together! 👩🏻‍💻
