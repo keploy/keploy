@@ -18,16 +18,16 @@
    <a href="https://twitter.com/Keploy_io">
     <img src="https://img.shields.io/badge/follow-%40keployio-1DA1F2?logo=twitter&style=social" alt="Keploy Twitter" />
   </a>
-
-<a href="https://github.com/Keploy/Keploy/issues">
-    <img src="https://img.shields.io/github/stars/keploy/keploy?color=%23EAC54F&logo=github&label=Help us reach 10K stars! Now at:" alt="Help us reach 10k stars!" />
-  </a>
+  
+  <a href="https://github.com/Keploy/Keploy/">
+  <img src="https://img.shields.io/github/stars/keploy/keploy?color=%23EAC54F&logo=github&label=Help%20us%20reach%2010K%20stars!%20Now%20at:" alt="Help us reach 10k stars!" />
+</a>
 
   <a href="https://landscape.cncf.io/?item=app-definition-and-development--continuous-integration-delivery--keploy">
     <img src="https://img.shields.io/badge/CNCF%20Landscape-5699C6?logo=cncf&style=social" alt="Keploy CNCF Landscape" />
   </a>
 
-[![Slack](https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white)](https://join.slack.com/t/keploy/shared_invite/zt-2poflru6f-_VAuvQfCBT8fDWv1WwSbkw)
+[![Slack](https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white)](https://join.slack.com/t/keploy/shared_invite/zt-357qqm9b5-PbZRVu3Yt2rJIa6ofrwWNg)
 [![LinkedIn](https://img.shields.io/badge/linkedin-%230077B5.svg?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/keploy/)
 [![YouTube](https://img.shields.io/badge/YouTube-%23FF0000.svg?style=for-the-badge&logo=YouTube&logoColor=white)](https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg)
 [![Twitter](https://img.shields.io/badge/Twitter-%231DA1F2.svg?style=for-the-badge&logo=Twitter&logoColor=white)](https://twitter.com/Keployio)
@@ -101,7 +101,7 @@ Setup and run keploy quickly, with no local machine installation required:
 ## 🤔 Questions?
 Reach out to us. We're here to help!
 
-[![Slack](https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white)](https://join.slack.com/t/keploy/shared_invite/zt-2poflru6f-_VAuvQfCBT8fDWv1WwSbkw)
+[![Slack](https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white)](https://join.slack.com/t/keploy/shared_invite/zt-357qqm9b5-PbZRVu3Yt2rJIa6ofrwWNg)
 [![LinkedIn](https://img.shields.io/badge/linkedin-%230077B5.svg?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/company/keploy/)
 [![YouTube](https://img.shields.io/badge/YouTube-%23FF0000.svg?style=for-the-badge&logo=YouTube&logoColor=white)](https://www.youtube.com/channel/UC6OTg7F4o0WkmNtSoob34lg)
 [![Twitter](https://img.shields.io/badge/Twitter-%231DA1F2.svg?style=for-the-badge&logo=Twitter&logoColor=white)](https://twitter.com/Keployio)
@@ -130,7 +130,7 @@ Keploy proxy captures and replays **ALL** (CRUD operations, including non-idempo
 
 Take a journey to **[How Keploy Works?](https://keploy.io/docs/keploy-explained/how-keploy-works/)** to discover the tricks behind the curtain!
 
-Here are Keploy's core features: 🛠
+  ## 🔧 Core Features
 
 - ♻️ **Combined Test Coverage:** Merge your Keploy Tests with your fave testing libraries(JUnit, go-test, py-test, jest) to see a combined test coverage.
 
@@ -144,7 +144,10 @@ Here are Keploy's core features: 🛠
 - 📽️ **Record-Replay Complex Flows:** Keploy can record and replay complex, distributed API flows as mocks and stubs. It's like having a time machine for your tests—saving you tons of time!
 
 
-- 🎭 **Multi-Purpose Mocks:** You can also use keploy Mocks, as server Tests!
+- 🎭 **Multi-Purpose Mocks:** You can also use Keploy-generated Mocks, as server Tests!
+
+
+👉 **Explore the code on GitHub**: [github.com/keploy/keploy](https://github.com/keploy/keploy)
 
 
 ## 👨🏻‍💻 Let's Build Together! 👩🏻‍💻

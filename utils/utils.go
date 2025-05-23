@@ -26,7 +26,6 @@ import (
 	"golang.org/x/text/language"
 
 	"github.com/getsentry/sentry-go"
-	"github.com/sbabiv/xml2map"
 	netLib "github.com/shirou/gopsutil/v3/net"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -59,6 +58,43 @@ func ReplaceHost(currentURL string, ipAddress string) (string, error) {
 	parsedURL.Host = strings.Replace(parsedURL.Host, parsedURL.Hostname(), ipAddress, 1)
 	// Return the modified URL
 	return parsedURL.String(), nil
+}
+
+func ReplaceGrpcHost(authority string, ipAddress string) (string, error) {
+	// Check if ipAddress is empty
+	if ipAddress == "" {
+		return authority, fmt.Errorf("failed to replace authority in case of docker env: empty IP address")
+	}
+
+	// Split authority into host and port
+	parts := strings.Split(authority, ":")
+	if len(parts) != 2 {
+		return authority, fmt.Errorf("invalid authority format, expected host:port but got %s", authority)
+	}
+
+	// Replace the host part with ipAddress, keeping the port
+	return ipAddress + ":" + parts[1], nil
+}
+
+func ReplaceGrpcPort(authority string, port string) (string, error) {
+	// Check if port is empty
+	if port == "" {
+		return authority, fmt.Errorf("failed to replace port in case of docker env: empty port")
+	}
+
+	// Split authority into host and port
+	parts := strings.Split(authority, ":")
+	if len(parts) == 0 {
+		return authority, fmt.Errorf("invalid authority format, got empty string")
+	}
+
+	// If there's no port in the authority, append the new port
+	if len(parts) == 1 {
+		return parts[0] + ":" + port, nil
+	}
+
+	// Replace the port part, keeping the host
+	return parts[0] + ":" + port, nil
 }
 
 // ReplaceBaseURL replaces the base URL (scheme + host) of the given URL with the provided baseURL.
@@ -265,9 +301,10 @@ func AskForConfirmation(s string) (bool, error) {
 
 		response = strings.ToLower(strings.TrimSpace(response))
 
-		if response == "y" || response == "yes" {
+		switch response {
+		case "y", "yes":
 			return true, nil
-		} else if response == "n" || response == "no" {
+		case "n", "no":
 			return false, nil
 		}
 	}
@@ -357,7 +394,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
       - name: Test-Report
         uses: keploy/testgpt@main
         with:
@@ -976,13 +1013,21 @@ func IsXMLResponse(resp *models.HTTPResp) bool {
 	return strings.Contains(contentType, "application/xml") || strings.Contains(contentType, "text/xml")
 }
 
-// XMLToMap converts an XML string into a map[string]interface{}
-func XMLToMap(xmlData string) (map[string]interface{}, error) {
-	// Convert XML to map[string]interface{}
-	m, err := xml2map.NewDecoder(strings.NewReader(xmlData)).Decode()
-	if err != nil {
-		return nil, err
-	}
+// // XMLToMap converts an XML string into a map[string]interface{}
+// func XMLToMap(data string) (map[string]any, error) {
+// 	mv, err := mxj.NewMapXml([]byte(data))
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	return mv, nil
+// }
 
-	return m, nil
-}
+// // MapToXML converts a map[string]interface{} into an XML string
+// func MapToXML(data map[string]any) (string, error) {
+// 	mv := mxj.Map(data)
+// 	xmlBytes, err := mv.Xml()
+// 	if err != nil {
+// 		return "", err
+// 	}
+// 	return string(xmlBytes), nil
+// }

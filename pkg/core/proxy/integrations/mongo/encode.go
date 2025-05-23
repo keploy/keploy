@@ -46,7 +46,7 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 				logger.Debug("reading from the mongo conn", zap.Any("", string(reqBuf)))
 				if err != nil {
 					if err == io.EOF {
-						logger.Debug("recieved request buffer is empty in record mode for mongo call")
+						logger.Debug("received request buffer is empty in record mode for mongo call")
 						errCh <- err
 						return nil
 					}
@@ -95,7 +95,7 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 					requestBuffer1, err := pUtil.ReadBytes(ctx, logger, clientConn)
 					if err != nil {
 						if err == io.EOF {
-							logger.Debug("recieved request buffer is empty in record mode for mongo request")
+							logger.Debug("received request buffer is empty in record mode for mongo request")
 							errCh <- err
 							return nil
 						}
@@ -146,7 +146,7 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 			responsePckLengthBuffer, err := pUtil.ReadRequiredBytes(ctx, logger, destConn, 4)
 			if err != nil {
 				if err == io.EOF {
-					logger.Debug("recieved response buffer is empty in record mode for mongo call")
+					logger.Debug("received response buffer is empty in record mode for mongo call")
 					errCh <- err
 					return nil
 				}
@@ -155,7 +155,7 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 				return nil
 			}
 
-			logger.Debug("recieved these pck length packets", zap.Any("packets", responsePckLengthBuffer))
+			logger.Debug("received these pck length packets", zap.Any("packets", responsePckLengthBuffer))
 
 			// convert packet length to LittleEndian integer.
 			pckLength := getPacketLength(responsePckLengthBuffer)
@@ -164,13 +164,13 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 			// read the entire response packet
 			responsePckDataBuffer, err := pUtil.ReadRequiredBytes(ctx, logger, destConn, int(pckLength)-4)
 
-			logger.Debug("recieved these packets", zap.Any("packets", responsePckDataBuffer))
+			logger.Debug("received these packets", zap.Any("packets", responsePckDataBuffer))
 
 			responseBuffer := append(responsePckLengthBuffer, responsePckDataBuffer...)
 			logger.Debug("reading from the destination mongo server", zap.Any("", string(responseBuffer)))
 			if err != nil {
 				if err == io.EOF {
-					logger.Debug("recieved response buffer is empty in record mode for mongo call")
+					logger.Debug("received response buffer is empty in record mode for mongo call")
 					errCh <- err
 					return nil
 				}
@@ -216,7 +216,7 @@ func (m *Mongo) encodeMongo(ctx context.Context, logger *zap.Logger, reqBuf []by
 					responseBuffer, err = pUtil.ReadBytes(ctx, logger, destConn)
 					if err != nil {
 						if err == io.EOF {
-							logger.Debug("recieved response buffer is empty in record mode for mongo call")
+							logger.Debug("received response buffer is empty in record mode for mongo call")
 							errCh <- err
 							return nil
 						}

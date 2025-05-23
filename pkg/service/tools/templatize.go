@@ -466,6 +466,8 @@ func RenderIfTemplatized(val interface{}) (bool, interface{}, error) {
 	}
 
 	// Check if the value is a template.
+	// Applied this nolint to ignore the staticcheck error here because of readability
+	// nolint:staticcheck
 	if !(strings.Contains(stringVal, "{{") && strings.Contains(stringVal, "}}")) {
 		return false, val, nil
 	}
@@ -881,10 +883,7 @@ func insertUnique(baseKey, value string, myMap map[string]interface{}) string {
 	}
 	key := baseKey
 	i := 0
-	for {
-		if myMap[key] == value {
-			break
-		}
+	for myMap[key] != value {
 		if _, exists := myMap[key]; !exists {
 			myMap[key] = value
 			break
@@ -936,7 +935,7 @@ func render(val string) (interface{}, error) {
 	return outputString, nil
 }
 
-// Compare the headers of 2 requests and add the templates.
+// Compare the headers of 2 utils.TemplatizedValues requests and add the templates.
 func compareReqHeaders(logger *zap.Logger, req1 map[string]string, req2 map[string]string) {
 	for key, val1 := range req1 {
 		// Check if the value is already present in the templatized values.

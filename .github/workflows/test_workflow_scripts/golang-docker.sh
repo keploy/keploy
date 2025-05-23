@@ -7,7 +7,7 @@ docker network create keploy-network
 docker run --name mongoDb --rm --net keploy-network -p 27017:27017 -d mongo
 
 # Generate the keploy-config file.
-sudo -E env PATH=$PATH ./../../keployv2 config --generate
+sudo -E env PATH=$PATH $RECORD_BIN config --generate
 
 # Update the global noise to ts.
 config_file="./keploy.yml"
@@ -64,7 +64,7 @@ send_request(){
 for i in {1..2}; do
     container_name="ginApp_${i}"
     send_request &
-    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker run -p8080:8080 --net keploy-network --rm --name $container_name gin-mongo" --container-name "$container_name"    &> "${container_name}.txt"
+    sudo -E env PATH=$PATH $RECORD_BIN record -c "docker run -p8080:8080 --net keploy-network --rm --name $container_name gin-mongo" --container-name "$container_name"    &> "${container_name}.txt"
 
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
@@ -83,7 +83,7 @@ done
 
 # Start the keploy in test mode.
 test_container="ginApp_test"
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
+sudo -E env PATH=$PATH $REPLAY_BIN test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."

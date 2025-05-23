@@ -85,11 +85,22 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 			utils.LogError(ts.logger, err, "failed to read the testcase from yaml")
 			return nil, err
 		}
+
+		if len(data) == 0 {
+			ts.logger.Warn("skipping empty testcase", zap.String("testcase name", name))
+			continue
+		}
+
 		var testCase *yaml.NetworkTrafficDoc
 		err = yamlLib.Unmarshal(data, &testCase)
 		if err != nil {
 			utils.LogError(ts.logger, err, "failed to unmarshall YAML data")
 			return nil, err
+		}
+
+		if testCase == nil {
+			ts.logger.Warn("skipping invalid testCase yaml", zap.String("testcase name", name))
+			continue
 		}
 
 		tc, err := Decode(testCase, ts.logger)
@@ -183,4 +194,54 @@ func (ts *TestYaml) DeleteTestSet(ctx context.Context, testSetID string) error {
 func (ts *TestYaml) ChangePath(path string) {
 
 	ts.TcsPath = path
+}
+
+func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, testSetID string, assertions map[models.AssertionType]interface{}) error {
+	// get the test case and fill the assertion and update the test case
+	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
+	data, err := yaml.ReadFile(ctx, ts.logger, tcsPath, testCaseID)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to read the testcase from yaml")
+		return err
+	}
+	if len(data) == 0 {
+		ts.logger.Warn("skipping empty testcase", zap.String("testcase name", testCaseID))
+		return nil
+	}
+	var testCase *yaml.NetworkTrafficDoc
+
+	err = yamlLib.Unmarshal(data, &testCase)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to unmarshall YAML data")
+		return err
+	}
+
+	if testCase == nil {
+		ts.logger.Warn("skipping invalid testCase yaml", zap.String("testcase name", testCaseID))
+		return nil
+	}
+
+	tc, err := Decode(testCase, ts.logger)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to decode the testcase")
+		return err
+	}
+	tc.Assertions = assertions
+	yamlTc, err := EncodeTestcase(*tc, ts.logger)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to encode the testcase")
+		return err
+	}
+	yamlTc.Name = testCaseID
+	data, err = yamlLib.Marshal(&yamlTc)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to marshall the testcase")
+		return err
+	}
+	err = yaml.WriteFile(ctx, ts.logger, tcsPath, testCaseID, data, false)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to write testcase yaml file")
+		return err
+	}
+	return nil
 }

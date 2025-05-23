@@ -276,7 +276,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 	switch cmd.Name() {
 	case "record":
-		cmd.Flags().Uint64("record-timer", 0, "User provided time to record its application")
+		cmd.Flags().Duration("record-timer", 0, "User provided time to record its application (e.g., \"5s\" for 5 seconds, \"1m\" for 1 minute)")
 		cmd.Flags().String("base-path", c.cfg.Record.BasePath, "Base URL to hit the server while recording the testcases")
 	case "test", "rerecord":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
@@ -299,6 +299,9 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 			cmd.Flags().Bool("disableMockUpload", c.cfg.Test.DisableMockUpload, "Store/Fetch mocks locally")
 			cmd.Flags().Bool("useLocalMock", false, "Use local mocks instead of fetching from the cloud")
 			cmd.Flags().Bool("disable-line-coverage", c.cfg.Test.DisableLineCoverage, "Disable line coverage generation.")
+			cmd.Flags().Bool("must-pass", c.cfg.Test.MustPass, "enforces that the tests must pass, if it doesn't, remove failing testcases")
+			cmd.Flags().Uint32Var(&c.cfg.Test.MaxFailAttempts, "max-fail-attempts", 5, "maximum number of testset failure that can be allowed during must-pass mode")
+			cmd.Flags().Uint32Var(&c.cfg.Test.MaxFlakyChecks, "flaky-check-retry", 1, "maximum number of retries to check for flakiness")
 		}
 	}
 }
@@ -715,6 +718,59 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 				c.cfg.ReRecord.Port = port
 				return nil
+			}
+
+			// enforce that the test-sets are provided when --must-pass is set to true
+			// to prevent accidental deletion of failed testcases in testsets which was due to application changes
+			// and not due to flakiness or our internal issue.
+			mustPass, err := cmd.Flags().GetBool("must-pass")
+			if err != nil {
+				errMsg := "failed to get the must-pass flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+
+			if mustPass {
+				c.cfg.Test.SkipCoverage = true
+				c.cfg.Test.DisableMockUpload = true
+			}
+
+			// in mustpass mode, set the maxFlakyChecks count to 3 explicitly,
+			// if it is not set through cmd flag.
+			if mustPass && !cmd.Flags().Changed("flaky-check-retry") {
+				c.cfg.Test.MaxFlakyChecks = 3
+			}
+
+			// if the user passes a value for this field, store it
+			if cmd.Flags().Changed("flaky-check-retry") {
+				c.cfg.Test.MaxFlakyChecks, err = cmd.Flags().GetUint32("flaky-check-retry")
+				if err != nil {
+					errMsg := "failed to get the provided flaky-check-retry count"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+			}
+
+			// if the user passes a value for this field, store it
+			if cmd.Flags().Changed("max-fail-attempts") {
+				c.cfg.Test.MaxFailAttempts, err = cmd.Flags().GetUint32("max-fail-attempts")
+				if err != nil {
+					errMsg := "failed to get the provided max-fail-attempts count"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+			}
+
+			// don't allow zero maxFlakyChecks and if must pass mode is enabled, then maxFailAttempts can't be zero.
+			if c.cfg.Test.MaxFlakyChecks == 0 {
+				return fmt.Errorf("value for maxFlakyChecks cannot be zero")
+			}
+			if mustPass && c.cfg.Test.MaxFailAttempts == 0 {
+				return fmt.Errorf("in must pass mode, value for maxFailAttempts cannot be zero")
+			}
+
+			if mustPass && !cmd.Flags().Changed("test-sets") {
+				return fmt.Errorf("--test-sets flag must be set to use --must-pass=true")
 			}
 
 			// skip coverage by default if command is of type docker

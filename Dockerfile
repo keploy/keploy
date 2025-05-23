@@ -1,5 +1,5 @@
 # === Build Stage ===
-FROM golang:1.22 AS build
+FROM golang:1.24 AS build
 
 # Set the working directory
 WORKDIR /app
@@ -7,6 +7,7 @@ WORKDIR /app
 # Define build arguments for ldflags
 ARG SENTRY_DSN_DOCKER
 ARG VERSION
+ARG SERVER_URL
 
 # Copy the Go module files and download dependencies
 COPY go.mod go.sum /app/

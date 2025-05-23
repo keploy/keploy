@@ -1,6 +1,6 @@
 module go.keploy.io/server/v2
 
-go 1.22.0
+go 1.24.1
 
 replace github.com/jackc/pgproto3/v2 => github.com/keploy/pgproto3/v2 v2.0.5
 
@@ -112,7 +112,6 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgproto3/v2 v2.3.2
 	github.com/keploy/jsonDiff v1.0.5
-	github.com/sbabiv/xml2map v1.2.1
 	github.com/shirou/gopsutil/v3 v3.24.3
 	github.com/spf13/viper v1.19.0
 	github.com/wI2L/jsondiff v0.5.0

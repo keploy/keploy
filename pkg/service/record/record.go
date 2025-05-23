@@ -105,7 +105,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	if err != nil {
 		stopReason = "failed to get new test-set id"
 		utils.LogError(r.logger, err, stopReason)
-		return fmt.Errorf(stopReason)
+		return fmt.Errorf("%s", stopReason)
 	}
 
 	//checking for context cancellation as we don't want to start the instrumentation if the context is cancelled
@@ -120,7 +120,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	if err != nil {
 		stopReason = "failed to instrument the application"
 		utils.LogError(r.logger, err, stopReason)
-		return fmt.Errorf(stopReason)
+		return fmt.Errorf("%s", stopReason)
 	}
 
 	r.config.AppID = appID
@@ -133,7 +133,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		if ctx.Err() == context.Canceled {
 			return err
 		}
-		return fmt.Errorf(stopReason)
+		return fmt.Errorf("%s", stopReason)
 	}
 
 	errGrp.Go(func() error {
@@ -227,7 +227,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 			stopReason = "keploy test mode binary stopped, hence stopping keploy"
 			return nil
 		default:
-			stopReason = "unknown error recieved from application, hence stopping keploy"
+			stopReason = "unknown error received from application, hence stopping keploy"
 		}
 
 	case err = <-insertTestErrChan:
@@ -238,7 +238,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		return nil
 	}
 	utils.LogError(r.logger, err, stopReason)
-	return fmt.Errorf(stopReason)
+	return fmt.Errorf("%s", stopReason)
 }
 
 func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
@@ -248,7 +248,7 @@ func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
 	if err != nil {
 		stopReason = "failed setting up the environment"
 		utils.LogError(r.logger, err, stopReason)
-		return 0, fmt.Errorf(stopReason)
+		return 0, fmt.Errorf("%s", stopReason)
 	}
 	r.config.AppID = appID
 
@@ -272,7 +272,7 @@ func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
 			if ctx.Err() == context.Canceled {
 				return appID, err
 			}
-			return appID, fmt.Errorf(stopReason)
+			return appID, fmt.Errorf("%s", stopReason)
 		}
 	}
 	return appID, nil
@@ -292,6 +292,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (Frame
 		Rules:          r.config.BypassRules,
 		MongoPassword:  r.config.Test.MongoPassword,
 		FallBackOnMiss: r.config.Test.FallBackOnMiss,
+		Backdate:       time.Now(),
 	}
 
 	outgoingChan, err := r.instrumentation.GetOutgoing(ctx, appID, outgoingOpts)

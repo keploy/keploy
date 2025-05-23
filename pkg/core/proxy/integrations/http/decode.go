@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -119,6 +120,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					}
 				}
 				errCh <- nil
+				return
+			}
+
+			if stub == nil {
+				utils.LogError(h.Logger, nil, "matched mock is nil", zap.Any("metadata", GetReqMeta(request)))
+				errCh <- errors.New("matched mock is nil")
 				return
 			}
 

@@ -36,6 +36,8 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			// To read the stream of request packets from the client
 			for {
 				buffer, err := pUtil.ReadBytes(ctx, logger, clientConn)
+				// Applied this nolint to ignore the staticcheck error here because of readability
+				// nolint:staticcheck
 				if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil && err.Error() != "EOF" {
 					utils.LogError(logger, err, "failed to read the request message in proxy for generic dependency")
 					return
@@ -54,7 +56,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 
 			// bestMatchedIndx := 0
 			// fuzzy match gives the index for the best matched generic mock
-			matched, genericResponses, err := fuzzyMatch(ctx, genericRequests, mockDb)
+			matched, genericResponses, err := fuzzyMatch(ctx, logger, genericRequests, mockDb)
 			if err != nil {
 				utils.LogError(logger, err, "error while matching generic mocks")
 			}
