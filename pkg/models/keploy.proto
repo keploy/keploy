@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package models;
+
+option go_package = "go.keploy.io/server/v2/pkg/models";
+
+service KeployInstance {
+    rpc Record (RecordRequest) returns (RecordReply);
+    rpc Mock (MockRequest) returns (MockReply);
+}
+
+message RecordRequest {
+    string test_case_path = 1;
+    string mock_path = 2;
+    string app_id = 3;
+    string test_set_id = 4;
+    GrpcSpec grpc_spec = 5;
+}
+
+message RecordReply {
+    bool success = 1;
+    string error_message = 2;
+}
+
+message MockRequest {
+    string mock_path = 1;
+    string app_id = 2;
+    string test_set_id = 3;
+    GrpcSpec grpc_spec = 4;
+}
+
+message MockReply {
+    bool success = 1;
+    string error_message = 2;
+}
+
+message GrpcSpec {
+    map<string, string> metadata = 1;
+    GrpcReq grpc_req = 2;
+    GrpcResp grpc_resp = 3;
+    int64 created = 4;
+    map<string, string> assertions = 5; // Assuming AssertionType is string for simplicity
+    google.protobuf.Timestamp req_timestamp_mock = 6;
+    google.protobuf.Timestamp res_timestamp_mock = 7;
+}
+
+message GrpcReq {
+    GrpcHeaders headers = 1;
+    GrpcLengthPrefixedMessage body = 2;
+    google.protobuf.Timestamp timestamp = 3;
+}
+
+message GrpcResp {
+    GrpcHeaders headers = 1;
+    GrpcLengthPrefixedMessage body = 2;
+    GrpcHeaders trailers = 3;
+    google.protobuf.Timestamp timestamp = 4;
+}
+
+message GrpcHeaders {
+    map<string, string> pseudo_headers = 1;
+    map<string, string> ordinary_headers = 2;
+}
+
+message GrpcLengthPrefixedMessage {
+    uint32 compression_flag = 1; // Changed from uint to uint32 for proto3 compatibility
+    uint32 message_length = 2;
+    string decoded_data = 3;
+}
+
+// Import Timestamp message type
+import "google/protobuf/timestamp.proto";
