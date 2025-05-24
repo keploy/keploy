@@ -532,6 +532,15 @@ func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOption
 	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
 }
 
+// RecordGRPC is a placeholder for capturing incoming gRPC requests.
+// TODO: Implement actual gRPC capture logic, potentially using eBPF or other mechanisms.
+func (h *Hooks) RecordGRPC(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
+	h.logger.Info("RecordGRPC called, placeholder implementation.", zap.Uint64("appID", id), zap.Any("options", opts))
+	// For now, return a nil channel and no error, as this is a placeholder.
+	// In a real implementation, this would involve setting up listeners for gRPC traffic.
+	return nil, nil
+}
+
 func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 	// closing all events
 	//other
