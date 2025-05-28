@@ -37,7 +37,7 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, 
 	}
 }
 
-func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
+func (r *Recorder) Start(ctx context.Context, reRecord bool, trafficType string) error {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	errGrp, _ := errgroup.WithContext(ctx)
@@ -124,7 +124,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	r.config.AppID = appID
 
 	// fetching test cases and mocks from the application and inserting them into the database
-	frames, err := r.GetTestAndMockChans(ctx, appID)
+	frames, err := r.GetTestAndMockChans(ctx, appID, trafficType)
 	if err != nil {
 		stopReason = "failed to get data frames"
 		utils.LogError(r.logger, err, stopReason)
@@ -268,12 +268,13 @@ func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
 	return appID, nil
 }
 
-func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (FrameChan, error) {
+func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64, trafficType string) (FrameChan, error) {
+	r.logger.Info("Getting test and mock channels", zap.String("trafficType", trafficType))
 	incomingOpts := models.IncomingOptions{
 		Filters:  r.config.Record.Filters,
 		BasePath: r.config.Record.BasePath,
 	}
-	incomingChan, err := r.instrumentation.GetIncoming(ctx, appID, incomingOpts)
+	incomingChan, err := r.instrumentation.GetIncoming(ctx, appID, incomingOpts, trafficType)
 	if err != nil {
 		return FrameChan{}, fmt.Errorf("failed to get incoming test cases: %w", err)
 	}
@@ -284,8 +285,7 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (Frame
 		FallBackOnMiss: r.config.Test.FallBackOnMiss,
 		Backdate:       time.Now(),
 	}
-
-	outgoingChan, err := r.instrumentation.GetOutgoing(ctx, appID, outgoingOpts)
+	outgoingChan, err := r.instrumentation.GetOutgoing(ctx, appID, outgoingOpts, trafficType)
 	if err != nil {
 		return FrameChan{}, fmt.Errorf("failed to get outgoing mocks: %w", err)
 	}

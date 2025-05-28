@@ -51,5 +51,12 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 		return nil
 	}
 
+	cmd.Flags().String("traffic-type", "http", "Type of traffic to record (e.g., 'http', 'grpc'). Default is 'http'.")
+
+	if err != nil {
+		utils.LogError(logger, err, "failed to add record flags")
+		return nil
+	}
+
 	return cmd
 }
