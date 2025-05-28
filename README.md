@@ -20,7 +20,7 @@
   </a>
   
   <a href="https://github.com/Keploy/Keploy/">
-  <img src="https://img.shields.io/github/stars/keploy/keploy?color=%23EAC54F&logo=github&label=Help%20us%20reach%2010K%20stars!%20Now%20at:" alt="Help us reach 10k stars!" />
+   <img src="https://img.shields.io/github/stars/keploy/keploy?color=%23EAC54F&logo=github&label=Help%20us%20reach%2020K%20stars!%20Now%20at:" alt="Help us reach 20k stars!" />
 </a>
 
   <a href="https://landscape.cncf.io/?item=app-definition-and-development--continuous-integration-delivery--keploy">
