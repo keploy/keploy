@@ -25,6 +25,7 @@ type Config struct {
 	ContainerName         string       `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
 	NetworkName           string       `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
 	BuildDelay            uint64       `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
+	TestSuite             TestSuite    `json:"testSuite" yaml:"testSuite" mapstructure:"testSuite"`
 	Test                  Test         `json:"test" yaml:"test" mapstructure:"test"`
 	Record                Record       `json:"record" yaml:"record" mapstructure:"record"`
 	Gen                   UtGen        `json:"gen" yaml:"-" mapstructure:"gen"`
@@ -44,6 +45,11 @@ type Config struct {
 	Version        string `json:"-" yaml:"-" mapstructure:"-"`
 	APIServerURL   string `json:"-" yaml:"-" mapstructure:"-"`
 	GitHubClientID string `json:"-" yaml:"-" mapstructure:"-"`
+}
+
+type TestSuite struct {
+	TSPath  string `json:"tsPath" yaml:"tsPath" mapstructure:"tsPath"`
+	BaseURL string `json:"baseUrl" yaml:"baseUrl" mapstructure:"baseUrl"`
 }
 
 type UtGen struct {
