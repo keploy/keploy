@@ -178,6 +178,10 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 
 	switch cmd.Name() {
 
+	case "testsuite":
+		cmd.Flags().String("base-url", "", "Base URL of the application to be tested")
+		cmd.Flags().String("ts-path", "keploy/testsuite", "Directory path containing test suite YAML files")
+
 	case "generate", "download":
 		cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate/download contracts")
 		cmd.Flags().StringSliceP("tests", "t", c.cfg.Contract.Tests, "Specify the tests for which to generate/download contracts")
