@@ -122,6 +122,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		}
 	case models.GRPC_EXPORT:
 		gRPCSpec := models.GrpcSpec{
+			Metadata:         mock.Spec.Metadata,
 			GrpcReq:          *mock.Spec.GRPCReq,
 			GrpcResp:         *mock.Spec.GRPCResp,
 			ReqTimestampMock: mock.Spec.ReqTimestampMock,
@@ -235,6 +236,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
+				Metadata:         grpcSpec.Metadata,
 				GRPCResp:         &grpcSpec.GrpcResp,
 				GRPCReq:          &grpcSpec.GrpcReq,
 				ReqTimestampMock: grpcSpec.ReqTimestampMock,

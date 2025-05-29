@@ -4,8 +4,10 @@ package replay
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 
@@ -101,17 +103,20 @@ func (h *Hooks) AfterTestSetRun(ctx context.Context, testSetID string, status bo
 		return nil
 	}
 
+	// get the plan of the current user
+
+	plan, err := getLatestPlan(ctx, h.logger, h.cfg.APIServerURL, token)
+	if err != nil {
+		h.logger.Error("Failed to get latest plan of the user", zap.Error(err))
+		return err
+	}
+
+	h.logger.Debug("The latest plan", zap.Any("Plan", plan))
+
 	// Cross verify the local mock file with the test-set config
 	tsConfig, err := h.tsConfigDB.Read(ctx, testSetID)
 	// If test-set config is not found, upload the mock file
 	if err != nil || tsConfig == nil || tsConfig.MockRegistry == nil {
-		h.logger.Info("uploading mock file...")
-		err = h.storage.Upload(ctx, mockFileReader, mockHash, h.cfg.AppName, token)
-		if err != nil {
-			h.logger.Error("Failed to upload mock file", zap.Error(err))
-			return err
-		}
-
 		// create ts config
 		var prescript, postscript string
 		var template map[string]interface{}
@@ -130,11 +135,20 @@ func (h *Hooks) AfterTestSetRun(ctx context.Context, testSetID string, status bo
 			},
 		}
 
-		if username == "" {
-			fmt.Println("Username not found in the token, skipping mock upload")
-			return nil
+		if plan == "Free" {
+			if username == "" {
+				h.logger.Warn("Username not found in the token, skipping mock upload")
+				return nil
+			}
+			tsConfig.MockRegistry.User = username
 		}
-		tsConfig.MockRegistry.User = username
+
+		h.logger.Info("uploading mock file...")
+		err = h.storage.Upload(ctx, mockFileReader, mockHash, h.cfg.AppName, token)
+		if err != nil {
+			h.logger.Error("Failed to upload mock file", zap.Error(err))
+			return err
+		}
 
 		err := h.tsConfigDB.Write(ctx, testSetID, tsConfig)
 		if err != nil {
@@ -279,4 +293,60 @@ func extractClaimsWithoutVerification(tokenString string) (jwt.MapClaims, error)
 		return claims, nil
 	}
 	return nil, fmt.Errorf("unable to parse claims")
+}
+
+type getPlanRes struct {
+	Plan  models.Plan `json:"plan"`
+	Error string      `json:"error"`
+}
+
+func getLatestPlan(ctx context.Context, logger *zap.Logger, serverUrl, token string) (string, error) {
+	logger.Debug("Getting the latest plan", zap.String("serverUrl", serverUrl), zap.String("token", token))
+
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/subscription/plan", serverUrl), nil)
+	if err != nil {
+		logger.Error("failed to create request", zap.Error(err))
+		return "", fmt.Errorf("failed to get plan")
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		logger.Error("http request failed", zap.Error(err))
+		return "", fmt.Errorf("failed to get plan")
+	}
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			logger.Error("failed to close response body", zap.Error(cerr))
+		}
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		logger.Error("failed to read response body", zap.Error(err))
+		return "", fmt.Errorf("failed to get plan")
+	}
+
+	var res getPlanRes
+	if err := json.Unmarshal(body, &res); err != nil {
+		logger.Error("failed to unmarshal response", zap.Error(err))
+		return "", fmt.Errorf("failed to get plan")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		logger.Error("non-200 response from subscription/plan", zap.Int("status", resp.StatusCode), zap.String("api_error", res.Error))
+		if res.Error != "" {
+			return "", fmt.Errorf("%s", res.Error)
+		}
+		return "", fmt.Errorf("failed to get plan")
+	}
+
+	if res.Plan.Type == "" {
+		logger.Error("plan type missing in successful response", zap.Any("plan", res.Plan))
+		return "", fmt.Errorf("plan not found")
+	}
+
+	return res.Plan.Type, nil
 }
