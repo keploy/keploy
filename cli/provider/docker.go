@@ -56,12 +56,17 @@ func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config)
 			value := parts[1]
 			if _, exists := DockerConfig.Envs[key]; !exists {
 				DockerConfig.Envs[key] = value
-			} else {
-				logger.Warn("Environment variable already exists in DockerConfig, skipping", zap.String("key", key))
+				continue
 			}
-		} else {
-			logger.Warn("Environment variable not in expected format, skipping", zap.String("env", env))
+
+			if key == "KEPLOY_API_KEY" {
+				continue
+			}
+
+			logger.Warn("Environment variable already exists in DockerConfig, skipping", zap.String("key", key))
+			continue
 		}
+		logger.Warn("Environment variable not in expected format, skipping", zap.String("env", env))
 	}
 
 	//Check if app command starts with docker or docker-compose.
