@@ -42,11 +42,32 @@ func GenerateDockerEnvs(config DockerConfigStruct) string {
 func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config) error {
 
 	if DockerConfig.Envs == nil {
-		DockerConfig.Envs = map[string]string{
-			"INSTALLATION_ID": conf.InstallationID,
+		DockerConfig.Envs = make(map[string]string)
+	}
+
+	DockerConfig.Envs["INSTALLATION_ID"] = conf.InstallationID
+
+	// set all the other environment variables from os environment
+	for _, env := range os.Environ() {
+		logger.Debug("setting environment variable", zap.String("env", env))
+		// Split the environment variable into key and value
+		parts := strings.SplitN(env, "=", 2)
+		if len(parts) == 2 {
+			key := parts[0]
+			value := parts[1]
+			// Add the environment variable to the DockerConfig
+			// if the key is not already set in the DockerConfig
+			if _, exists := DockerConfig.Envs[key]; !exists {
+				// Add the environment variable to the DockerConfig
+				DockerConfig.Envs[key] = value
+			} else {
+				// If the key already exists, log a warning
+				logger.Warn("Environment variable already exists in DockerConfig, skipping", zap.String("key", key))
+			}
+		} else {
+			// Log a warning if the environment variable is not in the expected format
+			logger.Warn("Environment variable not in expected format, skipping", zap.String("env", env))
 		}
-	} else {
-		DockerConfig.Envs["INSTALLATION_ID"] = conf.InstallationID
 	}
 
 	//Check if app command starts with docker or docker-compose.
