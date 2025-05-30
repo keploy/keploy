@@ -281,6 +281,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 				testSetResult = true
 			case models.TestSetStatusIgnored:
 				testSetResult = false
+			case models.TestSetStatusNoTestsToRun:
+				testSetResult = false
 			}
 
 			if testSetStatus != models.TestSetStatusIgnored {
@@ -506,7 +508,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if len(testCases) == 0 {
-		return models.TestSetStatusPassed, nil
+		r.logger.Warn("no valid test cases found to run for test set", zap.String("test-set", testSetID))
+		return models.TestSetStatusNoTestsToRun, nil
 	}
 
 	if _, ok := r.config.Test.IgnoredTests[testSetID]; ok && len(r.config.Test.IgnoredTests[testSetID]) == 0 {

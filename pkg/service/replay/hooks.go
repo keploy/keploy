@@ -193,10 +193,6 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 		return nil
 	}
 
-	if h.cfg.Test.DisableMockUpload {
-		return nil
-	}
-
 	if h.cfg.Test.UseLocalMock {
 		h.logger.Debug("Using local mock file, as UseLocalMock is selected", zap.String("testSetID", testSetID))
 		return nil
