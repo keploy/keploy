@@ -14,11 +14,23 @@ Open Source with Hacktoberfest 2023</h1>
 
 ## Our Journey with Hacktoberfest ❤️
 
-[Hacktoberfest](https://hacktoberfest.com/) is an initiative that matters very deeply to us. We launched the first iteration of Keploy as a mere open-source project in December 2021. Hacktoberfest 2022 was truly a game-changer for us, as we saw over 200 contributions from some lovely members of the open-source community that October.
+🎉 What is Hacktoberfest?
+Hacktoberfest is a global event that encourages people to contribute to open-source projects during the month of October.
 
-There are many different ways you can contribute to [Keploy](https://keploy.io). If you’ve ever wanted to contribute to open-source now is your chance!
+We care deeply about this initiative — in fact, Keploy started as a small open-source project back in December 2021. During Hacktoberfest 2022, we received over 200 amazing contributions from people around the world, and it helped shape Keploy into what it is today!
 
-All backgrounds and skill levels are encouraged to participate. [Learn How to Contribute?](https://opensource.guide/how-to-contribute)
+🙌 How You Can Contribute
+*There are many ways to contribute to Keploy — and you don’t need to be an expert to get started!
+*Whether you're a developer, designer, writer, or just curious about open source, we’d love to have you involved.
+*Fix typos or improve documentation
+*Add new features or suggest improvements
+*Help test and report bugs
+*Review or give feedback on pull requests
+*Everyone is welcome, no matter your background or skill level. 🎓💻
+
+👉 New to open source? Start here!
+
+
 
 # About Keploy
 
