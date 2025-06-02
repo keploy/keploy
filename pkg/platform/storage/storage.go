@@ -3,12 +3,14 @@ package storage
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"path/filepath"
 	"strings"
 
@@ -34,33 +36,45 @@ func New(serverURL string, logger *zap.Logger) *Storage {
 }
 
 func (s *Storage) Upload(ctx context.Context, file io.Reader, mockName string, appName string, token string) error {
-	// Prepare the multipart form file upload request
+	// Create a multipart buffer and writer
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
-	part, err := writer.CreateFormFile("mock", filepath.Base("mocks.yaml"))
+
+	// Create a custom part header for the file field
+	partHeader := textproto.MIMEHeader{}
+	partHeader.Set("Content-Disposition", fmt.Sprintf(`form-data; name="%s"; filename="%s"`, "mock", filepath.Base("mocks.yaml")))
+	partHeader.Set("Content-Type", "application/octet-stream")
+	partHeader.Set("Content-Encoding", "gzip") // Explicitly declare compression
+
+	part, err := writer.CreatePart(partHeader)
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(part, file); err != nil {
+
+	// Compress file data with gzip and write into multipart part
+	gzipWriter := gzip.NewWriter(part)
+	if _, err := io.Copy(gzipWriter, file); err != nil {
 		return err
 	}
-	err = writer.WriteField("appName", appName)
-	if err != nil {
+	if err := gzipWriter.Close(); err != nil {
+		return err
+	}
+
+	// Add other form fields
+	if err := writer.WriteField("appName", appName); err != nil {
 		s.logger.Error("Error writing appName field", zap.Error(err))
 		return err
 	}
-	err = writer.WriteField("mockName", mockName)
-	if err != nil {
+	if err := writer.WriteField("mockName", mockName); err != nil {
 		s.logger.Error("Error writing mockName field", zap.Error(err))
 		return err
 	}
-	err = writer.Close()
-	if err != nil {
+	if err := writer.Close(); err != nil {
 		s.logger.Error("Error closing writer", zap.Error(err))
 		return err
 	}
 
-	// Create a new HTTP request
+	// Prepare the HTTP request
 	req, err := http.NewRequestWithContext(ctx, "POST", s.serverURL+"/mock/upload", body)
 	if err != nil {
 		return err
@@ -68,18 +82,18 @@ func (s *Storage) Upload(ctx context.Context, file io.Reader, mockName string, a
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	// Execute the request
+	// Execute the HTTP request
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		err := resp.Body.Close()
-		if err != nil {
+		if err := resp.Body.Close(); err != nil {
 			utils.LogError(s.logger, err, "failed to close the http response body")
 		}
 	}()
 
+	// Parse the response
 	var mockUploadResponse MockUploadResponse
 	if err := json.NewDecoder(resp.Body).Decode(&mockUploadResponse); err != nil {
 		utils.LogError(s.logger, err, "failed to decode the response body")
@@ -96,7 +110,6 @@ func (s *Storage) Upload(ctx context.Context, file io.Reader, mockName string, a
 	}
 
 	s.logger.Info("Mock uploaded successfully")
-
 	return nil
 }
 
@@ -108,6 +121,8 @@ func (s *Storage) Download(ctx context.Context, mockName string, appName string,
 	}
 
 	req.Header.Set("Authorization", "Bearer "+jwtToken)
+
+	req.Header.Set("Accept-Encoding", "gzip") // Request gzip encoding
 
 	// Execute the request
 	resp, err := http.DefaultClient.Do(req)
@@ -128,6 +143,17 @@ func (s *Storage) Download(ctx context.Context, mockName string, appName string,
 			return nil, fmt.Errorf("failed to read response body and the resp code is: %d", resp.StatusCode)
 		}
 		return nil, fmt.Errorf("download failed with status code: %d, message: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	// Check if the response is gzipped
+	if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
+		s.logger.Debug("mock response is gzipped")
+		gr, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("failed to create gzip reader: %w", err)
+		}
+		return gr, nil // gr is an io.Reader, decompressing transparently
 	}
 
 	return resp.Body, nil
