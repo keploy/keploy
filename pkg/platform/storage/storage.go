@@ -13,6 +13,8 @@ import (
 	"net/textproto"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -36,6 +38,34 @@ func New(serverURL string, logger *zap.Logger) *Storage {
 }
 
 func (s *Storage) Upload(ctx context.Context, file io.Reader, mockName string, appName string, token string) error {
+
+	done := make(chan struct{})
+	var once sync.Once
+
+	closeDone := func() {
+		once.Do(func() {
+			close(done)
+		})
+	}
+
+	// Spinner goroutine
+	go func() {
+		spinnerChars := []rune{'|', '/', '-', '\\'}
+		i := 0
+		for {
+			select {
+			case <-done:
+				fmt.Print("\r") // Clear spinner line after done
+				return
+			default:
+				fmt.Printf("\rUploading... %c", spinnerChars[i%len(spinnerChars)])
+				i++
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+	}()
+	defer closeDone() // Ensure we close the channel when the function exits
+
 	// Create a multipart buffer and writer
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
@@ -99,6 +129,8 @@ func (s *Storage) Upload(ctx context.Context, file io.Reader, mockName string, a
 		utils.LogError(s.logger, err, "failed to decode the response body")
 		return err
 	}
+
+	closeDone()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("upload failed with status code: %d and error %s", resp.StatusCode, mockUploadResponse.Error)

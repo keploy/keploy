@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/golang-jwt/jwt/v4"
 	"go.keploy.io/server/v2/config"
@@ -232,6 +233,7 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 
 	token, _ := h.auth.GetToken(ctx)
 
+	h.logger.Info("Downloading mock file from cloud...", zap.String("testSetID", testSetID))
 	cloudFile, err := h.storage.Download(ctx, tsConfig.MockRegistry.Mock, tsConfig.MockRegistry.App, tsConfig.MockRegistry.User, token)
 	if err != nil {
 		h.logger.Error("Failed to download mock file", zap.Error(err))
@@ -251,10 +253,32 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 		}
 	}()
 
+	done := make(chan struct{})
+
+	// Spinner goroutine
+	go func() {
+		spinnerChars := []rune{'|', '/', '-', '\\'}
+		i := 0
+		for {
+			select {
+			case <-done:
+				fmt.Print("\r") // Clear spinner line after done
+				return
+			default:
+				fmt.Printf("\rDownloading... %c", spinnerChars[i%len(spinnerChars)])
+				i++
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+	}()
+
 	_, err = io.Copy(file, cloudFile)
 	if err != nil {
+		close(done)
 		return err
 	}
+	close(done)
+	h.logger.Info("Mock file downloaded successfully")
 
 	err = utils.AddToGitIgnore(h.logger, h.cfg.Path, "/*/mocks.yaml")
 	if err != nil {
