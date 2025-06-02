@@ -182,7 +182,12 @@ func (s *Storage) Download(ctx context.Context, mockName string, appName string,
 		s.logger.Debug("mock response is gzipped")
 		gr, err := gzip.NewReader(resp.Body)
 		if err != nil {
-			resp.Body.Close()
+			defer func() {
+				err := resp.Body.Close()
+				if err != nil {
+					utils.LogError(s.logger, err, "failed to close the http response body")
+				}
+			}()
 			return nil, fmt.Errorf("failed to create gzip reader: %w", err)
 		}
 		return gr, nil // gr is an io.Reader, decompressing transparently
