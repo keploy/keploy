@@ -400,7 +400,17 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 		}
 		c.logger.Info("Using the last directory name as appName : " + appName)
 		c.cfg.AppName = appName
+	} else {
+		appName, err := utils.GetLastDirectory()
+		if err != nil {
+			return fmt.Errorf("failed to get the last directory: %v", err)
+		}
+		if c.cfg.AppName != appName {
+			c.logger.Warn("AppName in config (" + c.cfg.AppName + ") does not match current directory name (" + appName + "). using current directory name as appName")
+			c.cfg.AppName = appName
+		}
 	}
+
 	if !IsConfigFileFound || rewriteConfig {
 		err := c.CreateConfigFile(ctx, defaultCfg)
 		if err != nil {
