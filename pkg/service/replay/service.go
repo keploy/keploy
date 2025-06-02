@@ -17,7 +17,7 @@ type Instrumentation interface {
 	// SetMocks Allows for setting mocks between test runs for better filtering and matching
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
 	// GetConsumedMocks to log the names of the mocks that were consumed during the test run of failed test cases
-	GetConsumedMocks(ctx context.Context, id uint64) ([]string, error)
+	GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error)
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
 
@@ -52,15 +52,16 @@ type TestDB interface {
 type MockDB interface {
 	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
 	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
-	UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]bool) error
+	UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState) error
 }
 
 type ReportDB interface {
 	GetAllTestRunIDs(ctx context.Context) ([]string, error)
 	GetTestCaseResults(ctx context.Context, testRunID string, testSetID string) ([]models.TestResult, error)
 	GetReport(ctx context.Context, testRunID string, testSetID string) (*models.TestReport, error)
-	InsertTestCaseResult(ctx context.Context, testRunID string, testSetID string, result *models.TestResult) error
-	InsertReport(ctx context.Context, testRunID string, testSetID string, testReport *models.TestReport) error
+	ClearTestCaseResults(_ context.Context, testRunID string, testSetID string)
+	InsertTestCaseResult(ctx context.Context, testRunID string, testSetID string, result *models.TestResult) error // 1
+	InsertReport(ctx context.Context, testRunID string, testSetID string, testReport *models.TestReport) error     // 2
 	UpdateReport(ctx context.Context, testRunID string, testCoverage any) error
 }
 
@@ -77,13 +78,14 @@ type Telemetry interface {
 
 type TestHooks interface {
 	SimulateRequest(ctx context.Context, appID uint64, tc *models.TestCase, testSetID string) (interface{}, error)
+	GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error)
 	BeforeTestSetRun(ctx context.Context, testSetID string) error
 	AfterTestSetRun(ctx context.Context, testSetID string, status bool) error
 	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error // hook executed after running all the test-sets
 }
 
 type Storage interface {
-	Upload(ctx context.Context, file io.Reader, mockName string, appName string, jwtToken string) error
+	Upload(ctx context.Context, file io.Reader, mockName string, appName string, jwtToken string) error // 3
 	Download(ctx context.Context, mockName string, appName string, userName string, jwtToken string) (io.Reader, error)
 }
 
@@ -91,11 +93,3 @@ type InstrumentState struct {
 	AppID      uint64
 	HookCancel context.CancelFunc
 }
-
-type MockAction string
-
-// MockAction constants define the possible actions that can be taken on a mocking.
-const (
-	Start  MockAction = "start"
-	Update MockAction = "update"
-)

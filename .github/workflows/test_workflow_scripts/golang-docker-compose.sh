@@ -9,7 +9,7 @@ docker compose build
 sudo rm -rf keploy/
 
 # Generate the keploy-config file.
-sudo -E env PATH=$PATH ./../../keployv2 config --generate
+sudo -E env PATH=$PATH $RECORD_BIN config --generate
 
 # Update the global noise to ts in the config file.
 config_file="./keploy.yml"
@@ -58,7 +58,7 @@ send_request(){
 for i in {1..2}; do
     container_name="echoApp"
     send_request &
-    sudo -E env PATH=$PATH ./../../keployv2 record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false &> "${container_name}.txt"
+    sudo -E env PATH=$PATH $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false &> "${container_name}.txt"
 
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
@@ -77,7 +77,7 @@ done
 
 # Start keploy in test mode.
 test_container="echoApp"
-sudo -E env PATH=$PATH ./../../keployv2 test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
+sudo -E env PATH=$PATH $REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."

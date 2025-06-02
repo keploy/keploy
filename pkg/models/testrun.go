@@ -66,6 +66,7 @@ const (
 	TestSetStatusInternalErr  TestSetStatus = "INTERNAL_ERR"
 	TestSetStatusFaultScript  TestSetStatus = "SCRIPT_FAULT"
 	TestSetStatusIgnored      TestSetStatus = "IGNORED"
+	TestSetStatusNoTestsToRun TestSetStatus = "NO_TESTS_TO_RUN"
 )
 
 func StringToTestSetStatus(s string) (TestSetStatus, error) {
@@ -84,6 +85,8 @@ func StringToTestSetStatus(s string) (TestSetStatus, error) {
 		return TestSetStatusFaultUserApp, nil
 	case "INTERNAL_ERR":
 		return TestSetStatusInternalErr, nil
+	case "NO_TESTS_TO_RUN":
+		return TestSetStatusNoTestsToRun, nil
 	default:
 		return "", errors.New("invalid TestSetStatus value")
 	}
