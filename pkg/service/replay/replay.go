@@ -233,6 +233,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 			initTimeTaken                                  time.Duration
 		)
 
+		initTotal = totalTests
+		initPassed = totalTestPassed
+		initFailed = totalTestFailed
+		initIgnored = totalTestIgnored
+		initTimeTaken = totalTestTimeTaken
+
 		var initialFailedTCs map[string]bool
 		flaky := false // only be changed during replay with --must-pass flag set
 		for attempt := 1; attempt <= int(r.config.Test.MaxFlakyChecks); attempt++ {
@@ -246,7 +252,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.reportDB.ClearTestCaseResults(ctx, testRunID, testSet)
 
 			// overwrite with values before testset run, so after all reruns we don't get a cummulative value
-			// gathered from reruning, instead only metrics from the last rerun would get added to the varaibles.
+			// gathered from reruning, instead only metrics from the last rerun would get added to the variables.
 			totalTests = initTotal
 			totalTestPassed = initPassed
 			totalTestFailed = initFailed
