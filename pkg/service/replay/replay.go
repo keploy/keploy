@@ -509,6 +509,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	if len(testCases) == 0 {
 		r.logger.Warn("no valid test cases found to run for test set", zap.String("test-set", testSetID))
+
+		testReport := &models.TestReport{
+			Version: models.GetVersion(),
+			TestSet: testSetID,
+			Status:  string(models.TestSetStatusNoTestsToRun),
+			Total:   0,
+			Ignored: 0,
+		}
+		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to insert report")
+			return models.TestSetStatusFailed, err
+		}
 		return models.TestSetStatusNoTestsToRun, nil
 	}
 
@@ -964,6 +977,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if r.config.Test.RemoveUnusedMocks && testSetStatus == models.TestSetStatusPassed && r.instrument {
 		r.logger.Debug("consumed mocks from the completed testset", zap.Any("for test-set", testSetID), zap.Any("consumed mocks", totalConsumedMocks))
 		// delete the unused mocks from the data store
+		r.logger.Info("deleting unused mocks from the data store", zap.Any("for test-set", testSetID))
 		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, totalConsumedMocks)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
