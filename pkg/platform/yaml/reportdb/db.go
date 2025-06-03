@@ -80,7 +80,7 @@ func (fe *TestReport) GetReport(ctx context.Context, testRunID string, testSetID
 	}
 	data, err := yaml.ReadFile(ctx, fe.Logger, path, reportName)
 	if err != nil {
-		utils.LogError(fe.Logger, err, "failed to read the mocks from config yaml", zap.Any("session", filepath.Base(path)))
+		utils.LogError(fe.Logger, err, "failed to read the test-set report", zap.Any("reportName", reportName), zap.Any("session", filepath.Base(path)))
 		return nil, err
 	}
 

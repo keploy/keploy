@@ -123,10 +123,17 @@ func (s *Storage) Upload(ctx context.Context, file io.Reader, mockName string, a
 		}
 	}()
 
-	// Parse the response
+	// Read the raw body
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		utils.LogError(s.logger, err, "failed to read the response body")
+		return err
+	}
+
+	// Decode into struct from the raw bytes
 	var mockUploadResponse MockUploadResponse
-	if err := json.NewDecoder(resp.Body).Decode(&mockUploadResponse); err != nil {
-		utils.LogError(s.logger, err, "failed to decode the response body")
+	if err := json.NewDecoder(bytes.NewReader(bodyBytes)).Decode(&mockUploadResponse); err != nil {
+		utils.LogError(s.logger, err, "failed to decode the response body", zap.Any("Response", resp), zap.String("body", string(bodyBytes)))
 		return err
 	}
 
