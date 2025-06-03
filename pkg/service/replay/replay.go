@@ -41,6 +41,8 @@ var totalTestPassed int
 var totalTestFailed int
 var totalTestIgnored int
 var totalTestTimeTaken time.Duration
+var failedTCsBySetID = make(map[string][]string)
+
 var HookImpl TestHooks
 
 type Replayer struct {
@@ -298,8 +300,15 @@ func (r *Replayer) Start(ctx context.Context) error {
 				}
 			}
 
-			tcResults, _ := r.reportDB.GetTestCaseResults(ctx, testRunID, testSet)
+			tcResults, err := r.reportDB.GetTestCaseResults(ctx, testRunID, testSet)
+			if err != nil && testSetStatus != models.TestSetStatusNoTestsToRun {
+				break
+			} else if err != nil {
+				utils.LogError(r.logger, err, "failed to get testcase results")
+				break
+			}
 			failedTcIDs := getFailedTCs(tcResults)
+			failedTCsBySetID[testSet] = failedTcIDs
 
 			// checking for flakiness when --must-pass flag is not set
 			// else if --must-pass is set, delete the failed testcases and rerun
@@ -1159,39 +1168,67 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 				utils.LogError(r.logger, err, "failed to print test run summary")
 				return
 			}
-			if _, err := pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\tIgnored\t\tTime Taken\t\n"); err != nil {
-				utils.LogError(r.logger, err, "failed to print test suite summary")
-				return
-			}
 		} else {
 			if _, err := pp.Printf("\n <=========================================> \n  COMPLETE TESTRUN SUMMARY. \n\tTotal tests: %s\n"+"\tTotal test passed: %s\n"+"\tTotal test failed: %s\n"+"\tTotal time taken: %s\n", totalTests, totalTestPassed, totalTestFailed, totalTestTimeTakenStr); err != nil {
 				utils.LogError(r.logger, err, "failed to print test run summary")
 				return
 			}
-			if _, err := pp.Printf("\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed\t\tTime Taken\t\n"); err != nil {
-				utils.LogError(r.logger, err, "failed to print test suite summary")
-				return
-			}
 		}
+
+		header := "\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed"
+		if totalTestIgnored > 0 {
+			header += "\t\tIgnored"
+		}
+		header += "\t\tTime Taken"
+		if totalTestFailed > 0 && !r.config.Test.MustPass {
+			header += "\tFailed Testcase Names"
+		}
+		header += "\t\n"
+
+		_, err := pp.Printf(header)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to print test suite summary header")
+			return
+		}
+
 		for _, testSuiteName := range testSuiteNames {
-			if completeTestReport[testSuiteName].status {
+			report := completeTestReport[testSuiteName]
+			if report.status {
 				pp.SetColorScheme(models.GetPassingColorScheme())
 			} else {
 				pp.SetColorScheme(models.GetFailingColorScheme())
 			}
 
-			testSetTimeTakenStr := timeWithUnits(completeTestReport[testSuiteName].duration)
+			testSetTimeTakenStr := timeWithUnits(report.duration)
 
-			if totalTestIgnored > 0 {
-				if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed, completeTestReport[testSuiteName].ignored, testSetTimeTakenStr); err != nil {
-					utils.LogError(r.logger, err, "failed to print test suite details")
-					return
+			var format strings.Builder
+			args := []interface{}{}
+
+			// Using a more dynamic way to build format string and arguments
+			// to ensure correct tabbing and conditional column
+			format.WriteString("\n\t%s\t\t%s\t\t%s\t\t%s")
+			args = append(args, testSuiteName, report.total, report.passed, report.failed)
+
+			if totalTestIgnored > 0 && !r.config.Test.MustPass {
+				format.WriteString("\t\t%s")
+				args = append(args, report.ignored)
+			}
+
+			format.WriteString("\t\t%s") // Time Taken
+			args = append(args, testSetTimeTakenStr)
+
+			if totalTestFailed > 0 && !r.config.Test.MustPass {
+				failedCasesStr := "-"
+				if failedCases, ok := failedTCsBySetID[testSuiteName]; ok && len(failedCases) > 0 {
+					failedCasesStr = strings.Join(failedCases, ", ")
 				}
-			} else {
-				if _, err := pp.Printf("\n\t%s\t\t%s\t\t%s\t\t%s\t\t%s", testSuiteName, completeTestReport[testSuiteName].total, completeTestReport[testSuiteName].passed, completeTestReport[testSuiteName].failed, testSetTimeTakenStr); err != nil {
-					utils.LogError(r.logger, err, "failed to print test suite details")
-					return
-				}
+				format.WriteString("\t%s")
+				args = append(args, failedCasesStr)
+			}
+
+			if _, err := pp.Printf(format.String(), args...); err != nil {
+				utils.LogError(r.logger, err, "failed to print test suite details")
+				return
 			}
 		}
 		if _, err := pp.Printf("\n<=========================================> \n\n"); err != nil {
