@@ -36,7 +36,7 @@ func Export(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 			provider.PrintLogo(disableAnsi)
 			svc, err := serviceFactory.GetService(ctx, "export")
 			if err != nil {
-				utils.LogError(logger, err, "failed to get service")
+				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
 				return nil
 			}
 			var tools toolsSvc.Service
