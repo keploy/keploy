@@ -301,10 +301,10 @@ func (r *Replayer) Start(ctx context.Context) error {
 			}
 
 			tcResults, err := r.reportDB.GetTestCaseResults(ctx, testRunID, testSet)
-			if err != nil && testSetStatus != models.TestSetStatusNoTestsToRun {
-				break
-			} else if err != nil {
-				utils.LogError(r.logger, err, "failed to get testcase results")
+			if err != nil {
+				if testSetStatus != models.TestSetStatusNoTestsToRun {
+					utils.LogError(r.logger, err, "failed to get testcase results")
+				}
 				break
 			}
 			failedTcIDs := getFailedTCs(tcResults)
@@ -1180,8 +1180,8 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 			header += "\t\tIgnored"
 		}
 		header += "\t\tTime Taken"
-		if totalTestFailed > 0 && !r.config.Test.MustPass {
-			header += "\tFailed Testcase Names"
+		if totalTestFailed > 0 {
+			header += "\tFailed Testcases"
 		}
 		header += "\t\n"
 
