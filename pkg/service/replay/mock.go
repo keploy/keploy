@@ -173,12 +173,12 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 
 	if role, ok = claims["role"].(string); !ok || role == "" {
 		m.logger.Error("Role not found in the token, skipping mock upload")
-		return err
+		return fmt.Errorf("failed to upload mock file: role not found in the token")
 	}
 
 	if username, ok = claims["username"].(string); !ok {
 		m.logger.Error("Username not found in the token, skipping mock upload")
-		return err
+		return fmt.Errorf("failed to upload mock file: username not found in the token")
 	}
 
 	// get the plan of the current user
