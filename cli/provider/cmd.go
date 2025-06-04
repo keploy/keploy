@@ -399,26 +399,22 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 		c.logger.Error("failed to validate flags", zap.Error(err))
 		return err
 	}
+
+	appName, err := utils.GetLastDirectory()
+	if err != nil {
+		return fmt.Errorf("failed to get the last directory for appName: %v", err)
+	}
+
 	// used to rewritte keploy.yml with <previous values> + <missing values> when true
 	var rewriteConfig = false
 	if c.cfg.AppName == "" {
 		// rewrite keploy.yml since AppName is missing
 		rewriteConfig = true
-		appName, err := utils.GetLastDirectory()
-		if err != nil {
-			return fmt.Errorf("failed to get the last directory: %v", err)
-		}
 		c.logger.Info("Using the last directory name as appName : " + appName)
 		c.cfg.AppName = appName
-	} else {
-		appName, err := utils.GetLastDirectory()
-		if err != nil {
-			return fmt.Errorf("failed to get the last directory: %v", err)
-		}
-		if c.cfg.AppName != appName {
-			c.logger.Warn("AppName in config (" + c.cfg.AppName + ") does not match current directory name (" + appName + "). using current directory name as appName")
-			c.cfg.AppName = appName
-		}
+	} else if c.cfg.AppName != appName {
+		c.logger.Warn("AppName in config (" + c.cfg.AppName + ") does not match current directory name (" + appName + "). using current directory name as appName")
+		c.cfg.AppName = appName
 	}
 
 	if !IsConfigFileFound || rewriteConfig {
