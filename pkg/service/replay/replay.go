@@ -52,16 +52,28 @@ type Replayer struct {
 	telemetry       Telemetry
 	instrumentation Instrumentation
 	config          *config.Config
+	auth            service.Auth
+	mock            *mock
 	instrument      bool
 	isLastTestSet   bool
 	isLastTestCase  bool
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
+
+	// TODO: add some comment.
+	mock := &mock{
+		cfg:        config,
+		storage:    storage,
+		logger:     logger,
+		tsConfigDB: testSetConf,
+	}
+
 	// set the request emulator for simulating test case requests, if not set
 	if HookImpl == nil {
-		SetTestHooks(NewHooks(logger, config, testSetConf, storage, auth, instrumentation))
+		SetTestHooks(NewHooks(logger, config, testSetConf, storage, auth, instrumentation, mock))
 	}
+
 	instrument := config.Command != ""
 	return &Replayer{
 		logger:          logger,
@@ -73,6 +85,8 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 		instrumentation: instrumentation,
 		config:          config,
 		instrument:      instrument,
+		auth:            auth,
+		mock:            mock,
 	}
 }
 
@@ -1385,5 +1399,105 @@ func (r *Replayer) replacePortInTestCase(testCase *models.TestCase, newPort stri
 		utils.LogError(r.logger, err, "failed to replace port")
 		return err
 	}
+	return nil
+}
+
+func (r *Replayer) GetSelectedTestSets(ctx context.Context) ([]string, error) {
+	// get all the testset ids
+	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil, err
+		}
+		utils.LogError(r.logger, err, "failed to get all test set ids")
+		return nil, fmt.Errorf("mocks downloading failed to due to error in getting test set ids")
+	}
+
+	var testSets []string
+	for _, testSetID := range testSetIDs {
+		if _, ok := r.config.Test.SelectedTests[testSetID]; !ok && len(r.config.Test.SelectedTests) != 0 {
+			continue
+		}
+		testSets = append(testSets, testSetID)
+	}
+	if len(testSets) == 0 {
+		testSets = testSetIDs
+	}
+
+	// Sort the testsets.
+	natsort.Sort(testSets)
+	return testSets, nil
+}
+
+func (r *Replayer) authenticateUser(ctx context.Context) error {
+	//authenticate the user
+	token, err := r.auth.GetToken(ctx)
+	if err != nil {
+		r.logger.Error("Failed to Authenticate user", zap.Error(err))
+		r.logger.Warn("Looks like you haven't logged in, skipping mock upload/download")
+		r.logger.Warn("Please login using `keploy login` to perform mock upload/download action")
+		return fmt.Errorf("mocks downloading failed to due to authentication error")
+	}
+
+	r.mock.setToken(token)
+	return nil
+}
+
+func (r *Replayer) DownloadMocks(ctx context.Context) error {
+	// Authenticate the user for mock registry
+	err := r.authenticateUser(ctx)
+	if err != nil {
+		return err
+	}
+
+	testSets, err := r.GetSelectedTestSets(ctx)
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to get selected test sets")
+		return fmt.Errorf("mocks downloading failed to due to error in getting selected test sets")
+	}
+
+	for _, testSetID := range testSets {
+		r.logger.Info("Downloading mocks for the testset", zap.String("testset", testSetID))
+
+		err := r.mock.download(ctx, testSetID)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return err
+			}
+			utils.LogError(r.logger, err, "failed to download mocks", zap.Any("testset", testSetID))
+			continue
+		}
+
+	}
+	return nil
+}
+
+func (r *Replayer) UploadMocks(ctx context.Context) error {
+	// Authenticate the user for mock registry
+	err := r.authenticateUser(ctx)
+	if err != nil {
+		return err
+	}
+
+	testSets, err := r.GetSelectedTestSets(ctx)
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to get selected test sets")
+		return fmt.Errorf("mocks uploading failed to due to error in getting selected test sets")
+	}
+
+	for _, testSetID := range testSets {
+		r.logger.Info("Uploading mocks for the testset", zap.String("testset", testSetID))
+
+		err := r.mock.upload(ctx, testSetID)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return err
+			}
+			utils.LogError(r.logger, err, "failed to upload mocks", zap.Any("testset", testSetID))
+			continue
+		}
+
+	}
+
 	return nil
 }

@@ -23,7 +23,7 @@ func Login(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFac
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
-				utils.LogError(logger, err, "failed to get service")
+				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
 				return nil
 			}
 			var tools toolsSvc.Service

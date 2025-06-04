@@ -178,11 +178,21 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 
 	switch cmd.Name() {
 
+	case "upload": //for uploading mocks
+		cmd.Flags().StringP("path", "p", ".", "Path to local keploy directory where generated mocks are stored")
+		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to consider e.g. -t \"test-set-1, test-set-2\"")
 	case "generate", "download":
+
+		if cmd.Name() == "download" && cmd.Parent() != nil && cmd.Parent().Name() == "mock" { // for downloading mocks
+			cmd.Flags().StringP("path", "p", ".", "Path to local keploy directory where generated mocks are stored")
+			cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to consider e.g. -t \"test-set-1, test-set-2\"")
+			return nil
+		}
+
 		cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate/download contracts")
 		cmd.Flags().StringSliceP("tests", "t", c.cfg.Contract.Tests, "Specify the tests for which to generate/download contracts")
 		cmd.Flags().StringP("path", "p", ".", "Specify the path to generate/download contracts")
-		if cmd.Name() == "download" {
+		if cmd.Name() == "download" { // for downloading contracts
 			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the path to download contracts")
 		}
 
@@ -520,7 +530,45 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	c.logger.Debug("config has been initialised", zap.Any("for cmd", cmd.Name()), zap.Any("config", c.cfg))
 
 	switch cmd.Name() {
+
+	case "upload": //for uploading mocks
+		path, err := cmd.Flags().GetString("path")
+		if err != nil {
+			errMsg := "failed to get the path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Path = utils.ToAbsPath(c.logger, path)
+
+		testSets, err := cmd.Flags().GetStringSlice("test-sets")
+		if err != nil {
+			errMsg := "failed to get the test-sets"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		config.SetSelectedTests(c.cfg, testSets)
+
 	case "generate", "download":
+
+		if cmd.Name() == "download" && cmd.Parent() != nil && cmd.Parent().Name() == "mock" {
+			path, err := cmd.Flags().GetString("path")
+			if err != nil {
+				errMsg := "failed to get the path"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.Path = utils.ToAbsPath(c.logger, path)
+
+			testSets, err := cmd.Flags().GetStringSlice("testsets")
+			if err != nil {
+				errMsg := "failed to get the testsets"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			config.SetSelectedTests(c.cfg, testSets)
+			return nil
+		}
+
 		path, err := cmd.Flags().GetString("path")
 		if err != nil {
 			errMsg := "failed to get the path"
