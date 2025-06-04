@@ -40,10 +40,10 @@ func Generate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			svc, err := serviceFactory.GetService(ctx, "contract")
 			if err != nil {
-				utils.LogError(logger, err, "failed to get service")
+				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
 				return nil
 			}
 			var contract contractSvc.Service
@@ -77,10 +77,10 @@ func Download(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			svc, err := serviceFactory.GetService(ctx, "contract")
 			if err != nil {
-				utils.LogError(logger, err, "failed to get service")
+				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
 				return nil
 			}
 			var contract contractSvc.Service
@@ -110,10 +110,10 @@ func Validate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			svc, err := serviceFactory.GetService(ctx, "contract")
 			if err != nil {
-				utils.LogError(logger, err, "failed to get service")
+				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
 				return nil
 			}
 			var contract contractSvc.Service

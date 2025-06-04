@@ -25,7 +25,7 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
-				utils.LogError(logger, err, "failed to get service")
+				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
 				return nil
 			}
 			var record recordSvc.Service

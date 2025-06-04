@@ -42,7 +42,7 @@ func Import(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 			basePath, _ := cmd.Flags().GetString("base-path")
 			svc, err := serviceFactory.GetService(ctx, "import")
 			if err != nil {
-				utils.LogError(logger, err, "failed to get service")
+				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
 				return nil
 			}
 			var tools toolsSvc.Service

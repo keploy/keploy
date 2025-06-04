@@ -51,7 +51,7 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 		return orchestrator.New(logger, recordSvc, toolsSvc, replaySvc, cfg), nil
 	case "record":
 		return recordSvc, nil
-	case "test", "normalize":
+	case "test", "normalize", "mock":
 		return replaySvc, nil
 	case "templatize", "config", "update", "login", "export", "import":
 		return toolsSvc, nil
