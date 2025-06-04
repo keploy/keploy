@@ -254,7 +254,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.reportDB.ClearTestCaseResults(ctx, testRunID, testSet)
 
 			// overwrite with values before testset run, so after all reruns we don't get a cummulative value
-			// gathered from reruning, instead only metrics from the last rerun would get added to the variables.
+			// gathered from rerunning, instead only metrics from the last rerun would get added to the variables.
 			totalTests = initTotal
 			totalTestPassed = initPassed
 			totalTestFailed = initFailed
@@ -426,7 +426,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 				}
 
 			} else {
-				utils.LogError(r.logger, err, "failed to calculate coverage for the test run")
+				r.logger.Warn("failed to calculate coverage for the test run", zap.Any("error", err))
 			}
 		}
 
