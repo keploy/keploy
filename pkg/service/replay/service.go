@@ -39,6 +39,9 @@ type Service interface {
 	NormalizeTestCases(ctx context.Context, testRun string, testSetID string, selectedTestCaseIDs []string, testResult []models.TestResult) error
 	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
 	DeleteTestSet(ctx context.Context, testSetID string) error
+
+	DownloadMocks(ctx context.Context) error
+	UploadMocks(ctx context.Context) error
 }
 
 type TestDB interface {
