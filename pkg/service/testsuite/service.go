@@ -1,6 +1,8 @@
 package testsuite
 
-import "context"
+import (
+	"context"
+)
 
 type Service interface {
 	Execute(ctx context.Context) error

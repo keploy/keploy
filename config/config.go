@@ -49,6 +49,7 @@ type Config struct {
 
 type TestSuite struct {
 	TSPath  string `json:"tsPath" yaml:"tsPath" mapstructure:"tsPath"`
+	TSFile  string `json:"tsFile" yaml:"tsFile" mapstructure:"tsFile"`
 	BaseURL string `json:"baseUrl" yaml:"baseUrl" mapstructure:"baseUrl"`
 }
 
