@@ -2,7 +2,6 @@
 package replay
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/golang-jwt/jwt/v4"
 	"go.keploy.io/server/v2/config"
@@ -27,9 +27,10 @@ type Hooks struct {
 	storage         Storage
 	auth            service.Auth
 	instrumentation Instrumentation
+	mock            *mock
 }
 
-func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, storage Storage, auth service.Auth, instrumentation Instrumentation) TestHooks {
+func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, storage Storage, auth service.Auth, instrumentation Instrumentation, mock *mock) TestHooks {
 	return &Hooks{
 		cfg:             cfg,
 		logger:          logger,
@@ -37,6 +38,7 @@ func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, 
 		storage:         storage,
 		auth:            auth,
 		instrumentation: instrumentation,
+		mock:            mock,
 	}
 }
 
@@ -70,117 +72,16 @@ func (h *Hooks) AfterTestSetRun(ctx context.Context, testSetID string, status bo
 		return nil
 	}
 
-	// Inspect local mock file
-	localMockPath := filepath.Join(h.cfg.Path, testSetID, "mocks.yaml")
-	mockFileContent, err := os.ReadFile(localMockPath)
-	if err != nil {
-		h.logger.Error("Failed to read mock file for mock upload", zap.String("path", localMockPath), zap.Error(err))
-		return nil
-	}
-	mockHash := utils.Hash(mockFileContent)
-	mockFileReader := bytes.NewReader(mockFileContent)
 	token, err := h.auth.GetToken(ctx)
 	if err != nil || token == "" {
 		h.logger.Error("Failed to Authenticate user, skipping mock upload", zap.Error(err))
 		return nil
 	}
+	h.mock.setToken(token)
 
-	claims, err := extractClaimsWithoutVerification(token)
-	var role, username string
-	var ok bool
+	err = h.mock.upload(ctx, testSetID)
 	if err != nil {
-		h.logger.Error("Failed to extract claim from token for mock upload", zap.Error(err))
-		return nil
-	}
-
-	if role, ok = claims["role"].(string); !ok || role == "" {
-		h.logger.Error("Role not found in the token, skipping mock upload")
-		return nil
-	}
-
-	if username, ok = claims["username"].(string); !ok {
-		h.logger.Error("Username not found in the token, skipping mock upload")
-		return nil
-	}
-
-	// get the plan of the current user
-
-	plan, err := getLatestPlan(ctx, h.logger, h.cfg.APIServerURL, token)
-	if err != nil {
-		h.logger.Error("Failed to get latest plan of the user", zap.Error(err))
-		return err
-	}
-
-	h.logger.Debug("The latest plan", zap.Any("Plan", plan))
-
-	// Cross verify the local mock file with the test-set config
-	tsConfig, err := h.tsConfigDB.Read(ctx, testSetID)
-	// If test-set config is not found, upload the mock file
-	if err != nil || tsConfig == nil || tsConfig.MockRegistry == nil {
-		// create ts config
-		var prescript, postscript string
-		var template map[string]interface{}
-		if tsConfig != nil {
-			prescript = tsConfig.PreScript
-			postscript = tsConfig.PostScript
-			template = tsConfig.Template
-		}
-		tsConfig = &models.TestSet{
-			PreScript:  prescript,
-			PostScript: postscript,
-			Template:   template,
-			MockRegistry: &models.MockRegistry{
-				Mock: mockHash,
-				App:  h.cfg.AppName,
-			},
-		}
-
-		if plan == "Free" {
-			if username == "" {
-				h.logger.Warn("Username not found in the token, skipping mock upload")
-				return nil
-			}
-			tsConfig.MockRegistry.User = username
-		}
-
-		h.logger.Info("uploading mock file...")
-		err = h.storage.Upload(ctx, mockFileReader, mockHash, h.cfg.AppName, token)
-		if err != nil {
-			h.logger.Error("Failed to upload mock file", zap.Error(err))
-			return err
-		}
-
-		err := h.tsConfigDB.Write(ctx, testSetID, tsConfig)
-		if err != nil {
-			h.logger.Error("Failed to write test set config", zap.Error(err))
-			return err
-		}
-		return nil
-	}
-
-	// If mock file is already uploaded, skip the upload
-	if tsConfig.MockRegistry.Mock == mockHash {
-		h.logger.Debug("Mock file is already uploaded, skipping upload", zap.String("testSetID", testSetID), zap.String("mockPath", localMockPath))
-		return nil
-	}
-
-	// If mock file is changed, upload the new mock file
-	h.logger.Debug("Mock file is changed, uploading new mock", zap.String("testSetID", testSetID), zap.String("mockPath", localMockPath))
-	if token == "" {
-		h.logger.Warn("Looks like you haven't logged in, skipping mock upload")
-		h.logger.Warn("Please login using `keploy login` to upload the mock file")
-		return nil
-	}
-	h.logger.Info("uploading mock file...")
-	err = h.storage.Upload(ctx, mockFileReader, mockHash, h.cfg.AppName, token)
-	if err != nil {
-		h.logger.Error("Failed to upload mock file", zap.Error(err))
-		return err
-	}
-
-	err = utils.AddToGitIgnore(h.logger, h.cfg.Path, "/*/mocks.yaml")
-	if err != nil {
-		utils.LogError(h.logger, err, "failed to add /*/mocks.yaml to .gitignore file")
+		h.logger.Warn("Failed to upload mock, hence skipping", zap.String("testSetID", testSetID), zap.Error(err))
 	}
 
 	return nil
@@ -193,14 +94,17 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 		return nil
 	}
 
-	if h.cfg.Test.DisableMockUpload {
-		return nil
-	}
-
 	if h.cfg.Test.UseLocalMock {
 		h.logger.Debug("Using local mock file, as UseLocalMock is selected", zap.String("testSetID", testSetID))
 		return nil
 	}
+
+	token, err := h.auth.GetToken(ctx)
+	if err != nil {
+		h.logger.Warn("Failed to Authenticate user, continuing with local mock if present", zap.Error(err))
+		return nil
+	}
+	h.mock.setToken(token)
 
 	// Check if test-set config is present
 	tsConfig, err := h.tsConfigDB.Read(ctx, testSetID)
@@ -234,8 +138,7 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 		h.logger.Warn("Using app name from the test-set's config.yml for mock retrieval", zap.String("appName", tsConfig.MockRegistry.App))
 	}
 
-	token, _ := h.auth.GetToken(ctx)
-
+	h.logger.Info("Downloading mock file from cloud...", zap.String("testSetID", testSetID))
 	cloudFile, err := h.storage.Download(ctx, tsConfig.MockRegistry.Mock, tsConfig.MockRegistry.App, tsConfig.MockRegistry.User, token)
 	if err != nil {
 		h.logger.Error("Failed to download mock file", zap.Error(err))
@@ -255,10 +158,32 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 		}
 	}()
 
+	done := make(chan struct{})
+
+	// Spinner goroutine
+	go func() {
+		spinnerChars := []rune{'|', '/', '-', '\\'}
+		i := 0
+		for {
+			select {
+			case <-done:
+				fmt.Print("\r") // Clear spinner line after done
+				return
+			default:
+				fmt.Printf("\rDownloading... %c", spinnerChars[i%len(spinnerChars)])
+				i++
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+	}()
+
 	_, err = io.Copy(file, cloudFile)
 	if err != nil {
+		close(done)
 		return err
 	}
+	close(done)
+	h.logger.Info("Mock file downloaded successfully")
 
 	err = utils.AddToGitIgnore(h.logger, h.cfg.Path, "/*/mocks.yaml")
 	if err != nil {
