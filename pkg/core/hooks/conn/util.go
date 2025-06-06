@@ -60,56 +60,55 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 	passThrough := proxyHttp.IsPassThrough(logger, req, uint(dstPort), headerOpts)
 
 	for _, filter := range opts.Filters {
-	matchType := strings.ToUpper(filter.MatchType)
+		matchType := strings.ToUpper(filter.MatchType)
 
-	urlMethodMatch := len(filter.URLMethods) == 0
-	if len(filter.URLMethods) > 0 {
-		for _, method := range filter.URLMethods {
-			if method == req.Method {
-				urlMethodMatch = true
-				break
-			}
-		}
-	}
-
-	headerMatch := len(filter.Headers) == 0
-	if len(filter.Headers) > 0 {
-		for filterHeaderKey, filterHeaderValue := range filter.Headers {
-			regex, err := regexp.Compile(filterHeaderValue)
-			if err != nil {
-				utils.LogError(logger, err, "failed to compile the header regex")
-				continue
-			}
-			for _, value := range req.Header.Values(filterHeaderKey) {
-				if regex.MatchString(value) {
-					headerMatch = true
+		urlMethodMatch := len(filter.URLMethods) == 0
+		if len(filter.URLMethods) > 0 {
+			for _, method := range filter.URLMethods {
+				if method == req.Method {
+					urlMethodMatch = true
 					break
 				}
 			}
-			if headerMatch {
-				break
+		}
+
+		headerMatch := len(filter.Headers) == 0
+		if len(filter.Headers) > 0 {
+			for filterHeaderKey, filterHeaderValue := range filter.Headers {
+				regex, err := regexp.Compile(filterHeaderValue)
+				if err != nil {
+					utils.LogError(logger, err, "failed to compile the header regex")
+					continue
+				}
+				for _, value := range req.Header.Values(filterHeaderKey) {
+					if regex.MatchString(value) {
+						headerMatch = true
+						break
+					}
+				}
+				if headerMatch {
+					break
+				}
+			}
+		}
+
+		// Apply AND / OR logic
+		switch matchType {
+		case "AND":
+			if urlMethodMatch && headerMatch {
+				passThrough = true
+			}
+		case "OR":
+			if urlMethodMatch || headerMatch {
+				passThrough = true
+			}
+		default:
+			// default to OR if unspecified
+			if urlMethodMatch || headerMatch {
+				passThrough = true
 			}
 		}
 	}
-
-	// Apply AND / OR logic
-	switch matchType {
-	case "AND":
-		if urlMethodMatch && headerMatch {
-			passThrough = true
-		}
-	case "OR":
-		if urlMethodMatch || headerMatch {
-			passThrough = true
-		}
-	default:
-		// default to OR if unspecified
-		if urlMethodMatch || headerMatch {
-			passThrough = true
-		}
-	}
-}
-
 
 	return passThrough
 }
