@@ -79,7 +79,7 @@ func (h *Hooks) AfterTestSetRun(ctx context.Context, testSetID string, status bo
 	}
 	h.mock.setToken(token)
 
-	err = h.mock.upload(ctx, testSetID)
+
 	if err != nil {
 		h.logger.Warn("Failed to upload mock, hence skipping", zap.String("testSetID", testSetID), zap.Error(err))
 	}
