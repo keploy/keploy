@@ -107,6 +107,7 @@ type Filter struct {
 	BypassRule `mapstructure:",squash"`
 	URLMethods []string          `json:"urlMethods" yaml:"urlMethods" mapstructure:"urlMethods"`
 	Headers    map[string]string `json:"headers" yaml:"headers" mapstructure:"headers"`
+	MatchType  string            `json:"matchType"`
 }
 
 type Test struct {
