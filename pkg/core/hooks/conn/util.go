@@ -62,7 +62,6 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 	for _, filter := range opts.Filters {
 		matchType := filter.MatchType
 
-
 		urlMethodMatch := len(filter.URLMethods) == 0
 		if len(filter.URLMethods) > 0 {
 			for _, method := range filter.URLMethods {
