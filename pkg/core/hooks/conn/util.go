@@ -99,11 +99,9 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 				passThrough = true
 			}
 		case config.OR:
-			if urlMethodMatch || headerMatch {
-				passThrough = true
-			}
+			fallthrough
 		default:
-			// default to OR if unspecified
+			// Fallback to OR logic for unknown or unspecified types
 			if urlMethodMatch || headerMatch {
 				passThrough = true
 			}
