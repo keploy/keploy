@@ -102,13 +102,19 @@ type BypassRule struct {
 	Host string `json:"host" yaml:"host" mapstructure:"host"`
 	Port uint   `json:"port" yaml:"port" mapstructure:"port"`
 }
+type MatchType string
+
+const (
+	OR  MatchType = "OR"
+	AND MatchType = "AND"
+)
 
 type Filter struct {
 	BypassRule `mapstructure:",squash"`
 	URLMethods []string          `json:"urlMethods" yaml:"urlMethods" mapstructure:"urlMethods"`
 	Headers    map[string]string `json:"headers" yaml:"headers" mapstructure:"headers"`
+	MatchType  MatchType         `json:"matchType"`
 }
-
 type Test struct {
 	SelectedTests       map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
 	GlobalNoise         Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
