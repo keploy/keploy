@@ -60,7 +60,8 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 	passThrough := proxyHttp.IsPassThrough(logger, req, uint(dstPort), headerOpts)
 
 	for _, filter := range opts.Filters {
-		matchType := strings.ToUpper(filter.MatchType)
+		matchType := filter.MatchType
+
 
 		urlMethodMatch := len(filter.URLMethods) == 0
 		if len(filter.URLMethods) > 0 {
@@ -94,11 +95,11 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 
 		// Apply AND / OR logic
 		switch matchType {
-		case "AND":
+		case config.AND:
 			if urlMethodMatch && headerMatch {
 				passThrough = true
 			}
-		case "OR":
+		case config.OR:
 			if urlMethodMatch || headerMatch {
 				passThrough = true
 			}
