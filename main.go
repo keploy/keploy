@@ -53,8 +53,8 @@ func setVersion() {
 func start(ctx context.Context) {
 	logger, err := log.New()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "keploy: failed to start the logger for the CLI:", err)
-		os.Exit(1)
+		fmt.Println("Failed to start the logger for the CLI", err)
+		return
 	}
 	defer func() {
 		if err := utils.DeleteFileIfNotExists(logger, "keploy-logs.txt"); err != nil {
