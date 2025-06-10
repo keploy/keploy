@@ -28,14 +28,14 @@ var gitHubClientID = "Iv23liFBvIVhL29i9BAp"
 
 func main() {
 	// Uncomment the following code to enable pprof for debugging
-	// go func() {
-	// 	fmt.Println("Starting pprof server for debugging...")
-	// 	err := http.ListenAndServe("localhost:6060", nil)
-	// 	if err != nil {
-	// 		fmt.Println("Failed to start the pprof server for debugging", err)
-	// 		return
-	// 	}
-	// }()
+	go func() {
+	 	fmt.Println("Starting pprof server for debugging...")
+	 	err := http.ListenAndServe("localhost:6060", nil)
+	 	if err != nil {
+	 		fmt.Println("Failed to start the pprof server for debugging", err)
+	 		return
+	 	}
+	}()
 	setVersion()
 	ctx := utils.NewCtx()
 	start(ctx)
@@ -53,8 +53,7 @@ func setVersion() {
 func start(ctx context.Context) {
 	logger, err := log.New()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "keploy: failed to start the logger for the CLI:", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to start the logger for the CLI: %w", err)
 	}
 	defer func() {
 		if err := utils.DeleteFileIfNotExists(logger, "keploy-logs.txt"); err != nil {
