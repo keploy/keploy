@@ -79,12 +79,29 @@ func NewUnitTestGenerator(
 		cov: &Coverage{
 			Path:    genConfig.CoverageReportPath,
 			Format:  genConfig.CoverageFormat,
-			Desired: genConfig.DesiredCoverage,
+			Desired: float64(genConfig.DesiredCoverage),
 		},
 		additionalPrompt: genConfig.AdditionalPrompt,
 		cur:              &Cursor{},
 		flakiness:        genConfig.Flakiness,
 	}
+
+	if generator.srcPath != "" && generator.testPath == "" {
+		//srcPath is given, testPath is not
+		effectiveTestDir := generator.dir
+		if effectiveTestDir == "" { //set to "."
+			effectiveTestDir = "."
+		}
+
+		derivedPath, err := getTestFilePath(generator.srcPath, effectiveTestDir)
+		if err != nil {
+			logger.Error("Failed to derive test file path", zap.Error(err), zap.String("sourceFile", generator.srcPath), zap.String("testDir", effectiveTestDir))
+			return nil, fmt.Errorf("failed to derive test file path for %s: %w", generator.srcPath, err)
+		}
+		generator.testPath = derivedPath
+		logger.Info("Test file path not provided, derived", zap.String("derivedTestPath", generator.testPath), zap.String("sourceFile", generator.srcPath))
+	}
+
 	return generator, nil
 }
 
@@ -99,20 +116,37 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 		// Continue if no cancellation
 	}
 
-	// To find the source files if the source path is not provided
-	if g.srcPath == "" {
+	isSingleFileMode := g.srcPath != ""
+	var filesToIterate []string
+
+	if isSingleFileMode {
+		filesToIterate = append(filesToIterate, g.srcPath)
+	} else { // Batch mode
 		if err := g.runCoverage(); err != nil {
 			return err
 		}
 		if len(g.Files) == 0 {
-			return fmt.Errorf("couldn't identify the source files. Please mention source file and test file using flags")
+			return fmt.Errorf("couldn't identify source files. Please specify source file using --source-file-path")
 		}
+		filesToIterate = g.Files
 	}
 	const paddingHeight = 1
 	columnWidths3 := []int{29, 29, 29}
 	columnWidths2 := []int{40, 40}
 
-	for i := 0; i < len(g.Files)+1; i++ {
+	for _, currentSrcPath := range filesToIterate {
+		g.srcPath = currentSrcPath
+
+		//If in batch mode or testPath not set
+		if !isSingleFileMode || g.testPath == "" {
+			derivedPath, err := getTestFilePath(g.srcPath, g.dir)
+			if err != nil {
+				g.logger.Error("Error deriving test file path", zap.Error(err))
+				continue
+			}
+			g.testPath = derivedPath
+		}
+
 		newTestFile := false
 		var err error
 
@@ -123,30 +157,29 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 		default:
 		}
 
-		// If the source file path is not provided, iterate over all the source files and test files
-		if i < len(g.Files) {
-			g.srcPath = g.Files[i]
-			g.testPath, err = getTestFilePath(g.srcPath, g.dir)
-			if err != nil || g.testPath == "" {
-				g.logger.Error("Error getting test file path", zap.Error(err))
-				continue
-			}
-			isCreated, err := createTestFile(g.testPath, g.srcPath)
-			if err != nil {
-				g.logger.Error("Error creating test file", zap.Error(err))
-				continue
-			}
-			newTestFile = isCreated
-		}
-
 		g.logger.Info(fmt.Sprintf("Generating tests for file: %s", g.srcPath))
-		isEmpty, err := utils.IsFileEmpty(g.testPath)
-		if err != nil {
-			g.logger.Error("Error checking if test file is empty", zap.Error(err))
-			return err
-		}
-		if isEmpty {
-			newTestFile = true
+		var isEmptyFile bool
+		if _, statErr := os.Stat(g.testPath); os.IsNotExist(statErr) {
+			testFileDir := filepath.Dir(g.testPath)
+			if err := os.MkdirAll(testFileDir, os.ModePerm); err != nil {
+				g.logger.Error("Error creating directory for test file", zap.Error(err))
+				continue
+			}
+
+			created, createErr := createTestFile(g.testPath, g.srcPath)
+			if createErr != nil {
+				g.logger.Error("Error creating test file", zap.Error(createErr))
+				continue
+			}
+			newTestFile = created
+			isEmptyFile = created
+		} else {
+			isEmptyFile, err = utils.IsFileEmpty(g.testPath)
+			if err != nil {
+				g.logger.Error("Error checking if test file is empty", zap.Error(err))
+				continue
+			}
+			newTestFile = isEmptyFile
 		}
 		if !newTestFile {
 			if err = g.runCoverage(); err != nil {
@@ -165,14 +198,13 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			utils.LogError(g.logger, err, "Error creating prompt builder")
 			return err
 		}
-		if !isEmpty {
+		if !isEmptyFile {
 			if err := g.setCursor(ctx); err != nil {
 				utils.LogError(g.logger, err, "Error during initial test suite analysis")
 				return err
 			}
 		}
 		initialCoverage := g.cov.Current
-		// Respect context cancellation in the inner loop
 		for g.cov.Current < (g.cov.Desired/100) && iterationCount <= g.maxIterations {
 			passedTests, noCoverageTest, failedBuild, totalTest := 0, 0, 0, 0
 			select {
