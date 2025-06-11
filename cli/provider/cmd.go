@@ -864,15 +864,22 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, nil, "API_KEY is not set")
 			return errors.New("API_KEY is not set")
 		}
-		if (c.cfg.Gen.SourceFilePath == "" && c.cfg.Gen.TestFilePath != "") || c.cfg.Gen.SourceFilePath != "" && c.cfg.Gen.TestFilePath == "" {
-			utils.LogError(c.logger, nil, "One of the SourceFilePath and TestFilePath is mentioned. Either provide both or neither")
-			return errors.New("sourceFilePath and testFilePath misconfigured")
-		} else if c.cfg.Gen.SourceFilePath == "" && c.cfg.Gen.TestFilePath == "" {
+		if c.cfg.Gen.SourceFilePath == "" {
+			//SourceFilePath is not provided, so TestDir is mandatory for batch processing
+			if c.cfg.Gen.TestFilePath != "" {
+				utils.LogError(c.logger, nil, "TestFilePath should not be provided when SourceFilePath is empty. Use TestDir for batch mode.")
+				return errors.New("testFilePath provided without sourceFilePath")
+			}
 			if c.cfg.Gen.TestDir == "" {
-				utils.LogError(c.logger, nil, "TestDir is not set, Please specify the test directory")
+				utils.LogError(c.logger, nil, "SourceFilePath is not provided. TestDir is required for processing multiple files.")
 				return errors.New("TestDir is not set")
 			}
 		}
+		if c.cfg.Gen.TestCommand == "" {
+			utils.LogError(c.logger, nil, "TestCommand is not set. Please specify the command to run tests.")
+			return errors.New("TestCommand is not set")
+		}
+
 	}
 
 	return nil
