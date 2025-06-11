@@ -157,7 +157,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 		default:
 		}
 
-		g.logger.Info(fmt.Sprintf("Generating tests for file: %s", g.srcPath))
+		g.logger.Info("Generating tests for file", zap.String("file", g.srcPath))
 		var isEmptyFile bool
 		if _, statErr := os.Stat(g.testPath); os.IsNotExist(statErr) {
 			testFileDir := filepath.Dir(g.testPath)
@@ -166,9 +166,9 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				continue
 			}
 
-			created, createErr := createTestFile(g.testPath, g.srcPath)
-			if createErr != nil {
-				g.logger.Error("Error creating test file", zap.Error(createErr))
+			created, err := createTestFile(g.testPath, g.srcPath)
+			if err != nil {
+				g.logger.Error("Error creating test file", zap.Error(err))
 				continue
 			}
 			newTestFile = created
