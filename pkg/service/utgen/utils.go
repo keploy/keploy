@@ -336,7 +336,16 @@ func createTestFile(testFilePath string, sourceFilePath string) (bool, error) {
 					}
 				}
 			}
-			initialContent = fmt.Sprintf("package %s\n\nimport (\n\t\"testing\"\n)\n", pkgName)
+			initialContent = fmt.Sprintf(`package %s
+
+			import (
+				"testing"
+			)
+
+			func TestPlaceholder(t *testing.T) {
+				t.Skip("Test")
+			}
+			`, pkgName)
 		case "python":
 			initialContent = fmt.Sprintf("# Test file for %s\nimport unittest\n\nclass TestMyModule(unittest.TestCase):\n    pass\n\nif __name__ == '__main__':\n    unittest.main()\n", filepath.Base(sourceFilePath))
 		case "javascript":
