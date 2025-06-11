@@ -253,22 +253,24 @@ func getTestFilePath(sourceFilePath, testDirectory string) (string, error) {
 		return "", fmt.Errorf("unsupported language: %s", language)
 	}
 
-	// Find the most specific existing test file
-	testFilePath, err := findTestFile(testDirectory, testFileBaseNames)
+	// Find existing test file
+	existingTestFilePath, err := findTestFile(testDirectory, testFileBaseNames)
 	if err != nil {
 		return "", err
 	}
-
-	// If a test file was found, return it
-	if testFilePath != "" {
-		return testFilePath, nil
+	// If a test file was found
+	if existingTestFilePath != "" {
+		return existingTestFilePath, nil
 	}
 
-	// Construct the relative path for the new test file
-	relativeDir := strings.TrimPrefix(filepath.Dir(sourceFilePath), "src")
-	testFilePath = filepath.Join(testDirectory, relativeDir, testFileBaseNames[0])
+	// If no existing test file is found
+	chosenTestFileName := testFileBaseNames[0]
+	srcFileDir := filepath.Dir(sourceFilePath)
 
-	return testFilePath, nil
+	if testDirectory == "" || testDirectory == "." {
+		return filepath.Join(srcFileDir, chosenTestFileName), nil
+	}
+	return filepath.Join(testDirectory, srcFileDir, chosenTestFileName), nil
 }
 
 func findTestFile(testDirectory string, testFileBaseNames []string) (string, error) {
@@ -317,14 +319,36 @@ func createTestFile(testFilePath string, sourceFilePath string) (bool, error) {
 			}
 		}()
 
-		// Write initial content to the test file
-		_, err = file.WriteString(fmt.Sprintf("// Unit test for %s\n", filepath.Base(sourceFilePath)))
-		if err != nil {
-			return false, err
+		language := GetCodeLanguage(sourceFilePath)
+		var initialContent string
+
+		switch language {
+		case "go":
+			pkgName := "main"
+			srcBytes, readErr := os.ReadFile(sourceFilePath)
+			if readErr == nil {
+				lines := strings.Split(string(srcBytes), "\n")
+				for _, line := range lines {
+					trimmedLine := strings.TrimSpace(line)
+					if strings.HasPrefix(trimmedLine, "package ") {
+						pkgName = strings.TrimSpace(strings.TrimPrefix(trimmedLine, "package "))
+						break
+					}
+				}
+			}
+			initialContent = fmt.Sprintf("package %s\n\nimport (\n\t\"testing\"\n)\n", pkgName)
+		case "python":
+			initialContent = fmt.Sprintf("# Test file for %s\nimport unittest\n\nclass TestMyModule(unittest.TestCase):\n    pass\n\nif __name__ == '__main__':\n    unittest.main()\n", filepath.Base(sourceFilePath))
+		case "javascript":
+			initialContent = fmt.Sprintf("// Test file for %s\n\ndescribe('%s tests', () => {\n  it('should pass', () => {\n    expect(true).toBe(true);\n  });\n});\n", filepath.Base(sourceFilePath), filepath.Base(sourceFilePath))
+		default:
+			initialContent = fmt.Sprintf("// Unit test for %s\n", filepath.Base(sourceFilePath))
 		}
 
+		if _, err = file.WriteString(initialContent); err != nil {
+			return false, err
+		}
 		return true, nil
 	}
-
 	return false, nil
 }
