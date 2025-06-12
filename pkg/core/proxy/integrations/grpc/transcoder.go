@@ -361,7 +361,7 @@ func (srv *Transcoder) ListenAndServe(ctx context.Context) error {
 			frame, err := srv.framer.ReadFrame()
 			if err != nil {
 				if err == io.EOF {
-					srv.logger.Debug("EOF reached. Closing the connection.")
+					srv.logger.Info("EOF reached. Closing the connection.")
 					return io.EOF
 				}
 				utils.LogError(srv.logger, err, "Failed to read frame")
