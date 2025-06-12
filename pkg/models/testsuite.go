@@ -1,4 +1,4 @@
-package testsuite
+package models
 
 // TestSuite represents the structure of a test suite YAML file
 type TestSuite struct {
@@ -11,12 +11,35 @@ type TestSuite struct {
 // TestSuiteSpec contains the metadata and steps for a test suite
 type TestSuiteSpec struct {
 	Metadata TestSuiteMetadata `yaml:"metadata"`
+	Load     LoadOptions       `yaml:"load,omitempty"`
 	Steps    []TestStep        `yaml:"steps"`
 }
 
 // TestSuiteMetadata contains description and other metadata for a test suite
 type TestSuiteMetadata struct {
 	Description string `yaml:"description"`
+}
+
+// LoadOptions represents load testing options
+type LoadOptions struct {
+	Profile    string      `yaml:"profile"`
+	VUs        int         `yaml:"vus"`
+	Duration   string      `yaml:"duration"`
+	RPS        int         `yaml:"rps"`
+	Stages     []LoadStage `yaml:"stages,omitempty"`
+	Thresholds []Threshold `yaml:"thresholds,omitempty"`
+}
+
+// LoadStage represents a single stage in a load test
+type LoadStage struct {
+	Duration string `yaml:"duration"`
+	Target   int    `yaml:"target"`
+}
+
+// Threshold represents a performance threshold in load testing
+type Threshold struct {
+	Metric    string `yaml:"metric"`
+	Condition string `yaml:"condition"`
 }
 
 // TestStep represents a single API call step in the test suite
@@ -27,11 +50,11 @@ type TestStep struct {
 	Body    string            `yaml:"body,omitempty"`
 	Headers map[string]string `yaml:"headers,omitempty"`
 	Extract map[string]string `yaml:"extract,omitempty"`
-	Assert  []Assertion       `yaml:"assert,omitempty"`
+	Assert  []TSAssertion     `yaml:"assert,omitempty"`
 }
 
 // Assertion represents an assertion to validate API responses
-type Assertion struct {
+type TSAssertion struct {
 	Type           string `yaml:"type"`
 	Key            string `yaml:"key,omitempty"`
 	ExpectedString string `yaml:"expected_string,omitempty"`

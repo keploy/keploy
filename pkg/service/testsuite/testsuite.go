@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -96,8 +97,8 @@ func (e *TSExecutor) Execute(ctx context.Context) error {
 }
 
 // executeStep executes a single test step and returns the result
-func (e *TSExecutor) executeStep(step TestStep) (*StepResult, error) {
-	result := &StepResult{
+func (e *TSExecutor) executeStep(step models.TestStep) (*models.StepResult, error) {
+	result := &models.StepResult{
 		StepName:      step.Name,
 		Method:        step.Method,
 		URL:           step.URL,
@@ -181,7 +182,7 @@ func (e *TSExecutor) executeStep(step TestStep) (*StepResult, error) {
 }
 
 // Helper function to process assertions
-func (e *TSExecutor) processAssertion(assertion Assertion, resp *http.Response, body []byte) (bool, string) {
+func (e *TSExecutor) processAssertion(assertion models.TSAssertion, resp *http.Response, body []byte) (bool, string) {
 	switch assertion.Type {
 	case "status_code":
 		expectedCode := assertion.ExpectedString

@@ -5,12 +5,13 @@ import (
 	"os"
 	"strings"
 
+	"go.keploy.io/server/v2/pkg/models"
 	"gopkg.in/yaml.v3"
 )
 
 // TSParser parses a YAML file into a TestSuite struct
-func TSParser(path string) (TestSuite, error) {
-	var ts TestSuite
+func TSParser(path string) (models.TestSuite, error) {
+	var ts models.TestSuite
 
 	fileInfo, err := os.Stat(path)
 	if err != nil {
