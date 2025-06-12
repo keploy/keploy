@@ -512,7 +512,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	}
 
 	if c.cfg.DisableANSI {
-		logger, err := log.ChangeColorEncoding()
+		logger, err := zap.NewProduction()
 		models.IsAnsiDisabled = true
 		*c.logger = *logger
 		if err != nil {

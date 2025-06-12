@@ -24,7 +24,7 @@ func New() (*zap.Logger, error) {
 		return NewColor(config, false), nil
 	})
 
-	LogCfg = zap.NewDevelopmentConfig()
+	LogCfg = zap.NewProductionConfig()
 
 	LogCfg.Encoding = "colorConsole"
 
@@ -96,7 +96,7 @@ func AddMode(mode string) (*zap.Logger, error) {
 		enc.AppendString(emoji + " " + mode + " " + t.Format(time.RFC3339) + " ")
 	}
 	// Rebuild the logger with the updated configuration
-	newLogger, err := cfg.Build()
+	newLogger, err := zap.NewProduction()
 	if err != nil {
 		return nil, fmt.Errorf("failed to add mode to logger: %v", err)
 	}

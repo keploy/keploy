@@ -13,7 +13,7 @@ import (
 	"go.keploy.io/server/v2/pkg/platform/auth"
 	userDb "go.keploy.io/server/v2/pkg/platform/yaml/configdb/user"
 	"go.keploy.io/server/v2/utils"
-	"go.keploy.io/server/v2/utils/log"
+	"go.uber.org/zap"
 	//pprof for debugging
 	// _ "net/http/pprof"
 )
@@ -51,7 +51,7 @@ func setVersion() {
 }
 
 func start(ctx context.Context) {
-	logger, err := log.New()
+	logger, err := zap.NewProduction()
 	if err != nil {
 		fmt.Println("Failed to start the logger for the CLI", err)
 		return
