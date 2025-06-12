@@ -68,7 +68,7 @@ You can choose from a carefully curated selection of Hacktoberfest requests that
 The open source community needs you. Do you have what it takes to join the community and build a better future? We’re here to help you.
 
 <p align="center">
-  <a href="https://x.com/keployio" target="_blank"><img src="https://img.shields.io/badge/Twitter-1D9BF0.svg?style=for-the-badge&logo=Twitter&logoColor=white"></a>
+  <a href="https://x.com/keployio" target="_blank"><img src="https://img.shields.io/badge/X-1D9BF0.svg?style=for-the-badge&logo=X&logoColor=white"></a>
   	&nbsp;
    <a href="https://www.linkedin.com/company/keploy/" target="_blank"><img src="https://img.shields.io/badge/LinkedIn-0A66C2.svg?style=for-the-badge&logo=LinkedIn&logoColor=white"></a>
   	&nbsp;
