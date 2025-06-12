@@ -84,7 +84,7 @@ func (srv *Transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 
 	grpcReq := srv.sic.FetchRequestForStream(id)
 
-	srv.logger.Debug("Getting mock for request from the mock database", zap.Any("request", grpcReq))
+	srv.logger.Warn("Getting mock for request from the mock database")
 
 	// Fetch all the mocks. We can't assume that the grpc calls are made in a certain order.
 	mock, err := FilterMocksBasedOnGrpcRequest(ctx, srv.logger, grpcReq, srv.mockDb)
@@ -95,7 +95,7 @@ func (srv *Transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 		return fmt.Errorf("failed to mock the output for unrecorded outgoing grpc call")
 	}
 
-	srv.logger.Debug("Found a mock for the request", zap.Any("mock", mock))
+	srv.logger.Warn("Found a mock for the request", zap.Any("mock", mock.Name))
 
 	grpcMockResp := mock.Spec.GRPCResp
 
@@ -126,7 +126,7 @@ func (srv *Transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 	}
 
 	// The headers are prepared. Write the frame.
-	srv.logger.Debug("Writing the first set of headers in a new HEADER frame.")
+	srv.logger.Warn("Writing the first set of headers in a new HEADER frame.")
 	err = srv.framer.WriteHeaders(http2.HeadersFrameParam{
 		StreamID:      id,
 		BlockFragment: buf.Bytes(),
@@ -144,7 +144,7 @@ func (srv *Transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 		return err
 	}
 
-	srv.logger.Debug("Writing the payload in a DATA frame", zap.Int("payload length", len(payload)))
+	srv.logger.Warn("Writing the payload in a DATA frame", zap.Int("payload length", len(payload)))
 	// Write the DATA frame with the payload.
 	err = srv.WriteData(ctx, id, payload)
 	if err != nil {
@@ -155,7 +155,7 @@ func (srv *Transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 	buf = new(bytes.Buffer)
 	encoder = hpack.NewEncoder(buf)
 
-	srv.logger.Debug("preparing the trailers in a different HEADER frame")
+	srv.logger.Warn("preparing the trailers in a different HEADER frame")
 	//Prepare the trailers.
 	//The pseudo headers should be written before ordinary ones.
 	for key, value := range grpcMockResp.Trailers.PseudoHeaders {
@@ -180,7 +180,7 @@ func (srv *Transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 	}
 
 	// The trailer is prepared. Write the frame.
-	srv.logger.Debug("Writing the trailers in a different HEADER frame")
+	srv.logger.Warn("Writing the trailers in a different HEADER frame")
 	err = srv.framer.WriteHeaders(http2.HeadersFrameParam{
 		StreamID:      id,
 		BlockFragment: buf.Bytes(),
@@ -231,7 +231,7 @@ func (srv *Transcoder) WriteData(ctx context.Context, streamID uint32, payload [
 		end := offset + chunkSize
 		data := payload[offset:end]
 
-		srv.logger.Debug("Writing chunked data frame", zap.Int("chunk size", chunkSize), zap.Int("offset", offset), zap.Int("end", end))
+		srv.logger.Warn("Writing chunked data frame", zap.Int("chunk size", chunkSize), zap.Int("offset", offset), zap.Int("end", end))
 		err := srv.framer.WriteData(streamID, false, data)
 		if err != nil {
 			utils.LogError(srv.logger, err, "could not write chunked data frame")
@@ -240,7 +240,7 @@ func (srv *Transcoder) WriteData(ctx context.Context, streamID uint32, payload [
 
 		offset = end
 		if offset == totalLen {
-			srv.logger.Debug("the offset is equal to the total length of the payload", zap.Int("offset", offset))
+			srv.logger.Warn("the offset is equal to the total length of the payload", zap.Int("offset", offset))
 		}
 	}
 
@@ -249,7 +249,7 @@ func (srv *Transcoder) WriteData(ctx context.Context, streamID uint32, payload [
 
 func (srv *Transcoder) ProcessWindowUpdateFrame(_ *http2.WindowUpdateFrame) error {
 	// Silently ignore Window tools frames, as we already know the mock payloads that we would send.
-	srv.logger.Debug("Received Window Update Frame. Skipping it...")
+	srv.logger.Warn("Received Window Update Frame. Skipping it...")
 	return nil
 }
 
@@ -278,7 +278,7 @@ func (srv *Transcoder) ProcessGoAwayFrame(_ *http2.GoAwayFrame) error {
 func (srv *Transcoder) ProcessPriorityFrame(_ *http2.PriorityFrame) error {
 	// We do not support reordering of frames based on priority, because we flush after each response.
 	// Silently skip it.
-	srv.logger.Debug("Received PRIORITY frame, Skipping it...")
+	srv.logger.Warn("Received PRIORITY frame, Skipping it...")
 	return nil
 }
 

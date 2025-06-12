@@ -44,7 +44,7 @@ func encodeGrpc(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientCo
 		if err != nil {
 			// check for EOF error
 			if err == io.EOF {
-				logger.Debug("EOF error received from client. Closing conn")
+				logger.Warn("EOF error received from client. Closing conn")
 				return nil
 			}
 			utils.LogError(logger, err, "failed to transfer frame from client to server")

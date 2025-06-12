@@ -41,11 +41,11 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 			grpcMocks := FilterMocksRelatedToGrpc(mocks)
 
 			if len(grpcMocks) == 0 {
-				logger.Debug("No grpc mocks found in the db")
+				logger.Warn("No grpc mocks found in the db")
 				return nil, nil
 			}
 
-			logger.Debug("Here are the grpc mocks in the db", zap.Int("len", len(grpcMocks)), zap.Any("grpcMocks", grpcMocks))
+			logger.Warn("Here are the grpc mocks in the db", zap.Int("len", len(grpcMocks)))
 
 			schemaMatched, err := schemaMatch(ctx, grpcReq, grpcMocks)
 			if err != nil {
@@ -53,16 +53,16 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 			}
 
 			if len(schemaMatched) == 0 {
-				logger.Debug("No mock found with schema match")
+				logger.Warn("No mock found with schema match")
 				return nil, nil
 			}
 
-			logger.Debug("Here are the grpc mocks with schema match", zap.Int("len", len(schemaMatched)), zap.Any("schemaMatched", schemaMatched))
+			logger.Warn("Here are the grpc mocks with schema match", zap.Int("len", len(schemaMatched)))
 
 			// Exact body Match
 			ok, matchedMock := exactBodyMatch(grpcReq.Body, schemaMatched)
 			if ok {
-				logger.Debug("Exact body match found", zap.Any("matchedMock", matchedMock))
+				logger.Warn("Exact body match found")
 				if !mockDb.DeleteFilteredMock(*matchedMock) {
 					continue
 				}
@@ -71,7 +71,7 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 
 			// apply fuzzy match for body with schemaMatched mocks
 
-			logger.Debug("Performing fuzzy match for decoded data in body")
+			logger.Warn("Performing fuzzy match for decoded data in body")
 			// Perform fuzzy match on the request
 			isMatched, bestMatch := fuzzyMatch(schemaMatched, grpcReq.Body.DecodedData)
 			if isMatched {

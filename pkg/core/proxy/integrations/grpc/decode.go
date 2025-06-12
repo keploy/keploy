@@ -23,7 +23,7 @@ func decodeGrpc(ctx context.Context, logger *zap.Logger, _ []byte, clientConn ne
 	if err != nil {
 		if err == io.EOF {
 			// EOF is expected when the server closes the connection.
-			logger.Debug("EOF while serving grpc request")
+			logger.Warn("EOF while serving grpc request")
 			return nil
 		}
 		utils.LogError(logger, nil, "could not serve grpc request")
