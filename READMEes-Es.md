@@ -53,7 +53,7 @@
     <img src="https://img.shields.io/badge/Join-Community!-orange" alt="Join our Community!" />
   </a>
   
-  <a href="https://x.com/Keploy_io">
+  <a href="https://x.com/Keployio">
     <img src="https://img.shields.io/badge/follow-%40keployio-1DA1F2?logo=X&style=social" alt="Keploy X" />
   </a>
 </h4>
