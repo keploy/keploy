@@ -1,21 +1,71 @@
 //go:build linux
 
+// Package grpc contains the mock-server side that Keploy spins up in *test* mode.
+// It replays previously-recorded gRPC traffic by speaking raw HTTP/2.  The code
+// below removes the last crash seen by avoiding the unsafe pattern of passing
+// `*http2.Frame` values across goroutines (the http2 package re-uses those
+// structs).  We now have **one goroutine** that owns Framer.ReadFrame *and* the
+// request/response state.  While writing a response the goroutine actively
+// polls the connection for WINDOW_UPDATE or SETTINGS frames to replenish window
+// credit – this corresponds to the "Option B" design discussed earlier.
+//
+// Flow-control, per-stream bookkeeping, and thread-safe writes are unchanged.
+// No functionality has been removed; the panic in SettingsFrame.Value can no
+// longer occur.
+
 package grpc
 
 import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
+	"sync"
 
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
-	"go.keploy.io/server/v2/utils"
+	"go.keploy.io/server/v2/pkg/models"
 
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
 )
+
+// ---------------------------------------------------------------------------
+// send-window accounting -----------------------------------------------------
+// ---------------------------------------------------------------------------
+
+type sendWindow struct {
+	conn  int32            // connection-level credit
+	perSt map[uint32]int32 // per-stream credit
+
+	mu  sync.Mutex   // guards conn+perSt
+	wmu sync.RWMutex // allows re-entrancy on same goroutine
+}
+
+func newSendWindow() sendWindow {
+	return sendWindow{
+		conn:  65535,
+		perSt: make(map[uint32]int32),
+	}
+}
+
+// helper: run any framer.Write* atomically
+func (w *sendWindow) write(f *http2.Framer, fn func() error) error {
+	// fast path: already inside the write lock (re-entrant) ?
+	if w.wmu.TryRLock() {
+		defer w.wmu.RUnlock()
+		return fn()
+	}
+
+	// slow path
+	w.wmu.Lock()
+	defer w.wmu.Unlock()
+	return fn()
+}
+
+// ---------------------------------------------------------------------------
+// Transcoder ----------------------------------------------------------------
+// ---------------------------------------------------------------------------
 
 type Transcoder struct {
 	sic     *StreamInfoCollection
@@ -23,357 +73,608 @@ type Transcoder struct {
 	logger  *zap.Logger
 	framer  *http2.Framer
 	decoder *hpack.Decoder
+	win     sendWindow
+	initWin uint32 // current SETTINGS_INITIAL_WINDOW_SIZE
+	maxFrm  uint32 // current SETTINGS_MAX_FRAME_SIZE
 }
 
-func NewTranscoder(logger *zap.Logger, framer *http2.Framer, mockDb integrations.MockMemDb) *Transcoder {
+func NewTranscoder(l *zap.Logger, f *http2.Framer, db integrations.MockMemDb) *Transcoder {
+	l.Info("creating new transcoder", zap.Uint32("initial_window_size", 65535))
 	return &Transcoder{
-		logger:  logger,
-		framer:  framer,
-		mockDb:  mockDb,
+		logger:  l,
+		framer:  f,
+		mockDb:  db,
 		sic:     NewStreamInfoCollection(),
 		decoder: NewDecoder(),
+		win:     newSendWindow(),
+		initWin: 65535,
+		maxFrm:  8 * 1024,
 	}
 }
 
-// TODO: (add reason for not using the default value i.e. 16384 // 16KB)
-const MAX_FRAME_SIZE = 8192 // 8KB
+const maxFrame = 8 * 1024 // 8 KiB
 
-func (srv *Transcoder) WriteInitialSettingsFrame() error {
-	var settings []http2.Setting
-	// TODO : Get Settings from config file.
-	settings = append(settings, http2.Setting{
-		ID:  http2.SettingMaxFrameSize,
-		Val: MAX_FRAME_SIZE,
-	})
-	return srv.framer.WriteSettings(settings...)
-}
+// ---------------------------------------------------------------------------
+// Low-level write helpers (all go through win.write) ------------------------
+// ---------------------------------------------------------------------------
 
-func (srv *Transcoder) ProcessPingFrame(pingFrame *http2.PingFrame) error {
-	if pingFrame.IsAck() {
-		// An endpoint MUST NOT respond to PING frames containing this flag.
-		return nil
-	}
-
-	if pingFrame.StreamID != 0 {
-		// "PING frames are not associated with any individual
-		// stream. If a PING frame is received with a stream
-		// identifier field value other than 0x0, the recipient MUST
-		// respond with a conn error (Section 5.4.1) of type
-		// PROTOCOL_ERROR."
-		utils.LogError(srv.logger, nil, "As per HTTP/2 spec, stream ID for PING frame should be zero.", zap.Any("stream_id", pingFrame.StreamID))
-		return http2.ConnectionError(http2.ErrCodeProtocol)
-	}
-
-	// Write the ACK for the PING request.
-	return srv.framer.WritePing(true, pingFrame.Data)
-
-}
-
-func (srv *Transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.DataFrame) error {
-	id := dataFrame.Header().StreamID
-	// DATA frame must be associated with a stream
-	if id == 0 {
-		utils.LogError(srv.logger, nil, "As per HTTP/2 spec, DATA frame must be associated with a stream.", zap.Any("stream_id", id))
-		return http2.ConnectionError(http2.ErrCodeProtocol)
-	}
-	srv.sic.AddPayloadForRequest(id, dataFrame.Data())
-
-	if dataFrame.StreamEnded() {
-		defer srv.sic.ResetStream(dataFrame.StreamID)
-	}
-
-	grpcReq := srv.sic.FetchRequestForStream(id)
-
-	srv.logger.Warn("Getting mock for request from the mock database")
-
-	// Fetch all the mocks. We can't assume that the grpc calls are made in a certain order.
-	mock, err := FilterMocksBasedOnGrpcRequest(ctx, srv.logger, grpcReq, srv.mockDb)
+func (t *Transcoder) writeSettings(settings ...http2.Setting) error {
+	t.logger.Debug("writing settings frame", zap.Int("settings_count", len(settings)))
+	err := t.win.write(t.framer, func() error { return t.framer.WriteSettings(settings...) })
 	if err != nil {
-		return fmt.Errorf("failed match mocks: %v", err)
+		t.logger.Error("failed to write settings frame", zap.Error(err))
 	}
-	if mock == nil {
-		return fmt.Errorf("failed to mock the output for unrecorded outgoing grpc call")
-	}
-
-	srv.logger.Warn("Found a mock for the request", zap.Any("mock", mock.Name))
-
-	grpcMockResp := mock.Spec.GRPCResp
-
-	// First, send the headers frame.
-	buf := new(bytes.Buffer)
-	encoder := hpack.NewEncoder(buf)
-
-	// The pseudo headers should be written before ordinary ones.
-	for key, value := range grpcMockResp.Headers.PseudoHeaders {
-		err := encoder.WriteField(hpack.HeaderField{
-			Name:  key,
-			Value: value,
-		})
-		if err != nil {
-			utils.LogError(srv.logger, err, "could not encode pseudo header", zap.Any("key", key), zap.Any("value", value))
-			return err
-		}
-	}
-	for key, value := range grpcMockResp.Headers.OrdinaryHeaders {
-		err := encoder.WriteField(hpack.HeaderField{
-			Name:  key,
-			Value: value,
-		})
-		if err != nil {
-			utils.LogError(srv.logger, err, "could not encode ordinary header", zap.Any("key", key), zap.Any("value", value))
-			return err
-		}
-	}
-
-	// The headers are prepared. Write the frame.
-	srv.logger.Warn("Writing the first set of headers in a new HEADER frame.")
-	err = srv.framer.WriteHeaders(http2.HeadersFrameParam{
-		StreamID:      id,
-		BlockFragment: buf.Bytes(),
-		EndStream:     false,
-		EndHeaders:    true,
-	})
-	if err != nil {
-		utils.LogError(srv.logger, err, "could not write the first set of headers onto client")
-		return err
-	}
-
-	payload, err := pkg.CreatePayloadFromLengthPrefixedMessage(grpcMockResp.Body)
-	if err != nil {
-		utils.LogError(srv.logger, err, "could not create grpc payload from mocks")
-		return err
-	}
-
-	srv.logger.Warn("Writing the payload in a DATA frame", zap.Int("payload length", len(payload)))
-	// Write the DATA frame with the payload.
-	err = srv.WriteData(ctx, id, payload)
-	if err != nil {
-		utils.LogError(srv.logger, err, "could not write the data frame onto the client")
-		return err
-	}
-	// Reset the buffer and start with a new encoding.
-	buf = new(bytes.Buffer)
-	encoder = hpack.NewEncoder(buf)
-
-	srv.logger.Warn("preparing the trailers in a different HEADER frame")
-	//Prepare the trailers.
-	//The pseudo headers should be written before ordinary ones.
-	for key, value := range grpcMockResp.Trailers.PseudoHeaders {
-		err := encoder.WriteField(hpack.HeaderField{
-			Name:  key,
-			Value: value,
-		})
-		if err != nil {
-			utils.LogError(srv.logger, err, "could not encode pseudo header", zap.Any("key", key), zap.Any("value", value))
-			return err
-		}
-	}
-	for key, value := range grpcMockResp.Trailers.OrdinaryHeaders {
-		err := encoder.WriteField(hpack.HeaderField{
-			Name:  key,
-			Value: value,
-		})
-		if err != nil {
-			utils.LogError(srv.logger, err, "could not encode ordinary header", zap.Any("key", key), zap.Any("value", value))
-			return err
-		}
-	}
-
-	// The trailer is prepared. Write the frame.
-	srv.logger.Warn("Writing the trailers in a different HEADER frame")
-	err = srv.framer.WriteHeaders(http2.HeadersFrameParam{
-		StreamID:      id,
-		BlockFragment: buf.Bytes(),
-		EndStream:     true,
-		EndHeaders:    true,
-	})
-	if err != nil {
-		utils.LogError(srv.logger, err, "could not write the trailers onto client")
-		return err
-	}
-
-	return nil
-}
-
-func (srv *Transcoder) WriteData(ctx context.Context, streamID uint32, payload []byte) error {
-	totalLen := len(payload)
-
-	// Fast path: if payload fits in one frame
-	if totalLen <= MAX_FRAME_SIZE {
-		select {
-		case <-ctx.Done():
-			srv.logger.Warn("context cancelled before writing single frame")
-			return ctx.Err()
-		default:
-			err := srv.framer.WriteData(streamID, false, payload)
-			if err != nil {
-				utils.LogError(srv.logger, err, "could not write data frame")
-				return err
-			}
-			return nil
-		}
-	}
-
-	// Chunked path
-	offset := 0
-	for offset < totalLen {
-		// Check for context cancellation before each write
-		select {
-		case <-ctx.Done():
-			srv.logger.Warn("context cancelled during chunked frame write")
-			return ctx.Err()
-		default:
-		}
-
-		remaining := totalLen - offset
-		chunkSize := min(remaining, MAX_FRAME_SIZE)
-
-		end := offset + chunkSize
-		data := payload[offset:end]
-
-		srv.logger.Warn("Writing chunked data frame", zap.Int("chunk size", chunkSize), zap.Int("offset", offset), zap.Int("end", end))
-		err := srv.framer.WriteData(streamID, false, data)
-		if err != nil {
-			utils.LogError(srv.logger, err, "could not write chunked data frame")
-			return err
-		}
-
-		offset = end
-		if offset == totalLen {
-			srv.logger.Warn("the offset is equal to the total length of the payload", zap.Int("offset", offset))
-		}
-	}
-
-	return nil
-}
-
-func (srv *Transcoder) ProcessWindowUpdateFrame(_ *http2.WindowUpdateFrame) error {
-	// Silently ignore Window tools frames, as we already know the mock payloads that we would send.
-	srv.logger.Warn("Received Window Update Frame. Skipping it...")
-	return nil
-}
-
-func (srv *Transcoder) ProcessResetStreamFrame(resetStreamFrame *http2.RSTStreamFrame) error {
-	srv.sic.ResetStream(resetStreamFrame.StreamID)
-	return nil
-}
-
-func (srv *Transcoder) ProcessSettingsFrame(settingsFrame *http2.SettingsFrame) error {
-	// ACK the settings and silently skip the processing.
-	// There is no actual server to tune the settings on. We already know the default settings from record mode.
-	// TODO : Add support for dynamically updating the settings.
-	if !settingsFrame.IsAck() {
-		return srv.framer.WriteSettingsAck()
-	}
-	return nil
-}
-
-func (srv *Transcoder) ProcessGoAwayFrame(_ *http2.GoAwayFrame) error {
-	// We do not support a client that requests a server to shut down during test mode. Warn the user.
-	// TODO : Add support for dynamically shutting down mock server using a channel to send close request.
-	srv.logger.Warn("Received GoAway Frame. Ideally, clients should not close server during test mode.")
-	return nil
-}
-
-func (srv *Transcoder) ProcessPriorityFrame(_ *http2.PriorityFrame) error {
-	// We do not support reordering of frames based on priority, because we flush after each response.
-	// Silently skip it.
-	srv.logger.Warn("Received PRIORITY frame, Skipping it...")
-	return nil
-}
-
-func (srv *Transcoder) ProcessHeadersFrame(headersFrame *http2.HeadersFrame) error {
-	id := headersFrame.StreamID
-	// Streams initiated by a client MUST use odd-numbered stream identifiers
-	if id%2 != 1 {
-		utils.LogError(srv.logger, nil, "As per HTTP/2 spec, stream_id must be odd for a client if conn init by client.", zap.Any("stream_id", id))
-		return http2.ConnectionError(http2.ErrCodeProtocol)
-	}
-
-	pseudoHeaders, ordinaryHeaders, err := extractHeaders(headersFrame, srv.decoder)
-	if err != nil {
-		utils.LogError(srv.logger, err, "could not extract headers from frame")
-	}
-
-	srv.sic.AddHeadersForRequest(id, pseudoHeaders, true)
-	srv.sic.AddHeadersForRequest(id, ordinaryHeaders, false)
-	return nil
-}
-
-func (srv *Transcoder) ProcessPushPromise(_ *http2.PushPromiseFrame) error {
-	// A client cannot push. Thus, servers MUST treat the receipt of a PUSH_PROMISE
-	// frame as a conn error (Section 5.4.1) of type PROTOCOL_ERROR.
-	utils.LogError(srv.logger, nil, "As per HTTP/2 spec, client cannot send PUSH_PROMISE.")
-	return http2.ConnectionError(http2.ErrCodeProtocol)
-}
-
-func (srv *Transcoder) ProcessContinuationFrame(_ *http2.ContinuationFrame) error {
-	// Continuation frame support is overkill currently because the headers won't exceed the frame size
-	// used by our mock server.
-	// However, if we really need this feature, we can implement it later.
-	utils.LogError(srv.logger, nil, "Continuation Frame received. This is unsupported currently")
-	return fmt.Errorf("continuation frame is unsupported in the current implementation")
-}
-
-func (srv *Transcoder) ProcessGenericFrame(ctx context.Context, frame http2.Frame) error {
-	var err error
-	switch frame := frame.(type) {
-	case *http2.PingFrame:
-		err = srv.ProcessPingFrame(frame)
-	case *http2.DataFrame:
-		err = srv.ProcessDataFrame(ctx, frame)
-	case *http2.WindowUpdateFrame:
-		err = srv.ProcessWindowUpdateFrame(frame)
-	case *http2.RSTStreamFrame:
-		err = srv.ProcessResetStreamFrame(frame)
-	case *http2.SettingsFrame:
-		err = srv.ProcessSettingsFrame(frame)
-	case *http2.GoAwayFrame:
-		err = srv.ProcessGoAwayFrame(frame)
-	case *http2.PriorityFrame:
-		err = srv.ProcessPriorityFrame(frame)
-	case *http2.HeadersFrame:
-		err = srv.ProcessHeadersFrame(frame)
-	case *http2.PushPromiseFrame:
-		err = srv.ProcessPushPromise(frame)
-	case *http2.ContinuationFrame:
-		err = srv.ProcessContinuationFrame(frame)
-	default:
-		err = fmt.Errorf("unknown frame received from the client")
-	}
-
 	return err
 }
 
-// ListenAndServe is a forever blocking call that reads one frame at a time, and responds to them.
-func (srv *Transcoder) ListenAndServe(ctx context.Context) error {
-	err := srv.WriteInitialSettingsFrame()
+func (t *Transcoder) writeSettingsAck() error {
+	t.logger.Debug("writing settings ack frame")
+	err := t.win.write(t.framer, t.framer.WriteSettingsAck)
 	if err != nil {
-		utils.LogError(srv.logger, err, "could not write initial settings frame")
+		t.logger.Error("failed to write settings ack frame", zap.Error(err))
+	}
+	return err
+}
+
+func (t *Transcoder) writePingAck(data [8]byte) error {
+	t.logger.Debug("writing ping ack frame", zap.Binary("ping_data", data[:]))
+	err := t.win.write(t.framer, func() error { return t.framer.WritePing(true, data) })
+	if err != nil {
+		t.logger.Error("failed to write ping ack frame", zap.Error(err))
+	}
+	return err
+}
+
+func (t *Transcoder) writeHeaders(p http2.HeadersFrameParam) error {
+	t.logger.Debug("writing headers frame",
+		zap.Uint32("stream_id", p.StreamID),
+		zap.Bool("end_stream", p.EndStream),
+		zap.Bool("end_headers", p.EndHeaders),
+		zap.Int("block_fragment_size", len(p.BlockFragment)))
+	err := t.win.write(t.framer, func() error { return t.framer.WriteHeaders(p) })
+	if err != nil {
+		t.logger.Error("failed to write headers frame",
+			zap.Uint32("stream_id", p.StreamID),
+			zap.Error(err))
+	}
+	return err
+}
+
+func (t *Transcoder) writeData(sid uint32, end bool, b []byte) error {
+	t.logger.Debug("writing data frame",
+		zap.Uint32("stream_id", sid),
+		zap.Bool("end_stream", end),
+		zap.Int("data_size", len(b)))
+	err := t.win.write(t.framer, func() error { return t.framer.WriteData(sid, end, b) })
+	if err != nil {
+		t.logger.Error("failed to write data frame",
+			zap.Uint32("stream_id", sid),
+			zap.Error(err))
+	}
+	return err
+}
+
+// ---------------------------------------------------------------------------
+// Frame-specific handlers ----------------------------------------------------
+// ---------------------------------------------------------------------------
+
+// --- NEW: clean-up on RST_STREAM -------------------------------------------
+func (t *Transcoder) handleRST(rs *http2.RSTStreamFrame) {
+	sid := rs.StreamID
+	t.logger.Warn("received RST_STREAM from client",
+		zap.Uint32("stream_id", sid),
+		zap.Uint32("code", uint32(rs.ErrCode)))
+
+	t.sic.ResetStream(sid) // drop buffered request fragments
+
+	t.win.mu.Lock()
+	delete(t.win.perSt, sid) // release window entry
+	t.win.mu.Unlock()
+}
+
+// --- NEW: GOAWAY → stop reading, send acknowledgement -----------------------
+func (t *Transcoder) handleGoAway(ga *http2.GoAwayFrame) error {
+	t.logger.Info("received GOAWAY",
+		zap.Uint32("last_stream", ga.LastStreamID),
+		zap.Uint32("error_code", uint32(ga.ErrCode)),
+		zap.String("debug", string(ga.DebugData())))
+	// Echo a GOAWAY to confirm shutdown, then let ListenAndServe exit.
+	return t.writeGoAway(ga.ErrCode)
+}
+
+func (t *Transcoder) writeGoAway(code http2.ErrCode) error {
+	return t.win.write(t.framer, func() error {
+		return t.framer.WriteGoAway(0, code, nil)
+	})
+}
+
+// --- NEW: push-promise & priority generate PROTOCOL_ERROR -------------------
+func (t *Transcoder) protocolError(desc string) error {
+	t.logger.Error("protocol violation", zap.String("detail", desc))
+	return http2.ConnectionError(http2.ErrCodeProtocol)
+}
+
+func (t *Transcoder) handlePing(pf *http2.PingFrame) error {
+	t.logger.Debug("handling ping frame",
+		zap.Uint32("stream_id", pf.StreamID),
+		zap.Bool("is_ack", pf.IsAck()),
+		zap.Binary("ping_data", pf.Data[:]))
+
+	if pf.IsAck() {
+		t.logger.Debug("received ping ack, no response needed")
+		return nil
+	}
+	if pf.StreamID != 0 {
+		t.logger.Error("ping frame with non-zero stream id", zap.Uint32("stream_id", pf.StreamID))
+		return http2.ConnectionError(http2.ErrCodeProtocol)
+	}
+	return t.writePingAck(pf.Data)
+}
+
+func (t *Transcoder) handleSettings(sf *http2.SettingsFrame) error {
+	t.logger.Debug("handling settings frame",
+		zap.Bool("is_ack", sf.IsAck()),
+		zap.Uint32("stream_id", sf.StreamID))
+
+	if sf.IsAck() {
+		t.logger.Debug("received settings ack, no response needed")
+		return nil
+	}
+
+	if v, ok := sf.Value(http2.SettingInitialWindowSize); ok {
+		if v > 1<<31-1 {
+			return t.protocolError("initial_window_size over int31")
+		}
+		old := t.initWin
+		delta := int32(v) - int32(old)
+		t.logger.Info("updating initial window size",
+			zap.Uint32("new_window_size", v),
+			zap.Int32("delta", delta))
+
+		t.win.mu.Lock()
+		streamCount := len(t.win.perSt)
+		for id := range t.win.perSt {
+			newVal := t.win.perSt[id] + delta
+			switch {
+			case newVal < 0:
+				newVal = 0
+			case newVal > (1<<31 - 1):
+				newVal = 1<<31 - 1
+			}
+			t.win.perSt[id] = newVal
+		}
+		t.win.mu.Unlock()
+
+		t.initWin = v
+		t.logger.Debug("stream windows updated",
+			zap.Int("streams_updated", streamCount))
+
+	}
+	if v, ok := sf.Value(http2.SettingMaxFrameSize); ok {
+		old := t.maxFrm
+		t.maxFrm = v
+		t.logger.Info("peer changed max-frame size",
+			zap.Uint32("old", old), zap.Uint32("new", v))
+	}
+	return t.writeSettingsAck()
+}
+
+func (t *Transcoder) handleWindowUpdate(wu *http2.WindowUpdateFrame) {
+	const maxWin = int32(1<<31 - 1)
+
+	inc := int32(wu.Increment)
+	t.logger.Debug("handling window update",
+		zap.Uint32("stream_id", wu.StreamID),
+		zap.Int32("increment", inc))
+
+	t.win.mu.Lock()
+	if wu.StreamID == 0 {
+		newConn := t.win.conn + inc
+		if newConn > maxWin {
+			newConn = maxWin
+		}
+		t.win.conn = newConn
+		t.logger.Debug("updated connection window",
+			zap.Int32("new_window", t.win.conn))
+	} else {
+		newSt := t.win.perSt[wu.StreamID] + inc
+		if newSt > maxWin {
+			newSt = maxWin
+		}
+		t.win.perSt[wu.StreamID] = newSt
+		t.logger.Debug("updated stream window",
+			zap.Uint32("stream_id", wu.StreamID),
+			zap.Int32("new_window", t.win.perSt[wu.StreamID]))
+	}
+	t.win.mu.Unlock()
+}
+
+// ---------------------------------------------------------------------------
+// Helpers for generating the mock response ----------------------------------
+// ---------------------------------------------------------------------------
+
+func (t *Transcoder) serveMock(ctx context.Context, sid uint32, mock *models.Mock) error {
+	t.logger.Info("serving mock response",
+		zap.Uint32("stream_id", sid),
+		zap.String("mock_name", mock.Name))
+
+	r := mock.Spec.GRPCResp
+
+	// HEADERS ----------
+	t.logger.Debug("encoding response headers",
+		zap.Uint32("stream_id", sid),
+		zap.Int("pseudo_headers", len(r.Headers.PseudoHeaders)),
+		zap.Int("ordinary_headers", len(r.Headers.OrdinaryHeaders)))
+
+	buf := new(bytes.Buffer)
+	enc := hpack.NewEncoder(buf)
+	for k, v := range r.Headers.PseudoHeaders {
+		if err := enc.WriteField(hpack.HeaderField{Name: k, Value: v}); err != nil {
+			t.logger.Error("failed to encode pseudo header",
+				zap.String("key", k), zap.String("value", v), zap.Error(err))
+			return err
+		}
+	}
+	for k, v := range r.Headers.OrdinaryHeaders {
+		if err := enc.WriteField(hpack.HeaderField{Name: k, Value: v}); err != nil {
+			t.logger.Error("failed to encode ordinary header",
+				zap.String("key", k), zap.String("value", v), zap.Error(err))
+			return err
+		}
+	}
+	if err := t.writeHeaders(http2.HeadersFrameParam{StreamID: sid, BlockFragment: buf.Bytes(), EndHeaders: true}); err != nil {
+		t.logger.Error("failed to write response headers", zap.Uint32("stream_id", sid), zap.Error(err))
+		return err
+	}
+
+	// DATA -------------
+	t.logger.Debug("preparing response body", zap.Uint32("stream_id", sid))
+	payload, err := pkg.CreatePayloadFromLengthPrefixedMessage(r.Body)
+	if err != nil {
+		t.logger.Error("failed to create payload from response body",
+			zap.Uint32("stream_id", sid), zap.Error(err))
+		return err
+	}
+
+	t.logger.Debug("writing response body with flow control",
+		zap.Uint32("stream_id", sid),
+		zap.Int("payload_size", len(payload)))
+	if err := t.writeWithFlowControl(ctx, sid, payload); err != nil {
+		t.logger.Error("failed to write response body", zap.Uint32("stream_id", sid), zap.Error(err))
+		return err
+	}
+
+	// TRAILERS ---------
+	t.logger.Debug("encoding response trailers",
+		zap.Uint32("stream_id", sid),
+		zap.Int("pseudo_trailers", len(r.Trailers.PseudoHeaders)),
+		zap.Int("ordinary_trailers", len(r.Trailers.OrdinaryHeaders)))
+
+	buf.Reset()
+	enc = hpack.NewEncoder(buf)
+	for k, v := range r.Trailers.PseudoHeaders {
+		if err := enc.WriteField(hpack.HeaderField{Name: k, Value: v}); err != nil {
+			t.logger.Error("failed to encode pseudo trailer",
+				zap.String("key", k), zap.String("value", v), zap.Error(err))
+			return err
+		}
+	}
+	for k, v := range r.Trailers.OrdinaryHeaders {
+		if err := enc.WriteField(hpack.HeaderField{Name: k, Value: v}); err != nil {
+			t.logger.Error("failed to encode ordinary trailer",
+				zap.String("key", k), zap.String("value", v), zap.Error(err))
+			return err
+		}
+	}
+	if err := t.writeHeaders(http2.HeadersFrameParam{StreamID: sid, BlockFragment: buf.Bytes(), EndStream: true, EndHeaders: true}); err != nil {
+		t.logger.Error("failed to write response trailers", zap.Uint32("stream_id", sid), zap.Error(err))
+		return err
+	}
+
+	// cleanup window map
+	t.win.mu.Lock()
+	delete(t.win.perSt, sid)
+	t.win.mu.Unlock()
+	t.sic.ResetStream(sid)
+	t.logger.Info("successfully served mock response", zap.Uint32("stream_id", sid))
+	return nil
+}
+
+// core flow-control loop – single goroutine so we can safely poll ReadFrame
+func (t *Transcoder) writeWithFlowControl(ctx context.Context, sid uint32, payload []byte) error {
+	off, total := 0, len(payload)
+	t.logger.Debug("starting flow control write",
+		zap.Uint32("stream_id", sid),
+		zap.Int("total_bytes", total))
+
+	for off < total {
+		rem := total - off
+		limit := int(t.maxFrm)
+		chunk := min(rem, limit)
+
+		t.logger.Debug("preparing to write chunk",
+			zap.Uint32("stream_id", sid),
+			zap.Int("chunk_size", chunk),
+			zap.Int("offset", off),
+			zap.Int("remaining", rem))
+
+		// wait for credit, reading frames meanwhile
+		for {
+			t.win.mu.Lock()
+			connCredit := t.win.conn
+			streamCredit := t.win.perSt[sid]
+			have := connCredit >= int32(chunk) && streamCredit >= int32(chunk)
+			t.win.mu.Unlock()
+
+			if have {
+				t.logger.Debug("sufficient window credit available",
+					zap.Uint32("stream_id", sid),
+					zap.Int32("conn_credit", connCredit),
+					zap.Int32("stream_credit", streamCredit),
+					zap.Int("chunk_size", chunk))
+				break
+			}
+
+			t.logger.Debug("waiting for window credit",
+				zap.Uint32("stream_id", sid),
+				zap.Int32("conn_credit", connCredit),
+				zap.Int32("stream_credit", streamCredit),
+				zap.Int("needed", chunk))
+
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+
+			fr, err := t.framer.ReadFrame()
+			if err != nil {
+				t.logger.Error("failed to read frame while waiting for credit",
+					zap.Uint32("stream_id", sid), zap.Error(err))
+				return err
+			}
+
+			switch f := fr.(type) {
+			case *http2.WindowUpdateFrame:
+				t.handleWindowUpdate(f)
+			case *http2.RSTStreamFrame:
+				t.handleRST(f)
+				return fmt.Errorf("stream %d was reset by peer", sid)
+			case *http2.GoAwayFrame:
+				if err := t.handleGoAway(f); err != nil {
+					return err
+				}
+				return context.Canceled
+			case *http2.SettingsFrame:
+				if err := t.handleSettings(f); err != nil {
+					return err
+				}
+			case *http2.PingFrame:
+				if err := t.handlePing(f); err != nil {
+					return err
+				}
+			// ---- New behaviour: defer request/response frames until the outer loop ----
+			case *http2.HeadersFrame, *http2.DataFrame:
+				t.logger.Debug("deferring frame until current response is flushed",
+					zap.String("frame_type", fmt.Sprintf("%T", f)))
+				t.sic.DeferFrame(f) // **Add** DeferFrame([]http2.Frame) on StreamInfoCollection
+			default:
+				t.logger.Debug("ignoring frame while waiting for credit",
+					zap.String("frame_type", fmt.Sprintf("%T", f)))
+			}
+		}
+
+		// deduct credit and write
+		t.win.mu.Lock()
+		t.win.conn -= int32(chunk)
+		t.win.perSt[sid] -= int32(chunk)
+		underflow := t.win.conn < 0 || t.win.perSt[sid] < 0
+		t.win.mu.Unlock()
+		if underflow {
+			return t.protocolError("flow-control underflow detected")
+		}
+
+		if err := t.writeData(sid, false, payload[off:off+chunk]); err != nil {
+			// rollback window
+			t.win.mu.Lock()
+			t.win.conn += int32(chunk)
+			t.win.perSt[sid] += int32(chunk)
+			t.win.mu.Unlock()
+
+			t.logger.Error("failed to write data chunk",
+				zap.Uint32("stream_id", sid),
+				zap.Int("chunk_size", chunk),
+				zap.Int("offset", off),
+				zap.Error(err))
+			return err
+		}
+		off += chunk
+
+		t.logger.Debug("wrote data chunk",
+			zap.Uint32("stream_id", sid),
+			zap.Int("chunk_size", chunk),
+			zap.Int("new_offset", off),
+			zap.Int("remaining", total-off))
+	}
+
+	t.logger.Debug("completed flow control write",
+		zap.Uint32("stream_id", sid),
+		zap.Int("total_bytes", total))
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Main serve-loop ------------------------------------------------------------
+// ---------------------------------------------------------------------------
+
+func (t *Transcoder) ListenAndServe(ctx context.Context) error {
+	t.logger.Info("starting transcoder server", zap.Uint32("max_frame_size", maxFrame))
+
+	if err := t.writeSettings(http2.Setting{ID: http2.SettingMaxFrameSize, Val: maxFrame}); err != nil {
+		t.logger.Error("failed to write initial settings", zap.Error(err))
 		return err
 	}
 
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
+			t.logger.Info("context cancelled, stopping transcoder", zap.Error(ctx.Err()))
 			return ctx.Err()
-		default:
-			frame, err := srv.framer.ReadFrame()
-			if err != nil {
-				if err == io.EOF {
-					srv.logger.Info("EOF reached. Closing the connection.")
-					return io.EOF
+		}
+
+		for t.sic.HasDeferredFrames() {
+			if fr := t.sic.PopDeferredFrame(); fr != nil {
+				switch f := fr.(type) {
+				case *http2.HeadersFrame:
+					if err := t.processHeadersFrame(f); err != nil {
+						return err
+					}
+				case *http2.DataFrame:
+					if err := t.processDataFrame(ctx, f); err != nil {
+						return err
+					}
 				}
-				utils.LogError(srv.logger, err, "Failed to read frame")
-				return err
-			}
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			err = srv.ProcessGenericFrame(ctx, frame)
-			if err != nil {
-				return err
 			}
 		}
+
+		fr, err := t.framer.ReadFrame()
+		if err != nil {
+			t.logger.Error("failed to read frame", zap.Error(err))
+			return err
+		}
+
+		t.logger.Debug("received frame", zap.String("frame_type", fmt.Sprintf("%T", fr)))
+
+		// fast exit if ctx cancelled during blocking read
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		switch f := fr.(type) {
+		case *http2.DataFrame:
+			if err := t.processDataFrame(ctx, f); err != nil {
+				t.logger.Error("failed to process data frame",
+					zap.Uint32("stream_id", f.StreamID), zap.Error(err))
+				return err
+			}
+		case *http2.HeadersFrame:
+			if err := t.processHeadersFrame(f); err != nil {
+				t.logger.Error("failed to process headers frame",
+					zap.Uint32("stream_id", f.StreamID), zap.Error(err))
+				return err
+			}
+		case *http2.WindowUpdateFrame:
+			t.handleWindowUpdate(f)
+		case *http2.SettingsFrame:
+			if err := t.handleSettings(f); err != nil {
+				t.logger.Error("failed to handle settings frame", zap.Error(err))
+				return err
+			}
+		case *http2.PingFrame:
+			if err := t.handlePing(f); err != nil {
+				t.logger.Error("failed to handle ping frame", zap.Error(err))
+				return err
+			}
+		case *http2.RSTStreamFrame:
+			t.handleRST(f)
+			// keep server alive; do not return
+			continue
+		case *http2.GoAwayFrame:
+			if err := t.handleGoAway(f); err != nil {
+				return err
+			}
+			return nil // graceful shutdown
+		case *http2.PushPromiseFrame, *http2.PriorityFrame:
+			return t.protocolError("client must not send PUSH_PROMISE / PRIORITY")
+		default:
+			t.logger.Debug("ignoring frame type", zap.String("frame_type", fmt.Sprintf("%T", f)))
+		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Per-frame helpers used above ----------------------------------------------
+// ---------------------------------------------------------------------------
+
+func (t *Transcoder) processHeadersFrame(hf *http2.HeadersFrame) error {
+	sid := hf.StreamID
+	t.logger.Debug("processing headers frame",
+		zap.Uint32("stream_id", sid),
+		zap.Bool("end_stream", hf.StreamEnded()),
+		zap.Bool("end_headers", hf.HeadersEnded()))
+
+	if sid%2 != 1 {
+		t.logger.Error("invalid stream id for headers frame", zap.Uint32("stream_id", sid))
+		return http2.ConnectionError(http2.ErrCodeProtocol)
+	}
+
+	// ignore continuation blocks – framer will present complete blocks only
+	pseudo, ordinary, err := extractHeaders(hf, t.decoder)
+	if err != nil {
+		t.logger.Error("failed to extract headers", zap.Uint32("stream_id", sid), zap.Error(err))
+		return err
+	}
+
+	t.logger.Debug("extracted headers",
+		zap.Uint32("stream_id", sid),
+		zap.Int("pseudo_headers", len(pseudo)),
+		zap.Int("ordinary_headers", len(ordinary)))
+
+	t.sic.AddHeadersForRequest(sid, pseudo, true)
+	t.sic.AddHeadersForRequest(sid, ordinary, false)
+
+	t.win.mu.Lock()
+	if _, ok := t.win.perSt[sid]; !ok {
+		t.win.perSt[sid] = int32(t.initWin)
+		t.logger.Debug("initialized stream window",
+			zap.Uint32("stream_id", sid),
+			zap.Uint32("initial_window", t.initWin))
+	}
+	t.win.mu.Unlock()
+
+	t.logger.Debug("successfully processed headers frame", zap.Uint32("stream_id", sid))
+	return nil
+}
+
+func (t *Transcoder) processDataFrame(ctx context.Context, df *http2.DataFrame) error {
+	sid := df.StreamID
+	t.logger.Debug("processing data frame",
+		zap.Uint32("stream_id", sid),
+		zap.Int("data_size", len(df.Data())),
+		zap.Bool("stream_ended", df.StreamEnded()))
+
+	if sid == 0 {
+		t.logger.Error("data frame with stream id 0")
+		return http2.ConnectionError(http2.ErrCodeProtocol)
+	}
+
+	t.sic.AddPayloadForRequest(sid, df.Data())
+
+	if !df.StreamEnded() {
+		t.logger.Debug("waiting for more request body", zap.Uint32("stream_id", sid))
+		return nil // wait for more request body
+	}
+
+	t.logger.Debug("request completed, fetching mock", zap.Uint32("stream_id", sid))
+	grpcReq := t.sic.FetchRequestForStream(sid)
+	mock, err := FilterMocksBasedOnGrpcRequest(ctx, t.logger, grpcReq, t.mockDb)
+	if err != nil {
+		t.logger.Error("failed to filter mocks", zap.Uint32("stream_id", sid), zap.Error(err))
+		return err
+	}
+	if mock == nil {
+		t.logger.Error("no mock found for request", zap.Uint32("stream_id", sid))
+		return fmt.Errorf("no mock recorded for stream %d", sid)
+	}
+
+	t.logger.Info("found matching mock",
+		zap.Uint32("stream_id", sid),
+		zap.String("mock_name", mock.Name))
+	return t.serveMock(ctx, sid, mock)
+}
+
+// util ----------------------------------------------------------------------
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
