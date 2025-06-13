@@ -10,6 +10,7 @@ import (
 
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
+	"golang.org/x/net/http2"
 )
 
 // StreamInfoCollection is a thread-safe data structure to store all communications
@@ -20,12 +21,50 @@ type StreamInfoCollection struct {
 	StreamInfo       map[uint32]models.GrpcStream
 	ReqTimestampMock time.Time
 	ResTimestampMock time.Time
+
+	// -------------------------------------------------------------
+	// NEW: queue to hold frames that must not be processed re-entrantly
+	// -------------------------------------------------------------
+	deferred []http2.Frame
 }
 
 func NewStreamInfoCollection() *StreamInfoCollection {
 	return &StreamInfoCollection{
 		StreamInfo: make(map[uint32]models.GrpcStream),
+		deferred:   make([]http2.Frame, 0, 8), // small default cap
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Deferred-frame helpers (thread-safe) --------------------------------------
+// ---------------------------------------------------------------------------
+
+// DeferFrame queues a frame for later processing by the main loop.
+// It is safe to call from any goroutine.
+func (sic *StreamInfoCollection) DeferFrame(f http2.Frame) {
+	sic.mutex.Lock()
+	defer sic.mutex.Unlock()
+	sic.deferred = append(sic.deferred, f)
+}
+
+// PopDeferredFrame returns the oldest deferred frame (FIFO order) or nil if
+// the queue is empty.
+func (sic *StreamInfoCollection) PopDeferredFrame() http2.Frame {
+	sic.mutex.Lock()
+	defer sic.mutex.Unlock()
+	if len(sic.deferred) == 0 {
+		return nil
+	}
+	fr := sic.deferred[0]
+	sic.deferred = sic.deferred[1:]
+	return fr
+}
+
+// HasDeferredFrames reports whether the queue is non-empty.
+func (sic *StreamInfoCollection) HasDeferredFrames() bool {
+	sic.mutex.Lock()
+	defer sic.mutex.Unlock()
+	return len(sic.deferred) > 0
 }
 
 func (sic *StreamInfoCollection) InitialiseStream(streamID uint32) {

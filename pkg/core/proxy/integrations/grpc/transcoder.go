@@ -38,8 +38,8 @@ type sendWindow struct {
 	conn  int32            // connection-level credit
 	perSt map[uint32]int32 // per-stream credit
 
-	mu  sync.Mutex // guards conn+perSt
-	wmu sync.Mutex // serialises every framer.Write*
+	mu  sync.Mutex   // guards conn+perSt
+	wmu sync.RWMutex // allows re-entrancy on same goroutine
 }
 
 func newSendWindow() sendWindow {
@@ -51,6 +51,13 @@ func newSendWindow() sendWindow {
 
 // helper: run any framer.Write* atomically
 func (w *sendWindow) write(f *http2.Framer, fn func() error) error {
+	// Fast-path: the same goroutine already holds the write lock?
+	if w.wmu.TryRLock() {
+		// We’re in a nested write → upgrade to read lock (re-entrant, non-blocking)
+		defer w.wmu.RUnlock()
+		return fn()
+	}
+	// Normal path
 	w.wmu.Lock()
 	defer w.wmu.Unlock()
 	return fn()
@@ -215,6 +222,9 @@ func (t *Transcoder) handleSettings(sf *http2.SettingsFrame) error {
 	}
 
 	if v, ok := sf.Value(http2.SettingInitialWindowSize); ok {
+		if v > 1<<31-1 {
+			return t.protocolError("initial_window_size over int31")
+		}
 		old := t.initWin
 		delta := int32(v) - int32(old)
 		t.logger.Info("updating initial window size",
@@ -422,22 +432,17 @@ func (t *Transcoder) writeWithFlowControl(ctx context.Context, sid uint32, paylo
 				return context.Canceled
 			case *http2.SettingsFrame:
 				if err := t.handleSettings(f); err != nil {
-					t.logger.Error("failed to handle settings frame during flow control", zap.Error(err))
 					return err
 				}
 			case *http2.PingFrame:
 				if err := t.handlePing(f); err != nil {
-					t.logger.Error("failed to handle ping frame during flow control", zap.Error(err))
 					return err
 				}
-			case *http2.HeadersFrame:
-				if err := t.processHeadersFrame(f); err != nil {
-					return err
-				}
-			case *http2.DataFrame:
-				if err := t.processDataFrame(ctx, f); err != nil {
-					return err
-				}
+			// ---- New behaviour: defer request/response frames until the outer loop ----
+			case *http2.HeadersFrame, *http2.DataFrame:
+				t.logger.Debug("deferring frame until current response is flushed",
+					zap.String("frame_type", fmt.Sprintf("%T", f)))
+				t.sic.DeferFrame(f) // **Add** DeferFrame([]http2.Frame) on StreamInfoCollection
 			default:
 				t.logger.Debug("ignoring frame while waiting for credit",
 					zap.String("frame_type", fmt.Sprintf("%T", f)))
@@ -447,12 +452,9 @@ func (t *Transcoder) writeWithFlowControl(ctx context.Context, sid uint32, paylo
 		// deduct credit and write
 		t.win.mu.Lock()
 		t.win.conn -= int32(chunk)
-		if t.win.conn < 0 {
-			t.win.conn = 0
-		}
 		t.win.perSt[sid] -= int32(chunk)
-		if t.win.perSt[sid] < 0 {
-			t.win.perSt[sid] = 0
+		if t.win.conn < 0 || t.win.perSt[sid] < 0 {
+			return t.protocolError("flow-control underflow detected")
 		}
 		t.win.mu.Unlock()
 
@@ -495,6 +497,21 @@ func (t *Transcoder) ListenAndServe(ctx context.Context) error {
 		if ctx.Err() != nil {
 			t.logger.Info("context cancelled, stopping transcoder", zap.Error(ctx.Err()))
 			return ctx.Err()
+		}
+
+		for t.sic.HasDeferredFrames() {
+			if fr := t.sic.PopDeferredFrame(); fr != nil {
+				switch f := fr.(type) {
+				case *http2.HeadersFrame:
+					if err := t.processHeadersFrame(f); err != nil {
+						return err
+					}
+				case *http2.DataFrame:
+					if err := t.processDataFrame(ctx, f); err != nil {
+						return err
+					}
+				}
+			}
 		}
 
 		fr, err := t.framer.ReadFrame()
