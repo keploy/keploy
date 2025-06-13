@@ -25,7 +25,6 @@ type Config struct {
 	ContainerName         string       `json:"containerName" yaml:"containerName" mapstructure:"containerName"`
 	NetworkName           string       `json:"networkName" yaml:"networkName" mapstructure:"networkName"`
 	BuildDelay            uint64       `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
-	TestSuite             TestSuite    `json:"testSuite" yaml:"testSuite" mapstructure:"testSuite"`
 	Test                  Test         `json:"test" yaml:"test" mapstructure:"test"`
 	Record                Record       `json:"record" yaml:"record" mapstructure:"record"`
 	Gen                   UtGen        `json:"gen" yaml:"-" mapstructure:"gen"`
@@ -39,12 +38,24 @@ type Config struct {
 	KeployNetwork         string       `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
 	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
 	Contract              Contract     `json:"contract" yaml:"contract" mapstructure:"contract"`
+	TestSuite             TestSuite    `json:"testSuite" yaml:"testSuite" mapstructure:"testSuite"`
+	Load                  LoadTest     `json:"load" yaml:"load" mapstructure:"load"`
 
 	InCi           bool   `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
 	InstallationID string `json:"-" yaml:"-" mapstructure:"-"`
 	Version        string `json:"-" yaml:"-" mapstructure:"-"`
 	APIServerURL   string `json:"-" yaml:"-" mapstructure:"-"`
 	GitHubClientID string `json:"-" yaml:"-" mapstructure:"-"`
+}
+
+type LoadTest struct {
+	TSPath   string `json:"tsPath" yaml:"tsPath" mapstructure:"tsPath"`
+	TSFile   string `json:"tsFile" yaml:"tsFile" mapstructure:"tsFile"`
+	Output   string `json:"output" yaml:"output" mapstructure:"output"`
+	VUs      int    `json:"vus" yaml:"vus" mapstructure:"vus"`
+	Duration string `json:"duration" yaml:"duration" mapstructure:"duration"`
+	RPS      int    `json:"rps" yaml:"rps" mapstructure:"rps"`
+	Insecure bool   `json:"insecure" yaml:"insecure" mapstructure:"insecure"`
 }
 
 type TestSuite struct {
