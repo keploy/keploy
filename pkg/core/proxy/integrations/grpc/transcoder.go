@@ -67,6 +67,8 @@ type Transcoder struct {
 	framer  *http2.Framer
 	decoder *hpack.Decoder
 	win     sendWindow
+	initWin uint32 // current SETTINGS_INITIAL_WINDOW_SIZE
+	maxFrm  uint32 // current SETTINGS_MAX_FRAME_SIZE
 }
 
 func NewTranscoder(l *zap.Logger, f *http2.Framer, db integrations.MockMemDb) *Transcoder {
@@ -78,6 +80,8 @@ func NewTranscoder(l *zap.Logger, f *http2.Framer, db integrations.MockMemDb) *T
 		sic:     NewStreamInfoCollection(),
 		decoder: NewDecoder(),
 		win:     newSendWindow(),
+		initWin: 65535,
+		maxFrm:  8 * 1024,
 	}
 }
 
@@ -147,6 +151,42 @@ func (t *Transcoder) writeData(sid uint32, end bool, b []byte) error {
 // Frame-specific handlers ----------------------------------------------------
 // ---------------------------------------------------------------------------
 
+// --- NEW: clean-up on RST_STREAM -------------------------------------------
+func (t *Transcoder) handleRST(rs *http2.RSTStreamFrame) {
+	sid := rs.StreamID
+	t.logger.Warn("received RST_STREAM from client",
+		zap.Uint32("stream_id", sid),
+		zap.Uint32("code", uint32(rs.ErrCode)))
+
+	t.sic.ResetStream(sid) // drop buffered request fragments
+
+	t.win.mu.Lock()
+	delete(t.win.perSt, sid) // release window entry
+	t.win.mu.Unlock()
+}
+
+// --- NEW: GOAWAY → stop reading, send acknowledgement -----------------------
+func (t *Transcoder) handleGoAway(ga *http2.GoAwayFrame) error {
+	t.logger.Info("received GOAWAY",
+		zap.Uint32("last_stream", ga.LastStreamID),
+		zap.Uint32("error_code", uint32(ga.ErrCode)),
+		zap.String("debug", string(ga.DebugData())))
+	// Echo a GOAWAY to confirm shutdown, then let ListenAndServe exit.
+	return t.writeGoAway(ga.ErrCode)
+}
+
+func (t *Transcoder) writeGoAway(code http2.ErrCode) error {
+	return t.win.write(t.framer, func() error {
+		return t.framer.WriteGoAway(0, code, nil)
+	})
+}
+
+// --- NEW: push-promise & priority generate PROTOCOL_ERROR -------------------
+func (t *Transcoder) protocolError(desc string) error {
+	t.logger.Error("protocol violation", zap.String("detail", desc))
+	return http2.ConnectionError(http2.ErrCodeProtocol)
+}
+
 func (t *Transcoder) handlePing(pf *http2.PingFrame) error {
 	t.logger.Debug("handling ping frame",
 		zap.Uint32("stream_id", pf.StreamID),
@@ -175,24 +215,29 @@ func (t *Transcoder) handleSettings(sf *http2.SettingsFrame) error {
 	}
 
 	if v, ok := sf.Value(http2.SettingInitialWindowSize); ok {
-		delta := int32(v) - 65535
+		old := t.initWin
+		delta := int32(v) - int32(old)
 		t.logger.Info("updating initial window size",
 			zap.Uint32("new_window_size", v),
 			zap.Int32("delta", delta))
 
 		t.win.mu.Lock()
-		oldConn := t.win.conn
-		t.win.conn += delta
 		streamCount := len(t.win.perSt)
 		for id := range t.win.perSt {
 			t.win.perSt[id] += delta
 		}
 		t.win.mu.Unlock()
 
-		t.logger.Debug("window size updated",
-			zap.Int32("old_conn_window", oldConn),
-			zap.Int32("new_conn_window", t.win.conn),
+		t.initWin = v
+		t.logger.Debug("stream windows updated",
 			zap.Int("streams_updated", streamCount))
+
+	}
+	if v, ok := sf.Value(http2.SettingMaxFrameSize); ok {
+		old := t.maxFrm
+		t.maxFrm = v
+		t.logger.Info("peer changed max-frame size",
+			zap.Uint32("old", old), zap.Uint32("new", v))
 	}
 	return t.writeSettingsAck()
 }
@@ -321,7 +366,8 @@ func (t *Transcoder) writeWithFlowControl(ctx context.Context, sid uint32, paylo
 
 	for off < total {
 		rem := total - off
-		chunk := min(rem, maxFrame)
+		limit := int(t.maxFrm)
+		chunk := min(rem, limit)
 
 		t.logger.Debug("preparing to write chunk",
 			zap.Uint32("stream_id", sid),
@@ -352,6 +398,10 @@ func (t *Transcoder) writeWithFlowControl(ctx context.Context, sid uint32, paylo
 				zap.Int32("stream_credit", streamCredit),
 				zap.Int("needed", chunk))
 
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+
 			fr, err := t.framer.ReadFrame()
 			if err != nil {
 				t.logger.Error("failed to read frame while waiting for credit",
@@ -362,6 +412,14 @@ func (t *Transcoder) writeWithFlowControl(ctx context.Context, sid uint32, paylo
 			switch f := fr.(type) {
 			case *http2.WindowUpdateFrame:
 				t.handleWindowUpdate(f)
+			case *http2.RSTStreamFrame:
+				t.handleRST(f)
+				return fmt.Errorf("stream %d was reset by peer", sid)
+			case *http2.GoAwayFrame:
+				if err := t.handleGoAway(f); err != nil {
+					return err
+				}
+				return context.Canceled
 			case *http2.SettingsFrame:
 				if err := t.handleSettings(f); err != nil {
 					t.logger.Error("failed to handle settings frame during flow control", zap.Error(err))
@@ -370,6 +428,14 @@ func (t *Transcoder) writeWithFlowControl(ctx context.Context, sid uint32, paylo
 			case *http2.PingFrame:
 				if err := t.handlePing(f); err != nil {
 					t.logger.Error("failed to handle ping frame during flow control", zap.Error(err))
+					return err
+				}
+			case *http2.HeadersFrame:
+				if err := t.processHeadersFrame(f); err != nil {
+					return err
+				}
+			case *http2.DataFrame:
+				if err := t.processDataFrame(ctx, f); err != nil {
 					return err
 				}
 			default:
@@ -381,7 +447,13 @@ func (t *Transcoder) writeWithFlowControl(ctx context.Context, sid uint32, paylo
 		// deduct credit and write
 		t.win.mu.Lock()
 		t.win.conn -= int32(chunk)
+		if t.win.conn < 0 {
+			t.win.conn = 0
+		}
 		t.win.perSt[sid] -= int32(chunk)
+		if t.win.perSt[sid] < 0 {
+			t.win.perSt[sid] = 0
+		}
 		t.win.mu.Unlock()
 
 		if err := t.writeData(sid, false, payload[off:off+chunk]); err != nil {
@@ -433,6 +505,11 @@ func (t *Transcoder) ListenAndServe(ctx context.Context) error {
 
 		t.logger.Debug("received frame", zap.String("frame_type", fmt.Sprintf("%T", fr)))
 
+		// fast exit if ctx cancelled during blocking read
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
 		switch f := fr.(type) {
 		case *http2.DataFrame:
 			if err := t.processDataFrame(ctx, f); err != nil {
@@ -458,6 +535,17 @@ func (t *Transcoder) ListenAndServe(ctx context.Context) error {
 				t.logger.Error("failed to handle ping frame", zap.Error(err))
 				return err
 			}
+		case *http2.RSTStreamFrame:
+			t.handleRST(f)
+			// keep server alive; do not return
+			continue
+		case *http2.GoAwayFrame:
+			if err := t.handleGoAway(f); err != nil {
+				return err
+			}
+			return nil // graceful shutdown
+		case *http2.PushPromiseFrame, *http2.PriorityFrame:
+			return t.protocolError("client must not send PUSH_PROMISE / PRIORITY")
 		default:
 			t.logger.Debug("ignoring frame type", zap.String("frame_type", fmt.Sprintf("%T", f)))
 		}
@@ -497,10 +585,10 @@ func (t *Transcoder) processHeadersFrame(hf *http2.HeadersFrame) error {
 
 	t.win.mu.Lock()
 	if _, ok := t.win.perSt[sid]; !ok {
-		t.win.perSt[sid] = 65535
+		t.win.perSt[sid] = int32(t.initWin)
 		t.logger.Debug("initialized stream window",
 			zap.Uint32("stream_id", sid),
-			zap.Int32("initial_window", 65535))
+			zap.Uint32("initial_window", t.initWin))
 	}
 	t.win.mu.Unlock()
 
