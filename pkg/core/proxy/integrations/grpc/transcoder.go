@@ -51,13 +51,13 @@ func newSendWindow() sendWindow {
 
 // helper: run any framer.Write* atomically
 func (w *sendWindow) write(f *http2.Framer, fn func() error) error {
-	// Fast-path: the same goroutine already holds the write lock?
+	// fast path: already inside the write lock (re-entrant) ?
 	if w.wmu.TryRLock() {
-		// We’re in a nested write → upgrade to read lock (re-entrant, non-blocking)
 		defer w.wmu.RUnlock()
 		return fn()
 	}
-	// Normal path
+
+	// slow path
 	w.wmu.Lock()
 	defer w.wmu.Unlock()
 	return fn()
@@ -234,7 +234,14 @@ func (t *Transcoder) handleSettings(sf *http2.SettingsFrame) error {
 		t.win.mu.Lock()
 		streamCount := len(t.win.perSt)
 		for id := range t.win.perSt {
-			t.win.perSt[id] += delta
+			newVal := t.win.perSt[id] + delta
+			switch {
+			case newVal < 0:
+				newVal = 0
+			case newVal > (1<<31 - 1):
+				newVal = 1<<31 - 1
+			}
+			t.win.perSt[id] = newVal
 		}
 		t.win.mu.Unlock()
 
@@ -253,6 +260,8 @@ func (t *Transcoder) handleSettings(sf *http2.SettingsFrame) error {
 }
 
 func (t *Transcoder) handleWindowUpdate(wu *http2.WindowUpdateFrame) {
+	const maxWin = int32(1<<31 - 1)
+
 	inc := int32(wu.Increment)
 	t.logger.Debug("handling window update",
 		zap.Uint32("stream_id", wu.StreamID),
@@ -260,17 +269,21 @@ func (t *Transcoder) handleWindowUpdate(wu *http2.WindowUpdateFrame) {
 
 	t.win.mu.Lock()
 	if wu.StreamID == 0 {
-		oldConn := t.win.conn
-		t.win.conn += inc
+		newConn := t.win.conn + inc
+		if newConn > maxWin {
+			newConn = maxWin
+		}
+		t.win.conn = newConn
 		t.logger.Debug("updated connection window",
-			zap.Int32("old_window", oldConn),
 			zap.Int32("new_window", t.win.conn))
 	} else {
-		oldStream := t.win.perSt[wu.StreamID]
-		t.win.perSt[wu.StreamID] += inc
+		newSt := t.win.perSt[wu.StreamID] + inc
+		if newSt > maxWin {
+			newSt = maxWin
+		}
+		t.win.perSt[wu.StreamID] = newSt
 		t.logger.Debug("updated stream window",
 			zap.Uint32("stream_id", wu.StreamID),
-			zap.Int32("old_window", oldStream),
 			zap.Int32("new_window", t.win.perSt[wu.StreamID]))
 	}
 	t.win.mu.Unlock()
@@ -362,7 +375,7 @@ func (t *Transcoder) serveMock(ctx context.Context, sid uint32, mock *models.Moc
 	t.win.mu.Lock()
 	delete(t.win.perSt, sid)
 	t.win.mu.Unlock()
-
+	t.sic.ResetStream(sid)
 	t.logger.Info("successfully served mock response", zap.Uint32("stream_id", sid))
 	return nil
 }
@@ -453,12 +466,19 @@ func (t *Transcoder) writeWithFlowControl(ctx context.Context, sid uint32, paylo
 		t.win.mu.Lock()
 		t.win.conn -= int32(chunk)
 		t.win.perSt[sid] -= int32(chunk)
-		if t.win.conn < 0 || t.win.perSt[sid] < 0 {
+		underflow := t.win.conn < 0 || t.win.perSt[sid] < 0
+		t.win.mu.Unlock()
+		if underflow {
 			return t.protocolError("flow-control underflow detected")
 		}
-		t.win.mu.Unlock()
 
 		if err := t.writeData(sid, false, payload[off:off+chunk]); err != nil {
+			// rollback window
+			t.win.mu.Lock()
+			t.win.conn += int32(chunk)
+			t.win.perSt[sid] += int32(chunk)
+			t.win.mu.Unlock()
+
 			t.logger.Error("failed to write data chunk",
 				zap.Uint32("stream_id", sid),
 				zap.Int("chunk_size", chunk),

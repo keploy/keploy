@@ -13,6 +13,8 @@ import (
 	"golang.org/x/net/http2"
 )
 
+const maxDeferred = 256
+
 // StreamInfoCollection is a thread-safe data structure to store all communications
 // that happen in a stream for grpc. This includes the headers and data frame for the
 // request and response.
@@ -44,6 +46,11 @@ func NewStreamInfoCollection() *StreamInfoCollection {
 func (sic *StreamInfoCollection) DeferFrame(f http2.Frame) {
 	sic.mutex.Lock()
 	defer sic.mutex.Unlock()
+
+	if len(sic.deferred) >= maxDeferred {
+		// Drop the oldest – flow-control guarantees the client will retry.
+		sic.deferred = sic.deferred[1:]
+	}
 	sic.deferred = append(sic.deferred, f)
 }
 
