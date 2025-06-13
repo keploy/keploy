@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync"
 
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
@@ -17,22 +18,37 @@ import (
 	"golang.org/x/net/http2/hpack"
 )
 
+type sendWindow struct {
+	conn  int32            // connection-level credit
+	perSt map[uint32]int32 // stream-level credit
+	mu    sync.Mutex
+	cond  *sync.Cond
+}
+
 type Transcoder struct {
 	sic     *StreamInfoCollection
 	mockDb  integrations.MockMemDb
 	logger  *zap.Logger
 	framer  *http2.Framer
 	decoder *hpack.Decoder
+	window  sendWindow
 }
 
 func NewTranscoder(logger *zap.Logger, framer *http2.Framer, mockDb integrations.MockMemDb) *Transcoder {
-	return &Transcoder{
+	tr := Transcoder{
 		logger:  logger,
 		framer:  framer,
 		mockDb:  mockDb,
 		sic:     NewStreamInfoCollection(),
 		decoder: NewDecoder(),
+		window: sendWindow{
+			conn:  65535, // default until we see the client's SETTINGS
+			perSt: make(map[uint32]int32),
+		},
 	}
+	tr.window.cond = sync.NewCond(&tr.window.mu)
+	return &tr
+
 }
 
 // TODO: (add reason for not using the default value i.e. 16384 // 16KB)
@@ -192,6 +208,11 @@ func (srv *Transcoder) ProcessDataFrame(ctx context.Context, dataFrame *http2.Da
 		return err
 	}
 
+	// -------- Stream finished: clean up window map --------
+	srv.window.mu.Lock()
+	delete(srv.window.perSt, id)
+	srv.window.mu.Unlock()
+
 	return nil
 }
 
@@ -228,6 +249,16 @@ func (srv *Transcoder) WriteData(ctx context.Context, streamID uint32, payload [
 		remaining := totalLen - offset
 		chunkSize := min(remaining, MAX_FRAME_SIZE)
 
+		// -------- FLOW-CONTROL GUARD --------
+		srv.window.mu.Lock()
+		for srv.window.conn < int32(chunkSize) || srv.window.perSt[streamID] < int32(chunkSize) {
+			srv.window.cond.Wait()
+		}
+		srv.window.conn -= int32(chunkSize)
+		srv.window.perSt[streamID] -= int32(chunkSize)
+		srv.window.mu.Unlock()
+		// -------- END GUARD ----------------
+
 		end := offset + chunkSize
 		data := payload[offset:end]
 
@@ -247,9 +278,18 @@ func (srv *Transcoder) WriteData(ctx context.Context, streamID uint32, payload [
 	return nil
 }
 
-func (srv *Transcoder) ProcessWindowUpdateFrame(_ *http2.WindowUpdateFrame) error {
+func (srv *Transcoder) ProcessWindowUpdateFrame(f *http2.WindowUpdateFrame) error {
 	// Silently ignore Window tools frames, as we already know the mock payloads that we would send.
-	srv.logger.Debug("Received Window Update Frame. Skipping it...")
+	inc := int32(f.Increment)
+	srv.window.mu.Lock()
+	if f.StreamID == 0 {
+		srv.window.conn += inc
+	} else {
+		srv.window.perSt[f.StreamID] += inc
+	}
+	srv.window.cond.Broadcast() // wake blocked writers
+	srv.window.mu.Unlock()
+	srv.logger.Debug("Processed Window Update Frame", zap.Uint32("stream_id", f.StreamID), zap.Int32("increment", inc))
 	return nil
 }
 
@@ -258,11 +298,25 @@ func (srv *Transcoder) ProcessResetStreamFrame(resetStreamFrame *http2.RSTStream
 	return nil
 }
 
-func (srv *Transcoder) ProcessSettingsFrame(settingsFrame *http2.SettingsFrame) error {
+func (srv *Transcoder) ProcessSettingsFrame(f *http2.SettingsFrame) error {
 	// ACK the settings and silently skip the processing.
 	// There is no actual server to tune the settings on. We already know the default settings from record mode.
 	// TODO : Add support for dynamically updating the settings.
-	if !settingsFrame.IsAck() {
+	if !f.IsAck() {
+		// Detect INITIAL_WINDOW_SIZE so that our per-stream credit is correct
+		if v, ok := f.Value(http2.SettingInitialWindowSize); ok {
+			srv.window.mu.Lock()
+			delta := int32(v) - 65535
+
+			// Grow connection-level credit by same delta (RFC7540 §6.9.2)
+			srv.window.conn += delta
+
+			// Adjust every **open** stream’s window
+			for id := range srv.window.perSt {
+				srv.window.perSt[id] += delta
+			}
+			srv.window.mu.Unlock()
+		}
 		return srv.framer.WriteSettingsAck()
 	}
 	return nil
@@ -297,6 +351,13 @@ func (srv *Transcoder) ProcessHeadersFrame(headersFrame *http2.HeadersFrame) err
 
 	srv.sic.AddHeadersForRequest(id, pseudoHeaders, true)
 	srv.sic.AddHeadersForRequest(id, ordinaryHeaders, false)
+
+	// Initialise the peer-advertised window (65535 by default) **once**.
+	srv.window.mu.Lock()
+	if _, seen := srv.window.perSt[id]; !seen {
+		srv.window.perSt[id] = 65535 // will be adjusted later by SETTINGS
+	}
+	srv.window.mu.Unlock()
 	return nil
 }
 
@@ -345,33 +406,65 @@ func (srv *Transcoder) ProcessGenericFrame(ctx context.Context, frame http2.Fram
 	return err
 }
 
-// ListenAndServe is a forever blocking call that reads one frame at a time, and responds to them.
 func (srv *Transcoder) ListenAndServe(ctx context.Context) error {
-	err := srv.WriteInitialSettingsFrame()
-	if err != nil {
+	if err := srv.WriteInitialSettingsFrame(); err != nil {
 		utils.LogError(srv.logger, err, "could not write initial settings frame")
 		return err
 	}
 
+	frames := make(chan http2.Frame, 32)
+	errCh := make(chan error, 1) // captures reader errors
+
+	// Reader goroutine -------------------------------------------------
+	go func() {
+		defer close(frames)
+		for {
+			// Respect ctx cancellation to avoid goroutine leaks.
+			select {
+			case <-ctx.Done():
+				errCh <- ctx.Err()
+				return
+			default:
+			}
+
+			fr, err := srv.framer.ReadFrame()
+			if err != nil {
+				// Send the *first* error; subsequent sends are non-blocking.
+				select {
+				case errCh <- err:
+				default:
+					{
+					}
+				}
+				return
+			}
+			frames <- fr
+		}
+	}()
+
+	// Serve loop -------------------------------------------------------
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		default:
-			frame, err := srv.framer.ReadFrame()
-			if err != nil {
-				if err == io.EOF {
-					srv.logger.Debug("EOF reached. Closing the connection.")
-					return io.EOF
+
+		case err := <-errCh:
+			if err == io.EOF {
+				return io.EOF
+			}
+			utils.LogError(srv.logger, err, "error reading frame from client")
+			return err
+
+		case fr, ok := <-frames:
+			if !ok { // reader has exited
+				if err := <-errCh; err != nil {
+					utils.LogError(srv.logger, err, "error reading frame from client")
+					return err
 				}
-				utils.LogError(srv.logger, err, "Failed to read frame")
-				return err
+				return io.EOF
 			}
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			err = srv.ProcessGenericFrame(ctx, frame)
-			if err != nil {
+			if err := srv.ProcessGenericFrame(ctx, fr); err != nil {
+				utils.LogError(srv.logger, err, "error processing frame from client", zap.Any("frame", fr))
 				return err
 			}
 		}
