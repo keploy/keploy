@@ -15,8 +15,12 @@ import (
 	userDb "go.keploy.io/server/v2/pkg/platform/yaml/configdb/user"
 	"go.keploy.io/server/v2/utils"
 	"go.keploy.io/server/v2/utils/log"
-	_ "net/http/pprof" // Enable pprof endpoint support
+	//pprof for debugging
+	_ "net/http/pprof"
 )
+
+// version is the version of the server and will be injected during build by ldflags, same with dsn
+// see https://goreleaser.com/customization/build/
 
 var version string
 var dsn string
@@ -24,7 +28,7 @@ var apiServerURI = "http://localhost:8083"
 var gitHubClientID = "Iv23liFBvIVhL29i9BAp"
 
 func main() {
-	// Optional: Enable pprof server for debugging (available at localhost:6060/debug/pprof)
+	// Enable pprof server for debugging (available at localhost:6060/debug/pprof)
 	go func() {
 		fmt.Println("Starting pprof server for debugging...")
 		if err := http.ListenAndServe("localhost:6060", nil); err != nil {
@@ -52,10 +56,11 @@ func setVersion() {
 	utils.VersionIdenitfier = "version"
 }
 
-func start(ctx context.Context) error {
+func start(ctx context.Context) {
 	logger, err := log.New()
 	if err != nil {
-		return fmt.Errorf("failed to start the logger for the CLI: %w", err)
+		fmt.Println("Failed to start the logger for the CLI", err)
+		return
 	}
 	defer func() {
 		if err := utils.DeleteFileIfNotExists(logger, "keploy-logs.txt"); err != nil {
@@ -89,8 +94,9 @@ func start(ctx context.Context) error {
 	userDb := userDb.New(logger, conf)
 	conf.InstallationID, err = userDb.GetInstallationID(ctx)
 	if err != nil {
-		utils.LogError(logger, err, "Failed to get installation ID")
-		return err
+		errMsg := "failed to get installation id"
+		utils.LogError(logger, err, errMsg)
+		os.Exit(1)
 	}
 	auth := auth.New(conf.APIServerURL, conf.InstallationID, logger, conf.GitHubClientID)
 
