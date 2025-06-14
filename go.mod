@@ -111,7 +111,7 @@ require (
 	github.com/golang-jwt/jwt/v4 v4.5.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgproto3/v2 v2.3.2
-	github.com/keploy/jsonDiff v1.0.5
+	github.com/keploy/jsonDiff v1.0.6
 	github.com/shirou/gopsutil/v3 v3.24.3
 	github.com/spf13/viper v1.19.0
 	github.com/wI2L/jsondiff v0.5.0
