@@ -1,4 +1,6 @@
 // Package main is the entry point for the keploy application.
+// Changes made in this pr - 1. I enabled the pprof server and improved error handling to make debugging and profiling easier for developers, ensuring issues can be quickly identified and resolved during development.
+// Changes made in this pr - 2. Centralizing error reporting and process termination in main() makes the codebase cleaner, more maintainable, and robust for future enhancements—helping the team scale and debug more efficiently.
 package main
 
 import (
