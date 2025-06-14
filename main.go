@@ -101,6 +101,3 @@ func start(ctx context.Context) error {
 
 	return nil
 }
-
-	}
-}
