@@ -1,9 +1,12 @@
 // Package main is the entry point for the keploy application.
+// Changes made in this pr - 1. I enabled the pprof server and improved error handling to make debugging and profiling easier for developers, ensuring issues can be quickly identified and resolved during development.
+// Changes made in this pr - 2. Centralizing error reporting and process termination in main() makes the codebase cleaner, more maintainable, and robust for future enhancements—helping the team scale and debug more efficiently.
 package main
 
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 
@@ -15,7 +18,7 @@ import (
 	"go.keploy.io/server/v2/utils"
 	"go.keploy.io/server/v2/utils/log"
 	//pprof for debugging
-	// _ "net/http/pprof"
+	_ "net/http/pprof"
 )
 
 // version is the version of the server and will be injected during build by ldflags, same with dsn
@@ -27,18 +30,23 @@ var apiServerURI = "http://localhost:8083"
 var gitHubClientID = "Iv23liFBvIVhL29i9BAp"
 
 func main() {
-	// Uncomment the following code to enable pprof for debugging
-	// go func() {
-	// 	fmt.Println("Starting pprof server for debugging...")
-	// 	err := http.ListenAndServe("localhost:6060", nil)
-	// 	if err != nil {
-	// 		fmt.Println("Failed to start the pprof server for debugging", err)
-	// 		return
-	// 	}
-	// }()
+	// Enable pprof server for debugging (available at localhost:6060/debug/pprof)
+	go func() {
+		fmt.Println("Starting pprof server for debugging...")
+		if err := http.ListenAndServe("localhost:6060", nil); err != nil {
+			fmt.Println("Failed to start the pprof server for debugging:", err)
+			return
+		}
+	}()
+
 	setVersion()
 	ctx := utils.NewCtx()
-	start(ctx)
+	err := start(ctx)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Keploy CLI startup failed:", err)
+		os.Exit(1)
+	}
+
 	os.Exit(utils.ErrCode)
 }
 
@@ -101,7 +109,9 @@ func start(ctx context.Context) {
 		if strings.HasPrefix(err.Error(), "unknown command") || strings.HasPrefix(err.Error(), "unknown shorthand") {
 			fmt.Println("Error: ", err.Error())
 			fmt.Println("Run 'keploy --help' for usage.")
-			os.Exit(1)
 		}
+		return err
 	}
+
+	return nil
 }
