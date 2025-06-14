@@ -93,6 +93,7 @@ func start(ctx context.Context) error {
 		return err
 	}
 	auth := auth.New(conf.APIServerURL, conf.InstallationID, logger, conf.GitHubClientID)
+	
 	svcProvider := provider.NewServiceProvider(logger, conf, auth)
 	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
