@@ -92,7 +92,7 @@ func NewTranscoder(l *zap.Logger, f *http2.Framer, db integrations.MockMemDb) *T
 	}
 }
 
-const maxFrame = 8 * 1024 // 8 KiB
+const maxFrame = 16 * 1024 // 16 KiB
 
 // ---------------------------------------------------------------------------
 // Low-level write helpers (all go through win.write) ------------------------
