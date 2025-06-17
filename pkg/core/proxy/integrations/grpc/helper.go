@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"google.golang.org/protobuf/encoding/protowire"
 )
@@ -69,15 +68,17 @@ func prettyPrintWire(b []byte, indent int) string {
 		case protowire.BytesType:
 			v, m := protowire.ConsumeBytes(b)
 			b = b[m:]
-			// try nested-message first
-			nested := prettyPrintWire(v, indent+1)
-			if strings.Contains(nested, ":") {
+			// first: if it looks like plain ASCII, render as a quoted string
+			if isPrintableASCII(v) {
+				buf.WriteString(fmt.Sprintf("{\"%s\"}\n", string(v)))
+				break
+			}
+			// otherwise *then* try interpreting it as a nested wire-message
+			if nested := prettyPrintWire(v, indent+1); strings.Contains(nested, ":") {
 				buf.WriteString("{\n")
 				buf.WriteString(nested)
 				writeIndent()
 				buf.WriteString("}\n")
-			} else if util.IsASCII(string(v)) {
-				buf.WriteString(fmt.Sprintf("{\"%s\"}\n", string(v)))
 			} else {
 				buf.WriteString("0x" + hex.EncodeToString(v) + "\n")
 			}
@@ -87,4 +88,15 @@ func prettyPrintWire(b []byte, indent int) string {
 		}
 	}
 	return strings.TrimRight(buf.String(), "\n")
+}
+
+// isPrintableASCII returns true only if every byte is between 0x20 and 0x7E.
+// This excludes control characters like 0x08 that confused the earlier test.
+func isPrintableASCII(b []byte) bool {
+	for _, c := range b {
+		if c < 0x20 || c > 0x7e {
+			return false
+		}
+	}
+	return len(b) > 0
 }
