@@ -62,9 +62,10 @@ type PromptBuilder struct {
 	FunctionUnderTest      string
 	ImportDetails          string
 	ModuleName             string
+	SourceRefactored       bool
 }
 
-func NewPromptBuilder(srcPath, testPath, covReportContent, includedFiles, additionalInstructions, language, additionalPrompt, functionUnderTest string, logger *zap.Logger) (*PromptBuilder, error) {
+func NewPromptBuilder(srcPath, testPath, covReportContent, includedFiles, additionalInstructions, language, additionalPrompt, functionUnderTest string, sourceRefactored bool, logger *zap.Logger) (*PromptBuilder, error) {
 	var err error
 	src := &Source{
 		Name: srcPath,
@@ -80,6 +81,7 @@ func NewPromptBuilder(srcPath, testPath, covReportContent, includedFiles, additi
 		Logger:            logger,
 		AdditionalPrompt:  additionalPrompt,
 		FunctionUnderTest: functionUnderTest,
+		SourceRefactored:  sourceRefactored,
 	}
 	promptBuilder.Src.Code, err = readFile(srcPath)
 	if err != nil {
@@ -129,42 +131,60 @@ func formatSection(content, templateText string) (string, error) {
 }
 
 func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, error) {
+	pb.Logger.Debug("Building prompt", zap.String("file", file), zap.String("language", pb.Language))
+
 	pb.Src.CodeNumbered = numberLines(pb.Src.Code)
 	pb.Test.CodeNumbered = numberLines(pb.Test.Code)
+
 	variables := map[string]interface{}{
-		"source_file_name":             pb.Src.Name,
-		"test_file_name":               pb.Test.Name,
-		"source_file_numbered":         pb.Src.CodeNumbered,
-		"test_file_numbered":           pb.Test.CodeNumbered,
-		"source_file":                  pb.Src.Code,
-		"test_file":                    pb.Test.Code,
-		"code_coverage_report":         pb.CovReportContent,
-		"additional_includes_section":  pb.IncludedFiles,
-		"failed_tests_section":         failedTestRuns,
-		"additional_instructions_text": pb.AdditionalInstructions,
-		"language":                     pb.Language,
-		"max_tests":                    MAX_TESTS_PER_RUN,
-		"additional_command":           pb.AdditionalPrompt,
-		"function_under_test":          pb.FunctionUnderTest,
-		"installed_packages":           formatInstalledPackages(pb.InstalledPackages),
-		"import_details":               pb.ImportDetails,
-		"module_name":                  pb.ModuleName,
+		"source_file_name":                 pb.Src.Name,
+		"test_file_name":                   pb.Test.Name,
+		"source_file_numbered":             pb.Src.CodeNumbered,
+		"test_file_numbered":               pb.Test.CodeNumbered,
+		"source_file":                      pb.Src.Code,
+		"test_file":                        pb.Test.Code,
+		"code_coverage_report":             pb.CovReportContent,
+		"additional_includes_section":      pb.IncludedFiles,
+		"failed_tests_section":             failedTestRuns,
+		"additional_instructions_text":     pb.AdditionalInstructions,
+		"language":                         pb.Language,
+		"max_tests":                        MAX_TESTS_PER_RUN,
+		"additional_command":               pb.AdditionalPrompt,
+		"function_under_test":              pb.FunctionUnderTest,
+		"installed_packages":               formatInstalledPackages(pb.InstalledPackages),
+		"import_details":                   pb.ImportDetails,
+		"module_name":                      pb.ModuleName,
+		"source_refactored":                pb.SourceRefactored,
+		"response_if_no_refactor_sentinel": "No refactoring needed",
 	}
 
 	settings := settings.GetSettings()
 
 	prompt := &Prompt{}
 
-	systemPrompt, err := renderTemplate(settings.GetString(file+".system"), variables)
+	systemPromptTemplate := settings.GetString(file + ".system")
+	if systemPromptTemplate == "" {
+		pb.Logger.Error("System prompt template not found", zap.String("templateKey", file+".system"))
+		return prompt, fmt.Errorf("system prompt template not found for: %s.system", file)
+	}
+
+	systemPrompt, err := renderTemplate(systemPromptTemplate, variables)
 	if err != nil {
+		pb.Logger.Error("Error rendering system prompt", zap.Error(err), zap.String("templateKey", file+".system"))
 		prompt.System = ""
 		prompt.User = ""
 		return prompt, fmt.Errorf("Error rendering system prompt: %v", err)
 	}
 	prompt.System = systemPrompt
+	userPromptTemplate := settings.GetString(file + ".user")
+	if userPromptTemplate == "" {
+		pb.Logger.Error("User prompt template not found", zap.String("templateKey", file+".user"))
+		return prompt, fmt.Errorf("user prompt template not found for: %s.user", file)
+	}
 
-	userPrompt, err := renderTemplate(settings.GetString(file+".user"), variables)
+	userPrompt, err := renderTemplate(userPromptTemplate, variables)
 	if err != nil {
+		pb.Logger.Error("Error rendering user prompt", zap.Error(err), zap.String("templateKey", file+".user"))
 		prompt.System = ""
 		prompt.User = ""
 		return prompt, fmt.Errorf("Error rendering user prompt: %v", err)
@@ -183,17 +203,21 @@ func formatInstalledPackages(packages []string) string {
 }
 
 func renderTemplate(templateText string, variables map[string]interface{}) (string, error) {
+	if templateText == "" {
+		return "", fmt.Errorf("template text is empty")
+	}
+
 	funcMap := template.FuncMap{
 		"trim": strings.TrimSpace,
 	}
 	tmpl, err := template.New("prompt").Funcs(funcMap).Parse(templateText)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("error parsing template: %w", err)
 	}
 	var buffer bytes.Buffer
 	err = tmpl.Execute(&buffer, variables)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("error executing template: %w", err)
 	}
 	return buffer.String(), nil
 }
