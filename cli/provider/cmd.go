@@ -179,17 +179,19 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	switch cmd.Name() {
 
 	case "load":
+		cmd.Flags().String("base-url", "", "Base URL of the application to be tested.")
 		cmd.Flags().String("ts-path", "keploy/testsuite", "Directory path containing test suite YAML files.")
 		cmd.Flags().StringP("file", "f", "", "Name of the testsuite yaml file.")
 		cmd.Flags().String("out", "json", "Output data format.")
-		cmd.Flags().Int("vus", 1, "Number of virtual users to run.")
-		cmd.Flags().String("duration", "1m", "Time for the load test to keep running.")
-		cmd.Flags().Int("rps", 0, "Number of requests per second to run.")
 		cmd.Flags().Bool("insecure", true, "Skip TLS verification for the requests.")
+		cmd.Flags().Int("vus", 1, "Number of virtual users to run.")
+		cmd.Flags().String("duration", "", "Time for the load test to keep running.")
+		cmd.Flags().Int("rps", 0, "Number of requests per second to run.")
 	case "testsuite":
 		cmd.Flags().String("base-url", "", "Base URL of the application to be tested.")
 		cmd.Flags().String("ts-path", "keploy/testsuite", "Directory path containing test suite YAML files.")
 		cmd.Flags().String("ts-file", "suite-0.yaml", "Name of the test suite YAML file.")
+
 	case "upload": //for uploading mocks
 		cmd.Flags().StringP("path", "p", ".", "Path to local keploy directory where generated mocks are stored")
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to consider e.g. -t \"test-set-1, test-set-2\"")
@@ -540,6 +542,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	switch cmd.Name() {
 
 	case "load":
+		baseURL, err := cmd.Flags().GetString("base-url")
+		if err != nil {
+			errMsg := "failed to get base-url flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.TestSuite.BaseURL = baseURL
+
 		tsPath, err := cmd.Flags().GetString("ts-path")
 		if err != nil {
 			errMsg := "failed to get ts-path flag"
@@ -547,6 +557,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Load.TSPath = tsPath
+		c.cfg.TestSuite.TSPath = tsPath
 
 		file, err := cmd.Flags().GetString("file")
 		if err != nil {
@@ -555,6 +566,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Load.TSFile = file
+		c.cfg.TestSuite.TSFile = file
 
 		output, err := cmd.Flags().GetString("out")
 		if err != nil {
@@ -564,30 +576,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.Load.Output = output
 
-		vus, err := cmd.Flags().GetInt("vus")
-		if err != nil {
-			errMsg := "failed to get vus flag"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		c.cfg.Load.VUs = vus
-
-		duration, err := cmd.Flags().GetString("duration")
-		if err != nil {
-			errMsg := "failed to get duration flag"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		c.cfg.Load.Duration = duration
-
-		rps, err := cmd.Flags().GetInt("rps")
-		if err != nil {
-			errMsg := "failed to get rps flag"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		c.cfg.Load.RPS = rps
-
 		insecure, err := cmd.Flags().GetBool("insecure")
 		if err != nil {
 			errMsg := "failed to get insecure flag"
@@ -595,6 +583,28 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Load.Insecure = insecure
+
+		_, err = cmd.Flags().GetInt("vus")
+		if err != nil {
+			errMsg := "failed to get vus flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+
+		_, err = cmd.Flags().GetString("duration")
+		if err != nil {
+			errMsg := "failed to get duration flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+
+		_, err = cmd.Flags().GetInt("rps")
+		if err != nil {
+			errMsg := "failed to get rps flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+
 	case "testsuite":
 		baseURL, err := cmd.Flags().GetString("base-url")
 		if err != nil {

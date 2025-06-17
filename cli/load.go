@@ -29,6 +29,15 @@ func Load(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFact
 				return nil
 			}
 
+			// Get CLI parameters
+			vus, _ := cmd.Flags().GetInt("vus")
+			duration, _ := cmd.Flags().GetString("duration")
+			rps, _ := cmd.Flags().GetInt("rps")
+
+			ctx := context.WithValue(ctx, "vus", vus)
+			ctx = context.WithValue(ctx, "duration", duration)
+			ctx = context.WithValue(ctx, "rps", rps)
+
 			var ltSvc loadSvc.Service
 			var ok bool
 			if ltSvc, ok = svc.(loadSvc.Service); !ok {

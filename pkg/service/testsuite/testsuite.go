@@ -102,6 +102,7 @@ type StepResult struct {
 type TSExecutor struct {
 	config    *config.Config
 	logger    *zap.Logger
+	Testsuite *TestSuite
 	client    *http.Client
 	baseURL   string
 	tsPath    string
@@ -109,10 +110,35 @@ type TSExecutor struct {
 	variables map[string]string
 }
 
-func NewTSExecutor(cfg *config.Config, logger *zap.Logger) (*TSExecutor, error) {
+func NewTSExecutor(cfg *config.Config, logger *zap.Logger, skipParsing bool) (*TSExecutor, error) {
+	var testsuite *TestSuite
+	if !skipParsing {
+		if cfg.TestSuite.TSPath == "" {
+			logger.Error("test suite path is not set")
+			return nil, fmt.Errorf("test suite path is not set, use --ts-path flag to set it")
+		}
+
+		if cfg.TestSuite.TSFile == "" {
+			logger.Error("test suite file is not set")
+			return nil, fmt.Errorf("test suite file is not set, use --ts-file flag to set it")
+		}
+
+		testsuitePath := filepath.Join(cfg.TestSuite.TSPath, cfg.TestSuite.TSFile)
+		logger.Debug("parsing test suite file", zap.String("file", testsuitePath))
+
+		ts, err := TSParser(testsuitePath)
+		if err != nil {
+			logger.Error("failed to parse test suite", zap.Error(err))
+			return nil, err
+		}
+		testsuite = &ts
+		logger.Info("test suite parsed successfully", zap.String("file", testsuitePath))
+	}
+
 	return &TSExecutor{
-		config: cfg,
-		logger: logger,
+		config:    cfg,
+		logger:    logger,
+		Testsuite: testsuite,
 		client: &http.Client{
 			Timeout: time.Duration(30) * time.Second,
 			Transport: &http.Transport{
@@ -128,44 +154,24 @@ func NewTSExecutor(cfg *config.Config, logger *zap.Logger) (*TSExecutor, error) 
 	}, nil
 }
 
-func (e *TSExecutor) Execute(ctx context.Context) error {
+func (e *TSExecutor) Execute(ctx *context.Context) error {
 	if e.baseURL == "" {
 		e.logger.Error("base URL is not set for the test suite execution")
 		return fmt.Errorf("base URL is not set for the test suite execution")
 	}
 
-	if e.tsPath == "" {
-		e.logger.Error("test suite path is not set")
-		return fmt.Errorf("test suite path is not set, use --ts-path flag to set it")
-	}
-
-	if e.tsFile == "" {
-		e.logger.Error("test suite file is not set")
-		return fmt.Errorf("test suite file is not set, use --ts-file flag to set it")
-	}
-
 	e.logger.Info("executing test suite", zap.String("path", e.tsPath), zap.String("baseURL", e.baseURL))
 
-	testsuitePath := filepath.Join(e.tsPath, e.tsFile)
-	e.logger.Debug("parsing test suite file", zap.String("file", testsuitePath))
-
-	testsuite, err := TSParser(testsuitePath)
-	if err != nil {
-		e.logger.Error("failed to parse test suite", zap.Error(err))
-		return err
-	}
-	e.logger.Info("test suite parsed successfully", zap.String("file", testsuitePath))
-
 	e.logger.Info("test suite details",
-		zap.String("name", testsuite.Name),
-		zap.String("version", testsuite.Version),
-		zap.String("kind", testsuite.Kind),
-		zap.String("description", testsuite.Spec.Metadata.Description),
+		zap.String("name", e.Testsuite.Name),
+		zap.String("version", e.Testsuite.Version),
+		zap.String("kind", e.Testsuite.Kind),
+		zap.String("description", e.Testsuite.Spec.Metadata.Description),
 	)
-	e.logger.Info("number of steps in the test suite", zap.Int("steps", len(testsuite.Spec.Steps)))
+	e.logger.Info("number of steps in the test suite", zap.Int("steps", len(e.Testsuite.Spec.Steps)))
 	e.logger.Info("base URL for the test suite", zap.String("baseURL", e.baseURL))
 
-	for _, step := range testsuite.Spec.Steps {
+	for _, step := range e.Testsuite.Spec.Steps {
 		e.logger.Info("executing step", zap.String("name", step.Name), zap.String("method", step.Method), zap.String("url", step.URL))
 		result, err := e.executeStep(step)
 		if err != nil {
