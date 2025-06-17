@@ -10,7 +10,9 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/encoding"
+	"google.golang.org/grpc/status"
 )
 
 func init() {
@@ -43,8 +45,18 @@ func (g *Grpc) MatchType(_ context.Context, reqBuf []byte) bool {
 }
 
 func (g *Grpc) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
-	logger := g.logger.With(zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)), zap.Any("Client IP Address", src.RemoteAddr().String()))
-
+	cid, ok := ctx.Value(models.ClientConnectionIDKey).(string)
+	if !ok {
+		return status.Errorf(codes.Internal, "missing ClientConnectionID in context")
+	}
+	did, ok := ctx.Value(models.DestConnectionIDKey).(string)
+	if !ok {
+		return status.Errorf(codes.Internal, "missing DestinationConnectionID in context")
+	}
+	logger := g.logger.With(
+		zap.String("Client ConnectionID", cid),
+		zap.String("Destination ConnectionID", did),
+		zap.String("Client IP Address", src.RemoteAddr().String()))
 	// Peek the preface (needed for type detection) **but replay it** for the gRPC server.
 	preface, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {
@@ -58,8 +70,13 @@ func (g *Grpc) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, m
 }
 
 func (g *Grpc) MockOutgoing(ctx context.Context, src net.Conn, _ *models.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
-	logger := g.logger.With(zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Client IP Address", src.RemoteAddr().String()))
-
+	cid, ok := ctx.Value(models.ClientConnectionIDKey).(string)
+	if !ok {
+		return status.Errorf(codes.Internal, "missing ClientConnectionID in context")
+	}
+	logger := g.logger.With(
+		zap.String("Client ConnectionID", cid),
+		zap.String("Client IP Address", src.RemoteAddr().String()))
 	// Consume the initial preface buffer from the connection.
 	preface, err := util.ReadInitialBuf(ctx, logger, src)
 	if err != nil {

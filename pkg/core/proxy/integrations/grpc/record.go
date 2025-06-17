@@ -22,10 +22,16 @@ import (
 // recordOutgoing starts a gRPC proxy to record a session.
 func recordOutgoing(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock) error {
 	// Ensure connections are closed on exit
+	cid, ok := ctx.Value(models.ClientConnectionIDKey).(string)
+	if !ok {
+		return status.Errorf(codes.Internal, "missing ClientConnectionID in context")
+	}
+
 	proxy := &grpcRecordingProxy{
 		logger:   logger,
 		destConn: destConn,
 		mocks:    mocks,
+		connID:   cid,
 	}
 
 	defer func() {
@@ -82,6 +88,7 @@ type grpcRecordingProxy struct {
 	logger   *zap.Logger
 	destConn net.Conn
 	mocks    chan<- *models.Mock
+	connID   string
 	ccMu     sync.Mutex       // protects cc
 	cc       *grpc.ClientConn // reused for all streams on this TCP conn
 }
@@ -113,11 +120,11 @@ func (p *grpcRecordingProxy) getClientConn(ctx context.Context) (*grpc.ClientCon
 // handler is the core of the proxy. It receives a call, forwards it, and records the interaction.
 func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStream) error {
 	startTime := time.Now()
-	fullMethod, _ := grpc.MethodFromServerStream(clientStream)
 	clientCtx := clientStream.Context()
-	connID, ok := clientCtx.Value(models.ClientConnectionIDKey).(string)
-	if !ok {
-		return status.Errorf(codes.Internal, "missing ClientConnectionID in context")
+	fullMethod, _ := grpc.MethodFromServerStream(clientStream)
+	connID := p.connID
+	if connID == "" {
+		connID = "0" // graceful fallback
 	}
 	md, _ := metadata.FromIncomingContext(clientCtx)
 
