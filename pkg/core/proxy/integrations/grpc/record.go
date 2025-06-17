@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -235,24 +236,9 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 	endTime := time.Now()
 	destTrailers := destStream.Trailer()
 	clientStream.SetTrailer(destTrailers)
-	// Treat normal end-of-stream (EOF) and context cancellation as success.
-	benign := func(err error) bool {
-		return err == nil || err == io.EOF || errors.Is(err, context.Canceled)
-	}
-	if !benign(reqErr) {
-		return status.Errorf(codes.Internal, "error during request forwarding: %v", reqErr)
-	}
-	// If the server returned a gRPC status, forward it unchanged.
-	if s, ok := status.FromError(respErr); ok && respErr != nil {
-		return s.Err()
-	}
-	// Otherwise, only treat non-benign transport errors as internal failures.
-	if !benign(respErr) {
-		return status.Errorf(codes.Internal,
-			"error during response forwarding: %v", respErr)
-	}
-
-	// Construct the mock
+	// ────────────────────────────────────────────────────────────────
+	// Construct & enqueue the mock **before** we possibly return.
+	// ────────────────────────────────────────────────────────────────
 	grpcReq := &models.GrpcReq{
 		Body:    createLengthPrefixedMessage(reqBuf.Bytes()),
 		Headers: p.grpcMetadataToHeaders(md, fullMethod, false),
@@ -264,12 +250,24 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 		Headers:  p.grpcMetadataToHeaders(respHeader, "", true),
 		Trailers: p.grpcMetadataToHeaders(destTrailers, "", true),
 	}
-	// make sure mandatory gRPC trailers are present
-	if _, ok := grpcResp.Trailers.OrdinaryHeaders["grpc-status"]; !ok {
-		grpcResp.Trailers.OrdinaryHeaders["grpc-status"] = "0"
-	}
-	if _, ok := grpcResp.Trailers.OrdinaryHeaders["grpc-message"]; !ok {
-		grpcResp.Trailers.OrdinaryHeaders["grpc-message"] = ""
+
+	//------------------------------------------------------------------
+	// If the server terminated the stream with a status error, make
+	// sure we record **that** code & message instead of default “0”.
+	//------------------------------------------------------------------
+	if st, ok := status.FromError(respErr); ok && respErr != nil {
+		grpcResp.Trailers.OrdinaryHeaders["grpc-status"] = fmt.Sprintf("%d", st.Code())
+		grpcResp.Trailers.OrdinaryHeaders["grpc-message"] = st.Message()
+		// Per gRPC spec error responses have no body – keep what we already
+		// captured (likely empty) but that’s harmless.
+	} else {
+		// Ensure mandatory keys are present for the happy-path case.
+		if _, ok := grpcResp.Trailers.OrdinaryHeaders["grpc-status"]; !ok {
+			grpcResp.Trailers.OrdinaryHeaders["grpc-status"] = "0"
+		}
+		if _, ok := grpcResp.Trailers.OrdinaryHeaders["grpc-message"]; !ok {
+			grpcResp.Trailers.OrdinaryHeaders["grpc-message"] = ""
+		}
 	}
 
 	p.mocks <- &models.Mock{
@@ -286,15 +284,28 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 	}
 	p.logger.Info("successfully recorded gRPC interaction", zap.String("method", fullMethod))
 
-	// Final safeguard – if the destination returned a non-nil gRPC status,
-	// propagate it *verbatim* to the client; otherwise handle it like before.
-	if s, ok := status.FromError(respErr); ok && respErr != nil {
-		return s.Err() // user-visible error (e.g. "user not found")
+	// ────────────────────────────────────────────────────────────────
+	// Now decide what to return to the client.
+	// ────────────────────────────────────────────────────────────────
+
+	// Treat normal end-of-stream (EOF) and context cancellation as success.
+	benign := func(err error) bool {
+		return err == nil || err == io.EOF || errors.Is(err, context.Canceled)
 	}
+	if !benign(reqErr) {
+		return status.Errorf(codes.Internal, "error during request forwarding: %v", reqErr)
+	}
+
+	// If the server ended the call with a (business) gRPC status error,
+	// propagate that **after** recording.
+	if s, ok := status.FromError(respErr); ok && respErr != nil {
+		return s.Err()
+	}
+
+	// Any other non-benign transport error?
 	if !benign(respErr) {
-		// non-gRPC, unexpected transport error
 		return status.Errorf(codes.Internal,
-			"destination returned non-gRPC error: %v", respErr)
+			"error during response forwarding: %v", respErr)
 	}
 
 	return nil

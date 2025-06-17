@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
@@ -121,6 +122,11 @@ func (s *grpcMockServer) handler(_ interface{}, stream grpc.ServerStream) error 
 	// 3. Send the mocked response
 	grpcResp := mock.Spec.GRPCResp
 
+	// --- Determine final gRPC status --------------------------------------
+	scStr := grpcResp.Trailers.OrdinaryHeaders["grpc-status"]
+	scInt, _ := strconv.Atoi(scStr)        // bad/missing ⇒ 0 (codes.OK)
+	finalCode := codes.Code(uint32(scInt)) // 0 ⇒ OK
+	finalMsg := grpcResp.Trailers.OrdinaryHeaders["grpc-message"]
 	// Send headers
 	respMd := s.headersToGrpcMetadata(grpcResp.Headers)
 	if err := stream.SendHeader(respMd); err != nil {
@@ -128,26 +134,30 @@ func (s *grpcMockServer) handler(_ interface{}, stream grpc.ServerStream) error 
 		return status.Errorf(codes.Internal, "failed to send headers: %v", err)
 	}
 
-	// Send body
-	respBody, err := createPayloadFromLengthPrefixedMessage(grpcResp.Body)
-	if err != nil {
-		s.logger.Error("failed to create payload from length-prefixed message", zap.Error(err))
-		return status.Errorf(codes.Internal, "failed to create response payload: %v", err)
+	// Send body **only when grpc-status == OK**
+	if finalCode == codes.OK {
+		respBody, err := createPayloadFromLengthPrefixedMessage(grpcResp.Body)
+		if err != nil {
+			s.logger.Error("failed to create payload from length-prefixed message", zap.Error(err))
+			return status.Errorf(codes.Internal, "failed to create response payload: %v", err)
+		}
+		if err := stream.SendMsg(&rawMessage{data: respBody}); err != nil {
+			s.logger.Error("failed to send response message", zap.Error(err))
+			return status.Errorf(codes.Internal, "failed to send response message: %v", err)
+		}
+		s.logger.Debug("sent mocked response body", zap.Int("size", len(respBody)))
 	}
 
-	if err := stream.SendMsg(&rawMessage{data: respBody}); err != nil {
-		s.logger.Error("failed to send response message", zap.Error(err))
-		return status.Errorf(codes.Internal, "failed to send response message: %v", err)
+	// For non-OK results return a status.Error – this makes the runtime
+	// write the required grpc-status / grpc-message trailers for us.
+	if finalCode != codes.OK {
+		return status.Error(finalCode, finalMsg)
 	}
-	s.logger.Debug("sent mocked response body", zap.Int("size", len(respBody)))
 
-	// Send trailers. The gRPC library will automatically interpret 'grpc-status'
-	// and 'grpc-message' from this metadata and set the call's final status.
+	// Success path – attach any extra trailers and finish.
 	trailerMd := s.headersToGrpcMetadata(grpcResp.Trailers)
 	stream.SetTrailer(trailerMd)
 	s.logger.Debug("sent mocked response trailers", zap.Any("trailers", trailerMd))
-
-	// Returning nil is important. The final status is determined by the trailers.
 	return nil
 }
 

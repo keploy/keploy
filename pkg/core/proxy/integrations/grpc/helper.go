@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"go.keploy.io/server/v2/pkg/models"
@@ -25,15 +26,6 @@ func createLengthPrefixedMessage(data []byte) models.GrpcLengthPrefixedMessage {
 		// DecodedData holds the raw data, cast to a string.
 		DecodedData: prettyPrintWire(data, 0), // <-- new
 	}
-}
-
-// createPayloadFromLengthPrefixedMessage extracts the raw message payload from a GrpcLengthPrefixedMessage.
-func createPayloadFromLengthPrefixedMessage(msg models.GrpcLengthPrefixedMessage) ([]byte, error) {
-	// The data is stored as a string, so we just cast it back to a byte slice.
-	// Return a copy so the caller can mutate safely.
-	buf := make([]byte, len(msg.DecodedData))
-	copy(buf, msg.DecodedData)
-	return buf, nil
 }
 
 // prettyPrintWire renders *any* protobuf wire payload without needing
@@ -99,4 +91,103 @@ func isPrintableASCII(b []byte) bool {
 		}
 	}
 	return len(b) > 0
+}
+
+const maxProtoNum = uint64(protowire.MaxValidNumber) // 1<<29 - 1
+
+func parsePrettyWire(s string) ([]byte, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, nil // nothing to decode
+	}
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	var idx int
+	return parseMsg(lines, &idx)
+}
+func parseMsg(lines []string, idx *int) ([]byte, error) {
+	var out []byte
+
+	for *idx < len(lines) {
+		line := strings.TrimSpace(lines[*idx])
+		*idx++
+
+		if line == "" { // skip blanks
+			continue
+		}
+		if line == "}" { // end of embedded message
+			return out, nil
+		}
+
+		colon := strings.IndexByte(line, ':')
+		if colon == -1 {
+			return nil, fmt.Errorf("pretty decode: malformed line %q", line)
+		}
+
+		// ── field number ───────────────────────────────────────────
+		fieldStr := strings.TrimSpace(line[:colon])
+		n64, err := strconv.ParseUint(fieldStr, 10, 64)
+		if err != nil || n64 == 0 || n64 > maxProtoNum {
+			return nil, fmt.Errorf("pretty decode: invalid field %q", fieldStr)
+		}
+		num := protowire.Number(n64)
+
+		rest := strings.TrimSpace(line[colon+1:])
+
+		// Try each encoding in a stable order; DO NOT mutate `rest`
+		// until we've decided what it is.
+
+		// 1️⃣ start of embedded message
+		if rest == "{" {
+			sub, err := parseMsg(lines, idx)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, protowire.AppendTag(nil, num, protowire.BytesType)...)
+			out = protowire.AppendBytes(out, sub)
+			continue
+		}
+
+		// 2️⃣ ASCII string  {"foo"}
+		if strings.HasPrefix(rest, "{\"") && strings.HasSuffix(rest, "\"}") {
+			str := rest[2 : len(rest)-2]
+			out = append(out, protowire.AppendTag(nil, num, protowire.BytesType)...)
+			out = protowire.AppendBytes(out, []byte(str))
+			continue
+		}
+
+		// 3️⃣ hex blob 0xCAFEBABE   (allow trailing } for inline close)
+		hexRest := strings.TrimSuffix(rest, "}")
+		if strings.HasPrefix(hexRest, "0x") || strings.HasPrefix(hexRest, "0X") {
+			bin, err := hex.DecodeString(hexRest[2:])
+			if err == nil {
+				out = append(out, protowire.AppendTag(nil, num, protowire.BytesType)...)
+				out = protowire.AppendBytes(out, bin)
+				if hexRest != rest { // had an inline '}'
+					return out, nil
+				}
+				continue
+			}
+		}
+
+		// 4️⃣ varint (optionally followed by inline '}')
+		trailingClose := strings.HasSuffix(rest, "}")
+		if trailingClose {
+			rest = strings.TrimSpace(rest[:len(rest)-1])
+		}
+		val, err := strconv.ParseUint(rest, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("pretty decode: %w", err)
+		}
+		out = append(out, protowire.AppendTag(nil, num, protowire.VarintType)...)
+		out = protowire.AppendVarint(out, val)
+		if trailingClose {
+			return out, nil
+		}
+	}
+	return out, nil
+}
+
+// ---------------------------------------------------------------------
+// replace the old “cast-back” helper with the decoder above
+func createPayloadFromLengthPrefixedMessage(msg models.GrpcLengthPrefixedMessage) ([]byte, error) {
+	return parsePrettyWire(msg.DecodedData)
 }
