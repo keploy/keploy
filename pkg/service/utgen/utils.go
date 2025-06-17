@@ -336,16 +336,7 @@ func createTestFile(testFilePath string, sourceFilePath string) (bool, error) {
 					}
 				}
 			}
-			initialContent = fmt.Sprintf(`package %s
-
-			import (
-				"testing"
-			)
-
-			func TestPlaceholder(t *testing.T) {
-				t.Skip("Test")
-			}
-			`, pkgName)
+			initialContent = fmt.Sprintf("package %s\n", pkgName)
 		case "python":
 			initialContent = fmt.Sprintf("# Test file for %s\nimport unittest\n\nclass TestMyModule(unittest.TestCase):\n    pass\n\nif __name__ == '__main__':\n    unittest.main()\n", filepath.Base(sourceFilePath))
 		case "javascript":
@@ -360,4 +351,42 @@ func createTestFile(testFilePath string, sourceFilePath string) (bool, error) {
 		return true, nil
 	}
 	return false, nil
+}
+
+func ExtractYAML(s string) string {
+
+	re := regexp.MustCompile("(?s)```yaml\\n(.*?)\\n```")
+	matches := re.FindStringSubmatch(s)
+	if len(matches) > 1 {
+		result := strings.TrimSpace(matches[1])
+		return result
+	}
+
+	re = regexp.MustCompile("(?s)```\\n(.*?)\\n```")
+	matches = re.FindStringSubmatch(s)
+	if len(matches) > 1 {
+		result := strings.TrimSpace(matches[1])
+		return result
+	}
+
+	lines := strings.Split(s, "\n")
+	var yamlLines []string
+	inYAML := false
+
+	for _, line := range lines {
+		if strings.HasPrefix(line, "language:") || strings.HasPrefix(line, "refactored_source_code:") {
+			inYAML = true
+		}
+		if inYAML {
+			yamlLines = append(yamlLines, line)
+		}
+	}
+
+	if len(yamlLines) > 0 {
+		result := strings.Join(yamlLines, "\n")
+		return result
+	}
+
+	result := strings.TrimSpace(s)
+	return result
 }

@@ -17,6 +17,7 @@ import (
 	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
+	"gopkg.in/yaml.v2"
 )
 
 type Coverage struct {
@@ -55,6 +56,7 @@ type UnitTestGenerator struct {
 	testCaseFailed   int
 	noCoverageTest   int
 	flakiness        bool
+	sourceRefactored bool
 }
 
 var discardedTestsFilename = "discardedTests.txt"
@@ -84,6 +86,7 @@ func NewUnitTestGenerator(
 		additionalPrompt: genConfig.AdditionalPrompt,
 		cur:              &Cursor{},
 		flakiness:        genConfig.Flakiness,
+		sourceRefactored: false,
 	}
 
 	if generator.srcPath != "" && generator.testPath == "" {
@@ -191,7 +194,17 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 
 		iterationCount := 1
 		g.lang = GetCodeLanguage(g.srcPath)
-		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt, g.ai.FunctionUnderTest, g.logger)
+
+		var originalSrcCode string
+		if !g.sourceRefactored {
+			err = g.refactorSourceCode(ctx, &originalSrcCode)
+			if err != nil {
+				utils.LogError(g.logger, err, "Error during source code refactoring")
+				return err
+			}
+		}
+
+		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt, g.ai.FunctionUnderTest, g.sourceRefactored, g.logger)
 		g.injector = NewInjectorBuilder(g.logger, g.lang)
 
 		if err != nil {
@@ -202,6 +215,13 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			if err := g.setCursor(ctx); err != nil {
 				utils.LogError(g.logger, err, "Error during initial test suite analysis")
 				return err
+			}
+		} else {
+			g.cur.Indentation = 0
+			if g.lang == "go" {
+				g.cur.Line = 1
+			} else {
+				g.cur.Line = 0
 			}
 		}
 		initialCoverage := g.cov.Current
@@ -258,26 +278,6 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				continue
 			}
 
-			var originalSrcCode string
-			var codeModified bool
-
-			// Check if code refactoring is needed
-			if len(testsDetails.RefactoredSourceCode) != 0 {
-				// Read the original source code
-				originalSrcCode, err = readFile(g.srcPath)
-				if err != nil {
-					return fmt.Errorf("failed to read the source code: %w", err)
-				}
-
-				// modify the source code for refactoring.
-				if !(strings.Contains(testsDetails.RefactoredSourceCode, "blank output don't refactor code") || strings.Contains(testsDetails.RefactoredSourceCode, "no refactoring")) {
-					if err := os.WriteFile(g.srcPath, []byte(testsDetails.RefactoredSourceCode), 0644); err != nil {
-						return fmt.Errorf("failed to refactor source code:%w", err)
-					}
-					codeModified = true
-				}
-			}
-
 			var overallCovInc = false
 
 			g.logger.Info("Validating new generated tests one by one")
@@ -298,26 +298,19 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				if err != nil {
 					utils.LogError(g.logger, err, "Error validating test")
 
-					rerr := revertSourceCode(g.srcPath, originalSrcCode, codeModified)
-					if rerr != nil {
-						utils.LogError(g.logger, rerr, "Error reverting source code")
+					if g.sourceRefactored && originalSrcCode != "" {
+						rerr := revertSourceCode(g.srcPath, originalSrcCode, true)
+						if rerr != nil {
+							utils.LogError(g.logger, rerr, "Error reverting source code")
+						}
 					}
 
 					return err
 				}
 
-				// if any test increases the coverage, set the flag to true
 				overallCovInc = overallCovInc || coverageInc
 			}
-			// if any of the test couldn't increase the coverage, revert the source code
-			if !overallCovInc {
-				err := revertSourceCode(g.srcPath, originalSrcCode, codeModified)
-				if err != nil {
-					utils.LogError(g.logger, err, "Error reverting source code")
-				}
-			} else {
-				g.promptBuilder.Src.Code = testsDetails.RefactoredSourceCode
-			}
+
 			if g.cov.Current < (g.cov.Desired/100) && g.cov.Current > 0 {
 				if err := g.runCoverage(); err != nil {
 					utils.LogError(g.logger, err, "Error running coverage")
@@ -841,5 +834,72 @@ func (g *UnitTestGenerator) saveFailedTestCasesToFile() error {
 	if err != nil {
 		return fmt.Errorf("error writing to discarded tests file: %w", err)
 	}
+	return nil
+}
+
+func (g *UnitTestGenerator) refactorSourceCode(ctx context.Context, originalSrcCode *string) error {
+	g.logger.Info("Analyzing source code for refactoring to improve testability...")
+
+	var err error
+	*originalSrcCode, err = readFile(g.srcPath)
+	if err != nil {
+		g.logger.Error("Failed to read source code for refactoring", zap.Error(err), zap.String("srcPath", g.srcPath))
+		return fmt.Errorf("failed to read the source code: %w", err)
+	}
+
+	refactorPromptBuilder, err := NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt, g.ai.FunctionUnderTest, g.sourceRefactored, g.logger)
+	if err != nil {
+		g.logger.Error("Error creating refactor prompt builder", zap.Error(err), zap.String("srcPath", g.srcPath), zap.String("testPath", g.testPath), zap.String("language", g.lang))
+		return fmt.Errorf("error creating refactor prompt builder: %w", err)
+	}
+
+	refactorPrompt, err := refactorPromptBuilder.BuildPrompt("refactor_prompt", "")
+	if err != nil {
+		g.logger.Error("Error building refactor prompt", zap.Error(err))
+		return fmt.Errorf("error building refactor prompt: %w", err)
+	}
+
+	aiRequest := AIRequest{
+		MaxTokens:      4096,
+		Prompt:         *refactorPrompt,
+		SessionID:      g.ai.SessionID,
+		RequestPurpose: "refactor",
+	}
+
+	response, err := g.ai.Call(ctx, CompletionParams{}, aiRequest, false)
+	if err != nil {
+		g.logger.Error("Error calling AI for refactoring", zap.Error(err), zap.String("sessionID", g.ai.SessionID))
+		return fmt.Errorf("error calling AI for refactoring: %w", err)
+	}
+
+	cleanedYAML := ExtractYAML(response)
+	var refactorDetails models.RefactorDetails
+	if err := yaml.Unmarshal([]byte(cleanedYAML), &refactorDetails); err != nil {
+		g.logger.Error("Error unmarshalling refactor details",
+			zap.Error(err),
+			zap.String("cleanedYAML", cleanedYAML),
+			zap.String("originalResponse", response),
+			zap.Int("yamlLength", len(cleanedYAML)))
+		return fmt.Errorf("error unmarshalling refactor details: %v", err)
+	}
+
+	if len(refactorDetails.RefactoredSourceCode) > 0 {
+		if strings.Contains(refactorDetails.RefactoredSourceCode, "blank output don't refactor code") ||
+			strings.Contains(refactorDetails.RefactoredSourceCode, "no refactoring") ||
+			strings.Contains(refactorDetails.RefactoredSourceCode, "No refactoring needed") {
+			g.logger.Info("Source code analysis complete - no refactoring needed")
+			return nil
+		}
+
+		if err := os.WriteFile(g.srcPath, []byte(refactorDetails.RefactoredSourceCode), 0644); err != nil {
+			g.logger.Error("Failed to write refactored source code", zap.Error(err), zap.String("srcPath", g.srcPath))
+			return fmt.Errorf("failed to refactor source code: %w", err)
+		}
+
+		g.sourceRefactored = true
+	} else {
+		g.logger.Info("Source code analysis complete - no refactoring needed (empty refactored code)")
+	}
+
 	return nil
 }
