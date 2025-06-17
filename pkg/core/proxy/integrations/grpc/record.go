@@ -193,11 +193,20 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 		for {
 			respMsg := new(rawMessage)
 			respErr = destStream.RecvMsg(respMsg)
-			if respErr == io.EOF {
-				return
-			}
-			if respErr != nil && respErr != io.EOF {
-				p.logger.Error("failed to receive message from destination", zap.Error(respErr))
+
+			switch {
+			case respErr == nil:
+				// normal message – relay it
+			case respErr == io.EOF:
+				return // clean finish
+			default:
+				// gRPC status error (business failure) is *expected*; just stop reading.
+				if _, ok := status.FromError(respErr); ok {
+					return
+				}
+				// real transport problem – still log it.
+				p.logger.Error("failed to receive message from destination",
+					zap.Error(respErr))
 				return
 			}
 			respBuf.Write(respMsg.data)
@@ -222,8 +231,14 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 	if !benign(reqErr) {
 		return status.Errorf(codes.Internal, "error during request forwarding: %v", reqErr)
 	}
+	// If the server returned a gRPC status, forward it unchanged.
+	if s, ok := status.FromError(respErr); ok && respErr != nil {
+		return s.Err()
+	}
+	// Otherwise, only treat non-benign transport errors as internal failures.
 	if !benign(respErr) {
-		return status.Errorf(codes.Internal, "error during response forwarding: %v", respErr)
+		return status.Errorf(codes.Internal,
+			"error during response forwarding: %v", respErr)
 	}
 
 	// Construct the mock
@@ -253,11 +268,13 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 	}
 	p.logger.Info("successfully recorded gRPC interaction", zap.String("method", fullMethod))
 
-	// Final safeguard – ignore benign EOF / cancellation here as well.
+	// Final safeguard – if the destination returned a non-nil gRPC status,
+	// propagate it *verbatim* to the client; otherwise handle it like before.
+	if s, ok := status.FromError(respErr); ok && respErr != nil {
+		return s.Err() // user-visible error (e.g. "user not found")
+	}
 	if !benign(respErr) {
-		if s, ok := status.FromError(respErr); ok {
-			return s.Err()
-		}
+		// non-gRPC, unexpected transport error
 		return status.Errorf(codes.Internal,
 			"destination returned non-gRPC error: %v", respErr)
 	}
