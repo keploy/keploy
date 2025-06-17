@@ -38,7 +38,6 @@ func main() {
 			return
 		}
 	}()
-
 	setVersion()
 	ctx := utils.NewCtx()
 	err := start(ctx)
@@ -46,7 +45,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Keploy CLI startup failed:", err)
 		os.Exit(1)
 	}
-
 	os.Exit(utils.ErrCode)
 }
 
@@ -112,6 +110,5 @@ func start(ctx context.Context) {
 		}
 		return err
 	}
-
 	return nil
 }
