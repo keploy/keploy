@@ -115,6 +115,10 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 	startTime := time.Now()
 	fullMethod, _ := grpc.MethodFromServerStream(clientStream)
 	clientCtx := clientStream.Context()
+	connID, ok := clientCtx.Value(models.ClientConnectionIDKey).(string)
+	if !ok {
+		return status.Errorf(codes.Internal, "missing ClientConnectionID in context")
+	}
 	md, _ := metadata.FromIncomingContext(clientCtx)
 
 	p.logger.Info("proxying gRPC request", zap.String("method", fullMethod), zap.Any("metadata", md))
@@ -253,13 +257,20 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 		Headers:  p.grpcMetadataToHeaders(respHeader, "", true),
 		Trailers: p.grpcMetadataToHeaders(destTrailers, "", true),
 	}
+	// make sure mandatory gRPC trailers are present
+	if _, ok := grpcResp.Trailers.OrdinaryHeaders["grpc-status"]; !ok {
+		grpcResp.Trailers.OrdinaryHeaders["grpc-status"] = "0"
+	}
+	if _, ok := grpcResp.Trailers.OrdinaryHeaders["grpc-message"]; !ok {
+		grpcResp.Trailers.OrdinaryHeaders["grpc-message"] = ""
+	}
 
 	p.mocks <- &models.Mock{
 		Version: models.GetVersion(),
 		Name:    "mocks",
 		Kind:    models.GRPC_EXPORT,
 		Spec: models.MockSpec{
-			Metadata:         map[string]string{"type": "gRPC"},
+			Metadata:         map[string]string{"connID": connID},
 			GRPCReq:          grpcReq,
 			GRPCResp:         grpcResp,
 			ReqTimestampMock: startTime,
@@ -307,6 +318,15 @@ func (p *grpcRecordingProxy) grpcMetadataToHeaders(md metadata.MD, fullMethod st
 		}
 		if _, ok := hdr.PseudoHeaders[":path"]; !ok {
 			hdr.PseudoHeaders[":path"] = fullMethod
+		}
+		hdr.OrdinaryHeaders["te"] = "trailers" // new – stable field
+	} else {
+		if _, ok := hdr.PseudoHeaders[":status"]; !ok {
+			hdr.PseudoHeaders[":status"] = "200"
+		}
+		if ct, ok := hdr.OrdinaryHeaders["content-type"]; ok &&
+			strings.HasPrefix(ct, "application/grpc") {
+			hdr.OrdinaryHeaders["content-type"] = "application/grpc"
 		}
 	}
 	return hdr

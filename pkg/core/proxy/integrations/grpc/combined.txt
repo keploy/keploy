@@ -1,0 +1,995 @@
+=== codec.go ===
+package grpc
+
+import (
+	"fmt"
+
+	"google.golang.org/protobuf/proto"
+)
+
+const rawCodecName = "keploy-raw"
+
+// rawCodec is a gRPC codec that passes byte slices through without any serialization.
+// This is crucial for proxying or mocking requests when we don't have the .proto definitions.
+type rawCodec struct{}
+
+// rawMessage is a wrapper for byte slices to satisfy the proto.Message interface.
+type rawMessage struct {
+	data []byte
+}
+
+func (m *rawMessage) Reset()         { *m = rawMessage{} }
+func (m *rawMessage) String() string { return string(m.data) }
+func (*rawMessage) ProtoMessage()    {}
+
+func (c *rawCodec) Marshal(v interface{}) ([]byte, error) {
+	// Marshal the rawMessage wrapper to its underlying byte slice.
+	if rm, ok := v.(*rawMessage); ok {
+		return rm.data, nil
+	}
+	// Fallback for other types, though we primarily use rawMessage.
+	if p, ok := v.(proto.Message); ok {
+		return proto.Marshal(p)
+	}
+	return nil, fmt.Errorf("failed to marshal, message is %T, want proto.Message", v)
+}
+
+func (c *rawCodec) Unmarshal(data []byte, v interface{}) error {
+	// Unmarshal the byte slice into the rawMessage wrapper.
+	if rm, ok := v.(*rawMessage); ok {
+		rm.data = make([]byte, len(data))
+		copy(rm.data, data)
+		return nil
+	}
+	// Fallback for other types.
+	if p, ok := v.(proto.Message); ok {
+		return proto.Unmarshal(data, p)
+	}
+	return fmt.Errorf("failed to unmarshal, message is %T, want proto.Message", v)
+}
+
+func (c *rawCodec) Name() string {
+	return rawCodecName
+}
+
+func (c *rawCodec) String() string {
+	return c.Name()
+}
+
+// passthroughCodec keeps 'proto' on the wire but avoids re-encoding.
+type passthroughCodec struct{}
+
+func (passthroughCodec) Name() string { return "proto" } // server already knows this one
+func (passthroughCodec) Marshal(v interface{}) ([]byte, error) {
+	if m, ok := v.(*rawMessage); ok {
+		return m.data, nil // send bytes exactly as we received them
+	}
+	return proto.Marshal(v.(proto.Message))
+}
+func (passthroughCodec) Unmarshal(data []byte, v interface{}) error {
+	if m, ok := v.(*rawMessage); ok {
+		m.data = append([]byte(nil), data...)
+		return nil
+	}
+	return proto.Unmarshal(data, v.(proto.Message))
+}
+
+=== grpc.go ===
+package grpc
+
+import (
+	"bytes"
+	"context"
+	"net"
+
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
+	"go.keploy.io/server/v2/pkg/core/proxy/util"
+	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/utils"
+	"go.uber.org/zap"
+	"google.golang.org/grpc/encoding"
+)
+
+func init() {
+	// Register the raw codec for passing raw bytes through the gRPC framework.
+	encoding.RegisterCodec(new(rawCodec))
+
+	integrations.Register(integrations.GRPC, &integrations.Parsers{
+		Initializer: New,
+		Priority:    100,
+	})
+}
+
+type Grpc struct {
+	logger *zap.Logger
+}
+
+func New(logger *zap.Logger) integrations.Integrations {
+	return &Grpc{
+		logger: logger,
+	}
+}
+
+// MatchType determines if the outgoing network call is gRPC by checking for the HTTP/2 preface.
+func (g *Grpc) MatchType(_ context.Context, reqBuf []byte) bool {
+	const preface = "PRI * HTTP/2"
+	if len(reqBuf) < len(preface) {
+		return false
+	}
+	return bytes.HasPrefix(reqBuf, []byte(preface))
+}
+
+func (g *Grpc) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+	logger := g.logger.With(zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)), zap.Any("Client IP Address", src.RemoteAddr().String()))
+
+	// Peek the preface (needed for type detection) **but replay it** for the gRPC server.
+	preface, err := util.ReadInitialBuf(ctx, logger, src)
+	if err != nil {
+		utils.LogError(logger, err, "failed to read the initial grpc message")
+		return err
+	}
+
+	return recordOutgoing(ctx, logger,
+		newReplayConn(preface, src), // <- give server the full preface
+		dst, mocks)
+}
+
+func (g *Grpc) MockOutgoing(ctx context.Context, src net.Conn, _ *models.ConditionalDstCfg, mockDb integrations.MockMemDb, _ models.OutgoingOptions) error {
+	logger := g.logger.With(zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Client IP Address", src.RemoteAddr().String()))
+
+	// Consume the initial preface buffer from the connection.
+	preface, err := util.ReadInitialBuf(ctx, logger, src)
+	if err != nil {
+		utils.LogError(logger, err, "failed to read the initial grpc message")
+		return err
+	}
+
+	return mockOutgoing(ctx, logger,
+		newReplayConn(preface, src), // <- same in mock path
+		mockDb)
+}
+
+=== helper.go ===
+package grpc
+
+import (
+	"go.keploy.io/server/v2/pkg/models"
+)
+
+// createLengthPrefixedMessage creates a GrpcLengthPrefixedMessage from a raw message payload.
+// The gRPC framework handles the actual 5-byte wire protocol prefix. This struct
+// is for Keploy's internal representation and matching.
+func createLengthPrefixedMessage(data []byte) models.GrpcLengthPrefixedMessage {
+	// The original implementation stored the raw bytes as a string, which can
+	// safely hold binary data in Go. We will follow this for consistency with
+	// the existing fuzzy matching logic.
+	return models.GrpcLengthPrefixedMessage{
+		// Compression flag is 0 for uncompressed.
+		CompressionFlag: 0,
+		// MessageLength is the length of the raw data.
+		MessageLength: uint32(len(data)),
+		// DecodedData holds the raw data, cast to a string.
+		DecodedData: string(data),
+	}
+}
+
+// createPayloadFromLengthPrefixedMessage extracts the raw message payload from a GrpcLengthPrefixedMessage.
+func createPayloadFromLengthPrefixedMessage(msg models.GrpcLengthPrefixedMessage) ([]byte, error) {
+	// The data is stored as a string, so we just cast it back to a byte slice.
+	// Return a copy so the caller can mutate safely.
+	buf := make([]byte, len(msg.DecodedData))
+	copy(buf, msg.DecodedData)
+	return buf, nil
+}
+
+=== listener.go ===
+package grpc
+
+import (
+	"net"
+	"sync"
+)
+
+// singleConnListener adapts an existing net.Conn so it can be passed to
+// grpc.Serve, which expects something that looks like a net.Listener but
+// only ever needs to serve one connection.
+type singleConnListener struct {
+	conn      net.Conn  // the single connection we expose
+	once      sync.Once // hands out conn exactly once
+	closeOnce sync.Once // closes the "done" channel exactly once
+	done      chan struct{}
+}
+
+func newSingleConnListener(conn net.Conn) *singleConnListener {
+	return &singleConnListener{
+		conn: conn,
+		done: make(chan struct{}),
+	}
+}
+
+func (l *singleConnListener) Accept() (net.Conn, error) {
+	var first bool
+	l.once.Do(func() { first = true })
+
+	if first {
+		// Wrap the conn so that closing it notifies the listener.
+		return &trackedConn{
+			Conn: l.conn,
+			onClose: func() {
+				l.closeOnce.Do(func() { close(l.done) })
+			},
+		}, nil
+	}
+
+	// After the first connection, Serve() may call Accept() again.
+	<-l.done // block until the trackedConn is closed
+	return nil, net.ErrClosed
+}
+
+func (l *singleConnListener) Close() error {
+	l.closeOnce.Do(func() { close(l.done) })
+	return l.conn.Close()
+}
+
+func (l *singleConnListener) Addr() net.Addr { return l.conn.LocalAddr() }
+
+// trackedConn executes onClose exactly once when Close is called.
+type trackedConn struct {
+	net.Conn
+	once    sync.Once
+	onClose func()
+}
+
+func (c *trackedConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.onClose)
+	return err
+}
+
+=== match.go ===
+package grpc
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/agnivade/levenshtein"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
+	"go.uber.org/zap"
+
+	"go.keploy.io/server/v2/pkg/models"
+)
+
+func FilterMocksRelatedToGrpc(mocks []*models.Mock) []*models.Mock {
+	var res []*models.Mock
+	for _, mock := range mocks {
+		if mock != nil && mock.Kind == models.GRPC_EXPORT && mock.Spec.GRPCReq != nil && mock.Spec.GRPCResp != nil {
+			res = append(res, mock)
+		}
+	}
+	return res
+}
+
+func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpcReq models.GrpcReq, mockDb integrations.MockMemDb) (*models.Mock, error) {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+			mocks, err := mockDb.GetFilteredMocks()
+			if err != nil {
+				return nil, fmt.Errorf("error while getting tsc mocks %v", err)
+			}
+
+			var matchedMock *models.Mock
+			var isMatched bool
+
+			grpcMocks := FilterMocksRelatedToGrpc(mocks)
+
+			if len(grpcMocks) == 0 {
+				logger.Debug("No grpc mocks found in the db")
+				return nil, nil
+			}
+
+			logger.Debug("Here are the grpc mocks in the db", zap.Int("len", len(grpcMocks)))
+
+			schemaMatched, err := schemaMatch(ctx, grpcReq, grpcMocks)
+			if err != nil {
+				return nil, err
+			}
+
+			if len(schemaMatched) == 0 {
+				logger.Debug("No mock found with schema match")
+				return nil, nil
+			}
+
+			logger.Debug("Here are the grpc mocks with schema match", zap.Int("len", len(schemaMatched)))
+
+			// Exact body Match
+			ok, matchedMock := exactBodyMatch(grpcReq.Body, schemaMatched)
+			if ok {
+				logger.Debug("Exact body match found", zap.Any("matchedMock", matchedMock))
+				if !mockDb.DeleteFilteredMock(*matchedMock) {
+					continue
+				}
+				return matchedMock, nil
+			}
+
+			// apply fuzzy match for body with schemaMatched mocks
+
+			logger.Debug("Performing fuzzy match for decoded data in body")
+			// Perform fuzzy match on the request
+			isMatched, bestMatch := fuzzyMatch(schemaMatched, grpcReq.Body.DecodedData)
+			if isMatched {
+				if !mockDb.DeleteFilteredMock(*bestMatch) {
+					continue
+				}
+				return bestMatch, nil
+			}
+			return nil, nil
+		}
+	}
+}
+
+func schemaMatch(ctx context.Context, req models.GrpcReq, mocks []*models.Mock) ([]*models.Mock, error) {
+	var schemaMatched []*models.Mock
+
+	for _, mock := range mocks {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		mockReq := mock.Spec.GRPCReq
+
+		// the pseudo headers should definitely match (:method, :path, etc.).
+		if !compareMap(mockReq.Headers.PseudoHeaders, req.Headers.PseudoHeaders) {
+			continue
+		}
+
+		// the ordinary headers keys should match.
+		if !compareMapKeys(mockReq.Headers.OrdinaryHeaders, req.Headers.OrdinaryHeaders) {
+			continue
+		}
+
+		// the content type should match.
+		if mockReq.Headers.OrdinaryHeaders["content-type"] != req.Headers.OrdinaryHeaders["content-type"] {
+			continue
+		}
+
+		schemaMatched = append(schemaMatched, mock)
+	}
+
+	return schemaMatched, nil
+}
+
+// Check if two maps have the same keys, ignoring values.
+func compareMapKeys(m1, m2 map[string]string) bool {
+	if len(m1) != len(m2) {
+		return false
+	}
+	for k := range m1 {
+		if _, ok := m2[k]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// Check if two maps are identical.
+func compareMap(m1, m2 map[string]string) bool {
+	if len(m1) != len(m2) {
+		return false
+	}
+	for k, v := range m1 {
+		if v2, ok := m2[k]; !ok || v != v2 {
+			return false
+		}
+	}
+	return true
+}
+
+func exactBodyMatch(body models.GrpcLengthPrefixedMessage, schemaMatched []*models.Mock) (bool, *models.Mock) {
+	for _, mock := range schemaMatched {
+		// The new implementation might not reconstruct the exact original prefix,
+		// so we match on the decoded data which is more reliable.
+		if mock.Spec.GRPCReq.Body.DecodedData == body.DecodedData {
+			return true, mock
+		}
+	}
+	return false, nil
+}
+
+// fuzzyMatch logic remains the same.
+func findStringMatch(req string, mockStrings []string) int {
+	minDist := int(^uint(0) >> 1)
+	bestMatch := -1
+	for idx, mock := range mockStrings {
+		if !util.IsASCII(mock) {
+			continue
+		}
+		dist := levenshtein.ComputeDistance(req, mock)
+		if dist == 0 {
+			return 0
+		}
+		if dist < minDist {
+			minDist = dist
+			bestMatch = idx
+		}
+	}
+	return bestMatch
+}
+
+func findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
+	mxSim := -1.0
+	mxIdx := -1
+	for idx, mock := range mocks {
+		encoded := []byte(mock.Spec.GRPCReq.Body.DecodedData)
+		k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
+		shingles1 := util.CreateShingles(encoded, k)
+		shingles2 := util.CreateShingles(reqBuff, k)
+		similarity := util.JaccardSimilarity(shingles1, shingles2)
+
+		if mxSim < similarity {
+			mxSim = similarity
+			mxIdx = idx
+		}
+	}
+	return mxIdx
+}
+
+func fuzzyMatch(tcsMocks []*models.Mock, reqBuff string) (bool, *models.Mock) {
+	mockStrings := make([]string, len(tcsMocks))
+	for i := range tcsMocks {
+		mockStrings[i] = tcsMocks[i].Spec.GRPCReq.Body.DecodedData
+	}
+
+	if util.IsASCII(reqBuff) {
+		idx := findStringMatch(string(reqBuff), mockStrings)
+		if idx != -1 {
+			return true, tcsMocks[idx]
+		}
+	}
+
+	idx := findBinaryMatch(tcsMocks, []byte(reqBuff))
+	if idx != -1 {
+		return true, tcsMocks[idx]
+	}
+	return false, nil
+}
+
+=== mock.go ===
+package grpc
+
+import (
+	"context"
+	"io"
+	"net"
+	"strings"
+
+	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
+	"go.keploy.io/server/v2/pkg/models"
+	"go.uber.org/zap"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
+)
+
+// mockOutgoing starts a gRPC server to mock responses for an incoming connection.
+func mockOutgoing(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mockDb integrations.MockMemDb) error {
+	// Always close the socket when we return.
+	defer func() {
+		if err := clientConn.Close(); err != nil &&
+			!strings.Contains(err.Error(), "use of closed network connection") {
+			logger.Error("failed to close client connection in mock mode", zap.Error(err))
+		}
+	}()
+
+	mockServer := &grpcMockServer{
+		logger: logger,
+		mockDb: mockDb,
+	}
+
+	// Create a gRPC server that uses our raw codec and unknown service handler.
+	srv := grpc.NewServer(
+		grpc.UnknownServiceHandler(mockServer.handler),
+		grpc.ForceServerCodec(new(rawCodec)),
+	)
+
+	// Use a single-connection listener to serve the mock on the given connection.
+	lis := newSingleConnListener(clientConn)
+	logger.Info("starting mock gRPC server")
+	// Run Serve in its own goroutine so we can stop it when the context is done.
+	srvErr := make(chan error, 1)
+	go func() { srvErr <- srv.Serve(lis) }()
+
+	select {
+	case <-ctx.Done():
+		// Parent context cancelled (Ctrl-C, timeout, etc.).
+		go srv.GracefulStop()
+		<-srvErr // wait for Serve to return
+		return ctx.Err()
+
+	case err := <-srvErr:
+		// Serve returned on its own (connection closed, reset, etc.).
+		switch {
+		case err == nil,
+			err == io.EOF,
+			strings.Contains(err.Error(), "use of closed network connection"):
+			logger.Debug("client connection closed (EOF)")
+			return nil
+		case strings.Contains(err.Error(), "connection reset by peer"):
+			logger.Warn("client connection was reset by peer")
+			return nil
+		default:
+			logger.Error("mock gRPC server failed", zap.Error(err))
+			return err
+		}
+	}
+}
+
+// grpcMockServer implements the gRPC unknown service handler to mock responses.
+type grpcMockServer struct {
+	logger *zap.Logger
+	mockDb integrations.MockMemDb
+}
+
+func (s *grpcMockServer) handler(_ interface{}, stream grpc.ServerStream) error {
+	// 1. Extract request details
+	fullMethod, ok := grpc.MethodFromServerStream(stream)
+	if !ok {
+		s.logger.Error("failed to get method from stream")
+		return status.Errorf(codes.Internal, "failed to get method from stream")
+	}
+
+	md, ok := metadata.FromIncomingContext(stream.Context())
+	if !ok {
+		s.logger.Warn("failed to get metadata from context")
+	}
+
+	s.logger.Info("received gRPC request to mock", zap.String("method", fullMethod), zap.Any("metadata", md))
+
+	// Read the request body.
+	var requestBody []byte
+	reqMsg := new(rawMessage)
+	if err := stream.RecvMsg(reqMsg); err != nil && err != io.EOF {
+		s.logger.Error("failed to receive request message from stream", zap.Error(err))
+		return status.Errorf(codes.Internal, "failed to receive request message: %v", err)
+	}
+	requestBody = reqMsg.data
+	s.logger.Debug("fully received request body", zap.Int("size", len(requestBody)))
+
+	grpcReq := &models.GrpcReq{
+		Headers: s.grpcMetadataToHeaders(md, fullMethod),
+		Body:    createLengthPrefixedMessage(requestBody),
+	}
+
+	// 2. Find a matching mock
+	s.logger.Debug("finding mock for gRPC request", zap.Any("request", grpcReq))
+	mock, err := FilterMocksBasedOnGrpcRequest(stream.Context(), s.logger, *grpcReq, s.mockDb)
+	if err != nil {
+		s.logger.Error("failed to find mock", zap.Error(err))
+		return status.Errorf(codes.Internal, "failed to find mock: %v", err)
+	}
+	if mock == nil {
+		s.logger.Error("no matching gRPC mock found", zap.String("method", fullMethod))
+		return status.Errorf(codes.NotFound, "no matching keploy mock found for %s", fullMethod)
+	}
+
+	s.logger.Info("found matching mock", zap.String("mock.name", mock.Name), zap.String("mock.kind", string(mock.Kind)))
+
+	// 3. Send the mocked response
+	grpcResp := mock.Spec.GRPCResp
+
+	// Send headers
+	respMd := s.headersToGrpcMetadata(grpcResp.Headers)
+	if err := stream.SendHeader(respMd); err != nil {
+		s.logger.Error("failed to send response headers", zap.Error(err))
+		return status.Errorf(codes.Internal, "failed to send headers: %v", err)
+	}
+
+	// Send body
+	respBody, err := createPayloadFromLengthPrefixedMessage(grpcResp.Body)
+	if err != nil {
+		s.logger.Error("failed to create payload from length-prefixed message", zap.Error(err))
+		return status.Errorf(codes.Internal, "failed to create response payload: %v", err)
+	}
+
+	if err := stream.SendMsg(&rawMessage{data: respBody}); err != nil {
+		s.logger.Error("failed to send response message", zap.Error(err))
+		return status.Errorf(codes.Internal, "failed to send response message: %v", err)
+	}
+	s.logger.Debug("sent mocked response body", zap.Int("size", len(respBody)))
+
+	// Send trailers. The gRPC library will automatically interpret 'grpc-status'
+	// and 'grpc-message' from this metadata and set the call's final status.
+	trailerMd := s.headersToGrpcMetadata(grpcResp.Trailers)
+	stream.SetTrailer(trailerMd)
+	s.logger.Debug("sent mocked response trailers", zap.Any("trailers", trailerMd))
+
+	// Returning nil is important. The final status is determined by the trailers.
+	return nil
+}
+
+// grpcMetadataToHeaders converts gRPC metadata to Keploy's header format.
+func (s *grpcMockServer) grpcMetadataToHeaders(md metadata.MD, fullMethod string) models.GrpcHeaders {
+	hdr := models.GrpcHeaders{
+		PseudoHeaders:   make(map[string]string),
+		OrdinaryHeaders: make(map[string]string),
+	}
+	for k, v := range md {
+		val := strings.Join(v, ", ")
+		if strings.HasPrefix(k, ":") {
+			hdr.PseudoHeaders[k] = val
+		} else {
+			hdr.OrdinaryHeaders[k] = val
+		}
+	}
+	// The grpc server framework consumes pseudo-headers, so we must add them back.
+	if method, ok := hdr.PseudoHeaders[":method"]; !ok || method == "" {
+		hdr.PseudoHeaders[":method"] = "POST"
+	}
+	if scheme, ok := hdr.PseudoHeaders[":scheme"]; !ok || scheme == "" {
+		hdr.PseudoHeaders[":scheme"] = "http"
+	}
+	if path, ok := hdr.PseudoHeaders[":path"]; !ok || path == "" {
+		hdr.PseudoHeaders[":path"] = fullMethod
+	}
+	return hdr
+}
+
+// headersToGrpcMetadata converts Keploy's header format to gRPC metadata.
+func (s *grpcMockServer) headersToGrpcMetadata(headers models.GrpcHeaders) metadata.MD {
+	md := metadata.New(nil)
+	for k, v := range headers.PseudoHeaders {
+		md.Set(k, v)
+	}
+	for k, v := range headers.OrdinaryHeaders {
+		md.Set(k, v)
+	}
+	return md
+}
+
+=== record.go ===
+package grpc
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"net"
+	"strings"
+	"sync"
+	"time"
+
+	"go.keploy.io/server/v2/pkg/models"
+	"go.uber.org/zap"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
+)
+
+// recordOutgoing starts a gRPC proxy to record a session.
+func recordOutgoing(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock) error {
+	// Ensure connections are closed on exit
+	proxy := &grpcRecordingProxy{
+		logger:   logger,
+		destConn: destConn,
+		mocks:    mocks,
+	}
+
+	defer func() {
+		if err := clientConn.Close(); err != nil &&
+			!strings.Contains(err.Error(), "use of closed network connection") {
+			logger.Error("failed to close client connection in record mode", zap.Error(err))
+		}
+		if err := destConn.Close(); err != nil &&
+			!strings.Contains(err.Error(), "use of closed network connection") {
+			logger.Error("failed to close destination connection in record mode", zap.Error(err))
+		}
+		// Close the grpc.ClientConn if it was created.
+		if proxy.cc != nil {
+			proxy.cc.Close()
+		}
+	}()
+
+	// Create a gRPC server to handle the client's request
+	srv := grpc.NewServer(
+		grpc.UnknownServiceHandler(proxy.handler),
+		grpc.ForceServerCodec(new(rawCodec)),
+	)
+
+	lis := newSingleConnListener(clientConn)
+	logger.Info("starting recording gRPC proxy server")
+
+	srvErr := make(chan error, 1)
+	go func() { srvErr <- srv.Serve(lis) }()
+
+	select {
+	case <-ctx.Done():
+		// Gracefully shut down once the recorder context is cancelled.
+		go srv.GracefulStop()
+		<-srvErr
+		return ctx.Err()
+	case err := <-srvErr:
+		switch {
+		case err == nil,
+			err == io.EOF,
+			strings.Contains(err.Error(), "connection reset by peer"),
+			strings.Contains(err.Error(), "use of closed network connection"):
+			logger.Info("gRPC recording proxy stopped gracefully")
+			return nil
+		default:
+			logger.Error("gRPC recording proxy server failed", zap.Error(err))
+			return err
+		}
+	}
+
+}
+
+// grpcRecordingProxy proxies gRPC calls, recording the request and response.
+type grpcRecordingProxy struct {
+	logger   *zap.Logger
+	destConn net.Conn
+	mocks    chan<- *models.Mock
+	ccMu     sync.Mutex       // protects cc
+	cc       *grpc.ClientConn // reused for all streams on this TCP conn
+}
+
+// getClientConn returns the (lazily-constructed) grpc.ClientConn that
+// multiplexes over p.destConn.
+func (p *grpcRecordingProxy) getClientConn(ctx context.Context) (*grpc.ClientConn, error) {
+	p.ccMu.Lock()
+	defer p.ccMu.Unlock()
+
+	if p.cc != nil {
+		return p.cc, nil
+	}
+
+	dialer := func(context.Context, string) (net.Conn, error) { return p.destConn, nil }
+	cc, err := grpc.DialContext(
+		ctx, "",
+		grpc.WithContextDialer(dialer),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(grpc.ForceCodec(passthroughCodec{})),
+	)
+	if err != nil {
+		return nil, err
+	}
+	p.cc = cc
+	return cc, nil
+}
+
+// handler is the core of the proxy. It receives a call, forwards it, and records the interaction.
+func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStream) error {
+	startTime := time.Now()
+	fullMethod, _ := grpc.MethodFromServerStream(clientStream)
+	clientCtx := clientStream.Context()
+	md, _ := metadata.FromIncomingContext(clientCtx)
+
+	p.logger.Info("proxying gRPC request", zap.String("method", fullMethod), zap.Any("metadata", md))
+
+	// 1. Obtain (or create once) the grpc.ClientConn that sits on destConn
+	destClientConn, err := p.getClientConn(clientCtx)
+	if err != nil {
+		p.logger.Error("failed to dial destination server", zap.Error(err))
+		return status.Errorf(codes.Internal, "failed to connect to destination: %v", err)
+	}
+
+	// 2. Forward the call to the destination
+	downstreamCtx, cancelDownstream := context.WithCancel(clientCtx)
+	defer cancelDownstream()
+
+	// ── Clean metadata: gRPC forbids user-supplied pseudo headers ("*:").
+	cleanMD := metadata.New(nil)
+	for k, v := range md {
+		if strings.HasPrefix(k, ":") {
+			continue // strip pseudo-headers
+		}
+		cleanMD[k] = v
+	}
+	downstreamCtx = metadata.NewOutgoingContext(downstreamCtx, cleanMD)
+	destStream, err := destClientConn.NewStream(downstreamCtx, &grpc.StreamDesc{
+		StreamName:    fullMethod,
+		ServerStreams: true,
+		ClientStreams: true,
+	}, fullMethod)
+	if err != nil {
+		p.logger.Error("failed to create new stream to destination", zap.Error(err))
+		return status.Errorf(codes.Internal, "failed to create stream to destination: %v", err)
+	}
+
+	// 3. Goroutines to proxy data in both directions and capture it
+	var wg sync.WaitGroup
+	var reqErr, respErr error
+	var reqBuf, respBuf bytes.Buffer
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			reqMsg := new(rawMessage)
+			reqErr = clientStream.RecvMsg(reqMsg)
+			if reqErr == io.EOF {
+				destStream.CloseSend()
+				return
+			}
+			if reqErr != nil {
+				p.logger.Error("failed to receive message from client", zap.Error(reqErr))
+				cancelDownstream()
+				return
+			}
+			reqBuf.Write(reqMsg.data)
+			if err := destStream.SendMsg(reqMsg); err != nil {
+				p.logger.Error("failed to send message to destination", zap.Error(err))
+				reqErr = err
+				return
+			}
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		header, err := destStream.Header()
+		if err != nil {
+			p.logger.Warn("failed to get headers from destination stream", zap.Error(err))
+		}
+		if err := clientStream.SendHeader(header); err != nil {
+			p.logger.Error("failed to send headers to client", zap.Error(err))
+			respErr = err
+			return
+		}
+		for {
+			respMsg := new(rawMessage)
+			respErr = destStream.RecvMsg(respMsg)
+
+			switch {
+			case respErr == nil:
+				// normal message – relay it
+			case respErr == io.EOF:
+				return // clean finish
+			default:
+				// gRPC status error (business failure) is *expected*; just stop reading.
+				if _, ok := status.FromError(respErr); ok {
+					return
+				}
+				// real transport problem – still log it.
+				p.logger.Error("failed to receive message from destination",
+					zap.Error(respErr))
+				return
+			}
+			respBuf.Write(respMsg.data)
+			if err := clientStream.SendMsg(respMsg); err != nil {
+				p.logger.Error("failed to send message to client", zap.Error(err))
+				respErr = err
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+
+	// 4. Finalize and record
+	endTime := time.Now()
+	destTrailers := destStream.Trailer()
+	clientStream.SetTrailer(destTrailers)
+	// Treat normal end-of-stream (EOF) and context cancellation as success.
+	benign := func(err error) bool {
+		return err == nil || err == io.EOF || errors.Is(err, context.Canceled)
+	}
+	if !benign(reqErr) {
+		return status.Errorf(codes.Internal, "error during request forwarding: %v", reqErr)
+	}
+	// If the server returned a gRPC status, forward it unchanged.
+	if s, ok := status.FromError(respErr); ok && respErr != nil {
+		return s.Err()
+	}
+	// Otherwise, only treat non-benign transport errors as internal failures.
+	if !benign(respErr) {
+		return status.Errorf(codes.Internal,
+			"error during response forwarding: %v", respErr)
+	}
+
+	// Construct the mock
+	grpcReq := &models.GrpcReq{
+		Body:    createLengthPrefixedMessage(reqBuf.Bytes()),
+		Headers: p.grpcMetadataToHeaders(md, fullMethod, false),
+	}
+
+	respHeader, _ := destStream.Header()
+	grpcResp := &models.GrpcResp{
+		Body:     createLengthPrefixedMessage(respBuf.Bytes()),
+		Headers:  p.grpcMetadataToHeaders(respHeader, "", true),
+		Trailers: p.grpcMetadataToHeaders(destTrailers, "", true),
+	}
+
+	p.mocks <- &models.Mock{
+		Version: models.GetVersion(),
+		Name:    "mocks",
+		Kind:    models.GRPC_EXPORT,
+		Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "gRPC"},
+			GRPCReq:          grpcReq,
+			GRPCResp:         grpcResp,
+			ReqTimestampMock: startTime,
+			ResTimestampMock: endTime,
+		},
+	}
+	p.logger.Info("successfully recorded gRPC interaction", zap.String("method", fullMethod))
+
+	// Final safeguard – if the destination returned a non-nil gRPC status,
+	// propagate it *verbatim* to the client; otherwise handle it like before.
+	if s, ok := status.FromError(respErr); ok && respErr != nil {
+		return s.Err() // user-visible error (e.g. "user not found")
+	}
+	if !benign(respErr) {
+		// non-gRPC, unexpected transport error
+		return status.Errorf(codes.Internal,
+			"destination returned non-gRPC error: %v", respErr)
+	}
+
+	return nil
+}
+
+// grpcMetadataToHeaders converts gRPC metadata to Keploy's header format.
+func (p *grpcRecordingProxy) grpcMetadataToHeaders(md metadata.MD, fullMethod string, isResponse bool) models.GrpcHeaders {
+	hdr := models.GrpcHeaders{
+		PseudoHeaders:   make(map[string]string),
+		OrdinaryHeaders: make(map[string]string),
+	}
+
+	for k, v := range md {
+		val := strings.Join(v, ", ")
+		if strings.HasPrefix(k, ":") {
+			hdr.PseudoHeaders[k] = val
+		} else {
+			hdr.OrdinaryHeaders[k] = val
+		}
+	}
+
+	if !isResponse {
+		if _, ok := hdr.PseudoHeaders[":method"]; !ok {
+			hdr.PseudoHeaders[":method"] = "POST"
+		}
+		if _, ok := hdr.PseudoHeaders[":scheme"]; !ok {
+			hdr.PseudoHeaders[":scheme"] = "http"
+		}
+		if _, ok := hdr.PseudoHeaders[":path"]; !ok {
+			hdr.PseudoHeaders[":path"] = fullMethod
+		}
+	}
+	return hdr
+}
+
+=== replayconn.go ===
+package grpc
+
+import (
+	"bytes"
+	"net"
+)
+
+// replayConn first serves the bytes in buf, then falls through to Conn.
+type replayConn struct {
+	net.Conn
+	buf *bytes.Reader
+}
+
+func newReplayConn(initial []byte, c net.Conn) net.Conn {
+	return &replayConn{
+		Conn: c,
+		buf:  bytes.NewReader(initial),
+	}
+}
+
+func (r *replayConn) Read(p []byte) (int, error) {
+	if r.buf.Len() > 0 {
+		return r.buf.Read(p)
+	}
+	return r.Conn.Read(p)
+}
+

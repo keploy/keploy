@@ -165,6 +165,9 @@ func (s *grpcMockServer) grpcMetadataToHeaders(md metadata.MD, fullMethod string
 			hdr.OrdinaryHeaders[k] = val
 		}
 	}
+	// Stabilise the header set so it matches what was recorded
+	hdr.OrdinaryHeaders["te"] = "trailers"
+
 	// The grpc server framework consumes pseudo-headers, so we must add them back.
 	if method, ok := hdr.PseudoHeaders[":method"]; !ok || method == "" {
 		hdr.PseudoHeaders[":method"] = "POST"
