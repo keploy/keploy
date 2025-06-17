@@ -17,8 +17,10 @@ import (
 
 // mockOutgoing starts a gRPC server to mock responses for an incoming connection.
 func mockOutgoing(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mockDb integrations.MockMemDb) error {
+	// Always close the socket when we return.
 	defer func() {
-		if err := clientConn.Close(); err != nil {
+		if err := clientConn.Close(); err != nil &&
+			!strings.Contains(err.Error(), "use of closed network connection") {
 			logger.Error("failed to close client connection in mock mode", zap.Error(err))
 		}
 	}()
@@ -37,24 +39,33 @@ func mockOutgoing(ctx context.Context, logger *zap.Logger, clientConn net.Conn, 
 	// Use a single-connection listener to serve the mock on the given connection.
 	lis := newSingleConnListener(clientConn)
 	logger.Info("starting mock gRPC server")
+	// Run Serve in its own goroutine so we can stop it when the context is done.
+	srvErr := make(chan error, 1)
+	go func() { srvErr <- srv.Serve(lis) }()
 
-	err := srv.Serve(lis)
-	if err != nil {
-		// EOF is expected when the client closes the connection.
-		if err == io.EOF {
+	select {
+	case <-ctx.Done():
+		// Parent context cancelled (Ctrl-C, timeout, etc.).
+		go srv.GracefulStop()
+		<-srvErr // wait for Serve to return
+		return ctx.Err()
+
+	case err := <-srvErr:
+		// Serve returned on its own (connection closed, reset, etc.).
+		switch {
+		case err == nil,
+			err == io.EOF,
+			strings.Contains(err.Error(), "use of closed network connection"):
 			logger.Debug("client connection closed (EOF)")
 			return nil
-		}
-		// A reset error is also common if the client terminates abruptly.
-		if strings.Contains(err.Error(), "connection reset by peer") {
+		case strings.Contains(err.Error(), "connection reset by peer"):
 			logger.Warn("client connection was reset by peer")
 			return nil
+		default:
+			logger.Error("mock gRPC server failed", zap.Error(err))
+			return err
 		}
-		logger.Error("mock gRPC server failed", zap.Error(err))
-		return err
 	}
-	logger.Info("mock gRPC server stopped gracefully")
-	return nil
 }
 
 // grpcMockServer implements the gRPC unknown service handler to mock responses.

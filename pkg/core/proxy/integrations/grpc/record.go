@@ -1,7 +1,9 @@
 package grpc
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"strings"
@@ -20,20 +22,26 @@ import (
 // recordOutgoing starts a gRPC proxy to record a session.
 func recordOutgoing(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, mocks chan<- *models.Mock) error {
 	// Ensure connections are closed on exit
-	defer func() {
-		if err := clientConn.Close(); err != nil {
-			logger.Error("failed to close client connection in record mode", zap.Error(err))
-		}
-		if err := destConn.Close(); err != nil {
-			logger.Error("failed to close destination connection in record mode", zap.Error(err))
-		}
-	}()
-
 	proxy := &grpcRecordingProxy{
 		logger:   logger,
 		destConn: destConn,
 		mocks:    mocks,
 	}
+
+	defer func() {
+		if err := clientConn.Close(); err != nil &&
+			!strings.Contains(err.Error(), "use of closed network connection") {
+			logger.Error("failed to close client connection in record mode", zap.Error(err))
+		}
+		if err := destConn.Close(); err != nil &&
+			!strings.Contains(err.Error(), "use of closed network connection") {
+			logger.Error("failed to close destination connection in record mode", zap.Error(err))
+		}
+		// Close the grpc.ClientConn if it was created.
+		if proxy.cc != nil {
+			proxy.cc.Close()
+		}
+	}()
 
 	// Create a gRPC server to handle the client's request
 	srv := grpc.NewServer(
@@ -44,14 +52,29 @@ func recordOutgoing(ctx context.Context, logger *zap.Logger, clientConn, destCon
 	lis := newSingleConnListener(clientConn)
 	logger.Info("starting recording gRPC proxy server")
 
-	err := srv.Serve(lis)
-	if err != nil && err != io.EOF && !strings.Contains(err.Error(), "connection reset by peer") {
-		logger.Error("gRPC recording proxy server failed", zap.Error(err))
-		return err
+	srvErr := make(chan error, 1)
+	go func() { srvErr <- srv.Serve(lis) }()
+
+	select {
+	case <-ctx.Done():
+		// Gracefully shut down once the recorder context is cancelled.
+		go srv.GracefulStop()
+		<-srvErr
+		return ctx.Err()
+	case err := <-srvErr:
+		switch {
+		case err == nil,
+			err == io.EOF,
+			strings.Contains(err.Error(), "connection reset by peer"),
+			strings.Contains(err.Error(), "use of closed network connection"):
+			logger.Info("gRPC recording proxy stopped gracefully")
+			return nil
+		default:
+			logger.Error("gRPC recording proxy server failed", zap.Error(err))
+			return err
+		}
 	}
 
-	logger.Info("gRPC recording proxy stopped gracefully")
-	return nil
 }
 
 // grpcRecordingProxy proxies gRPC calls, recording the request and response.
@@ -59,6 +82,32 @@ type grpcRecordingProxy struct {
 	logger   *zap.Logger
 	destConn net.Conn
 	mocks    chan<- *models.Mock
+	ccMu     sync.Mutex       // protects cc
+	cc       *grpc.ClientConn // reused for all streams on this TCP conn
+}
+
+// getClientConn returns the (lazily-constructed) grpc.ClientConn that
+// multiplexes over p.destConn.
+func (p *grpcRecordingProxy) getClientConn(ctx context.Context) (*grpc.ClientConn, error) {
+	p.ccMu.Lock()
+	defer p.ccMu.Unlock()
+
+	if p.cc != nil {
+		return p.cc, nil
+	}
+
+	dialer := func(context.Context, string) (net.Conn, error) { return p.destConn, nil }
+	cc, err := grpc.DialContext(
+		ctx, "",
+		grpc.WithContextDialer(dialer),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(grpc.ForceCodec(passthroughCodec{})),
+	)
+	if err != nil {
+		return nil, err
+	}
+	p.cc = cc
+	return cc, nil
 }
 
 // handler is the core of the proxy. It receives a call, forwards it, and records the interaction.
@@ -70,26 +119,26 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 
 	p.logger.Info("proxying gRPC request", zap.String("method", fullMethod), zap.Any("metadata", md))
 
-	// 1. Create a client connection to the destination server
-	dialer := func(context.Context, string) (net.Conn, error) {
-		return p.destConn, nil
-	}
-	destClientConn, err := grpc.DialContext(clientCtx, "",
-		grpc.WithContextDialer(dialer),
-		grpc.WithTransportCredentials(insecure.NewCredentials()), // We are proxying, not terminating TLS
-		grpc.WithDefaultCallOptions(grpc.ForceCodec(new(rawCodec))),
-	)
+	// 1. Obtain (or create once) the grpc.ClientConn that sits on destConn
+	destClientConn, err := p.getClientConn(clientCtx)
 	if err != nil {
 		p.logger.Error("failed to dial destination server", zap.Error(err))
 		return status.Errorf(codes.Internal, "failed to connect to destination: %v", err)
 	}
-	defer destClientConn.Close()
 
 	// 2. Forward the call to the destination
 	downstreamCtx, cancelDownstream := context.WithCancel(clientCtx)
 	defer cancelDownstream()
 
-	downstreamCtx = metadata.NewOutgoingContext(downstreamCtx, md.Copy())
+	// ── Clean metadata: gRPC forbids user-supplied pseudo headers ("*:").
+	cleanMD := metadata.New(nil)
+	for k, v := range md {
+		if strings.HasPrefix(k, ":") {
+			continue // strip pseudo-headers
+		}
+		cleanMD[k] = v
+	}
+	downstreamCtx = metadata.NewOutgoingContext(downstreamCtx, cleanMD)
 	destStream, err := destClientConn.NewStream(downstreamCtx, &grpc.StreamDesc{
 		StreamName:    fullMethod,
 		ServerStreams: true,
@@ -103,7 +152,7 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 	// 3. Goroutines to proxy data in both directions and capture it
 	var wg sync.WaitGroup
 	var reqErr, respErr error
-	var reqBody, respBody []byte
+	var reqBuf, respBuf bytes.Buffer
 
 	wg.Add(1)
 	go func() {
@@ -120,7 +169,7 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 				cancelDownstream()
 				return
 			}
-			reqBody = reqMsg.data
+			reqBuf.Write(reqMsg.data)
 			if err := destStream.SendMsg(reqMsg); err != nil {
 				p.logger.Error("failed to send message to destination", zap.Error(err))
 				reqErr = err
@@ -147,11 +196,11 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 			if respErr == io.EOF {
 				return
 			}
-			if respErr != nil {
+			if respErr != nil && respErr != io.EOF {
 				p.logger.Error("failed to receive message from destination", zap.Error(respErr))
 				return
 			}
-			respBody = respMsg.data
+			respBuf.Write(respMsg.data)
 			if err := clientStream.SendMsg(respMsg); err != nil {
 				p.logger.Error("failed to send message to client", zap.Error(err))
 				respErr = err
@@ -166,23 +215,26 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 	endTime := time.Now()
 	destTrailers := destStream.Trailer()
 	clientStream.SetTrailer(destTrailers)
-
-	if reqErr != nil && reqErr != io.EOF {
+	// Treat normal end-of-stream (EOF) and context cancellation as success.
+	benign := func(err error) bool {
+		return err == nil || err == io.EOF || errors.Is(err, context.Canceled)
+	}
+	if !benign(reqErr) {
 		return status.Errorf(codes.Internal, "error during request forwarding: %v", reqErr)
 	}
-	if respErr != nil && respErr != io.EOF {
+	if !benign(respErr) {
 		return status.Errorf(codes.Internal, "error during response forwarding: %v", respErr)
 	}
 
 	// Construct the mock
 	grpcReq := &models.GrpcReq{
-		Body:    createLengthPrefixedMessage(reqBody),
+		Body:    createLengthPrefixedMessage(reqBuf.Bytes()),
 		Headers: p.grpcMetadataToHeaders(md, fullMethod, false),
 	}
 
 	respHeader, _ := destStream.Header()
 	grpcResp := &models.GrpcResp{
-		Body:     createLengthPrefixedMessage(respBody),
+		Body:     createLengthPrefixedMessage(respBuf.Bytes()),
 		Headers:  p.grpcMetadataToHeaders(respHeader, "", true),
 		Trailers: p.grpcMetadataToHeaders(destTrailers, "", true),
 	}
@@ -201,11 +253,13 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 	}
 	p.logger.Info("successfully recorded gRPC interaction", zap.String("method", fullMethod))
 
-	if respErr != nil {
+	// Final safeguard – ignore benign EOF / cancellation here as well.
+	if !benign(respErr) {
 		if s, ok := status.FromError(respErr); ok {
 			return s.Err()
 		}
-		return status.Errorf(codes.Internal, "destination returned non-gRPC error: %v", respErr)
+		return status.Errorf(codes.Internal,
+			"destination returned non-gRPC error: %v", respErr)
 	}
 
 	return nil

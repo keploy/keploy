@@ -54,3 +54,21 @@ func (c *rawCodec) Name() string {
 func (c *rawCodec) String() string {
 	return c.Name()
 }
+
+// passthroughCodec keeps 'proto' on the wire but avoids re-encoding.
+type passthroughCodec struct{}
+
+func (passthroughCodec) Name() string { return "proto" } // server already knows this one
+func (passthroughCodec) Marshal(v interface{}) ([]byte, error) {
+	if m, ok := v.(*rawMessage); ok {
+		return m.data, nil // send bytes exactly as we received them
+	}
+	return proto.Marshal(v.(proto.Message))
+}
+func (passthroughCodec) Unmarshal(data []byte, v interface{}) error {
+	if m, ok := v.(*rawMessage); ok {
+		m.data = append([]byte(nil), data...)
+		return nil
+	}
+	return proto.Unmarshal(data, v.(proto.Message))
+}

@@ -24,5 +24,8 @@ func createLengthPrefixedMessage(data []byte) models.GrpcLengthPrefixedMessage {
 // createPayloadFromLengthPrefixedMessage extracts the raw message payload from a GrpcLengthPrefixedMessage.
 func createPayloadFromLengthPrefixedMessage(msg models.GrpcLengthPrefixedMessage) ([]byte, error) {
 	// The data is stored as a string, so we just cast it back to a byte slice.
-	return []byte(msg.DecodedData), nil
+	// Return a copy so the caller can mutate safely.
+	buf := make([]byte, len(msg.DecodedData))
+	copy(buf, msg.DecodedData)
+	return buf, nil
 }
