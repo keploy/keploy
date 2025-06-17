@@ -286,25 +286,35 @@ var ConfigGuide = `
 
 // AskForConfirmation asks the user for confirmation. A user must type in "yes" or "no" and
 // then press enter. It has fuzzy matching, so "y", "Y", "yes", "YES", and "Yes" all count as
-// confirmations. If the input is not recognized, exit gracefully as "no".
-func AskForConfirmation(s string) (bool, error) {
+// confirmations. If the input is not recognized or interrupted, exit gracefully as "no".
+func AskForConfirmation(ctx context.Context, s string) (bool, error) {
 	reader := bufio.NewReader(os.Stdin)
 
 	fmt.Printf("%s [y/n]: ", s)
 
-	response, err := reader.ReadString('\n')
-	if err != nil {
-		return false, err
-	}
+	respCh := make(chan string, 1)
+	errCh := make(chan error, 1)
 
-	response = strings.ToLower(strings.TrimSpace(response))
+	go func() {
+		response, err := reader.ReadString('\n')
+		if err != nil {
+			errCh <- err
+		} else {
+			respCh <- response
+		}
+	}()
 
-	switch response {
-	case "y", "yes":
-		return true, nil
-	case "n", "no":
+	select {
+	case <-ctx.Done():
+		// Cobra caught SIGINT (Ctrl+C) and cancelled its root context
 		return false, nil
-	default:
+	case err := <-errCh:
+		return false, err
+	case response := <-respCh:
+		response = strings.ToLower(strings.TrimSpace(response))
+		if response == "y" || response == "yes" {
+			return true, nil
+		}
 		return false, nil
 	}
 }
