@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v2/pkg"
@@ -156,31 +157,43 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 	if !o.config.InCi {
 		o.logger.Info("Re-record was successfull. Do you want to remove the older testsets? (y/n)", zap.Any("testsets", SelectedTests))
 		reader := bufio.NewReader(os.Stdin)
-		input, err := reader.ReadString('\n')
-		if err != nil {
-			o.logger.Warn("Failed to read input. The older testsets will be kept.")
-			return nil
-		}
+		maxRetries := 3
+		
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			input, err := reader.ReadString('\n')
+			if err != nil {
+				o.logger.Warn("Failed to read input. The older testsets will be kept.")
+				return nil
+			}
 
-		if len(input) == 0 {
-			o.logger.Warn("Empty input. The older testsets will be kept.")
-			return nil
-		}
-		// Trimming the newline character for cleaner switch statement
-		input = input[:len(input)-1]
-		switch input {
-		case "y", "Y":
-			for _, testSet := range SelectedTests {
-				err := o.replay.DeleteTestSet(ctx, testSet)
-				if err != nil {
-					o.logger.Warn("Failed to delete the testset", zap.String("testset", testSet))
+			if len(input) == 0 {
+				o.logger.Warn("Empty input. The older testsets will be kept.")
+				return nil
+			}
+			
+			// Trimming the newline character for cleaner switch statement
+			input = strings.TrimSpace(input)
+			switch input {
+			case "y", "Y":
+				for _, testSet := range SelectedTests {
+					err := o.replay.DeleteTestSet(ctx, testSet)
+					if err != nil {
+						o.logger.Warn("Failed to delete the testset", zap.String("testset", testSet))
+					}
+				}
+				o.logger.Info("Deleted the older testsets successfully")
+				return nil
+			case "n", "N":
+				o.logger.Info("skipping the deletion of older testsets")
+				return nil
+			default:
+				if attempt < maxRetries {
+					fmt.Printf("Invalid input '%s'. Please enter 'y'/'Y' or 'n'/'N'. Attempt %d/%d\n", input, attempt, maxRetries)
+				} else {
+					o.logger.Warn("Invalid input. Maximum attempts reached. The older testsets will be kept.")
+					return nil
 				}
 			}
-			o.logger.Info("Deleted the older testsets successfully")
-		case "n", "N":
-			o.logger.Info("skipping the deletion of older testsets")
-		default:
-			o.logger.Warn("Invalid input. The older testsets will be kept.")
 		}
 	}
 	return nil
@@ -314,18 +327,32 @@ func (o *Orchestrator) checkForTemplates(ctx context.Context, testSets []string)
 	o.config.Templatize.TestSets = nonTemplatized
 	o.logger.Warn("The following testSets are not templatized. Do you want to templatize them to handle noisy fields?(y/n)", zap.Any("testSets:", nonTemplatized))
 	reader := bufio.NewReader(os.Stdin)
-	input, err := reader.ReadString('\n')
-	if err != nil {
-		o.logger.Warn("failed to read input. Skipping templatization")
-	}
-	if input == "n\n" || input == "N\n" {
-		o.logger.Info("skipping templatization")
-		return
-	}
-
-	if input == "y\n" || input == "Y\n" {
-		if err := o.tools.Templatize(ctx); err != nil {
-			utils.LogError(o.logger, err, "failed to templatize test cases, skipping templatization")
+	maxRetries := 3
+	
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			o.logger.Warn("failed to read input. Skipping templatization")
+			return
+		}
+		
+		input = strings.TrimSpace(input)
+		switch input {
+		case "n", "N":
+			o.logger.Info("skipping templatization")
+			return
+		case "y", "Y":
+			if err := o.tools.Templatize(ctx); err != nil {
+				utils.LogError(o.logger, err, "failed to templatize test cases, skipping templatization")
+			}
+			return
+		default:
+			if attempt < maxRetries {
+				fmt.Printf("Invalid input '%s'. Please enter 'y'/'Y' or 'n'/'N'. Attempt %d/%d\n", input, attempt, maxRetries)
+			} else {
+				o.logger.Warn("Invalid input. Maximum attempts reached. Skipping templatization.")
+				return
+			}
 		}
 	}
 }
