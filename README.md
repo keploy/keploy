@@ -170,3 +170,10 @@ Whether you're a newbie coder or a wizard 🧙‍♀️, your perspective is gol
 ⚙️ [Installation Guide](https://keploy.io/docs/application-development/)
 
 📖 [Contribution Guide](https://keploy.io/docs/keploy-explained/contribution-guide/)
+
+## 📦 Installation
+
+To install Keploy, make sure you have Go installed, then run:
+
+```bash
+go install github.com/keploy/keploy@latest
