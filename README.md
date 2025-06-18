@@ -36,7 +36,7 @@
 </h4>
 
 
-[Keploy](https://keploy.io) is **developer-centric** API testing tool that creates **tests along with built-in-mocks**, faster than unit tests.
+[Keploy](https://keploy.io) is a **developer-centric** API testing tool that creates **tests along with built-in-mocks**, faster than unit tests.
 
 Keploy not only records API calls, but also records database calls and replays them during testing, making it **easy to use, powerful, and extensible**.
 
