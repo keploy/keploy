@@ -145,7 +145,7 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 	// Get the name of the operating system.
 	osName := runtime.GOOS
 	//TODO: configure the hardcoded port mapping
-	img := DockerConfig.DockerImage + ":v" + utils.Version
+	img := DockerConfig.DockerImage + ":" + utils.Version
 	logger.Info("Starting keploy in docker with image", zap.String("image:", img))
 	envs := GenerateDockerEnvs(DockerConfig)
 	if envs != "" {
