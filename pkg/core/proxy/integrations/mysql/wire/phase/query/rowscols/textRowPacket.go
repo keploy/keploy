@@ -90,7 +90,7 @@ func DecodeTextRow(_ context.Context, _ *zap.Logger, data []byte, columns []*mys
 			layout := "2006-01-02 15:04:05"
 			t, err := time.Parse(layout, dateTimeStr)
 			if err != nil {
-				return nil, 0, fmt.Errorf("failed to parse the datetime/timestamp string")
+				return nil, 0, fmt.Errorf("failed to parse the datetime/timestamp string: received %s, expected format %s", dateTimeStr, layout)
 			}
 
 			year, month, day := t.Date()
