@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 
 	"go.keploy.io/server/v2/config"
@@ -35,6 +36,9 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 
 			if isGenerate {
 				filePath := filepath.Join(cfg.Path, "keploy.yml")
+				fmt.Println("DEBUG: cfg.InCi =", cfg.InCi)
+				fmt.Println("DEBUG: filePath =", filePath)
+				fmt.Println("DEBUG: file exists =", utils.CheckFileExists(filePath))
 				if !cfg.InCi && utils.CheckFileExists(filePath) {
 					override, err := utils.AskForConfirmation("Config file already exists. Do you want to override it?")
 					if err != nil {

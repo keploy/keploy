@@ -290,26 +290,22 @@ var ConfigGuide = `
 // until it gets a valid response from the user.
 func AskForConfirmation(s string) (bool, error) {
 	reader := bufio.NewReader(os.Stdin)
-
-	for {
-		fmt.Printf("%s [y/n]: ", s)
-
-		response, err := reader.ReadString('\n')
-		if err != nil {
-			return false, err
-		}
-
-		response = strings.ToLower(strings.TrimSpace(response))
-
-		switch response {
-		case "y", "yes":
-			return true, nil
-		case "n", "no":
-			return false, nil
-		}
+	fmt.Printf("%s [y/n]: ", s)
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		return false, err
+	}
+	response = strings.ToLower(strings.TrimSpace(response))
+	switch response {
+	case "y", "yes":
+		return true, nil
+	case "n", "no":
+		return false, nil
+	default:
+		fmt.Println("Invalid input. Exiting...")
+		return false, errors.New("invalid confirmation input")
 	}
 }
-
 func CheckFileExists(path string) bool {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return false
