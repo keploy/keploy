@@ -327,7 +327,6 @@ func AskForConfirmation(s string) (bool, error) {
 			return false, errors.New("invalid confirmation input")
 		}
 	}
-	return false, errors.New("unexpected confirmation input handling")
 }
 
 func CheckFileExists(path string) bool {
