@@ -286,12 +286,13 @@ var ConfigGuide = `
 
 // AskForConfirmation asks the user for confirmation. A user must type in "yes" or "no" and
 // then press enter. It has fuzzy matching, so "y", "Y", "yes", "YES", and "Yes" all count as
-// confirmations. If the input is not recognized, it will ask again. The function does not return
-// until it gets a valid response from the user.
+// confirmations. If the input is not recognized, it will ask again up to 3 times before defaulting to "no".
+// The function provides clear feedback for invalid input and allows graceful exit.
 func AskForConfirmation(s string) (bool, error) {
 	reader := bufio.NewReader(os.Stdin)
+	maxRetries := 3
 
-	for {
+	for attempt := 1; attempt <= maxRetries; attempt++ {
 		fmt.Printf("%s [y/n]: ", s)
 
 		response, err := reader.ReadString('\n')
@@ -306,8 +307,18 @@ func AskForConfirmation(s string) (bool, error) {
 			return true, nil
 		case "n", "no":
 			return false, nil
+		default:
+			if attempt < maxRetries {
+				fmt.Printf("Invalid input '%s'. Please enter 'y'/'yes' or 'n'/'no'. Attempt %d/%d\n", response, attempt, maxRetries)
+			} else {
+				fmt.Printf("Invalid input '%s'. Maximum attempts reached. Defaulting to 'no'.\n", response)
+				return false, nil
+			}
 		}
 	}
+
+	// This should never be reached, but just in case
+	return false, nil
 }
 
 func CheckFileExists(path string) bool {

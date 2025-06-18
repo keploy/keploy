@@ -298,14 +298,33 @@ func (pi *PostmanImporter) scanForEmptyResponses(collection *PostmanCollectionSt
 
 func (pi *PostmanImporter) promptUserForCapture() bool {
 	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("Some responses are empty. We need to hit the server to record these responses. Is your server running? (yes/no): ")
-	response, err := reader.ReadString('\n')
-	if err != nil {
-		pi.logger.Error("Failed to read user input", zap.Error(err))
-		return false
+	maxRetries := 3
+	
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		fmt.Print("Some responses are empty. We need to hit the server to record these responses. Is your server running? (yes/no): ")
+		response, err := reader.ReadString('\n')
+		if err != nil {
+			pi.logger.Error("Failed to read user input", zap.Error(err))
+			return false
+		}
+		response = strings.TrimSpace(strings.ToLower(response))
+		
+		switch response {
+		case "yes", "y":
+			return true
+		case "no", "n":
+			return false
+		default:
+			if attempt < maxRetries {
+				fmt.Printf("Invalid input '%s'. Please enter 'yes'/'y' or 'no'/'n'. Attempt %d/%d\n", response, attempt, maxRetries)
+			} else {
+				fmt.Printf("Invalid input '%s'. Maximum attempts reached. Defaulting to 'no'.\n", response)
+				return false
+			}
+		}
 	}
-	response = strings.TrimSpace(strings.ToLower(response))
-	return response == "yes"
+	
+	return false
 }
 
 func (pi *PostmanImporter) processEmptyResponse(testItem *TestData, globalVariables map[string]string, basePath string) error {
