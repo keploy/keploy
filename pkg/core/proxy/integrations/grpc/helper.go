@@ -34,7 +34,8 @@ func createLengthPrefixedMessage(data []byte) models.GrpcLengthPrefixedMessage {
 // the .proto file.  It is good enough for inspection & matching.
 func prettyPrintWire(b []byte, indent int) string {
 	var buf bytes.Buffer
-	writeIndent := func() { buf.WriteString(strings.Repeat("  ", indent)) }
+	indentPrefix := strings.Repeat("  ", indent)
+	writeIndent := func() { buf.WriteString(indentPrefix) }
 
 	for len(b) > 0 {
 		num, wt, n := protowire.ConsumeTag(b)

@@ -5,6 +5,7 @@ package grpc
 import (
 	"context"
 	"io"
+	"math"
 	"net"
 	"strconv"
 	"strings"
@@ -126,8 +127,14 @@ func (s *grpcMockServer) handler(_ interface{}, stream grpc.ServerStream) error 
 
 	// --- Determine final gRPC status --------------------------------------
 	scStr := grpcResp.Trailers.OrdinaryHeaders["grpc-status"]
-	scInt, _ := strconv.Atoi(scStr)        // bad/missing ⇒ 0 (codes.OK)
-	finalCode := codes.Code(uint32(scInt)) // 0 ⇒ OK
+	scInt, err := strconv.Atoi(scStr) // bad/missing ⇒ 0 (codes.OK)
+	var finalCode codes.Code
+	if err != nil || scInt < 0 || scInt > math.MaxUint32 {
+		s.logger.Warn("invalid grpc-status value, defaulting to codes.OK", zap.String("grpc-status", scStr))
+		finalCode = codes.OK
+	} else {
+		finalCode = codes.Code(uint32(scInt)) // 0 ⇒ OK
+	}
 	finalMsg := grpcResp.Trailers.OrdinaryHeaders["grpc-message"]
 	// Send headers
 	respMd := s.headersToGrpcMetadata(grpcResp.Headers)

@@ -48,7 +48,10 @@ func recordOutgoing(ctx context.Context, logger *zap.Logger, clientConn, destCon
 		}
 		// Close the grpc.ClientConn if it was created.
 		if proxy.cc != nil {
-			proxy.cc.Close()
+			err := proxy.cc.Close()
+			if err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
+				logger.Error("failed to close gRPC client connection in record mode", zap.Error(err))
+			}
 		}
 	}()
 
@@ -107,8 +110,8 @@ func (p *grpcRecordingProxy) getClientConn(ctx context.Context) (*grpc.ClientCon
 	}
 
 	dialer := func(context.Context, string) (net.Conn, error) { return p.destConn, nil }
-	cc, err := grpc.DialContext(
-		ctx, "",
+	cc, err := grpc.NewClient(
+		"",
 		grpc.WithContextDialer(dialer),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithDefaultCallOptions(grpc.ForceCodec(passthroughCodec{})),
@@ -175,7 +178,11 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 			reqMsg := new(rawMessage)
 			reqErr = clientStream.RecvMsg(reqMsg)
 			if reqErr == io.EOF {
-				destStream.CloseSend()
+				err := destStream.CloseSend()
+				if err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
+					p.logger.Error("failed to close send stream to destination", zap.Error(err))
+					cancelDownstream()
+				}
 				return
 			}
 			if reqErr != nil {
@@ -208,10 +215,10 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 			respMsg := new(rawMessage)
 			respErr = destStream.RecvMsg(respMsg)
 
-			switch {
-			case respErr == nil:
+			switch respErr {
+			case nil:
 				// normal message – relay it
-			case respErr == io.EOF:
+			case io.EOF:
 				return // clean finish
 			default:
 				// gRPC status error (business failure) is *expected*; just stop reading.
