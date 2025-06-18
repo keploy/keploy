@@ -291,24 +291,26 @@ var ConfigGuide = `
 func AskForConfirmation(s string) (bool, error) {
 	reader := bufio.NewReader(os.Stdin)
 
-	for {
-		fmt.Printf("%s [y/n]: ", s)
+	fmt.Printf("%s [y/n]: ", s)
 
-		response, err := reader.ReadString('\n')
-		if err != nil {
-			return false, err
-		}
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		return false, err
+	}
 
-		response = strings.ToLower(strings.TrimSpace(response))
+	response = strings.ToLower(strings.TrimSpace(response))
 
-		switch response {
-		case "y", "yes":
-			return true, nil
-		case "n", "no":
-			return false, nil
-		}
+	switch response {
+	case "y", "yes":
+		return true, nil
+	case "n", "no":
+		return false, nil
+	default:
+		fmt.Println("Invalid input. Expected 'y' or 'n'. Exiting.")
+		return false, errors.New("invalid input")
 	}
 }
+
 
 func CheckFileExists(path string) bool {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
