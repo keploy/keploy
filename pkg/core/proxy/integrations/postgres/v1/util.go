@@ -382,44 +382,108 @@ func getChandedDataRow(input string) (string, error) {
 }
 
 func decodePgRequest(buffer []byte, logger *zap.Logger) *models.Backend {
+	// Safety check for buffer length
+	if len(buffer) < 5 {
+		logger.Debug("postgres request buffer too short", zap.Int("length", len(buffer)))
+		return nil
+	}
 
 	pg := NewBackend()
 
 	if !isStartupPacket(buffer) && len(buffer) > 5 {
 		bufferCopy := buffer
 		for i := 0; i < len(bufferCopy)-5; {
-			pg.BackendWrapper.MsgType = buffer[i]
-			pg.BackendWrapper.BodyLen = int(binary.BigEndian.Uint32(buffer[i+1:])) - 4
-			if len(buffer) < (i + pg.BackendWrapper.BodyLen + 5) {
-				logger.Debug("failed to translate the postgres request message due to shorter network packet buffer")
+			// Safety check for remaining buffer
+			if i+5 >= len(buffer) {
+				logger.Debug("insufficient buffer for message header at position", zap.Int("position", i))
 				break
 			}
+
+			pg.BackendWrapper.MsgType = buffer[i]
+
+			// Validate message type before proceeding
+			validTypes := "BCDEFfcdHPpQSX"
+			isValidType := false
+			for _, t := range validTypes {
+				if pg.BackendWrapper.MsgType == byte(t) {
+					isValidType = true
+					break
+				}
+			}
+
+			if !isValidType {
+				logger.Debug("invalid message type encountered",
+					zap.String("type", string(pg.BackendWrapper.MsgType)),
+					zap.Int("position", i))
+				break
+			}
+
+			// Safe body length extraction
+			if i+5 > len(buffer) {
+				logger.Debug("insufficient buffer for message length", zap.Int("position", i))
+				break
+			}
+
+			pg.BackendWrapper.BodyLen = int(binary.BigEndian.Uint32(buffer[i+1:])) - 4
+
+			// Validate body length
+			if pg.BackendWrapper.BodyLen < 0 || pg.BackendWrapper.BodyLen > 1000000 { // 1MB limit
+				logger.Debug("invalid body length",
+					zap.Int("body_length", pg.BackendWrapper.BodyLen),
+					zap.Int("position", i))
+				break
+			}
+
+			if len(buffer) < (i + pg.BackendWrapper.BodyLen + 5) {
+				logger.Debug("failed to translate the postgres request message due to shorter network packet buffer",
+					zap.Int("required_length", i+pg.BackendWrapper.BodyLen+5),
+					zap.Int("buffer_length", len(buffer)))
+				break
+			}
+
 			msg, err := pg.translateToReadableBackend(buffer[i:(i + pg.BackendWrapper.BodyLen + 5)])
 			if err != nil && buffer[i] != 112 {
-				logger.Debug("failed to translate the request message to readable", zap.Error(err))
-			}
-			if pg.BackendWrapper.MsgType == 'p' {
-				pg.BackendWrapper.PasswordMessage = *msg.(*pgproto3.PasswordMessage)
-			}
-
-			if pg.BackendWrapper.MsgType == 'P' {
-				pg.BackendWrapper.Parse = *msg.(*pgproto3.Parse)
-				pg.BackendWrapper.Parses = append(pg.BackendWrapper.Parses, pg.BackendWrapper.Parse)
+				logger.Debug("failed to translate the request message to readable",
+					zap.Error(err),
+					zap.String("message_type", string(pg.BackendWrapper.MsgType)),
+					zap.Int("position", i))
+				// Continue processing instead of breaking completely
+				i += 5 + pg.BackendWrapper.BodyLen
+				continue
 			}
 
-			if pg.BackendWrapper.MsgType == 'B' {
-				pg.BackendWrapper.Bind = *msg.(*pgproto3.Bind)
-				pg.BackendWrapper.Binds = append(pg.BackendWrapper.Binds, pg.BackendWrapper.Bind)
-			}
-
-			if pg.BackendWrapper.MsgType == 'E' {
-				pg.BackendWrapper.Execute = *msg.(*pgproto3.Execute)
-				pg.BackendWrapper.Executes = append(pg.BackendWrapper.Executes, pg.BackendWrapper.Execute)
+			// Safe message type casting with validation
+			switch pg.BackendWrapper.MsgType {
+			case 'p':
+				if passwordMsg, ok := msg.(*pgproto3.PasswordMessage); ok {
+					pg.BackendWrapper.PasswordMessage = *passwordMsg
+				}
+			case 'P':
+				if parseMsg, ok := msg.(*pgproto3.Parse); ok {
+					pg.BackendWrapper.Parse = *parseMsg
+					pg.BackendWrapper.Parses = append(pg.BackendWrapper.Parses, pg.BackendWrapper.Parse)
+				}
+			case 'B':
+				if bindMsg, ok := msg.(*pgproto3.Bind); ok {
+					pg.BackendWrapper.Bind = *bindMsg
+					pg.BackendWrapper.Binds = append(pg.BackendWrapper.Binds, pg.BackendWrapper.Bind)
+				}
+			case 'E':
+				if executeMsg, ok := msg.(*pgproto3.Execute); ok {
+					pg.BackendWrapper.Execute = *executeMsg
+					pg.BackendWrapper.Executes = append(pg.BackendWrapper.Executes, pg.BackendWrapper.Execute)
+				}
 			}
 
 			pg.BackendWrapper.PacketTypes = append(pg.BackendWrapper.PacketTypes, string(pg.BackendWrapper.MsgType))
 
 			i += 5 + pg.BackendWrapper.BodyLen
+		}
+
+		// Only return a mock if we successfully processed at least one packet
+		if len(pg.BackendWrapper.PacketTypes) == 0 {
+			logger.Debug("no valid packets processed in postgres request")
+			return nil
 		}
 
 		pgMock := &models.Backend{
