@@ -93,6 +93,23 @@ When we merge your PR, a new build automatically occurs and your changes publish
 Keploy is written in `Go` (Golang) and leverages Go Modules. Relevant coding style guidelines are the [Go Code Review Comments](https://code.google.com/p/go-wiki/wiki/CodeReviewComments) and the _Formatting and style_ section of Peter Bourgon's [Go: Best
 Practices for Production Environments](https://peter.bourgon.org/go-in-production/#formatting-and-style).
 
+---
+
+## 🧭 Step-by-Step Guide for First-Time Contributors
+
+This section is specially written to help first-time contributors make their first PR to Keploy smoothly.
+
+### 1. 🍴 Fork the Repository
+Click the **Fork** button at the top-right corner of [Keploy GitHub repo](https://github.com/keploy/keploy) to create your own copy.
+
+### 2. 📥 Clone Your Fork
+Copy the HTTPS URL of your fork (e.g., `https://github.com/<your-username>/keploy.git`) and run:
+
+```bash
+git clone https://github.com/<your-username>/keploy.git
+cd keploy
+
+
 There are many ways in which you can contribute to Keploy.
 
 ###  <a name="keploy-server">Keploy Server</a>
