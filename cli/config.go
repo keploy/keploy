@@ -42,6 +42,7 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 						return err
 					}
 					if !override {
+						logger.Info("Skipping config file override")
 						return nil
 					}
 				}
