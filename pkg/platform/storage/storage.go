@@ -104,6 +104,11 @@ func (s *Storage) Upload(ctx context.Context, file io.Reader, mockName string, a
 		return err
 	}
 
+	s.logger.Debug("making mock upload request",
+		zap.String("serverURL", s.serverURL),
+		zap.Any("body", body.String()),
+	)
+
 	// Prepare the HTTP request
 	req, err := http.NewRequestWithContext(ctx, "POST", s.serverURL+"/mock/upload", body)
 	if err != nil {
