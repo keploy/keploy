@@ -43,7 +43,7 @@ In most cases, you can add this signoff to your commit automatically with the
 address (sorry, no pseudonyms or anonymous contributions). An example of signing off on a commit:
 
 ```
-$ commit -s -m “my commit message w/signoff”
+git commit -s -m "my commit message w/signoff"
 ```
 
 To ensure all your commits are signed, you may choose to add this alias to your global `.gitconfig`:
@@ -69,7 +69,7 @@ To ensure that each change is relevant and properly peer reviewed, please adhere
 This means that if you are outside the Keploy organization, you must fork the repository and create PRs from branches on your own fork.
 The README in GitHub's [first-contributions repo](https://github.com/firstcontributions/first-contributions) provides an example.
 
-## ## How to set up the docs website locally?
+## How to set up the docs website locally?
 
 1. Fork the repository
 
@@ -94,20 +94,26 @@ Keploy is written in `Go` (Golang) and leverages Go Modules. Relevant coding sty
 Practices for Production Environments](https://peter.bourgon.org/go-in-production/#formatting-and-style).
 
 ---
+---
 
 ## 🧭 Step-by-Step Guide for First-Time Contributors
 
-This section is specially written to help first-time contributors make their first PR to Keploy smoothly.
+## 🧭 Step-by-Step Guide for First-Time Contributors
+
+This section is written to help first-time contributors make their first Pull Request (PR) to Keploy smoothly.
 
 ### 1. 🍴 Fork the Repository
-Click the **Fork** button at the top-right corner of [Keploy GitHub repo](https://github.com/keploy/keploy) to create your own copy.
+
+Click the **Fork** button at the top-right corner of the [Keploy GitHub repo](https://github.com/keploy/keploy) to create your own copy under your GitHub account.
 
 ### 2. 📥 Clone Your Fork
-Copy the HTTPS URL of your fork (e.g., `https://github.com/<your-username>/keploy.git`) and run:
+
+Navigate to your forked repo on GitHub, click the green **Code** button, copy the **HTTPS URL** (e.g., `https://github.com/<YOUR_GITHUB_USERNAME>/keploy.git`), and run:
 
 ```bash
-git clone https://github.com/<your-username>/keploy.git
+git clone https://github.com/<YOUR_GITHUB_USERNAME>/keploy.git
 cd keploy
+
 
 
 There are many ways in which you can contribute to Keploy.
