@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"os/user"
 	"path/filepath"
 	"runtime/debug"
@@ -286,28 +287,47 @@ var ConfigGuide = `
 
 // AskForConfirmation asks the user for confirmation. A user must type in "yes" or "no" and
 // then press enter. It has fuzzy matching, so "y", "Y", "yes", "YES", and "Yes" all count as
-// confirmations. If the input is not recognized, it will ask again. The function does not return
-// until it gets a valid response from the user.
+// confirmations. If the input is not recognized, it will return an error and exit gracefully.
 func AskForConfirmation(s string) (bool, error) {
 	reader := bufio.NewReader(os.Stdin)
 
-	for {
-		fmt.Printf("%s [y/n]: ", s)
+	// Set up channel to listen for interrupt (Ctrl+C)
+	interrupt := make(chan os.Signal, 1)
+	signal.Notify(interrupt, os.Interrupt)
+	defer signal.Stop(interrupt)
 
+	input := make(chan string, 1)
+	inputErr := make(chan error, 1)
+
+	go func() {
+		fmt.Printf("%s [y/n]: ", s)
 		response, err := reader.ReadString('\n')
 		if err != nil {
-			return false, err
+			inputErr <- err
+			return
 		}
+		input <- response
+	}()
 
+	select {
+	case <-interrupt:
+		fmt.Println("\nInterrupted. Exiting.")
+		os.Exit(1)
+	case err := <-inputErr:
+		return false, err
+	case response := <-input:
 		response = strings.ToLower(strings.TrimSpace(response))
-
 		switch response {
 		case "y", "yes":
 			return true, nil
 		case "n", "no":
 			return false, nil
+		default:
+			fmt.Println("Invalid input. Exiting without overwriting config.")
+			return false, errors.New("invalid confirmation input")
 		}
 	}
+	return false, errors.New("unexpected confirmation input handling")
 }
 
 func CheckFileExists(path string) bool {
