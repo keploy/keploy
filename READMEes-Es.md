@@ -57,6 +57,7 @@
     <img src="https://img.shields.io/badge/follow-%40keployio-1DA1F2?logo=twitter&style=social" alt="Keploy Twitter" />
   </a>
 </h4>
+<!-- This is the Spanish version of the README file. For English, refer to the main README.md -->
 
 ## 🎤 Presentando Keploy 🐰
 Keploy es una herramienta de prueba de backend centrada en el **desarrollador**. Realiza pruebas de backend con **mocks incorporados**, más rápido que las pruebas unitarias, a partir del tráfico del usuario, lo que lo hace **fácil de usar, potente y extensible**. 🛠
