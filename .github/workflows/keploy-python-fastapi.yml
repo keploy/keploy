@@ -36,11 +36,12 @@ jobs:
       - name: Record Keploy testcases
         run: |
           keploy record -c "uvicorn samples.python-fastapi.app:app --host 0.0.0.0 --port 8080" --delay 5 &
+          KEPLOY_PID=$!
           sleep 10
           curl http://localhost:8080/
           curl -X POST http://localhost:8080/echo -H "Content-Type: application/json" -d '{"msg":"hi"}'
           sleep 5
-          pkill keploy
+          kill $KEPLOY_PID
 
       - name: Run Keploy tests
         run: |
