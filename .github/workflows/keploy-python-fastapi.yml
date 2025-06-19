@@ -25,7 +25,8 @@ jobs:
 
       - name: Start FastAPI app
         run: |
-          nohup uvicorn samples.python-fastapi.app:app --host 0.0.0.0 --port 8080 &
+          nohup uvicorn app:app --app-dir samples/python-fastapi --host 0.0.0.0 --port 8080 &
+          UVICORN_PID=$!
           sleep 5
 
       - name: Download Keploy
@@ -35,7 +36,7 @@ jobs:
 
       - name: Record Keploy testcases
         run: |
-          keploy record -c "uvicorn samples.python-fastapi.app:app --host 0.0.0.0 --port 8080" --delay 5 &
+          keploy record -c "uvicorn app:app --app-dir samples/python-fastapi --host 0.0.0.0 --port 8080" --delay 5 &
           KEPLOY_PID=$!
           sleep 10
           curl http://localhost:8080/
@@ -43,6 +44,10 @@ jobs:
           sleep 5
           kill $KEPLOY_PID
 
+      - name: Kill Uvicorn process
+        run: |
+          kill $UVICORN_PID || true
+
       - name: Run Keploy tests
         run: |
-          keploy test -c "uvicorn samples.python-fastapi.app:app --host 0.0.0.0 --port 8080" --delay 5
+          keploy test -c "uvicorn samples-python-fastapi.app:app --host 0.0.0.0 --port 8080" --delay 5

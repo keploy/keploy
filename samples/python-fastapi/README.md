@@ -9,17 +9,22 @@ This folder contains a minimal [FastAPI](https://fastapi.tiangolo.com/) applicat
 
 ## Usage
 
-1. **Install dependencies:**
+1. **Navigate to the sample directory:**
+   ```bash
+   cd samples/python-fastapi
+   ```
+
+2. **Install dependencies:**
    ```bash
    pip install -r requirements.txt
    ```
 
-2. **Run the FastAPI app:**
+3. **Run the FastAPI app:**
    ```bash
    uvicorn app:app --host 0.0.0.0 --port 8080
    ```
 
-3. **Test with Keploy:**
+4. **Test with Keploy:**
    - Use Keploy in record and test mode as described in the main repository documentation or in the CI workflow.
 
 ## Endpoints
