@@ -205,12 +205,11 @@ func parseMsg(lines []string, idx *int) ([]byte, error) {
 			out = append(out, protowire.AppendTag(nil, num, protowire.BytesType)...)
 			out = protowire.AppendBytes(out, []byte(str))
 
-			// If **this** line also contains the structural `}` (i.e. ends
-			// with `"}`) we are done – otherwise the next token will be the
-			// closing brace and parseMsg will resolve it in the normal way.
-			if strings.HasSuffix(strings.TrimSpace(rest[endQuote:]), "\"}") {
-				// consumed inline close
-			}
+			// Whatever follows the closing quote on this physical line
+			// (whitespace, a structural ‘}’, garbage) is irrelevant – the
+			// tokenizer already broke real braces out into their own tokens,
+			// so we simply ignore the tail and move on.
+
 			continue
 		}
 
