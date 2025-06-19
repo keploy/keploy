@@ -13,6 +13,49 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
+// tokenizePrettyLines splits the pretty-printed wire output into a slice in
+// which **every** closing brace that is outside a quoted string becomes its
+// own logical line.  This makes the downstream parser tolerant of lines such
+// as:
+//
+//	1: {"foo"}  }}
+//
+// which previously produced “pretty decode: strconv.ParseUint … invalid
+// syntax”.
+func tokenizePrettyLines(s string) []string {
+	raw := strings.Split(strings.TrimSpace(s), "\n")
+	var out []string
+
+	for _, l := range raw {
+		inQuotes := false
+		var buf strings.Builder
+
+		for _, r := range l {
+			switch r {
+			case '"':
+				inQuotes = !inQuotes
+				buf.WriteRune(r)
+			case '}':
+				if inQuotes {
+					buf.WriteRune(r)
+					continue
+				}
+				if tok := strings.TrimSpace(buf.String()); tok != "" {
+					out = append(out, tok)
+				}
+				out = append(out, "}") // the brace itself
+				buf.Reset()
+			default:
+				buf.WriteRune(r)
+			}
+		}
+		if tok := strings.TrimSpace(buf.String()); tok != "" {
+			out = append(out, tok)
+		}
+	}
+	return out
+}
+
 // createLengthPrefixedMessage creates a GrpcLengthPrefixedMessage from a raw message payload.
 // The gRPC framework handles the actual 5-byte wire protocol prefix. This struct
 // is for Keploy's internal representation and matching.
@@ -102,7 +145,7 @@ func parsePrettyWire(s string) ([]byte, error) {
 	if strings.TrimSpace(s) == "" {
 		return nil, nil // nothing to decode
 	}
-	lines := strings.Split(strings.TrimSpace(s), "\n")
+	lines := tokenizePrettyLines(s)
 	var idx int
 	return parseMsg(lines, &idx)
 }
