@@ -1,0 +1,47 @@
+# .github/workflows/keploy-python-fastapi.yml
+name: Keploy HTTP Parser Test - Python FastAPI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+
+jobs:
+  keploy-fastapi-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install FastAPI dependencies
+        run: |
+          pip install -r samples/python-fastapi/requirements.txt
+
+      - name: Start FastAPI app
+        run: |
+          nohup uvicorn samples.python-fastapi.app:app --host 0.0.0.0 --port 8080 &
+          sleep 5
+
+      - name: Download Keploy
+        run: |
+          curl --silent --location "https://github.com/keploy/keploy/releases/latest/download/keploy_linux_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/keploy /usr/local/bin/keploy
+
+      - name: Record Keploy testcases
+        run: |
+          keploy record -c "uvicorn samples.python-fastapi.app:app --host 0.0.0.0 --port 8080" --delay 5 &
+          sleep 10
+          curl http://localhost:8080/
+          curl -X POST http://localhost:8080/echo -H "Content-Type: application/json" -d '{"msg":"hi"}'
+          sleep 5
+          pkill keploy
+
+      - name: Run Keploy tests
+        run: |
+          keploy test -c "uvicorn samples.python-fastapi.app:app --host 0.0.0.0 --port 8080" --delay 5
