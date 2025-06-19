@@ -192,11 +192,25 @@ func parseMsg(lines []string, idx *int) ([]byte, error) {
 			continue
 		}
 
-		// 2️⃣ ASCII string  {"foo"}
-		if strings.HasPrefix(rest, "{\"") && strings.HasSuffix(rest, "\"}") {
-			str := rest[2 : len(rest)-2]
+		// 2️⃣ ASCII string  {"foo"}      ─ or ─     {"foo"}  <newline>
+		if strings.HasPrefix(rest, "{\"") {
+			// Find the last closing quote on this line.
+			endQuote := strings.LastIndex(rest, "\"")
+			if endQuote == -1 {
+				return nil, fmt.Errorf("pretty decode: unterminated quote in %q", rest)
+			}
+
+			// Extract the bytes inside {" … "}
+			str := rest[2:endQuote]
 			out = append(out, protowire.AppendTag(nil, num, protowire.BytesType)...)
 			out = protowire.AppendBytes(out, []byte(str))
+
+			// If **this** line also contains the structural `}` (i.e. ends
+			// with `"}`) we are done – otherwise the next token will be the
+			// closing brace and parseMsg will resolve it in the normal way.
+			if strings.HasSuffix(strings.TrimSpace(rest[endQuote:]), "\"}") {
+				// consumed inline close
+			}
 			continue
 		}
 
