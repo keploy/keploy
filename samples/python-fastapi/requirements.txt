@@ -1,0 +1,3 @@
+# examples/python-fastapi/requirements.txt
+fastapi
+uvicorn
