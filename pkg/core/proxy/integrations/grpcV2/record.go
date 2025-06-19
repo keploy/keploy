@@ -110,7 +110,7 @@ func (p *grpcRecordingProxy) getClientConn(ctx context.Context) (*grpc.ClientCon
 	}
 
 	dialer := func(context.Context, string) (net.Conn, error) { return p.destConn, nil }
-	cc, err := grpc.NewClient(
+	cc, err := grpc.DialContext(ctx,
 		"",
 		grpc.WithContextDialer(dialer),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
