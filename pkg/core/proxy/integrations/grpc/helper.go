@@ -204,12 +204,24 @@ func parseMsg(lines []string, idx *int) ([]byte, error) {
 			str := rest[2:endQuote]
 			out = append(out, protowire.AppendTag(nil, num, protowire.BytesType)...)
 			out = protowire.AppendBytes(out, []byte(str))
-
-			// Whatever follows the closing quote on this physical line
-			// (whitespace, a structural ‘}’, garbage) is irrelevant – the
-			// tokenizer already broke real braces out into their own tokens,
-			// so we simply ignore the tail and move on.
-
+			// ── DON’T lose structural braces that share the same line  ──
+			// Anything after the closing quote might include one or more
+			// real ‘}’ that terminate the current (or even parent)
+			// sub-message.  We must push those tokens back so the main state
+			// machine can see them.
+			//
+			tail := strings.TrimSpace(rest[endQuote+1:])
+			if tail != "" {
+				// Expand the tail into logical tokens *in the same order* we
+				// would have produced had they been on their own lines, then
+				// inject them right after the current position.
+				more := tokenizePrettyLines(tail)
+				// lines and *idx are shared slices/pointers; safe to splice.
+				*idx -= 1 // rewind to re-process insert
+				lines = append(lines[:*idx+1], append(more, lines[*idx+1:]...)...)
+			}
+			// The current line is done – the loop will advance to whatever
+			// token we just injected (or the next original one).
 			continue
 		}
 
