@@ -19,8 +19,21 @@ func DecodeQuery(_ context.Context, data []byte) (*mysql.QueryPacket, error) {
 
 	packet := &mysql.QueryPacket{
 		Command: data[0],
-		Query:   string(data[1:]),
+		Query:   ReplaceTabsWithSpaces(string(data[1:])),
 	}
 
 	return packet, nil
+}
+
+// This is required to replace tabs with spaces in the query string, as yaml does not support tabs.
+func ReplaceTabsWithSpaces(query string) string {
+	result := ""
+	for _, char := range query {
+		if char == '\t' {
+			result += "    " // 4 spaces
+		} else {
+			result += string(char)
+		}
+	}
+	return result
 }

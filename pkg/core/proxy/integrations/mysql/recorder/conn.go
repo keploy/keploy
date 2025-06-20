@@ -519,6 +519,20 @@ func handleFullAuth(ctx context.Context, logger *zap.Logger, clientConn, destCon
 		resp: make([]mysql.Response, 0),
 	}
 
+	// If the connection is using SSL, we don't need to exchange the public key and encrypted password,
+	// we can directly handle the plain password.
+	// This is because the SSL connection already provides a secure channel for the password exchange.
+	if decodeCtx.UseSSL {
+		logger.Debug("Handling caching_sha2_password full auth in SSL request, using plain password")
+		res2, err := handlePlainPassword(ctx, logger, clientConn, destConn, decodeCtx)
+		if err != nil {
+			utils.LogError(logger, err, "failed to handle plain password in caching_sha2_password(full auth) in ssl request")
+		}
+		// Set the final response operation of the handshake
+		setHandshakeResult(&res, res2)
+		return res, nil
+	}
+
 	// read the public key request from the client
 	publicKeyRequest, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
 	if err != nil {
@@ -638,5 +652,78 @@ func handleFullAuth(ctx context.Context, logger *zap.Logger, clientConn, destCon
 	res.responseOperation = finalResPkt.Header.Type
 
 	logger.Debug("full auth is handled successfully")
+	return res, nil
+}
+
+func handlePlainPassword(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, decodeCtx *wire.DecodeContext) (handshakeRes, error) {
+	res := handshakeRes{
+		req:  make([]mysql.Request, 0),
+		resp: make([]mysql.Response, 0),
+	}
+
+	// read the plain password from the client
+	plainPassBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
+	if err != nil {
+		utils.LogError(logger, err, "failed to read plain password from the client")
+		return res, err
+	}
+	_, err = destConn.Write(plainPassBuf)
+	if err != nil {
+		if ctx.Err() != nil {
+			return res, ctx.Err()
+		}
+		utils.LogError(logger, err, "failed to write plain password to the server")
+		return res, err
+	}
+
+	plainPass, err := mysqlUtils.BytesToMySQLPacket(plainPassBuf)
+	if err != nil {
+		utils.LogError(logger, err, "failed to parse MySQL packet")
+		return res, err
+	}
+
+	plainPassPkt := &mysql.PacketBundle{
+		Header: &mysql.PacketInfo{
+			Header: &plainPass.Header,
+			Type:   mysql.PlainPassword,
+		},
+		Message: intgUtils.EncodeBase64(plainPass.Payload),
+	}
+
+	res.req = append(res.req, mysql.Request{
+		PacketBundle: *plainPassPkt,
+	})
+
+	// read the final response from the server (ok or error)
+	finalServerResponse, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+	if err != nil {
+		utils.LogError(logger, err, "failed to read final response from server")
+		return res, err
+	}
+	_, err = clientConn.Write(finalServerResponse)
+	if err != nil {
+		if ctx.Err() != nil {
+			return res, ctx.Err()
+		}
+		utils.LogError(logger, err, "failed to write final response to client")
+
+		return res, err
+	}
+
+	finalResPkt, err := wire.DecodePayload(ctx, logger, finalServerResponse, clientConn, decodeCtx)
+
+	if err != nil {
+		utils.LogError(logger, err, "failed to decode final response packet during caching sha2 password full auth (plain password)")
+		return res, err
+	}
+
+	res.resp = append(res.resp, mysql.Response{
+		PacketBundle: *finalResPkt,
+	})
+
+	// Set the final response operation of the handshake
+	res.responseOperation = finalResPkt.Header.Type
+
+	logger.Debug("full auth (plain password) is handled successfully")
 	return res, nil
 }
