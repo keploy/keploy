@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 
@@ -288,4 +289,63 @@ func WriteUint24(buf *bytes.Buffer, value uint32) error {
 	buf.WriteByte(byte(value >> 8))
 	buf.WriteByte(byte(value >> 16))
 	return nil
+}
+
+func ParseBinaryDate(b []byte) (interface{}, int, error) {
+	if len(b) == 0 {
+		return nil, 0, nil
+	}
+	length := b[0]
+	if length == 0 {
+		return nil, 1, nil
+	}
+	year := binary.LittleEndian.Uint16(b[1:3])
+	month := b[3]
+	day := b[4]
+	return fmt.Sprintf("%04d-%02d-%02d", year, month, day), int(length) + 1, nil
+}
+
+func ParseBinaryDateTime(b []byte) (interface{}, int, error) {
+	if len(b) == 0 {
+		return nil, 0, nil
+	}
+	length := b[0]
+	if length == 0 {
+		return nil, 1, nil
+	}
+	year := binary.LittleEndian.Uint16(b[1:3])
+	month := b[3]
+	day := b[4]
+	hour := b[5]
+	minute := b[6]
+	second := b[7]
+	if length > 7 {
+		microsecond := binary.LittleEndian.Uint32(b[8:12])
+		return fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d.%06d", year, month, day, hour, minute, second, microsecond), int(length) + 1, nil
+	}
+	return fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d", year, month, day, hour, minute, second), int(length) + 1, nil
+}
+
+func ParseBinaryTime(b []byte) (interface{}, int, error) {
+	if len(b) == 0 {
+		return nil, 0, nil
+	}
+	length := b[0]
+	if length == 0 {
+		return nil, 1, nil
+	}
+	isNegative := b[1] == 1
+	days := binary.LittleEndian.Uint32(b[2:6])
+	hours := b[6]
+	minutes := b[7]
+	seconds := b[8]
+	var microseconds uint32
+	if length > 8 {
+		microseconds = binary.LittleEndian.Uint32(b[9:13])
+	}
+	timeString := fmt.Sprintf("%d %02d:%02d:%02d.%06d", days, hours, minutes, seconds, microseconds)
+	if isNegative {
+		timeString = "-" + timeString
+	}
+	return timeString, int(length) + 1, nil
 }

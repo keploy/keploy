@@ -99,13 +99,105 @@ func DecodeStmtExecute(_ context.Context, _ *zap.Logger, data []byte, preparedSt
 		if pos >= len(data) {
 			return nil, io.ErrUnexpectedEOF
 		}
-		length, _, n := utils.ReadLengthEncodedInteger(data[pos:])
-		pos += n
-		if pos+int(length) > len(data) {
-			return nil, io.ErrUnexpectedEOF
+
+		// Process Parameter based on its type
+		param := &packet.Parameters[i]
+
+		// Handle length-encoded values (only for types that require variable-length data)
+		switch mysql.FieldType(param.Type) {
+		case mysql.FieldTypeString, mysql.FieldTypeVarString, mysql.FieldTypeVarChar, mysql.FieldTypeBLOB, mysql.FieldTypeTinyBLOB, mysql.FieldTypeMediumBLOB, mysql.FieldTypeLongBLOB, mysql.FieldTypeJSON:
+			// Read the length of the parameter value
+			length, _, n := utils.ReadLengthEncodedInteger(data[pos:])
+			pos += n
+			if pos+int(length) > len(data) {
+				return nil, io.ErrUnexpectedEOF
+			}
+			param.Value = data[pos : pos+int(length)]
+			pos += int(length)
+		case mysql.FieldTypeLong:
+			if len(data[pos:]) < 4 {
+				return nil, fmt.Errorf("malformed FieldTypeLong value")
+			}
+			if param.Unsigned {
+				param.Value = uint32(binary.LittleEndian.Uint32(data[pos : pos+4]))
+			} else {
+				param.Value = int32(binary.LittleEndian.Uint32(data[pos : pos+4]))
+			}
+			pos += 4
+
+		case mysql.FieldTypeTiny:
+			if len(data[pos:]) < 1 {
+				return nil, fmt.Errorf("malformed FieldTypeTiny value")
+			}
+			if param.Unsigned {
+				param.Value = uint8(data[pos])
+			} else {
+				param.Value = int8(data[pos])
+			}
+			pos += 1
+
+		case mysql.FieldTypeShort, mysql.FieldTypeYear:
+			if len(data[pos:]) < 2 {
+				return nil, fmt.Errorf("malformed FieldTypeShort value")
+			}
+			if param.Unsigned {
+				param.Value = uint16(binary.LittleEndian.Uint16(data[pos : pos+2]))
+			} else {
+				param.Value = int16(binary.LittleEndian.Uint16(data[pos : pos+2]))
+			}
+			pos += 2
+
+		case mysql.FieldTypeLongLong:
+			if len(data[pos:]) < 8 {
+				return nil, fmt.Errorf("malformed FieldTypeLongLong value")
+			}
+			if param.Unsigned {
+				param.Value = uint64(binary.LittleEndian.Uint64(data[pos : pos+8]))
+			} else {
+				param.Value = int64(binary.LittleEndian.Uint64(data[pos : pos+8]))
+			}
+			pos += 8
+
+		case mysql.FieldTypeFloat:
+			if len(data[pos:]) < 4 {
+				return nil, fmt.Errorf("malformed FieldTypeFloat value")
+			}
+			param.Value = float32(binary.LittleEndian.Uint32(data[pos : pos+4]))
+			pos += 4
+
+		case mysql.FieldTypeDouble:
+			if len(data[pos:]) < 8 {
+				return nil, fmt.Errorf("malformed FieldTypeDouble value")
+			}
+			param.Value = float64(binary.LittleEndian.Uint64(data[pos : pos+8]))
+			pos += 8
+
+		case mysql.FieldTypeDate, mysql.FieldTypeNewDate:
+			value, _, err := utils.ParseBinaryDate(data[pos:])
+			if err != nil {
+				return nil, err
+			}
+			param.Value = value
+			pos += len(param.Value.(string)) // Assuming date parsing returns a string
+
+		case mysql.FieldTypeTimestamp, mysql.FieldTypeDateTime:
+			value, _, err := utils.ParseBinaryDateTime(data[pos:])
+			if err != nil {
+				return nil, err
+			}
+			param.Value = value
+			pos += len(param.Value.(string)) // Assuming datetime parsing returns a string
+
+		case mysql.FieldTypeTime:
+			value, _, err := utils.ParseBinaryTime(data[pos:])
+			if err != nil {
+				return nil, err
+			}
+			param.Value = value
+			pos += len(param.Value.(string)) // Assuming time parsing returns a string
+		default:
+			return nil, fmt.Errorf("unsupported parameter type: %d", param.Type)
 		}
-		packet.Parameters[i].Value = data[pos : pos+int(length)]
-		pos += int(length)
 	}
 
 	return packet, nil
