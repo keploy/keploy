@@ -642,14 +642,14 @@ func simulatePlainPassword(ctx context.Context, logger *zap.Logger, clientConn n
 	plainPassMock, ok := req[0].Message.(string)
 	if !ok {
 		utils.LogError(logger, nil, "failed to assert plain password packet")
-		return nil
+		return fmt.Errorf("failed to assert plain password packet")
 	}
 
 	// Match the header of the plain password
 	ok = matchHeader(*req[0].Header.Header, plainPassPkt.Header)
 	if !ok {
 		utils.LogError(logger, nil, "header mismatch for plain password", zap.Any("expected", req[0].Header.Header), zap.Any("actual", plainPassPkt.Header))
-		return nil
+		return fmt.Errorf("header mismatch for plain password")
 	}
 
 	// Match the plain password from the client with the mock

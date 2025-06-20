@@ -527,6 +527,7 @@ func handleFullAuth(ctx context.Context, logger *zap.Logger, clientConn, destCon
 		res2, err := handlePlainPassword(ctx, logger, clientConn, destConn, decodeCtx)
 		if err != nil {
 			utils.LogError(logger, err, "failed to handle plain password in caching_sha2_password(full auth) in ssl request")
+			return res, fmt.Errorf("failed to handle plain password in caching_sha2_password full auth: %w", err)
 		}
 		// Set the final response operation of the handshake
 		setHandshakeResult(&res, res2)
