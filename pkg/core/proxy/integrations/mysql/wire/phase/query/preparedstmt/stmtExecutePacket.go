@@ -9,6 +9,8 @@ import (
 	"io"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
+	intUtil "go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
+
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.uber.org/zap"
 )
@@ -112,7 +114,12 @@ func DecodeStmtExecute(_ context.Context, _ *zap.Logger, data []byte, preparedSt
 			if pos+int(length) > len(data) {
 				return nil, io.ErrUnexpectedEOF
 			}
-			param.Value = data[pos : pos+int(length)]
+
+			if intUtil.IsASCII(string(data[pos : pos+int(length)])) {
+				param.Value = string(data[pos : pos+int(length)])
+			} else {
+				param.Value = intUtil.EncodeBase64(data[pos : pos+int(length)])
+			}
 			pos += int(length)
 		case mysql.FieldTypeLong:
 			if len(data[pos:]) < 4 {
