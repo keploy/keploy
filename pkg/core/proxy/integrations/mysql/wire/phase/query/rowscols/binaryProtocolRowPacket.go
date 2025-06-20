@@ -146,82 +146,23 @@ func readBinaryValue(data []byte, col *mysql.ColumnDefinition41) (*binaryValueRe
 		return res, 8, nil
 
 	case mysql.FieldTypeDate, mysql.FieldTypeNewDate:
-		value, n, err := parseBinaryDate(data)
+		value, n, err := utils.ParseBinaryDate(data)
 		res.value = value
 		return res, n, err
 
 	case mysql.FieldTypeTimestamp, mysql.FieldTypeDateTime:
-		value, n, err := parseBinaryDateTime(data)
+		value, n, err := utils.ParseBinaryDateTime(data)
 		res.value = value
 		return res, n, err
 
 	case mysql.FieldTypeTime:
-		value, n, err := parseBinaryTime(data)
+		value, n, err := utils.ParseBinaryTime(data)
 		res.value = value
 		return res, n, err
 
 	default:
 		return nil, 0, fmt.Errorf("unsupported column type: %v", col.Type)
 	}
-}
-
-func parseBinaryDate(b []byte) (interface{}, int, error) {
-	if len(b) == 0 {
-		return nil, 0, nil
-	}
-	length := b[0]
-	if length == 0 {
-		return nil, 1, nil
-	}
-	year := binary.LittleEndian.Uint16(b[1:3])
-	month := b[3]
-	day := b[4]
-	return fmt.Sprintf("%04d-%02d-%02d", year, month, day), int(length) + 1, nil
-}
-
-func parseBinaryDateTime(b []byte) (interface{}, int, error) {
-	if len(b) == 0 {
-		return nil, 0, nil
-	}
-	length := b[0]
-	if length == 0 {
-		return nil, 1, nil
-	}
-	year := binary.LittleEndian.Uint16(b[1:3])
-	month := b[3]
-	day := b[4]
-	hour := b[5]
-	minute := b[6]
-	second := b[7]
-	if length > 7 {
-		microsecond := binary.LittleEndian.Uint32(b[8:12])
-		return fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d.%06d", year, month, day, hour, minute, second, microsecond), int(length) + 1, nil
-	}
-	return fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d", year, month, day, hour, minute, second), int(length) + 1, nil
-}
-
-func parseBinaryTime(b []byte) (interface{}, int, error) {
-	if len(b) == 0 {
-		return nil, 0, nil
-	}
-	length := b[0]
-	if length == 0 {
-		return nil, 1, nil
-	}
-	isNegative := b[1] == 1
-	days := binary.LittleEndian.Uint32(b[2:6])
-	hours := b[6]
-	minutes := b[7]
-	seconds := b[8]
-	var microseconds uint32
-	if length > 8 {
-		microseconds = binary.LittleEndian.Uint32(b[9:13])
-	}
-	timeString := fmt.Sprintf("%d %02d:%02d:%02d.%06d", days, hours, minutes, seconds, microseconds)
-	if isNegative {
-		timeString = "-" + timeString
-	}
-	return timeString, int(length) + 1, nil
 }
 
 func EncodeBinaryRow(_ context.Context, logger *zap.Logger, row *mysql.BinaryRow, columns []*mysql.ColumnDefinition41) ([]byte, error) {
