@@ -4,7 +4,6 @@ package wire
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"net"
 
@@ -145,10 +144,17 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 		}
 	}
 
-	// Encode the header for the packet
-	header := make([]byte, 4)
-	binary.LittleEndian.PutUint32(header, uint32(packet.Header.Header.PayloadLength))
-	header[3] = packet.Header.Header.SequenceID
+	// --- write fresh header -------------------------------------------
+	payloadLen := uint32(len(data))
+	if payloadLen > 0xFFFFFF {
+		return nil, fmt.Errorf("payload too large (%d bytes)", payloadLen)
+	}
+	header := []byte{
+		byte(payloadLen),
+		byte(payloadLen >> 8),
+		byte(payloadLen >> 16),
+		packet.Header.Header.SequenceID,
+	}
 	data = append(header, data...)
 
 	logger.Debug("Encoded Packet", zap.String("packet", packet.Header.Type), zap.ByteString("data", data))
