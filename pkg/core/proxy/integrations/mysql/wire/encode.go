@@ -145,6 +145,9 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 	}
 
 	// --- write fresh header -------------------------------------------
+	// The payload length is now dynamically computed from the data length (len(data))
+	// instead of being derived from the packet header field. This ensures the payload
+	// size accurately reflects the actual data being sent.
 	payloadLen := uint32(len(data))
 	if payloadLen > 0xFFFFFF {
 		return nil, fmt.Errorf("payload too large (%d bytes)", payloadLen)
