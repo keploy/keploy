@@ -56,6 +56,8 @@ type LoadStage struct {
 type Threshold struct {
 	Metric    string `yaml:"metric"`
 	Condition string `yaml:"condition"`
+	Severity  string `yaml:"severity"`
+	Comment   string `yaml:"comment,omitempty"`
 }
 
 // TestStep represents a single API call step in the test suite
@@ -76,17 +78,6 @@ type TSAssertion struct {
 	ExpectedString string `yaml:"expected_string,omitempty"`
 }
 
-// SuiteResult represents the results of executing a test suite
-type SuiteResult struct {
-	SuiteName     string       `json:"suite_name"`
-	TotalSteps    int          `json:"total_steps"`
-	PassedSteps   int          `json:"passed_steps"`
-	FailedSteps   int          `json:"failed_steps"`
-	StepResults   []StepResult `json:"step_results"`
-	ExecutionTime float64      `json:"execution_time_ms"`
-	Success       bool         `json:"success"`
-}
-
 // StepResult represents the result of executing a single test step
 type StepResult struct {
 	StepName      string            `json:"step_name"`
@@ -94,9 +85,20 @@ type StepResult struct {
 	URL           string            `json:"url"`
 	Status        string            `json:"status"`
 	StatusCode    int               `json:"status_code,omitempty"`
-	ResponseTime  int64             `json:"response_time_ms"`
+	ResponseTime  time.Duration     `json:"response_time"`
 	FailureReason string            `json:"failure_reason,omitempty"`
 	ExtractedVars map[string]string `json:"extracted_vars,omitempty"`
+	ReqBytes      int64             `json:"req_bytes"`
+	ResBytes      int64             `json:"res_bytes"`
+}
+
+// ExecutionReport represents the summary of the test suite execution
+type ExecutionReport struct {
+	SuiteName     string        `json:"suite_name"`
+	TotalSteps    int           `json:"total_steps"`
+	FailedSteps   int           `json:"failed_steps"`
+	StepsResult   []StepResult  `json:"steps_result"`
+	ExecutionTime time.Duration `json:"execution_time"` // Total execution of the test suite
 }
 
 type TSExecutor struct {
@@ -154,34 +156,50 @@ func NewTSExecutor(cfg *config.Config, logger *zap.Logger, skipParsing bool) (*T
 	}, nil
 }
 
-func (e *TSExecutor) Execute(ctx *context.Context) error {
+func (e *TSExecutor) Execute(ctx context.Context) (*ExecutionReport, error) {
 	if e.baseURL == "" {
 		e.logger.Error("base URL is not set for the test suite execution")
-		return fmt.Errorf("base URL is not set for the test suite execution")
+		return nil, fmt.Errorf("base URL is not set for the test suite execution")
 	}
 
 	e.logger.Info("executing test suite", zap.String("path", e.tsPath), zap.String("baseURL", e.baseURL))
 
-	e.logger.Info("test suite details",
+	e.logger.Debug("test suite details",
 		zap.String("name", e.Testsuite.Name),
 		zap.String("version", e.Testsuite.Version),
 		zap.String("kind", e.Testsuite.Kind),
 		zap.String("description", e.Testsuite.Spec.Metadata.Description),
 	)
-	e.logger.Info("number of steps in the test suite", zap.Int("steps", len(e.Testsuite.Spec.Steps)))
-	e.logger.Info("base URL for the test suite", zap.String("baseURL", e.baseURL))
+	e.logger.Debug("number of steps in the test suite", zap.Int("steps", len(e.Testsuite.Spec.Steps)))
+	e.logger.Debug("base URL for the test suite", zap.String("baseURL", e.baseURL))
+
+	er := &ExecutionReport{
+		SuiteName:     e.Testsuite.Name,
+		TotalSteps:    len(e.Testsuite.Spec.Steps),
+		FailedSteps:   0,
+		StepsResult:   make([]StepResult, 0, len(e.Testsuite.Spec.Steps)),
+		ExecutionTime: time.Duration(0),
+	}
+
+	startTime := time.Now()
 
 	for _, step := range e.Testsuite.Spec.Steps {
-		e.logger.Info("executing step", zap.String("name", step.Name), zap.String("method", step.Method), zap.String("url", step.URL))
+		e.logger.Debug("executing step", zap.String("name", step.Name), zap.String("method", step.Method), zap.String("url", step.URL))
 		result, err := e.executeStep(step)
 		if err != nil {
 			e.logger.Error("failed to execute step", zap.String("step", step.Name), zap.Error(err))
-			return err
+			return nil, err
 		}
-		e.logger.Info("step executed", zap.String("step", step.Name), zap.Any("result", result))
+		e.logger.Info("step executed", zap.String("step", step.Name), zap.String("status", result.Status), zap.Any("result", result))
+		er.StepsResult = append(er.StepsResult, *result)
+		if result.Status == "failed" {
+			er.FailedSteps++
+		}
 	}
 
-	return nil
+	er.ExecutionTime = time.Since(startTime)
+
+	return er, nil
 }
 
 // executeStep executes a single test step and returns the result
@@ -205,6 +223,16 @@ func (e *TSExecutor) executeStep(step TestStep) (*StepResult, error) {
 		result.FailureReason = fmt.Sprintf("failed to create request: %v", err)
 		return result, err
 	}
+	if req.Body != nil {
+		bodyBytes, err := io.ReadAll(strings.NewReader(interpolatedBody))
+		if err != nil {
+			result.FailureReason = fmt.Sprintf("failed to read request body: %v", err)
+			return result, err
+		}
+		result.ReqBytes = int64(len(bodyBytes))
+	} else {
+		result.ReqBytes = 0
+	}
 
 	for key, value := range step.Headers {
 		interpolatedValue := e.interpolateVariables(value)
@@ -220,13 +248,14 @@ func (e *TSExecutor) executeStep(step TestStep) (*StepResult, error) {
 	}
 	defer resp.Body.Close()
 
-	result.ResponseTime = time.Since(startTime).Milliseconds()
+	result.ResponseTime = time.Since(startTime)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		result.FailureReason = fmt.Sprintf("failed to read response body: %v", err)
 		return result, err
 	}
+	result.ResBytes = int64(len(body))
 
 	result.StatusCode = resp.StatusCode
 
@@ -304,7 +333,7 @@ func (e *TSExecutor) processAssertion(assertion TSAssertion, resp *http.Response
 
 // Helper function to interpolate variables in strings
 func (e *TSExecutor) interpolateVariables(input string) string {
-	if e.variables == nil || len(e.variables) == 0 || input == "" {
+	if len(e.variables) == 0 || input == "" {
 		return input
 	}
 
