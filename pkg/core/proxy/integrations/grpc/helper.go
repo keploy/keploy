@@ -106,9 +106,10 @@ func prettyPrintWire(b []byte, indent int) string {
 		case protowire.BytesType:
 			v, m := protowire.ConsumeBytes(b)
 			b = b[m:]
-			// first: if it looks like plain ASCII, render as a quoted string
+			// render printable ASCII as   1: "foo"
+			// (no extra braces that confuse the round-trip parser)
 			if isPrintableASCII(v) {
-				buf.WriteString(fmt.Sprintf("{\"%s\"}\n", string(v)))
+				buf.WriteString(fmt.Sprintf("%q\n", string(v))) // -> "foo"
 				break
 			}
 			// otherwise *then* try interpreting it as a nested wire-message
@@ -192,8 +193,14 @@ func parseMsg(lines []string, idx *int) ([]byte, error) {
 			continue
 		}
 
-		// 2️⃣ ASCII string  {"foo"}      ─ or ─     {"foo"}  <newline>
-		if strings.HasPrefix(rest, "{\"") {
+		// 2️⃣ ASCII string
+		//     legacy form  {"foo"}
+		//     new form     "foo"
+		if strings.HasPrefix(rest, "{\"") || strings.HasPrefix(rest, "\"") {
+			// Strip the optional leading '{'
+			if rest[0] == '{' {
+				rest = rest[1:]
+			}
 			// Find the last closing quote on this line.
 			endQuote := strings.LastIndex(rest, "\"")
 			if endQuote == -1 {
@@ -201,27 +208,9 @@ func parseMsg(lines []string, idx *int) ([]byte, error) {
 			}
 
 			// Extract the bytes inside {" … "}
-			str := rest[2:endQuote]
+			str := rest[1:endQuote]
 			out = append(out, protowire.AppendTag(nil, num, protowire.BytesType)...)
 			out = protowire.AppendBytes(out, []byte(str))
-			// ── DON’T lose structural braces that share the same line  ──
-			// Anything after the closing quote might include one or more
-			// real ‘}’ that terminate the current (or even parent)
-			// sub-message.  We must push those tokens back so the main state
-			// machine can see them.
-			//
-			tail := strings.TrimSpace(rest[endQuote+1:])
-			if tail != "" {
-				// Expand the tail into logical tokens *in the same order* we
-				// would have produced had they been on their own lines, then
-				// inject them right after the current position.
-				more := tokenizePrettyLines(tail)
-				// lines and *idx are shared slices/pointers; safe to splice.
-				*idx -= 1 // rewind to re-process insert
-				lines = append(lines[:*idx+1], append(more, lines[*idx+1:]...)...)
-			}
-			// The current line is done – the loop will advance to whatever
-			// token we just injected (or the next original one).
 			continue
 		}
 
