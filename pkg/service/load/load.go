@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"sync"
-	"time"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/service/testsuite"
@@ -91,59 +89,18 @@ func (lt *LoadTester) Start(ctx context.Context) error {
 		zap.Bool("insecure", lt.insecure),
 	)
 
-	d, err := time.ParseDuration(lt.duration)
-	if err != nil {
-		lt.logger.Error("Failed to parse duration", zap.Error(err))
-		return fmt.Errorf("failed to parse duration: %w", err)
+	mc := NewMetricsCollector(lt.config, lt.logger, lt.vus)
+	scheduler := NewScheduler(&lt.testsuite.Spec.Load, mc, lt.logger, lt.config)
+
+	if err := scheduler.Run(ctx, lt.testsuite); err != nil {
+		lt.logger.Error("Failed to run load test", zap.Error(err))
+		return fmt.Errorf("failed to run load test: %w", err)
 	}
 
-	// Create a context with timeout for the load test
-	ctx, cancel := context.WithTimeout(ctx, d)
-	defer cancel()
+	steps := mc.SetStepsMetrics()
+	te := NewThresholdEvaluator(lt.config, lt.logger)
+	te.Evaluate(steps)
 
-	var wg sync.WaitGroup
-
-	for i := 0; i < lt.vus; i++ {
-		wg.Add(1)
-		vuID := i + 1
-		lt.logger.Debug("Starting virtual user", zap.Int("vuID", vuID))
-		go func(vuID int) {
-			defer wg.Done()
-			options := testsuite.LoadOptions{
-				Profile:    lt.profile,
-				VUs:        lt.vus,
-				Duration:   lt.duration,
-				RPS:        lt.rps,
-				Stages:     lt.testsuite.Spec.Load.Stages,
-				Thresholds: lt.testsuite.Spec.Load.Thresholds,
-			}
-			if err := lt.runVirtualUser(&ctx, options, vuID); err != nil {
-				lt.logger.Error("Failed to run virtual user", zap.Int("vuID", vuID), zap.Error(err))
-			}
-		}(vuID)
-	}
-
-	wg.Wait()
 	lt.logger.Info("Load test completed", zap.String("tsFile", lt.tsFile))
-	return nil
-}
-
-func (lt *LoadTester) runVirtualUser(ctx *context.Context, options testsuite.LoadOptions, vuID int) error {
-	lt.logger.Debug("Running virtual user", zap.Int("vuID", vuID))
-
-	tsExec, err := testsuite.NewTSExecutor(lt.config, lt.logger, true)
-	if err != nil {
-		lt.logger.Error("Failed to create TestSuite executor", zap.Int("vuID", vuID), zap.Error(err))
-		return fmt.Errorf("failed to create TestSuite executor: %w", err)
-	}
-	// NOTE (for future pop up questions): Use the passed (options) parameter istead of the (LoadOptions) of the testsuite
-	// cause it got the overwritten by the CLI.
-	tsExec.Testsuite = lt.testsuite
-
-	if err := tsExec.Execute(ctx); err != nil {
-		lt.logger.Error("Failed to execute TestSuite", zap.Int("vuID", vuID), zap.Error(err))
-		return fmt.Errorf("failed to execute TestSuite: %w", err)
-	}
-	lt.logger.Info("Virtual user completed", zap.Int("vuID", vuID))
 	return nil
 }

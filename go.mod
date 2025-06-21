@@ -124,7 +124,10 @@ require (
 	sigs.k8s.io/kustomize/kyaml v0.17.2
 )
 
-require github.com/perimeterx/marshmallow v1.1.5 // indirect
+require (
+	github.com/perimeterx/marshmallow v1.1.5 // indirect
+	golang.org/x/time v0.12.0 // indirect
+)
 
 require (
 	github.com/alecthomas/chroma v0.10.0 // indirect
