@@ -121,7 +121,7 @@ func DecodeTextRow(_ context.Context, _ *zap.Logger, data []byte, columns []*mys
 		default:
 			value, _, n, err := utils.ReadLengthEncodedString(data[offset:])
 			if err != nil {
-				return nil, offset, err
+				return nil, offset, fmt.Errorf("failed to read length-encoded string: %w", err)
 			}
 			row.Values = append(row.Values, mysql.ColumnEntry{
 				Type:  mysql.FieldType(col.Type),
