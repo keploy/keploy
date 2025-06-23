@@ -42,7 +42,9 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					logger.Debug("closing the client connection since the read deadline is reached")
 					return io.EOF
 				}
-				if err != io.EOF {
+				if err == io.EOF {
+					logger.Debug("closing the client connection due to eof", zap.Error(err))
+				} else {
 					utils.LogError(logger, err, "failed to read command packet from client")
 				}
 				return err
@@ -69,6 +71,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			resp, ok, err := matchCommand(ctx, logger, req, mockDb, decodeCtx)
 			if err != nil {
 				if err == io.EOF {
+					logger.Debug("EOF error while matching the command, closing the connection")
 					return io.EOF
 				}
 				utils.LogError(logger, err, "failed to match the command")
@@ -94,12 +97,14 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			buf, err := wire.EncodeToBinary(ctx, logger, &resp.PacketBundle, clientConn, decodeCtx)
 			if err != nil {
 				utils.LogError(logger, err, "failed to encode the response", zap.Any("response", resp))
+				return err
 			}
 
 			// Write the response to the client
 			_, err = clientConn.Write(buf)
 			if err != nil {
 				if ctx.Err() != nil {
+					logger.Debug("context done while writing the response to the client", zap.Error(ctx.Err()))
 					return ctx.Err()
 				}
 				utils.LogError(logger, err, "failed to write the response to the client")

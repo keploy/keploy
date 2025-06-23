@@ -335,7 +335,7 @@ func ReadRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader
 				return buffer, result.err
 			}
 
-			if result.n == numBytes {
+			if numBytes == 0 {
 				return buffer, nil
 			}
 		}
