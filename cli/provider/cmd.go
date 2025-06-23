@@ -1,4 +1,4 @@
-// Package provider provides functionality for the keploy provider.\
+// Package provider provides functionality for the keploy provider.
 package provider
 
 import (
@@ -165,7 +165,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	//sets the displayment of flag-related errors
 	cmd.SilenceErrors = true
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
-		PrintLogo(true)
+		PrintLogo(os.Stdout, true)
 		color.Red(fmt.Sprintf("❌ error: %v", err))
 		fmt.Println()
 		return err
@@ -477,7 +477,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 }
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
-	PrintLogo(disableAnsi)
+	PrintLogo(os.Stdout, disableAnsi)
 	if c.cfg.Debug {
 		logger, err := log.ChangeLogLevel(zap.DebugLevel)
 		*c.logger = *logger
