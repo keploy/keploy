@@ -16,19 +16,22 @@ type Scheduler struct {
 	config      *config.Config
 	logger      *zap.Logger
 	loadOptions *testsuite.LoadOptions
+	ts          *testsuite.TestSuite
 	collector   *MetricsCollector
 	limiter     *rate.Limiter
 	cancelAll   context.CancelFunc
 	wg          sync.WaitGroup
 }
 
-func NewScheduler(loadOptions *testsuite.LoadOptions, collector *MetricsCollector, logger *zap.Logger, config *config.Config) *Scheduler {
+func NewScheduler(logger *zap.Logger, config *config.Config, loadOptions *testsuite.LoadOptions, ts *testsuite.TestSuite, collector *MetricsCollector) *Scheduler {
 	var lim *rate.Limiter
 	if loadOptions.RPS > 0 {
 		lim = rate.NewLimiter(rate.Limit(loadOptions.RPS), loadOptions.RPS)
 	}
+
 	return &Scheduler{
 		loadOptions: loadOptions,
+		ts:          ts,
 		collector:   collector,
 		limiter:     lim,
 		logger:      logger,
@@ -36,7 +39,7 @@ func NewScheduler(loadOptions *testsuite.LoadOptions, collector *MetricsCollecto
 	}
 }
 
-func (s *Scheduler) Run(parent context.Context, ts *testsuite.TestSuite) error {
+func (s *Scheduler) Run(parent context.Context) error {
 	duration, err := time.ParseDuration(s.loadOptions.Duration)
 	if err != nil {
 		s.logger.Error("Failed to parse duration", zap.String("duration", s.loadOptions.Duration), zap.Error(err))
@@ -48,9 +51,9 @@ func (s *Scheduler) Run(parent context.Context, ts *testsuite.TestSuite) error {
 
 	switch s.loadOptions.Profile {
 	case "constant_vus":
-		return s.runConstant(ctx, ts)
+		return s.runConstant(ctx, s.ts)
 	case "ramping_vus":
-		return s.runRamping(ctx, ts)
+		return s.runRamping(ctx, s.ts)
 	default:
 		return fmt.Errorf("unknown load profile %q", s.loadOptions.Profile)
 	}

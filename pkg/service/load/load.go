@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/service/testsuite"
@@ -24,17 +25,6 @@ type LoadTester struct {
 	rps       int
 }
 
-/*
-LoadOptionsDefaults defines the default options for load testing.
-It can be used to check if enterd values from CLI are default or not.
-if defaults then do nothing, if not then use the values from CLI.
-*/
-// type LoadOptionsDefaults struct {
-// 	VUs      int
-// 	Duration string
-// 	RPS      int
-// }
-
 func NewLoadTester(cfg *config.Config, logger *zap.Logger) (*LoadTester, error) {
 	testsuitePath := filepath.Join(cfg.Load.TSPath, cfg.Load.TSFile)
 	logger.Info("Parsing TestSuite File", zap.String("path", testsuitePath))
@@ -43,6 +33,11 @@ func NewLoadTester(cfg *config.Config, logger *zap.Logger) (*LoadTester, error) 
 	if err != nil {
 		logger.Error("Failed to parse TestSuite file", zap.Error(err))
 		return nil, fmt.Errorf("failed to parse TestSuite file: %w", err)
+	}
+
+	if testsuite.Spec.Load.Profile == "" {
+		testsuite.Spec.Load.Profile = "constant_vus"
+		logger.Info("Load profile not specified, defaulting to 'constant_vus'")
 	}
 
 	return &LoadTester{
@@ -66,17 +61,26 @@ func (lt *LoadTester) Start(ctx context.Context) error {
 		return fmt.Errorf("load test file is not specified, please provide a valid testsuite file using --file or -f flag")
 	}
 
-	if ctx.Value("vus") != nil && ctx.Value("vus") != 1 {
+	if ctx.Value("vus") != nil && ctx.Value("vus") != 1 && lt.profile == "constant_vus" {
 		lt.vus = ctx.Value("vus").(int)
 		lt.logger.Debug("Overriding VUs from CLI", zap.Int("vus", lt.vus))
 	}
-	if ctx.Value("duration") != nil && ctx.Value("duration") != "" {
+	if ctx.Value("duration") != nil && ctx.Value("duration") != "" && lt.profile == "constant_vus" {
 		lt.duration = ctx.Value("duration").(string)
 		lt.logger.Debug("Overriding duration from CLI", zap.String("duration", lt.duration))
 	}
-	if ctx.Value("rps") != nil && ctx.Value("rps") != 0 {
+	if ctx.Value("rps") != nil && ctx.Value("rps") != 0 && lt.profile == "constant_vus" {
 		lt.rps = ctx.Value("rps").(int)
 		lt.logger.Debug("Overriding RPS from CLI", zap.Int("rps", lt.rps))
+	}
+
+	loadOptions := &testsuite.LoadOptions{
+		Profile:    lt.profile,
+		VUs:        lt.vus,
+		Duration:   lt.duration,
+		RPS:        lt.rps,
+		Stages:     lt.testsuite.Spec.Load.Stages,
+		Thresholds: lt.testsuite.Spec.Load.Thresholds,
 	}
 
 	lt.logger.Info("Starting load test",
@@ -90,17 +94,85 @@ func (lt *LoadTester) Start(ctx context.Context) error {
 	)
 
 	mc := NewMetricsCollector(lt.config, lt.logger, lt.vus)
-	scheduler := NewScheduler(&lt.testsuite.Spec.Load, mc, lt.logger, lt.config)
+	scheduler := NewScheduler(lt.logger, lt.config, loadOptions, lt.testsuite, mc)
 
-	if err := scheduler.Run(ctx, lt.testsuite); err != nil {
+	if err := scheduler.Run(ctx); err != nil {
 		lt.logger.Error("Failed to run load test", zap.Error(err))
 		return fmt.Errorf("failed to run load test: %w", err)
 	}
 
 	steps := mc.SetStepsMetrics()
-	te := NewThresholdEvaluator(lt.config, lt.logger)
-	te.Evaluate(steps)
+	te := NewThresholdEvaluator(lt.config, lt.logger, lt.testsuite)
+	report := te.Evaluate(steps)
+
+	lt.printCLISummary(report)
 
 	lt.logger.Info("Load test completed", zap.String("tsFile", lt.tsFile))
 	return nil
+}
+
+func (lt *LoadTester) printCLISummary(report []StepThresholdReport) {
+	lt.logger.Info("Load test summary",
+		zap.String("tsFile", lt.tsFile),
+		zap.Int("vus", lt.vus),
+		zap.String("duration", lt.duration),
+		zap.Int("rps", lt.rps),
+	)
+
+	// Total Requests:      3,000
+	// Failures:            18 (0.6%)
+	// P95 Latency:         460ms
+	// Data Sent:           1.2 MB
+	// Data Received:       5.4 MB
+
+	// Thresholds:
+	//   ✓ http_req_duration_p95 < 500ms
+	//   ✗ http_req_failed_rate <= 1%
+	//   ✓ data_received > 1MB
+
+	// Test Result: ❌ FAILED (1 critical threshold breached)
+
+	for _, stepReport := range report {
+		thresholdStatus := make(map[string]int)
+		testResultStatus := "PASSED"
+
+		fmt.Println("Step:", stepReport.StepName)
+		fmt.Printf("  Total Requests:      %d\n", stepReport.TotalRequests)
+		fmt.Printf("  Failures:            %d (%.2f%%)\n", stepReport.TotalFailures,
+			float64(stepReport.TotalFailures)/float64(stepReport.TotalRequests)*100)
+		fmt.Printf("  P95 Latency:         %s\n", stepReport.P95Latency)
+		fmt.Printf("  Data Sent:           %.2f MB\n", float64(stepReport.TotalBytesOut)/(1024*1024))
+		fmt.Printf("  Data Received:       %.2f MB\n", float64(stepReport.TotalBytesIn)/(1024*1024))
+		fmt.Println("  Thresholds:")
+
+		for _, th := range stepReport.Thresholds {
+			status := "✓"
+			if !th.Pass {
+				status = "✗"
+				thresholdStatus[th.Severity]++
+				testResultStatus = "FAILED"
+			}
+			fmt.Printf("    %s %-25s %-25s \tActual(%v)\n", status, th.Metric, fmt.Sprintf("condition(%s)", th.Condition), th.Actual)
+		}
+
+		if testResultStatus == "FAILED" {
+			fmt.Printf("  Test Result: ❌ %s ", testResultStatus)
+			if thresholdStatus["critical"] > 0 {
+				fmt.Printf("(%d critical threshold breached) ", thresholdStatus["critical"])
+			}
+			if thresholdStatus["high"] > 0 {
+				fmt.Printf("(%d high threshold breached) ", thresholdStatus["high"])
+			}
+			if thresholdStatus["medium"] > 0 {
+				fmt.Printf("(%d medium threshold breached) ", thresholdStatus["medium"])
+			}
+			if thresholdStatus["low"] > 0 {
+				fmt.Printf("(%d low threshold breached) ", thresholdStatus["low"])
+			}
+			fmt.Printf("\n")
+		} else {
+			fmt.Printf("  Test Result: ✅ %s\n", testResultStatus)
+		}
+		fmt.Println(strings.Repeat("-", 100))
+	}
 }

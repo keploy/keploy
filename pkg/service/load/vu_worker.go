@@ -50,10 +50,11 @@ func NewVUWorker(cfg *config.Config, logger *zap.Logger, id int, ts *testsuite.T
 
 func (w *VUWorker) vuWorker(ctx context.Context) {
 	VUReport := &VUReport{
-		VUID:        w.VUID,
-		TSExecCount: 0,
-		TSExecTime:  make([]time.Duration, 0),
-		Steps:       make([]StepReport, 0),
+		VUID:          w.VUID,
+		TSExecCount:   0,
+		TSExecFailure: 0,
+		TSExecTime:    make([]time.Duration, 0),
+		Steps:         make([]StepReport, 0),
 	}
 	w.logger.Debug("Running virtual user", zap.Int("vuID", w.VUID))
 
@@ -81,23 +82,21 @@ func (w *VUWorker) vuWorker(ctx context.Context) {
 			w.waitG.Done()
 			return
 		default:
-			execReport, err := tsExec.Execute(ctx)
+			execReport, err := tsExec.Execute(ctx, w.limiter)
 			if err != nil {
 				w.logger.Error("Failed to execute TestSuite", zap.Int("vuID", w.VUID), zap.Error(err))
-				VUReport.TSExecCount++
 				VUReport.TSExecFailure++
 				// TODO: stop or continue
 				// return
-			} else {
-				w.logger.Debug("Virtual user executed TestSuite", zap.Int("vuID", w.VUID))
-				VUReport.TSExecCount++
-				VUReport.TSExecTime = append(VUReport.TSExecTime, execReport.ExecutionTime)
+			}
+			w.logger.Debug("Virtual user executed TestSuite", zap.Int("vuID", w.VUID))
+			VUReport.TSExecCount++
+			VUReport.TSExecTime = append(VUReport.TSExecTime, execReport.ExecutionTime)
 
-				for i, step := range execReport.StepsResult {
-					VUReport.Steps[i].StepCount++
-					VUReport.Steps[i].StepResponseTime = append(VUReport.Steps[i].StepResponseTime, step.ResponseTime)
-					VUReport.Steps[i].StepResults = append(VUReport.Steps[i].StepResults, step)
-				}
+			for i, step := range execReport.StepsResult {
+				VUReport.Steps[i].StepCount++
+				VUReport.Steps[i].StepResponseTime = append(VUReport.Steps[i].StepResponseTime, step.ResponseTime)
+				VUReport.Steps[i].StepResults = append(VUReport.Steps[i].StepResults, step)
 			}
 		}
 	}

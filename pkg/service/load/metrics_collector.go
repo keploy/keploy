@@ -47,7 +47,7 @@ func (mc *MetricsCollector) SetStepsMetrics() []StepMetrics {
 			steps[j].StepCount += step.StepCount
 			steps[j].StepResponseTime = append(steps[j].StepResponseTime, step.StepResponseTime...)
 			for _, result := range step.StepResults {
-				if result.Status != "success" {
+				if result.Status == "failed" {
 					steps[j].StepFailure++
 				}
 				steps[j].StepBytesIn += result.ReqBytes

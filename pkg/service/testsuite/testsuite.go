@@ -14,6 +14,7 @@ import (
 
 	"go.keploy.io/server/v2/config"
 	"go.uber.org/zap"
+	"golang.org/x/time/rate"
 )
 
 // TestSuite represents the structure of a test suite YAML file
@@ -156,7 +157,7 @@ func NewTSExecutor(cfg *config.Config, logger *zap.Logger, skipParsing bool) (*T
 	}, nil
 }
 
-func (e *TSExecutor) Execute(ctx context.Context) (*ExecutionReport, error) {
+func (e *TSExecutor) Execute(ctx context.Context, limiter *rate.Limiter) (*ExecutionReport, error) {
 	if e.baseURL == "" {
 		e.logger.Error("base URL is not set for the test suite execution")
 		return nil, fmt.Errorf("base URL is not set for the test suite execution")
@@ -185,12 +186,17 @@ func (e *TSExecutor) Execute(ctx context.Context) (*ExecutionReport, error) {
 
 	for _, step := range e.Testsuite.Spec.Steps {
 		e.logger.Debug("executing step", zap.String("name", step.Name), zap.String("method", step.Method), zap.String("url", step.URL))
+		if limiter != nil {
+			if err := limiter.Wait(ctx); err != nil {
+				e.logger.Warn("Rate limiter wait warn", zap.Error(err))
+				continue
+			}
+		}
 		result, err := e.executeStep(step)
 		if err != nil {
 			e.logger.Error("failed to execute step", zap.String("step", step.Name), zap.Error(err))
-			return nil, err
 		}
-		e.logger.Info("step executed", zap.String("step", step.Name), zap.String("status", result.Status), zap.Any("result", result))
+		e.logger.Debug("step executed", zap.String("step", step.Name), zap.String("status", result.Status), zap.Any("result", result))
 		er.StepsResult = append(er.StepsResult, *result)
 		if result.Status == "failed" {
 			er.FailedSteps++

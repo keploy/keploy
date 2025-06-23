@@ -36,7 +36,7 @@ func TestSuite(ctx context.Context, logger *zap.Logger, _ *config.Config, servic
 				return nil
 			}
 
-			_, err = tsSvc.Execute(ctx)
+			_, err = tsSvc.Execute(ctx, nil)
 			if err != nil {
 				utils.LogError(logger, err, "failed to execute testsuite")
 				return nil
