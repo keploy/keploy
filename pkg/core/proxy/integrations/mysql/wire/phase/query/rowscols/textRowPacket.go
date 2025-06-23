@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
@@ -87,10 +88,24 @@ func DecodeTextRow(_ context.Context, _ *zap.Logger, data []byte, columns []*mys
 				return nil, 0, fmt.Errorf("invalid datetime/timestamp data length")
 			}
 			dateTimeStr := string(data[:dataLength])
+			// Check for MySQL's special zero date value.
+			if dateTimeStr == "0000-00-00 00:00:00" || strings.HasPrefix(dateTimeStr, "0000-00-00 00:00:00.") {
+				// Handle it gracefully. You could represent it as nil, a zero time.Time{},
+				// or keep the original string depending on Keploy's desired behavior.
+				// Let's keep it as the original string for this example.
+				row.Values = append(row.Values, mysql.ColumnEntry{
+					Type:  mysql.FieldType(col.Type),
+					Name:  col.Name,
+					Value: dateTimeStr, // Preserve the original string
+				})
+				offset += int(dataLength) + 1
+				continue // Skip to the next column
+			}
+
 			layout := "2006-01-02 15:04:05"
 			t, err := time.Parse(layout, dateTimeStr)
 			if err != nil {
-				return nil, 0, fmt.Errorf("failed to parse the datetime/timestamp string")
+				return nil, 0, fmt.Errorf("failed to parse the datetime/timestamp string: received %q, expected format %q", dateTimeStr, layout)
 			}
 
 			year, month, day := t.Date()
@@ -106,7 +121,7 @@ func DecodeTextRow(_ context.Context, _ *zap.Logger, data []byte, columns []*mys
 		default:
 			value, _, n, err := utils.ReadLengthEncodedString(data[offset:])
 			if err != nil {
-				return nil, offset, err
+				return nil, offset, fmt.Errorf("failed to read length-encoded string: %w", err)
 			}
 			row.Values = append(row.Values, mysql.ColumnEntry{
 				Type:  mysql.FieldType(col.Type),
