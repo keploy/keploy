@@ -20,16 +20,18 @@ import (
 type Recorder struct {
 	logger          *zap.Logger
 	testDB          TestDB
+	IdempotencyDB   IdempotencyDB
 	mockDB          MockDB
 	telemetry       Telemetry
 	instrumentation Instrumentation
 	config          *config.Config
 }
 
-func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
+func New(logger *zap.Logger, testDB TestDB, idempotencydb IdempotencyDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
 	return &Recorder{
 		logger:          logger,
 		testDB:          testDB,
+		IdempotencyDB:   idempotencydb,
 		mockDB:          mockDB,
 		telemetry:       telemetry,
 		instrumentation: instrumentation,
@@ -136,6 +138,14 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 
 	errGrp.Go(func() error {
 		for testCase := range frames.Incoming {
+			isIdemReplay := r.IdempotencyDB.CheckReplayHeader(testCase)
+			if isIdemReplay {
+				// r.IdempotencyDB.StoreReplayResult()
+				continue
+			} else if r.config.ContainerName == "" && r.config.NetworkName == "" {
+				r.IdempotencyDB.ReplayTestCase(ctx, testCase, newTestSetID, 3)
+				r.IdempotencyDB.StoreDynamicHeaders(ctx, testCase, newTestSetID)
+			}
 			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
 			if err != nil {
 				if ctx.Err() == context.Canceled {

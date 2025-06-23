@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/v2/pkg/platform/storage"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb/testset"
+	idempotencydb "go.keploy.io/server/v2/pkg/platform/yaml/idempotencydb"
 	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
 	openapidb "go.keploy.io/server/v2/pkg/platform/yaml/openapidb"
 	reportdb "go.keploy.io/server/v2/pkg/platform/yaml/reportdb"
@@ -43,7 +44,7 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 		return nil, err
 	}
 	contractSvc := contract.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlOpenAPIDb, cfg)
-	recordSvc := record.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, cfg)
+	recordSvc := record.New(logger, commonServices.YamlTestDB, commonServices.YamlIdemDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, cfg)
 	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, auth, commonServices.Storage, cfg)
 	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, tel, auth, cfg)
 	switch cmd {
@@ -102,6 +103,7 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 	instrumentation := core.New(logger, h, p, t, client)
 
 	testDB := testdb.New(logger, c.Path)
+	idempotencydb := idempotencydb.New(logger, c.Path, "irrreport.yaml")
 	mockDB := mockdb.New(logger, c.Path, "")
 	openAPIdb := openapidb.New(logger, filepath.Join(c.Path, "schema"))
 	reportDB := reportdb.New(logger, c.Path+"/reports")
@@ -110,6 +112,7 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 	return &CommonInternalService{
 		commonPlatformServices{
 			YamlTestDB:    testDB,
+			YamlIdemDB:    idempotencydb,
 			YamlMockDb:    mockDB,
 			YamlOpenAPIDb: openAPIdb,
 			YamlReportDb:  reportDB,
