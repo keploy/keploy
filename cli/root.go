@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"os"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/cli/provider"
@@ -20,7 +21,7 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 		Version: utils.Version,
 		PreRun: func(cmd *cobra.Command, _ []string) {
 			disableAnsi, _ := cmd.Flags().GetBool("disable-ansi")
-			provider.PrintLogo(disableAnsi)
+			provider.PrintLogo(os.Stdout, disableAnsi)
 		},
 	}
 
@@ -28,7 +29,7 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 
 	rootCmd.SetHelpFunc(func(cmd *cobra.Command, args []string) {
 		disableAnsi, _ := cmd.Flags().GetBool("disable-ansi")
-		provider.PrintLogo(disableAnsi)
+		provider.PrintLogo(os.Stdout, disableAnsi)
 
 		// Use the default help function instead of calling the parent's HelpFunc
 		defaultHelpFunc(cmd, args)
