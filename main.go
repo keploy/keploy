@@ -82,7 +82,12 @@ func start(ctx context.Context) {
 		utils.SentryInit(logger, dsn)
 		//logger = utils.ModifyToSentryLogger(ctx, logger, sentry.CurrentHub().Client(), configDb)
 	}
-	conf := config.New()
+	conf, err := config.New()
+	if err != nil {
+		errMsg := "failed to create new config"
+		utils.LogError(logger, err, errMsg)
+		os.Exit(1)
+	}
 	conf.APIServerURL = apiServerURI
 	conf.GitHubClientID = gitHubClientID
 	userDb := userDb.New(logger, conf)
