@@ -57,7 +57,7 @@ func (mc *MetricsCollector) SetStepsMetrics() []StepMetrics {
 	}
 
 	for _, step := range steps {
-		mc.logger.Info("Step Metrics",
+		mc.logger.Debug("Step Metrics",
 			zap.String("stepName", step.StepName),
 			zap.Int("stepCount", step.StepCount),
 			zap.Int("stepFailure", step.StepFailure),

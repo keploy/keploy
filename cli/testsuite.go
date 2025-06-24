@@ -36,6 +36,8 @@ func TestSuite(ctx context.Context, logger *zap.Logger, _ *config.Config, servic
 				return nil
 			}
 
+			ctx = context.WithValue(ctx, "command", cmd.Name())
+
 			_, err = tsSvc.Execute(ctx, nil)
 			if err != nil {
 				utils.LogError(logger, err, "failed to execute testsuite")

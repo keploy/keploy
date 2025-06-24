@@ -2,7 +2,9 @@ package load
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -10,6 +12,14 @@ import (
 	"go.keploy.io/server/v2/pkg/service/testsuite"
 	"go.uber.org/zap"
 )
+
+type LTReport struct {
+	TestSuiteFile string                `json:"test_suite_file"`
+	VUs           int                   `json:"vus"`
+	Duration      string                `json:"duration"`
+	RPS           int                   `json:"rps"`
+	Steps         []StepThresholdReport `json:"steps"`
+}
 
 type LoadTester struct {
 	config    *config.Config
@@ -107,6 +117,21 @@ func (lt *LoadTester) Start(ctx context.Context) error {
 
 	lt.printCLISummary(report)
 
+	ltReport := LTReport{
+		TestSuiteFile: lt.tsFile,
+		VUs:           lt.vus,
+		Duration:      lt.duration,
+		RPS:           lt.rps,
+		Steps:         report,
+	}
+
+	if lt.out == "json" {
+		err := lt.saveJSONReport(ltReport)
+		if err != nil {
+			lt.logger.Error("Failed to save JSON report", zap.Error(err))
+		}
+	}
+
 	lt.logger.Info("Load test completed", zap.String("tsFile", lt.tsFile))
 	return nil
 }
@@ -175,4 +200,29 @@ func (lt *LoadTester) printCLISummary(report []StepThresholdReport) {
 		}
 		fmt.Println(strings.Repeat("-", 100))
 	}
+}
+
+func (lt *LoadTester) saveJSONReport(report LTReport) error {
+	err := os.MkdirAll(filepath.Join("keploy", "load", "reports"), 0755)
+	if err != nil {
+		lt.logger.Error("Failed to create reports directory", zap.Error(err))
+		return fmt.Errorf("failed to create reports directory: %w", err)
+	}
+	filePath := filepath.Join("keploy", "load", "reports", fmt.Sprintf("%s.json", strings.TrimSuffix(lt.tsFile, filepath.Ext(lt.tsFile))))
+	file, err := os.Create(filePath)
+	if err != nil {
+		lt.logger.Error("Failed to create output file", zap.Error(err))
+		return fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(report); err != nil {
+		lt.logger.Error("Failed to encode report to JSON", zap.Error(err))
+		return fmt.Errorf("failed to encode report to JSON: %w", err)
+	}
+
+	lt.logger.Info("Report saved successfully", zap.String("output", filePath))
+	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
+	"gopkg.in/yaml.v3"
 )
 
 // TestSuite represents the structure of a test suite YAML file
@@ -204,6 +206,48 @@ func (e *TSExecutor) Execute(ctx context.Context, limiter *rate.Limiter) (*Execu
 	}
 
 	er.ExecutionTime = time.Since(startTime)
+
+	if ctx.Value("command") == "testsuite" {
+		fmt.Println("Test Suite Execution Report:")
+		fmt.Printf("  Suite Name: %s\n", er.SuiteName)
+		fmt.Printf("  Base URL: %s\n", e.baseURL)
+		fmt.Printf("  Total Steps: %d\n", er.TotalSteps)
+		fmt.Printf("  Failed Steps: %d\n", er.FailedSteps)
+		fmt.Printf("  Execution Time: %s\n", er.ExecutionTime)
+		fmt.Println("  Steps Result:")
+		for _, stepResult := range er.StepsResult {
+			fmt.Printf("    Step Name: %s\n", stepResult.StepName)
+			fmt.Printf("      Status: %s\n", stepResult.Status)
+			if stepResult.FailureReason != "" {
+				fmt.Printf("      Failure Reason: %s\n", stepResult.FailureReason)
+			}
+		}
+
+		reportDir := filepath.Join(e.tsPath, "ts_reports")
+		if err := os.MkdirAll(reportDir, 0755); err != nil {
+			e.logger.Error("failed to create report directory", zap.String("dir", reportDir), zap.Error(err))
+			return nil, fmt.Errorf("failed to create report directory: %v", err)
+		}
+		reportFile := filepath.Join(reportDir, fmt.Sprintf("%s_report_%s", time.Now().Format("20060102150405"), e.tsFile))
+		file, err := os.Create(reportFile)
+		if err != nil {
+			e.logger.Error("failed to create report file", zap.String("file", reportFile), zap.Error(err))
+			return nil, fmt.Errorf("failed to create report file: %v", err)
+		}
+		defer file.Close()
+
+		data, err := yaml.Marshal(er)
+		if err != nil {
+			e.logger.Error("failed to marshal report data", zap.String("file", reportFile), zap.Error(err))
+			return nil, fmt.Errorf("failed to marshal report data: %v", err)
+		}
+		_, err = file.Write(data)
+		if err != nil {
+			e.logger.Error("failed to write report data to file", zap.String("file", reportFile), zap.Error(err))
+			return nil, fmt.Errorf("failed to write report data to file: %v", err)
+		}
+		e.logger.Info("test suite execution report saved", zap.String("file", reportFile))
+	}
 
 	return er, nil
 }
