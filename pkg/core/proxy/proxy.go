@@ -728,3 +728,26 @@ func (p *Proxy) GetConsumedMocks(_ context.Context, id uint64) ([]models.MockSta
 	}
 	return m.(*MockManager).GetConsumedMocks(), nil
 }
+
+// RecordGRPCMock is a placeholder for recording outgoing gRPC calls as mocks.
+// TODO: Implement actual gRPC interception and mock generation logic.
+func (p *Proxy) RecordGRPCMock(ctx context.Context, id uint64, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+	p.logger.Info("RecordGRPCMock called, placeholder implementation.", zap.Uint64("appID", id), zap.Any("options", opts))
+
+	// For now, this is a placeholder. In a real implementation, this would involve:
+	// 1. Identifying outgoing gRPC calls.
+	// 2. Capturing request and response data.
+	// 3. Formatting this data into *models.Mock.
+	// 4. Sending the mock to the `mocks` channel.
+
+	// Example of how a session might be managed (similar to the existing Record method):
+	// p.sessions.Set(id, &core.Session{
+	// 	ID:              id,
+	// 	Mode:            models.MODE_RECORD, // Or a specific gRPC record mode if needed
+	// 	MC:              mocks,
+	// 	OutgoingOptions: opts,
+	// })
+	// p.MockManagers.Store(id, NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), p.logger))
+
+	return nil
+}

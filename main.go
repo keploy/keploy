@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v2/cli"
 	"go.keploy.io/server/v2/cli/provider"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/grpc" // Import for gRPC server
 	"go.keploy.io/server/v2/pkg/platform/auth"
 	userDb "go.keploy.io/server/v2/pkg/platform/yaml/configdb/user"
 	"go.keploy.io/server/v2/utils"
@@ -67,6 +68,17 @@ func start(ctx context.Context) {
 		}
 	}()
 	defer utils.Recover(logger)
+
+	// Start the gRPC server in a goroutine
+	// TODO: Make port configurable
+	grpcServer := grpc.NewServer(logger, "8081")
+	go func() {
+		if err := grpcServer.Start(); err != nil {
+			utils.LogError(logger, err, "Failed to start gRPC server")
+			// Depending on the desired behavior, we might want to os.Exit(1) here
+			// or allow the CLI to continue running. For now, just log the error.
+		}
+	}()
 
 	// The 'umask' command is commonly used in various operating systems to regulate the permissions of newly created files.
 	// These 'umask' values subtract from the permissions assigned by the process, effectively lowering the permissions.

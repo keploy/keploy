@@ -1,0 +1,41 @@
+# Go build outputs
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binaries
+*.test
+
+# Output of the go coverage tool, e.g. cover.out
+*.out
+
+# IDE and editor specific files
+.idea/
+.vscode/
+*.swp
+*~
+*.DS_Store
+
+# Keploy generated files
+# This includes recorded test cases and mocks.
+# Users might want to commit these, but for a generic .gitignore,
+# it's common to ignore generated directories that can be reproduced.
+# If users want to version their Keploy tests, they can remove this line.
+keploy/
+
+# Local Keploy configuration (if any, though typically not in project dir)
+# .keploy/
+
+# Demo-specific binaries (if any are built and placed here)
+demo_grpc_service/demo_grpc_service_server
+demo_grpc_service/client/demo_grpc_service_client
+
+# Dependency directories (if not using Go modules, or for other languages)
+vendor/
+node_modules/
+
+# Log files
+*.log
+```

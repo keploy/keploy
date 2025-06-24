@@ -19,7 +19,7 @@ type Instrumentation interface {
 }
 
 type Service interface {
-	Start(ctx context.Context, reRecord bool) error
+	Start(ctx context.Context, reRecord bool, trafficType string) error
 	GetContainerIP(ctx context.Context, id uint64) (string, error)
 }
 

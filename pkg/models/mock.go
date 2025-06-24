@@ -14,7 +14,8 @@ const (
 	REDIS       Kind = "Redis"
 	MySQL       Kind = "MySQL"
 	Postgres    Kind = "Postgres"
-	GRPC_EXPORT Kind = "gRPC"
+	GRPC_EXPORT Kind = "gRPC" // For exported gRPC mocks
+	KindGrpc    Kind = "gRPC" // Standard gRPC kind, potentially overlapping with GRPC_EXPORT but added for clarity as per task
 	Mongo       Kind = "Mongo"
 )
 
