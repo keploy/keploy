@@ -61,6 +61,8 @@ func (te *ThresholdEvaluator) Evaluate(steps []StepMetrics) []StepThresholdRepor
 		totalBytesIn := step.StepBytesIn
 		totalBytesOut := step.StepBytesOut
 
+		// Calculate P95 latency
+		// getting the index and value of 95th percentile from the response times.
 		var p95Idx int
 		var p95 time.Duration
 		if len(allResponseTimes) > 0 {
@@ -73,11 +75,15 @@ func (te *ThresholdEvaluator) Evaluate(steps []StepMetrics) []StepThresholdRepor
 			p95 = allResponseTimes[p95Idx]
 		}
 
+		// Calculate failed rate as a percentage
+		// If totalRequests is 0, we avoid division by zero by setting failedRate to 0.
 		var failedRate float64
 		if totalRequests > 0 {
 			failedRate = (float64(totalFailures) / float64(totalRequests)) * 100
 		}
 
+		// Convert bytes to MB for reporting
+		// 1 MB = 1024 * 1024 bytes
 		dataReceivedMB := float64(totalBytesIn) / (1024 * 1024)
 		dataSentMB := float64(totalBytesOut) / (1024 * 1024)
 
@@ -189,11 +195,17 @@ func (te *ThresholdEvaluator) Evaluate(steps []StepMetrics) []StepThresholdRepor
 	return reports
 }
 
+// compareDuration compares a time.Duration value with a condition string.
+// The condition string can be in the format of "<", "<=", ">", ">=", "=",
+// and can include a duration value like "500ms", "1s", etc.
+// Returns true if the condition is met, false otherwise.
 func compareDuration(val time.Duration, cond string) bool {
 	cond = strings.TrimSpace(cond)
 	if cond == "" {
 		return true
 	}
+	// seperate the given string into operator and value
+	// e.g. "<= 500ms" -> op = "<=", cmpStr = "500ms"
 	var op string
 	var cmpStr string
 	if strings.HasPrefix(cond, "<=") {
@@ -233,11 +245,18 @@ func compareDuration(val time.Duration, cond string) bool {
 	return false
 }
 
+// compareFloat compares a float64 value with a condition string.
+// The condition string can be in the format of "<", "<=", ">", ">=", "=",
+// and can include a value like "50%", "100MB", etc.
+// Returns true if the condition is met, false otherwise.
 func compareFloat(val float64, cond string) bool {
 	cond = strings.TrimSpace(cond)
 	if cond == "" {
 		return true
 	}
+	// separate the given string into operator and value
+	// e.g. "<= 50%" -> op = "<=", cmpStr = "50%"
+	// e.g. "> 100MB" -> op = ">", cmpStr = "100MB"
 	var op string
 	var cmpStr string
 	if strings.HasPrefix(cond, "<=") {

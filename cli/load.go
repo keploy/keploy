@@ -34,6 +34,7 @@ func Load(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFact
 			duration, _ := cmd.Flags().GetString("duration")
 			rps, _ := cmd.Flags().GetInt("rps")
 
+			// values comming from CLI flags to override the spec.load options.
 			ctx := context.WithValue(ctx, "vus", vus)
 			ctx = context.WithValue(ctx, "duration", duration)
 			ctx = context.WithValue(ctx, "rps", rps)

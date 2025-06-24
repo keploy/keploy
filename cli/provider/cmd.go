@@ -181,7 +181,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "load":
 		cmd.Flags().String("base-url", "", "Base URL of the application to be tested.")
 		cmd.Flags().String("ts-path", "keploy/testsuite", "Directory path containing test suite YAML files.")
-		cmd.Flags().StringP("file", "f", "", "Name of the testsuite yaml file.")
+		cmd.Flags().StringP("file", "f", "suite-0.yaml", "Name of the testsuite yaml file.")
 		cmd.Flags().String("out", "json", "Output data format.")
 		cmd.Flags().Bool("insecure", true, "Skip TLS verification for the requests.")
 		cmd.Flags().Int("vus", 1, "Number of virtual users to run.")

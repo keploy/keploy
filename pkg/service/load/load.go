@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/service/testsuite"
@@ -71,6 +72,7 @@ func (lt *LoadTester) Start(ctx context.Context) error {
 		return fmt.Errorf("load test file is not specified, please provide a valid testsuite file using --file or -f flag")
 	}
 
+	// looks for CLI overrides
 	if ctx.Value("vus") != nil && ctx.Value("vus") != 1 && lt.profile == "constant_vus" {
 		lt.vus = ctx.Value("vus").(int)
 		lt.logger.Debug("Overriding VUs from CLI", zap.Int("vus", lt.vus))
@@ -84,6 +86,7 @@ func (lt *LoadTester) Start(ctx context.Context) error {
 		lt.logger.Debug("Overriding RPS from CLI", zap.Int("rps", lt.rps))
 	}
 
+	// init load options with values from testsuite spec and CLI overrides
 	loadOptions := &testsuite.LoadOptions{
 		Profile:    lt.profile,
 		VUs:        lt.vus,
@@ -208,7 +211,8 @@ func (lt *LoadTester) saveJSONReport(report LTReport) error {
 		lt.logger.Error("Failed to create reports directory", zap.Error(err))
 		return fmt.Errorf("failed to create reports directory: %w", err)
 	}
-	filePath := filepath.Join("keploy", "load", "reports", fmt.Sprintf("%s.json", strings.TrimSuffix(lt.tsFile, filepath.Ext(lt.tsFile))))
+	filePath := filepath.Join("keploy", "load", "reports",
+		fmt.Sprintf("%s_%s.json", time.Now().Format("20060102_150405"), strings.TrimSuffix(lt.tsFile, filepath.Ext(lt.tsFile))))
 	file, err := os.Create(filePath)
 	if err != nil {
 		lt.logger.Error("Failed to create output file", zap.Error(err))

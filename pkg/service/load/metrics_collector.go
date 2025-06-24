@@ -34,6 +34,7 @@ func (mc *MetricsCollector) SetStepsMetrics() []StepMetrics {
 	steps := make([]StepMetrics, len(mc.VUsReports[0].Steps))
 	for i, vuReport := range mc.VUsReports {
 		for j, step := range vuReport.Steps {
+			// Initialize per step metrics. step 1, 2, 3 and so on. it the same step across all VUs but with different results.
 			if i == 0 {
 				steps[j] = StepMetrics{
 					StepName:         step.StepName,
@@ -44,6 +45,7 @@ func (mc *MetricsCollector) SetStepsMetrics() []StepMetrics {
 					StepBytesOut:     0,
 				}
 			}
+			// collecting the results from different VUs into one place to operate on later.
 			steps[j].StepCount += step.StepCount
 			steps[j].StepResponseTime = append(steps[j].StepResponseTime, step.StepResponseTime...)
 			for _, result := range step.StepResults {

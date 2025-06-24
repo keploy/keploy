@@ -36,6 +36,8 @@ func TestSuite(ctx context.Context, logger *zap.Logger, _ *config.Config, servic
 				return nil
 			}
 
+			// If any other command is using the TSExecutor there is no need to report to the screen.
+			// for example, the load command uses the TSExecutor to execute the testsuite. It does not need to report the execution to the screen.
 			ctx = context.WithValue(ctx, "command", cmd.Name())
 
 			_, err = tsSvc.Execute(ctx, nil)

@@ -72,11 +72,13 @@ func (w *VUWorker) vuWorker(ctx context.Context) {
 		w.logger.Error("Failed to create TestSuite executor", zap.Int("vuID", w.VUID), zap.Error(err))
 	}
 
+	// Set the TestSuite for the executor manually after skipping the parsing.
 	tsExec.Testsuite = w.ts
 
 	for {
 		select {
 		case <-ctx.Done():
+			// if the context duration is done, waits for reporting to the MetricsCollector.
 			w.mc.CollectVUReport(VUReport)
 			w.logger.Debug("Virtual user context done", zap.Int("vuID", w.VUID))
 			w.waitG.Done()
@@ -93,6 +95,7 @@ func (w *VUWorker) vuWorker(ctx context.Context) {
 			VUReport.TSExecCount++
 			VUReport.TSExecTime = append(VUReport.TSExecTime, execReport.ExecutionTime)
 
+			// collecting per step results.
 			for i, step := range execReport.StepsResult {
 				VUReport.Steps[i].StepCount++
 				VUReport.Steps[i].StepResponseTime = append(VUReport.Steps[i].StepResponseTime, step.ResponseTime)

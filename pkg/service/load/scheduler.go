@@ -24,6 +24,7 @@ type Scheduler struct {
 }
 
 func NewScheduler(logger *zap.Logger, config *config.Config, loadOptions *testsuite.LoadOptions, ts *testsuite.TestSuite, collector *MetricsCollector) *Scheduler {
+	// setting the rate limiter based on the RPS specified in loadOptions will be passed later to the TSExecutor execute function.
 	var lim *rate.Limiter
 	if loadOptions.RPS > 0 {
 		lim = rate.NewLimiter(rate.Limit(loadOptions.RPS), loadOptions.RPS)
@@ -40,6 +41,8 @@ func NewScheduler(logger *zap.Logger, config *config.Config, loadOptions *testsu
 }
 
 func (s *Scheduler) Run(parent context.Context) error {
+	// setting the context with a timeout based on the duration specified in loadOptions.
+	// will be given to the VUWorker goroutines along with the waitgroup to synchronize.
 	duration, err := time.ParseDuration(s.loadOptions.Duration)
 	if err != nil {
 		s.logger.Error("Failed to parse duration", zap.String("duration", s.loadOptions.Duration), zap.Error(err))
@@ -49,6 +52,7 @@ func (s *Scheduler) Run(parent context.Context) error {
 	s.cancelAll = cancel
 	defer cancel()
 
+	// check if the loadOptions has a valid profile set, if not return an error.
 	switch s.loadOptions.Profile {
 	case "constant_vus":
 		return s.runConstant(ctx, s.ts)
@@ -66,6 +70,7 @@ func (s *Scheduler) runConstant(ctx context.Context, ts *testsuite.TestSuite) er
 		return err
 	}
 
+	// if context is done it waits for all VU goroutines to finish reporting back to the MetricCollector.
 	<-ctx.Done()
 	s.wg.Wait()
 
@@ -76,6 +81,7 @@ func (s *Scheduler) runRamping(ctx context.Context, ts *testsuite.TestSuite) err
 	start := time.Now()
 	current := 0
 	for _, stg := range s.loadOptions.Stages {
+		// spawning VU goroutines based on the target specified in the stage.
 		target := stg.Target
 		delta := target - current
 		if delta > 0 {
@@ -83,10 +89,12 @@ func (s *Scheduler) runRamping(ctx context.Context, ts *testsuite.TestSuite) err
 				return err
 			}
 		}
+
 		stageDuration, err := time.ParseDuration(stg.Duration)
 		if err != nil {
 			return err
 		}
+		// setting the time for every duration stage to wait until the next stage starts or context duration is done.
 		sleepUntil := start.Add(stageDuration)
 		select {
 		case <-ctx.Done():
@@ -95,6 +103,8 @@ func (s *Scheduler) runRamping(ctx context.Context, ts *testsuite.TestSuite) err
 		}
 		current = target
 	}
+
+	// if context is done it waits for all VU goroutines to finish reporting back to the MetricCollector.
 
 	<-ctx.Done()
 	s.wg.Wait()
@@ -105,6 +115,8 @@ func (s *Scheduler) runRamping(ctx context.Context, ts *testsuite.TestSuite) err
 func (s *Scheduler) spawnVUGoroutines(ctx context.Context, ts *testsuite.TestSuite, n int) error {
 	for i := 0; i < n; i++ {
 		s.wg.Add(1)
+		// spawning VUWorker goroutines with the context, test suite, metrics collector, rate limiter and waitgroup.
+		// the VUWorker will execute the test suite steps and report the results back to the MetricsCollector.
 		go func(id int) {
 			vuWorker := NewVUWorker(s.config, s.logger, id+1, ts, s.collector, s.limiter, &s.wg)
 			vuWorker.vuWorker(ctx)
