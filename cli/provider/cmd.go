@@ -232,7 +232,18 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-
+	case "embed":
+		cmd.Flags().String("source-path", "", "Path to the source file for embedding generation.")
+		cmd.Flags().String("output-path", "embeddings.json", "Path to save the generated embeddings.")
+		cmd.Flags().String("model", "text-embedding-ada-002", "Model to use for embedding generation.")
+		cmd.Flags().String("llm-base-url", "", "Base URL for the AI model.")
+		cmd.Flags().String("llm-api-version", "", "API version of the llm")
+		err := cmd.MarkFlagRequired("source-path")
+		if err != nil {
+			errMsg := "failed to mark source-path as required flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
 	case "record", "test", "rerecord":
 		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
 			cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate contracts")
@@ -367,6 +378,8 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"recordTimer":           "record-timer",
 		"urlMethods":            "url-methods",
 		"inCi":                  "in-ci",
+		"sourcePath":            "source-path",
+		"outputPath":            "output-path",
 	}
 
 	if newName, ok := flagNameMapping[name]; ok {
@@ -879,7 +892,19 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, nil, "TestCommand is not set. Please specify the command to run tests.")
 			return errors.New("TestCommand is not set")
 		}
-
+	case "embed":
+		if os.Getenv("API_KEY") == "" {
+			utils.LogError(c.logger, nil, "API_KEY is not set")
+			return errors.New("API_KEY is not set")
+		}
+		if c.cfg.Embed.SourcePath == "" {
+			utils.LogError(c.logger, nil, "SourcePath is not provided. Please specify the source file path.")
+			return errors.New("SourcePath is not set")
+		}
+		if _, err := os.Stat(c.cfg.Embed.SourcePath); os.IsNotExist(err) {
+			utils.LogError(c.logger, err, "Source file does not exist", zap.String("path", c.cfg.Embed.SourcePath))
+			return errors.New("source file does not exist")
+		}
 	}
 
 	return nil

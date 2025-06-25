@@ -106,6 +106,11 @@ func (tel *Telemetry) GenerateUT() {
 	go tel.SendTelemetry("GenerateUT", dataMap)
 }
 
+func (tel *Telemetry) GenerateEmbedding() {
+	dataMap := &sync.Map{}
+	go tel.SendTelemetry("GenerateEmbedding", dataMap)
+}
+
 // RecordedMocks is Telemetry event for the mocks that are recorded in the mocking feature
 func (tel *Telemetry) RecordedMocks(mockTotal map[string]int) {
 	mockMap := &sync.Map{}
