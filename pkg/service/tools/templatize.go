@@ -513,30 +513,27 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 interfa
 			}
 		}
 	case geko.Array:
-		for i, val := range v.List {
-			var err error
-			var isTemplatized bool
-			original := val
-			isTemplatized, val, err = RenderIfTemplatized(val)
-			if err != nil {
-				return false
-			}
-			switch x := val.(type) {
+		for i, v := range v.List {
+			switch x := v.(type) {
 			case string:
-				addTemplates(logger, &x, interface2)
+				processNestedTemplates(logger, val1, &x)
 				v.List[i] = x
-			case float32, float64, int, int64:
-				x = interface{}(x)
-				addTemplates(logger, &x, interface2)
+			case float32:
+				processNestedTemplates(logger, val1, &x)
+				v.List[i] = x
+			case int:
+				processNestedTemplates(logger, val1, &x)
+				v.List[i] = x
+			case int64:
+				processNestedTemplates(logger, val1, &x)
+				v.List[i] = x
+			case float64:
+				processNestedTemplates(logger, val1, &x)
 				v.List[i] = x
 			default:
-				addTemplates(logger, v.List[i], interface2)
+				processNestedTemplates(logger, val1, v.List[i])
 			}
-			if isTemplatized {
-				v.Set(i, original)
-			} else {
-				v.Set(i, v.List[i])
-			}
+			v.Set(i, v.List[i])
 		}
 	case map[string]string:
 		for key, val := range v {
@@ -662,9 +659,10 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 interfa
 	return false
 }
 
-// TODO: add better comment here and rename this function.
-// Here we simplify the second interface and finally add the templates.
-func addTemplates1(logger *zap.Logger, val1 *string, body interface{}) bool {
+// processNestedTemplates recursively processes nested data structures and adds template placeholders
+// for matching values. This function simplifies complex nested interfaces and adds templates
+// to create consistent test data patterns.
+func processNestedTemplates(logger *zap.Logger, val1 *string, body interface{}) bool {
 	switch b := body.(type) {
 	case geko.ObjectItems:
 		keys := b.Keys()
@@ -682,26 +680,26 @@ func addTemplates1(logger *zap.Logger, val1 *string, body interface{}) bool {
 			switch vals[i].(type) {
 			case string:
 				x := vals[i].(string)
-				ok = addTemplates1(logger, val1, &x)
+				ok = processNestedTemplates(logger, val1, &x)
 				vals[i] = x
 			case float32:
 				x := vals[i].(float32)
-				ok = addTemplates1(logger, val1, &x)
+				ok = processNestedTemplates(logger, val1, &x)
 				vals[i] = x
 			case int:
 				x := vals[i].(int)
-				ok = addTemplates1(logger, val1, &x)
+				ok = processNestedTemplates(logger, val1, &x)
 				vals[i] = x
 			case int64:
 				x := vals[i].(int64)
-				ok = addTemplates1(logger, val1, &x)
+				ok = processNestedTemplates(logger, val1, &x)
 				vals[i] = x
 			case float64:
 				x := vals[i].(float64)
-				ok = addTemplates1(logger, val1, &x)
+				ok = processNestedTemplates(logger, val1, &x)
 				vals[i] = x
 			default:
-				ok = addTemplates1(logger, val1, vals[i])
+				ok = processNestedTemplates(logger, val1, vals[i])
 			}
 			// we can't change if the type of vals[i] is also object item.
 			if ok && reflect.TypeOf(vals[i]) != reflect.TypeOf(b) {
@@ -721,22 +719,22 @@ func addTemplates1(logger *zap.Logger, val1 *string, body interface{}) bool {
 		for i, v := range b.List {
 			switch x := v.(type) {
 			case string:
-				addTemplates1(logger, val1, &x)
+				processNestedTemplates(logger, val1, &x)
 				b.List[i] = x
 			case float32:
-				addTemplates1(logger, val1, &x)
+				processNestedTemplates(logger, val1, &x)
 				b.List[i] = x
 			case int:
-				addTemplates1(logger, val1, &x)
+				processNestedTemplates(logger, val1, &x)
 				b.List[i] = x
 			case int64:
-				addTemplates1(logger, val1, &x)
+				processNestedTemplates(logger, val1, &x)
 				b.List[i] = x
 			case float64:
-				addTemplates1(logger, val1, &x)
+				processNestedTemplates(logger, val1, &x)
 				b.List[i] = x
 			default:
-				addTemplates1(logger, val1, b.List[i])
+				processNestedTemplates(logger, val1, b.List[i])
 			}
 			b.Set(i, b.List[i])
 		}
@@ -791,17 +789,17 @@ func addTemplates1(logger *zap.Logger, val1 *string, body interface{}) bool {
 			var ok bool
 			switch x := val2.(type) {
 			case string:
-				ok = addTemplates1(logger, val1, &x)
+				ok = processNestedTemplates(logger, val1, &x)
 			case float32:
-				ok = addTemplates1(logger, val1, &x)
+				ok = processNestedTemplates(logger, val1, &x)
 			case int:
-				ok = addTemplates1(logger, val1, &x)
+				ok = processNestedTemplates(logger, val1, &x)
 			case int64:
-				ok = addTemplates1(logger, val1, &x)
+				ok = processNestedTemplates(logger, val1, &x)
 			case float64:
-				ok = addTemplates1(logger, val1, &x)
+				ok = processNestedTemplates(logger, val1, &x)
 			default:
-				ok = addTemplates1(logger, val1, val2)
+				ok = processNestedTemplates(logger, val1, val2)
 			}
 
 			if ok {
@@ -836,22 +834,22 @@ func addTemplates1(logger *zap.Logger, val1 *string, body interface{}) bool {
 		for i, val := range b {
 			switch x := val.(type) {
 			case string:
-				addTemplates1(logger, val1, &x)
+				processNestedTemplates(logger, val1, &x)
 				b[i] = x
 			case float32:
-				addTemplates1(logger, val1, &x)
+				processNestedTemplates(logger, val1, &x)
 				b[i] = x
 			case int:
-				addTemplates1(logger, val1, &x)
+				processNestedTemplates(logger, val1, &x)
 				b[i] = x
 			case int64:
-				addTemplates1(logger, val1, &x)
+				processNestedTemplates(logger, val1, &x)
 				b[i] = x
 			case float64:
-				addTemplates1(logger, val1, &x)
+				processNestedTemplates(logger, val1, &x)
 				b[i] = x
 			default:
-				addTemplates1(logger, val1, b[i])
+				processNestedTemplates(logger, val1, b[i])
 			}
 			b[i] = val
 		}
@@ -867,9 +865,11 @@ func getType(val interface{}) string {
 		return "int"
 	case float64, float32, *float64, *float32:
 		return "float"
+	default:
+		// Return "string" as a safe default for unknown types
+		// This ensures the template system continues to work even with unexpected types
+		return "string"
 	}
-	//TODO: handle the default case properly, return some errot.
-	return ""
 }
 
 // This function returns a unique key for each value, for instance if id already exists, it will return id1.
@@ -916,23 +916,24 @@ func render(val string) (interface{}, error) {
 		return val, fmt.Errorf("failed to execute the template %v", zap.Error(err))
 	}
 
+	// Handle string type templates
 	if strings.Contains(val, "string") {
 		return output.String(), nil
 	}
 
-	// Remove the double quotes from the output for rest of the values. (int, float)
+	// Remove the double quotes from the output for numeric values (int, float)
 	outputString := strings.Trim(output.String(), `"`)
 
-	// TODO: why do we need this when we have already declared the funcMap.
-	// Convert this to the appropriate type and return.
+	// Convert to the appropriate type based on the template
 	switch {
 	case strings.Contains(val, "int"):
-		return utils.ToInt(output.String()), nil
+		return utils.ToInt(outputString), nil
 	case strings.Contains(val, "float"):
-		return utils.ToFloat(output.String()), nil
+		return utils.ToFloat(outputString), nil
+	default:
+		// Return as string for unknown types
+		return outputString, nil
 	}
-
-	return outputString, nil
 }
 
 // Compare the headers of 2 utils.TemplatizedValues requests and add the templates.
