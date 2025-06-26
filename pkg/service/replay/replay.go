@@ -821,6 +821,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if loopErr != nil {
 			utils.LogError(r.logger, loopErr, "failed to simulate request")
 			failure++
+			testSetStatus = models.TestSetStatusFailed
 			testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, loopErr.Error())
 			loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 			if loopErr != nil {
@@ -849,6 +850,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if !ok {
 				r.logger.Error("invalid response type for HTTP test case")
 				failure++
+				testSetStatus = models.TestSetStatusFailed
 				testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, "invalid response type for HTTP test case")
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
@@ -864,6 +866,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if !ok {
 				r.logger.Error("invalid response type for gRPC test case")
 				failure++
+				testSetStatus = models.TestSetStatusFailed
 				testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, "invalid response type for gRPC test case")
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
@@ -1460,9 +1463,7 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 
 	switch testCase.Kind {
 	case models.HTTP:
-		if testCase.HTTPResp.StatusCode != 0 {
-			result.StatusCode.Expected = testCase.HTTPResp.StatusCode
-		}
+		result.StatusCode.Expected = testCase.HTTPResp.StatusCode
 
 		testCaseResult.Req = models.HTTPReq{
 			Method:     testCase.HTTPReq.Method,
