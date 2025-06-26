@@ -911,17 +911,29 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 		if expSlice.Len() != actSlice.Len() {
 			return matchJSONComparisonResult, nil
 		}
+
+		// ­Special rule: we're at the root of the slice (key == "")
+		// and every element is a map or slice (i.e. a JSON object or array) → don’t add “[i]” prefixes.
+		dropPrefix := key == "" &&
+			expSlice.Len() > 0 && (reflect.TypeOf(expSlice.Index(0).Interface()).Kind() == reflect.Map || reflect.TypeOf(expSlice.Index(0).Interface()).Kind() == reflect.Slice)
+
 		isMatched := true
 		isExact := true
 		for i := 0; i < expSlice.Len(); i++ {
 			matched := false
 			for j := 0; j < actSlice.Len(); j++ {
-				prefixedVal := key + "[" + fmt.Sprint(j) + "]"
-				if valMatchJSONComparisonResult, err := matchJSONWithNoiseHandling(prefixedVal, expSlice.Index(i).Interface(), actSlice.Index(j).Interface(), noiseMap, ignoreOrdering); err == nil && valMatchJSONComparisonResult.matches {
+				childKey := ""
+				if !dropPrefix {
+					childKey = fmt.Sprintf("%s[%d]", key, j)
+				}
+
+				if valMatchJSONComparisonResult, err := matchJSONWithNoiseHandling(childKey, expSlice.Index(i).Interface(), actSlice.Index(j).Interface(), noiseMap, ignoreOrdering); err == nil && valMatchJSONComparisonResult.matches {
 					if !valMatchJSONComparisonResult.isExact {
 						for _, val := range valMatchJSONComparisonResult.differences {
-							prefixedVal := key + "[" + fmt.Sprint(j) + "]." + val // Prefix the value
-							matchJSONComparisonResult.differences = append(matchJSONComparisonResult.differences, prefixedVal)
+							if childKey != "" {
+								val = childKey + "." + val
+							}
+							matchJSONComparisonResult.differences = append(matchJSONComparisonResult.differences, val)
 						}
 					}
 					matched = true
