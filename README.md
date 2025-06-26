@@ -4,7 +4,7 @@
 </p>
 <h3 align="center">
 <b>
-⚡️ API tests faster than unit tests, from user traffic ⚡️
+⚡️ API tests faster than unit tests, from user traffic !⚡️
 </b>
 </h3 >
 <p align="center">
