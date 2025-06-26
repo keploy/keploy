@@ -912,16 +912,18 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 			return matchJSONComparisonResult, nil
 		}
 
-		// ­Special rule: we're at the root of the slice (key == "")
-		// and every element is a map or slice (i.e. a JSON object or array) → don’t add “[i]” prefixes.
-		dropPrefix := key == "" &&
-			expSlice.Len() > 0 && (reflect.TypeOf(expSlice.Index(0).Interface()).Kind() == reflect.Map || reflect.TypeOf(expSlice.Index(0).Interface()).Kind() == reflect.Slice)
-
 		isMatched := true
 		isExact := true
 		for i := 0; i < expSlice.Len(); i++ {
 			matched := false
 			for j := 0; j < actSlice.Len(); j++ {
+
+				// ­Special rule: we're at the root of the slice (key == "")
+				// and every element is a map or slice (i.e. a JSON object or array) → don’t add “[i]” prefixes.
+
+				dropPrefix := key == "" &&
+					expSlice.Len() > 0 && (reflect.TypeOf(expSlice.Index(i).Interface()).Kind() == reflect.Map || reflect.TypeOf(expSlice.Index(i).Interface()).Kind() == reflect.Slice)
+
 				childKey := ""
 				if !dropPrefix {
 					childKey = fmt.Sprintf("%s[%d]", key, j)
