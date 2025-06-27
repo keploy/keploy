@@ -361,11 +361,19 @@ func decodeMySQLMessage(_ context.Context, logger *zap.Logger, yamlSpec *mysql.S
 			}
 			req.Message = msg
 
-		case "encrypted_password":
+		case mysql.EncryptedPassword:
 			var msg string
 			err := v.Message.Decode(&msg)
 			if err != nil {
 				utils.LogError(logger, err, "failed to unmarshal yaml document into mysql (string) encrypted_password")
+				return nil, err
+			}
+			req.Message = msg
+		case mysql.PlainPassword:
+			var msg string
+			err := v.Message.Decode(&msg)
+			if err != nil {
+				utils.LogError(logger, err, "failed to unmarshal yaml document into mysql (string) plain_password")
 				return nil, err
 			}
 			req.Message = msg

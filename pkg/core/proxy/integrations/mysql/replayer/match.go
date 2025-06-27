@@ -3,10 +3,10 @@
 package replayer
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"reflect"
 
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
@@ -436,7 +436,7 @@ func matchStmtExecutePacket(_ context.Context, _ *zap.Logger, expected, actual m
 			if expectedParam.Type == actualParam.Type &&
 				expectedParam.Name == actualParam.Name &&
 				expectedParam.Unsigned == actualParam.Unsigned &&
-				bytes.Equal(expectedParam.Value, actualParam.Value) {
+				reflect.DeepEqual(expectedParam.Value, actualParam.Value) {
 				matchCount++
 			}
 		}

@@ -3,6 +3,8 @@ package provider
 import (
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"strings"
 
@@ -30,39 +32,53 @@ var Logo = `
         ▓
 `
 
-func PrintLogo(disableANSI bool) {
-	if binaryToDocker := os.Getenv("BINARY_TO_DOCKER"); binaryToDocker != "true" {
-		printKeployLogo(disableANSI, Logo)
-		fmt.Printf("%s: %v\n\n", utils.VersionIdenitfier, utils.Version)
+func PrintLogo(wr io.Writer, disableANSI bool) {
+	if os.Getenv("BINARY_TO_DOCKER") != "true" {
+		printKeployLogo(wr, disableANSI, Logo)
+		// print version to the same writer
+		_, err := fmt.Fprintf(wr, "%s: %v\n\n", utils.VersionIdenitfier, utils.Version)
+		if err != nil {
+			log.Fatalf("Error printing version: %v", err)
+		}
 	}
 }
 
-// PrintKeployLogo prints the Keploy logo to the console, optionally with a gradient color effect.
-func printKeployLogo(useColor bool, logo string) {
-	// ANSI escape code to reset color
+func printKeployLogo(wr io.Writer, disableANSI bool, logo string) {
 	const reset = "\033[0m"
-	if !useColor {
-		// Print each line of the logo
-		lines := strings.Split(logo, "\n")
-		for i, line := range lines {
-			for j, char := range line {
-				var color = getLogoColor(i, j)
+	lines := strings.Split(logo, "\n")
 
-				// Print each character
-				fmt.Print(color, string(char), reset)
+	if !disableANSI {
+		for i, line := range lines {
+			for j, ch := range line {
+				color := getLogoColor(i, j)
+				// wrapper now uses fmt.Fprint, so this will correctly print color + char + reset
+				FprintWrapper(false, wr, color, string(ch), reset)
 			}
-			fmt.Println()
+			FprintWrapper(true, wr) // newline after each line
 		}
 	} else {
-		fmt.Print(logo)
-		fmt.Println()
+		// plain logo (no per-char coloring)
+		FprintWrapper(false, wr, logo)
+		FprintWrapper(true, wr)
 	}
+}
 
+// FprintWrapper prints all its args (like fmt.Fprint) and optionally a leading newline.
+func FprintWrapper(newLine bool, wr io.Writer, a ...interface{}) {
+	if newLine {
+		if _, err := fmt.Fprintln(wr); err != nil {
+			log.Fatalf("Error printing newline: %v", err)
+		}
+	}
+	if len(a) > 0 {
+		if _, err := fmt.Fprint(wr, a...); err != nil {
+			log.Fatalf("Error printing output: %v", err)
+		}
+	}
 }
 
 // Get the color for the logo at position (i, j)
 func getLogoColor(i, j int) string {
-	// Orange to Yellow gradient colors (reversed order)
 	gradientColors := []string{
 		"\033[38;5;202m", // Dark Orange
 		"\033[38;5;208m",

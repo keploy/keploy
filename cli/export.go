@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"os"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/cli/provider"
@@ -23,7 +24,7 @@ func Export(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 		Example: "keploy export",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
-			provider.PrintLogo(disableAnsi)
+			provider.PrintLogo(os.Stdout, disableAnsi)
 			return cmd.Help()
 		},
 	}
@@ -33,7 +34,7 @@ func Export(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 		Example: "keploy export postman",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
-			provider.PrintLogo(disableAnsi)
+			provider.PrintLogo(os.Stdout, disableAnsi)
 			svc, err := serviceFactory.GetService(ctx, "export")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))

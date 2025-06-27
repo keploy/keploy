@@ -426,7 +426,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		logger.Debug("COM_STMT_SEND_LONG_DATA decoded", zap.Any("parsed packet", parsedPacket))
 	default:
 		logger.Warn("Unknown packet type", zap.String("PacketType", fmt.Sprintf("%#x", payloadType)), zap.Any("payload", payload), zap.Any("last operation", lastOp))
-		setPacketInfo(ctx, parsedPacket, itgUtils.EncodeBase64(payload), "Unknown type", clientConn, RESET, decodeCtx)
+		setPacketInfo(ctx, parsedPacket, itgUtils.EncodeBase64(payload), fmt.Sprintf("%#x", payloadType), clientConn, RESET, decodeCtx)
 	}
 
 	return parsedPacket, nil

@@ -290,13 +290,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	//checking how much time proxy takes to execute the flow.
 	start := time.Now()
 
-	defer func(start time.Time) {
-		duration := time.Since(start)
-		p.logger.Debug("time taken by proxy to execute the flow", zap.Any("Duration(ms)", duration.Milliseconds()))
-	}(start)
-
 	// making a new client connection id for each client connection
 	clientConnID := util.GetNextID()
+
+	defer func(start time.Time) {
+		duration := time.Since(start)
+		p.logger.Debug("time taken by proxy to execute the flow", zap.Any("Client ConnectionID", clientConnID), zap.Any("Duration(ms)", duration.Milliseconds()))
+	}(start)
+
 	// dstConn stores conn with actual destination for the outgoing network call
 	var dstConn net.Conn
 
