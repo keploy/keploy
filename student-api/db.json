@@ -1,0 +1,16 @@
+{
+  "students": [
+    {
+      "id": 1,
+      "name": "Ashika Singh",
+      "email": "ashika@example.com",
+      "course": "Full Stack Development"
+    },
+    {
+      "id": 2,
+      "name": "Ravi Kumar",
+      "email": "ravi@example.com",
+      "course": "Data Science"
+    }
+  ]
+}
