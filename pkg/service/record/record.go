@@ -326,32 +326,17 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 		utils.LogError(r.logger, err, "failed to parse metadata", zap.String("metadata", r.config.Record.Metadata))
 		return
 	}
+	testSet := &models.TestSet{
+		PreScript:  "",
+		PostScript: "",
+		Template:   make(map[string]interface{}),
+		Metadata:   metadata,
+	}
 
-	// Check if config already exists
-	existingTestSet, err := r.testSetConf.Read(ctx, testSetID)
+	err = r.testSetConf.Write(ctx, testSetID, testSet)
 	if err != nil {
-		// Config doesn't exist, create new one with basic template structure
-		testSet := &models.TestSet{
-			PreScript:  "",
-			PostScript: "",
-			Template:   make(map[string]interface{}),
-			Metadata:   metadata,
-		}
-
-		err = r.testSetConf.Write(ctx, testSetID, testSet)
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to create config file with metadata", zap.String("testSet", testSetID))
-		} else {
-			r.logger.Info("Created config.yaml with metadata (run 'keploy templatize' to add template variables)", zap.String("testSet", testSetID), zap.Any("metadata", metadata))
-		}
+		utils.LogError(r.logger, err, "failed to create config file with metadata", zap.String("testSet", testSetID))
 	} else {
-		// Config exists, append metadata
-		existingTestSet.Metadata = metadata
-		err = r.testSetConf.Write(ctx, testSetID, existingTestSet)
-		if err != nil {
-			utils.LogError(r.logger, err, "failed to update config file with metadata", zap.String("testSet", testSetID))
-		} else {
-			r.logger.Info("Updated config.yaml with metadata", zap.String("testSet", testSetID), zap.Any("metadata", metadata))
-		}
+		r.logger.Info("Created config.yaml with metadata (run 'keploy templatize' to add template variables)", zap.String("testSet", testSetID), zap.Any("metadata", metadata))
 	}
 }
