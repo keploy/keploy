@@ -23,16 +23,18 @@ type Recorder struct {
 	mockDB          MockDB
 	telemetry       Telemetry
 	instrumentation Instrumentation
+	testSetConf     TestSetConfig
 	config          *config.Config
 }
 
-func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
+func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, config *config.Config) Service {
 	return &Recorder{
 		logger:          logger,
 		testDB:          testDB,
 		mockDB:          mockDB,
 		telemetry:       telemetry,
 		instrumentation: instrumentation,
+		testSetConf:     testSetConf,
 		config:          config,
 	}
 }
@@ -93,6 +95,11 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
 		r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
+
+		// Create config.yaml if metadata is provided
+		if r.config.Record.Metadata != "" {
+			r.createConfigWithMetadata(ctx, newTestSetID)
+		}
 	}()
 
 	defer close(appErrChan)
@@ -310,4 +317,41 @@ func (r *Recorder) GetNextTestSetID(ctx context.Context) (string, error) {
 
 func (r *Recorder) GetContainerIP(ctx context.Context, id uint64) (string, error) {
 	return r.instrumentation.GetContainerIP(ctx, id)
+}
+
+func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID string) {
+	// Parse metadata from the config
+	metadata, err := utils.ParseMetadata(r.config.Record.Metadata)
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to parse metadata", zap.String("metadata", r.config.Record.Metadata))
+		return
+	}
+
+	// Check if config already exists
+	existingTestSet, err := r.testSetConf.Read(ctx, testSetID)
+	if err != nil {
+		// Config doesn't exist, create new one with basic template structure
+		testSet := &models.TestSet{
+			PreScript:  "",
+			PostScript: "",
+			Template:   make(map[string]interface{}),
+			Metadata:   metadata,
+		}
+
+		err = r.testSetConf.Write(ctx, testSetID, testSet)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to create config file with metadata", zap.String("testSet", testSetID))
+		} else {
+			r.logger.Info("Created config.yaml with metadata (run 'keploy templatize' to add template variables)", zap.String("testSet", testSetID), zap.Any("metadata", metadata))
+		}
+	} else {
+		// Config exists, append metadata
+		existingTestSet.Metadata = metadata
+		err = r.testSetConf.Write(ctx, testSetID, existingTestSet)
+		if err != nil {
+			utils.LogError(r.logger, err, "failed to update config file with metadata", zap.String("testSet", testSetID))
+		} else {
+			r.logger.Info("Updated config.yaml with metadata", zap.String("testSet", testSetID), zap.Any("metadata", metadata))
+		}
+	}
 }
