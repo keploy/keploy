@@ -1010,6 +1010,7 @@ func IsFileEmpty(filePath string) (bool, error) {
 	}
 	return fileInfo.Size() == 0, nil
 }
+
 func IsXMLResponse(resp *models.HTTPResp) bool {
 	if resp == nil || resp.Header == nil {
 		return false
@@ -1020,6 +1021,43 @@ func IsXMLResponse(resp *models.HTTPResp) bool {
 		return false
 	}
 	return strings.Contains(contentType, "application/xml") || strings.Contains(contentType, "text/xml")
+}
+
+// ParseMetadata parses a metadata string in the format "key1=value1,key2=value2" into a map
+func ParseMetadata(metadataStr string) (map[string]interface{}, error) {
+	if metadataStr == "" {
+		return nil, nil
+	}
+
+	metadata := make(map[string]interface{})
+	pairs := strings.Split(metadataStr, ",")
+
+	for _, pair := range pairs {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+
+		keyValue := strings.SplitN(pair, "=", 2)
+		if len(keyValue) != 2 {
+			return nil, fmt.Errorf("invalid metadata format: %s. Expected format: key1=value1,key2=value2", pair)
+		}
+
+		key := strings.TrimSpace(keyValue[0])
+		value := strings.TrimSpace(keyValue[1])
+
+		if key == "" {
+			return nil, fmt.Errorf("empty key in metadata pair: %s", pair)
+		}
+
+		if value == "" {
+			return nil, fmt.Errorf("empty value in metadata pair: %s", pair)
+		}
+
+		metadata[key] = value
+	}
+
+	return metadata, nil
 }
 
 // // XMLToMap converts an XML string into a map[string]interface{}

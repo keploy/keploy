@@ -33,6 +33,11 @@ type MockDB interface {
 	InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error
 }
 
+type TestSetConfig interface {
+	Read(ctx context.Context, testSetID string) (*models.TestSet, error)
+	Write(ctx context.Context, testSetID string, testSet *models.TestSet) error
+}
+
 type Telemetry interface {
 	RecordedTestSuite(testSet string, testsTotal int, mockTotal map[string]int)
 	RecordedTestCaseMock(mockType string)

@@ -70,6 +70,7 @@ type Record struct {
 	Filters     []Filter      `json:"filters" yaml:"filters" mapstructure:"filters"`
 	BasePath    string        `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
 	RecordTimer time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
+	Metadata    string        `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
 }
 
 type ReRecord struct {
