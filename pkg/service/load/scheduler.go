@@ -40,7 +40,7 @@ func NewScheduler(logger *zap.Logger, config *config.Config, loadOptions *testsu
 	}
 }
 
-func (s *Scheduler) Run(parent context.Context) error {
+func (s *Scheduler) Run(parent context.Context, exporter *Exporter) error {
 	// setting the context with a timeout based on the duration specified in loadOptions.
 	// will be given to the VUWorker goroutines along with the waitgroup to synchronize.
 	duration, err := time.ParseDuration(s.loadOptions.Duration)
@@ -55,16 +55,16 @@ func (s *Scheduler) Run(parent context.Context) error {
 	// check if the loadOptions has a valid profile set, if not return an error.
 	switch s.loadOptions.Profile {
 	case "constant_vus":
-		return s.runConstant(ctx, s.ts)
+		return s.runConstant(ctx, s.ts, exporter)
 	case "ramping_vus":
-		return s.runRamping(ctx, s.ts)
+		return s.runRamping(ctx, s.ts, exporter)
 	default:
 		return fmt.Errorf("unknown load profile %q", s.loadOptions.Profile)
 	}
 }
 
-func (s *Scheduler) runConstant(ctx context.Context, ts *testsuite.TestSuite) error {
-	err := s.spawnVUGoroutines(ctx, ts, s.loadOptions.VUs)
+func (s *Scheduler) runConstant(ctx context.Context, ts *testsuite.TestSuite, exporter *Exporter) error {
+	err := s.spawnVUGoroutines(ctx, ts, s.loadOptions.VUs, exporter)
 	if err != nil {
 		s.logger.Error("Failed to spawn VU goroutines", zap.Int("vus", s.loadOptions.VUs), zap.Error(err))
 		return err
@@ -77,7 +77,7 @@ func (s *Scheduler) runConstant(ctx context.Context, ts *testsuite.TestSuite) er
 	return nil
 }
 
-func (s *Scheduler) runRamping(ctx context.Context, ts *testsuite.TestSuite) error {
+func (s *Scheduler) runRamping(ctx context.Context, ts *testsuite.TestSuite, exporter *Exporter) error {
 	start := time.Now()
 	current := 0
 	for _, stg := range s.loadOptions.Stages {
@@ -85,7 +85,7 @@ func (s *Scheduler) runRamping(ctx context.Context, ts *testsuite.TestSuite) err
 		target := stg.Target
 		delta := target - current
 		if delta > 0 {
-			if err := s.spawnVUGoroutines(ctx, ts, delta); err != nil {
+			if err := s.spawnVUGoroutines(ctx, ts, delta, exporter); err != nil {
 				return err
 			}
 		}
@@ -112,13 +112,14 @@ func (s *Scheduler) runRamping(ctx context.Context, ts *testsuite.TestSuite) err
 	return nil
 }
 
-func (s *Scheduler) spawnVUGoroutines(ctx context.Context, ts *testsuite.TestSuite, n int) error {
+func (s *Scheduler) spawnVUGoroutines(ctx context.Context, ts *testsuite.TestSuite, n int, exporter *Exporter) error {
+	exporter.StartServer(ctx)
 	for i := 0; i < n; i++ {
 		s.wg.Add(1)
 		// spawning VUWorker goroutines with the context, test suite, metrics collector, rate limiter and waitgroup.
 		// the VUWorker will execute the test suite steps and report the results back to the MetricsCollector.
 		go func(id int) {
-			vuWorker := NewVUWorker(s.config, s.logger, id+1, ts, s.collector, s.limiter, &s.wg)
+			vuWorker := NewVUWorker(s.config, s.logger, id, ts, s.collector, s.limiter, &s.wg, exporter)
 			vuWorker.vuWorker(ctx)
 		}(i)
 	}

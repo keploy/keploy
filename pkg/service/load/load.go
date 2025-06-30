@@ -106,10 +106,11 @@ func (lt *LoadTester) Start(ctx context.Context) error {
 		zap.Bool("insecure", lt.insecure),
 	)
 
+	exporter := NewExporter(lt.config, lt.logger, lt.vus)
 	mc := NewMetricsCollector(lt.config, lt.logger, lt.vus)
 	scheduler := NewScheduler(lt.logger, lt.config, loadOptions, lt.testsuite, mc)
 
-	if err := scheduler.Run(ctx); err != nil {
+	if err := scheduler.Run(ctx, exporter); err != nil {
 		lt.logger.Error("Failed to run load test", zap.Error(err))
 		return fmt.Errorf("failed to run load test: %w", err)
 	}
@@ -221,6 +222,7 @@ func (lt *LoadTester) saveJSONReport(report LTReport) error {
 	defer file.Close()
 
 	encoder := json.NewEncoder(file)
+	encoder.SetEscapeHTML(false)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(report); err != nil {
 		lt.logger.Error("Failed to encode report to JSON", zap.Error(err))

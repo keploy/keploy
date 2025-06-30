@@ -127,6 +127,7 @@ require (
 require (
 	github.com/perimeterx/marshmallow v1.1.5 // indirect
 	golang.org/x/time v0.12.0 // indirect
+	github.com/gorilla/mux v1.8.1
 )
 
 require (

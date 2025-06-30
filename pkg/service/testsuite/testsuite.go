@@ -165,7 +165,19 @@ func (e *TSExecutor) Execute(ctx context.Context, limiter *rate.Limiter) (*Execu
 		return nil, fmt.Errorf("base URL is not set for the test suite execution")
 	}
 
-	e.logger.Info("executing test suite", zap.String("path", e.tsPath), zap.String("baseURL", e.baseURL))
+	if e.client == nil {
+		e.logger.Error("HTTP client is not initialized for the test suite execution")
+		return nil, fmt.Errorf("HTTP client is not initialized for the test suite execution")
+	}
+
+	if e.Testsuite == nil {
+		e.logger.Error("test suite is not set for execution")
+		return nil, fmt.Errorf("test suite is not set for execution, please provide a valid test suite using --ts-file or -f flag")
+	}
+
+	if ctx.Value("command") == "testsuite" {
+		e.logger.Info("executing test suite", zap.String("path", e.tsPath), zap.String("baseURL", e.baseURL))
+	}
 
 	e.logger.Debug("test suite details",
 		zap.String("name", e.Testsuite.Name),
@@ -190,7 +202,7 @@ func (e *TSExecutor) Execute(ctx context.Context, limiter *rate.Limiter) (*Execu
 		e.logger.Debug("executing step", zap.String("name", step.Name), zap.String("method", step.Method), zap.String("url", step.URL))
 		if limiter != nil {
 			if err := limiter.Wait(ctx); err != nil {
-				e.logger.Warn("Rate limiter wait warn", zap.Error(err))
+				e.logger.Debug("Rate limiter wait warn", zap.Error(err))
 				continue
 			}
 		}

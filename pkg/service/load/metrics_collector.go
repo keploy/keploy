@@ -47,11 +47,9 @@ func (mc *MetricsCollector) SetStepsMetrics() []StepMetrics {
 			}
 			// collecting the results from different VUs into one place to operate on later.
 			steps[j].StepCount += step.StepCount
+			steps[j].StepFailure += step.StepFailure
 			steps[j].StepResponseTime = append(steps[j].StepResponseTime, step.StepResponseTime...)
 			for _, result := range step.StepResults {
-				if result.Status == "failed" {
-					steps[j].StepFailure++
-				}
 				steps[j].StepBytesIn += result.ReqBytes
 				steps[j].StepBytesOut += result.ResBytes
 			}
@@ -73,7 +71,7 @@ func (mc *MetricsCollector) SetStepsMetrics() []StepMetrics {
 }
 
 func (mc *MetricsCollector) CollectVUReport(vuReport *VUReport) {
-	mc.VUsReports[vuReport.VUID-1] = *vuReport
+	mc.VUsReports[vuReport.VUID] = *vuReport
 	mc.logger.Debug("VU Report collected",
 		zap.Int("vuID", vuReport.VUID),
 		zap.Int("tsExecCount", vuReport.TSExecCount),
