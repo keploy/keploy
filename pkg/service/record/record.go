@@ -95,11 +95,6 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		}
 		r.telemetry.RecordedTestSuite(newTestSetID, testCount, mockCountMap)
-
-		// Create config.yaml if metadata is provided
-		if r.config.Record.Metadata != "" {
-			r.createConfigWithMetadata(ctx, newTestSetID)
-		}
 	}()
 
 	defer close(appErrChan)
@@ -111,6 +106,11 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		stopReason = "failed to get new test-set id"
 		utils.LogError(r.logger, err, stopReason)
 		return fmt.Errorf("%s", stopReason)
+	}
+
+	// Create config.yaml if metadata is provided
+	if r.config.Record.Metadata != "" {
+		r.createConfigWithMetadata(ctx, newTestSetID)
 	}
 
 	//checking for context cancellation as we don't want to start the instrumentation if the context is cancelled
@@ -335,8 +335,9 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 
 	err = r.testSetConf.Write(ctx, testSetID, testSet)
 	if err != nil {
-		utils.LogError(r.logger, err, "failed to create config file with metadata", zap.String("testSet", testSetID))
-	} else {
-		r.logger.Info("Created config.yaml with metadata (run 'keploy templatize' to add template variables)", zap.String("testSet", testSetID), zap.Any("metadata", metadata))
+		utils.LogError(r.logger, err, "Failed to create test-set config file with metadata", zap.String("testSet", testSetID))
+		return
 	}
+
+	r.logger.Info("Created test-set config file with metadata")
 }
