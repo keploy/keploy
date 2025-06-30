@@ -1458,12 +1458,12 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 		TestCasePath: filepath.Join(r.config.Path, testSetID),
 		MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
 		Noise:        testCase.Noise,
-		Result:       *result,
 	}
 
 	switch testCase.Kind {
 	case models.HTTP:
 		result.StatusCode.Expected = testCase.HTTPResp.StatusCode
+		result.BodyResult[0].Expected = testCase.HTTPResp.Body
 
 		testCaseResult.Req = models.HTTPReq{
 			Method:     testCase.HTTPReq.Method,
@@ -1482,6 +1482,7 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 			Header:     make(map[string]string),
 			Body:       errorMessage,
 		}
+
 	case models.GRPC_EXPORT:
 		testCaseResult.GrpcReq = testCase.GrpcReq
 		testCaseResult.GrpcRes = models.GrpcResp{
@@ -1498,6 +1499,8 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 			},
 		}
 	}
+
+	testCaseResult.Result = *result
 
 	return testCaseResult
 }
