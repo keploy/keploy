@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"time"
 
@@ -308,6 +309,20 @@ func (r *Recorder) RunApplication(ctx context.Context, appID uint64, opts models
 }
 
 func (r *Recorder) GetNextTestSetID(ctx context.Context) (string, error) {
+	// Check if metadata is provided and contains a name key
+	if r.config.Record.Metadata != "" {
+		metadata, err := utils.ParseMetadata(r.config.Record.Metadata)
+		if err == nil && metadata != nil {
+			for key, value := range metadata {
+				if strings.ToLower(key) == "name" {
+					if nameStr, ok := value.(string); ok && nameStr != "" {
+						return nameStr, nil
+					}
+				}
+			}
+		}
+	}
+
 	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get test set IDs: %w", err)
