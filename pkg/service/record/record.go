@@ -310,49 +310,50 @@ func (r *Recorder) RunApplication(ctx context.Context, appID uint64, opts models
 }
 
 func (r *Recorder) GetNextTestSetID(ctx context.Context) (string, error) {
-	if r.config.Record.Metadata != "" {
-		if meta, err := utils.ParseMetadata(r.config.Record.Metadata); err == nil && meta != nil {
-			if v, ok := meta["name"]; ok {
-				if baseName, ok := v.(string); ok && baseName != "" {
-					all, err := r.testDB.GetAllTestSetIDs(ctx)
-					if err != nil {
-						return "", fmt.Errorf("failed to get test set IDs: %w", err)
-					}
+	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to get test set IDs: %w", err)
+	}
 
-					exists := make(map[string]struct{}, len(all))
-					for _, id := range all {
-						exists[id] = struct{}{}
-					}
+	if r.config.Record.Metadata == "" {
+		return pkg.NextID(testSetIDs, models.TestSetPattern), nil
+	}
 
-					if _, taken := exists[baseName]; !taken {
-						return baseName, nil
-					}
+	meta, err := utils.ParseMetadata(r.config.Record.Metadata)
+	if err != nil || meta == nil {
+		return pkg.NextID(testSetIDs, models.TestSetPattern), nil
+	}
 
-					// find max suffix used
-					max := 0
-					prefix := baseName + "-"
-					for id := range exists {
-						if strings.HasPrefix(id, prefix) {
-							// expect ids like "foo-2", "foo-17", etc
-							if n, err := strconv.Atoi(id[len(prefix):]); err == nil {
-								if n > max {
-									max = n
-								}
-							}
-						}
-					}
+	nameVal, hasName := meta["name"]
+	baseName, isString := nameVal.(string)
+	if !hasName || !isString || baseName == "" {
+		return pkg.NextID(testSetIDs, models.TestSetPattern), nil
+	}
 
-					return fmt.Sprintf("%s-%d", baseName, max+1), nil
-				}
+	existingIDs := make(map[string]struct{}, len(testSetIDs))
+	for _, id := range testSetIDs {
+		existingIDs[id] = struct{}{}
+	}
+
+	if _, taken := existingIDs[baseName]; !taken {
+		return baseName, nil
+	}
+
+	takenSuffixes := make(map[int]struct{}, len(testSetIDs))
+	namePrefix := baseName + "-"
+	for id := range existingIDs {
+		if strings.HasPrefix(id, namePrefix) {
+			if n, err := strconv.Atoi(id[len(namePrefix):]); err == nil {
+				takenSuffixes[n] = struct{}{}
 			}
 		}
 	}
 
-	all, err := r.testDB.GetAllTestSetIDs(ctx)
-	if err != nil {
-		return "", fmt.Errorf("failed to get test set IDs: %w", err)
+	for i := 1; ; i++ {
+		if _, used := takenSuffixes[i]; !used {
+			return fmt.Sprintf("%s-%d", baseName, i), nil
+		}
 	}
-	return pkg.NextID(all, models.TestSetPattern), nil
 }
 
 func (r *Recorder) GetContainerIP(ctx context.Context, id uint64) (string, error) {
