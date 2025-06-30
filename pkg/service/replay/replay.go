@@ -1431,23 +1431,6 @@ func SetTestHooks(testHooks TestHooks) {
 
 // CreateFailedTestResult creates a test result for failed test cases
 func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID string, started time.Time, errorMessage string) *models.TestResult {
-	result := &models.Result{
-		StatusCode: models.IntResult{
-			Normal:   false,
-			Expected: 0,
-			Actual:   0,
-		},
-		HeadersResult: make([]models.HeaderResult, 0),
-		BodyResult: []models.BodyResult{{
-			Normal:   false,
-			Type:     models.Plain,
-			Expected: "",
-			Actual:   errorMessage,
-		}},
-		DepResult:     make([]models.DepResult, 0),
-		TrailerResult: make([]models.HeaderResult, 0),
-	}
-
 	testCaseResult := &models.TestResult{
 		Kind:         testCase.Kind,
 		Name:         testSetID,
@@ -1460,25 +1443,17 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 		Noise:        testCase.Noise,
 	}
 
+	var result *models.Result
+
 	switch testCase.Kind {
 	case models.HTTP:
-		result.StatusCode.Expected = testCase.HTTPResp.StatusCode
-		result.BodyResult[0].Expected = testCase.HTTPResp.Body
-
-		expectedHeaders := pkg.ToHTTPHeader(testCase.HTTPResp.Header)
-		for headerKey, headerValues := range expectedHeaders {
-			result.HeadersResult = append(result.HeadersResult, models.HeaderResult{
-				Normal: false,
-				Expected: models.Header{
-					Key:   headerKey,
-					Value: headerValues,
-				},
-				Actual: models.Header{
-					Key:   headerKey,
-					Value: []string{},
-				},
-			})
+		actualResponse := &models.HTTPResp{
+			StatusCode: 0,
+			Header:     make(map[string]string),
+			Body:       errorMessage,
 		}
+
+		_, result = r.compareHTTPResp(testCase, actualResponse, testSetID)
 
 		testCaseResult.Req = models.HTTPReq{
 			Method:     testCase.HTTPReq.Method,
@@ -1492,48 +1467,10 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 			Form:       testCase.HTTPReq.Form,
 			Timestamp:  testCase.HTTPReq.Timestamp,
 		}
-		testCaseResult.Res = models.HTTPResp{
-			StatusCode: 0,
-			Header:     make(map[string]string),
-			Body:       errorMessage,
-		}
+		testCaseResult.Res = *actualResponse
 
 	case models.GRPC_EXPORT:
-		if testCase.GrpcResp.Headers.PseudoHeaders != nil {
-			for headerKey, headerValue := range testCase.GrpcResp.Headers.PseudoHeaders {
-				result.HeadersResult = append(result.HeadersResult, models.HeaderResult{
-					Normal: false,
-					Expected: models.Header{
-						Key:   headerKey,
-						Value: []string{headerValue},
-					},
-					Actual: models.Header{
-						Key:   headerKey,
-						Value: []string{},
-					},
-				})
-			}
-		}
-		if testCase.GrpcResp.Headers.OrdinaryHeaders != nil {
-			for headerKey, headerValue := range testCase.GrpcResp.Headers.OrdinaryHeaders {
-				result.HeadersResult = append(result.HeadersResult, models.HeaderResult{
-					Normal: false,
-					Expected: models.Header{
-						Key:   headerKey,
-						Value: []string{headerValue},
-					},
-					Actual: models.Header{
-						Key:   headerKey,
-						Value: []string{},
-					},
-				})
-			}
-		}
-
-		result.BodyResult[0].Expected = testCase.GrpcResp.Body.DecodedData
-
-		testCaseResult.GrpcReq = testCase.GrpcReq
-		testCaseResult.GrpcRes = models.GrpcResp{
+		actualResponse := &models.GrpcResp{
 			Headers: models.GrpcHeaders{
 				PseudoHeaders:   make(map[string]string),
 				OrdinaryHeaders: make(map[string]string),
@@ -1546,9 +1483,16 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 				OrdinaryHeaders: make(map[string]string),
 			},
 		}
+
+		_, result = r.compareGRPCResp(testCase, actualResponse, testSetID)
+
+		testCaseResult.GrpcReq = testCase.GrpcReq
+		testCaseResult.GrpcRes = *actualResponse
 	}
 
-	testCaseResult.Result = *result
+	if result != nil {
+		testCaseResult.Result = *result
+	}
 
 	return testCaseResult
 }
