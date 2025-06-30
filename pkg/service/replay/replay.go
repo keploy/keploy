@@ -1465,6 +1465,21 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 		result.StatusCode.Expected = testCase.HTTPResp.StatusCode
 		result.BodyResult[0].Expected = testCase.HTTPResp.Body
 
+		expectedHeaders := pkg.ToHTTPHeader(testCase.HTTPResp.Header)
+		for headerKey, headerValues := range expectedHeaders {
+			result.HeadersResult = append(result.HeadersResult, models.HeaderResult{
+				Normal: false,
+				Expected: models.Header{
+					Key:   headerKey,
+					Value: headerValues,
+				},
+				Actual: models.Header{
+					Key:   headerKey,
+					Value: []string{},
+				},
+			})
+		}
+
 		testCaseResult.Req = models.HTTPReq{
 			Method:     testCase.HTTPReq.Method,
 			ProtoMajor: testCase.HTTPReq.ProtoMajor,
@@ -1484,6 +1499,39 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 		}
 
 	case models.GRPC_EXPORT:
+		if testCase.GrpcResp.Headers.PseudoHeaders != nil {
+			for headerKey, headerValue := range testCase.GrpcResp.Headers.PseudoHeaders {
+				result.HeadersResult = append(result.HeadersResult, models.HeaderResult{
+					Normal: false,
+					Expected: models.Header{
+						Key:   headerKey,
+						Value: []string{headerValue},
+					},
+					Actual: models.Header{
+						Key:   headerKey,
+						Value: []string{},
+					},
+				})
+			}
+		}
+		if testCase.GrpcResp.Headers.OrdinaryHeaders != nil {
+			for headerKey, headerValue := range testCase.GrpcResp.Headers.OrdinaryHeaders {
+				result.HeadersResult = append(result.HeadersResult, models.HeaderResult{
+					Normal: false,
+					Expected: models.Header{
+						Key:   headerKey,
+						Value: []string{headerValue},
+					},
+					Actual: models.Header{
+						Key:   headerKey,
+						Value: []string{},
+					},
+				})
+			}
+		}
+
+		result.BodyResult[0].Expected = testCase.GrpcResp.Body.DecodedData
+
 		testCaseResult.GrpcReq = testCase.GrpcReq
 		testCaseResult.GrpcRes = models.GrpcResp{
 			Headers: models.GrpcHeaders{
