@@ -854,7 +854,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, "invalid response type for HTTP test case")
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
-					utils.LogError(r.logger, loopErr, "failed to insert test case result for type assertion error")
+					utils.LogError(r.logger, loopErr, fmt.Sprintf("failed to insert test case result for type assertion error in %s test case", testCase.Kind))
 					break
 				}
 				continue
