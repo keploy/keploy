@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"time"
@@ -309,25 +310,49 @@ func (r *Recorder) RunApplication(ctx context.Context, appID uint64, opts models
 }
 
 func (r *Recorder) GetNextTestSetID(ctx context.Context) (string, error) {
-	// Check if metadata is provided and contains a name key
 	if r.config.Record.Metadata != "" {
-		metadata, err := utils.ParseMetadata(r.config.Record.Metadata)
-		if err == nil && metadata != nil {
-			for key, value := range metadata {
-				if strings.ToLower(key) == "name" {
-					if nameStr, ok := value.(string); ok && nameStr != "" {
-						return nameStr, nil
+		if meta, err := utils.ParseMetadata(r.config.Record.Metadata); err == nil && meta != nil {
+			if v, ok := meta["name"]; ok {
+				if baseName, ok := v.(string); ok && baseName != "" {
+					all, err := r.testDB.GetAllTestSetIDs(ctx)
+					if err != nil {
+						return "", fmt.Errorf("failed to get test set IDs: %w", err)
 					}
+
+					exists := make(map[string]struct{}, len(all))
+					for _, id := range all {
+						exists[id] = struct{}{}
+					}
+
+					if _, taken := exists[baseName]; !taken {
+						return baseName, nil
+					}
+
+					// find max suffix used
+					max := 0
+					prefix := baseName + "-"
+					for id := range exists {
+						if strings.HasPrefix(id, prefix) {
+							// expect ids like "foo-2", "foo-17", etc
+							if n, err := strconv.Atoi(id[len(prefix):]); err == nil {
+								if n > max {
+									max = n
+								}
+							}
+						}
+					}
+
+					return fmt.Sprintf("%s-%d", baseName, max+1), nil
 				}
 			}
 		}
 	}
 
-	testSetIDs, err := r.testDB.GetAllTestSetIDs(ctx)
+	all, err := r.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get test set IDs: %w", err)
 	}
-	return pkg.NextID(testSetIDs, models.TestSetPattern), nil
+	return pkg.NextID(all, models.TestSetPattern), nil
 }
 
 func (r *Recorder) GetContainerIP(ctx context.Context, id uint64) (string, error) {
