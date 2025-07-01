@@ -739,6 +739,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	for idx, testCase := range testCases {
+
 		// check if its the last test case running
 		if idx == len(testCases)-1 && r.isLastTestSet {
 			r.isLastTestCase = true
@@ -1073,14 +1074,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 
-		// Write secret values if any exist
 		if len(utils.SecretValues) > 0 {
 			utils.RemoveDoubleQuotes(utils.SecretValues)
 			err = r.testSetConf.WriteSecret(ctx, testSetID, utils.SecretValues)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to write secret values")
 			} else {
-				// Add secret files to .gitignore to prevent them from being committed
 				err = utils.AddToGitIgnore(r.logger, r.config.Path, "/*/secret.yaml")
 				if err != nil {
 					r.logger.Warn("Failed to add secret files to .gitignore", zap.Error(err))

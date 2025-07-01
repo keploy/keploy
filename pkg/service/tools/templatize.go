@@ -179,7 +179,6 @@ func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, te
 		return err
 	}
 
-	// Write secret values if any exist
 	if len(utils.SecretValues) > 0 {
 		utils.RemoveDoubleQuotes(utils.SecretValues)
 		err = t.testSetConf.WriteSecret(ctx, testSetID, utils.SecretValues)
@@ -938,15 +937,12 @@ func render(val string) (interface{}, error) {
 		return val, fmt.Errorf("failed to parse the testcase using template %v", zap.Error(err))
 	}
 
-	// Create a combined data map that includes both regular values and secrets
 	data := make(map[string]interface{})
 
-	// Add regular templated values
 	for k, v := range utils.TemplatizedValues {
 		data[k] = v
 	}
 
-	// Add secret values under the "secret" key if any exist
 	if len(utils.SecretValues) > 0 {
 		data["secret"] = utils.SecretValues
 	}

@@ -61,10 +61,8 @@ func (db *Db[T]) Write(ctx context.Context, testSetID string, config T) error {
 func (db *Db[T]) ReadSecret(ctx context.Context, testSetID string) (map[string]interface{}, error) {
 	filePath := filepath.Join(db.path, testSetID)
 
-	// Check if secret.yaml exists
 	secretPath := filepath.Join(filePath, "secret.yaml")
 	if _, err := os.Stat(secretPath); os.IsNotExist(err) {
-		// Return empty map if secret file doesn't exist (not an error)
 		return make(map[string]interface{}), nil
 	}
 
@@ -84,7 +82,6 @@ func (db *Db[T]) ReadSecret(ctx context.Context, testSetID string) (map[string]i
 
 // WriteSecret writes the secret configuration for a test set
 func (db *Db[T]) WriteSecret(ctx context.Context, testSetID string, secrets map[string]interface{}) error {
-	// Only write secret file if there are actual secrets
 	if len(secrets) == 0 {
 		return nil
 	}

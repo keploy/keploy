@@ -232,7 +232,6 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 		return false, err
 	}
 
-	// Read the template and secret values once per test set (outside the loop for efficiency)
 	testSetConf, err := o.replay.GetTestSetConf(ctx, testSet)
 	if err != nil {
 		o.logger.Debug("failed to read template values")
@@ -242,7 +241,6 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 		utils.SecretValues = map[string]interface{}{}
 	} else {
 		utils.TemplatizedValues = testSetConf.Template
-		// Load secret values from the Secret field that should be populated by the TestSet model
 		if testSetConf.Secret != nil {
 			utils.SecretValues = testSetConf.Secret
 		} else {
