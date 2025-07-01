@@ -353,11 +353,10 @@ func (r *Recorder) GetNextTestSetID(ctx context.Context) (string, error) {
 	newSuffix := highestSuffix + 1
 	assignedName := fmt.Sprintf("%s-%d", requestedName, newSuffix)
 
-	r.logger.Warn(
-		"Test set name collision detected; using suffixed ID",
-		zap.String("requestedName", requestedName),
-		zap.String("assignedName", assignedName),
-	)
+	r.logger.Warn(fmt.Sprintf(
+		"Test set name '%s' already exists, using '%s' instead. You can change this name if you want.",
+		requestedName, assignedName,
+	))
 
 	return assignedName, nil
 }
