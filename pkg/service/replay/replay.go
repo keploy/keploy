@@ -821,6 +821,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if loopErr != nil {
 			utils.LogError(r.logger, loopErr, "failed to simulate request")
 			failure++
+			testSetStatus = models.TestSetStatusFailed
+			testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, loopErr.Error())
+			loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+			if loopErr != nil {
+				utils.LogError(r.logger, loopErr, "failed to insert test case result for simulation error")
+				break
+			}
 			continue
 		}
 
@@ -843,6 +850,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if !ok {
 				r.logger.Error("invalid response type for HTTP test case")
 				failure++
+				testSetStatus = models.TestSetStatusFailed
+				testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, "invalid response type for HTTP test case")
+				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+				if loopErr != nil {
+					utils.LogError(r.logger, loopErr, fmt.Sprintf("failed to insert test case result for type assertion error in %s test case", testCase.Kind))
+					break
+				}
 				continue
 			}
 			testPass, testResult = r.compareHTTPResp(testCase, httpResp, testSetID)
@@ -852,6 +866,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if !ok {
 				r.logger.Error("invalid response type for gRPC test case")
 				failure++
+				testSetStatus = models.TestSetStatusFailed
+				testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, "invalid response type for gRPC test case")
+				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+				if loopErr != nil {
+					utils.LogError(r.logger, loopErr, "failed to insert test case result for type assertion error")
+					break
+				}
 				continue
 			}
 			testPass, testResult = r.compareGRPCResp(testCase, grpcResp, testSetID)
@@ -927,7 +948,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if testCaseResult != nil {
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
-					utils.LogError(r.logger, err, "failed to insert test case result")
+					utils.LogError(r.logger, loopErr, "failed to insert test case result")
 					break
 				}
 			} else {
@@ -1406,6 +1427,74 @@ func (r *Replayer) DeleteTests(ctx context.Context, testSetID string, testCaseID
 
 func SetTestHooks(testHooks TestHooks) {
 	HookImpl = testHooks
+}
+
+// CreateFailedTestResult creates a test result for failed test cases
+func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID string, started time.Time, errorMessage string) *models.TestResult {
+	testCaseResult := &models.TestResult{
+		Kind:         testCase.Kind,
+		Name:         testSetID,
+		Status:       models.TestStatusFailed,
+		Started:      started.Unix(),
+		Completed:    time.Now().UTC().Unix(),
+		TestCaseID:   testCase.Name,
+		TestCasePath: filepath.Join(r.config.Path, testSetID),
+		MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
+		Noise:        testCase.Noise,
+	}
+
+	var result *models.Result
+
+	switch testCase.Kind {
+	case models.HTTP:
+		actualResponse := &models.HTTPResp{
+			StatusCode: 0,
+			Header:     make(map[string]string),
+			Body:       errorMessage,
+		}
+
+		_, result = r.compareHTTPResp(testCase, actualResponse, testSetID)
+
+		testCaseResult.Req = models.HTTPReq{
+			Method:     testCase.HTTPReq.Method,
+			ProtoMajor: testCase.HTTPReq.ProtoMajor,
+			ProtoMinor: testCase.HTTPReq.ProtoMinor,
+			URL:        testCase.HTTPReq.URL,
+			URLParams:  testCase.HTTPReq.URLParams,
+			Header:     testCase.HTTPReq.Header,
+			Body:       testCase.HTTPReq.Body,
+			Binary:     testCase.HTTPReq.Binary,
+			Form:       testCase.HTTPReq.Form,
+			Timestamp:  testCase.HTTPReq.Timestamp,
+		}
+		testCaseResult.Res = *actualResponse
+
+	case models.GRPC_EXPORT:
+		actualResponse := &models.GrpcResp{
+			Headers: models.GrpcHeaders{
+				PseudoHeaders:   make(map[string]string),
+				OrdinaryHeaders: make(map[string]string),
+			},
+			Body: models.GrpcLengthPrefixedMessage{
+				DecodedData: errorMessage,
+			},
+			Trailers: models.GrpcHeaders{
+				PseudoHeaders:   make(map[string]string),
+				OrdinaryHeaders: make(map[string]string),
+			},
+		}
+
+		_, result = r.compareGRPCResp(testCase, actualResponse, testSetID)
+
+		testCaseResult.GrpcReq = testCase.GrpcReq
+		testCaseResult.GrpcRes = *actualResponse
+	}
+
+	if result != nil {
+		testCaseResult.Result = *result
+	}
+
+	return testCaseResult
 }
 
 func (r *Replayer) replaceHostInTestCase(testCase *models.TestCase, newHost, logContext string) error {
