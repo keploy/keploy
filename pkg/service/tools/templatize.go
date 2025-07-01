@@ -168,10 +168,18 @@ func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, te
 	}
 
 	utils.RemoveDoubleQuotes(utils.TemplatizedValues)
-	err := t.testSetConf.Write(ctx, testSetID, &models.TestSet{
+
+	var existingMetadata map[string]interface{}
+	existingTestSet, err := t.testSetConf.Read(ctx, testSetID)
+	if err == nil && existingTestSet != nil && existingTestSet.Metadata != nil {
+		existingMetadata = existingTestSet.Metadata
+	}
+
+	err = t.testSetConf.Write(ctx, testSetID, &models.TestSet{
 		PreScript:  "",
 		PostScript: "",
 		Template:   utils.TemplatizedValues,
+		Metadata:   existingMetadata,
 	})
 	if err != nil {
 		utils.LogError(t.logger, err, "failed to write test set")
