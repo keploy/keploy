@@ -112,7 +112,6 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 
 	// Create config.yaml if metadata is provided
 	if r.config.Record.Metadata != "" {
-		r.config.Record.Metadata = utils.TrimSpaces(r.config.Record.Metadata)
 		r.createConfigWithMetadata(ctx, newTestSetID)
 	}
 
