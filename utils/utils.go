@@ -38,6 +38,7 @@ import (
 var WarningSign = "\U000026A0"
 
 var TemplatizedValues = map[string]interface{}{}
+var SecretValues = map[string]interface{}{}
 
 var ErrCode = 0
 

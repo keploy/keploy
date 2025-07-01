@@ -3,6 +3,7 @@ package testset
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 
 	"go.keploy.io/server/v2/pkg/platform/yaml"
@@ -50,6 +51,54 @@ func (db *Db[T]) Write(ctx context.Context, testSetID string, config T) error {
 	err = yaml.WriteFile(ctx, db.logger, filePath, "config", data, false)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to write test-set configuration in yaml file", zap.String("testSet", testSetID))
+		return err
+	}
+
+	return nil
+}
+
+// ReadSecret reads the secret configuration for a test set
+func (db *Db[T]) ReadSecret(ctx context.Context, testSetID string) (map[string]interface{}, error) {
+	filePath := filepath.Join(db.path, testSetID)
+
+	// Check if secret.yaml exists
+	secretPath := filepath.Join(filePath, "secret.yaml")
+	if _, err := os.Stat(secretPath); os.IsNotExist(err) {
+		// Return empty map if secret file doesn't exist (not an error)
+		return make(map[string]interface{}), nil
+	}
+
+	data, err := yaml.ReadFile(ctx, db.logger, filePath, "secret")
+	if err != nil {
+		return nil, err
+	}
+
+	var secretConfig map[string]interface{}
+	if err := yamlLib.Unmarshal(data, &secretConfig); err != nil {
+		utils.LogError(db.logger, err, "failed to unmarshal test-set secret file", zap.String("testSet", testSetID))
+		return nil, err
+	}
+
+	return secretConfig, nil
+}
+
+// WriteSecret writes the secret configuration for a test set
+func (db *Db[T]) WriteSecret(ctx context.Context, testSetID string, secrets map[string]interface{}) error {
+	// Only write secret file if there are actual secrets
+	if len(secrets) == 0 {
+		return nil
+	}
+
+	filePath := filepath.Join(db.path, testSetID)
+	data, err := yamlLib.Marshal(secrets)
+	if err != nil {
+		utils.LogError(db.logger, err, "failed to marshal test-set secret file", zap.String("testSet", testSetID))
+		return err
+	}
+
+	err = yaml.WriteFile(ctx, db.logger, filePath, "secret", data, false)
+	if err != nil {
+		utils.LogError(db.logger, err, "failed to write test-set secret configuration in yaml file", zap.String("testSet", testSetID))
 		return err
 	}
 

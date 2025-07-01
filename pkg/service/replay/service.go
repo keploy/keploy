@@ -71,6 +71,8 @@ type ReportDB interface {
 type TestSetConfig interface {
 	Read(ctx context.Context, testSetID string) (*models.TestSet, error)
 	Write(ctx context.Context, testSetID string, testSet *models.TestSet) error
+	ReadSecret(ctx context.Context, testSetID string) (map[string]interface{}, error)
+	WriteSecret(ctx context.Context, testSetID string, secret map[string]interface{}) error
 }
 
 type Telemetry interface {

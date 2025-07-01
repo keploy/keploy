@@ -44,6 +44,15 @@ func (t *Tools) Templatize(ctx context.Context) error {
 			utils.TemplatizedValues = make(map[string]interface{})
 		}
 
+		// Load secret values if they exist
+		secretValues, err := t.testSetConf.ReadSecret(ctx, testSetID)
+		if err != nil {
+			t.logger.Debug("Failed to read secret values, continuing with empty secrets", zap.String("testSet", testSetID), zap.Error(err))
+			utils.SecretValues = make(map[string]interface{})
+		} else {
+			utils.SecretValues = secretValues
+		}
+
 		// Get test cases from the database
 		tcs, err := t.testDB.GetTestCases(ctx, testSetID)
 		if err != nil {
@@ -169,6 +178,24 @@ func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, te
 		utils.LogError(t.logger, err, "failed to write test set")
 		return err
 	}
+
+	// Write secret values if any exist
+	if len(utils.SecretValues) > 0 {
+		utils.RemoveDoubleQuotes(utils.SecretValues)
+		err = t.testSetConf.WriteSecret(ctx, testSetID, utils.SecretValues)
+		if err != nil {
+			utils.LogError(t.logger, err, "failed to write secret values")
+			return err
+		}
+
+		// Add secret files to .gitignore to prevent them from being committed
+		err = utils.AddToGitIgnore(t.logger, t.config.Path, "/*/secret.yaml")
+		if err != nil {
+			t.logger.Warn("Failed to add secret files to .gitignore", zap.Error(err))
+			// Don't return error since this is not critical for the templatize operation
+		}
+	}
+
 	return nil
 }
 
@@ -910,8 +937,22 @@ func render(val string) (interface{}, error) {
 	if err != nil {
 		return val, fmt.Errorf("failed to parse the testcase using template %v", zap.Error(err))
 	}
+
+	// Create a combined data map that includes both regular values and secrets
+	data := make(map[string]interface{})
+
+	// Add regular templated values
+	for k, v := range utils.TemplatizedValues {
+		data[k] = v
+	}
+
+	// Add secret values under the "secret" key if any exist
+	if len(utils.SecretValues) > 0 {
+		data["secret"] = utils.SecretValues
+	}
+
 	var output bytes.Buffer
-	err = tmpl.Execute(&output, utils.TemplatizedValues)
+	err = tmpl.Execute(&output, data)
 	if err != nil {
 		return val, fmt.Errorf("failed to execute the template %v", zap.Error(err))
 	}
