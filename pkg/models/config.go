@@ -6,6 +6,7 @@ type TestSet struct {
 	PostScript   string                 `json:"post_script" bson:"post_script" yaml:"postScript"`
 	Template     map[string]interface{} `json:"template" bson:"template" yaml:"template"`
 	MockRegistry *MockRegistry          `yaml:"mockRegistry" bson:"mock_registry" json:"mockRegistry,omitempty"`
+	Metadata     map[string]interface{} `json:"metadata" bson:"metadata" yaml:"metadata,omitempty"`
 }
 
 type MockRegistry struct {
