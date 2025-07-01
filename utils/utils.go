@@ -1026,48 +1026,48 @@ func IsXMLResponse(resp *models.HTTPResp) bool {
 
 // TrimSpaces removes unwanted spaces around unescaped ',' and '='
 func TrimSpaces(input string) string {
-    var output strings.Builder
-    var lastWasEscape bool        // tracks if the previous rune was a backslash
-    var skippingSpaces bool       // set when we just wrote a separator
+	var output strings.Builder
+	var lastWasEscape bool  // tracks if the previous rune was a backslash
+	var skippingSpaces bool // set when we just wrote a separator
 
-    for _, ch := range input {
-        // after writing a separator, drop any spaces
-        if skippingSpaces {
-            if ch == ' ' {
-                continue
-            }
-            skippingSpaces = false
-        }
+	for _, ch := range input {
+		// after writing a separator, drop any spaces
+		if skippingSpaces {
+			if ch == ' ' {
+				continue
+			}
+			skippingSpaces = false
+		}
 
-        // handle escape character
-        if ch == '\\' && !lastWasEscape {
-            lastWasEscape = true
-            output.WriteRune(ch)
-            continue
-        }
+		// handle escape character
+		if ch == '\\' && !lastWasEscape {
+			lastWasEscape = true
+			output.WriteRune(ch)
+			continue
+		}
 
-        // if this is an unescaped separator, trim before & skip after
-        if (ch == ',' || ch == '=') && !lastWasEscape {
-            // remove trailing spaces before the separator
-            trimmed := strings.TrimRight(output.String(), " ")
-            output.Reset()
-            output.WriteString(trimmed)
+		// if this is an unescaped separator, trim before & skip after
+		if (ch == ',' || ch == '=') && !lastWasEscape {
+			// remove trailing spaces before the separator
+			trimmed := strings.TrimRight(output.String(), " ")
+			output.Reset()
+			output.WriteString(trimmed)
 
-            // write the separator itself
-            output.WriteRune(ch)
+			// write the separator itself
+			output.WriteRune(ch)
 
-            // skip any spaces that follow
-            skippingSpaces = true
-            lastWasEscape = false
-            continue
-        }
+			// skip any spaces that follow
+			skippingSpaces = true
+			lastWasEscape = false
+			continue
+		}
 
-        // normal character (or escaped separator)
-        output.WriteRune(ch)
-        lastWasEscape = false
-    }
+		// normal character (or escaped separator)
+		output.WriteRune(ch)
+		lastWasEscape = false
+	}
 
-    return output.String()
+	return output.String()
 }
 
 func ParseMetadata(metadataStr string) (map[string]interface{}, error) {
