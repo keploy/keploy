@@ -318,15 +318,14 @@ func (r *Recorder) GetNextTestSetID(ctx context.Context) (string, error) {
 	if r.config.Record.Metadata == "" {
 		return pkg.NextID(testSetIDs, models.TestSetPattern), nil
 	}
-
 	meta, err := utils.ParseMetadata(r.config.Record.Metadata)
 	if err != nil || meta == nil {
 		return pkg.NextID(testSetIDs, models.TestSetPattern), nil
 	}
 
-	nameVal, hasName := meta["name"]
-	baseName, isString := nameVal.(string)
-	if !hasName || !isString || baseName == "" {
+	nameVal, ok := meta["name"]
+	requestedName, isStr := nameVal.(string)
+	if !ok || !isStr || requestedName == "" {
 		return pkg.NextID(testSetIDs, models.TestSetPattern), nil
 	}
 
@@ -335,25 +334,32 @@ func (r *Recorder) GetNextTestSetID(ctx context.Context) (string, error) {
 		existingIDs[id] = struct{}{}
 	}
 
-	if _, taken := existingIDs[baseName]; !taken {
-		return baseName, nil
+	if _, occupied := existingIDs[requestedName]; !occupied {
+		return requestedName, nil
 	}
 
-	takenSuffixes := make(map[int]struct{}, len(testSetIDs))
-	namePrefix := baseName + "-"
+	var highestSuffix int
+	namePrefix := requestedName + "-"
 	for id := range existingIDs {
-		if strings.HasPrefix(id, namePrefix) {
-			if n, err := strconv.Atoi(id[len(namePrefix):]); err == nil {
-				takenSuffixes[n] = struct{}{}
-			}
+		if !strings.HasPrefix(id, namePrefix) {
+			continue
+		}
+		suffixPart := id[len(namePrefix):]
+		if n, err := strconv.Atoi(suffixPart); err == nil && n > highestSuffix {
+			highestSuffix = n
 		}
 	}
 
-	for i := 1; ; i++ {
-		if _, used := takenSuffixes[i]; !used {
-			return fmt.Sprintf("%s-%d", baseName, i), nil
-		}
-	}
+	newSuffix := highestSuffix + 1
+	assignedName := fmt.Sprintf("%s-%d", requestedName, newSuffix)
+
+	r.logger.Warn(
+		"Test set name collision detected; using suffixed ID",
+		zap.String("requestedName", requestedName),
+		zap.String("assignedName", assignedName),
+	)
+
+	return assignedName, nil
 }
 
 func (r *Recorder) GetContainerIP(ctx context.Context, id uint64) (string, error) {
