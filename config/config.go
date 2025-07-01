@@ -241,8 +241,10 @@ func SetSelectedTestsNormalize(conf *Config, value string) error {
 
 type Embed struct {
 	SourcePath    string `json:"sourcePath" yaml:"sourcePath" mapstructure:"sourcePath"`
-	OutputPath    string `json:"outputPath" yaml:"outputPath" mapstructure:"outputPath"`
 	Model         string `json:"model" yaml:"model" mapstructure:"model"`
 	LLMBaseURL    string `json:"llmBaseUrl" yaml:"llmBaseUrl" mapstructure:"llmBaseUrl"`
 	LLMApiVersion string `json:"llmApiVersion" yaml:"llmApiVersion" mapstructure:"llmApiVersion"`
+	DatabaseURL   string `json:"databaseURL" yaml:"databaseURL" mapstructure:"databaseURL"`
+	APIKey        string `json:"apiKey" yaml:"apiKey" mapstructure:"apiKey"`
+	ModelName     string `json:"modelName" yaml:"modelName" mapstructure:"modelName"`
 }

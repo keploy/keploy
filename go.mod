@@ -23,8 +23,8 @@ require (
 	github.com/spf13/cobra v1.8.0
 	go.mongodb.org/mongo-driver v1.11.6
 	go.uber.org/zap v1.26.0
-	golang.org/x/crypto v0.24.0 // indirect
-	golang.org/x/sys v0.29.0
+	golang.org/x/crypto v0.37.0 // indirect
+	golang.org/x/sys v0.32.0
 	google.golang.org/protobuf v1.34.1 // indirect
 )
 
@@ -80,7 +80,7 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jackc/chunkreader/v2 v2.0.0 // indirect
 	github.com/jackc/pgio v1.0.0 // indirect
-	github.com/jmoiron/sqlx v1.3.3 // indirect
+	github.com/jmoiron/sqlx v1.3.5 // indirect
 	github.com/klauspost/compress v1.17.7 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
@@ -93,10 +93,10 @@ require (
 	github.com/zmap/zcrypto v0.0.0-20210511125630-18f1e0152cfc // indirect
 	github.com/zmap/zlint/v3 v3.1.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/mod v0.17.0 // indirect
-	golang.org/x/net v0.26.0
-	golang.org/x/text v0.16.0
-	golang.org/x/tools v0.21.1-0.20240508182429-e35e4ccd0d2d // indirect
+	golang.org/x/mod v0.24.0 // indirect
+	golang.org/x/net v0.37.0
+	golang.org/x/text v0.24.0
+	golang.org/x/tools v0.31.0 // indirect
 	k8s.io/klog/v2 v2.120.1 // indirect
 )
 
@@ -111,23 +111,28 @@ require (
 	github.com/golang-jwt/jwt/v4 v4.5.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgproto3/v2 v2.3.2
+	github.com/jackc/pgx/v5 v5.7.5
 	github.com/keploy/jsonDiff v1.0.6
+	github.com/pgvector/pgvector-go v0.3.0
+	github.com/pkoukk/tiktoken-go v0.1.7
 	github.com/shirou/gopsutil/v3 v3.24.3
+	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
 	github.com/spf13/viper v1.19.0
 	github.com/wI2L/jsondiff v0.5.0
 	github.com/xdg-go/pbkdf2 v1.0.0
 	github.com/xdg-go/scram v1.1.1
 	github.com/xdg-go/stringprep v1.0.4
-	golang.org/x/sync v0.7.0
-	golang.org/x/term v0.28.0
+	golang.org/x/sync v0.13.0
+	golang.org/x/term v0.31.0
 	gopkg.in/yaml.v2 v2.4.0
 	sigs.k8s.io/kustomize/kyaml v0.17.2
 )
 
 require (
+	github.com/jackc/pgpassfile v1.0.0 // indirect
+	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/perimeterx/marshmallow v1.1.5 // indirect
-	github.com/pkoukk/tiktoken-go v0.1.7 // indirect
-	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82 // indirect
+	github.com/x448/float16 v0.8.4 // indirect
 )
 
 require (

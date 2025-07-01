@@ -328,6 +328,7 @@ func (cp *CodeParser) getNodeTypesOfInterest(fileExtension string) (map[string]s
 	return types, nil
 }
 
+// to identify points of interest in the code, such as imports, classes, functions.
 func (cp *CodeParser) ExtractPointsOfInterest(node *sitter.Node, fileExtension string) ([]PointOfInterest, error) {
 	interestMap, err := cp.getNodeTypesOfInterest(fileExtension)
 	if err != nil {
@@ -374,6 +375,7 @@ func (cp *CodeParser) getNodesForComments(fileExtension string) (map[string]stri
 	return types, nil
 }
 
+// extracts comments and decorators from the code.
 func (cp *CodeParser) ExtractComments(node *sitter.Node, fileExtension string) ([]PointOfInterest, error) {
 	commentMap, err := cp.getNodesForComments(fileExtension)
 	if err != nil {
@@ -398,6 +400,7 @@ func (cp *CodeParser) ExtractComments(node *sitter.Node, fileExtension string) (
 	return comments, nil
 }
 
+// will be called by chunker to get lines for points of interest.
 func (cp *CodeParser) GetLinesForPointsOfInterest(code string, fileExtension string) (map[string][]int, error) {
 	rootNode, err := cp.ParseCode(code, fileExtension)
 	if err != nil {
@@ -427,6 +430,7 @@ func (cp *CodeParser) GetLinesForPointsOfInterest(code string, fileExtension str
 	return lineNumbersWithLabels, nil
 }
 
+// will be called by chunker to get lines for comments and decorators.
 func (cp *CodeParser) GetLinesForComments(code string, fileExtension string) (map[string][]int, error) {
 	rootNode, err := cp.ParseCode(code, fileExtension)
 	if err != nil {
