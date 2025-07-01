@@ -33,6 +33,7 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
+	"helm.sh/helm/v3/pkg/strvals"
 )
 
 var WarningSign = "\U000026A0"
@@ -1010,6 +1011,7 @@ func IsFileEmpty(filePath string) (bool, error) {
 	}
 	return fileInfo.Size() == 0, nil
 }
+
 func IsXMLResponse(resp *models.HTTPResp) bool {
 	if resp == nil || resp.Header == nil {
 		return false
@@ -1020,6 +1022,63 @@ func IsXMLResponse(resp *models.HTTPResp) bool {
 		return false
 	}
 	return strings.Contains(contentType, "application/xml") || strings.Contains(contentType, "text/xml")
+}
+
+// TrimSpaces removes unwanted spaces around unescaped ',' and '='
+func TrimSpaces(input string) string {
+	var output strings.Builder
+	var lastWasEscape bool  // tracks if the previous rune was a backslash
+	var skippingSpaces bool // set when we just wrote a separator
+
+	for _, ch := range input {
+		// after writing a separator, drop any spaces
+		if skippingSpaces {
+			if ch == ' ' {
+				continue
+			}
+			skippingSpaces = false
+		}
+
+		// handle escape character
+		if ch == '\\' && !lastWasEscape {
+			lastWasEscape = true
+			output.WriteRune(ch)
+			continue
+		}
+
+		// if this is an unescaped separator, trim before & skip after
+		if (ch == ',' || ch == '=') && !lastWasEscape {
+			// remove trailing spaces before the separator
+			trimmed := strings.TrimRight(output.String(), " ")
+			output.Reset()
+			output.WriteString(trimmed)
+
+			// write the separator itself
+			output.WriteRune(ch)
+
+			// skip any spaces that follow
+			skippingSpaces = true
+			lastWasEscape = false
+			continue
+		}
+
+		// normal character (or escaped separator)
+		output.WriteRune(ch)
+		lastWasEscape = false
+	}
+
+	return output.String()
+}
+
+func ParseMetadata(metadataStr string) (map[string]interface{}, error) {
+	if metadataStr == "" {
+		return nil, nil
+	}
+	m := make(map[string]interface{})
+	if err := strvals.ParseInto(metadataStr, m); err != nil {
+		return nil, fmt.Errorf("cannot parse metadata: %w", err)
+	}
+	return m, nil
 }
 
 // // XMLToMap converts an XML string into a map[string]interface{}
