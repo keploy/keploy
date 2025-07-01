@@ -44,7 +44,6 @@ func (t *Tools) Templatize(ctx context.Context) error {
 			utils.TemplatizedValues = make(map[string]interface{})
 		}
 
-		// Load secret values if they exist
 		secretValues, err := t.testSetConf.ReadSecret(ctx, testSetID)
 		if err != nil {
 			t.logger.Debug("Failed to read secret values, continuing with empty secrets", zap.String("testSet", testSetID), zap.Error(err))
@@ -180,18 +179,9 @@ func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, te
 	}
 
 	if len(utils.SecretValues) > 0 {
-		utils.RemoveDoubleQuotes(utils.SecretValues)
-		err = t.testSetConf.WriteSecret(ctx, testSetID, utils.SecretValues)
-		if err != nil {
-			utils.LogError(t.logger, err, "failed to write secret values")
-			return err
-		}
-
-		// Add secret files to .gitignore to prevent them from being committed
 		err = utils.AddToGitIgnore(t.logger, t.config.Path, "/*/secret.yaml")
 		if err != nil {
 			t.logger.Warn("Failed to add secret files to .gitignore", zap.Error(err))
-			// Don't return error since this is not critical for the templatize operation
 		}
 	}
 

@@ -738,6 +738,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		utils.SecretValues = secretValues
 	}
 
+	// Add secret files to .gitignore if they exist
+	if len(utils.SecretValues) > 0 {
+		err = utils.AddToGitIgnore(r.logger, r.config.Path, "/*/secret.yaml")
+		if err != nil {
+			r.logger.Warn("Failed to add secret files to .gitignore", zap.Error(err))
+		}
+	}
+
 	for idx, testCase := range testCases {
 
 		// check if its the last test case running
@@ -1073,20 +1081,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				utils.LogError(r.logger, err, "failed to write the templatized values to the yaml")
 			}
 		}
-
-		if len(utils.SecretValues) > 0 {
-			utils.RemoveDoubleQuotes(utils.SecretValues)
-			err = r.testSetConf.WriteSecret(ctx, testSetID, utils.SecretValues)
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to write secret values")
-			} else {
-				err = utils.AddToGitIgnore(r.logger, r.config.Path, "/*/secret.yaml")
-				if err != nil {
-					r.logger.Warn("Failed to add secret files to .gitignore", zap.Error(err))
-				}
-			}
-		}
-
 	}
 
 	return testSetStatus, nil

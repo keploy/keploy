@@ -79,25 +79,3 @@ func (db *Db[T]) ReadSecret(ctx context.Context, testSetID string) (map[string]i
 
 	return secretConfig, nil
 }
-
-// WriteSecret writes the secret configuration for a test set
-func (db *Db[T]) WriteSecret(ctx context.Context, testSetID string, secrets map[string]interface{}) error {
-	if len(secrets) == 0 {
-		return nil
-	}
-
-	filePath := filepath.Join(db.path, testSetID)
-	data, err := yamlLib.Marshal(secrets)
-	if err != nil {
-		utils.LogError(db.logger, err, "failed to marshal test-set secret file", zap.String("testSet", testSetID))
-		return err
-	}
-
-	err = yaml.WriteFile(ctx, db.logger, filePath, "secret", data, false)
-	if err != nil {
-		utils.LogError(db.logger, err, "failed to write test-set secret configuration in yaml file", zap.String("testSet", testSetID))
-		return err
-	}
-
-	return nil
-}

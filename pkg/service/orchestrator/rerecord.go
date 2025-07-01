@@ -232,6 +232,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 		return false, err
 	}
 
+	// Read the template and secret values once per test set
 	testSetConf, err := o.replay.GetTestSetConf(ctx, testSet)
 	if err != nil {
 		o.logger.Debug("failed to read template values")
