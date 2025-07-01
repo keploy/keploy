@@ -112,6 +112,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 
 	// Create config.yaml if metadata is provided
 	if r.config.Record.Metadata != "" {
+		r.config.Record.Metadata = utils.TrimSpaces(r.config.Record.Metadata)
 		r.createConfigWithMetadata(ctx, newTestSetID)
 	}
 
@@ -318,6 +319,7 @@ func (r *Recorder) GetNextTestSetID(ctx context.Context) (string, error) {
 	if r.config.Record.Metadata == "" {
 		return pkg.NextID(testSetIDs, models.TestSetPattern), nil
 	}
+	r.config.Record.Metadata = utils.TrimSpaces(r.config.Record.Metadata)
 	meta, err := utils.ParseMetadata(r.config.Record.Metadata)
 	if err != nil || meta == nil {
 		return pkg.NextID(testSetIDs, models.TestSetPattern), nil
