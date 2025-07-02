@@ -46,7 +46,7 @@ func (t *Tools) Templatize(ctx context.Context) error {
 
 		secretValues, err := t.testSetConf.ReadSecret(ctx, testSetID)
 		if err != nil {
-			t.logger.Debug("Failed to read secret values, continuing with empty secrets", zap.String("testSet", testSetID), zap.Error(err))
+			t.logger.Warn("Failed to read secret values, continuing with empty secrets", zap.String("testSet", testSetID), zap.Error(err))
 			utils.SecretValues = make(map[string]interface{})
 		} else {
 			utils.SecretValues = secretValues
