@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -36,6 +37,15 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 	if err := yamlLib.Unmarshal(data, &config); err != nil {
 		utils.LogError(db.logger, err, "failed to unmarshal test-set config file", zap.String("testSet", testSetID))
 		return config, err
+	}
+
+	if testSetConfig, ok := any(config).(*models.TestSet); ok {
+		secretValues, err := db.ReadSecret(ctx, testSetID)
+		if err != nil {
+			db.logger.Warn("Failed to read secret values, continuing without secrets", zap.String("testSet", testSetID), zap.Error(err))
+		} else {
+			testSetConfig.Secret = secretValues
+		}
 	}
 
 	return config, nil
