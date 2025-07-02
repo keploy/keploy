@@ -10,6 +10,15 @@ type TestSet struct {
 	Metadata     map[string]interface{} `json:"metadata" bson:"metadata" yaml:"metadata,omitempty"`
 }
 
+// Secret interface for types that support secret configuration.
+type Secret interface {
+	SetSecrets(secrets map[string]interface{})
+}
+
+func (ts *TestSet) SetSecrets(secrets map[string]interface{}) {
+	ts.Secret = secrets
+}
+
 type MockRegistry struct {
 	Mock string `json:"mock" bson:"mock" yaml:"mock,omitempty"`
 	App  string `json:"app" bson:"app" yaml:"app,omitempty"`
