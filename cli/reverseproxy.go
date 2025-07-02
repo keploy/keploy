@@ -6,14 +6,12 @@ import (
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/cli/provider"
 	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
 func init() {
 	Register("reverse-proxy", ReverseProxy)
 }
-
 
 func ReverseProxy(ctx context.Context, logger *zap.Logger, _ *config.Config, _ ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var proxyCmd = &cobra.Command{
@@ -32,11 +30,7 @@ func ReverseProxy(ctx context.Context, logger *zap.Logger, _ *config.Config, _ S
 
 	proxyCmd.Flags().Int("proxy-port", 16789, "Port to listen for incoming HTTP requests (default 16789)")
 	proxyCmd.Flags().String("forward-to", "localhost:5001", "Backend address to forward all requests to (e.g., localhost:5001)")
-
-	if err := cmdConfigurator.AddFlags(proxyCmd); err != nil {
-		utils.LogError(logger, err, "failed to add reverse-proxy flags")
-		return nil
-	}
+	proxyCmd.Flags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
 
 	return proxyCmd
 }
