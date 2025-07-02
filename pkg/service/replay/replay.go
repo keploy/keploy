@@ -728,8 +728,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// var to store the error in the loop
 	var loopErr error
 	utils.TemplatizedValues = conf.Template
+	utils.SecretValues = conf.Secret
+
+	// Add secret files to .gitignore if they exist
+	if len(utils.SecretValues) > 0 {
+		err = utils.AddToGitIgnore(r.logger, r.config.Path, "/*/secret.yaml")
+		if err != nil {
+			r.logger.Warn("Failed to add secret files to .gitignore", zap.Error(err))
+		}
+	}
 
 	for idx, testCase := range testCases {
+
 		// check if its the last test case running
 		if idx == len(testCases)-1 && r.isLastTestSet {
 			r.isLastTestCase = true
@@ -1084,7 +1094,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				utils.LogError(r.logger, err, "failed to write the templatized values to the yaml")
 			}
 		}
-
 	}
 
 	return testSetStatus, nil
