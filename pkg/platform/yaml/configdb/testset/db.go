@@ -39,14 +39,19 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 		return config, err
 	}
 
-	if secretConfig, ok := any(config).(models.Secret); ok {
-		secretValues, err := db.ReadSecret(ctx, testSetID)
-		if err != nil {
-			db.logger.Warn("Failed to read secret values, continuing without secrets", zap.String("testSet", testSetID), zap.Error(err))
-		} else {
-			secretConfig.SetSecrets(secretValues)
-		}
+	secretConfig, ok := any(config).(models.Secret)
+
+	if !ok {
+		return config, nil
 	}
+
+	secretValues, err := db.ReadSecret(ctx, testSetID)
+	if err != nil {
+		db.logger.Warn("Failed to read secret values, continuing without secrets", zap.String("testSet", testSetID), zap.Error(err))
+		return config, err
+	}
+
+	secretConfig.SetSecrets(secretValues)
 
 	return config, nil
 }

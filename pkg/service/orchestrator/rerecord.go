@@ -237,15 +237,17 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 	if err != nil {
 		o.logger.Debug("failed to read template values")
 	}
-	if testSetConf == nil {
-		utils.TemplatizedValues = map[string]interface{}{}
-		utils.SecretValues = map[string]interface{}{}
-	} else {
-		utils.TemplatizedValues = testSetConf.Template
+
+	utils.TemplatizedValues = map[string]interface{}{}
+	utils.SecretValues = map[string]interface{}{}
+
+	if testSetConf != nil {
+		if testSetConf.Template != nil {
+			utils.TemplatizedValues = testSetConf.Template
+		}
+
 		if testSetConf.Secret != nil {
 			utils.SecretValues = testSetConf.Secret
-		} else {
-			utils.SecretValues = map[string]interface{}{}
 		}
 	}
 
