@@ -44,12 +44,10 @@ func (t *Tools) Templatize(ctx context.Context) error {
 			utils.TemplatizedValues = make(map[string]interface{})
 		}
 
-		secretValues, err := t.testSetConf.ReadSecret(ctx, testSetID)
-		if err != nil {
-			t.logger.Warn("Failed to read secret values, continuing with empty secrets", zap.String("testSet", testSetID), zap.Error(err))
-			utils.SecretValues = make(map[string]interface{})
+		if err == nil && (testSet != nil && testSet.Secret != nil) {
+			utils.SecretValues = testSet.Secret
 		} else {
-			utils.SecretValues = secretValues
+			utils.SecretValues = make(map[string]interface{})
 		}
 
 		// Get test cases from the database

@@ -728,15 +728,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// var to store the error in the loop
 	var loopErr error
 	utils.TemplatizedValues = conf.Template
-
-	// Load secret values if they exist
-	secretValues, err := r.testSetConf.ReadSecret(runTestSetCtx, testSetID)
-	if err != nil {
-		r.logger.Debug("Failed to read secret values, continuing with empty secrets", zap.String("testSet", testSetID), zap.Error(err))
-		utils.SecretValues = make(map[string]interface{})
-	} else {
-		utils.SecretValues = secretValues
-	}
+	utils.SecretValues = conf.Secret
 
 	// Add secret files to .gitignore if they exist
 	if len(utils.SecretValues) > 0 {
