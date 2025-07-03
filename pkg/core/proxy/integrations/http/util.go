@@ -4,11 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"io"
-	"net/http"
-	"regexp"
 
-	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
@@ -36,58 +32,6 @@ func hasCompleteHeaders(httpChunk []byte) bool {
 
 	// Check if the byte slice contains the header end sequence
 	return bytes.Contains(httpChunk, headerEndSequence)
-}
-
-// GetReqMeta returns the metadata of the request
-func GetReqMeta(req *http.Request) map[string]string {
-	reqMeta := map[string]string{}
-	if req != nil {
-		// get request metadata
-		reqMeta = map[string]string{
-			"method": req.Method,
-			"url":    req.URL.String(),
-			"host":   req.Host,
-		}
-	}
-	return reqMeta
-}
-
-func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts models.OutgoingOptions) bool {
-	passThrough := false
-
-	for _, bypass := range opts.Rules {
-		if bypass.Host != "" {
-			regex, err := regexp.Compile(bypass.Host)
-			if err != nil {
-				utils.LogError(logger, err, "failed to compile the host regex", zap.Any("metadata", GetReqMeta(req)))
-				continue
-			}
-			passThrough = regex.MatchString(req.Host)
-			if !passThrough {
-				continue
-			}
-		}
-		if bypass.Path != "" {
-			regex, err := regexp.Compile(bypass.Path)
-			if err != nil {
-				utils.LogError(logger, err, "failed to compile the path regex", zap.Any("metadata", GetReqMeta(req)))
-				continue
-			}
-			passThrough = regex.MatchString(req.URL.String())
-			if !passThrough {
-				continue
-			}
-		}
-
-		if passThrough {
-			if bypass.Port == 0 || bypass.Port == destPort {
-				return true
-			}
-			passThrough = false
-		}
-	}
-
-	return passThrough
 }
 
 func encode(buffer []byte) string {

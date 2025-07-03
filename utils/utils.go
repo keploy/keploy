@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -145,6 +146,58 @@ func ReplacePort(currentURL string, port string) (string, error) {
 	}
 
 	return parsedURL.String(), nil
+}
+
+// GetReqMeta returns the metadata of the request
+func GetReqMeta(req *http.Request) map[string]string {
+	reqMeta := map[string]string{}
+	if req != nil {
+		// get request metadata
+		reqMeta = map[string]string{
+			"method": req.Method,
+			"url":    req.URL.String(),
+			"host":   req.Host,
+		}
+	}
+	return reqMeta
+}
+
+func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts models.OutgoingOptions) bool {
+	passThrough := false
+
+	for _, bypass := range opts.Rules {
+		if bypass.Host != "" {
+			regex, err := regexp.Compile(bypass.Host)
+			if err != nil {
+				LogError(logger, err, "failed to compile the host regex", zap.Any("metadata", GetReqMeta(req)))
+				continue
+			}
+			passThrough = regex.MatchString(req.Host)
+			if !passThrough {
+				continue
+			}
+		}
+		if bypass.Path != "" {
+			regex, err := regexp.Compile(bypass.Path)
+			if err != nil {
+				LogError(logger, err, "failed to compile the path regex", zap.Any("metadata", GetReqMeta(req)))
+				continue
+			}
+			passThrough = regex.MatchString(req.URL.String())
+			if !passThrough {
+				continue
+			}
+		}
+
+		if passThrough {
+			if bypass.Port == 0 || bypass.Port == destPort {
+				return true
+			}
+			passThrough = false
+		}
+	}
+
+	return passThrough
 }
 
 func kebabToCamel(s string) string {
