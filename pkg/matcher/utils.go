@@ -93,11 +93,12 @@ func MarshalResponseBodies(status string, mockOperation, testOperation *models.O
 }
 func FindOperation(item models.PathItem) (*models.Operation, string) {
 	operations := map[string]*models.Operation{
-		"GET":    item.Get,
-		"POST":   item.Post,
-		"PUT":    item.Put,
-		"DELETE": item.Delete,
-		"PATCH":  item.Patch,
+		"GET":     item.Get,
+		"POST":    item.Post,
+		"PUT":     item.Put,
+		"DELETE":  item.Delete,
+		"PATCH":   item.Patch,
+		"OPTIONS": item.Options,
 	}
 
 	for method, operation := range operations {
