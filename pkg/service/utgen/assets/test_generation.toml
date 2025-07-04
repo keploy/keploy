@@ -1,5 +1,7 @@
 [test_generation]
 system="""\
+You are an AI assistant specialized in generating unit tests for {{ .language }} code.
+Your primary goal is to create comprehensive and effective unit tests based on the provided source code, existing tests, and code coverage report.
 """
 
 user="""\
@@ -14,15 +16,6 @@ Your task is to generate additional unit tests to complement the existing test s
   - **Identify Return Types:**
     - Determine the data types of return values for each function or method.
     - Use return type information to guide the creation of relevant test cases.
-
-- **Refactor for Testability:**
-  - **Refactor the provided source code to improve testability**, including making external dependencies easily mockable, especially for asynchronous interactions.
-  - Ensure refactoring enhances testability without altering functionality or breaking existing behavior.
-  - Provide refactored code in the `refactored_source_code` field if changes are made.
-  - **Refactoring Techniques:**
-    - Use dependency injection to manage dependencies.
-    - Separate concerns to isolate different parts of the code.
-    - Implement interfaces or abstract classes to make components easily mockable.
 
 - **Utilize the Code Coverage Report:**
   - Identify specific parts of the code not yet covered by tests.
@@ -132,14 +125,6 @@ The following is the existing code coverage report. Use this to determine what t
 {{ .code_coverage_report| trim }}
 =========
 
-## Refactoring Guidelines
-To improve testability without altering functionality, consider the following refactoring techniques:
-- **Dependency Injection:** Pass dependencies as parameters to functions or constructors.
-- **Separation of Concerns:** Isolate different parts of the code to simplify testing.
-- **Use of Interfaces/Abstract Classes:** Define interfaces or abstract classes for components to facilitate mocking.
-
-Provide any refactored source code in the `refactored_source_code` field if changes are made.
-
 ## Mocking Strategies
 When simulating dependencies or external interactions:
 - Use appropriate mocking libraries based on the language (e.g., `unittest.mock` for Python, Mockito for Java).
@@ -188,7 +173,6 @@ class NewTests(BaseModel):
     language: str = Field(description="The programming language of the source code")
     existing_test_function_signature: str = Field(description="A single line repeating a signature header of one of the existing test functions")
     new_tests: List[SingleTest] = Field(min_items=1, max_items={{ .max_tests }}, description="A list of new test functions to append to the existing test suite, aiming to increase the code coverage. Each test should run as-is, without requiring any additional inputs or setup code.")
-    refactored_source_code: str = Field(description="The refactored source code that improves testability while retaining original functionality.")
 
 =====
     
@@ -250,9 +234,6 @@ new_tests:
     {{- end }}
   test_tags: happy path
 
-refactored_source_code: |
-  # Here is the modified source code that retains original functionality but improves testability.
-  ...
 ```
 
 additions:
@@ -341,14 +322,6 @@ and external types that interact with the main code.
 {{ .import_details | trim }}
 
 {{- end }}
-
-# Configuration for handling refactored code output
-
-[refactor]
-
-# Response to send if the refactored_source_code field looks like `no refactor response` or is empty
-response_if_no_refactor = "blank output don't refactor code"
-
 
 Response (should be a valid YAML, and nothing else):
 ```yaml
