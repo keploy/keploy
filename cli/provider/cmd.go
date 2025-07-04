@@ -56,10 +56,10 @@ Golang Application
 
 Node Application
 	Record:
-	sudo -E env PATH=$PATH keploy record -c “npm start --prefix /path/to/node/app"
+	sudo -E env PATH=$PATH keploy record -c "npm start --prefix /path/to/node/app"
 
 	Test:
-	sudo -E env PATH=$PATH keploy test -c “npm start --prefix /path/to/node/app" --delay 10
+	sudo -E env PATH=$PATH keploy test -c "npm start --prefix /path/to/node/app" --delay 10
 
 Java
 	Record:
@@ -91,10 +91,10 @@ Golang Application
 
 Node Application
 	Record:
-	keploy record -c “npm start --prefix /path/to/node/app"
+	keploy record -c "npm start --prefix /path/to/node/app"
 
 	Test:
-	keploy test -c “npm start --prefix /path/to/node/app" --delay 10
+	keploy test -c "npm start --prefix /path/to/node/app" --delay 10
 
 Java
 	Record:
@@ -240,6 +240,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().Bool("download", true, "Specify whether to download contracts or not")
 			cmd.Flags().Bool("generate", true, "Specify whether to generate schemas for the current service or not")
 			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the driven flag to validate contracts")
+			cmd.Flags().Bool("proxy", false, "Enable reverse proxy mock generation logic for consumer-driven contract testing")
 			return nil
 		}
 
@@ -574,6 +575,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 
 		c.cfg.Contract.Path = utils.ToAbsPath(c.logger, path)
+		// Also set the general Path for schema generation compatibility
+		c.cfg.Path = utils.ToAbsPath(c.logger, path)
 
 		services, err := cmd.Flags().GetStringSlice("services")
 		if err != nil {
@@ -599,9 +602,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New(errMsg)
 			}
 
-		}
+			c.cfg.Contract.Proxy, err = cmd.Flags().GetBool("proxy")
+			if err != nil {
+				errMsg := "failed to get the proxy flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
 
-		c.cfg.Path = utils.ToAbsPath(c.logger, path)
+			c.cfg.Path = utils.ToAbsPath(c.logger, path)
+		}
 
 	case "config":
 		path, err := cmd.Flags().GetString("path")
@@ -651,6 +660,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			c.cfg.Contract.Driven, err = cmd.Flags().GetString("driven")
 			if err != nil {
 				errMsg := "failed to get the driven flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+
+			c.cfg.Contract.Proxy, err = cmd.Flags().GetBool("proxy")
+			if err != nil {
+				errMsg := "failed to get the proxy flag"
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}

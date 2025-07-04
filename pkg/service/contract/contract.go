@@ -2,15 +2,18 @@
 package contract
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/fatih/color"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/matcher"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.keploy.io/server/v2/pkg/service/contract/consumer"
@@ -191,8 +194,8 @@ func (s *contract) HTTPDocToOpenAPI(logger *zap.Logger, custom models.HTTPDoc) (
 		}
 	case "OPTIONS":
 		pathItem.Options = &models.Operation{
-			Summary:     "Handle preflight CORS request",
-			Description: "Handle OPTIONS preflight request for CORS",
+			Summary:     "CORS preflight request",
+			Description: "Auto-generated CORS preflight operation",
 			OperationID: operationID,
 			Parameters:  parameters,
 			Responses:   byCode,
@@ -332,6 +335,312 @@ func (s *contract) GenerateMocksSchemas(ctx context.Context, services []string, 
 	return nil // Return nil if the function completes successfully.
 }
 
+// GenerateReverseProxyMocksSchemas generates mock schemas from reverse proxy recorded data.
+// This is used for client services that record server responses via reverse proxy.
+func (s *contract) GenerateReverseProxyMocksSchemas(ctx context.Context, mappings map[string][]string) error {
+	s.logger.Info("GenerateReverseProxyMocksSchemas called", zap.Any("mappings", mappings))
+
+	// The reverse proxy mocks are always stored in the keploy directory
+	testSetPath := "keploy"
+	if s.config.Path != "" && s.config.Path != "." {
+		testSetPath = s.config.Path
+	}
+	entries, err := os.ReadDir(testSetPath)
+	if err != nil {
+		utils.LogError(s.logger, err, "failed to read test set directory")
+		return err
+	}
+
+	// Loop through each test-set directory
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.Contains(entry.Name(), "test-set") {
+			continue
+		}
+
+		testSetID := entry.Name()
+		s.logger.Info("Processing test-set", zap.String("testSetID", testSetID))
+
+		// Read mocks directly from YAML file
+		mockFilePath := filepath.Join(testSetPath, testSetID, "mocks.yaml")
+
+		data, err := os.ReadFile(mockFilePath)
+		if err != nil {
+			s.logger.Debug("no mocks file found for test set", zap.String("testSetID", testSetID))
+			continue
+		}
+
+		// Parse multiple YAML documents
+		var reverseMocks []*models.Mock
+		decoder := yamlLib.NewDecoder(bytes.NewReader(data))
+		for {
+			var mock models.Mock
+			err := decoder.Decode(&mock)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				utils.LogError(s.logger, err, "failed to decode mock from YAML")
+				continue
+			}
+			reverseMocks = append(reverseMocks, &mock)
+		}
+
+		s.logger.Info("Found reverse proxy mocks", zap.Int("count", len(reverseMocks)))
+		if len(reverseMocks) == 0 {
+			s.logger.Info("No reverse proxy mocks found for test set", zap.String("testSetID", testSetID))
+			continue
+		}
+
+		var duplicateServices []string
+
+		// Group operations by service and path
+		servicePathOperations := make(map[string]map[string]map[string]*models.Operation)
+
+		// Loop through each HTTP mock to group by service and path
+		s.logger.Info("Starting to process reverse mocks", zap.Int("totalCount", len(reverseMocks)))
+		for i, reverseMock := range reverseMocks {
+			if reverseMock.Spec.HTTPReq == nil || reverseMock.Spec.HTTPReq.URL == "" {
+				s.logger.Info("Skipping mock with nil or empty request", zap.Int("index", i))
+				continue
+			}
+
+			mockURL := reverseMock.Spec.HTTPReq.URL
+			s.logger.Info("Processing mock", zap.Int("index", i), zap.String("url", mockURL), zap.String("method", string(reverseMock.Spec.HTTPReq.Method)))
+
+			// Loop through services and their mappings to find the relevant mock
+			for service, serviceMappings := range mappings {
+				var mappingFound bool
+
+				// Check if the mock's URL matches any service mapping
+				for _, mapping := range serviceMappings {
+					// Handle parameterized paths (e.g., /edit/:id should match /edit/actualId)
+					if s.matchesPathPattern(mapping, mockURL) {
+						s.logger.Info("Found matching path", zap.String("service", service), zap.String("mapping", mapping), zap.String("mockURL", mockURL))
+
+						// Initialize nested maps if they don't exist
+						if servicePathOperations[service] == nil {
+							servicePathOperations[service] = make(map[string]map[string]*models.Operation)
+						}
+						if servicePathOperations[service][mapping] == nil {
+							servicePathOperations[service][mapping] = make(map[string]*models.Operation)
+						}
+
+						// Convert to HTTPDoc format expected by contract generation
+						httpDoc := &models.HTTPDoc{
+							Version: string(reverseMock.Version),
+							Kind:    string(reverseMock.Kind),
+							Name:    reverseMock.Name,
+							Spec: models.HTTPSchema{
+								Metadata: reverseMock.Spec.Metadata,
+								Request: models.HTTPReq{
+									Method:     reverseMock.Spec.HTTPReq.Method,
+									ProtoMajor: reverseMock.Spec.HTTPReq.ProtoMajor,
+									ProtoMinor: reverseMock.Spec.HTTPReq.ProtoMinor,
+									URL:        reverseMock.Spec.HTTPReq.URL,
+									URLParams:  reverseMock.Spec.HTTPReq.URLParams,
+									Header:     reverseMock.Spec.HTTPReq.Header,
+									Body:       reverseMock.Spec.HTTPReq.Body,
+									Binary:     reverseMock.Spec.HTTPReq.Binary,
+									Form:       reverseMock.Spec.HTTPReq.Form,
+								},
+								Response: models.HTTPResp{
+									StatusCode:    reverseMock.Spec.HTTPResp.StatusCode,
+									Header:        reverseMock.Spec.HTTPResp.Header,
+									Body:          reverseMock.Spec.HTTPResp.Body,
+									Binary:        reverseMock.Spec.HTTPResp.Binary,
+									StatusMessage: reverseMock.Spec.HTTPResp.StatusMessage,
+									ProtoMajor:    reverseMock.Spec.HTTPResp.ProtoMajor,
+									ProtoMinor:    reverseMock.Spec.HTTPResp.ProtoMinor,
+								},
+								Created:          reverseMock.Spec.Created,
+								ReqTimestampMock: reverseMock.Spec.ReqTimestampMock,
+								ResTimestampMock: reverseMock.Spec.ResTimestampMock,
+							},
+						}
+
+						// Convert the HTTP mock to OpenAPI operation
+						openapi, err := s.HTTPDocToOpenAPI(s.logger, *httpDoc)
+						if err != nil {
+							s.logger.Debug("skipping reverse proxy mock for schema generation", zap.Error(err))
+							continue
+						}
+
+						// Extract the operation for this method from the OpenAPI
+						for _, pathItem := range openapi.Paths {
+							operation, method := matcher.FindOperation(pathItem)
+							if operation != nil {
+								s.logger.Debug("Extracted operation", zap.String("method", method), zap.String("service", service), zap.String("mapping", mapping))
+								// Store the operation by method for this path
+								servicePathOperations[service][mapping][strings.ToLower(method)] = operation
+							}
+						}
+
+						mappingFound = true
+						break
+					}
+				}
+
+				// Break the outer loop if the relevant mapping is found
+				if mappingFound {
+					break
+				}
+			}
+		}
+
+		s.logger.Info("Grouped operations by service", zap.Int("serviceCount", len(servicePathOperations)))
+		for service, pathOps := range servicePathOperations {
+			s.logger.Info("Service operations", zap.String("service", service), zap.Int("pathCount", len(pathOps)))
+		}
+
+		// Now write combined OpenAPI documents for each service
+		for service, pathOperations := range servicePathOperations {
+			s.logger.Info("Writing combined schema for service", zap.String("service", service), zap.Int("pathCount", len(pathOperations)))
+
+			// Create a single OpenAPI document with all operations for this service
+			combinedOpenAPI := models.OpenAPI{
+				OpenAPI: "3.0.0",
+				Info: models.Info{
+					Title:       "mocks",
+					Version:     "api.keploy.io/v1beta1",
+					Description: "Http",
+				},
+				Servers: []map[string]string{
+					{"url": "temp"},
+				},
+				Paths:      make(map[string]models.PathItem),
+				Components: map[string]interface{}{},
+			}
+
+			// Combine all operations for each path
+			for pathPattern, operations := range pathOperations {
+				pathItem := models.PathItem{}
+
+				s.logger.Debug("Combining operations for path", zap.String("path", pathPattern), zap.Int("operationCount", len(operations)))
+
+				for method, operation := range operations {
+					switch method {
+					case "get":
+						pathItem.Get = operation
+					case "post":
+						pathItem.Post = operation
+					case "put":
+						pathItem.Put = operation
+					case "delete":
+						pathItem.Delete = operation
+					case "patch":
+						pathItem.Patch = operation
+					case "options":
+						pathItem.Options = operation
+					}
+				}
+
+				combinedOpenAPI.Paths[pathPattern] = pathItem
+			}
+
+			// Only write if we have operations
+			if len(combinedOpenAPI.Paths) > 0 {
+				// Check for duplicate services to append or create new file
+				var isAppend bool
+				if yaml.Contains(duplicateServices, service) {
+					isAppend = true
+				} else {
+					duplicateServices = append(duplicateServices, service)
+				}
+
+				// Validate the generated OpenAPI schema
+				if err = validateSchema(combinedOpenAPI); err != nil {
+					s.logger.Debug("skipping combined reverse proxy mock due to invalid schema", zap.Error(err))
+					continue
+				}
+
+				s.logger.Info("Writing combined OpenAPI schema", zap.String("service", service), zap.String("testSetID", testSetID), zap.Bool("isAppend", isAppend))
+
+				// Write the combined OpenAPI document to the specified directory
+				outputPath := filepath.Join(s.config.Path, "schema", "mocks", service, testSetID)
+				err = s.openAPIDB.WriteSchema(ctx, s.logger, outputPath, "mocks", combinedOpenAPI, isAppend)
+				if err != nil {
+					utils.LogError(s.logger, err, "failed to write the combined reverse proxy mock OpenAPI schema")
+					return err
+				}
+
+				s.logger.Info("Combined reverse proxy mock schema written", zap.String("service", service), zap.String("testSetID", testSetID))
+			} else {
+				s.logger.Debug("No operations found for service", zap.String("service", service))
+			}
+		}
+	}
+
+	return nil // Return nil if the function completes successfully
+}
+
+// matchesPathPattern checks if a URL matches a path pattern with parameters
+// e.g., "/edit/:id" matches "/edit/12345", "/delete/:id" matches "/delete" or "/delete/id"
+func (s *contract) matchesPathPattern(pattern, url string) bool {
+	// If exact match, return true
+	if pattern == url {
+		return true
+	}
+
+	// Split both pattern and URL by '/'
+	patternParts := strings.Split(pattern, "/")
+	urlParts := strings.Split(url, "/")
+
+	// Handle case where URL has fewer parts than pattern (e.g., "/delete" vs "/delete/:id")
+	// This allows "/delete/:id" to match "/delete"
+	if len(urlParts) < len(patternParts) {
+		// Check if the missing parts are all parameters (start with ':')
+		for i := len(urlParts); i < len(patternParts); i++ {
+			if !strings.HasPrefix(patternParts[i], ":") {
+				return false // Non-parameter part is missing
+			}
+		}
+		// Check existing parts match
+		for i, part := range urlParts {
+			if i >= len(patternParts) {
+				return false
+			}
+			if !strings.HasPrefix(patternParts[i], ":") && part != patternParts[i] {
+				return false
+			}
+		}
+		return true
+	}
+
+	// Handle case where URL has more parts than pattern (e.g., "/delete/id" vs "/delete")
+	if len(patternParts) < len(urlParts) {
+		// Check if all pattern parts match the corresponding URL parts
+		for i, part := range patternParts {
+			if i >= len(urlParts) {
+				return false
+			}
+			if part != "" && part != urlParts[i] {
+				return false
+			}
+		}
+		return true
+	}
+
+	// Same number of parts - check each part
+	for i, part := range patternParts {
+		if i >= len(urlParts) {
+			return false
+		}
+		// If pattern part starts with ':', it's a parameter - match any non-empty value
+		if strings.HasPrefix(part, ":") {
+			if urlParts[i] == "" {
+				return false
+			}
+			continue
+		}
+		// Exact match required for non-parameter parts
+		if part != urlParts[i] {
+			return false
+		}
+	}
+
+	return true
+}
+
 func (s *contract) GenerateTestsSchemas(ctx context.Context, selectedTests []string) error {
 	testSetsIDs, err := s.testDB.GetAllTestSetIDs(ctx)
 	if err != nil {
@@ -401,6 +710,37 @@ func (s *contract) Generate(ctx context.Context, checkConfig bool) error {
 	if err != nil {
 		utils.LogError(s.logger, err, "failed to generate mocks schemas")
 		return err
+	}
+
+	// Generate reverse proxy mocks if:
+	// 1. Proxy flag is enabled for consumer-driven testing, OR
+	// 2. We have reverse proxy data available (detect by checking for test-set directories with mocks.yaml)
+	shouldGenerateReverseProxyMocks := s.config.Contract.Proxy && s.config.Contract.Driven == "consumer"
+	if !shouldGenerateReverseProxyMocks {
+		// Check if we have reverse proxy mocks available
+		testSetPath := "keploy"
+		if s.config.Path != "" && s.config.Path != "." {
+			testSetPath = s.config.Path
+		}
+		if entries, err := os.ReadDir(testSetPath); err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() && strings.Contains(entry.Name(), "test-set") {
+					mockFilePath := filepath.Join(testSetPath, entry.Name(), "mocks.yaml")
+					if _, err := os.Stat(mockFilePath); err == nil {
+						shouldGenerateReverseProxyMocks = true
+						s.logger.Info("Detected reverse proxy mocks, enabling reverse proxy mock generation")
+						break
+					}
+				}
+			}
+		}
+	}
+
+	if shouldGenerateReverseProxyMocks {
+		err = s.GenerateReverseProxyMocksSchemas(ctx, mappings)
+		if err != nil {
+			return err
+		}
 	}
 	if err := saveServiceMappings(s.config.Contract.Mappings, filepath.Join(s.config.Path, "schema")); err != nil {
 		utils.LogError(s.logger, err, "failed to save service mappings")
