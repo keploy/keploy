@@ -4,9 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -19,7 +22,17 @@ import (
 
 func StartReverseProxy(ctx context.Context, proxyPort int, forwardTo string) error {
 	logger, _ := zap.NewProduction()
-	logger.Info("[Keploy] Reverse proxy mode started", zap.Int("port", proxyPort), zap.String("forwardTo", forwardTo))
+
+	basePath := "keploy"
+	existing, _ := yaml.ReadSessionIndices(ctx, basePath, logger) // ignore error if directory doesn't exist yet
+	testSetID := pkg.NextID(existing, models.TestSetPattern)
+	testSetPath := filepath.Join(basePath, testSetID)
+
+	if err := os.MkdirAll(filepath.Join(testSetPath, "tests"), 0o777); err != nil {
+		logger.Warn("failed to create tests directory", zap.Error(err))
+	}
+
+	logger.Info("[Keploy] Reverse proxy mode started", zap.Int("port", proxyPort), zap.String("forwardTo", forwardTo), zap.String("testSet", testSetID))
 
 	ln, err := net.Listen("tcp", ":"+strconv.Itoa(proxyPort))
 	if err != nil {
@@ -34,11 +47,11 @@ func StartReverseProxy(ctx context.Context, proxyPort int, forwardTo string) err
 		if err != nil {
 			continue
 		}
-		go handleReverseProxyConn(ctx, logger, conn, forwardTo)
+		go handleReverseProxyConn(ctx, logger, conn, forwardTo, testSetPath)
 	}
 }
 
-func handleReverseProxyConn(ctx context.Context, logger *zap.Logger, clientConn net.Conn, backendAddr string) {
+func handleReverseProxyConn(ctx context.Context, logger *zap.Logger, clientConn net.Conn, backendAddr string, testSetPath string) {
 	defer clientConn.Close()
 
 	req, err := http.ReadRequest(bufio.NewReader(clientConn))
@@ -77,10 +90,10 @@ func handleReverseProxyConn(ctx context.Context, logger *zap.Logger, clientConn 
 		return
 	}
 
-	recordHTTPMock(ctx, logger, req, resp, respBodyBytes)
+	recordHTTPMock(ctx, logger, req, resp, respBodyBytes, testSetPath)
 }
 
-func recordHTTPMock(ctx context.Context, logger *zap.Logger, req *http.Request, resp *http.Response, respBodyBytes []byte) {
+func recordHTTPMock(ctx context.Context, logger *zap.Logger, req *http.Request, resp *http.Response, respBodyBytes []byte, testSetPath string) {
 	var reqBuf bytes.Buffer
 	req.Write(&reqBuf)
 
@@ -108,11 +121,14 @@ func recordHTTPMock(ctx context.Context, logger *zap.Logger, req *http.Request, 
 				Header:     pkg.ToYamlHTTPHeader(req.Header),
 				Body:       string(reqBodyBytes),
 				URLParams:  pkg.URLParams(req),
+				Timestamp:  time.Now(),
 			},
 			HTTPResp: &models.HTTPResp{
-				StatusCode: resp.StatusCode,
-				Header:     pkg.ToYamlHTTPHeader(resp.Header),
-				Body:       string(respBodyBytes),
+				StatusCode:    resp.StatusCode,
+				Header:        pkg.ToYamlHTTPHeader(resp.Header),
+				Body:          string(respBodyBytes),
+				StatusMessage: resp.Status,
+				Timestamp:     time.Now(),
 			},
 			Created:          time.Now().Unix(),
 			ReqTimestampMock: time.Now(),
@@ -126,9 +142,77 @@ func recordHTTPMock(ctx context.Context, logger *zap.Logger, req *http.Request, 
 		return
 	}
 
-	if err := yaml.WriteFile(ctx, logger, "keploy/test-set-0", "mocks", mockYaml, true); err != nil {
+	if err := yaml.WriteFile(ctx, logger, testSetPath, "mocks", mockYaml, true); err != nil {
 		logger.Error("Failed to write mock file", zap.Error(err))
 	} else {
 		logger.Info("Mock recorded for frontend→backend call")
+	}
+
+	testsDir := filepath.Join(testSetPath, "tests")
+
+	testFiles, _ := os.ReadDir(testsDir)
+	testIndex := len(testFiles)
+	testName := fmt.Sprintf("test-%d", testIndex)
+
+	httpReq := models.HTTPReq{
+		Method:     models.Method(req.Method),
+		ProtoMajor: req.ProtoMajor,
+		ProtoMinor: req.ProtoMinor,
+		URL:        req.URL.String(),
+		Header:     pkg.ToYamlHTTPHeader(req.Header),
+		Body:       string(reqBodyBytes),
+		URLParams:  pkg.URLParams(req),
+		Timestamp:  time.Now(),
+	}
+
+	httpResp := models.HTTPResp{
+		StatusCode:    resp.StatusCode,
+		Header:        pkg.ToYamlHTTPHeader(resp.Header),
+		Body:          string(respBodyBytes),
+		StatusMessage: resp.Status,
+		Timestamp:     time.Now(),
+	}
+
+	type SpecFormat struct {
+		Metadata   map[string]interface{} `yaml:"metadata"`
+		Req        models.HTTPReq         `yaml:"req"`
+		Resp       models.HTTPResp        `yaml:"resp"`
+		Objects    []interface{}          `yaml:"objects"`
+		Assertions map[string]interface{} `yaml:"assertions,omitempty"`
+		Created    int64                  `yaml:"created"`
+	}
+
+	type TestCaseFormat struct {
+		Version string     `yaml:"version"`
+		Kind    string     `yaml:"kind"`
+		Name    string     `yaml:"name"`
+		Spec    SpecFormat `yaml:"spec"`
+		Curl    string     `yaml:"curl,omitempty"`
+	}
+
+	tcFormat := TestCaseFormat{
+		Version: string(models.GetVersion()),
+		Kind:    string(models.HTTP),
+		Name:    testName,
+		Spec: SpecFormat{
+			Metadata: make(map[string]interface{}),
+			Req:      httpReq,
+			Resp:     httpResp,
+			Objects:  []interface{}{},
+			Created:  time.Now().Unix(),
+		},
+		Curl: pkg.MakeCurlCommand(httpReq),
+	}
+
+	tcYaml, err := yamlLib.Marshal(tcFormat)
+	if err != nil {
+		logger.Error("Failed to marshal test case", zap.Error(err))
+		return
+	}
+
+	if err := yaml.WriteFile(ctx, logger, testsDir, testName, tcYaml, false); err != nil {
+		logger.Error("Failed to write testcase", zap.Error(err))
+	} else {
+		logger.Info("Testcase recorded", zap.String("name", testName))
 	}
 }

@@ -109,7 +109,7 @@ func (s *contract) HTTPDocToOpenAPI(logger *zap.Logger, custom models.HTTPDoc) (
 		utils.LogError(logger, err, "failed to generate unique ID")
 		return models.OpenAPI{}, err
 	}
-	// Determine if the request method is GET or POST
+	// Determine if the request method is GET, POST, PUT, PATCH, DELETE, or OPTIONS
 	var pathItem models.PathItem
 	switch custom.Spec.Request.Method {
 	case "GET":
@@ -189,9 +189,18 @@ func (s *contract) HTTPDocToOpenAPI(logger *zap.Logger, custom models.HTTPDoc) (
 			Parameters:  parameters,
 			Responses:   byCode,
 		}
+	case "OPTIONS":
+		pathItem.Options = &models.Operation{
+			Summary:     "Handle preflight CORS request",
+			Description: "Handle OPTIONS preflight request for CORS",
+			OperationID: operationID,
+			Parameters:  parameters,
+			Responses:   byCode,
+		}
 	default:
-		utils.LogError(logger, err, "Unsupported Method")
-		return models.OpenAPI{}, err
+		unsupportedErr := fmt.Errorf("unsupported method %v", custom.Spec.Request.Method)
+		utils.LogError(logger, unsupportedErr, "Unsupported Method")
+		return models.OpenAPI{}, unsupportedErr
 	}
 
 	// Extract the URL path
@@ -290,15 +299,14 @@ func (s *contract) GenerateMocksSchemas(ctx context.Context, services []string, 
 						// Convert the HTTP mock to OpenAPI documentation.
 						openapi, err := s.HTTPDocToOpenAPI(s.logger, *mock)
 						if err != nil {
-							utils.LogError(s.logger, err, "failed to convert the yaml file to openapi")
-							return fmt.Errorf("failed to convert the yaml file to openapi")
+							s.logger.Debug("skipping mock for schema generation", zap.Error(err))
+							continue
 						}
 
 						// Validate the generated OpenAPI schema.
-						err = validateSchema(openapi)
-						if err != nil {
-							utils.LogError(s.logger, err, "failed to validate the OpenAPI schema")
-							return err
+						if err = validateSchema(openapi); err != nil {
+							s.logger.Debug("skipping mock due to invalid schema", zap.Error(err))
+							continue
 						}
 
 						// Write the OpenAPI document to the specified directory.
@@ -351,14 +359,13 @@ func (s *contract) GenerateTestsSchemas(ctx context.Context, selectedTests []str
 
 			openapi, err := s.HTTPDocToOpenAPI(s.logger, httpSpec)
 			if err != nil {
-				utils.LogError(s.logger, err, "failed to convert the yaml file to openapi")
-				return fmt.Errorf("failed to convert the yaml file to openapi")
+				s.logger.Debug("skipping test case for schema generation", zap.Error(err))
+				continue
 			}
 			// Validate the OpenAPI document
-			err = validateSchema(openapi)
-			if err != nil {
-				utils.LogError(s.logger, err, "failed to validate the OpenAPI schema")
-				return err
+			if err = validateSchema(openapi); err != nil {
+				s.logger.Debug("skipping test due to invalid schema", zap.Error(err))
+				continue
 			}
 			// Save it using the OpenAPIDB
 			err = s.openAPIDB.WriteSchema(ctx, s.logger, filepath.Join(s.config.Path, "schema", "tests", testSetID), tc.Name, openapi, false)
