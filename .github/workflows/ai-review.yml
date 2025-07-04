@@ -1,0 +1,161 @@
+name: Ollama Model Setup and PR Review
+
+on:
+  pull_request:
+    branches: [ main ]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  ollama_workflow:
+    name: Ollama Setup, Model Download, and PR Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Ollama (amd64 bundle)
+        id: install_ollama
+        run: |
+          echo "--- Installing Ollama ---"
+          curl -fsSL https://ollama.com/install.sh | sh
+          echo "Ollama installation complete."
+
+      - name: Start Ollama Service, Pull Model, and Prepare for Review
+        id: setup_ollama_and_pull_model
+        run: |
+          echo "--- Starting Ollama service in background ---"
+          nohup ollama serve &> ollama_serve.log &
+          OLLAMA_PID=$!
+          echo "Ollama server PID: $OLLAMA_PID"
+
+          echo "Waiting for Ollama service to be ready..."
+          until curl http://localhost:11434/api/tags > /dev/null 2>&1; do
+            sleep 1
+          done
+          echo "Ollama service is ready at http://localhost:11434."
+
+          echo "--- Pulling qwen3:14b model ---"
+          START_TIME=$(date +%s)
+          ollama pull qwen3:14b
+          END_TIME=$(date +%s)
+          DOWNLOAD_DURATION=$((END_TIME - START_TIME))
+          echo "::notice file=ollama_pull_duration.log::Model download time: ${DOWNLOAD_DURATION} seconds"
+          echo "download_duration=${DOWNLOAD_DURATION}" >> $GITHUB_OUTPUT
+          echo "ollama_pid=$OLLAMA_PID" >> $GITHUB_OUTPUT
+        env:
+          OLLAMA_HOST: 0.0.0.0:11434
+
+      - name: Display Measured Download Duration
+        run: |
+          echo "-------------------------------------------------------------------"
+          echo "Summary of Ollama Model Operation Times:"
+          echo "Model Download Duration: ${{ steps.setup_ollama_and_pull_model.outputs.download_duration }} seconds"
+          echo "Note: Initial model load time will occur during the first inference (PR review)."
+          echo "-------------------------------------------------------------------"
+
+      - name: Get PR diff
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          git diff origin/${{ github.base_ref }}...HEAD > pr_diff.txt
+
+      - name: Review PR with Ollama and Custom Prompt
+        id: review_with_ollama
+        if: github.event_name == 'pull_request'
+        run: |
+          DIFF_FILE_PATH="pr_diff.txt"
+          if [ -f "$DIFF_FILE_PATH" ] && [ -s "$DIFF_FILE_PATH" ]; then
+            PR_DIFF=$(cat "$DIFF_FILE_PATH")
+
+            CUSTOM_PROMPT="You are an expert code reviewer. Your task is to analyze the provided git diff, identify potential issues, suggest improvements, and summarize the key changes. Pay close attention to:
+            - Readability and code style adherence.
+            - Potential bugs or edge cases.
+            - Security vulnerabilities.
+            - Performance implications.
+            - Adherence to best practices.
+            - Missing tests or documentation.
+
+            Here is the git diff:
+            \`\`\`diff
+            $PR_DIFF
+            \`\`\`
+
+            Provide your review in a concise and actionable manner, using markdown formatting including code blocks where necessary. Start with a brief summary, then list specific findings and suggestions.  Output only the review comments for the code changes. Do not include your reasoning or thinking process.
+            End with a summary of the most critical issues found."
+
+            echo "--- Sending diff to Ollama for review ---"
+            echo "$CUSTOM_PROMPT" | ollama run qwen3:14b > ollama_raw_review.txt
+
+            echo "--- Ollama PR Review Result ---"
+            echo "::group::Ollama Review Output"
+            cat ollama_raw_review.txt
+            echo "::endgroup::"
+          else
+            echo "No diff content found or diff file is empty. Skipping PR review."
+            echo "" > ollama_raw_review.txt
+          fi
+        env:
+          OLLAMA_HOST: 0.0.0.0:11434
+
+      - name: Remove LLM thinking process from review
+        if: github.event_name == 'pull_request'
+        run: |
+          awk '
+            BEGIN {skip=0}
+            /^Thinking\.\.\./ {skip=1; next}
+            /^\.\.\.done thinking\./ {skip=0; next}
+            skip==0 {print}
+          ' ollama_raw_review.txt > ollama_clean_review.txt
+
+      - name: Set review output as environment variable
+        id: set_review_output
+        if: github.event_name == 'pull_request'
+        run: |
+          echo "REVIEW_RESULT<<EOF" >> $GITHUB_ENV
+          cat ollama_clean_review.txt >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Create PR Comment
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const reviewOutput = process.env.REVIEW_RESULT;
+            if (reviewOutput && reviewOutput.trim() !== "") {
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `## 🤖 Ollama Code Review (qwen3:14b)\n\n${reviewOutput}`
+              });
+            } else {
+              console.log('No review content generated. Skipping PR comment.');
+            }
+        env:
+          REVIEW_RESULT: ${{ env.REVIEW_RESULT }}
+        if: always() && github.event_name == 'pull_request' && env.REVIEW_RESULT != ''
+
+      - name: Stop Ollama Service (Cleanup)
+        if: always()
+        run: |
+          echo "--- Stopping Ollama service ---"
+          OLLAMA_PID="${{ steps.setup_ollama_and_pull_model.outputs.ollama_pid }}"
+          if [ -n "$OLLAMA_PID" ] && ps -p "$OLLAMA_PID" > /dev/null; then
+            kill "$OLLAMA_PID"
+            echo "Ollama service with PID $OLLAMA_PID stopped."
+          else
+            echo "Ollama service not running or already stopped."
+          fi
+
+      - name: Show diff file
+        run: |
+          cat pr_diff.txt || echo "No diff file found"
+          echo "Diff file size: $(wc -c < pr_diff.txt)"
