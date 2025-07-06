@@ -60,6 +60,13 @@ func handleReverseProxyConn(ctx context.Context, logger *zap.Logger, clientConn 
 		return
 	}
 
+	var reqBodyBytes []byte
+	if req.Body != nil {
+		reqBodyBytes, _ = io.ReadAll(req.Body)
+		req.Body.Close()
+		req.Body = io.NopCloser(bytes.NewReader(reqBodyBytes))
+	}
+
 	req.Header.Del("If-None-Match")
 	req.Header.Del("If-Modified-Since")
 
@@ -90,19 +97,10 @@ func handleReverseProxyConn(ctx context.Context, logger *zap.Logger, clientConn 
 		return
 	}
 
-	recordHTTPMock(ctx, logger, req, resp, respBodyBytes, testSetPath)
+	recordHTTPMock(ctx, logger, req, reqBodyBytes, resp, respBodyBytes, testSetPath)
 }
 
-func recordHTTPMock(ctx context.Context, logger *zap.Logger, req *http.Request, resp *http.Response, respBodyBytes []byte, testSetPath string) {
-	var reqBuf bytes.Buffer
-	req.Write(&reqBuf)
-
-	reqParsed, _ := http.ReadRequest(bufio.NewReader(bytes.NewReader(reqBuf.Bytes())))
-	var reqBodyBytes []byte
-	if reqParsed.Body != nil {
-		reqBodyBytes, _ = io.ReadAll(reqParsed.Body)
-	}
-
+func recordHTTPMock(ctx context.Context, logger *zap.Logger, req *http.Request, reqBodyBytes []byte, resp *http.Response, respBodyBytes []byte, testSetPath string) {
 	mock := &models.Mock{
 		Version: models.GetVersion(),
 		Name:    "mocks",
