@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -44,10 +46,10 @@ func NewExporter(cfg *config.Config, logger *zap.Logger, vus int, ltToken *LTTok
 	}
 }
 
-func (e *Exporter) GetMetrics(vuReport *VUReport) {
+func (e *Exporter) GetMetrics(vuReport VUReport) {
 	e.mu.Lock()
-	e.vusReport[vuReport.VUID] = *vuReport
-	e.mu.Unlock()
+	defer e.mu.Unlock()
+	e.vusReport[vuReport.VUID] = vuReport
 	e.logger.Debug("VU Report collected", zap.Int("VUID", vuReport.VUID))
 }
 
@@ -55,10 +57,25 @@ func (e *Exporter) StartServer(ctx context.Context) error {
 	r := mux.NewRouter()
 	r.HandleFunc("/metrics", e.metricsHandler).Methods("GET")
 
+	port := 9090
+	portOK := false
+	for !portOK {
+		listener, err := net.Listen("tcp", ":"+strconv.Itoa(port))
+		if err != nil {
+			e.logger.Warn("Failed to listen on port", zap.String("port", strconv.Itoa(port)), zap.Error(err))
+			port++
+			continue
+		}
+		portOK = true
+		listener.Close()
+	}
+
 	server := &http.Server{
-		Addr:    ":9090",
+		Addr:    ":" + strconv.Itoa(port),
 		Handler: r,
 	}
+
+	e.ltToken.URL = "http://localhost:" + strconv.Itoa(port) + "/metrics"
 
 	go func() {
 		defer func() {
@@ -66,7 +83,7 @@ func (e *Exporter) StartServer(ctx context.Context) error {
 				e.logger.Error("Metrics server panicked", zap.Any("recover", r))
 			}
 		}()
-		e.logger.Info("Metrics server starting on :9090")
+		e.logger.Info("Metrics server starting on port", zap.Int("port", port))
 		err := server.ListenAndServe()
 		if err != nil && err != http.ErrServerClosed {
 			e.logger.Error("Failed to start metrics server", zap.Error(err))
@@ -76,8 +93,8 @@ func (e *Exporter) StartServer(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 		e.logger.Info("Shutting down metrics server...")
-		// wait 5 seconds for the server to shutdown gracefully
-		ctxShutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// wait 1 second for the server to shutdown gracefully
+		ctxShutdown, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
 		if err := server.Shutdown(ctxShutdown); err != nil {
 			e.logger.Error("Failed to shutdown metrics server", zap.Error(err))
@@ -92,19 +109,30 @@ func (e *Exporter) metricsHandler(res http.ResponseWriter, req *http.Request) {
 	res.Header().Set("Access-Control-Allow-Methods", "GET")
 	res.Header().Set("Content-Type", "application/json")
 
-	e.mu.RLock()
-	vusReportCopy := make([]VUReport, len(e.vusReport))
-	copy(vusReportCopy, e.vusReport)
-	e.mu.RUnlock()
+	// vusReportCopy := make([]VUReport, len(e.vusReport))
+	// for i, report := range e.vusReport {
+	// 	vusReportCopy[i].VUID = report.VUID
+	// 	vusReportCopy[i].TSExecCount = report.TSExecCount
+	// 	vusReportCopy[i].TSExecFailure = report.TSExecFailure
+	// 	vusReportCopy[i].TSExecTime = make([]time.Duration, len(report.TSExecTime))
+	// 	copy(vusReportCopy[i].TSExecTime, report.TSExecTime)
+	// 	vusReportCopy[i].Steps = make([]StepReport, len(report.Steps))
+	// 	for j, step := range report.Steps {
+	// 		vusReportCopy[i].Steps[j].StepName = step.StepName
+	// 		vusReportCopy[i].Steps[j].StepCount = step.StepCount
+	// 		vusReportCopy[i].Steps[j].StepFailure = step.StepFailure
+	// 		vusReportCopy[i].Steps[j].StepResponseTime = make([]time.Duration, len(step.StepResponseTime))
+	// 		copy(vusReportCopy[i].Steps[j].StepResponseTime, step.StepResponseTime)
+	// 		vusReportCopy[i].Steps[j].StepBytesIn = step.StepBytesIn
+	// 		vusReportCopy[i].Steps[j].StepBytesOut = step.StepBytesOut
+	// 	}
+	// }
 
-	if len(vusReportCopy) == 0 {
-		e.logger.Warn("No VU reports available")
-		res.WriteHeader(http.StatusNoContent)
-		return
-	}
 	encoder := json.NewEncoder(res)
 	encoder.SetEscapeHTML(false)
-	err := encoder.Encode(vusReportCopy)
+	e.mu.RLock()
+	err := encoder.Encode(e.vusReport)
+	defer e.mu.RUnlock()
 	if err != nil {
 		e.logger.Error("Failed to encode VU reports", zap.Error(err))
 		res.WriteHeader(http.StatusInternalServerError)

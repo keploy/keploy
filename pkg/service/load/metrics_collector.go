@@ -1,6 +1,7 @@
 package load
 
 import (
+	"sync"
 	"time"
 
 	"go.keploy.io/server/v2/config"
@@ -11,6 +12,7 @@ type MetricsCollector struct {
 	config     *config.Config
 	logger     *zap.Logger
 	VUsReports []VUReport
+	mu         sync.RWMutex
 }
 
 type StepMetrics struct {
@@ -31,6 +33,14 @@ func NewMetricsCollector(config *config.Config, logger *zap.Logger, vus int) *Me
 }
 
 func (mc *MetricsCollector) SetStepsMetrics() []StepMetrics {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+
+	if len(mc.VUsReports) == 0 || len(mc.VUsReports[0].Steps) == 0 {
+		mc.logger.Warn("No VU reports or steps available for metrics calculation")
+		return nil
+	}
+
 	steps := make([]StepMetrics, len(mc.VUsReports[0].Steps))
 	for i, vuReport := range mc.VUsReports {
 		for j, step := range vuReport.Steps {
@@ -49,10 +59,8 @@ func (mc *MetricsCollector) SetStepsMetrics() []StepMetrics {
 			steps[j].StepCount += step.StepCount
 			steps[j].StepFailure += step.StepFailure
 			steps[j].StepResponseTime = append(steps[j].StepResponseTime, step.StepResponseTime...)
-			for _, result := range step.StepResults {
-				steps[j].StepBytesIn += result.ReqBytes
-				steps[j].StepBytesOut += result.ResBytes
-			}
+			steps[j].StepBytesIn += step.StepBytesIn
+			steps[j].StepBytesOut += step.StepBytesOut
 		}
 	}
 
@@ -71,6 +79,8 @@ func (mc *MetricsCollector) SetStepsMetrics() []StepMetrics {
 }
 
 func (mc *MetricsCollector) CollectVUReport(vuReport *VUReport) {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
 	mc.VUsReports[vuReport.VUID] = *vuReport
 	mc.logger.Debug("VU Report collected",
 		zap.Int("vuID", vuReport.VUID),

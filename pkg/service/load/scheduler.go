@@ -21,6 +21,7 @@ type Scheduler struct {
 	limiter     *rate.Limiter
 	cancelAll   context.CancelFunc
 	wg          sync.WaitGroup
+	vuCownter   int
 }
 
 func NewScheduler(logger *zap.Logger, config *config.Config, loadOptions *testsuite.LoadOptions, ts *testsuite.TestSuite, collector *MetricsCollector) *Scheduler {
@@ -37,6 +38,7 @@ func NewScheduler(logger *zap.Logger, config *config.Config, loadOptions *testsu
 		limiter:     lim,
 		logger:      logger,
 		config:      config,
+		vuCownter:   0,
 	}
 }
 
@@ -66,6 +68,8 @@ func (s *Scheduler) Run(parent context.Context, exporter *Exporter) error {
 }
 
 func (s *Scheduler) runConstant(ctx context.Context, ts *testsuite.TestSuite, exporter *Exporter) error {
+	exporter.StartServer(ctx)
+	exporter.ExportLoadTestToken()
 	err := s.spawnVUGoroutines(ctx, ts, s.loadOptions.VUs, exporter)
 	if err != nil {
 		s.logger.Error("Failed to spawn VU goroutines", zap.Int("vus", s.loadOptions.VUs), zap.Error(err))
@@ -80,8 +84,11 @@ func (s *Scheduler) runConstant(ctx context.Context, ts *testsuite.TestSuite, ex
 }
 
 func (s *Scheduler) runRamping(ctx context.Context, ts *testsuite.TestSuite, exporter *Exporter) error {
+	exporter.StartServer(ctx)
+	exporter.ExportLoadTestToken()
 	start := time.Now()
 	current := 0
+	cumulative := start
 	for _, stg := range s.loadOptions.Stages {
 		// spawning VU goroutines based on the target specified in the stage.
 		target := stg.Target
@@ -96,12 +103,12 @@ func (s *Scheduler) runRamping(ctx context.Context, ts *testsuite.TestSuite, exp
 		if err != nil {
 			return err
 		}
-		// setting the time for every duration stage to wait until the next stage starts or context duration is done.
-		sleepUntil := start.Add(stageDuration)
+		cumulative = cumulative.Add(stageDuration)
 		select {
 		case <-ctx.Done():
+			s.wg.Wait()
 			return nil
-		case <-time.After(time.Until(sleepUntil)):
+		case <-time.After(time.Until(cumulative)):
 		}
 		current = target
 	}
@@ -115,16 +122,17 @@ func (s *Scheduler) runRamping(ctx context.Context, ts *testsuite.TestSuite, exp
 }
 
 func (s *Scheduler) spawnVUGoroutines(ctx context.Context, ts *testsuite.TestSuite, n int, exporter *Exporter) error {
-	exporter.StartServer(ctx)
-	exporter.ExportLoadTestToken()
-	for i := 0; i < n; i++ {
+	startID := s.vuCownter
+	endID := s.vuCownter + n
+	for id := startID; id < endID; id++ {
 		s.wg.Add(1)
 		// spawning VUWorker goroutines with the context, test suite, metrics collector, rate limiter and waitgroup.
 		// the VUWorker will execute the test suite steps and report the results back to the MetricsCollector.
 		go func(id int) {
 			vuWorker := NewVUWorker(s.config, s.logger, id, ts, s.collector, s.limiter, &s.wg, exporter)
 			vuWorker.vuWorker(ctx)
-		}(i)
+		}(id)
 	}
+	s.vuCownter += n
 	return nil
 }

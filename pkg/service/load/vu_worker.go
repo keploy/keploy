@@ -31,11 +31,12 @@ type VUReport struct {
 }
 
 type StepReport struct {
-	StepName         string                 `json:"step_name"`
-	StepCount        int                    `json:"step_count"`
-	StepFailure      int                    `json:"step_failure"`
-	StepResponseTime []time.Duration        `json:"step_response_time"`
-	StepResults      []testsuite.StepResult `json:"step_results"`
+	StepName         string          `json:"step_name"`
+	StepCount        int             `json:"step_count"`
+	StepFailure      int             `json:"step_failure"`
+	StepResponseTime []time.Duration `json:"step_response_time"`
+	StepBytesIn      int64           `json:"step_bytes_in"`
+	StepBytesOut     int64           `json:"step_bytes_out"`
 }
 
 func NewVUWorker(cfg *config.Config, logger *zap.Logger, id int, ts *testsuite.TestSuite, col *MetricsCollector, lim *rate.Limiter, wg *sync.WaitGroup, exp *Exporter) *VUWorker {
@@ -52,7 +53,7 @@ func NewVUWorker(cfg *config.Config, logger *zap.Logger, id int, ts *testsuite.T
 }
 
 func (w *VUWorker) vuWorker(ctx context.Context) {
-	VUReport := &VUReport{
+	VUReport := VUReport{
 		VUID:          w.VUID,
 		TSExecCount:   0,
 		TSExecFailure: 0,
@@ -66,7 +67,6 @@ func (w *VUWorker) vuWorker(ctx context.Context) {
 			StepName:         step.Name,
 			StepCount:        0,
 			StepResponseTime: make([]time.Duration, 0),
-			StepResults:      make([]testsuite.StepResult, 0),
 		}
 	}
 
@@ -82,12 +82,13 @@ func (w *VUWorker) vuWorker(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			// if the context duration is done, waits for reporting to the MetricsCollector.
-			w.mc.CollectVUReport(VUReport)
+			w.mc.CollectVUReport(&VUReport)
 			w.logger.Debug("Virtual user context done", zap.Int("vuID", w.VUID))
 			w.waitG.Done()
 			return
 		default:
 			execReport, err := tsExec.Execute(ctx, w.limiter)
+			w.exporter.mu.Lock()
 			if err != nil { // an execution failure occurs if any parameters needed is missing like the base-url, not on the step failure.
 				w.logger.Error("Failed to execute TestSuite", zap.Int("vuID", w.VUID), zap.Error(err))
 				VUReport.TSExecCount++
@@ -106,9 +107,11 @@ func (w *VUWorker) vuWorker(ctx context.Context) {
 					}
 					VUReport.Steps[i].StepCount++
 					VUReport.Steps[i].StepResponseTime = append(VUReport.Steps[i].StepResponseTime, step.ResponseTime)
-					VUReport.Steps[i].StepResults = append(VUReport.Steps[i].StepResults, step)
+					VUReport.Steps[i].StepBytesIn += step.ReqBytes
+					VUReport.Steps[i].StepBytesOut += step.ResBytes
 				}
 			}
+			w.exporter.mu.Unlock()
 			w.exporter.GetMetrics(VUReport)
 		}
 	}
