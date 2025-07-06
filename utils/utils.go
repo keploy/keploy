@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -33,11 +34,13 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
+	"helm.sh/helm/v3/pkg/strvals"
 )
 
 var WarningSign = "\U000026A0"
 
 var TemplatizedValues = map[string]interface{}{}
+var SecretValues = map[string]interface{}{}
 
 var ErrCode = 0
 
@@ -143,6 +146,58 @@ func ReplacePort(currentURL string, port string) (string, error) {
 	}
 
 	return parsedURL.String(), nil
+}
+
+// GetReqMeta returns the metadata of the request
+func GetReqMeta(req *http.Request) map[string]string {
+	reqMeta := map[string]string{}
+	if req != nil {
+		// get request metadata
+		reqMeta = map[string]string{
+			"method": req.Method,
+			"url":    req.URL.String(),
+			"host":   req.Host,
+		}
+	}
+	return reqMeta
+}
+
+func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts models.OutgoingOptions) bool {
+	passThrough := false
+
+	for _, bypass := range opts.Rules {
+		if bypass.Host != "" {
+			regex, err := regexp.Compile(bypass.Host)
+			if err != nil {
+				LogError(logger, err, "failed to compile the host regex", zap.Any("metadata", GetReqMeta(req)))
+				continue
+			}
+			passThrough = regex.MatchString(req.Host)
+			if !passThrough {
+				continue
+			}
+		}
+		if bypass.Path != "" {
+			regex, err := regexp.Compile(bypass.Path)
+			if err != nil {
+				LogError(logger, err, "failed to compile the path regex", zap.Any("metadata", GetReqMeta(req)))
+				continue
+			}
+			passThrough = regex.MatchString(req.URL.String())
+			if !passThrough {
+				continue
+			}
+		}
+
+		if passThrough {
+			if bypass.Port == 0 || bypass.Port == destPort {
+				return true
+			}
+			passThrough = false
+		}
+	}
+
+	return passThrough
 }
 
 func kebabToCamel(s string) string {
@@ -1010,6 +1065,7 @@ func IsFileEmpty(filePath string) (bool, error) {
 	}
 	return fileInfo.Size() == 0, nil
 }
+
 func IsXMLResponse(resp *models.HTTPResp) bool {
 	if resp == nil || resp.Header == nil {
 		return false
@@ -1020,6 +1076,63 @@ func IsXMLResponse(resp *models.HTTPResp) bool {
 		return false
 	}
 	return strings.Contains(contentType, "application/xml") || strings.Contains(contentType, "text/xml")
+}
+
+// TrimSpaces removes unwanted spaces around unescaped ',' and '='
+func TrimSpaces(input string) string {
+	var output strings.Builder
+	var lastWasEscape bool  // tracks if the previous rune was a backslash
+	var skippingSpaces bool // set when we just wrote a separator
+
+	for _, ch := range input {
+		// after writing a separator, drop any spaces
+		if skippingSpaces {
+			if ch == ' ' {
+				continue
+			}
+			skippingSpaces = false
+		}
+
+		// handle escape character
+		if ch == '\\' && !lastWasEscape {
+			lastWasEscape = true
+			output.WriteRune(ch)
+			continue
+		}
+
+		// if this is an unescaped separator, trim before & skip after
+		if (ch == ',' || ch == '=') && !lastWasEscape {
+			// remove trailing spaces before the separator
+			trimmed := strings.TrimRight(output.String(), " ")
+			output.Reset()
+			output.WriteString(trimmed)
+
+			// write the separator itself
+			output.WriteRune(ch)
+
+			// skip any spaces that follow
+			skippingSpaces = true
+			lastWasEscape = false
+			continue
+		}
+
+		// normal character (or escaped separator)
+		output.WriteRune(ch)
+		lastWasEscape = false
+	}
+
+	return output.String()
+}
+
+func ParseMetadata(metadataStr string) (map[string]interface{}, error) {
+	if metadataStr == "" {
+		return nil, nil
+	}
+	m := make(map[string]interface{})
+	if err := strvals.ParseInto(metadataStr, m); err != nil {
+		return nil, fmt.Errorf("cannot parse metadata: %w", err)
+	}
+	return m, nil
 }
 
 // // XMLToMap converts an XML string into a map[string]interface{}
