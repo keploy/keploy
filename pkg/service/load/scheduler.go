@@ -52,6 +52,8 @@ func (s *Scheduler) Run(parent context.Context, exporter *Exporter) error {
 	s.cancelAll = cancel
 	defer cancel()
 
+	exporter.ltToken.CreatedAt = time.Now()
+
 	// check if the loadOptions has a valid profile set, if not return an error.
 	switch s.loadOptions.Profile {
 	case "constant_vus":
@@ -114,6 +116,7 @@ func (s *Scheduler) runRamping(ctx context.Context, ts *testsuite.TestSuite, exp
 
 func (s *Scheduler) spawnVUGoroutines(ctx context.Context, ts *testsuite.TestSuite, n int, exporter *Exporter) error {
 	exporter.StartServer(ctx)
+	exporter.ExportLoadTestToken()
 	for i := 0; i < n; i++ {
 		s.wg.Add(1)
 		// spawning VUWorker goroutines with the context, test suite, metrics collector, rate limiter and waitgroup.

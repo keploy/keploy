@@ -96,6 +96,14 @@ func (lt *LoadTester) Start(ctx context.Context) error {
 		Thresholds: lt.testsuite.Spec.Load.Thresholds,
 	}
 
+	ltToken := &LTToken{
+		ID:          time.Now().Format("20060102_150405"),
+		URL:         "http://localhost:9090/metrics",
+		Title:       lt.testsuite.Name,
+		Description: lt.testsuite.Spec.Metadata.Description,
+		LoadOptions: *loadOptions,
+	}
+
 	lt.logger.Info("Starting load test",
 		zap.String("tsPath", lt.tsPath),
 		zap.String("tsFile", lt.tsFile),
@@ -106,7 +114,7 @@ func (lt *LoadTester) Start(ctx context.Context) error {
 		zap.Bool("insecure", lt.insecure),
 	)
 
-	exporter := NewExporter(lt.config, lt.logger, lt.vus)
+	exporter := NewExporter(lt.config, lt.logger, lt.vus, ltToken)
 	mc := NewMetricsCollector(lt.config, lt.logger, lt.vus)
 	scheduler := NewScheduler(lt.logger, lt.config, loadOptions, lt.testsuite, mc)
 
