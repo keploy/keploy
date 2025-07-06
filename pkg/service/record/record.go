@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"time"
 
@@ -23,16 +25,18 @@ type Recorder struct {
 	mockDB          MockDB
 	telemetry       Telemetry
 	instrumentation Instrumentation
+	testSetConf     TestSetConfig
 	config          *config.Config
 }
 
-func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, config *config.Config) Service {
+func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, config *config.Config) Service {
 	return &Recorder{
 		logger:          logger,
 		testDB:          testDB,
 		mockDB:          mockDB,
 		telemetry:       telemetry,
 		instrumentation: instrumentation,
+		testSetConf:     testSetConf,
 		config:          config,
 	}
 }
@@ -104,6 +108,11 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		stopReason = "failed to get new test-set id"
 		utils.LogError(r.logger, err, stopReason)
 		return fmt.Errorf("%s", stopReason)
+	}
+
+	// Create config.yaml if metadata is provided
+	if r.config.Record.Metadata != "" {
+		r.createConfigWithMetadata(ctx, newTestSetID)
 	}
 
 	//checking for context cancellation as we don't want to start the instrumentation if the context is cancelled
@@ -305,9 +314,77 @@ func (r *Recorder) GetNextTestSetID(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to get test set IDs: %w", err)
 	}
-	return pkg.NextID(testSetIDs, models.TestSetPattern), nil
+
+	if r.config.Record.Metadata == "" {
+		return pkg.NextID(testSetIDs, models.TestSetPattern), nil
+	}
+	r.config.Record.Metadata = utils.TrimSpaces(r.config.Record.Metadata)
+	meta, err := utils.ParseMetadata(r.config.Record.Metadata)
+	if err != nil || meta == nil {
+		return pkg.NextID(testSetIDs, models.TestSetPattern), nil
+	}
+
+	nameVal, ok := meta["name"]
+	requestedName, isStr := nameVal.(string)
+	if !ok || !isStr || requestedName == "" {
+		return pkg.NextID(testSetIDs, models.TestSetPattern), nil
+	}
+
+	existingIDs := make(map[string]struct{}, len(testSetIDs))
+	for _, id := range testSetIDs {
+		existingIDs[id] = struct{}{}
+	}
+
+	if _, occupied := existingIDs[requestedName]; !occupied {
+		return requestedName, nil
+	}
+
+	var highestSuffix int
+	namePrefix := requestedName + "-"
+	for id := range existingIDs {
+		if !strings.HasPrefix(id, namePrefix) {
+			continue
+		}
+		suffixPart := id[len(namePrefix):]
+		if n, err := strconv.Atoi(suffixPart); err == nil && n > highestSuffix {
+			highestSuffix = n
+		}
+	}
+
+	newSuffix := highestSuffix + 1
+	assignedName := fmt.Sprintf("%s-%d", requestedName, newSuffix)
+
+	r.logger.Warn(fmt.Sprintf(
+		"Test set name '%s' already exists, using '%s' instead. You can change this name if you want.",
+		requestedName, assignedName,
+	))
+
+	return assignedName, nil
 }
 
 func (r *Recorder) GetContainerIP(ctx context.Context, id uint64) (string, error) {
 	return r.instrumentation.GetContainerIP(ctx, id)
+}
+
+func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID string) {
+	// Parse metadata from the config
+	metadata, err := utils.ParseMetadata(r.config.Record.Metadata)
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to parse metadata", zap.String("metadata", r.config.Record.Metadata))
+		return
+	}
+	testSet := &models.TestSet{
+		PreScript:  "",
+		PostScript: "",
+		Template:   make(map[string]interface{}),
+		Metadata:   metadata,
+	}
+
+	err = r.testSetConf.Write(ctx, testSetID, testSet)
+	if err != nil {
+		utils.LogError(r.logger, err, "Failed to create test-set config file with metadata", zap.String("testSet", testSetID))
+		return
+	}
+
+	r.logger.Info("Created test-set config file with metadata")
 }

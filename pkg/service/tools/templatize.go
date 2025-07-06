@@ -44,6 +44,12 @@ func (t *Tools) Templatize(ctx context.Context) error {
 			utils.TemplatizedValues = make(map[string]interface{})
 		}
 
+		if err == nil && (testSet != nil && testSet.Secret != nil) {
+			utils.SecretValues = testSet.Secret
+		} else {
+			utils.SecretValues = make(map[string]interface{})
+		}
+
 		// Get test cases from the database
 		tcs, err := t.testDB.GetTestCases(ctx, testSetID)
 		if err != nil {
@@ -160,15 +166,31 @@ func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, te
 	}
 
 	utils.RemoveDoubleQuotes(utils.TemplatizedValues)
-	err := t.testSetConf.Write(ctx, testSetID, &models.TestSet{
+
+	var existingMetadata map[string]interface{}
+	existingTestSet, err := t.testSetConf.Read(ctx, testSetID)
+	if err == nil && existingTestSet != nil && existingTestSet.Metadata != nil {
+		existingMetadata = existingTestSet.Metadata
+	}
+
+	err = t.testSetConf.Write(ctx, testSetID, &models.TestSet{
 		PreScript:  "",
 		PostScript: "",
 		Template:   utils.TemplatizedValues,
+		Metadata:   existingMetadata,
 	})
 	if err != nil {
 		utils.LogError(t.logger, err, "failed to write test set")
 		return err
 	}
+
+	if len(utils.SecretValues) > 0 {
+		err = utils.AddToGitIgnore(t.logger, t.config.Path, "/*/secret.yaml")
+		if err != nil {
+			t.logger.Warn("Failed to add secret files to .gitignore", zap.Error(err))
+		}
+	}
+
 	return nil
 }
 
@@ -910,8 +932,19 @@ func render(val string) (interface{}, error) {
 	if err != nil {
 		return val, fmt.Errorf("failed to parse the testcase using template %v", zap.Error(err))
 	}
+
+	data := make(map[string]interface{})
+
+	for k, v := range utils.TemplatizedValues {
+		data[k] = v
+	}
+
+	if len(utils.SecretValues) > 0 {
+		data["secret"] = utils.SecretValues
+	}
+
 	var output bytes.Buffer
-	err = tmpl.Execute(&output, utils.TemplatizedValues)
+	err = tmpl.Execute(&output, data)
 	if err != nil {
 		return val, fmt.Errorf("failed to execute the template %v", zap.Error(err))
 	}
