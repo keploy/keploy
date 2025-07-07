@@ -485,25 +485,29 @@ func (e *EmbedService) generateEmbeddingsForAllFiles(allChunks map[string]map[in
 }
 
 func (e *EmbedService) initializeDatabase(ctx context.Context) error {
-	// Create embeddings table
+	dropTableQuery := `DROP TABLE IF EXISTS code_embeddings;`
+	_, err := e.pgConn.Exec(ctx, dropTableQuery)
+	if err != nil {
+		return fmt.Errorf("failed to drop existing embeddings table: %w", err)
+	}
+
 	createTableQuery := `
         CREATE TABLE IF NOT EXISTS code_embeddings (
             id BIGSERIAL PRIMARY KEY,
             file_path TEXT NOT NULL,
             chunk_id INTEGER NOT NULL,
             content TEXT NOT NULL,
-            embedding VECTOR(1536),
+            embedding VECTOR(384),
             created_at TIMESTAMP DEFAULT NOW(),
             UNIQUE(file_path, chunk_id)
         )
     `
 
-	_, err := e.pgConn.Exec(ctx, createTableQuery)
+	_, err = e.pgConn.Exec(ctx, createTableQuery)
 	if err != nil {
 		return fmt.Errorf("failed to create embeddings table: %w", err)
 	}
 
-	// Create index for vector similarity search
 	indexQuery := `
         CREATE INDEX IF NOT EXISTS code_embeddings_embedding_idx 
         ON code_embeddings USING hnsw (embedding vector_cosine_ops)
@@ -553,9 +557,11 @@ func (e *EmbedService) callAIService(content string) ([]float32, error) {
 	}
 
 	url := fmt.Sprintf("https://api-inference.huggingface.co/models/%s", modelID)
-
 	type requestBody struct {
-		Inputs  []string               `json:"inputs"`
+		Inputs struct {
+			SourceSentence string   `json:"source_sentence"`
+			Sentences      []string `json:"sentences"`
+		} `json:"inputs"`
 		Options map[string]interface{} `json:"options,omitempty"`
 	}
 
@@ -573,7 +579,13 @@ func (e *EmbedService) callAIService(content string) ([]float32, error) {
 	}
 
 	reqBody := requestBody{
-		Inputs: []string{content},
+		Inputs: struct {
+			SourceSentence string   `json:"source_sentence"`
+			Sentences      []string `json:"sentences"`
+		}{
+			SourceSentence: content,
+			Sentences:      []string{content},
+		},
 		Options: map[string]interface{}{
 			"wait_for_model": true,
 			"use_cache":      false,
