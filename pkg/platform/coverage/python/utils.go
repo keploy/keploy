@@ -8,6 +8,10 @@ import (
 )
 
 func createPyCoverageConfig(logger *zap.Logger) {
+	// In the below config, in the concurrency section, we are setting the concurrency to multiprocessing and thread.
+	// Where multiprocessing is for collecting coverage for processes spawned by the Python application,
+	// and thread is for collecting coverage for the main thread.
+
 	// Define the content of the .coveragerc file
 	configContent := `[run]
 omit =
