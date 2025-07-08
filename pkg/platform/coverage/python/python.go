@@ -15,6 +15,10 @@ import (
 	"go.uber.org/zap"
 )
 
+var execCommand123 = exec.Command
+var execCommandContext456 = exec.CommandContext
+var osReadFile789 = os.ReadFile
+
 type Python struct {
 	ctx        context.Context
 	logger     *zap.Logger
@@ -34,7 +38,7 @@ func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cm
 }
 
 func (p *Python) PreProcess(_ bool) (string, error) {
-	cmd := exec.Command("coverage")
+	cmd := execCommand123("coverage")
 	err := cmd.Run()
 	if err != nil {
 		p.logger.Warn("coverage tool not found, skipping coverage caluclation. Please install coverage tool using 'pip install coverage'")
@@ -106,7 +110,7 @@ func (p *Python) GetCoverage() (models.TestCoverage, error) {
 		"--data-file=" + covFileName, // final merged file
 	}, matches...)
 
-	combineCmd := exec.CommandContext(p.ctx, p.executable, args...)
+	combineCmd := execCommandContext456(p.ctx, p.executable, args...)
 	combineCmd.Stdout = os.Stdout
 	combineCmd.Stderr = os.Stderr
 
@@ -114,14 +118,14 @@ func (p *Python) GetCoverage() (models.TestCoverage, error) {
 		p.logger.Error("failed to combine coverage files", zap.Error(err))
 		return testCov, err
 	}
-	generateCovJSONCmd := exec.CommandContext(p.ctx, p.executable, "-m", "coverage", "json", "--data-file="+covFileName)
+	generateCovJSONCmd := execCommandContext456(p.ctx, p.executable, "-m", "coverage", "json", "--data-file="+covFileName)
 	generateCovJSONCmd.Stdout = os.Stdout
 	generateCovJSONCmd.Stderr = os.Stderr
 	err = generateCovJSONCmd.Run()
 	if err != nil {
 		return testCov, err
 	}
-	coverageData, err := os.ReadFile("coverage.json")
+	coverageData, err := osReadFile789("coverage.json")
 	if err != nil {
 		return testCov, err
 	}
