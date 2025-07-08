@@ -13,6 +13,9 @@ func createPyCoverageConfig(logger *zap.Logger) {
 omit =
     /usr/*
 sigterm = true
+concurrency  = multiprocessing, thread
+parallel = true
+data_file = .coverage.keploy
 `
 
 	// Create or overwrite the .coveragerc file
