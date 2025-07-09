@@ -232,7 +232,17 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-
+	case "embed":
+		cmd.Flags().String("source-path", "", "Path to the source file for embedding generation.")
+		cmd.Flags().String("model", "text-embedding-ada-002", "Model to use for embedding generation.")
+		cmd.Flags().String("llm-base-url", "", "Base URL for the AI model.")
+		cmd.Flags().String("llm-api-version", "", "API version of the llm")
+		err := cmd.MarkFlagRequired("source-path")
+		if err != nil {
+			errMsg := "failed to mark source-path as required flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
 	case "record", "test", "rerecord":
 		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
 			cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate contracts")
@@ -368,6 +378,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"recordTimer":           "record-timer",
 		"urlMethods":            "url-methods",
 		"inCi":                  "in-ci",
+		"sourcePath":            "source-path",
 	}
 
 	if newName, ok := flagNameMapping[name]; ok {
@@ -871,14 +882,40 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, nil, "API_KEY is not set")
 			return errors.New("API_KEY is not set")
 		}
-		if (c.cfg.Gen.SourceFilePath == "" && c.cfg.Gen.TestFilePath != "") || c.cfg.Gen.SourceFilePath != "" && c.cfg.Gen.TestFilePath == "" {
-			utils.LogError(c.logger, nil, "One of the SourceFilePath and TestFilePath is mentioned. Either provide both or neither")
-			return errors.New("sourceFilePath and testFilePath misconfigured")
-		} else if c.cfg.Gen.SourceFilePath == "" && c.cfg.Gen.TestFilePath == "" {
+		if c.cfg.Gen.SourceFilePath == "" {
+			//SourceFilePath is not provided, so TestDir is mandatory for batch processing
+			if c.cfg.Gen.TestFilePath != "" {
+				utils.LogError(c.logger, nil, "TestFilePath should not be provided when SourceFilePath is empty. Use TestDir for batch mode.")
+				return errors.New("testFilePath provided without sourceFilePath")
+			}
 			if c.cfg.Gen.TestDir == "" {
-				utils.LogError(c.logger, nil, "TestDir is not set, Please specify the test directory")
+				utils.LogError(c.logger, nil, "SourceFilePath is not provided. TestDir is required for processing multiple files.")
 				return errors.New("TestDir is not set")
 			}
+		}
+		if c.cfg.Gen.TestCommand == "" {
+			utils.LogError(c.logger, nil, "TestCommand is not set. Please specify the command to run tests.")
+			return errors.New("TestCommand is not set")
+		}
+	case "embed":
+		if os.Getenv("API_KEY") == "" {
+			utils.LogError(c.logger, nil, "API_KEY is not set")
+			return errors.New("API_KEY is not set")
+		}
+
+		if c.cfg.Embed.SourcePath == "" {
+			cwd, err := os.Getwd()
+			if err != nil {
+				utils.LogError(c.logger, err, "Failed to get current working directory")
+				return errors.New("failed to get current working directory")
+			}
+			c.cfg.Embed.SourcePath = cwd
+			c.logger.Info("No source path provided, using current directory", zap.String("path", cwd))
+		}
+
+		if _, err := os.Stat(c.cfg.Embed.SourcePath); os.IsNotExist(err) {
+			utils.LogError(c.logger, err, "Source path does not exist", zap.String("path", c.cfg.Embed.SourcePath))
+			return errors.New("source path does not exist")
 		}
 	}
 

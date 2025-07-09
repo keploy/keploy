@@ -38,6 +38,7 @@ type Config struct {
 	KeployNetwork         string       `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
 	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
 	Contract              Contract     `json:"contract" yaml:"contract" mapstructure:"contract"`
+	Embed                 Embed        `json:"embed" yaml:"embed" mapstructure:"embed"`
 
 	InCi           bool   `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
 	InstallationID string `json:"-" yaml:"-" mapstructure:"-"`
@@ -237,4 +238,14 @@ func SetSelectedTestsNormalize(conf *Config, value string) error {
 	}
 	conf.Normalize.SelectedTests = tests
 	return nil
+}
+
+type Embed struct {
+	SourcePath    string `json:"sourcePath" yaml:"sourcePath" mapstructure:"sourcePath"`
+	Model         string `json:"model" yaml:"model" mapstructure:"model"`
+	LLMBaseURL    string `json:"llmBaseUrl" yaml:"llmBaseUrl" mapstructure:"llmBaseUrl"`
+	LLMApiVersion string `json:"llmApiVersion" yaml:"llmApiVersion" mapstructure:"llmApiVersion"`
+	DatabaseURL   string `json:"databaseURL" yaml:"databaseURL" mapstructure:"databaseURL"`
+	APIKey        string `json:"apiKey" yaml:"apiKey" mapstructure:"apiKey"`
+	ModelName     string `json:"modelName" yaml:"modelName" mapstructure:"modelName"`
 }
