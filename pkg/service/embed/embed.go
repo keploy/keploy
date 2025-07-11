@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -167,38 +168,77 @@ func (e *EmbedService) GenerateEmbeddings(chunks map[int]string, filePath string
 		return fmt.Errorf("failed to initialize database: %w", err)
 	}
 
-	for chunkID, chunkContent := range chunks {
-		e.logger.Debug("Processing chunk for embedding",
-			zap.Int("chunkID", chunkID),
-			zap.String("filePath", filePath),
-			zap.Int("contentLength", len(chunkContent)))
-
-		// Call AI service to generate embeddings
-		embedding, err := e.callAIService(chunkContent)
-		if err != nil {
-			e.logger.Error("Failed to generate embedding",
-				zap.Int("chunkID", chunkID),
-				zap.String("filePath", filePath),
-				zap.Error(err))
-			continue
-		}
-
-		// Store embedding in PostgreSQL with pgvector
-		err = e.storeEmbedding(ctx, filePath, chunkID, chunkContent, embedding)
-		if err != nil {
-			e.logger.Error("Failed to store embedding",
-				zap.Int("chunkID", chunkID),
-				zap.String("filePath", filePath),
-				zap.Error(err))
-			continue
-		}
-
-		e.logger.Debug("Successfully stored embedding",
-			zap.Int("chunkID", chunkID),
-			zap.String("filePath", filePath))
+	if len(chunks) == 0 {
+		return nil
 	}
 
-	e.logger.Info("Embedding generation and storage completed successfully")
+	// To keep order, since maps are unordered.
+	sortedChunkIDs := make([]int, 0, len(chunks))
+	for chunkID := range chunks {
+		sortedChunkIDs = append(sortedChunkIDs, chunkID)
+	}
+	sort.Ints(sortedChunkIDs)
+
+	const batchSize = 32 // Process chunks in batches to manage memory
+
+	for i := 0; i < len(sortedChunkIDs); i += batchSize {
+		end := i + batchSize
+		if end > len(sortedChunkIDs) {
+			end = len(sortedChunkIDs)
+		}
+		batchIDs := sortedChunkIDs[i:end]
+
+		batchContents := make([]string, 0, len(batchIDs))
+		validChunkIDs := make([]int, 0, len(batchIDs))
+
+		for _, chunkID := range batchIDs {
+			chunkContent := chunks[chunkID]
+			if strings.TrimSpace(chunkContent) == "" {
+				e.logger.Warn("Skipping empty chunk", zap.Int("chunkID", chunkID), zap.String("filePath", filePath))
+				continue
+			}
+			batchContents = append(batchContents, chunkContent)
+			validChunkIDs = append(validChunkIDs, chunkID)
+		}
+
+		if len(batchContents) == 0 {
+			continue
+		}
+
+		embeddings, err := e.callAIService(batchContents)
+		if err != nil {
+			e.logger.Error("Failed to generate embeddings for batch",
+				zap.String("filePath", filePath),
+				zap.Error(err))
+			continue // Continue with the next batch
+		}
+
+		if len(embeddings) != len(batchContents) {
+			e.logger.Error("Mismatch in number of embeddings returned for batch",
+				zap.Int("expected", len(batchContents)),
+				zap.Int("received", len(embeddings)),
+				zap.String("filePath", filePath))
+			continue // Continue with the next batch
+		}
+
+		for j, embedding := range embeddings {
+			chunkID := validChunkIDs[j]
+			chunkContent := batchContents[j]
+			err = e.storeEmbedding(ctx, filePath, chunkID, chunkContent, embedding)
+			if err != nil {
+				e.logger.Error("Failed to store embedding",
+					zap.Int("chunkID", chunkID),
+					zap.String("filePath", filePath),
+					zap.Error(err))
+			} else {
+				e.logger.Debug("Successfully stored embedding",
+					zap.Int("chunkID", chunkID),
+					zap.String("filePath", filePath))
+			}
+		}
+	}
+
+	e.logger.Info("Embedding generation and storage completed successfully for file", zap.String("filePath", filePath))
 	return nil
 }
 
@@ -227,7 +267,8 @@ func (e *EmbedService) getFileExtension(filePath string) string {
 }
 
 func (e *EmbedService) getTokenLimit() int {
-	return 4000
+	// Using a token limit appropriate for the sentence-transformers model
+	return 256
 }
 
 func (e *EmbedService) shouldSkipDirectory(dirPath string) bool {
@@ -379,40 +420,84 @@ func (e *EmbedService) processDirectoryStreaming(ctx context.Context, dirPath st
 	}()
 
 	// Consumer goroutine to process chunks as they arrive
+	batchSize := 32 // A reasonable batch size
+	var chunkBatch []ChunkJob
 	chunkCount := 0
+
 	for chunk := range chunkChan {
-		chunkCount++
-		e.logger.Debug("Processing chunk for embedding (streaming)",
-			zap.Int("chunkID", chunk.ChunkID),
-			zap.String("filePath", chunk.FilePath),
-			zap.Int("totalProcessed", chunkCount))
-
-		embedding, err := e.callAIService(chunk.Content)
-		if err != nil {
-			e.logger.Error("Failed to generate embedding",
-				zap.String("file", chunk.FilePath),
-				zap.Int("chunkID", chunk.ChunkID),
-				zap.Error(err))
-			continue
+		chunkBatch = append(chunkBatch, chunk)
+		if len(chunkBatch) >= batchSize {
+			e.processChunkBatch(ctx, chunkBatch)
+			chunkCount += len(chunkBatch)
+			chunkBatch = nil // Reset batch
 		}
+	}
 
-		err = e.storeEmbedding(ctx, chunk.FilePath, chunk.ChunkID, chunk.Content, embedding)
-		if err != nil {
-			e.logger.Error("Failed to store embedding",
-				zap.String("file", chunk.FilePath),
-				zap.Int("chunkID", chunk.ChunkID),
-				zap.Error(err))
-		} else {
-			e.logger.Debug("Successfully stored embedding (streaming)",
-				zap.Int("chunkID", chunk.ChunkID),
-				zap.String("filePath", chunk.FilePath))
-		}
+	// Process any remaining chunks in the last batch
+	if len(chunkBatch) > 0 {
+		e.processChunkBatch(ctx, chunkBatch)
+		chunkCount += len(chunkBatch)
 	}
 
 	e.logger.Info("Embedding generation completed (streaming)",
 		zap.Int("totalChunks", chunkCount))
 
 	return <-errChan
+}
+
+func (e *EmbedService) processChunkBatch(ctx context.Context, batch []ChunkJob) {
+	e.logger.Debug("Processing chunk batch for embedding (streaming)",
+		zap.Int("batchSize", len(batch)))
+
+	contents := make([]string, 0, len(batch))
+	validJobs := make([]ChunkJob, 0, len(batch))
+
+	for _, job := range batch {
+		if strings.TrimSpace(job.Content) == "" {
+			e.logger.Warn("Skipping empty chunk in batch", zap.Int("chunkID", job.ChunkID), zap.String("filePath", job.FilePath))
+			continue
+		}
+		contents = append(contents, job.Content)
+		validJobs = append(validJobs, job)
+	}
+
+	if len(contents) == 0 {
+		return
+	}
+
+	embeddings, err := e.callAIService(contents)
+	if err != nil {
+		e.logger.Error("Failed to generate embeddings for batch", zap.Error(err))
+		for _, job := range validJobs {
+			e.logger.Error("Failed to generate embedding for chunk in batch",
+				zap.String("file", job.FilePath),
+				zap.Int("chunkID", job.ChunkID),
+				zap.Error(err))
+		}
+		return
+	}
+
+	if len(embeddings) != len(validJobs) {
+		e.logger.Error("Mismatch in number of embeddings returned for batch",
+			zap.Int("expected", len(validJobs)),
+			zap.Int("received", len(embeddings)))
+		return
+	}
+
+	for i, embedding := range embeddings {
+		job := validJobs[i]
+		err = e.storeEmbedding(ctx, job.FilePath, job.ChunkID, job.Content, embedding)
+		if err != nil {
+			e.logger.Error("Failed to store embedding",
+				zap.String("file", job.FilePath),
+				zap.Int("chunkID", job.ChunkID),
+				zap.Error(err))
+		} else {
+			e.logger.Debug("Successfully stored embedding (streaming)",
+				zap.Int("chunkID", job.ChunkID),
+				zap.String("filePath", job.FilePath))
+		}
+	}
 }
 
 func (e *EmbedService) processSingleFile(_ context.Context, filePath string) error {
@@ -541,55 +626,25 @@ func (e *EmbedService) storeEmbedding(ctx context.Context, filePath string, chun
 	return nil
 }
 
-func (e *EmbedService) callAIService(content string) ([]float32, error) {
-	token := os.Getenv("HF_TOKEN")
-	if token == "" {
-		if e.cfg.Embed.APIKey != "" {
-			token = e.cfg.Embed.APIKey
-		} else {
-			return nil, fmt.Errorf("HF_TOKEN environment variable or config APIKey not set")
-		}
-	}
-
+func (e *EmbedService) callAIService(contents []string) ([][]float32, error) {
 	modelID := "sentence-transformers/all-MiniLM-L6-v2"
 	if e.cfg.Embed.ModelName != "" {
 		modelID = e.cfg.Embed.ModelName
 	}
 
-	url := fmt.Sprintf("https://api-inference.huggingface.co/models/%s", modelID)
+	url := "https://4be83bff41e1.ngrok-free.app/generate_embeddings/"
+
 	type requestBody struct {
-		Inputs struct {
-			SourceSentence string   `json:"source_sentence"`
-			Sentences      []string `json:"sentences"`
-		} `json:"inputs"`
-		Options map[string]interface{} `json:"options,omitempty"`
+		Sentences []string `json:"sentences"`
 	}
 
-	if strings.TrimSpace(content) == "" {
-		e.logger.Warn("Empty content provided for embedding generation")
-		return nil, fmt.Errorf("content is empty")
+	if len(contents) == 0 {
+		return [][]float32{}, nil
 	}
 
-	maxContentLength := 512
-	if len(content) > maxContentLength {
-		e.logger.Warn("Content too long, truncating",
-			zap.Int("originalLength", len(content)),
-			zap.Int("maxLength", maxContentLength))
-		content = content[:maxContentLength]
-	}
-
+	// The chunker should now provide appropriately sized chunks, so we don't need to split them here.
 	reqBody := requestBody{
-		Inputs: struct {
-			SourceSentence string   `json:"source_sentence"`
-			Sentences      []string `json:"sentences"`
-		}{
-			SourceSentence: content,
-			Sentences:      []string{content},
-		},
-		Options: map[string]interface{}{
-			"wait_for_model": true,
-			"use_cache":      false,
-		},
+		Sentences: contents,
 	}
 
 	payload, err := json.Marshal(reqBody)
@@ -607,17 +662,16 @@ func (e *EmbedService) callAIService(content string) ([]float32, error) {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{
 		Timeout: 60 * time.Second,
 	}
 
-	e.logger.Debug("Calling HuggingFace API for embedding generation",
+	e.logger.Debug("Calling local embedding service",
 		zap.String("model", modelID),
 		zap.String("url", url),
-		zap.Int("contentLength", len(content)))
+		zap.Int("contentCount", len(contents)))
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -632,67 +686,39 @@ func (e *EmbedService) callAIService(content string) ([]float32, error) {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	e.logger.Debug("HuggingFace API response",
-		zap.Int("statusCode", resp.StatusCode),
-		zap.String("response", string(body)))
+	e.logger.Debug("Local embedding service response",
+		zap.Int("statusCode", resp.StatusCode))
 
 	if resp.StatusCode != http.StatusOK {
-		e.logger.Error("HuggingFace API error",
+		e.logger.Error("Local embedding service error",
 			zap.Int("statusCode", resp.StatusCode),
 			zap.String("response", string(body)))
-
-		switch resp.StatusCode {
-		case http.StatusUnauthorized:
-			return nil, fmt.Errorf("unauthorized: check HF_TOKEN")
-		case http.StatusTooManyRequests:
-			return nil, fmt.Errorf("rate limited: too many requests")
-		case http.StatusServiceUnavailable:
-			return nil, fmt.Errorf("model loading: try again in a few moments")
-		case http.StatusNotFound:
-			return nil, fmt.Errorf("model not found: %s. Check if the model exists", modelID)
-		default:
-			return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
-		}
+		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
 	}
 
-	var embeddings []float64
-	if err := json.Unmarshal(body, &embeddings); err != nil {
-		var nestedEmbeddings [][]float64
-		if err2 := json.Unmarshal(body, &nestedEmbeddings); err2 != nil {
-			e.logger.Error("Failed to decode JSON response",
-				zap.Error(err),
-				zap.Error(err2),
-				zap.String("rawResponse", string(body)))
-			return nil, fmt.Errorf("failed to decode embeddings: %w", err)
-		}
-		if len(nestedEmbeddings) == 0 || len(nestedEmbeddings[0]) == 0 {
-			return nil, fmt.Errorf("received empty embedding vector")
-		}
-		embeddings = nestedEmbeddings[0]
+	var response struct {
+		Embeddings [][]float64 `json:"embeddings"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		e.logger.Error("Failed to decode JSON response",
+			zap.Error(err),
+			zap.String("rawResponse", string(body)))
+		return nil, fmt.Errorf("failed to decode embeddings: %w", err)
 	}
 
-	if len(embeddings) == 0 {
-		e.logger.Error("Empty embedding vector received")
-		return nil, fmt.Errorf("received empty embedding vector")
+	if len(response.Embeddings) != len(contents) {
+		return nil, fmt.Errorf("mismatch between number of sentences sent (%d) and embeddings received (%d)", len(contents), len(response.Embeddings))
 	}
 
-	// Convert float64 to float32 for pgvector compatibility
-	result := make([]float32, len(embeddings))
-	for i, val := range embeddings {
-		if math.IsNaN(val) || math.IsInf(val, 0) {
-			e.logger.Warn("Invalid float value in embedding",
-				zap.Int("index", i),
-				zap.Float64("value", val))
-			val = 0.0
-		}
-		result[i] = float32(val)
+	finalEmbeddings := make([][]float32, len(contents))
+	for i := 0; i < len(contents); i++ {
+		finalEmbeddings[i] = convertToFloat32(response.Embeddings[i], e.logger, i)
 	}
 
-	e.logger.Debug("Successfully generated embedding",
-		zap.Int("dimensions", len(result)),
-		zap.String("model", modelID))
+	e.logger.Debug("Successfully generated embeddings",
+		zap.Int("count", len(finalEmbeddings)))
 
-	return result, nil
+	return finalEmbeddings, nil
 }
 
 func (e *EmbedService) SearchSimilarCode(ctx context.Context, queryEmbedding []float32, limit int) ([]SearchResult, error) {
@@ -735,4 +761,48 @@ func (e *EmbedService) Close() error {
 		return e.pgConn.Close(context.Background())
 	}
 	return nil
+}
+
+func averageEmbeddings(embeddings [][]float64) ([]float64, error) {
+	if len(embeddings) == 0 {
+		return nil, fmt.Errorf("cannot average empty list of embeddings")
+	}
+	if len(embeddings[0]) == 0 {
+		return nil, fmt.Errorf("cannot average zero-dimension embeddings")
+	}
+
+	dim := len(embeddings[0])
+	avgEmbedding := make([]float64, dim)
+
+	for _, emb := range embeddings {
+		if len(emb) != dim {
+			return nil, fmt.Errorf("cannot average embeddings of different dimensions: %d vs %d", len(emb), dim)
+		}
+		for i := 0; i < dim; i++ {
+			avgEmbedding[i] += emb[i]
+		}
+	}
+
+	for i := 0; i < dim; i++ {
+		avgEmbedding[i] /= float64(len(embeddings))
+	}
+
+	return avgEmbedding, nil
+}
+
+func convertToFloat32(embedding []float64, logger *zap.Logger, indexInBatch int) []float32 {
+	result := make([]float32, len(embedding))
+	for i, val := range embedding {
+		if math.IsNaN(val) || math.IsInf(val, 0) {
+			if logger != nil {
+				logger.Warn("Invalid float value in embedding, replacing with 0.0",
+					zap.Int("originalIndexInBatch", indexInBatch),
+					zap.Int("valueIndex", i),
+					zap.Float64("value", val))
+			}
+			val = 0.0
+		}
+		result[i] = float32(val)
+	}
+	return result
 }

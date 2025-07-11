@@ -19,7 +19,7 @@ func EmbedCommand(ctx context.Context, logger *zap.Logger, _ *config.Config, ser
 	var cmd = &cobra.Command{
 		Use:     "embed",
 		Short:   "generate embeddings for source code using AI",
-		Example: `keploy embed --source-path="/sparsh"`,
+		Example: `keploy embed --source-path="/project"`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
