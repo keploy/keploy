@@ -91,7 +91,10 @@ func (g *Golang) GetCoverage() (models.TestCoverage, error) {
 	g.mu.Lock()
 	if g.listener != nil {
 		// Closing the listener will unblock the Accept() call in the goroutine.
-		g.listener.Close()
+		if err := g.listener.Close(); err != nil {
+			g.logger.Warn("Error closing listener", zap.Error(err))
+		}
+		g.listener = nil
 	}
 	g.mu.Unlock()
 
@@ -132,7 +135,12 @@ func (g *Golang) startDataReceiver() error {
 	g.listener = ln
 	g.mu.Unlock()
 
-	defer ln.Close()
+	defer func() {
+		ln.Close()
+		g.mu.Lock()
+		g.listener = nil
+		g.mu.Unlock()
+	}()
 
 	for {
 		// FIX: Set a deadline on Accept to allow periodic checks of the context.
@@ -201,19 +209,17 @@ func (g *Golang) appendToDedupFile(record DedupRecord) error {
 	g.dedupFileMu.Lock()
 	defer g.dedupFileMu.Unlock()
 
-	// CHANGE THE SLICE TYPE from []interface{} to []DedupRecord
 	var existingRecords []DedupRecord
 	yamlFile, err := os.ReadFile(dedupFileName)
 	if err == nil {
-		// This will now unmarshal into a slice of structs, preserving order.
 		if err := yaml.Unmarshal(yamlFile, &existingRecords); err != nil {
-			g.logger.Warn("failed to unmarshal existing dedup file, overwriting", zap.Error(err))
+			g.logger.Warn("failed to unmarshal existing dedup file, starting fresh", zap.Error(err))
+			existingRecords = []DedupRecord{}
 		}
 	}
 
 	existingRecords = append(existingRecords, record)
 
-	// This will now marshal a slice of structs, respecting field order for each element.
 	newData, err := yaml.Marshal(&existingRecords)
 	if err != nil {
 		return fmt.Errorf("failed to marshal new dedup data: %w", err)

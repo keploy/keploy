@@ -825,7 +825,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				break
 			}
 		}
-		
+
 		if !r.config.Test.SkipCoverage && r.config.Test.Language == models.Go {
 			if goCov, ok := r.cov.(golang.Service); ok {
 				goCov.StartCoverage(testSetID + "/" + testCase.Name)
@@ -840,7 +840,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				goCov.EndCoverage(testSetID + "/" + testCase.Name)
 			}
 		}
-		
+
 		if loopErr != nil {
 			utils.LogError(r.logger, loopErr, "failed to simulate request")
 			failure++
