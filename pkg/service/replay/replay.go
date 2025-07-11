@@ -59,6 +59,7 @@ type Replayer struct {
 	instrument      bool
 	isLastTestSet   bool
 	isLastTestCase  bool
+	cov             coverage.Service
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
@@ -160,22 +161,21 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 	}
 
-	var cov coverage.Service
 	switch r.config.Test.Language {
 	case models.Go:
-		cov = golang.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.CoverageReportPath, r.config.CommandType)
+		r.cov = golang.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.CoverageReportPath, r.config.CommandType)
 	case models.Python:
-		cov = python.New(ctx, r.logger, r.reportDB, r.config.Command, executable)
+		r.cov = python.New(ctx, r.logger, r.reportDB, r.config.Command, executable)
 	case models.Javascript:
-		cov = javascript.New(ctx, r.logger, r.reportDB, r.config.Command)
+		r.cov = javascript.New(ctx, r.logger, r.reportDB, r.config.Command)
 	case models.Java:
-		cov = java.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.JacocoAgentPath, executable)
+		r.cov = java.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.JacocoAgentPath, executable)
 	default:
 		r.config.Test.SkipCoverage = true
 	}
 	if !r.config.Test.SkipCoverage {
 		if utils.CmdType(r.config.CommandType) == utils.Native {
-			r.config.Command, err = cov.PreProcess(r.config.Test.DisableLineCoverage)
+			r.config.Command, err = r.cov.PreProcess(r.config.Test.DisableLineCoverage)
 
 			if err != nil {
 				r.config.Test.SkipCoverage = true
@@ -431,10 +431,10 @@ func (r *Replayer) Start(ctx context.Context) error {
 		var err error
 		if !r.config.Test.SkipCoverage {
 			r.logger.Info("calculating coverage for the test run and inserting it into the report")
-			coverageData, err = cov.GetCoverage()
+			coverageData, err = r.cov.GetCoverage()
 			if err == nil {
 				r.logger.Sugar().Infoln(models.HighlightPassingString("Total Coverage Percentage: ", coverageData.TotalCov))
-				err = cov.AppendCoverage(&coverageData, testRunID)
+				err = r.cov.AppendCoverage(&coverageData, testRunID)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to update report with the coverage data")
 				}
@@ -825,9 +825,22 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				break
 			}
 		}
+		
+		if !r.config.Test.SkipCoverage && r.config.Test.Language == models.Go {
+			if goCov, ok := r.cov.(golang.Service); ok {
+				goCov.StartCoverage(testSetID + "/" + testCase.Name)
+			}
+		}
 
 		started := time.Now().UTC()
 		resp, loopErr := HookImpl.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
+
+		if !r.config.Test.SkipCoverage && r.config.Test.Language == models.Go {
+			if goCov, ok := r.cov.(golang.Service); ok {
+				goCov.EndCoverage(testSetID + "/" + testCase.Name)
+			}
+		}
+		
 		if loopErr != nil {
 			utils.LogError(r.logger, loopErr, "failed to simulate request")
 			failure++
