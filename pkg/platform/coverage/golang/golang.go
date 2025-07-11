@@ -55,6 +55,11 @@ type Golang struct {
 	listener net.Listener
 }
 
+type DedupRecord struct {
+	ID                  string           `json:"id" yaml:"id"`
+	ExecutedLinesByFile map[string][]int `json:"executedLinesByFile" yaml:"executedLinesByFile"`
+}
+
 // New creates and initializes the hybrid Go coverage service.
 func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cmd, coverageReportPath, commandType string) Service {
 	g, gctx := errgroup.WithContext(ctx)
@@ -170,11 +175,6 @@ func (g *Golang) handleDataConnection(conn net.Conn) {
 		return
 	}
 
-	type DedupRecord struct {
-		ID                  string           `json:"id"`
-		ExecutedLinesByFile map[string][]int `json:"executedLinesByFile"`
-	}
-
 	var record DedupRecord
 	if err := json.Unmarshal(data, &record); err != nil {
 		g.logger.Warn("Received invalid JSON from coverage agent", zap.Error(err))
@@ -187,13 +187,8 @@ func (g *Golang) handleDataConnection(conn net.Conn) {
 		g.coverageData[record.ID] = data
 		g.mu.Unlock()
 
-		// Modify the record for YAML output to match the expected format.
-		// This splits "test-set-1/test-1" into "test-1".
-		parts := strings.Split(record.ID, "/")
-		if len(parts) > 0 {
-			record.ID = parts[len(parts)-1]
-		}
-
+		// The record's ID is already in the correct "test-set/test-case" format.
+		// Do not modify it. Pass it directly to the file writer.
 		if err := g.appendToDedupFile(record); err != nil {
 			g.logger.Error("Failed to write to dedupdata.yaml", zap.Error(err))
 		}
@@ -202,17 +197,23 @@ func (g *Golang) handleDataConnection(conn net.Conn) {
 	}
 }
 
-func (g *Golang) appendToDedupFile(record interface{}) error {
+func (g *Golang) appendToDedupFile(record DedupRecord) error {
 	g.dedupFileMu.Lock()
 	defer g.dedupFileMu.Unlock()
-	var existingRecords []interface{}
+
+	// CHANGE THE SLICE TYPE from []interface{} to []DedupRecord
+	var existingRecords []DedupRecord
 	yamlFile, err := os.ReadFile(dedupFileName)
 	if err == nil {
+		// This will now unmarshal into a slice of structs, preserving order.
 		if err := yaml.Unmarshal(yamlFile, &existingRecords); err != nil {
 			g.logger.Warn("failed to unmarshal existing dedup file, overwriting", zap.Error(err))
 		}
 	}
+
 	existingRecords = append(existingRecords, record)
+
+	// This will now marshal a slice of structs, respecting field order for each element.
 	newData, err := yaml.Marshal(&existingRecords)
 	if err != nil {
 		return fmt.Errorf("failed to marshal new dedup data: %w", err)
