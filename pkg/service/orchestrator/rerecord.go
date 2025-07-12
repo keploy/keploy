@@ -232,6 +232,25 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 		return false, err
 	}
 
+	// Read the template and secret values once per test set
+	testSetConf, err := o.replay.GetTestSetConf(ctx, testSet)
+	if err != nil {
+		o.logger.Debug("failed to read template values")
+	}
+
+	utils.TemplatizedValues = map[string]interface{}{}
+	utils.SecretValues = map[string]interface{}{}
+
+	if testSetConf != nil {
+		if testSetConf.Template != nil {
+			utils.TemplatizedValues = testSetConf.Template
+		}
+
+		if testSetConf.Secret != nil {
+			utils.SecretValues = testSetConf.Secret
+		}
+	}
+
 	allTcRecorded := true
 	var simErr bool
 	for _, tc := range tcs {
@@ -245,16 +264,6 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 				break
 			}
 			o.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HTTPReq.URL))
-		}
-		// Read the template values.
-		testSetConf, err := o.replay.GetTestSetConf(ctx, testSet)
-		if err != nil {
-			o.logger.Debug("failed to read template values")
-		}
-		if testSetConf == nil {
-			utils.TemplatizedValues = map[string]interface{}{}
-		} else {
-			utils.TemplatizedValues = testSetConf.Template
 		}
 
 		if o.config.ReRecord.Host != "" {
