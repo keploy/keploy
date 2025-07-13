@@ -1,4 +1,3 @@
-// Package golang implements a hybrid coverage service for Go applications.
 package golang
 
 import (
