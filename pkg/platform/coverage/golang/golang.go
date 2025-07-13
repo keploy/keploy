@@ -115,8 +115,8 @@ func (g *Golang) GetCoverage() (models.TestCoverage, error) {
 		return g.getSocketCoverage()
 	}
 
-	g.logger.Info("No coverage data received. Attempting to calculate coverage using legacy GOCOVERDIR method.")
-	return g.getLegacyCoverage()
+	g.logger.Info("No coverage data received. Attempting to calculate coverage using GOCOVERDIR method.")
+	return g.getGoCoverDirCoverage()
 }
 
 // startDataReceiver listens for coverage data from the instrumented app.
@@ -327,7 +327,7 @@ func (g *Golang) getSocketCoverage() (models.TestCoverage, error) {
 	return finalCoverage, nil
 }
 
-func (g *Golang) getLegacyCoverage() (models.TestCoverage, error) {
+func (g *Golang) getGoCoverDirCoverage() (models.TestCoverage, error) {
 	testCov := models.TestCoverage{
 		FileCov:  make(map[string]string),
 		TotalCov: "",
