@@ -29,8 +29,6 @@ const (
 	dedupFileName     = "dedupData.yaml"
 )
 
-// Service interface now correctly inherits from the base coverage.Service
-// and includes methods for per-test-case coverage control.
 type Service interface {
 	coverage.Service
 	StartCoverage(testID string)
@@ -51,7 +49,6 @@ type Golang struct {
 	mu           sync.Mutex
 	coverageData map[string][]byte
 	dedupFileMu  sync.Mutex
-	// listener is protected by the mutex to prevent data races.
 	listener net.Listener
 }
 
@@ -86,7 +83,6 @@ func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cm
 	return cov
 }
 
-// GetCoverage gracefully shuts down the listeners and calculates coverage.
 func (g *Golang) GetCoverage() (models.TestCoverage, error) {
 	g.mu.Lock()
 	if g.listener != nil {
@@ -130,7 +126,6 @@ func (g *Golang) startDataReceiver() error {
 		return err
 	}
 
-	// FIX: Protect the assignment of the listener to prevent a data race.
 	g.mu.Lock()
 	g.listener = ln
 	g.mu.Unlock()
@@ -143,26 +138,22 @@ func (g *Golang) startDataReceiver() error {
 	}()
 
 	for {
-		// FIX: Set a deadline on Accept to allow periodic checks of the context.
-		// This makes the shutdown more responsive.
 		if uln, ok := ln.(*net.UnixListener); ok {
 			uln.SetDeadline(time.Now().Add(1 * time.Second))
 		}
 
 		conn, err := ln.Accept()
 		if err != nil {
-			// Check for timeout error, which is expected.
 			if opErr, ok := err.(*net.OpError); ok && opErr.Timeout() {
 				select {
-				case <-g.gctx.Done(): // Context was canceled, so exit.
+				case <-g.gctx.Done():
 					return g.gctx.Err()
 				default:
-					continue // No cancellation, continue listening.
+					continue
 				}
 			}
-			// Check for the error indicating the listener was closed.
 			if strings.Contains(err.Error(), "use of closed network connection") {
-				return nil // Graceful shutdown.
+				return nil
 			}
 			g.logger.Warn("Error accepting data connection", zap.Error(err))
 			continue
@@ -191,7 +182,6 @@ func (g *Golang) handleDataConnection(conn net.Conn) {
 
 	if len(record.ExecutedLinesByFile) > 0 {
 		g.mu.Lock()
-		// Store the original data with the full ID for internal processing.
 		g.coverageData[record.ID] = data
 		g.mu.Unlock()
 
@@ -257,8 +247,6 @@ func (g *Golang) StartCoverage(testID string) {
 
 func (g *Golang) EndCoverage(testID string) {
 	g.sendCommand(fmt.Sprintf("END %s", testID))
-	// FIX: Add a small delay to ensure the agent has time to send the data back
-	// before the test run proceeds to the next test or finishes.
 	time.Sleep(100 * time.Millisecond)
 }
 
