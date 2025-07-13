@@ -96,7 +96,8 @@ func (g *Golang) GetCoverage() (models.TestCoverage, error) {
 	// Cancel the context to signal all goroutines to stop.
 	g.cancel()
 
-	// Wait for the errgroup to finish.
+	// Wait for the errgroup to finish. This ensures that any pending data
+	// from the socket has been fully processed and written to dedupData.yaml.
 	if err := g.g.Wait(); err != nil && err != context.Canceled {
 		g.logger.Warn("Error during coverage service shutdown", zap.Error(err))
 	}
@@ -106,11 +107,12 @@ func (g *Golang) GetCoverage() (models.TestCoverage, error) {
 	g.mu.Unlock()
 
 	if dataReceived {
-		g.logger.Info("Coverage data received via socket. Calculating coverage using socket-based method.")
-		return g.getSocketCoverage()
+		g.logger.Info("Coverage data received via socket, 'dedupData.yaml' has been generated.")
+	} else {
+		g.logger.Info("No coverage data received via socket.")
 	}
 
-	g.logger.Info("No coverage data received. Attempting to calculate coverage using GOCOVERDIR method.")
+	g.logger.Info("Calculating final coverage report using the GOCOVERDIR method.")
 	return g.getGoCoverDirCoverage()
 }
 
