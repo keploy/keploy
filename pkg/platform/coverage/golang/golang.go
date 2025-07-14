@@ -49,6 +49,8 @@ type Golang struct {
 	coverageData map[string][]byte
 	dedupFileMu  sync.Mutex
 	listener     net.Listener
+	// socketCoverageDetected tracks if we've successfully received socket-based coverage data
+	socketCoverageDetected bool
 }
 
 type DedupRecord struct {
@@ -72,10 +74,6 @@ func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cm
 		gctx:               gctx,
 		cancel:             cancel,
 		coverageData:       make(map[string][]byte),
-	}
-
-	if err := os.Remove(dedupFileName); err != nil && !os.IsNotExist(err) {
-		logger.Warn("Failed to remove old dedupData.yaml file", zap.Error(err))
 	}
 
 	cov.g.Go(cov.startDataReceiver)
@@ -183,6 +181,17 @@ func (g *Golang) handleDataConnection(conn net.Conn) {
 
 	if len(record.ExecutedLinesByFile) > 0 {
 		g.mu.Lock()
+		// Delete the old dedupData.yaml file only when we first receive socket-based coverage data
+		// This confirms that the user has imported the SDK and socket connection is working
+		if !g.socketCoverageDetected {
+			if err := os.Remove(dedupFileName); err != nil && !os.IsNotExist(err) {
+				g.logger.Warn("Failed to remove old dedupData.yaml file", zap.Error(err))
+				return
+			} else {
+				g.logger.Info("Removed old dedupData.yaml file as socket-based coverage is now active")
+			}
+			g.socketCoverageDetected = true
+		}
 		g.coverageData[record.ID] = data
 		g.mu.Unlock()
 
