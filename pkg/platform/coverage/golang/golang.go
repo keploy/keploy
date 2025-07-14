@@ -295,14 +295,20 @@ func (g *Golang) getGoCoverDirCoverage() (models.TestCoverage, error) {
 	}
 	for idx, line := range strings.Split(string(covdata), "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "mode:") || line == "" {
+		if strings.HasPrefix(line, "mode") || line == "" {
 			continue
 		}
 		lineFields := strings.Fields(line)
 		malformedErrMsg := "go coverage file is malformed"
 		if len(lineFields) == 3 {
-			noOfLines, _ := strconv.Atoi(lineFields[1])
-			coveredOrNot, _ := strconv.Atoi(lineFields[2])
+			noOfLines, err := strconv.Atoi(lineFields[1])
+			if err != nil {
+				return testCov, fmt.Errorf("%s at line %d", malformedErrMsg, idx)
+			}
+			coveredOrNot, err := strconv.Atoi(lineFields[2])
+			if err != nil {
+				return testCov, fmt.Errorf("%s at line %d", malformedErrMsg, idx)
+			}
 			i := strings.Index(line, ":")
 			var filename string
 			if i > 0 {
