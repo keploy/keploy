@@ -48,7 +48,7 @@ type Golang struct {
 	mu           sync.Mutex
 	coverageData map[string][]byte
 	dedupFileMu  sync.Mutex
-	listener net.Listener
+	listener     net.Listener
 }
 
 type DedupRecord struct {
@@ -189,7 +189,7 @@ func (g *Golang) handleDataConnection(conn net.Conn) {
 		// The record's ID is already in the correct "test-set/test-case" format.
 		// Do not modify it. Pass it directly to the file writer.
 		if err := g.appendToDedupFile(record); err != nil {
-			g.logger.Error("Failed to write to dedupdata.yaml", zap.Error(err))
+			g.logger.Error("Failed to write to dedupData.yaml", zap.Error(err))
 		}
 	} else {
 		g.logger.Debug("Received coverage report with no executed lines", zap.String("testID", record.ID))
