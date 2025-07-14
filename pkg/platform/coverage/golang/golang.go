@@ -261,61 +261,6 @@ func (g *Golang) sendCommand(command string) {
 	_, _ = conn.Write([]byte(command + "\n"))
 }
 
-func (g *Golang) getSocketCoverage() (models.TestCoverage, error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	aggregatedCoveredLines := make(map[string]map[int]bool)
-	type coveragePayload struct {
-		ExecutedLinesByFile map[string][]int `json:"executedLinesByFile"`
-	}
-
-	for _, data := range g.coverageData {
-		var payload coveragePayload
-		if err := json.Unmarshal(data, &payload); err != nil {
-			g.logger.Warn("failed to unmarshal coverage payload", zap.Error(err))
-			continue
-		}
-		for file, lines := range payload.ExecutedLinesByFile {
-			if _, ok := aggregatedCoveredLines[file]; !ok {
-				aggregatedCoveredLines[file] = make(map[int]bool)
-			}
-			for _, line := range lines {
-				aggregatedCoveredLines[file][line] = true
-			}
-		}
-	}
-
-	finalCoverage := models.TestCoverage{FileCov: make(map[string]string)}
-	totalLines := 0
-	totalCoveredLines := 0
-
-	for file, linesSet := range aggregatedCoveredLines {
-		content, err := os.ReadFile(file)
-		if err != nil {
-			g.logger.Warn("Could not read source file for line count", zap.String("file", file), zap.Error(err))
-			continue
-		}
-		fileTotalLines := len(strings.Split(string(content), "\n"))
-		fileCoveredLines := len(linesSet)
-		totalLines += fileTotalLines
-		totalCoveredLines += fileCoveredLines
-
-		if fileTotalLines > 0 {
-			covPercentage := float64(fileCoveredLines*100) / float64(fileTotalLines)
-			finalCoverage.FileCov[file] = fmt.Sprintf("%.2f%%", covPercentage)
-		}
-	}
-
-	if totalLines > 0 {
-		finalCoverage.TotalCov = fmt.Sprintf("%.2f%%", (float64(totalCoveredLines*100) / float64(totalLines)))
-	} else {
-		finalCoverage.TotalCov = "0.00%"
-	}
-	finalCoverage.Loc = models.Loc{Total: totalLines, Covered: totalCoveredLines}
-	return finalCoverage, nil
-}
-
 func (g *Golang) getGoCoverDirCoverage() (models.TestCoverage, error) {
 	testCov := models.TestCoverage{
 		FileCov:  make(map[string]string),
