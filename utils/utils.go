@@ -691,24 +691,25 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 	// Find all descendant PIDs of the given PID & then signal them.
 	// Any shell doesn't signal its children when it receives a signal.
 	// Children may have their own process groups, so we need to signal them separately.
-	children, err := findChildPIDs(ppid)
-	if err != nil {
-		return err
-	}
 
-	children = append(children, ppid)
-	uniqueProcess, err := uniqueProcessGroups(children)
-	if err != nil {
-		logger.Error("failed to find unique process groups", zap.Int("pid", ppid), zap.Error(err))
-		uniqueProcess = children
-	}
+	// children, err := findChildPIDs(ppid)
+	// if err != nil {
+	// 	return err
+	// }
 
-	for _, pid := range uniqueProcess {
-		err := SendSignal(logger, -pid, sig)
-		if err != nil {
-			logger.Error("error sending signal to the process group id", zap.Int("pgid", pid), zap.Error(err))
-		}
+	// children = append(children, ppid)
+	// uniqueProcess, err := uniqueProcessGroups(children)
+	// if err != nil {
+	// 	logger.Error("failed to find unique process groups", zap.Int("pid", ppid), zap.Error(err))
+	// 	uniqueProcess = children
+	// }
+
+	// for _, pid := range uniqueProcess {
+	err := SendSignal(logger, -ppid, sig)
+	if err != nil {
+		logger.Error("error sending signal to the process group id", zap.Int("pgid", ppid), zap.Error(err))
 	}
+	// }
 	return nil
 }
 
