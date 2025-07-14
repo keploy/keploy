@@ -73,6 +73,8 @@ Your task is to generate additional unit tests to complement the existing test s
   - The primary objective is to **increase the overall code coverage significantly**.
   - Do not include the code coverage report or any policies in your response.
 
+- **Important for Go:** Do NOT include the `package` declaration in the `test_code` field. The test file already has it. The `test_code` should only contain the test function itself (e.g., `func TestMyFunction(t *testing.T) { ... }`).
+
 {{ if .function_under_test }}
 - **Focus Function:**  
   - You must generate test cases specifically targeting the function named `{{ .function_under_test }}`.  

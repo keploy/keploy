@@ -15,6 +15,7 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/service"
+	"go.keploy.io/server/v2/pkg/service/embed"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v2"
@@ -57,6 +58,7 @@ type UnitTestGenerator struct {
 	noCoverageTest   int
 	flakiness        bool
 	sourceRefactored bool
+	embedService     embed.Service
 }
 
 var discardedTestsFilename = "discardedTests.txt"
@@ -66,6 +68,7 @@ func NewUnitTestGenerator(
 	tel Telemetry,
 	auth service.Auth,
 	logger *zap.Logger,
+	embedService embed.Service,
 ) (*UnitTestGenerator, error) {
 	genConfig := cfg.Gen
 
@@ -87,6 +90,7 @@ func NewUnitTestGenerator(
 		cur:              &Cursor{},
 		flakiness:        genConfig.Flakiness,
 		sourceRefactored: false,
+		embedService:     embedService,
 	}
 
 	if generator.srcPath != "" && generator.testPath == "" {
@@ -204,7 +208,40 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			}
 		}
 
-		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt, g.ai.FunctionUnderTest, g.sourceRefactored, g.logger)
+		var codebaseContext string
+		if g.embedService != nil {
+			g.logger.Info("searching for similar code snippets in the codebase")
+			srcContent, err := os.ReadFile(g.srcPath)
+			if err != nil {
+				g.logger.Warn("failed to read source file for context search", zap.Error(err))
+			} else {
+				embeddings, err := g.embedService.GenerateEmbeddingsForQ([]string{string(srcContent)})
+				if err != nil {
+					g.logger.Warn("failed to generate embeddings for context search", zap.Error(err))
+				} else if len(embeddings) > 0 {
+					searchResults, err := g.embedService.SearchSimilarCode(ctx, embeddings[0], 5)
+					if err != nil {
+						g.logger.Warn("failed to search for similar code", zap.Error(err))
+					} else {
+						var contextBuilder strings.Builder
+						for _, res := range searchResults {
+							if res.FilePath != g.srcPath {
+								contextBuilder.WriteString(fmt.Sprintf("--- From file: %s ---\n", res.FilePath))
+								contextBuilder.WriteString(res.Content)
+								contextBuilder.WriteString("\n\n")
+							}
+						}
+						codebaseContext = contextBuilder.String()
+						if codebaseContext != "" {
+							g.logger.Info("found some context from the codebase")
+							g.logger.Debug("context from codebase", zap.String("codebaseContext", codebaseContext))
+						}
+					}
+				}
+			}
+		}
+
+		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, codebaseContext, "", g.lang, g.additionalPrompt, g.ai.FunctionUnderTest, g.sourceRefactored, g.logger)
 		g.injector = NewInjectorBuilder(g.logger, g.lang)
 
 		if err != nil {

@@ -129,6 +129,12 @@ func (e *EmbedService) ProcessCode(code string, fileExtension string, tokenLimit
 	e.logger.Info("Code chunking completed",
 		zap.Int("numChunks", len(chunks)))
 
+	for chunkID, content := range chunks {
+		e.logger.Debug("Generated chunk",
+			zap.Int("chunkID", chunkID),
+			zap.String("content", content))
+	}
+
 	// Clean chunks by removing \n and \t characters
 	cleanedChunks := e.cleanChunks(chunks)
 
@@ -267,7 +273,6 @@ func (e *EmbedService) getFileExtension(filePath string) string {
 }
 
 func (e *EmbedService) getTokenLimit() int {
-	// Using a token limit appropriate for the sentence-transformers model
 	return 256
 }
 
@@ -632,7 +637,7 @@ func (e *EmbedService) callAIService(contents []string) ([][]float32, error) {
 		modelID = e.cfg.Embed.ModelName
 	}
 
-	url := "https://4be83bff41e1.ngrok-free.app/generate_embeddings/"
+	url := "https://94c3b3b195b1.ngrok-free.app/generate_embeddings/"
 
 	type requestBody struct {
 		Sentences []string `json:"sentences"`
@@ -721,6 +726,13 @@ func (e *EmbedService) callAIService(contents []string) ([][]float32, error) {
 	return finalEmbeddings, nil
 }
 
+func (e *EmbedService) GenerateEmbeddingsForQ(contents []string) ([][]float32, error) {
+	if len(contents) == 0 {
+		return [][]float32{}, nil
+	}
+	return e.callAIService(contents)
+}
+
 func (e *EmbedService) SearchSimilarCode(ctx context.Context, queryEmbedding []float32, limit int) ([]SearchResult, error) {
 	query := `
         SELECT file_path, chunk_id, content, embedding <-> $1 as distance
@@ -747,13 +759,6 @@ func (e *EmbedService) SearchSimilarCode(ctx context.Context, queryEmbedding []f
 	}
 
 	return results, nil
-}
-
-type SearchResult struct {
-	FilePath string  `json:"file_path"`
-	ChunkID  int     `json:"chunk_id"`
-	Content  string  `json:"content"`
-	Distance float64 `json:"distance"`
 }
 
 func (e *EmbedService) Close() error {
