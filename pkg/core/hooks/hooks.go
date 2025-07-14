@@ -92,6 +92,8 @@ type Hooks struct {
 	objects     bpfObjects
 	writev      link.Link
 	writevRet   link.Link
+	readv       link.Link
+	readvRet    link.Link
 	appID       uint64
 }
 
@@ -382,6 +384,24 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	h.writeRet = wtRet
 
 	// Open a Kprobe at the entry point of the kernel function and attach the
+	// pre-compiled program for readv.
+	readv, err := link.Kprobe("sys_readv", objs.SyscallProbeEntryReadv, nil)
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to attach the kprobe hook on sys_readv")
+		return err
+	}
+	h.readv = readv
+
+	// Open a Kprobe at the exit point of the kernel function and attach the
+	// pre-compiled program for readv.
+	readvRet, err := link.Kretprobe("sys_readv", objs.SyscallProbeRetReadv, &link.KprobeOptions{RetprobeMaxActive: 1024})
+	if err != nil {
+		utils.LogError(h.logger, err, "failed to attach the kretprobe hook on sys_readv")
+		return err
+	}
+	h.readvRet = readvRet
+
+	// Open a Kprobe at the entry point of the kernel function and attach the
 	// pre-compiled program for writev.
 	wtv, err := link.Kprobe("sys_writev", objs.SyscallProbeEntryWritev, nil)
 	if err != nil {
@@ -610,6 +630,14 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 	if err := h.writevRet.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the writevRet")
 	}
+
+	if err := h.readv.Close(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the readv")
+	}
+	if err := h.readvRet.Close(); err != nil {
+		utils.LogError(h.logger, err, "failed to close the readvRet")
+	}
+
 	if err := h.close.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the close")
 	}
