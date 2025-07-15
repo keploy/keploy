@@ -779,7 +779,7 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 	for _, pid := range uniqueProcess {
 		err := SendSignal(logger, -pid, sig)
 		if err != nil {
-			logger.Error("error sending signal to the process group id", zap.Int("pgid", ppid), zap.Error(err))
+			logger.Error("error sending signal to the process group id", zap.Int("pgid", pid), zap.Error(err))
 			continue
 		}
 		// Wait for this particular process to exit with a timeout of 3 seconds
@@ -833,7 +833,7 @@ func isProcessRunning(pid int) (bool, error) {
 	err = process.Signal(syscall.Signal(0))
 	if err != nil {
 		// If error occurs when signaling, it means the process is no longer running
-		if err.Error() == "os: process already finished" {
+		if errors.Is(err, os.ErrProcessDone) || err == syscall.ESRCH {
 			return false, nil
 		}
 		// If there’s another error, consider the process as still running
