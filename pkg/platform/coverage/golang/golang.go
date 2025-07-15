@@ -54,9 +54,17 @@ type Golang struct {
 }
 
 type DedupRecord struct {
-	ID                  string           `json:"id" yaml:"id"`
-	ExecutedLinesByFile map[string][]int `json:"executedLinesByFile" yaml:"executedLinesByFile"`
+	ID                  string           `json:"id"`
+	ExecutedLinesByFile map[string][]int `json:"executedLinesByFile"`
 }
+
+// CoverageReport defines the nested structure for the dedupData.yaml file.
+// It maps a test set ID to its collection of test cases.
+type CoverageReport map[string]TestSetData
+
+// TestSetData maps a test case ID to its coverage information, which itself is a
+// map of file paths to the lines executed in that file.
+type TestSetData map[string]map[string][]int
 
 // New creates and initializes the hybrid Go coverage service.
 func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cmd, coverageReportPath, commandType string) Service {
@@ -209,21 +217,38 @@ func (g *Golang) appendToDedupFile(record DedupRecord) error {
 	g.dedupFileMu.Lock()
 	defer g.dedupFileMu.Unlock()
 
-	var existingRecords []DedupRecord
+	parts := strings.SplitN(record.ID, "/", 2)
+	if len(parts) != 2 {
+		g.logger.Warn("Received malformed test ID, skipping dedup file update", zap.String("testID", record.ID))
+		return nil
+	}
+	testSetID, testCaseID := parts[0], parts[1]
+
+	report := make(CoverageReport)
 	yamlFile, err := os.ReadFile(dedupFileName)
-	if err == nil {
-		if err := yaml.Unmarshal(yamlFile, &existingRecords); err != nil {
+	// If the file exists and is not empty, try to unmarshal it.
+	if err == nil && len(yamlFile) > 0 {
+		if err := yaml.Unmarshal(yamlFile, &report); err != nil {
 			g.logger.Warn("failed to unmarshal existing dedup file, starting fresh", zap.Error(err))
-			existingRecords = []DedupRecord{}
+			// Reset report to ensure a clean state if unmarshaling fails.
+			report = make(CoverageReport)
 		}
 	}
 
-	existingRecords = append(existingRecords, record)
+	// Ensure the test set map exists.
+	if _, ok := report[testSetID]; !ok {
+		report[testSetID] = make(TestSetData)
+	}
 
-	newData, err := yaml.Marshal(&existingRecords)
+	// Add or update the test case's coverage data.
+	report[testSetID][testCaseID] = record.ExecutedLinesByFile
+
+	// Marshal the updated report back to YAML.
+	newData, err := yaml.Marshal(&report)
 	if err != nil {
 		return fmt.Errorf("failed to marshal new dedup data: %w", err)
 	}
+
 	return os.WriteFile(dedupFileName, newData, 0644)
 }
 
