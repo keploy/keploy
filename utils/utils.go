@@ -816,7 +816,7 @@ func waitForProcessExit(pid int, timeout time.Duration, logger *zap.Logger) erro
 			}
 
 			// Wait for 1 second before checking again
-			time.Sleep(1 * time.Second)
+			time.Sleep(300 * time.Millisecond)
 		}
 	}
 }
