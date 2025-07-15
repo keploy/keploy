@@ -312,18 +312,18 @@ func (g *Golang) getGoCoverDirCoverage() (models.TestCoverage, error) {
 		if len(lineFields) == 3 {
 			noOfLines, err := strconv.Atoi(lineFields[1])
 			if err != nil {
-				return testCov, fmt.Errorf("%s at line %d", malformedErrMsg, idx)
+				return testCov, err
 			}
 			coveredOrNot, err := strconv.Atoi(lineFields[2])
 			if err != nil {
-				return testCov, fmt.Errorf("%s at line %d", malformedErrMsg, idx)
+				return testCov, err
 			}
 			i := strings.Index(line, ":")
 			var filename string
 			if i > 0 {
 				filename = line[:i]
 			} else {
-				return testCov, fmt.Errorf("%s at line %d", malformedErrMsg, idx)
+				return testCov, fmt.Errorf("%s at %d", malformedErrMsg, idx)
 			}
 			if _, ok := coveragePerFileTmp[filename]; !ok {
 				coveragePerFileTmp[filename] = make([]int, 2)
