@@ -123,6 +123,14 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 		// Continue if no cancellation
 	}
 
+	if g.embedService != nil {
+		g.logger.Info("starting embedding service to build codebase context")
+		err := g.embedService.Start(ctx)
+		if err != nil {
+			g.logger.Warn("failed to build codebase context, proceeding without it", zap.Error(err))
+		}
+	}
+
 	isSingleFileMode := g.srcPath != ""
 	var filesToIterate []string
 
@@ -233,8 +241,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 						}
 						codebaseContext = contextBuilder.String()
 						if codebaseContext != "" {
-							g.logger.Info("found some context from the codebase")
-							g.logger.Debug("context from codebase", zap.String("codebaseContext", codebaseContext))
+							g.logger.Info("Found codebase context to be sent to AI.", zap.String("codebaseContext", codebaseContext))
 						}
 					}
 				}
@@ -577,6 +584,7 @@ func (g *UnitTestGenerator) GenerateTests(ctx context.Context, iterationCount in
 		return &models.UTDetails{}, err
 	}
 
+	// fmt.Println(g.prompt.User)
 	aiRequest := AIRequest{
 		MaxTokens:      4096,
 		Prompt:         *g.prompt,

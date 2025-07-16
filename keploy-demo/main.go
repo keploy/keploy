@@ -17,7 +17,7 @@ func DoubleAndAdd(a, b int, adder Adder) int {
 }
 
 func main() {
-	adder := helpers.AdderImpl{} // Assuming helpers package provides an implementation of Adder
+	adder := helpers.AdderImpl{}
 	result := DoubleAndAdd(5, 10, adder)
 	fmt.Println("The result is:", result)
 }

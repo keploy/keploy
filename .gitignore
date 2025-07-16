@@ -59,3 +59,7 @@ test-reports
 # Ignore the debug_bin
 __debug_bin*
 keploy
+GEMINI.md
+keploy-demo
+./keploy-demo
+keploy-demo

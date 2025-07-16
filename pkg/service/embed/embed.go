@@ -94,20 +94,25 @@ func (e *EmbedService) Start(ctx context.Context) error {
 	default:
 	}
 
-	e.logger.Info("Starting embedding generation", zap.String("sourcePath", e.cfg.Embed.SourcePath))
+	sourcePath := e.cfg.Embed.SourcePath
+	if sourcePath == "" {
+		sourcePath = "."
+	}
+
+	e.logger.Info("Starting embedding generation", zap.String("sourcePath", sourcePath))
 
 	// Check if source path is a file or directory
-	fileInfo, err := os.Stat(e.cfg.Embed.SourcePath)
+	fileInfo, err := os.Stat(sourcePath)
 	if err != nil {
 		return fmt.Errorf("failed to stat source path: %w", err)
 	}
 
 	if fileInfo.IsDir() {
 		// Process directory using streaming approach
-		return e.processDirectoryStreaming(ctx, e.cfg.Embed.SourcePath)
+		return e.processDirectoryStreaming(ctx, sourcePath)
 	} else {
 		// Process single file
-		return e.processSingleFile(ctx, e.cfg.Embed.SourcePath)
+		return e.processSingleFile(ctx, sourcePath)
 	}
 }
 
@@ -129,12 +134,6 @@ func (e *EmbedService) ProcessCode(code string, fileExtension string, tokenLimit
 	e.logger.Info("Code chunking completed",
 		zap.Int("numChunks", len(chunks)))
 
-	for chunkID, content := range chunks {
-		e.logger.Debug("Generated chunk",
-			zap.Int("chunkID", chunkID),
-			zap.String("content", content))
-	}
-
 	// Clean chunks by removing \n and \t characters
 	cleanedChunks := e.cleanChunks(chunks)
 
@@ -145,12 +144,9 @@ func (e *EmbedService) cleanChunks(chunks map[int]string) map[int]string {
 	cleanedChunks := make(map[int]string)
 
 	for chunkID, content := range chunks {
-		// Remove \n and \t characters
-		cleanedContent := strings.ReplaceAll(content, "\n", " ")
-		cleanedContent = strings.ReplaceAll(cleanedContent, "\t", " ")
-
-		// Replace multiple spaces with single space
-		cleanedContent = strings.Join(strings.Fields(cleanedContent), " ")
+		// Normalize all Unicode whitespace (including newlines and tabs) into single spaces.
+		// This is a more robust and efficient approach than multiple replacements.
+		cleanedContent := strings.Join(strings.Fields(content), " ")
 
 		cleanedChunks[chunkID] = cleanedContent
 
@@ -575,12 +571,23 @@ func (e *EmbedService) generateEmbeddingsForAllFiles(allChunks map[string]map[in
 }
 
 func (e *EmbedService) initializeDatabase(ctx context.Context) error {
-	dropTableQuery := `DROP TABLE IF EXISTS code_embeddings;`
-	_, err := e.pgConn.Exec(ctx, dropTableQuery)
+
+	//
+	// dropCleanup := `
+	// DROP INDEX IF EXISTS code_embeddings_embedding_idx;
+	// DROP TABLE IF EXISTS code_embeddings;
+	// `
+	// if _, err := e.pgConn.Exec(ctx, dropCleanup); err != nil {
+	// 	e.logger.Warn("Failed to drop existing index/table", zap.Error(err))
+	// }
+
+	// Create the vector extension if it doesn't exist.
+	_, err := e.pgConn.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS vector")
 	if err != nil {
-		return fmt.Errorf("failed to drop existing embeddings table: %w", err)
+		e.logger.Warn("Failed to create vector extension, it might already exist.", zap.Error(err))
 	}
 
+	// Create the table if it doesn't exist.
 	createTableQuery := `
         CREATE TABLE IF NOT EXISTS code_embeddings (
             id BIGSERIAL PRIMARY KEY,
@@ -592,20 +599,19 @@ func (e *EmbedService) initializeDatabase(ctx context.Context) error {
             UNIQUE(file_path, chunk_id)
         )
     `
-
 	_, err = e.pgConn.Exec(ctx, createTableQuery)
 	if err != nil {
 		return fmt.Errorf("failed to create embeddings table: %w", err)
 	}
 
+	// Create the index if it doesn't exist.
 	indexQuery := `
         CREATE INDEX IF NOT EXISTS code_embeddings_embedding_idx 
         ON code_embeddings USING hnsw (embedding vector_cosine_ops)
     `
-
 	_, err = e.pgConn.Exec(ctx, indexQuery)
 	if err != nil {
-		e.logger.Warn("Failed to create vector index", zap.Error(err))
+		e.logger.Warn("Failed to create vector index, it might already exist.", zap.Error(err))
 	}
 
 	return nil
@@ -637,7 +643,7 @@ func (e *EmbedService) callAIService(contents []string) ([][]float32, error) {
 		modelID = e.cfg.Embed.ModelName
 	}
 
-	url := "https://94c3b3b195b1.ngrok-free.app/generate_embeddings/"
+	url := "https://cec9dfa460ec.ngrok-free.app/generate_embeddings/"
 
 	type requestBody struct {
 		Sentences []string `json:"sentences"`
@@ -758,6 +764,7 @@ func (e *EmbedService) SearchSimilarCode(ctx context.Context, queryEmbedding []f
 		results = append(results, result)
 	}
 
+	e.logger.Info("found similar code snippets", zap.Any("results", results))
 	return results, nil
 }
 

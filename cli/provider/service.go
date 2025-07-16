@@ -45,6 +45,11 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 	case "embed":
 		return embed.NewEmbedService(n.cfg, tel, n.auth, n.logger)
 	case "gen":
+		if n.cfg.Gen.SourceFilePath != "" {
+			n.cfg.Embed.SourcePath = n.cfg.Gen.SourceFilePath
+		} else if n.cfg.Gen.TestDir != "" {
+			n.cfg.Embed.SourcePath = n.cfg.Gen.TestDir
+		}
 		embedService, err := embed.NewEmbedService(n.cfg, tel, n.auth, n.logger)
 		if err != nil {
 			n.logger.Warn("failed to create embed service, proceeding without it", zap.Error(err))
