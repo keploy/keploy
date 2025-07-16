@@ -11,7 +11,6 @@ import (
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire"
-	intgUtil "go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.keploy.io/server/v2/utils"
@@ -156,21 +155,10 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			return nil, false, err
 		}
 
-		// Get the mysql mocks
-		mocks := intgUtil.GetMockByKind(unfiltered, "MySQL")
-
-		if len(mocks) == 0 {
-			if ctx.Err() != nil {
-				return nil, false, ctx.Err()
-			}
-			utils.LogError(logger, nil, "no mysql mocks found")
-			return nil, false, fmt.Errorf("no mysql mocks found")
-		}
-
 		var tcsMocks []*models.Mock
 		// Ignore the "config" metadata mocks
-		for _, mock := range mocks {
-			if mock.Spec.Metadata["type"] != "config" {
+		for _, mock := range unfiltered {
+			if mock.Kind == models.Kind("MySQL") && mock.Spec.Metadata["type"] != "config" {
 				tcsMocks = append(tcsMocks, mock)
 			}
 		}
