@@ -47,9 +47,10 @@ func loadBpfObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
 type bpfSpecs struct {
 	bpfProgramSpecs
 	bpfMapSpecs
+	bpfVariableSpecs
 }
 
-// bpfSpecs contains programs before they are loaded into the kernel.
+// bpfProgramSpecs contains programs before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfProgramSpecs struct {
@@ -101,6 +102,7 @@ type bpfMapSpecs struct {
 	DestInfoMap                 *ebpf.MapSpec `ebpf:"dest_info_map"`
 	DockerAppRegistrationMap    *ebpf.MapSpec `ebpf:"docker_app_registration_map"`
 	E2eInfoMap                  *ebpf.MapSpec `ebpf:"e2e_info_map"`
+	IovecBufferHeap             *ebpf.MapSpec `ebpf:"iovec_buffer_heap"`
 	KeployAgentKernelPidMap     *ebpf.MapSpec `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.MapSpec `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.MapSpec `ebpf:"keploy_client_kernel_pid_map"`
@@ -115,12 +117,19 @@ type bpfMapSpecs struct {
 	TaskStructMap               *ebpf.MapSpec `ebpf:"task_struct_map"`
 }
 
+// bpfVariableSpecs contains global variables before they are loaded into the kernel.
+//
+// It can be passed ebpf.CollectionSpec.Assign.
+type bpfVariableSpecs struct {
+}
+
 // bpfObjects contains all objects after they have been loaded into the kernel.
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfObjects struct {
 	bpfPrograms
 	bpfMaps
+	bpfVariables
 }
 
 func (o *bpfObjects) Close() error {
@@ -144,6 +153,7 @@ type bpfMaps struct {
 	DestInfoMap                 *ebpf.Map `ebpf:"dest_info_map"`
 	DockerAppRegistrationMap    *ebpf.Map `ebpf:"docker_app_registration_map"`
 	E2eInfoMap                  *ebpf.Map `ebpf:"e2e_info_map"`
+	IovecBufferHeap             *ebpf.Map `ebpf:"iovec_buffer_heap"`
 	KeployAgentKernelPidMap     *ebpf.Map `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.Map `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.Map `ebpf:"keploy_client_kernel_pid_map"`
@@ -170,6 +180,7 @@ func (m *bpfMaps) Close() error {
 		m.DestInfoMap,
 		m.DockerAppRegistrationMap,
 		m.E2eInfoMap,
+		m.IovecBufferHeap,
 		m.KeployAgentKernelPidMap,
 		m.KeployAgentRegistrationMap,
 		m.KeployClientKernelPidMap,
@@ -183,6 +194,12 @@ func (m *bpfMaps) Close() error {
 		m.SocketOpenEvents,
 		m.TaskStructMap,
 	)
+}
+
+// bpfVariables contains all global variables after they have been loaded into the kernel.
+//
+// It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
+type bpfVariables struct {
 }
 
 // bpfPrograms contains all programs after they have been loaded into the kernel.
