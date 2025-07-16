@@ -15,8 +15,10 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/service"
+	"go.keploy.io/server/v2/pkg/service/embed"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
+	"gopkg.in/yaml.v2"
 )
 
 type Coverage struct {
@@ -55,6 +57,8 @@ type UnitTestGenerator struct {
 	testCaseFailed   int
 	noCoverageTest   int
 	flakiness        bool
+	sourceRefactored bool
+	embedService     embed.Service
 }
 
 var discardedTestsFilename = "discardedTests.txt"
@@ -64,6 +68,7 @@ func NewUnitTestGenerator(
 	tel Telemetry,
 	auth service.Auth,
 	logger *zap.Logger,
+	embedService embed.Service,
 ) (*UnitTestGenerator, error) {
 	genConfig := cfg.Gen
 
@@ -79,12 +84,31 @@ func NewUnitTestGenerator(
 		cov: &Coverage{
 			Path:    genConfig.CoverageReportPath,
 			Format:  genConfig.CoverageFormat,
-			Desired: genConfig.DesiredCoverage,
+			Desired: float64(genConfig.DesiredCoverage),
 		},
 		additionalPrompt: genConfig.AdditionalPrompt,
 		cur:              &Cursor{},
 		flakiness:        genConfig.Flakiness,
+		sourceRefactored: false,
+		embedService:     embedService,
 	}
+
+	if generator.srcPath != "" && generator.testPath == "" {
+		//srcPath is given, testPath is not
+		effectiveTestDir := generator.dir
+		if effectiveTestDir == "" { //set to "."
+			effectiveTestDir = "."
+		}
+
+		derivedPath, err := getTestFilePath(generator.srcPath, effectiveTestDir)
+		if err != nil {
+			logger.Error("Failed to derive test file path", zap.Error(err), zap.String("sourceFile", generator.srcPath), zap.String("testDir", effectiveTestDir))
+			return nil, fmt.Errorf("failed to derive test file path for %s: %w", generator.srcPath, err)
+		}
+		generator.testPath = derivedPath
+		logger.Info("Test file path not provided, derived", zap.String("derivedTestPath", generator.testPath), zap.String("sourceFile", generator.srcPath))
+	}
+
 	return generator, nil
 }
 
@@ -99,20 +123,37 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 		// Continue if no cancellation
 	}
 
-	// To find the source files if the source path is not provided
-	if g.srcPath == "" {
+	isSingleFileMode := g.srcPath != ""
+	var filesToIterate []string
+
+	if isSingleFileMode {
+		filesToIterate = append(filesToIterate, g.srcPath)
+	} else { // Batch mode
 		if err := g.runCoverage(); err != nil {
 			return err
 		}
 		if len(g.Files) == 0 {
-			return fmt.Errorf("couldn't identify the source files. Please mention source file and test file using flags")
+			return fmt.Errorf("couldn't identify source files. Please specify source file using --source-file-path")
 		}
+		filesToIterate = g.Files
 	}
 	const paddingHeight = 1
 	columnWidths3 := []int{29, 29, 29}
 	columnWidths2 := []int{40, 40}
 
-	for i := 0; i < len(g.Files)+1; i++ {
+	for _, currentSrcPath := range filesToIterate {
+		g.srcPath = currentSrcPath
+
+		//If in batch mode or testPath not set
+		if !isSingleFileMode || g.testPath == "" {
+			derivedPath, err := getTestFilePath(g.srcPath, g.dir)
+			if err != nil {
+				g.logger.Error("Error deriving test file path", zap.Error(err))
+				continue
+			}
+			g.testPath = derivedPath
+		}
+
 		newTestFile := false
 		var err error
 
@@ -123,30 +164,29 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 		default:
 		}
 
-		// If the source file path is not provided, iterate over all the source files and test files
-		if i < len(g.Files) {
-			g.srcPath = g.Files[i]
-			g.testPath, err = getTestFilePath(g.srcPath, g.dir)
-			if err != nil || g.testPath == "" {
-				g.logger.Error("Error getting test file path", zap.Error(err))
+		g.logger.Info("Generating tests for file", zap.String("file", g.srcPath))
+		var isEmptyFile bool
+		if _, statErr := os.Stat(g.testPath); os.IsNotExist(statErr) {
+			testFileDir := filepath.Dir(g.testPath)
+			if err := os.MkdirAll(testFileDir, os.ModePerm); err != nil {
+				g.logger.Error("Error creating directory for test file", zap.Error(err))
 				continue
 			}
-			isCreated, err := createTestFile(g.testPath, g.srcPath)
+
+			created, err := createTestFile(g.testPath, g.srcPath)
 			if err != nil {
 				g.logger.Error("Error creating test file", zap.Error(err))
 				continue
 			}
-			newTestFile = isCreated
-		}
-
-		g.logger.Info(fmt.Sprintf("Generating tests for file: %s", g.srcPath))
-		isEmpty, err := utils.IsFileEmpty(g.testPath)
-		if err != nil {
-			g.logger.Error("Error checking if test file is empty", zap.Error(err))
-			return err
-		}
-		if isEmpty {
-			newTestFile = true
+			newTestFile = created
+			isEmptyFile = created
+		} else {
+			isEmptyFile, err = utils.IsFileEmpty(g.testPath)
+			if err != nil {
+				g.logger.Error("Error checking if test file is empty", zap.Error(err))
+				continue
+			}
+			newTestFile = isEmptyFile
 		}
 		if !newTestFile {
 			if err = g.runCoverage(); err != nil {
@@ -158,21 +198,70 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 
 		iterationCount := 1
 		g.lang = GetCodeLanguage(g.srcPath)
-		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt, g.ai.FunctionUnderTest, g.logger)
+
+		var originalSrcCode string
+		if !g.sourceRefactored {
+			err = g.refactorSourceCode(ctx, &originalSrcCode)
+			if err != nil {
+				utils.LogError(g.logger, err, "Error during source code refactoring")
+				return err
+			}
+		}
+
+		var codebaseContext string
+		if g.embedService != nil {
+			g.logger.Info("searching for similar code snippets in the codebase")
+			srcContent, err := os.ReadFile(g.srcPath)
+			if err != nil {
+				g.logger.Warn("failed to read source file for context search", zap.Error(err))
+			} else {
+				embeddings, err := g.embedService.GenerateEmbeddingsForQ([]string{string(srcContent)})
+				if err != nil {
+					g.logger.Warn("failed to generate embeddings for context search", zap.Error(err))
+				} else if len(embeddings) > 0 {
+					searchResults, err := g.embedService.SearchSimilarCode(ctx, embeddings[0], 5)
+					if err != nil {
+						g.logger.Warn("failed to search for similar code", zap.Error(err))
+					} else {
+						var contextBuilder strings.Builder
+						for _, res := range searchResults {
+							if res.FilePath != g.srcPath {
+								contextBuilder.WriteString(fmt.Sprintf("--- From file: %s ---\n", res.FilePath))
+								contextBuilder.WriteString(res.Content)
+								contextBuilder.WriteString("\n\n")
+							}
+						}
+						codebaseContext = contextBuilder.String()
+						if codebaseContext != "" {
+							g.logger.Info("found some context from the codebase")
+							g.logger.Debug("context from codebase", zap.String("codebaseContext", codebaseContext))
+						}
+					}
+				}
+			}
+		}
+
+		g.promptBuilder, err = NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, codebaseContext, "", g.lang, g.additionalPrompt, g.ai.FunctionUnderTest, g.sourceRefactored, g.logger)
 		g.injector = NewInjectorBuilder(g.logger, g.lang)
 
 		if err != nil {
 			utils.LogError(g.logger, err, "Error creating prompt builder")
 			return err
 		}
-		if !isEmpty {
+		if !isEmptyFile {
 			if err := g.setCursor(ctx); err != nil {
 				utils.LogError(g.logger, err, "Error during initial test suite analysis")
 				return err
 			}
+		} else {
+			g.cur.Indentation = 0
+			if g.lang == "go" {
+				g.cur.Line = 1
+			} else {
+				g.cur.Line = 0
+			}
 		}
 		initialCoverage := g.cov.Current
-		// Respect context cancellation in the inner loop
 		for g.cov.Current < (g.cov.Desired/100) && iterationCount <= g.maxIterations {
 			passedTests, noCoverageTest, failedBuild, totalTest := 0, 0, 0, 0
 			select {
@@ -226,26 +315,6 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				continue
 			}
 
-			var originalSrcCode string
-			var codeModified bool
-
-			// Check if code refactoring is needed
-			if len(testsDetails.RefactoredSourceCode) != 0 {
-				// Read the original source code
-				originalSrcCode, err = readFile(g.srcPath)
-				if err != nil {
-					return fmt.Errorf("failed to read the source code: %w", err)
-				}
-
-				// modify the source code for refactoring.
-				if !(strings.Contains(testsDetails.RefactoredSourceCode, "blank output don't refactor code") || strings.Contains(testsDetails.RefactoredSourceCode, "no refactoring")) {
-					if err := os.WriteFile(g.srcPath, []byte(testsDetails.RefactoredSourceCode), 0644); err != nil {
-						return fmt.Errorf("failed to refactor source code:%w", err)
-					}
-					codeModified = true
-				}
-			}
-
 			var overallCovInc = false
 
 			g.logger.Info("Validating new generated tests one by one")
@@ -266,26 +335,19 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				if err != nil {
 					utils.LogError(g.logger, err, "Error validating test")
 
-					rerr := revertSourceCode(g.srcPath, originalSrcCode, codeModified)
-					if rerr != nil {
-						utils.LogError(g.logger, rerr, "Error reverting source code")
+					if g.sourceRefactored && originalSrcCode != "" {
+						rerr := revertSourceCode(g.srcPath, originalSrcCode, true)
+						if rerr != nil {
+							utils.LogError(g.logger, rerr, "Error reverting source code")
+						}
 					}
 
 					return err
 				}
 
-				// if any test increases the coverage, set the flag to true
 				overallCovInc = overallCovInc || coverageInc
 			}
-			// if any of the test couldn't increase the coverage, revert the source code
-			if !overallCovInc {
-				err := revertSourceCode(g.srcPath, originalSrcCode, codeModified)
-				if err != nil {
-					utils.LogError(g.logger, err, "Error reverting source code")
-				}
-			} else {
-				g.promptBuilder.Src.Code = testsDetails.RefactoredSourceCode
-			}
+
 			if g.cov.Current < (g.cov.Desired/100) && g.cov.Current > 0 {
 				if err := g.runCoverage(); err != nil {
 					utils.LogError(g.logger, err, "Error running coverage")
@@ -809,5 +871,72 @@ func (g *UnitTestGenerator) saveFailedTestCasesToFile() error {
 	if err != nil {
 		return fmt.Errorf("error writing to discarded tests file: %w", err)
 	}
+	return nil
+}
+
+func (g *UnitTestGenerator) refactorSourceCode(ctx context.Context, originalSrcCode *string) error {
+	g.logger.Info("Analyzing source code for refactoring to improve testability...")
+
+	var err error
+	*originalSrcCode, err = readFile(g.srcPath)
+	if err != nil {
+		g.logger.Error("Failed to read source code for refactoring", zap.Error(err), zap.String("srcPath", g.srcPath))
+		return fmt.Errorf("failed to read the source code: %w", err)
+	}
+
+	refactorPromptBuilder, err := NewPromptBuilder(g.srcPath, g.testPath, g.cov.Content, "", "", g.lang, g.additionalPrompt, g.ai.FunctionUnderTest, g.sourceRefactored, g.logger)
+	if err != nil {
+		g.logger.Error("Error creating refactor prompt builder", zap.Error(err), zap.String("srcPath", g.srcPath), zap.String("testPath", g.testPath), zap.String("language", g.lang))
+		return fmt.Errorf("error creating refactor prompt builder: %w", err)
+	}
+
+	refactorPrompt, err := refactorPromptBuilder.BuildPrompt("refactor_prompt", "")
+	if err != nil {
+		g.logger.Error("Error building refactor prompt", zap.Error(err))
+		return fmt.Errorf("error building refactor prompt: %w", err)
+	}
+
+	aiRequest := AIRequest{
+		MaxTokens:      4096,
+		Prompt:         *refactorPrompt,
+		SessionID:      g.ai.SessionID,
+		RequestPurpose: "refactor",
+	}
+
+	response, err := g.ai.Call(ctx, CompletionParams{}, aiRequest, false)
+	if err != nil {
+		g.logger.Error("Error calling AI for refactoring", zap.Error(err), zap.String("sessionID", g.ai.SessionID))
+		return fmt.Errorf("error calling AI for refactoring: %w", err)
+	}
+
+	cleanedYAML := ExtractYAML(response)
+	var refactorDetails models.RefactorDetails
+	if err := yaml.Unmarshal([]byte(cleanedYAML), &refactorDetails); err != nil {
+		g.logger.Error("Error unmarshalling refactor details",
+			zap.Error(err),
+			zap.String("cleanedYAML", cleanedYAML),
+			zap.String("originalResponse", response),
+			zap.Int("yamlLength", len(cleanedYAML)))
+		return fmt.Errorf("error unmarshalling refactor details: %v", err)
+	}
+
+	if len(refactorDetails.RefactoredSourceCode) > 0 {
+		if strings.Contains(refactorDetails.RefactoredSourceCode, "blank output don't refactor code") ||
+			strings.Contains(refactorDetails.RefactoredSourceCode, "no refactoring") ||
+			strings.Contains(refactorDetails.RefactoredSourceCode, "No refactoring needed") {
+			g.logger.Info("Source code analysis complete - no refactoring needed")
+			return nil
+		}
+
+		if err := os.WriteFile(g.srcPath, []byte(refactorDetails.RefactoredSourceCode), 0644); err != nil {
+			g.logger.Error("Failed to write refactored source code", zap.Error(err), zap.String("srcPath", g.srcPath))
+			return fmt.Errorf("failed to refactor source code: %w", err)
+		}
+
+		g.sourceRefactored = true
+	} else {
+		g.logger.Info("Source code analysis complete - no refactoring needed (empty refactored code)")
+	}
+
 	return nil
 }

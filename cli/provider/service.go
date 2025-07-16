@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/utils"
 
+	"go.keploy.io/server/v2/pkg/service/embed"
 	"go.keploy.io/server/v2/pkg/service/utgen"
 	"go.uber.org/zap"
 )
@@ -41,8 +42,14 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 	tel.Ping()
 
 	switch cmd {
+	case "embed":
+		return embed.NewEmbedService(n.cfg, tel, n.auth, n.logger)
 	case "gen":
-		return utgen.NewUnitTestGenerator(n.cfg, tel, n.auth, n.logger)
+		embedService, err := embed.NewEmbedService(n.cfg, tel, n.auth, n.logger)
+		if err != nil {
+			n.logger.Warn("failed to create embed service, proceeding without it", zap.Error(err))
+		}
+		return utgen.NewUnitTestGenerator(n.cfg, tel, n.auth, n.logger, embedService)
 	case "record", "test", "mock", "normalize", "rerecord", "contract", "config", "update", "login", "export", "import", "templatize":
 		return Get(ctx, cmd, n.cfg, n.logger, tel, n.auth)
 	default:
