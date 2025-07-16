@@ -40,7 +40,7 @@ type IncomingOptions struct {
 type SetupOptions struct {
 	Container     string
 	DockerNetwork string
-	DockerDelay   uint64
+	DockerDelay   time.Duration
 }
 
 type RunOptions struct {
