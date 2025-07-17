@@ -145,22 +145,13 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			return nil, false, ctx.Err()
 		}
 
-		// Get the tcs mocks from the mockDb
-		unfiltered, err := mockDb.GetUnFilteredMocks()
+		tcsMocks, err := mockDb.GetUnFilteredMocksByType(req.Header.Type)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, false, ctx.Err()
 			}
-			utils.LogError(logger, err, "failed to get unfiltered mocks")
+			utils.LogError(logger, err, "failed to get unfiltered mocks by type")
 			return nil, false, err
-		}
-
-		var tcsMocks []*models.Mock
-		// Ignore the "config" metadata mocks
-		for _, mock := range unfiltered {
-			if mock.Kind == models.Kind("MySQL") && mock.Spec.Metadata["type"] != "config" {
-				tcsMocks = append(tcsMocks, mock)
-			}
 		}
 
 		if len(tcsMocks) == 0 {

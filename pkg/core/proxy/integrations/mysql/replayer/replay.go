@@ -10,7 +10,6 @@ import (
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire"
-	intgUtil "go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
@@ -23,26 +22,10 @@ import (
 func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	errCh := make(chan error, 1)
 
-	unfiltered, err := mockDb.GetUnFilteredMocks()
+	configMocks, err := mockDb.GetUnFilteredConfigMocks()
 	if err != nil {
-		utils.LogError(logger, err, "failed to get unfiltered mocks")
+		utils.LogError(logger, err, "failed to get mysql config mocks")
 		return err
-	}
-
-	// Get the mysql mocks
-	mocks := intgUtil.GetMockByKind(unfiltered, "MySQL")
-
-	if len(mocks) == 0 {
-		utils.LogError(logger, nil, "no mysql mocks found")
-		return nil
-	}
-
-	var configMocks []*models.Mock
-	// Get the mocks having "config" metadata
-	for _, mock := range mocks {
-		if mock.Spec.Metadata["type"] == "config" {
-			configMocks = append(configMocks, mock)
-		}
 	}
 
 	if len(configMocks) == 0 {
