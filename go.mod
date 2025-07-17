@@ -6,7 +6,7 @@ replace github.com/jackc/pgproto3/v2 => github.com/keploy/pgproto3/v2 v2.0.5
 
 require (
 	github.com/Microsoft/go-winio v0.6.1 // indirect
-	github.com/cilium/ebpf v0.13.2
+	github.com/cilium/ebpf v0.19.0
 	github.com/cloudflare/cfssl v1.6.4
 	github.com/docker/distribution v2.8.2+incompatible // indirect
 	github.com/docker/docker v24.0.4+incompatible
