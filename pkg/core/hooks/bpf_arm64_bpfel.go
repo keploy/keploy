@@ -47,9 +47,10 @@ func loadBpfObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
 type bpfSpecs struct {
 	bpfProgramSpecs
 	bpfMapSpecs
+	bpfVariableSpecs
 }
 
-// bpfSpecs contains programs before they are loaded into the kernel.
+// bpfProgramSpecs contains programs before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfProgramSpecs struct {
@@ -61,6 +62,7 @@ type bpfProgramSpecs struct {
 	SyscallProbeEntryAccept4         *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_accept4"`
 	SyscallProbeEntryClose           *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_close"`
 	SyscallProbeEntryRead            *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_read"`
+	SyscallProbeEntryReadv           *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_readv"`
 	SyscallProbeEntryRecvfrom        *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_recvfrom"`
 	SyscallProbeEntrySendto          *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_sendto"`
 	SyscallProbeEntryTcpV4Connect    *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_tcp_v4_connect"`
@@ -75,6 +77,7 @@ type bpfProgramSpecs struct {
 	SyscallProbeRetClose             *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_close"`
 	SyscallProbeRetConnect           *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_connect"`
 	SyscallProbeRetRead              *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_read"`
+	SyscallProbeRetReadv             *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_readv"`
 	SyscallProbeRetRecvfrom          *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_recvfrom"`
 	SyscallProbeRetSendto            *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_sendto"`
 	SyscallProbeRetTcpV4Connect      *ebpf.ProgramSpec `ebpf:"syscall__probe_ret_tcp_v4_connect"`
@@ -99,6 +102,7 @@ type bpfMapSpecs struct {
 	DestInfoMap                 *ebpf.MapSpec `ebpf:"dest_info_map"`
 	DockerAppRegistrationMap    *ebpf.MapSpec `ebpf:"docker_app_registration_map"`
 	E2eInfoMap                  *ebpf.MapSpec `ebpf:"e2e_info_map"`
+	IovecBufferHeap             *ebpf.MapSpec `ebpf:"iovec_buffer_heap"`
 	KeployAgentKernelPidMap     *ebpf.MapSpec `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.MapSpec `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.MapSpec `ebpf:"keploy_client_kernel_pid_map"`
@@ -113,12 +117,19 @@ type bpfMapSpecs struct {
 	TaskStructMap               *ebpf.MapSpec `ebpf:"task_struct_map"`
 }
 
+// bpfVariableSpecs contains global variables before they are loaded into the kernel.
+//
+// It can be passed ebpf.CollectionSpec.Assign.
+type bpfVariableSpecs struct {
+}
+
 // bpfObjects contains all objects after they have been loaded into the kernel.
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfObjects struct {
 	bpfPrograms
 	bpfMaps
+	bpfVariables
 }
 
 func (o *bpfObjects) Close() error {
@@ -142,6 +153,7 @@ type bpfMaps struct {
 	DestInfoMap                 *ebpf.Map `ebpf:"dest_info_map"`
 	DockerAppRegistrationMap    *ebpf.Map `ebpf:"docker_app_registration_map"`
 	E2eInfoMap                  *ebpf.Map `ebpf:"e2e_info_map"`
+	IovecBufferHeap             *ebpf.Map `ebpf:"iovec_buffer_heap"`
 	KeployAgentKernelPidMap     *ebpf.Map `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.Map `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.Map `ebpf:"keploy_client_kernel_pid_map"`
@@ -168,6 +180,7 @@ func (m *bpfMaps) Close() error {
 		m.DestInfoMap,
 		m.DockerAppRegistrationMap,
 		m.E2eInfoMap,
+		m.IovecBufferHeap,
 		m.KeployAgentKernelPidMap,
 		m.KeployAgentRegistrationMap,
 		m.KeployClientKernelPidMap,
@@ -183,6 +196,12 @@ func (m *bpfMaps) Close() error {
 	)
 }
 
+// bpfVariables contains all global variables after they have been loaded into the kernel.
+//
+// It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
+type bpfVariables struct {
+}
+
 // bpfPrograms contains all programs after they have been loaded into the kernel.
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
@@ -195,6 +214,7 @@ type bpfPrograms struct {
 	SyscallProbeEntryAccept4         *ebpf.Program `ebpf:"syscall__probe_entry_accept4"`
 	SyscallProbeEntryClose           *ebpf.Program `ebpf:"syscall__probe_entry_close"`
 	SyscallProbeEntryRead            *ebpf.Program `ebpf:"syscall__probe_entry_read"`
+	SyscallProbeEntryReadv           *ebpf.Program `ebpf:"syscall__probe_entry_readv"`
 	SyscallProbeEntryRecvfrom        *ebpf.Program `ebpf:"syscall__probe_entry_recvfrom"`
 	SyscallProbeEntrySendto          *ebpf.Program `ebpf:"syscall__probe_entry_sendto"`
 	SyscallProbeEntryTcpV4Connect    *ebpf.Program `ebpf:"syscall__probe_entry_tcp_v4_connect"`
@@ -209,6 +229,7 @@ type bpfPrograms struct {
 	SyscallProbeRetClose             *ebpf.Program `ebpf:"syscall__probe_ret_close"`
 	SyscallProbeRetConnect           *ebpf.Program `ebpf:"syscall__probe_ret_connect"`
 	SyscallProbeRetRead              *ebpf.Program `ebpf:"syscall__probe_ret_read"`
+	SyscallProbeRetReadv             *ebpf.Program `ebpf:"syscall__probe_ret_readv"`
 	SyscallProbeRetRecvfrom          *ebpf.Program `ebpf:"syscall__probe_ret_recvfrom"`
 	SyscallProbeRetSendto            *ebpf.Program `ebpf:"syscall__probe_ret_sendto"`
 	SyscallProbeRetTcpV4Connect      *ebpf.Program `ebpf:"syscall__probe_ret_tcp_v4_connect"`
@@ -229,6 +250,7 @@ func (p *bpfPrograms) Close() error {
 		p.SyscallProbeEntryAccept4,
 		p.SyscallProbeEntryClose,
 		p.SyscallProbeEntryRead,
+		p.SyscallProbeEntryReadv,
 		p.SyscallProbeEntryRecvfrom,
 		p.SyscallProbeEntrySendto,
 		p.SyscallProbeEntryTcpV4Connect,
@@ -243,6 +265,7 @@ func (p *bpfPrograms) Close() error {
 		p.SyscallProbeRetClose,
 		p.SyscallProbeRetConnect,
 		p.SyscallProbeRetRead,
+		p.SyscallProbeRetReadv,
 		p.SyscallProbeRetRecvfrom,
 		p.SyscallProbeRetSendto,
 		p.SyscallProbeRetTcpV4Connect,
