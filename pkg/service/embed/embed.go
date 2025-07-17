@@ -23,17 +23,22 @@ import (
 )
 
 type EmbedService struct {
-	cfg    *config.Config
-	logger *zap.Logger
-	auth   service.Auth
-	tel    Telemetry
-	pgConn *pgx.Conn
+	cfg     *config.Config
+	logger  *zap.Logger
+	auth    service.Auth
+	tel     Telemetry
+	pgConn  *pgx.Conn
+	repoMap *RepoMap
 }
 
 type ChunkJob struct {
 	FilePath string
 	ChunkID  int
 	Content  string
+}
+type SymbolJob struct {
+	FilePath string
+	Symbols  []SymbolInfo
 }
 
 type Telemetry interface {
@@ -77,11 +82,12 @@ func NewEmbedService(
 	}
 
 	return &EmbedService{
-		cfg:    cfg,
-		logger: logger,
-		auth:   auth,
-		tel:    tel,
-		pgConn: conn,
+		cfg:     cfg,
+		logger:  logger,
+		auth:    auth,
+		tel:     tel,
+		pgConn:  conn,
+		repoMap: NewRepoMap(logger),
 	}, nil
 }
 
@@ -109,11 +115,19 @@ func (e *EmbedService) Start(ctx context.Context) error {
 
 	if fileInfo.IsDir() {
 		// Process directory using streaming approach
-		return e.processDirectoryStreaming(ctx, sourcePath)
+		err = e.processDirectoryStreaming(ctx, sourcePath)
 	} else {
 		// Process single file
-		return e.processSingleFile(ctx, sourcePath)
+		err = e.processSingleFile(ctx, sourcePath)
 	}
+
+	if err != nil {
+		return err
+	}
+
+	// Save the repository map after processing is complete
+	repoMapPath := filepath.Join(e.cfg.Path, "embeddings", "repo_map.json")
+	return e.repoMap.Save(repoMapPath)
 }
 
 func (e *EmbedService) ProcessCode(code string, fileExtension string, tokenLimit int) (map[int]string, error) {
@@ -400,11 +414,35 @@ func (e *EmbedService) processDirectoryStreaming(ctx context.Context, dirPath st
 				return nil
 			}
 
-			e.logger.Debug("Processing file", zap.String("file", path))
+			e.logger.Debug("Processing file for symbols and chunks", zap.String("file", path))
 
-			chunks, err := e.processSingleFileForChunks(path)
+			// Read file content once for both symbol extraction and chunking
+			code, err := e.readSourceFile(path)
 			if err != nil {
-				e.logger.Warn("Failed to process file", zap.String("file", path), zap.Error(err))
+				e.logger.Warn("Failed to read file, skipping", zap.String("file", path), zap.Error(err))
+				return nil
+			}
+
+			fileExt := e.getFileExtension(path)
+
+			// Extract symbols and add to the repo map
+			parser, err := NewCodeParser(fileExt)
+			if err != nil {
+				e.logger.Warn("Failed to create parser, skipping symbol extraction", zap.String("file", path), zap.Error(err))
+			} else {
+				symbols, err := parser.ExtractSymbols(code, fileExt, path)
+				if err != nil {
+					e.logger.Warn("Failed to extract symbols", zap.String("file", path), zap.Error(err))
+				} else if len(symbols) > 0 {
+					e.repoMap.AddSymbols(symbols)
+				}
+				parser.Close()
+			}
+
+			// Process for chunks and embeddings
+			chunks, err := e.ProcessCode(code, fileExt, e.getTokenLimit())
+			if err != nil {
+				e.logger.Warn("Failed to process and chunk file", zap.String("file", path), zap.Error(err))
 				return nil
 			}
 
@@ -643,7 +681,7 @@ func (e *EmbedService) callAIService(contents []string) ([][]float32, error) {
 		modelID = e.cfg.Embed.ModelName
 	}
 
-	url := "https://cec9dfa460ec.ngrok-free.app/generate_embeddings/"
+	url := "https://58f4956fd5c5.ngrok-free.app/generate_embeddings/"
 
 	type requestBody struct {
 		Sentences []string `json:"sentences"`
@@ -817,4 +855,71 @@ func convertToFloat32(embedding []float64, logger *zap.Logger, indexInBatch int)
 		result[i] = float32(val)
 	}
 	return result
+}
+
+func (e *EmbedService) Converse(ctx context.Context, query string) error {
+	// 1. Load the repository map
+	repoMapPath := filepath.Join(e.cfg.Path, "embeddings", "repo_map.json")
+	if err := e.repoMap.Load(repoMapPath); err != nil {
+		return fmt.Errorf("failed to load repository map, please run `keploy embed` first: %w", err)
+	}
+
+	// 2. Generate an embedding for the user's query
+	e.logger.Info("Generating embedding for query", zap.String("query", query))
+	queryEmbeddings, err := e.GenerateEmbeddingsForQ([]string{query})
+	if err != nil {
+		return fmt.Errorf("failed to generate embedding for query: %w", err)
+	}
+	if len(queryEmbeddings) == 0 {
+		return fmt.Errorf("received no embedding for the query")
+	}
+	queryEmbedding := queryEmbeddings[0]
+
+	// 3. Find similar code chunks
+	e.logger.Info("Searching for similar code chunks in the database")
+	searchResults, err := e.SearchSimilarCode(ctx, queryEmbedding, 10)
+	if err != nil {
+		return fmt.Errorf("failed to search for similar code: %w", err)
+	}
+
+	if len(searchResults) == 0 {
+		e.logger.Warn("No similar code snippets found for the query.")
+		fmt.Println("I couldn't find any code snippets relevant to your question. Please try rephrasing or be more specific.")
+		return nil
+	}
+
+	// 4. Build context from search results
+	var contextBuilder strings.Builder
+	for _, res := range searchResults {
+		contextBuilder.WriteString(fmt.Sprintf("--- From file: %s ---\n", res.FilePath))
+		contextBuilder.WriteString(res.Content)
+		contextBuilder.WriteString("\n---\n\n")
+	}
+
+	// 5. Construct the final prompt using the new prompt builder
+	promptBuilder := NewPromptBuilder(query, contextBuilder.String(), e.logger)
+	prompt, err := promptBuilder.BuildPrompt("ai_conversation")
+	if err != nil {
+		return fmt.Errorf("failed to build prompt: %w", err)
+	}
+
+	// 6. Call the LLM and stream the response
+	e.logger.Info("Sending request to LLM for answer generation")
+
+	aiClient, err := NewAIClient(e.cfg, e.logger, e.auth)
+	if err != nil {
+		return fmt.Errorf("failed to create AI client: %w", err)
+	}
+
+	response, err := aiClient.GenerateResponse(ctx, prompt)
+	if err != nil {
+		return fmt.Errorf("failed to get response from AI: %w", err)
+	}
+
+	fmt.Println("\nAI Assistant:")
+	fmt.Println("----------------")
+	fmt.Println(response)
+	fmt.Println("----------------")
+
+	return nil
 }

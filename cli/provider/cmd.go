@@ -243,6 +243,9 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+	case "converse":
+		cmd.Flags().String("llm-base-url", "", "Base URL for the AI model.")
+		return nil
 	case "record", "test", "rerecord":
 		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
 			cmd.Flags().StringSliceP("services", "s", c.cfg.Contract.Services, "Specify the services for which to generate contracts")

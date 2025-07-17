@@ -8,6 +8,7 @@ type Service interface {
 	GenerateEmbeddings(chunks map[int]string, filePath string) error
 	GenerateEmbeddingsForQ(contents []string) ([][]float32, error)
 	SearchSimilarCode(ctx context.Context, queryEmbedding []float32, limit int) ([]SearchResult, error)
+	Converse(ctx context.Context, query string) error
 }
 
 type SearchResult struct {

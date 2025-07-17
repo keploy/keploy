@@ -400,6 +400,81 @@ func (cp *CodeParser) ExtractComments(node *sitter.Node, fileExtension string) (
 	return comments, nil
 }
 
+// Extracts the name of a symbol, e.g., function name, class name.
+func (cp *CodeParser) extractSymbolName(node *sitter.Node, nodeType string, code []byte) string {
+	var nameNode *sitter.Node
+	switch nodeType {
+	case "function_definition", "class_definition": // Python
+		nameNode = node.ChildByFieldName("name")
+	case "function_declaration", "class_declaration": // JavaScript
+		nameNode = node.ChildByFieldName("name")
+	case "method_declaration": // Go
+		nameNode = node.ChildByFieldName("name")
+	// Special handling for Go's type declarations (structs, interfaces)
+	case "type_declaration":
+		// For type declarations, the name is often in a `type_identifier` within the `type_spec`
+		typeSpecNode := node.ChildByFieldName("type")
+		if typeSpecNode != nil {
+			// This handles `type MyStruct struct { ... }`
+			nameNode = node.ChildByFieldName("name")
+		}
+	}
+
+	if nameNode != nil {
+		return nameNode.Content(code)
+	}
+
+	// Fallback for Go function declarations where the name is directly a child
+	if nodeType == "function_declaration" {
+		nameNode = node.ChildByFieldName("name")
+		if nameNode != nil {
+			return nameNode.Content(code)
+		}
+	}
+	return ""
+}
+
+// ExtractSymbols parses the code and returns a list of all defined symbols.
+func (cp *CodeParser) ExtractSymbols(code, fileExtension, filePath string) ([]SymbolInfo, error) {
+	rootNode, err := cp.ParseCode(code, fileExtension)
+	if err != nil {
+		return nil, fmt.Errorf("parsing code for symbols failed (ext: %s): %w", fileExtension, err)
+	}
+
+	interestMap, err := cp.getNodeTypesOfInterest(fileExtension)
+	if err != nil {
+		return nil, err
+	}
+
+	var symbols []SymbolInfo
+	var recurse func(n *sitter.Node)
+	recurse = func(n *sitter.Node) {
+		if n == nil {
+			return
+		}
+		nodeType := n.Type()
+		if label, ok := interestMap[nodeType]; ok {
+			name := cp.extractSymbolName(n, nodeType, []byte(code))
+			if name != "" {
+				symbol := SymbolInfo{
+					Name:      name,
+					Type:      label,
+					FilePath:  filePath,
+					StartLine: int(n.StartPoint().Row) + 1,
+					EndLine:   int(n.EndPoint().Row) + 1,
+					Content:   n.Content([]byte(code)),
+				}
+				symbols = append(symbols, symbol)
+			}
+		}
+		for i := 0; i < int(n.ChildCount()); i++ {
+			recurse(n.Child(i))
+		}
+	}
+	recurse(rootNode)
+	return symbols, nil
+}
+
 // will be called by chunker to get lines for points of interest.
 func (cp *CodeParser) GetLinesForPointsOfInterest(code string, fileExtension string) (map[string][]int, error) {
 	rootNode, err := cp.ParseCode(code, fileExtension)
