@@ -32,13 +32,11 @@ type CompletionResponse struct {
 	Choices []Choice `json:"choices"`
 }
 
-// KeployAIRequest is the request body for Keploy's AI service
 type KeployAIRequest struct {
 	Prompt    Prompt `json:"prompt"`
 	SessionID string `json:"sessionId"`
 }
 
-// KeployAIResponse is the response body from Keploy's AI service
 type KeployAIResponse struct {
 	IsSuccess    bool   `json:"isSuccess"`
 	Error        string `json:"error"`
@@ -49,8 +47,7 @@ type AIClient struct {
 	cfg    *config.Config
 	logger *zap.Logger
 	apiKey string
-	// Add Auth field for Keploy token retrieval
-	Auth service.Auth
+	Auth   service.Auth
 }
 
 func NewAIClient(cfg *config.Config, logger *zap.Logger, auth service.Auth) (*AIClient, error) {
@@ -73,7 +70,6 @@ func (ac *AIClient) GenerateResponse(ctx context.Context, prompt *Prompt) (strin
 		apiBaseURL = ac.cfg.Embed.LLMBaseURL
 	}
 
-	// Logic to handle Keploy's own AI service
 	if strings.Contains(apiBaseURL, "keploy.io") {
 		token, err := ac.getKeployToken(ctx)
 		if err != nil {
@@ -124,7 +120,6 @@ func (ac *AIClient) GenerateResponse(ctx context.Context, prompt *Prompt) (strin
 		return ac.unmarshalYAML(aiResponse.FinalContent)
 	}
 
-	// Existing logic for OpenAI-compatible APIs
 	model := ac.cfg.Embed.Model
 	if model == "" {
 		model = "gpt-4o"
@@ -190,7 +185,6 @@ func (ac *AIClient) GenerateResponse(ctx context.Context, prompt *Prompt) (strin
 	return ac.unmarshalYAML(response)
 }
 
-// getKeployToken retrieves a Keploy-issued token using the Auth field (stub, implement as needed)
 func (ac *AIClient) getKeployToken(ctx context.Context) (string, error) {
 	if ac.Auth == nil {
 		return "", fmt.Errorf("Auth is not configured for Keploy token retrieval")
@@ -206,8 +200,5 @@ func (ac *AIClient) unmarshalYAML(response string) (string, error) {
 		return response, nil
 	}
 
-	// If it is a YAML, it might be a structured response we don't want to just print.
-	// For now, we'll just return the raw response if it's a valid YAML.
-	// In the future, we could handle structured responses here.
 	return response, nil
 }

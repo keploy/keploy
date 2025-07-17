@@ -29,6 +29,7 @@ type EmbedService struct {
 	tel     Telemetry
 	pgConn  *pgx.Conn
 	repoMap *RepoMap
+	parser  *CodeParser
 }
 
 type ChunkJob struct {
@@ -81,6 +82,12 @@ func NewEmbedService(
 		return nil, fmt.Errorf("failed to register pgvector types: %w", err)
 	}
 
+	// Initialize the shared code parser once.
+	parser, err := NewCodeParser("go")
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize shared code parser: %w", err)
+	}
+
 	return &EmbedService{
 		cfg:     cfg,
 		logger:  logger,
@@ -88,6 +95,7 @@ func NewEmbedService(
 		tel:     tel,
 		pgConn:  conn,
 		repoMap: NewRepoMap(logger),
+		parser:  parser,
 	}, nil
 }
 
@@ -139,7 +147,7 @@ func (e *EmbedService) ProcessCode(code string, fileExtension string, tokenLimit
 	chunker := NewCodeChunker(fileExtension, "cl100k_base")
 
 	// Chunk the code
-	chunks, err := chunker.Chunk(code, tokenLimit)
+	chunks, err := chunker.Chunk(e.parser, code, tokenLimit)
 	if err != nil {
 		e.logger.Error("Failed to chunk code", zap.Error(err))
 		return nil, fmt.Errorf("failed to chunk code: %w", err)
@@ -425,18 +433,12 @@ func (e *EmbedService) processDirectoryStreaming(ctx context.Context, dirPath st
 
 			fileExt := e.getFileExtension(path)
 
-			// Extract symbols and add to the repo map
-			parser, err := NewCodeParser(fileExt)
+			// Extract symbols and add to the repo map using the shared parser
+			symbols, err := e.parser.ExtractSymbols(code, fileExt, path)
 			if err != nil {
-				e.logger.Warn("Failed to create parser, skipping symbol extraction", zap.String("file", path), zap.Error(err))
-			} else {
-				symbols, err := parser.ExtractSymbols(code, fileExt, path)
-				if err != nil {
-					e.logger.Warn("Failed to extract symbols", zap.String("file", path), zap.Error(err))
-				} else if len(symbols) > 0 {
-					e.repoMap.AddSymbols(symbols)
-				}
-				parser.Close()
+				e.logger.Warn("Failed to extract symbols", zap.String("file", path), zap.Error(err))
+			} else if len(symbols) > 0 {
+				e.repoMap.AddSymbols(symbols)
 			}
 
 			// Process for chunks and embeddings
@@ -807,6 +809,9 @@ func (e *EmbedService) SearchSimilarCode(ctx context.Context, queryEmbedding []f
 }
 
 func (e *EmbedService) Close() error {
+	if e.parser != nil {
+		e.parser.Close()
+	}
 	if e.pgConn != nil {
 		return e.pgConn.Close(context.Background())
 	}

@@ -7,7 +7,7 @@ import (
 )
 
 type Chunker interface {
-	Chunk(content string, tokenLimit int) (map[int]string, error)
+	Chunk(parser *CodeParser, content string, tokenLimit int) (map[int]string, error)
 	GetChunk(chunkedContent map[int]string, chunkNumber int) (string, bool)
 }
 
@@ -69,12 +69,10 @@ func NewCodeChunker(fileExtension string, encodingName string) *CodeChunker {
 }
 
 // Chunk splits code into chunks based on token limits and points of interest.
-func (cc *CodeChunker) Chunk(code string, tokenLimit int) (map[int]string, error) {
-	parser, err := NewCodeParser(cc.fileExtension)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize code parser for extension %s: %w", cc.fileExtension, err)
+func (cc *CodeChunker) Chunk(parser *CodeParser, code string, tokenLimit int) (map[int]string, error) {
+	if parser == nil {
+		return nil, fmt.Errorf("code parser is nil")
 	}
-	defer parser.Close()
 
 	lines := strings.Split(code, "\n")
 	if len(lines) == 0 || (len(lines) == 1 && lines[0] == "") {

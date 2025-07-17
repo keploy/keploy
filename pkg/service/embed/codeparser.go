@@ -57,8 +57,8 @@ var (
 	}()
 
 	languageExtensionMap = map[string]string{
-		"py": "python",
-		"js": "javascript",
+		// "py": "python",
+		// "js": "javascript",
 		"go": "go",
 	}
 

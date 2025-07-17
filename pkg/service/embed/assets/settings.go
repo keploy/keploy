@@ -7,7 +7,6 @@ import (
 	"github.com/pelletier/go-toml"
 )
 
-//go:embed ai_chat.toml
 var assets embed.FS
 
 var (
