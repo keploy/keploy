@@ -87,7 +87,7 @@ func (rm *RepoMap) Load(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			rm.logger.Warn("RepoMap file does not exist, starting with an empty map.", zap.String("path", path))
+			rm.logger.Info("RepoMap file does not exist, starting with an empty map.", zap.String("path", path))
 			rm.Symbols = make(map[string][]SymbolInfo)
 			return nil
 		}

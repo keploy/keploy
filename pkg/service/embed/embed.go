@@ -634,7 +634,7 @@ func (e *EmbedService) initializeDatabase(ctx context.Context) error {
             file_path TEXT NOT NULL,
             chunk_id INTEGER NOT NULL,
             content TEXT NOT NULL,
-            embedding VECTOR(384),
+            embedding VECTOR(1536),
             created_at TIMESTAMP DEFAULT NOW(),
             UNIQUE(file_path, chunk_id)
         )
@@ -683,7 +683,7 @@ func (e *EmbedService) callAIService(contents []string) ([][]float32, error) {
 		modelID = e.cfg.Embed.ModelName
 	}
 
-	url := "https://58f4956fd5c5.ngrok-free.app/generate_embeddings/"
+	url := "https://ac408babbda6.ngrok-free.app/generate_embeddings/"
 
 	type requestBody struct {
 		Sentences []string `json:"sentences"`
@@ -704,7 +704,7 @@ func (e *EmbedService) callAIService(contents []string) ([][]float32, error) {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(payload))
@@ -716,7 +716,7 @@ func (e *EmbedService) callAIService(contents []string) ([][]float32, error) {
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{
-		Timeout: 60 * time.Second,
+		Timeout: 180 * time.Second,
 	}
 
 	e.logger.Debug("Calling local embedding service",
