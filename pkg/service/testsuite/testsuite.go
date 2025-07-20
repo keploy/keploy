@@ -30,6 +30,7 @@ type TestSuite struct {
 // TestSuiteSpec contains the metadata and steps for a test suite
 type TestSuiteSpec struct {
 	Metadata TestSuiteMetadata `yaml:"metadata"`
+	Security Security          `yaml:"security,omitempty"`
 	Load     LoadOptions       `yaml:"load,omitempty"`
 	Steps    []TestStep        `yaml:"steps"`
 }
@@ -37,6 +38,19 @@ type TestSuiteSpec struct {
 // TestSuiteMetadata contains description and other metadata for a test suite
 type TestSuiteMetadata struct {
 	Description string `yaml:"description"`
+}
+
+// Security contains security-related configurations for the test suite
+type Security struct {
+	RuleSet           string    `yaml:"ruleset"`
+	CustomPath        string    `yaml:"custom_path,omitempty"`
+	SeverityThreshold string    `yaml:"severity_threshold"`
+	AllowList         AllowList `yaml:"allow_list"`
+}
+
+type AllowList struct {
+	Headers []string `yaml:"headers,omitempty"`
+	Keys    []string `yaml:"keys,omitempty"`
 }
 
 // LoadOptions represents load testing options

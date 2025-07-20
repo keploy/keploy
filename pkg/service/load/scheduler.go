@@ -69,7 +69,6 @@ func (s *Scheduler) Run(parent context.Context, exporter *Exporter) error {
 
 func (s *Scheduler) runConstant(ctx context.Context, ts *testsuite.TestSuite, exporter *Exporter) error {
 	exporter.StartServer(ctx)
-	exporter.ExportLoadTestToken()
 	err := s.spawnVUGoroutines(ctx, ts, s.loadOptions.VUs, exporter)
 	if err != nil {
 		s.logger.Error("Failed to spawn VU goroutines", zap.Int("vus", s.loadOptions.VUs), zap.Error(err))
@@ -85,7 +84,6 @@ func (s *Scheduler) runConstant(ctx context.Context, ts *testsuite.TestSuite, ex
 
 func (s *Scheduler) runRamping(ctx context.Context, ts *testsuite.TestSuite, exporter *Exporter) error {
 	exporter.StartServer(ctx)
-	exporter.ExportLoadTestToken()
 	start := time.Now()
 	current := 0
 	cumulative := start

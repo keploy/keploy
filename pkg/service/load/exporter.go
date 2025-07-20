@@ -1,7 +1,6 @@
 package load
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net"
@@ -31,6 +30,7 @@ type Exporter struct {
 	logger       *zap.Logger
 	dashboardURL string
 	ltToken      *LTToken
+	isServed     bool
 	vusReport    []VUReport
 	mu           sync.RWMutex
 }
@@ -42,6 +42,7 @@ func NewExporter(cfg *config.Config, logger *zap.Logger, vus int, ltToken *LTTok
 		logger:       logger,
 		dashboardURL: "http://localhost:3000",
 		ltToken:      ltToken,
+		isServed:     false,
 		vusReport:    make([]VUReport, vus),
 	}
 }
@@ -56,6 +57,44 @@ func (e *Exporter) GetMetrics(vuReport VUReport) {
 func (e *Exporter) StartServer(ctx context.Context) error {
 	r := mux.NewRouter()
 	r.HandleFunc("/metrics", e.metricsHandler).Methods("GET")
+
+	// To export dashboard Token
+	// ==========================================================================================
+	rr := mux.NewRouter()
+	rr.HandleFunc("/dashboards", e.HandleGETDashboards).Methods("GET")
+
+	tokenServer := &http.Server{
+		Addr:    ":2345",
+		Handler: rr,
+	}
+	go func() {
+		tokenPortOK := false
+		for !tokenPortOK {
+			listener, err := net.Listen("tcp", ":2345")
+			if err != nil {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			tokenPortOK = true
+			listener.Close()
+		}
+		go func() {
+			for {
+				e.mu.RLock()
+				isServed := e.isServed
+				e.mu.RUnlock()
+
+				if isServed {
+					e.logger.Info("Dashboard token served successfully")
+					tokenServer.Shutdown(context.Background())
+					return
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+		}()
+		tokenServer.ListenAndServe()
+	}()
+	// ==========================================================================================
 
 	port := 9090
 	portOK := false
@@ -140,32 +179,53 @@ func (e *Exporter) metricsHandler(res http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func (e *Exporter) ExportLoadTestToken() {
-	tokenURL := e.dashboardURL + "/api/load"
+func (e *Exporter) HandleGETDashboards(res http.ResponseWriter, req *http.Request) {
+	res.Header().Set("Access-Control-Allow-Origin", "*")
+	res.Header().Set("Access-Control-Allow-Methods", "GET")
+	res.Header().Set("Content-Type", "application/json")
 
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// Marshal the LTToken to JSON
 	tokenData, err := json.Marshal(e.ltToken)
 	if err != nil {
 		e.logger.Error("Failed to marshal LTToken", zap.Error(err))
+		res.WriteHeader(http.StatusInternalServerError)
+		e.isServed = true
 		return
 	}
 
-	req, err := http.NewRequest("POST", tokenURL, bytes.NewBuffer(tokenData))
-	if err != nil {
-		e.logger.Error("Failed to create request for LTToken", zap.Error(err))
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		e.logger.Error("Failed to send LTToken to dashboard", zap.Error(err))
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusCreated {
-		e.logger.Error("Failed to send LTToken to dashboard", zap.Int("statusCode", resp.StatusCode))
-		return
-	}
+	res.Write(tokenData)
+	e.isServed = true
 }
+
+// func (e *Exporter) ExportLoadTestToken() {
+// 	tokenURL := e.dashboardURL + "/api/load"
+
+// 	tokenData, err := json.Marshal(e.ltToken)
+// 	if err != nil {
+// 		e.logger.Error("Failed to marshal LTToken", zap.Error(err))
+// 		return
+// 	}
+
+// 	req, err := http.NewRequest("POST", tokenURL, bytes.NewBuffer(tokenData))
+// 	if err != nil {
+// 		e.logger.Error("Failed to create request for LTToken", zap.Error(err))
+// 		return
+// 	}
+// 	req.Header.Set("Content-Type", "application/json")
+
+// 	client := &http.Client{}
+// 	resp, err := client.Do(req)
+// 	if err != nil {
+// 		e.logger.Error("Failed to send LTToken to dashboard", zap.Error(err))
+// 		return
+// 	}
+// 	defer resp.Body.Close()
+
+// 	if resp.StatusCode != http.StatusCreated {
+// 		e.logger.Error("Failed to send LTToken to dashboard", zap.Int("statusCode", resp.StatusCode))
+// 		return
+// 	}
+// }
