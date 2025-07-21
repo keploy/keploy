@@ -55,17 +55,14 @@ func (e *Exporter) GetMetrics(vuReport VUReport) {
 }
 
 func (e *Exporter) StartServer(ctx context.Context) error {
-	r := mux.NewRouter()
-	r.HandleFunc("/metrics", e.metricsHandler).Methods("GET")
-
-	// To export dashboard Token
+	// To serve LT Token to the dashboard
 	// ==========================================================================================
-	rr := mux.NewRouter()
-	rr.HandleFunc("/dashboards", e.HandleGETDashboards).Methods("GET")
+	tokenRouter := mux.NewRouter()
+	tokenRouter.HandleFunc("/dashboards", e.HandleGETDashboards).Methods("GET")
 
 	tokenServer := &http.Server{
 		Addr:    ":2345",
-		Handler: rr,
+		Handler: tokenRouter,
 	}
 	go func() {
 		tokenPortOK := false
@@ -85,16 +82,23 @@ func (e *Exporter) StartServer(ctx context.Context) error {
 				e.mu.RUnlock()
 
 				if isServed {
-					e.logger.Info("Dashboard token served successfully")
+					e.logger.Info("Dashboard token served successfully, shutting down token server")
 					tokenServer.Shutdown(context.Background())
 					return
 				}
 				time.Sleep(100 * time.Millisecond)
 			}
 		}()
-		tokenServer.ListenAndServe()
+		e.logger.Info("Starting token server on port 2345")
+		err := tokenServer.ListenAndServe()
+		if err != nil && err != http.ErrServerClosed {
+			e.logger.Error("Failed to start token server", zap.Error(err))
+		}
 	}()
 	// ==========================================================================================
+
+	metricsRouter := mux.NewRouter()
+	metricsRouter.HandleFunc("/metrics", e.metricsHandler).Methods("GET")
 
 	port := 9090
 	portOK := false
@@ -109,9 +113,9 @@ func (e *Exporter) StartServer(ctx context.Context) error {
 		listener.Close()
 	}
 
-	server := &http.Server{
+	metricsServer := &http.Server{
 		Addr:    ":" + strconv.Itoa(port),
-		Handler: r,
+		Handler: metricsRouter,
 	}
 
 	e.ltToken.URL = "http://localhost:" + strconv.Itoa(port) + "/metrics"
@@ -123,7 +127,7 @@ func (e *Exporter) StartServer(ctx context.Context) error {
 			}
 		}()
 		e.logger.Info("Metrics server starting on port", zap.Int("port", port))
-		err := server.ListenAndServe()
+		err := metricsServer.ListenAndServe()
 		if err != nil && err != http.ErrServerClosed {
 			e.logger.Error("Failed to start metrics server", zap.Error(err))
 		}
@@ -135,7 +139,7 @@ func (e *Exporter) StartServer(ctx context.Context) error {
 		// wait 1 second for the server to shutdown gracefully
 		ctxShutdown, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
-		if err := server.Shutdown(ctxShutdown); err != nil {
+		if err := metricsServer.Shutdown(ctxShutdown); err != nil {
 			e.logger.Error("Failed to shutdown metrics server", zap.Error(err))
 		}
 	}()
@@ -199,33 +203,3 @@ func (e *Exporter) HandleGETDashboards(res http.ResponseWriter, req *http.Reques
 	res.Write(tokenData)
 	e.isServed = true
 }
-
-// func (e *Exporter) ExportLoadTestToken() {
-// 	tokenURL := e.dashboardURL + "/api/load"
-
-// 	tokenData, err := json.Marshal(e.ltToken)
-// 	if err != nil {
-// 		e.logger.Error("Failed to marshal LTToken", zap.Error(err))
-// 		return
-// 	}
-
-// 	req, err := http.NewRequest("POST", tokenURL, bytes.NewBuffer(tokenData))
-// 	if err != nil {
-// 		e.logger.Error("Failed to create request for LTToken", zap.Error(err))
-// 		return
-// 	}
-// 	req.Header.Set("Content-Type", "application/json")
-
-// 	client := &http.Client{}
-// 	resp, err := client.Do(req)
-// 	if err != nil {
-// 		e.logger.Error("Failed to send LTToken to dashboard", zap.Error(err))
-// 		return
-// 	}
-// 	defer resp.Body.Close()
-
-// 	if resp.StatusCode != http.StatusCreated {
-// 		e.logger.Error("Failed to send LTToken to dashboard", zap.Int("statusCode", resp.StatusCode))
-// 		return
-// 	}
-// }

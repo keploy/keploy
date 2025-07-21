@@ -68,6 +68,8 @@ func (s *Scheduler) Run(parent context.Context, exporter *Exporter) error {
 }
 
 func (s *Scheduler) runConstant(ctx context.Context, ts *testsuite.TestSuite, exporter *Exporter) error {
+	de := NewDashboardExposer(s.config, s.logger)
+	de.Expose(ctx)
 	exporter.StartServer(ctx)
 	err := s.spawnVUGoroutines(ctx, ts, s.loadOptions.VUs, exporter)
 	if err != nil {
@@ -83,6 +85,8 @@ func (s *Scheduler) runConstant(ctx context.Context, ts *testsuite.TestSuite, ex
 }
 
 func (s *Scheduler) runRamping(ctx context.Context, ts *testsuite.TestSuite, exporter *Exporter) error {
+	de := NewDashboardExposer(s.config, s.logger)
+	de.Expose(ctx)
 	exporter.StartServer(ctx)
 	start := time.Now()
 	current := 0
