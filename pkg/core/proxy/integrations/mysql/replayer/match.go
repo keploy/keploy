@@ -269,15 +269,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					}
 				// case mysql.CommandStatusToString(mysql.COM_STMT_SEND_LONG_DATA):
 				case mysql.CommandStatusToString(mysql.COM_QUERY):
-					// minLength := min(len(reqpkt.Query), 100)
-					// logger.Info("Matching the query packet", zap.Any("time", time.Now().UnixMilli()), zap.Any("query", []byte(reqpkt.Query)[:minLength]), zap.Any("mock-name", mock.Name))
 					matchCount := matchQueryPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
-					// if matchCount > maxMatchedCount {
-					// 	logger.Info("Matched the query packet", zap.Any("time", time.Now().UnixMilli()), zap.Any("query", []byte(reqpkt.Query)[:minLength]), zap.Any("mock-name", mock.Name))
-					// 	maxMatchedCount = matchCount
-					// 	matchedResp = &mock.Spec.MySQLResponses[0]
-					// 	matchedMock = mock
-					// }
 
 					if matchCount == 3 {
 						maxMatchedCount = matchCount
