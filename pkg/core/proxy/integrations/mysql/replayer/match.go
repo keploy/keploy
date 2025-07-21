@@ -210,7 +210,6 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					return nil, false, ctx.Err()
 				}
 
-				
 				switch req.Header.Type {
 				//utiltiy commands
 				case mysql.CommandStatusToString(mysql.COM_QUIT):
