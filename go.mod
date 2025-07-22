@@ -114,7 +114,6 @@ require (
 	github.com/pelletier/go-toml v1.9.5
 	github.com/pgvector/pgvector-go v0.3.0
 	github.com/pkoukk/tiktoken-go v0.1.7
-	github.com/sashabaranov/go-openai v1.40.5
 	github.com/shirou/gopsutil/v3 v3.24.3
 	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
 	github.com/spf13/viper v1.19.0

@@ -12,34 +12,33 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/pgvector/pgvector-go"
 	pgxvector "github.com/pgvector/pgvector-go/pgx"
+	sitter "github.com/smacker/go-tree-sitter"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/service"
 	"go.uber.org/zap"
 )
 
 type EmbedService struct {
-	cfg     *config.Config
-	logger  *zap.Logger
-	auth    service.Auth
-	tel     Telemetry
-	pgConn  *pgx.Conn
-	repoMap *RepoMap
-	parser  *CodeParser
+	cfg       *config.Config
+	logger    *zap.Logger
+	auth      service.Auth
+	tel       Telemetry
+	pgConn    *pgx.Conn
+	parser    *CodeParser
+	allChunks map[string]map[int]string
+	mu        sync.Mutex
 }
 
 type ChunkJob struct {
 	FilePath string
 	ChunkID  int
 	Content  string
-}
-type SymbolJob struct {
-	FilePath string
-	Symbols  []SymbolInfo
 }
 
 type Telemetry interface {
@@ -52,7 +51,6 @@ func NewEmbedService(
 	auth service.Auth,
 	logger *zap.Logger,
 ) (*EmbedService, error) {
-	// Initialize PostgreSQL connection
 	ctx := context.Background()
 	databaseURL := cfg.Embed.DatabaseURL
 	if databaseURL == "" {
@@ -83,19 +81,19 @@ func NewEmbedService(
 	}
 
 	// Initialize the shared code parser once.
-	parser, err := NewCodeParser("go")
+	parser, err := NewCodeParser()
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize shared code parser: %w", err)
 	}
 
 	return &EmbedService{
-		cfg:     cfg,
-		logger:  logger,
-		auth:    auth,
-		tel:     tel,
-		pgConn:  conn,
-		repoMap: NewRepoMap(logger),
-		parser:  parser,
+		cfg:       cfg,
+		logger:    logger,
+		auth:      auth,
+		tel:       tel,
+		pgConn:    conn,
+		parser:    parser,
+		allChunks: make(map[string]map[int]string),
 	}, nil
 }
 
@@ -133,12 +131,62 @@ func (e *EmbedService) Start(ctx context.Context) error {
 		return err
 	}
 
-	// Save the repository map after processing is complete
-	repoMapPath := filepath.Join(e.cfg.Path, "embeddings", "repo_map.json")
-	return e.repoMap.Save(repoMapPath)
+	if err := e.writeChunksToFile(); err != nil {
+		e.logger.Error("Failed to write chunks to file", zap.Error(err))
+	}
+
+	return nil
 }
 
-func (e *EmbedService) ProcessCode(code string, fileExtension string, tokenLimit int) (map[int]string, error) {
+func (e *EmbedService) writeChunksToFile() error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current working directory: %w", err)
+	}
+	outputFile, err := os.Create(filepath.Join(cwd, "chunks.txt"))
+	if err != nil {
+		return fmt.Errorf("failed to create chunks.txt: %w", err)
+	}
+	defer outputFile.Close()
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// Sort file paths for consistent output
+	filePaths := make([]string, 0, len(e.allChunks))
+	for path := range e.allChunks {
+		filePaths = append(filePaths, path)
+	}
+	sort.Strings(filePaths)
+
+	for _, path := range filePaths {
+		chunks := e.allChunks[path]
+		if _, err := outputFile.WriteString(fmt.Sprintf("--- File: %s---\n\n", path)); err != nil {
+			return err
+		}
+
+		// Sort chunk IDs for consistent output
+		chunkIDs := make([]int, 0, len(chunks))
+		for id := range chunks {
+			chunkIDs = append(chunkIDs, id)
+		}
+		sort.Ints(chunkIDs)
+
+		for _, id := range chunkIDs {
+			content := chunks[id]
+			header := fmt.Sprintf("--- Chunk %d---\n", id)
+			separator := "------------------\n\n"
+			if _, err := outputFile.WriteString(header + content + "\n" + separator); err != nil {
+				return err
+			}
+		}
+	}
+
+	e.logger.Info("Successfully wrote generated chunks to chunks.txt")
+	return nil
+}
+
+func (e *EmbedService) ProcessCodeWithAST(rootNode *sitter.Node, code string, fileExtension string, tokenLimit int) (map[int]string, error) {
 	e.logger.Info("Processing code for chunking",
 		zap.String("fileExtension", fileExtension),
 		zap.Int("tokenLimit", tokenLimit))
@@ -147,7 +195,7 @@ func (e *EmbedService) ProcessCode(code string, fileExtension string, tokenLimit
 	chunker := NewCodeChunker(fileExtension, "cl100k_base")
 
 	// Chunk the code
-	chunks, err := chunker.Chunk(e.parser, code, tokenLimit)
+	chunks, err := chunker.Chunk(e.parser, rootNode, code, tokenLimit)
 	if err != nil {
 		e.logger.Error("Failed to chunk code", zap.Error(err))
 		return nil, fmt.Errorf("failed to chunk code: %w", err)
@@ -160,6 +208,20 @@ func (e *EmbedService) ProcessCode(code string, fileExtension string, tokenLimit
 	cleanedChunks := e.cleanChunks(chunks)
 
 	return cleanedChunks, nil
+}
+
+func (e *EmbedService) ProcessCode(code string, fileExtension string, tokenLimit int) (map[int]string, error) {
+	e.logger.Info("Processing code for chunking (interface compatibility)",
+		zap.String("fileExtension", fileExtension),
+		zap.Int("tokenLimit", tokenLimit))
+
+	rootNode, err := e.parser.ParseCode(code, fileExtension)
+	if err != nil {
+		e.logger.Warn("Failed to parse code in ProcessCode", zap.Error(err))
+		return nil, fmt.Errorf("failed to parse code: %w", err)
+	}
+
+	return e.ProcessCodeWithAST(rootNode, code, fileExtension, tokenLimit)
 }
 
 func (e *EmbedService) cleanChunks(chunks map[int]string) map[int]string {
@@ -433,19 +495,24 @@ func (e *EmbedService) processDirectoryStreaming(ctx context.Context, dirPath st
 
 			fileExt := e.getFileExtension(path)
 
-			// Extract symbols and add to the repo map using the shared parser
-			symbols, err := e.parser.ExtractSymbols(code, fileExt, path)
+			// Parse the code once to get the AST
+			rootNode, err := e.parser.ParseCode(code, fileExt)
 			if err != nil {
-				e.logger.Warn("Failed to extract symbols", zap.String("file", path), zap.Error(err))
-			} else if len(symbols) > 0 {
-				e.repoMap.AddSymbols(symbols)
+				e.logger.Warn("Failed to parse code, skipping", zap.String("file", path), zap.Error(err))
+				return nil
 			}
 
 			// Process for chunks and embeddings
-			chunks, err := e.ProcessCode(code, fileExt, e.getTokenLimit())
+			chunks, err := e.ProcessCodeWithAST(rootNode, code, fileExt, e.getTokenLimit())
 			if err != nil {
 				e.logger.Warn("Failed to process and chunk file", zap.String("file", path), zap.Error(err))
 				return nil
+			}
+
+			if len(chunks) > 0 {
+				e.mu.Lock()
+				e.allChunks[path] = chunks
+				e.mu.Unlock()
 			}
 
 			for chunkID, content := range chunks {
@@ -547,6 +614,12 @@ func (e *EmbedService) processSingleFile(_ context.Context, filePath string) err
 		return err
 	}
 
+	if len(chunks) > 0 {
+		e.mu.Lock()
+		e.allChunks[filePath] = chunks
+		e.mu.Unlock()
+	}
+
 	return e.GenerateEmbeddings(chunks, filePath)
 }
 
@@ -560,8 +633,14 @@ func (e *EmbedService) processSingleFileForChunks(filePath string) (map[int]stri
 	// Determine file extension
 	fileExt := e.getFileExtension(filePath)
 
+	// Parse the code once to get the AST
+	rootNode, err := e.parser.ParseCode(code, fileExt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse code: %w", err)
+	}
+
 	// Process the code using chunker
-	chunks, err := e.ProcessCode(code, fileExt, e.getTokenLimit())
+	chunks, err := e.ProcessCodeWithAST(rootNode, code, fileExt, e.getTokenLimit())
 	if err != nil {
 		return nil, fmt.Errorf("failed to process code: %w", err)
 	}
@@ -612,7 +691,6 @@ func (e *EmbedService) generateEmbeddingsForAllFiles(allChunks map[string]map[in
 
 func (e *EmbedService) initializeDatabase(ctx context.Context) error {
 
-	//
 	// dropCleanup := `
 	// DROP INDEX IF EXISTS code_embeddings_embedding_idx;
 	// DROP TABLE IF EXISTS code_embeddings;
@@ -683,7 +761,7 @@ func (e *EmbedService) callAIService(contents []string) ([][]float32, error) {
 		modelID = e.cfg.Embed.ModelName
 	}
 
-	url := "https://ac408babbda6.ngrok-free.app/generate_embeddings/"
+	url := "https://570cd6e79410.ngrok-free.app/generate_embeddings/"
 
 	type requestBody struct {
 		Sentences []string `json:"sentences"`
@@ -809,40 +887,10 @@ func (e *EmbedService) SearchSimilarCode(ctx context.Context, queryEmbedding []f
 }
 
 func (e *EmbedService) Close() error {
-	if e.parser != nil {
-		e.parser.Close()
-	}
 	if e.pgConn != nil {
 		return e.pgConn.Close(context.Background())
 	}
 	return nil
-}
-
-func averageEmbeddings(embeddings [][]float64) ([]float64, error) {
-	if len(embeddings) == 0 {
-		return nil, fmt.Errorf("cannot average empty list of embeddings")
-	}
-	if len(embeddings[0]) == 0 {
-		return nil, fmt.Errorf("cannot average zero-dimension embeddings")
-	}
-
-	dim := len(embeddings[0])
-	avgEmbedding := make([]float64, dim)
-
-	for _, emb := range embeddings {
-		if len(emb) != dim {
-			return nil, fmt.Errorf("cannot average embeddings of different dimensions: %d vs %d", len(emb), dim)
-		}
-		for i := 0; i < dim; i++ {
-			avgEmbedding[i] += emb[i]
-		}
-	}
-
-	for i := 0; i < dim; i++ {
-		avgEmbedding[i] /= float64(len(embeddings))
-	}
-
-	return avgEmbedding, nil
 }
 
 func convertToFloat32(embedding []float64, logger *zap.Logger, indexInBatch int) []float32 {
@@ -863,13 +911,7 @@ func convertToFloat32(embedding []float64, logger *zap.Logger, indexInBatch int)
 }
 
 func (e *EmbedService) Converse(ctx context.Context, query string) error {
-	// 1. Load the repository map
-	repoMapPath := filepath.Join(e.cfg.Path, "embeddings", "repo_map.json")
-	if err := e.repoMap.Load(repoMapPath); err != nil {
-		return fmt.Errorf("failed to load repository map, please run `keploy embed` first: %w", err)
-	}
-
-	// 2. Generate an embedding for the user's query
+	// 1. Generate an embedding for the user's query
 	e.logger.Info("Generating embedding for query", zap.String("query", query))
 	queryEmbeddings, err := e.GenerateEmbeddingsForQ([]string{query})
 	if err != nil {
@@ -880,35 +922,36 @@ func (e *EmbedService) Converse(ctx context.Context, query string) error {
 	}
 	queryEmbedding := queryEmbeddings[0]
 
-	// 3. Find similar code chunks
+	// 2. Find similar code chunks from vector DB
 	e.logger.Info("Searching for similar code chunks in the database")
 	searchResults, err := e.SearchSimilarCode(ctx, queryEmbedding, 10)
 	if err != nil {
 		return fmt.Errorf("failed to search for similar code: %w", err)
 	}
 
+	// 3. Build context from vector search results
+	var contextBuilder strings.Builder
+
 	if len(searchResults) == 0 {
-		e.logger.Warn("No similar code snippets found for the query.")
+		e.logger.Warn("No relevant code snippets or symbols found for the query.")
 		fmt.Println("I couldn't find any code snippets relevant to your question. Please try rephrasing or be more specific.")
 		return nil
 	}
 
-	// 4. Build context from search results
-	var contextBuilder strings.Builder
 	for _, res := range searchResults {
-		contextBuilder.WriteString(fmt.Sprintf("--- From file: %s ---\n", res.FilePath))
+		contextBuilder.WriteString(fmt.Sprintf("--- Code Snippet from file: %s ---\n", res.FilePath))
 		contextBuilder.WriteString(res.Content)
 		contextBuilder.WriteString("\n---\n\n")
 	}
 
-	// 5. Construct the final prompt using the new prompt builder
+	// 4. Construct the final prompt using the new prompt builder
 	promptBuilder := NewPromptBuilder(query, contextBuilder.String(), e.logger)
 	prompt, err := promptBuilder.BuildPrompt("ai_conversation")
 	if err != nil {
 		return fmt.Errorf("failed to build prompt: %w", err)
 	}
 
-	// 6. Call the LLM and stream the response
+	// 5. Call the LLM and stream the response
 	e.logger.Info("Sending request to LLM for answer generation")
 
 	aiClient, err := NewAIClient(e.cfg, e.logger, e.auth)

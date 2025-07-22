@@ -20,4 +20,21 @@ func main() {
 	adder := helpers.AdderImpl{}
 	result := DoubleAndAdd(5, 10, adder)
 	fmt.Println("The result is:", result)
+
+	// Adding many lines to exceed the 256 token limit for testing the chunker.
+	fmt.Println("This is a line to add tokens and test the chunking logic for large functions.")
+	fmt.Println("This is a line to add tokens and test the chunking logic for large functions.")
+	fmt.Println("This is a line to add tokens and test the chunking logic for large functions.")
+	fmt.Println("This is a line to add tokens and test the chunking logic for large functions.")
+	fmt.Println("This is a line to add tokens and test the chunking logic for large functions.")
+	fmt.Println("This is a line to add tokens and test the chunking logic for large functions.")
+	fmt.Println("This is a line to add tokens and test the chunking logic for large functions.")
+	fmt.Println("This is a line to add tokens and test the chunking logic for large functions.")
+	fmt.Println("This is a line to add tokens and test the chunking logic for large functions.")
+	fmt.Println("This is a line to add tokens and test the chunking logic for large functions.")
+	fmt.Println("This is a line to add tokens and test the chunking logic for large functions.")
+	fmt.Println("This is a line to add tokens and test the chunking logic for large functions.")
+	fmt.Println("This is a line to add tokens and test the chunking logic for large functions.")
+	fmt.Println("This is a line to add tokens and test the chunking logic for large functions.")
+	fmt.Println("This is a line to add tokens and test the chunking logic for large functions.")
 }
