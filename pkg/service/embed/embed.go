@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -186,11 +187,7 @@ func (e *EmbedService) writeChunksToFile() error {
 	return nil
 }
 
-func (e *EmbedService) ProcessCodeWithAST(rootNode *sitter.Node, code string, fileExtension string, tokenLimit int) (map[int]string, error) {
-	e.logger.Info("Processing code for chunking",
-		zap.String("fileExtension", fileExtension),
-		zap.Int("tokenLimit", tokenLimit))
-
+func (e *EmbedService) ProcessCodeWithAST(rootNode *sitter.Node, code string, fileExtension string, tokenLimit int, filePath string) (map[int]string, error) {
 	// Create a code chunker for the specific file extension
 	chunker := NewCodeChunker(fileExtension, "cl100k_base")
 
@@ -201,8 +198,11 @@ func (e *EmbedService) ProcessCodeWithAST(rootNode *sitter.Node, code string, fi
 		return nil, fmt.Errorf("failed to chunk code: %w", err)
 	}
 
-	e.logger.Info("Code chunking completed",
-		zap.Int("numChunks", len(chunks)))
+	logFields := []zap.Field{zap.Int("numChunks", len(chunks))}
+	if filePath != "" {
+		logFields = append(logFields, zap.String("filePath", filePath))
+	}
+	e.logger.Info("Code chunking completed", logFields...)
 
 	// Clean chunks by removing \n and \t characters
 	cleanedChunks := e.cleanChunks(chunks)
@@ -211,17 +211,13 @@ func (e *EmbedService) ProcessCodeWithAST(rootNode *sitter.Node, code string, fi
 }
 
 func (e *EmbedService) ProcessCode(code string, fileExtension string, tokenLimit int) (map[int]string, error) {
-	e.logger.Info("Processing code for chunking (interface compatibility)",
-		zap.String("fileExtension", fileExtension),
-		zap.Int("tokenLimit", tokenLimit))
-
 	rootNode, err := e.parser.ParseCode(code, fileExtension)
 	if err != nil {
 		e.logger.Warn("Failed to parse code in ProcessCode", zap.Error(err))
 		return nil, fmt.Errorf("failed to parse code: %w", err)
 	}
 
-	return e.ProcessCodeWithAST(rootNode, code, fileExtension, tokenLimit)
+	return e.ProcessCodeWithAST(rootNode, code, fileExtension, tokenLimit, "")
 }
 
 func (e *EmbedService) cleanChunks(chunks map[int]string) map[int]string {
@@ -391,144 +387,77 @@ func (e *EmbedService) shouldSkipDirectory(dirPath string) bool {
 	return skipDirs[dirName]
 }
 
-func (e *EmbedService) processDirectory(ctx context.Context, dirPath string) error {
-	e.logger.Info("Processing directory for embeddings", zap.String("directory", dirPath))
-
-	var allChunks = make(map[string]map[int]string) // filePath -> chunks
-
-	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			e.logger.Warn("Error accessing path", zap.String("path", path), zap.Error(err))
-			return nil
-		}
-
-		// Check for context cancellation
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("process cancelled by user")
-		default:
-		}
-
-		// Skip directories that should be ignored
-		if info.IsDir() {
-			if e.shouldSkipDirectory(path) {
-				e.logger.Debug("Skipping directory", zap.String("dir", path))
-				return filepath.SkipDir // This skips the entire directory
-			}
-			return nil
-		}
-
-		// Skip non-code files
-		if !e.isCodeFile(path) {
-			return nil
-		}
-
-		e.logger.Debug("Processing file", zap.String("file", path))
-
-		// Process each file
-		chunks, err := e.processSingleFileForChunks(path)
-		if err != nil {
-			e.logger.Warn("Failed to process file", zap.String("file", path), zap.Error(err))
-			return nil
-		}
-
-		if len(chunks) > 0 {
-			allChunks[path] = chunks
-		}
-
-		return nil
-	})
-
-	if err != nil {
-		return fmt.Errorf("failed to walk directory: %w", err)
-	}
-
-	// Generate embeddings for all chunks
-	return e.generateEmbeddingsForAllFiles(allChunks)
-}
-
 func (e *EmbedService) processDirectoryStreaming(ctx context.Context, dirPath string) error {
 	e.logger.Info("Processing directory for embeddings (streaming)", zap.String("directory", dirPath))
-
-	chunkChan := make(chan ChunkJob, 100)
-	errChan := make(chan error, 1)
 
 	if err := e.initializeDatabase(ctx); err != nil {
 		return fmt.Errorf("failed to initialize database: %w", err)
 	}
 
-	go func() {
-		defer close(chunkChan)
-		err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				e.logger.Warn("Error accessing path", zap.String("path", path), zap.Error(err))
-				return nil
-			}
-
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-
-			if info.IsDir() {
-				if e.shouldSkipDirectory(path) {
-					e.logger.Debug("Skipping directory", zap.String("dir", path))
-					return filepath.SkipDir
-				}
-				return nil
-			}
-
-			// Skip non-code files
-			if !e.isCodeFile(path) {
-				return nil
-			}
-
-			e.logger.Debug("Processing file for symbols and chunks", zap.String("file", path))
-
-			// Read file content once for both symbol extraction and chunking
-			code, err := e.readSourceFile(path)
-			if err != nil {
-				e.logger.Warn("Failed to read file, skipping", zap.String("file", path), zap.Error(err))
-				return nil
-			}
-
-			fileExt := e.getFileExtension(path)
-
-			// Parse the code once to get the AST
-			rootNode, err := e.parser.ParseCode(code, fileExt)
-			if err != nil {
-				e.logger.Warn("Failed to parse code, skipping", zap.String("file", path), zap.Error(err))
-				return nil
-			}
-
-			// Process for chunks and embeddings
-			chunks, err := e.ProcessCodeWithAST(rootNode, code, fileExt, e.getTokenLimit())
-			if err != nil {
-				e.logger.Warn("Failed to process and chunk file", zap.String("file", path), zap.Error(err))
-				return nil
-			}
-
-			if len(chunks) > 0 {
-				e.mu.Lock()
-				e.allChunks[path] = chunks
-				e.mu.Unlock()
-			}
-
-			for chunkID, content := range chunks {
-				select {
-				case chunkChan <- ChunkJob{FilePath: path, ChunkID: chunkID, Content: content}:
-				case <-ctx.Done():
-					return ctx.Err()
-				}
+	// 1. Collect all file paths to process.
+	var filePaths []string
+	walkErr := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			e.logger.Warn("Error accessing path, skipping", zap.String("path", path), zap.Error(err))
+			return nil // Continue walking even if one path fails.
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if info.IsDir() {
+			if e.shouldSkipDirectory(path) {
+				e.logger.Debug("Skipping directory", zap.String("dir", path))
+				return filepath.SkipDir
 			}
 			return nil
-		})
-		errChan <- err
+		}
+		if e.isCodeFile(path) {
+			filePaths = append(filePaths, path)
+		}
+		return nil
+	})
+
+	if walkErr != nil {
+		return fmt.Errorf("error walking directory to collect files: %w", walkErr)
+	}
+
+	// 2. Setup worker pool.
+	numWorkers := runtime.NumCPU()
+	jobs := make(chan string, len(filePaths))
+	chunkChan := make(chan ChunkJob, 100) // Buffered channel for chunks.
+	var wg sync.WaitGroup
+
+	// 3. Start workers.
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for path := range jobs {
+				e.processFileForChunking(path, chunkChan, ctx)
+			}
+		}()
+	}
+
+	// 4. Distribute jobs.
+	go func() {
+		for _, path := range filePaths {
+			select {
+			case jobs <- path:
+			case <-ctx.Done():
+				break
+			}
+		}
+		close(jobs)
 	}()
 
-	// Consumer goroutine to process chunks as they arrive
-	batchSize := 32 // A reasonable batch size
+	// Goroutine to close chunkChan after all workers are done.
+	go func() {
+		wg.Wait()
+		close(chunkChan)
+	}()
+
+	// 5. Consume chunks from chunkChan and process them in batches.
+	batchSize := 32
 	var chunkBatch []ChunkJob
 	chunkCount := 0
 
@@ -537,20 +466,66 @@ func (e *EmbedService) processDirectoryStreaming(ctx context.Context, dirPath st
 		if len(chunkBatch) >= batchSize {
 			e.processChunkBatch(ctx, chunkBatch)
 			chunkCount += len(chunkBatch)
-			chunkBatch = nil // Reset batch
+			chunkBatch = nil // Reset batch.
 		}
 	}
 
-	// Process any remaining chunks in the last batch
+	// Process any remaining chunks in the last batch.
 	if len(chunkBatch) > 0 {
 		e.processChunkBatch(ctx, chunkBatch)
 		chunkCount += len(chunkBatch)
 	}
 
 	e.logger.Info("Embedding generation completed (streaming)",
-		zap.Int("totalChunks", chunkCount))
+		zap.Int("totalChunks", chunkCount),
+		zap.Int("totalFiles", len(filePaths)))
 
-	return <-errChan
+	return nil
+}
+
+// processFileForChunking reads a single file, parses it, chunks it, and sends the chunks to a channel.
+func (e *EmbedService) processFileForChunking(path string, chunkChan chan<- ChunkJob, ctx context.Context) {
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+
+	e.logger.Debug("Processing file for symbols and chunks", zap.String("file", path))
+
+	code, err := e.readSourceFile(path)
+	if err != nil {
+		e.logger.Warn("Failed to read file, skipping", zap.String("file", path), zap.Error(err))
+		return
+	}
+
+	fileExt := e.getFileExtension(path)
+
+	rootNode, err := e.parser.ParseCode(code, fileExt)
+	if err != nil {
+		e.logger.Warn("Failed to parse code, skipping", zap.String("file", path), zap.Error(err))
+		return
+	}
+
+	chunks, err := e.ProcessCodeWithAST(rootNode, code, fileExt, e.getTokenLimit(), path)
+	if err != nil {
+		e.logger.Warn("Failed to process and chunk file", zap.String("file", path), zap.Error(err))
+		return
+	}
+
+	if len(chunks) > 0 {
+		e.mu.Lock()
+		e.allChunks[path] = chunks
+		e.mu.Unlock()
+	}
+
+	for chunkID, content := range chunks {
+		select {
+		case chunkChan <- ChunkJob{FilePath: path, ChunkID: chunkID, Content: content}:
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func (e *EmbedService) processChunkBatch(ctx context.Context, batch []ChunkJob) {
@@ -640,7 +615,7 @@ func (e *EmbedService) processSingleFileForChunks(filePath string) (map[int]stri
 	}
 
 	// Process the code using chunker
-	chunks, err := e.ProcessCodeWithAST(rootNode, code, fileExt, e.getTokenLimit())
+	chunks, err := e.ProcessCodeWithAST(rootNode, code, fileExt, e.getTokenLimit(), filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to process code: %w", err)
 	}
@@ -761,7 +736,7 @@ func (e *EmbedService) callAIService(contents []string) ([][]float32, error) {
 		modelID = e.cfg.Embed.ModelName
 	}
 
-	url := "https://570cd6e79410.ngrok-free.app/generate_embeddings/"
+	url := "https://4c1a297c36bc.ngrok-free.app/generate_embeddings/"
 
 	type requestBody struct {
 		Sentences []string `json:"sentences"`

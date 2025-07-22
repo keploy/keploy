@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	sitter "github.com/smacker/go-tree-sitter"
+	"github.com/pkoukk/tiktoken-go"
 )
 
 type Chunker interface {
@@ -112,7 +113,7 @@ func (cc *CodeChunker) Chunk(parser *CodeParser, rootNode *sitter.Node, code str
 				chunkNumber++
 			}
 		} else {
-			// The block is too large; split it line by line.
+			// The block is too large; split it by token count.
 			functionName := parser.ExtractSymbolName(poi.Node, []byte(code))
 			splitOversizedBlock(blockContent, tokenLimit, cc.encodingName, &chunks, &chunkNumber, functionName)
 		}
@@ -122,61 +123,43 @@ func (cc *CodeChunker) Chunk(parser *CodeParser, rootNode *sitter.Node, code str
 }
 
 // splitOversizedBlock handles the case where a single semantic block (like a function)
-// is larger than the token limit, breaking it down line by line.
+// is larger than the token limit. It splits the block into chunks based on token count.
 func splitOversizedBlock(blockContent string, tokenLimit int, encodingName string, chunks *map[int]string, chunkNumber *int, functionName string) {
-	lines := strings.Split(blockContent, "\n")
-	currentChunkLines := []string{}
-	currentTokenCount := 0
+	tke, err := tiktoken.EncodingForModel(encodingName)
+	if err != nil {
+		tke, _ = tiktoken.GetEncoding("cl100k_base")
+	}
+
+	allTokens := tke.Encode(blockContent, nil, nil)
 	partNumber := 1
 
-	for i, line := range lines {
-		lineTokenCount, err := CountTokens(line+"\n", encodingName)
-		if err != nil {
-			continue
+	for start := 0; start < len(allTokens); {
+		end := start + tokenLimit
+		if end > len(allTokens) {
+			end = len(allTokens)
 		}
 
-		// Handle single lines that are too large.
-		if lineTokenCount > tokenLimit {
-			if len(currentChunkLines) > 0 {
-				// First, save the current chunk.
-				addChunkWithHeader(chunks, chunkNumber, &partNumber, functionName, currentChunkLines, i == len(lines)-1)
-				currentChunkLines = []string{}
-				currentTokenCount = 0
-			}
-			// Then, save the oversized line as its own chunk.
-			addChunkWithHeader(chunks, chunkNumber, &partNumber, functionName, []string{line}, i == len(lines)-1)
-			continue
-		}
+		chunkTokens := allTokens[start:end]
+		chunkContentBytes := tke.Decode(chunkTokens)
+		chunkContent := string(chunkContentBytes)
 
-		if currentTokenCount+lineTokenCount > tokenLimit && len(currentChunkLines) > 0 {
-			addChunkWithHeader(chunks, chunkNumber, &partNumber, functionName, currentChunkLines, i == len(lines)-1)
-			currentChunkLines = []string{line}
-			currentTokenCount = lineTokenCount
+		isLast := end == len(allTokens)
+
+		var header string
+		if partNumber == 1 {
+			header = fmt.Sprintf("Function %s (start):\n", functionName)
+		} else if isLast {
+			header = fmt.Sprintf("Function %s (end):\n", functionName)
 		} else {
-			currentChunkLines = append(currentChunkLines, line)
-			currentTokenCount += lineTokenCount
+			header = fmt.Sprintf("Function %s (part %d):\n", functionName, partNumber)
 		}
-	}
 
-	if len(currentChunkLines) > 0 {
-		addChunkWithHeader(chunks, chunkNumber, &partNumber, functionName, currentChunkLines, true)
-	}
-}
+		(*chunks)[*chunkNumber] = header + chunkContent
+		*chunkNumber++
+		partNumber++
 
-func addChunkWithHeader(chunks *map[int]string, chunkNumber *int, partNumber *int, functionName string, lines []string, isLast bool) {
-	header := ""
-	if *partNumber == 1 {
-		header = fmt.Sprintf("Function %s (start):\n", functionName)
-	} else if isLast {
-		header = fmt.Sprintf("Function %s (end):\n", functionName)
-	} else {
-		header = fmt.Sprintf("Function %s (part %d):\n", functionName, *partNumber)
+		start = end
 	}
-
-	chunkContent := header + strings.Join(lines, "\n")
-	(*chunks)[*chunkNumber] = chunkContent
-	*chunkNumber++
-	*partNumber++
 }
 
 // GetChunk retrieves a specific chunk by its number.
