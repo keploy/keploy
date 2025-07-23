@@ -15,7 +15,6 @@ import (
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
-	proxyHttp "go.keploy.io/server/v2/pkg/core/proxy/integrations/http"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -44,44 +43,48 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 			return false
 		}
 	}
-	var bypassRules []config.BypassRule
 
-	for _, filter := range opts.Filters {
-		bypassRules = append(bypassRules, filter.BypassRule)
+	var passThrough bool
+
+	type cond struct {
+		eligible bool
+		match    bool
 	}
 
-	// Host, Path and Port matching
-	headerOpts := models.OutgoingOptions{
-		Rules:          bypassRules,
-		MongoPassword:  "",
-		SQLDelay:       0,
-		FallBackOnMiss: false,
-	}
-	passThrough := proxyHttp.IsPassThrough(logger, req, uint(dstPort), headerOpts)
-
 	for _, filter := range opts.Filters {
-		matchType := filter.MatchType
 
-		urlMethodMatch := len(filter.URLMethods) == 0
-		if len(filter.URLMethods) > 0 {
-			for _, method := range filter.URLMethods {
-				if method == req.Method {
+		//  1. bypass rule
+		bypassEligible := !(filter.BypassRule.Host == "" &&
+			filter.BypassRule.Path == "" &&
+			filter.BypassRule.Port == 0)
+
+		opts := models.OutgoingOptions{Rules: []config.BypassRule{filter.BypassRule}}
+		byPassMatch := utils.IsPassThrough(logger, req, uint(dstPort), opts)
+
+		//  2. URL-method rule
+		urlMethodEligible := len(filter.URLMethods) > 0
+		urlMethodMatch := false
+		if urlMethodEligible {
+			for _, m := range filter.URLMethods {
+				if m == req.Method {
 					urlMethodMatch = true
 					break
 				}
 			}
 		}
 
-		headerMatch := len(filter.Headers) == 0
-		if len(filter.Headers) > 0 {
-			for filterHeaderKey, filterHeaderValue := range filter.Headers {
-				regex, err := regexp.Compile(filterHeaderValue)
+		//  3. header rule
+		headerEligible := len(filter.Headers) > 0
+		headerMatch := false
+		if headerEligible {
+			for key, vals := range filter.Headers {
+				rx, err := regexp.Compile(vals)
 				if err != nil {
-					utils.LogError(logger, err, "failed to compile the header regex")
+					utils.LogError(logger, err, "bad header regex")
 					continue
 				}
-				for _, value := range req.Header.Values(filterHeaderKey) {
-					if regex.MatchString(value) {
+				for _, v := range req.Header.Values(key) {
+					if rx.MatchString(v) {
 						headerMatch = true
 						break
 					}
@@ -92,18 +95,39 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 			}
 		}
 
-		// Apply AND / OR logic
-		switch matchType {
+		conds := []cond{
+			{bypassEligible, byPassMatch},
+			{urlMethodEligible, urlMethodMatch},
+			{headerEligible, headerMatch},
+		}
+
+		switch filter.MatchType {
 		case config.AND:
-			if urlMethodMatch && headerMatch {
-				passThrough = true
+			pass := true
+			seen := false
+			for _, c := range conds {
+				if !c.eligible {
+					continue
+				} // ignore ineligible ones
+				seen = true
+				if !c.match {
+					pass = false
+					break
+				}
 			}
+			if seen && pass {
+				passThrough = true
+				return passThrough
+			}
+
 		case config.OR:
 			fallthrough
 		default:
-			// Fallback to OR logic for unknown or unspecified types
-			if urlMethodMatch || headerMatch {
-				passThrough = true
+			for _, c := range conds {
+				if c.eligible && c.match {
+					passThrough = true
+					return passThrough
+				}
 			}
 		}
 	}
