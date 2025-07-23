@@ -1,9 +1,9 @@
-name: Ollama Model Setup and PR Review
+name: GitHub Models PR Review
 
 on:
-  pull_request:
-    branches: [ main ]
-    types: [opened, synchronize, reopened]
+  pull_request: 
+    branches:
+      - dev-review-setup
   workflow_dispatch:
 
 permissions:
@@ -12,8 +12,8 @@ permissions:
   issues: write
 
 jobs:
-  ollama_workflow:
-    name: Ollama Setup, Model Download, and PR Review
+  pr_review:
+    name: AI-Powered PR Review with GitHub Models
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
 
@@ -23,139 +23,446 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install Ollama (amd64 bundle)
-        id: install_ollama
-        run: |
-          echo "--- Installing Ollama ---"
-          curl -fsSL https://ollama.com/install.sh | sh
-          echo "Ollama installation complete."
-
-      - name: Start Ollama Service, Pull Model, and Prepare for Review
-        id: setup_ollama_and_pull_model
-        run: |
-          echo "--- Starting Ollama service in background ---"
-          nohup ollama serve &> ollama_serve.log &
-          OLLAMA_PID=$!
-          echo "Ollama server PID: $OLLAMA_PID"
-
-          echo "Waiting for Ollama service to be ready..."
-          until curl http://localhost:11434/api/tags > /dev/null 2>&1; do
-            sleep 1
-          done
-          echo "Ollama service is ready at http://localhost:11434."
-
-          echo "--- Pulling qwen3:14b model ---"
-          START_TIME=$(date +%s)
-          ollama pull qwen3:14b
-          END_TIME=$(date +%s)
-          DOWNLOAD_DURATION=$((END_TIME - START_TIME))
-          echo "::notice file=ollama_pull_duration.log::Model download time: ${DOWNLOAD_DURATION} seconds"
-          echo "download_duration=${DOWNLOAD_DURATION}" >> $GITHUB_OUTPUT
-          echo "ollama_pid=$OLLAMA_PID" >> $GITHUB_OUTPUT
-        env:
-          OLLAMA_HOST: 0.0.0.0:11434
-
-      - name: Display Measured Download Duration
-        run: |
-          echo "-------------------------------------------------------------------"
-          echo "Summary of Ollama Model Operation Times:"
-          echo "Model Download Duration: ${{ steps.setup_ollama_and_pull_model.outputs.download_duration }} seconds"
-          echo "Note: Initial model load time will occur during the first inference (PR review)."
-          echo "-------------------------------------------------------------------"
-
       - name: Get PR diff
         run: |
           git fetch origin ${{ github.base_ref }}
           git diff origin/${{ github.base_ref }}...HEAD > pr_diff.txt
-
-      - name: Review PR with Ollama and Custom Prompt
-        id: review_with_ollama
-        if: github.event_name == 'pull_request'
+          
+      - name: Smart file prioritization with 6700 token limit
         run: |
-          DIFF_FILE_PATH="pr_diff.txt"
-          if [ -f "$DIFF_FILE_PATH" ] && [ -s "$DIFF_FILE_PATH" ]; then
-            PR_DIFF=$(cat "$DIFF_FILE_PATH")
-
-            CUSTOM_PROMPT="You are an expert code reviewer. Your task is to analyze the provided git diff, identify potential issues, suggest improvements, and summarize the key changes. Pay close attention to:
-            - Readability and code style adherence.
-            - Potential bugs or edge cases.
-            - Security vulnerabilities.
-            - Performance implications.
-            - Adherence to best practices.
-            - Missing tests or documentation.
-
-            Here is the git diff:
-            \`\`\`diff
-            $PR_DIFF
-            \`\`\`
-
-            Provide your review in a concise and actionable manner, using markdown formatting including code blocks where necessary. Start with a brief summary, then list specific findings and suggestions.  Output only the review comments for the code changes. Do not include your reasoning or thinking process.
-            End with a summary of the most critical issues found."
-
-            echo "--- Sending diff to Ollama for review ---"
-            echo "$CUSTOM_PROMPT" | ollama run qwen3:14b > ollama_raw_review.txt
-
-            echo "--- Ollama PR Review Result ---"
-            echo "::group::Ollama Review Output"
-            cat ollama_raw_review.txt
-            echo "::endgroup::"
+          DIFF_SIZE=$(wc -c < pr_diff.txt)
+          ESTIMATED_TOKENS=$((DIFF_SIZE / 4))
+          
+          # Token limits optimized for gpt-4.1-nano
+          MAX_DIFF_TOKENS=6700
+          SAFE_DIFF_TOKENS=6000  # Conservative buffer
+          
+          echo "Original diff size: $DIFF_SIZE bytes (~$ESTIMATED_TOKENS tokens)"
+          echo "Max allowed tokens: $MAX_DIFF_TOKENS"
+          
+          if [ $ESTIMATED_TOKENS -gt $MAX_DIFF_TOKENS ]; then
+            echo "⚠️  Diff exceeds token limits, applying smart file prioritization..."
+            
+            # Get changed files with detailed analysis
+            git diff origin/${{ github.base_ref }}...HEAD --name-only > all_changed_files.txt
+            
+            # Advanced file priority and size analysis
+            > priority_analysis.txt
+            while read -r file; do
+              if [ -n "$file" ] && [ -f "$file" ]; then
+                FILE_DIFF_SIZE=$(git diff origin/${{ github.base_ref }}...HEAD -- "$file" | wc -c)
+                FILE_TOKENS=$((FILE_DIFF_SIZE / 4))
+                
+                # Advanced priority scoring system
+                PRIORITY=5  # Default lowest priority
+                CATEGORY="Other"
+                
+                # Critical priority (1) - Core application files
+                if echo "$file" | grep -qE '\.(js|jsx|ts|tsx|py|java|go|rs|php|rb|swift|kt|scala|cs|cpp|c|h|hpp)$' && ! echo "$file" | grep -qE '(test|spec|mock)'; then
+                  PRIORITY=1
+                  CATEGORY="Core Code"
+                # High priority (2) - Configuration and security
+                elif echo "$file" | grep -qE 'package\.json|package-lock\.json|requirements\.txt|Dockerfile|docker-compose\.yml|\.env|\.env\.|config\.|\.config|\.yml$|\.yaml$|\.toml$|\.ini$|\.conf$|Makefile|CMakeLists\.txt'; then
+                  PRIORITY=2
+                  CATEGORY="Configuration"
+                # Medium-High priority (3) - Tests and critical docs
+                elif echo "$file" | grep -qE '\.(test\.|spec\.|_test\.py|test_.*\.py)$|README|CHANGELOG|LICENSE'; then
+                  PRIORITY=3
+                  CATEGORY="Tests/Docs"
+                # Medium priority (4) - Styles and medium docs
+                elif echo "$file" | grep -qE '\.(css|scss|sass|less|styl|md|rst|txt)$'; then
+                  PRIORITY=4
+                  CATEGORY="Styles/Docs"
+                fi
+                
+                echo "$PRIORITY:$FILE_TOKENS:$CATEGORY:$file" >> priority_analysis.txt
+              fi
+            done < all_changed_files.txt
+            
+            # Sort by priority (1=critical, 5=low) then by size (smaller first for better coverage)
+            sort -t: -k1,1n -k2,2n priority_analysis.txt > sorted_files.txt
+            
+            # Build focused diff with smart token management
+            echo "# Focused Code Review - Smart File Prioritization" > focused_diff.txt
+            echo "" >> focused_diff.txt
+            echo "**Analysis Strategy:** Prioritizing critical code files, configurations, and tests within token constraints." >> focused_diff.txt
+            echo "" >> focused_diff.txt
+            
+            CURRENT_TOKENS=150  # Account for headers and metadata
+            FILES_INCLUDED=0
+            declare -A CATEGORY_COUNT
+            
+            echo "## Files Included in Review:" >> focused_diff.txt
+            echo "" >> focused_diff.txt
+            
+            while IFS=':' read -r priority tokens category filepath; do
+              if [ -n "$filepath" ] && [ $((CURRENT_TOKENS + tokens)) -lt $SAFE_DIFF_TOKENS ]; then
+                echo "### $category: \`$filepath\`" >> focused_diff.txt
+                echo "**Priority:** $priority | **Estimated Impact:** $tokens tokens" >> focused_diff.txt
+                echo "" >> focused_diff.txt
+                git diff origin/${{ github.base_ref }}...HEAD -- "$filepath" >> focused_diff.txt
+                echo "" >> focused_diff.txt
+                echo "---" >> focused_diff.txt
+                echo "" >> focused_diff.txt
+                
+                CURRENT_TOKENS=$((CURRENT_TOKENS + tokens))
+                FILES_INCLUDED=$((FILES_INCLUDED + 1))
+                CATEGORY_COUNT[$category]=$((${CATEGORY_COUNT[$category]} + 1))
+                
+                echo "✓ Included $filepath [$category] ($tokens tokens, running total: $CURRENT_TOKENS)"
+              else
+                echo "✗ Skipped $filepath [$category] ($tokens tokens) - would exceed limit"
+              fi
+            done < sorted_files.txt
+            
+            # Add summary footer
+            echo "" >> focused_diff.txt
+            echo "## Review Scope Summary" >> focused_diff.txt
+            echo "| Category | Files Reviewed |" >> focused_diff.txt
+            echo "|----------|----------------|" >> focused_diff.txt
+            for category in "${!CATEGORY_COUNT[@]}"; do
+              echo "| $category | ${CATEGORY_COUNT[$category]} |" >> focused_diff.txt
+            done
+            echo "" >> focused_diff.txt
+            echo "**Total Files:** $FILES_INCLUDED | **Token Usage:** ~$CURRENT_TOKENS/$MAX_DIFF_TOKENS" >> focused_diff.txt
+            
+            mv focused_diff.txt pr_diff.txt
+            
+            NEW_SIZE=$(wc -c < pr_diff.txt)
+            NEW_TOKENS=$((NEW_SIZE / 4))
+            echo "✅ Prioritized diff: $NEW_SIZE bytes (~$NEW_TOKENS tokens)"
+            
           else
-            echo "No diff content found or diff file is empty. Skipping PR review."
-            echo "" > ollama_raw_review.txt
+            echo "✅ Diff size within limits, proceeding with full review"
           fi
-        env:
-          OLLAMA_HOST: 0.0.0.0:11434
+          
+          # Final safety check with hard limits
+          FINAL_SIZE=$(wc -c < pr_diff.txt)
+          FINAL_TOKENS=$((FINAL_SIZE / 4))
+          
+          if [ $FINAL_TOKENS -gt $SAFE_DIFF_TOKENS ]; then
+            echo "⚠️  Applying final safety truncation..."
+            # Hard limit: 5000 tokens * 4 chars/token = 20000 chars
+            head -c 20000 pr_diff.txt > truncated.txt
+            echo "" >> truncated.txt
+            echo "--- DIFF TRUNCATED: REACHED SAFE TOKEN LIMIT ---" >> truncated.txt
+            echo "**Remaining files require separate review**" >> truncated.txt
+            mv truncated.txt pr_diff.txt
+            echo "Safety truncated to: $(wc -c < pr_diff.txt) bytes"
+          fi
+          
+          # Cleanup temporary files
+          rm -f all_changed_files.txt priority_analysis.txt sorted_files.txt
 
-      - name: Remove LLM thinking process from review
+      - name: Review PR with GitHub Models (GPT-4.1-nano)
+        id: review_with_github_models
         if: github.event_name == 'pull_request'
-        run: |
-          awk '
-            BEGIN {skip=0}
-            /^Thinking\.\.\./ {skip=1; next}
-            /^\.\.\.done thinking\./ {skip=0; next}
-            skip==0 {print}
-          ' ollama_raw_review.txt > ollama_clean_review.txt
-
-      - name: Set review output as environment variable
-        id: set_review_output
-        if: github.event_name == 'pull_request'
-        run: |
-          echo "REVIEW_RESULT<<EOF" >> $GITHUB_ENV
-          cat ollama_clean_review.txt >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-
-      - name: Create PR Comment
-        uses: actions/github-script@v6
+        uses: actions/github-script@v7
         with:
           script: |
-            const reviewOutput = process.env.REVIEW_RESULT;
-            if (reviewOutput && reviewOutput.trim() !== "") {
-              github.rest.issues.createComment({
+            const fs = require('fs');
+            
+            let prDiff = '';
+            try {
+              prDiff = fs.readFileSync('pr_diff.txt', 'utf8');
+            } catch (error) {
+              console.log('No diff file found or empty diff');
+              return;
+            }
+            
+            if (!prDiff.trim()) {
+              console.log('Empty diff, skipping review');
+              return;
+            }
+
+            // Comprehensive prompt with code example requirements
+            const prompt = `You are an expert code reviewer. Analyze the provided git diff and deliver a comprehensive, professional code review following the exact structure below.
+
+            ### FORMATTING REQUIREMENTS:
+            - Use proper markdown with clear sections
+            - Include specific code snippets with language tags
+            - Provide concrete examples for improvements
+            - Use tables for structured findings like example : 
+            <details>
+              <summary>📂 Click to expand issue table</summary>
+            | Category | Issue Description | Location (File:Line) | Severity | Recommendation |
+            |----------|-------------------|----------------------|----------|----------------|
+            | Example  | Description here  | file.js:42           | High     | Specific fix   |
+            </details>
+            - Reference specific file locations
+            - Professional tone, no emojis
+
+            ### REQUIRED STRUCTURE:
+
+            ## Code Review Summary
+            Brief overview of changes and overall quality assessment.
+
+            ## Critical Issues
+            List high-priority issues requiring immediate attention with clear impact explanations.
+
+            ## Code Quality Analysis
+
+            ### Security Concerns
+            Identify security issues with code examples and explanations.
+
+            ### Performance Issues  
+            Highlight performance problems with optimization suggestions.
+
+            ### Best Practices
+            Note coding standard violations and improvement opportunities.
+
+            ## Detailed Findings
+
+            <details>
+              <summary>📂 Click to expand issue table</summary>
+
+            | Category | Issue Description | Location (File:Line) | Severity | Recommendation |
+            |----------|-------------------|----------------------|----------|----------------|
+            | Example  | Description here  | file.js:42           | High     | Specific fix   |
+
+            </details>
+
+            ## Code Examples
+
+            ### Current Implementation
+            Show problematic code snippets with explanations of why they're issues.
+
+            \`\`\`javascript
+            // Current problematic code
+            const example = "show actual code from diff";
+            \`\`\`
+
+            **Issue:** Explain what's wrong with this code.
+
+            ### Suggested Improvements
+            Present corrected versions with detailed explanations:
+
+            \`\`\`javascript  
+            // Improved version
+            const betterExample = "show how to fix it";
+            // Add validation, error handling, etc.
+            \`\`\`
+
+            **Improvement:** Explain why this is better and what benefits it provides.
+
+            ## Testing Recommendations
+            Specific test suggestions for the changes.
+
+            ## Documentation Notes
+            Documentation improvements or additions needed.
+
+            ---
+
+            Here is the diff to review:
+            \`\`\`diff
+            ${prDiff}
+            \`\`\``;
+
+            try {
+              const response = await fetch('https://models.github.ai/inference/chat/completions', {
+                method: 'POST',
+                headers: {
+                  'Authorization': `Bearer ${{ secrets.GH_PAT_MODELS }}`,
+                  'Content-Type': 'application/json',
+                  'User-Agent': 'GitHub-Actions-PR-Review/1.0'
+                },
+                body: JSON.stringify({
+                  messages: [
+                    {
+                      role: "system",
+                      content: "You are a senior software engineer conducting thorough code reviews. Provide detailed, actionable feedback with proper markdown formatting, concrete code examples, and structured recommendations. Focus on security, performance, maintainability, and best practices. Always include before/after code examples for suggested improvements."
+                    },
+                    {
+                      role: "user",
+                      content: prompt
+                    }
+                  ],
+                  model: "gpt-4.1-nano",
+                  temperature: 0.1,
+                  max_tokens: 4000
+                })
+              });
+
+              if (!response.ok) {
+                const errorText = await response.text();
+                
+                // Graceful fallback for token limits or API errors
+                if (response.status === 413 || errorText.includes('tokens_limit_reached') || errorText.includes('too large')) {
+                  console.log('Triggering graceful fallback due to size limits...');
+                  
+                  // Create comprehensive fallback review
+                  const changedFiles = prDiff.split('\n')
+                    .filter(line => line.startsWith('diff --git'))
+                    .map(line => {
+                      const match = line.match(/b\/(.+)/);
+                      return match ? match[1] : 'Unknown';
+                    })
+                    .slice(0, 15);
+
+                  const addedLines = prDiff.split('\n').filter(line => line.startsWith('+')).length;
+                  const removedLines = prDiff.split('\n').filter(line => line.startsWith('-')).length;
+                  
+                  const fallbackReview = `## AI Code Review - Large Diff Analysis
+
+            This pull request contains extensive changes that exceed optimal token limits for detailed AI analysis. However, here's a comprehensive review strategy:
+
+            ### Change Overview
+            - **Files Modified:** ${changedFiles.length}${changedFiles.length >= 15 ? '+' : ''}
+            - **Lines Added:** ~${addedLines}
+            - **Lines Removed:** ~${removedLines}
+            - **Diff Size:** ${Math.floor(prDiff.length / 1024)}KB (~${Math.floor(prDiff.length / 4)} tokens)
+
+            ### Files Requiring Manual Review
+
+            #### High Priority Files
+            ${changedFiles.filter(f => f.match(/\.(js|jsx|ts|tsx|py|java|go|rs|php|rb)$/)).map(f => `- \`${f}\` - Core application logic`).join('\n')}
+
+            #### Configuration Files  
+            ${changedFiles.filter(f => f.match(/package\.json|requirements\.txt|Dockerfile|\.env|config/)).map(f => `- \`${f}\` - System configuration`).join('\n')}
+
+            #### Other Files
+            ${changedFiles.filter(f => !f.match(/\.(js|jsx|ts|tsx|py|java|go|rs|php|rb)$/) && !f.match(/package\.json|requirements\.txt|Dockerfile|\.env|config/)).map(f => `- \`${f}\``).join('\n')}
+
+            ### Recommended Manual Review Checklist
+
+            #### 🔒 Security Review
+            - [ ] Check for hardcoded secrets, API keys, or passwords
+            - [ ] Validate input sanitization and XSS prevention  
+            - [ ] Review authentication and authorization changes
+            - [ ] Examine SQL queries for injection vulnerabilities
+            - [ ] Verify secure communication protocols
+
+            #### ⚡ Performance Review  
+            - [ ] Look for inefficient database queries or N+1 problems
+            - [ ] Check for memory leaks in loops or event handlers
+            - [ ] Review caching strategies and implementation
+            - [ ] Examine bundle size impact for frontend changes
+            - [ ] Validate algorithm complexity for data processing
+
+            #### 🧪 Testing Requirements
+            - [ ] Ensure unit tests cover new functionality
+            - [ ] Add integration tests for API changes
+            - [ ] Update end-to-end tests for UI modifications
+            - [ ] Verify edge cases and error scenarios are tested
+            - [ ] Check test coverage metrics
+
+            #### 📚 Code Quality Standards
+            - [ ] Consistent naming conventions and code style
+            - [ ] Proper error handling and logging
+            - [ ] Documentation and comments for complex logic
+            - [ ] Dependencies are necessary and up-to-date
+            - [ ] No dead code or unused imports
+
+            #### 🔄 Breaking Changes Assessment
+            - [ ] API compatibility with existing integrations
+            - [ ] Database migration safety and rollback plans
+            - [ ] Configuration changes deployment strategy
+            - [ ] Backward compatibility for public interfaces
+
+            ### Suggested Review Strategy
+
+            1. **Start with Critical Files:** Focus on core business logic and security-sensitive components
+            2. **Review in Small Chunks:** Break down the review by functional area or file type
+            3. **Use Static Analysis:** Run linters, security scanners, and code quality tools
+            4. **Test Thoroughly:** Deploy to staging environment and run comprehensive tests
+            5. **Pair Review:** Consider pair programming sessions for complex changes
+
+            ### Next Steps
+            - Consider breaking this large PR into smaller, focused pull requests
+            - Run automated security and quality scans
+            - Schedule dedicated review sessions with team members
+            - Ensure proper staging environment testing before merge
+
+            ---
+            **Review Status:** Manual review required due to diff complexity  
+            **Generated:** ${new Date().toLocaleString()}  
+            **Fallback Reason:** ${response.status === 413 ? 'Token limit exceeded' : 'API error encountered'}
+
+            > 💡 **Tip:** For better AI reviews in the future, consider smaller, more focused pull requests (< 1000 lines changed).`;
+
+                  await github.rest.issues.createComment({
+                    issue_number: context.issue.number,
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    body: fallbackReview
+                  });
+                  
+                  console.log('✅ Graceful fallback review posted successfully');
+                  return;
+                }
+                
+                throw new Error(`GitHub Models API error: ${response.status} ${response.statusText} - ${errorText}`);
+              }
+
+              const data = await response.json();
+              const reviewContent = data.choices[0].message.content;
+              
+              // Post the review content directly without metadata wrapper
+              await github.rest.issues.createComment({
                 issue_number: context.issue.number,
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                body: `## 🤖 Ollama Code Review (qwen3:14b)\n\n${reviewOutput}`
+                body: reviewContent
               });
-            } else {
-              console.log('No review content generated. Skipping PR comment.');
-            }
-        env:
-          REVIEW_RESULT: ${{ env.REVIEW_RESULT }}
-        if: always() && github.event_name == 'pull_request' && env.REVIEW_RESULT != ''
 
-      - name: Stop Ollama Service (Cleanup)
+              console.log('✅ Comprehensive PR review posted successfully');
+              
+            } catch (error) {
+              console.error('Error in GitHub Models API call:', error);
+              
+              // Enhanced error reporting
+              const errorReport = `## ❌ AI Code Review - Error Occurred
+
+            An error occurred while generating the automated code review.
+
+            ### Error Details
+            \`\`\`
+            ${error.message}
+            \`\`\`
+
+            ### Manual Review Required
+            Please proceed with manual code review using these guidelines:
+
+            #### Quick Review Checklist
+            - **Security:** Check for vulnerabilities and exposed credentials
+            - **Performance:** Look for inefficient code patterns  
+            - **Testing:** Ensure adequate test coverage
+            - **Documentation:** Verify code is properly documented
+            - **Standards:** Confirm adherence to team coding standards
+
+            #### Troubleshooting
+            - Check workflow logs for detailed error information
+            - Verify GitHub Models API token permissions
+            - Consider reducing diff size if token limits were exceeded
+
+            ---
+            **Error Time:** ${new Date().toLocaleString()}  
+            **Suggested Action:** Manual review and investigate workflow configuration`;
+
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: errorReport
+              });
+              
+              core.setFailed(`Failed to generate AI review: ${error.message}`);
+            }
+
+      - name: Display final diff statistics
         if: always()
         run: |
-          echo "--- Stopping Ollama service ---"
-          OLLAMA_PID="${{ steps.setup_ollama_and_pull_model.outputs.ollama_pid }}"
-          if [ -n "$OLLAMA_PID" ] && ps -p "$OLLAMA_PID" > /dev/null; then
-            kill "$OLLAMA_PID"
-            echo "Ollama service with PID $OLLAMA_PID stopped."
+          if [ -f pr_diff.txt ]; then
+            FINAL_SIZE=$(wc -c < pr_diff.txt)
+            FINAL_TOKENS=$((FINAL_SIZE / 4))
+            LINES=$(wc -l < pr_diff.txt)
+            
+            echo "=== FINAL DIFF STATISTICS ==="
+            echo "📊 Size: $FINAL_SIZE bytes"
+            echo "🎯 Estimated tokens: $FINAL_TOKENS"
+            echo "📝 Lines: $LINES"
+            echo "✅ Token limit compliance: $([ $FINAL_TOKENS -le 6700 ] && echo "PASSED" || echo "EXCEEDED")"
+            echo "=========================="
           else
-            echo "Ollama service not running or already stopped."
+            echo "❌ No diff file found"
           fi
-
-      - name: Show diff file
-        run: |
-          cat pr_diff.txt || echo "No diff file found"
-          echo "Diff file size: $(wc -c < pr_diff.txt)"
