@@ -38,12 +38,30 @@ type Config struct {
 	KeployNetwork         string       `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
 	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
 	Contract              Contract     `json:"contract" yaml:"contract" mapstructure:"contract"`
+	TestSuite             TestSuite    `json:"testSuite" yaml:"testSuite" mapstructure:"testSuite"`
+	Load                  LoadTest     `json:"load" yaml:"load" mapstructure:"load"`
 
 	InCi           bool   `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
 	InstallationID string `json:"-" yaml:"-" mapstructure:"-"`
 	Version        string `json:"-" yaml:"-" mapstructure:"-"`
 	APIServerURL   string `json:"-" yaml:"-" mapstructure:"-"`
 	GitHubClientID string `json:"-" yaml:"-" mapstructure:"-"`
+}
+
+type LoadTest struct {
+	TSPath   string `json:"tsPath" yaml:"tsPath" mapstructure:"tsPath"`
+	TSFile   string `json:"tsFile" yaml:"tsFile" mapstructure:"tsFile"`
+	Output   string `json:"output" yaml:"output" mapstructure:"output"`
+	VUs      int    `json:"vus" yaml:"vus" mapstructure:"vus"`
+	Duration string `json:"duration" yaml:"duration" mapstructure:"duration"`
+	RPS      int    `json:"rps" yaml:"rps" mapstructure:"rps"`
+	Insecure bool   `json:"insecure" yaml:"insecure" mapstructure:"insecure"`
+}
+
+type TestSuite struct {
+	TSPath  string `json:"tsPath" yaml:"tsPath" mapstructure:"tsPath"`
+	TSFile  string `json:"tsFile" yaml:"tsFile" mapstructure:"tsFile"`
+	BaseURL string `json:"baseUrl" yaml:"baseUrl" mapstructure:"baseUrl"`
 }
 
 type UtGen struct {
