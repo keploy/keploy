@@ -71,7 +71,9 @@ func recordOutgoing(ctx context.Context, logger *zap.Logger, clientConn, destCon
 	case <-ctx.Done():
 		// Gracefully shut down once the recorder context is cancelled.
 		go srv.GracefulStop()
-		<-srvErr
+		logger.Debug("waiting for gRPC recording proxy server to stop")
+		err := <-srvErr
+		logger.Info("gRPC recording proxy server stopped gracefully", zap.Error(err))
 		return ctx.Err()
 	case err := <-srvErr:
 		switch {
@@ -144,6 +146,11 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 		return status.Errorf(codes.Internal, "failed to connect to destination: %v", err)
 	}
 
+	if destClientConn == nil {
+		p.logger.Error("destination client connection is nil")
+		return status.Errorf(codes.Internal, "destination client connection is nil")
+	}
+
 	// 2. Forward the call to the destination
 	downstreamCtx, cancelDownstream := context.WithCancel(clientCtx)
 	defer cancelDownstream()
@@ -163,6 +170,10 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 		ClientStreams: true,
 	}, fullMethod)
 	if err != nil {
+		if downstreamCtx.Err() != nil {
+			p.logger.Warn("context cancelled before creating stream to destination", zap.Error(downstreamCtx.Err()))
+			return status.Errorf(codes.Canceled, "context cancelled before creating stream to destination: %v", downstreamCtx.Err())
+		}
 		p.logger.Error("failed to create new stream to destination", zap.Error(err))
 		return status.Errorf(codes.Internal, "failed to create stream to destination: %v", err)
 	}
@@ -180,6 +191,7 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 			reqErr = clientStream.RecvMsg(reqMsg)
 			if reqErr == io.EOF {
 				err := destStream.CloseSend()
+				p.logger.Debug("client stream closed", zap.Error(err))
 				if err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
 					p.logger.Error("failed to close send stream to destination", zap.Error(err))
 					cancelDownstream()
@@ -215,11 +227,14 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 		for {
 			respMsg := new(rawMessage)
 			respErr = destStream.RecvMsg(respMsg)
-
+			if respErr != nil {
+				p.logger.Debug("received Error from destination", zap.Error(respErr))
+			}
 			switch respErr {
 			case nil:
 				// normal message – relay it
 			case io.EOF:
+				p.logger.Debug("destination stream closed due to EOF")
 				return // clean finish
 			default:
 				// gRPC status error (business failure) is *expected*; just stop reading.
@@ -309,6 +324,10 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 	// If the server ended the call with a (business) gRPC status error,
 	// propagate that **after** recording.
 	if s, ok := status.FromError(respErr); ok && respErr != nil {
+		p.logger.Debug("received gRPC status error from destination",
+			zap.String("code", s.Code().String()),
+			zap.String("message", s.Message()))
+
 		return s.Err()
 	}
 
