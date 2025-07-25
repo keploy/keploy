@@ -344,8 +344,19 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 
 		case models.StatusCodeClass:
 			class := toString(value)
-			actualClass := fmt.Sprintf("%dxx", actualResponse.StatusCode/100)
-			if class != actualClass {
+			var classStr string
+			if len(class) == 3 {
+				// handle if class given is status code without xx, e.g. 200
+				if class[1:] != "xx" {
+					classStr = fmt.Sprintf("%cxx", class[0])
+				} else {
+					classStr = class
+				}
+			} else {
+				classStr = class
+			}
+			actualClass := fmt.Sprintf("%dxx", 200/100)
+			if classStr != actualClass {
 				pass = false
 				logger.Error("status_code_class assertion failed", zap.String("expected", class), zap.String("actual", actualClass))
 			}
