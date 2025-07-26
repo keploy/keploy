@@ -8,7 +8,6 @@ import (
 
 	"github.com/jackc/pgproto3/v2"
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
@@ -30,7 +29,11 @@ func NewFrontend() *FrontendWrapper {
 
 // PG Response Packet Transcoder
 func (b *BackendWrapper) translateToReadableBackend(msgBody []byte) (pgproto3.FrontendMessage, error) {
-	// fmt.Println("msgType", b.BackendWrapper.MsgType)
+	// Safety check for message body length
+	if len(msgBody) < 5 {
+		return nil, fmt.Errorf("message body too short: %d bytes, minimum required: 5", len(msgBody))
+	}
+
 	var msg pgproto3.FrontendMessage
 	switch b.BackendWrapper.MsgType {
 	case 'B':
@@ -76,19 +79,37 @@ func (b *BackendWrapper) translateToReadableBackend(msgBody []byte) (pgproto3.Fr
 	case 'X':
 		msg = &b.BackendWrapper.Terminate
 	default:
-		return nil, fmt.Errorf("unknown message type: %c", b.BackendWrapper.MsgType)
+		return nil, fmt.Errorf("unknown message type: %c (0x%02X)", b.BackendWrapper.MsgType, b.BackendWrapper.MsgType)
 	}
+
+	// Safely decode the message
 	err := msg.Decode(msgBody[5:])
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode message type %c: %w", b.BackendWrapper.MsgType, err)
+	}
+
 	if b.BackendWrapper.MsgType == 'P' {
 		*msg.(*pgproto3.Parse) = b.BackendWrapper.Parse
 	}
 
-	return msg, err
+	return msg, nil
 }
 
 func (f *FrontendWrapper) translateToReadableResponse(logger *zap.Logger, msgBody []byte) (pgproto3.BackendMessage, error) {
+	// Safety check for message body length
+	if len(msgBody) < 5 {
+		return nil, fmt.Errorf("response message body too short: %d bytes, minimum required: 5", len(msgBody))
+	}
+
 	f.FrontendWrapper.BodyLen = int(binary.BigEndian.Uint32(msgBody[1:])) - 4
 	f.FrontendWrapper.MsgType = msgBody[0]
+
+	// Validate body length against actual message size
+	if len(msgBody) < f.FrontendWrapper.BodyLen+5 {
+		return nil, fmt.Errorf("insufficient message body: got %d bytes, expected %d",
+			len(msgBody), f.FrontendWrapper.BodyLen+5)
+	}
+
 	var msg pgproto3.BackendMessage
 	switch f.FrontendWrapper.MsgType {
 	case '1':
@@ -126,7 +147,7 @@ func (f *FrontendWrapper) translateToReadableResponse(logger *zap.Logger, msgBod
 		var err error
 		msg, err = f.findAuthMsgType(msgBody)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to find auth message type: %w", err)
 		}
 	case 's':
 		msg = &f.FrontendWrapper.PortalSuspended
@@ -143,23 +164,29 @@ func (f *FrontendWrapper) translateToReadableResponse(logger *zap.Logger, msgBod
 	case 'Z':
 		msg = &f.FrontendWrapper.ReadyForQuery
 	default:
-		return nil, fmt.Errorf("unknown message type: %c", f.FrontendWrapper.MsgType)
+		return nil, fmt.Errorf("unknown message type: %c (0x%02X)", f.FrontendWrapper.MsgType, f.FrontendWrapper.MsgType)
 	}
 
 	logger.Debug("msgFrontend", zap.String("msgFrontend", string(msgBody)))
 
 	err := msg.Decode(msgBody[5:])
 	if err != nil {
-		utils.LogError(logger, err, "Error from decoding request message")
+		logger.Error("Error from decoding response message",
+			zap.Error(err),
+			zap.Uint8("message_type", f.FrontendWrapper.MsgType),
+			zap.Int("body_length", f.FrontendWrapper.BodyLen))
+		return nil, fmt.Errorf("failed to decode response message type %c: %w", f.FrontendWrapper.MsgType, err)
 	}
 
+	// Validate encoding consistency
 	bits := msg.Encode([]byte{})
-	// println("Length of bits", len(bits), "Length of msgBody", len(msgBody))
 	if len(bits) != len(msgBody) {
-		logger.Debug("Encoded Data doesn't match the original data ..")
+		logger.Debug("Encoded data doesn't match the original data",
+			zap.Int("encoded_length", len(bits)),
+			zap.Int("original_length", len(msgBody)))
 	}
 
-	return msg, err
+	return msg, nil
 }
 
 const (
@@ -174,53 +201,64 @@ const (
 const ProtocolVersionNumber uint32 = 196608
 
 func (b *BackendWrapper) decodeStartupMessage(buf []byte) (pgproto3.FrontendMessage, error) {
+	// Add safety check for buffer length
+	if len(buf) < 8 {
+		return nil, fmt.Errorf("startup message too short: %d bytes, minimum required: 8", len(buf))
+	}
 
 	reader := pgproto3.NewByteReader(buf)
-	buf, err := reader.Next(4)
-
+	lenBuf, err := reader.Next(4)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read message length: %w", err)
 	}
-	msgSize := int(binary.BigEndian.Uint32(buf) - 4)
+
+	msgSize := int(binary.BigEndian.Uint32(lenBuf) - 4)
 
 	if msgSize < minStartupPacketLen || msgSize > maxStartupPacketLen {
-		return nil, fmt.Errorf("invalid length of startup packet: %d", msgSize)
+		return nil, fmt.Errorf("invalid length of startup packet: %d (min: %d, max: %d)",
+			msgSize, minStartupPacketLen, maxStartupPacketLen)
 	}
 
-	buf, err = reader.Next(msgSize)
+	// Check if we have enough bytes for the message
+	if len(buf) < msgSize+4 {
+		return nil, fmt.Errorf("insufficient buffer for startup message: got %d bytes, need %d",
+			len(buf), msgSize+4)
+	}
+
+	msgBuf, err := reader.Next(msgSize)
 	if err != nil {
-		return nil, fmt.Errorf("invalid length of startup packet: %d", msgSize)
+		return nil, fmt.Errorf("failed to read startup message body: %w", err)
 	}
 
-	code := binary.BigEndian.Uint32(buf)
+	code := binary.BigEndian.Uint32(msgBuf)
 
 	switch code {
 	case ProtocolVersionNumber:
-		err := b.BackendWrapper.StartupMessage.Decode(buf)
+		err := b.BackendWrapper.StartupMessage.Decode(msgBuf)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to decode startup message: %w", err)
 		}
 		return &b.BackendWrapper.StartupMessage, nil
 	case sslRequestNumber:
-		err := b.BackendWrapper.SSlRequest.Decode(buf)
+		err := b.BackendWrapper.SSlRequest.Decode(msgBuf)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to decode SSL request: %w", err)
 		}
 		return &b.BackendWrapper.SSlRequest, nil
 	case cancelRequestCode:
-		err := b.BackendWrapper.CancelRequest.Decode(buf)
+		err := b.BackendWrapper.CancelRequest.Decode(msgBuf)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to decode cancel request: %w", err)
 		}
 		return &b.BackendWrapper.CancelRequest, nil
 	case gssEncReqNumber:
-		err := b.BackendWrapper.GssEncRequest.Decode(buf)
+		err := b.BackendWrapper.GssEncRequest.Decode(msgBuf)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to decode GSS encryption request: %w", err)
 		}
 		return &b.BackendWrapper.GssEncRequest, nil
 	default:
-		return nil, fmt.Errorf("unknown startup message code: %d", code)
+		return nil, fmt.Errorf("unknown startup message code: %d (0x%08X)", code, code)
 	}
 }
 
@@ -307,6 +345,9 @@ func parseAuthType(buffer []byte) (int32, error) {
 }
 
 func isStartupPacket(packet []byte) bool {
+	if len(packet) < 8 {
+		return false
+	}
 	protocolVersion := binary.BigEndian.Uint32(packet[4:8])
 	// printStartupPacketDetails(packet)
 	return protocolVersion == 196608 // 3.0 in PostgreSQL
