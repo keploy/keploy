@@ -227,7 +227,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 				if err != nil {
 					g.logger.Warn("failed to generate embeddings for context search", zap.Error(err))
 				} else if len(embeddings) > 0 {
-					searchResults, err := g.embedService.SearchSimilarCode(ctx, embeddings[0], 5)
+					searchResults, err := g.embedService.SearchSimilarCode(ctx, embeddings[0], 10)
 					if err != nil {
 						g.logger.Warn("failed to search for similar code", zap.Error(err))
 					} else {
@@ -592,7 +592,7 @@ func (g *UnitTestGenerator) GenerateTests(ctx context.Context, iterationCount in
 		Iteration:      iterationCount,
 		RequestPurpose: requestPurpose,
 	}
-
+	fmt.Print(aiRequest.Prompt.User)
 	response, err := g.ai.Call(ctx, CompletionParams{}, aiRequest, false)
 	if err != nil {
 		return &models.UTDetails{}, err

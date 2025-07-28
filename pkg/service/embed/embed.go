@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -40,6 +41,14 @@ type ChunkJob struct {
 	FilePath string
 	ChunkID  int
 	Content  string
+}
+
+// EmbeddingResult holds the data passed from embedding workers to the DB writer.
+type EmbeddingResult struct {
+	FilePath  string
+	ChunkID   int
+	Content   string
+	Embedding []float32
 }
 
 type Telemetry interface {
@@ -254,6 +263,7 @@ func (e *EmbedService) GenerateEmbeddings(chunks map[int]string, filePath string
 		return nil
 	}
 
+	var results []EmbeddingResult
 	// To keep order, since maps are unordered.
 	sortedChunkIDs := make([]int, 0, len(chunks))
 	for chunkID := range chunks {
@@ -304,20 +314,18 @@ func (e *EmbedService) GenerateEmbeddings(chunks map[int]string, filePath string
 		}
 
 		for j, embedding := range embeddings {
-			chunkID := validChunkIDs[j]
-			chunkContent := batchContents[j]
-			err = e.storeEmbedding(ctx, filePath, chunkID, chunkContent, embedding)
-			if err != nil {
-				e.logger.Error("Failed to store embedding",
-					zap.Int("chunkID", chunkID),
-					zap.String("filePath", filePath),
-					zap.Error(err))
-			} else {
-				e.logger.Debug("Successfully stored embedding",
-					zap.Int("chunkID", chunkID),
-					zap.String("filePath", filePath))
-			}
+			results = append(results, EmbeddingResult{
+				FilePath:  filePath,
+				ChunkID:   validChunkIDs[j],
+				Content:   batchContents[j],
+				Embedding: embedding,
+			})
 		}
+	}
+
+	if err := e.storeEmbeddingsBatch(ctx, results); err != nil {
+		e.logger.Error("Failed to store embeddings batch for file", zap.String("filePath", filePath), zap.Error(err))
+		return err
 	}
 
 	e.logger.Info("Embedding generation and storage completed successfully for file", zap.String("filePath", filePath))
@@ -421,64 +429,107 @@ func (e *EmbedService) processDirectoryStreaming(ctx context.Context, dirPath st
 		return fmt.Errorf("error walking directory to collect files: %w", walkErr)
 	}
 
-	// 2. Setup worker pool.
-	numWorkers := runtime.NumCPU()
-	jobs := make(chan string, len(filePaths))
-	chunkChan := make(chan ChunkJob, 100) // Buffered channel for chunks.
-	var wg sync.WaitGroup
+	// Pipeline setup
+	numChunkWorkers := runtime.NumCPU()
+	numEmbeddingWorkers := 4 // Configurable, mindful of API rate limits
+	chunkingJobs := make(chan string, len(filePaths))
+	chunkChan := make(chan ChunkJob, 100)
+	embeddingJobsChan := make(chan []ChunkJob, numEmbeddingWorkers)
+	dbWriteChan := make(chan EmbeddingResult, 100)
+	var chunkingWg, embeddingWg sync.WaitGroup
+	var totalChunks, totalEmbeddings, totalStored int64
 
-	// 3. Start workers.
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
+	// Stage 1: Chunking Workers
+	for i := 0; i < numChunkWorkers; i++ {
+		chunkingWg.Add(1)
 		go func() {
-			defer wg.Done()
-			for path := range jobs {
+			defer chunkingWg.Done()
+			for path := range chunkingJobs {
 				e.processFileForChunking(path, chunkChan, ctx)
 			}
 		}()
 	}
 
-	// 4. Distribute jobs.
+	// Stage 2: Chunk Batcher
 	go func() {
-		for _, path := range filePaths {
-			select {
-			case jobs <- path:
-			case <-ctx.Done():
-				break
+		const batchSize = 32
+		var batch []ChunkJob
+		for chunk := range chunkChan {
+			atomic.AddInt64(&totalChunks, 1)
+			batch = append(batch, chunk)
+			if len(batch) >= batchSize {
+				embeddingJobsChan <- batch
+				batch = nil
 			}
 		}
-		close(jobs)
-	}()
-
-	// Goroutine to close chunkChan after all workers are done.
-	go func() {
-		wg.Wait()
-		close(chunkChan)
-	}()
-
-	// 5. Consume chunks from chunkChan and process them in batches.
-	batchSize := 32
-	var chunkBatch []ChunkJob
-	chunkCount := 0
-
-	for chunk := range chunkChan {
-		chunkBatch = append(chunkBatch, chunk)
-		if len(chunkBatch) >= batchSize {
-			e.processChunkBatch(ctx, chunkBatch)
-			chunkCount += len(chunkBatch)
-			chunkBatch = nil // Reset batch.
+		if len(batch) > 0 {
+			embeddingJobsChan <- batch
 		}
+		close(embeddingJobsChan)
+	}()
+
+	// Stage 3: Embedding Workers
+	for i := 0; i < numEmbeddingWorkers; i++ {
+		embeddingWg.Add(1)
+		go func() {
+			defer embeddingWg.Done()
+			for batch := range embeddingJobsChan {
+				results, err := e.processChunkBatchForEmbeddings(batch)
+				if err != nil {
+					e.logger.Error("Failed to process chunk batch for embeddings", zap.Error(err))
+					continue
+				}
+				atomic.AddInt64(&totalEmbeddings, int64(len(results)))
+				for _, res := range results {
+					dbWriteChan <- res
+				}
+			}
+		}()
 	}
 
-	// Process any remaining chunks in the last batch.
-	if len(chunkBatch) > 0 {
-		e.processChunkBatch(ctx, chunkBatch)
-		chunkCount += len(chunkBatch)
+	// Stage 4: Database Writer
+	var dbWg sync.WaitGroup
+	dbWg.Add(1)
+	go func() {
+		defer dbWg.Done()
+		const dbBatchSize = 128
+		var dbBatch []EmbeddingResult
+		for res := range dbWriteChan {
+			dbBatch = append(dbBatch, res)
+			if len(dbBatch) >= dbBatchSize {
+				if err := e.storeEmbeddingsBatch(ctx, dbBatch); err != nil {
+					e.logger.Error("Failed to store embeddings batch", zap.Error(err))
+				}
+				atomic.AddInt64(&totalStored, int64(len(dbBatch)))
+				dbBatch = nil
+			}
+		}
+		if len(dbBatch) > 0 {
+			if err := e.storeEmbeddingsBatch(ctx, dbBatch); err != nil {
+				e.logger.Error("Failed to store remaining embeddings batch", zap.Error(err))
+			}
+			atomic.AddInt64(&totalStored, int64(len(dbBatch)))
+		}
+	}()
+
+	// Start the pipeline
+	for _, path := range filePaths {
+		chunkingJobs <- path
 	}
+	close(chunkingJobs)
+
+	// Wait for pipeline to finish
+	chunkingWg.Wait()
+	close(chunkChan)
+	embeddingWg.Wait()
+	close(dbWriteChan)
+	dbWg.Wait()
 
 	e.logger.Info("Embedding generation completed (streaming)",
-		zap.Int("totalChunks", chunkCount),
-		zap.Int("totalFiles", len(filePaths)))
+		zap.Int("totalFiles", len(filePaths)),
+		zap.Int64("totalChunksGenerated", totalChunks),
+		zap.Int64("totalEmbeddingsGenerated", totalEmbeddings),
+		zap.Int64("totalEmbeddingsStored", totalStored))
 
 	return nil
 }
@@ -528,9 +579,8 @@ func (e *EmbedService) processFileForChunking(path string, chunkChan chan<- Chun
 	}
 }
 
-func (e *EmbedService) processChunkBatch(ctx context.Context, batch []ChunkJob) {
-	e.logger.Debug("Processing chunk batch for embedding (streaming)",
-		zap.Int("batchSize", len(batch)))
+func (e *EmbedService) processChunkBatchForEmbeddings(batch []ChunkJob) ([]EmbeddingResult, error) {
+	e.logger.Debug("Processing chunk batch for embedding", zap.Int("batchSize", len(batch)))
 
 	contents := make([]string, 0, len(batch))
 	validJobs := make([]ChunkJob, 0, len(batch))
@@ -545,42 +595,29 @@ func (e *EmbedService) processChunkBatch(ctx context.Context, batch []ChunkJob) 
 	}
 
 	if len(contents) == 0 {
-		return
+		return nil, nil
 	}
 
 	embeddings, err := e.callAIService(contents)
 	if err != nil {
-		e.logger.Error("Failed to generate embeddings for batch", zap.Error(err))
-		for _, job := range validJobs {
-			e.logger.Error("Failed to generate embedding for chunk in batch",
-				zap.String("file", job.FilePath),
-				zap.Int("chunkID", job.ChunkID),
-				zap.Error(err))
-		}
-		return
+		return nil, fmt.Errorf("failed to generate embeddings for batch: %w", err)
 	}
 
 	if len(embeddings) != len(validJobs) {
-		e.logger.Error("Mismatch in number of embeddings returned for batch",
-			zap.Int("expected", len(validJobs)),
-			zap.Int("received", len(embeddings)))
-		return
+		return nil, fmt.Errorf("mismatch in number of embeddings returned for batch (expected %d, got %d)", len(validJobs), len(embeddings))
 	}
 
+	results := make([]EmbeddingResult, len(validJobs))
 	for i, embedding := range embeddings {
 		job := validJobs[i]
-		err = e.storeEmbedding(ctx, job.FilePath, job.ChunkID, job.Content, embedding)
-		if err != nil {
-			e.logger.Error("Failed to store embedding",
-				zap.String("file", job.FilePath),
-				zap.Int("chunkID", job.ChunkID),
-				zap.Error(err))
-		} else {
-			e.logger.Debug("Successfully stored embedding (streaming)",
-				zap.Int("chunkID", job.ChunkID),
-				zap.String("filePath", job.FilePath))
+		results[i] = EmbeddingResult{
+			FilePath:  job.FilePath,
+			ChunkID:   job.ChunkID,
+			Content:   job.Content,
+			Embedding: embedding,
 		}
 	}
+	return results, nil
 }
 
 func (e *EmbedService) processSingleFile(_ context.Context, filePath string) error {
@@ -623,7 +660,6 @@ func (e *EmbedService) processSingleFileForChunks(filePath string) (map[int]stri
 	return chunks, nil
 }
 
-// Also extend the supported file types
 func (e *EmbedService) isCodeFile(filePath string) bool {
 	ext := strings.ToLower(filepath.Ext(filePath))
 
@@ -636,43 +672,15 @@ func (e *EmbedService) isCodeFile(filePath string) bool {
 	return codeExtensions[ext]
 }
 
-func (e *EmbedService) generateEmbeddingsForAllFiles(allChunks map[string]map[int]string) error {
-	totalChunks := 0
-	for _, chunks := range allChunks {
-		totalChunks += len(chunks)
-	}
-
-	e.logger.Info("Generating embeddings for all files",
-		zap.Int("totalFiles", len(allChunks)),
-		zap.Int("totalChunks", totalChunks))
-
-	for filePath, chunks := range allChunks {
-		e.logger.Debug("Processing file chunks",
-			zap.String("file", filePath),
-			zap.Int("numChunks", len(chunks)))
-
-		err := e.GenerateEmbeddings(chunks, filePath)
-		if err != nil {
-			e.logger.Error("Failed to generate embeddings for file",
-				zap.String("file", filePath),
-				zap.Error(err))
-			continue
-		}
-	}
-
-	e.logger.Info("Embedding generation completed for all files")
-	return nil
-}
-
 func (e *EmbedService) initializeDatabase(ctx context.Context) error {
 
-	// dropCleanup := `
-	// DROP INDEX IF EXISTS code_embeddings_embedding_idx;
-	// DROP TABLE IF EXISTS code_embeddings;
-	// `
-	// if _, err := e.pgConn.Exec(ctx, dropCleanup); err != nil {
-	// 	e.logger.Warn("Failed to drop existing index/table", zap.Error(err))
-	// }
+	dropCleanup := `
+	DROP INDEX IF EXISTS code_embeddings_embedding_idx;
+	DROP TABLE IF EXISTS code_embeddings;
+	`
+	if _, err := e.pgConn.Exec(ctx, dropCleanup); err != nil {
+		e.logger.Warn("Failed to drop existing index/table", zap.Error(err))
+	}
 
 	// Create the vector extension if it doesn't exist.
 	_, err := e.pgConn.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS vector")
@@ -710,21 +718,27 @@ func (e *EmbedService) initializeDatabase(ctx context.Context) error {
 	return nil
 }
 
-func (e *EmbedService) storeEmbedding(ctx context.Context, filePath string, chunkID int, content string, embedding []float32) error {
-	query := `
-        INSERT INTO code_embeddings (file_path, chunk_id, content, embedding)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (file_path, chunk_id)
-        DO UPDATE SET 
-            content = EXCLUDED.content,
-            embedding = EXCLUDED.embedding,
-            created_at = NOW()
-    `
+func (e *EmbedService) storeEmbeddingsBatch(ctx context.Context, batch []EmbeddingResult) error {
+	if len(batch) == 0 {
+		return nil
+	}
 
-	vector := pgvector.NewVector(embedding)
-	_, err := e.pgConn.Exec(ctx, query, filePath, chunkID, content, vector)
+	e.logger.Debug("Storing embeddings batch", zap.Int("size", len(batch)))
+
+	source := pgx.CopyFromRows(func() [][]any {
+		rows := make([][]any, len(batch))
+		for i, res := range batch {
+			rows[i] = []any{res.FilePath, res.ChunkID, res.Content, pgvector.NewVector(res.Embedding)}
+		}
+		return rows
+	}())
+
+	columns := []string{"file_path", "chunk_id", "content", "embedding"}
+	tableName := pgx.Identifier{"code_embeddings"}
+
+	_, err := e.pgConn.CopyFrom(ctx, tableName, columns, source)
 	if err != nil {
-		return fmt.Errorf("failed to insert embedding: %w", err)
+		return fmt.Errorf("failed to perform bulk insert of embeddings: %w", err)
 	}
 
 	return nil
@@ -736,7 +750,7 @@ func (e *EmbedService) callAIService(contents []string) ([][]float32, error) {
 		modelID = e.cfg.Embed.ModelName
 	}
 
-	url := "https://4c1a297c36bc.ngrok-free.app/generate_embeddings/"
+	url := "https://57b1bf57c566.ngrok-free.app/generate_embeddings/"
 
 	type requestBody struct {
 		Sentences []string `json:"sentences"`
@@ -746,7 +760,6 @@ func (e *EmbedService) callAIService(contents []string) ([][]float32, error) {
 		return [][]float32{}, nil
 	}
 
-	// The chunker should now provide appropriately sized chunks, so we don't need to split them here.
 	reqBody := requestBody{
 		Sentences: contents,
 	}
