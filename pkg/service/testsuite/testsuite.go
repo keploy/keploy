@@ -45,6 +45,7 @@ type Security struct {
 	RuleSet           string    `yaml:"ruleset"`
 	CustomPath        string    `yaml:"custom_path,omitempty"`
 	SeverityThreshold string    `yaml:"severity_threshold"`
+	Disable           []int     `yaml:"disable,omitempty"`
 	AllowList         AllowList `yaml:"allow_list"`
 }
 

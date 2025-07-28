@@ -178,6 +178,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 
 	switch cmd.Name() {
 
+	case "sekchecker":
 	case "load":
 		cmd.Flags().String("base-url", "", "Base URL of the application to be tested.")
 		cmd.Flags().String("ts-path", "keploy/testsuite", "Directory path containing test suite YAML files.")
