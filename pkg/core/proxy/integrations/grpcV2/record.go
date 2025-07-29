@@ -17,7 +17,9 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
+	_ "google.golang.org/grpc/encoding/gzip"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
@@ -108,13 +110,26 @@ func (p *grpcRecordingProxy) getClientConn(ctx context.Context) (*grpc.ClientCon
 	defer p.ccMu.Unlock()
 
 	if p.cc != nil {
+		s := p.cc.GetState()
+		p.logger.Debug("checking gRPC client connection state",
+			zap.String("state", s.String()),
+			zap.String("connID", p.connID))
+		if s == connectivity.Shutdown {
+			_ = p.cc.Close() // ignore error
+			p.cc = nil       // force re-dial
+		}
+	}
+
+	if p.cc != nil {
 		return p.cc, nil
 	}
 
 	dialer := func(context.Context, string) (net.Conn, error) { return p.destConn, nil }
+
+	target := p.destConn.RemoteAddr().String() // or explicit host:port string
 	cc, err := grpc.DialContext(
 		ctx,
-		"",
+		target,
 		grpc.WithContextDialer(dialer),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithDefaultCallOptions(grpc.ForceCodec(passthroughCodec{})),
@@ -128,6 +143,7 @@ func (p *grpcRecordingProxy) getClientConn(ctx context.Context) (*grpc.ClientCon
 
 // handler is the core of the proxy. It receives a call, forwards it, and records the interaction.
 func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStream) error {
+	p.logger.Info("received gRPC call")
 	startTime := time.Now()
 	clientCtx := clientStream.Context()
 	fullMethod, _ := grpc.MethodFromServerStream(clientStream)
@@ -135,6 +151,7 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 	if connID == "" {
 		connID = "0" // graceful fallback
 	}
+
 	md, _ := metadata.FromIncomingContext(clientCtx)
 
 	p.logger.Info("proxying gRPC request", zap.String("method", fullMethod), zap.Any("metadata", md))
@@ -158,11 +175,13 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 	// ── Clean metadata: gRPC forbids user-supplied pseudo headers ("*:").
 	cleanMD := metadata.New(nil)
 	for k, v := range md {
+		fmt.Printf("[MD] key: %s, value: %s\n", k, v)
 		if strings.HasPrefix(k, ":") {
 			continue // strip pseudo-headers
 		}
 		cleanMD[k] = v
 	}
+
 	downstreamCtx = metadata.NewOutgoingContext(downstreamCtx, cleanMD)
 	destStream, err := destClientConn.NewStream(downstreamCtx, &grpc.StreamDesc{
 		StreamName:    fullMethod,
@@ -203,6 +222,12 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 				cancelDownstream()
 				return
 			}
+			p.logger.Debug("received message from client", zap.Int("size", len(reqMsg.data)),
+				zap.String("Msg", reqMsg.String()))
+
+			// append keploy at the end of message
+			// reqBuf.Write([]byte("keploy"))
+
 			reqBuf.Write(reqMsg.data)
 			if err := destStream.SendMsg(reqMsg); err != nil {
 				p.logger.Error("failed to send message to destination", zap.Error(err))
@@ -212,13 +237,18 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 		}
 	}()
 
+	respHeader := metadata.MD{}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		header, err := destStream.Header()
 		if err != nil {
 			p.logger.Warn("failed to get headers from destination stream", zap.Error(err))
+			respErr = err
+			return
 		}
+
+		respHeader = header
 		if err := clientStream.SendHeader(header); err != nil {
 			p.logger.Error("failed to send headers to client", zap.Error(err))
 			respErr = err
@@ -226,6 +256,9 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 		}
 		for {
 			respMsg := new(rawMessage)
+			p.logger.Debug("received message from server", zap.Int("size", len(respMsg.data)),
+				zap.String("Msg", respMsg.String()))
+
 			respErr = destStream.RecvMsg(respMsg)
 			if respErr != nil {
 				p.logger.Debug("received Error from destination", zap.Error(respErr))
@@ -269,7 +302,11 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 		Headers: p.grpcMetadataToHeaders(md, fullMethod, false),
 	}
 
-	respHeader, _ := destStream.Header()
+	p.logger.Info("[Debug] printing headers and trailer of grpc response",
+		zap.Any("headers", respHeader),
+		zap.Any("trailers", destTrailers))
+
+	// respHeader, _ := destStream.Header()
 	grpcResp := &models.GrpcResp{
 		Body:     createLengthPrefixedMessage(respBuf.Bytes()),
 		Headers:  p.grpcMetadataToHeaders(respHeader, "", true),
@@ -368,13 +405,13 @@ func (p *grpcRecordingProxy) grpcMetadataToHeaders(md metadata.MD, fullMethod st
 		}
 		hdr.OrdinaryHeaders["te"] = "trailers" // new – stable field
 	} else {
-		if _, ok := hdr.PseudoHeaders[":status"]; !ok {
-			hdr.PseudoHeaders[":status"] = "200"
-		}
-		if ct, ok := hdr.OrdinaryHeaders["content-type"]; ok &&
-			strings.HasPrefix(ct, "application/grpc") {
-			hdr.OrdinaryHeaders["content-type"] = "application/grpc"
-		}
+		// if _, ok := hdr.PseudoHeaders[":status"]; !ok {
+		// 	hdr.PseudoHeaders[":status"] = "200"
+		// }
+		// if ct, ok := hdr.OrdinaryHeaders["content-type"]; ok &&
+		// 	strings.HasPrefix(ct, "application/grpc") {
+		// 	hdr.OrdinaryHeaders["content-type"] = "application/grpc"
+		// }
 	}
 	return hdr
 }
