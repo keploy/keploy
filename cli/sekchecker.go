@@ -52,10 +52,18 @@ func SekChecker(ctx context.Context, logger *zap.Logger, cfg *config.Config, ser
 		return nil
 	}
 
-	cmd.AddCommand(AddCRCommand(cmd, logger, cfg, serviceFactory, cmdConfigurator))
-	cmd.AddCommand(RemoveCRCommand(cmd, logger, cfg, serviceFactory, cmdConfigurator))
-	cmd.AddCommand(UpdateCRCommand(cmd, logger, cfg, serviceFactory, cmdConfigurator))
-	cmd.AddCommand(ListCRsCommand(cmd, logger, cfg, serviceFactory, cmdConfigurator))
+	if addCmd := AddCRCommand(cmd, logger, cfg, serviceFactory, cmdConfigurator); addCmd != nil {
+		cmd.AddCommand(addCmd)
+	}
+	if removeCmd := RemoveCRCommand(cmd, logger, cfg, serviceFactory, cmdConfigurator); removeCmd != nil {
+		cmd.AddCommand(removeCmd)
+	}
+	if updateCmd := UpdateCRCommand(cmd, logger, cfg, serviceFactory, cmdConfigurator); updateCmd != nil {
+		cmd.AddCommand(updateCmd)
+	}
+	if listCmd := ListCRsCommand(cmd, logger, cfg, serviceFactory, cmdConfigurator); listCmd != nil {
+		cmd.AddCommand(listCmd)
+	}
 
 	return cmd
 }
