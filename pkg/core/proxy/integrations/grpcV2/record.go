@@ -114,15 +114,18 @@ func (p *grpcRecordingProxy) getClientConn(ctx context.Context) (*grpc.ClientCon
 		p.logger.Debug("checking gRPC client connection state",
 			zap.String("state", s.String()),
 			zap.String("connID", p.connID))
-		if s == connectivity.Shutdown {
+		if s != connectivity.Ready && s != connectivity.Connecting {
 			_ = p.cc.Close() // ignore error
-			p.cc = nil       // force re-dial
+			// p.cc = nil       // force re-dial
+			return nil, io.EOF
 		}
 	}
 
 	if p.cc != nil {
 		return p.cc, nil
 	}
+
+	p.logger.Debug("creating new gRPC client connection because p.cc is nil", zap.Any("p.cc", p.cc))
 
 	dialer := func(context.Context, string) (net.Conn, error) { return p.destConn, nil }
 
@@ -159,6 +162,10 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 	// 1. Obtain (or create once) the grpc.ClientConn that sits on destConn
 	destClientConn, err := p.getClientConn(clientCtx)
 	if err != nil {
+		if errors.Is(err, io.EOF) {
+			p.logger.Warn("gRPC client connection is closed, cannot forward request", zap.Error(err))
+			return io.EOF
+		}
 		p.logger.Error("failed to dial destination server", zap.Error(err))
 		return status.Errorf(codes.Internal, "failed to connect to destination: %v", err)
 	}
