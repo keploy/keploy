@@ -147,7 +147,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 			return err
 		}
 
-		respBody , err = pkg.DecodeBody(h.Logger, respParsed.Header.Get("Content-Encoding"), respBody)
+		respBody, err = pkg.DecompressBody(h.Logger, respParsed.Header.Get("Content-Encoding"), respBody)
 		if err != nil {
 			utils.LogError(h.Logger, err, "failed to decode the http response body", zap.Any("metadata", utils.GetReqMeta(req)))
 			return err

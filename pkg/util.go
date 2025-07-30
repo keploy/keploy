@@ -4,10 +4,10 @@ package pkg
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"encoding/xml"
-	"compress/gzip"
 	"fmt"
 	"io"
 	"io/fs"
@@ -234,7 +234,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		return nil, errReadRespBody
 	}
 
-	respBody, errDecodeRespBody := DecodeBody(logger, httpResp.Header.Get("Content-Encoding"), respBody)
+	respBody, errDecodeRespBody := DecompressBody(logger, httpResp.Header.Get("Content-Encoding"), respBody)
 	if errDecodeRespBody != nil {
 		utils.LogError(logger, errDecodeRespBody, "failed to decode response body")
 		return nil, errDecodeRespBody
@@ -570,7 +570,7 @@ func IsCSV(data []byte) bool {
 	return false
 }
 
-func DecodeBody(logger *zap.Logger, encoding string, body []byte) ([]byte, error) {
+func DecompressBody(logger *zap.Logger, encoding string, body []byte) ([]byte, error) {
 	switch encoding {
 	case "br":
 		logger.Debug("decoding brotli compressed response body")

@@ -201,8 +201,8 @@ func Capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 		reqBody = []byte(decodedBody)
 	}
 
-	respBody, err = pkg.DecodeBody(logger, resp.Header.Get("Content-Encoding"), respBody)
-	if err != nil {
+	respBody, errDecode := pkg.DecompressBody(logger, resp.Header.Get("Content-Encoding"), respBody)
+	if errDecode != nil {
 		return
 	}
 
