@@ -16,10 +16,9 @@ import (
 	"net/url"
 	"os"
 	"sort"
-	"sync/atomic"
-
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"text/template"
@@ -573,7 +572,7 @@ func IsCSV(data []byte) bool {
 func DecompressBody(logger *zap.Logger, encoding string, body []byte) ([]byte, error) {
 	switch encoding {
 	case "br":
-		logger.Debug("decoding brotli compressed response body")
+		logger.Debug("decompressing brotli compressed response body")
 		reader := brotli.NewReader(bytes.NewReader(body))
 		decodedBody, err := io.ReadAll(reader)
 		if err != nil {
@@ -595,6 +594,40 @@ func DecompressBody(logger *zap.Logger, encoding string, body []byte) ([]byte, e
 			return nil, err
 		}
 		return decodedBody, nil
+	}
+	return body, nil
+}
+
+func CompressBody(logger *zap.Logger, encoding string, body []byte) ([]byte, error) {
+	switch encoding {
+	case "gzip":
+		var compressedBuffer bytes.Buffer
+		gw := gzip.NewWriter(&compressedBuffer)
+		_, err := gw.Write(body)
+		if err != nil {
+			utils.LogError(logger, err, "failed to write compressed data to gzip writer")
+			return nil, err
+		}
+		err = gw.Close()
+		if err != nil {
+			utils.LogError(logger, err, "failed to close gzip writer")
+			return nil, err
+		}
+		return compressedBuffer.Bytes(), nil
+	case "br":
+		var compressedBuffer bytes.Buffer
+		bw := brotli.NewWriter(&compressedBuffer)
+		_, err := bw.Write(body)
+		if err != nil {
+			utils.LogError(logger, err, "failed to write compressed data to brotli writer")
+			return nil, err
+		}
+		err = bw.Close()
+		if err != nil {
+			utils.LogError(logger, err, "failed to close brotli writer")
+			return nil, err
+		}
+		return compressedBuffer.Bytes(), nil
 	}
 	return body, nil
 }
