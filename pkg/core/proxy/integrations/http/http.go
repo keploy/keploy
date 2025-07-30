@@ -5,7 +5,6 @@ package http
 import (
 	"bufio"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
