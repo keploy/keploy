@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Load test scripts and start MongoDB container
-source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
+source ./../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Prepare environment
 npm install
@@ -18,7 +18,7 @@ sudo $RECORD_BIN config --generate
 
 # Update the global noise to ts.
 config_file="./keploy.yml"
-sed -i 's/global: {}/global: {"body": {"page":""}}/' "$config_file"
+sed -i 's/global: {}/global: {"header": {"Etag":""}}/' "$config_file"
 
 send_request(){
     sleep 10
