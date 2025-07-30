@@ -40,7 +40,7 @@ send_request(){
     pid=$(pgrep keploy)
     echo "$pid Keploy PID" 
     echo "Killing keploy"
-    sudo kill $pid
+    sudo kill -9 $pid
 }
 
 # Record and test sessions in a loop
@@ -48,6 +48,7 @@ for i in {1..2}; do
     app_name="nodeApp_${i}"
     send_request &
     sudo -E env PATH=$PATH $RECORD_BIN record -c 'node app.js'    &> "${app_name}.txt"
+    cat "${app_name}.txt"
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"

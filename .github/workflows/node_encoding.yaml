@@ -33,7 +33,7 @@ jobs:
         with:
           src: ${{ matrix.replay_src }}
 
-      - name: Checkout samples-typescript repository
+      - name: Checkout Encoding sample repository
         uses: actions/checkout@v4
         with:
           repository: ayush3160/http-br
