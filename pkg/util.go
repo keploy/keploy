@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"io/fs"
@@ -23,6 +24,7 @@ import (
 
 	"text/template"
 
+	"github.com/andybalholm/brotli"
 	"go.keploy.io/server/v2/pkg/models"
 
 	"go.keploy.io/server/v2/utils"
@@ -230,6 +232,12 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	if errReadRespBody != nil {
 		utils.LogError(logger, errReadRespBody, "failed reading response body")
 		return nil, errReadRespBody
+	}
+
+	respBody, errDecodeRespBody := DecodeBody(logger, httpResp.Header.Get("Content-Encoding"), respBody)
+	if errDecodeRespBody != nil {
+		utils.LogError(logger, errDecodeRespBody, "failed to decode response body")
+		return nil, errDecodeRespBody
 	}
 
 	resp = &models.HTTPResp{
@@ -560,4 +568,33 @@ func IsCSV(data []byte) bool {
 		return strings.Contains(lines[0], ",")
 	}
 	return false
+}
+
+func DecodeBody(logger *zap.Logger, encoding string, body []byte) ([]byte, error) {
+	switch encoding {
+	case "br":
+		logger.Debug("decoding brotli compressed response body")
+		reader := brotli.NewReader(bytes.NewReader(body))
+		decodedBody, err := io.ReadAll(reader)
+		if err != nil {
+			utils.LogError(logger, err, "failed to read the brotli compressed response body")
+			return nil, err
+		}
+		return decodedBody, nil
+	case "gzip":
+		logger.Debug("decoding gzip compressed response body")
+		reader, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			utils.LogError(logger, err, "failed to create gzip reader")
+			return nil, err
+		}
+		defer reader.Close()
+		decodedBody, err := io.ReadAll(reader)
+		if err != nil {
+			utils.LogError(logger, err, "failed to read the gzip compressed response body")
+			return nil, err
+		}
+		return decodedBody, nil
+	}
+	return body, nil
 }

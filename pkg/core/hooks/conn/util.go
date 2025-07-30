@@ -201,6 +201,11 @@ func Capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 		reqBody = []byte(decodedBody)
 	}
 
+	respBody, err = pkg.DecodeBody(logger, resp.Header.Get("Content-Encoding"), respBody)
+	if err != nil {
+		return
+	}
+
 	t <- &models.TestCase{
 		Version: models.GetVersion(),
 		Name:    pkg.ToYamlHTTPHeader(req.Header)["Keploy-Test-Name"],

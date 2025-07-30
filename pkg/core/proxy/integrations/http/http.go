@@ -142,25 +142,18 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	var respBody []byte
 	//Checking if the body of the response is empty or does not exist.
 	if respParsed.Body != nil { // Read
-		if respParsed.Header.Get("Content-Encoding") == "gzip" {
-			check := respParsed.Body
-			ok, reader := isGZipped(check, h.Logger)
-			h.Logger.Debug("The body is gzip? " + strconv.FormatBool(ok))
-			h.Logger.Debug("", zap.Any("isGzipped", ok))
-			if ok {
-				gzipReader, err := gzip.NewReader(reader)
-				if err != nil {
-					utils.LogError(h.Logger, err, "failed to create a gzip reader", zap.Any("metadata", utils.GetReqMeta(req)))
-					return err
-				}
-				respParsed.Body = gzipReader
-			}
-		}
 		respBody, err = io.ReadAll(respParsed.Body)
 		if err != nil {
 			utils.LogError(h.Logger, err, "failed to read the the http response body", zap.Any("metadata", utils.GetReqMeta(req)))
 			return err
 		}
+
+		respBody , err = pkg.DecodeBody(h.Logger, respParsed.Header.Get("Content-Encoding"), respBody)
+		if err != nil {
+			utils.LogError(h.Logger, err, "failed to decode the http response body", zap.Any("metadata", utils.GetReqMeta(req)))
+			return err
+		}
+
 		h.Logger.Debug("This is the response body: " + string(respBody))
 		//Set the content length to the headers.
 		respParsed.Header.Set("Content-Length", strconv.Itoa(len(respBody)))
