@@ -291,7 +291,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 			continue // Proceed with the next command
 		}
 
-		o.logger.Info("Re-recorded the testcase successfully", zap.String("curl", tc.Curl), zap.Any("response", (resp)))
+		o.logger.Info("Re-recorded the testcase successfully for the given testset", zap.String("testset", testSet), zap.String("testcase", tc.Name))
 	}
 
 	if simErr {
