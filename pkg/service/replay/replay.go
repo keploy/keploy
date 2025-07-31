@@ -169,7 +169,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	case models.Python:
 		// if the executable is not starting with "python" or "python3" then skipCoverage
 		if !strings.HasPrefix(executable, "python") && !strings.HasPrefix(executable, "python3") {
-			r.logger.Warn("python command not python or python3, skipping coverage caluclation")
+			r.logger.Warn("python command not python or python3, skipping coverage calculation")
 			r.config.Test.SkipCoverage = true
 		}
 		cov = python.New(ctx, r.logger, r.reportDB, r.config.Command, executable)
