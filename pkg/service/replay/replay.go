@@ -160,11 +160,18 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 	}
 
+	r.logger.Debug("language detected", zap.String("language", r.config.Test.Language.String()), zap.String("executable", executable))
+
 	var cov coverage.Service
 	switch r.config.Test.Language {
 	case models.Go:
 		cov = golang.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.CoverageReportPath, r.config.CommandType)
 	case models.Python:
+		// if the executable is not starting with "python" or "python3" then skipCoverage
+		if !strings.HasPrefix(executable, "python") && !strings.HasPrefix(executable, "python3") {
+			r.logger.Warn("python command not python or python3, skipping coverage calculation")
+			r.config.Test.SkipCoverage = true
+		}
 		cov = python.New(ctx, r.logger, r.reportDB, r.config.Command, executable)
 	case models.Javascript:
 		cov = javascript.New(ctx, r.logger, r.reportDB, r.config.Command)

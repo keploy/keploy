@@ -41,10 +41,36 @@ func (p *Python) PreProcess(_ bool) (string, error) {
 		return p.cmd, err
 	}
 	createPyCoverageConfig(p.logger)
-	covCmd := fmt.Sprintf("%s -m coverage run", p.executable)
-	str, err := strings.Replace(p.cmd, p.executable, covCmd, 1), nil
-	p.logger.Debug("PreProcess command for Python coverage", zap.String("command", str))
-	return str, err
+
+	// Split the command into parts to handle environment variables and other prefixes
+	parts := strings.Fields(p.cmd)
+
+	// Find the index of the executable
+	executableIndex := -1
+	for i, part := range parts {
+		if part == p.executable {
+			executableIndex = i
+			break
+		}
+	}
+
+	if executableIndex == -1 {
+		// Fallback to original behavior if executable not found as separate part
+		covCmd := fmt.Sprintf("%s -m coverage run", p.executable)
+		str := strings.Replace(p.cmd, p.executable, covCmd, 1)
+		p.logger.Debug("PreProcess command for Python coverage (fallback)", zap.String("command", str))
+		return str, nil
+	}
+
+	// Insert coverage flags right after the executable
+	newParts := make([]string, 0, len(parts)+3)               // +3 for "-m", "coverage", "run"
+	newParts = append(newParts, parts[:executableIndex+1]...) // Include executable
+	newParts = append(newParts, "-m", "coverage", "run")      // Add coverage flags
+	newParts = append(newParts, parts[executableIndex+1:]...) // Add remaining parts
+
+	str := strings.Join(newParts, " ")
+	p.logger.Debug("PreProcess command for Python coverage", zap.String("command", str), zap.String("executable", p.executable))
+	return str, nil
 }
 
 type pyCoverageFile struct {

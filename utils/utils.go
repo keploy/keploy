@@ -1013,22 +1013,44 @@ func DetectLanguage(logger *zap.Logger, cmd string) (config.Language, string) {
 		return models.Unknown, ""
 	}
 	fields := strings.Fields(cmd)
-	executable := fields[0]
-	if strings.HasPrefix(cmd, "python") {
+
+	// Find the actual executable by skipping environment variable assignments
+	executable := ""
+	for _, field := range fields {
+		// Skip environment variable assignments (KEY=VALUE format)
+		if strings.Contains(field, "=") && !strings.HasPrefix(field, "/") {
+			continue
+		}
+		// This is the actual executable
+		executable = field
+		break
+	}
+
+	if executable == "" {
+		return models.Unknown, ""
+	}
+
+	// Check for Python
+	pythonRegex := regexp.MustCompile(`(?i)(^|.*/)(python(\d+(\.\d+)*)?)$`)
+	if pythonRegex.MatchString(executable) {
 		return models.Python, executable
 	}
 
+	// Check for Node.js
 	if executable == "node" || executable == "npm" || executable == "yarn" {
 		return models.Javascript, executable
 	}
 
+	// Check for Java
 	if executable == "java" {
 		return models.Java, executable
 	}
 
-	if executable == "go" || (len(fields) == 1 && isGoBinary(logger, executable)) {
+	// Check for Go
+	if executable == "go" || (isGoBinary(logger, executable)) {
 		return models.Go, executable
 	}
+
 	return models.Unknown, executable
 }
 
