@@ -12,6 +12,13 @@ if [ -f "./keploy.yml" ]; then
     rm ./keploy.yml
 fi
 
+echo "Record Bin: $RECORD_BIN"
+echo "Record Version:"
+sudo $RECORD_BIN --version
+echo "Replay Bin: $REPLAY_BIN"
+echo "Replay Version:"
+sudo $REPLAY_BIN --version
+
 # Generate the keploy-config file.
 sudo $RECORD_BIN config --generate
 
