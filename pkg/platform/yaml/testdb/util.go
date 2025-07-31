@@ -68,11 +68,12 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 			// need to check here for type here as well as push in other custom assertions
 			Assertions: func() map[models.AssertionType]interface{} {
 				a := map[models.AssertionType]interface{}{}
-				if len(noise) > 0 {
-					a[models.NoiseAssertion] = noise
-				}
 				for k, v := range tc.Assertions {
 					a[k] = v
+				}
+
+				if len(noise) > 0 {
+					a[models.NoiseAssertion] = noise
 				}
 
 				// Optionally add other custom assertions if needed here
