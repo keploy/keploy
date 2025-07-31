@@ -153,6 +153,7 @@ func Match(mock, test models.OpenAPI, testSetID string, mockSetID string, logger
 		if testItem, found := test.Paths[path]; found {
 			mockOperation, mockOperationType := matcher.FindOperation(mockItem)
 			testOperation, testOperationType := matcher.FindOperation(testItem)
+
 			if mode == models.IdentifyMode {
 				if pass, err = compareOperationTypes(mockOperationType, testOperationType); err != nil {
 					return candidateScore, false, err
@@ -193,9 +194,130 @@ func Match(mock, test models.OpenAPI, testSetID string, mockSetID string, logger
 
 	return candidateScore, pass, nil
 }
+
+// MatchWithEnhancedChecks is used for proxy mode consumer-driven contract testing
+// It includes enhanced nil checks to handle OpenAPI schemas generated from reverse proxy mocks
+func MatchWithEnhancedChecks(mock, test models.OpenAPI, testSetID string, mockSetID string, logger *zap.Logger, mode models.SchemaMatchMode) (float64, bool, error) {
+	pass := false
+
+	candidateScore := -1.0
+	newLogger := pp.New()
+	newLogger.WithLineInfo = false
+	newLogger.SetColorScheme(models.GetFailingColorScheme())
+
+	for path, mockItem := range mock.Paths {
+		logDiffs := matcher.NewDiffsPrinter(test.Info.Title + "/" + mock.Info.Title)
+		var err error
+		if testItem, found := test.Paths[path]; found {
+			mockOperation, mockOperationType := matcher.FindOperation(mockItem)
+			testOperation, testOperationType := matcher.FindOperation(testItem)
+
+			// Add nil checks to prevent panic - ENHANCED FOR PROXY MODE
+			if mockOperation == nil {
+				utils.LogError(logger, fmt.Errorf("mockOperation is nil for path %s", path), "Failed to find operation in mock")
+				continue
+			}
+			if testOperation == nil {
+				utils.LogError(logger, fmt.Errorf("testOperation is nil for path %s", path), "Failed to find operation in test")
+				continue
+			}
+
+			if mode == models.IdentifyMode {
+				if pass, err = compareOperationTypes(mockOperationType, testOperationType); err != nil {
+					return candidateScore, false, err
+				}
+				if !pass {
+					continue
+				}
+				if pass, err = compareParameters(mockOperation.Parameters, testOperation.Parameters); err != nil {
+					return candidateScore, false, err
+				}
+				if !pass {
+					continue
+				}
+				if pass, err = compareRequestBodies(mockOperation, testOperation, logDiffs, newLogger, logger, test.Info.Title, mock.Info.Title, testSetID, mockSetID); err != nil {
+					return candidateScore, false, err
+				}
+				if !pass {
+					continue
+				}
+			}
+			var statusCode string
+			for status := range mockOperation.Responses {
+				statusCode = status
+				break
+
+			}
+
+			// Add nil check for empty statusCode - ENHANCED FOR PROXY MODE
+			if statusCode == "" {
+				utils.LogError(logger, fmt.Errorf("no responses found in mockOperation for path %s", path), "Failed to find status code")
+				continue
+			}
+
+			if candidateScore, pass, _, err = compareResponseBodies(statusCode, mockOperation, testOperation, logDiffs, newLogger, logger, test.Info.Title, mock.Info.Title, testSetID, mockSetID, mode); err != nil {
+				return candidateScore, false, err
+			}
+
+		} else {
+			pass = false
+
+		}
+
+	}
+
+	return candidateScore, pass, nil
+}
+
 func calculateSimilarityScore(mockOperation, testOperation *models.Operation, status string) (float64, error) {
-	testParameters := testOperation.Responses[status].Content["application/json"].Schema.Properties
-	mockParameters := mockOperation.Responses[status].Content["application/json"].Schema.Properties
+	// Add nil checks to prevent panic
+	if testOperation == nil || testOperation.Responses == nil {
+		return 0.0, fmt.Errorf("testOperation or testOperation.Responses is nil")
+	}
+
+	testResponse, ok := testOperation.Responses[status]
+	if !ok {
+		return 0.0, fmt.Errorf("testOperation.Responses[%s] doesn't exist", status)
+	}
+
+	if testResponse.Content == nil {
+		return 0.0, fmt.Errorf("testResponse.Content is nil")
+	}
+
+	testContent, ok := testResponse.Content["application/json"]
+	if !ok {
+		return 0.0, fmt.Errorf("testResponse.Content[\"application/json\"] doesn't exist")
+	}
+
+	testParameters := testContent.Schema.Properties
+	if testParameters == nil {
+		return 0.0, fmt.Errorf("testContent.Schema.Properties is nil")
+	}
+
+	// Similar checks for mock operation
+	if mockOperation == nil || mockOperation.Responses == nil {
+		return 0.0, fmt.Errorf("mockOperation or mockOperation.Responses is nil")
+	}
+
+	mockResponse, ok := mockOperation.Responses[status]
+	if !ok {
+		return 0.0, fmt.Errorf("mockOperation.Responses[%s] doesn't exist", status)
+	}
+
+	if mockResponse.Content == nil {
+		return 0.0, fmt.Errorf("mockResponse.Content is nil")
+	}
+
+	mockContent, ok := mockResponse.Content["application/json"]
+	if !ok {
+		return 0.0, fmt.Errorf("mockResponse.Content[\"application/json\"] doesn't exist")
+	}
+
+	mockParameters := mockContent.Schema.Properties
+	if mockParameters == nil {
+		return 0.0, fmt.Errorf("mockContent.Schema.Properties is nil")
+	}
+
 	score := 0.0
 	for key, testParam := range testParameters {
 		if _, ok := mockParameters[key]; ok {
