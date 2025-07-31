@@ -31,16 +31,16 @@ send_request(){
     done
     echo "App started"
     # Start making curl calls to record the testcases and mocks.
-    curl -H "Accept-Encoding: br" -i http://localhost:3000/
-    curl -H "Accept-Encoding: gzip" -i http://localhost:3000/
-    curl -H "Accept-Encoding: br" -i http://localhost:3000/proxy
-    curl -H "Accept-Encoding: gzip" -i http://localhost:3000/proxy 
+    curl -v -H "Accept-Encoding: br" -i http://localhost:3000/ --output -
+    curl -v -H "Accept-Encoding: gzip" -i http://localhost:3000/ --output -
+    curl -v -H "Accept-Encoding: br" -i http://localhost:3000/proxy --output -
+    curl -v -H "Accept-Encoding: gzip" -i http://localhost:3000/proxy --output -
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
     pid=$(pgrep keploy)
     echo "$pid Keploy PID" 
     echo "Killing keploy"
-    sudo kill -9 $pid
+    sudo kill $pid
 }
 
 # Record and test sessions in a loop
