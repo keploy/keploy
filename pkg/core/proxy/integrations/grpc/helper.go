@@ -77,7 +77,7 @@ func createLengthPrefixedMessage(data []byte) models.GrpcLengthPrefixedMessage {
 // the .proto file.  It is good enough for inspection & matching.
 func prettyPrintWire(b []byte, indent int) string {
 	var buf bytes.Buffer
-	indentPrefix := strings.Repeat("  ", indent)
+	indentPrefix := strings.Repeat(" ", indent)
 	writeIndent := func() { buf.WriteString(indentPrefix) }
 
 	for len(b) > 0 {
@@ -93,20 +93,40 @@ func prettyPrintWire(b []byte, indent int) string {
 		switch wt {
 		case protowire.VarintType:
 			v, m := protowire.ConsumeVarint(b)
+			if m < 0 {
+				buf.WriteString(hex.EncodeToString(b) + "\n")
+				b = nil
+				continue
+			}
 			b = b[m:]
 			buf.WriteString(fmt.Sprintf("%d\n", v))
 		case protowire.Fixed32Type:
 			v, m := protowire.ConsumeFixed32(b)
+			if m < 0 {
+				buf.WriteString(hex.EncodeToString(b) + "\n")
+				b = nil
+				continue
+			}
 			b = b[m:]
 			buf.WriteString(fmt.Sprintf("%d\n", v))
 		case protowire.Fixed64Type:
 			v, m := protowire.ConsumeFixed64(b)
+			if m < 0 {
+				buf.WriteString(hex.EncodeToString(b) + "\n")
+				b = nil
+				continue
+			}
 			b = b[m:]
 			buf.WriteString(fmt.Sprintf("%d\n", v))
 		case protowire.BytesType:
 			v, m := protowire.ConsumeBytes(b)
+			if m < 0 {
+				buf.WriteString(hex.EncodeToString(b) + "\n")
+				b = nil
+				continue
+			}
 			b = b[m:]
-			// render printable ASCII as   1: "foo"
+			// render printable ASCII as 1: "foo"
 			// (no extra braces that confuse the round-trip parser)
 			if isPrintableASCII(v) {
 				buf.WriteString(fmt.Sprintf("%q\n", string(v))) // -> "foo"
