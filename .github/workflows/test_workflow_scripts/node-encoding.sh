@@ -25,17 +25,17 @@ send_request(){
     sleep 10
     app_started=false
     while [ "$app_started" = false ]; do
-        if curl -X GET http://localhost:3000/; then
+        if curl http://localhost:3000/; then
             app_started=true
         fi
         sleep 3 # wait for 3 seconds before checking again.
     done
     echo "App started"
     # Start making curl calls to record the testcases and mocks.
-    curl -X GET -v -H "Accept-Encoding: br" -i http://localhost:3000/ --output -
-    curl -X GET -v -H "Accept-Encoding: gzip" -i http://localhost:3000/ --output -
-    curl -X GET -v -H "Accept-Encoding: br" -i http://localhost:3000/proxy --output -
-    curl -X GET -v -H "Accept-Encoding: gzip" -i http://localhost:3000/proxy --output -
+    curl -v -H "Accept-Encoding: br" -i http://localhost:3000/ --output -
+    curl -v -H "Accept-Encoding: gzip" -i http://localhost:3000/ --output -
+    curl -v -H "Accept-Encoding: br" -i http://localhost:3000/proxy --output -
+    curl -v -H "Accept-Encoding: gzip" -i http://localhost:3000/proxy --output -
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
     echo "Killing node server.js"
@@ -70,7 +70,7 @@ done
 
 # Test modes and result checking
 sudo -E env PATH=$PATH $REPLAY_BIN test -c 'node app.js' --delay 10    &> test_logs1.txt
-
+cat test_logs1.txt
 if grep "ERROR" "test_logs1.txt"; then
     echo "Error found in pipeline..."
     cat "test_logs1.txt"
@@ -82,7 +82,8 @@ if grep "WARNING: DATA RACE" "test_logs1.txt"; then
     exit 1
 fi
 
-sudo -E env PATH=$PATH $REPLAY_BIN test -c 'npm start' --delay 10 --testsets test-set-0    &> test_logs2.txt
+sudo -E env PATH=$PATH $REPLAY_BIN test -c 'node app.js' --delay 10 --testsets test-set-0    &> test_logs2.txt
+cat test_logs2.txt
 if grep "ERROR" "test_logs2.txt"; then
     echo "Error found in pipeline..."
     cat "test_logs2.txt"
@@ -95,6 +96,7 @@ if grep "WARNING: DATA RACE" "test_logs2.txt"; then
 fi
 
 sudo -E env PATH=$PATH $REPLAY_BIN test -c 'node app.js' --apiTimeout 30 --delay 10    &> test_logs3.txt
+cat test_logs3.txt
 if grep "ERROR" "test_logs3.txt"; then
     echo "Error found in pipeline..."
     cat "test_logs3.txt"
