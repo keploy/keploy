@@ -1,0 +1,48 @@
+name: Node Encoding Workflow
+description: "Run the Node Encoding Sample application with Keploy"
+on:
+  workflow_call:
+jobs:
+  node_encoding:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_latest
+            record_src: build
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: ${{ matrix.job }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.replay_src }}
+
+      - name: Checkout Encoding sample repository
+        uses: actions/checkout@v4
+        with:
+          repository: ayush3160/http-br
+          path: http-br
+
+      - name: Run the Encoding Sample application
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          cd http-br
+          source ./../.github/workflows/test_workflow_scripts/node-encoding.sh

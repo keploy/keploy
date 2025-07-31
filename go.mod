@@ -102,6 +102,7 @@ require (
 	facette.io/natsort v0.0.0-20181210072756-2cd4dd1e2dcb
 	github.com/7sDream/geko v0.1.1
 	github.com/agnivade/levenshtein v1.1.1
+	github.com/andybalholm/brotli v1.2.0
 	github.com/charmbracelet/glamour v0.6.0
 	github.com/denisbrodbeck/machineid v1.0.1
 	github.com/emirpasic/gods v1.18.1

@@ -69,3 +69,6 @@ jobs:
   run_python_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/python_linux.yml
+  run_node_encoding:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/node_encoding.yaml

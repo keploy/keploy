@@ -6,7 +6,6 @@ package http
 import (
 	"bufio"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -99,6 +98,15 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				raw:    reqBuf,
 			}
 
+			if input.header.Get("Content-Encoding") != "" {
+				input.body, err = pkg.Decompress(h.Logger, input.header.Get("Content-Encoding"), input.body)
+				if err != nil {
+					utils.LogError(h.Logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(request)))
+					errCh <- err
+					return
+				}
+			}
+
 			ok, stub, err := h.match(ctx, input, mockDb) // calling match function to match mocks
 			if err != nil {
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
@@ -138,28 +146,18 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// Fetching the response headers
 			header := pkg.ToHTTPHeader(stub.Spec.HTTPResp.Header)
 
-			//Check if the gzip encoding is present in the header
-			if header["Content-Encoding"] != nil && header["Content-Encoding"][0] == "gzip" {
-				var compressedBuffer bytes.Buffer
-				gw := gzip.NewWriter(&compressedBuffer)
-				_, err := gw.Write([]byte(body))
+			//Check if the content encoding is present in the header
+			if encoding, ok := header["Content-Encoding"]; ok && len(encoding) > 0 {
+				compressedBody, err := pkg.Compress(h.Logger, encoding[0], []byte(body))
 				if err != nil {
 					utils.LogError(h.Logger, err, "failed to compress the response body", zap.Any("metadata", utils.GetReqMeta(request)))
 					errCh <- err
 					return
 				}
-				err = gw.Close()
-				if err != nil {
-					utils.LogError(h.Logger, err, "failed to close the gzip writer", zap.Any("metadata", utils.GetReqMeta(request)))
-					errCh <- err
-					return
-				}
-				h.Logger.Debug("the length of the response body: " + strconv.Itoa(len(compressedBuffer.String())))
-				respBody = compressedBuffer.String()
-				// responseString = statusLine + headers + "\r\n" + compressedBuffer.String()
+				h.Logger.Debug("the length of the response body: " + strconv.Itoa(len(compressedBody)))
+				respBody = string(compressedBody)
 			} else {
 				respBody = body
-				// responseString = statusLine + headers + "\r\n" + body
 			}
 
 			var headers string
