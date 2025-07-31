@@ -6,11 +6,13 @@ import (
 
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/golang"
+	"github.com/smacker/go-tree-sitter/javascript"
+	"github.com/smacker/go-tree-sitter/python"
 )
 
 var languageExtensionMap = map[string]string{
-	// "py": "python",
-	// "js": "javascript",
+	"py": "python",
+	"js": "javascript",
 	"go": "go",
 }
 
@@ -30,13 +32,15 @@ func NewCodeParser() (*CodeParser, error) {
 		languages: make(map[string]*sitter.Language),
 	}
 	cp.languages["go"] = golang.GetLanguage()
+	cp.languages["python"] = python.GetLanguage()
+	cp.languages["javascript"] = javascript.GetLanguage()
 	return cp, nil
 }
 
 func (cp *CodeParser) ParseCode(code string, fileExtension string) (*sitter.Node, error) {
 	languageName, ok := languageExtensionMap[fileExtension]
 	if !ok {
-		return nil, fmt.Errorf("unsupported file type: %s. Supported extensions: go", fileExtension)
+		return nil, fmt.Errorf("unsupported file type: %s. Supported extensions: go, py, js", fileExtension)
 	}
 
 	lang, ok := cp.languages[languageName]
@@ -57,32 +61,23 @@ func (cp *CodeParser) ParseCode(code string, fileExtension string) (*sitter.Node
 	return tree.RootNode(), nil
 }
 
-var nodeTypesOfInterestData = map[string]map[string]string{
-	"py": {
-		"import_statement":      "Import",
-		"import_from_statement": "Import",
-		"class_definition":      "Class",
-		"function_definition":   "Function",
-	},
-	"js": {
-		"import_statement":     "Import",
-		"export_statement":     "Export",
-		"class_declaration":    "Class",
-		"function_declaration": "Function",
-		"arrow_function":       "Arrow Function",
-	},
-	"go": {
-		"function_declaration": "Function",
-		"method_declaration":   "Method",
-	},
-}
 
-func (cp *CodeParser) getNodeTypesOfInterest(fileExtension string) (map[string]string, error) {
-	types, ok := nodeTypesOfInterestData[fileExtension]
-	if !ok {
-		return nil, fmt.Errorf("unsupported file type for points of interest: %s. Supported: py, js, go", fileExtension)
-	}
-	return types, nil
+
+var queries = map[string]string{
+	"go": `
+		(function_declaration) @func
+		(method_declaration) @func
+	`,
+	"python": `
+		(function_definition) @func
+		(class_definition) @class
+	`,
+	"javascript": `
+		(function_declaration) @func
+		(arrow_function) @func
+		(method_definition) @func
+		(class_declaration) @class
+	`,
 }
 
 // ExtractPointsOfInterest to find all function and method declarations.
@@ -92,14 +87,14 @@ func (cp *CodeParser) ExtractPointsOfInterest(rootNode *sitter.Node, fileExtensi
 		return nil, fmt.Errorf("language not supported for query: %s", fileExtension)
 	}
 
-	// Query for functions and methods
-	queryStr := `
-    (function_declaration) @func
-    (method_declaration) @func`
+	queryStr, ok := queries[languageExtensionMap[fileExtension]]
+	if !ok {
+		return nil, fmt.Errorf("no query found for language: %s", languageExtensionMap[fileExtension])
+	}
 
 	q, err := sitter.NewQuery([]byte(queryStr), lang)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create query: %w", err)
+		return nil, fmt.Errorf("failed to create query for %s: %w", fileExtension, err)
 	}
 
 	qc := sitter.NewQueryCursor()
@@ -112,9 +107,21 @@ func (cp *CodeParser) ExtractPointsOfInterest(rootNode *sitter.Node, fileExtensi
 			break
 		}
 		for _, c := range m.Captures {
-			label := "Function"
-			if c.Node.Type() == "method_declaration" {
-				label = "Method"
+			var label string
+			captureName := q.CaptureNameForId(c.Index)
+			switch captureName {
+			case "func":
+				// For Go, we need to differentiate between a function and a method.
+				if fileExtension == "go" && c.Node.Type() == "method_declaration" {
+					label = "Method"
+				} else {
+					label = "Function"
+				}
+			case "class":
+				label = "Class"
+			default:
+				// Fallback for any other captures, though we don't expect any.
+				label = captureName
 			}
 			points = append(points, PointOfInterest{Node: c.Node, Label: label})
 		}

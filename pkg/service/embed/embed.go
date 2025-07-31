@@ -745,12 +745,13 @@ func (e *EmbedService) storeEmbeddingsBatch(ctx context.Context, batch []Embeddi
 }
 
 func (e *EmbedService) callAIService(contents []string) ([][]float32, error) {
+	e.logger.Info("Sending request to embedding service", zap.Int("chunk_count", len(contents)))
 	modelID := "sentence-transformers/all-MiniLM-L6-v2"
 	if e.cfg.Embed.ModelName != "" {
 		modelID = e.cfg.Embed.ModelName
 	}
 
-	url := "https://57b1bf57c566.ngrok-free.app/generate_embeddings/"
+	url := "https://457595b02002.ngrok-free.app/generate_embeddings/"
 
 	type requestBody struct {
 		Sentences []string `json:"sentences"`
