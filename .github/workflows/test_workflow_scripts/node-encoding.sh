@@ -36,9 +36,15 @@ send_request(){
     curl -v -H "Accept-Encoding: gzip" -i http://localhost:3000/ --output -
     curl -v -H "Accept-Encoding: br" -i http://localhost:3000/proxy --output -
     curl -v -H "Accept-Encoding: gzip" -i http://localhost:3000/proxy --output -
-    node request.js
+    node request.js &
+    request_pid=$!
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
+    echo "Killing request.js"
+    if kill -0 $request_pid 2>/dev/null; then
+        kill $request_pid
+        wait $request_pid 2>/dev/null
+    fi
     echo "Killing node server.js"
     kill $node_pid
     wait $node_pid 2>/dev/null
