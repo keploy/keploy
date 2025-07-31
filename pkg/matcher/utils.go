@@ -598,7 +598,7 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 	match := true
 	_, isHeaderNoisy := noise["header"]
 	for k, v := range h1 {
-		regexArr, isNoisy := CheckStringExist(strings.ToLower(k), noise)
+		regexArr, isNoisy := SubstringKeyMatch(strings.ToLower(k), noise)
 		if isNoisy && len(regexArr) != 0 {
 			isNoisy, _ = MatchesAnyRegex(v[0], regexArr)
 		}
@@ -675,7 +675,7 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 		}
 	}
 	for k, v := range h2 {
-		regexArr, isNoisy := CheckStringExist(strings.ToLower(k), noise)
+		regexArr, isNoisy := SubstringKeyMatch(strings.ToLower(k), noise)
 		if isNoisy && len(regexArr) != 0 {
 			isNoisy, _ = MatchesAnyRegex(v[0], regexArr)
 		}
@@ -724,12 +724,21 @@ func MapToArray(mp map[string][]string) []string {
 	return result
 }
 
-func CheckStringExist(s string, mp map[string][]string) ([]string, bool) {
-	if val, ok := mp[s]; ok {
-		return val, ok
+func SubstringKeyMatch(s string, mp map[string][]string) ([]string, bool) {
+	for key, val := range mp {
+		if strings.Contains(s, key) {
+			return val, true
+		}
 	}
 	return []string{}, false
 }
+
+// func CheckStringExist(s string, mp map[string][]string) ([]string, bool) {
+// 	if val, ok := mp[s]; ok {
+// 		return val, ok
+// 	}
+// 	return []string{}, false
+// }
 
 func MatchesAnyRegex(str string, regexArray []string) (bool, string) {
 	for _, pattern := range regexArray {
@@ -843,7 +852,7 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 	}
 	switch x.Kind() {
 	case reflect.Float64, reflect.String, reflect.Bool:
-		regexArr, isNoisy := CheckStringExist(key, noiseMap)
+		regexArr, isNoisy := SubstringKeyMatch(key, noiseMap)
 		if isNoisy && len(regexArr) != 0 {
 			isNoisy, _ = MatchesAnyRegex(InterfaceToString(expected), regexArr)
 		}
@@ -857,7 +866,7 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 		copiedExpMap := make(map[string]interface{})
 		copiedActMap := make(map[string]interface{})
 
-		if regexArr, isNoisy := CheckStringExist(key, noiseMap); isNoisy && len(regexArr) == 0 {
+		if regexArr, isNoisy := SubstringKeyMatch(key, noiseMap); isNoisy && len(regexArr) == 0 {
 			break
 		}
 		// Copy each key-value pair from expMap to copiedExpMap
@@ -885,7 +894,7 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 			}
 			// remove the noisy key from both expected and actual JSON.
 			// Viper bindings are case insensitive, so we need convert the key to lowercase.
-			if _, ok := CheckStringExist(strings.ToLower(prefix+k), noiseMap); ok {
+			if _, ok := SubstringKeyMatch(strings.ToLower(prefix+k), noiseMap); ok {
 				delete(copiedExpMap, prefix+k)
 				delete(copiedActMap, k)
 				continue
@@ -903,7 +912,7 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 		matchJSONComparisonResult.differences = append(matchJSONComparisonResult.differences, differences...)
 		return matchJSONComparisonResult, nil
 	case reflect.Slice:
-		if regexArr, isNoisy := CheckStringExist(key, noiseMap); isNoisy && len(regexArr) == 0 {
+		if regexArr, isNoisy := SubstringKeyMatch(key, noiseMap); isNoisy && len(regexArr) == 0 {
 			break
 		}
 		expSlice := reflect.ValueOf(expected)
@@ -911,17 +920,31 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 		if expSlice.Len() != actSlice.Len() {
 			return matchJSONComparisonResult, nil
 		}
+
 		isMatched := true
 		isExact := true
 		for i := 0; i < expSlice.Len(); i++ {
 			matched := false
 			for j := 0; j < actSlice.Len(); j++ {
-				prefixedVal := key + "[" + fmt.Sprint(j) + "]"
-				if valMatchJSONComparisonResult, err := matchJSONWithNoiseHandling(prefixedVal, expSlice.Index(i).Interface(), actSlice.Index(j).Interface(), noiseMap, ignoreOrdering); err == nil && valMatchJSONComparisonResult.matches {
+
+				// ­Special rule: we're at the root of the slice (key == "")
+				// and every element is a map or slice (i.e. a JSON object or array) → don’t add “[i]” prefixes.
+
+				dropPrefix := key == "" &&
+					expSlice.Len() > 0 && (reflect.TypeOf(expSlice.Index(i).Interface()).Kind() == reflect.Map || reflect.TypeOf(expSlice.Index(i).Interface()).Kind() == reflect.Slice)
+
+				childKey := ""
+				if !dropPrefix {
+					childKey = fmt.Sprintf("%s[%d]", key, j)
+				}
+
+				if valMatchJSONComparisonResult, err := matchJSONWithNoiseHandling(childKey, expSlice.Index(i).Interface(), actSlice.Index(j).Interface(), noiseMap, ignoreOrdering); err == nil && valMatchJSONComparisonResult.matches {
 					if !valMatchJSONComparisonResult.isExact {
 						for _, val := range valMatchJSONComparisonResult.differences {
-							prefixedVal := key + "[" + fmt.Sprint(j) + "]." + val // Prefix the value
-							matchJSONComparisonResult.differences = append(matchJSONComparisonResult.differences, prefixedVal)
+							if childKey != "" {
+								val = childKey + "." + val
+							}
+							matchJSONComparisonResult.differences = append(matchJSONComparisonResult.differences, val)
 						}
 					}
 					matched = true

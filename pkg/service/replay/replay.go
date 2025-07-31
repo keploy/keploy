@@ -160,11 +160,18 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 	}
 
+	r.logger.Debug("language detected", zap.String("language", r.config.Test.Language.String()), zap.String("executable", executable))
+
 	var cov coverage.Service
 	switch r.config.Test.Language {
 	case models.Go:
 		cov = golang.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.CoverageReportPath, r.config.CommandType)
 	case models.Python:
+		// if the executable is not starting with "python" or "python3" then skipCoverage
+		if !strings.HasPrefix(executable, "python") && !strings.HasPrefix(executable, "python3") {
+			r.logger.Warn("python command not python or python3, skipping coverage calculation")
+			r.config.Test.SkipCoverage = true
+		}
 		cov = python.New(ctx, r.logger, r.reportDB, r.config.Command, executable)
 	case models.Javascript:
 		cov = javascript.New(ctx, r.logger, r.reportDB, r.config.Command)
@@ -218,6 +225,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// Sort the testsets.
 	natsort.Sort(testSets)
+
+	err = HookImpl.BeforeTestRun(ctx, testRunID)
+	if err != nil {
+		stopReason = fmt.Sprintf("failed to run before test run hook: %v", err)
+		utils.LogError(r.logger, err, stopReason)
+	}
+
 	for i, testSet := range testSets {
 		testSetResult = false
 		err := HookImpl.BeforeTestSetRun(ctx, testSet)
@@ -589,7 +603,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	conf, err = r.testSetConf.Read(runTestSetCtx, testSetID)
 	if err != nil {
 		if strings.Contains(err.Error(), "no such file or directory") || strings.Contains(err.Error(), "The system cannot find the file specified") {
-			r.logger.Info("config file not found, continuing execution...", zap.String("test-set", testSetID))
+			r.logger.Info("test-set config file not found, continuing execution...", zap.String("test-set", testSetID))
 		} else {
 			return models.TestSetStatusFailed, fmt.Errorf("failed to read test set config: %w", err)
 		}
@@ -728,8 +742,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// var to store the error in the loop
 	var loopErr error
 	utils.TemplatizedValues = conf.Template
+	utils.SecretValues = conf.Secret
+
+	// Add secret files to .gitignore if they exist
+	if len(utils.SecretValues) > 0 {
+		err = utils.AddToGitIgnore(r.logger, r.config.Path, "/*/secret.yaml")
+		if err != nil {
+			r.logger.Warn("Failed to add secret files to .gitignore", zap.Error(err))
+		}
+	}
 
 	for idx, testCase := range testCases {
+
 		// check if its the last test case running
 		if idx == len(testCases)-1 && r.isLastTestSet {
 			r.isLastTestCase = true
@@ -821,6 +845,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if loopErr != nil {
 			utils.LogError(r.logger, loopErr, "failed to simulate request")
 			failure++
+			testSetStatus = models.TestSetStatusFailed
+			testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, loopErr.Error())
+			loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+			if loopErr != nil {
+				utils.LogError(r.logger, loopErr, "failed to insert test case result for simulation error")
+				break
+			}
 			continue
 		}
 
@@ -843,6 +874,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if !ok {
 				r.logger.Error("invalid response type for HTTP test case")
 				failure++
+				testSetStatus = models.TestSetStatusFailed
+				testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, "invalid response type for HTTP test case")
+				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+				if loopErr != nil {
+					utils.LogError(r.logger, loopErr, fmt.Sprintf("failed to insert test case result for type assertion error in %s test case", testCase.Kind))
+					break
+				}
 				continue
 			}
 			testPass, testResult = r.compareHTTPResp(testCase, httpResp, testSetID)
@@ -852,6 +890,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if !ok {
 				r.logger.Error("invalid response type for gRPC test case")
 				failure++
+				testSetStatus = models.TestSetStatusFailed
+				testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, "invalid response type for gRPC test case")
+				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+				if loopErr != nil {
+					utils.LogError(r.logger, loopErr, "failed to insert test case result for type assertion error")
+					break
+				}
 				continue
 			}
 			testPass, testResult = r.compareGRPCResp(testCase, grpcResp, testSetID)
@@ -927,7 +972,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if testCaseResult != nil {
 				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 				if loopErr != nil {
-					utils.LogError(r.logger, err, "failed to insert test case result")
+					utils.LogError(r.logger, loopErr, "failed to insert test case result")
 					break
 				}
 			} else {
@@ -1063,7 +1108,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				utils.LogError(r.logger, err, "failed to write the templatized values to the yaml")
 			}
 		}
-
 	}
 
 	return testSetStatus, nil
@@ -1406,6 +1450,74 @@ func (r *Replayer) DeleteTests(ctx context.Context, testSetID string, testCaseID
 
 func SetTestHooks(testHooks TestHooks) {
 	HookImpl = testHooks
+}
+
+// CreateFailedTestResult creates a test result for failed test cases
+func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID string, started time.Time, errorMessage string) *models.TestResult {
+	testCaseResult := &models.TestResult{
+		Kind:         testCase.Kind,
+		Name:         testSetID,
+		Status:       models.TestStatusFailed,
+		Started:      started.Unix(),
+		Completed:    time.Now().UTC().Unix(),
+		TestCaseID:   testCase.Name,
+		TestCasePath: filepath.Join(r.config.Path, testSetID),
+		MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
+		Noise:        testCase.Noise,
+	}
+
+	var result *models.Result
+
+	switch testCase.Kind {
+	case models.HTTP:
+		actualResponse := &models.HTTPResp{
+			StatusCode: 0,
+			Header:     make(map[string]string),
+			Body:       errorMessage,
+		}
+
+		_, result = r.compareHTTPResp(testCase, actualResponse, testSetID)
+
+		testCaseResult.Req = models.HTTPReq{
+			Method:     testCase.HTTPReq.Method,
+			ProtoMajor: testCase.HTTPReq.ProtoMajor,
+			ProtoMinor: testCase.HTTPReq.ProtoMinor,
+			URL:        testCase.HTTPReq.URL,
+			URLParams:  testCase.HTTPReq.URLParams,
+			Header:     testCase.HTTPReq.Header,
+			Body:       testCase.HTTPReq.Body,
+			Binary:     testCase.HTTPReq.Binary,
+			Form:       testCase.HTTPReq.Form,
+			Timestamp:  testCase.HTTPReq.Timestamp,
+		}
+		testCaseResult.Res = *actualResponse
+
+	case models.GRPC_EXPORT:
+		actualResponse := &models.GrpcResp{
+			Headers: models.GrpcHeaders{
+				PseudoHeaders:   make(map[string]string),
+				OrdinaryHeaders: make(map[string]string),
+			},
+			Body: models.GrpcLengthPrefixedMessage{
+				DecodedData: errorMessage,
+			},
+			Trailers: models.GrpcHeaders{
+				PseudoHeaders:   make(map[string]string),
+				OrdinaryHeaders: make(map[string]string),
+			},
+		}
+
+		_, result = r.compareGRPCResp(testCase, actualResponse, testSetID)
+
+		testCaseResult.GrpcReq = testCase.GrpcReq
+		testCaseResult.GrpcRes = *actualResponse
+	}
+
+	if result != nil {
+		testCaseResult.Result = *result
+	}
+
+	return testCaseResult
 }
 
 func (r *Replayer) replaceHostInTestCase(testCase *models.TestCase, newHost, logContext string) error {
