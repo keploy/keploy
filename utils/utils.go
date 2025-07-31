@@ -1031,7 +1031,8 @@ func DetectLanguage(logger *zap.Logger, cmd string) (config.Language, string) {
 	}
 
 	// Check for Python
-	if strings.HasPrefix(executable, "python") || strings.HasSuffix(executable, "python") {
+	pythonRegex := regexp.MustCompile(`(?i)(^|.*/)(python(\d+(\.\d+)*)?)$`)
+	if pythonRegex.MatchString(executable) {
 		return models.Python, executable
 	}
 
