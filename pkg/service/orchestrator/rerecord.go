@@ -206,17 +206,14 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 		return false, fmt.Errorf("%s", errMsg)
 	}
 	cmdType := utils.CmdType(o.config.CommandType)
-	fmt.Println("Command type is:", cmdType)
 	var userIP string
 	if utils.IsDockerCmd(cmdType) {
 		host = o.config.ContainerName
-		fmt.Println("Using container name as host:", host)
 		userIP, err = o.record.GetContainerIP(ctx, o.config.AppID)
 		if err != nil {
 			utils.LogError(o.logger, err, "failed to get the app ip")
 			return false, err
 		}
-		fmt.Println("Using user IP:", userIP)
 	}
 	delay := o.config.Test.Delay
 	timeout := time.Duration(120+delay) * time.Second
