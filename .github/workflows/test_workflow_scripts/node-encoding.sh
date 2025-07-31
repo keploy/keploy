@@ -5,7 +5,6 @@ source ./../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Prepare environment
 npm install
-node server.js &
 rm -rf keploy/
 
 # Check if there is a keploy-config file, if there is, delete it.
@@ -21,6 +20,8 @@ config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"header": {"Etag":""}}/' "$config_file"
 
 send_request(){
+    node server.js &
+    node_pid=$!
     sleep 10
     app_started=false
     while [ "$app_started" = false ]; do
@@ -31,12 +32,15 @@ send_request(){
     done
     echo "App started"
     # Start making curl calls to record the testcases and mocks.
-    curl -v -H "Accept-Encoding: br" -i http://localhost:3000/ --output -
-    curl -v -H "Accept-Encoding: gzip" -i http://localhost:3000/ --output -
-    curl -v -H "Accept-Encoding: br" -i http://localhost:3000/proxy --output -
-    curl -v -H "Accept-Encoding: gzip" -i http://localhost:3000/proxy --output -
+    curl -X GET -v -H "Accept-Encoding: br" -i http://localhost:3000/ --output -
+    curl -X GET -v -H "Accept-Encoding: gzip" -i http://localhost:3000/ --output -
+    curl -X GET -v -H "Accept-Encoding: br" -i http://localhost:3000/proxy --output -
+    curl -X GET -v -H "Accept-Encoding: gzip" -i http://localhost:3000/proxy --output -
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
+    echo "Killing node server.js"
+    kill $node_pid
+    wait $node_pid 2>/dev/null
     pid=$(pgrep keploy)
     echo "$pid Keploy PID" 
     echo "Killing keploy"
