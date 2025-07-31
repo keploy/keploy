@@ -129,10 +129,12 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 			return err
 		}
 
-		reqBody, err = pkg.Decompress(h.Logger, req.Header.Get("Content-Encoding"), reqBody)
-		if err != nil {
-			utils.LogError(h.Logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(req)))
-			return err
+		if req.Header.Get("Content-Encoding") != "" {
+			reqBody, err = pkg.Decompress(h.Logger, req.Header.Get("Content-Encoding"), reqBody)
+			if err != nil {
+				utils.LogError(h.Logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(req)))
+				return err
+			}
 		}
 	}
 
@@ -153,10 +155,12 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 			return err
 		}
 
-		respBody, err = pkg.Decompress(h.Logger, respParsed.Header.Get("Content-Encoding"), respBody)
-		if err != nil {
-			utils.LogError(h.Logger, err, "failed to decode the http response body", zap.Any("metadata", utils.GetReqMeta(req)))
-			return err
+		if respParsed.Header.Get("Content-Encoding") != "" {
+			respBody, err = pkg.Decompress(h.Logger, respParsed.Header.Get("Content-Encoding"), respBody)
+			if err != nil {
+				utils.LogError(h.Logger, err, "failed to decode the http response body", zap.Any("metadata", utils.GetReqMeta(req)))
+				return err
+			}
 		}
 
 		h.Logger.Debug("This is the response body: " + string(respBody))

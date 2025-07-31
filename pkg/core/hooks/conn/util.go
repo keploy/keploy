@@ -167,10 +167,12 @@ func Capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 		return
 	}
 
-	reqBody, errDecompress := pkg.Decompress(logger, req.Header.Get("Content-Encoding"), reqBody)
-	if errDecompress != nil {
-		utils.LogError(logger, errDecompress, "failed to decompress the request body")
-		return
+	if req.Header.Get("Content-Encoding") != "" {
+		reqBody, err = pkg.Decompress(logger, req.Header.Get("Content-Encoding"), reqBody)
+		if err != nil {
+			utils.LogError(logger, err, "failed to decompress the request body")
+			return
+		}
 	}
 
 	defer func() {
@@ -207,9 +209,12 @@ func Capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 		reqBody = []byte(decodedBody)
 	}
 
-	respBody, errDecode := pkg.Decompress(logger, resp.Header.Get("Content-Encoding"), respBody)
-	if errDecode != nil {
-		return
+	if resp.Header.Get("Content-Encoding") != "" {
+		respBody, err = pkg.Decompress(logger, resp.Header.Get("Content-Encoding"), respBody)
+		if err != nil {
+			utils.LogError(logger, err, "failed to decompress the response body")
+			return
+		}
 	}
 
 	t <- &models.TestCase{

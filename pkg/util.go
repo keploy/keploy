@@ -144,10 +144,15 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}
 
-	reqBody, err := Compress(logger, tc.HTTPReq.Header["Content-Encoding"], []byte(tc.HTTPReq.Body))
-	if err != nil {
-		utils.LogError(logger, err, "failed to compress the request body")
-		return nil, err
+	var reqBody []byte
+	var err error
+
+	if tc.HTTPReq.Header["Content-Encoding"] != "" {
+		reqBody, err = Compress(logger, tc.HTTPReq.Header["Content-Encoding"], []byte(tc.HTTPReq.Body))
+		if err != nil {
+			utils.LogError(logger, err, "failed to compress the request body")
+			return nil, err
+		}
 	}
 
 	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
@@ -239,10 +244,12 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		return nil, errReadRespBody
 	}
 
-	respBody, errDecodeRespBody := Decompress(logger, httpResp.Header.Get("Content-Encoding"), respBody)
-	if errDecodeRespBody != nil {
-		utils.LogError(logger, errDecodeRespBody, "failed to decode response body")
-		return nil, errDecodeRespBody
+	if httpResp.Header.Get("Content-Encoding") != "" {
+		respBody, err = Decompress(logger, httpResp.Header.Get("Content-Encoding"), respBody)
+		if err != nil {
+			utils.LogError(logger, err, "failed to decode response body")
+			return nil, err
+		}
 	}
 
 	resp = &models.HTTPResp{
@@ -575,41 +582,42 @@ func IsCSV(data []byte) bool {
 	return false
 }
 
-func Decompress(logger *zap.Logger, encoding string, body []byte) ([]byte, error) {
+func Decompress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) {
 	switch encoding {
 	case "br":
-		logger.Debug("decompressing brotli compressed response body")
-		reader := brotli.NewReader(bytes.NewReader(body))
-		decodedBody, err := io.ReadAll(reader)
+		logger.Debug("decompressing brotli compressed data")
+		reader := brotli.NewReader(bytes.NewReader(data))
+		decodedData, err := io.ReadAll(reader)
 		if err != nil {
-			utils.LogError(logger, err, "failed to read the brotli compressed response body")
+			utils.LogError(logger, err, "failed to read the brotli compressed data")
 			return nil, err
 		}
-		return decodedBody, nil
+		return decodedData, nil
 	case "gzip":
-		logger.Debug("decoding gzip compressed response body")
-		reader, err := gzip.NewReader(bytes.NewReader(body))
+		logger.Debug("decoding gzip compressed data")
+		reader, err := gzip.NewReader(bytes.NewReader(data))
 		if err != nil {
 			utils.LogError(logger, err, "failed to create gzip reader")
 			return nil, err
 		}
 		defer reader.Close()
-		decodedBody, err := io.ReadAll(reader)
+		decodedData, err := io.ReadAll(reader)
 		if err != nil {
-			utils.LogError(logger, err, "failed to read the gzip compressed response body")
+			utils.LogError(logger, err, "failed to read the gzip compressed data")
 			return nil, err
 		}
-		return decodedBody, nil
+		return decodedData, nil
 	}
-	return body, nil
+	return data, nil
 }
 
-func Compress(logger *zap.Logger, encoding string, body []byte) ([]byte, error) {
+func Compress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) {
 	switch encoding {
 	case "gzip":
+		logger.Debug("compressing data using gzip")
 		var compressedBuffer bytes.Buffer
 		gw := gzip.NewWriter(&compressedBuffer)
-		_, err := gw.Write(body)
+		_, err := gw.Write(data)
 		if err != nil {
 			utils.LogError(logger, err, "failed to write compressed data to gzip writer")
 			return nil, err
@@ -621,9 +629,10 @@ func Compress(logger *zap.Logger, encoding string, body []byte) ([]byte, error) 
 		}
 		return compressedBuffer.Bytes(), nil
 	case "br":
+		logger.Debug("compressing data using brotli")
 		var compressedBuffer bytes.Buffer
 		bw := brotli.NewWriter(&compressedBuffer)
-		_, err := bw.Write(body)
+		_, err := bw.Write(data)
 		if err != nil {
 			utils.LogError(logger, err, "failed to write compressed data to brotli writer")
 			return nil, err
@@ -635,5 +644,5 @@ func Compress(logger *zap.Logger, encoding string, body []byte) ([]byte, error) 
 		}
 		return compressedBuffer.Bytes(), nil
 	}
-	return body, nil
+	return data, nil
 }
