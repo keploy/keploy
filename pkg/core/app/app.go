@@ -30,6 +30,7 @@ func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opt
 		cmd:              cmd,
 		docker:           client,
 		kind:             utils.FindDockerCmd(cmd),
+		containerIPv4:    make(chan string, 1),
 		keployContainer:  "keploy-v2",
 		container:        opts.Container,
 		containerDelay:   opts.DockerDelay,
@@ -92,9 +93,11 @@ func (a *App) KeployIPv4Addr() string {
 }
 
 func (a *App) ContainerIPv4Addr() string {
+	fmt.Println("Getting container IPv4 address...")
 	return <-a.containerIPv4
 }
 func (a *App) SetContainerIPv4Addr(ipAddr string) {
+	a.logger.Debug("setting container IPv4 address", zap.String("ipAddr", ipAddr))
 	a.containerIPv4 <- ipAddr
 }
 
@@ -301,7 +304,7 @@ func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
 		a.logger.Debug("container network not found", zap.Any("containerDetails.NetworkSettings.Networks", info.NetworkSettings.Networks))
 		return false, fmt.Errorf("container network not found: %s", fmt.Sprintf("%+v", info.NetworkSettings.Networks))
 	}
-
+	fmt.Println("Container network found, setting IPv4 address...", n.IPAddress)
 	a.SetContainerIPv4Addr(n.IPAddress)
 	return inode != 0 && n.IPAddress != "", nil
 }
@@ -352,6 +355,7 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 				errCh <- ctx.Err()
 				return nil
 			case e := <-messages:
+				fmt.Println("Received event:", e)
 				done, err := a.extractMeta(ctx, e)
 				if err != nil {
 					errCh <- err
@@ -428,7 +432,6 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 
 func (a *App) Run(ctx context.Context, inodeChan chan uint64) models.AppError {
 	a.inodeChan = inodeChan
-	a.containerIPv4 = make(chan string, 1)
 
 	if utils.IsDockerCmd(a.kind) {
 		return a.runDocker(ctx)
@@ -478,6 +481,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 			if utils.IsDockerCmd(a.kind) {
 				a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
 				err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
+				
 				return err
 			}
 			return utils.InterruptProcessTree(a.logger, cmd.Process.Pid, syscall.SIGINT)

@@ -431,7 +431,6 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -446,6 +445,7 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 				return nil
 			}
 		case <-timer.C:
+			fmt.Println("Timeout reached while waiting for port", host, ":", port)
 			msg := "Please add delay if your application takes more time to start"
 			return fmt.Errorf("timeout after %v waiting for port %s:%s, %s", timeout, host, port, msg)
 		}
