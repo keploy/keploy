@@ -144,11 +144,11 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}
 
-	var reqBody []byte
+	reqBody := []byte(tc.HTTPReq.Body)
 	var err error
 
 	if tc.HTTPReq.Header["Content-Encoding"] != "" {
-		reqBody, err = Compress(logger, tc.HTTPReq.Header["Content-Encoding"], []byte(tc.HTTPReq.Body))
+		reqBody, err = Compress(logger, tc.HTTPReq.Header["Content-Encoding"], reqBody)
 		if err != nil {
 			utils.LogError(logger, err, "failed to compress the request body")
 			return nil, err
