@@ -146,7 +146,7 @@ func (p *grpcRecordingProxy) getClientConn(ctx context.Context) (*grpc.ClientCon
 
 // handler is the core of the proxy. It receives a call, forwards it, and records the interaction.
 func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStream) error {
-	p.logger.Info("received gRPC call")
+	p.logger.Debug("received gRPC call")
 	startTime := time.Now()
 	clientCtx := clientStream.Context()
 	fullMethod, _ := grpc.MethodFromServerStream(clientStream)
@@ -309,10 +309,11 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 		Headers: p.grpcMetadataToHeaders(md, fullMethod, false),
 	}
 
-	p.logger.Info("[Debug] printing headers and trailer of grpc response",
+	p.logger.Debug("headers and trailer of grpc response",
 		zap.Any("headers", respHeader),
 		zap.Any("trailers", destTrailers))
 
+	// p.logger.Debug("Response body", zap.Int("body size", len(respBuf.Bytes())), zap.Any("body", respBuf.Bytes()))
 	// respHeader, _ := destStream.Header()
 	grpcResp := &models.GrpcResp{
 		Body:     createLengthPrefixedMessage(respBuf.Bytes()),
