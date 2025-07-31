@@ -30,6 +30,7 @@ func NewSingletonSettings() *SingletonSettings {
 			"language.toml",
 			"indentation.toml",
 			"insert_line.toml",
+			"refactor_prompt.toml",
 		}
 
 		v := viper.New()
