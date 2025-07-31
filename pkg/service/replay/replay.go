@@ -218,6 +218,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	// Sort the testsets.
 	natsort.Sort(testSets)
+
+	err = HookImpl.BeforeTestRun(ctx, testRunID)
+	if err != nil {
+		stopReason = fmt.Sprintf("failed to run before test run hook: %v", err)
+		utils.LogError(r.logger, err, stopReason)
+	}
+
 	for i, testSet := range testSets {
 		testSetResult = false
 		err := HookImpl.BeforeTestSetRun(ctx, testSet)
