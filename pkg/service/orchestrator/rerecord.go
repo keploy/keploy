@@ -218,9 +218,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 		}
 		fmt.Println("Using user IP:", userIP)
 	}
-	fmt.Println("Using host:", host, "and port:", port)
 	delay := o.config.Test.Delay
-	fmt.Println("Using delay:::", delay)
 	timeout := time.Duration(120+delay) * time.Second
 
 	o.logger.Debug("", zap.String("host", host), zap.String("port", port), zap.Any("WaitTimeout", timeout), zap.Any("CommandType", cmdType))
