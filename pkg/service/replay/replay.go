@@ -160,6 +160,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 		}
 	}
 
+	r.logger.Debug("language detected", zap.String("language", r.config.Test.Language.String()), zap.String("executable", executable))
+
 	var cov coverage.Service
 	switch r.config.Test.Language {
 	case models.Go:
