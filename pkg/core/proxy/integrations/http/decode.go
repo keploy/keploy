@@ -139,7 +139,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 
 			//Check if the content encoding is present in the header
 			if encoding, ok := header["Content-Encoding"]; ok && len(encoding) > 0 {
-				compressedBody, err := pkg.CompressBody(h.Logger, encoding[0], []byte(body))
+				compressedBody, err := pkg.Compress(h.Logger, encoding[0], []byte(body))
 				if err != nil {
 					utils.LogError(h.Logger, err, "failed to compress the response body", zap.Any("metadata", utils.GetReqMeta(request)))
 					errCh <- err

@@ -144,8 +144,14 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}
 
+	reqBody, err := Compress(logger, tc.HTTPReq.Header["Content-Encoding"], []byte(tc.HTTPReq.Body))
+	if err != nil {
+		utils.LogError(logger, err, "failed to compress the request body")
+		return nil, err
+	}
+
 	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
-	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, bytes.NewBufferString(tc.HTTPReq.Body))
+	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, bytes.NewBuffer(reqBody))
 	if err != nil {
 		utils.LogError(logger, err, "failed to create a http request from the yaml document")
 		return nil, err
@@ -233,7 +239,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		return nil, errReadRespBody
 	}
 
-	respBody, errDecodeRespBody := DecompressBody(logger, httpResp.Header.Get("Content-Encoding"), respBody)
+	respBody, errDecodeRespBody := Decompress(logger, httpResp.Header.Get("Content-Encoding"), respBody)
 	if errDecodeRespBody != nil {
 		utils.LogError(logger, errDecodeRespBody, "failed to decode response body")
 		return nil, errDecodeRespBody
@@ -569,7 +575,7 @@ func IsCSV(data []byte) bool {
 	return false
 }
 
-func DecompressBody(logger *zap.Logger, encoding string, body []byte) ([]byte, error) {
+func Decompress(logger *zap.Logger, encoding string, body []byte) ([]byte, error) {
 	switch encoding {
 	case "br":
 		logger.Debug("decompressing brotli compressed response body")
@@ -598,7 +604,7 @@ func DecompressBody(logger *zap.Logger, encoding string, body []byte) ([]byte, e
 	return body, nil
 }
 
-func CompressBody(logger *zap.Logger, encoding string, body []byte) ([]byte, error) {
+func Compress(logger *zap.Logger, encoding string, body []byte) ([]byte, error) {
 	switch encoding {
 	case "gzip":
 		var compressedBuffer bytes.Buffer
