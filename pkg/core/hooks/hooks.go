@@ -560,6 +560,7 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 	if err := h.socket.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the socket")
 	}
+	h.appID = 0
 
 	if !opts.E2E {
 		if err := h.udpp4.Close(); err != nil {
