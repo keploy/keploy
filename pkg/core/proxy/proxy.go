@@ -354,9 +354,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if srcConn != nil {
 			err := srcConn.Close()
 			if err != nil {
-				utils.LogError(p.logger, err, "failed to close the source connection", zap.Any("clientConnID", clientConnID))
+				if !strings.Contains(err.Error(), "use of closed network connection") {
+					utils.LogError(p.logger, err, "failed to close the source connection", zap.Any("clientConnID", clientConnID))
+				}
 				return
 			}
+
 		}
 
 		if dstConn != nil {

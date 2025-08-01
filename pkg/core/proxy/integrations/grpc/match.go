@@ -45,7 +45,7 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 				return nil, nil
 			}
 
-			logger.Debug("Here are the grpc mocks in the db", zap.Int("len", len(grpcMocks)), zap.Any("grpcMocks", grpcMocks))
+			logger.Debug("Here are the grpc mocks in the db", zap.Int("len", len(grpcMocks)))
 
 			schemaMatched, err := schemaMatch(ctx, grpcReq, grpcMocks)
 			if err != nil {
@@ -57,7 +57,7 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 				return nil, nil
 			}
 
-			logger.Debug("Here are the grpc mocks with schema match", zap.Int("len", len(schemaMatched)), zap.Any("schemaMatched", schemaMatched))
+			logger.Debug("Here are the grpc mocks with schema match", zap.Int("len", len(schemaMatched)))
 
 			// Exact body Match
 			ok, matchedMock := exactBodyMatch(grpcReq.Body, schemaMatched)
@@ -94,7 +94,7 @@ func schemaMatch(ctx context.Context, req models.GrpcReq, mocks []*models.Mock) 
 		}
 		mockReq := mock.Spec.GRPCReq
 
-		// the pseudo headers should defintely match.
+		// the pseudo headers should definitely match (:method, :path, etc.).
 		if !compareMap(mockReq.Headers.PseudoHeaders, req.Headers.PseudoHeaders) {
 			continue
 		}
@@ -109,36 +109,26 @@ func schemaMatch(ctx context.Context, req models.GrpcReq, mocks []*models.Mock) 
 			continue
 		}
 
-		// additionally check for the compression flag here only
-		if mockReq.Body.CompressionFlag != req.Body.CompressionFlag {
-			continue
-		}
-
 		schemaMatched = append(schemaMatched, mock)
 	}
 
 	return schemaMatched, nil
 }
 
-// Check if two maps have the same keys
+// Check if two maps have the same keys, ignoring values.
 func compareMapKeys(m1, m2 map[string]string) bool {
-	if len(m1) > len(m2) {
-		for k := range m2 {
-			if _, ok := m1[k]; !ok {
-				return false
-			}
-		}
-	} else {
-		for k := range m1 {
-			if _, ok := m2[k]; !ok {
-				return false
-			}
+	if len(m1) != len(m2) {
+		return false
+	}
+	for k := range m1 {
+		if _, ok := m2[k]; !ok {
+			return false
 		}
 	}
 	return true
 }
 
-// Check if two maps are identical
+// Check if two maps are identical.
 func compareMap(m1, m2 map[string]string) bool {
 	if len(m1) != len(m2) {
 		return false
@@ -153,14 +143,16 @@ func compareMap(m1, m2 map[string]string) bool {
 
 func exactBodyMatch(body models.GrpcLengthPrefixedMessage, schemaMatched []*models.Mock) (bool, *models.Mock) {
 	for _, mock := range schemaMatched {
-		if mock.Spec.GRPCReq.Body.MessageLength == body.MessageLength && mock.Spec.GRPCReq.Body.DecodedData == body.DecodedData {
+		// The new implementation might not reconstruct the exact original prefix,
+		// so we match on the decoded data which is more reliable.
+		if mock.Spec.GRPCReq.Body.DecodedData == body.DecodedData {
 			return true, mock
 		}
 	}
 	return false, nil
 }
 
-// Fuzzy match helper for string matching
+// fuzzyMatch logic remains the same.
 func findStringMatch(req string, mockStrings []string) int {
 	minDist := int(^uint(0) >> 1)
 	bestMatch := -1
@@ -180,20 +172,15 @@ func findStringMatch(req string, mockStrings []string) int {
 	return bestMatch
 }
 
-// TODO: generalize the function to work with any type of integration
 func findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
-
 	mxSim := -1.0
 	mxIdx := -1
-	// find the fuzzy hash of the mocks
 	for idx, mock := range mocks {
 		encoded := []byte(mock.Spec.GRPCReq.Body.DecodedData)
 		k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
 		shingles1 := util.CreateShingles(encoded, k)
 		shingles2 := util.CreateShingles(reqBuff, k)
 		similarity := util.JaccardSimilarity(shingles1, shingles2)
-
-		// log.Debugf("Jaccard Similarity:%f\n", similarity)
 
 		if mxSim < similarity {
 			mxSim = similarity
@@ -203,10 +190,7 @@ func findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 	return mxIdx
 }
 
-// fuzzy match on the request
 func fuzzyMatch(tcsMocks []*models.Mock, reqBuff string) (bool, *models.Mock) {
-
-	// String-based fuzzy matching
 	mockStrings := make([]string, len(tcsMocks))
 	for i := range tcsMocks {
 		mockStrings[i] = tcsMocks[i].Spec.GRPCReq.Body.DecodedData
