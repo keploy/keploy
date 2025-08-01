@@ -778,6 +778,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					return errors.New(errMsg)
 				}
 				c.cfg.ReRecord.Port = port
+				c.cfg.Test.Delay, err = cmd.Flags().GetUint64("delay")
+				if err != nil {
+					errMsg := "failed to get the provided delay"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
 				return nil
 			}
 

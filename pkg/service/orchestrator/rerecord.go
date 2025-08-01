@@ -207,6 +207,8 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 	}
 	cmdType := utils.CmdType(o.config.CommandType)
 	var userIP string
+	delay := o.config.Test.Delay
+	time.Sleep(time.Duration(delay) * time.Second)
 	if utils.IsDockerCmd(cmdType) {
 		host = o.config.ContainerName
 		userIP, err = o.record.GetContainerIP(ctx, o.config.AppID)
@@ -215,7 +217,6 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 			return false, err
 		}
 	}
-	delay := o.config.Test.Delay
 	timeout := time.Duration(120+delay) * time.Second
 
 	o.logger.Debug("", zap.String("host", host), zap.String("port", port), zap.Any("WaitTimeout", timeout), zap.Any("CommandType", cmdType))

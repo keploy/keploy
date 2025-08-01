@@ -30,7 +30,6 @@ func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opt
 		cmd:              cmd,
 		docker:           client,
 		kind:             utils.FindDockerCmd(cmd),
-		containerIPv4:    make(chan string, 1),
 		keployContainer:  "keploy-v2",
 		container:        opts.Container,
 		containerDelay:   opts.DockerDelay,
@@ -429,7 +428,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 
 func (a *App) Run(ctx context.Context, inodeChan chan uint64) models.AppError {
 	a.inodeChan = inodeChan
-
+	a.containerIPv4 = make(chan string, 1)
 	if utils.IsDockerCmd(a.kind) {
 		return a.runDocker(ctx)
 	}
