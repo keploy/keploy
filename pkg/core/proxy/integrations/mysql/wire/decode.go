@@ -21,19 +21,6 @@ import (
 	"go.uber.org/zap"
 )
 
-/*
-    1.  BytesToMySQLStruct
-	2.	DecodeMySQLBytes
-	3.	ParseMySQLPacket
-	4.	MySQLBytesToStruct
-	5.	UnmarshalMySQLPacket
-	6.	ConvertBytesToMySQL
-	7.	DeserializeMySQLPacket
-	8.	DecodeMySQLData
-	9.	BytesToMySQLData
-	10.	UnpackMySQLBytes
-*/
-
 // DecodePayload is used to decode mysql packets that don't consist of multiple packets within them, because we are reading per packet.
 func DecodePayload(ctx context.Context, logger *zap.Logger, data []byte, clientConn net.Conn, decodeCtx *DecodeContext) (*mysql.PacketBundle, error) {
 	//Parse the data into mysql header and payload
@@ -82,7 +69,7 @@ func handleQueryStmtResponse(ctx context.Context, logger *zap.Logger, packet mys
 
 	sg, ok := decodeCtx.ServerGreetings.Load(clientConn)
 	if !ok {
-		return parsedPacket, fmt.Errorf("Server Greetings not found")
+		return parsedPacket, fmt.Errorf("server Greetings not found")
 	}
 
 	logger.Debug("Last operation when handling client query", zap.Any("last operation", mysql.CommandStatusToString(lastOp)))
@@ -160,7 +147,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 	if payloadType != mysql.HandshakeV10 {
 		sg, ok = decodeCtx.ServerGreetings.Load(clientConn)
 		if !ok {
-			return parsedPacket, fmt.Errorf("Server Greetings not found")
+			return parsedPacket, fmt.Errorf("server Greetings not found")
 		}
 	}
 
@@ -439,7 +426,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 		logger.Debug("COM_STMT_SEND_LONG_DATA decoded", zap.Any("parsed packet", parsedPacket))
 	default:
 		logger.Warn("Unknown packet type", zap.String("PacketType", fmt.Sprintf("%#x", payloadType)), zap.Any("payload", payload), zap.Any("last operation", lastOp))
-		setPacketInfo(ctx, parsedPacket, itgUtils.EncodeBase64(payload), "Unknown type", clientConn, RESET, decodeCtx)
+		setPacketInfo(ctx, parsedPacket, itgUtils.EncodeBase64(payload), fmt.Sprintf("%#x", payloadType), clientConn, RESET, decodeCtx)
 	}
 
 	return parsedPacket, nil

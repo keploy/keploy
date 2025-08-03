@@ -4,8 +4,10 @@ package pkg
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"io/fs"
@@ -13,13 +15,15 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-
+	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"text/template"
 
+	"github.com/andybalholm/brotli"
 	"go.keploy.io/server/v2/pkg/models"
 
 	"go.keploy.io/server/v2/utils"
@@ -27,6 +31,16 @@ import (
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
+
+var SortCounter int64 = -1
+
+func InitSortCounter(counter int64) {
+	atomic.StoreInt64(&SortCounter, counter)
+}
+
+func GetNextSortNum() int64 {
+	return atomic.AddInt64(&SortCounter, 1)
+}
 
 // URLParams returns the Url and Query parameters from the request url.
 func URLParams(r *http.Request) map[string]string {
@@ -89,7 +103,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	//TODO: adjust this logic in the render function in order to remove the redundant code
 	// convert testcase to string and render the template values.
-	if len(utils.TemplatizedValues) > 0 {
+	if len(utils.TemplatizedValues) > 0 || len(utils.SecretValues) > 0 {
 		testCaseStr, err := json.Marshal(tc)
 		if err != nil {
 			utils.LogError(logger, err, "failed to marshal the testcase")
@@ -106,8 +120,18 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 			return nil, err
 		}
 
+		data := make(map[string]interface{})
+
+		for k, v := range utils.TemplatizedValues {
+			data[k] = v
+		}
+
+		if len(utils.SecretValues) > 0 {
+			data["secret"] = utils.SecretValues
+		}
+
 		var output bytes.Buffer
-		err = tmpl.Execute(&output, utils.TemplatizedValues)
+		err = tmpl.Execute(&output, data)
 		if err != nil {
 			utils.LogError(logger, err, "failed to execute the template")
 			return nil, err
@@ -120,8 +144,19 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}
 
+	reqBody := []byte(tc.HTTPReq.Body)
+	var err error
+
+	if tc.HTTPReq.Header["Content-Encoding"] != "" {
+		reqBody, err = Compress(logger, tc.HTTPReq.Header["Content-Encoding"], reqBody)
+		if err != nil {
+			utils.LogError(logger, err, "failed to compress the request body")
+			return nil, err
+		}
+	}
+
 	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
-	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, bytes.NewBufferString(tc.HTTPReq.Body))
+	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, bytes.NewBuffer(reqBody))
 	if err != nil {
 		utils.LogError(logger, err, "failed to create a http request from the yaml document")
 		return nil, err
@@ -209,6 +244,14 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		return nil, errReadRespBody
 	}
 
+	if httpResp.Header.Get("Content-Encoding") != "" {
+		respBody, err = Decompress(logger, httpResp.Header.Get("Content-Encoding"), respBody)
+		if err != nil {
+			utils.LogError(logger, err, "failed to decode response body")
+			return nil, err
+		}
+	}
+
 	resp = &models.HTTPResp{
 		StatusCode: httpResp.StatusCode,
 		Body:       string(respBody),
@@ -266,14 +309,21 @@ func MakeCurlCommand(tc models.HTTPReq) string {
 
 func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 	indices := []string{}
+
 	dir, err := os.OpenFile(path, os.O_RDONLY, fs.FileMode(os.O_RDONLY))
 	if err != nil {
-		Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
-		return indices, nil
+		Logger.Debug("creating a folder for the keploy  generated testcases", zap.Error(err))
+		return indices, err
 	}
+	defer func() {
+		if closeErr := dir.Close(); closeErr != nil {
+			Logger.Debug("failed to close directory", zap.Error(closeErr))
+		}
+	}()
 
 	files, err := dir.ReadDir(0)
 	if err != nil {
+		Logger.Debug("failed to read directory contents", zap.Error(err))
 		return indices, err
 	}
 
@@ -282,6 +332,7 @@ func ReadSessionIndices(path string, Logger *zap.Logger) ([]string, error) {
 			indices = append(indices, v.Name())
 		}
 	}
+
 	return indices, nil
 }
 
@@ -400,7 +451,6 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -419,4 +469,179 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 			return fmt.Errorf("timeout after %v waiting for port %s:%s, %s", timeout, host, port, msg)
 		}
 	}
+}
+
+func FilterTcsMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time) []*models.Mock {
+	filteredMocks, _ := filterByTimeStamp(ctx, logger, m, afterTime, beforeTime)
+
+	sort.SliceStable(filteredMocks, func(i, j int) bool {
+		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
+	})
+
+	return filteredMocks
+}
+
+func FilterConfigMocks(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time) []*models.Mock {
+	filteredMocks, unfilteredMocks := filterByTimeStamp(ctx, logger, m, afterTime, beforeTime)
+
+	sort.SliceStable(filteredMocks, func(i, j int) bool {
+		return filteredMocks[i].Spec.ReqTimestampMock.Before(filteredMocks[j].Spec.ReqTimestampMock)
+	})
+
+	sort.SliceStable(unfilteredMocks, func(i, j int) bool {
+		return unfilteredMocks[i].Spec.ReqTimestampMock.Before(unfilteredMocks[j].Spec.ReqTimestampMock)
+	})
+
+	return append(filteredMocks, unfilteredMocks...)
+}
+
+func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, []*models.Mock) {
+
+	filteredMocks := make([]*models.Mock, 0)
+	unfilteredMocks := make([]*models.Mock, 0)
+
+	if afterTime.Equal(time.Time{}) {
+		return m, unfilteredMocks
+	}
+
+	if beforeTime.Equal(time.Time{}) {
+		return m, unfilteredMocks
+	}
+
+	isNonKeploy := false
+
+	for _, mock := range m {
+		// doing deep copy to prevent data race, which was happening due to the write to isFiltered
+		// field in this for loop, and write in mockmanager functions.
+		tmp := *mock
+		p := &tmp
+		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
+			isNonKeploy = true
+		}
+		if p.Spec.ReqTimestampMock.Equal(time.Time{}) || p.Spec.ResTimestampMock.Equal(time.Time{}) {
+			logger.Debug("request or response timestamp of mock is missing")
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, p)
+			continue
+		}
+
+		if p.Spec.ReqTimestampMock.After(afterTime) && p.Spec.ResTimestampMock.Before(beforeTime) {
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, p)
+			continue
+		}
+		p.TestModeInfo.IsFiltered = false
+		unfilteredMocks = append(unfilteredMocks, p)
+	}
+	if isNonKeploy {
+		logger.Debug("Few mocks in the mock File are not recorded by keploy ignoring them")
+	}
+	return filteredMocks, unfilteredMocks
+}
+
+func GuessContentType(data []byte) models.BodyType {
+	// Use net/http library's DetectContentType for basic MIME type detection
+	mimeType := http.DetectContentType(data)
+
+	// Additional checks to further specify the content type
+	switch {
+	case IsJSON(data):
+		return models.JSON
+	case IsXML(data):
+		return models.XML
+	case strings.Contains(mimeType, "text/html"):
+		return models.HTML
+	case strings.Contains(mimeType, "text/plain"):
+		if IsCSV(data) {
+			return models.CSV
+		}
+		return models.Plain
+	}
+
+	return models.UnknownType
+}
+
+func IsJSON(body []byte) bool {
+	var js interface{}
+	return json.Unmarshal(body, &js) == nil
+}
+
+func IsXML(data []byte) bool {
+	var xm xml.Name
+	return xml.Unmarshal(data, &xm) == nil
+}
+
+// IsCSV checks if data can be parsed as CSV by looking for common characteristics
+func IsCSV(data []byte) bool {
+	// Very simple CSV check: look for commas in the first line
+	content := string(data)
+	if lines := strings.Split(content, "\n"); len(lines) > 0 {
+		return strings.Contains(lines[0], ",")
+	}
+	return false
+}
+
+func Decompress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) {
+	switch encoding {
+	case "br":
+		logger.Debug("decompressing brotli compressed data")
+		reader := brotli.NewReader(bytes.NewReader(data))
+		decodedData, err := io.ReadAll(reader)
+		if err != nil {
+			utils.LogError(logger, err, "failed to read the brotli compressed data")
+			return nil, err
+		}
+		return decodedData, nil
+	case "gzip":
+		logger.Debug("decoding gzip compressed data")
+		reader, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			utils.LogError(logger, err, "failed to create gzip reader")
+			return nil, err
+		}
+		defer reader.Close()
+		decodedData, err := io.ReadAll(reader)
+		if err != nil {
+			utils.LogError(logger, err, "failed to read the gzip compressed data")
+			return nil, err
+		}
+		return decodedData, nil
+	}
+	return data, nil
+}
+
+func Compress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) {
+	switch encoding {
+	case "gzip":
+		logger.Debug("compressing data using gzip")
+		var compressedBuffer bytes.Buffer
+		gw := gzip.NewWriter(&compressedBuffer)
+		_, err := gw.Write(data)
+		if err != nil {
+			utils.LogError(logger, err, "failed to write compressed data to gzip writer")
+			return nil, err
+		}
+		err = gw.Close()
+		if err != nil {
+			utils.LogError(logger, err, "failed to close gzip writer")
+			return nil, err
+		}
+		return compressedBuffer.Bytes(), nil
+	case "br":
+		logger.Debug("compressing data using brotli")
+		var compressedBuffer bytes.Buffer
+		bw := brotli.NewWriter(&compressedBuffer)
+		_, err := bw.Write(data)
+		if err != nil {
+			utils.LogError(logger, err, "failed to write compressed data to brotli writer")
+			return nil, err
+		}
+		err = bw.Close()
+		if err != nil {
+			utils.LogError(logger, err, "failed to close brotli writer")
+			return nil, err
+		}
+		return compressedBuffer.Bytes(), nil
+	}
+	return data, nil
 }

@@ -161,7 +161,7 @@ func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error
 		logger.Debug("", zap.Any("java_home", javaHome), zap.Any("caCertsPath", cacertsPath), zap.Any("caPath", caPath))
 
 		if isJavaCAExist(ctx, alias, storePass, cacertsPath) {
-			logger.Info("Java detected and CA already exists", zap.String("path", cacertsPath))
+			logger.Debug("Java detected and CA already exists", zap.String("path", cacertsPath))
 			return nil
 		}
 
@@ -178,8 +178,8 @@ func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error
 			}
 		}
 
-		logger.Info("Java detected and successfully imported CA", zap.String("path", cacertsPath), zap.String("output", string(cmdOutput)))
-		logger.Info("Successfully imported CA", zap.Any("", cmdOutput))
+		logger.Debug("Java detected and successfully imported CA", zap.String("path", cacertsPath), zap.String("output", string(cmdOutput)))
+		logger.Debug("Successfully imported CA", zap.Any("", cmdOutput))
 	} else {
 		logger.Debug("Java is not installed on the system")
 	}

@@ -12,8 +12,10 @@ import (
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	mysqlUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire"
+	intgUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	pTls "go.keploy.io/server/v2/pkg/core/proxy/tls"
 	pUtils "go.keploy.io/server/v2/pkg/core/proxy/util"
+
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.keploy.io/server/v2/utils"
@@ -104,7 +106,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 		// Get the SSL request from the mock
 		_, ok = req[reqIdx].Message.(*mysql.SSLRequestPacket)
 		if !ok {
-			utils.LogError(logger, nil, "failed to assert mock SSL request packet", zap.Any("expected", req[reqIdx].PacketBundle.Header.Type))
+			utils.LogError(logger, nil, "failed to assert mock SSL request packet", zap.Any("expected", req[reqIdx].Header.Type))
 			return res, nil
 		}
 
@@ -203,7 +205,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 	// For Native password: next packet is Ok/Err
 	// For CachingSha2 password: next packet is AuthMoreData
 
-	authDecider := resp[respIdx].PacketBundle.Header.Type
+	authDecider := resp[respIdx].Header.Type
 
 	// Check if the next packet is AuthSwitchRequest
 	// Server sends AuthSwitchRequest when it wants to switch the auth mechanism
@@ -282,7 +284,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 			return res, nil
 		}
 
-		authDecider = resp[respIdx].PacketBundle.Header.Type
+		authDecider = resp[respIdx].Header.Type
 	}
 
 	switch authDecider {
@@ -316,7 +318,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 
 func simulateNativePassword(ctx context.Context, logger *zap.Logger, clientConn net.Conn, nativePassMocks reqResp, initialHandshakeMock *models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) error {
 
-	logger.Debug("final response for native password", zap.Any("response", nativePassMocks.resp[0].PacketBundle.Header.Type))
+	logger.Debug("final response for native password", zap.Any("response", nativePassMocks.resp[0].Header.Type))
 
 	// Send the final response (OK/Err) to the client
 	buf, err := wire.EncodeToBinary(ctx, logger, &nativePassMocks.resp[0].PacketBundle, clientConn, decodeCtx)
@@ -418,7 +420,7 @@ func simulateFastAuthSuccess(ctx context.Context, logger *zap.Logger, clientConn
 		return fmt.Errorf("final response mock not found for fast auth success")
 	}
 
-	logger.Debug("final response for fast auth success", zap.Any("response", resp[0].PacketBundle.Header.Type))
+	logger.Debug("final response for fast auth success", zap.Any("response", resp[0].Header.Type))
 
 	// Send the final response (OK/Err) to the client
 	buf, err := wire.EncodeToBinary(ctx, logger, &resp[0].PacketBundle, clientConn, decodeCtx)
@@ -453,6 +455,16 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 	resp := fullAuthMocks.resp
 	req := fullAuthMocks.req
 
+	if decodeCtx.UseSSL {
+		logger.Debug("This is an ssl request, simulating plain password in caching_sha2_password full auth")
+		err := simulatePlainPassword(ctx, logger, clientConn, fullAuthMocks, initialHandshakeMock, mockDb, decodeCtx)
+		if err != nil {
+			utils.LogError(logger, err, "failed to simulate plain password in caching_sha2_password full auth")
+			return err
+		}
+		return nil
+	}
+
 	// read the public key request from the client
 	publicKeyRequestBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
 	if err != nil {
@@ -486,9 +498,9 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 	}
 
 	// Match the header of the public key request
-	ok = matchHeader(*req[0].PacketBundle.Header.Header, *pkt.Header.Header)
+	ok = matchHeader(*req[0].Header.Header, *pkt.Header.Header)
 	if !ok {
-		utils.LogError(logger, nil, "header mismatch for public key request", zap.Any("expected", req[0].PacketBundle.Header.Header), zap.Any("actual", pkt.Header.Header))
+		utils.LogError(logger, nil, "header mismatch for public key request", zap.Any("expected", req[0].Header.Header), zap.Any("actual", pkt.Header.Header))
 		return nil
 	}
 
@@ -505,7 +517,7 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 	}
 
 	// Get the AuthMoreData packet
-	_, ok = resp[0].PacketBundle.Message.(*mysql.AuthMoreDataPacket)
+	_, ok = resp[0].Message.(*mysql.AuthMoreDataPacket)
 	if !ok {
 		utils.LogError(logger, nil, "failed to assert auth more data packet (public key)")
 		return nil
@@ -568,7 +580,7 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 		return fmt.Errorf("final response mock not found for full auth")
 	}
 
-	logger.Debug("final response for full auth", zap.Any("response", resp[1].PacketBundle.Header.Type))
+	logger.Debug("final response for full auth", zap.Any("response", resp[1].Header.Type))
 
 	// Get the final response (OK/Err) from the mock
 	// Send the final response (OK/Err) to the client
@@ -597,5 +609,88 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 
 	logger.Debug("full auth completed successfully")
 
+	return nil
+}
+
+func simulatePlainPassword(ctx context.Context, logger *zap.Logger, clientConn net.Conn, fullAuthMocks reqResp, initialHandshakeMock *models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) error {
+
+	req := fullAuthMocks.req
+	resp := fullAuthMocks.resp
+
+	// read the plain password from the client
+	plainPassBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
+	if err != nil {
+		utils.LogError(logger, err, "failed to read plain password from client")
+		return err
+	}
+
+	// Get the packet from the buffer
+	plainPassPkt, err := mysqlUtils.BytesToMySQLPacket(plainPassBuf)
+	if err != nil {
+		utils.LogError(logger, err, "failed to convert plain password to packet")
+		return err
+	}
+
+	plainPass := string(intgUtils.EncodeBase64(plainPassPkt.Payload))
+
+	// Get the plain password from the mock
+	if len(req) < 1 {
+		utils.LogError(logger, nil, "no mysql mocks found for plain password")
+		return fmt.Errorf("no mysql mocks found for plain password")
+	}
+
+	plainPassMock, ok := req[0].Message.(string)
+	if !ok {
+		utils.LogError(logger, nil, "failed to assert plain password packet")
+		return fmt.Errorf("failed to assert plain password packet")
+	}
+
+	// Match the header of the plain password
+	ok = matchHeader(*req[0].Header.Header, plainPassPkt.Header)
+	if !ok {
+		utils.LogError(logger, nil, "header mismatch for plain password", zap.Any("expected", req[0].Header.Header), zap.Any("actual", plainPassPkt.Header))
+		return fmt.Errorf("header mismatch for plain password")
+	}
+
+	// Match the plain password from the client with the mock
+	if plainPass != plainPassMock {
+		utils.LogError(logger, nil, "plain password mismatch", zap.Any("actual", plainPass), zap.Any("expected", plainPassMock))
+		return fmt.Errorf("plain password mismatch")
+	}
+
+	//Now send the final response (OK/Err) to the client
+	if len(resp) < 1 {
+		utils.LogError(logger, nil, "final response mock not found for full auth (plain password)")
+		return fmt.Errorf("final response mock not found for full auth (plain password)")
+	}
+
+	logger.Debug("final response for full auth(plain password)", zap.Any("response", resp[0].Header.Type))
+
+	// Get the final response (OK/Err) from the mock
+	// Send the final response (OK/Err) to the client
+	buf, err := wire.EncodeToBinary(ctx, logger, &resp[0].PacketBundle, clientConn, decodeCtx)
+	if err != nil {
+		utils.LogError(logger, err, "failed to encode final response packet for full auth (plain password)")
+		return err
+	}
+
+	_, err = clientConn.Write(buf)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		utils.LogError(logger, err, "failed to write final response for full auth (plain password) to the client")
+		return err
+	}
+
+	// FullAuth mechanism only comes for the first time unless COM_CHANGE_USER is called (that is not supported for now).
+	// Afterwards only fast auth success is expected. So, we can delete this.
+	ok = mockDb.DeleteUnFilteredMock(*initialHandshakeMock)
+	// TODO: need to check what to do in this case
+	if !ok {
+		utils.LogError(logger, nil, "failed to delete unfiltered mock during full auth (plain password) in ssl request")
+	}
+
+	logger.Debug("full auth (plain-password) in ssl request completed successfully")
 	return nil
 }

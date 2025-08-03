@@ -194,12 +194,40 @@ func compareSecondResponse(val1 *string, response2 *interface{}, key1 string, ke
 			}
 		}
 	case float64, int64, int, float32:
-		if *val1 != utils.ToString(v2) && key1 == key2 {
-			valFromTemplate := utils.TemplatizedValues[key1]
-			if valFromTemplate != nil && *val1 == utils.ToString(valFromTemplate) {
-				utils.TemplatizedValues[key1] = v2
+		if *val1 != v2 {
+
+			// Reverse the templatized values map.
+			revMap := reverseMap(utils.TemplatizedValues)
+			if _, ok := revMap[*val1]; ok && key1 == key2 {
+				key := revMap[*val1]
+				utils.TemplatizedValues[key] = v2
 				*val1 = utils.ToString(v2)
+				return
 			}
+			// 1) try integer parse
+			if i, err := strconv.Atoi(*val1); err == nil {
+				if _, ok := revMap[i]; ok && key1 == key2 {
+					key := revMap[i]
+					utils.TemplatizedValues[key] = v2
+					*val1 = utils.ToString(v2)
+				}
+			}
+			if f, err := strconv.ParseFloat(*val1, 32); err == nil {
+				if _, ok := revMap[f]; ok && key1 == key2 {
+					key := revMap[f]
+					utils.TemplatizedValues[key] = v2
+					*val1 = utils.ToString(v2)
+				}
+			}
+			if f, err := strconv.ParseFloat(*val1, 64); err == nil {
+				if _, ok := revMap[f]; ok && key1 == key2 {
+
+					key := revMap[*val1]
+					utils.TemplatizedValues[key] = v2
+					*val1 = utils.ToString(v2)
+				}
+			}
+
 		}
 	}
 }
@@ -570,7 +598,7 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 	match := true
 	_, isHeaderNoisy := noise["header"]
 	for k, v := range h1 {
-		regexArr, isNoisy := CheckStringExist(strings.ToLower(k), noise)
+		regexArr, isNoisy := SubstringKeyMatch(strings.ToLower(k), noise)
 		if isNoisy && len(regexArr) != 0 {
 			isNoisy, _ = MatchesAnyRegex(v[0], regexArr)
 		}
@@ -647,7 +675,7 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 		}
 	}
 	for k, v := range h2 {
-		regexArr, isNoisy := CheckStringExist(strings.ToLower(k), noise)
+		regexArr, isNoisy := SubstringKeyMatch(strings.ToLower(k), noise)
 		if isNoisy && len(regexArr) != 0 {
 			isNoisy, _ = MatchesAnyRegex(v[0], regexArr)
 		}
@@ -696,12 +724,21 @@ func MapToArray(mp map[string][]string) []string {
 	return result
 }
 
-func CheckStringExist(s string, mp map[string][]string) ([]string, bool) {
-	if val, ok := mp[s]; ok {
-		return val, ok
+func SubstringKeyMatch(s string, mp map[string][]string) ([]string, bool) {
+	for key, val := range mp {
+		if strings.Contains(s, key) {
+			return val, true
+		}
 	}
 	return []string{}, false
 }
+
+// func CheckStringExist(s string, mp map[string][]string) ([]string, bool) {
+// 	if val, ok := mp[s]; ok {
+// 		return val, ok
+// 	}
+// 	return []string{}, false
+// }
 
 func MatchesAnyRegex(str string, regexArray []string) (bool, string) {
 	for _, pattern := range regexArray {
@@ -815,7 +852,7 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 	}
 	switch x.Kind() {
 	case reflect.Float64, reflect.String, reflect.Bool:
-		regexArr, isNoisy := CheckStringExist(key, noiseMap)
+		regexArr, isNoisy := SubstringKeyMatch(key, noiseMap)
 		if isNoisy && len(regexArr) != 0 {
 			isNoisy, _ = MatchesAnyRegex(InterfaceToString(expected), regexArr)
 		}
@@ -829,7 +866,7 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 		copiedExpMap := make(map[string]interface{})
 		copiedActMap := make(map[string]interface{})
 
-		if regexArr, isNoisy := CheckStringExist(key, noiseMap); isNoisy && len(regexArr) == 0 {
+		if regexArr, isNoisy := SubstringKeyMatch(key, noiseMap); isNoisy && len(regexArr) == 0 {
 			break
 		}
 		// Copy each key-value pair from expMap to copiedExpMap
@@ -857,7 +894,7 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 			}
 			// remove the noisy key from both expected and actual JSON.
 			// Viper bindings are case insensitive, so we need convert the key to lowercase.
-			if _, ok := CheckStringExist(strings.ToLower(prefix+k), noiseMap); ok {
+			if _, ok := SubstringKeyMatch(strings.ToLower(prefix+k), noiseMap); ok {
 				delete(copiedExpMap, prefix+k)
 				delete(copiedActMap, k)
 				continue
@@ -875,7 +912,7 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 		matchJSONComparisonResult.differences = append(matchJSONComparisonResult.differences, differences...)
 		return matchJSONComparisonResult, nil
 	case reflect.Slice:
-		if regexArr, isNoisy := CheckStringExist(key, noiseMap); isNoisy && len(regexArr) == 0 {
+		if regexArr, isNoisy := SubstringKeyMatch(key, noiseMap); isNoisy && len(regexArr) == 0 {
 			break
 		}
 		expSlice := reflect.ValueOf(expected)
@@ -883,17 +920,31 @@ func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseM
 		if expSlice.Len() != actSlice.Len() {
 			return matchJSONComparisonResult, nil
 		}
+
 		isMatched := true
 		isExact := true
 		for i := 0; i < expSlice.Len(); i++ {
 			matched := false
 			for j := 0; j < actSlice.Len(); j++ {
-				prefixedVal := key + "[" + fmt.Sprint(j) + "]"
-				if valMatchJSONComparisonResult, err := matchJSONWithNoiseHandling(prefixedVal, expSlice.Index(i).Interface(), actSlice.Index(j).Interface(), noiseMap, ignoreOrdering); err == nil && valMatchJSONComparisonResult.matches {
+
+				// ­Special rule: we're at the root of the slice (key == "")
+				// and every element is a map or slice (i.e. a JSON object or array) → don’t add “[i]” prefixes.
+
+				dropPrefix := key == "" &&
+					expSlice.Len() > 0 && (reflect.TypeOf(expSlice.Index(i).Interface()).Kind() == reflect.Map || reflect.TypeOf(expSlice.Index(i).Interface()).Kind() == reflect.Slice)
+
+				childKey := ""
+				if !dropPrefix {
+					childKey = fmt.Sprintf("%s[%d]", key, j)
+				}
+
+				if valMatchJSONComparisonResult, err := matchJSONWithNoiseHandling(childKey, expSlice.Index(i).Interface(), actSlice.Index(j).Interface(), noiseMap, ignoreOrdering); err == nil && valMatchJSONComparisonResult.matches {
 					if !valMatchJSONComparisonResult.isExact {
 						for _, val := range valMatchJSONComparisonResult.differences {
-							prefixedVal := key + "[" + fmt.Sprint(j) + "]." + val // Prefix the value
-							matchJSONComparisonResult.differences = append(matchJSONComparisonResult.differences, prefixedVal)
+							if childKey != "" {
+								val = childKey + "." + val
+							}
+							matchJSONComparisonResult.differences = append(matchJSONComparisonResult.differences, val)
 						}
 					}
 					matched = true
@@ -953,4 +1004,44 @@ func InterfaceToString(val interface{}) string {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+func JsonContains(actualJSON string, expectedJSON map[string]interface{}) (bool, error) {
+	var actual interface{}
+	err := json.Unmarshal([]byte(actualJSON), &actual)
+	if err != nil {
+		return false, fmt.Errorf("failed to unmarshal actual JSON: %v", err)
+	}
+
+	return containsRecursive(actual, expectedJSON), nil
+}
+
+// containsRecursive recursively checks if the expected data is in the actual data.
+func containsRecursive(actual interface{}, expected map[string]interface{}) bool {
+	actualMap, ok := actual.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	for key, expectedValue := range expected {
+		actualValue, exists := actualMap[key]
+		if !exists {
+			return false
+		}
+
+		switch v := expectedValue.(type) {
+		case map[string]interface{}:
+			if actualMapVal, ok := actualValue.(map[string]interface{}); ok {
+				if !containsRecursive(actualMapVal, v) {
+					return false
+				}
+			} else {
+				return false
+			}
+		default:
+			if !reflect.DeepEqual(actualValue, expectedValue) {
+				return false
+			}
+		}
+	}
+	return true
 }

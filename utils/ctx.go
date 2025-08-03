@@ -27,8 +27,8 @@ func NewCtx() context.Context {
 
 	// Start a goroutine that will cancel the context when a signal is received
 	go func() {
-		<-sigs
-		fmt.Println("Signal received, canceling context...")
+		sig := <-sigs // this received signal will be inside keploy docker container if running in docker else on the host.
+		fmt.Printf("Signal received: %s, canceling context...\n", sig)
 		cancel()
 	}()
 

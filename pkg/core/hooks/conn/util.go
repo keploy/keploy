@@ -15,7 +15,6 @@ import (
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg"
-	proxyHttp "go.keploy.io/server/v2/pkg/core/proxy/integrations/http"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -44,54 +43,90 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 			return false
 		}
 	}
-	var bypassRules []config.BypassRule
 
-	for _, filter := range opts.Filters {
-		bypassRules = append(bypassRules, filter.BypassRule)
+	var passThrough bool
+
+	type cond struct {
+		eligible bool
+		match    bool
 	}
 
-	// Host, Path and Port matching
-	headerOpts := models.OutgoingOptions{
-		Rules:          bypassRules,
-		MongoPassword:  "",
-		SQLDelay:       0,
-		FallBackOnMiss: false,
-	}
-	passThrough := proxyHttp.IsPassThrough(logger, req, uint(dstPort), headerOpts)
-
 	for _, filter := range opts.Filters {
-		if filter.URLMethods != nil && len(filter.URLMethods) != 0 {
-			urlMethodMatch := false
-			for _, method := range filter.URLMethods {
-				if method == req.Method {
+
+		//  1. bypass rule
+		bypassEligible := !(filter.BypassRule.Host == "" &&
+			filter.BypassRule.Path == "" &&
+			filter.BypassRule.Port == 0)
+
+		opts := models.OutgoingOptions{Rules: []config.BypassRule{filter.BypassRule}}
+		byPassMatch := utils.IsPassThrough(logger, req, uint(dstPort), opts)
+
+		//  2. URL-method rule
+		urlMethodEligible := len(filter.URLMethods) > 0
+		urlMethodMatch := false
+		if urlMethodEligible {
+			for _, m := range filter.URLMethods {
+				if m == req.Method {
 					urlMethodMatch = true
 					break
 				}
 			}
-			passThrough = urlMethodMatch
-			if !passThrough {
-				continue
-			}
 		}
-		if filter.Headers != nil && len(filter.Headers) != 0 {
-			headerMatch := false
-			for filterHeaderKey, filterHeaderValue := range filter.Headers {
-				regex, err := regexp.Compile(filterHeaderValue)
+
+		//  3. header rule
+		headerEligible := len(filter.Headers) > 0
+		headerMatch := false
+		if headerEligible {
+			for key, vals := range filter.Headers {
+				rx, err := regexp.Compile(vals)
 				if err != nil {
-					utils.LogError(logger, err, "failed to compile the header regex")
+					utils.LogError(logger, err, "bad header regex")
 					continue
 				}
-				if req.Header.Get(filterHeaderKey) != "" {
-					for _, value := range req.Header.Values(filterHeaderKey) {
-						headerMatch = regex.MatchString(value)
-						if headerMatch {
-							break
-						}
+				for _, v := range req.Header.Values(key) {
+					if rx.MatchString(v) {
+						headerMatch = true
+						break
 					}
 				}
-				passThrough = headerMatch
-				if passThrough {
+				if headerMatch {
 					break
+				}
+			}
+		}
+
+		conds := []cond{
+			{bypassEligible, byPassMatch},
+			{urlMethodEligible, urlMethodMatch},
+			{headerEligible, headerMatch},
+		}
+
+		switch filter.MatchType {
+		case config.AND:
+			pass := true
+			seen := false
+			for _, c := range conds {
+				if !c.eligible {
+					continue
+				} // ignore ineligible ones
+				seen = true
+				if !c.match {
+					pass = false
+					break
+				}
+			}
+			if seen && pass {
+				passThrough = true
+				return passThrough
+			}
+
+		case config.OR:
+			fallthrough
+		default:
+			for _, c := range conds {
+				if c.eligible && c.match {
+					passThrough = true
+					return passThrough
 				}
 			}
 		}
@@ -132,6 +167,14 @@ func Capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 		return
 	}
 
+	if req.Header.Get("Content-Encoding") != "" {
+		reqBody, err = pkg.Decompress(logger, req.Header.Get("Content-Encoding"), reqBody)
+		if err != nil {
+			utils.LogError(logger, err, "failed to decompress the request body")
+			return
+		}
+	}
+
 	defer func() {
 		err := resp.Body.Close()
 		if err != nil {
@@ -164,6 +207,14 @@ func Capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 			return
 		}
 		reqBody = []byte(decodedBody)
+	}
+
+	if resp.Header.Get("Content-Encoding") != "" {
+		respBody, err = pkg.Decompress(logger, resp.Header.Get("Content-Encoding"), respBody)
+		if err != nil {
+			utils.LogError(logger, err, "failed to decompress the response body")
+			return
+		}
 	}
 
 	t <- &models.TestCase{

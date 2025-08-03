@@ -70,6 +70,7 @@ type Record struct {
 	Filters     []Filter      `json:"filters" yaml:"filters" mapstructure:"filters"`
 	BasePath    string        `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
 	RecordTimer time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
+	Metadata    string        `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
 }
 
 type ReRecord struct {
@@ -102,13 +103,19 @@ type BypassRule struct {
 	Host string `json:"host" yaml:"host" mapstructure:"host"`
 	Port uint   `json:"port" yaml:"port" mapstructure:"port"`
 }
+type MatchType string
+
+const (
+	OR  MatchType = "OR"
+	AND MatchType = "AND"
+)
 
 type Filter struct {
 	BypassRule `mapstructure:",squash"`
 	URLMethods []string          `json:"urlMethods" yaml:"urlMethods" mapstructure:"urlMethods"`
 	Headers    map[string]string `json:"headers" yaml:"headers" mapstructure:"headers"`
+	MatchType  MatchType         `json:"matchType"`
 }
-
 type Test struct {
 	SelectedTests       map[string][]string `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
 	GlobalNoise         Globalnoise         `json:"globalNoise" yaml:"globalNoise" mapstructure:"globalNoise"`
@@ -131,6 +138,9 @@ type Test struct {
 	DisableMockUpload   bool                `json:"disableMockUpload" yaml:"disableMockUpload" mapstructure:"disableMockUpload"`
 	UseLocalMock        bool                `json:"useLocalMock" yaml:"useLocalMock" mapstructure:"useLocalMock"`
 	UpdateTemplate      bool                `json:"updateTemplate" yaml:"updateTemplate" mapstructure:"updateTemplate"`
+	MustPass            bool                `json:"mustPass" yaml:"mustPass" mapstructure:"mustPass"`
+	MaxFailAttempts     uint32              `json:"maxFailAttempts" yaml:"maxFailAttempts" mapstructure:"maxFailAttempts"`
+	MaxFlakyChecks      uint32              `json:"maxFlakyChecks" yaml:"maxFlakyChecks" mapstructure:"maxFlakyChecks"`
 }
 
 type Language string

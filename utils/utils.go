@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -26,7 +27,6 @@ import (
 	"golang.org/x/text/language"
 
 	"github.com/getsentry/sentry-go"
-	"github.com/sbabiv/xml2map"
 	netLib "github.com/shirou/gopsutil/v3/net"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -34,11 +34,13 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
+	"helm.sh/helm/v3/pkg/strvals"
 )
 
 var WarningSign = "\U000026A0"
 
 var TemplatizedValues = map[string]interface{}{}
+var SecretValues = map[string]interface{}{}
 
 var ErrCode = 0
 
@@ -144,6 +146,58 @@ func ReplacePort(currentURL string, port string) (string, error) {
 	}
 
 	return parsedURL.String(), nil
+}
+
+// GetReqMeta returns the metadata of the request
+func GetReqMeta(req *http.Request) map[string]string {
+	reqMeta := map[string]string{}
+	if req != nil {
+		// get request metadata
+		reqMeta = map[string]string{
+			"method": req.Method,
+			"url":    req.URL.String(),
+			"host":   req.Host,
+		}
+	}
+	return reqMeta
+}
+
+func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts models.OutgoingOptions) bool {
+	passThrough := false
+
+	for _, bypass := range opts.Rules {
+		if bypass.Host != "" {
+			regex, err := regexp.Compile(bypass.Host)
+			if err != nil {
+				LogError(logger, err, "failed to compile the host regex", zap.Any("metadata", GetReqMeta(req)))
+				continue
+			}
+			passThrough = regex.MatchString(req.Host)
+			if !passThrough {
+				continue
+			}
+		}
+		if bypass.Path != "" {
+			regex, err := regexp.Compile(bypass.Path)
+			if err != nil {
+				LogError(logger, err, "failed to compile the path regex", zap.Any("metadata", GetReqMeta(req)))
+				continue
+			}
+			passThrough = regex.MatchString(req.URL.String())
+			if !passThrough {
+				continue
+			}
+		}
+
+		if passThrough {
+			if bypass.Port == 0 || bypass.Port == destPort {
+				return true
+			}
+			passThrough = false
+		}
+	}
+
+	return passThrough
 }
 
 func kebabToCamel(s string) string {
@@ -287,26 +341,36 @@ var ConfigGuide = `
 
 // AskForConfirmation asks the user for confirmation. A user must type in "yes" or "no" and
 // then press enter. It has fuzzy matching, so "y", "Y", "yes", "YES", and "Yes" all count as
-// confirmations. If the input is not recognized, it will ask again. The function does not return
-// until it gets a valid response from the user.
-func AskForConfirmation(s string) (bool, error) {
+// confirmations. If the input is not recognized or interrupted, exit gracefully as "no".
+func AskForConfirmation(ctx context.Context, s string) (bool, error) {
 	reader := bufio.NewReader(os.Stdin)
 
-	for {
-		fmt.Printf("%s [y/n]: ", s)
+	fmt.Printf("%s [y/n]: ", s)
 
+	respCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+
+	go func() {
 		response, err := reader.ReadString('\n')
 		if err != nil {
-			return false, err
+			errCh <- err
+		} else {
+			respCh <- response
 		}
+	}()
 
+	select {
+	case <-ctx.Done():
+		// Cobra caught SIGINT (Ctrl+C) and cancelled its root context
+		return false, nil
+	case err := <-errCh:
+		return false, err
+	case response := <-respCh:
 		response = strings.ToLower(strings.TrimSpace(response))
-
 		if response == "y" || response == "yes" {
 			return true, nil
-		} else if response == "n" || response == "no" {
-			return false, nil
 		}
+		return false, nil
 	}
 }
 
@@ -394,7 +458,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
       - name: Test-Report
         uses: keploy/testgpt@main
         with:
@@ -691,25 +755,93 @@ func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) erro
 	// Find all descendant PIDs of the given PID & then signal them.
 	// Any shell doesn't signal its children when it receives a signal.
 	// Children may have their own process groups, so we need to signal them separately.
+
+	logger.Debug("Interrupting process tree", zap.Int("pid", ppid), zap.String("signal", sig.String()))
+
 	children, err := findChildPIDs(ppid)
 	if err != nil {
 		return err
 	}
 
 	children = append(children, ppid)
+
+	logger.Debug("Found child PIDs", zap.Ints("children", children))
+
 	uniqueProcess, err := uniqueProcessGroups(children)
 	if err != nil {
 		logger.Error("failed to find unique process groups", zap.Int("pid", ppid), zap.Error(err))
 		uniqueProcess = children
 	}
 
+	logger.Debug("Unique process groups", zap.Ints("uniqueProcess", uniqueProcess))
+
+	// Send signal to interrupt each process and wait for them to exit one by one
 	for _, pid := range uniqueProcess {
 		err := SendSignal(logger, -pid, sig)
 		if err != nil {
 			logger.Error("error sending signal to the process group id", zap.Int("pgid", pid), zap.Error(err))
+			continue
+		}
+		// Wait for this particular process to exit with a timeout of 3 seconds
+		err = waitForProcessExit(pid, 3*time.Second, logger)
+		if err != nil {
+			logger.Error("error waiting for process to exit", zap.Int("pid", pid), zap.Error(err))
 		}
 	}
 	return nil
+}
+
+// waitForProcessExit waits for the process to exit or times out after the specified duration
+func waitForProcessExit(pid int, timeout time.Duration, logger *zap.Logger) error {
+	// Create a timeout channel
+	timeoutCh := time.After(timeout)
+
+	// Loop to check if the process is running
+	for {
+		select {
+		case <-timeoutCh:
+			// If the timeout is reached, log the timeout and break
+			logger.Warn("Timed out waiting for process to exit", zap.Int("pid", pid))
+			return nil
+		default:
+			// Check if the process is running
+			isRunning, err := isProcessRunning(pid)
+			if err != nil {
+				return err
+			}
+
+			if !isRunning {
+				logger.Debug("Process exited", zap.Int("pid", pid))
+				return nil
+			}
+
+			// Wait for 1 second before checking again
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
+}
+
+// isProcessRunning checks if a particular process is still running using os.FindProcess
+func isProcessRunning(pid int) (bool, error) {
+	// Try to find the process
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false, err // Process lookup failed
+	}
+
+	// Attempt to signal the process (0 means no action, just error check)
+	err = process.Signal(syscall.Signal(0))
+	if err != nil {
+		// If error occurs when signaling, it means the process is no longer running
+		if errors.Is(err, os.ErrProcessDone) || err == syscall.ESRCH {
+			return false, nil
+		}
+		// If there’s another error, consider the process as still running
+		return true, nil
+	}
+
+	// No error means the process is running
+	return true, nil
 }
 
 func uniqueProcessGroups(pids []int) ([]int, error) {
@@ -881,22 +1013,44 @@ func DetectLanguage(logger *zap.Logger, cmd string) (config.Language, string) {
 		return models.Unknown, ""
 	}
 	fields := strings.Fields(cmd)
-	executable := fields[0]
-	if strings.HasPrefix(cmd, "python") {
+
+	// Find the actual executable by skipping environment variable assignments
+	executable := ""
+	for _, field := range fields {
+		// Skip environment variable assignments (KEY=VALUE format)
+		if strings.Contains(field, "=") && !strings.HasPrefix(field, "/") {
+			continue
+		}
+		// This is the actual executable
+		executable = field
+		break
+	}
+
+	if executable == "" {
+		return models.Unknown, ""
+	}
+
+	// Check for Python
+	pythonRegex := regexp.MustCompile(`(?i)(^|.*/)(python(\d+(\.\d+)*)?)$`)
+	if pythonRegex.MatchString(executable) {
 		return models.Python, executable
 	}
 
+	// Check for Node.js
 	if executable == "node" || executable == "npm" || executable == "yarn" {
 		return models.Javascript, executable
 	}
 
+	// Check for Java
 	if executable == "java" {
 		return models.Java, executable
 	}
 
-	if executable == "go" || (len(fields) == 1 && isGoBinary(logger, executable)) {
+	// Check for Go
+	if executable == "go" || (isGoBinary(logger, executable)) {
 		return models.Go, executable
 	}
+
 	return models.Unknown, executable
 }
 
@@ -1001,6 +1155,7 @@ func IsFileEmpty(filePath string) (bool, error) {
 	}
 	return fileInfo.Size() == 0, nil
 }
+
 func IsXMLResponse(resp *models.HTTPResp) bool {
 	if resp == nil || resp.Header == nil {
 		return false
@@ -1013,13 +1168,78 @@ func IsXMLResponse(resp *models.HTTPResp) bool {
 	return strings.Contains(contentType, "application/xml") || strings.Contains(contentType, "text/xml")
 }
 
-// XMLToMap converts an XML string into a map[string]interface{}
-func XMLToMap(xmlData string) (map[string]interface{}, error) {
-	// Convert XML to map[string]interface{}
-	m, err := xml2map.NewDecoder(strings.NewReader(xmlData)).Decode()
-	if err != nil {
-		return nil, err
+// TrimSpaces removes unwanted spaces around unescaped ',' and '='
+func TrimSpaces(input string) string {
+	var output strings.Builder
+	var lastWasEscape bool  // tracks if the previous rune was a backslash
+	var skippingSpaces bool // set when we just wrote a separator
+
+	for _, ch := range input {
+		// after writing a separator, drop any spaces
+		if skippingSpaces {
+			if ch == ' ' {
+				continue
+			}
+			skippingSpaces = false
+		}
+
+		// handle escape character
+		if ch == '\\' && !lastWasEscape {
+			lastWasEscape = true
+			output.WriteRune(ch)
+			continue
+		}
+
+		// if this is an unescaped separator, trim before & skip after
+		if (ch == ',' || ch == '=') && !lastWasEscape {
+			// remove trailing spaces before the separator
+			trimmed := strings.TrimRight(output.String(), " ")
+			output.Reset()
+			output.WriteString(trimmed)
+
+			// write the separator itself
+			output.WriteRune(ch)
+
+			// skip any spaces that follow
+			skippingSpaces = true
+			lastWasEscape = false
+			continue
+		}
+
+		// normal character (or escaped separator)
+		output.WriteRune(ch)
+		lastWasEscape = false
 	}
 
+	return output.String()
+}
+
+func ParseMetadata(metadataStr string) (map[string]interface{}, error) {
+	if metadataStr == "" {
+		return nil, nil
+	}
+	m := make(map[string]interface{})
+	if err := strvals.ParseInto(metadataStr, m); err != nil {
+		return nil, fmt.Errorf("cannot parse metadata: %w", err)
+	}
 	return m, nil
 }
+
+// // XMLToMap converts an XML string into a map[string]interface{}
+// func XMLToMap(data string) (map[string]any, error) {
+// 	mv, err := mxj.NewMapXml([]byte(data))
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	return mv, nil
+// }
+
+// // MapToXML converts a map[string]interface{} into an XML string
+// func MapToXML(data map[string]any) (string, error) {
+// 	mv := mxj.Map(data)
+// 	xmlBytes, err := mv.Xml()
+// 	if err != nil {
+// 		return "", err
+// 	}
+// 	return string(xmlBytes), nil
+// }

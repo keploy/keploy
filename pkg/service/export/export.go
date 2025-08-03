@@ -190,10 +190,19 @@ func Export(_ context.Context, logger *zap.Logger) error {
 						continue
 					}
 
+					if len(data) == 0 {
+						logger.Warn("skippping empty testcase", zap.String("testcase name", testFile.Name()))
+						continue
+					}
+
 					var testCase *yaml.NetworkTrafficDoc
 					err = yamlLib.Unmarshal(data, &testCase)
 					if err != nil {
 						utils.LogError(logger, err, "failed to unmarshall YAML data")
+						continue
+					}
+					if testCase == nil {
+						logger.Warn("skipping invalid testCase yaml", zap.String("testcase name", testFile.Name()))
 						continue
 					}
 

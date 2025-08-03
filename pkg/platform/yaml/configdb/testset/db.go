@@ -3,8 +3,10 @@ package testset
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -37,6 +39,20 @@ func (db *Db[T]) Read(ctx context.Context, testSetID string) (T, error) {
 		return config, err
 	}
 
+	secretConfig, ok := any(config).(models.Secret)
+
+	if !ok {
+		return config, nil
+	}
+
+	secretValues, err := db.ReadSecret(ctx, testSetID)
+	if err != nil {
+		db.logger.Warn("Failed to read secret values, continuing without secrets", zap.String("testSet", testSetID), zap.Error(err))
+		return config, err
+	}
+
+	secretConfig.SetSecrets(secretValues)
+
 	return config, nil
 }
 
@@ -54,4 +70,27 @@ func (db *Db[T]) Write(ctx context.Context, testSetID string, config T) error {
 	}
 
 	return nil
+}
+
+// ReadSecret reads the secret configuration for a test set
+func (db *Db[T]) ReadSecret(ctx context.Context, testSetID string) (map[string]interface{}, error) {
+	filePath := filepath.Join(db.path, testSetID)
+
+	secretPath := filepath.Join(filePath, "secret.yaml")
+	if _, err := os.Stat(secretPath); os.IsNotExist(err) {
+		return make(map[string]interface{}), nil
+	}
+
+	data, err := yaml.ReadFile(ctx, db.logger, filePath, "secret")
+	if err != nil {
+		return nil, err
+	}
+
+	var secretConfig map[string]interface{}
+	if err := yamlLib.Unmarshal(data, &secretConfig); err != nil {
+		utils.LogError(db.logger, err, "failed to unmarshal test-set secret file", zap.String("testSet", testSetID))
+		return nil, err
+	}
+
+	return secretConfig, nil
 }

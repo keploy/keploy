@@ -1,21 +1,45 @@
 name: Python On Linux
-on: [pull_request]
+on:
+  workflow_call:
 jobs:
   python_linux:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_latest
+            record_src: build
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: ${{ matrix.job }}
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v2
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Build binary
-      run: |
-        go build -race -tags=viper_bind_struct -o keployv2
-    - name: Checkout the samples-python repository
-      uses: actions/checkout@v2
-      with:
-        repository: keploy/samples-python
-        path: samples-python
-    - name: Run the sample python application
-      run: |
-        cd samples-python/django-postgres/django_postgres
-        source ../../../.github/workflows/test_workflow_scripts/python-linux.sh
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.replay_src }}
+      - name: Checkout the samples-python repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-python
+          path: samples-python
+      - name: Run the sample python application
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          cd samples-python/django-postgres/django_postgres
+          source ../../../.github/workflows/test_workflow_scripts/python-linux.sh

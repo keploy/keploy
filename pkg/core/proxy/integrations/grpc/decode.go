@@ -5,6 +5,7 @@ package grpc
 
 import (
 	"context"
+	"io"
 	"net"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
@@ -20,6 +21,11 @@ func decodeGrpc(ctx context.Context, logger *zap.Logger, _ []byte, clientConn ne
 	// fake server in the test mode
 	err := srv.ListenAndServe(ctx)
 	if err != nil {
+		if err == io.EOF {
+			// EOF is expected when the server closes the connection.
+			logger.Debug("EOF while serving grpc request")
+			return nil
+		}
 		utils.LogError(logger, nil, "could not serve grpc request")
 		return err
 	}

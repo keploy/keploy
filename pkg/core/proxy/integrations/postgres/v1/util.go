@@ -19,7 +19,7 @@ func postgresDecoderFrontend(response models.Frontend) ([]byte, error) {
 	var resbuffer []byte
 	// list of packets available in the buffer
 	packets := response.PacketTypes
-	var cc, dtr, ps int = 0, 0, 0
+	var cc, dtr, ps = 0, 0, 0
 	for _, packet := range packets {
 		var msg pgproto3.BackendMessage
 
@@ -377,7 +377,7 @@ func getChandedDataRow(input string) (string, error) {
 		binary.BigEndian.PutUint32(buffer, uint32(difference))
 		return "b64:" + util.EncodeBase64(buffer), nil
 	}
-	return "b64:AAAAAA==", errors.New("Invalid input")
+	return "b64:AAAAAA==", errors.New("invalid input")
 
 }
 

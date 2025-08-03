@@ -103,7 +103,7 @@ func NewPromptBuilder(srcPath, testPath, covReportContent, includedFiles, additi
 func readFile(filePath string) (string, error) {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
-		return "", fmt.Errorf("Error reading %s: %v", filePath, err)
+		return "", fmt.Errorf("error reading %s: %v", filePath, err)
 	}
 	return string(content), nil
 }

@@ -41,6 +41,7 @@ const (
 // Some constants for MySQL
 const (
 	EncryptedPassword = "encrypted_password"
+	PlainPassword     = "plain_password"
 	AuthSwithResponse = "AuthSwitchResponse"
 )
 

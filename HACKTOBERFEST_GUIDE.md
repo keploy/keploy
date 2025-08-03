@@ -68,13 +68,13 @@ You can choose from a carefully curated selection of Hacktoberfest requests that
 The open source community needs you. Do you have what it takes to join the community and build a better future? We’re here to help you.
 
 <p align="center">
-  <a href="https://twitter.com/keployio" target="_blank"><img src="https://img.shields.io/badge/Twitter-1D9BF0.svg?style=for-the-badge&logo=Twitter&logoColor=white"></a>
+  <a href="https://x.com/keployio" target="_blank"><img src="https://img.shields.io/badge/X-1D9BF0.svg?style=for-the-badge&logo=X&logoColor=white"></a>
   	&nbsp;
    <a href="https://www.linkedin.com/company/keploy/" target="_blank"><img src="https://img.shields.io/badge/LinkedIn-0A66C2.svg?style=for-the-badge&logo=LinkedIn&logoColor=white"></a>
   	&nbsp;
    <a href="https://community.keploy.io/" target="_blank"><img src="https://img.shields.io/badge/Blog-0A0A0A.svg?style=for-the-badge&logo=rss&logoColor=white"></a>
   	&nbsp;
-   <a href="https://join.slack.com/t/keploy/shared_invite/zt-2poflru6f-_VAuvQfCBT8fDWv1WwSbkw" target="_blank"><img src="https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white"></a>
+   <a href="https://join.slack.com/t/keploy/shared_invite/zt-357qqm9b5-PbZRVu3Yt2rJIa6ofrwWNg" target="_blank"><img src="https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white"></a>
   	&nbsp;
 </p>
 

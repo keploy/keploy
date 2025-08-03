@@ -90,7 +90,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	}
 	result.BodyResult = append(result.BodyResult, models.BodyResult{
 		Normal:   compressionFlagNormal,
-		Type:     models.BodyTypeGrpcCompression,
+		Type:     models.GrpcCompression,
 		Expected: fmt.Sprintf("%d", expectedResp.Body.CompressionFlag),
 		Actual:   fmt.Sprintf("%d", actualResp.Body.CompressionFlag),
 	})
@@ -110,7 +110,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	}
 	result.BodyResult = append(result.BodyResult, models.BodyResult{
 		Normal:   messageLengthNormal,
-		Type:     models.BodyTypeGrpcLength,
+		Type:     models.GrpcLength,
 		Expected: fmt.Sprintf("%d", expectedResp.Body.MessageLength),
 		Actual:   fmt.Sprintf("%d", actualResp.Body.MessageLength),
 	})
@@ -130,7 +130,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	}
 	result.BodyResult = append(result.BodyResult, models.BodyResult{
 		Normal:   decodedDataNormal,
-		Type:     models.BodyTypeGrpcData,
+		Type:     models.GrpcData,
 		Expected: expectedResp.Body.DecodedData,
 		Actual:   actualResp.Body.DecodedData,
 	})
@@ -186,14 +186,15 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 					logDiffs.PushHeaderDiff(diff.Expected, diff.Actual, header, headerNoise)
 				} else if strings.HasPrefix(path, "body.") {
 					bodyPart := strings.TrimPrefix(path, "body.")
-					if bodyPart == "message_length" {
+					switch bodyPart {
+					case "message_length":
 						// Message length is a good indicator of difference for gRPC
 						logDiffs.PushHeaderDiff(diff.Expected, diff.Actual, "message_length (body)", bodyNoise)
-					} else if bodyPart == "compression_flag" {
+					case "compression_flag":
 						// Compression flag
 						logDiffs.PushHeaderDiff(diff.Expected, diff.Actual, "compression_flag (body)", bodyNoise)
-					} else {
-						// Body differences
+					default:
+						// Any other body differences
 						logDiffs.PushBodyDiff(diff.Expected, diff.Actual, bodyNoise)
 					}
 				}
