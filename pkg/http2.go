@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"strings"
 	"sync"
@@ -43,6 +44,11 @@ func ExtractHTTP2Frame(data []byte) (http2.Frame, int, error) {
 	// Validate length before proceeding
 	if length > MaxFrameSize {
 		return nil, 0, fmt.Errorf("frame length %d exceeds maximum allowed size %d", length, MaxFrameSize)
+	}
+
+	// ✅ Prevent integer overflow on 32-bit systems
+	if length > uint32(math.MaxInt32-9) {
+		return nil, 0, fmt.Errorf("frame length %d would cause integer overflow", length)
 	}
 
 	// Check if we have the complete frame
