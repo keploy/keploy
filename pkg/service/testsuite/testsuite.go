@@ -42,10 +42,10 @@ type TestSuiteMetadata struct {
 
 // Security contains security-related configurations for the test suite
 type Security struct {
-	RuleSet           string    `yaml:"ruleset"`
+	Ruleset           string    `yaml:"ruleset"`
 	CustomPath        string    `yaml:"custom_path,omitempty"`
 	SeverityThreshold string    `yaml:"severity_threshold"`
-	Disable           []int     `yaml:"disable,omitempty"`
+	Disable           []string  `yaml:"disable,omitempty"`
 	AllowList         AllowList `yaml:"allow_list"`
 }
 
@@ -103,6 +103,8 @@ type StepResult struct {
 	URL           string            `json:"url"`
 	Status        string            `json:"status"`
 	StatusCode    int               `json:"status_code,omitempty"`
+	Header        http.Header       `json:"header,omitempty"`
+	Body          string            `json:"body,omitempty"`
 	ResponseTime  time.Duration     `json:"response_time"`
 	FailureReason string            `json:"failure_reason,omitempty"`
 	ExtractedVars map[string]string `json:"extracted_vars,omitempty"`
@@ -281,16 +283,16 @@ func (e *TSExecutor) Execute(ctx context.Context, limiter *rate.Limiter) (*Execu
 
 // executeStep executes a single test step and returns the result
 func (e *TSExecutor) executeStep(step TestStep) (*StepResult, error) {
+	interpolatedURL := e.InterpolateVariables(step.URL)
+	interpolatedBody := e.InterpolateVariables(step.Body)
+
 	result := &StepResult{
 		StepName:      step.Name,
 		Method:        step.Method,
-		URL:           step.URL,
+		URL:           interpolatedURL,
 		Status:        "failed", // Default to failed, will update to passed if successful
 		ExtractedVars: make(map[string]string),
 	}
-
-	interpolatedURL := e.interpolateVariables(step.URL)
-	interpolatedBody := e.interpolateVariables(step.Body)
 
 	fullURL := e.baseURL + interpolatedURL
 	e.logger.Debug("sending request", zap.String("url", fullURL), zap.String("method", step.Method))
@@ -312,7 +314,7 @@ func (e *TSExecutor) executeStep(step TestStep) (*StepResult, error) {
 	}
 
 	for key, value := range step.Headers {
-		interpolatedValue := e.interpolateVariables(value)
+		interpolatedValue := e.InterpolateVariables(value)
 		req.Header.Add(key, interpolatedValue)
 	}
 
@@ -335,10 +337,12 @@ func (e *TSExecutor) executeStep(step TestStep) (*StepResult, error) {
 	result.ResBytes = int64(len(body))
 
 	result.StatusCode = resp.StatusCode
+	result.Header = resp.Header
+	result.Body = string(body)
 
 	assertionsPassed := true
 	for _, assertion := range step.Assert {
-		interpolatedExpectedString := e.interpolateVariables(assertion.ExpectedString)
+		interpolatedExpectedString := e.InterpolateVariables(assertion.ExpectedString)
 		assertionCopy := assertion
 		assertionCopy.ExpectedString = interpolatedExpectedString
 
@@ -409,7 +413,7 @@ func (e *TSExecutor) processAssertion(assertion TSAssertion, resp *http.Response
 }
 
 // Helper function to interpolate variables in strings
-func (e *TSExecutor) interpolateVariables(input string) string {
+func (e *TSExecutor) InterpolateVariables(input string) string {
 	if len(e.variables) == 0 || input == "" {
 		return input
 	}

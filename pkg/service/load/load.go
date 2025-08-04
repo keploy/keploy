@@ -26,10 +26,6 @@ type LoadTester struct {
 	config    *config.Config
 	logger    *zap.Logger
 	testsuite *testsuite.TestSuite
-	tsPath    string
-	tsFile    string
-	out       string
-	insecure  bool
 	profile   string
 	vus       int
 	duration  string
@@ -37,7 +33,7 @@ type LoadTester struct {
 }
 
 func NewLoadTester(cfg *config.Config, logger *zap.Logger) (*LoadTester, error) {
-	testsuitePath := filepath.Join(cfg.Load.TSPath, cfg.Load.TSFile)
+	testsuitePath := filepath.Join(cfg.TestSuite.TSPath, cfg.TestSuite.TSFile)
 	logger.Info("Parsing TestSuite File", zap.String("path", testsuitePath))
 
 	testsuite, err := testsuite.TSParser(testsuitePath)
@@ -55,10 +51,6 @@ func NewLoadTester(cfg *config.Config, logger *zap.Logger) (*LoadTester, error) 
 		config:    cfg,
 		logger:    logger,
 		testsuite: &testsuite,
-		tsPath:    cfg.Load.TSPath,
-		tsFile:    cfg.Load.TSFile,
-		out:       cfg.Load.Output,
-		insecure:  cfg.Load.Insecure,
 		profile:   testsuite.Spec.Load.Profile,
 		vus:       testsuite.Spec.Load.VUs,
 		duration:  testsuite.Spec.Load.Duration,
@@ -67,11 +59,6 @@ func NewLoadTester(cfg *config.Config, logger *zap.Logger) (*LoadTester, error) 
 }
 
 func (lt *LoadTester) Start(ctx context.Context) error {
-	if lt.tsFile == "" {
-		lt.logger.Error("Load test file is not specified")
-		return fmt.Errorf("load test file is not specified, please provide a valid testsuite file using --file or -f flag")
-	}
-
 	// looks for CLI overrides
 	if ctx.Value("vus") != nil && ctx.Value("vus") != 1 && lt.profile == "constant_vus" {
 		lt.vus = ctx.Value("vus").(int)
@@ -105,13 +92,9 @@ func (lt *LoadTester) Start(ctx context.Context) error {
 	}
 
 	lt.logger.Info("Starting load test",
-		zap.String("tsPath", lt.tsPath),
-		zap.String("tsFile", lt.tsFile),
-		zap.String("output", lt.out),
 		zap.Int("vus", lt.vus),
 		zap.String("duration", lt.duration),
 		zap.Int("rps", lt.rps),
-		zap.Bool("insecure", lt.insecure),
 	)
 
 	exporter := NewExporter(lt.config, lt.logger, lt.vus, ltToken)
@@ -130,27 +113,25 @@ func (lt *LoadTester) Start(ctx context.Context) error {
 	lt.printCLISummary(report)
 
 	ltReport := LTReport{
-		TestSuiteFile: lt.tsFile,
+		TestSuiteFile: lt.config.TestSuite.TSFile,
 		VUs:           lt.vus,
 		Duration:      lt.duration,
 		RPS:           lt.rps,
 		Steps:         report,
 	}
 
-	if lt.out == "json" {
-		err := lt.saveJSONReport(ltReport)
-		if err != nil {
-			lt.logger.Error("Failed to save JSON report", zap.Error(err))
-		}
+	err := lt.saveJSONReport(ltReport)
+	if err != nil {
+		lt.logger.Error("Failed to save JSON report", zap.Error(err))
 	}
 
-	lt.logger.Info("Load test completed", zap.String("tsFile", lt.tsFile))
+	lt.logger.Info("Load test completed", zap.String("tsFile", lt.config.TestSuite.TSFile))
 	return nil
 }
 
 func (lt *LoadTester) printCLISummary(report []StepThresholdReport) {
 	lt.logger.Info("Load test summary",
-		zap.String("tsFile", lt.tsFile),
+		zap.String("tsFile", lt.config.TestSuite.TSFile),
 		zap.Int("vus", lt.vus),
 		zap.String("duration", lt.duration),
 		zap.Int("rps", lt.rps),
@@ -221,7 +202,7 @@ func (lt *LoadTester) saveJSONReport(report LTReport) error {
 		return fmt.Errorf("failed to create reports directory: %w", err)
 	}
 	filePath := filepath.Join("keploy", "load", "reports",
-		fmt.Sprintf("%s_%s.json", time.Now().Format("20060102_150405"), strings.TrimSuffix(lt.tsFile, filepath.Ext(lt.tsFile))))
+		fmt.Sprintf("%s_%s.json", time.Now().Format("20060102_150405"), strings.TrimSuffix(lt.config.TestSuite.TSFile, filepath.Ext(lt.config.TestSuite.TSFile))))
 	file, err := os.Create(filePath)
 	if err != nil {
 		lt.logger.Error("Failed to create output file", zap.Error(err))

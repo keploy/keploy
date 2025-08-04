@@ -176,22 +176,41 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	cmd.Flags().SetNormalizeFunc(aliasNormalizeFunc)
 	cmd.Flags().String("configPath", ".", "Path to the local directory where keploy configuration file is stored")
 
-	switch cmd.Name() {
+	// Flags for secure subcommands
+	if cmd.Parent() != nil && cmd.Parent().Name() == "secure" {
+		switch cmd.Name() {
+		case "add":
+			cmd.Flags().String("checks-path", "keploy/secure/custom-checks.yaml", "Path to the custom checks file")
+		case "remove":
+			cmd.Flags().String("checks-path", "keploy/secure/custom-checks.yaml", "Path to the custom checks file")
+			cmd.Flags().String("id", "", "ID of the custom check to remove")
+		case "update":
+			cmd.Flags().String("checks-path", "keploy/secure/custom-checks.yaml", "Path to the custom checks file")
+			cmd.Flags().String("id", "", "ID of the custom check to update")
+		case "list":
+			cmd.Flags().String("rule-set", "basic", "Specify which checks to list: 'basic' (built-in), 'custom'")
+			cmd.Flags().String("checks-path", "keploy/secure/custom-checks.yaml", "Path to the custom checks file")
+		}
+		return nil
+	}
 
-	case "sekchecker":
+	switch cmd.Name() {
+	case "secure":
+		cmd.Flags().String("base-url", "", "Base URL of the application to be tested.")
+		cmd.Flags().String("ts-path", "keploy/testsuite", "Directory path containing test suite YAML files.")
+		cmd.Flags().String("ts-file", "suite-0.yaml", "Name of the testsuite YAML file.")
+		cmd.Flags().String("rule-set", "basic", "Specify which checks to execute: 'basic' (built-in), 'custom'")
 	case "load":
 		cmd.Flags().String("base-url", "", "Base URL of the application to be tested.")
 		cmd.Flags().String("ts-path", "keploy/testsuite", "Directory path containing test suite YAML files.")
-		cmd.Flags().StringP("file", "f", "suite-0.yaml", "Name of the testsuite yaml file.")
-		cmd.Flags().String("out", "json", "Output data format.")
-		cmd.Flags().Bool("insecure", true, "Skip TLS verification for the requests.")
+		cmd.Flags().String("ts-file", "suite-0.yaml", "Name of the testsuite YAML file.")
 		cmd.Flags().Int("vus", 1, "Number of virtual users to run.")
 		cmd.Flags().String("duration", "", "Time for the load test to keep running.")
 		cmd.Flags().Int("rps", 0, "Number of requests per second to run.")
 	case "testsuite":
 		cmd.Flags().String("base-url", "", "Base URL of the application to be tested.")
 		cmd.Flags().String("ts-path", "keploy/testsuite", "Directory path containing test suite YAML files.")
-		cmd.Flags().String("ts-file", "suite-0.yaml", "Name of the test suite YAML file.")
+		cmd.Flags().String("ts-file", "suite-0.yaml", "Name of the testsuite YAML file.")
 
 	case "upload": //for uploading mocks
 		cmd.Flags().StringP("path", "p", ".", "Path to local keploy directory where generated mocks are stored")
@@ -539,6 +558,31 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 	switch cmd.Name() {
 
+	case "secure":
+		baseURL, err := cmd.Flags().GetString("base-url")
+		if err != nil {
+			errMsg := "failed to get base-url flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.TestSuite.BaseURL = baseURL
+
+		tsPath, err := cmd.Flags().GetString("ts-path")
+		if err != nil {
+			errMsg := "failed to get ts-path flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.TestSuite.TSPath = tsPath
+
+		file, err := cmd.Flags().GetString("ts-file")
+		if err != nil {
+			errMsg := "failed to get ts-file flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.TestSuite.TSFile = file
+
 	case "load":
 		baseURL, err := cmd.Flags().GetString("base-url")
 		if err != nil {
@@ -554,33 +598,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		c.cfg.Load.TSPath = tsPath
 		c.cfg.TestSuite.TSPath = tsPath
 
-		file, err := cmd.Flags().GetString("file")
+		file, err := cmd.Flags().GetString("ts-file")
 		if err != nil {
-			errMsg := "failed to get file flag"
+			errMsg := "failed to get ts-file flag"
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		c.cfg.Load.TSFile = file
 		c.cfg.TestSuite.TSFile = file
-
-		output, err := cmd.Flags().GetString("out")
-		if err != nil {
-			errMsg := "failed to get output format flag"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		c.cfg.Load.Output = output
-
-		insecure, err := cmd.Flags().GetBool("insecure")
-		if err != nil {
-			errMsg := "failed to get insecure flag"
-			utils.LogError(c.logger, err, errMsg)
-			return errors.New(errMsg)
-		}
-		c.cfg.Load.Insecure = insecure
 
 		_, err = cmd.Flags().GetInt("vus")
 		if err != nil {
