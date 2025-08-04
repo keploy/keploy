@@ -172,7 +172,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.logger.Warn("python command not python or python3, skipping coverage calculation")
 			r.config.Test.SkipCoverage = true
 		}
-		cov = python.New(ctx, r.logger, r.reportDB, r.config.Command, executable)
+		cov = python.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.CommandType, executable)
 
 	case models.Javascript:
 		cov = javascript.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.CommandType)
