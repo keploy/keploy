@@ -5,7 +5,6 @@ package grpc
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 
