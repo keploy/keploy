@@ -34,7 +34,6 @@ func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opt
 		container:        opts.Container,
 		containerDelay:   opts.DockerDelay,
 		containerNetwork: opts.DockerNetwork,
-		containerIPv4:    make(chan string, 1),
 	}
 	return app
 }
@@ -96,6 +95,7 @@ func (a *App) ContainerIPv4Addr() string {
 	return <-a.containerIPv4
 }
 func (a *App) SetContainerIPv4Addr(ipAddr string) {
+	a.logger.Debug("setting container IPv4 address", zap.String("ipAddr", ipAddr))
 	a.containerIPv4 <- ipAddr
 }
 
@@ -260,8 +260,8 @@ func (a *App) injectNetwork(network string) error {
 	}
 	return fmt.Errorf("failed to find the network:%v in the keploy container", network)
 }
-
 func (a *App) extractMeta(ctx context.Context, e events.Message) (bool, error) {
+
 	if e.Action != "start" {
 		return false, nil
 	}
@@ -332,9 +332,16 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 		errCh <- errors.New("failed to get the error group from the context")
 		return errCh
 	}
+
 	g.Go(func() error {
 		defer utils.Recover(a.logger)
-		defer close(errCh)
+		// closing the channels in any case when returning.
+		defer func() {
+			a.logger.Debug("closing err, containerIPv4 and inode channels ")
+			close(errCh)
+			close(a.containerIPv4)
+			close(a.inodeChan)
+		}()
 		for {
 			select {
 			case <-timer.C:
@@ -377,7 +384,10 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 	g, ctx := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, g)
 
+	dockerMetaCtx, cancel := context.WithCancel(ctx)
+
 	defer func() {
+		cancel()
 		err := g.Wait()
 		if err != nil {
 			utils.LogError(a.logger, err, "failed to run dockerized app")
@@ -385,8 +395,9 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 	}()
 
 	errCh := make(chan error, 1)
+
 	// listen for the "create container" event in order to send the inode of the container to the kernel
-	errCh2 := a.getDockerMeta(ctx)
+	errCh2 := a.getDockerMeta(dockerMetaCtx)
 
 	g.Go(func() error {
 		defer utils.Recover(a.logger)
@@ -417,7 +428,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 
 func (a *App) Run(ctx context.Context, inodeChan chan uint64) models.AppError {
 	a.inodeChan = inodeChan
-
+	a.containerIPv4 = make(chan string, 1)
 	if utils.IsDockerCmd(a.kind) {
 		return a.runDocker(ctx)
 	}
@@ -466,6 +477,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 			if utils.IsDockerCmd(a.kind) {
 				a.logger.Debug("sending SIGINT to the container", zap.Any("cmd.Process.Pid", cmd.Process.Pid))
 				err := utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGINT)
+
 				return err
 			}
 			return utils.InterruptProcessTree(a.logger, cmd.Process.Pid, syscall.SIGINT)

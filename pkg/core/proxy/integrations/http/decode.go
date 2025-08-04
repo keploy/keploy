@@ -6,8 +6,8 @@ package http
 import (
 	"bufio"
 	"bytes"
-	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -85,7 +85,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 
 			reqBody, err := io.ReadAll(request.Body)
 			if err != nil {
-				utils.LogError(h.Logger, err, "failed to read from request body", zap.Any("metadata", GetReqMeta(request)))
+				utils.LogError(h.Logger, err, "failed to read from request body", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
 				return
 			}
@@ -98,27 +98,42 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				raw:    reqBuf,
 			}
 
+			if input.header.Get("Content-Encoding") != "" {
+				input.body, err = pkg.Decompress(h.Logger, input.header.Get("Content-Encoding"), input.body)
+				if err != nil {
+					utils.LogError(h.Logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(request)))
+					errCh <- err
+					return
+				}
+			}
+
 			ok, stub, err := h.match(ctx, input, mockDb) // calling match function to match mocks
 			if err != nil {
-				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", GetReqMeta(request)))
+				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
 				return
 			}
 			h.Logger.Debug("after matching the http request", zap.Any("isMatched", ok), zap.Any("stub", stub), zap.Error(err))
 
 			if !ok {
-				if !IsPassThrough(h.Logger, request, dstCfg.Port, opts) {
-					utils.LogError(h.Logger, nil, "Didn't match any preExisting http mock", zap.Any("metadata", GetReqMeta(request)))
+				if !utils.IsPassThrough(h.Logger, request, dstCfg.Port, opts) {
+					utils.LogError(h.Logger, nil, "Didn't match any preExisting http mock", zap.Any("metadata", utils.GetReqMeta(request)))
 				}
 				if opts.FallBackOnMiss {
 					_, err = pUtil.PassThrough(ctx, h.Logger, clientConn, dstCfg, [][]byte{reqBuf})
 					if err != nil {
-						utils.LogError(h.Logger, err, "failed to passThrough http request", zap.Any("metadata", GetReqMeta(request)))
+						utils.LogError(h.Logger, err, "failed to passThrough http request", zap.Any("metadata", utils.GetReqMeta(request)))
 						errCh <- err
 						return
 					}
 				}
 				errCh <- nil
+				return
+			}
+
+			if stub == nil {
+				utils.LogError(h.Logger, nil, "matched mock is nil", zap.Any("metadata", utils.GetReqMeta(request)))
+				errCh <- errors.New("matched mock is nil")
 				return
 			}
 
@@ -131,28 +146,18 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// Fetching the response headers
 			header := pkg.ToHTTPHeader(stub.Spec.HTTPResp.Header)
 
-			//Check if the gzip encoding is present in the header
-			if header["Content-Encoding"] != nil && header["Content-Encoding"][0] == "gzip" {
-				var compressedBuffer bytes.Buffer
-				gw := gzip.NewWriter(&compressedBuffer)
-				_, err := gw.Write([]byte(body))
+			//Check if the content encoding is present in the header
+			if encoding, ok := header["Content-Encoding"]; ok && len(encoding) > 0 {
+				compressedBody, err := pkg.Compress(h.Logger, encoding[0], []byte(body))
 				if err != nil {
-					utils.LogError(h.Logger, err, "failed to compress the response body", zap.Any("metadata", GetReqMeta(request)))
+					utils.LogError(h.Logger, err, "failed to compress the response body", zap.Any("metadata", utils.GetReqMeta(request)))
 					errCh <- err
 					return
 				}
-				err = gw.Close()
-				if err != nil {
-					utils.LogError(h.Logger, err, "failed to close the gzip writer", zap.Any("metadata", GetReqMeta(request)))
-					errCh <- err
-					return
-				}
-				h.Logger.Debug("the length of the response body: " + strconv.Itoa(len(compressedBuffer.String())))
-				respBody = compressedBuffer.String()
-				// responseString = statusLine + headers + "\r\n" + compressedBuffer.String()
+				h.Logger.Debug("the length of the response body: " + strconv.Itoa(len(compressedBody)))
+				respBody = string(compressedBody)
 			} else {
 				respBody = body
-				// responseString = statusLine + headers + "\r\n" + body
 			}
 
 			var headers string
@@ -174,7 +179,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if ctx.Err() != nil {
 					return
 				}
-				utils.LogError(h.Logger, err, "failed to write the mock output to the user application", zap.Any("metadata", GetReqMeta(request)))
+				utils.LogError(h.Logger, err, "failed to write the mock output to the user application", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
 				return
 			}

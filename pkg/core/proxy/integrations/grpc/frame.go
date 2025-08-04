@@ -11,12 +11,13 @@ import (
 	"time"
 
 	"go.keploy.io/server/v2/pkg/models"
+	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
 )
 
 // transferFrame reads one frame from rhs and writes it to lhs.
-func transferFrame(ctx context.Context, lhs net.Conn, rhs net.Conn, sic *StreamInfoCollection, reqFromClient bool, decoder *hpack.Decoder, mocks chan<- *models.Mock) error {
+func transferFrame(ctx context.Context, _ *zap.Logger, lhs net.Conn, rhs net.Conn, sic *StreamInfoCollection, reqFromClient bool, decoder *hpack.Decoder, mocks chan<- *models.Mock) error {
 	respFromServer := !reqFromClient
 	framer := http2.NewFramer(lhs, rhs)
 	for {

@@ -18,7 +18,7 @@ build_docker_image() {
     echo "Building Docker image..."
 
     # Build the Docker image
-    docker image build -t ghcr.io/keploy/keploy:v2-dev .
+    docker image build -t ttl.sh/keploy/keploy:1h .
 
     if [ $? -eq 0 ]; then
         echo "Docker image built successfully."

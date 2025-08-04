@@ -7,11 +7,11 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"math"
+	"reflect"
 
+	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire"
-	intgUtil "go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.keploy.io/server/v2/utils"
@@ -105,8 +105,8 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 	}
 
 	// Match the AuthResponse
-	if string(exp.AuthResponse) != string(act.AuthResponse) {
-		return fmt.Errorf("auth response mismatch for handshake response, expected: %s, actual: %s", string(exp.AuthResponse), string(act.AuthResponse))
+	if !bytes.Equal(exp.AuthResponse, act.AuthResponse) {
+		return fmt.Errorf("auth response mismatch for handshake response, expected: %v, actual: %v", exp.AuthResponse, act.AuthResponse)
 	}
 
 	// Match the Database
@@ -156,23 +156,24 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			return nil, false, err
 		}
 
-		// Get the mysql mocks
-		mocks := intgUtil.GetMockByKind(unfiltered, "MySQL")
+		var tcsMocks []*models.Mock
+		var hasMySQLMocks bool
+		// Filter for non-config MySQL mocks in a single pass.
+		for _, mock := range unfiltered {
+			if mock.Kind == models.MySQL {
+				hasMySQLMocks = true
+				if mock.Spec.Metadata["type"] != "config" {
+					tcsMocks = append(tcsMocks, mock)
+				}
+			}
+		}
 
-		if len(mocks) == 0 {
+		if !hasMySQLMocks {
 			if ctx.Err() != nil {
 				return nil, false, ctx.Err()
 			}
 			utils.LogError(logger, nil, "no mysql mocks found")
 			return nil, false, fmt.Errorf("no mysql mocks found")
-		}
-
-		var tcsMocks []*models.Mock
-		// Ignore the "config" metadata mocks
-		for _, mock := range mocks {
-			if mock.Spec.Metadata["type"] != "config" {
-				tcsMocks = append(tcsMocks, mock)
-			}
 		}
 
 		if len(tcsMocks) == 0 {
@@ -195,6 +196,8 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		var matchedResp *mysql.Response
 		var matchedMock *models.Mock
 
+		queryMatched := false
+
 		// Match the request with the mock
 		for _, mock := range tcsMocks {
 
@@ -206,9 +209,6 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 				if ctx.Err() != nil {
 					return nil, false, ctx.Err()
 				}
-
-				//debug log
-				// logger.Debug("Matching the request with the mock", zap.Any("mock", mockReq), zap.Any("request", req))
 
 				switch req.Header.Type {
 				//utiltiy commands
@@ -270,10 +270,12 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 				// case mysql.CommandStatusToString(mysql.COM_STMT_SEND_LONG_DATA):
 				case mysql.CommandStatusToString(mysql.COM_QUERY):
 					matchCount := matchQueryPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
-					if matchCount > maxMatchedCount {
+
+					if matchCount == 3 {
 						maxMatchedCount = matchCount
 						matchedResp = &mock.Spec.MySQLResponses[0]
 						matchedMock = mock
+						queryMatched = true
 					}
 
 				case mysql.CommandStatusToString(mysql.COM_STMT_PREPARE):
@@ -291,6 +293,9 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 						matchedMock = mock
 					}
 				}
+			}
+			if queryMatched {
+				break
 			}
 		}
 		if matchedResp == nil {
@@ -319,8 +324,8 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 
 		// Delete the matched mock from the mockDb
 
-		ok := updateMock(ctx, logger, matchedMock, mockDb)
-		if !ok {
+		okk := updateMock(ctx, logger, matchedMock, mockDb)
+		if !okk {
 			//TODO: see what to do in case of failed deletion
 			logger.Debug("failed to update the matched mock")
 			continue
@@ -362,6 +367,11 @@ func matchQueryPacket(_ context.Context, _ *zap.Logger, expected, actual mysql.P
 	}
 	expectedMessage, _ := expected.Message.(*mysql.QueryPacket)
 	actualMessage, _ := actual.Message.(*mysql.QueryPacket)
+
+	if len(expectedMessage.Query) != len(actualMessage.Query) {
+		return 0 // If the query lengths are not equal, return zero
+	}
+
 	// Match the query for query packet
 	if expectedMessage.Query == actualMessage.Query {
 		matchCount++
@@ -436,7 +446,7 @@ func matchStmtExecutePacket(_ context.Context, _ *zap.Logger, expected, actual m
 			if expectedParam.Type == actualParam.Type &&
 				expectedParam.Name == actualParam.Name &&
 				expectedParam.Unsigned == actualParam.Unsigned &&
-				bytes.Equal(expectedParam.Value, actualParam.Value) {
+				reflect.DeepEqual(expectedParam.Value, actualParam.Value) {
 				matchCount++
 			}
 		}
@@ -568,20 +578,12 @@ func matchResetConnectionPacket(_ context.Context, _ *zap.Logger, expected, actu
 // and delete the duplicate code.
 // updateMock processes the matched mock based on its filtered status.
 func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock, mockDb integrations.MockMemDb) bool {
-	if matchedMock.TestModeInfo.IsFiltered {
-		originalMatchedMock := *matchedMock
-		matchedMock.TestModeInfo.IsFiltered = false
-		matchedMock.TestModeInfo.SortOrder = math.MaxInt
-		//UpdateUnFilteredMock also marks the mock as used
-		updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
-		return updated
+	originalMatchedMock := *matchedMock
+	matchedMock.TestModeInfo.IsFiltered = false
+	matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+	updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
+	if !updated {
+		logger.Debug("failed to update matched mock")
 	}
-
-	// we don't update the mock if the IsFiltered is false
-	err := mockDb.FlagMockAsUsed(*matchedMock)
-	if err != nil {
-		logger.Error("failed to flag mock as used", zap.Error(err))
-	}
-
-	return true
+	return updated
 }

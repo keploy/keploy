@@ -1,6 +1,5 @@
 package models
 
-type Kind string
 type BodyType string
 type Version string
 
@@ -8,12 +7,17 @@ const V1Beta1 = Version("api.keploy.io/v1beta1")
 
 // BodyType constants for HTTP and gRPC
 const (
-	BodyTypeJSON            BodyType = "JSON"
-	BodyTypeText            BodyType = "TEXT"
-	BodyTypeBinary          BodyType = "BINARY"
-	BodyTypeGrpcCompression BodyType = "GRPC_COMPRESSION"
-	BodyTypeGrpcLength      BodyType = "GRPC_LENGTH"
-	BodyTypeGrpcData        BodyType = "GRPC_DATA"
+	JSON            BodyType = "JSON"
+	XML             BodyType = "XML"
+	HTML            BodyType = "HTML"
+	CSV             BodyType = "CSV"
+	Plain           BodyType = "PLAIN"
+	Utf8            BodyType = "utf-8"
+	Binary          BodyType = "BINARY"
+	GrpcCompression BodyType = "GRPC_COMPRESSION"
+	GrpcLength      BodyType = "GRPC_LENGTH"
+	GrpcData        BodyType = "GRPC_DATA"
+	UnknownType     BodyType = "UNKNOWN"
 )
 
 var (
@@ -28,28 +32,6 @@ func GetVersion() (V1 Version) {
 	return currentVersion
 }
 
-//TODO: Why are we declaring mock types in testcase.go file?
-
-// mocks types
-const (
-	HTTP          Kind     = "Http"
-	GENERIC       Kind     = "Generic"
-	REDIS         Kind     = "Redis"
-	MySQL         Kind     = "MySQL"
-	Postgres      Kind     = "Postgres"
-	GRPC_EXPORT   Kind     = "gRPC"
-	Mongo         Kind     = "Mongo"
-	BodyTypeUtf8  BodyType = "utf-8"
-	BodyTypePlain BodyType = "PLAIN"
-	BodyTypeError BodyType = "ERROR"
-)
-
-// HTTP Response Types
-const (
-	HTTPResponseJSON = "json"
-	HTTPResponseXML  = "xml"
-)
-
 type TestCase struct {
 	Version     Version                       `json:"version" bson:"version"`
 	Kind        Kind                          `json:"kind" bson:"kind"`
@@ -60,7 +42,6 @@ type TestCase struct {
 	Captured    int64                         `json:"captured" bson:"captured"`
 	HTTPReq     HTTPReq                       `json:"http_req" bson:"http_req"`
 	HTTPResp    HTTPResp                      `json:"http_resp" bson:"http_resp"`
-	XMLResp     XMLResp                       `json:"xml_resp" bson:"xml_resp"`
 	AllKeys     map[string][]string           `json:"all_keys" bson:"all_keys"`
 	GrpcResp    GrpcResp                      `json:"grpcResp" bson:"grpcResp"`
 	GrpcReq     GrpcReq                       `json:"grpcReq" bson:"grpcReq"`

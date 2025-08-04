@@ -132,7 +132,7 @@ type Parameter struct {
 	Type     uint16 `yaml:"type"`
 	Unsigned bool   `yaml:"unsigned"`
 	Name     string `yaml:"name,omitempty"`
-	Value    []byte `yaml:"value"`
+	Value    any    `yaml:"value"`
 }
 
 // COM_STMT_FETCH packet is not currently supported because its response involves multi-resultset

@@ -5,7 +5,6 @@ package http
 import (
 	"bufio"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -81,7 +80,7 @@ func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, m
 }
 
 func (h *HTTP) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
-	h.Logger = h.Logger.With(zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)), zap.Any("Client IP Address", src.RemoteAddr().String()))
+	// h.Logger = h.Logger.With(zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)), zap.Any("Client IP Address", src.RemoteAddr().String()))
 	h.Logger.Debug("Mocking the outgoing http call in test mode")
 
 	reqBuf, err := util.ReadInitialBuf(ctx, h.Logger, src)
@@ -126,15 +125,23 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		reqBody, err = io.ReadAll(req.Body)
 		if err != nil {
 			// TODO right way to log errors
-			utils.LogError(h.Logger, err, "failed to read the http request body", zap.Any("metadata", GetReqMeta(req)))
+			utils.LogError(h.Logger, err, "failed to read the http request body", zap.Any("metadata", utils.GetReqMeta(req)))
 			return err
+		}
+
+		if req.Header.Get("Content-Encoding") != "" {
+			reqBody, err = pkg.Decompress(h.Logger, req.Header.Get("Content-Encoding"), reqBody)
+			if err != nil {
+				utils.LogError(h.Logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(req)))
+				return err
+			}
 		}
 	}
 
 	// converts the response message buffer to http response
 	respParsed, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(mock.Resp)), req)
 	if err != nil {
-		utils.LogError(h.Logger, err, "failed to parse the http response message", zap.Any("metadata", GetReqMeta(req)))
+		utils.LogError(h.Logger, err, "failed to parse the http response message", zap.Any("metadata", utils.GetReqMeta(req)))
 		return err
 	}
 
@@ -142,25 +149,20 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	var respBody []byte
 	//Checking if the body of the response is empty or does not exist.
 	if respParsed.Body != nil { // Read
-		if respParsed.Header.Get("Content-Encoding") == "gzip" {
-			check := respParsed.Body
-			ok, reader := isGZipped(check, h.Logger)
-			h.Logger.Debug("The body is gzip? " + strconv.FormatBool(ok))
-			h.Logger.Debug("", zap.Any("isGzipped", ok))
-			if ok {
-				gzipReader, err := gzip.NewReader(reader)
-				if err != nil {
-					utils.LogError(h.Logger, err, "failed to create a gzip reader", zap.Any("metadata", GetReqMeta(req)))
-					return err
-				}
-				respParsed.Body = gzipReader
-			}
-		}
 		respBody, err = io.ReadAll(respParsed.Body)
 		if err != nil {
-			utils.LogError(h.Logger, err, "failed to read the the http response body", zap.Any("metadata", GetReqMeta(req)))
+			utils.LogError(h.Logger, err, "failed to read the the http response body", zap.Any("metadata", utils.GetReqMeta(req)))
 			return err
 		}
+
+		if respParsed.Header.Get("Content-Encoding") != "" {
+			respBody, err = pkg.Decompress(h.Logger, respParsed.Header.Get("Content-Encoding"), respBody)
+			if err != nil {
+				utils.LogError(h.Logger, err, "failed to decode the http response body", zap.Any("metadata", utils.GetReqMeta(req)))
+				return err
+			}
+		}
+
 		h.Logger.Debug("This is the response body: " + string(respBody))
 		//Set the content length to the headers.
 		respParsed.Header.Set("Content-Length", strconv.Itoa(len(respBody)))
@@ -175,8 +177,8 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	}
 
 	// Check if the request is a passThrough request
-	if IsPassThrough(h.Logger, req, destPort, opts) {
-		h.Logger.Debug("The request is a passThrough request", zap.Any("metadata", GetReqMeta(req)))
+	if utils.IsPassThrough(h.Logger, req, destPort, opts) {
+		h.Logger.Debug("The request is a passThrough request", zap.Any("metadata", utils.GetReqMeta(req)))
 		return nil
 	}
 

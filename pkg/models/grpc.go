@@ -5,6 +5,7 @@ import (
 )
 
 type GrpcSpec struct {
+	Metadata         map[string]string             `json:"metadata" yaml:"metadata"`
 	GrpcReq          GrpcReq                       `json:"grpcReq" yaml:"grpcReq"`
 	GrpcResp         GrpcResp                      `json:"grpcResp" yaml:"grpcResp"`
 	Created          int64                         `json:"created" yaml:"created"`
@@ -37,11 +38,21 @@ type GrpcResp struct {
 	Timestamp time.Time                 `json:"timestamp" yaml:"timestamp"`
 }
 
-// GrpcStream is a helper function to combine the request-response model in a single struct.
+// GrpcStream is a helper function to combine the request-response model in a single struct
 type GrpcStream struct {
 	StreamID uint32
 	GrpcReq  GrpcReq
 	GrpcResp GrpcResp
+
+	// to handle request (coming in multiple frames)
+	ReqRawData        []byte
+	ReqPrefixParsed   bool
+	ReqExpectedLength uint32
+
+	// to handle response (coming in multiple frames)
+	RespRawData        []byte
+	RespPrefixParsed   bool
+	RespExpectedLength uint32
 }
 
 // NewGrpcStream returns a GrpcStream with all the nested maps initialised.

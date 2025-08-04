@@ -290,13 +290,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	//checking how much time proxy takes to execute the flow.
 	start := time.Now()
 
-	defer func(start time.Time) {
-		duration := time.Since(start)
-		p.logger.Debug("time taken by proxy to execute the flow", zap.Any("Duration(ms)", duration.Milliseconds()))
-	}(start)
-
 	// making a new client connection id for each client connection
 	clientConnID := util.GetNextID()
+
+	defer func(start time.Time) {
+		duration := time.Since(start)
+		p.logger.Debug("time taken by proxy to execute the flow", zap.Any("Client ConnectionID", clientConnID), zap.Any("Duration(ms)", duration.Milliseconds()))
+	}(start)
+
 	// dstConn stores conn with actual destination for the outgoing network call
 	var dstConn net.Conn
 
@@ -720,7 +721,7 @@ func (p *Proxy) SetMocks(_ context.Context, id uint64, filtered []*models.Mock, 
 }
 
 // GetConsumedMocks returns the consumed filtered mocks for a given app id
-func (p *Proxy) GetConsumedMocks(_ context.Context, id uint64) ([]string, error) {
+func (p *Proxy) GetConsumedMocks(_ context.Context, id uint64) ([]models.MockState, error) {
 	m, ok := p.MockManagers.Load(id)
 	if !ok {
 		return nil, fmt.Errorf("mock manager not found to get consumed filtered mocks")
