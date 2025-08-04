@@ -196,8 +196,6 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		var matchedResp *mysql.Response
 		var matchedMock *models.Mock
 
-		queryMatched := false
-
 		// Match the request with the mock
 		for _, mock := range tcsMocks {
 
@@ -271,11 +269,10 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 				case mysql.CommandStatusToString(mysql.COM_QUERY):
 					matchCount := matchQueryPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
 
-					if matchCount == 3 {
+					if matchCount > maxMatchedCount {
 						maxMatchedCount = matchCount
 						matchedResp = &mock.Spec.MySQLResponses[0]
 						matchedMock = mock
-						queryMatched = true
 					}
 
 				case mysql.CommandStatusToString(mysql.COM_STMT_PREPARE):
@@ -293,9 +290,6 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 						matchedMock = mock
 					}
 				}
-			}
-			if queryMatched {
-				break
 			}
 		}
 		if matchedResp == nil {
