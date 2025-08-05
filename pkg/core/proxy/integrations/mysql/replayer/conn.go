@@ -368,7 +368,23 @@ func simulateCacheSha2Password(ctx context.Context, logger *zap.Logger, clientCo
 		return nil
 	}
 
+	var mechanismString string
 	CachingSha2PasswordMechanism := pkt.Data
+
+	logger.Debug("[DEBUG] CachingSha2PasswordMechanism CachingSha2PasswordMechanism", zap.String("mechanism", CachingSha2PasswordMechanism), zap.Binary("mechanismBytes", []byte(CachingSha2PasswordMechanism)))
+
+	if len(CachingSha2PasswordMechanism) == 1 {
+		// CachingSha2PasswordMechanism single byte -> map to symbolic string
+		b := CachingSha2PasswordMechanism[0]
+		logger.Debug("[DEBUG] CachingSha2PasswordMechanism byte value", zap.Uint8("mechanismByte", b))
+		mechanismString = mysql.CachingSha2PasswordToString(mysql.CachingSha2Password(b))
+	} else if len(CachingSha2PasswordMechanism) > 1 {
+		// already symbolic
+		mechanismString = CachingSha2PasswordMechanism
+	} else {
+		mechanismString = "UNKNOWN"
+	}
+	logger.Debug("[DEBUG] CachingSha2PasswordMechanism normalized", zap.String("mechanismString", mechanismString))
 
 	authBuf, err := wire.EncodeToBinary(ctx, logger, &resp[0].PacketBundle, clientConn, decodeCtx)
 	if err != nil {
@@ -395,7 +411,7 @@ func simulateCacheSha2Password(ctx context.Context, logger *zap.Logger, clientCo
 	cacheSha2PassMock.resp = cacheSha2PassMock.resp[1:]
 
 	//simulate the caching_sha2_password auth mechanism
-	switch CachingSha2PasswordMechanism {
+	switch mechanismString {
 	case mysql.CachingSha2PasswordToString(mysql.PerformFullAuthentication):
 		err := simulateFullAuth(ctx, logger, clientConn, cacheSha2PassMock, initialHandshakeMock, mockDb, decodeCtx)
 		if err != nil {
@@ -408,6 +424,10 @@ func simulateCacheSha2Password(ctx context.Context, logger *zap.Logger, clientCo
 			utils.LogError(logger, err, "failed to simulate fast auth success")
 			return err
 		}
+	default:
+		// return an error
+		utils.LogError(logger, nil, "unknown caching_sha2_password mechanism", zap.String("mechanism", mechanismString))
+		return fmt.Errorf("unknown caching_sha2_password mechanism: %s", mechanismString)
 	}
 	return nil
 }
