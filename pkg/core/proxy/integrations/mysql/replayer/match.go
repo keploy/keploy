@@ -358,15 +358,19 @@ func matchClosePacket(_ context.Context, _ *zap.Logger, expected, actual mysql.P
 func getQueryStructure(sql string) (string, error) {
 	stmt, err := sqlparser.Parse(sql)
 	if err != nil {
-		return "", err // Propagate the parsing error
+		return "", fmt.Errorf("failed to parse SQL: %w", err)
 	}
 
 	var structureParts []string
 	// Walk the AST and collect the Go type of each grammatical node.
-	_ = sqlparser.Walk(func(node sqlparser.SQLNode) (bool, error) {
+	err = sqlparser.Walk(func(node sqlparser.SQLNode) (bool, error) {
 		structureParts = append(structureParts, reflect.TypeOf(node).String())
 		return true, nil
 	}, stmt)
+
+	if err != nil {
+		return "", fmt.Errorf("failed to walk the AST: %w", err)
+	}
 
 	return strings.Join(structureParts, "->"), nil
 }
@@ -388,13 +392,13 @@ func matchQueryPacket(_ context.Context, log *zap.Logger, expected, actual mysql
 
 	expectedSignature, err := getQueryStructure(expectedMessage.Query)
 	if err != nil {
-		log.Error("failed to get query structure", zap.Error(err))
+		log.Error("failed to get expected query structure", zap.Error(err))
 		return false
 	}
 
 	actualSignature, err := getQueryStructure(actualMessage.Query)
 	if err != nil {
-		log.Error("failed to get query structure", zap.Error(err))
+		log.Error("failed to get actual query structure", zap.Error(err))
 		return false
 	}
 

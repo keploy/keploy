@@ -424,6 +424,10 @@ func simulateCacheSha2Password(ctx context.Context, logger *zap.Logger, clientCo
 			utils.LogError(logger, err, "failed to simulate fast auth success")
 			return err
 		}
+	default:
+		// return an error 
+		utils.LogError(logger, nil, "unknown caching_sha2_password mechanism", zap.String("mechanism", mechanismString))
+		return fmt.Errorf("unknown caching_sha2_password mechanism: %s", mechanismString)
 	}
 	return nil
 }
