@@ -377,13 +377,13 @@ func matchQueryPacket(_ context.Context, log *zap.Logger, expected, actual mysql
 
 	// Match the type and return zero if the types are not equal
 	if expected.Header.Type != actual.Header.Type {
-		log.Error("Type mismatch for query packet", zap.String("expected", expected.Header.Type), zap.String("actual", actual.Header.Type))
+		// log.Error("Type mismatch for query packet", zap.String("expected", expected.Header.Type), zap.String("actual", actual.Header.Type))
 		return matchCount
 	}
 	// Match the header
 	ok := matchHeader(*expected.Header.Header, *actual.Header.Header)
 	if ok {
-		log.Warn("Matched query packet header", zap.Any("expected_header", expected.Header.Header), zap.Any("actual_header", actual.Header.Header))
+		// log.Warn("Matched query packet header", zap.Any("expected_header", expected.Header.Header), zap.Any("actual_header", actual.Header.Header))
 		matchCount += 2
 	}
 	expectedMessage, _ := expected.Message.(*mysql.QueryPacket)
@@ -392,18 +392,18 @@ func matchQueryPacket(_ context.Context, log *zap.Logger, expected, actual mysql
 	// Get the structural fingerprint for the expected query.
 	expectedFingerprint, err := getQueryStructure(expectedMessage.Query)
 	if err != nil {
-		log.Error("Failed to parse expected query for structural comparison",
-			zap.String("query", expectedMessage.Query),
-			zap.Error(err))
+		// log.Error("Failed to parse expected query for structural comparison",
+		// 	zap.String("query", expectedMessage.Query),
+		// 	zap.Error(err))
 		return matchCount
 	}
 
 	// Get the structural fingerprint for the actual query.
 	actualFingerprint, err := getQueryStructure(actualMessage.Query)
 	if err != nil {
-		log.Error("Failed to parse actual query for structural comparison",
-			zap.String("query", actualMessage.Query),
-			zap.Error(err))
+		// log.Error("Failed to parse actual query for structural comparison",
+		// 	zap.String("query", actualMessage.Query),
+		// 	zap.Error(err))
 		return matchCount
 	}
 
