@@ -273,8 +273,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 				case mysql.CommandStatusToString(mysql.COM_QUERY):
 					matchCount := matchQueryPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
 					// logger.Warn("match count is", zap.Int("matchCount", matchCount))
-					if matchCount == 3 {
-						maxMatchedCount = matchCount
+					if matchCount {
 						matchedResp = &mock.Spec.MySQLResponses[0]
 						matchedMock = mock
 						queryMatched = true
@@ -372,55 +371,41 @@ func getQueryStructure(sql string) (string, error) {
 	return strings.Join(structureParts, "->"), nil
 }
 
-func matchQueryPacket(_ context.Context, log *zap.Logger, expected, actual mysql.PacketBundle) int {
-	matchCount := 0
-
+func matchQueryPacket(_ context.Context, log *zap.Logger, expected, actual mysql.PacketBundle) bool {
 	// Match the type and return zero if the types are not equal
 	if expected.Header.Type != actual.Header.Type {
-		// log.Error("Type mismatch for query packet", zap.String("expected", expected.Header.Type), zap.String("actual", actual.Header.Type))
-		return matchCount
+		return false
 	}
-	// Match the header
-	ok := matchHeader(*expected.Header.Header, *actual.Header.Header)
-	if ok {
-		// log.Warn("Matched query packet header", zap.Any("expected_header", expected.Header.Header), zap.Any("actual_header", actual.Header.Header))
-		matchCount += 2
-	}
+
 	expectedMessage, _ := expected.Message.(*mysql.QueryPacket)
 	actualMessage, _ := actual.Message.(*mysql.QueryPacket)
 
-	// Get the structural fingerprint for the expected query.
-	expectedFingerprint, err := getQueryStructure(expectedMessage.Query)
+	if actual.Header.Header.PayloadLength == expected.Header.Header.PayloadLength {
+		// check if the query is equal (exact string matching)
+		if expectedMessage.Query == actualMessage.Query {
+			// log.Warn("query out", zap.String("expected query", expectedMessage.Query),
+			// 	zap.String("actual query", actualMessage.Query))
+			return true
+		}
+	}
+
+	expectedSignature, err := getQueryStructure(expectedMessage.Query)
 	if err != nil {
-		log.Error("Failed to parse expected query for structural comparison",
-			zap.String("query", expectedMessage.Query),
-			zap.Error(err))
-		return matchCount
+		log.Error("failed to get query structure", zap.Error(err))
 	}
 
-	// Get the structural fingerprint for the actual query.
-	actualFingerprint, err := getQueryStructure(actualMessage.Query)
+	actualSignature, err := getQueryStructure(actualMessage.Query)
 	if err != nil {
-		log.Error("Failed to parse actual query for structural comparison",
-			zap.String("query", actualMessage.Query),
-			zap.Error(err))
-		return matchCount
+		log.Error("failed to get query structure", zap.Error(err))
+	}
+	
+	if expectedSignature == actualSignature {
+		log.Warn("query structure matched", zap.String("expected signature", expectedSignature),
+			zap.String("actual signature", actualSignature))
+		return true
 	}
 
-	// Now, compare the fingerprints instead of the raw strings.
-	if expectedFingerprint == actualFingerprint {
-		log.Debug("Structurally matched query packet (literals ignored)",
-			zap.String("expected_query", expectedMessage.Query),
-			zap.String("actual_query", actualMessage.Query))
-		// You might want to give this a higher score than a simple header match.
-		matchCount++
-		return matchCount
-	}
-	log.Debug("Query packets do not match structurally",
-		zap.String("expected_query", expectedMessage.Query),
-		zap.String("actual_query", actualMessage.Query))
-
-	return matchCount
+	return false
 }
 
 func matchPreparePacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
