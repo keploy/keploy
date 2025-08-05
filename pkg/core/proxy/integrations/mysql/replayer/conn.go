@@ -431,21 +431,26 @@ func simulateCacheSha2Password(ctx context.Context, logger *zap.Logger, clientCo
 		return nil
 	}
 
-	logger.Debug("[DEBUG] Got auth more data packet", zap.Any("pkt", pkt))
-	CachingSha2PasswordMechanism := pkt.Data
-	logger.Debug("[DEBUG] CachingSha2PasswordMechanism raw", zap.String("mechanism", CachingSha2PasswordMechanism), zap.Binary("mechanismBytes", []byte(CachingSha2PasswordMechanism)))
-	
-	// Convert the raw byte value to the proper string representation
-	var mechanismString string
-	if len(CachingSha2PasswordMechanism) > 0 {
-		mechanismByte := CachingSha2PasswordMechanism[0]
-		logger.Debug("[DEBUG] CachingSha2PasswordMechanism byte value", zap.Uint8("mechanismByte", mechanismByte))
-		mechanismString = mysql.CachingSha2PasswordToString(mysql.CachingSha2Password(mechanismByte))
-		logger.Debug("[DEBUG] CachingSha2PasswordMechanism converted", zap.String("mechanismString", mechanismString))
-	} else {
-		logger.Debug("[DEBUG] CachingSha2PasswordMechanism is empty")
-		mechanismString = "UNKNOWN"
-	}
+	    // Normalize mechanism to symbolic string so switch below matches for both old and new mocks.
+      // Old mocks store pkt.Data as a single raw byte string: "\x03" or "\x04".
+      // New mocks may store the symbolic name already via recorder normalization.
+	  var mechanismString string
+      raw := pkt.Data
+      logger.Debug("[DEBUG] CachingSha2PasswordMechanism raw", zap.String("mechanism", raw), zap.Binary("mechanismBytes", []byte(raw)))
+
+      if len(raw) == 1 {
+              // raw single byte -> map to symbolic string
+              b := raw[0]
+              logger.Debug("[DEBUG] CachingSha2PasswordMechanism byte value", zap.Uint8("mechanismByte", b))
+              mechanismString = mysql.CachingSha2PasswordToString(mysql.CachingSha2Password(b))
+      } else if len(raw) > 1 {
+              // already symbolic
+              mechanismString = raw
+      } else {
+              mechanismString = "UNKNOWN"
+      }
+      logger.Debug("[DEBUG] CachingSha2PasswordMechanism normalized", zap.String("mechanismString", mechanismString))
+
 
 	logger.Debug("[DEBUG] Encoding auth more data packet to binary", zap.Any("packet", resp[0].PacketBundle))
 	authBuf, err := wire.EncodeToBinary(ctx, logger, &resp[0].PacketBundle, clientConn, decodeCtx)
@@ -499,7 +504,7 @@ func simulateCacheSha2Password(ctx context.Context, logger *zap.Logger, clientCo
 			return err
 		}
 	default:
-		logger.Debug("[DEBUG] Unknown CachingSha2PasswordMechanism", zap.String("mechanismString", mechanismString), zap.String("rawMechanism", CachingSha2PasswordMechanism))
+		logger.Debug("[DEBUG] Unknown CachingSha2PasswordMechanism", zap.String("mechanismString", mechanismString), zap.String("rawMechanism", raw))
 	}
 	logger.Debug("[DEBUG] simulateCacheSha2Password completed successfully")
 	return nil
