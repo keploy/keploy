@@ -271,12 +271,11 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					}
 				// case mysql.CommandStatusToString(mysql.COM_STMT_SEND_LONG_DATA):
 				case mysql.CommandStatusToString(mysql.COM_QUERY):
-					matched := matchQueryPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
-					// logger.Warn("match count is", zap.Int("matchCount", matchCount))
-					if matched {
+					matchCount := matchQueryPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
+					if matchCount > maxMatchedCount {
+						maxMatchedCount = matchCount
 						matchedResp = &mock.Spec.MySQLResponses[0]
 						matchedMock = mock
-						queryMatched = true
 					}
 
 				case mysql.CommandStatusToString(mysql.COM_STMT_PREPARE):
@@ -371,40 +370,24 @@ func getQueryStructure(sql string) (string, error) {
 	return strings.Join(structureParts, "->"), nil
 }
 
-func matchQueryPacket(_ context.Context, log *zap.Logger, expected, actual mysql.PacketBundle) bool {
+func matchQueryPacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
+	matchCount := 0
 	// Match the type and return zero if the types are not equal
 	if expected.Header.Type != actual.Header.Type {
-		return false
+		return 0
 	}
-
+	// Match the header
+	ok := matchHeader(*expected.Header.Header, *actual.Header.Header)
+	if ok {
+		matchCount += 2
+	}
 	expectedMessage, _ := expected.Message.(*mysql.QueryPacket)
 	actualMessage, _ := actual.Message.(*mysql.QueryPacket)
-
-	if actual.Header.Header.PayloadLength == expected.Header.Header.PayloadLength {
-		if expectedMessage.Query == actualMessage.Query {
-			return true
-		}
+	// Match the query for query packet
+	if expectedMessage.Query == actualMessage.Query {
+		matchCount++
 	}
-
-	expectedSignature, err := getQueryStructure(expectedMessage.Query)
-	if err != nil {
-		log.Error("failed to get query structure", zap.Error(err))
-		return false
-	}
-
-	actualSignature, err := getQueryStructure(actualMessage.Query)
-	if err != nil {
-		log.Error("failed to get query structure", zap.Error(err))
-		return false
-	}
-	
-	if expectedSignature == actualSignature {
-		log.Debug("query structure matched", zap.String("expected signature", expectedSignature),
-			zap.String("actual signature", actualSignature))
-		return true
-	}
-
-	return false
+	return matchCount
 }
 
 func matchPreparePacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
