@@ -392,11 +392,13 @@ func matchQueryPacket(_ context.Context, log *zap.Logger, expected, actual mysql
 	expectedSignature, err := getQueryStructure(expectedMessage.Query)
 	if err != nil {
 		log.Error("failed to get query structure", zap.Error(err))
+		return false
 	}
 
 	actualSignature, err := getQueryStructure(actualMessage.Query)
 	if err != nil {
 		log.Error("failed to get query structure", zap.Error(err))
+		return false
 	}
 	
 	if expectedSignature == actualSignature {
