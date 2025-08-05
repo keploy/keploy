@@ -397,7 +397,7 @@ func matchQueryPacket(_ context.Context, log *zap.Logger, expected, actual mysql
 		log.Error("failed to get query structure", zap.Error(err))
 		return false
 	}
-	
+
 	if expectedSignature == actualSignature {
 		log.Debug("query structure matched", zap.String("expected signature", expectedSignature),
 			zap.String("actual signature", actualSignature))
