@@ -434,39 +434,20 @@ func simulateCacheSha2Password(ctx context.Context, logger *zap.Logger, clientCo
 	logger.Debug("[DEBUG] Got auth more data packet", zap.Any("pkt", pkt))
 	CachingSha2PasswordMechanism := pkt.Data
 	logger.Debug("[DEBUG] CachingSha2PasswordMechanism raw", zap.String("mechanism", CachingSha2PasswordMechanism), zap.Binary("mechanismBytes", []byte(CachingSha2PasswordMechanism)))
-
+	
 	// Convert the raw byte value to the proper string representation
-	// var mechanismString string
-	// if len(CachingSha2PasswordMechanism) > 0 {
-	// 	mechanismByte := CachingSha2PasswordMechanism[0]
-	// 	logger.Debug("[DEBUG] CachingSha2PasswordMechanism byte value", zap.Uint8("mechanismByte", mechanismByte))
-	// 	mechanismString = mysql.CachingSha2PasswordToString(mysql.CachingSha2Password(mechanismByte))
-	// 	logger.Debug("[DEBUG] CachingSha2PasswordMechanism converted", zap.String("mechanismString", mechanismString))
-	// } else {
-	// 	logger.Debug("[DEBUG] CachingSha2PasswordMechanism is empty")
-	// 	mechanismString = "UNKNOWN"
-	// }
-
-	// logger.Debug("[DEBUG] Encoding auth more data packet to binary", zap.Any("packet", resp[0].PacketBundle))
-
-	// Resolve the caching_sha2_password mechanism into a canonical string.
-	// Recorder currently stores this as a string (e.g., "FastAuthSuccess").
-	// Older mocks may have a raw tag in []byte form. Support both.
-	var mechStr string
-	switch v := pkt.Data.(type) {
-	case string:
-		mechStr = v
-	case []byte:
-		if len(v) > 0 {
-			if s, err := wire.GetCachingSha2PasswordMechanism(v[0]); err == nil {
-				mechStr = s
-			}
-		}
-	default:
-		mechStr = ""
+	var mechanismString string
+	if len(CachingSha2PasswordMechanism) > 0 {
+		mechanismByte := CachingSha2PasswordMechanism[0]
+		logger.Debug("[DEBUG] CachingSha2PasswordMechanism byte value", zap.Uint8("mechanismByte", mechanismByte))
+		mechanismString = mysql.CachingSha2PasswordToString(mysql.CachingSha2Password(mechanismByte))
+		logger.Debug("[DEBUG] CachingSha2PasswordMechanism converted", zap.String("mechanismString", mechanismString))
+	} else {
+		logger.Debug("[DEBUG] CachingSha2PasswordMechanism is empty")
+		mechanismString = "UNKNOWN"
 	}
-	logger.Debug("CachingSha2PasswordMechanism",
-		zap.String("mechanism", mechStr), zap.Any("raw", pkt.Data))
+
+	logger.Debug("[DEBUG] Encoding auth more data packet to binary", zap.Any("packet", resp[0].PacketBundle))
 	authBuf, err := wire.EncodeToBinary(ctx, logger, &resp[0].PacketBundle, clientConn, decodeCtx)
 	if err != nil {
 		utils.LogError(logger, err, "failed to encode auth more data packet")
