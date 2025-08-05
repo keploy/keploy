@@ -381,10 +381,7 @@ func matchQueryPacket(_ context.Context, log *zap.Logger, expected, actual mysql
 	actualMessage, _ := actual.Message.(*mysql.QueryPacket)
 
 	if actual.Header.Header.PayloadLength == expected.Header.Header.PayloadLength {
-		// check if the query is equal (exact string matching)
 		if expectedMessage.Query == actualMessage.Query {
-			// log.Warn("query out", zap.String("expected query", expectedMessage.Query),
-			// 	zap.String("actual query", actualMessage.Query))
 			return true
 		}
 	}
@@ -402,7 +399,7 @@ func matchQueryPacket(_ context.Context, log *zap.Logger, expected, actual mysql
 	}
 	
 	if expectedSignature == actualSignature {
-		log.Warn("query structure matched", zap.String("expected signature", expectedSignature),
+		log.Debug("query structure matched", zap.String("expected signature", expectedSignature),
 			zap.String("actual signature", actualSignature))
 		return true
 	}
