@@ -272,8 +272,8 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 				// case mysql.CommandStatusToString(mysql.COM_STMT_SEND_LONG_DATA):
 				case mysql.CommandStatusToString(mysql.COM_QUERY):
 					matchCount := matchQueryPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
-					logger.Warn("match count is", zap.Int("matchCount", matchCount))
-					if matchCount >= 3 {
+					// logger.Warn("match count is", zap.Int("matchCount", matchCount))
+					if matchCount == 3 {
 						maxMatchedCount = matchCount
 						matchedResp = &mock.Spec.MySQLResponses[0]
 						matchedMock = mock
@@ -392,18 +392,18 @@ func matchQueryPacket(_ context.Context, log *zap.Logger, expected, actual mysql
 	// Get the structural fingerprint for the expected query.
 	expectedFingerprint, err := getQueryStructure(expectedMessage.Query)
 	if err != nil {
-		// log.Error("Failed to parse expected query for structural comparison",
-		// 	zap.String("query", expectedMessage.Query),
-		// 	zap.Error(err))
+		log.Error("Failed to parse expected query for structural comparison",
+			zap.String("query", expectedMessage.Query),
+			zap.Error(err))
 		return matchCount
 	}
 
 	// Get the structural fingerprint for the actual query.
 	actualFingerprint, err := getQueryStructure(actualMessage.Query)
 	if err != nil {
-		// log.Error("Failed to parse actual query for structural comparison",
-		// 	zap.String("query", actualMessage.Query),
-		// 	zap.Error(err))
+		log.Error("Failed to parse actual query for structural comparison",
+			zap.String("query", actualMessage.Query),
+			zap.Error(err))
 		return matchCount
 	}
 
