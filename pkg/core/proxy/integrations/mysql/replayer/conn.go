@@ -425,7 +425,7 @@ func simulateCacheSha2Password(ctx context.Context, logger *zap.Logger, clientCo
 			return err
 		}
 	default:
-		// return an error 
+		// return an error
 		utils.LogError(logger, nil, "unknown caching_sha2_password mechanism", zap.String("mechanism", mechanismString))
 		return fmt.Errorf("unknown caching_sha2_password mechanism: %s", mechanismString)
 	}
