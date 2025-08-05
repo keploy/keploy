@@ -271,9 +271,9 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					}
 				// case mysql.CommandStatusToString(mysql.COM_STMT_SEND_LONG_DATA):
 				case mysql.CommandStatusToString(mysql.COM_QUERY):
-					matchCount := matchQueryPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
+					matched := matchQueryPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
 					// logger.Warn("match count is", zap.Int("matchCount", matchCount))
-					if matchCount {
+					if matched {
 						matchedResp = &mock.Spec.MySQLResponses[0]
 						matchedMock = mock
 						queryMatched = true
