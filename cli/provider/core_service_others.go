@@ -38,7 +38,7 @@ func Get(ctx context.Context, cmd string, c *config.Config, logger *zap.Logger, 
 	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, auth, commonServices.Storage, c)
 
 	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, tel, auth, c)
-	if (cmd == "test" && c.Test.BasePath != "") || cmd == "normalize" {
+	if (cmd == "test" && c.Test.BasePath != "") || cmd == "normalize" || cmd == "mock" {
 		return replaySvc, nil
 	}
 

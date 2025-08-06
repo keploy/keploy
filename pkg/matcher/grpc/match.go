@@ -90,7 +90,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	}
 	result.BodyResult = append(result.BodyResult, models.BodyResult{
 		Normal:   compressionFlagNormal,
-		Type:     models.BodyTypeGrpcCompression,
+		Type:     models.GrpcCompression,
 		Expected: fmt.Sprintf("%d", expectedResp.Body.CompressionFlag),
 		Actual:   fmt.Sprintf("%d", actualResp.Body.CompressionFlag),
 	})
@@ -110,7 +110,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	}
 	result.BodyResult = append(result.BodyResult, models.BodyResult{
 		Normal:   messageLengthNormal,
-		Type:     models.BodyTypeGrpcLength,
+		Type:     models.GrpcLength,
 		Expected: fmt.Sprintf("%d", expectedResp.Body.MessageLength),
 		Actual:   fmt.Sprintf("%d", actualResp.Body.MessageLength),
 	})
@@ -130,7 +130,7 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	}
 	result.BodyResult = append(result.BodyResult, models.BodyResult{
 		Normal:   decodedDataNormal,
-		Type:     models.BodyTypeGrpcData,
+		Type:     models.GrpcData,
 		Expected: expectedResp.Body.DecodedData,
 		Actual:   actualResp.Body.DecodedData,
 	})

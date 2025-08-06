@@ -12,8 +12,10 @@ import (
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	mysqlUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire"
+	intgUtils "go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	pTls "go.keploy.io/server/v2/pkg/core/proxy/tls"
 	pUtils "go.keploy.io/server/v2/pkg/core/proxy/util"
+
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.keploy.io/server/v2/utils"
@@ -366,7 +368,23 @@ func simulateCacheSha2Password(ctx context.Context, logger *zap.Logger, clientCo
 		return nil
 	}
 
+	var mechanismString string
 	CachingSha2PasswordMechanism := pkt.Data
+
+	logger.Debug("[DEBUG] CachingSha2PasswordMechanism CachingSha2PasswordMechanism", zap.String("mechanism", CachingSha2PasswordMechanism), zap.Binary("mechanismBytes", []byte(CachingSha2PasswordMechanism)))
+
+	if len(CachingSha2PasswordMechanism) == 1 {
+		// CachingSha2PasswordMechanism single byte -> map to symbolic string
+		b := CachingSha2PasswordMechanism[0]
+		logger.Debug("[DEBUG] CachingSha2PasswordMechanism byte value", zap.Uint8("mechanismByte", b))
+		mechanismString = mysql.CachingSha2PasswordToString(mysql.CachingSha2Password(b))
+	} else if len(CachingSha2PasswordMechanism) > 1 {
+		// already symbolic
+		mechanismString = CachingSha2PasswordMechanism
+	} else {
+		mechanismString = "UNKNOWN"
+	}
+	logger.Debug("[DEBUG] CachingSha2PasswordMechanism normalized", zap.String("mechanismString", mechanismString))
 
 	authBuf, err := wire.EncodeToBinary(ctx, logger, &resp[0].PacketBundle, clientConn, decodeCtx)
 	if err != nil {
@@ -393,7 +411,7 @@ func simulateCacheSha2Password(ctx context.Context, logger *zap.Logger, clientCo
 	cacheSha2PassMock.resp = cacheSha2PassMock.resp[1:]
 
 	//simulate the caching_sha2_password auth mechanism
-	switch CachingSha2PasswordMechanism {
+	switch mechanismString {
 	case mysql.CachingSha2PasswordToString(mysql.PerformFullAuthentication):
 		err := simulateFullAuth(ctx, logger, clientConn, cacheSha2PassMock, initialHandshakeMock, mockDb, decodeCtx)
 		if err != nil {
@@ -406,6 +424,10 @@ func simulateCacheSha2Password(ctx context.Context, logger *zap.Logger, clientCo
 			utils.LogError(logger, err, "failed to simulate fast auth success")
 			return err
 		}
+	default:
+		// return an error
+		utils.LogError(logger, nil, "unknown caching_sha2_password mechanism", zap.String("mechanism", mechanismString))
+		return fmt.Errorf("unknown caching_sha2_password mechanism: %s", mechanismString)
 	}
 	return nil
 }
@@ -452,6 +474,16 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 
 	resp := fullAuthMocks.resp
 	req := fullAuthMocks.req
+
+	if decodeCtx.UseSSL {
+		logger.Debug("This is an ssl request, simulating plain password in caching_sha2_password full auth")
+		err := simulatePlainPassword(ctx, logger, clientConn, fullAuthMocks, initialHandshakeMock, mockDb, decodeCtx)
+		if err != nil {
+			utils.LogError(logger, err, "failed to simulate plain password in caching_sha2_password full auth")
+			return err
+		}
+		return nil
+	}
 
 	// read the public key request from the client
 	publicKeyRequestBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
@@ -597,5 +629,88 @@ func simulateFullAuth(ctx context.Context, logger *zap.Logger, clientConn net.Co
 
 	logger.Debug("full auth completed successfully")
 
+	return nil
+}
+
+func simulatePlainPassword(ctx context.Context, logger *zap.Logger, clientConn net.Conn, fullAuthMocks reqResp, initialHandshakeMock *models.Mock, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) error {
+
+	req := fullAuthMocks.req
+	resp := fullAuthMocks.resp
+
+	// read the plain password from the client
+	plainPassBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
+	if err != nil {
+		utils.LogError(logger, err, "failed to read plain password from client")
+		return err
+	}
+
+	// Get the packet from the buffer
+	plainPassPkt, err := mysqlUtils.BytesToMySQLPacket(plainPassBuf)
+	if err != nil {
+		utils.LogError(logger, err, "failed to convert plain password to packet")
+		return err
+	}
+
+	plainPass := string(intgUtils.EncodeBase64(plainPassPkt.Payload))
+
+	// Get the plain password from the mock
+	if len(req) < 1 {
+		utils.LogError(logger, nil, "no mysql mocks found for plain password")
+		return fmt.Errorf("no mysql mocks found for plain password")
+	}
+
+	plainPassMock, ok := req[0].Message.(string)
+	if !ok {
+		utils.LogError(logger, nil, "failed to assert plain password packet")
+		return fmt.Errorf("failed to assert plain password packet")
+	}
+
+	// Match the header of the plain password
+	ok = matchHeader(*req[0].Header.Header, plainPassPkt.Header)
+	if !ok {
+		utils.LogError(logger, nil, "header mismatch for plain password", zap.Any("expected", req[0].Header.Header), zap.Any("actual", plainPassPkt.Header))
+		return fmt.Errorf("header mismatch for plain password")
+	}
+
+	// Match the plain password from the client with the mock
+	if plainPass != plainPassMock {
+		utils.LogError(logger, nil, "plain password mismatch", zap.Any("actual", plainPass), zap.Any("expected", plainPassMock))
+		return fmt.Errorf("plain password mismatch")
+	}
+
+	//Now send the final response (OK/Err) to the client
+	if len(resp) < 1 {
+		utils.LogError(logger, nil, "final response mock not found for full auth (plain password)")
+		return fmt.Errorf("final response mock not found for full auth (plain password)")
+	}
+
+	logger.Debug("final response for full auth(plain password)", zap.Any("response", resp[0].Header.Type))
+
+	// Get the final response (OK/Err) from the mock
+	// Send the final response (OK/Err) to the client
+	buf, err := wire.EncodeToBinary(ctx, logger, &resp[0].PacketBundle, clientConn, decodeCtx)
+	if err != nil {
+		utils.LogError(logger, err, "failed to encode final response packet for full auth (plain password)")
+		return err
+	}
+
+	_, err = clientConn.Write(buf)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		utils.LogError(logger, err, "failed to write final response for full auth (plain password) to the client")
+		return err
+	}
+
+	// FullAuth mechanism only comes for the first time unless COM_CHANGE_USER is called (that is not supported for now).
+	// Afterwards only fast auth success is expected. So, we can delete this.
+	ok = mockDb.DeleteUnFilteredMock(*initialHandshakeMock)
+	// TODO: need to check what to do in this case
+	if !ok {
+		utils.LogError(logger, nil, "failed to delete unfiltered mock during full auth (plain password) in ssl request")
+	}
+
+	logger.Debug("full auth (plain-password) in ssl request completed successfully")
 	return nil
 }

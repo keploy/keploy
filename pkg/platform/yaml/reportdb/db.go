@@ -33,6 +33,13 @@ func New(logger *zap.Logger, reportPath string) *TestReport {
 	}
 }
 
+func (fe *TestReport) ClearTestCaseResults(_ context.Context, testRunID string, testSetID string) {
+	fe.m.Lock()
+	defer fe.m.Unlock()
+
+	fe.tests[testRunID] = make(map[string][]models.TestResult)
+}
+
 func (fe *TestReport) GetAllTestRunIDs(ctx context.Context) ([]string, error) {
 	return yaml.ReadSessionIndices(ctx, fe.Path, fe.Logger)
 }
@@ -73,7 +80,7 @@ func (fe *TestReport) GetReport(ctx context.Context, testRunID string, testSetID
 	}
 	data, err := yaml.ReadFile(ctx, fe.Logger, path, reportName)
 	if err != nil {
-		utils.LogError(fe.Logger, err, "failed to read the mocks from config yaml", zap.Any("session", filepath.Base(path)))
+		utils.LogError(fe.Logger, err, "failed to read the test-set report", zap.Any("reportName", reportName), zap.Any("session", filepath.Base(path)))
 		return nil, err
 	}
 

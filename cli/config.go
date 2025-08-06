@@ -36,18 +36,19 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 			if isGenerate {
 				filePath := filepath.Join(cfg.Path, "keploy.yml")
 				if !cfg.InCi && utils.CheckFileExists(filePath) {
-					override, err := utils.AskForConfirmation("Config file already exists. Do you want to override it?")
+					override, err := utils.AskForConfirmation(ctx, "Config file already exists. Do you want to override it?")
 					if err != nil {
 						utils.LogError(logger, err, "failed to ask for confirmation")
 						return err
 					}
 					if !override {
+						logger.Info("Skipping config file override")
 						return nil
 					}
 				}
 				svc, err := servicefactory.GetService(ctx, cmd.Name())
 				if err != nil {
-					utils.LogError(logger, err, "failed to get service")
+					utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
 					return err
 				}
 				var tools toolsSvc.Service

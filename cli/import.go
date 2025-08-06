@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"os"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/cli/provider"
@@ -23,7 +24,7 @@ func Import(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 		Example: "keploy import",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
-			provider.PrintLogo(disableAnsi)
+			provider.PrintLogo(os.Stdout, disableAnsi)
 			return cmd.Help()
 		},
 	}
@@ -34,7 +35,7 @@ func Import(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 		Example: "keploy import postman",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
-			provider.PrintLogo(disableAnsi)
+			provider.PrintLogo(os.Stdout, disableAnsi)
 			path, _ := cmd.Flags().GetString("path")
 			if path == "" {
 				path = "output.json"
@@ -42,7 +43,7 @@ func Import(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 			basePath, _ := cmd.Flags().GetString("base-path")
 			svc, err := serviceFactory.GetService(ctx, "import")
 			if err != nil {
-				utils.LogError(logger, err, "failed to get service")
+				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
 				return nil
 			}
 			var tools toolsSvc.Service

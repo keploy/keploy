@@ -19,7 +19,6 @@ import (
 
 func (o *Orchestrator) ReRecord(ctx context.Context) error {
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
-
 	var stopReason string
 	var err error
 
@@ -44,7 +43,6 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 
 	// Check for templates
 	o.checkForTemplates(ctx, testSets)
-
 	// Sort the testsets to ensure that the testcases are re-recorded in the same order
 	sort.SliceStable(testSets, func(i, j int) bool {
 		return testSets[i] < testSets[j]
@@ -187,9 +185,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 }
 
 func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, error) {
-
 	//replay the recorded testcases
-
 	tcs, err := o.replay.GetTestCases(ctx, testSet)
 	if err != nil {
 		errMsg := "failed to get all testcases"
@@ -210,19 +206,17 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 		return false, fmt.Errorf("%s", errMsg)
 	}
 	cmdType := utils.CmdType(o.config.CommandType)
-
 	var userIP string
+	delay := o.config.Test.Delay
+	time.Sleep(time.Duration(delay) * time.Second)
 	if utils.IsDockerCmd(cmdType) {
 		host = o.config.ContainerName
-
 		userIP, err = o.record.GetContainerIP(ctx, o.config.AppID)
 		if err != nil {
 			utils.LogError(o.logger, err, "failed to get the app ip")
 			return false, err
 		}
 	}
-
-	delay := o.config.Test.Delay
 	timeout := time.Duration(120+delay) * time.Second
 
 	o.logger.Debug("", zap.String("host", host), zap.String("port", port), zap.Any("WaitTimeout", timeout), zap.Any("CommandType", cmdType))
@@ -230,6 +224,25 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 	if err := pkg.WaitForPort(ctx, host, port, timeout); err != nil {
 		utils.LogError(o.logger, err, "Waiting for port failed", zap.String("host", host), zap.String("port", port))
 		return false, err
+	}
+
+	// Read the template and secret values once per test set
+	testSetConf, err := o.replay.GetTestSetConf(ctx, testSet)
+	if err != nil {
+		o.logger.Debug("failed to read template values")
+	}
+
+	utils.TemplatizedValues = map[string]interface{}{}
+	utils.SecretValues = map[string]interface{}{}
+
+	if testSetConf != nil {
+		if testSetConf.Template != nil {
+			utils.TemplatizedValues = testSetConf.Template
+		}
+
+		if testSetConf.Secret != nil {
+			utils.SecretValues = testSetConf.Secret
+		}
 	}
 
 	allTcRecorded := true
@@ -245,16 +258,6 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 				break
 			}
 			o.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HTTPReq.URL))
-		}
-		// Read the template values.
-		testSetConf, err := o.replay.GetTestSetConf(ctx, testSet)
-		if err != nil {
-			o.logger.Debug("failed to read template values")
-		}
-		if testSetConf == nil {
-			utils.TemplatizedValues = map[string]interface{}{}
-		} else {
-			utils.TemplatizedValues = testSetConf.Template
 		}
 
 		if o.config.ReRecord.Host != "" {
@@ -282,7 +285,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 			continue // Proceed with the next command
 		}
 
-		o.logger.Info("Re-recorded the testcase successfully", zap.String("curl", tc.Curl), zap.Any("response", (resp)))
+		o.logger.Info("Re-recorded the testcase successfully", zap.String("testcase", tc.Name), zap.String("of testset", testSet))
 	}
 
 	if simErr {

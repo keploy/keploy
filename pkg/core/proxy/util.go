@@ -28,7 +28,7 @@ func writeNsswitchConfig(logger *zap.Logger, nsSwitchConfig string, data []byte,
 
 func (p *Proxy) globalPassThrough(ctx context.Context, client, dest net.Conn) error {
 
-	logger := p.logger.With(zap.Any("Client IP Address", client.RemoteAddr().String()), zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)))
+	logger := p.logger.With(zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)), zap.Any("Client IP Address", client.RemoteAddr().String()))
 
 	clientBuffChan := make(chan []byte)
 	destBuffChan := make(chan []byte)
@@ -72,16 +72,4 @@ func (p *Proxy) globalPassThrough(ctx context.Context, client, dest net.Conn) er
 			return err
 		}
 	}
-}
-
-func localMock(copyMock []interface{}) ([]models.Mock, error) {
-	var copiedMocks []models.Mock
-	for _, m := range copyMock {
-		if mock, ok := m.(*models.Mock); ok {
-			copiedMocks = append(copiedMocks, *mock)
-		} else {
-			return nil, fmt.Errorf("expected mock instance, got %v", m)
-		}
-	}
-	return copiedMocks, nil
 }

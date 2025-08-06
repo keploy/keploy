@@ -5,7 +5,6 @@ package http
 import (
 	"bufio"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -63,7 +62,7 @@ func (h *HTTP) MatchType(_ context.Context, buf []byte) bool {
 }
 
 func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
-	logger := h.Logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)))
+	logger := h.Logger.With(zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)), zap.Any("Client IP Address", src.RemoteAddr().String()))
 
 	h.Logger.Debug("Recording the outgoing http call in record mode")
 
@@ -81,7 +80,7 @@ func (h *HTTP) RecordOutgoing(ctx context.Context, src net.Conn, dst net.Conn, m
 }
 
 func (h *HTTP) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
-	h.Logger = h.Logger.With(zap.Any("Client IP Address", src.RemoteAddr().String()), zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)))
+	// h.Logger = h.Logger.With(zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)), zap.Any("Client IP Address", src.RemoteAddr().String()))
 	h.Logger.Debug("Mocking the outgoing http call in test mode")
 
 	reqBuf, err := util.ReadInitialBuf(ctx, h.Logger, src)
@@ -99,7 +98,7 @@ func (h *HTTP) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.Co
 }
 
 // ParseFinalHTTP is used to parse the final http request and response and save it in a yaml file
-func (h *HTTP) parseFinalHTTP(_ context.Context, mock *FinalHTTP, destPort uint, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
+func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uint, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
 	var req *http.Request
 	// converts the request message buffer to http request
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(mock.Req)))
@@ -126,15 +125,23 @@ func (h *HTTP) parseFinalHTTP(_ context.Context, mock *FinalHTTP, destPort uint,
 		reqBody, err = io.ReadAll(req.Body)
 		if err != nil {
 			// TODO right way to log errors
-			utils.LogError(h.Logger, err, "failed to read the http request body", zap.Any("metadata", GetReqMeta(req)))
+			utils.LogError(h.Logger, err, "failed to read the http request body", zap.Any("metadata", utils.GetReqMeta(req)))
 			return err
+		}
+
+		if req.Header.Get("Content-Encoding") != "" {
+			reqBody, err = pkg.Decompress(h.Logger, req.Header.Get("Content-Encoding"), reqBody)
+			if err != nil {
+				utils.LogError(h.Logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(req)))
+				return err
+			}
 		}
 	}
 
 	// converts the response message buffer to http response
 	respParsed, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(mock.Resp)), req)
 	if err != nil {
-		utils.LogError(h.Logger, err, "failed to parse the http response message", zap.Any("metadata", GetReqMeta(req)))
+		utils.LogError(h.Logger, err, "failed to parse the http response message", zap.Any("metadata", utils.GetReqMeta(req)))
 		return err
 	}
 
@@ -142,25 +149,20 @@ func (h *HTTP) parseFinalHTTP(_ context.Context, mock *FinalHTTP, destPort uint,
 	var respBody []byte
 	//Checking if the body of the response is empty or does not exist.
 	if respParsed.Body != nil { // Read
-		if respParsed.Header.Get("Content-Encoding") == "gzip" {
-			check := respParsed.Body
-			ok, reader := isGZipped(check, h.Logger)
-			h.Logger.Debug("The body is gzip? " + strconv.FormatBool(ok))
-			h.Logger.Debug("", zap.Any("isGzipped", ok))
-			if ok {
-				gzipReader, err := gzip.NewReader(reader)
-				if err != nil {
-					utils.LogError(h.Logger, err, "failed to create a gzip reader", zap.Any("metadata", GetReqMeta(req)))
-					return err
-				}
-				respParsed.Body = gzipReader
-			}
-		}
 		respBody, err = io.ReadAll(respParsed.Body)
 		if err != nil {
-			utils.LogError(h.Logger, err, "failed to read the the http response body", zap.Any("metadata", GetReqMeta(req)))
+			utils.LogError(h.Logger, err, "failed to read the the http response body", zap.Any("metadata", utils.GetReqMeta(req)))
 			return err
 		}
+
+		if respParsed.Header.Get("Content-Encoding") != "" {
+			respBody, err = pkg.Decompress(h.Logger, respParsed.Header.Get("Content-Encoding"), respBody)
+			if err != nil {
+				utils.LogError(h.Logger, err, "failed to decode the http response body", zap.Any("metadata", utils.GetReqMeta(req)))
+				return err
+			}
+		}
+
 		h.Logger.Debug("This is the response body: " + string(respBody))
 		//Set the content length to the headers.
 		respParsed.Header.Set("Content-Length", strconv.Itoa(len(respBody)))
@@ -171,11 +173,12 @@ func (h *HTTP) parseFinalHTTP(_ context.Context, mock *FinalHTTP, destPort uint,
 		"name":      "Http",
 		"type":      models.HTTPClient,
 		"operation": req.Method,
+		"connID":    ctx.Value(models.ClientConnectionIDKey).(string),
 	}
 
 	// Check if the request is a passThrough request
-	if IsPassThrough(h.Logger, req, destPort, opts) {
-		h.Logger.Debug("The request is a passThrough request", zap.Any("metadata", GetReqMeta(req)))
+	if utils.IsPassThrough(h.Logger, req, destPort, opts) {
+		h.Logger.Debug("The request is a passThrough request", zap.Any("metadata", utils.GetReqMeta(req)))
 		return nil
 	}
 

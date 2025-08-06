@@ -3,7 +3,8 @@
 
 ## Links & References
 
-**Fixes:** #123  <!-- Replace with actual issue number -->
+**Closes:** #[issue number that will be closed through this PR]
+- NA (if very small change like typo, linting, etc.)
 
 ### 🔗 Related PRs
 - NA
@@ -38,7 +39,7 @@
 - [ ] 📓 Wiki
 - [ ] 🙅 no documentation needed
 
-## Are there any sample code to test the changes?
+## Are there any sample code or steps to test the changes?
 - [ ] 👍 yes, mentioned below
 - [ ] 🙅 no, because it is not needed
 
@@ -59,7 +60,7 @@ Please ensure your PR title and branch name follow the Keploy semantics:
 **Examples:**
 
 - **PR Title**: `fix: patch MongoDB document update bug`  
-- **Branch Name**: `feature/#1-login-flow`
+- **Branch Name**: `feat/#1-login-flow` (You may skip mentioning the issue number in the branch name if the change is small and the PR description clearly explains it.)
 
 ---
 
