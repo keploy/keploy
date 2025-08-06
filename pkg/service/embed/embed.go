@@ -248,12 +248,17 @@ func (e *EmbedService) cleanChunks(chunks map[int]string) map[int]string {
 	return cleanedChunks
 }
 
-func (e *EmbedService) GenerateEmbeddings(chunks map[int]string, filePath string) error {
+func (e *EmbedService) GenerateEmbeddings(ctx context.Context, chunks map[int]string, filePath string) error {
+	// Check for context cancellation before starting
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("process cancelled by user")
+	default:
+	}
+
 	e.logger.Info("Generating and storing embeddings for chunks",
 		zap.Int("numChunks", len(chunks)),
 		zap.String("filePath", filePath))
-
-	ctx := context.Background()
 
 	if err := e.initializeDatabase(ctx); err != nil {
 		return fmt.Errorf("failed to initialize database: %w", err)
@@ -274,6 +279,13 @@ func (e *EmbedService) GenerateEmbeddings(chunks map[int]string, filePath string
 	const batchSize = 32 // Process chunks in batches to manage memory
 
 	for i := 0; i < len(sortedChunkIDs); i += batchSize {
+		// Check for context cancellation in each batch iteration
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("process cancelled by user")
+		default:
+		}
+
 		end := i + batchSize
 		if end > len(sortedChunkIDs) {
 			end = len(sortedChunkIDs)
@@ -297,7 +309,7 @@ func (e *EmbedService) GenerateEmbeddings(chunks map[int]string, filePath string
 			continue
 		}
 
-		embeddings, err := e.callAIService(batchContents)
+		embeddings, err := e.callAIService(ctx, batchContents)
 		if err != nil {
 			e.logger.Error("Failed to generate embeddings for batch",
 				zap.String("filePath", filePath),
@@ -455,15 +467,29 @@ func (e *EmbedService) processDirectoryStreaming(ctx context.Context, dirPath st
 		const batchSize = 32
 		var batch []ChunkJob
 		for chunk := range chunkChan {
+			// Check for context cancellation
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 			atomic.AddInt64(&totalChunks, 1)
 			batch = append(batch, chunk)
 			if len(batch) >= batchSize {
-				embeddingJobsChan <- batch
+				select {
+				case embeddingJobsChan <- batch:
+				case <-ctx.Done():
+					return
+				}
 				batch = nil
 			}
 		}
 		if len(batch) > 0 {
-			embeddingJobsChan <- batch
+			select {
+			case embeddingJobsChan <- batch:
+			case <-ctx.Done():
+				return
+			}
 		}
 		close(embeddingJobsChan)
 	}()
@@ -474,14 +500,24 @@ func (e *EmbedService) processDirectoryStreaming(ctx context.Context, dirPath st
 		go func() {
 			defer embeddingWg.Done()
 			for batch := range embeddingJobsChan {
-				results, err := e.processChunkBatchForEmbeddings(batch)
+				// Check for context cancellation
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				results, err := e.processChunkBatchForEmbeddings(ctx, batch)
 				if err != nil {
 					e.logger.Error("Failed to process chunk batch for embeddings", zap.Error(err))
 					continue
 				}
 				atomic.AddInt64(&totalEmbeddings, int64(len(results)))
 				for _, res := range results {
-					dbWriteChan <- res
+					select {
+					case dbWriteChan <- res:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 		}()
@@ -495,6 +531,12 @@ func (e *EmbedService) processDirectoryStreaming(ctx context.Context, dirPath st
 		const dbBatchSize = 128
 		var dbBatch []EmbeddingResult
 		for res := range dbWriteChan {
+			// Check for context cancellation
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 			dbBatch = append(dbBatch, res)
 			if len(dbBatch) >= dbBatchSize {
 				if err := e.storeEmbeddingsBatch(ctx, dbBatch); err != nil {
@@ -514,6 +556,19 @@ func (e *EmbedService) processDirectoryStreaming(ctx context.Context, dirPath st
 
 	// Start the pipeline
 	for _, path := range filePaths {
+		// Check for context cancellation before processing each file
+		select {
+		case <-ctx.Done():
+			// Close channels to signal workers to stop
+			close(chunkingJobs)
+			chunkingWg.Wait()
+			close(chunkChan)
+			embeddingWg.Wait()
+			close(dbWriteChan)
+			dbWg.Wait()
+			return fmt.Errorf("process cancelled by user")
+		default:
+		}
 		chunkingJobs <- path
 	}
 	close(chunkingJobs)
@@ -579,7 +634,7 @@ func (e *EmbedService) processFileForChunking(path string, chunkChan chan<- Chun
 	}
 }
 
-func (e *EmbedService) processChunkBatchForEmbeddings(batch []ChunkJob) ([]EmbeddingResult, error) {
+func (e *EmbedService) processChunkBatchForEmbeddings(ctx context.Context, batch []ChunkJob) ([]EmbeddingResult, error) {
 	e.logger.Debug("Processing chunk batch for embedding", zap.Int("batchSize", len(batch)))
 
 	contents := make([]string, 0, len(batch))
@@ -598,7 +653,7 @@ func (e *EmbedService) processChunkBatchForEmbeddings(batch []ChunkJob) ([]Embed
 		return nil, nil
 	}
 
-	embeddings, err := e.callAIService(contents)
+	embeddings, err := e.callAIService(ctx, contents)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate embeddings for batch: %w", err)
 	}
@@ -620,7 +675,7 @@ func (e *EmbedService) processChunkBatchForEmbeddings(batch []ChunkJob) ([]Embed
 	return results, nil
 }
 
-func (e *EmbedService) processSingleFile(_ context.Context, filePath string) error {
+func (e *EmbedService) processSingleFile(ctx context.Context, filePath string) error {
 	chunks, err := e.processSingleFileForChunks(filePath)
 	if err != nil {
 		return err
@@ -632,7 +687,7 @@ func (e *EmbedService) processSingleFile(_ context.Context, filePath string) err
 		e.mu.Unlock()
 	}
 
-	return e.GenerateEmbeddings(chunks, filePath)
+	return e.GenerateEmbeddings(ctx, chunks, filePath)
 }
 
 func (e *EmbedService) processSingleFileForChunks(filePath string) (map[int]string, error) {
@@ -674,13 +729,13 @@ func (e *EmbedService) isCodeFile(filePath string) bool {
 
 func (e *EmbedService) initializeDatabase(ctx context.Context) error {
 
-	dropCleanup := `
-	DROP INDEX IF EXISTS code_embeddings_embedding_idx;
-	DROP TABLE IF EXISTS code_embeddings;
-	`
-	if _, err := e.pgConn.Exec(ctx, dropCleanup); err != nil {
-		e.logger.Warn("Failed to drop existing index/table", zap.Error(err))
-	}
+	// dropCleanup := `
+	// DROP INDEX IF EXISTS code_embeddings_embedding_idx;
+	// DROP TABLE IF EXISTS code_embeddings;
+	// `
+	// if _, err := e.pgConn.Exec(ctx, dropCleanup); err != nil {
+	// 	e.logger.Warn("Failed to drop existing index/table", zap.Error(err))
+	// }
 
 	// Create the vector extension if it doesn't exist.
 	_, err := e.pgConn.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS vector")
@@ -744,14 +799,21 @@ func (e *EmbedService) storeEmbeddingsBatch(ctx context.Context, batch []Embeddi
 	return nil
 }
 
-func (e *EmbedService) callAIService(contents []string) ([][]float32, error) {
+func (e *EmbedService) callAIService(ctx context.Context, contents []string) ([][]float32, error) {
+	// Check for context cancellation before making the request
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("process cancelled by user")
+	default:
+	}
+
 	e.logger.Info("Sending request to embedding service", zap.Int("chunk_count", len(contents)))
 	modelID := "sentence-transformers/all-MiniLM-L6-v2"
 	if e.cfg.Embed.ModelName != "" {
 		modelID = e.cfg.Embed.ModelName
 	}
 
-	url := "https://457595b02002.ngrok-free.app/generate_embeddings/"
+	url := "https://9daea86b729c.ngrok-free.app/generate_embeddings/"
 
 	type requestBody struct {
 		Sentences []string `json:"sentences"`
@@ -771,9 +833,7 @@ func (e *EmbedService) callAIService(contents []string) ([][]float32, error) {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
-	defer cancel()
-
+	// Use the passed context instead of creating a new one
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(payload))
 	if err != nil {
 		e.logger.Error("Failed to create HTTP request", zap.Error(err))
@@ -839,11 +899,11 @@ func (e *EmbedService) callAIService(contents []string) ([][]float32, error) {
 	return finalEmbeddings, nil
 }
 
-func (e *EmbedService) GenerateEmbeddingsForQ(contents []string) ([][]float32, error) {
+func (e *EmbedService) GenerateEmbeddingsForQ(ctx context.Context, contents []string) ([][]float32, error) {
 	if len(contents) == 0 {
 		return [][]float32{}, nil
 	}
-	return e.callAIService(contents)
+	return e.callAIService(ctx, contents)
 }
 
 func (e *EmbedService) SearchSimilarCode(ctx context.Context, queryEmbedding []float32, limit int) ([]SearchResult, error) {
@@ -902,7 +962,7 @@ func convertToFloat32(embedding []float64, logger *zap.Logger, indexInBatch int)
 func (e *EmbedService) Converse(ctx context.Context, query string) error {
 	// 1. Generate an embedding for the user's query
 	e.logger.Info("Generating embedding for query", zap.String("query", query))
-	queryEmbeddings, err := e.GenerateEmbeddingsForQ([]string{query})
+	queryEmbeddings, err := e.GenerateEmbeddingsForQ(ctx, []string{query})
 	if err != nil {
 		return fmt.Errorf("failed to generate embedding for query: %w", err)
 	}

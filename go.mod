@@ -52,7 +52,7 @@ require (
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/sourcegraph/conc v0.3.0 // indirect
 	github.com/spf13/afero v1.11.0 // indirect
-	github.com/spf13/cast v1.7.0 // indirect
+	github.com/spf13/cast v1.7.1 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/tidwall/gjson v1.17.1 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
@@ -111,6 +111,7 @@ require (
 	github.com/jackc/pgproto3/v2 v2.3.2
 	github.com/jackc/pgx/v5 v5.7.5
 	github.com/keploy/jsonDiff v1.0.6
+	github.com/mark3labs/mcp-go v0.36.0
 	github.com/pelletier/go-toml v1.9.5
 	github.com/pgvector/pgvector-go v0.3.0
 	github.com/pkoukk/tiktoken-go v0.1.7
@@ -129,10 +130,15 @@ require (
 )
 
 require (
+	github.com/bahlo/generic-list-go v0.2.0 // indirect
+	github.com/buger/jsonparser v1.1.1 // indirect
+	github.com/invopop/jsonschema v0.13.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/perimeterx/marshmallow v1.1.5 // indirect
+	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
+	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 )
 
 require (

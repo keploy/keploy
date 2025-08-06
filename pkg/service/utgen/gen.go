@@ -223,7 +223,7 @@ func (g *UnitTestGenerator) Start(ctx context.Context) error {
 			if err != nil {
 				g.logger.Warn("failed to read source file for context search", zap.Error(err))
 			} else {
-				embeddings, err := g.embedService.GenerateEmbeddingsForQ([]string{string(srcContent)})
+				embeddings, err := g.embedService.GenerateEmbeddingsForQ(ctx, []string{string(srcContent)})
 				if err != nil {
 					g.logger.Warn("failed to generate embeddings for context search", zap.Error(err))
 				} else if len(embeddings) > 0 {
