@@ -3,8 +3,8 @@ package conn
 
 // constant for the maximum size of the event body
 const (
-	EventBodyMaxSize    = 16384    // 16 KB
-	EventBodyMaxSizeBig = 4194304  // 4 MB
+	EventBodyMaxSize    = 16384   // 16 KB
+	EventBodyMaxSizeBig = 4194304 // 4 MB
 )
 
 // ID is a conversion of the following C-Struct into GO.
