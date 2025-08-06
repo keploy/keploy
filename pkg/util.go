@@ -451,7 +451,6 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
-
 	for {
 		select {
 		case <-ctx.Done():
