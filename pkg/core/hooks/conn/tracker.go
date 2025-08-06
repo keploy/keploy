@@ -191,15 +191,8 @@ func (conn *Tracker) AddDataEventBig(event SocketDataEventBig) {
 	conn.UpdateTimestamps()
 	msgLength := event.MsgSize
 
-	// Trim leading zeros from the data
-	start := 3
-	for ; start < len(event.Msg)-1; start++ {
-		if event.Msg[start] != 0 {
-			break
-		}
-	}
 
-	data := event.Msg[start:] // trimming leading zeros
+	data := event.Msg[24:] // trimming leading zeros (24 bytes of zeros because 8 bytes header when we reserve the data + 1 byte round-up, then again 8 bytes at user space header and 7 bytes round-up)
 	data = data[:msgLength]   // trimming trailing zeros
 
 	// Check for HTTP/2 preface if we haven't detected protocol yet
@@ -249,14 +242,8 @@ func (conn *Tracker) AddDataEventSmall(event SocketDataEventSmall) {
 	if event.MsgSize > EventBodyMaxSize {
 		msgLength = EventBodyMaxSize
 	}
-	// Trim leading zeros from the data
-	start := 3
-	for ; start < len(event.Msg)-1; start++ {
-		if event.Msg[start] != 0 {
-			break
-		}
-	}
-	data := event.Msg[start:] // trimming leading zeros
+
+	data := event.Msg[24:] // trimming leading zeros
 	data = data[:msgLength]   // trimming trailing zeros
 
 	// Check for HTTP/2 preface if we haven't detected protocol yet
@@ -616,13 +603,7 @@ func (conn *Tracker) handleHTTP1DataBig(event SocketDataEventBig) {
 
 		// Assign the size of the message to the variable msgLength
 		msgLength := event.MsgSize
-		start := 3
-		for ; start < len(event.Msg)-1; start++ {
-			if event.Msg[start] != 0 {
-				break
-			}
-		}
-		data := event.Msg[start:]
+		data := event.Msg[24:]
 		data = data[:msgLength]
 		// Append the message (up to msgLength) to the conn's sent buffer
 		conn.resp = append(conn.resp, data...)
@@ -653,13 +634,7 @@ func (conn *Tracker) handleHTTP1DataBig(event SocketDataEventBig) {
 		// Assign the size of the message to the variable msgLength
 		msgLength := event.MsgSize
 
-		start := 3
-		for ; start < len(event.Msg)-1; start++ {
-			if event.Msg[start] != 0 {
-				break
-			}
-		}
-		data := event.Msg[start:]
+		data := event.Msg[24:]
 		data = data[:msgLength]
 		// Append the message (up to msgLength) to the conn's receive buffer
 		conn.req = append(conn.req, data...)
@@ -707,13 +682,7 @@ func (conn *Tracker) handleHTTP1DataSmall(event SocketDataEventSmall) {
 			msgLength = EventBodyMaxSize
 		}
 
-		start := 3
-		for ; start < len(event.Msg)-1; start++ {
-			if event.Msg[start] != 0 {
-				break
-			}
-		}
-		data := event.Msg[start:]
+		data := event.Msg[24:]
 		data = data[:msgLength]
 		// Append the message (up to msgLength) to the conn's sent buffer
 		conn.resp = append(conn.resp, data...)
@@ -749,14 +718,8 @@ func (conn *Tracker) handleHTTP1DataSmall(event SocketDataEventSmall) {
 			msgLength = EventBodyMaxSize
 		}
 
-		start := 3
-		for ; start < len(event.Msg)-1; start++ {
-			if event.Msg[start] != 0 {
-				break
-			}
-		}
 
-		data := event.Msg[start:]
+		data := event.Msg[24:]
 		data = data[:msgLength]
 		// Append the message (up to msgLength) to the conn's receive buffer
 		conn.req = append(conn.req, data...)
