@@ -15,6 +15,10 @@ var Emoji = "\U0001F430" + " Keploy:"
 
 var LogCfg zap.Config
 
+// Assignable wrappers for system-interacting functions for testability
+var osOpenFile234 = os.OpenFile
+var osStdout234 = os.Stdout
+
 func New() (*zap.Logger, *os.File, error) {
 	_ = zap.RegisterEncoder("colorConsole", func(config zapcore.EncoderConfig) (zapcore.Encoder, error) {
 		return NewColor(config, true), nil
@@ -23,12 +27,12 @@ func New() (*zap.Logger, *os.File, error) {
 		return NewColor(config, false), nil
 	})
 
-	logFile, err := os.OpenFile("keploy-logs.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0777)
+	logFile, err := osOpenFile234("keploy-logs.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0777)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to open log file: %v", err)
 	}
 
-	writer := zapcore.NewMultiWriteSyncer(zapcore.AddSync(os.Stdout), zapcore.AddSync(logFile))
+	writer := zapcore.NewMultiWriteSyncer(zapcore.AddSync(osStdout234), zapcore.AddSync(logFile))
 
 	LogCfg = zap.NewDevelopmentConfig()
 
