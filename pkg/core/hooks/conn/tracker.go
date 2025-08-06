@@ -191,9 +191,8 @@ func (conn *Tracker) AddDataEventBig(event SocketDataEventBig) {
 	conn.UpdateTimestamps()
 	msgLength := event.MsgSize
 
-
-	data := event.Msg[24:] // trimming leading zeros (24 bytes of zeros because 8 bytes header when we reserve the data + 1 byte round-up, then again 8 bytes at user space header and 7 bytes round-up)
-	data = data[:msgLength]   // trimming trailing zeros
+	data := event.Msg[24:]  // trimming leading zeros (24 bytes of zeros because 8 bytes header when we reserve the data + 1 byte round-up, then again 8 bytes at user space header and 7 bytes round-up)
+	data = data[:msgLength] // trimming trailing zeros
 
 	// Check for HTTP/2 preface if we haven't detected protocol yet
 	if !conn.protocolDetected {
@@ -243,8 +242,8 @@ func (conn *Tracker) AddDataEventSmall(event SocketDataEventSmall) {
 		msgLength = EventBodyMaxSize
 	}
 
-	data := event.Msg[24:] // trimming leading zeros
-	data = data[:msgLength]   // trimming trailing zeros
+	data := event.Msg[24:]  // trimming leading zeros
+	data = data[:msgLength] // trimming trailing zeros
 
 	// Check for HTTP/2 preface if we haven't detected protocol yet
 	if !conn.protocolDetected {
@@ -717,7 +716,6 @@ func (conn *Tracker) handleHTTP1DataSmall(event SocketDataEventSmall) {
 		if event.MsgSize > EventBodyMaxSize {
 			msgLength = EventBodyMaxSize
 		}
-
 
 		data := event.Msg[24:]
 		data = data[:msgLength]
