@@ -124,113 +124,121 @@ func ParseIntoJSON(response string) (interface{}, error) {
 // CompareResponses compares the two responses, if there is any difference in the values,
 // It checks in the templatized values map if the value is already present, it will update the value in the map.
 // It also changes the expected value to the actual value in the response1 (expected body)
-func CompareResponses(response1, response2 *interface{}, key string) {
-	switch v1 := (*response1).(type) {
+func CompareResponses(expected, actual *interface{}) {
+	flat := map[string]interface{}{}
+	flatten(*actual, "", flat)
+
+	walkAndPatch(expected, flat, "")
+}
+
+func flatten(node interface{}, path string, out map[string]interface{}) {
+	switch v := node.(type) {
 	case geko.Array:
-		for _, val1 := range v1.List {
-			CompareResponses(&val1, response2, "")
+		for i := range v.List {
+			p := fmt.Sprintf("%s[%d]", path, i)
+			flatten(v.List[i], p, out)
 		}
 	case geko.ObjectItems:
-		keys := v1.Keys()
-		vals := v1.Values()
+		keys, vals := v.Keys(), v.Values()
 		for i := range keys {
-			CompareResponses(&vals[i], response2, keys[i])
-			v1.SetValueByIndex(i, vals[i]) // in order to change the expected value if required
+			p := joinPath(path, keys[i])
+			flatten(vals[i], p, out)
 		}
 	case map[string]interface{}:
-		for key, val := range v1 {
-			CompareResponses(&val, response2, key)
-			v1[key] = val // in order to change the expected value if required
+		for k, val := range v {
+			p := joinPath(path, k)
+			flatten(val, p, out)
 		}
+	default: // leaf
+		out[path] = v
+	}
+}
+
+func joinPath(parent, child string) string {
+	if parent == "" {
+		return child
+	}
+	return parent + "." + child
+}
+
+func walkAndPatch(nodePtr *interface{}, flat map[string]interface{}, path string) {
+	switch v := (*nodePtr).(type) {
+
+	case geko.Array:
+		for i := range v.List {
+			p := fmt.Sprintf("%s[%d]", path, i)
+			walkAndPatch(&v.List[i], flat, p)
+		}
+
+	case geko.ObjectItems:
+		keys, vals := v.Keys(), v.Values()
+		for i := range keys {
+			p := joinPath(path, keys[i])
+			walkAndPatch(&vals[i], flat, p)
+			v.SetValueByIndex(i, vals[i]) // write-back
+		}
+
+	case map[string]interface{}:
+		for k := range v {
+			p := joinPath(path, k)
+			val := v[k]
+			walkAndPatch(&val, flat, p)
+			v[k] = val
+		}
+
 	case string:
-		compareSecondResponse(&v1, response2, key, "")
-		*response1 = v1
+		if act, ok := flat[path]; ok {
+			patchLeaf(nodePtr, act)
+		}
+
 	case float64, int64, int, float32:
-		v1String := utils.ToString(v1)
-		compareSecondResponse(&(v1String), response2, key, "")
-		// Retain the original type
-		switch (*response1).(type) {
-		case float64:
-			*response1 = utils.ToFloat(v1String)
-		case int:
-			*response1 = utils.ToInt(v1String)
-		case int64:
-			*response1 = utils.ToInt(v1String)
-		case float32:
-			f := utils.ToFloat(v1String)
-			*response1 = float32(f)
-		default:
-			*response1 = v1 // Keep it unchanged if it’s an unexpected type
+		if act, ok := flat[path]; ok {
+			patchLeaf(nodePtr, act) // keeps original numeric type
 		}
 	}
 }
 
-// Simplify the second response into type string for comparison.
-func compareSecondResponse(val1 *string, response2 *interface{}, key1 string, key2 string) {
-	switch v2 := (*response2).(type) {
-	case geko.Array:
-		for _, val2 := range v2.List {
-			compareSecondResponse(val1, &val2, key1, "")
-		}
+func patchLeaf(dst *interface{}, actual interface{}) {
+	switch orig := (*dst).(type) {
 
-	case geko.ObjectItems:
-		keys := v2.Keys()
-		vals := v2.Values()
-		for i := range keys {
-			compareSecondResponse(val1, &vals[i], key1, keys[i])
-		}
-	case map[string]interface{}:
-		for key, val := range v2 {
-			compareSecondResponse(val1, &val, key1, key)
-		}
 	case string:
-		if *val1 != v2 {
-			// Reverse the templatized values map.
-			revMap := reverseMap(utils.TemplatizedValues)
-			if _, ok := revMap[*val1]; ok && key1 == key2 {
-				key := revMap[*val1]
-				utils.TemplatizedValues[key] = v2
-				*val1 = v2
-			}
+		templ := *dst
+		if templ != actual {
+			mergeTemplate(templ, actual) // update utils.TemplatizedValues
+			*dst = actual
 		}
+
 	case float64, int64, int, float32:
-		if *val1 != v2 {
-
-			// Reverse the templatized values map.
-			revMap := reverseMap(utils.TemplatizedValues)
-			if _, ok := revMap[*val1]; ok && key1 == key2 {
-				key := revMap[*val1]
-				utils.TemplatizedValues[key] = v2
-				*val1 = utils.ToString(v2)
-				return
-			}
-			// 1) try integer parse
-			if i, err := strconv.Atoi(*val1); err == nil {
-				if _, ok := revMap[i]; ok && key1 == key2 {
-					key := revMap[i]
-					utils.TemplatizedValues[key] = v2
-					*val1 = utils.ToString(v2)
-				}
-			}
-			if f, err := strconv.ParseFloat(*val1, 32); err == nil {
-				if _, ok := revMap[f]; ok && key1 == key2 {
-					key := revMap[f]
-					utils.TemplatizedValues[key] = v2
-					*val1 = utils.ToString(v2)
-				}
-			}
-			if f, err := strconv.ParseFloat(*val1, 64); err == nil {
-				if _, ok := revMap[f]; ok && key1 == key2 {
-
-					key := revMap[*val1]
-					utils.TemplatizedValues[key] = v2
-					*val1 = utils.ToString(v2)
-				}
-			}
-
+		str := utils.ToString(orig) // template key
+		if str != utils.ToString(actual) {
+			mergeTemplate(str, actual)
+			*dst = castBack(actual, orig)
 		}
 	}
 }
+
+func castBack(actual, origType interface{}) interface{} {
+	switch actual.(type) {
+	case float64:
+		return utils.ToFloat(utils.ToString(origType))
+	case int:
+		return utils.ToInt(utils.ToString(origType))
+	case int64:
+		return int64(utils.ToInt(utils.ToString(origType)))
+	case float32:
+		return float32(utils.ToFloat(utils.ToString(origType)))
+	default:
+		return origType
+	}
+}
+
+func mergeTemplate(templateKey interface{}, actual interface{}) {
+	rev := reverseMap(utils.TemplatizedValues)
+	if k, ok := rev[templateKey]; ok {
+		utils.TemplatizedValues[k] = actual
+	}
+}
+
 func reverseMap(m map[string]interface{}) map[interface{}]string {
 	var reverseMap = make(map[interface{}]string)
 	for key, val := range m {
