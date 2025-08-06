@@ -4,9 +4,7 @@ package redis
 
 import (
 	"context"
-	"fmt"
 
-	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
