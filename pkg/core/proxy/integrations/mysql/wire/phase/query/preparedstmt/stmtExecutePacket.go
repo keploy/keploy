@@ -17,7 +17,9 @@ import (
 
 // COM_STMT_EXECUTE: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_stmt_execute.html
 
-func DecodeStmtExecute(_ context.Context, _ *zap.Logger, data []byte, preparedStmts map[uint32]*mysql.StmtPrepareOkPacket) (*mysql.StmtExecutePacket, error) {
+// TODO: Add checks for CLIENT_QUERY_ATTRIBUTES.
+
+func DecodeStmtExecute(_ context.Context, _ *zap.Logger, data []byte, preparedStmts map[uint32]*mysql.StmtPrepareOkPacket, clientCapabilities uint32) (*mysql.StmtExecutePacket, error) {
 	if len(data) < 10 {
 		return &mysql.StmtExecutePacket{}, fmt.Errorf("packet length too short for COM_STMT_EXECUTE")
 	}

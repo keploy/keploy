@@ -385,7 +385,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 
 	case payloadType == mysql.COM_STMT_EXECUTE:
 		logger.Debug("COM_STMT_EXECUTE packet", zap.Any("Type", payloadType))
-		pkt, err := preparedstmt.DecodeStmtExecute(ctx, logger, payload, decodeCtx.PreparedStatements)
+		pkt, err := preparedstmt.DecodeStmtExecute(ctx, logger, payload, decodeCtx.PreparedStatements, decodeCtx.ClientCapabilities)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode COM_STMT_EXECUTE packet: %w", err)
 		}

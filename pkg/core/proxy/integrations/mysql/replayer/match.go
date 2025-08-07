@@ -402,31 +402,31 @@ func matchQueryPacket(_ context.Context, log *zap.Logger, expected, actual mysql
 
 	// check if any of them the query is dml and other is not, then there is no match.
 	if sqlparser.IsDML(expectedMessage.Query) && !sqlparser.IsDML(actualMessage.Query) {
-		log.Info("[Debug] Query DML mismatch", zap.String("expected query", expectedMessage.Query),
+		log.Info("[Debug] expected query is dml but actual is not", zap.String("expected query", expectedMessage.Query),
 			zap.String("actual query", actualMessage.Query))
 		return false, 0
 	} else if !sqlparser.IsDML(expectedMessage.Query) && sqlparser.IsDML(actualMessage.Query) {
-		log.Info("[Debug] Query DML mismatch", zap.String("expected query", expectedMessage.Query),
+		log.Info("[Debug] actual query is dml but expected is not", zap.String("expected query", expectedMessage.Query),
 			zap.String("actual query", actualMessage.Query))
 		return false, 0
 	}
 
 	if !(sqlparser.IsDML(expectedMessage.Query) && sqlparser.IsDML(actualMessage.Query)) {
-		log.Info("[Debug] Query is not dml", zap.String("expected query", expectedMessage.Query),
+		log.Info("[Debug] No Query is dml", zap.String("expected query", expectedMessage.Query),
 			zap.String("actual query", actualMessage.Query))
 		return false, matchCount
 	}
 
 	// Here we can compare the structure of the queries, as both are DML queries.
 
-	log.Info("[Debug] Actual query", zap.String("query", actualMessage.Query))
+	log.Info("[Debug] Both queries are DML", zap.String("expected query", expectedMessage.Query), zap.String("actual query", actualMessage.Query))
+
 	actualSignature, err := getQueryStructure(actualMessage.Query)
 	if err != nil {
 		log.Error("failed to get actual query structure", zap.String("actual Query", actualMessage.Query), zap.Error(err))
 		return false, matchCount
 	}
 
-	log.Info("[Debug] Expected query", zap.String("query", expectedMessage.Query))
 	expectedSignature, err := getQueryStructure(expectedMessage.Query)
 	if err != nil {
 		log.Error("failed to get expected query structure", zap.String("expected Query", expectedMessage.Query), zap.Error(err))
