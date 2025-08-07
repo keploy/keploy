@@ -7,7 +7,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/cli"
 	"go.keploy.io/server/v2/cli/provider"
 	"go.keploy.io/server/v2/config"
@@ -27,24 +26,6 @@ var dsn string
 var apiServerURI = "http://localhost:8083"
 var gitHubClientID = "Iv23liFBvIVhL29i9BAp"
 
-// for testing purposes
-var (
-	osExit     = os.Exit
-	startFn    = start
-	logNew     = log.New
-	executeCmd = func(cmd *cobra.Command) error { return cmd.Execute() }
-	closeFile  = func(f *os.File) error {
-		if f != nil {
-			return f.Close()
-		}
-		return nil
-	}
-	deleteFile        = utils.DeleteFileIfNotExists
-	getInstallationID = func(udb *userDb.Db, ctx context.Context) (string, error) {
-		return udb.GetInstallationID(ctx)
-	}
-)
-
 func main() {
 	// Uncomment the following code to enable pprof for debugging
 	// go func() {
@@ -57,8 +38,8 @@ func main() {
 	// }()
 	setVersion()
 	ctx := utils.NewCtx()
-	startFn(ctx)
-	osExit(utils.ErrCode)
+	start(ctx)
+	os.Exit(utils.ErrCode)
 }
 
 func setVersion() {
@@ -70,24 +51,24 @@ func setVersion() {
 }
 
 func start(ctx context.Context) {
-	logger, logFile, err := logNew()
+	logger, logFile, err := log.New()
 	if err != nil {
 		fmt.Println("Failed to start the logger for the CLI", err)
 		return
 	}
 	defer func() {
 		if logFile != nil {
-			err := closeFile(logFile)
+			err := logFile.Close()
 			if err != nil {
 				utils.LogError(logger, err, "Failed to close log file")
 				return
 			}
 		}
-		if err := deleteFile(logger, "keploy-logs.txt"); err != nil {
+		if err := utils.DeleteFileIfNotExists(logger, "keploy-logs.txt"); err != nil {
 			utils.LogError(logger, err, "Failed to delete Keploy Logs")
 			return
 		}
-		if err := deleteFile(logger, "docker-compose-tmp.yaml"); err != nil {
+		if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {
 			utils.LogError(logger, err, "Failed to delete Temporary Docker Compose")
 			return
 		}
@@ -111,25 +92,23 @@ func start(ctx context.Context) {
 	conf := config.New()
 	conf.APIServerURL = apiServerURI
 	conf.GitHubClientID = gitHubClientID
-	udb := userDb.New(logger, conf)
-	conf.InstallationID, err = getInstallationID(udb, ctx)
+	userDb := userDb.New(logger, conf)
+	conf.InstallationID, err = userDb.GetInstallationID(ctx)
 	if err != nil {
 		errMsg := "failed to get installation id"
 		utils.LogError(logger, err, errMsg)
-		osExit(1)
-		return
+		os.Exit(1)
 	}
-	authSvc := auth.New(conf.APIServerURL, conf.InstallationID, logger, conf.GitHubClientID)
+	auth := auth.New(conf.APIServerURL, conf.InstallationID, logger, conf.GitHubClientID)
 
-	svcProvider := provider.NewServiceProvider(logger, conf, authSvc)
+	svcProvider := provider.NewServiceProvider(logger, conf, auth)
 	cmdConfigurator := provider.NewCmdConfigurator(logger, conf)
 	rootCmd := cli.Root(ctx, logger, svcProvider, cmdConfigurator)
-	if err := executeCmd(rootCmd); err != nil {
+	if err := rootCmd.Execute(); err != nil {
 		if strings.HasPrefix(err.Error(), "unknown command") || strings.HasPrefix(err.Error(), "unknown shorthand") {
 			fmt.Println("Error: ", err.Error())
 			fmt.Println("Run 'keploy --help' for usage.")
-			osExit(1)
-			return
+			os.Exit(1)
 		}
 	}
 }
