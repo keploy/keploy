@@ -241,7 +241,7 @@ func (conn *Tracker) AddDataEventSmall(event SocketDataEventSmall) {
 		msgLength = EventBodyMaxSize
 	}
 
-	data := event.Msg[:msgLength]  
+	data := event.Msg[:msgLength]
 
 	// Check for HTTP/2 preface if we haven't detected protocol yet
 	if !conn.protocolDetected {
