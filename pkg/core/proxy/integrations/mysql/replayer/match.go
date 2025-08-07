@@ -358,6 +358,7 @@ func matchClosePacket(_ context.Context, _ *zap.Logger, expected, actual mysql.P
 	return matchCount
 }
 
+// TODO: Use some new library to get the ast structure of the query.
 func getQueryStructure(sql string) (string, error) {
 	stmt, err := sqlparser.Parse(sql)
 	if err != nil {
