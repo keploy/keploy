@@ -42,10 +42,10 @@ type SocketDataEventBig struct {
 	Direction            TrafficDirectionEnum
 	MsgSize              uint32
 	Pos                  uint64
-	Msg                  [EventBodyMaxSizeBig]byte
 	ValidateReadBytes    int64
 	ValidateWrittenBytes int64
 	ClientID             uint64
+	Msg                  [EventBodyMaxSizeBig]byte
 }
 type SocketDataEventSmall struct {
 	EntryTimestampNano   uint64
@@ -54,10 +54,10 @@ type SocketDataEventSmall struct {
 	Direction            TrafficDirectionEnum
 	MsgSize              uint32
 	Pos                  uint64
-	Msg                  [EventBodyMaxSize]byte
 	ValidateReadBytes    int64
 	ValidateWrittenBytes int64
 	ClientID             uint64
+	Msg                  [EventBodyMaxSize]byte
 }
 
 // SocketOpenEvent is a conversion of the following C-Struct into GO.
