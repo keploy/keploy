@@ -26,8 +26,6 @@ var dsn string
 var apiServerURI = "http://localhost:8083"
 var gitHubClientID = "Iv23liFBvIVhL29i9BAp"
 
-var osExit293 = os.Exit
-
 func main() {
 	// Uncomment the following code to enable pprof for debugging
 	// go func() {
@@ -41,7 +39,7 @@ func main() {
 	setVersion()
 	ctx := utils.NewCtx()
 	start(ctx)
-	osExit293(utils.ErrCode)
+	os.Exit(utils.ErrCode)
 }
 
 func setVersion() {
@@ -101,7 +99,7 @@ func start(ctx context.Context) {
 	if err != nil {
 		errMsg := "failed to get installation id"
 		utils.LogError(logger, err, errMsg)
-		osExit293(1)
+		os.Exit(1)
 	}
 	auth := auth.New(conf.APIServerURL, conf.InstallationID, logger, conf.GitHubClientID)
 
@@ -112,7 +110,7 @@ func start(ctx context.Context) {
 		if strings.HasPrefix(err.Error(), "unknown command") || strings.HasPrefix(err.Error(), "unknown shorthand") {
 			fmt.Println("Error: ", err.Error())
 			fmt.Println("Run 'keploy --help' for usage.")
-			osExit293(1)
+			os.Exit(1)
 		}
 	}
 }
