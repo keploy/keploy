@@ -68,6 +68,8 @@ contract:
   download: false
   generate: false
 inCi: false
+embed:
+  incremental: true
 `
 
 func GetDefaultConfig() string {

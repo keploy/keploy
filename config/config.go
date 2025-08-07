@@ -248,4 +248,14 @@ type Embed struct {
 	DatabaseURL   string `json:"databaseURL" yaml:"databaseURL" mapstructure:"databaseURL"`
 	APIKey        string `json:"apiKey" yaml:"apiKey" mapstructure:"apiKey"`
 	ModelName     string `json:"modelName" yaml:"modelName" mapstructure:"modelName"`
+	Incremental   bool   `json:"incremental" yaml:"incremental" mapstructure:"incremental"`
+}
+
+// NewDefaultConfig returns a Config struct with sensible defaults, including incremental embedding enabled.
+func NewDefaultConfig() *Config {
+	return &Config{
+		Embed: Embed{
+			Incremental: true,
+		},
+	}
 }
