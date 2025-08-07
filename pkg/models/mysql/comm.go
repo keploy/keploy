@@ -10,11 +10,15 @@ package mysql
 
 */
 
-// COM_QUERY packet (currently does not support if CLIENT_QUERY_ATTRIBUTES is set)
+// COM_QUERY packet
 
 type QueryPacket struct {
-	Command byte   `yaml:"command"`
-	Query   string `yaml:"query"`
+	Command           byte        `yaml:"command"`
+	ParameterCount    int         `yaml:"parameter_count"`
+	NullBitmap        []byte      `yaml:"null_bitmap"`
+	NewParamsBindFlag byte        `yaml:"new_params_bind_flag"`
+	Parameters        []Parameter `yaml:"parameters"`
+	Query             string      `yaml:"query"`
 }
 
 // LocalInFileRequestPacket is used to send local file request to server, currently not supported

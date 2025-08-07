@@ -362,7 +362,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 	case payloadType == mysql.COM_QUERY:
 		logger.Debug("COM_QUERY packet", zap.Any("Type", payloadType))
 
-		pkt, err := query.DecodeQuery(ctx, payload)
+		pkt, err := query.DecodeQuery(ctx, logger, payload, decodeCtx.ClientCapabilities)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode COM_QUERY packet: %w", err)
 		}
