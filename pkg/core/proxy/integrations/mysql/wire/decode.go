@@ -361,14 +361,18 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 	// command packets
 	case payloadType == mysql.COM_QUERY:
 		logger.Debug("COM_QUERY packet", zap.Any("Type", payloadType))
-
-		pkt, err := query.DecodeQuery(ctx, payload)
+		// Use the new decoder which can handle CLIENT_QUERY_ATTRIBUTES.
+		// It requires the client's capability flags, which we stored in the context.
+		queryStr, err := connection.DecodeComQuery(payload[1:], decodeCtx.ClientCapabilities)
 		if err != nil {
 			return parsedPacket, fmt.Errorf("failed to decode COM_QUERY packet: %w", err)
 		}
-
+		// Manually construct the QueryPacket.
+		pkt := &mysql.QueryPacket{
+			Command: payload[0],
+			Query:   queryStr,
+		}
 		setPacketInfo(ctx, parsedPacket, pkt, mysql.CommandStatusToString(mysql.COM_QUERY), clientConn, mysql.COM_QUERY, decodeCtx)
-
 		lstOp, _ := decodeCtx.LastOp.Load(clientConn)
 		logger.Debug("COM_QUERY decoded", zap.Any("parsed packet", parsedPacket), zap.Any("last operation", lstOp))
 

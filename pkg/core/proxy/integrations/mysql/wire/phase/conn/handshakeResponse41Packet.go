@@ -244,3 +244,71 @@ func EncodeHandshakeResponse41(_ context.Context, _ *zap.Logger, packet *mysql.H
 
 	return buf.Bytes(), nil
 }
+
+// DecodeComQuery parses a COM_QUERY packet. If the CLIENT_QUERY_ATTRIBUTES capability
+// is set on the connection, it parses and skips the query attributes section
+// before returning the SQL query.
+// The input `data` should be the payload of the COM_QUERY packet, with the
+// initial command byte (0x03) already removed.
+// `capabilityFlags` should be the client's capabilities from the handshake.
+func DecodeComQuery(data []byte, capabilityFlags uint32) (string, error) {
+	// If the flag is not set, the entire payload is the query.
+	if capabilityFlags&mysql.CLIENT_QUERY_ATTRIBUTES == 0 {
+		return string(data), nil
+	}
+
+	// --- Attributes are present, parse and skip them ---
+	// Reference: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_query.html
+
+	// 1. Parameter Count (lenenc)
+	paramCount, isNull, n := utils.ReadLengthEncodedInteger(data)
+	if isNull || n == 0 {
+		return "", errors.New("COM_QUERY: failed to read parameter_count")
+	}
+	data = data[n:]
+
+	// 2. Parameter Set Count (lenenc)
+	// The documentation states this is currently always 1. We just need to parse it.
+	_, isNull, n = utils.ReadLengthEncodedInteger(data)
+	if isNull || n == 0 {
+		return "", errors.New("COM_QUERY: failed to read parameter_set_count")
+	}
+	data = data[n:]
+
+	if paramCount > 0 {
+		// 3. NULL-bitmap, length = (paramCount + 7) / 8
+		nullBitmapLen := (int(paramCount) + 7) / 8
+		if len(data) < nullBitmapLen {
+			return "", fmt.Errorf("COM_QUERY: packet too short for null_bitmap, needs %d bytes but have %d", nullBitmapLen, len(data))
+		}
+		data = data[nullBitmapLen:]
+
+		// 4. new_params_bind_flag (1 byte)
+		if len(data) < 1 {
+			return "", errors.New("COM_QUERY: packet too short for new_params_bind_flag")
+		}
+		newParamsBindFlag := data[0]
+		data = data[1:]
+
+		// 5. Parameter types and names (if new_params_bind_flag is 1)
+		if newParamsBindFlag == 1 {
+			for i := uint64(0); i < paramCount; i++ {
+				// param_type_and_flag (2 bytes)
+				if len(data) < 2 {
+					return "", fmt.Errorf("COM_QUERY: packet too short for parameter type on param #%d", i)
+				}
+				data = data[2:]
+
+				// parameter name (string<lenenc>)
+				_, _, n, err := utils.ReadLengthEncodedString(data)
+				if err != nil {
+					return "", fmt.Errorf("COM_QUERY: error reading parameter name on param #%d: %w", i, err)
+				}
+				data = data[n:]
+			}
+		}
+	}
+
+	// The remainder of the packet is the SQL query.
+	return string(data), nil
+}
