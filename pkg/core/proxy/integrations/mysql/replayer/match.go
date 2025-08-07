@@ -10,7 +10,6 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/xwb1989/sqlparser"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire"
@@ -18,6 +17,7 @@ import (
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
+	"vitess.io/vitess/go/vt/sqlparser"
 )
 
 func matchHeader(expected, actual mysql.Header) bool {
@@ -358,9 +358,15 @@ func matchClosePacket(_ context.Context, _ *zap.Logger, expected, actual mysql.P
 	return matchCount
 }
 
-// TODO: Use some new library to get the ast structure of the query.
 func getQueryStructure(sql string) (string, error) {
-	stmt, err := sqlparser.Parse(sql)
+
+	opts := sqlparser.Options{}
+	parser, err := sqlparser.New(opts)
+	if err != nil {
+		return "", fmt.Errorf("failed to create MYSQL query parser: %w", err)
+	}
+
+	stmt, err := parser.Parse(sql)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse SQL: %w", err)
 	}
