@@ -86,7 +86,7 @@ jobs:
           # The '(.values // [])' part provides an empty array `[]` if the 'values' key is missing.
           REPOS_JSON=$(echo "${SHEET_DATA}" | jq -c '(.values // []) | map(.[0])')
           echo "repos=${REPOS_JSON}" >> $GITHUB_OUTPUT
-  
+
   test-and-benchmark:
     needs: [build-keploy, prepare-matrix]
     if: needs.prepare-matrix.outputs.repos != '[]'
@@ -255,6 +255,9 @@ jobs:
         uses: "google-github-actions/auth@v2"
         with:
           credentials_json: "${{ secrets.GCP_SA_KEY }}"
+          # Add this line to request permission for Google Sheets
+          scopes: "https://www.googleapis.com/auth/spreadsheets"
+          
       - name: Download all individual reports
         uses: actions/download-artifact@v4
         with:
