@@ -54,7 +54,10 @@ jobs:
         run: |
           API_URL="https://sheets.googleapis.com/v4/spreadsheets/${{ secrets.SHEET_ID }}/values/${{ env.REPOS_SHEET_NAME }}!A2:A"
           response=$(curl -s --request GET "$API_URL" --header "Authorization: Bearer ${{ steps.auth.outputs.access_token }}")
-          echo "$response"
+
+          # Add this line to see the real API response in the logs
+          echo "API Response: $response"
+
           echo "SHEET_VALUES<<EOF" >> $GITHUB_OUTPUT; echo "$response" >> $GITHUB_OUTPUT; echo "EOF" >> $GITHUB_OUTPUT
       - name: Create JSON Matrix from Sheet Data
         id: create-matrix
