@@ -49,22 +49,39 @@ jobs:
         uses: "google-github-actions/auth@v2"
         with:
           credentials_json: "${{ secrets.GCP_SA_KEY }}"
+
       - name: Get Repo List from Google Sheet via REST API
         id: get-repos
         run: |
           API_URL="https://sheets.googleapis.com/v4/spreadsheets/${{ secrets.SHEET_ID }}/values/${{ env.REPOS_SHEET_NAME }}!A2:A"
           response=$(curl -s --request GET "$API_URL" --header "Authorization: Bearer ${{ steps.auth.outputs.access_token }}")
 
-          # Add this line to see the real API response in the logs
+          # This helps in debugging by showing the exact API response in the logs
           echo "API Response: $response"
 
-          echo "SHEET_VALUES<<EOF" >> $GITHUB_OUTPUT; echo "$response" >> $GITHUB_OUTPUT; echo "EOF" >> $GITHUB_OUTPUT
+          # Set the full response as a step output
+          echo "SHEET_VALUES<<EOF" >> $GITHUB_OUTPUT
+          echo "$response" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
       - name: Create JSON Matrix from Sheet Data
         id: create-matrix
         run: |
-          REPOS_JSON=$(echo "${{ steps.get-repos.outputs.SHEET_VALUES }}" | jq -c '.values | map(.[0])')
-          echo "repos=${REPOS_JSON}" >> $GITHUB_OUTPUT
+          # Store the potentially multi-line JSON output in a variable
+          SHEET_DATA='${{ steps.get-repos.outputs.SHEET_VALUES }}'
 
+          # First, check if the API response contains an 'error' key
+          if echo "${SHEET_DATA}" | jq -e '.error' > /dev/null; then
+            echo "::error::API call to Google Sheets failed. Full response below:"
+            echo "${SHEET_DATA}"
+            exit 1
+          fi
+
+          # If no error, parse the values. 
+          # The '(.values // [])' part provides an empty array `[]` if the 'values' key is missing (e.g., for an empty sheet), preventing errors.
+          REPOS_JSON=$(echo "${SHEET_DATA}" | jq -c '(.values // []) | map(.[0])')
+          echo "repos=${REPOS_JSON}" >> $GITHUB_OUTPUT
+        
   test-and-benchmark:
     needs: [build-keploy, prepare-matrix]
     if: needs.prepare-matrix.outputs.repos != '[]'
