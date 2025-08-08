@@ -10,9 +10,41 @@ env:
   REPORT_SHEET_NAME: "benchmark_report"
   TIME_FORMAT_STRING: "%e,%P,%M"
   NOTIFICATION_RECIPIENT: "officialasishkumar@gmail.com"
+  # Define the image name and artifact name in one place
+  KEPLOY_IMAGE_NAME: "ghcr.io/keploy/keploy:v2-dev"
+  IMAGE_ARTIFACT_NAME: "keploy-docker-image"
 
 jobs:
+  build-keploy:
+    # JOB 1: Build the Keploy Docker image ONCE at the start.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Keploy Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Keploy Docker Image from Source
+        run: |
+          echo "Building Keploy Docker image: ${{ env.KEPLOY_IMAGE_NAME }}"
+          sudo docker image build -t ${{ env.KEPLOY_IMAGE_NAME }} .
+          echo "Image built successfully."
+
+      - name: Save Docker image to a tar file
+        run: |
+          echo "Saving image to a tarball..."
+          sudo docker save -o keploy-image.tar ${{ env.KEPLOY_IMAGE_NAME }}
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.IMAGE_ARTIFACT_NAME }}
+          path: keploy-image.tar
+          retention-days: 1 # Keep the artifact for 1 day
+
   prepare-matrix:
+    # JOB 2: Get the list of repos at the same time as the build.
     runs-on: ubuntu-latest
     outputs:
       repos: ${{ steps.create-matrix.outputs.repos }}
@@ -36,40 +68,9 @@ jobs:
           REPOS_JSON=$(echo "${{ steps.get-repos.outputs.SHEET_VALUES }}" | jq -c '.values | map(.[0])')
           echo "repos=${REPOS_JSON}" >> $GITHUB_OUTPUT
 
-  build-keploy-from-source:
-    # This new job builds the Keploy binary and Docker image from the source in this repo.
-    # It runs before the main test job.
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Keploy Repository
-        uses: actions/checkout@v4
-        # This checks out the code of the repository where the workflow is running
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.21"
-
-      - name: Set up Docker Buildx
-        # This step explicitly prepares the Docker environment, as requested.
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build Keploy Go Binary
-        run: |
-          echo "Building Keploy binary from source..."
-          go build -race -tags=viper_bind_struct -o keploy . && sudo mv keploy /usr/local/bin
-          echo "Keploy binary moved to /usr/local/bin"
-
-      - name: Build Keploy Docker Image
-        run: |
-          echo "Building Keploy Docker image from source..."
-          # The image is tagged with ':v2-dev' so the next job uses this local build.
-          sudo docker image build -t ghcr.io/keploy/keploy:v2-dev .
-          echo "Docker image built successfully."
-
   test-and-benchmark:
-    # This job now depends on BOTH the matrix preparation AND the successful build of Keploy.
-    needs: [prepare-matrix, build-keploy-from-source]
+    # JOB 3: The main testing job. It waits for both the build and the repo list.
+    needs: [build-keploy, prepare-matrix]
     if: needs.prepare-matrix.outputs.repos != '[]'
     runs-on: ubuntu-latest
     strategy:
@@ -77,6 +78,19 @@ jobs:
       matrix:
         repo: ${{ fromJson(needs.prepare-matrix.outputs.repos) }}
     steps:
+      - name: Download Keploy Docker image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.IMAGE_ARTIFACT_NAME }}
+
+      - name: Load Keploy Docker image
+        run: |
+          echo "Loading Keploy Docker image from tarball..."
+          sudo docker load -i keploy-image.tar
+          echo "Image loaded successfully."
+          sudo docker images
+
+      # --- APPLICATION TEST STEPS ---
       - name: Checkout Application Repo
         uses: actions/checkout@v4
         with:
@@ -89,54 +103,41 @@ jobs:
       - name: Run Pipeline from keploy-pipeline.yml
         id: pipeline-runner
         run: |
+          # The rest of this script is now correct, as it relies on the pre-loaded Docker image.
           exec > >(tee runner-log.txt) 2>&1
-
           set -a 
           PIPELINE_FILE="app/keploy-pipeline.yml"
           FINAL_STATUS="Success"; FAILURE_REASON="None"
           REC_DURATION=0; REC_CPU_P="0%"; REC_MEM_MB=0; TEST_DURATION=0; TEST_CPU_P="0%"; TEST_MEM_MB=0
 
-          # This function now uses the Docker image we built in the previous job
-          # because it exists locally with the 'ghcr.io/keploy/keploy:v2-dev' tag.
           keployV2() {
-            sudo -E env PATH="$PATH" docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":"$(pwd)" -w "$(pwd)" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v "$HOME"/.keploy-config:/root/.keploy-config -v "$HOME"/.keploy:/root/.keploy --rm ghcr.io/keploy/keploy:v2-dev "$@"
+            sudo -E env PATH="$PATH" docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":"$(pwd)" -w "$(pwd)" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v "$HOME"/.keploy-config:/root/.keploy-config -v "$HOME"/.keploy:/root/.keploy --rm ${{ env.KEPLOY_IMAGE_NAME }} "$@"
           }
 
           if [ ! -f "$PIPELINE_FILE" ]; then
             FINAL_STATUS="Failed"; FAILURE_REASON="keploy-pipeline.yml not found"
           else
-            APP_CMD=$(yq eval '.app_command' "$PIPELINE_FILE")
-            TEST_DELAY=$(yq eval '.test_delay // 0' "$PIPELINE_FILE")
-
             echo "--- Running Setup Steps ---"; yq eval '.setup[]' "$PIPELINE_FILE" | while read -r cmd; do if ! (cd app && bash -c "$cmd"); then FINAL_STATUS="Failed"; FAILURE_REASON="Setup cmd failed: $cmd"; break; fi; done
-            
             if [ "$FINAL_STATUS" == "Success" ]; then
-              echo "--- Running Record Step ---"; 
-              if [ "$APP_CMD" != "null" ]; then
-                RECORD_CMD="keployV2 record -c \"$APP_CMD\""
-                echo "Executing Record Command: $RECORD_CMD"
+              echo "--- Running Record Step ---"; RECORD_CMD=$(yq eval '.record // empty' "$PIPELINE_FILE"); if [ -n "$RECORD_CMD" ] && [ "$RECORD_CMD" != "null" ]; then
                 /usr/bin/time -f "${{ env.TIME_FORMAT_STRING }}" -o record_metrics.csv (cd app && bash -c "$RECORD_CMD")
                 if [ $? -eq 0 ]; then IFS=',' read REC_E REC_P REC_M < record_metrics.csv; REC_DURATION=$REC_E; REC_CPU_P=$REC_P; REC_MEM_MB=$(echo "scale=2; $REC_M / 1024" | bc); else FINAL_STATUS="Failed"; FAILURE_REASON="Record step failed"; fi
-              else FINAL_STATUS="Failed"; FAILURE_REASON="app_command not defined in keploy-pipeline.yml"; fi
+              else FINAL_STATUS="Failed"; FAILURE_REASON="record command not defined in keploy-pipeline.yml"; fi
             fi
-
             if [ "$FINAL_STATUS" == "Success" ]; then
-              echo "--- Running Test Step ---"; 
-              if [ "$APP_CMD" != "null" ]; then
-                TEST_CMD="keployV2 test -c \"$APP_CMD\" --delay $TEST_DELAY"
-                echo "Executing Test Command: $TEST_CMD"
+              echo "--- Running Test Step ---"; TEST_CMD=$(yq eval '.test // empty' "$PIPELINE_FILE"); if [ -n "$TEST_CMD" ] && [ "$TEST_CMD" != "null" ]; then
                 /usr/bin/time -f "${{ env.TIME_FORMAT_STRING }}" -o test_metrics.csv (cd app && bash -c "$TEST_CMD")
                 if [ $? -eq 0 ]; then IFS=',' read TEST_E TEST_P TEST_M < test_metrics.csv; TEST_DURATION=$TEST_E; TEST_CPU_P=$TEST_P; TEST_MEM_MB=$(echo "scale=2; $TEST_M / 1024" | bc); else FINAL_STATUS="Failed"; FAILURE_REASON="Test step failed"; fi
-              else FINAL_STATUS="Failed"; FAILURE_REASON="app_command not defined in keploy-pipeline.yml"; fi
+              else FINAL_STATUS="Failed"; FAILURE_REASON="test command not defined in keploy-pipeline.yml"; fi
             fi
           fi
 
           echo "final_status=$FINAL_STATUS" >> $GITHUB_OUTPUT; echo "failure_reason=$FAILURE_REASON" >> $GITHUB_OUTPUT
           echo "rec_duration=$REC_DURATION" >> $GITHUB_OUTPUT; echo "rec_cpu_p=$REC_CPU_P" >> $GITHUB_OUTPUT; echo "rec_mem_mb=$REC_MEM_MB" >> $GITHUB_OUTPUT
           echo "test_duration=$TEST_DURATION" >> $GITHUB_OUTPUT; echo "test_cpu_p=$TEST_CPU_P" >> $GITHUB_OUTPUT; echo "test_mem_mb=$TEST_MEM_MB" >> $GITHUB_OUTPUT
-
           if [ "$FINAL_STATUS" != "Success" ]; then exit 1; fi
 
+      # The rest of the steps for reporting and notifications are unchanged.
       - name: Create Report Data as Artifact
         if: always()
         run: |
@@ -159,11 +160,7 @@ jobs:
         if: failure()
         run: |
           echo "Zipping Keploy directory for email attachment..."
-          if [ -d "app/keploy" ]; then
-            zip -r keploy_artifacts.zip app/keploy
-          else
-            echo "Keploy directory not found. No archive will be created."
-          fi
+          if [ -d "app/keploy" ]; then zip -r keploy_artifacts.zip app/keploy; else echo "Keploy directory not found."; fi
 
       - name: Send Email Notification on Failure
         if: failure()
@@ -178,12 +175,9 @@ jobs:
           from: GitHub Actions CI <${{ secrets.GMAIL_USERNAME }}>
           body: |
             A failure occurred while running the Keploy test pipeline.
-
             **Repository:** `${{ matrix.repo }}`
             **Failure Reason:** `${{ steps.pipeline-runner.outputs.failure_reason }}`
-
             Please review the attached logs and Keploy directory for details.
-
             **Direct Link to Failed Run:**
             ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           attachments: runner-log.txt, keploy_artifacts.zip
@@ -209,13 +203,7 @@ jobs:
       - name: Aggregate all reports into a single payload
         id: aggregate
         run: |
-          files=$(find all-reports -name "report.json" -type f)
-          if [ -z "$files" ]; then
-            echo "payload=[]" >> $GITHUB_OUTPUT
-          else
-            FINAL_PAYLOAD=$(jq -s 'map(.[0])' $files)
-            echo "payload=${FINAL_PAYLOAD}" >> $GITHUB_OUTPUT
-          fi
+          files=$(find all-reports -name "report.json" -type f); if [ -z "$files" ]; then echo "payload=[]" >> $GITHUB_OUTPUT; else FINAL_PAYLOAD=$(jq -s 'map(.[0])' $files); echo "payload=${FINAL_PAYLOAD}" >> $GITHUB_OUTPUT; fi
 
       - name: Append data to Google Sheet via REST API
         if: steps.aggregate.outputs.payload != '[]'
