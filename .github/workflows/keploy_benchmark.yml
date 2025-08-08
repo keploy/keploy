@@ -66,22 +66,27 @@ jobs:
 
       - name: Create JSON Matrix from Sheet Data
         id: create-matrix
+        # Set the output as an environment variable for this step.
+        # This is the safest way to handle complex strings with special characters.
+        env:
+          SHEET_DATA: ${{ steps.get-repos.outputs.SHEET_VALUES }}
         run: |
-          # Store the potentially multi-line JSON output in a variable
-          SHEET_DATA='${{ steps.get-repos.outputs.SHEET_VALUES }}'
+          # The SHEET_DATA is now available as a properly escaped environment variable.
+          # We can now safely use it in the script.
 
-          # First, check if the API response contains an 'error' key
+          # First, check if the API response contains an 'error' key.
+          # Always quote variables in shell scripts to avoid issues.
           if echo "${SHEET_DATA}" | jq -e '.error' > /dev/null; then
-            echo "::error::API call to Google Sheets failed. Full response below:"
+            echo "::error::API call to Google Sheets failed. The service account may be missing permissions or the Google Sheets API is not enabled. Full response below:"
             echo "${SHEET_DATA}"
             exit 1
           fi
 
-          # If no error, parse the values. 
-          # The '(.values // [])' part provides an empty array `[]` if the 'values' key is missing (e.g., for an empty sheet), preventing errors.
+          # If no error, parse the values.
+          # The '(.values // [])' part provides an empty array `[]` if the 'values' key is missing.
           REPOS_JSON=$(echo "${SHEET_DATA}" | jq -c '(.values // []) | map(.[0])')
           echo "repos=${REPOS_JSON}" >> $GITHUB_OUTPUT
-        
+  
   test-and-benchmark:
     needs: [build-keploy, prepare-matrix]
     if: needs.prepare-matrix.outputs.repos != '[]'
