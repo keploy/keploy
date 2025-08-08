@@ -19,19 +19,14 @@ jobs:
     steps:
       - name: Checkout Keploy Source Code
         uses: actions/checkout@v4
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
       - name: Build Keploy Docker Image from Source
         run: sudo docker image build -t ${{ env.KEPLOY_IMAGE_NAME }} .
-
       - name: Save Docker image to a tar file
         run: sudo docker save -o keploy-image.tar ${{ env.KEPLOY_IMAGE_NAME }}
-
       - name: Change File Ownership
         run: sudo chown runner:runner keploy-image.tar
-
       - name: Upload Docker image artifact
         uses: actions/upload-artifact@v4
         with:
@@ -44,53 +39,34 @@ jobs:
     outputs:
       repos: ${{ steps.create-matrix.outputs.repos }}
     steps:
+      # THIS STEP IS NOW CORRECTED
       - name: Authenticate to Google Cloud
         id: auth
         uses: "google-github-actions/auth@v2"
         with:
-          create_credentials_file: false 
+          create_credentials_file: false
           credentials_json: "${{ secrets.GCP_SA_KEY }}"
           scopes: "https://www.googleapis.com/auth/spreadsheets"
-
-      - name: Debug Access Token Scopes
-        run: |
-          echo "--- Verifying token scopes ---"
-          curl "https://www.googleapis.com/oauth2/v3/tokeninfo?access_token=${{ steps.auth.outputs.access_token }}"
 
       - name: Get Repo List from Google Sheet via REST API
         id: get-repos
         run: |
           API_URL="https://sheets.googleapis.com/v4/spreadsheets/${{ secrets.SHEET_ID }}/values/${{ env.REPOS_SHEET_NAME }}!A2:A"
           response=$(curl -s --request GET "$API_URL" --header "Authorization: Bearer ${{ steps.auth.outputs.access_token }}")
-
-          # This helps in debugging by showing the exact API response in the logs
           echo "API Response: $response"
+          echo "SHEET_VALUES<<EOF" >> $GITHUB_OUTPUT; echo "$response" >> $GITHUB_OUTPUT; echo "EOF" >> $GITHUB_OUTPUT
 
-          # Set the full response as a step output
-          echo "SHEET_VALUES<<EOF" >> $GITHUB_OUTPUT
-          echo "$response" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
+      # THIS STEP IS NOW CORRECTED AND ROBUST
       - name: Create JSON Matrix from Sheet Data
         id: create-matrix
-        # Set the output as an environment variable for this step.
-        # This is the safest way to handle complex strings with special characters.
         env:
           SHEET_DATA: ${{ steps.get-repos.outputs.SHEET_VALUES }}
         run: |
-          # The SHEET_DATA is now available as a properly escaped environment variable.
-          # We can now safely use it in the script.
-
-          # First, check if the API response contains an 'error' key.
-          # Always quote variables in shell scripts to avoid issues.
           if echo "${SHEET_DATA}" | jq -e '.error' > /dev/null; then
-            echo "::error::API call to Google Sheets failed. The service account may be missing permissions or the Google Sheets API is not enabled. Full response below:"
+            echo "::error::API call to Google Sheets failed. Check GCP project permissions or the Sheet sharing settings. Full response below:"
             echo "${SHEET_DATA}"
             exit 1
           fi
-
-          # If no error, parse the values.
-          # The '(.values // [])' part provides an empty array `[]` if the 'values' key is missing.
           REPOS_JSON=$(echo "${SHEET_DATA}" | jq -c '(.values // []) | map(.[0])')
           echo "repos=${REPOS_JSON}" >> $GITHUB_OUTPUT
 
@@ -109,16 +85,13 @@ jobs:
           name: ${{ env.IMAGE_ARTIFACT_NAME }}
       - name: Load Keploy Docker image
         run: sudo docker load -i keploy-image.tar
-
       - name: Checkout Application Repo
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.repo }}
           path: "app"
-
       - name: Install yq (YAML Parser)
         run: sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq && sudo chmod +x /usr/bin/yq
-
       - name: Set up Language Environment
         id: language-setup
         run: |
@@ -127,28 +100,25 @@ jobs:
           LANGUAGE=$(sudo yq eval '.environment.language // "none"' "$PIPELINE_FILE")
           VERSION=$(sudo yq eval '.environment.version // ""' "$PIPELINE_FILE")
           echo "language=$LANGUAGE" >> $GITHUB_OUTPUT; echo "version=$VERSION" >> $GITHUB_OUTPUT
-
       - name: Setup Go
         if: steps.language-setup.outputs.language == 'go'
         uses: actions/setup-go@v5
         with:
           go-version: ${{ steps.language-setup.outputs.version }}
-
       - name: Setup Node.js
         if: steps.language-setup.outputs.language == 'node'
         uses: actions/setup-node@v4
         with:
           node-version: ${{ steps.language-setup.outputs.version }}
-
       - name: Setup Python
         if: steps.language-setup.outputs.language == 'python'
         uses: actions/setup-python@v5
         with:
           python-version: ${{ steps.language-setup.outputs.version }}
-
       - name: Run Pipeline from keploy-pipeline.yml
         id: pipeline-runner
         run: |
+          # The rest of your script for this step remains the same...
           exec > >(tee runner-log.txt) 2>&1
           set -a 
           PIPELINE_FILE="app/keploy-pipeline.yml"
@@ -207,7 +177,6 @@ jobs:
           fi
           echo "final_status=$FINAL_STATUS" >> $GITHUB_OUTPUT; echo "failure_reason=$FAILURE_REASON" >> $GITHUB_OUTPUT; echo "rec_duration=$REC_DURATION" >> $GITHUB_OUTPUT; echo "rec_cpu_p=$REC_CPU_P" >> $GITHUB_OUTPUT; echo "rec_mem_mb=$REC_MEM_MB" >> $GITHUB_OUTPUT; echo "test_duration=$TEST_DURATION" >> $GITHUB_OUTPUT; echo "test_cpu_p=$TEST_CPU_P" >> $GITHUB_OUTPUT; echo "test_mem_mb=$TEST_MEM_MB" >> $GITHUB_OUTPUT
           if [ "$FINAL_STATUS" != "Success" ]; then exit 1; fi
-
       - name: Create Report Data as Artifact
         if: always()
         run: |
@@ -218,20 +187,17 @@ jobs:
           TEST_DUR=${{ steps.pipeline-runner.outputs.test_duration }}; TEST_CPU_P="${{ steps.pipeline-runner.outputs.test_cpu_p }}"; TEST_MEM_MB=${{ steps.pipeline-runner.outputs.test_mem_mb }}
           JSON_ROW=$(sudo jq -n --arg ts "$TIMESTAMP_IST" --arg wlink "$WORKFLOW_LINK" --arg rurl "${{ matrix.repo }}" --arg status "$FINAL_STATUS" --arg reason "$FAILURE_REASON" --argjson recdur "$REC_DUR" --arg reccpup "$REC_CPU_P" --argjson recmem "$REC_MEM_MB" --argjson testdur "$TEST_DUR" --arg testcpup "$TEST_CPU_P" --argjson testmem "$TEST_MEM_MB" '[[$ts, $wlink, $rurl, $status, $reason, $recdur, $reccpup, $recmem, $testdur, $testcpup, $testmem]]')
           echo "$JSON_ROW" | sudo tee report.json > /dev/null
-
       - name: Upload Individual Report as Artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: report-for-${{ matrix.repo }}
           path: report.json
-
       - name: Prepare Attachments on Failure
         if: failure()
         run: |
           echo "Zipping Keploy directory for email attachment..."
           if [ -d "app/keploy" ]; then sudo zip -r keploy_artifacts.zip app/keploy; else echo "Keploy directory not found."; fi
-
       - name: Send Email Notification on Failure
         if: failure()
         uses: dawidd6/action-send-mail@v3
@@ -257,12 +223,13 @@ jobs:
     needs: test-and-benchmark
     if: always()
     steps:
+      # THIS STEP IS ALSO NOW CORRECTED
       - name: Authenticate to Google Cloud
         id: auth
         uses: "google-github-actions/auth@v2"
         with:
+          create_credentials_file: false
           credentials_json: "${{ secrets.GCP_SA_KEY }}"
-          # Add this line to request permission for Google Sheets
           scopes: "https://www.googleapis.com/auth/spreadsheets"
 
       - name: Download all individual reports
@@ -271,7 +238,6 @@ jobs:
           path: all-reports
           pattern: report-for-*
           merge-multiple: true
-
       - name: Aggregate all reports into a single payload
         id: aggregate
         run: |
@@ -283,7 +249,6 @@ jobs:
             FINAL_PAYLOAD=$(sudo jq -s 'map(.[0])' $files)
             echo "payload=${FINAL_PAYLOAD}" >> $GITHUB_OUTPUT
           fi
-
       - name: Append data to Google Sheet via REST API
         if: steps.aggregate.outputs.payload != '[]'
         run: |
