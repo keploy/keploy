@@ -115,7 +115,7 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 			return nil, fmt.Errorf("expected StmtPrepareOkPacket, got %T", packet.Message)
 		}
 
-		data, err = preparedstmt.EncodePrepareOk(ctx, logger, pkt)
+		data, err = preparedstmt.EncodePrepareOk(ctx, logger, pkt, serverGreeting.CapabilityFlags)
 		if err != nil {
 			return nil, fmt.Errorf("error encoding StmtPrepareOkPacket: %v", err)
 		}

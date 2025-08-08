@@ -147,6 +147,15 @@ const (
 	UNIQUE_FLAG         = 65536
 )
 
+// Cursor types for prepared statements
+const (
+	CURSOR_TYPE_NO_CURSOR     byte = 0x0
+	CURSOR_TYPE_READ_ONLY     byte = 0x1
+	CURSOR_TYPE_FOR_UPDATE    byte = 0x2
+	CURSOR_TYPE_SCROLLABLE    byte = 0x4
+	PARAMETER_COUNT_AVAILABLE byte = 0x8
+)
+
 // Utility command Packet Status
 const (
 	COM_QUIT             byte = 0x01
