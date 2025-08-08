@@ -108,23 +108,6 @@ func DecodeStmtExecute(_ context.Context, _ *zap.Logger, data []byte, preparedSt
 			// Process Parameter based on its type
 			param := &packet.Parameters[i]
 
-			// // Check if the parameter is in the NULL bitmap
-			// nullByteIndex := i / 8
-			// nullBitMask := byte(1 << (i % 8))
-			// if (packet.NullBitmap[nullByteIndex] & nullBitMask) != 0 {
-			// 	param.Value = nil
-			// 	continue // Skip reading a value for this parameter
-			// }
-
-			// // Use the new centralized helper function to parse the value
-			// val, n, err := utils.ParseParameterValue(data[pos:], mysql.FieldType(param.Type), param.Unsigned)
-			// if err != nil {
-			// 	log.Warn("failed to parse parameter value for stmt execute in stmtExecutePacket", zap.Error(err))
-			// 	return nil, fmt.Errorf("failed to parse parameter value for stmt execute: %w", err)
-			// }
-			// param.Value = val
-			// pos += n
-
 			// Handle length-encoded values (only for types that require variable-length data)
 			switch mysql.FieldType(param.Type) {
 			case mysql.FieldTypeString, mysql.FieldTypeVarString, mysql.FieldTypeVarChar, mysql.FieldTypeBLOB, mysql.FieldTypeTinyBLOB, mysql.FieldTypeMediumBLOB, mysql.FieldTypeLongBLOB, mysql.FieldTypeJSON:
