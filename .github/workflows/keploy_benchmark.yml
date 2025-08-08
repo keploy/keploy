@@ -38,7 +38,7 @@ jobs:
           name: ${{ env.IMAGE_ARTIFACT_NAME }}
           path: keploy-image.tar
           retention-days: 1
-          
+
   prepare-matrix:
     runs-on: ubuntu-latest
     outputs:
@@ -235,10 +235,19 @@ jobs:
           path: all-reports
           pattern: report-for-*
           merge-multiple: true
+
       - name: Aggregate all reports into a single payload
         id: aggregate
         run: |
-          files=$(find all-reports -name "report.json" -type f); if [ -z "$files" ]; then echo "payload=[]" >> $GITHUB_OUTPUT; else FINAL_PAYLOAD=$(sudo jq -s 'map(.[0])' $files); echo "payload=${FINAL_PAYLOAD}" >> $GITHUB_OUTPUT; fi
+          mkdir -p all-reports
+          files=$(find all-reports -name "report.json" -type f)
+          if [ -z "$files" ]; then 
+            echo "payload=[]" >> $GITHUB_OUTPUT
+          else 
+            FINAL_PAYLOAD=$(sudo jq -s 'map(.[0])' $files)
+            echo "payload=${FINAL_PAYLOAD}" >> $GITHUB_OUTPUT
+          fi
+
       - name: Append data to Google Sheet via REST API
         if: steps.aggregate.outputs.payload != '[]'
         run: |
