@@ -211,7 +211,7 @@ func decodePacket(ctx context.Context, logger *zap.Logger, packet mysql.Packet, 
 	case payloadType == mysql.OK:
 		if lastOp == mysql.COM_STMT_PREPARE {
 			logger.Debug("COM_STMT_PREPARE_OK packet", zap.Any("Type", payloadType))
-			pkt, err := preparedstmt.DecodePrepareOk(ctx, logger, payload)
+			pkt, err := preparedstmt.DecodePrepareOk(ctx, logger, payload, sg.CapabilityFlags)
 			if err != nil {
 				return parsedPacket, fmt.Errorf("failed to decode COM_STMT_PREPARE_OK packet: %w", err)
 			}

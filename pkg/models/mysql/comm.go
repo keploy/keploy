@@ -106,12 +106,15 @@ type StmtPreparePacket struct {
 // COM_STMT_PREPARE_OK packet
 
 type StmtPrepareOkPacket struct {
-	Status       byte   `yaml:"status"`
-	StatementID  uint32 `yaml:"statement_id"`
-	NumColumns   uint16 `yaml:"num_columns"`
-	NumParams    uint16 `yaml:"num_params"`
-	Filler       byte   `yaml:"filler"`
-	WarningCount uint16 `yaml:"warning_count"`
+	Status               byte   `yaml:"status"`
+	StatementID          uint32 `yaml:"statement_id"`
+	NumColumns           uint16 `yaml:"num_columns"`
+	NumParams            uint16 `yaml:"num_params"`
+	Filler               byte   `yaml:"filler"`
+	WarningAvailable     bool   `yaml:"warning_available"`
+	WarningCount         uint16 `yaml:"warning_count"`
+	MetaFollowsAvailable bool   `yaml:"meta_follows_available"`
+	MetaFollows          byte   `yaml:"meta_follows"`
 
 	ParamDefs          []*ColumnDefinition41 `yaml:"param_definitions"`
 	EOFAfterParamDefs  []byte                `yaml:"eofAfterParamDefs"`

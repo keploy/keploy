@@ -21,7 +21,7 @@ import (
 
 func DecodeQuery(_ context.Context, logger *zap.Logger, data []byte, clientCapabilities uint32) (*mysql.QueryPacket, error) {
 
-	logger.Info("[Query] Decoding query packet", zap.Int("data_length", len(data)), zap.Any("query buffer", string(data)))
+	logger.Debug("Decoding query packet", zap.Int("data_length", len(data)), zap.Any("query buffer", string(data)))
 
 	if len(data) < 2 {
 		return nil, fmt.Errorf("query packet is empty")
@@ -36,7 +36,7 @@ func DecodeQuery(_ context.Context, logger *zap.Logger, data []byte, clientCapab
 	if clientCapabilities&mysql.CLIENT_QUERY_ATTRIBUTES == 0 {
 		packet.Query = string(data[pos:])
 		packet.Query = replaceTabsWithSpaces(packet.Query)
-		logger.Info("[Query] Decoded query packet without attributes", zap.String("query", packet.Query))
+		logger.Debug("Decoded query packet without attributes", zap.String("query", packet.Query))
 		return packet, nil
 	}
 
@@ -51,8 +51,6 @@ func DecodeQuery(_ context.Context, logger *zap.Logger, data []byte, clientCapab
 	}
 	pos += n
 
-	logger.Info("[Query] parameter_count read successfully", zap.Uint64("param_count", paramCount), zap.Int("bytes_consumed", n), zap.Any("data", string(data[pos:])))
-
 	packet.ParameterCount = int(paramCount)
 
 	if pos >= len(data) {
@@ -66,8 +64,6 @@ func DecodeQuery(_ context.Context, logger *zap.Logger, data []byte, clientCapab
 	}
 	pos += n
 
-	logger.Info("[Query] parameter_set_count read successfully", zap.Uint64("param_set_count", paramSetCount), zap.Int("bytes_consumed", n), zap.Any("data", string(data[pos:])))
-
 	if paramCount > 0 {
 
 		nullBitmapLength := (packet.ParameterCount + 7) / 8
@@ -77,14 +73,11 @@ func DecodeQuery(_ context.Context, logger *zap.Logger, data []byte, clientCapab
 		packet.NullBitmap = data[pos : pos+nullBitmapLength]
 		pos += int(nullBitmapLength)
 
-		logger.Info("[Query] null_bitmap read successfully", zap.Int("null_bitmap_length", nullBitmapLength), zap.Int("bytes_consumed", nullBitmapLength), zap.Any("data", string(data[pos:])))
 		if pos+1 > len(data) {
 			return nil, fmt.Errorf("malformed query packet: data too short for new_params_bind_flag")
 		}
 		packet.NewParamsBindFlag = data[pos]
 		pos++
-
-		logger.Info("[Query] new_params_bind_flag read successfully", zap.Uint8("bind_flag", packet.NewParamsBindFlag), zap.Int("bytes_consumed", 1), zap.Any("data", string(data[pos:])))
 
 		if packet.NewParamsBindFlag != 1 {
 			return nil, fmt.Errorf("malformed query packet: new_params_bind_flag should be always 1 if parameter_count > 0")
@@ -221,7 +214,7 @@ func DecodeQuery(_ context.Context, logger *zap.Logger, data []byte, clientCapab
 	packet.Query = string(data[pos:])
 	packet.Query = replaceTabsWithSpaces(packet.Query)
 
-	logger.Info("[Query] Decoded query packet with attributes", zap.String("query", packet.Query))
+	logger.Debug("Decoded query packet with attributes", zap.String("query", packet.Query))
 
 	return packet, nil
 }
