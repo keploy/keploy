@@ -143,7 +143,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			}
 			err := req.Message.Encode(v.Message)
 			if err != nil {
-				utils.LogError(logger, err, "failed to encode mongo request wiremessage into yaml")
+				utils.LogError(logger, err, "failed to encode mysql request wiremessage into yaml")
 				return nil, err
 			}
 			requests = append(requests, req)
@@ -156,7 +156,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			}
 			err := resp.Message.Encode(v.Message)
 			if err != nil {
-				utils.LogError(logger, err, "failed to encode mongo response wiremessage into yaml")
+				utils.LogError(logger, err, "failed to encode mysql response wiremessage into yaml")
 				return nil, err
 			}
 			responses = append(responses, resp)
