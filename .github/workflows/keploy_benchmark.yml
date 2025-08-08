@@ -49,6 +49,12 @@ jobs:
         uses: "google-github-actions/auth@v2"
         with:
           credentials_json: "${{ secrets.GCP_SA_KEY }}"
+          scopes: "https://www.googleapis.com/auth/spreadsheets"
+
+      - name: Debug Access Token Scopes
+        run: |
+          echo "--- Verifying token scopes ---"
+          curl "https://www.googleapis.com/oauth2/v3/tokeninfo?access_token=${{ steps.auth.outputs.access_token }}"
 
       - name: Get Repo List from Google Sheet via REST API
         id: get-repos
@@ -257,7 +263,7 @@ jobs:
           credentials_json: "${{ secrets.GCP_SA_KEY }}"
           # Add this line to request permission for Google Sheets
           scopes: "https://www.googleapis.com/auth/spreadsheets"
-          
+
       - name: Download all individual reports
         uses: actions/download-artifact@v4
         with:
