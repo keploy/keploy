@@ -39,7 +39,6 @@ jobs:
     outputs:
       repos: ${{ steps.create-matrix.outputs.repos }}
     steps:
-      # THIS STEP IS NOW CORRECTED
       - name: Authenticate to Google Cloud
         id: auth
         uses: "google-github-actions/auth@v2"
@@ -56,7 +55,6 @@ jobs:
           echo "API Response: $response"
           echo "SHEET_VALUES<<EOF" >> $GITHUB_OUTPUT; echo "$response" >> $GITHUB_OUTPUT; echo "EOF" >> $GITHUB_OUTPUT
 
-      # THIS STEP IS NOW CORRECTED AND ROBUST
       - name: Create JSON Matrix from Sheet Data
         id: create-matrix
         env:
@@ -223,14 +221,13 @@ jobs:
     needs: test-and-benchmark
     if: always()
     steps:
-      # THIS STEP IS ALSO NOW CORRECTED
       - name: Authenticate to Google Cloud
         id: auth
         uses: "google-github-actions/auth@v2"
         with:
           create_credentials_file: false
           credentials_json: "${{ secrets.GCP_SA_KEY }}"
-          scopes: "https://www.googleapis.com/auth/spreadsheets"
+          # scopes: "https://www.googleapis.com/auth/spreadsheets"
 
       - name: Download all individual reports
         uses: actions/download-artifact@v4
