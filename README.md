@@ -149,6 +149,76 @@ Take a journey to **[How Keploy Works?](https://keploy.io/docs/keploy-explained/
 
 👉 **Explore the code on GitHub**: [github.com/keploy/keploy](https://github.com/keploy/keploy)
 
+## 🔐 Security & Data Privacy
+
+Keploy captures real API traffic to generate tests, which may include sensitive data like API keys, tokens, or PII (Personally Identifiable Information). Keploy is designed to protect your data while delivering full test automation power.
+
+---
+
+### 🧱 How Keploy Protects Your Data
+
+| 🛡️ Feature                     | ✅ Description                                                                  |
+|------------------------------- |------------------------------------------------------------------------------  |
+| 🔒 **Local-First Architecture** | All test data stays on your machine — **nothing is sent to external servers**  |
+| 🙈 **Secret Auto-Masking**       | Common secrets like passwords & API keys are masked by default                |
+| 🛠️ **Custom Masking Rules**      | Define your own masking patterns via `keploy.yaml`                            |
+| 🚫 **Sensitive Log Blocking**    | Payload data is excluded from logs unless explicitly enabled                  |
+
+---
+
+### 🔗 **End-to-End Security Workflow**
+
+```text
+Client API Request
+        |
+        v
++------------------------+
+| Keploy Capture         |
+| (Local Middleware)     |
++------------------------+
+        |
+        v
++--------------------------------+
+| Data Sanitization              |
+|                                |
+|  - Mask Headers (Authorization)|
+|  - Mask Body Fields (password) |
+|  - Apply Custom YAML Rules     |
++--------------------------------+
+        |
+        v
++------------------------------------+
+| Test Case Generation               |
+|  +------------------------------+  |
+|  | Request/Response to YAML    |   |
+|  | Capture Dependency Calls    |   |
+|  | Generate Mocks for Replay   |   |
+|  +------------------------------+  |
++------------------------------------+
+        |
+        v
++---------------------------------------+
+| Local Storage                         |
+|  - Save under ./keploy/tests          |
+|  - No external transmission**         |
++---------------------------------------+
+        |
+        v
++---------------------------------------+
+| Test Execution                        |
+|  - Replay API Calls                   |
+|  - Inject Mocks (No Live Calls)       |
+|  - Validate Responses                 |
++---------------------------------------+
+        |
+        v
++---------------------------+
+| Local Test Report         |
+|  - Pass/Fail Summary      |
+|  - Available in Console   |
++---------------------------+
+```
+
 
 ## 👨🏻‍💻 Let's Build Together! 👩🏻‍💻
 Whether you're a newbie coder or a wizard 🧙‍♀️, your perspective is golden. Take a peek at our:
