@@ -45,7 +45,7 @@ jobs:
         with:
           create_credentials_file: false
           credentials_json: "${{ secrets.GCP_SA_KEY }}"
-          scopes: "https://www.googleapis.com/auth/spreadsheets"
+          access_token_scopes: "https://www.googleapis.com/auth/spreadsheets"
 
       - name: Get Repo List from Google Sheet via REST API
         id: get-repos
@@ -227,7 +227,7 @@ jobs:
         with:
           create_credentials_file: false
           credentials_json: "${{ secrets.GCP_SA_KEY }}"
-          # scopes: "https://www.googleapis.com/auth/spreadsheets"
+          access_token_scopes: "https://www.googleapis.com/auth/spreadsheets"
 
       - name: Download all individual reports
         uses: actions/download-artifact@v4
