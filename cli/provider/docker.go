@@ -64,6 +64,20 @@ func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config)
 	}
 	// gracefully exit the current process
 	logger.Info("exiting the current process as the command is moved to docker")
+
+	if utils.LogFile != nil {
+		err := utils.LogFile.Close()
+		if err != nil {
+			utils.LogError(logger, err, "Failed to close Keploy Logs")
+		}
+		if err := utils.DeleteFileIfNotExists(logger, "keploy-logs.txt"); err != nil {
+			return nil
+		}
+		if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {
+			return nil
+		}
+	}
+
 	os.Exit(0)
 	return nil
 }

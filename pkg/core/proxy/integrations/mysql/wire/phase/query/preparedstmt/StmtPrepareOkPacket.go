@@ -16,8 +16,8 @@ import (
 
 // COM_STMT_PREPARE_OK: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_stmt_prepare.html#sect_protocol_com_stmt_prepare_response_ok
 
-func DecodePrepareOk(_ context.Context, _ *zap.Logger, data []byte) (*mysql.StmtPrepareOkPacket, error) {
-	if len(data) < 12 {
+func DecodePrepareOk(_ context.Context, _ *zap.Logger, data []byte, capabilities uint32) (*mysql.StmtPrepareOkPacket, error) {
+	if len(data) < 10 {
 		return nil, errors.New("data length is not enough for COM_STMT_PREPARE_OK")
 	}
 
@@ -41,17 +41,26 @@ func DecodePrepareOk(_ context.Context, _ *zap.Logger, data []byte) (*mysql.Stmt
 	response.Filler = data[offset]
 	offset++
 
-	response.WarningCount = binary.LittleEndian.Uint16(data[offset : offset+2])
-	// offset += 2
+	if len(data) >= 12 {
+		response.WarningCount = binary.LittleEndian.Uint16(data[offset : offset+2])
+		response.WarningAvailable = true
+		offset += 2
+
+		if capabilities&uint32(mysql.CLIENT_OPTIONAL_RESULTSET_METADATA) > 0 && len(data) > offset {
+			response.MetaFollows = data[offset]
+			response.MetaFollowsAvailable = true
+			// offset++
+		}
+	}
 
 	return response, nil
 }
 
-func EncodePrepareOk(ctx context.Context, logger *zap.Logger, packet *mysql.StmtPrepareOkPacket) ([]byte, error) {
+func EncodePrepareOk(ctx context.Context, logger *zap.Logger, packet *mysql.StmtPrepareOkPacket, capabilities uint32) ([]byte, error) {
 	buf := new(bytes.Buffer)
 
 	// Encode the Prepare OK packet
-	prepareOkBytes, err := EncodePreparedStmtResponse(ctx, logger, packet)
+	prepareOkBytes, err := EncodePreparedStmtResponse(ctx, logger, packet, capabilities)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode StmtPrepareOkPacket: %w", err)
 	}
@@ -98,7 +107,7 @@ func EncodePrepareOk(ctx context.Context, logger *zap.Logger, packet *mysql.Stmt
 	return buf.Bytes(), nil
 }
 
-func EncodePreparedStmtResponse(_ context.Context, _ *zap.Logger, packet *mysql.StmtPrepareOkPacket) ([]byte, error) {
+func EncodePreparedStmtResponse(_ context.Context, _ *zap.Logger, packet *mysql.StmtPrepareOkPacket, capabilities uint32) ([]byte, error) {
 	buf := new(bytes.Buffer)
 
 	// Write Status
@@ -126,9 +135,18 @@ func EncodePreparedStmtResponse(_ context.Context, _ *zap.Logger, packet *mysql.
 		return nil, fmt.Errorf("failed to write Filler: %w", err)
 	}
 
-	// Write Warning Count
-	if err := binary.Write(buf, binary.LittleEndian, packet.WarningCount); err != nil {
-		return nil, fmt.Errorf("failed to write WarningCount: %w", err)
+	if packet.WarningAvailable {
+		// Write Warning Count
+		if err := binary.Write(buf, binary.LittleEndian, packet.WarningCount); err != nil {
+			return nil, fmt.Errorf("failed to write WarningCount: %w", err)
+		}
+	}
+
+	if capabilities&uint32(mysql.CLIENT_OPTIONAL_RESULTSET_METADATA) > 0 && packet.MetaFollowsAvailable {
+		// Write Meta Follows
+		if err := buf.WriteByte(packet.MetaFollows); err != nil {
+			return nil, fmt.Errorf("failed to write MetaFollows: %w", err)
+		}
 	}
 
 	return buf.Bytes(), nil
