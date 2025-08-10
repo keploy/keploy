@@ -194,14 +194,21 @@ jobs:
           KEPLOY_SH="$KBASE --entrypoint /bin/sh $KEPLOY_IMG -lc"
 
           echo "--- Running Setup Steps ---"
-          yq eval '.setup // [] | .[]' "$PIPELINE_FILE" | while read -r cmd; do
-            [ -z "$cmd" ] && continue
-            cmd=${cmd//'docker-compose'/'docker compose'}
-            echo "\$ $cmd"
-            if ! (cd app && sudo -E bash -lc "$cmd"); then
-              FINAL_STATUS="Failed"; FAILURE_REASON="Setup cmd failed: $cmd"; break
-            fi
-          done
+          setup_commands=$(yq eval '.setup // [] | .[]' "$PIPELINE_FILE")
+          if [ -n "$setup_commands" ]; then
+            while IFS= read -r cmd; do
+              [ -z "$cmd" ] && continue
+              cmd=${cmd//'docker-compose'/'docker compose'}
+              echo "\$ $cmd"
+              if ! (cd app && sudo -E bash -lc "$cmd"); then
+                FINAL_STATUS="Failed"
+                FAILURE_REASON="Setup cmd failed: $cmd"
+                echo "final_status=Failed" >> $GITHUB_OUTPUT
+                echo "failure_reason=Setup cmd failed: $cmd" >> $GITHUB_OUTPUT
+                exit 1
+              fi
+            done <<< "$setup_commands"
+          fi
 
           # --- Preflight: ensure docker + compose are usable inside Keploy container ---
           echo "--- Preflight: Docker/Compose inside Keploy container ---"
@@ -212,8 +219,8 @@ jobs:
             exit 1
           }
 
-    
-                    if [ "$FINAL_STATUS" = "Success" ]; then
+          # RECORD phase
+          if [ "$FINAL_STATUS" = "Success" ]; then
             RECORD_CMD=$(yq eval '.record_command // ""' "$PIPELINE_FILE")
             if [ -n "$RECORD_CMD" ]; then
               RECORD_CMD=${RECORD_CMD//'docker-compose'/'docker compose'}
@@ -222,17 +229,23 @@ jobs:
               # Define a cleanup trap
               trap 'echo "Stopping Keploy..."; sudo docker stop keploy-v2 || true; wait "$KEPLOY_PID" || true' EXIT
 
-              # Start Keploy in the background
-              echo ">> cd app && $KEPLOY_RUN $RECORD_CMD"
-              (cd app && $KEPLOY_RUN $RECORD_CMD) &
+              # Start Keploy in the background with timing
+              echo ">> cd app && sudo /usr/bin/time -f \"${{ env.TIME_FORMAT_STRING }}\" -o ../record_metrics.csv $KEPLOY_RUN $RECORD_CMD"
+              (cd app && sudo /usr/bin/time -f "${{ env.TIME_FORMAT_STRING }}" -o ../record_metrics.csv $KEPLOY_RUN $RECORD_CMD) &
               KEPLOY_PID=$!
               echo "Keploy record PID: $KEPLOY_PID"
 
+              # Extract container name from the record command
+              APP_CONTAINER_NAME=$(echo "$RECORD_CMD" | grep -o '\--container-name ['\''"][^'\''"]*['\''"]' | sed 's/--container-name ['\''"]//g' | sed 's/['\''"]$//g' || echo "")
+              if [ -z "$APP_CONTAINER_NAME" ]; then
+                APP_CONTAINER_NAME=$(echo "$RECORD_CMD" | grep -o '\--container-name [^ ]*' | cut -d' ' -f2 || echo "app")
+              fi
+              
               # Wait for the application container to be ready
-              echo "Waiting for app container: fastapi-app (timeout 90s)..."
+              echo "Waiting for app container: $APP_CONTAINER_NAME (timeout 90s)..."
               for i in {1..30}; do
-                if sudo docker ps --filter "name=fastapi-app" --filter "status=running" -q | grep -q .; then
-                  echo "fastapi-app is running."
+                if sudo docker ps --filter "name=$APP_CONTAINER_NAME" --filter "status=running" -q | grep -q .; then
+                  echo "$APP_CONTAINER_NAME is running."
                   break
                 fi
                 sleep 3
@@ -240,8 +253,8 @@ jobs:
                   echo "::error::App container did not become running in time."
                   echo "---- docker compose ps ----"
                   (cd app && sudo docker compose ps || true)
-                  echo "---- fastapi-app logs (last 200) ----"
-                  sudo docker logs fastapi-app --tail=200 || true
+                  echo "---- $APP_CONTAINER_NAME logs (last 200) ----"
+                  sudo docker logs "$APP_CONTAINER_NAME" --tail=200 || true
                   FINAL_STATUS="Failed"; FAILURE_REASON="Record orchestration failed (app didn't start)"
                   break
                 fi
@@ -265,6 +278,12 @@ jobs:
               echo "Stopping Keploy..."
               sudo docker stop keploy-v2 || true # Use stop instead of kill for graceful shutdown
               wait "$KEPLOY_PID" || true
+              
+              # Collect record metrics if available
+              if [ -f record_metrics.csv ]; then
+                IFS=',' read REC_E REC_P REC_M < record_metrics.csv
+                REC_DURATION=$REC_E; REC_CPU_P=$REC_P; REC_MEM_MB=$(echo "scale=2; $REC_M / 1024" | bc -l)
+              fi
 
             else
               echo "::warning::record_command not defined; skipping record phase"
@@ -282,11 +301,36 @@ jobs:
               if sudo /usr/bin/time -f "${{ env.TIME_FORMAT_STRING }}" -o test_metrics.csv bash -lc "cd app && $KEPLOY_RUN $TEST_CMD"; then
                 IFS=',' read TEST_E TEST_P TEST_M < test_metrics.csv
                 TEST_DURATION=$TEST_E; TEST_CPU_P=$TEST_P; TEST_MEM_MB=$(echo "scale=2; $TEST_M / 1024" | bc)
+                
+                # Check test results
+                all_passed=true
+                if [ -d "app/keploy/reports" ]; then
+                  for report_file in app/keploy/reports/test-run-*/test-set-*-report.yaml; do
+                    if [ -f "$report_file" ]; then
+                      test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+                      echo "Test status for $(basename "$report_file"): $test_status"
+                      if [ "$test_status" != "PASSED" ]; then
+                        all_passed=false
+                        break
+                      fi
+                    fi
+                  done
+                else
+                  echo "::warning::No test reports found"
+                  all_passed=false
+                fi
+                
+                if [ "$all_passed" = false ]; then
+                  FINAL_STATUS="Failed"; FAILURE_REASON="Test step failed (tests did not pass)"
+                fi
               else
                 echo "---- docker compose ps (after test failure) ----"
                 (cd app && docker compose ps || true)
-                echo "---- fastapi-app logs (last 200) ----"
-                docker logs fastapi-app --tail=200 || true
+                # Try to log any running containers
+                for container in $(sudo docker ps --format "{{.Names}}" 2>/dev/null); do
+                  echo "---- $container logs (last 200) ----"
+                  sudo docker logs "$container" --tail=200 || true
+                done
                 FINAL_STATUS="Failed"; FAILURE_REASON="Test step failed (likely no test-sets recorded)"
               fi
             else
