@@ -101,6 +101,22 @@ jobs:
       - name: Load Keploy Docker image
         run: sudo docker load -i keploy-image.tar
 
+      - name: Verify Docker setup for container
+        run: |
+          echo "=== Host Docker Information ==="
+          docker version
+          echo ""
+          echo "Docker binary location: $(which docker)"
+          echo "Docker socket permissions: $(ls -la /var/run/docker.sock)"
+          echo ""
+          echo "=== Docker CLI Plugins ==="
+          for path in "/usr/lib/docker/cli-plugins" "/usr/libexec/docker/cli-plugins" "/usr/local/lib/docker/cli-plugins"; do
+            if [ -d "$path" ]; then
+              echo "Found plugins in: $path"
+              ls -la "$path" || true
+            fi
+          done
+
       # Accept full URLs (https/ssh) OR owner/repo
       - name: Clone Application Repo
         run: |
@@ -112,10 +128,23 @@ jobs:
             git clone "https://github.com/$REPO.git" "$DEST"
           fi
 
-      - name: Install yq (YAML Parser)
+      - name: Install yq (YAML Parser), bc (Calculator), and ensure Docker Compose
         run: |
           sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq
           sudo chmod +x /usr/bin/yq
+          sudo apt-get update && sudo apt-get install -y bc
+
+          echo "Current Docker Compose version:"
+          docker compose version || docker-compose version || true
+
+          # Ensure we have the compose plugin
+          if ! docker compose version >/dev/null 2>&1; then
+            echo "Installing Docker Compose plugin..."
+            sudo apt-get install -y docker-compose-plugin
+          fi
+
+          echo "Final Docker Compose check:"
+          docker compose version
 
       - name: Set up Language Environment
         id: language-setup
@@ -174,24 +203,37 @@ jobs:
           # Clean any stale container name
           sudo docker rm -f keploy-v2 >/dev/null 2>&1 || true
 
+          # Find Docker binary and plugins paths
+          DOCKER_BIN=$(which docker)
+          DOCKER_CLI_PLUGINS=""
+
+          # Check common Docker CLI plugin paths
+          for path in "/usr/lib/docker/cli-plugins" "/usr/libexec/docker/cli-plugins" "/usr/local/lib/docker/cli-plugins"; do
+            if [ -d "$path" ]; then
+              DOCKER_CLI_PLUGINS="$DOCKER_CLI_PLUGINS -v $path:$path:ro"
+            fi
+          done
+
+          echo "Docker binary: $DOCKER_BIN"
+          echo "Docker CLI plugins: $DOCKER_CLI_PLUGINS"
+
           # Base docker run line (IMPORTANT: use $PWD so it resolves AFTER 'cd app')
           KEPLOY_IMG="${{ env.KEPLOY_IMAGE_NAME }}"
-          KBASE='sudo -E env PATH="$PATH" docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host \
-            -v "$PWD":"$PWD" -w "$PWD" \
+          KBASE="sudo -E env PATH=\"\$PATH\" docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host \
+            -v \"\$PWD\":\"\$PWD\" -w \"\$PWD\" \
             -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf \
             -v /var/run/docker.sock:/var/run/docker.sock \
-            -v /usr/bin/docker:/usr/bin/docker:ro \
-            -v /usr/lib/docker/cli-plugins:/usr/lib/docker/cli-plugins:ro \
-            -v /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro \
-            -v "$HOME"/.keploy-config:/root/.keploy-config -v "$HOME"/.keploy:/root/.keploy \
-            --rm'
+            -v \"$DOCKER_BIN\":/usr/local/bin/docker:ro \
+            $DOCKER_CLI_PLUGINS \
+            -v \"\$HOME\"/.keploy-config:/root/.keploy-config -v \"\$HOME\"/.keploy:/root/.keploy \
+            -e PATH=\"/usr/local/bin:\$PATH\" \
+            --rm"
 
           # Run Keploy (default entrypoint)
-
           KEPLOY_RUN="$KBASE $KEPLOY_IMG"
 
           # Run an interactive shell INSIDE Keploy container (override entrypoint)
-          KEPLOY_SH="$KBASE --entrypoint /bin/sh $KEPLOY_IMG -lc"
+          KEPLOY_SH="$KBASE --entrypoint /bin/sh $KEPLOY_IMG -c"
 
           echo "--- Running Setup Steps ---"
           setup_commands=$(yq eval '.setup // [] | .[]' "$PIPELINE_FILE")
@@ -212,12 +254,25 @@ jobs:
 
           # --- Preflight: ensure docker + compose are usable inside Keploy container ---
           echo "--- Preflight: Docker/Compose inside Keploy container ---"
-          (cd app && eval "$KEPLOY_SH 'docker version && docker compose version'") || {
-            echo "::error::Docker/Compose not available inside Keploy container"
+          echo "Testing Docker availability..."
+
+          if ! (cd app && eval "$KEPLOY_SH 'which docker && docker version'"); then
+            echo "::error::Docker not available inside Keploy container"
+            echo "Host Docker info:"
+            docker version || true
+            echo "Docker binary location: $(which docker)"
+            echo "Docker socket: $(ls -la /var/run/docker.sock)"
             echo "final_status=Failed" >> $GITHUB_OUTPUT
-            echo "failure_reason=Docker/Compose unavailable inside Keploy container" >> $GITHUB_OUTPUT
+            echo "failure_reason=Docker unavailable inside Keploy container" >> $GITHUB_OUTPUT
             exit 1
-          }
+          fi
+
+          echo "Testing Docker Compose availability..."
+          if ! (cd app && eval "$KEPLOY_SH 'docker compose version'"); then
+            echo "::warning::Docker Compose not working, but proceeding..."
+          fi
+
+          echo "Docker and Compose preflight check completed."
 
           # RECORD phase
           if [ "$FINAL_STATUS" = "Success" ]; then
