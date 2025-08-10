@@ -1,6 +1,6 @@
 #!/bin/bash
 
-source ../test_workflow_scripts/test-iid.sh
+source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Checkout to the specified branch
 git fetch origin
@@ -24,85 +24,53 @@ sudo $RECORD_BIN config --generate
 sudo rm -rf keploy/  # Clean old test data
 config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"header": {"Allow":[],}}/' "$config_file"
-sleep 5
+sleep 5  # Allow time for configuration changes
 
-# --- START OF FIX ---
-# This function now kills BOTH Keploy and the application it started.
-shutdown_keploy() {
-    # Find and kill the Keploy process
-    KEPLOY_PID=$(pgrep -n keploy)
-    if [ -n "$KEPLOY_PID" ]; then
-        echo "Attempting graceful shutdown of Keploy (PID: $KEPLOY_PID)..."
-        sudo kill $KEPLOY_PID
-        # Wait a moment for it to exit
-        sleep 2
-        # If it's still there, force kill it
-        if sudo kill -0 $KEPLOY_PID 2>/dev/null; then
-            echo "Forcing Keploy termination..."
-            sudo kill -9 $KEPLOY_PID
-        fi
-    else
-        echo "Keploy process not found to shut down."
-    fi
-
-    # Find and kill the Django application process
-    # The "-f" flag is crucial to match the full command line string
-    APP_PID=$(pgrep -f "python3 manage.py runserver")
-    if [ -n "$APP_PID" ]; then
-        echo "Shutting down Django application (PID: $APP_PID)..."
-        sudo kill $APP_PID 2>/dev/null
-        sleep 2
-        # If it's still there, force kill it
-        if sudo kill -0 $APP_PID 2>/dev/null; then
-            echo "Forcing Django app termination..."
-            sudo kill -9 $APP_PID
-        fi
-    else
-        echo "Django application process not found."
-    fi
-}
-# --- END OF FIX ---
-
-# This function sends requests and then triggers the shutdown
 send_request(){
-    echo "Waiting for application to be ready..."
-    for i in {1..20}; do
-        if curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/user/ | grep -q "200"; then
-            echo "Application is ready."
-            break
-        fi
-        sleep 3
-    done
-
-    echo "Sending API requests..."
-    curl --location 'http://127.0.0.1:8000/user/' --header 'Content-Type: application/json' --data-raw '{"name": "Jane Smith", "email": "jane.smith@example.com", "password": "smith567", "website": "www.janesmith.com"}'
-    curl --location 'http://127.0.0.1:8000/user/' --header 'Content-Type: application/json' --data-raw '{"name": "John Doe", "email": "john.doe@example.com", "password": "john567", "website": "www.johndoe.com"}'
-    curl --location 'http://127.0.0.1:8000/user/'
-    
-    echo "Waiting for Keploy to capture requests..."
     sleep 10
-    
-    shutdown_keploy
+    app_started=false
+    while [ "$app_started" = false ]; do
+        # Using a known valid endpoint for the health check
+        if curl -s -o /dev/null http://127.0.0.1:8000/user/; then
+            app_started=true
+        fi
+        sleep 3 # wait for 3 seconds before checking again.
+    done
+    echo "App started"
+    # Start making curl calls to record the testcases and mocks.
+    curl --location 'http://127.0.0.1:8000/user/' --header 'Content-Type: application/json' --data-raw '{
+        "name": "Jane Smith",
+        "email": "jane.smith@example.com",
+        "password": "smith567",
+        "website": "www.janesmith.com"
+    }'
+    curl --location 'http://127.0.0.1:8000/user/' --header 'Content-Type: application/json' --data-raw '{
+        "name": "John Doe",
+        "email": "john.doe@example.com",
+        "password": "john567",
+        "website": "www.johndoe.com"
+    }'
+    curl --location 'http://127.0.0.1:8000/user/'
+    # Wait for 10 seconds for keploy to record the tcs and mocks.
+    sleep 10
+    pid=$(pgrep keploy)
+    echo "$pid Keploy PID" 
+    echo "Killing keploy"
+    sudo kill $pid
 }
 
 echo "=== RECORDING PHASE WITH METRICS ==="
+# Record and Test cycles
 for i in {1..2}; do
     app_name="flaskApp_${i}"
-    echo "--- Starting Record Cycle ${i} ---"
-
     send_request &
     
+    # --- METRICS ADDED HERE ---
+    # The Keploy record command is wrapped with /usr/bin/time to capture metrics.
     sudo /usr/bin/time -f "Record Phase ${i} - Elapsed: %e seconds, CPU: %P, Memory: %M KB" \
         -o "record_metrics_${i}.txt" \
         sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 manage.py runserver" &> "${app_name}.txt"
-
-    wait
     
-    # Redundant cleanup as a final safety measure
-    sudo fuser -k 8000/tcp || true
-    sudo fuser -k 16789/tcp || true
-    sleep 5
-
     if grep "ERROR" "${app_name}.txt" | grep -v "user application terminated"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
@@ -113,24 +81,22 @@ for i in {1..2}; do
         cat "${app_name}.txt"
         exit 1
     fi
-
-    echo "=== Record Metrics for iteration ${i} ==="
-    cat "record_metrics_${i}.txt"
-    echo "--- Finished Record Cycle ${i} ---"
+    sleep 5
+    wait
+    echo "Recorded test case and mocks for iteration ${i}"
 done
 
 echo "=== TESTING PHASE WITH METRICS ==="
+# --- METRICS ADDED HERE ---
+# The Keploy test command is wrapped with /usr/bin/time to capture metrics.
 sudo /usr/bin/time -f "Test Phase - Elapsed: %e seconds, CPU: %P, Memory Peak: %M KB" \
     -o "test_metrics_detailed.txt" \
     sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 manage.py runserver" --delay 10 &> test_logs.txt
 
-echo "=== TEST EXECUTION METRICS ==="
-cat "test_metrics_detailed.txt"
-
 if grep "ERROR" "test_logs.txt"; then
-    echo "Error found in pipeline..."
-    cat "test_logs.txt"
-    exit 1
+        echo "Error found in pipeline..."
+        cat "test_logs.txt"
+        exit 1
 fi
 if grep "WARNING: DATA RACE" "test_logs.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
@@ -161,12 +127,13 @@ else
     all_passed=false
 fi
 
+# --- BENCHMARK SUMMARY SECTION ADDED ---
 echo "=== BENCHMARK SUMMARY ==="
 echo "Application: Python Django + PostgreSQL"
 echo "Record Cycles: 2"
 echo "Test Sets: 2"
 
-echo "=== AGGREGATED METRICS ==="
+echo "--- AGGREGATED METRICS ---"
 for i in {1..2}; do
     if [ -f "record_metrics_${i}.txt" ]; then
         echo "Record Cycle ${i}:"
@@ -178,14 +145,14 @@ if [ -f "test_metrics_detailed.txt" ]; then
     echo "Test Execution:"
     cat "test_metrics_detailed.txt"
 fi
+# --- END OF SUMMARY SECTION ---
 
+# Check the overall test status and exit accordingly
 if [ "$all_passed" = true ]; then
-    echo "=== BENCHMARK COMPLETED SUCCESSFULLY ==="
-    echo "All tests passed - Application is functioning correctly"
+    echo "All tests passed"
     exit 0
 else
-    echo "=== BENCHMARK FAILED ==="
-    echo "Some tests failed - Review test logs below:"
+    echo "Some tests failed. Review logs."
     cat "test_logs.txt"
     exit 1
 fi
