@@ -10,8 +10,6 @@ env:
   REPORT_SHEET_NAME: "benchmark_report"
   TIME_FORMAT_STRING: "%e,%P,%M"
   NOTIFICATION_RECIPIENT: "asish.kumar.programmer@gmail.com"
-  KEPLOY_IMAGE_NAME: "ghcr.io/keploy/keploy:v2-dev"
-  IMAGE_ARTIFACT_NAME: "keploy-docker-image"
 
 jobs:
   build-keploy:
@@ -19,19 +17,17 @@ jobs:
     steps:
       - name: Checkout Keploy Source Code
         uses: actions/checkout@v4
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Build Keploy Docker Image from Source
-        run: sudo docker image build -t ${{ env.KEPLOY_IMAGE_NAME }} .
-      - name: Save Docker image to a tar file
-        run: sudo docker save -o keploy-image.tar ${{ env.KEPLOY_IMAGE_NAME }}
-      - name: Change File Ownership
-        run: sudo chown runner:runner keploy-image.tar
-      - name: Upload Docker image artifact
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: Build Keploy Binary
+        run: go build -o keploy
+      - name: Upload Keploy Binary as Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.IMAGE_ARTIFACT_NAME }}
-          path: keploy-image.tar
+          name: build
+          path: keploy
           retention-days: 1
 
   prepare-matrix:
@@ -93,29 +89,19 @@ jobs:
       matrix:
         repo: ${{ fromJson(needs.prepare-matrix.outputs.repos) }}
     steps:
-      - name: Download Keploy Docker image artifact
+      - name: Download Keploy Binary Artifact
         uses: actions/download-artifact@v4
         with:
-          name: ${{ env.IMAGE_ARTIFACT_NAME }}
+          name: build
+          path: build
 
-      - name: Load Keploy Docker image
-        run: sudo docker load -i keploy-image.tar
-
-      - name: Verify Docker setup for container
+      - name: Set up Keploy Binary
         run: |
-          echo "=== Host Docker Information ==="
-          docker version
-          echo ""
-          echo "Docker binary location: $(which docker)"
-          echo "Docker socket permissions: $(ls -la /var/run/docker.sock)"
-          echo ""
-          echo "=== Docker CLI Plugins ==="
-          for path in "/usr/lib/docker/cli-plugins" "/usr/libexec/docker/cli-plugins" "/usr/local/lib/docker/cli-plugins"; do
-            if [ -d "$path" ]; then
-              echo "Found plugins in: $path"
-              ls -la "$path" || true
-            fi
-          done
+          chmod +x build/keploy
+          echo "RECORD_BIN=$PWD/build/keploy" >> $GITHUB_ENV
+          echo "REPLAY_BIN=$PWD/build/keploy" >> $GITHUB_ENV
+          echo "Keploy binary location: $PWD/build/keploy"
+          $PWD/build/keploy --version || true
 
       # Accept full URLs (https/ssh) OR owner/repo
       - name: Clone Application Repo
@@ -200,40 +186,12 @@ jobs:
           REC_DURATION=0; REC_CPU_P="0%"; REC_MEM_MB=0
           TEST_DURATION=0; TEST_CPU_P="0%"; TEST_MEM_MB=0
 
-          # Clean any stale container name
-          sudo docker rm -f keploy-v2 >/dev/null 2>&1 || true
+          # Clean up any existing keploy data
+          sudo rm -rf app/keploy/ 2>/dev/null || true
 
-          # Find Docker binary and plugins paths
-          DOCKER_BIN=$(which docker)
-          DOCKER_CLI_PLUGINS=""
-
-          # Check common Docker CLI plugin paths
-          for path in "/usr/lib/docker/cli-plugins" "/usr/libexec/docker/cli-plugins" "/usr/local/lib/docker/cli-plugins"; do
-            if [ -d "$path" ]; then
-              DOCKER_CLI_PLUGINS="$DOCKER_CLI_PLUGINS -v $path:$path:ro"
-            fi
-          done
-
-          echo "Docker binary: $DOCKER_BIN"
-          echo "Docker CLI plugins: $DOCKER_CLI_PLUGINS"
-
-          # Base docker run line (IMPORTANT: use $PWD so it resolves AFTER 'cd app')
-          KEPLOY_IMG="${{ env.KEPLOY_IMAGE_NAME }}"
-          KBASE="sudo -E env PATH=\"\$PATH\" docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host \
-            -v \"\$PWD\":\"\$PWD\" -w \"\$PWD\" \
-            -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v \"$DOCKER_BIN\":/usr/local/bin/docker:ro \
-            $DOCKER_CLI_PLUGINS \
-            -v \"\$HOME\"/.keploy-config:/root/.keploy-config -v \"\$HOME\"/.keploy:/root/.keploy \
-            -e PATH=\"/usr/local/bin:\$PATH\" \
-            --rm"
-
-          # Run Keploy (default entrypoint)
-          KEPLOY_RUN="$KBASE $KEPLOY_IMG"
-
-          # Run an interactive shell INSIDE Keploy container (override entrypoint)
-          KEPLOY_SH="$KBASE --entrypoint /bin/sh $KEPLOY_IMG -c"
+          echo "Using native keploy binary approach"
+          echo "RECORD_BIN: $RECORD_BIN"
+          echo "REPLAY_BIN: $REPLAY_BIN"
 
           echo "--- Running Setup Steps ---"
           setup_commands=$(yq eval '.setup // [] | .[]' "$PIPELINE_FILE")
@@ -252,27 +210,36 @@ jobs:
             done <<< "$setup_commands"
           fi
 
-          # --- Preflight: ensure docker + compose are usable inside Keploy container ---
-          echo "--- Preflight: Docker/Compose inside Keploy container ---"
-          echo "Testing Docker availability..."
+          # Generate keploy config if not exists
+          if [ ! -f "app/keploy.yml" ] && [ ! -f "app/keploy.yaml" ]; then
+            echo "--- Generating Keploy Config ---"
+            cd app && sudo -E env PATH="$PATH" $RECORD_BIN config --generate
+            cd ..
+          fi
 
-          if ! (cd app && eval "$KEPLOY_SH 'which docker && docker version'"); then
-            echo "::error::Docker not available inside Keploy container"
-            echo "Host Docker info:"
-            docker version || true
-            echo "Docker binary location: $(which docker)"
-            echo "Docker socket: $(ls -la /var/run/docker.sock)"
+          echo "--- Preflight: Testing keploy binary and Docker ---"
+          echo "Keploy binary test:"
+          $RECORD_BIN --version || {
+            echo "::error::Keploy binary not working"
             echo "final_status=Failed" >> $GITHUB_OUTPUT
-            echo "failure_reason=Docker unavailable inside Keploy container" >> $GITHUB_OUTPUT
+            echo "failure_reason=Keploy binary not working" >> $GITHUB_OUTPUT
             exit 1
-          fi
+          }
 
-          echo "Testing Docker Compose availability..."
-          if ! (cd app && eval "$KEPLOY_SH 'docker compose version'"); then
+          echo "Docker availability test:"
+          docker version || {
+            echo "::error::Docker not available"
+            echo "final_status=Failed" >> $GITHUB_OUTPUT
+            echo "failure_reason=Docker not available" >> $GITHUB_OUTPUT
+            exit 1
+          }
+
+          echo "Docker Compose test:"
+          docker compose version || {
             echo "::warning::Docker Compose not working, but proceeding..."
-          fi
+          }
 
-          echo "Docker and Compose preflight check completed."
+          echo "Preflight checks completed."
 
           # RECORD phase
           if [ "$FINAL_STATUS" = "Success" ]; then
@@ -282,11 +249,20 @@ jobs:
               echo "--- Running Record Step ---"
               
               # Define a cleanup trap
-              trap 'echo "Stopping Keploy..."; sudo docker stop keploy-v2 || true; wait "$KEPLOY_PID" || true' EXIT
+              container_kill() {
+                pid=$(pgrep -n keploy)
+                if [ -n "$pid" ]; then
+                  echo "$pid Keploy PID"
+                  echo "Killing keploy"
+                  sudo kill $pid 2>/dev/null || true
+                fi
+              }
+              trap 'echo "Stopping Keploy..."; container_kill; wait "$KEPLOY_PID" || true' EXIT
 
-              # Start Keploy in the background with timing
-              echo ">> cd app && sudo /usr/bin/time -f \"${{ env.TIME_FORMAT_STRING }}\" -o ../record_metrics.csv $KEPLOY_RUN $RECORD_CMD"
-              (cd app && sudo /usr/bin/time -f "${{ env.TIME_FORMAT_STRING }}" -o ../record_metrics.csv $KEPLOY_RUN $RECORD_CMD) &
+              # Start Keploy in the background with timing (native binary approach)
+              echo ">> cd app && sudo /usr/bin/time -f \"${{ env.TIME_FORMAT_STRING }}\" -o ../record_metrics.csv sudo -E env PATH=\"\$PATH\" \$RECORD_BIN $RECORD_CMD"
+              (cd app && sudo /usr/bin/time -f "${{ env.TIME_FORMAT_STRING }}" -o ../record_metrics.csv \
+                sudo -E env PATH="$PATH" $RECORD_BIN $RECORD_CMD &> ../record_output.txt) &
               KEPLOY_PID=$!
               echo "Keploy record PID: $KEPLOY_PID"
 
@@ -331,11 +307,19 @@ jobs:
               # Stop Keploy and remove the trap
               trap - EXIT
               echo "Stopping Keploy..."
-              sudo docker stop keploy-v2 || true # Use stop instead of kill for graceful shutdown
+              container_kill
               wait "$KEPLOY_PID" || true
               
-              # Collect record metrics if available
-              if [ -f record_metrics.csv ]; then
+              # Check for errors in record output
+              if [ -f record_output.txt ] && grep -q "ERROR" record_output.txt; then
+                echo "Error found in record phase..."
+                cat record_output.txt
+                FINAL_STATUS="Failed"; FAILURE_REASON="Record phase had errors"
+              elif [ -f record_output.txt ] && grep -q "WARNING: DATA RACE" record_output.txt; then
+                echo "Race condition detected in recording..."
+                cat record_output.txt
+                FINAL_STATUS="Failed"; FAILURE_REASON="Record phase had race condition"
+              elif [ -f record_metrics.csv ]; then
                 IFS=',' read REC_E REC_P REC_M < record_metrics.csv
                 REC_DURATION=$REC_E; REC_CPU_P=$REC_P; REC_MEM_MB=$(echo "scale=2; $REC_M / 1024" | bc -l)
               fi
@@ -352,10 +336,22 @@ jobs:
             if [ -n "$TEST_CMD" ]; then
               TEST_CMD=${TEST_CMD//'docker-compose'/'docker compose'}
               echo "--- Running Test Step ---"
-              echo ">> cd app && eval \"$KEPLOY_RUN\" $TEST_CMD"
-              if sudo /usr/bin/time -f "${{ env.TIME_FORMAT_STRING }}" -o test_metrics.csv bash -lc "cd app && $KEPLOY_RUN $TEST_CMD"; then
+              echo ">> cd app && sudo -E env PATH=\"\$PATH\" \$REPLAY_BIN $TEST_CMD"
+              if (cd app && sudo /usr/bin/time -f "${{ env.TIME_FORMAT_STRING }}" -o ../test_metrics.csv \
+                sudo -E env PATH="$PATH" $REPLAY_BIN $TEST_CMD &> ../test_output.txt); then
                 IFS=',' read TEST_E TEST_P TEST_M < test_metrics.csv
-                TEST_DURATION=$TEST_E; TEST_CPU_P=$TEST_P; TEST_MEM_MB=$(echo "scale=2; $TEST_M / 1024" | bc)
+                TEST_DURATION=$TEST_E; TEST_CPU_P=$TEST_P; TEST_MEM_MB=$(echo "scale=2; $TEST_M / 1024" | bc -l)
+                
+                # Check for errors in test output
+                if [ -f test_output.txt ] && grep -q "ERROR" test_output.txt; then
+                  echo "Error found in test phase..."
+                  cat test_output.txt
+                  FINAL_STATUS="Failed"; FAILURE_REASON="Test phase had errors"
+                elif [ -f test_output.txt ] && grep -q "WARNING: DATA RACE" test_output.txt; then
+                  echo "Race condition detected in test..."
+                  cat test_output.txt
+                  FINAL_STATUS="Failed"; FAILURE_REASON="Test phase had race condition"
+                fi
                 
                 # Check test results
                 all_passed=true
@@ -379,6 +375,10 @@ jobs:
                   FINAL_STATUS="Failed"; FAILURE_REASON="Test step failed (tests did not pass)"
                 fi
               else
+                echo "Test execution failed"
+                if [ -f test_output.txt ]; then
+                  cat test_output.txt
+                fi
                 echo "---- docker compose ps (after test failure) ----"
                 (cd app && docker compose ps || true)
                 # Try to log any running containers
@@ -386,7 +386,7 @@ jobs:
                   echo "---- $container logs (last 200) ----"
                   sudo docker logs "$container" --tail=200 || true
                 done
-                FINAL_STATUS="Failed"; FAILURE_REASON="Test step failed (likely no test-sets recorded)"
+                FINAL_STATUS="Failed"; FAILURE_REASON="Test step failed (execution error)"
               fi
             else
               FINAL_STATUS="Failed"; FAILURE_REASON="test_command not defined"
