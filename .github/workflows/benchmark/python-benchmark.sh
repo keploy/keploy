@@ -9,13 +9,48 @@ git checkout native-linux
 # Start the postgres database
 docker compose up -d
 
-# Install dependencies
-pip3 install -r requirements.txt
+# Verify Python installation
+echo "=== Python Environment Setup ==="
+which python3
+python3 --version
+which pip3
+pip3 --version
+
+# Install dependencies with verbose output
+echo "=== Installing Dependencies ==="
+echo "Looking for requirements.txt..."
+ls -la | grep requirements || echo "requirements.txt not found in current directory"
+if [ -f "requirements.txt" ]; then
+    echo "Installing from requirements.txt:"
+    cat requirements.txt
+    pip3 install -r requirements.txt --verbose
+else
+    echo "requirements.txt not found, installing Django directly"
+    pip3 install Django psycopg2-binary
+fi
+
+# Verify Django installation
+echo "=== Verifying Django Installation ==="
+python3 -c "import django; print(f'Django version: {django.get_version()}')" || echo "Django import failed"
 
 # Setup environment
 export PYTHON_PATH=./venv/lib/python3.10/site-packages/django
 
+# Debug current working directory and files
+echo "=== Current Directory and Files ==="
+pwd
+ls -la
+echo "=== Checking for manage.py ==="
+if [ -f "manage.py" ]; then
+    echo "manage.py found"
+    head -10 manage.py
+else
+    echo "manage.py not found in current directory"
+    find . -name "manage.py" -type f || echo "manage.py not found anywhere"
+fi
+
 # Database migrations
+echo "=== Running Database Migrations ==="
 python3 manage.py makemigrations
 python3 manage.py migrate
 

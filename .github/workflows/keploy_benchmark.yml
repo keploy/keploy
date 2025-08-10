@@ -61,6 +61,11 @@ jobs:
           echo "Keploy binary location: ${{ steps.record.outputs.path }}"
           ${{ steps.record.outputs.path }} --version || true
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
       - name: Checkout the samples-python repository
         uses: actions/checkout@v4
         with:
