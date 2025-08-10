@@ -213,39 +213,42 @@ jobs:
           }
 
     
-          if [ "$FINAL_STATUS" = "Success" ]; then
+                    if [ "$FINAL_STATUS" = "Success" ]; then
             RECORD_CMD=$(yq eval '.record_command // ""' "$PIPELINE_FILE")
             if [ -n "$RECORD_CMD" ]; then
               RECORD_CMD=${RECORD_CMD//'docker-compose'/'docker compose'}
-              if ! grep -q -- "--cmd-type" <<< "$RECORD_CMD"; then
-                RECORD_CMD="$RECORD_CMD --cmd-type docker-compose"
-              fi
               echo "--- Running Record Step ---"
-              sudo -E bash -lc '
-                set -e
-                trap "kill -2 $KEPLOY_PID 2>/dev/null || true; wait $KEPLOY_PID || true" EXIT
-                echo ">> cd app && $KEPLOY_RUN $RECORD_CMD"
-                (cd app && $KEPLOY_RUN $RECORD_CMD) &
-                KEPLOY_PID=$!
-                echo "Keploy record PID: $KEPLOY_PID"
+              
+              # Define a cleanup trap
+              trap 'echo "Stopping Keploy..."; sudo docker stop keploy-v2 || true; wait "$KEPLOY_PID" || true' EXIT
 
-                echo "Waiting for app container: fastapi-app (timeout 90s)..."
-                for i in {1..30}; do
-                  if docker ps --filter "name=fastapi-app" --filter "status=running" -q | grep -q .; then
-                    echo "fastapi-app is running."
-                    break
-                  fi
-                  sleep 3
-                  if [ $i -eq 30 ]; then
-                    echo "App container did not become running in time."
-                    echo "---- docker compose ps ----"
-                    (cd app && docker compose ps || true)
-                    echo "---- fastapi-app logs (last 200) ----"
-                    docker logs fastapi-app --tail=200 || true
-                    exit 1
-                  fi
-                done
+              # Start Keploy in the background
+              echo ">> cd app && $KEPLOY_RUN $RECORD_CMD"
+              (cd app && $KEPLOY_RUN $RECORD_CMD) &
+              KEPLOY_PID=$!
+              echo "Keploy record PID: $KEPLOY_PID"
 
+              # Wait for the application container to be ready
+              echo "Waiting for app container: fastapi-app (timeout 90s)..."
+              for i in {1..30}; do
+                if sudo docker ps --filter "name=fastapi-app" --filter "status=running" -q | grep -q .; then
+                  echo "fastapi-app is running."
+                  break
+                fi
+                sleep 3
+                if [ $i -eq 30 ]; then
+                  echo "::error::App container did not become running in time."
+                  echo "---- docker compose ps ----"
+                  (cd app && sudo docker compose ps || true)
+                  echo "---- fastapi-app logs (last 200) ----"
+                  sudo docker logs fastapi-app --tail=200 || true
+                  FINAL_STATUS="Failed"; FAILURE_REASON="Record orchestration failed (app didn't start)"
+                  break
+                fi
+              done
+
+              # Generate traffic only if the app started successfully
+              if [ "$FINAL_STATUS" = "Success" ]; then
                 if [ -f "app/curls.sh" ]; then
                   chmod +x app/curls.sh
                   echo "Executing app/curls.sh ..."
@@ -253,18 +256,21 @@ jobs:
                 else
                   echo "::warning::app/curls.sh not found; continuing without traffic"
                 fi
-
                 echo "Cooling down 10s..."
                 sleep 10
-                echo "Stopping Keploy..."
-                kill -2 $KEPLOY_PID 2>/dev/null || true
-                wait $KEPLOY_PID || true
-                trap - EXIT
-              ' || { FINAL_STATUS="Failed"; FAILURE_REASON="Record orchestration failed (compose/app didn’t start)"; }
+              fi
+              
+              # Stop Keploy and remove the trap
+              trap - EXIT
+              echo "Stopping Keploy..."
+              sudo docker stop keploy-v2 || true # Use stop instead of kill for graceful shutdown
+              wait "$KEPLOY_PID" || true
+
             else
               echo "::warning::record_command not defined; skipping record phase"
             fi
           fi
+
 
           # TEST
           if [ "$FINAL_STATUS" = "Success" ]; then
