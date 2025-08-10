@@ -1,4 +1,4 @@
-name: Keploy Dynamic Test and Benchmark Pipeline
+name: Keploy Benchmark Pipeline
 
 on:
   push:
@@ -6,10 +6,7 @@ on:
   workflow_dispatch:
 
 env:
-  REPOS_SHEET_NAME: "repos"
-  REPORT_SHEET_NAME: "benchmark_report"
   TIME_FORMAT_STRING: "%e,%P,%M"
-  NOTIFICATION_RECIPIENT: "asish.kumar.programmer@gmail.com"
 
 jobs:
   build-keploy:
@@ -30,65 +27,24 @@ jobs:
           path: keploy
           retention-days: 1
 
-  prepare-matrix:
+  python-benchmark:
+    needs: [build-keploy]
     runs-on: ubuntu-latest
-    outputs:
-      repos: ${{ steps.create-matrix.outputs.repos }}
+    name: Python Django PostgreSQL Benchmark
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: google-github-actions/setup-gcloud@v2
+      - id: record
+        uses: ./.github/actions/download-binary
         with:
-          version: ">= 463.0.0"
+          src: build
 
-      - name: Activate service account
-        id: gcloud-auth
-        env:
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-        run: |
-          echo "$GCP_SA_KEY" > sa.json
-          gcloud auth activate-service-account --key-file=sa.json
-          ACCESS_TOKEN=$(gcloud auth print-access-token --scopes=https://www.googleapis.com/auth/spreadsheets.readonly)
-          if [ -z "$ACCESS_TOKEN" ]; then
-            echo "::error::Failed to mint access token"; exit 1
-          fi
-          echo "access_token=$ACCESS_TOKEN" >> $GITHUB_OUTPUT
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
 
-      - name: Get Repo List from Google Sheet via REST API
-        id: get-repos
-        env:
-          TOKEN: ${{ steps.gcloud-auth.outputs.access_token }}
-          SHEET_ID: ${{ secrets.SHEET_ID }}
-          REPOS_SHEET_NAME: ${{ env.REPOS_SHEET_NAME }}
-        run: |
-          API_URL="https://sheets.googleapis.com/v4/spreadsheets/$SHEET_ID/values/${REPOS_SHEET_NAME}!A2:A"
-          response=$(curl -s --fail --show-error --get "$API_URL" -H "Authorization: Bearer $TOKEN")
-          echo "SHEET_VALUES<<EOF" >> $GITHUB_OUTPUT
-          echo "$response" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Create JSON Matrix from Sheet Data
-        id: create-matrix
-        env:
-          SHEET_DATA: ${{ steps.get-repos.outputs.SHEET_VALUES }}
-        run: |
-          if echo "${SHEET_DATA}" | jq -e '.error' > /dev/null; then
-            echo "::error::API call to Google Sheets failed. Full response below:"
-            echo "${SHEET_DATA}"
-            exit 1
-          fi
-          REPOS_JSON=$(echo "${SHEET_DATA}" | jq -c '(.values // []) | map(.[0])')
-          echo "repos=${REPOS_JSON}" >> $GITHUB_OUTPUT
-
-  test-and-benchmark:
-    needs: [build-keploy, prepare-matrix]
-    if: needs.prepare-matrix.outputs.repos != '[]'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        repo: ${{ fromJson(needs.prepare-matrix.outputs.repos) }}
-    steps:
       - name: Download Keploy Binary Artifact
         uses: actions/download-artifact@v4
         with:
@@ -98,421 +54,131 @@ jobs:
       - name: Set up Keploy Binary
         run: |
           chmod +x build/keploy
-          echo "RECORD_BIN=$PWD/build/keploy" >> $GITHUB_ENV
-          echo "REPLAY_BIN=$PWD/build/keploy" >> $GITHUB_ENV
-          echo "Keploy binary location: $PWD/build/keploy"
-          $PWD/build/keploy --version || true
+          echo "RECORD_BIN=${{ steps.record.outputs.path }}" >> $GITHUB_ENV
+          echo "REPLAY_BIN=${{ steps.replay.outputs.path }}" >> $GITHUB_ENV
+          echo "Keploy binary location: ${{ steps.record.outputs.path }}"
+          ${{ steps.record.outputs.path }} --version || true
 
-      # Accept full URLs (https/ssh) OR owner/repo
-      - name: Clone Application Repo
-        run: |
-          REPO="${{ matrix.repo }}"
-          DEST="app"
-          if [[ "$REPO" =~ ^https?:// ]] || [[ "$REPO" =~ ^git@ ]]; then
-            git clone "$REPO" "$DEST"
-          else
-            git clone "https://github.com/$REPO.git" "$DEST"
-          fi
+      - name: Checkout the samples-python repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-python
+          path: samples-python
 
-      - name: Install yq (YAML Parser), bc (Calculator), and ensure Docker Compose
+      - name: Install system dependencies
         run: |
-          sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq
-          sudo chmod +x /usr/bin/yq
           sudo apt-get update && sudo apt-get install -y bc
-
           echo "Current Docker Compose version:"
           docker compose version || docker-compose version || true
 
-          # Ensure we have the compose plugin
-          if ! docker compose version >/dev/null 2>&1; then
-            echo "Installing Docker Compose plugin..."
-            sudo apt-get install -y docker-compose-plugin
-          fi
-
-          echo "Final Docker Compose check:"
-          docker compose version
-
-      - name: Set up Language Environment
-        id: language-setup
+      - name: Run Python Django Benchmark
+        id: python-benchmark
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
         run: |
-          FOUND=$( (cd app && git ls-files | grep -E '(^|/)(keploy-pipeline\.yml|keploy\.ya?ml)$' | head -n1) )
-          if [ -z "$FOUND" ]; then
-            echo "language=none" >> $GITHUB_OUTPUT
-            echo "version=" >> $GITHUB_OUTPUT
-            echo "pipeline_file=" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          PIPELINE_FILE="app/$FOUND"
-          LANGUAGE=$(yq eval '.environment.language // "none"' "$PIPELINE_FILE")
-          VERSION=$(yq eval '.environment.version // ""' "$PIPELINE_FILE")
-          echo "language=$LANGUAGE" >> $GITHUB_OUTPUT
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "pipeline_file=$PIPELINE_FILE" >> $GITHUB_OUTPUT
+          cd samples-python/django-postgres/django_postgres
+          chmod +x ../../../.github/workflows/benchmark/python-benchmark.sh
 
-      - name: Setup Go
-        if: steps.language-setup.outputs.language == 'go'
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ steps.language-setup.outputs.version }}
+          # Execute benchmark with metrics collection
+          exec > >(tee benchmark_output.log) 2>&1
 
-      - name: Setup Node.js
-        if: steps.language-setup.outputs.language == 'node'
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ steps.language-setup.outputs.version }}
+          echo "=== Starting Python Django PostgreSQL Benchmark ==="
+          echo "Using RECORD_BIN: $RECORD_BIN"
+          echo "Using REPLAY_BIN: $REPLAY_BIN"
 
-      - name: Setup Python
-        if: steps.language-setup.outputs.language == 'python'
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ steps.language-setup.outputs.version }}
+          # Run the benchmark script
+          source ../../../.github/workflows/benchmark/python-benchmark.sh
 
-      - name: Run Pipeline from keploy-pipeline.yml
-        id: pipeline-runner
-        shell: bash
-        run: |
-          exec > >(tee runner-log.txt) 2>&1
+          echo "=== Benchmark completed successfully ==="
 
-          PIPELINE_FILE="${{ steps.language-setup.outputs.pipeline_file }}"
-          if [ -z "$PIPELINE_FILE" ]; then
-            echo "Failure reason: pipeline file not found (keploy-pipeline.yml / keploy.yml / keploy.yaml)"
-            echo "final_status=Failed" >> $GITHUB_OUTPUT
-            echo "failure_reason=pipeline file not found" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-          echo "Using pipeline file: $PIPELINE_FILE"
-
-          FINAL_STATUS="Success"; FAILURE_REASON="None"
-          REC_DURATION=0; REC_CPU_P="0%"; REC_MEM_MB=0
-          TEST_DURATION=0; TEST_CPU_P="0%"; TEST_MEM_MB=0
-
-          # Clean up any existing keploy data
-          sudo rm -rf app/keploy/ 2>/dev/null || true
-
-          echo "Using native keploy binary approach"
-          echo "RECORD_BIN: $RECORD_BIN"
-          echo "REPLAY_BIN: $REPLAY_BIN"
-
-          echo "--- Running Setup Steps ---"
-          setup_commands=$(yq eval '.setup // [] | .[]' "$PIPELINE_FILE")
-          if [ -n "$setup_commands" ]; then
-            while IFS= read -r cmd; do
-              [ -z "$cmd" ] && continue
-              cmd=${cmd//'docker-compose'/'docker compose'}
-              echo "\$ $cmd"
-              if ! (cd app && sudo -E bash -lc "$cmd"); then
-                FINAL_STATUS="Failed"
-                FAILURE_REASON="Setup cmd failed: $cmd"
-                echo "final_status=Failed" >> $GITHUB_OUTPUT
-                echo "failure_reason=Setup cmd failed: $cmd" >> $GITHUB_OUTPUT
-                exit 1
-              fi
-            done <<< "$setup_commands"
-          fi
-
-          # Generate keploy config if not exists
-          if [ ! -f "app/keploy.yml" ] && [ ! -f "app/keploy.yaml" ]; then
-            echo "--- Generating Keploy Config ---"
-            cd app && sudo -E env PATH="$PATH" $RECORD_BIN config --generate
-            cd ..
-          fi
-
-          echo "--- Preflight: Testing keploy binary and Docker ---"
-          echo "Keploy binary test:"
-          $RECORD_BIN --version || {
-            echo "::error::Keploy binary not working"
-            echo "final_status=Failed" >> $GITHUB_OUTPUT
-            echo "failure_reason=Keploy binary not working" >> $GITHUB_OUTPUT
-            exit 1
-          }
-
-          echo "Docker availability test:"
-          docker version || {
-            echo "::error::Docker not available"
-            echo "final_status=Failed" >> $GITHUB_OUTPUT
-            echo "failure_reason=Docker not available" >> $GITHUB_OUTPUT
-            exit 1
-          }
-
-          echo "Docker Compose test:"
-          docker compose version || {
-            echo "::warning::Docker Compose not working, but proceeding..."
-          }
-
-          echo "Preflight checks completed."
-
-          # RECORD phase
-          if [ "$FINAL_STATUS" = "Success" ]; then
-            RECORD_CMD=$(yq eval '.record_command // ""' "$PIPELINE_FILE")
-            if [ -n "$RECORD_CMD" ]; then
-              RECORD_CMD=${RECORD_CMD//'docker-compose'/'docker compose'}
-              echo "--- Running Record Step ---"
-              
-              # Define a cleanup trap
-              container_kill() {
-                pid=$(pgrep -n keploy)
-                if [ -n "$pid" ]; then
-                  echo "$pid Keploy PID"
-                  echo "Killing keploy"
-                  sudo kill $pid 2>/dev/null || true
-                fi
-              }
-              trap 'echo "Stopping Keploy..."; container_kill; wait "$KEPLOY_PID" || true' EXIT
-
-              # Start Keploy in the background with timing (native binary approach)
-              echo ">> cd app && sudo /usr/bin/time -f \"${{ env.TIME_FORMAT_STRING }}\" -o ../record_metrics.csv sudo -E env PATH=\"\$PATH\" \$RECORD_BIN $RECORD_CMD"
-              (cd app && sudo /usr/bin/time -f "${{ env.TIME_FORMAT_STRING }}" -o ../record_metrics.csv \
-                sudo -E env PATH="$PATH" $RECORD_BIN $RECORD_CMD &> ../record_output.txt) &
-              KEPLOY_PID=$!
-              echo "Keploy record PID: $KEPLOY_PID"
-
-              # Extract container name from the record command
-              APP_CONTAINER_NAME=$(echo "$RECORD_CMD" | grep -o '\--container-name ['\''"][^'\''"]*['\''"]' | sed 's/--container-name ['\''"]//g' | sed 's/['\''"]$//g' || echo "")
-              if [ -z "$APP_CONTAINER_NAME" ]; then
-                APP_CONTAINER_NAME=$(echo "$RECORD_CMD" | grep -o '\--container-name [^ ]*' | cut -d' ' -f2 || echo "app")
-              fi
-              
-              # Wait for the application container to be ready
-              echo "Waiting for app container: $APP_CONTAINER_NAME (timeout 90s)..."
-              for i in {1..30}; do
-                if sudo docker ps --filter "name=$APP_CONTAINER_NAME" --filter "status=running" -q | grep -q .; then
-                  echo "$APP_CONTAINER_NAME is running."
-                  break
-                fi
-                sleep 3
-                if [ $i -eq 30 ]; then
-                  echo "::error::App container did not become running in time."
-                  echo "---- docker compose ps ----"
-                  (cd app && sudo docker compose ps || true)
-                  echo "---- $APP_CONTAINER_NAME logs (last 200) ----"
-                  sudo docker logs "$APP_CONTAINER_NAME" --tail=200 || true
-                  FINAL_STATUS="Failed"; FAILURE_REASON="Record orchestration failed (app didn't start)"
-                  break
-                fi
-              done
-
-              # Generate traffic only if the app started successfully
-              if [ "$FINAL_STATUS" = "Success" ]; then
-                if [ -f "app/curls.sh" ]; then
-                  chmod +x app/curls.sh
-                  echo "Executing app/curls.sh ..."
-                  (cd app && ./curls.sh)
-                else
-                  echo "::warning::app/curls.sh not found; continuing without traffic"
-                fi
-                echo "Cooling down 10s..."
-                sleep 10
-              fi
-              
-              # Stop Keploy and remove the trap
-              trap - EXIT
-              echo "Stopping Keploy..."
-              container_kill
-              wait "$KEPLOY_PID" || true
-              
-              # Check for errors in record output
-              if [ -f record_output.txt ] && grep -q "ERROR" record_output.txt; then
-                echo "Error found in record phase..."
-                cat record_output.txt
-                FINAL_STATUS="Failed"; FAILURE_REASON="Record phase had errors"
-              elif [ -f record_output.txt ] && grep -q "WARNING: DATA RACE" record_output.txt; then
-                echo "Race condition detected in recording..."
-                cat record_output.txt
-                FINAL_STATUS="Failed"; FAILURE_REASON="Record phase had race condition"
-              elif [ -f record_metrics.csv ]; then
-                IFS=',' read REC_E REC_P REC_M < record_metrics.csv
-                REC_DURATION=$REC_E; REC_CPU_P=$REC_P; REC_MEM_MB=$(echo "scale=2; $REC_M / 1024" | bc -l)
-              fi
-
-            else
-              echo "::warning::record_command not defined; skipping record phase"
-            fi
-          fi
-
-
-          # TEST
-          if [ "$FINAL_STATUS" = "Success" ]; then
-            TEST_CMD=$(yq eval '.test_command // ""' "$PIPELINE_FILE")
-            if [ -n "$TEST_CMD" ]; then
-              TEST_CMD=${TEST_CMD//'docker-compose'/'docker compose'}
-              echo "--- Running Test Step ---"
-              echo ">> cd app && sudo -E env PATH=\"\$PATH\" \$REPLAY_BIN $TEST_CMD"
-              if (cd app && sudo /usr/bin/time -f "${{ env.TIME_FORMAT_STRING }}" -o ../test_metrics.csv \
-                sudo -E env PATH="$PATH" $REPLAY_BIN $TEST_CMD &> ../test_output.txt); then
-                IFS=',' read TEST_E TEST_P TEST_M < test_metrics.csv
-                TEST_DURATION=$TEST_E; TEST_CPU_P=$TEST_P; TEST_MEM_MB=$(echo "scale=2; $TEST_M / 1024" | bc -l)
-                
-                # Check for errors in test output
-                if [ -f test_output.txt ] && grep -q "ERROR" test_output.txt; then
-                  echo "Error found in test phase..."
-                  cat test_output.txt
-                  FINAL_STATUS="Failed"; FAILURE_REASON="Test phase had errors"
-                elif [ -f test_output.txt ] && grep -q "WARNING: DATA RACE" test_output.txt; then
-                  echo "Race condition detected in test..."
-                  cat test_output.txt
-                  FINAL_STATUS="Failed"; FAILURE_REASON="Test phase had race condition"
-                fi
-                
-                # Check test results
-                all_passed=true
-                if [ -d "app/keploy/reports" ]; then
-                  for report_file in app/keploy/reports/test-run-*/test-set-*-report.yaml; do
-                    if [ -f "$report_file" ]; then
-                      test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-                      echo "Test status for $(basename "$report_file"): $test_status"
-                      if [ "$test_status" != "PASSED" ]; then
-                        all_passed=false
-                        break
-                      fi
-                    fi
-                  done
-                else
-                  echo "::warning::No test reports found"
-                  all_passed=false
-                fi
-                
-                if [ "$all_passed" = false ]; then
-                  FINAL_STATUS="Failed"; FAILURE_REASON="Test step failed (tests did not pass)"
-                fi
-              else
-                echo "Test execution failed"
-                if [ -f test_output.txt ]; then
-                  cat test_output.txt
-                fi
-                echo "---- docker compose ps (after test failure) ----"
-                (cd app && docker compose ps || true)
-                # Try to log any running containers
-                for container in $(sudo docker ps --format "{{.Names}}" 2>/dev/null); do
-                  echo "---- $container logs (last 200) ----"
-                  sudo docker logs "$container" --tail=200 || true
-                done
-                FINAL_STATUS="Failed"; FAILURE_REASON="Test step failed (execution error)"
-              fi
-            else
-              FINAL_STATUS="Failed"; FAILURE_REASON="test_command not defined"
-            fi
-          fi
-
-          echo "Failure reason: $FAILURE_REASON"
-          echo "final_status=$FINAL_STATUS" >> $GITHUB_OUTPUT
-          echo "failure_reason=$FAILURE_REASON" >> $GITHUB_OUTPUT
-          echo "rec_duration=$REC_DURATION" >> $GITHUB_OUTPUT
-          echo "rec_cpu_p=$REC_CPU_P" >> $GITHUB_OUTPUT
-          echo "rec_mem_mb=$REC_MEM_MB" >> $GITHUB_OUTPUT
-          echo "test_duration=$TEST_DURATION" >> $GITHUB_OUTPUT
-          echo "test_cpu_p=$TEST_CPU_P" >> $GITHUB_OUTPUT
-          echo "test_mem_mb=$TEST_MEM_MB" >> $GITHUB_OUTPUT
-
-          if [ "$FINAL_STATUS" != "Success" ]; then exit 1; fi
-
-      - name: Create Report Data as Artifact
-        if: always()
-        run: |
-          TIMESTAMP_IST=$(TZ='Asia/Kolkata' date +'%b %d, %Y, %I:%M %p %Z')
-          WORKFLOW_LINK="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          FINAL_STATUS="${{ steps.pipeline-runner.outputs.final_status }}"
-          FAILURE_REASON="${{ steps.pipeline-runner.outputs.failure_reason }}"
-          REC_DUR=${{ steps.pipeline-runner.outputs.rec_duration || 0 }}
-          REC_CPU_P="${{ steps.pipeline-runner.outputs.rec_cpu_p || '0%' }}"
-          REC_MEM_MB=${{ steps.pipeline-runner.outputs.rec_mem_mb || 0 }}
-          TEST_DUR=${{ steps.pipeline-runner.outputs.test_duration || 0 }}
-          TEST_CPU_P="${{ steps.pipeline-runner.outputs.test_cpu_p || '0%' }}"
-          TEST_MEM_MB=${{ steps.pipeline-runner.outputs.test_mem_mb || 0 }}
-          JSON_ROW=$(jq -n \
-            --arg ts "$TIMESTAMP_IST" \
-            --arg wlink "$WORKFLOW_LINK" \
-            --arg rurl "${{ matrix.repo }}" \
-            --arg status "$FINAL_STATUS" \
-            --arg reason "$FAILURE_REASON" \
-            --argjson recdur $REC_DUR \
-            --arg reccpup "$REC_CPU_P" \
-            --argjson recmem $REC_MEM_MB \
-            --argjson testdur $TEST_DUR \
-            --arg testcpup "$TEST_CPU_P" \
-            --argjson testmem $TEST_MEM_MB \
-            '[[$ts, $wlink, $rurl, $status, $reason, $recdur, $reccpup, $recmem, $testdur, $testcpup, $testmem]]')
-          echo "$JSON_ROW" > report.json
-
-      - name: Sanitize artifact name
-        id: safe-name
-        if: always()
-        run: |
-          RAW="${{ matrix.repo }}"
-          SAFE="$RAW"
-          SAFE="${SAFE#https://}"; SAFE="${SAFE#http://}"; SAFE="${SAFE#git@}"
-          SAFE="${SAFE//\//-}"; SAFE="${SAFE//:/-}"; SAFE="${SAFE//@/-}"; SAFE="${SAFE// /-}"
-          SAFE=$(printf '%s' "$SAFE" | sed 's/[^A-Za-z0-9._-]/-/g')
-          echo "safe=$SAFE" >> $GITHUB_OUTPUT
-
-      - name: Upload Individual Report as Artifact
+      - name: Upload Benchmark Results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: report-for-${{ steps.safe-name.outputs.safe }}
-          path: report.json
+          name: python-benchmark-results
+          path: |
+            samples-python/django-postgres/django_postgres/benchmark_output.log
+            samples-python/django-postgres/django_postgres/record_metrics_*.txt
+            samples-python/django-postgres/django_postgres/test_metrics_detailed.txt
+            samples-python/django-postgres/django_postgres/keploy/reports/
+          retention-days: 7
 
-      - name: Prepare Attachments on Failure
-        if: failure()
+      - name: Display Benchmark Summary
+        if: always()
         run: |
-          echo "Zipping Keploy directory for email attachment..."
-          if [ -d "app/keploy" ]; then sudo zip -r keploy_artifacts.zip app/keploy; else echo "Keploy directory not found."; fi
+          cd samples-python/django-postgres/django_postgres
+          echo "=== BENCHMARK SUMMARY ==="
+          echo "Application: Python Django + PostgreSQL"
+          echo "Timestamp: $(date)"
+          echo "Workflow Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-      - name: Send Email Notification on Failure
-        if: failure()
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: "smtp.gmail.com"
-          server_port: 587
-          username: ${{ secrets.GMAIL_USERNAME }}
-          password: ${{ secrets.GMAIL_APP_PASSWORD }}
-          subject: "❌ CI Failure: Keploy Test Failed for ${{ matrix.repo }}"
-          to: ${{ env.NOTIFICATION_RECIPIENT }}
-          from: GitHub Actions CI <${{ secrets.GMAIL_USERNAME }}>
-          body: |
-            A failure occurred while running the Keploy test pipeline.
-            **Repository:** `${{ matrix.repo }}`
-            **Failure Reason:** `${{ steps.pipeline-runner.outputs.failure_reason }}`
-            **Logs:** See runner-log.txt artifact.
-            **Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          attachments: runner-log.txt, keploy_artifacts.zip
+          echo ""
+          echo "=== METRICS SUMMARY ==="
 
-  report-to-google-sheets:
-    runs-on: ubuntu-latest
-    needs: test-and-benchmark
-    if: always()
-    steps:
-      - name: Authenticate to Google Cloud
-        id: auth
-        uses: "google-github-actions/auth@v2"
-        with:
-          create_credentials_file: false
-          credentials_json: "${{ secrets.GCP_SA_KEY }}"
-          access_token_scopes: "https://www.googleapis.com/auth/spreadsheets"
+          # Display record metrics
+          for i in {1..2}; do
+            if [ -f "record_metrics_${i}.txt" ]; then
+              echo "Record Cycle ${i}:"
+              cat "record_metrics_${i}.txt"
+            fi
+          done
 
-      - name: Download all individual reports
-        uses: actions/download-artifact@v4
-        with:
-          path: all-reports
-          pattern: report-for-*
-          merge-multiple: true
-
-      - name: Aggregate all reports into a single payload
-        id: aggregate
-        run: |
-          files=$(find all-reports -name "report.json" -type f)
-          if [ -z "$files" ]; then 
-            echo "payload=[]" >> $GITHUB_OUTPUT
-          else 
-            FINAL_PAYLOAD=$(jq -s 'map(.[0])' $files)
-            echo "payload=${FINAL_PAYLOAD}" >> $GITHUB_OUTPUT
+          # Display test metrics
+          if [ -f "test_metrics_detailed.txt" ]; then
+            echo "Test Execution Metrics:"
+            cat "test_metrics_detailed.txt"
           fi
 
-      - name: Append data to Google Sheet via REST API
-        if: steps.aggregate.outputs.payload != '[]'
+  # Future: Add more language benchmarks
+  # golang-benchmark:
+  #   needs: [build-keploy]
+  #   runs-on: ubuntu-latest
+  #   # Similar structure for Go benchmarks
+
+  # nodejs-benchmark:
+  #   needs: [build-keploy]
+  #   runs-on: ubuntu-latest
+  #   # Similar structure for Node.js benchmarks
+
+  benchmark-summary:
+    runs-on: ubuntu-latest
+    needs: [python-benchmark]
+    if: always()
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all benchmark results
+        uses: actions/download-artifact@v4
+        with:
+          path: all-benchmark-results
+          pattern: "*-benchmark-results"
+          merge-multiple: true
+
+      - name: Generate Benchmark Report
         run: |
-          API_URL="https://sheets.googleapis.com/v4/spreadsheets/${{ secrets.SHEET_ID }}/values/${{ env.REPORT_SHEET_NAME }}:append?valueInputOption=USER_ENTERED"
-          JSON_BODY=$(jq -n --argjson values "${{ steps.aggregate.outputs.payload }}" '{ "values": $values }')
-          curl -s --request POST "$API_URL" \
-               --header "Authorization: Bearer ${{ steps.auth.outputs.access_token }}" \
-               --header "Content-Type: application/json" \
-               --data-raw "$JSON_BODY"
+          echo "# Keploy Benchmark Report" > benchmark_report.md
+          echo "" >> benchmark_report.md
+          echo "**Generated:** $(date)" >> benchmark_report.md
+          echo "**Workflow:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> benchmark_report.md
+          echo "" >> benchmark_report.md
+
+          echo "## Summary" >> benchmark_report.md
+          echo "- **Python Django PostgreSQL**: ${{ needs.python-benchmark.result }}" >> benchmark_report.md
+          echo "" >> benchmark_report.md
+
+          echo "## Detailed Results" >> benchmark_report.md
+          if [ -f all-benchmark-results/benchmark_output.log ]; then
+            echo "### Python Django PostgreSQL Benchmark" >> benchmark_report.md
+            echo '```' >> benchmark_report.md
+            cat all-benchmark-results/benchmark_output.log >> benchmark_report.md
+            echo '```' >> benchmark_report.md
+          fi
+
+      - name: Upload Final Benchmark Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: keploy-benchmark-report
+          path: benchmark_report.md
+          retention-days: 30
