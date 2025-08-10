@@ -39,20 +39,44 @@ jobs:
     outputs:
       repos: ${{ steps.create-matrix.outputs.repos }}
     steps:
-      - name: Authenticate to Google Cloud
-        id: auth
-        uses: "google-github-actions/auth@v1"
+      - uses: actions/checkout@v4
+
+      # Install gcloud CLI
+      - uses: google-github-actions/setup-gcloud@v2
         with:
-          credentials_json: "${{ secrets.GCP_SA_KEY }}"
-          access_token_scopes: "https://www.googleapis.com/auth/spreadsheets"
+          version: ">= 463.0.0"
+
+      # Write the SA key to a file and activate the account
+      - name: Activate service account
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          echo "$GCP_SA_KEY" > sa.json
+          echo "Service account email:" $(jq -r .client_email sa.json)
+          echo "Project from key:     " $(jq -r .project_id sa.json)
+          gcloud auth activate-service-account --key-file=sa.json
+          # Mint an OAuth access token for Sheets scope (no IAM Credentials API involved)
+          ACCESS_TOKEN=$(gcloud auth print-access-token --scopes=https://www.googleapis.com/auth/spreadsheets.readonly)
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "::error::Failed to mint access token"; exit 1
+          fi
+          echo "access_token=$ACCESS_TOKEN" >> $GITHUB_OUTPUT
+        id: gcloud-auth
 
       - name: Get Repo List from Google Sheet via REST API
         id: get-repos
+        env:
+          TOKEN: ${{ steps.gcloud-auth.outputs.access_token }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          REPOS_SHEET_NAME: ${{ env.REPOS_SHEET_NAME }}
         run: |
-          API_URL="https://sheets.googleapis.com/v4/spreadsheets/${{ secrets.SHEET_ID }}/values/${{ env.REPOS_SHEET_NAME }}!A2:A"
-          response=$(curl -s --request GET "$API_URL" --header "Authorization: Bearer ${{ steps.auth.outputs.access_token }}")
+          API_URL="https://sheets.googleapis.com/v4/spreadsheets/$SHEET_ID/values/${REPOS_SHEET_NAME}!A2:A"
+          response=$(curl -s --fail --show-error --get "$API_URL" \
+            -H "Authorization: Bearer $TOKEN")
           echo "API Response: $response"
-          echo "SHEET_VALUES<<EOF" >> $GITHUB_OUTPUT; echo "$response" >> $GITHUB_OUTPUT; echo "EOF" >> $GITHUB_OUTPUT
+          echo "SHEET_VALUES<<EOF" >> $GITHUB_OUTPUT
+          echo "$response" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Create JSON Matrix from Sheet Data
         id: create-matrix
@@ -60,7 +84,7 @@ jobs:
           SHEET_DATA: ${{ steps.get-repos.outputs.SHEET_VALUES }}
         run: |
           if echo "${SHEET_DATA}" | jq -e '.error' > /dev/null; then
-            echo "::error::API call to Google Sheets failed. Check GCP project permissions or the Sheet sharing settings. Full response below:"
+            echo "::error::API call to Google Sheets failed. Full response below:"
             echo "${SHEET_DATA}"
             exit 1
           fi
