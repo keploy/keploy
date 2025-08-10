@@ -176,14 +176,14 @@ jobs:
 
           # IMPORTANT: use $PWD (expands at runtime after 'cd app')
           export KEPLOY_RUN='sudo -E env PATH="$PATH" docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host \
-            -v "$PWD":"$PWD" -w "$PWD" \
-            -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v /usr/bin/docker:/usr/bin/docker:ro \
-            -v /usr/lib/docker/cli-plugins:/usr/lib/docker/cli-plugins:ro \
-            -v /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro \
-            -v "$HOME"/.keploy-config:/root/.keploy-config -v "$HOME"/.keploy:/root/.keploy \
-            --rm ${{ env.KEPLOY_IMAGE_NAME }}'
+          -v "$PWD":"$PWD" -w "$PWD" \
+          -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf \
+          -v /var/run/docker.sock:/var/run/docker.sock \
+          -v /usr/bin/docker:/usr/bin/docker:ro \
+          -v /usr/lib/docker/cli-plugins:/usr/lib/docker/cli-plugins:ro \
+          -v /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro \
+          -v "$HOME"/.keploy-config:/root/.keploy-config -v "$HOME"/.keploy:/root/.keploy \
+          --rm ghcr.io/keploy/keploy:v2-dev'
 
           echo "--- Running Setup Steps ---"
           yq eval '.setup // [] | .[]' "$PIPELINE_FILE" | while read -r cmd; do
@@ -195,7 +195,9 @@ jobs:
             fi
           done
 
-          # RECORD (optional but recommended)
+          (cd app && eval "$KEPLOY_RUN" sh -lc 'docker version && docker compose version') || {
+          echo "::error::Docker/Compose not available inside Keploy container"; exit 1; }
+
           if [ "$FINAL_STATUS" = "Success" ]; then
             RECORD_CMD=$(yq eval '.record_command // ""' "$PIPELINE_FILE")
             if [ -n "$RECORD_CMD" ]; then
