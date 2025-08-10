@@ -177,13 +177,14 @@ jobs:
 
           # Keploy runner — mount compose plugin dirs so 'docker compose' works inside
           export KEPLOY_RUN='sudo -E env PATH="$PATH" docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host \
-            -v "'"$(pwd)"'":"'"$(pwd)"'" -w "'"$(pwd)"'" \
-            -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v /usr/lib/docker/cli-plugins:/usr/lib/docker/cli-plugins \
-            -v /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins \
-            -v "$HOME"/.keploy-config:/root/.keploy-config -v "$HOME"/.keploy:/root/.keploy \
-            --rm ${{ env.KEPLOY_IMAGE_NAME }}'
+          -v "'"$(pwd)"'":"'"$(pwd)"'" -w "'"$(pwd)"'" \
+          -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf \
+          -v /var/run/docker.sock:/var/run/docker.sock \
+          -v /usr/bin/docker:/usr/bin/docker:ro \
+          -v /usr/lib/docker/cli-plugins:/usr/lib/docker/cli-plugins:ro \
+          -v /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro \
+          -v "$HOME"/.keploy-config:/root/.keploy-config -v "$HOME"/.keploy:/root/.keploy \
+          --rm ${{ env.KEPLOY_IMAGE_NAME }}'
 
           echo "--- Running Setup Steps ---"
           yq eval '.setup // [] | .[]' "$PIPELINE_FILE" | while read -r cmd; do
@@ -199,29 +200,45 @@ jobs:
           if [ "$FINAL_STATUS" = "Success" ]; then
             RECORD_CMD=$(yq eval '.record_command // ""' "$PIPELINE_FILE")
             if [ -n "$RECORD_CMD" ]; then
-              # Ensure v2 syntax inside command as well
+              # Ensure compose v2 syntax and cmd-type
               RECORD_CMD=${RECORD_CMD//'docker-compose'/'docker compose'}
+              if ! grep -q -- "--cmd-type" <<< "$RECORD_CMD"; then
+                RECORD_CMD="$RECORD_CMD --cmd-type docker-compose"
+              fi
+
               echo "--- Running Record Step ---"
               sudo -E bash -lc '
                 set -e
-                trap "kill -2 $KEPLOY_PID; wait $KEPLOY_PID || true" EXIT
+                trap "kill -2 $KEPLOY_PID 2>/dev/null || true; wait $KEPLOY_PID || true" EXIT
                 (cd app && eval "$KEPLOY_RUN" '"$RECORD_CMD"') &
                 KEPLOY_PID=$!
                 echo "Keploy record PID: $KEPLOY_PID"
-                echo "Waiting 20s for application to start..."
-                sleep 20
+
+                # Wait until the app container is running (up to 90s)
+                for i in {1..30}; do
+                  if docker ps --filter "name=fastapi-app" --filter "status=running" -q >/dev/null | grep -q .; then
+                    echo "fastapi-app is running."; break
+                  fi
+                  sleep 3
+                  if [ $i -eq 30 ]; then
+                    echo "App container did not become running in time."
+                    exit 1
+                  fi
+                done
+
                 if [ -f "app/curls.sh" ]; then
                   chmod +x app/curls.sh
                   (cd app && ./curls.sh)
                 else
                   echo "::warning::app/curls.sh not found; continuing without traffic"
                 fi
+
                 echo "Cooling down 10s..."
                 sleep 10
-                kill -2 $KEPLOY_PID
+                kill -2 $KEPLOY_PID 2>/dev/null || true
                 wait $KEPLOY_PID || true
                 trap - EXIT
-              ' || { FINAL_STATUS="Failed"; FAILURE_REASON="Record orchestration failed (app likely didn’t start)"; }
+              ' || { FINAL_STATUS="Failed"; FAILURE_REASON="Record orchestration failed (compose/app didn’t start)"; }
             else
               echo "::warning::record_command not defined; skipping record phase"
             fi
