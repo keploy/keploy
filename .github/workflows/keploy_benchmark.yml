@@ -9,7 +9,7 @@ env:
   REPOS_SHEET_NAME: "repos"
   REPORT_SHEET_NAME: "benchmark_report"
   TIME_FORMAT_STRING: "%e,%P,%M"
-  NOTIFICATION_RECIPIENT: "officialasishkumar@gmail.com"
+  NOTIFICATION_RECIPIENT: "asish.kumar.programmer@gmail.com"
   KEPLOY_IMAGE_NAME: "ghcr.io/keploy/keploy:v2-dev"
   IMAGE_ARTIFACT_NAME: "keploy-docker-image"
 
