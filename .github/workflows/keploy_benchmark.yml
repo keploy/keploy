@@ -120,7 +120,6 @@ jobs:
       - name: Set up Language Environment
         id: language-setup
         run: |
-          # autodiscover pipeline file name/location
           FOUND=$( (cd app && git ls-files | grep -E '(^|/)(keploy-pipeline\.yml|keploy\.ya?ml)$' | head -n1) )
           if [ -z "$FOUND" ]; then
             echo "language=none" >> $GITHUB_OUTPUT
@@ -159,7 +158,6 @@ jobs:
         run: |
           exec > >(tee runner-log.txt) 2>&1
 
-          # Inputs / defaults
           PIPELINE_FILE="${{ steps.language-setup.outputs.pipeline_file }}"
           if [ -z "$PIPELINE_FILE" ]; then
             echo "Failure reason: pipeline file not found (keploy-pipeline.yml / keploy.yml / keploy.yaml)"
@@ -167,30 +165,31 @@ jobs:
             echo "failure_reason=pipeline file not found" >> $GITHUB_OUTPUT
             exit 1
           fi
+          echo "Using pipeline file: $PIPELINE_FILE"
 
           FINAL_STATUS="Success"; FAILURE_REASON="None"
           REC_DURATION=0; REC_CPU_P="0%"; REC_MEM_MB=0
           TEST_DURATION=0; TEST_CPU_P="0%"; TEST_MEM_MB=0
 
-          # Clean any stale container name (Compose/Keploy)
+          # Clean any stale container name
           sudo docker rm -f keploy-v2 >/dev/null 2>&1 || true
 
-          # Keploy runner — mount compose plugin dirs so 'docker compose' works inside
+          # IMPORTANT: use $PWD (expands at runtime after 'cd app')
           export KEPLOY_RUN='sudo -E env PATH="$PATH" docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host \
-          -v "'"$(pwd)"'":"'"$(pwd)"'" -w "'"$(pwd)"'" \
-          -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf \
-          -v /var/run/docker.sock:/var/run/docker.sock \
-          -v /usr/bin/docker:/usr/bin/docker:ro \
-          -v /usr/lib/docker/cli-plugins:/usr/lib/docker/cli-plugins:ro \
-          -v /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro \
-          -v "$HOME"/.keploy-config:/root/.keploy-config -v "$HOME"/.keploy:/root/.keploy \
-          --rm ${{ env.KEPLOY_IMAGE_NAME }}'
+            -v "$PWD":"$PWD" -w "$PWD" \
+            -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v /usr/bin/docker:/usr/bin/docker:ro \
+            -v /usr/lib/docker/cli-plugins:/usr/lib/docker/cli-plugins:ro \
+            -v /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro \
+            -v "$HOME"/.keploy-config:/root/.keploy-config -v "$HOME"/.keploy:/root/.keploy \
+            --rm ${{ env.KEPLOY_IMAGE_NAME }}'
 
           echo "--- Running Setup Steps ---"
           yq eval '.setup // [] | .[]' "$PIPELINE_FILE" | while read -r cmd; do
             [ -z "$cmd" ] && continue
-            # Prefer Compose v2 if user wrote 'docker-compose'
             cmd=${cmd//'docker-compose'/'docker compose'}
+            echo "\$ $cmd"
             if ! (cd app && sudo -E bash -lc "$cmd"); then
               FINAL_STATUS="Failed"; FAILURE_REASON="Setup cmd failed: $cmd"; break
             fi
@@ -200,34 +199,39 @@ jobs:
           if [ "$FINAL_STATUS" = "Success" ]; then
             RECORD_CMD=$(yq eval '.record_command // ""' "$PIPELINE_FILE")
             if [ -n "$RECORD_CMD" ]; then
-              # Ensure compose v2 syntax and cmd-type
               RECORD_CMD=${RECORD_CMD//'docker-compose'/'docker compose'}
               if ! grep -q -- "--cmd-type" <<< "$RECORD_CMD"; then
                 RECORD_CMD="$RECORD_CMD --cmd-type docker-compose"
               fi
-
               echo "--- Running Record Step ---"
               sudo -E bash -lc '
                 set -e
                 trap "kill -2 $KEPLOY_PID 2>/dev/null || true; wait $KEPLOY_PID || true" EXIT
+                echo ">> cd app && eval \"$KEPLOY_RUN\" '"$RECORD_CMD"'"
                 (cd app && eval "$KEPLOY_RUN" '"$RECORD_CMD"') &
                 KEPLOY_PID=$!
                 echo "Keploy record PID: $KEPLOY_PID"
 
-                # Wait until the app container is running (up to 90s)
+                echo "Waiting for app container: fastapi-app (timeout 90s)..."
                 for i in {1..30}; do
-                  if docker ps --filter "name=fastapi-app" --filter "status=running" -q >/dev/null | grep -q .; then
-                    echo "fastapi-app is running."; break
+                  if docker ps --filter "name=fastapi-app" --filter "status=running" -q | grep -q .; then
+                    echo "fastapi-app is running."
+                    break
                   fi
                   sleep 3
                   if [ $i -eq 30 ]; then
                     echo "App container did not become running in time."
+                    echo "---- docker compose ps ----"
+                    (cd app && docker compose ps || true)
+                    echo "---- fastapi-app logs (last 200) ----"
+                    docker logs fastapi-app --tail=200 || true
                     exit 1
                   fi
                 done
 
                 if [ -f "app/curls.sh" ]; then
                   chmod +x app/curls.sh
+                  echo "Executing app/curls.sh ..."
                   (cd app && ./curls.sh)
                 else
                   echo "::warning::app/curls.sh not found; continuing without traffic"
@@ -235,6 +239,7 @@ jobs:
 
                 echo "Cooling down 10s..."
                 sleep 10
+                echo "Stopping Keploy..."
                 kill -2 $KEPLOY_PID 2>/dev/null || true
                 wait $KEPLOY_PID || true
                 trap - EXIT
@@ -250,10 +255,15 @@ jobs:
             if [ -n "$TEST_CMD" ]; then
               TEST_CMD=${TEST_CMD//'docker-compose'/'docker compose'}
               echo "--- Running Test Step ---"
+              echo ">> cd app && eval \"$KEPLOY_RUN\" $TEST_CMD"
               if sudo /usr/bin/time -f "${{ env.TIME_FORMAT_STRING }}" -o test_metrics.csv bash -lc "cd app && eval \"$KEPLOY_RUN\" $TEST_CMD"; then
                 IFS=',' read TEST_E TEST_P TEST_M < test_metrics.csv
                 TEST_DURATION=$TEST_E; TEST_CPU_P=$TEST_P; TEST_MEM_MB=$(echo "scale=2; $TEST_M / 1024" | bc)
               else
+                echo "---- docker compose ps (after test failure) ----"
+                (cd app && docker compose ps || true)
+                echo "---- fastapi-app logs (last 200) ----"
+                docker logs fastapi-app --tail=200 || true
                 FINAL_STATUS="Failed"; FAILURE_REASON="Test step failed (likely no test-sets recorded)"
               fi
             else
@@ -271,7 +281,6 @@ jobs:
           echo "test_cpu_p=$TEST_CPU_P" >> $GITHUB_OUTPUT
           echo "test_mem_mb=$TEST_MEM_MB" >> $GITHUB_OUTPUT
 
-          # Fail step to trigger email/attachments if needed
           if [ "$FINAL_STATUS" != "Success" ]; then exit 1; fi
 
       - name: Create Report Data as Artifact
