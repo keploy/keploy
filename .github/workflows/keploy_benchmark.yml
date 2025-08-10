@@ -212,7 +212,7 @@ jobs:
             exit 1
           }
 
-          # RECORD (optional but recommended)
+    
           if [ "$FINAL_STATUS" = "Success" ]; then
             RECORD_CMD=$(yq eval '.record_command // ""' "$PIPELINE_FILE")
             if [ -n "$RECORD_CMD" ]; then
@@ -224,8 +224,8 @@ jobs:
               sudo -E bash -lc '
                 set -e
                 trap "kill -2 $KEPLOY_PID 2>/dev/null || true; wait $KEPLOY_PID || true" EXIT
-                echo ">> cd app && eval \"$KEPLOY_RUN\" '"$RECORD_CMD"'"
-                (cd app && eval "$KEPLOY_RUN" '"$RECORD_CMD"') &
+                echo ">> cd app && $KEPLOY_RUN $RECORD_CMD"
+                (cd app && $KEPLOY_RUN $RECORD_CMD) &
                 KEPLOY_PID=$!
                 echo "Keploy record PID: $KEPLOY_PID"
 
@@ -273,7 +273,7 @@ jobs:
               TEST_CMD=${TEST_CMD//'docker-compose'/'docker compose'}
               echo "--- Running Test Step ---"
               echo ">> cd app && eval \"$KEPLOY_RUN\" $TEST_CMD"
-              if sudo /usr/bin/time -f "${{ env.TIME_FORMAT_STRING }}" -o test_metrics.csv bash -lc "cd app && eval \"$KEPLOY_RUN\" $TEST_CMD"; then
+              if sudo /usr/bin/time -f "${{ env.TIME_FORMAT_STRING }}" -o test_metrics.csv bash -lc "cd app && $KEPLOY_RUN $TEST_CMD"; then
                 IFS=',' read TEST_E TEST_P TEST_M < test_metrics.csv
                 TEST_DURATION=$TEST_E; TEST_CPU_P=$TEST_P; TEST_MEM_MB=$(echo "scale=2; $TEST_M / 1024" | bc)
               else
