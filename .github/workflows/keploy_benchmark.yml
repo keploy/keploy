@@ -43,8 +43,8 @@ jobs:
         id: auth
         uses: "google-github-actions/auth@v2"
         with:
-          create_credentials_file: false
           credentials_json: "${{ secrets.GCP_SA_KEY }}"
+          token_format: 'access_token'      
           access_token_scopes: "https://www.googleapis.com/auth/spreadsheets"
 
       - name: Get Repo List from Google Sheet via REST API
