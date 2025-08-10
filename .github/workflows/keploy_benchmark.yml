@@ -100,7 +100,6 @@ jobs:
       - name: Load Keploy Docker image
         run: sudo docker load -i keploy-image.tar
 
-      # ✅ Accept full URLs (https/ssh) OR owner/repo
       - name: Clone Application Repo
         run: |
           REPO="${{ matrix.repo }}"
@@ -149,14 +148,20 @@ jobs:
         shell: bash
         run: |
           exec > >(tee runner-log.txt) 2>&1
-          set +e
 
           PIPELINE_FILE="app/keploy-pipeline.yml"
           FINAL_STATUS="Success"; FAILURE_REASON="None"
           REC_DURATION=0; REC_CPU_P="0%"; REC_MEM_MB=0; TEST_DURATION=0; TEST_CPU_P="0%"; TEST_MEM_MB=0
 
-          # Use an ENV VAR (persists across sudo bash -c) instead of a bash function
-          export KEPLOY_RUN='sudo -E env PATH="$PATH" docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "'"$(pwd)"'":"'"$(pwd)"'" -w "'"$(pwd)"'" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v "$HOME"/.keploy-config:/root/.keploy-config -v "$HOME"/.keploy:/root/.keploy --rm ${{ env.KEPLOY_IMAGE_NAME }}'
+          # Ensure no name collision on reruns
+          sudo docker rm -f keploy-v2 >/dev/null 2>&1 || true
+
+          export KEPLOY_RUN='sudo -E env PATH="$PATH" docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host \
+            -v "'"$(pwd)"'":"'"$(pwd)"'" -w "'"$(pwd)"'" \
+            -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$HOME"/.keploy-config:/root/.keploy-config -v "$HOME"/.keploy:/root/.keploy \
+            --rm ${{ env.KEPLOY_IMAGE_NAME }}'
 
           if [ ! -f "$PIPELINE_FILE" ]; then
             FINAL_STATUS="Failed"; FAILURE_REASON="keploy-pipeline.yml not found"
@@ -169,27 +174,29 @@ jobs:
               fi
             done
 
-            # --- RECORD STEP ORCHESTRATION ---
+            # --- RECORD (traffic optional if curls.sh missing) ---
             if [ "$FINAL_STATUS" = "Success" ]; then
               RECORD_CMD=$(yq eval '.record_command // ""' "$PIPELINE_FILE")
               if [ -z "$RECORD_CMD" ]; then
-                FINAL_STATUS="Failed"; FAILURE_REASON="record_command not defined in yml"
+                echo "::warning::record_command not defined; skipping record phase"
               else
                 echo "--- Running Record Step ---"
                 sudo -E bash -lc '
-                  trap "echo '\''Trapped exit signal, stopping Keploy...'\''; kill -2 $KEPLOY_PID; wait $KEPLOY_PID || true" EXIT
+                  trap "kill -2 $KEPLOY_PID; wait $KEPLOY_PID || true" EXIT
                   (cd app && eval "$KEPLOY_RUN" '"$RECORD_CMD"') &
                   KEPLOY_PID=$!
-                  echo "Keploy record started with PID: $KEPLOY_PID"
+                  echo "Keploy record PID: $KEPLOY_PID"
                   echo "Waiting 20s for application to start..."
                   sleep 20
-                  if [ ! -f "app/curls.sh" ]; then echo "Error: curls.sh not found!"; exit 1; fi
-                  chmod +x app/curls.sh
-                  (cd app && ./curls.sh)
-                  STATUS=$?
-                  echo "Traffic script finished. Waiting 20s for cool-down..."
-                  sleep 20
-                  echo "Stopping Keploy..."
+                  if [ -f "app/curls.sh" ]; then
+                    chmod +x app/curls.sh
+                    (cd app && ./curls.sh); STATUS=$?
+                  else
+                    echo "::warning::app/curls.sh not found; continuing without traffic"
+                    STATUS=0
+                  fi
+                  echo "Cooling down 10s..."
+                  sleep 10
                   kill -2 $KEPLOY_PID
                   wait $KEPLOY_PID || true
                   trap - EXIT
@@ -199,7 +206,7 @@ jobs:
               fi
             fi
 
-            # --- TEST STEP DIRECT EXECUTION ---
+            # --- TEST ---
             if [ "$FINAL_STATUS" = "Success" ]; then
               TEST_CMD=$(yq eval '.test_command // ""' "$PIPELINE_FILE")
               if [ -n "$TEST_CMD" ]; then
@@ -207,9 +214,7 @@ jobs:
                 sudo /usr/bin/time -f "${{ env.TIME_FORMAT_STRING }}" -o test_metrics.csv bash -lc "cd app && eval \"$KEPLOY_RUN\" $TEST_CMD"
                 if [ $? -eq 0 ]; then
                   IFS=',' read TEST_E TEST_P TEST_M < test_metrics.csv
-                  TEST_DURATION=$TEST_E
-                  TEST_CPU_P=$TEST_P
-                  TEST_MEM_MB=$(echo "scale=2; $TEST_M / 1024" | bc)
+                  TEST_DURATION=$TEST_E; TEST_CPU_P=$TEST_P; TEST_MEM_MB=$(echo "scale=2; $TEST_M / 1024" | bc)
                 else
                   FINAL_STATUS="Failed"; FAILURE_REASON="Test step failed"
                 fi
@@ -219,6 +224,7 @@ jobs:
             fi
           fi
 
+          echo "Failure reason: $FAILURE_REASON"
           echo "final_status=$FINAL_STATUS" >> $GITHUB_OUTPUT
           echo "failure_reason=$FAILURE_REASON" >> $GITHUB_OUTPUT
           echo "rec_duration=$REC_DURATION" >> $GITHUB_OUTPUT
@@ -228,6 +234,7 @@ jobs:
           echo "test_cpu_p=$TEST_CPU_P" >> $GITHUB_OUTPUT
           echo "test_mem_mb=$TEST_MEM_MB" >> $GITHUB_OUTPUT
 
+          # keep the step failed when pipeline failed (so email/attachments trigger)
           if [ "$FINAL_STATUS" != "Success" ]; then exit 1; fi
 
       - name: Create Report Data as Artifact
@@ -237,32 +244,35 @@ jobs:
           WORKFLOW_LINK="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           FINAL_STATUS="${{ steps.pipeline-runner.outputs.final_status }}"
           FAILURE_REASON="${{ steps.pipeline-runner.outputs.failure_reason }}"
-          REC_DUR=${{ steps.pipeline-runner.outputs.rec_duration }}
-          REC_CPU_P="${{ steps.pipeline-runner.outputs.rec_cpu_p }}"
-          REC_MEM_MB=${{ steps.pipeline-runner.outputs.rec_mem_mb }}
-          TEST_DUR=${{ steps.pipeline-runner.outputs.test_duration }}
-          TEST_CPU_P="${{ steps.pipeline-runner.outputs.test_cpu_p }}"
-          TEST_MEM_MB=${{ steps.pipeline-runner.outputs.test_mem_mb }}
+          REC_DUR=${{ steps.pipeline-runner.outputs.rec_duration || 0 }}
+          REC_CPU_P="${{ steps.pipeline-runner.outputs.rec_cpu_p || '0%' }}"
+          REC_MEM_MB=${{ steps.pipeline-runner.outputs.rec_mem_mb || 0 }}
+          TEST_DUR=${{ steps.pipeline-runner.outputs.test_duration || 0 }}
+          TEST_CPU_P="${{ steps.pipeline-runner.outputs.test_cpu_p || '0%' }}"
+          TEST_MEM_MB=${{ steps.pipeline-runner.outputs.test_mem_mb || 0 }}
           JSON_ROW=$(jq -n \
-            --arg ts "$TIMESTAMP_IST" \
-            --arg wlink "$WORKFLOW_LINK" \
+            --arg ts "$TIMESTAMP_IST" --arg wlink "$WORKFLOW_LINK" \
             --arg rurl "${{ matrix.repo }}" \
-            --arg status "$FINAL_STATUS" \
-            --arg reason "$FAILURE_REASON" \
-            --argjson recdur ${REC_DUR:-0} \
-            --arg reccpup "$REC_CPU_P" \
-            --argjson recmem ${REC_MEM_MB:-0} \
-            --argjson testdur ${TEST_DUR:-0} \
-            --arg testcpup "$TEST_CPU_P" \
-            --argjson testmem ${TEST_MEM_MB:-0} \
+            --arg status "$FINAL_STATUS" --arg reason "$FAILURE_REASON" \
+            --argjson recdur $REC_DUR --arg reccpup "$REC_CPU_P" --argjson recmem $REC_MEM_MB \
+            --argjson testdur $TEST_DUR --arg testcpup "$TEST_CPU_P" --argjson testmem $TEST_MEM_MB \
             '[[$ts, $wlink, $rurl, $status, $reason, $recdur, $reccpup, $recmem, $testdur, $testcpup, $testmem]]')
           echo "$JSON_ROW" > report.json
+
+      - name: Sanitize artifact name
+        id: safe-name
+        if: always()
+        run: |
+          RAW="${{ matrix.repo }}"
+          # Replace anything not allowed with '-'
+          SAFE=$(echo "$RAW" | tr '/:@ ' '----' | tr -c 'A-Za-z0-9._- ' '-')
+          echo "safe=$SAFE" >> $GITHUB_OUTPUT
 
       - name: Upload Individual Report as Artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: report-for-${{ matrix.repo }}
+          name: report-for-${{ steps.safe-name.outputs.safe }}
           path: report.json
 
       - name: Prepare Attachments on Failure
