@@ -174,16 +174,24 @@ jobs:
           # Clean any stale container name
           sudo docker rm -f keploy-v2 >/dev/null 2>&1 || true
 
-          # IMPORTANT: use $PWD (expands at runtime after 'cd app')
-          export KEPLOY_RUN='sudo -E env PATH="$PATH" docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host \
-          -v "$PWD":"$PWD" -w "$PWD" \
-          -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf \
-          -v /var/run/docker.sock:/var/run/docker.sock \
-          -v /usr/bin/docker:/usr/bin/docker:ro \
-          -v /usr/lib/docker/cli-plugins:/usr/lib/docker/cli-plugins:ro \
-          -v /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro \
-          -v "$HOME"/.keploy-config:/root/.keploy-config -v "$HOME"/.keploy:/root/.keploy \
-          --rm ghcr.io/keploy/keploy:v2-dev'
+          # Base docker run line (IMPORTANT: use $PWD so it resolves AFTER 'cd app')
+          KEPLOY_IMG="${{ env.KEPLOY_IMAGE_NAME }}"
+          KBASE='sudo -E env PATH="$PATH" docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host \
+            -v "$PWD":"$PWD" -w "$PWD" \
+            -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v /usr/bin/docker:/usr/bin/docker:ro \
+            -v /usr/lib/docker/cli-plugins:/usr/lib/docker/cli-plugins:ro \
+            -v /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro \
+            -v "$HOME"/.keploy-config:/root/.keploy-config -v "$HOME"/.keploy:/root/.keploy \
+            --rm'
+
+          # Run Keploy (default entrypoint)
+/bin/sh
+          KEPLOY_RUN="$KBASE $KEPLOY_IMG"
+
+          # Run an interactive shell INSIDE Keploy container (override entrypoint)
+          KEPLOY_SH="$KBASE --entrypoint /bin/sh $KEPLOY_IMG -lc"
 
           echo "--- Running Setup Steps ---"
           yq eval '.setup // [] | .[]' "$PIPELINE_FILE" | while read -r cmd; do
@@ -195,9 +203,16 @@ jobs:
             fi
           done
 
-          (cd app && eval "$KEPLOY_RUN" sh -lc 'docker version && docker compose version') || {
-          echo "::error::Docker/Compose not available inside Keploy container"; exit 1; }
+          # --- Preflight: ensure docker + compose are usable inside Keploy container ---
+          echo "--- Preflight: Docker/Compose inside Keploy container ---"
+          (cd app && eval "$KEPLOY_SH 'docker version && docker compose version'") || {
+            echo "::error::Docker/Compose not available inside Keploy container"
+            echo "final_status=Failed" >> $GITHUB_OUTPUT
+            echo "failure_reason=Docker/Compose unavailable inside Keploy container" >> $GITHUB_OUTPUT
+            exit 1
+          }
 
+          # RECORD (optional but recommended)
           if [ "$FINAL_STATUS" = "Success" ]; then
             RECORD_CMD=$(yq eval '.record_command // ""' "$PIPELINE_FILE")
             if [ -n "$RECORD_CMD" ]; then
