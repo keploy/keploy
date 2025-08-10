@@ -27,28 +27,38 @@ sed -i 's/global: {}/global: {"header": {"Allow":[],}}/' "$config_file"
 sleep 5
 
 # --- START OF FIX ---
-# This function now has a timeout and will force-kill the process if it gets stuck.
+# This function now kills BOTH Keploy and the application it started.
 shutdown_keploy() {
+    # Find and kill the Keploy process
     KEPLOY_PID=$(pgrep -n keploy)
     if [ -n "$KEPLOY_PID" ]; then
         echo "Attempting graceful shutdown of Keploy (PID: $KEPLOY_PID)..."
         sudo kill $KEPLOY_PID
-
-        # Wait up to 10 seconds for graceful shutdown
-        for _ in {1..10}; do
-            # Check if the process still exists. `kill -0` is a standard way to do this.
-            if ! sudo kill -0 $KEPLOY_PID 2>/dev/null; then
-                echo "Keploy shut down gracefully."
-                return 0 # Exit the function successfully
-            fi
-            sleep 1
-        done
-
-        # If the loop finishes, the process is still alive. Force kill it.
-        echo "Keploy did not shut down gracefully after 10 seconds. Forcing termination..."
-        sudo kill -9 $KEPLOY_PID
+        # Wait a moment for it to exit
+        sleep 2
+        # If it's still there, force kill it
+        if sudo kill -0 $KEPLOY_PID 2>/dev/null; then
+            echo "Forcing Keploy termination..."
+            sudo kill -9 $KEPLOY_PID
+        fi
     else
         echo "Keploy process not found to shut down."
+    fi
+
+    # Find and kill the Django application process
+    # The "-f" flag is crucial to match the full command line string
+    APP_PID=$(pgrep -f "python3 manage.py runserver")
+    if [ -n "$APP_PID" ]; then
+        echo "Shutting down Django application (PID: $APP_PID)..."
+        sudo kill $APP_PID 2>/dev/null
+        sleep 2
+        # If it's still there, force kill it
+        if sudo kill -0 $APP_PID 2>/dev/null; then
+            echo "Forcing Django app termination..."
+            sudo kill -9 $APP_PID
+        fi
+    else
+        echo "Django application process not found."
     fi
 }
 # --- END OF FIX ---
@@ -56,7 +66,6 @@ shutdown_keploy() {
 # This function sends requests and then triggers the shutdown
 send_request(){
     echo "Waiting for application to be ready..."
-    # Wait for the app to be available
     for i in {1..20}; do
         if curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/user/ | grep -q "200"; then
             echo "Application is ready."
@@ -73,7 +82,6 @@ send_request(){
     echo "Waiting for Keploy to capture requests..."
     sleep 10
     
-    # After requests are sent, shut down Keploy
     shutdown_keploy
 }
 
@@ -82,23 +90,19 @@ for i in {1..2}; do
     app_name="flaskApp_${i}"
     echo "--- Starting Record Cycle ${i} ---"
 
-    # Run send_request in the background. It will kill keploy when done.
     send_request &
     
-    # Run keploy record in the foreground. This will block until send_request kills it.
     sudo /usr/bin/time -f "Record Phase ${i} - Elapsed: %e seconds, CPU: %P, Memory: %M KB" \
         -o "record_metrics_${i}.txt" \
         sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 manage.py runserver" &> "${app_name}.txt"
 
-    # Wait for the background send_request process to finish completely
     wait
     
-    # Forcefully clean up ports as a safety measure before the next loop
+    # Redundant cleanup as a final safety measure
     sudo fuser -k 8000/tcp || true
     sudo fuser -k 16789/tcp || true
     sleep 5
 
-    # Check for errors, but ignore the "user application terminated" one since we caused it.
     if grep "ERROR" "${app_name}.txt" | grep -v "user application terminated"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
