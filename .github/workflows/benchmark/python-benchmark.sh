@@ -26,16 +26,26 @@ config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"header": {"Allow":[],}}/' "$config_file"
 sleep 5  # Allow time for configuration changes
 
+# MODIFIED: This function now only sends requests and does not manage processes.
 send_request(){
-    sleep 10
+    echo "Waiting for application to be ready..."
     app_started=false
-    while [ "$app_started" = false ]; do
-        if curl -X GET http://127.0.0.1:8000/; then
+    # Try for 60 seconds before timing out
+    for i in {1..20}; do
+        # MODIFIED: Health check now hits a valid endpoint
+        if curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/user/ | grep -q "200"; then
             app_started=true
+            break
         fi
         sleep 3 # wait for 3 seconds before checking again.
     done
-    echo "App started"
+
+    if [ "$app_started" = false ]; then
+        echo "Application failed to start in time. Exiting."
+        exit 1
+    fi
+
+    echo "App started. Sending API requests..."
     # Start making curl calls to record the testcases and mocks.
     curl --location 'http://127.0.0.1:8000/user/' --header 'Content-Type: application/json' --data-raw '{
         "name": "Jane Smith",
@@ -50,24 +60,32 @@ send_request(){
         "website": "www.johndoe.com"
     }'
     curl --location 'http://127.0.0.1:8000/user/'
-    # Wait for 10 seconds for keploy to record the tcs and mocks.
+    
+    # Wait for keploy to capture all requests
+    echo "Waiting for Keploy to process recordings..."
     sleep 10
-    pid=$(pgrep keploy)
-    echo "$pid Keploy PID" 
-    echo "Killing keploy"
-    sudo kill $pid
 }
 
 echo "=== RECORDING PHASE WITH METRICS ==="
 # Record and Test cycles
 for i in {1..2}; do
     app_name="flaskApp_${i}"
-    send_request &
     
-    # Record with timing metrics
+    # MODIFIED: Start Keploy record in the background and get its PID
+    echo "Starting Keploy record for iteration ${i}..."
     sudo /usr/bin/time -f "Record Phase ${i} - Elapsed: %e seconds, CPU: %P, Memory: %M KB" \
         -o "record_metrics_${i}.txt" \
-        sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 manage.py runserver" &> "${app_name}.txt"
+        sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 manage.py runserver" &> "${app_name}.txt" &
+    KEPLOY_PID=$!
+    
+    # Run send_request in the foreground
+    send_request
+    
+    # MODIFIED: Kill the Keploy process from the main script
+    echo "Stopping Keploy (PID: $KEPLOY_PID)..."
+    sudo kill $KEPLOY_PID
+    wait $KEPLOY_PID 2>/dev/null # Wait for the process to terminate completely
+    echo "Keploy stopped for iteration ${i}."
     
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
@@ -79,8 +97,7 @@ for i in {1..2}; do
         cat "${app_name}.txt"
         exit 1
     fi
-    sleep 5
-    wait
+    sleep 5 # Give time for ports to be freed before the next iteration
     
     # Display record metrics
     echo "=== Record Metrics for iteration ${i} ==="
@@ -111,24 +128,36 @@ fi
 
 all_passed=true
 
-for i in {0..1}
-do
-    # Define the report file for each test set
-    report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
+# MODIFIED: Check if the reports directory exists before looping
+if [ -d "./keploy/reports/test-run-0" ]; then
+    for i in {0..1}; do
+        # Define the report file for each test set
+        report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
 
-    # Extract the test status
-    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+        if [ -f "$report_file" ]; then
+            # Extract the test status
+            test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
 
-    # Print the status for debugging
-    echo "Test status for test-set-$i: $test_status"
+            # Print the status for debugging
+            echo "Test status for test-set-$i: $test_status"
 
-    # Check if any test set did not pass
-    if [ "$test_status" != "PASSED" ]; then
-        all_passed=false
-        echo "Test-set-$i did not pass."
-        break # Exit the loop early as all tests need to pass
-    fi
-done
+            # Check if any test set did not pass
+            if [ "$test_status" != "PASSED" ]; then
+                all_passed=false
+                echo "Test-set-$i did not pass."
+                break # Exit the loop early as all tests need to pass
+            fi
+        else
+            echo "Report file $report_file not found for test-set-$i."
+            all_passed=false
+            break
+        fi
+    done
+else
+    echo "Keploy reports directory not found. Assuming test failure."
+    all_passed=false
+fi
+
 
 # Generate benchmark summary
 echo "=== BENCHMARK SUMMARY ==="
