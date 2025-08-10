@@ -26,17 +26,32 @@ config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"header": {"Allow":[],}}/' "$config_file"
 sleep 5
 
-# This function finds and kills the Keploy process
+# --- START OF FIX ---
+# This function now has a timeout and will force-kill the process if it gets stuck.
 shutdown_keploy() {
-    # pgrep is more reliable for finding the process by name
     KEPLOY_PID=$(pgrep -n keploy)
     if [ -n "$KEPLOY_PID" ]; then
-        echo "Found Keploy PID: $KEPLOY_PID. Shutting it down."
+        echo "Attempting graceful shutdown of Keploy (PID: $KEPLOY_PID)..."
         sudo kill $KEPLOY_PID
+
+        # Wait up to 10 seconds for graceful shutdown
+        for _ in {1..10}; do
+            # Check if the process still exists. `kill -0` is a standard way to do this.
+            if ! sudo kill -0 $KEPLOY_PID 2>/dev/null; then
+                echo "Keploy shut down gracefully."
+                return 0 # Exit the function successfully
+            fi
+            sleep 1
+        done
+
+        # If the loop finishes, the process is still alive. Force kill it.
+        echo "Keploy did not shut down gracefully after 10 seconds. Forcing termination..."
+        sudo kill -9 $KEPLOY_PID
     else
-        echo "Keploy process not found."
+        echo "Keploy process not found to shut down."
     fi
 }
+# --- END OF FIX ---
 
 # This function sends requests and then triggers the shutdown
 send_request(){
@@ -71,7 +86,6 @@ for i in {1..2}; do
     send_request &
     
     # Run keploy record in the foreground. This will block until send_request kills it.
-    # This is the correct pattern.
     sudo /usr/bin/time -f "Record Phase ${i} - Elapsed: %e seconds, CPU: %P, Memory: %M KB" \
         -o "record_metrics_${i}.txt" \
         sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 manage.py runserver" &> "${app_name}.txt"
@@ -84,6 +98,7 @@ for i in {1..2}; do
     sudo fuser -k 16789/tcp || true
     sleep 5
 
+    # Check for errors, but ignore the "user application terminated" one since we caused it.
     if grep "ERROR" "${app_name}.txt" | grep -v "user application terminated"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
@@ -143,7 +158,6 @@ else
 fi
 
 echo "=== BENCHMARK SUMMARY ==="
-# ... (rest of the script is unchanged and should be fine) ...
 echo "Application: Python Django + PostgreSQL"
 echo "Record Cycles: 2"
 echo "Test Sets: 2"
