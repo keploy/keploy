@@ -38,7 +38,7 @@ jobs:
       - name: Checkout the samples-python repository
         uses: actions/checkout@v4
         with:
-          repository: keploy/samples-python
+          repository: officialasishkumar/samples-python
           path: samples-python
       - name: Run the flask-mongo application
         env:
@@ -46,4 +46,12 @@ jobs:
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
         run: |
           cd samples-python/flask-mongo
-          source ./../../.github/workflows/test_workflow_scripts/python-docker.sh
+          source ./../../.github/workflows/test_workflow_scripts/python/django_postgres/python-docker.sh
+
+      - name: Run the flask-mysql application
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          cd samples-python/flask-mysql
+          source ./../../.github/workflows/test_workflow_scripts/python/flask-mysql/python-docker.sh
