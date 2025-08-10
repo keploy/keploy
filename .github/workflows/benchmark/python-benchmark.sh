@@ -9,48 +9,13 @@ git checkout native-linux
 # Start the postgres database
 docker compose up -d
 
-# Verify Python installation
-echo "=== Python Environment Setup ==="
-which python3
-python3 --version
-which pip3
-pip3 --version
-
-# Install dependencies with verbose output
-echo "=== Installing Dependencies ==="
-echo "Looking for requirements.txt..."
-ls -la | grep requirements || echo "requirements.txt not found in current directory"
-if [ -f "requirements.txt" ]; then
-    echo "Installing from requirements.txt:"
-    cat requirements.txt
-    pip3 install -r requirements.txt --verbose
-else
-    echo "requirements.txt not found, installing Django directly"
-    pip3 install Django psycopg2-binary
-fi
-
-# Verify Django installation
-echo "=== Verifying Django Installation ==="
-python3 -c "import django; print(f'Django version: {django.get_version()}')" || echo "Django import failed"
+# Install dependencies
+pip3 install -r requirements.txt
 
 # Setup environment
 export PYTHON_PATH=./venv/lib/python3.10/site-packages/django
 
-# Debug current working directory and files
-echo "=== Current Directory and Files ==="
-pwd
-ls -la
-echo "=== Checking for manage.py ==="
-if [ -f "manage.py" ]; then
-    echo "manage.py found"
-    head -10 manage.py
-else
-    echo "manage.py not found in current directory"
-    find . -name "manage.py" -type f || echo "manage.py not found anywhere"
-fi
-
 # Database migrations
-echo "=== Running Database Migrations ==="
 python3 manage.py makemigrations
 python3 manage.py migrate
 
@@ -93,13 +58,13 @@ send_request(){
     sudo kill $pid
 }
 
-# Record cycles (metrics collection for recording phase)
 echo "=== RECORDING PHASE WITH METRICS ==="
+# Record and Test cycles
 for i in {1..2}; do
     app_name="flaskApp_${i}"
     send_request &
     
-    # Record with timing metrics using /usr/bin/time
+    # Record with timing metrics
     sudo /usr/bin/time -f "Record Phase ${i} - Elapsed: %e seconds, CPU: %P, Memory: %M KB" \
         -o "record_metrics_${i}.txt" \
         sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 manage.py runserver" &> "${app_name}.txt"
@@ -123,24 +88,20 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
-# Testing phase with detailed metrics collection
 echo "=== TESTING PHASE WITH METRICS ==="
-echo "Starting test phase with detailed metrics collection..."
-
-# Test with comprehensive timing and resource monitoring
-sudo /usr/bin/time -f "Test Phase - Elapsed: %e seconds, CPU: %P, Memory Peak: %M KB, Sys Time: %S, User Time: %U" \
+# Testing phase with metrics
+sudo /usr/bin/time -f "Test Phase - Elapsed: %e seconds, CPU: %P, Memory Peak: %M KB" \
     -o "test_metrics_detailed.txt" \
     sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 manage.py runserver" --delay 10 &> test_logs.txt
 
-# Extract and display test metrics
+# Display test metrics
 echo "=== TEST EXECUTION METRICS ==="
 cat "test_metrics_detailed.txt"
 
-# Check for errors in test execution
 if grep "ERROR" "test_logs.txt"; then
-    echo "Error found in test pipeline..."
-    cat "test_logs.txt"
-    exit 1
+        echo "Error found in pipeline..."
+        cat "test_logs.txt"
+        exit 1
 fi
 if grep "WARNING: DATA RACE" "test_logs.txt"; then
     echo "Race condition detected in test, stopping pipeline..."
@@ -148,8 +109,6 @@ if grep "WARNING: DATA RACE" "test_logs.txt"; then
     exit 1
 fi
 
-# Test results validation
-echo "=== TEST RESULTS VALIDATION ==="
 all_passed=true
 
 for i in {0..1}
@@ -191,7 +150,7 @@ if [ -f "test_metrics_detailed.txt" ]; then
     cat "test_metrics_detailed.txt"
 fi
 
-# Final status check
+# Check the overall test status and exit accordingly
 if [ "$all_passed" = true ]; then
     echo "=== BENCHMARK COMPLETED SUCCESSFULLY ==="
     echo "All tests passed - Application is functioning correctly"
