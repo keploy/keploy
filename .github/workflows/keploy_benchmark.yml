@@ -41,21 +41,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Install gcloud CLI
       - uses: google-github-actions/setup-gcloud@v2
         with:
           version: ">= 463.0.0"
 
-      # Write the SA key to a file and activate the account
       - name: Activate service account
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
         run: |
           echo "$GCP_SA_KEY" > sa.json
-          echo "Service account email:" $(jq -r .client_email sa.json)
-          echo "Project from key:     " $(jq -r .project_id sa.json)
           gcloud auth activate-service-account --key-file=sa.json
-          # Mint an OAuth access token for Sheets scope (no IAM Credentials API involved)
           ACCESS_TOKEN=$(gcloud auth print-access-token --scopes=https://www.googleapis.com/auth/spreadsheets.readonly)
           if [ -z "$ACCESS_TOKEN" ]; then
             echo "::error::Failed to mint access token"; exit 1
@@ -71,9 +66,7 @@ jobs:
           REPOS_SHEET_NAME: ${{ env.REPOS_SHEET_NAME }}
         run: |
           API_URL="https://sheets.googleapis.com/v4/spreadsheets/$SHEET_ID/values/${REPOS_SHEET_NAME}!A2:A"
-          response=$(curl -s --fail --show-error --get "$API_URL" \
-            -H "Authorization: Bearer $TOKEN")
-          echo "API Response: $response"
+          response=$(curl -s --fail --show-error --get "$API_URL" -H "Authorization: Bearer $TOKEN")
           echo "SHEET_VALUES<<EOF" >> $GITHUB_OUTPUT
           echo "$response" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
@@ -106,119 +99,178 @@ jobs:
           name: ${{ env.IMAGE_ARTIFACT_NAME }}
       - name: Load Keploy Docker image
         run: sudo docker load -i keploy-image.tar
-      - name: Checkout Application Repo
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ matrix.repo }}
-          path: "app"
+
+      # ✅ Accept full URLs (https/ssh) OR owner/repo
+      - name: Clone Application Repo
+        run: |
+          REPO="${{ matrix.repo }}"
+          DEST="app"
+          if [[ "$REPO" =~ ^https?:// ]] || [[ "$REPO" =~ ^git@ ]]; then
+            git clone "$REPO" "$DEST"
+          else
+            git clone "https://github.com/$REPO.git" "$DEST"
+          fi
+
       - name: Install yq (YAML Parser)
-        run: sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq && sudo chmod +x /usr/bin/yq
+        run: |
+          sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq
+          sudo chmod +x /usr/bin/yq
+
       - name: Set up Language Environment
         id: language-setup
         run: |
           PIPELINE_FILE="app/keploy-pipeline.yml"
           if [ ! -f "$PIPELINE_FILE" ]; then echo "language=none" >> $GITHUB_OUTPUT; exit 0; fi
-          LANGUAGE=$(sudo yq eval '.environment.language // "none"' "$PIPELINE_FILE")
-          VERSION=$(sudo yq eval '.environment.version // ""' "$PIPELINE_FILE")
-          echo "language=$LANGUAGE" >> $GITHUB_OUTPUT; echo "version=$VERSION" >> $GITHUB_OUTPUT
+          LANGUAGE=$(yq eval '.environment.language // "none"' "$PIPELINE_FILE")
+          VERSION=$(yq eval '.environment.version // ""' "$PIPELINE_FILE")
+          echo "language=$LANGUAGE" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
       - name: Setup Go
         if: steps.language-setup.outputs.language == 'go'
         uses: actions/setup-go@v5
         with:
           go-version: ${{ steps.language-setup.outputs.version }}
+
       - name: Setup Node.js
         if: steps.language-setup.outputs.language == 'node'
         uses: actions/setup-node@v4
         with:
           node-version: ${{ steps.language-setup.outputs.version }}
+
       - name: Setup Python
         if: steps.language-setup.outputs.language == 'python'
         uses: actions/setup-python@v5
         with:
           python-version: ${{ steps.language-setup.outputs.version }}
+
       - name: Run Pipeline from keploy-pipeline.yml
         id: pipeline-runner
+        shell: bash
         run: |
-          # The rest of your script for this step remains the same...
           exec > >(tee runner-log.txt) 2>&1
-          set -a 
+          set +e
+
           PIPELINE_FILE="app/keploy-pipeline.yml"
           FINAL_STATUS="Success"; FAILURE_REASON="None"
           REC_DURATION=0; REC_CPU_P="0%"; REC_MEM_MB=0; TEST_DURATION=0; TEST_CPU_P="0%"; TEST_MEM_MB=0
 
-          keployV2() {
-            sudo -E env PATH="$PATH" docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "$(pwd)":"$(pwd)" -w "$(pwd)" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v "$HOME"/.keploy-config:/root/.keploy-config -v "$HOME"/.keploy:/root/.keploy --rm ${{ env.KEPLOY_IMAGE_NAME }} "$@"
-          }
-          export -f keployV2
+          # Use an ENV VAR (persists across sudo bash -c) instead of a bash function
+          export KEPLOY_RUN='sudo -E env PATH="$PATH" docker run --name keploy-v2 -p 16789:16789 --privileged --pid=host -v "'"$(pwd)"'":"'"$(pwd)"'" -w "'"$(pwd)"'" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v "$HOME"/.keploy-config:/root/.keploy-config -v "$HOME"/.keploy:/root/.keploy --rm ${{ env.KEPLOY_IMAGE_NAME }}'
 
-          if [ ! -f "$PIPELINE_FILE" ]; then FINAL_STATUS="Failed"; FAILURE_REASON="keploy-pipeline.yml not found"; else
-            echo "--- Running Setup Steps ---"; sudo yq eval '.setup[]' "$PIPELINE_FILE" | while read -r cmd; do if ! (cd app && sudo -E bash -c "$cmd"); then FINAL_STATUS="Failed"; FAILURE_REASON="Setup cmd failed: $cmd"; break; fi; done
-            
+          if [ ! -f "$PIPELINE_FILE" ]; then
+            FINAL_STATUS="Failed"; FAILURE_REASON="keploy-pipeline.yml not found"
+          else
+            echo "--- Running Setup Steps ---"
+            yq eval '.setup // [] | .[]' "$PIPELINE_FILE" | while read -r cmd; do
+              [ -z "$cmd" ] && continue
+              if ! (cd app && sudo -E bash -lc "$cmd"); then
+                FINAL_STATUS="Failed"; FAILURE_REASON="Setup cmd failed: $cmd"; break
+              fi
+            done
+
             # --- RECORD STEP ORCHESTRATION ---
-            if [ "$FINAL_STATUS" == "Success" ]; then
-              RECORD_CMD=$(sudo yq eval '.record_command // empty' "$PIPELINE_FILE")
+            if [ "$FINAL_STATUS" = "Success" ]; then
+              RECORD_CMD=$(yq eval '.record_command // ""' "$PIPELINE_FILE")
               if [ -z "$RECORD_CMD" ]; then
                 FINAL_STATUS="Failed"; FAILURE_REASON="record_command not defined in yml"
               else
                 echo "--- Running Record Step ---"
-                sudo -E bash -c '
-                  trap "echo '\''Trapped exit signal, stopping Keploy...'\''; kill -2 \$KEPLOY_PID; wait \$KEPLOY_PID || true" EXIT
-                  (cd app && eval keployV2 '"$RECORD_CMD"') &
+                sudo -E bash -lc '
+                  trap "echo '\''Trapped exit signal, stopping Keploy...'\''; kill -2 $KEPLOY_PID; wait $KEPLOY_PID || true" EXIT
+                  (cd app && eval "$KEPLOY_RUN" '"$RECORD_CMD"') &
                   KEPLOY_PID=$!
                   echo "Keploy record started with PID: $KEPLOY_PID"
                   echo "Waiting 20s for application to start..."
                   sleep 20
                   if [ ! -f "app/curls.sh" ]; then echo "Error: curls.sh not found!"; exit 1; fi
-                  echo "Executing traffic script: curls.sh..."
-                  sudo chmod +x app/curls.sh
-                  (cd app && sudo ./curls.sh)
-                  if [ $? -ne 0 ]; then echo "Error: curls.sh failed."; exit 1; fi
+                  chmod +x app/curls.sh
+                  (cd app && ./curls.sh)
+                  STATUS=$?
                   echo "Traffic script finished. Waiting 20s for cool-down..."
                   sleep 20
                   echo "Stopping Keploy..."
                   kill -2 $KEPLOY_PID
                   wait $KEPLOY_PID || true
                   trap - EXIT
+                  exit $STATUS
                 '
                 if [ $? -ne 0 ]; then FINAL_STATUS="Failed"; FAILURE_REASON="Record orchestration failed"; fi
               fi
             fi
-            
+
             # --- TEST STEP DIRECT EXECUTION ---
-            if [ "$FINAL_STATUS" == "Success" ]; then
-              TEST_CMD=$(sudo yq eval '.test_command // empty' "$PIPELINE_FILE")
-              if [ -n "$TEST_CMD" ] && [ "$TEST_CMD" != "null" ]; then
+            if [ "$FINAL_STATUS" = "Success" ]; then
+              TEST_CMD=$(yq eval '.test_command // ""' "$PIPELINE_FILE")
+              if [ -n "$TEST_CMD" ]; then
                 echo "--- Running Test Step ---"
-                sudo /usr/bin/time -f "${{ env.TIME_FORMAT_STRING }}" -o test_metrics.csv bash -c "cd app && eval keployV2 $TEST_CMD"
-                if [ $? -eq 0 ]; then IFS=',' read TEST_E TEST_P TEST_M < test_metrics.csv; TEST_DURATION=$TEST_E; TEST_CPU_P=$TEST_P; TEST_MEM_MB=$(echo "scale=2; $TEST_M / 1024" | bc); else FINAL_STATUS="Failed"; FAILURE_REASON="Test step failed"; fi
-              else 
+                sudo /usr/bin/time -f "${{ env.TIME_FORMAT_STRING }}" -o test_metrics.csv bash -lc "cd app && eval \"$KEPLOY_RUN\" $TEST_CMD"
+                if [ $? -eq 0 ]; then
+                  IFS=',' read TEST_E TEST_P TEST_M < test_metrics.csv
+                  TEST_DURATION=$TEST_E
+                  TEST_CPU_P=$TEST_P
+                  TEST_MEM_MB=$(echo "scale=2; $TEST_M / 1024" | bc)
+                else
+                  FINAL_STATUS="Failed"; FAILURE_REASON="Test step failed"
+                fi
+              else
                 FINAL_STATUS="Failed"; FAILURE_REASON="test_command not defined"
               fi
             fi
           fi
-          echo "final_status=$FINAL_STATUS" >> $GITHUB_OUTPUT; echo "failure_reason=$FAILURE_REASON" >> $GITHUB_OUTPUT; echo "rec_duration=$REC_DURATION" >> $GITHUB_OUTPUT; echo "rec_cpu_p=$REC_CPU_P" >> $GITHUB_OUTPUT; echo "rec_mem_mb=$REC_MEM_MB" >> $GITHUB_OUTPUT; echo "test_duration=$TEST_DURATION" >> $GITHUB_OUTPUT; echo "test_cpu_p=$TEST_CPU_P" >> $GITHUB_OUTPUT; echo "test_mem_mb=$TEST_MEM_MB" >> $GITHUB_OUTPUT
+
+          echo "final_status=$FINAL_STATUS" >> $GITHUB_OUTPUT
+          echo "failure_reason=$FAILURE_REASON" >> $GITHUB_OUTPUT
+          echo "rec_duration=$REC_DURATION" >> $GITHUB_OUTPUT
+          echo "rec_cpu_p=$REC_CPU_P" >> $GITHUB_OUTPUT
+          echo "rec_mem_mb=$REC_MEM_MB" >> $GITHUB_OUTPUT
+          echo "test_duration=$TEST_DURATION" >> $GITHUB_OUTPUT
+          echo "test_cpu_p=$TEST_CPU_P" >> $GITHUB_OUTPUT
+          echo "test_mem_mb=$TEST_MEM_MB" >> $GITHUB_OUTPUT
+
           if [ "$FINAL_STATUS" != "Success" ]; then exit 1; fi
+
       - name: Create Report Data as Artifact
         if: always()
         run: |
           TIMESTAMP_IST=$(TZ='Asia/Kolkata' date +'%b %d, %Y, %I:%M %p %Z')
           WORKFLOW_LINK="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          FINAL_STATUS="${{ steps.pipeline-runner.outputs.final_status }}"; FAILURE_REASON="${{ steps.pipeline-runner.outputs.failure_reason }}"
-          REC_DUR=${{ steps.pipeline-runner.outputs.rec_duration }}; REC_CPU_P="${{ steps.pipeline-runner.outputs.rec_cpu_p }}"; REC_MEM_MB=${{ steps.pipeline-runner.outputs.rec_mem_mb }}
-          TEST_DUR=${{ steps.pipeline-runner.outputs.test_duration }}; TEST_CPU_P="${{ steps.pipeline-runner.outputs.test_cpu_p }}"; TEST_MEM_MB=${{ steps.pipeline-runner.outputs.test_mem_mb }}
-          JSON_ROW=$(sudo jq -n --arg ts "$TIMESTAMP_IST" --arg wlink "$WORKFLOW_LINK" --arg rurl "${{ matrix.repo }}" --arg status "$FINAL_STATUS" --arg reason "$FAILURE_REASON" --argjson recdur "$REC_DUR" --arg reccpup "$REC_CPU_P" --argjson recmem "$REC_MEM_MB" --argjson testdur "$TEST_DUR" --arg testcpup "$TEST_CPU_P" --argjson testmem "$TEST_MEM_MB" '[[$ts, $wlink, $rurl, $status, $reason, $recdur, $reccpup, $recmem, $testdur, $testcpup, $testmem]]')
-          echo "$JSON_ROW" | sudo tee report.json > /dev/null
+          FINAL_STATUS="${{ steps.pipeline-runner.outputs.final_status }}"
+          FAILURE_REASON="${{ steps.pipeline-runner.outputs.failure_reason }}"
+          REC_DUR=${{ steps.pipeline-runner.outputs.rec_duration }}
+          REC_CPU_P="${{ steps.pipeline-runner.outputs.rec_cpu_p }}"
+          REC_MEM_MB=${{ steps.pipeline-runner.outputs.rec_mem_mb }}
+          TEST_DUR=${{ steps.pipeline-runner.outputs.test_duration }}
+          TEST_CPU_P="${{ steps.pipeline-runner.outputs.test_cpu_p }}"
+          TEST_MEM_MB=${{ steps.pipeline-runner.outputs.test_mem_mb }}
+          JSON_ROW=$(jq -n \
+            --arg ts "$TIMESTAMP_IST" \
+            --arg wlink "$WORKFLOW_LINK" \
+            --arg rurl "${{ matrix.repo }}" \
+            --arg status "$FINAL_STATUS" \
+            --arg reason "$FAILURE_REASON" \
+            --argjson recdur ${REC_DUR:-0} \
+            --arg reccpup "$REC_CPU_P" \
+            --argjson recmem ${REC_MEM_MB:-0} \
+            --argjson testdur ${TEST_DUR:-0} \
+            --arg testcpup "$TEST_CPU_P" \
+            --argjson testmem ${TEST_MEM_MB:-0} \
+            '[[$ts, $wlink, $rurl, $status, $reason, $recdur, $reccpup, $recmem, $testdur, $testcpup, $testmem]]')
+          echo "$JSON_ROW" > report.json
+
       - name: Upload Individual Report as Artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: report-for-${{ matrix.repo }}
           path: report.json
+
       - name: Prepare Attachments on Failure
         if: failure()
         run: |
           echo "Zipping Keploy directory for email attachment..."
           if [ -d "app/keploy" ]; then sudo zip -r keploy_artifacts.zip app/keploy; else echo "Keploy directory not found."; fi
+
       - name: Send Email Notification on Failure
         if: failure()
         uses: dawidd6/action-send-mail@v3
@@ -258,20 +310,24 @@ jobs:
           path: all-reports
           pattern: report-for-*
           merge-multiple: true
+
       - name: Aggregate all reports into a single payload
         id: aggregate
         run: |
-          mkdir -p all-reports
           files=$(find all-reports -name "report.json" -type f)
           if [ -z "$files" ]; then 
             echo "payload=[]" >> $GITHUB_OUTPUT
           else 
-            FINAL_PAYLOAD=$(sudo jq -s 'map(.[0])' $files)
+            FINAL_PAYLOAD=$(jq -s 'map(.[0])' $files)
             echo "payload=${FINAL_PAYLOAD}" >> $GITHUB_OUTPUT
           fi
+
       - name: Append data to Google Sheet via REST API
         if: steps.aggregate.outputs.payload != '[]'
         run: |
           API_URL="https://sheets.googleapis.com/v4/spreadsheets/${{ secrets.SHEET_ID }}/values/${{ env.REPORT_SHEET_NAME }}:append?valueInputOption=USER_ENTERED"
           JSON_BODY=$(jq -n --argjson values "${{ steps.aggregate.outputs.payload }}" '{ "values": $values }')
-          curl -s --request POST "$API_URL" --header "Authorization: Bearer ${{ steps.auth.outputs.access_token }}" --header "Content-Type: application/json" --data-raw "$JSON_BODY"
+          curl -s --request POST "$API_URL" \
+               --header "Authorization: Bearer ${{ steps.auth.outputs.access_token }}" \
+               --header "Content-Type: application/json" \
+               --data-raw "$JSON_BODY"
