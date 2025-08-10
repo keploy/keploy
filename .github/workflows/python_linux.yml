@@ -42,4 +42,12 @@ jobs:
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
         run: |
           cd samples-python/django-postgres/django_postgres
-          source ../../../.github/workflows/test_workflow_scripts/python-linux.sh
+          source ../../.github/workflows/test_workflow_scripts/python/django_postgres/python-linux.sh
+
+      - name: Run the flask-mysql python application
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          cd samples-python/flask-mysql
+          source ../../.github/workflows/test_workflow_scripts/python/flask_mysql/python-linux.sh

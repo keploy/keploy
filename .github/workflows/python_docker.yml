@@ -46,4 +46,4 @@ jobs:
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
         run: |
           cd samples-python/flask-mongo
-          source ./../../.github/workflows/test_workflow_scripts/python-docker.sh
+          source ../../.github/workflows/test_workflow_scripts/python-docker.sh
