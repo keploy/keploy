@@ -30,8 +30,7 @@ send_request(){
     sleep 10
     app_started=false
     while [ "$app_started" = false ]; do
-        # Using a known valid endpoint for the health check
-        if curl -s -o /dev/null http://127.0.0.1:8000/user/; then
+        if curl -X GET http://127.0.0.1:8000/; then
             app_started=true
         fi
         sleep 3 # wait for 3 seconds before checking again.
@@ -59,19 +58,12 @@ send_request(){
     sudo kill $pid
 }
 
-echo "=== RECORDING PHASE WITH METRICS ==="
 # Record and Test cycles
 for i in {1..2}; do
     app_name="flaskApp_${i}"
     send_request &
-    
-    # --- METRICS ADDED HERE ---
-    # The Keploy record command is wrapped with /usr/bin/time to capture metrics.
-    sudo /usr/bin/time -f "Record Phase ${i} - Elapsed: %e seconds, CPU: %P, Memory: %M KB" \
-        -o "record_metrics_${i}.txt" \
-        sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 manage.py runserver" &> "${app_name}.txt"
-    
-    if grep "ERROR" "${app_name}.txt" | grep -v "user application terminated"; then
+    sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 manage.py runserver"   &> "${app_name}.txt"
+    if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
         exit 1
@@ -86,12 +78,11 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
-echo "=== TESTING PHASE WITH METRICS ==="
-# --- METRICS ADDED HERE ---
-# The Keploy test command is wrapped with /usr/bin/time to capture metrics.
-sudo /usr/bin/time -f "Test Phase - Elapsed: %e seconds, CPU: %P, Memory Peak: %M KB" \
-    -o "test_metrics_detailed.txt" \
-    sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 manage.py runserver" --delay 10 &> test_logs.txt
+# Testing phase with benchmarking
+echo "Starting test phase with performance monitoring..."
+/usr/bin/time -f "Elapsed: %e\nCPU: %P\nMemory Peak: %M KB" \
+    sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 manage.py runserver" --delay 10 \
+    &> test_logs.txt 2> test_metrics_detailed.txt
 
 if grep "ERROR" "test_logs.txt"; then
         echo "Error found in pipeline..."
@@ -104,55 +95,34 @@ if grep "WARNING: DATA RACE" "test_logs.txt"; then
     exit 1
 fi
 
+echo "Test phase completed. Performance metrics saved to test_metrics_detailed.txt"
+
 all_passed=true
-if [ -d "./keploy/reports/test-run-0" ]; then
-    for i in {0..1}; do
-        report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
-        if [ -f "$report_file" ]; then
-            test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-            echo "Test status for test-set-$i: $test_status"
-            if [ "$test_status" != "PASSED" ]; then
-                all_passed=false
-                echo "Test-set-$i did not pass."
-                break
-            fi
-        else
-            echo "Report file $report_file not found."
-            all_passed=false
-            break
-        fi
-    done
-else
-    echo "Keploy reports directory not found. Assuming test failure."
-    all_passed=false
-fi
 
-# --- BENCHMARK SUMMARY SECTION ADDED ---
-echo "=== BENCHMARK SUMMARY ==="
-echo "Application: Python Django + PostgreSQL"
-echo "Record Cycles: 2"
-echo "Test Sets: 2"
+for i in {0..1}
+do
+    # Define the report file for each test set
+    report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
 
-echo "--- AGGREGATED METRICS ---"
-for i in {1..2}; do
-    if [ -f "record_metrics_${i}.txt" ]; then
-        echo "Record Cycle ${i}:"
-        cat "record_metrics_${i}.txt"
+    # Extract the test status
+    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+
+    # Print the status for debugging
+    echo "Test status for test-set-$i: $test_status"
+
+    # Check if any test set did not pass
+    if [ "$test_status" != "PASSED" ]; then
+        all_passed=false
+        echo "Test-set-$i did not pass."
+        break # Exit the loop early as all tests need to pass
     fi
 done
-
-if [ -f "test_metrics_detailed.txt" ]; then
-    echo "Test Execution:"
-    cat "test_metrics_detailed.txt"
-fi
-# --- END OF SUMMARY SECTION ---
 
 # Check the overall test status and exit accordingly
 if [ "$all_passed" = true ]; then
     echo "All tests passed"
     exit 0
 else
-    echo "Some tests failed. Review logs."
     cat "test_logs.txt"
     exit 1
 fi
