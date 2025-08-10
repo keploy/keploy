@@ -7,6 +7,8 @@ on:
 
 env:
   TIME_FORMAT_STRING: "%e,%P,%M"
+  REPORT_SHEET_NAME: "benchmark_report"
+  NOTIFICATION_RECIPIENT: "asish.kumar.programmer@gmail.com"
 
 jobs:
   build-keploy:
@@ -87,10 +89,49 @@ jobs:
           echo "Using RECORD_BIN: $RECORD_BIN"
           echo "Using REPLAY_BIN: $REPLAY_BIN"
 
-          # Run the benchmark script
-          source ../../../.github/workflows/benchmark/python-benchmark.sh
+          # Initialize metrics variables
+          FINAL_STATUS="Success"
+          FAILURE_REASON="None"
+          REC_DURATION=0; REC_CPU_P="0%"; REC_MEM_MB=0
+          TEST_DURATION=0; TEST_CPU_P="0%"; TEST_MEM_MB=0
 
-          echo "=== Benchmark completed successfully ==="
+          # Run the benchmark script and capture metrics
+          if source ../../../.github/workflows/benchmark/python-benchmark.sh; then
+            echo "=== Benchmark completed successfully ==="
+            
+            # Parse metrics from benchmark files
+            if [ -f "record_metrics_1.txt" ]; then
+              REC_LINE=$(cat record_metrics_1.txt | grep "Elapsed")
+              REC_DURATION=$(echo "$REC_LINE" | grep -o 'Elapsed: [0-9.]*' | cut -d' ' -f2)
+              REC_CPU_P=$(echo "$REC_LINE" | grep -o 'CPU: [0-9.]*%' | cut -d' ' -f2)
+              REC_MEM_KB=$(echo "$REC_LINE" | grep -o 'Memory: [0-9]* KB' | cut -d' ' -f2)
+              REC_MEM_MB=$(echo "scale=2; $REC_MEM_KB / 1024" | bc -l)
+            fi
+            
+            if [ -f "test_metrics_detailed.txt" ]; then
+              TEST_LINE=$(cat test_metrics_detailed.txt | grep "Elapsed")
+              TEST_DURATION=$(echo "$TEST_LINE" | grep -o 'Elapsed: [0-9.]*' | cut -d' ' -f2)
+              TEST_CPU_P=$(echo "$TEST_LINE" | grep -o 'CPU: [0-9.]*%' | cut -d' ' -f2)
+              TEST_MEM_KB=$(echo "$TEST_LINE" | grep -o 'Memory Peak: [0-9]* KB' | cut -d' ' -f3)
+              TEST_MEM_MB=$(echo "scale=2; $TEST_MEM_KB / 1024" | bc -l)
+            fi
+          else
+            echo "=== Benchmark failed ==="
+            FINAL_STATUS="Failed"
+            FAILURE_REASON="Benchmark script execution failed"
+          fi
+
+          # Output metrics for other jobs
+          echo "final_status=$FINAL_STATUS" >> $GITHUB_OUTPUT
+          echo "failure_reason=$FAILURE_REASON" >> $GITHUB_OUTPUT
+          echo "rec_duration=$REC_DURATION" >> $GITHUB_OUTPUT
+          echo "rec_cpu_p=$REC_CPU_P" >> $GITHUB_OUTPUT
+          echo "rec_mem_mb=$REC_MEM_MB" >> $GITHUB_OUTPUT
+          echo "test_duration=$TEST_DURATION" >> $GITHUB_OUTPUT
+          echo "test_cpu_p=$TEST_CPU_P" >> $GITHUB_OUTPUT
+          echo "test_mem_mb=$TEST_MEM_MB" >> $GITHUB_OUTPUT
+
+          if [ "$FINAL_STATUS" != "Success" ]; then exit 1; fi
 
       - name: Upload Benchmark Results
         if: always()
@@ -124,11 +165,79 @@ jobs:
             fi
           done
 
-          # Display test metrics
+                    # Display test metrics
           if [ -f "test_metrics_detailed.txt" ]; then
             echo "Test Execution Metrics:"
             cat "test_metrics_detailed.txt"
           fi
+
+      - name: Create Report Data for Google Sheets
+        if: always()
+        run: |
+          cd samples-python/django-postgres/django_postgres
+          TIMESTAMP_IST=$(TZ='Asia/Kolkata' date +'%b %d, %Y, %I:%M %p %Z')
+          WORKFLOW_LINK="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          FINAL_STATUS="${{ steps.python-benchmark.outputs.final_status }}"
+          FAILURE_REASON="${{ steps.python-benchmark.outputs.failure_reason }}"
+          REC_DUR=${{ steps.python-benchmark.outputs.rec_duration || 0 }}
+          REC_CPU_P="${{ steps.python-benchmark.outputs.rec_cpu_p || '0%' }}"
+          REC_MEM_MB=${{ steps.python-benchmark.outputs.rec_mem_mb || 0 }}
+          TEST_DUR=${{ steps.python-benchmark.outputs.test_duration || 0 }}
+          TEST_CPU_P="${{ steps.python-benchmark.outputs.test_cpu_p || '0%' }}"
+          TEST_MEM_MB=${{ steps.python-benchmark.outputs.test_mem_mb || 0 }}
+          APPLICATION="Python Django + PostgreSQL"
+
+          JSON_ROW=$(jq -n \
+            --arg ts "$TIMESTAMP_IST" \
+            --arg wlink "$WORKFLOW_LINK" \
+            --arg app "$APPLICATION" \
+            --arg status "$FINAL_STATUS" \
+            --arg reason "$FAILURE_REASON" \
+            --argjson recdur $REC_DUR \
+            --arg reccpup "$REC_CPU_P" \
+            --argjson recmem $REC_MEM_MB \
+            --argjson testdur $TEST_DUR \
+            --arg testcpup "$TEST_CPU_P" \
+            --argjson testmem $TEST_MEM_MB \
+            '[[$ts, $wlink, $app, $status, $reason, $recdur, $reccpup, $recmem, $testdur, $testcpup, $testmem]]')
+          echo "$JSON_ROW" > ../../../python_report.json
+
+      - name: Upload Report Data as Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-benchmark-report
+          path: python_report.json
+
+      - name: Prepare Attachments on Failure
+        if: failure()
+        run: |
+          echo "Zipping Keploy directory for email attachment..."
+          cd samples-python/django-postgres/django_postgres
+          if [ -d "keploy" ]; then 
+            sudo zip -r ../../../keploy_artifacts.zip keploy
+          else 
+            echo "Keploy directory not found."
+          fi
+
+      - name: Send Email Notification on Failure
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: "smtp.gmail.com"
+          server_port: 587
+          username: ${{ secrets.GMAIL_USERNAME }}
+          password: ${{ secrets.GMAIL_APP_PASSWORD }}
+          subject: "❌ CI Failure: Keploy Benchmark Failed for Python Django"
+          to: ${{ env.NOTIFICATION_RECIPIENT }}
+          from: GitHub Actions CI <${{ secrets.GMAIL_USERNAME }}>
+          body: |
+            A failure occurred while running the Keploy benchmark pipeline.
+            **Application:** Python Django + PostgreSQL
+            **Failure Reason:** `${{ steps.python-benchmark.outputs.failure_reason }}`
+            **Logs:** See benchmark_output.log artifact.
+            **Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          attachments: samples-python/django-postgres/django_postgres/benchmark_output.log, keploy_artifacts.zip
 
   # Future: Add more language benchmarks
   # golang-benchmark:
@@ -140,6 +249,47 @@ jobs:
   #   needs: [build-keploy]
   #   runs-on: ubuntu-latest
   #   # Similar structure for Node.js benchmarks
+
+  report-to-google-sheets:
+    runs-on: ubuntu-latest
+    needs: [python-benchmark]
+    if: always()
+    steps:
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: "google-github-actions/auth@v2"
+        with:
+          create_credentials_file: false
+          credentials_json: "${{ secrets.GCP_SA_KEY }}"
+          access_token_scopes: "https://www.googleapis.com/auth/spreadsheets"
+
+      - name: Download all benchmark reports
+        uses: actions/download-artifact@v4
+        with:
+          path: all-reports
+          pattern: "*-benchmark-report"
+          merge-multiple: true
+
+      - name: Aggregate all reports into a single payload
+        id: aggregate
+        run: |
+          files=$(find all-reports -name "*_report.json" -type f)
+          if [ -z "$files" ]; then 
+            echo "payload=[]" >> $GITHUB_OUTPUT
+          else 
+            FINAL_PAYLOAD=$(jq -s 'map(.[0])' $files)
+            echo "payload=${FINAL_PAYLOAD}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Append data to Google Sheet via REST API
+        if: steps.aggregate.outputs.payload != '[]'
+        run: |
+          API_URL="https://sheets.googleapis.com/v4/spreadsheets/${{ secrets.SHEET_ID }}/values/${{ env.REPORT_SHEET_NAME }}:append?valueInputOption=USER_ENTERED"
+          JSON_BODY=$(jq -n --argjson values "${{ steps.aggregate.outputs.payload }}" '{ "values": $values }')
+          curl -s --request POST "$API_URL" \
+               --header "Authorization: Bearer ${{ steps.auth.outputs.access_token }}" \
+               --header "Content-Type: application/json" \
+               --data-raw "$JSON_BODY"
 
   benchmark-summary:
     runs-on: ubuntu-latest
