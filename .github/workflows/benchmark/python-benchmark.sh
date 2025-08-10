@@ -26,13 +26,11 @@ config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"header": {"Allow":[],}}/' "$config_file"
 sleep 5  # Allow time for configuration changes
 
-# MODIFIED: This function now only sends requests and does not manage processes.
 send_request(){
     echo "Waiting for application to be ready..."
     app_started=false
     # Try for 60 seconds before timing out
     for i in {1..20}; do
-        # MODIFIED: Health check now hits a valid endpoint
         if curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/user/ | grep -q "200"; then
             app_started=true
             break
@@ -61,7 +59,6 @@ send_request(){
     }'
     curl --location 'http://127.0.0.1:8000/user/'
     
-    # Wait for keploy to capture all requests
     echo "Waiting for Keploy to process recordings..."
     sleep 10
 }
@@ -71,22 +68,27 @@ echo "=== RECORDING PHASE WITH METRICS ==="
 for i in {1..2}; do
     app_name="flaskApp_${i}"
     
-    # MODIFIED: Start Keploy record in the background and get its PID
     echo "Starting Keploy record for iteration ${i}..."
     sudo /usr/bin/time -f "Record Phase ${i} - Elapsed: %e seconds, CPU: %P, Memory: %M KB" \
         -o "record_metrics_${i}.txt" \
         sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 manage.py runserver" &> "${app_name}.txt" &
     KEPLOY_PID=$!
     
-    # Run send_request in the foreground
     send_request
     
-    # MODIFIED: Kill the Keploy process from the main script
-    echo "Stopping Keploy (PID: $KEPLOY_PID)..."
+    # --- START OF FIX ---
+    echo "Stopping Keploy (PID: $KEPLOY_PID) and related processes..."
     sudo kill $KEPLOY_PID
-    wait $KEPLOY_PID 2>/dev/null # Wait for the process to terminate completely
-    echo "Keploy stopped for iteration ${i}."
     
+    # Forcefully kill any processes on the app and proxy ports to prevent "address in use" errors.
+    # The '|| true' ensures the script doesn't fail if the port is already free.
+    sudo fuser -k 8000/tcp || true
+    sudo fuser -k 16789/tcp || true
+
+    wait $KEPLOY_PID 2>/dev/null # Wait for the main Keploy process to terminate
+    echo "Processes stopped for iteration ${i}."
+    # --- END OF FIX ---
+
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in pipeline..."
         cat "${app_name}.txt"
@@ -97,12 +99,13 @@ for i in {1..2}; do
         cat "${app_name}.txt"
         exit 1
     fi
-    sleep 5 # Give time for ports to be freed before the next iteration
     
     # Display record metrics
     echo "=== Record Metrics for iteration ${i} ==="
     cat "record_metrics_${i}.txt"
     echo "Recorded test case and mocks for iteration ${i}"
+    
+    sleep 5 # Give OS time to release ports fully
 done
 
 echo "=== TESTING PHASE WITH METRICS ==="
@@ -128,24 +131,17 @@ fi
 
 all_passed=true
 
-# MODIFIED: Check if the reports directory exists before looping
 if [ -d "./keploy/reports/test-run-0" ]; then
     for i in {0..1}; do
-        # Define the report file for each test set
         report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
 
         if [ -f "$report_file" ]; then
-            # Extract the test status
             test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-
-            # Print the status for debugging
             echo "Test status for test-set-$i: $test_status"
-
-            # Check if any test set did not pass
             if [ "$test_status" != "PASSED" ]; then
                 all_passed=false
                 echo "Test-set-$i did not pass."
-                break # Exit the loop early as all tests need to pass
+                break
             fi
         else
             echo "Report file $report_file not found for test-set-$i."
@@ -158,14 +154,11 @@ else
     all_passed=false
 fi
 
-
-# Generate benchmark summary
 echo "=== BENCHMARK SUMMARY ==="
 echo "Application: Python Django + PostgreSQL"
 echo "Record Cycles: 2"
 echo "Test Sets: 2"
 
-# Aggregate metrics
 echo "=== AGGREGATED METRICS ==="
 for i in {1..2}; do
     if [ -f "record_metrics_${i}.txt" ]; then
@@ -179,7 +172,6 @@ if [ -f "test_metrics_detailed.txt" ]; then
     cat "test_metrics_detailed.txt"
 fi
 
-# Check the overall test status and exit accordingly
 if [ "$all_passed" = true ]; then
     echo "=== BENCHMARK COMPLETED SUCCESSFULLY ==="
     echo "All tests passed - Application is functioning correctly"
