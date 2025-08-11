@@ -72,7 +72,17 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 		return nil
 	}
 
-	return r.printFailedTestReports(failedTests)
+	err = r.printFailedTestReports(failedTests)
+	if err != nil {
+		r.logger.Error("failed to print failed test reports", zap.Error(err))
+		return err
+	}
+
+	r.logger.Info(fmt.Sprintf("✂️ CLI output truncated - see the %s report file for the complete diff.", latestRunID))
+
+	r.logger.Info("Report generation completed successfully")
+
+	return nil
 }
 
 // extractTestSetIDs extracts and cleans test set IDs from config
@@ -174,8 +184,6 @@ func (r *Report) printSingleTestReport(test models.TestResult) error {
 	if err := r.printAndRenderDiffs(printer, logs, &logDiffs); err != nil {
 		return err
 	}
-
-	printer.Println("✂  CLI output truncated — see the report file for the complete diff.")
 
 	return nil
 }
