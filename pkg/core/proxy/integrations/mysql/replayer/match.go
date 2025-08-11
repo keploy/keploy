@@ -438,7 +438,7 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 
 	actualSignature, err := getQueryStructure(actualQuery)
 	if err != nil {
-		log.Error("failed to get actual query structure",
+		log.Warn("failed to get actual query structure",
 			zap.String("actual Query", actualQuery),
 			zap.Error(err))
 		return false, matchCount
@@ -446,7 +446,7 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 
 	expectedSignature, err := getQueryStructure(expectedQuery)
 	if err != nil {
-		log.Error("failed to get expected query structure",
+		log.Warn("failed to get expected query structure",
 			zap.String("expected Query", expectedQuery),
 			zap.Error(err))
 		return false, matchCount
