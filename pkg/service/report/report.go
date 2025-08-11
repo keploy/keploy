@@ -19,13 +19,15 @@ type Report struct {
 	logger   *zap.Logger
 	config   *config.Config
 	reportDB ReportDB
+	testDB   TestDB
 }
 
-func New(logger *zap.Logger, cfg *config.Config, reportDB ReportDB) *Report {
+func New(logger *zap.Logger, cfg *config.Config, reportDB ReportDB, testDB TestDB) *Report {
 	return &Report{
 		logger:   logger,
 		config:   cfg,
 		reportDB: reportDB,
+		testDB:   testDB,
 	}
 }
 
@@ -33,8 +35,20 @@ func New(logger *zap.Logger, cfg *config.Config, reportDB ReportDB) *Report {
 func (r *Report) GenerateReport(ctx context.Context) error {
 	testSetIDs := r.extractTestSetIDs()
 	if len(testSetIDs) == 0 {
-		r.logger.Warn("No test sets selected for report generation")
-		return nil
+		r.logger.Info("No test sets selected for report generation, Generating report for all test sets")
+
+		var err error
+
+		testSetIDs, err = r.testDB.GetAllTestSetIDs(ctx)
+		if err != nil {
+			r.logger.Error("failed to get all test set ids", zap.Error(err))
+			return err
+		}
+
+		if len(testSetIDs) == 0 {
+			r.logger.Warn("No test sets found for report generation")
+			return nil
+		}
 	}
 
 	latestRunID, err := r.getLatestTestRunID(ctx)
