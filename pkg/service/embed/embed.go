@@ -906,7 +906,7 @@ func (e *EmbedService) callAIService(ctx context.Context, contents []string) ([]
 		modelID = e.cfg.Embed.ModelName
 	}
 
-	url := "https://0f072232ca22.ngrok-free.app/generate_embeddings/"
+	url := "https://51427e8e8672.ngrok-free.app/generate_embeddings/"
 
 	type requestBody struct {
 		Sentences []string `json:"sentences"`

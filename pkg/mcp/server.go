@@ -66,8 +66,18 @@ func (s *Server) handleConverse(
 }
 
 func (s *Server) captureConverseOutput(ctx context.Context, query string) (string, error) {
-	if err := s.embedService.Converse(ctx, query); err != nil {
+	response, err := HandleConverseForMCP(ctx, s.embedService, query, s.logger)
+	if err != nil {
+		s.logger.Error("MCP server: New converse handler failed", zap.Error(err))
 		return "", err
 	}
-	return "query processed successfully – see server logs for full transcript", nil
+
+	jsonResponse, err := ConverseResponseToJSON(response)
+	if err != nil {
+		s.logger.Error("MCP server: Failed to convert response to JSON", zap.Error(err))
+		return "", err
+	}
+
+	s.logger.Info("MCP server: Successfully generated JSON response", zap.Int("response_length", len(jsonResponse)))
+	return jsonResponse, nil
 }

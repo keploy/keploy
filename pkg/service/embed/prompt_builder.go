@@ -68,7 +68,6 @@ func (pb *PromptBuilder) BuildPrompt(file string) (*Prompt, error) {
 		return nil, fmt.Errorf("error rendering user prompt: %v", err)
 	}
 	prompt.User = html.UnescapeString(userPrompt)
-	fmt.Print(prompt.User)
 	return prompt, nil
 }
 
