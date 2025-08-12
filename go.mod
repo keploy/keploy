@@ -127,16 +127,17 @@ require (
 	vitess.io/vitess v0.22.1
 )
 
+require github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
+
 require (
-	github.com/gorilla/mux v1.8.1
-	github.com/perimeterx/marshmallow v1.1.5 // indirect
-	golang.org/x/time v0.12.0
 	github.com/golang/glog v1.2.4 // indirect
+	github.com/gorilla/mux v1.8.1
 	github.com/perimeterx/marshmallow v1.1.5 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20241121165744-79df5c4772f2 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
 	golang.org/x/exp v0.0.0-20250305212735-054e65f0b394 // indirect
+	golang.org/x/time v0.12.0
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250313205543-e70fdf4c4cb4 // indirect
 	google.golang.org/grpc v1.71.0 // indirect
 )

@@ -6,24 +6,32 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
+	"os/exec"
 	"path"
 	"strconv"
+	"strings"
 
+	"github.com/pkg/browser"
 	"go.keploy.io/server/v2/config"
 	"go.uber.org/zap"
 )
 
 type DashboardExposer struct {
-	config *config.Config
-	logger *zap.Logger
-	port   int
+	config      *config.Config
+	logger      *zap.Logger
+	port        int
+	instanceID  string
+	instanceURL string
 }
 
-func NewDashboardExposer(cfg *config.Config, logger *zap.Logger) *DashboardExposer {
+func NewDashboardExposer(cfg *config.Config, logger *zap.Logger, loadTestID string) *DashboardExposer {
 	return &DashboardExposer{
-		config: cfg,
-		logger: logger,
-		port:   3000, // Default port for the dashboard, until it's configured otherwise // TODO
+		config:      cfg,
+		logger:      logger,
+		port:        3000, // Default port for the dashboard, until it's configured otherwise // TODO
+		instanceID:  loadTestID,
+		instanceURL: "http://localhost:3000/?dashboard=" + loadTestID,
 	}
 }
 
@@ -41,6 +49,9 @@ func (de *DashboardExposer) Expose(ctx context.Context) {
 		}
 	}()
 
+	de.logger.Info("Opening browser on dashboard", zap.String("URL", de.instanceURL))
+	de.openBrowser()
+
 	go func() {
 		<-ctx.Done()
 		de.logger.Info("Shutting down dashboard exposer...")
@@ -49,6 +60,33 @@ func (de *DashboardExposer) Expose(ctx context.Context) {
 		}
 	}()
 }
+
+// =========================================================================================================
+
+func (de *DashboardExposer) openBrowser() {
+	if isWSL() {
+		err := exec.Command("cmd.exe", "/c", "start", de.instanceURL).Run()
+		if err != nil {
+			de.logger.Error("Failed to open browser in WSL", zap.Error(err))
+		}
+	} else {
+		err := browser.OpenURL(de.instanceURL)
+		if err != nil {
+			de.logger.Error("Failed to open browser", zap.Error(err))
+		}
+	}
+}
+
+func isWSL() bool {
+	data, err := os.ReadFile("/proc/version")
+	if err != nil {
+		return false
+	}
+	content := strings.ToLower(string(data))
+	return strings.Contains(content, "microsoft") || strings.Contains(content, "wsl")
+}
+
+// =========================================================================================================
 
 //go:embed out/*
 var content embed.FS

@@ -327,16 +327,21 @@ func NewSecurityChecker(cfg *config.Config, logger *zap.Logger) (*SecurityChecke
 	}, nil
 }
 
-func (s *SecurityChecker) Start(ctx context.Context) error {
+func (s *SecurityChecker) Start(ctx context.Context) (*SecurityReport, error) {
+	if s.ruleset == "" {
+		s.ruleset = "basic" // Default to basic ruleset if not specified
+	}
 	// CLI override
-	if ctx.Value("rule-set") != "basic" {
-		s.ruleset = ctx.Value("rule-set").(string)
+	if ruleSetValue := ctx.Value("rule-set"); ruleSetValue != nil {
+		if ruleSetStr, ok := ruleSetValue.(string); ok && ruleSetStr != "basic" {
+			s.ruleset = ruleSetStr
+		}
 	}
 
 	// Create and execute TestSuite to get step data
 	tsExecutor, err := testsuite.NewTSExecutor(s.config, s.logger, true)
 	if err != nil {
-		return fmt.Errorf("failed to create testsuite executor: %w", err)
+		return nil, fmt.Errorf("failed to create testsuite executor: %w", err)
 	}
 
 	tsExecutor.Testsuite = s.testsuite
@@ -344,7 +349,7 @@ func (s *SecurityChecker) Start(ctx context.Context) error {
 	// Execute the testsuite
 	executionReport, err := tsExecutor.Execute(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("failed to execute testsuite: %w", err)
+		return nil, fmt.Errorf("failed to execute testsuite: %w", err)
 	}
 
 	// Convert execution results to Step structures for security analysis
@@ -356,7 +361,7 @@ func (s *SecurityChecker) Start(ctx context.Context) error {
 	// Print the security report
 	s.printSecurityReport(securityReport)
 
-	return nil
+	return securityReport, nil
 }
 
 func (s *SecurityChecker) AddCustomCheck(ctx context.Context) error {

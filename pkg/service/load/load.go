@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/service/secure"
 	"go.keploy.io/server/v2/pkg/service/testsuite"
 	"go.uber.org/zap"
 )
@@ -23,13 +24,14 @@ type LTReport struct {
 }
 
 type LoadTester struct {
-	config    *config.Config
-	logger    *zap.Logger
-	testsuite *testsuite.TestSuite
-	profile   string
-	vus       int
-	duration  string
-	rps       int
+	config     *config.Config
+	logger     *zap.Logger
+	testsuite  *testsuite.TestSuite
+	loadTestID string
+	profile    string
+	vus        int
+	duration   string
+	rps        int
 }
 
 func NewLoadTester(cfg *config.Config, logger *zap.Logger) (*LoadTester, error) {
@@ -48,13 +50,14 @@ func NewLoadTester(cfg *config.Config, logger *zap.Logger) (*LoadTester, error) 
 	}
 
 	return &LoadTester{
-		config:    cfg,
-		logger:    logger,
-		testsuite: &testsuite,
-		profile:   testsuite.Spec.Load.Profile,
-		vus:       testsuite.Spec.Load.VUs,
-		duration:  testsuite.Spec.Load.Duration,
-		rps:       testsuite.Spec.Load.RPS,
+		config:     cfg,
+		logger:     logger,
+		testsuite:  &testsuite,
+		loadTestID: time.Now().Format("20060102_150405"),
+		profile:    testsuite.Spec.Load.Profile,
+		vus:        testsuite.Spec.Load.VUs,
+		duration:   testsuite.Spec.Load.Duration,
+		rps:        testsuite.Spec.Load.RPS,
 	}, nil
 }
 
@@ -84,7 +87,7 @@ func (lt *LoadTester) Start(ctx context.Context) error {
 	}
 
 	ltToken := &LTToken{
-		ID:          time.Now().Format("20060102_150405"),
+		ID:          lt.loadTestID,
 		URL:         "http://localhost:9090/metrics",
 		Title:       lt.testsuite.Name,
 		Description: lt.testsuite.Spec.Metadata.Description,
@@ -97,11 +100,24 @@ func (lt *LoadTester) Start(ctx context.Context) error {
 		zap.Int("rps", lt.rps),
 	)
 
+	securityChecker, err := secure.NewSecurityChecker(lt.config, lt.logger)
+	if err != nil {
+		lt.logger.Error("Failed to create security checker", zap.Error(err))
+	}
+
+	securityReport, err := securityChecker.Start(ctx)
+	if err != nil {
+		lt.logger.Error("Failed to start security checker", zap.Error(err))
+	}
+
+	ltToken.SecurityReport = securityReport
+
+	dashboardExposer := NewDashboardExposer(lt.config, lt.logger, lt.loadTestID)
 	exporter := NewExporter(lt.config, lt.logger, lt.vus, ltToken)
 	mc := NewMetricsCollector(lt.config, lt.logger, lt.vus)
 	scheduler := NewScheduler(lt.logger, lt.config, loadOptions, lt.testsuite, mc)
 
-	if err := scheduler.Run(ctx, exporter); err != nil {
+	if err := scheduler.Run(ctx, exporter, dashboardExposer); err != nil {
 		lt.logger.Error("Failed to run load test", zap.Error(err))
 		return fmt.Errorf("failed to run load test: %w", err)
 	}
@@ -120,7 +136,7 @@ func (lt *LoadTester) Start(ctx context.Context) error {
 		Steps:         report,
 	}
 
-	err := lt.saveJSONReport(ltReport)
+	err = lt.saveJSONReport(ltReport)
 	if err != nil {
 		lt.logger.Error("Failed to save JSON report", zap.Error(err))
 	}

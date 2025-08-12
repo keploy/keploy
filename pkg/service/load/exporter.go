@@ -11,39 +11,39 @@ import (
 
 	"github.com/gorilla/mux"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/service/secure"
 	"go.keploy.io/server/v2/pkg/service/testsuite"
 	"go.uber.org/zap"
 )
 
 // Exporter Load Test Token, it contains unique identifier for the load test with the load test information.
 type LTToken struct {
-	ID          string                `json:"id"`
-	URL         string                `json:"url"`
-	Title       string                `json:"title"`
-	CreatedAt   time.Time             `json:"created_at"`
-	Description string                `json:"description"`
-	LoadOptions testsuite.LoadOptions `json:"load_options"`
+	ID             string                 `json:"id"`
+	URL            string                 `json:"url"`
+	Title          string                 `json:"title"`
+	CreatedAt      time.Time              `json:"created_at"`
+	Description    string                 `json:"description"`
+	LoadOptions    testsuite.LoadOptions  `json:"load_options"`
+	SecurityReport *secure.SecurityReport `json:"security_report,omitempty"`
 }
 
 type Exporter struct {
-	config       *config.Config
-	logger       *zap.Logger
-	dashboardURL string
-	ltToken      *LTToken
-	isServed     bool
-	vusReport    []VUReport
-	mu           sync.RWMutex
+	config    *config.Config
+	logger    *zap.Logger
+	ltToken   *LTToken
+	isServed  bool
+	vusReport []VUReport
+	mu        sync.RWMutex
 }
 
 // Exporter is responsible for providing endpoint to export the load test report in JSON format.
 func NewExporter(cfg *config.Config, logger *zap.Logger, vus int, ltToken *LTToken) *Exporter {
 	return &Exporter{
-		config:       cfg,
-		logger:       logger,
-		dashboardURL: "http://localhost:3000",
-		ltToken:      ltToken,
-		isServed:     false,
-		vusReport:    make([]VUReport, vus),
+		config:    cfg,
+		logger:    logger,
+		ltToken:   ltToken,
+		isServed:  false,
+		vusReport: make([]VUReport, vus),
 	}
 }
 
@@ -148,7 +148,7 @@ func (e *Exporter) StartServer(ctx context.Context) error {
 }
 
 func (e *Exporter) metricsHandler(res http.ResponseWriter, req *http.Request) {
-	res.Header().Set("Access-Control-Allow-Origin", e.dashboardURL)
+	res.Header().Set("Access-Control-Allow-Origin", "*")
 	res.Header().Set("Access-Control-Allow-Methods", "GET")
 	res.Header().Set("Content-Type", "application/json")
 
