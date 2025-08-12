@@ -51,11 +51,83 @@ jobs:
           repository: keploy/samples-python
           path: samples-python
 
+      - name: Create results directory
+        run: mkdir -p results
+
       - name: Run the ${{ matrix.app.name }} application
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
         run: |
+          set -o pipefail # Make sure the script's exit code is propagated
           cd samples-python/${{ matrix.app.path }}
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/${{ matrix.app.script_dir }}/python-linux.sh 2>&1 | tee $GITHUB_WORKSPACE/results/output.log
 
-          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/${{ matrix.app.script_dir }}/python-linux.sh
+      # This step will always run, even if the previous step fails
+      - name: Archive test results
+        if: always()
+        run: |
+          # Create a summary file with the job status
+          echo "Job: ${{ matrix.app.name }} (${{ matrix.config.name }})" > summary.txt
+          echo "Status: ${{ job.status }}" >> summary.txt
+          echo "See attached logs for details." >> summary.txt
+
+          # Move the summary into the results directory
+          mv summary.txt results/
+
+          # Create a zip file for this job's results
+          zip -r results.zip results/
+
+      # Upload the zip file as an artifact
+      - name: Upload results artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.app.name }}-${{ matrix.config.name }}
+          path: results.zip
+
+  send-summary-report:
+    # This job must wait for all matrix jobs to finish
+    needs: test-python-app
+    # `if: always()` ensures this job runs even if some of the tests failed
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all test artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-results
+
+      - name: Prepare email content and attachments
+        id: prep-email
+        run: |
+          # Create a single summary file by combining all individual summaries
+          echo "## Test Run Summary" > summary_body.md
+          echo "" >> summary_body.md
+          echo "Workflow Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> summary_body.md
+          echo "" >> summary_body.md
+
+          # Find all summary files and concatenate them
+          find all-results -type f -name 'summary.txt' -exec cat {} + >> summary_body.md
+
+          # Create a list of all result zip files to attach
+          # The mail action supports glob patterns, so we just need the directory
+          echo "attachment_path=all-results" >> $GITHUB_OUTPUT
+
+      - name: Send summary email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          # SMTP server connection details
+          server_address: ${{ secrets.SMTP_HOST }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+
+          # Email details
+          subject: "Test Summary for ${{ github.repository }} - Run ${{ github.run_id }}"
+          body: file://summary_body.md
+          to: ${{ secrets.RECIPIENT_EMAILS }}
+          from: GitHub Actions <actions@github.com> # Or your preferred 'from' address
+
+          # Attach all the zip files from all the downloaded artifacts
+          attachments: ${{ steps.prep-email.outputs.attachment_path }}/*/*.zip
