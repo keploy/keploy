@@ -1,6 +1,6 @@
 #!/bin/bash
 
-source ../../.github/workflows/test_workflow_scripts/test-iid.sh
+source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Create a shared network for Keploy and the application containers
 docker network create keploy-network || true
@@ -203,7 +203,7 @@ for attempt in {1..3}; do
         continue # Skip to the next attempt
     fi
 
-    sleep 5
+    sleep 5 # Extra wait time for DB initialization
 
     # Run the test for the current attempt
     log_file="test_logs_attempt_${attempt}.txt"
