@@ -1,6 +1,6 @@
 #!/bin/bash
 
-source ../../.github/workflows/test_workflow_scripts/test-iid.sh
+source ../../test-iid.sh
 
 # Checkout to the specified branch
 git fetch origin
