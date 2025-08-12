@@ -10,6 +10,11 @@ docker run --name mongo --rm --net keploy-network -p 27017:27017 -d mongo
 rm -rf keploy/  # Clean up old test data
 docker build -t flask-app:1.0 .  # Build the Docker image
 
+if ! [ -f "./keploy.yml" ]; then
+    echo "keploy.yml not found, generating..."
+    sudo $RECORD_BIN config --generate
+fi
+
 # Configure keploy
 sed -i 's/global: {}/global: {"header": {"Allow":[]}}/' "./keploy.yml"
 sleep 5  # Allow time for configuration to apply
