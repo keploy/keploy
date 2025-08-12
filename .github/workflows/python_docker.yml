@@ -52,4 +52,4 @@ jobs:
         run: |
           set -o pipefail
           cd samples-python/${{ matrix.app.path }}
-          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python-docker/${{ matrix.app.script_dir }}/python-docker.sh 2>&1 | tee $GITHUB_WORKSPACE/results/output.log
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/${{ matrix.app.script_dir }}/python-docker.sh 2>&1 | tee $GITHUB_WORKSPACE/results/output.log
