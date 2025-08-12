@@ -10,7 +10,7 @@ jobs:
       matrix:
         app:
           - name: django-postgres
-            path: django-postgres
+            path: django-postgres/django_postgres
             script_dir: django_postgres
           - name: flask-mysql
             path: flask_mysql
