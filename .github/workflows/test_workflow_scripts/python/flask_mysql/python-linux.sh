@@ -176,10 +176,10 @@ fi
 
 echo "✅ Sanity check passed. Found recorded test sets."
 
-echo "Starting testing phase with up to 5 attempts..."
+echo "Starting testing phase with up to 3 attempts..."
 
-for attempt in {1..5}; do
-    echo "--- Test Attempt ${attempt}/5 ---"
+for attempt in {1..3}; do
+    echo "--- Test Attempt ${attempt}/3 ---"
 
     # Reset database state for a clean test environment before each attempt
     echo "Resetting database state for attempt ${attempt}..."
