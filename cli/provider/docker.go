@@ -31,7 +31,11 @@ var DockerConfig = DockerConfigStruct{
 func GenerateDockerEnvs(config DockerConfigStruct) string {
 	var envs []string
 	for key, value := range config.Envs {
-		envs = append(envs, fmt.Sprintf("-e %s='%s'", key, value))
+		if runtime.GOOS == "windows" {
+			envs = append(envs, fmt.Sprintf("-e %s=%s", key, value))
+		} else {
+			envs = append(envs, fmt.Sprintf("-e %s='%s'", key, value))
+		}
 	}
 	return strings.Join(envs, " ")
 }
@@ -113,11 +117,6 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 		var args []string
 		args = append(args, "/C")
 		args = append(args, strings.Split(keployAlias, " ")...)
-
-		for key, value := range DockerConfig.Envs {
-			args = append(args, "-e", key+"="+value)
-		}
-
 		args = append(args, os.Args[1:]...)
 		// Use cmd.exe /C for Windows
 		cmd = exec.CommandContext(
@@ -166,16 +165,10 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 	//TODO: configure the hardcoded port mapping
 	img := DockerConfig.DockerImage + ":v" + utils.Version
 	logger.Info("Starting keploy in docker with image", zap.String("image:", img))
-
-	var envs string
-
-	if osName != "windows" {
-		envs = GenerateDockerEnvs(DockerConfig)
-		if envs != "" {
-			envs = envs + " "
-		}
+	envs := GenerateDockerEnvs(DockerConfig)
+	if envs != "" {
+		envs = envs + " "
 	}
-
 	var ttyFlag string
 
 	if term.IsTerminal(int(os.Stdin.Fd())) {
