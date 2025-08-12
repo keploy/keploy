@@ -34,12 +34,12 @@ jobs:
       - id: record
         uses: ./.github/actions/download-binary
         with:
-          src: ${{ matrix.app.record_src }}
+          src: ${{ matrix.config.record_src }}
 
       - id: replay
         uses: ./.github/actions/download-binary
         with:
-          src: ${{ matrix.app.replay_src }}
+          src: ${{ matrix.config.replay_src }}
 
       - name: Checkout the samples-python repository
         uses: actions/checkout@v4
