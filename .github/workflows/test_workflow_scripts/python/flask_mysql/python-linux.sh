@@ -203,7 +203,7 @@ for attempt in {1..3}; do
         continue # Skip to the next attempt
     fi
 
-    sleep 10 # Extra wait time for DB initialization
+    sleep 5
 
     # Run the test for the current attempt
     log_file="test_logs_attempt_${attempt}.txt"
