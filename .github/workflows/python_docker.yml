@@ -7,21 +7,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        app:
-          - name: django-postgres
-            path: django-postgres
-            script_dir: django_postgres
-        config:
-          - name: record_latest_replay_build
+        include:
+          - job: record_latest_replay_build
             record_src: latest
             replay_src: build
-          - name: record_build_replay_latest
+          - job: record_build_replay_latest
             record_src: build
             replay_src: latest
-          - name: record_build_replay_build
+          - job: record_build_replay_build
             record_src: build
             replay_src: build
-    name: ${{ matrix.app.name }} (${{ matrix.config.name }})
+    name: ${{ matrix.job }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -32,24 +28,22 @@ jobs:
       - id: record
         uses: ./.github/actions/download-binary
         with:
-          src: ${{ matrix.config.record_src }}
+          src: ${{ matrix.record_src }}
 
       - id: replay
         uses: ./.github/actions/download-binary
         with:
-          src: ${{ matrix.config.replay_src }}
+          src: ${{ matrix.replay_src }}
 
       - name: Checkout the samples-python repository
         uses: actions/checkout@v4
         with:
           repository: keploy/samples-python
           path: samples-python
-
-      - name: Run the ${{ matrix.app.name }} application
+      - name: Run the flask-mongo application
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
         run: |
-          set -o pipefail
-          cd samples-python/${{ matrix.app.path }}
-          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/${{ matrix.app.script_dir }}/python-docker.sh 2>&1 | tee $GITHUB_WORKSPACE/results/output.log
+          cd samples-python/flask-mongo
+          source ./../../.github/workflows/test_workflow_scripts/python-docker.sh
