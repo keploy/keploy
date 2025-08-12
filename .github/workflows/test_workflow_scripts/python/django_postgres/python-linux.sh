@@ -20,7 +20,7 @@ python3 manage.py makemigrations
 python3 manage.py migrate
 
 # Configuration and cleanup
-sudo $RECORD_BIN config --generate
+sudo $RECORD_BIN config --generate -p .
 sudo rm -rf keploy/  # Clean old test data
 config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"header": {"Allow":[],}}/' "$config_file"
