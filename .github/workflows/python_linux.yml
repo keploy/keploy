@@ -47,7 +47,8 @@ jobs:
         with:
           repository: keploy/samples-python
           path: samples-python
-
+      
+      # This directory is only for the main output.log, not the final artifact.
       - name: Create results directory
         run: mkdir -p results
 
@@ -56,37 +57,50 @@ jobs:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
         run: |
-          set -o pipefail # Make sure the script's exit code is propagated
+          set -o pipefail
           cd samples-python/${{ matrix.app.path }}
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/${{ matrix.app.script_dir }}/python-linux.sh 2>&1 | tee $GITHUB_WORKSPACE/results/output.log
 
-      # This step will always run, even if the previous step fails
-      - name: Archive test results
+      - name: Create final zip artifact
         if: always()
         run: |
-          # Create a summary file with the job status
-          echo "Job: ${{ matrix.app.name }} (${{ matrix.config.name }})" > summary.txt
-          echo "Status: ${{ job.status }}" >> summary.txt
-          echo "See attached logs for details." >> summary.txt
+          APP_DIR="samples-python/${{ matrix.app.path }}"
+          STAGING_DIR="$GITHUB_WORKSPACE/staging"
+          ZIP_NAME="results-${{ matrix.app.name }}-${{ matrix.config.name }}.zip"
 
-          # Move the summary into the results directory
-          mv summary.txt results/
+          mkdir -p $STAGING_DIR
 
-          # Create a zip file for this job's results
-          zip -r results.zip results/
+          # Copy keploy directory if it exists
+          if [ -d "$APP_DIR/keploy" ]; then
+            cp -r "$APP_DIR/keploy" "$STAGING_DIR/"
+          fi
 
-      # Upload the zip file as an artifact
+          # Copy all .txt log files from the app directory
+          find "$APP_DIR" -maxdepth 1 -type f -name "*.txt" -exec cp {} "$STAGING_DIR/" \;
+
+          # Copy main output log
+          if [ -f "$GITHUB_WORKSPACE/results/output.log" ]; then
+            cp "$GITHUB_WORKSPACE/results/output.log" "$STAGING_DIR/"
+          fi
+          
+          # Create summary file inside the staging area
+          echo "Job: ${{ matrix.app.name }}" > $STAGING_DIR/summary.txt
+          echo "Config: ${{ matrix.config.name }}" >> $STAGING_DIR/summary.txt
+          echo "Status: ${{ job.status }}" >> $STAGING_DIR/summary.txt
+
+          # Create the zip from the staging directory's contents
+          cd $STAGING_DIR
+          zip -r "$GITHUB_WORKSPACE/$ZIP_NAME" .
+
       - name: Upload results artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-${{ matrix.app.name }}-${{ matrix.config.name }}
-          path: results.zip
+          name: results-${{ matrix.app.name }}-${{ matrix.config.name }}
+          path: results-${{ matrix.app.name }}-${{ matrix.config.name }}.zip
 
   send-summary-report:
-    # This job must wait for all matrix jobs to finish
     needs: test-python-app
-    # `if: always()` ensures this job runs even if some of the tests failed
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -98,34 +112,69 @@ jobs:
       - name: Prepare email content and attachments
         id: prep-email
         run: |
-          # Create a single summary file by combining all individual summaries
-          echo "## Test Run Summary" > summary_body.md
-          echo "" >> summary_body.md
-          echo "Workflow Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> summary_body.md
-          echo "" >> summary_body.md
+          BODY_FILE="summary_body.txt"
 
-          # Find all summary files and concatenate them
-          find all-results -type f -name 'summary.txt' -exec cat {} + >> summary_body.md
+          echo "Python Linux Tests Report" > $BODY_FILE
+          echo "" >> $BODY_FILE
+          echo "Workflow Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> $BODY_FILE
+          echo "Repository: ${{ github.repository }}" >> $BODY_FILE
+          echo "Branch: ${{ github.ref_name }}" >> $BODY_FILE
+          echo "Timestamp: $(date)" >> $BODY_FILE
+          echo "" >> $BODY_FILE
+          echo "Summary" >> $BODY_FILE
+          echo "----------------------------------------------------" >> $BODY_FILE
 
-          # Create a list of all result zip files to attach
-          # The mail action supports glob patterns, so we just need the directory
-          echo "attachment_path=all-results" >> $GITHUB_OUTPUT
+          failed_count=0
+          total_count=0
+          failed_zips=()
+
+          # Process all downloaded zip files
+          for zip_file in $(find all-results -type f -name '*.zip'); do
+            total_count=$((total_count + 1))
+            
+            # Extract summary.txt content from the zip to a variable
+            SUMMARY_CONTENT=$(unzip -p "$zip_file" summary.txt)
+            JOB_NAME=$(echo "$SUMMARY_CONTENT" | grep "Job:" | sed 's/Job: //')
+            JOB_CONFIG=$(echo "$SUMMARY_CONTENT" | grep "Config:" | sed 's/Config: //')
+            JOB_STATUS=$(echo "$SUMMARY_CONTENT" | grep "Status:" | sed 's/Status: //')
+            
+            if [ "$JOB_STATUS" = "success" ]; then
+              STATUS_ICON="✅ Success"
+            else
+              STATUS_ICON="❌ Failed"
+              failed_count=$((failed_count + 1))
+              
+              # Rename the zip for failure and add it to the list of attachments
+              new_zip_name="failed-${JOB_NAME}-${JOB_CONFIG}.zip"
+              mv "$zip_file" "$new_zip_name"
+              failed_zips+=("$new_zip_name")
+            fi
+            printf "%-20s | %-30s | %s\n" "$JOB_NAME" "$JOB_CONFIG" "$STATUS_ICON" >> $BODY_FILE
+          done
+          
+          echo "----------------------------------------------------" >> $BODY_FILE
+          echo "" >> $BODY_FILE
+          passed_count=$((total_count - failed_count))
+          echo "Total Tests: $total_count | Failed: $failed_count | Passed: $passed_count" >> $BODY_FILE
+
+          attachment_paths=$(IFS=,; echo "${failed_zips[*]}")
+          echo "attachment_path=${attachment_paths}" >> $GITHUB_OUTPUT
+
+          if [ $failed_count -gt 0 ]; then
+            echo "email_subject=🚨 Python Tests FAILED ($failed_count/$total_count) - ${{ github.repository }} #${{ github.run_id }}" >> $GITHUB_OUTPUT
+          else
+            echo "email_subject=✅ Python Tests PASSED - ${{ github.repository }} #${{ github.run_id }}" >> $GITHUB_OUTPUT
+          fi
 
       - name: Send summary email
         uses: dawidd6/action-send-mail@v3
         with:
-          # SMTP server connection details (ensure these secrets exist)
           server_address: "smtp.gmail.com"
           server_port: "587"
           username: ${{ secrets.GMAIL_USERNAME }}
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
-
-          # Email details
-          subject: "Test Summary for ${{ github.repository }} - Run ${{ github.run_id }}"
-          body: file://summary_body.md
+          subject: ${{ steps.prep-email.outputs.email_subject }}
+          body: file://summary_body.txt
           to: ${{ secrets.RECIPIENT_EMAILS }}
           from: ${{ secrets.GMAIL_USERNAME }}
-
-          convert_markdown: true
-
           attachments: ${{ steps.prep-email.outputs.attachment_path }}
