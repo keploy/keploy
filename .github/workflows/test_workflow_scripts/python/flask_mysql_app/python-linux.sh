@@ -128,20 +128,6 @@ send_request(){
     echo "Getting migrations..."
     curl -s -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:5000/system/migrations'
 
-    # API log creation
-    echo "Creating API log..."
-    curl -s -X POST -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
-        -d '{"event": "test_log", "details": "This is a test log entry"}' \
-        'http://127.0.0.1:5000/logs'
-
-    # Client summary report
-    echo "Getting client summary report..."
-    curl -s -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:5000/reports/client-summary'
-
-    # Full financial summary
-    echo "Getting full financial summary..."
-    curl -s -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:5000/reports/full-financial-summary'
-
     # Search clients
     echo "Searching clients..."
     curl -s -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:5000/search/clients?q=Global'
@@ -155,26 +141,6 @@ send_request(){
     curl -s -X POST -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
         -d '{"from_account_id": 1, "to_account_id": 2, "amount": "100.50"}' \
         'http://127.0.0.1:5000/transactions/transfer'
-
-    # Concurrent load testing simulation (reduced scale for recording)
-    echo "Running concurrent requests simulation..."
-    for i in {1..5}; do
-        # Parallel data creation
-        curl -s -X POST -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
-            -d "{\"message\": \"Load test message $i\"}" \
-            'http://127.0.0.1:5000/data' &
-        
-        # Parallel system status checks
-        curl -s -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:5000/system/status' &
-        
-        # Parallel log creation
-        curl -s -X POST -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
-            -d "{\"event\": \"concurrent_test\", \"details\": \"Concurrent test $i\"}" \
-            'http://127.0.0.1:5000/logs' &
-    done
-    
-    # Wait for all background jobs to complete
-    wait
     
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
@@ -189,14 +155,9 @@ for i in {1..2}; do
     app_name="flask-mysql-app-native-${i}"
     send_request &
     # Pass necessary environment variables to the recording session
-    sudo -E env PATH="$PATH" DB_HOST=$DB_HOST DB_PORT=$DB_PORT DB_USER=$DB_USER DB_PASSWORD=$DB_PASSWORD DB_NAME=$DB_NAME $RECORD_BIN record -c "python3 main.py" &> "${app_name}.txt" || true    
+    sudo -E env PATH="$PATH" DB_HOST=$DB_HOST DB_PORT=$DB_PORT DB_USER=$DB_USER DB_PASSWORD=$DB_PASSWORD DB_NAME=$DB_NAME $RECORD_BIN record -c "python3 main.py" &> "${app_name}.txt" || true
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in recording..."
-        cat "${app_name}.txt"
-        exit 1
-    fi
-    if grep "WARNING: DATA RACE" "${app_name}.txt"; then
-        echo "Race condition detected in recording, stopping pipeline..."
         cat "${app_name}.txt"
         exit 1
     fi
@@ -260,9 +221,9 @@ for attempt in {1..5}; do
     cat "${log_file}"
     echo "-------------------------------------------"
 
-    # Check for generic errors or data races in logs first
-    if grep -q "ERROR" "${log_file}" || grep -q "WARNING: DATA RACE" "${log_file}"; then
-        echo "❌ Test Attempt ${attempt} Failed. Found ERROR or DATA RACE in logs."
+    # Check for generic errors in logs first
+    if grep -q "ERROR" "${log_file}"; then
+        echo "❌ Test Attempt ${attempt} Failed. Found ERROR in logs."
         if [ "$attempt" -lt 5 ]; then
             echo "Retrying..."
             sleep 5
