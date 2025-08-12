@@ -45,8 +45,9 @@ jobs:
       - name: Checkout the samples-python repository
         uses: actions/checkout@v4
         with:
-          repository: keploy/samples-python
+          repository: officialasishkumar/samples-python
           path: samples-python
+          ref: flask-mysql
       
       # This directory is only for the main output.log, not the final artifact.
       - name: Create results directory
