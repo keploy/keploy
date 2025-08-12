@@ -42,33 +42,54 @@ jobs:
   run_golang_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/golang_linux.yml
+    secrets: inherit
+
   run_golang_http_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/golang_http_linux.yml
+    secrets: inherit
+
   run_golang_mysql_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/golang_mysql_linux.yml
+    secrets: inherit
+
   run_golang_docker:
-    needs: [build-and-upload, upload-latest,build-docker-image]
+    needs: [build-and-upload, upload-latest, build-docker-image]
     uses: ./.github/workflows/golang_docker.yml
+    secrets: inherit
+
   run_golang_docker-compose:
     needs: [build-and-upload, upload-latest, build-docker-image]
     uses: ./.github/workflows/golang_docker-compose.yml
+    secrets: inherit
+
   run_java_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/java_linux.yml
+    secrets: inherit
+
   run_node_linux:
     needs: [build-and-upload, upload-latest]
-    uses: ./.github/workflows/node_linux.yml  
+    uses: ./.github/workflows/node_linux.yml
+    secrets: inherit
+
   run_node_docker:
     needs: [build-and-upload, upload-latest, build-docker-image]
     uses: ./.github/workflows/node_docker.yml
+    secrets: inherit
+
   run_python_docker:
     needs: [build-and-upload, upload-latest, build-docker-image]
     uses: ./.github/workflows/python_docker.yml
+    secrets: inherit
+
   run_python_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/python_linux.yml
+    secrets: inherit
+
   run_node_encoding:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/node_encoding.yaml
+    secrets: inherit
