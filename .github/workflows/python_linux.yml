@@ -114,17 +114,18 @@ jobs:
       - name: Send summary email
         uses: dawidd6/action-send-mail@v3
         with:
-          # SMTP server connection details
-          server_address: ${{ secrets.SMTP_HOST }}
-          server_port: ${{ secrets.SMTP_PORT }}
-          username: ${{ secrets.SMTP_USERNAME }}
-          password: ${{ secrets.SMTP_PASSWORD }}
+          # SMTP server connection details (ensure these secrets exist)
+          server_address: "smtp.gmail.com"
+          server_port: "587"
+          username: ${{ secrets.GMAIL_USERNAME }}
+          password: ${{ secrets.GMAIL_APP_PASSWORD }}
 
           # Email details
           subject: "Test Summary for ${{ github.repository }} - Run ${{ github.run_id }}"
           body: file://summary_body.md
           to: ${{ secrets.RECIPIENT_EMAILS }}
-          from: GitHub Actions <actions@github.com> # Or your preferred 'from' address
+          from: ${{ secrets.GMAIL_USERNAME }}
 
-          # Attach all the zip files from all the downloaded artifacts
-          attachments: ${{ steps.prep-email.outputs.attachment_path }}/*/*.zip
+          convert_markdown: true
+
+          attachments: ${{ steps.prep-email.outputs.attachment_path }}
