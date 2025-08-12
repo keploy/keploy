@@ -9,14 +9,14 @@ jobs:
       fail-fast: false
       matrix:
         app:
-          - name: django_postgres
-            path: django_postgres
+          - name: django-postgres
+            path: django-postgres
             script_dir: django_postgres
-          - name: flask_mysql
-            path: flask_mysql
+          - name: flask-mysql
+            path: flask-mysql
             script_dir: flask_mysql
-          - name: flask_mysql-jwt
-            path: flask_mysql_app
+          - name: flask-mysql-jwt
+            path: flask-mysql_app
             script_dir: flask_mysql_app
 
         config:
