@@ -13,11 +13,8 @@ jobs:
             path: django-postgres
             script_dir: django_postgres
           - name: flask-mysql
-            path: flask-mysql
+            path: flask_mysql
             script_dir: flask_mysql
-          - name: flask-mysql-jwt
-            path: flask-mysql_app
-            script_dir: flask_mysql_app
 
         config:
           - name: record_latest_replay_build

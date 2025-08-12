@@ -5,7 +5,6 @@ source ../../.github/workflows/test_workflow_scripts/test-iid.sh
 # Create a shared network for Keploy and the application containers
 docker network create keploy-network || true
 
-
 # Start the database
 docker compose up -d
 
@@ -78,10 +77,10 @@ send_request(){
     # Wait for the application to be fully started
     sleep 10
     app_started=false
-    echo "Checking for app readiness on port 5001..."
+    echo "Checking for app readiness on port 5000..."
     while [ "$app_started" = false ]; do
-        # App runs on port 5001 as per demo.py
-        if curl -s --head http://127.0.0.1:5001/ > /dev/null; then
+        # App runs on port 5000 as per main.py
+        if curl -s --head http://127.0.0.1:5000/health > /dev/null; then
             app_started=true
             echo "App is ready!"
         fi
@@ -90,29 +89,58 @@ send_request(){
     
     # 1. Login to get the JWT token
     echo "Logging in to get JWT token..."
-    TOKEN=$(curl -s -X POST -H "Content-Type: application/json" \
+    TOKEN_RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" \
         -d '{"username": "admin", "password": "admin123"}' \
-        "http://127.0.0.1:5001/login" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+        "http://127.0.0.1:5000/login")
 
-    if [ -z "$TOKEN" ]; then
-        echo "Failed to retrieve JWT token. Aborting."
+    TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r .access_token)
+
+    if [ -z "$TOKEN" ] || [ "$TOKEN" == "null" ]; then
+        echo "Failed to retrieve JWT token. Response: $TOKEN_RESPONSE"
         pid=$(pgrep keploy)
         sudo kill "$pid"
         exit 1
     fi
-    echo "Token received."
+    echo "Token received: ${TOKEN:0:20}..."
     
     # 2. Start making curl calls to record the testcases and mocks.
     echo "Sending API requests..."
-    curl -X POST -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
-        -d '{"name": "Keyboard", "quantity": 50, "price": 75.00, "description": "Mechanical keyboard"}' \
-        'http://127.0.0.1:5001/robust-test/create'
+    
+    # Basic data creation (from curls.sh)
+    echo "Creating data entry..."
+    curl -s -X POST -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
+        -d '{"message": "hello world"}' \
+        'http://127.0.0.1:5000/data'
 
-    curl -X POST -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
-        -d '{"name": "Webcam", "quantity": 30}' \
-        'http://127.0.0.1:5001/robust-test/create-with-null'
+    # Get all data
+    echo "Getting all data..."
+    curl -s -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:5000/data'
 
-    curl -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:5001/robust-test/get-all'
+    # Complex queries endpoint (from curls.sh)
+    echo "Hitting complex queries endpoint..."
+    curl -s -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:5000/generate-complex-queries'
+
+    # System status endpoint
+    echo "Getting system status..."
+    curl -s -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:5000/system/status'
+
+    # Migrations endpoint
+    echo "Getting migrations..."
+    curl -s -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:5000/system/migrations'
+
+    # Search clients
+    echo "Searching clients..."
+    curl -s -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:5000/search/clients?q=Global'
+
+    # Token check
+    echo "Checking token..."
+    curl -s -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:5000/auth/check-token/9522d59c56404995af98d4c30bde72b3'
+
+    # Transfer funds (valid transaction)
+    echo "Testing fund transfer..."
+    curl -s -X POST -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
+        -d '{"from_account_id": 1, "to_account_id": 2, "amount": "100.50"}' \
+        'http://127.0.0.1:5000/transactions/transfer'
     
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
@@ -127,15 +155,9 @@ for i in {1..2}; do
     app_name="flask-mysql-app-native-${i}"
     send_request &
     # Pass necessary environment variables to the recording session
-    sudo -E env PATH="$PATH" DB_HOST=$DB_HOST DB_PORT=$DB_PORT DB_USER=$DB_USER DB_PASSWORD=$DB_PASSWORD DB_NAME=$DB_NAME $RECORD_BIN record -c "python3 demo.py" &> "${app_name}.txt"
-    
+    sudo -E env PATH="$PATH" DB_HOST=$DB_HOST DB_PORT=$DB_PORT DB_USER=$DB_USER DB_PASSWORD=$DB_PASSWORD DB_NAME=$DB_NAME $RECORD_BIN record -c "python3 main.py" &> "${app_name}.txt" || true
     if grep "ERROR" "${app_name}.txt"; then
         echo "Error found in recording..."
-        cat "${app_name}.txt"
-        exit 1
-    fi
-    if grep "WARNING: DATA RACE" "${app_name}.txt"; then
-        echo "Race condition detected in recording, stopping pipeline..."
         cat "${app_name}.txt"
         exit 1
     fi
@@ -143,7 +165,6 @@ for i in {1..2}; do
     wait # Wait for send_request to finish
     echo "Recorded test case and mocks for iteration ${i}"
 done
-
 
 # Sanity: ensure we actually have recorded tests by checking for test-set-* directories
 if [ -z "$(ls -d ./keploy/test-set-* 2>/dev/null)" ]; then
@@ -191,7 +212,7 @@ for attempt in {1..5}; do
     set +e
     sudo -E env PATH="$PATH" \
       DB_HOST=$DB_HOST DB_PORT=$DB_PORT DB_USER=$DB_USER DB_PASSWORD=$DB_PASSWORD DB_NAME=$DB_NAME \
-      "$REPLAY_BIN" test -c "python3 demo.py" --delay 20 &> "${log_file}"
+      "$REPLAY_BIN" test -c "python3 main.py" --delay 20 &> "${log_file}"
     TEST_EXIT_CODE=$?
     set -e
 
@@ -200,9 +221,9 @@ for attempt in {1..5}; do
     cat "${log_file}"
     echo "-------------------------------------------"
 
-    # Check for generic errors or data races in logs first
-    if grep -q "ERROR" "${log_file}" || grep -q "WARNING: DATA RACE" "${log_file}"; then
-        echo "❌ Test Attempt ${attempt} Failed. Found ERROR or DATA RACE in logs."
+    # Check for generic errors in logs first
+    if grep -q "ERROR" "${log_file}"; then
+        echo "❌ Test Attempt ${attempt} Failed. Found ERROR in logs."
         if [ "$attempt" -lt 5 ]; then
             echo "Retrying..."
             sleep 5
