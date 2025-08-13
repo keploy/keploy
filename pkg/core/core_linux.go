@@ -229,10 +229,11 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 		return nil
 	})
 
-	olderApp := a.GetAppCommand()
+	originalApp := a.GetAppCommand()
 	runAppErrGrp.Go(func() error {
 		defer utils.Recover(c.logger)
 		defer close(appErrCh)
+		defer a.SetAppCommand(originalApp)
 		if opts.AppCommand != "" {
 			a.SetAppCommand(opts.AppCommand)
 		}
@@ -247,13 +248,10 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 	select {
 	case <-runAppCtx.Done():
 		c.logger.Debug("Run context cancelled, stopping the app and reverting the app command")
-		a.SetAppCommand(olderApp)
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}
 	case appErr := <-appErrCh:
-		a.SetAppCommand(olderApp)
 		return appErr
 	case inodeErr := <-inodeErrCh:
-		a.SetAppCommand(olderApp)
 		return models.AppError{AppErrorType: models.ErrInternal, Err: inodeErr}
 	}
 }
