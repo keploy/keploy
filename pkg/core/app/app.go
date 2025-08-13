@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"sync"
 	"syscall"
 	"time"
 
@@ -43,6 +44,7 @@ type App struct {
 	docker           docker.Client
 	id               uint64
 	cmd              string
+	cmdMu            sync.RWMutex // protects access to cmd during runtime updates
 	kind             utils.CmdType
 	containerDelay   uint64
 	container        string
@@ -216,6 +218,19 @@ func (a *App) SetupCompose() error {
 		return err
 	}
 	return nil
+}
+
+func (a *App) SetAppCommand(appCommand string) {
+	a.cmdMu.Lock()
+	defer a.cmdMu.Unlock()
+	a.logger.Debug("Setting App Command", zap.String("cmd", appCommand))
+	a.cmd = appCommand
+}
+
+func (a *App) GetAppCommand() string {
+	a.cmdMu.RLock()
+	defer a.cmdMu.RUnlock()
+	return a.cmd
 }
 
 func (a *App) Kind(_ context.Context) utils.CmdType {
@@ -464,9 +479,9 @@ func (a *App) waitTillExit() {
 }
 
 func (a *App) run(ctx context.Context) models.AppError {
-
 	userCmd := a.cmd
 
+	fmt.Println("Running command:", userCmd)
 	if utils.FindDockerCmd(a.cmd) == utils.DockerRun {
 		userCmd = utils.EnsureRmBeforeName(userCmd)
 	}
