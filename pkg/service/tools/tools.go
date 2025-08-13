@@ -18,6 +18,7 @@ import (
 
 	"github.com/charmbracelet/glamour"
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/pkg/service/export"
 	postmanimport "go.keploy.io/server/v2/pkg/service/import"
@@ -327,4 +328,8 @@ func (t *Tools) IgnoreTestSet(_ context.Context, _ string) error {
 
 func (t *Tools) Login(ctx context.Context) bool {
 	return t.auth.Login(ctx)
+}
+
+func (t *Tools) WriteTestSetConf(ctx context.Context, testSetID string, testSet *models.TestSet) error {
+	return t.testSetConf.Write(ctx, testSetID, testSet)
 }
