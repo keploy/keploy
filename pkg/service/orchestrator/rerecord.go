@@ -9,9 +9,12 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/7sDream/geko"
 	"go.keploy.io/server/v2/pkg"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -247,6 +250,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 
 	allTcRecorded := true
 	var simErr bool
+	var updatedTcs []*models.TestCase
 	for _, tc := range tcs {
 		if ctx.Err() != nil {
 			return false, ctx.Err()
@@ -285,7 +289,23 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 			continue // Proceed with the next command
 		}
 
+		// Create updated test case with new response data for template extraction
+		updatedTc := &models.TestCase{
+			Name:     tc.Name,
+			HTTPReq:  tc.HTTPReq,
+			HTTPResp: *resp, // Use the new response from re-recording
+		}
+		updatedTcs = append(updatedTcs, updatedTc)
+
 		o.logger.Info("Re-recorded the testcase successfully", zap.String("testcase", tc.Name), zap.String("of testset", testSet))
+	}
+
+	// Extract new template values from the re-recorded responses and update config
+	if allTcRecorded && len(updatedTcs) > 0 {
+		err = o.updateTemplateValues(ctx, testSet, updatedTcs)
+		if err != nil {
+			utils.LogError(o.logger, err, "failed to update template values from re-recorded responses")
+		}
 	}
 
 	if simErr {
@@ -310,10 +330,6 @@ func (o *Orchestrator) checkForTemplates(ctx context.Context, testSets []string)
 		}
 	}
 
-	if len(nonTemplatized) == 0 {
-		return
-	}
-
 	o.config.Templatize.TestSets = nonTemplatized
 	o.logger.Warn("The following testSets are not templatized. Do you want to templatize them to handle noisy fields?(y/n)", zap.Any("testSets:", nonTemplatized))
 	reader := bufio.NewReader(os.Stdin)
@@ -330,5 +346,195 @@ func (o *Orchestrator) checkForTemplates(ctx context.Context, testSets []string)
 		if err := o.tools.Templatize(ctx); err != nil {
 			utils.LogError(o.logger, err, "failed to templatize test cases, skipping templatization")
 		}
+	}
+}
+
+// updateTemplateValues extracts new template values from re-recorded responses and updates the config
+func (o *Orchestrator) updateTemplateValues(ctx context.Context, testSet string, updatedTcs []*models.TestCase) error {
+	if len(updatedTcs) == 0 {
+		return nil
+	}
+
+	// Create a copy of existing templatized values to preserve non-response related templates
+	newTemplateValues := make(map[string]interface{})
+	for k, v := range utils.TemplatizedValues {
+		newTemplateValues[k] = v
+	}
+
+	// Process responses to extract new template values
+	// Response Body to Request Headers (authorization tokens, etc.)
+	for i := 0; i < len(updatedTcs)-1; i++ {
+		jsonResponse, err := o.parseIntoJSON(updatedTcs[i].HTTPResp.Body)
+		if err != nil || jsonResponse == nil {
+			continue
+		}
+		for j := i + 1; j < len(updatedTcs); j++ {
+			o.extractTemplatesFromResponse(updatedTcs[j].HTTPReq.Header, jsonResponse, &newTemplateValues)
+		}
+	}
+
+	// Response body to response body (if values appear in subsequent responses)
+	for i := 0; i < len(updatedTcs)-1; i++ {
+		jsonResponse, err := o.parseIntoJSON(updatedTcs[i].HTTPResp.Body)
+		if err != nil || jsonResponse == nil {
+			continue
+		}
+		for j := i + 1; j < len(updatedTcs); j++ {
+			jsonResponse2, err := o.parseIntoJSON(updatedTcs[j].HTTPResp.Body)
+			if err != nil || jsonResponse2 == nil {
+				continue
+			}
+			o.extractTemplatesFromResponse(jsonResponse2, jsonResponse, &newTemplateValues)
+		}
+	}
+
+	// Update global template values
+	utils.TemplatizedValues = newTemplateValues
+
+	// Read existing test set configuration to preserve metadata and scripts
+	var existingMetadata map[string]interface{}
+	var preScript, postScript string
+	existingTestSet, err := o.replay.GetTestSetConf(ctx, testSet)
+	if err == nil && existingTestSet != nil {
+		if existingTestSet.Metadata != nil {
+			existingMetadata = existingTestSet.Metadata
+		}
+		preScript = existingTestSet.PreScript
+		postScript = existingTestSet.PostScript
+	}
+
+	// Write updated template values to config
+	err = o.tools.WriteTestSetConf(ctx, testSet, &models.TestSet{
+		PreScript:  preScript,
+		PostScript: postScript,
+		Template:   newTemplateValues,
+		Metadata:   existingMetadata,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to write updated template values: %w", err)
+	}
+
+	o.logger.Info("Updated template values from re-recorded responses", zap.String("testset", testSet), zap.Int("templateCount", len(newTemplateValues)))
+	return nil
+}
+
+// parseIntoJSON parses a JSON string into an interface for template processing
+func (o *Orchestrator) parseIntoJSON(response string) (interface{}, error) {
+	if response == "" {
+		return nil, nil
+	}
+	// Use the same JSON parsing as the templatize module
+	result, err := geko.JSONUnmarshal([]byte(response))
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %v", err)
+	}
+	return result, nil
+}
+
+// extractTemplatesFromResponse extracts template values from response data and updates the template map
+func (o *Orchestrator) extractTemplatesFromResponse(targetInterface interface{}, sourceInterface interface{}, templateValues *map[string]interface{}) {
+	// This is a simplified version of the addTemplates function from templatize.go
+	// It extracts values from sourceInterface and creates templates for matching values in targetInterface
+
+	switch target := targetInterface.(type) {
+	case map[string]string:
+		// Handle headers (most common case for authorization tokens)
+		o.extractFromMap(target, sourceInterface, templateValues)
+	case geko.ObjectItems:
+		// Handle JSON objects
+		o.extractFromGekoObject(target, sourceInterface, templateValues)
+	}
+}
+
+// extractFromMap extracts template values from a map (typically headers)
+func (o *Orchestrator) extractFromMap(target map[string]string, source interface{}, templateValues *map[string]interface{}) {
+	sourceObj, ok := source.(geko.ObjectItems)
+	if !ok {
+		return
+	}
+
+	sourceKeys := sourceObj.Keys()
+	sourceVals := sourceObj.Values()
+
+	for i, sourceKey := range sourceKeys {
+		sourceVal := sourceVals[i]
+
+		// Look for matching values in target map
+		for targetKey, targetVal := range target {
+			if o.valuesMatch(targetVal, sourceVal) {
+				// Create template key
+				templateKey := o.generateTemplateKey(sourceKey, targetKey)
+				(*templateValues)[templateKey] = sourceVal
+
+				// Update target with template reference
+				target[targetKey] = fmt.Sprintf("{{string .%s}}", templateKey)
+				o.logger.Debug("Extracted template value", zap.String("key", templateKey), zap.Any("value", sourceVal))
+			}
+		}
+	}
+}
+
+// extractFromGekoObject extracts template values from geko JSON objects
+func (o *Orchestrator) extractFromGekoObject(target geko.ObjectItems, source interface{}, templateValues *map[string]interface{}) {
+	sourceObj, ok := source.(geko.ObjectItems)
+	if !ok {
+		return
+	}
+
+	sourceKeys := sourceObj.Keys()
+	sourceVals := sourceObj.Values()
+	targetKeys := target.Keys()
+	targetVals := target.Values()
+
+	for i, sourceKey := range sourceKeys {
+		sourceVal := sourceVals[i]
+
+		for j, targetKey := range targetKeys {
+			targetVal := targetVals[j]
+
+			if o.valuesMatch(targetVal, sourceVal) {
+				templateKey := o.generateTemplateKey(sourceKey, targetKey)
+				(*templateValues)[templateKey] = sourceVal
+
+				// Update target with template reference
+				target.SetValueByIndex(j, fmt.Sprintf("{{%s .%s}}", o.getValueType(sourceVal), templateKey))
+				o.logger.Debug("Extracted template value", zap.String("key", templateKey), zap.Any("value", sourceVal))
+			}
+		}
+	}
+}
+
+// valuesMatch checks if two values are equivalent for template extraction
+func (o *Orchestrator) valuesMatch(val1, val2 interface{}) bool {
+	// Convert both to strings for comparison
+	str1 := fmt.Sprintf("%v", val1)
+	str2 := fmt.Sprintf("%v", val2)
+
+	// Skip empty values and template references
+	if str1 == "" || str2 == "" || strings.Contains(str1, "{{") || strings.Contains(str2, "{{") {
+		return false
+	}
+
+	return str1 == str2
+}
+
+// generateTemplateKey creates a unique template key
+func (o *Orchestrator) generateTemplateKey(sourceKey, targetKey string) string {
+	// Create a meaningful key name
+	if sourceKey == targetKey {
+		return sourceKey
+	}
+	return fmt.Sprintf("%s_%s", sourceKey, targetKey)
+}
+
+// getValueType determines the type for template formatting
+func (o *Orchestrator) getValueType(value interface{}) string {
+	switch value.(type) {
+	case int, int64:
+		return "int"
+	case float32, float64:
+		return "float"
+	default:
+		return "string"
 	}
 }
