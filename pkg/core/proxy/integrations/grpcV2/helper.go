@@ -83,7 +83,7 @@ func prettyPrintWire(b []byte, indent int) string {
 	for len(b) > 0 {
 		num, wt, n := protowire.ConsumeTag(b)
 		if n < 0 { // malformed → raw hex
-			buf.WriteString(hex.EncodeToString(b))
+			buf.WriteString("0x" + hex.EncodeToString(b))
 			break
 		}
 		b = b[n:]
@@ -94,7 +94,7 @@ func prettyPrintWire(b []byte, indent int) string {
 		case protowire.VarintType:
 			v, m := protowire.ConsumeVarint(b)
 			if m < 0 {
-				buf.WriteString(hex.EncodeToString(b) + "\n")
+				buf.WriteString("0x" + hex.EncodeToString(b) + "\n")
 				b = nil
 				continue
 			}
@@ -103,7 +103,7 @@ func prettyPrintWire(b []byte, indent int) string {
 		case protowire.Fixed32Type:
 			v, m := protowire.ConsumeFixed32(b)
 			if m < 0 {
-				buf.WriteString(hex.EncodeToString(b) + "\n")
+				buf.WriteString("0x" + hex.EncodeToString(b) + "\n")
 				b = nil
 				continue
 			}
@@ -112,7 +112,7 @@ func prettyPrintWire(b []byte, indent int) string {
 		case protowire.Fixed64Type:
 			v, m := protowire.ConsumeFixed64(b)
 			if m < 0 {
-				buf.WriteString(hex.EncodeToString(b) + "\n")
+				buf.WriteString("0x" + hex.EncodeToString(b) + "\n")
 				b = nil
 				continue
 			}
@@ -121,7 +121,7 @@ func prettyPrintWire(b []byte, indent int) string {
 		case protowire.BytesType:
 			v, m := protowire.ConsumeBytes(b)
 			if m < 0 {
-				buf.WriteString(hex.EncodeToString(b) + "\n")
+				buf.WriteString("0x" + hex.EncodeToString(b) + "\n")
 				b = nil
 				continue
 			}
@@ -142,7 +142,7 @@ func prettyPrintWire(b []byte, indent int) string {
 				buf.WriteString("0x" + hex.EncodeToString(v) + "\n")
 			}
 		default:
-			buf.WriteString(hex.EncodeToString(b) + "\n")
+			buf.WriteString("0x" + hex.EncodeToString(b) + "\n")
 			b = nil
 		}
 	}
