@@ -1,0 +1,27 @@
+name: Advanced KeployAI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  ai-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Smart AI Code Review
+        uses: euclidstellar/code-review-agent@v1
+        with:
+          github-token: ${{ secrets.GH_TOKEN }}
+          model: 'gpt-4o'
+          ollama-model: 'gemma3n:e4b'
+          temperature: 0.1
+          ignore-patterns: '*.md,*.lock,dist/**'
