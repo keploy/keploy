@@ -173,16 +173,16 @@ func saveMock(ctx context.Context, requests, responses []models.Payload, reqTime
 	metadata["type"] = "config"
 	metadata["connID"] = ctx.Value(models.ClientConnectionIDKey).(string)
 
-	mocks <- &models.Mock{
-		Version: models.GetVersion(),
-		Name:    "mocks",
-		Kind:    models.REDIS,
-		Spec: models.MockSpec{
-			RedisRequests:    redisRequestsCopy,
-			RedisResponses:   redisResponsesCopy,
-			ReqTimestampMock: reqTimestampMock,
-			ResTimestampMock: resTimestampMock,
-			Metadata:         metadata,
-		},
-	}
+	// mocks <- &models.Mock{
+	// 	Version: models.GetVersion(),
+	// 	Name:    "mocks",
+	// 	Kind:    models.REDIS,
+	// 	Spec: models.MockSpec{
+	// 		RedisRequests:    redisRequestsCopy,
+	// 		RedisResponses:   redisResponsesCopy,
+	// 		ReqTimestampMock: reqTimestampMock,
+	// 		ResTimestampMock: resTimestampMock,
+	// 		Metadata:         metadata,
+	// 	},
+	// }
 }
