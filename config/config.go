@@ -86,6 +86,7 @@ type Contract struct {
 	Download bool     `json:"download" yaml:"download" mapstructure:"download"`
 	Generate bool     `json:"generate" yaml:"generate" mapstructure:"generate"`
 	Driven   string   `json:"driven" yaml:"driven" mapstructure:"driven"`
+	Proxy    bool     `json:"proxy" yaml:"proxy" mapstructure:"proxy"`
 	Mappings Mappings `json:"mappings" yaml:"mappings" mapstructure:"mappings"`
 }
 type Mappings struct {
