@@ -10,7 +10,6 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/xwb1989/sqlparser"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire"
@@ -18,6 +17,7 @@ import (
 	"go.keploy.io/server/v2/pkg/models/mysql"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
+	"vitess.io/vitess/go/vt/sqlparser"
 )
 
 func matchHeader(expected, actual mysql.Header) bool {
@@ -271,17 +271,24 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 					}
 				// case mysql.CommandStatusToString(mysql.COM_STMT_SEND_LONG_DATA):
 				case mysql.CommandStatusToString(mysql.COM_QUERY):
-					matched := matchQueryPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
-					// logger.Warn("match count is", zap.Int("matchCount", matchCount))
+					matched, matchCount := matchQueryPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
 					if matched {
 						matchedResp = &mock.Spec.MySQLResponses[0]
 						matchedMock = mock
 						queryMatched = true
+					} else if matchCount > maxMatchedCount {
+						maxMatchedCount = matchCount
+						matchedResp = &mock.Spec.MySQLResponses[0]
+						matchedMock = mock
 					}
 
 				case mysql.CommandStatusToString(mysql.COM_STMT_PREPARE):
-					matchCount := matchPreparePacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
-					if matchCount > maxMatchedCount {
+					matched, matchCount := matchPreparePacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
+					if matched {
+						matchedResp = &mock.Spec.MySQLResponses[0]
+						matchedMock = mock
+						queryMatched = true
+					} else if matchCount > maxMatchedCount {
 						maxMatchedCount = matchCount
 						matchedResp = &mock.Spec.MySQLResponses[0]
 						matchedMock = mock
@@ -356,7 +363,14 @@ func matchClosePacket(_ context.Context, _ *zap.Logger, expected, actual mysql.P
 }
 
 func getQueryStructure(sql string) (string, error) {
-	stmt, err := sqlparser.Parse(sql)
+
+	opts := sqlparser.Options{}
+	parser, err := sqlparser.New(opts)
+	if err != nil {
+		return "", fmt.Errorf("failed to create MYSQL query parser: %w", err)
+	}
+
+	stmt, err := parser.Parse(sql)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse SQL: %w", err)
 	}
@@ -375,61 +389,93 @@ func getQueryStructure(sql string) (string, error) {
 	return strings.Join(structureParts, "->"), nil
 }
 
-func matchQueryPacket(_ context.Context, log *zap.Logger, expected, actual mysql.PacketBundle) bool {
+func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.PacketBundle, getQuery func(packet mysql.PacketBundle) string) (bool, int) {
+	matchCount := 0
+
 	// Match the type and return zero if the types are not equal
 	if expected.Header.Type != actual.Header.Type {
-		return false
+		return false, 0
 	}
 
-	expectedMessage, _ := expected.Message.(*mysql.QueryPacket)
-	actualMessage, _ := actual.Message.(*mysql.QueryPacket)
+	expectedQuery := getQuery(expected)
+	actualQuery := getQuery(actual)
 
 	if actual.Header.Header.PayloadLength == expected.Header.Header.PayloadLength {
-		if expectedMessage.Query == actualMessage.Query {
-			return true
+		matchCount++
+		if expectedQuery == actualQuery {
+			matchCount++
+			log.Debug("Query Exact matched",
+				zap.String("expected query", expectedQuery),
+				zap.String("actual query", actualQuery))
+			return true, matchCount
 		}
 	}
 
-	expectedSignature, err := getQueryStructure(expectedMessage.Query)
-	if err != nil {
-		log.Error("failed to get expected query structure", zap.Error(err))
-		return false
+	// check if any of them the query is dml and other is not, then there is no match.
+	if sqlparser.IsDML(expectedQuery) && !sqlparser.IsDML(actualQuery) {
+		log.Debug("expected query is dml but actual is not",
+			zap.String("expected query", expectedQuery),
+			zap.String("actual query", actualQuery))
+		return false, 0
+	} else if !sqlparser.IsDML(expectedQuery) && sqlparser.IsDML(actualQuery) {
+		log.Debug("actual query is dml but expected is not",
+			zap.String("expected query", expectedQuery),
+			zap.String("actual query", actualQuery))
+		return false, 0
 	}
 
-	actualSignature, err := getQueryStructure(actualMessage.Query)
+	if !(sqlparser.IsDML(expectedQuery) && sqlparser.IsDML(actualQuery)) {
+		log.Debug("No Query is dml",
+			zap.String("expected query", expectedQuery),
+			zap.String("actual query", actualQuery))
+		return false, matchCount
+	}
+
+	// Here we can compare the structure of the queries, as both are DML queries.
+	log.Debug("Both queries are DML",
+		zap.String("expected query", expectedQuery),
+		zap.String("actual query", actualQuery))
+
+	actualSignature, err := getQueryStructure(actualQuery)
 	if err != nil {
-		log.Error("failed to get actual query structure", zap.Error(err))
-		return false
+		log.Warn("failed to get actual query structure",
+			zap.String("actual Query", actualQuery),
+			zap.Error(err))
+		return false, matchCount
+	}
+
+	expectedSignature, err := getQueryStructure(expectedQuery)
+	if err != nil {
+		log.Warn("failed to get expected query structure",
+			zap.String("expected Query", expectedQuery),
+			zap.Error(err))
+		return false, matchCount
 	}
 
 	if expectedSignature == actualSignature {
-		log.Debug("query structure matched", zap.String("expected signature", expectedSignature),
+		log.Debug("query structure matched",
+			zap.String("expected signature", expectedSignature),
 			zap.String("actual signature", actualSignature))
-		return true
+		return true, matchCount
 	}
 
-	return false
+	return false, matchCount
 }
 
-func matchPreparePacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
-	matchCount := 0
-	// Match the type and return zero if the types are not equal
-	if expected.Header.Type != actual.Header.Type {
-		return 0
+func matchQueryPacket(ctx context.Context, log *zap.Logger, expected, actual mysql.PacketBundle) (bool, int) {
+	getQuery := func(packet mysql.PacketBundle) string {
+		msg, _ := packet.Message.(*mysql.QueryPacket)
+		return msg.Query
 	}
-	// Match the header
-	ok := matchHeader(*expected.Header.Header, *actual.Header.Header)
-	if ok {
-		matchCount += 2
-	}
-	expectedMessage, _ := expected.Message.(*mysql.StmtPreparePacket)
-	actualMessage, _ := actual.Message.(*mysql.StmtPreparePacket)
+	return matchQuery(ctx, log, expected, actual, getQuery)
+}
 
-	// Match the query for prepare packet
-	if expectedMessage.Query == actualMessage.Query {
-		matchCount++
+func matchPreparePacket(ctx context.Context, log *zap.Logger, expected, actual mysql.PacketBundle) (bool, int) {
+	getQuery := func(packet mysql.PacketBundle) string {
+		msg, _ := packet.Message.(*mysql.StmtPreparePacket)
+		return msg.Query
 	}
-	return matchCount
+	return matchQuery(ctx, log, expected, actual, getQuery)
 }
 
 func matchStmtExecutePacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {

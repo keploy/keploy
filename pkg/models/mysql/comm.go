@@ -10,11 +10,15 @@ package mysql
 
 */
 
-// COM_QUERY packet (currently does not support if CLIENT_QUERY_ATTRIBUTES is set)
+// COM_QUERY packet
 
 type QueryPacket struct {
-	Command byte   `yaml:"command"`
-	Query   string `yaml:"query"`
+	Command           byte        `yaml:"command"`
+	ParameterCount    int         `yaml:"parameter_count"`
+	NullBitmap        []byte      `yaml:"null_bitmap"`
+	NewParamsBindFlag byte        `yaml:"new_params_bind_flag"`
+	Parameters        []Parameter `yaml:"parameters"`
+	Query             string      `yaml:"query"`
 }
 
 // LocalInFileRequestPacket is used to send local file request to server, currently not supported
@@ -102,12 +106,15 @@ type StmtPreparePacket struct {
 // COM_STMT_PREPARE_OK packet
 
 type StmtPrepareOkPacket struct {
-	Status       byte   `yaml:"status"`
-	StatementID  uint32 `yaml:"statement_id"`
-	NumColumns   uint16 `yaml:"num_columns"`
-	NumParams    uint16 `yaml:"num_params"`
-	Filler       byte   `yaml:"filler"`
-	WarningCount uint16 `yaml:"warning_count"`
+	Status               byte   `yaml:"status"`
+	StatementID          uint32 `yaml:"statement_id"`
+	NumColumns           uint16 `yaml:"num_columns"`
+	NumParams            uint16 `yaml:"num_params"`
+	Filler               byte   `yaml:"filler"`
+	WarningAvailable     bool   `yaml:"warning_available"`
+	WarningCount         uint16 `yaml:"warning_count"`
+	MetaFollowsAvailable bool   `yaml:"meta_follows_available"`
+	MetaFollows          byte   `yaml:"meta_follows"`
 
 	ParamDefs          []*ColumnDefinition41 `yaml:"param_definitions"`
 	EOFAfterParamDefs  []byte                `yaml:"eofAfterParamDefs"`
