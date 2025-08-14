@@ -9,6 +9,8 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
+var osOpenFile184 = os.OpenFile
+var osChmod184 = os.Chmod
 var Emoji = "\U0001F430" + " Keploy:"
 
 // TODO find better way than global variable
@@ -23,12 +25,12 @@ func New() (*zap.Logger, *os.File, error) {
 		return NewColor(config, false), nil
 	})
 
-	logFile, err := os.OpenFile("keploy-logs.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0777)
+	logFile, err := osOpenFile184("keploy-logs.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0777)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to open log file: %v", err)
 	}
 
-	err = os.Chmod("keploy-logs.txt", 0777)
+	err = osChmod184("keploy-logs.txt", 0777)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to set the log file permission to 777: %v", err)
 	}
