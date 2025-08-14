@@ -20,7 +20,7 @@ jobs:
       - name: Run Smart AI Code Review
         uses: euclidstellar/code-review-agent@v1
         with:
-          github-token: ${{ secrets.GH_TOKEN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           model: 'gpt-4o'
           ollama-model: 'gemma3n:e4b'
           temperature: 0.1
