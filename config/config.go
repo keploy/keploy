@@ -27,6 +27,7 @@ type Config struct {
 	BuildDelay            uint64       `json:"buildDelay" yaml:"buildDelay" mapstructure:"buildDelay"`
 	Test                  Test         `json:"test" yaml:"test" mapstructure:"test"`
 	Record                Record       `json:"record" yaml:"record" mapstructure:"record"`
+	Report                Report       `json:"report" yaml:"report" mapstructure:"report"`
 	Gen                   UtGen        `json:"gen" yaml:"-" mapstructure:"gen"`
 	Normalize             Normalize    `json:"normalize" yaml:"-" mapstructure:"normalize"`
 	ReRecord              ReRecord     `json:"rerecord" yaml:"-" mapstructure:"rerecord"`
@@ -143,6 +144,10 @@ type Test struct {
 	MaxFlakyChecks      uint32              `json:"maxFlakyChecks" yaml:"maxFlakyChecks" mapstructure:"maxFlakyChecks"`
 }
 
+type Report struct {
+	SelectedTestSets map[string][]string `json:"selectedTestSets" yaml:"selectedTestSets" mapstructure:"selectedTestSets"`
+}
+
 type Language string
 
 // String is used both by fmt.Print and by Cobra in help text
@@ -213,6 +218,13 @@ func SetSelectedServices(conf *Config, services []string) {
 func SetSelectedContractTests(conf *Config, tests []string) {
 
 	conf.Contract.Tests = tests
+}
+
+func SetSelectedTestSets(conf *Config, testSets []string) {
+	conf.Report.SelectedTestSets = make(map[string][]string)
+	for _, testSet := range testSets {
+		conf.Report.SelectedTestSets[testSet] = []string{}
+	}
 }
 
 func SetSelectedTestsNormalize(conf *Config, value string) error {
