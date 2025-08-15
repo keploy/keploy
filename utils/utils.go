@@ -1137,11 +1137,17 @@ func ParseMetadata(metadataStr string) (map[string]interface{}, error) {
 	return m, nil
 }
 
-// RenderTemplatesInString finds all template placeholders (e.g., {{.name}}) in a string,
+// RenderTemplatesInString finds all template placeholders (e.g., {{.name}} or {{string .name}}) in a string,
 // executes them with the provided data, and replaces them with the result.
-// It is robust against strings that contain non-template curly braces.
+// It is robust against strings that contain non-template curly braces by using a strict regex.
 func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[string]interface{}) (string, error) {
-	re := regexp.MustCompile(`\{\{[^{}]*\}\}`)
+	// This regex is specifically designed to match valid Keploy templates:
+	// - It must start with {{ and optional whitespace.
+	// - It can optionally have a function call ("string", "int", "float") followed by whitespace.
+	// - It MUST contain a dot (.) to indicate a field access.
+	// - It non-greedily matches characters until the closing braces.
+	// This prevents it from matching invalid syntax like {{u^2}}.
+	re := regexp.MustCompile(`\{\{\s*(?:string\s+|int\s+|float\s+)?\.[^{}]*?\}\}`)
 
 	funcMap := template.FuncMap{
 		"int":    ToInt,
@@ -1155,10 +1161,9 @@ func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[
 		// Only parse and execute the matched placeholder, not the entire string.
 		tmpl, err := template.New("sub").Funcs(funcMap).Parse(match)
 		if err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("failed to parse template placeholder '%s': %v", match, err)
-			}
-			return match // Return the original placeholder on error.
+
+			logger.Debug("failed to parse a valid-looking template placeholder", zap.String("placeholder", match), zap.Error(err))
+			return match
 		}
 
 		var output bytes.Buffer
@@ -1167,7 +1172,7 @@ func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[
 			if firstErr == nil {
 				firstErr = fmt.Errorf("failed to execute template placeholder '%s': %v", match, err)
 			}
-			return match // Return the original placeholder on error.
+			return match
 		}
 
 		return output.String()
