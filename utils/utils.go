@@ -2,6 +2,7 @@ package utils
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"debug/elf"
@@ -21,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"text/template"
 	"time"
 
 	"golang.org/x/text/cases"
@@ -1133,6 +1135,45 @@ func ParseMetadata(metadataStr string) (map[string]interface{}, error) {
 		return nil, fmt.Errorf("cannot parse metadata: %w", err)
 	}
 	return m, nil
+}
+
+// RenderTemplatesInString finds all template placeholders (e.g., {{.name}}) in a string,
+// executes them with the provided data, and replaces them with the result.
+// It is robust against strings that contain non-template curly braces.
+func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[string]interface{}) (string, error) {
+	re := regexp.MustCompile(`\{\{[^{}]*\}\}`)
+
+	funcMap := template.FuncMap{
+		"int":    ToInt,
+		"string": ToString,
+		"float":  ToFloat,
+	}
+
+	var firstErr error
+
+	result := re.ReplaceAllStringFunc(input, func(match string) string {
+		// Only parse and execute the matched placeholder, not the entire string.
+		tmpl, err := template.New("sub").Funcs(funcMap).Parse(match)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("failed to parse template placeholder '%s': %v", match, err)
+			}
+			return match // Return the original placeholder on error.
+		}
+
+		var output bytes.Buffer
+		err = tmpl.Execute(&output, templateData)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("failed to execute template placeholder '%s': %v", match, err)
+			}
+			return match // Return the original placeholder on error.
+		}
+
+		return output.String()
+	})
+
+	return result, firstErr
 }
 
 // // XMLToMap converts an XML string into a map[string]interface{}
