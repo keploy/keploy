@@ -15,7 +15,7 @@ import (
 
 // tokenizePrettyLines splits the pretty-printed wire output into a slice in
 // which **every** closing brace that is outside a quoted string becomes its
-// own logical line.  This makes the downstream parser tolerant of lines such
+// own logical line. This makes the downstream parser tolerant of lines such
 // as:
 //
 //	1: {"foo"}  }}
@@ -74,79 +74,103 @@ func createLengthPrefixedMessage(data []byte) models.GrpcLengthPrefixedMessage {
 }
 
 // prettyPrintWire renders *any* protobuf wire payload without needing
-// the .proto file.  It is good enough for inspection & matching.
+// the .proto file. It is good enough for inspection & matching.
+// This function implements a schema-less disassembly of the wire format,
+// producing a human-readable output that can be losslessly parsed back
+// into the original byte sequence by parsePrettyWire.
 func prettyPrintWire(b []byte, indent int) string {
-	var buf bytes.Buffer
-	indentPrefix := strings.Repeat(" ", indent)
-	writeIndent := func() { buf.WriteString(indentPrefix) }
+	var out strings.Builder
+	indentStr := strings.Repeat("  ", indent)
+
+	// spew.Dump(b)
 
 	for len(b) > 0 {
-		num, wt, n := protowire.ConsumeTag(b)
-		if n < 0 { // malformed → raw hex
-			buf.WriteString("0x" + hex.EncodeToString(b))
+		// protowire.ConsumeField is the key helper. It parses a complete
+		// field (tag + value) and returns its total length, which simplifies
+		// advancing our byte slice `b`.
+		num, typ, n := protowire.ConsumeField(b)
+		if n < 0 {
+			// If we can't parse a valid field, the rest of the buffer is
+			// treated as raw, unparsable data. We'll represent it as a
+			// hex literal, similar to Protoscope's `...` syntax.
+			out.WriteString(fmt.Sprintf("%s`%s`\n", indentStr, hex.EncodeToString(b)))
 			break
 		}
-		b = b[n:]
-		writeIndent()
-		buf.WriteString(fmt.Sprintf("%d: ", num))
 
-		switch wt {
+		// Isolate the raw bytes for just the value part of the field.
+		// We need to re-parse the tag to find out how long it was.
+		_, _, tagN := protowire.ConsumeTag(b)
+		valueBytes := b[tagN:n]
+
+		// Write the field number and a colon, e.g., "1: ".
+		out.WriteString(fmt.Sprintf("%s%d: ", indentStr, num))
+
+		switch typ {
 		case protowire.VarintType:
-			v, m := protowire.ConsumeVarint(b)
-			if m < 0 {
-				buf.WriteString("0x" + hex.EncodeToString(b) + "\n")
-				b = nil
-				continue
-			}
-			b = b[m:]
-			buf.WriteString(fmt.Sprintf("%d\n", v))
+			// For varints, we just decode and print the uint64 value.
+			// Without a schema, we can't know if it's an int32, sint64, bool, etc.
+			// so we stick to the basic numeric representation.
+			v, _ := protowire.ConsumeVarint(valueBytes)
+			out.WriteString(fmt.Sprintf("%d\n", v))
+
 		case protowire.Fixed32Type:
-			v, m := protowire.ConsumeFixed32(b)
-			if m < 0 {
-				buf.WriteString("0x" + hex.EncodeToString(b) + "\n")
-				b = nil
-				continue
-			}
-			b = b[m:]
-			buf.WriteString(fmt.Sprintf("%d\n", v))
+			// For fixed 32-bit values, we represent them as a hex literal
+			// with an 'i32' suffix. This is unambiguous and can represent
+			// fixed32, sfixed32, or float.
+			v, _ := protowire.ConsumeFixed32(valueBytes)
+			out.WriteString(fmt.Sprintf("0x%xi32\n", v))
+
 		case protowire.Fixed64Type:
-			v, m := protowire.ConsumeFixed64(b)
-			if m < 0 {
-				buf.WriteString("0x" + hex.EncodeToString(b) + "\n")
-				b = nil
-				continue
-			}
-			b = b[m:]
-			buf.WriteString(fmt.Sprintf("%d\n", v))
+			// Similarly, fixed 64-bit values get a hex literal with an
+			// 'i64' suffix for fixed64, sfixed64, or double.
+			v, _ := protowire.ConsumeFixed64(valueBytes)
+			out.WriteString(fmt.Sprintf("0x%xi64\n", v))
+
 		case protowire.BytesType:
-			v, m := protowire.ConsumeBytes(b)
-			if m < 0 {
-				buf.WriteString("0x" + hex.EncodeToString(b) + "\n")
-				b = nil
-				continue
-			}
-			b = b[m:]
-			// render printable ASCII as 1: "foo"
-			// (no extra braces that confuse the round-trip parser)
-			if isPrintableASCII(v) {
-				buf.WriteString(fmt.Sprintf("%q\n", string(v))) // -> "foo"
-				continue
-			}
-			// otherwise *then* try interpreting it as a nested wire-message
-			if nested := prettyPrintWire(v, indent+1); strings.Contains(nested, ":") {
-				buf.WriteString("{\n")
-				buf.WriteString(nested)
-				writeIndent()
-				buf.WriteString("}\n")
+			// This is the most complex type, as it can be a string, bytes,
+			// a nested message, or a packed repeated field.
+			innerBytes, _ := protowire.ConsumeBytes(valueBytes)
+
+			// Heuristic: If the content is all printable ASCII, format it as a
+			// quoted string. This is a good guess for string fields.
+			if isPrintableASCII(innerBytes) {
+				// Use strconv.Quote for safe, standard-library string escaping.
+				out.WriteString(strconv.Quote(string(innerBytes)) + "\n")
 			} else {
-				buf.WriteString("0x" + hex.EncodeToString(v) + "\n")
+				// Otherwise, we assume it's a nested message or packed field.
+				// We format it recursively inside curly braces `{}`.
+				// If it's not a valid message, the recursive call will just
+				// render it as a hex literal inside the braces, which is fine.
+				out.WriteString("{\n")
+				out.WriteString(prettyPrintWire(innerBytes, indent+1))
+				out.WriteString(fmt.Sprintf("%s}\n", indentStr))
 			}
+
+		case protowire.StartGroupType:
+			// Groups are a deprecated feature but we handle them for completeness.
+			// The valueBytes contain the group's content AND its end marker.
+			// We find the end marker and recursively print the content inside `!{}`.
+			endTagLen := protowire.SizeTag(num)
+			contentBytes := valueBytes[:len(valueBytes)-endTagLen]
+
+			out.WriteString("!{\n")
+			out.WriteString(prettyPrintWire(contentBytes, indent+1))
+			out.WriteString(fmt.Sprintf("%s}\n", indentStr))
+
+		case protowire.EndGroupType:
+			// This case should not be hit if ConsumeField is used, as it consumes
+			// the entire group. This is a defensive measure.
+			out.WriteString("<Unexpected EndGroup>\n")
+
 		default:
-			buf.WriteString("0x" + hex.EncodeToString(b) + "\n")
-			b = nil
+			// Unknown wire types are dumped as hex.
+			out.WriteString(fmt.Sprintf("<UnknownType %d> `%s`\n", typ, hex.EncodeToString(valueBytes)))
 		}
+
+		// Advance the buffer to the next field.
+		b = b[n:]
 	}
-	return strings.TrimRight(buf.String(), "\n")
+	return out.String()
 }
 
 // isPrintableASCII returns true only if every byte is between 0x20 and 0x7E.
@@ -170,100 +194,113 @@ func parsePrettyWire(s string) ([]byte, error) {
 	var idx int
 	return parseMsg(lines, &idx)
 }
+
 func parseMsg(lines []string, idx *int) ([]byte, error) {
-	var out []byte
+	var buf bytes.Buffer
 
 	for *idx < len(lines) {
-		line := strings.TrimSpace(lines[*idx])
+		line := lines[*idx]
 		*idx++
 
-		if line == "" { // skip blanks
+		if line == "}" || line == "!}" {
+			return buf.Bytes(), nil // End of the current message/group
+		}
+
+		parts := strings.SplitN(line, ": ", 2)
+		if len(parts) != 2 {
+			// This could be a raw hex or string literal without a field number,
+			// which can happen inside a packed field.
+			if strings.HasPrefix(line, "`") && strings.HasSuffix(line, "`") {
+				// Hex literal: `...`
+				data, err := hex.DecodeString(line[1 : len(line)-1])
+				if err != nil {
+					return nil, fmt.Errorf("pretty decode: invalid hex literal on line %d: %s", *idx, line)
+				}
+				buf.Write(data)
+			} else if strings.HasPrefix(line, "\"") && strings.HasSuffix(line, "\"") {
+				// String literal: "..."
+				s, err := strconv.Unquote(line)
+				if err != nil {
+					return nil, fmt.Errorf("pretty decode: invalid string literal on line %d: %s", *idx, line)
+				}
+				buf.Write([]byte(s))
+			} else {
+				// Assume it's a varint inside a packed field.
+				val, err := strconv.ParseUint(line, 10, 64)
+				if err != nil {
+					return nil, fmt.Errorf("pretty decode: expected packed varint on line %d: %s", *idx, line)
+				}
+				buf.Write(protowire.AppendVarint(nil, val))
+			}
 			continue
 		}
-		if line == "}" { // end of embedded message
-			return out, nil
+
+		// We have a standard "field_number: value" line.
+		fieldNumStr, valueStr := parts[0], parts[1]
+		fieldNum, err := strconv.ParseUint(fieldNumStr, 10, 64)
+		if err != nil || fieldNum > maxProtoNum {
+			return nil, fmt.Errorf("pretty decode: invalid field number on line %d: %s", *idx, fieldNumStr)
 		}
 
-		colon := strings.IndexByte(line, ':')
-		if colon == -1 {
-			return nil, fmt.Errorf("pretty decode: malformed line %q", line)
-		}
-
-		// ── field number ───────────────────────────────────────────
-		fieldStr := strings.TrimSpace(line[:colon])
-		n64, err := strconv.ParseUint(fieldStr, 10, 64)
-		if err != nil || n64 == 0 || n64 > maxProtoNum {
-			return nil, fmt.Errorf("pretty decode: invalid field %q", fieldStr)
-		}
-		num := protowire.Number(n64)
-
-		rest := strings.TrimSpace(line[colon+1:])
-
-		// Try each encoding in a stable order; DO NOT mutate `rest`
-		// until we've decided what it is.
-
-		// 1️⃣ start of embedded message
-		if rest == "{" {
-			sub, err := parseMsg(lines, idx)
+		switch {
+		case valueStr == "{":
+			// Length-prefixed message/bytes
+			content, err := parseMsg(lines, idx)
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, protowire.AppendTag(nil, num, protowire.BytesType)...)
-			out = protowire.AppendBytes(out, sub)
-			continue
-		}
+			buf.Write(protowire.AppendTag(nil, protowire.Number(fieldNum), protowire.BytesType))
+			buf.Write(protowire.AppendBytes(nil, content))
 
-		// 2️⃣ ASCII string
-		//     legacy form  {"foo"}
-		//     new form     "foo"
-		if strings.HasPrefix(rest, "{\"") || strings.HasPrefix(rest, "\"") {
-			// Strip the optional leading '{'
-			if rest[0] == '{' {
-				rest = rest[1:]
+		case valueStr == "!{":
+			// Start of a group
+			content, err := parseMsg(lines, idx)
+			if err != nil {
+				return nil, err
 			}
-			// Find the last closing quote on this line.
-			endQuote := strings.LastIndex(rest, "\"")
-			if endQuote == -1 {
-				return nil, fmt.Errorf("pretty decode: unterminated quote in %q", rest)
+			buf.Write(protowire.AppendTag(nil, protowire.Number(fieldNum), protowire.StartGroupType))
+			buf.Write(content)
+			buf.Write(protowire.AppendTag(nil, protowire.Number(fieldNum), protowire.EndGroupType))
+
+		case strings.HasPrefix(valueStr, "0x") && strings.HasSuffix(valueStr, "i32"):
+			// Fixed32 value
+			val, err := strconv.ParseUint(valueStr[2:len(valueStr)-3], 16, 32)
+			if err != nil {
+				return nil, fmt.Errorf("pretty decode: invalid i32 on line %d: %s", *idx, valueStr)
 			}
+			buf.Write(protowire.AppendTag(nil, protowire.Number(fieldNum), protowire.Fixed32Type))
+			buf.Write(protowire.AppendFixed32(nil, uint32(val)))
 
-			// Extract the bytes inside {" … "}
-			str := rest[1:endQuote]
-			out = append(out, protowire.AppendTag(nil, num, protowire.BytesType)...)
-			out = protowire.AppendBytes(out, []byte(str))
-			continue
-		}
-
-		// 3️⃣ hex blob 0xCAFEBABE   (allow trailing } for inline close)
-		hexRest := strings.TrimSuffix(rest, "}")
-		if strings.HasPrefix(hexRest, "0x") || strings.HasPrefix(hexRest, "0X") {
-			bin, err := hex.DecodeString(hexRest[2:])
-			if err == nil {
-				out = append(out, protowire.AppendTag(nil, num, protowire.BytesType)...)
-				out = protowire.AppendBytes(out, bin)
-				if hexRest != rest { // had an inline '}'
-					return out, nil
-				}
-				continue
+		case strings.HasPrefix(valueStr, "0x") && strings.HasSuffix(valueStr, "i64"):
+			// Fixed64 value
+			val, err := strconv.ParseUint(valueStr[2:len(valueStr)-3], 16, 64)
+			if err != nil {
+				return nil, fmt.Errorf("pretty decode: invalid i64 on line %d: %s", *idx, valueStr)
 			}
-		}
+			buf.Write(protowire.AppendTag(nil, protowire.Number(fieldNum), protowire.Fixed64Type))
+			buf.Write(protowire.AppendFixed64(nil, val))
 
-		// 4️⃣ varint (optionally followed by inline '}')
-		trailingClose := strings.HasSuffix(rest, "}")
-		if trailingClose {
-			rest = strings.TrimSpace(rest[:len(rest)-1])
-		}
-		val, err := strconv.ParseUint(rest, 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("pretty decode: %w", err)
-		}
-		out = append(out, protowire.AppendTag(nil, num, protowire.VarintType)...)
-		out = protowire.AppendVarint(out, val)
-		if trailingClose {
-			return out, nil
+		case strings.HasPrefix(valueStr, "\""):
+			// Quoted string value
+			s, err := strconv.Unquote(valueStr)
+			if err != nil {
+				return nil, fmt.Errorf("pretty decode: invalid string on line %d: %s", *idx, valueStr)
+			}
+			buf.Write(protowire.AppendTag(nil, protowire.Number(fieldNum), protowire.BytesType))
+			buf.Write(protowire.AppendBytes(nil, []byte(s)))
+
+		default:
+			// Assume it's a varint
+			val, err := strconv.ParseUint(valueStr, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("pretty decode: invalid varint on line %d: %s", *idx, valueStr)
+			}
+			buf.Write(protowire.AppendTag(nil, protowire.Number(fieldNum), protowire.VarintType))
+			buf.Write(protowire.AppendVarint(nil, val))
 		}
 	}
-	return out, nil
+
+	return buf.Bytes(), nil
 }
 
 // ---------------------------------------------------------------------
