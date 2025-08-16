@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"go.keploy.io/server/v2/config"
@@ -365,6 +367,26 @@ func (s *SecurityChecker) Start(ctx context.Context) (*SecurityReport, error) {
 }
 
 func (s *SecurityChecker) AddCustomCheck(ctx context.Context) error {
+	// Set up signal handling for graceful exit on Ctrl+C
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signalChan)
+
+	// Create a context that can be cancelled by signals
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Handle signals in a goroutine
+	go func() {
+		select {
+		case <-signalChan:
+			fmt.Println("\n\n⚠️  Operation cancelled by user.")
+			cancel()
+		case <-ctx.Done():
+			return
+		}
+	}()
+
 	fmt.Println("\n🔒 Add Custom Security Check")
 	fmt.Println("=" + strings.Repeat("=", 50))
 
@@ -372,80 +394,237 @@ func (s *SecurityChecker) AddCustomCheck(ctx context.Context) error {
 
 	var check SecurityCheck
 
-	fmt.Print("Enter check ID (unique identifier): ")
-	scanner.Scan()
-	check.ID = strings.TrimSpace(scanner.Text())
-	if check.ID == "" {
-		return fmt.Errorf("check ID is required")
+	// Get check ID with validation loop
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("operation cancelled")
+		default:
+		}
+
+		fmt.Print("Enter check ID (unique identifier): ")
+		if !scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("operation cancelled")
+			default:
+				return fmt.Errorf("failed to read input")
+			}
+		}
+		check.ID = strings.TrimSpace(scanner.Text())
+		if check.ID != "" {
+			break
+		}
+		fmt.Println("❌ Error: Check ID is required. Please try again.")
 	}
 
-	fmt.Print("Enter check name: ")
-	scanner.Scan()
-	check.Name = strings.TrimSpace(scanner.Text())
-	if check.Name == "" {
-		return fmt.Errorf("check name is required")
+	// Get check name with validation loop
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("operation cancelled")
+		default:
+		}
+
+		fmt.Print("Enter check name: ")
+		if !scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("operation cancelled")
+			default:
+				return fmt.Errorf("failed to read input")
+			}
+		}
+		check.Name = strings.TrimSpace(scanner.Text())
+		if check.Name != "" {
+			break
+		}
+		fmt.Println("❌ Error: Check name is required. Please try again.")
 	}
 
-	fmt.Print("Enter check description: ")
-	scanner.Scan()
-	check.Description = strings.TrimSpace(scanner.Text())
-	if check.Description == "" {
-		return fmt.Errorf("check description is required")
+	// Get check description with validation loop
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("operation cancelled")
+		default:
+		}
+
+		fmt.Print("Enter check description: ")
+		if !scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("operation cancelled")
+			default:
+				return fmt.Errorf("failed to read input")
+			}
+		}
+		check.Description = strings.TrimSpace(scanner.Text())
+		if check.Description != "" {
+			break
+		}
+		fmt.Println("❌ Error: Check description is required. Please try again.")
 	}
 
-	fmt.Print("Enter severity (CRITICAL/HIGH/MEDIUM/LOW): ")
-	scanner.Scan()
-	severity := strings.ToUpper(strings.TrimSpace(scanner.Text()))
-	if severity != "CRITICAL" && severity != "HIGH" && severity != "MEDIUM" && severity != "LOW" {
-		return fmt.Errorf("invalid severity. Must be one of: CRITICAL, HIGH, MEDIUM, LOW")
-	}
-	check.Severity = severity
+	// Get severity with validation loop
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("operation cancelled")
+		default:
+		}
 
-	fmt.Print("Enter check type (header/body/cookie/url): ")
-	scanner.Scan()
-	checkType := strings.ToLower(strings.TrimSpace(scanner.Text()))
-	if checkType != "header" && checkType != "body" && checkType != "cookie" && checkType != "url" {
-		return fmt.Errorf("invalid type. Must be one of: header, body, cookie, url")
+		fmt.Print("Enter severity (CRITICAL/HIGH/MEDIUM/LOW): ")
+		if !scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("operation cancelled")
+			default:
+				return fmt.Errorf("failed to read input")
+			}
+		}
+		severity := strings.ToUpper(strings.TrimSpace(scanner.Text()))
+		if severity == "CRITICAL" || severity == "HIGH" || severity == "MEDIUM" || severity == "LOW" {
+			check.Severity = severity
+			break
+		}
+		fmt.Println("❌ Error: Invalid severity. Must be one of: CRITICAL, HIGH, MEDIUM, LOW. Please try again.")
 	}
-	check.Type = checkType
 
-	fmt.Print("Enter target (request/response): ")
-	scanner.Scan()
-	target := strings.ToLower(strings.TrimSpace(scanner.Text()))
-	if target != "request" && target != "response" {
-		return fmt.Errorf("invalid target. Must be one of: request, response")
+	// Get check type with validation loop
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("operation cancelled")
+		default:
+		}
+
+		fmt.Print("Enter check type (header/body/cookie/url): ")
+		if !scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("operation cancelled")
+			default:
+				return fmt.Errorf("failed to read input")
+			}
+		}
+		checkType := strings.ToLower(strings.TrimSpace(scanner.Text()))
+		if checkType == "header" || checkType == "body" || checkType == "cookie" || checkType == "url" {
+			check.Type = checkType
+			break
+		}
+		fmt.Println("❌ Error: Invalid type. Must be one of: header, body, cookie, url. Please try again.")
 	}
-	check.Target = target
 
-	fmt.Print("Enter key (header name, regex pattern, etc.): ")
-	scanner.Scan()
-	check.Key = strings.TrimSpace(scanner.Text())
-	if check.Key == "" {
-		return fmt.Errorf("key is required")
+	// Get target with validation loop
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("operation cancelled")
+		default:
+		}
+
+		fmt.Print("Enter target (request/response): ")
+		if !scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("operation cancelled")
+			default:
+				return fmt.Errorf("failed to read input")
+			}
+		}
+		target := strings.ToLower(strings.TrimSpace(scanner.Text()))
+		if target == "request" || target == "response" {
+			check.Target = target
+			break
+		}
+		fmt.Println("❌ Error: Invalid target. Must be one of: request, response. Please try again.")
+	}
+
+	// Get key with validation loop
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("operation cancelled")
+		default:
+		}
+
+		fmt.Print("Enter key (header name, regex pattern, etc.): ")
+		if !scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("operation cancelled")
+			default:
+				return fmt.Errorf("failed to read input")
+			}
+		}
+		check.Key = strings.TrimSpace(scanner.Text())
+		if check.Key != "" {
+			break
+		}
+		fmt.Println("❌ Error: Key is required. Please try again.")
+	}
+
+	// Get expected value (optional)
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("operation cancelled")
+	default:
 	}
 
 	fmt.Print("Enter expected value (optional, press Enter to skip): ")
-	scanner.Scan()
-	check.Value = strings.TrimSpace(scanner.Text())
-
-	fmt.Print("Enter operation (exists/equals/contains/regex/not_exists/not_equals): ")
-	scanner.Scan()
-	operation := strings.ToLower(strings.TrimSpace(scanner.Text()))
-	validOps := []string{"exists", "equals", "contains", "regex", "not_exists", "not_equals"}
-	isValidOp := false
-	for _, op := range validOps {
-		if operation == op {
-			isValidOp = true
-			break
+	if !scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("operation cancelled")
+		default:
+			return fmt.Errorf("failed to read input")
 		}
 	}
-	if !isValidOp {
-		return fmt.Errorf("invalid operation. Must be one of: %s", strings.Join(validOps, ", "))
+	check.Value = strings.TrimSpace(scanner.Text())
+
+	// Get operation with validation loop
+	validOps := []string{"exists", "equals", "contains", "regex", "not_exists", "not_equals"}
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("operation cancelled")
+		default:
+		}
+
+		fmt.Print("Enter operation (exists/equals/contains/regex/not_exists/not_equals): ")
+		if !scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("operation cancelled")
+			default:
+				return fmt.Errorf("failed to read input")
+			}
+		}
+		operation := strings.ToLower(strings.TrimSpace(scanner.Text()))
+		isValidOp := false
+		for _, op := range validOps {
+			if operation == op {
+				isValidOp = true
+				break
+			}
+		}
+		if isValidOp {
+			check.Operation = operation
+			break
+		}
+		fmt.Printf("❌ Error: Invalid operation. Must be one of: %s. Please try again.\n", strings.Join(validOps, ", "))
 	}
-	check.Operation = operation
 
 	// Set default status
 	check.Status = "enabled"
+
+	// Check for cancellation before saving
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("operation cancelled")
+	default:
+	}
 
 	if err := s.saveCustomCheck(ctx, check); err != nil {
 		return fmt.Errorf("failed to save custom check: %w", err)
@@ -456,6 +635,26 @@ func (s *SecurityChecker) AddCustomCheck(ctx context.Context) error {
 }
 
 func (s *SecurityChecker) RemoveCustomCheck(ctx context.Context) error {
+	// Set up signal handling for graceful exit on Ctrl+C
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signalChan)
+
+	// Create a context that can be cancelled by signals
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Handle signals in a goroutine
+	go func() {
+		select {
+		case <-signalChan:
+			fmt.Println("\n\n⚠️  Operation cancelled by user.")
+			cancel()
+		case <-ctx.Done():
+			return
+		}
+	}()
+
 	fmt.Println("\n🔒 Remove Custom Security Check")
 	fmt.Println("=" + strings.Repeat("=", 50))
 
@@ -474,27 +673,72 @@ func (s *SecurityChecker) RemoveCustomCheck(ctx context.Context) error {
 		fmt.Printf("%d. [%s] %s - %s\n", i+1, check.ID, check.Name, check.Severity)
 	}
 
-	scanner := bufio.NewScanner(os.Stdin)
-	fmt.Print("\nEnter the ID of the check to remove: ")
-	scanner.Scan()
-	checkID := strings.TrimSpace(scanner.Text())
-
-	if checkID == "" {
-		return fmt.Errorf("check ID is required")
+	// Check the ID from the CLI before asking
+	checkID := ""
+	if idValue := ctx.Value("id"); idValue != nil {
+		if idStr, ok := idValue.(string); ok {
+			checkID = idStr
+		}
 	}
 
-	found := false
+	scanner := bufio.NewScanner(os.Stdin)
+
+	// Get check ID with validation loop
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("operation cancelled")
+		default:
+		}
+
+		if checkID == "" {
+			fmt.Print("\nEnter the ID of the check to remove: ")
+			if !scanner.Scan() {
+				select {
+				case <-ctx.Done():
+					return fmt.Errorf("operation cancelled")
+				default:
+					return fmt.Errorf("failed to read input")
+				}
+			}
+			checkID = strings.TrimSpace(scanner.Text())
+		}
+
+		if checkID == "" {
+			fmt.Println("❌ Error: Check ID is required. Please try again.")
+			continue
+		}
+
+		// Check if the ID exists
+		found := false
+		for _, check := range customChecks {
+			if check.ID == checkID {
+				found = true
+				break
+			}
+		}
+
+		if found {
+			break
+		}
+
+		fmt.Printf("❌ Error: Custom check with ID '%s' not found. Please try again.\n", checkID)
+		checkID = "" // Reset to ask again
+	}
+
+	// Remove the check
 	var updatedChecks []SecurityCheck
 	for _, check := range customChecks {
 		if check.ID != checkID {
 			updatedChecks = append(updatedChecks, check)
-		} else {
-			found = true
 		}
 	}
 
-	if !found {
-		return fmt.Errorf("custom check with ID '%s' not found", checkID)
+	// Check for cancellation before saving
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("operation cancelled")
+	default:
 	}
 
 	if err := s.saveCustomChecks(ctx, updatedChecks); err != nil {
@@ -506,6 +750,26 @@ func (s *SecurityChecker) RemoveCustomCheck(ctx context.Context) error {
 }
 
 func (s *SecurityChecker) UpdateCustomCheck(ctx context.Context) error {
+	// Set up signal handling for graceful exit on Ctrl+C
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signalChan)
+
+	// Create a context that can be cancelled by signals
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Handle signals in a goroutine
+	go func() {
+		select {
+		case <-signalChan:
+			fmt.Println("\n\n⚠️  Operation cancelled by user.")
+			cancel()
+		case <-ctx.Done():
+			return
+		}
+	}()
+
 	fmt.Println("\n🔒 Update Custom Security Check")
 	fmt.Println("=" + strings.Repeat("=", 50))
 
@@ -524,77 +788,230 @@ func (s *SecurityChecker) UpdateCustomCheck(ctx context.Context) error {
 		fmt.Printf("%d. [%s] %s - %s\n", i+1, check.ID, check.Name, check.Severity)
 	}
 
-	scanner := bufio.NewScanner(os.Stdin)
-	fmt.Print("\nEnter the ID of the check to update: ")
-	scanner.Scan()
-	checkID := strings.TrimSpace(scanner.Text())
-
-	if checkID == "" {
-		return fmt.Errorf("check ID is required")
-	}
-
-	var checkIndex = -1
-	for i, check := range customChecks {
-		if check.ID == checkID {
-			checkIndex = i
-			break
+	// Check the ID from the CLI before asking
+	checkID := ""
+	if idValue := ctx.Value("id"); idValue != nil {
+		if idStr, ok := idValue.(string); ok {
+			checkID = idStr
 		}
 	}
 
-	if checkIndex == -1 {
-		return fmt.Errorf("custom check with ID '%s' not found", checkID)
+	scanner := bufio.NewScanner(os.Stdin)
+
+	// Get check ID with validation loop
+	var checkIndex = -1
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("operation cancelled")
+		default:
+		}
+
+		if checkID == "" {
+			fmt.Print("\nEnter the ID of the check to update: ")
+			if !scanner.Scan() {
+				select {
+				case <-ctx.Done():
+					return fmt.Errorf("operation cancelled")
+				default:
+					return fmt.Errorf("failed to read input")
+				}
+			}
+			checkID = strings.TrimSpace(scanner.Text())
+		}
+
+		if checkID == "" {
+			fmt.Println("❌ Error: Check ID is required. Please try again.")
+			continue
+		}
+
+		// Find the check
+		for i, check := range customChecks {
+			if check.ID == checkID {
+				checkIndex = i
+				break
+			}
+		}
+
+		if checkIndex != -1 {
+			break
+		}
+
+		fmt.Printf("❌ Error: Custom check with ID '%s' not found. Please try again.\n", checkID)
+		checkID = "" // Reset to ask again
+		checkIndex = -1
 	}
 
 	check := &customChecks[checkIndex]
 	fmt.Printf("\nUpdating check: %s\n", check.Name)
 	fmt.Println("Press Enter to keep current value, or enter new value:")
 
+	// Check for cancellation before each input
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("operation cancelled")
+	default:
+	}
+
 	fmt.Printf("Name [%s]: ", check.Name)
-	scanner.Scan()
+	if !scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("operation cancelled")
+		default:
+			return fmt.Errorf("failed to read input")
+		}
+	}
 	if newName := strings.TrimSpace(scanner.Text()); newName != "" {
 		check.Name = newName
 	}
 
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("operation cancelled")
+	default:
+	}
+
 	fmt.Printf("Description [%s]: ", check.Description)
-	scanner.Scan()
+	if !scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("operation cancelled")
+		default:
+			return fmt.Errorf("failed to read input")
+		}
+	}
 	if newDesc := strings.TrimSpace(scanner.Text()); newDesc != "" {
 		check.Description = newDesc
 	}
 
-	fmt.Printf("Severity [%s] (CRITICAL/HIGH/MEDIUM/LOW): ", check.Severity)
-	scanner.Scan()
-	if newSeverity := strings.ToUpper(strings.TrimSpace(scanner.Text())); newSeverity != "" {
-		if newSeverity != "CRITICAL" && newSeverity != "HIGH" && newSeverity != "MEDIUM" && newSeverity != "LOW" {
-			return fmt.Errorf("invalid severity. Must be one of: CRITICAL, HIGH, MEDIUM, LOW")
+	// Get severity with validation loop
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("operation cancelled")
+		default:
 		}
-		check.Severity = newSeverity
+
+		fmt.Printf("Severity [%s] (CRITICAL/HIGH/MEDIUM/LOW): ", check.Severity)
+		if !scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("operation cancelled")
+			default:
+				return fmt.Errorf("failed to read input")
+			}
+		}
+		newSeverity := strings.ToUpper(strings.TrimSpace(scanner.Text()))
+
+		if newSeverity == "" {
+			// Keep current value
+			break
+		}
+
+		if newSeverity == "CRITICAL" || newSeverity == "HIGH" || newSeverity == "MEDIUM" || newSeverity == "LOW" {
+			check.Severity = newSeverity
+			break
+		}
+
+		fmt.Println("❌ Error: Invalid severity. Must be one of: CRITICAL, HIGH, MEDIUM, LOW. Please try again.")
 	}
 
-	fmt.Printf("Type [%s] (header/body/cookie/url): ", check.Type)
-	scanner.Scan()
-	if newType := strings.ToLower(strings.TrimSpace(scanner.Text())); newType != "" {
-		if newType != "header" && newType != "body" && newType != "cookie" && newType != "url" {
-			return fmt.Errorf("invalid type. Must be one of: header, body, cookie, url")
+	// Get type with validation loop
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("operation cancelled")
+		default:
 		}
-		check.Type = newType
+
+		fmt.Printf("Type [%s] (header/body/cookie/url): ", check.Type)
+		if !scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("operation cancelled")
+			default:
+				return fmt.Errorf("failed to read input")
+			}
+		}
+		newType := strings.ToLower(strings.TrimSpace(scanner.Text()))
+
+		if newType == "" {
+			// Keep current value
+			break
+		}
+
+		if newType == "header" || newType == "body" || newType == "cookie" || newType == "url" {
+			check.Type = newType
+			break
+		}
+
+		fmt.Println("❌ Error: Invalid type. Must be one of: header, body, cookie, url. Please try again.")
+	}
+
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("operation cancelled")
+	default:
 	}
 
 	fmt.Printf("Key [%s]: ", check.Key)
-	scanner.Scan()
+	if !scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("operation cancelled")
+		default:
+			return fmt.Errorf("failed to read input")
+		}
+	}
 	if newKey := strings.TrimSpace(scanner.Text()); newKey != "" {
 		check.Key = newKey
 	}
 
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("operation cancelled")
+	default:
+	}
+
 	fmt.Printf("Value [%s]: ", check.Value)
-	scanner.Scan()
+	if !scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("operation cancelled")
+		default:
+			return fmt.Errorf("failed to read input")
+		}
+	}
 	if newValue := strings.TrimSpace(scanner.Text()); newValue != "" {
 		check.Value = newValue
 	}
 
-	fmt.Printf("Operation [%s] (exists/equals/contains/regex/not_exists/not_equals): ", check.Operation)
-	scanner.Scan()
-	if newOp := strings.ToLower(strings.TrimSpace(scanner.Text())); newOp != "" {
-		validOps := []string{"exists", "equals", "contains", "regex", "not_exists", "not_equals"}
+	// Get operation with validation loop
+	validOps := []string{"exists", "equals", "contains", "regex", "not_exists", "not_equals"}
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("operation cancelled")
+		default:
+		}
+
+		fmt.Printf("Operation [%s] (exists/equals/contains/regex/not_exists/not_equals): ", check.Operation)
+		if !scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("operation cancelled")
+			default:
+				return fmt.Errorf("failed to read input")
+			}
+		}
+		newOp := strings.ToLower(strings.TrimSpace(scanner.Text()))
+
+		if newOp == "" {
+			// Keep current value
+			break
+		}
+
 		isValidOp := false
 		for _, op := range validOps {
 			if newOp == op {
@@ -602,19 +1019,52 @@ func (s *SecurityChecker) UpdateCustomCheck(ctx context.Context) error {
 				break
 			}
 		}
-		if !isValidOp {
-			return fmt.Errorf("invalid operation. Must be one of: %s", strings.Join(validOps, ", "))
+
+		if isValidOp {
+			check.Operation = newOp
+			break
 		}
-		check.Operation = newOp
+
+		fmt.Printf("❌ Error: Invalid operation. Must be one of: %s. Please try again.\n", strings.Join(validOps, ", "))
 	}
 
-	fmt.Printf("Status [%s] (enabled/disabled): ", check.Status)
-	scanner.Scan()
-	if newStatus := strings.ToLower(strings.TrimSpace(scanner.Text())); newStatus != "" {
-		if newStatus != "enabled" && newStatus != "disabled" {
-			return fmt.Errorf("invalid status. Must be 'enabled' or 'disabled'")
+	// Get status with validation loop
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("operation cancelled")
+		default:
 		}
-		check.Status = newStatus
+
+		fmt.Printf("Status [%s] (enabled/disabled): ", check.Status)
+		if !scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("operation cancelled")
+			default:
+				return fmt.Errorf("failed to read input")
+			}
+		}
+		newStatus := strings.ToLower(strings.TrimSpace(scanner.Text()))
+
+		if newStatus == "" {
+			// Keep current value
+			break
+		}
+
+		if newStatus == "enabled" || newStatus == "disabled" {
+			check.Status = newStatus
+			break
+		}
+
+		fmt.Println("❌ Error: Invalid status. Must be 'enabled' or 'disabled'. Please try again.")
+	}
+
+	// Check for cancellation before saving
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("operation cancelled")
+	default:
 	}
 
 	if err := s.saveCustomChecks(ctx, customChecks); err != nil {
@@ -626,6 +1076,16 @@ func (s *SecurityChecker) UpdateCustomCheck(ctx context.Context) error {
 }
 
 func (s *SecurityChecker) ListChecks(ctx context.Context) error {
+	if s.ruleset == "" {
+		s.ruleset = "basic" // Default to basic ruleset if not specified
+	}
+	// CLI override
+	if ruleSetValue := ctx.Value("rule-set"); ruleSetValue != nil {
+		if ruleSetStr, ok := ruleSetValue.(string); ok && ruleSetStr != "basic" {
+			s.ruleset = ruleSetStr
+		}
+	}
+
 	switch s.ruleset {
 	case "basic", "built-in":
 		fmt.Println("\n🔒 Built-in Security Checks")

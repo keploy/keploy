@@ -42,7 +42,7 @@ func Secure(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 			// Add flag values to context
 			ctx = context.WithValue(ctx, "rule-set", ruleSet)
 
-			err = secSvc.Start(ctx)
+			_, err = secSvc.Start(ctx)
 			if err != nil {
 				utils.LogError(logger, err, "failed to start secure")
 				return nil
