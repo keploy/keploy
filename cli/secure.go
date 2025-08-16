@@ -38,9 +38,11 @@ func Secure(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 
 			// Get flag values
 			ruleSet, _ := cmd.Flags().GetString("rule-set")
+			checksPath, _ := cmd.Flags().GetString("checks-path")
 
 			// Add flag values to context
 			ctx = context.WithValue(ctx, "rule-set", ruleSet)
+			ctx = context.WithValue(ctx, "checks-path", checksPath)
 
 			_, err = secSvc.Start(ctx)
 			if err != nil {
