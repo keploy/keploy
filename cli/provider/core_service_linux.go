@@ -27,6 +27,7 @@ import (
 	"go.keploy.io/server/v2/pkg/service/orchestrator"
 	"go.keploy.io/server/v2/pkg/service/record"
 	"go.keploy.io/server/v2/pkg/service/replay"
+	"go.keploy.io/server/v2/pkg/service/schema"
 	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -57,6 +58,9 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 		return toolsSvc, nil
 	case "contract":
 		return contractSvc, nil
+	case "schema":
+		schemaSvc := schema.New(logger, commonServices.YamlOpenAPIDb, commonServices.YamlTestSetDB, tel, cfg)
+		return schemaSvc, nil
 	default:
 		return nil, errors.New("invalid command")
 	}
