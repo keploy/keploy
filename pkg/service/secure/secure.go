@@ -1,7 +1,6 @@
 package secure
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"net/http"
@@ -78,6 +77,7 @@ type Step struct {
 }
 
 // Built-in security checks
+// Only 10 Checks, commneted checks are for code testing purpose.
 var BuiltInSecurityChecks = []SecurityCheck{
 	{
 		ID:          "https-enforcement",
@@ -113,50 +113,50 @@ var BuiltInSecurityChecks = []SecurityCheck{
 		Operation:   "exists",
 		Status:      "enabled",
 	},
-	{
-		ID:          "content-security-policy",
-		Name:        "Content Security Policy",
-		Description: "Check for Content-Security-Policy header",
-		Severity:    "HIGH",
-		Type:        "header",
-		Target:      "response",
-		Key:         "Content-Security-Policy",
-		Operation:   "exists",
-		Status:      "enabled",
-	},
-	{
-		ID:          "email-exposure",
-		Name:        "Email Exposure",
-		Description: "Check for email addresses in response body",
-		Severity:    "CRITICAL",
-		Type:        "body",
-		Target:      "response",
-		Key:         ".+@.+\\..+",
-		Operation:   "regex",
-		Status:      "enabled",
-	},
-	{
-		ID:          "credit-card-exposure",
-		Name:        "Credit Card Exposure",
-		Description: "Check for credit card numbers in response body",
-		Severity:    "CRITICAL",
-		Type:        "body",
-		Target:      "response",
-		Key:         "\\b(?:\\d[ -]*?){13,16}\\b",
-		Operation:   "regex",
-		Status:      "enabled",
-	},
-	{
-		ID:          "api-key-exposure",
-		Name:        "API Key Exposure",
-		Description: "Check for API keys in response body",
-		Severity:    "CRITICAL",
-		Type:        "body",
-		Target:      "response",
-		Key:         "sk_(live|test)_[a-zA-Z0-9]{24}",
-		Operation:   "regex",
-		Status:      "enabled",
-	},
+	// {
+	// 	ID:          "content-security-policy",
+	// 	Name:        "Content Security Policy",
+	// 	Description: "Check for Content-Security-Policy header",
+	// 	Severity:    "HIGH",
+	// 	Type:        "header",
+	// 	Target:      "response",
+	// 	Key:         "Content-Security-Policy",
+	// 	Operation:   "exists",
+	// 	Status:      "enabled",
+	// },
+	// {
+	// 	ID:          "email-exposure",
+	// 	Name:        "Email Exposure",
+	// 	Description: "Check for email addresses in response body",
+	// 	Severity:    "CRITICAL",
+	// 	Type:        "body",
+	// 	Target:      "response",
+	// 	Key:         ".+@.+\\..+",
+	// 	Operation:   "regex",
+	// 	Status:      "enabled",
+	// },
+	// {
+	// 	ID:          "credit-card-exposure",
+	// 	Name:        "Credit Card Exposure",
+	// 	Description: "Check for credit card numbers in response body",
+	// 	Severity:    "CRITICAL",
+	// 	Type:        "body",
+	// 	Target:      "response",
+	// 	Key:         "\\b(?:\\d[ -]*?){13,16}\\b",
+	// 	Operation:   "regex",
+	// 	Status:      "enabled",
+	// },
+	// {
+	// 	ID:          "api-key-exposure",
+	// 	Name:        "API Key Exposure",
+	// 	Description: "Check for API keys in response body",
+	// 	Severity:    "CRITICAL",
+	// 	Type:        "body",
+	// 	Target:      "response",
+	// 	Key:         "sk_(live|test)_[a-zA-Z0-9]{24}",
+	// 	Operation:   "regex",
+	// 	Status:      "enabled",
+	// },
 	{
 		ID:          "secure-cookie",
 		Name:        "Secure Cookie",
@@ -202,39 +202,39 @@ var BuiltInSecurityChecks = []SecurityCheck{
 		Operation:   "not_equals",
 		Status:      "enabled",
 	},
-	{
-		ID:          "java-stack-trace",
-		Name:        "Java Stack Trace",
-		Description: "Check for Java stack traces in response",
-		Severity:    "MEDIUM",
-		Type:        "body",
-		Target:      "response",
-		Key:         "java\\.lang\\.Exception|at com\\.|at java\\.",
-		Operation:   "regex",
-		Status:      "enabled",
-	},
-	{
-		ID:          "python-stack-trace",
-		Name:        "Python Stack Trace",
-		Description: "Check for Python stack traces in response",
-		Severity:    "MEDIUM",
-		Type:        "body",
-		Target:      "response",
-		Key:         "Traceback \\(most recent call last\\)",
-		Operation:   "regex",
-		Status:      "enabled",
-	},
-	{
-		ID:          "nodejs-error",
-		Name:        "Node.js Error",
-		Description: "Check for Node.js errors in response",
-		Severity:    "MEDIUM",
-		Type:        "body",
-		Target:      "response",
-		Key:         "Error: ENOENT|TypeError:|ReferenceError:",
-		Operation:   "regex",
-		Status:      "enabled",
-	},
+	// {
+	// 	ID:          "java-stack-trace",
+	// 	Name:        "Java Stack Trace",
+	// 	Description: "Check for Java stack traces in response",
+	// 	Severity:    "MEDIUM",
+	// 	Type:        "body",
+	// 	Target:      "response",
+	// 	Key:         "java\\.lang\\.Exception|at com\\.|at java\\.",
+	// 	Operation:   "regex",
+	// 	Status:      "enabled",
+	// },
+	// {
+	// 	ID:          "python-stack-trace",
+	// 	Name:        "Python Stack Trace",
+	// 	Description: "Check for Python stack traces in response",
+	// 	Severity:    "MEDIUM",
+	// 	Type:        "body",
+	// 	Target:      "response",
+	// 	Key:         "Traceback \\(most recent call last\\)",
+	// 	Operation:   "regex",
+	// 	Status:      "enabled",
+	// },
+	// {
+	// 	ID:          "nodejs-error",
+	// 	Name:        "Node.js Error",
+	// 	Description: "Check for Node.js errors in response",
+	// 	Severity:    "MEDIUM",
+	// 	Type:        "body",
+	// 	Target:      "response",
+	// 	Key:         "Error: ENOENT|TypeError:|ReferenceError:",
+	// 	Operation:   "regex",
+	// 	Status:      "enabled",
+	// },
 	{
 		ID:          "server-version-leak",
 		Name:        "Server Version Leak",
@@ -269,39 +269,39 @@ var BuiltInSecurityChecks = []SecurityCheck{
 		Operation:   "exists",
 		Status:      "enabled",
 	},
-	{
-		ID:          "api-key-in-request-body",
-		Name:        "API Key in Request Body",
-		Description: "Check for API keys in request body",
-		Severity:    "CRITICAL",
-		Type:        "body",
-		Target:      "request",
-		Key:         "api[_-]?key|apikey|access[_-]?token|secret[_-]?key",
-		Operation:   "regex",
-		Status:      "enabled",
-	},
-	{
-		ID:          "password-in-request-body",
-		Name:        "Password in Request Body",
-		Description: "Check for passwords in request body",
-		Severity:    "CRITICAL",
-		Type:        "body",
-		Target:      "request",
-		Key:         "\"password\"\\s*:\\s*\"[^\"]+\"",
-		Operation:   "regex",
-		Status:      "enabled",
-	},
-	{
-		ID:          "sql-injection-in-request",
-		Name:        "SQL Injection in Request",
-		Description: "Check for potential SQL injection patterns in request body",
-		Severity:    "HIGH",
-		Type:        "body",
-		Target:      "request",
-		Key:         "('|(\\-\\-)|;|\\||\\*|(%27)|(%2D%2D)|(%7C)|(%2A))",
-		Operation:   "regex",
-		Status:      "enabled",
-	},
+	// {
+	// 	ID:          "api-key-in-request-body",
+	// 	Name:        "API Key in Request Body",
+	// 	Description: "Check for API keys in request body",
+	// 	Severity:    "CRITICAL",
+	// 	Type:        "body",
+	// 	Target:      "request",
+	// 	Key:         "api[_-]?key|apikey|access[_-]?token|secret[_-]?key",
+	// 	Operation:   "regex",
+	// 	Status:      "enabled",
+	// },
+	// {
+	// 	ID:          "password-in-request-body",
+	// 	Name:        "Password in Request Body",
+	// 	Description: "Check for passwords in request body",
+	// 	Severity:    "CRITICAL",
+	// 	Type:        "body",
+	// 	Target:      "request",
+	// 	Key:         "\"password\"\\s*:\\s*\"[^\"]+\"",
+	// 	Operation:   "regex",
+	// 	Status:      "enabled",
+	// },
+	// {
+	// 	ID:          "sql-injection-in-request",
+	// 	Name:        "SQL Injection in Request",
+	// 	Description: "Check for potential SQL injection patterns in request body",
+	// 	Severity:    "HIGH",
+	// 	Type:        "body",
+	// 	Target:      "request",
+	// 	Key:         "('|(\\-\\-)|;|\\||\\*|(%27)|(%2D%2D)|(%7C)|(%2A))",
+	// 	Operation:   "regex",
+	// 	Status:      "enabled",
+	// },
 }
 
 type SecurityChecker struct {
@@ -358,7 +358,7 @@ func (s *SecurityChecker) Start(ctx context.Context) (*SecurityReport, error) {
 	steps := s.convertExecutionReportToSteps(executionReport, tsExecutor)
 
 	// Run security checks on the steps
-	securityReport := s.runSecurityChecks(steps)
+	securityReport := s.runSecurityChecks(ctx, steps)
 
 	// Print the security report
 	s.printSecurityReport(securityReport)
@@ -390,29 +390,17 @@ func (s *SecurityChecker) AddCustomCheck(ctx context.Context) error {
 	fmt.Println("\n🔒 Add Custom Security Check")
 	fmt.Println("=" + strings.Repeat("=", 50))
 
-	scanner := bufio.NewScanner(os.Stdin)
-
 	var check SecurityCheck
 
 	// Get check ID with validation loop
 	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("operation cancelled")
-		default:
+		input, err := readInputWithCancel(ctx, "Enter check ID (unique identifier): ")
+		if err != nil {
+			return err
 		}
 
-		fmt.Print("Enter check ID (unique identifier): ")
-		if !scanner.Scan() {
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("operation cancelled")
-			default:
-				return fmt.Errorf("failed to read input")
-			}
-		}
-		check.ID = strings.TrimSpace(scanner.Text())
-		if check.ID != "" {
+		if input != "" {
+			check.ID = input
 			break
 		}
 		fmt.Println("❌ Error: Check ID is required. Please try again.")
@@ -420,23 +408,13 @@ func (s *SecurityChecker) AddCustomCheck(ctx context.Context) error {
 
 	// Get check name with validation loop
 	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("operation cancelled")
-		default:
+		input, err := readInputWithCancel(ctx, "Enter check name: ")
+		if err != nil {
+			return err
 		}
 
-		fmt.Print("Enter check name: ")
-		if !scanner.Scan() {
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("operation cancelled")
-			default:
-				return fmt.Errorf("failed to read input")
-			}
-		}
-		check.Name = strings.TrimSpace(scanner.Text())
-		if check.Name != "" {
+		if input != "" {
+			check.Name = input
 			break
 		}
 		fmt.Println("❌ Error: Check name is required. Please try again.")
@@ -444,23 +422,13 @@ func (s *SecurityChecker) AddCustomCheck(ctx context.Context) error {
 
 	// Get check description with validation loop
 	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("operation cancelled")
-		default:
+		input, err := readInputWithCancel(ctx, "Enter check description: ")
+		if err != nil {
+			return err
 		}
 
-		fmt.Print("Enter check description: ")
-		if !scanner.Scan() {
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("operation cancelled")
-			default:
-				return fmt.Errorf("failed to read input")
-			}
-		}
-		check.Description = strings.TrimSpace(scanner.Text())
-		if check.Description != "" {
+		if input != "" {
+			check.Description = input
 			break
 		}
 		fmt.Println("❌ Error: Check description is required. Please try again.")
@@ -468,22 +436,12 @@ func (s *SecurityChecker) AddCustomCheck(ctx context.Context) error {
 
 	// Get severity with validation loop
 	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("operation cancelled")
-		default:
+		input, err := readInputWithCancel(ctx, "Enter severity (CRITICAL/HIGH/MEDIUM/LOW): ")
+		if err != nil {
+			return err
 		}
 
-		fmt.Print("Enter severity (CRITICAL/HIGH/MEDIUM/LOW): ")
-		if !scanner.Scan() {
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("operation cancelled")
-			default:
-				return fmt.Errorf("failed to read input")
-			}
-		}
-		severity := strings.ToUpper(strings.TrimSpace(scanner.Text()))
+		severity := strings.ToUpper(input)
 		if severity == "CRITICAL" || severity == "HIGH" || severity == "MEDIUM" || severity == "LOW" {
 			check.Severity = severity
 			break
@@ -493,22 +451,12 @@ func (s *SecurityChecker) AddCustomCheck(ctx context.Context) error {
 
 	// Get check type with validation loop
 	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("operation cancelled")
-		default:
+		input, err := readInputWithCancel(ctx, "Enter check type (header/body/cookie/url): ")
+		if err != nil {
+			return err
 		}
 
-		fmt.Print("Enter check type (header/body/cookie/url): ")
-		if !scanner.Scan() {
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("operation cancelled")
-			default:
-				return fmt.Errorf("failed to read input")
-			}
-		}
-		checkType := strings.ToLower(strings.TrimSpace(scanner.Text()))
+		checkType := strings.ToLower(input)
 		if checkType == "header" || checkType == "body" || checkType == "cookie" || checkType == "url" {
 			check.Type = checkType
 			break
@@ -518,22 +466,12 @@ func (s *SecurityChecker) AddCustomCheck(ctx context.Context) error {
 
 	// Get target with validation loop
 	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("operation cancelled")
-		default:
+		input, err := readInputWithCancel(ctx, "Enter target (request/response): ")
+		if err != nil {
+			return err
 		}
 
-		fmt.Print("Enter target (request/response): ")
-		if !scanner.Scan() {
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("operation cancelled")
-			default:
-				return fmt.Errorf("failed to read input")
-			}
-		}
-		target := strings.ToLower(strings.TrimSpace(scanner.Text()))
+		target := strings.ToLower(input)
 		if target == "request" || target == "response" {
 			check.Target = target
 			break
@@ -543,65 +481,34 @@ func (s *SecurityChecker) AddCustomCheck(ctx context.Context) error {
 
 	// Get key with validation loop
 	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("operation cancelled")
-		default:
+		input, err := readInputWithCancel(ctx, "Enter key (header name, regex pattern, etc.): ")
+		if err != nil {
+			return err
 		}
 
-		fmt.Print("Enter key (header name, regex pattern, etc.): ")
-		if !scanner.Scan() {
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("operation cancelled")
-			default:
-				return fmt.Errorf("failed to read input")
-			}
-		}
-		check.Key = strings.TrimSpace(scanner.Text())
-		if check.Key != "" {
+		if input != "" {
+			check.Key = input
 			break
 		}
 		fmt.Println("❌ Error: Key is required. Please try again.")
 	}
 
 	// Get expected value (optional)
-	select {
-	case <-ctx.Done():
-		return fmt.Errorf("operation cancelled")
-	default:
+	input, err := readInputWithCancel(ctx, "Enter expected value (optional, press Enter to skip): ")
+	if err != nil {
+		return err
 	}
-
-	fmt.Print("Enter expected value (optional, press Enter to skip): ")
-	if !scanner.Scan() {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("operation cancelled")
-		default:
-			return fmt.Errorf("failed to read input")
-		}
-	}
-	check.Value = strings.TrimSpace(scanner.Text())
+	check.Value = input
 
 	// Get operation with validation loop
 	validOps := []string{"exists", "equals", "contains", "regex", "not_exists", "not_equals"}
 	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("operation cancelled")
-		default:
+		input, err := readInputWithCancel(ctx, "Enter operation (exists/equals/contains/regex/not_exists/not_equals): ")
+		if err != nil {
+			return err
 		}
 
-		fmt.Print("Enter operation (exists/equals/contains/regex/not_exists/not_equals): ")
-		if !scanner.Scan() {
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("operation cancelled")
-			default:
-				return fmt.Errorf("failed to read input")
-			}
-		}
-		operation := strings.ToLower(strings.TrimSpace(scanner.Text()))
+		operation := strings.ToLower(input)
 		isValidOp := false
 		for _, op := range validOps {
 			if operation == op {
@@ -618,13 +525,6 @@ func (s *SecurityChecker) AddCustomCheck(ctx context.Context) error {
 
 	// Set default status
 	check.Status = "enabled"
-
-	// Check for cancellation before saving
-	select {
-	case <-ctx.Done():
-		return fmt.Errorf("operation cancelled")
-	default:
-	}
 
 	if err := s.saveCustomCheck(ctx, check); err != nil {
 		return fmt.Errorf("failed to save custom check: %w", err)
@@ -681,27 +581,14 @@ func (s *SecurityChecker) RemoveCustomCheck(ctx context.Context) error {
 		}
 	}
 
-	scanner := bufio.NewScanner(os.Stdin)
-
 	// Get check ID with validation loop
 	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("operation cancelled")
-		default:
-		}
-
 		if checkID == "" {
-			fmt.Print("\nEnter the ID of the check to remove: ")
-			if !scanner.Scan() {
-				select {
-				case <-ctx.Done():
-					return fmt.Errorf("operation cancelled")
-				default:
-					return fmt.Errorf("failed to read input")
-				}
+			input, err := readInputWithCancel(ctx, "\nEnter the ID of the check to remove: ")
+			if err != nil {
+				return err
 			}
-			checkID = strings.TrimSpace(scanner.Text())
+			checkID = input
 		}
 
 		if checkID == "" {
@@ -732,13 +619,6 @@ func (s *SecurityChecker) RemoveCustomCheck(ctx context.Context) error {
 		if check.ID != checkID {
 			updatedChecks = append(updatedChecks, check)
 		}
-	}
-
-	// Check for cancellation before saving
-	select {
-	case <-ctx.Done():
-		return fmt.Errorf("operation cancelled")
-	default:
 	}
 
 	if err := s.saveCustomChecks(ctx, updatedChecks); err != nil {
@@ -796,28 +676,15 @@ func (s *SecurityChecker) UpdateCustomCheck(ctx context.Context) error {
 		}
 	}
 
-	scanner := bufio.NewScanner(os.Stdin)
-
 	// Get check ID with validation loop
 	var checkIndex = -1
 	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("operation cancelled")
-		default:
-		}
-
 		if checkID == "" {
-			fmt.Print("\nEnter the ID of the check to update: ")
-			if !scanner.Scan() {
-				select {
-				case <-ctx.Done():
-					return fmt.Errorf("operation cancelled")
-				default:
-					return fmt.Errorf("failed to read input")
-				}
+			input, err := readInputWithCancel(ctx, "\nEnter the ID of the check to update: ")
+			if err != nil {
+				return err
 			}
-			checkID = strings.TrimSpace(scanner.Text())
+			checkID = input
 		}
 
 		if checkID == "" {
@@ -846,63 +713,31 @@ func (s *SecurityChecker) UpdateCustomCheck(ctx context.Context) error {
 	fmt.Printf("\nUpdating check: %s\n", check.Name)
 	fmt.Println("Press Enter to keep current value, or enter new value:")
 
-	// Check for cancellation before each input
-	select {
-	case <-ctx.Done():
-		return fmt.Errorf("operation cancelled")
-	default:
+	// Update name
+	input, err := readInputWithCancel(ctx, fmt.Sprintf("Name [%s]: ", check.Name))
+	if err != nil {
+		return err
 	}
-
-	fmt.Printf("Name [%s]: ", check.Name)
-	if !scanner.Scan() {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("operation cancelled")
-		default:
-			return fmt.Errorf("failed to read input")
-		}
-	}
-	if newName := strings.TrimSpace(scanner.Text()); newName != "" {
+	if newName := strings.TrimSpace(input); newName != "" {
 		check.Name = newName
 	}
 
-	select {
-	case <-ctx.Done():
-		return fmt.Errorf("operation cancelled")
-	default:
+	// Update description
+	input, err = readInputWithCancel(ctx, fmt.Sprintf("Description [%s]: ", check.Description))
+	if err != nil {
+		return err
 	}
-
-	fmt.Printf("Description [%s]: ", check.Description)
-	if !scanner.Scan() {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("operation cancelled")
-		default:
-			return fmt.Errorf("failed to read input")
-		}
-	}
-	if newDesc := strings.TrimSpace(scanner.Text()); newDesc != "" {
+	if newDesc := strings.TrimSpace(input); newDesc != "" {
 		check.Description = newDesc
 	}
 
 	// Get severity with validation loop
 	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("operation cancelled")
-		default:
+		input, err := readInputWithCancel(ctx, fmt.Sprintf("Severity [%s] (CRITICAL/HIGH/MEDIUM/LOW): ", check.Severity))
+		if err != nil {
+			return err
 		}
-
-		fmt.Printf("Severity [%s] (CRITICAL/HIGH/MEDIUM/LOW): ", check.Severity)
-		if !scanner.Scan() {
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("operation cancelled")
-			default:
-				return fmt.Errorf("failed to read input")
-			}
-		}
-		newSeverity := strings.ToUpper(strings.TrimSpace(scanner.Text()))
+		newSeverity := strings.ToUpper(strings.TrimSpace(input))
 
 		if newSeverity == "" {
 			// Keep current value
@@ -919,22 +754,11 @@ func (s *SecurityChecker) UpdateCustomCheck(ctx context.Context) error {
 
 	// Get type with validation loop
 	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("operation cancelled")
-		default:
+		input, err := readInputWithCancel(ctx, fmt.Sprintf("Type [%s] (header/body/cookie/url): ", check.Type))
+		if err != nil {
+			return err
 		}
-
-		fmt.Printf("Type [%s] (header/body/cookie/url): ", check.Type)
-		if !scanner.Scan() {
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("operation cancelled")
-			default:
-				return fmt.Errorf("failed to read input")
-			}
-		}
-		newType := strings.ToLower(strings.TrimSpace(scanner.Text()))
+		newType := strings.ToLower(strings.TrimSpace(input))
 
 		if newType == "" {
 			// Keep current value
@@ -949,63 +773,32 @@ func (s *SecurityChecker) UpdateCustomCheck(ctx context.Context) error {
 		fmt.Println("❌ Error: Invalid type. Must be one of: header, body, cookie, url. Please try again.")
 	}
 
-	select {
-	case <-ctx.Done():
-		return fmt.Errorf("operation cancelled")
-	default:
+	// Update key
+	input, err = readInputWithCancel(ctx, fmt.Sprintf("Key [%s]: ", check.Key))
+	if err != nil {
+		return err
 	}
-
-	fmt.Printf("Key [%s]: ", check.Key)
-	if !scanner.Scan() {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("operation cancelled")
-		default:
-			return fmt.Errorf("failed to read input")
-		}
-	}
-	if newKey := strings.TrimSpace(scanner.Text()); newKey != "" {
+	if newKey := strings.TrimSpace(input); newKey != "" {
 		check.Key = newKey
 	}
 
-	select {
-	case <-ctx.Done():
-		return fmt.Errorf("operation cancelled")
-	default:
+	// Update value
+	input, err = readInputWithCancel(ctx, fmt.Sprintf("Value [%s]: ", check.Value))
+	if err != nil {
+		return err
 	}
-
-	fmt.Printf("Value [%s]: ", check.Value)
-	if !scanner.Scan() {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("operation cancelled")
-		default:
-			return fmt.Errorf("failed to read input")
-		}
-	}
-	if newValue := strings.TrimSpace(scanner.Text()); newValue != "" {
+	if newValue := strings.TrimSpace(input); newValue != "" {
 		check.Value = newValue
 	}
 
 	// Get operation with validation loop
 	validOps := []string{"exists", "equals", "contains", "regex", "not_exists", "not_equals"}
 	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("operation cancelled")
-		default:
+		input, err := readInputWithCancel(ctx, fmt.Sprintf("Operation [%s] (exists/equals/contains/regex/not_exists/not_equals): ", check.Operation))
+		if err != nil {
+			return err
 		}
-
-		fmt.Printf("Operation [%s] (exists/equals/contains/regex/not_exists/not_equals): ", check.Operation)
-		if !scanner.Scan() {
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("operation cancelled")
-			default:
-				return fmt.Errorf("failed to read input")
-			}
-		}
-		newOp := strings.ToLower(strings.TrimSpace(scanner.Text()))
+		newOp := strings.ToLower(strings.TrimSpace(input))
 
 		if newOp == "" {
 			// Keep current value
@@ -1030,22 +823,11 @@ func (s *SecurityChecker) UpdateCustomCheck(ctx context.Context) error {
 
 	// Get status with validation loop
 	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("operation cancelled")
-		default:
+		input, err := readInputWithCancel(ctx, fmt.Sprintf("Status [%s] (enabled/disabled): ", check.Status))
+		if err != nil {
+			return err
 		}
-
-		fmt.Printf("Status [%s] (enabled/disabled): ", check.Status)
-		if !scanner.Scan() {
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("operation cancelled")
-			default:
-				return fmt.Errorf("failed to read input")
-			}
-		}
-		newStatus := strings.ToLower(strings.TrimSpace(scanner.Text()))
+		newStatus := strings.ToLower(strings.TrimSpace(input))
 
 		if newStatus == "" {
 			// Keep current value
@@ -1058,13 +840,6 @@ func (s *SecurityChecker) UpdateCustomCheck(ctx context.Context) error {
 		}
 
 		fmt.Println("❌ Error: Invalid status. Must be 'enabled' or 'disabled'. Please try again.")
-	}
-
-	// Check for cancellation before saving
-	select {
-	case <-ctx.Done():
-		return fmt.Errorf("operation cancelled")
-	default:
 	}
 
 	if err := s.saveCustomChecks(ctx, customChecks); err != nil {
@@ -1157,7 +932,7 @@ func (s *SecurityChecker) ListChecks(ctx context.Context) error {
 
 // =================================================================================================
 
-func (s *SecurityChecker) runSecurityChecks(steps []Step) *SecurityReport {
+func (s *SecurityChecker) runSecurityChecks(ctx context.Context, steps []Step) *SecurityReport {
 	report := &SecurityReport{
 		TestSuite: s.testsuite.Name,
 		Timestamp: time.Now().Format(time.RFC3339),
@@ -1166,7 +941,7 @@ func (s *SecurityChecker) runSecurityChecks(steps []Step) *SecurityReport {
 	}
 
 	// Get enabled checks based on ruleset
-	enabledChecks := s.getEnabledChecks()
+	enabledChecks := s.getEnabledChecks(ctx)
 
 	for _, step := range steps {
 		for _, check := range enabledChecks {

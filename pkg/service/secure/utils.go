@@ -1,6 +1,7 @@
 package secure
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v2/pkg/service/testsuite"
+	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
 
@@ -17,6 +19,14 @@ func (s *SecurityChecker) convertExecutionReportToSteps(report *testsuite.Execut
 	steps := make([]Step, 0, len(report.StepsResult))
 
 	for i, stepResult := range report.StepsResult {
+		// Skip failed steps - don't run security checks on failed steps
+		if stepResult.Status == "failed" {
+			s.logger.Info("Skipping security checks for failed step",
+				zap.String("stepName", stepResult.StepName),
+				zap.String("failureReason", stepResult.FailureReason))
+			continue
+		}
+
 		// Get the corresponding test step from the testsuite
 		if i >= len(executor.Testsuite.Spec.Steps) {
 			continue
@@ -56,6 +66,36 @@ func (s *SecurityChecker) convertExecutionReportToSteps(report *testsuite.Execut
 	}
 
 	return steps
+}
+
+// readInputWithCancel reads a line of input from stdin with cancellation support
+func readInputWithCancel(ctx context.Context, prompt string) (string, error) {
+	fmt.Print(prompt)
+
+	inputChan := make(chan string, 1)
+	errorChan := make(chan error, 1)
+
+	go func() {
+		scanner := bufio.NewScanner(os.Stdin)
+		if scanner.Scan() {
+			inputChan <- scanner.Text()
+		} else {
+			if err := scanner.Err(); err != nil {
+				errorChan <- err
+			} else {
+				errorChan <- fmt.Errorf("EOF")
+			}
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return "", fmt.Errorf("operation cancelled")
+	case input := <-inputChan:
+		return strings.TrimSpace(input), nil
+	case err := <-errorChan:
+		return "", err
+	}
 }
 
 func (s *SecurityChecker) isInAllowList(category, value string) bool {
@@ -129,18 +169,62 @@ func (s *SecurityChecker) filterResultsBySeverity(results []SecurityResult, seve
 	return filtered
 }
 
-func (s *SecurityChecker) getEnabledChecks() []SecurityCheck {
+func (s *SecurityChecker) getEnabledChecks(ctx context.Context) []SecurityCheck {
 	var enabled []SecurityCheck
 
-	for _, check := range BuiltInSecurityChecks {
-		// Check effective status considering both Status field and disable list
-		effectiveStatus := s.getEffectiveStatus(check)
-		if effectiveStatus == "disabled" {
-			continue
+	switch s.ruleset {
+	case "basic":
+		// Use built-in checks only
+		for _, check := range BuiltInSecurityChecks {
+			// Check effective status considering both Status field and disable list
+			effectiveStatus := s.getEffectiveStatus(check)
+			if effectiveStatus == "disabled" {
+				continue
+			}
+			enabled = append(enabled, check)
 		}
 
-		enabled = append(enabled, check)
+	case "custom":
+		// Use custom checks only
+		customChecks, err := s.loadCustomChecks(ctx)
+		if err != nil {
+			s.logger.Error("Failed to load custom checks", zap.Error(err))
+			// Fallback to built-in checks if custom checks can't be loaded
+			for _, check := range BuiltInSecurityChecks {
+				effectiveStatus := s.getEffectiveStatus(check)
+				if effectiveStatus == "disabled" {
+					continue
+				}
+				enabled = append(enabled, check)
+			}
+		} else {
+			if len(customChecks) == 0 {
+				s.logger.Warn("No custom checks found, consider adding some or using 'basic' ruleset")
+			}
+			for _, check := range customChecks {
+				effectiveStatus := s.getEffectiveStatus(check)
+				if effectiveStatus == "disabled" {
+					continue
+				}
+				enabled = append(enabled, check)
+			}
+		}
+
+	default:
+		// Default to built-in checks for unknown rulesets
+		s.logger.Warn("Unknown ruleset, falling back to basic", zap.String("ruleset", s.ruleset))
+		for _, check := range BuiltInSecurityChecks {
+			effectiveStatus := s.getEffectiveStatus(check)
+			if effectiveStatus == "disabled" {
+				continue
+			}
+			enabled = append(enabled, check)
+		}
 	}
+
+	s.logger.Debug("Loaded security checks",
+		zap.String("ruleset", s.ruleset),
+		zap.Int("totalChecks", len(enabled)))
 
 	return enabled
 }
