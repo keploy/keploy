@@ -390,7 +390,7 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 		cancel()
 		err := g.Wait()
 		if err != nil {
-			utils.LogError(a.logger, err, "failed to run dockerized app")
+			utils.LogError(a.logger, err, "failed to run doc kerized app")
 		}
 	}()
 
