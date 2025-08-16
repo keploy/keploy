@@ -28,6 +28,11 @@ func New() (*zap.Logger, *os.File, error) {
 		return nil, nil, fmt.Errorf("failed to open log file: %v", err)
 	}
 
+	err = os.Chmod("keploy-logs.txt", 0777)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to set the log file permission to 777: %v", err)
+	}
+
 	writer := zapcore.NewMultiWriteSyncer(zapcore.AddSync(os.Stdout), zapcore.AddSync(logFile))
 
 	LogCfg = zap.NewDevelopmentConfig()
