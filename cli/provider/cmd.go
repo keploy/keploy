@@ -196,7 +196,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the path to download contracts")
 		}
 
-	case "update", "export", "import":
+	case "update", "export", "import", "schema", "assert":
 		return nil
 	case "postman":
 		cmd.Flags().StringP("path", "p", "", "Specify the path to the postman collection")
@@ -886,6 +886,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New("TestDir is not set")
 			}
 		}
+	case "schema":
+		// Schema commands don't need special validation
+		return nil
 	}
 
 	return nil

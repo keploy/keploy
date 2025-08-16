@@ -140,3 +140,16 @@ type MockMapping struct {
 	TestSetID string     `json:"testSetId" yaml:"testSetId"`
 	Mocks     []*OpenAPI `json:"mocks" yaml:"mocks"`
 }
+
+type SchemaAssertionResult struct {
+	TotalEndpoints int           `json:"totalEndpoints" yaml:"totalEndpoints"`
+	PassedCount    int           `json:"passedCount" yaml:"passedCount"`
+	FailedCount    int           `json:"failedCount" yaml:"failedCount"`
+	Errors         []SchemaError `json:"errors" yaml:"errors"`
+}
+
+type SchemaError struct {
+	Endpoint string `json:"endpoint" yaml:"endpoint"`
+	Method   string `json:"method" yaml:"method"`
+	Error    string `json:"error" yaml:"error"`
+}
