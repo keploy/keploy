@@ -31,7 +31,11 @@ var DockerConfig = DockerConfigStruct{
 func GenerateDockerEnvs(config DockerConfigStruct) string {
 	var envs []string
 	for key, value := range config.Envs {
-		envs = append(envs, fmt.Sprintf("-e %s='%s'", key, value))
+		if runtime.GOOS == "windows" {
+			envs = append(envs, fmt.Sprintf("-e %s=%s", key, value))
+		} else {
+			envs = append(envs, fmt.Sprintf("-e %s='%s'", key, value))
+		}
 	}
 	return strings.Join(envs, " ")
 }
@@ -64,6 +68,20 @@ func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config)
 	}
 	// gracefully exit the current process
 	logger.Info("exiting the current process as the command is moved to docker")
+
+	if utils.LogFile != nil {
+		err := utils.LogFile.Close()
+		if err != nil {
+			utils.LogError(logger, err, "Failed to close Keploy Logs")
+		}
+		if err := utils.DeleteFileIfNotExists(logger, "keploy-logs.txt"); err != nil {
+			return nil
+		}
+		if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {
+			return nil
+		}
+	}
+
 	os.Exit(0)
 	return nil
 }
