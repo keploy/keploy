@@ -24,7 +24,6 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
-
 	pTls "go.keploy.io/server/v2/pkg/core/proxy/tls"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
@@ -727,4 +726,37 @@ func (p *Proxy) GetConsumedMocks(_ context.Context, id uint64) ([]models.MockSta
 		return nil, fmt.Errorf("mock manager not found to get consumed filtered mocks")
 	}
 	return m.(*MockManager).GetConsumedMocks(), nil
+}
+
+// Reset clears the state of the proxy, allowing it to be reused for a new test set
+// without needing a full restart. It closes all active client connections,
+// clears session information, resets mock managers, and purges any global stateful caches.
+func (p *Proxy) Reset() {
+	p.logger.Info("Resetting proxy state for new test set")
+
+	// 1. Close all active client connections
+	// By closing the connections, any goroutines blocked on Read/Write operations
+	// for these connections will receive an error and terminate.
+	p.connMutex.Lock()
+	for _, conn := range p.clientConnections {
+		if conn != nil {
+			conn.Close() // Errors are ignored as we are tearing down anyway.
+		}
+	}
+	p.clientConnections = nil // Clear the slice.
+	p.connMutex.Unlock()
+	p.logger.Debug("Closed all active client connections")
+
+	// 2. Reset session and mock management state.
+	// This ensures no mocks or session rules from a previous run are carried over.
+	p.sessions = core.NewSessions()
+	p.MockManagers = sync.Map{}
+	p.logger.Debug("Reset sessions and mock managers")
+
+	// 3. Clear the global DNS cache.
+	p.resetDNSCache()
+
+	// TODO: Reset state for individual integrations that use global variables.P
+
+	p.logger.Info("Proxy state has been successfully reset")
 }
