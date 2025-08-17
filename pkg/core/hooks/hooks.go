@@ -670,6 +670,8 @@ func (h *Hooks) UnloadForTestSet(ctx context.Context, id uint64, opts core.HookC
 	// Clean up session
 	h.sess.Delete(id)
 
+	h.appID = 0
+
 	h.logger.Debug("eBPF hooks unloaded successfully for test set", zap.Uint64("appID", id))
 	return nil
 }
