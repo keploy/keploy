@@ -19,6 +19,8 @@ type Hooks interface {
 	DestInfo
 	OutgoingInfo
 	Load(ctx context.Context, id uint64, cfg HookCfg) error
+	LoadForTestSet(ctx context.Context, id uint64, cfg HookCfg) error
+	UnloadForTestSet(ctx context.Context, id uint64, cfg HookCfg) error
 	Record(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error)
 }
 

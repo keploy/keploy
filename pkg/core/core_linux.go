@@ -270,3 +270,71 @@ func (c *Core) GetContainerIP(_ context.Context, id uint64) (string, error) {
 func (c *Core) Reset() {
 	c.Proxy.Reset()
 }
+
+// HookForTestSet loads eBPF hooks for a specific test set
+func (c *Core) HookForTestSet(ctx context.Context, id uint64, opts models.HookOptions) error {
+	a, err := c.getApp(id)
+	if err != nil {
+		utils.LogError(c.logger, err, "failed to get app")
+		return fmt.Errorf("failed to get app: %w", err)
+	}
+
+	isDocker := utils.IsDockerCmd(a.Kind(ctx))
+
+	// Load hooks for test set
+	err = c.LoadForTestSet(ctx, id, HookCfg{
+		AppID:      id,
+		Pid:        0,
+		IsDocker:   isDocker,
+		KeployIPV4: a.KeployIPv4Addr(),
+		Mode:       opts.Mode,
+		Rules:      opts.Rules,
+		E2E:        opts.E2E,
+		Port:       opts.Port,
+	})
+	if err != nil {
+		utils.LogError(c.logger, err, "failed to load hooks for test set")
+		return fmt.Errorf("failed to load hooks for test set: %w", err)
+	}
+
+	return nil
+}
+
+// UnhookForTestSet unloads eBPF hooks for a specific test set
+func (c *Core) UnhookForTestSet(ctx context.Context, id uint64, opts models.HookOptions) error {
+	a, err := c.getApp(id)
+	if err != nil {
+		utils.LogError(c.logger, err, "failed to get app")
+		return fmt.Errorf("failed to get app: %w", err)
+	}
+
+	isDocker := utils.IsDockerCmd(a.Kind(ctx))
+
+	// Unload hooks for test set
+	err = c.UnloadForTestSet(ctx, id, HookCfg{
+		AppID:      id,
+		Pid:        0,
+		IsDocker:   isDocker,
+		KeployIPV4: a.KeployIPv4Addr(),
+		Mode:       opts.Mode,
+		Rules:      opts.Rules,
+		E2E:        opts.E2E,
+		Port:       opts.Port,
+	})
+	if err != nil {
+		utils.LogError(c.logger, err, "failed to unload hooks for test set")
+		return fmt.Errorf("failed to unload hooks for test set: %w", err)
+	}
+
+	return nil
+}
+
+// LoadForTestSet calls the hooks LoadForTestSet method
+func (c *Core) LoadForTestSet(ctx context.Context, id uint64, cfg HookCfg) error {
+	return c.Hooks.LoadForTestSet(ctx, id, cfg)
+}
+
+// UnloadForTestSet calls the hooks UnloadForTestSet method
+func (c *Core) UnloadForTestSet(ctx context.Context, id uint64, cfg HookCfg) error {
+	return c.Hooks.UnloadForTestSet(ctx, id, cfg)
+}
