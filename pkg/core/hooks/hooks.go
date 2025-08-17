@@ -114,7 +114,8 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 	g.Go(func() error {
 		defer utils.Recover(h.logger)
 		<-ctx.Done()
-		h.unLoad(ctx, opts)
+		// Already done after every test set run, so we don't need to unload at the end since it is already done 
+		// h.unLoad(ctx, opts)
 
 		//deleting in order to free the memory in case of rerecord.
 		h.sess.Delete(id)
