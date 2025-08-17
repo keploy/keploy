@@ -50,6 +50,18 @@ func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.A
 	}
 }
 
+func (c *Core) HookForTestSet(ctx context.Context, id uint64, opts models.HookOptions) error {
+	return errUnsupported
+}
+
+func (c *Core) UnhookForTestSet(ctx context.Context, id uint64, opts models.HookOptions) error {
+	return errUnsupported
+}
+
+func (c *Core) Reset() {
+	// No-op for non-Linux systems
+}
+
 func (c *Core) GetContainerIP(_ context.Context, id uint64) (string, error) {
 	return "", errUnsupported
 }
