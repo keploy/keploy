@@ -163,7 +163,7 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			if ctx.Err() != nil {
 				return nil, false, ctx.Err()
 			}
-			utils.LogError(logger, nil, "no mysql mocks found")
+			utils.LogError(logger, nil, "no mysql mocks found. size of unfiltered mocks", zap.Any("size", len(unfiltered)))
 			return nil, false, fmt.Errorf("no mysql mocks found")
 		}
 

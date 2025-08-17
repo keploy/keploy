@@ -17,17 +17,17 @@ import (
 	"go.uber.org/zap"
 )
 
-func (h *HTTP) HandleChunkedRequests(ctx context.Context, finalReq *[]byte, clientConn, destConn net.Conn) error {
+func (h *HTTP) HandleChunkedRequests(ctx context.Context, finalReq *[]byte, clientConn, destConn net.Conn, logger *zap.Logger) error {
 
 	if hasCompleteHeaders(*finalReq) {
-		h.Logger.Debug("this request has complete headers in the first chunk itself.")
+		logger.Debug("this request has complete headers in the first chunk itself.")
 	}
 
 	for !hasCompleteHeaders(*finalReq) {
-		h.Logger.Debug("couldn't get complete headers in first chunk so reading more chunks")
-		reqHeader, err := pUtil.ReadBytes(ctx, h.Logger, clientConn)
+		logger.Debug("couldn't get complete headers in first chunk so reading more chunks")
+		reqHeader, err := pUtil.ReadBytes(ctx, logger, clientConn)
 		if err != nil {
-			utils.LogError(h.Logger, nil, "failed to read the request message from the client")
+			utils.LogError(logger, nil, "failed to read the request message from the client")
 			return err
 		}
 		// destConn is nil in case of test mode
@@ -37,7 +37,7 @@ func (h *HTTP) HandleChunkedRequests(ctx context.Context, finalReq *[]byte, clie
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
-				utils.LogError(h.Logger, nil, "failed to write request message to the destination server")
+				utils.LogError(logger, nil, "failed to write request message to the destination server")
 				return err
 			}
 		}
@@ -62,7 +62,7 @@ func (h *HTTP) HandleChunkedRequests(ctx context.Context, finalReq *[]byte, clie
 	if contentLengthHeader != "" {
 		contentLength, err := strconv.Atoi(contentLengthHeader)
 		if err != nil {
-			utils.LogError(h.Logger, err, "failed to get the content-length header")
+			utils.LogError(logger, err, "failed to get the content-length header")
 			return fmt.Errorf("failed to handle chunked request")
 		}
 		//Get the length of the body in the request.

@@ -112,7 +112,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			// Capture the request timestamp
 			reqTimestampMock := time.Now()
 
-			err := h.HandleChunkedRequests(ctx, &finalReq, clientConn, destConn)
+			err := h.HandleChunkedRequests(ctx, &finalReq, clientConn, destConn, h.Logger)
 			if err != nil {
 				utils.LogError(h.Logger, err, "failed to handle chunked requests")
 				errCh <- err

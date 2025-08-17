@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"sync"
 	"syscall"
 	"time"
 
@@ -48,6 +49,7 @@ type App struct {
 	container        string
 	containerNetwork string
 	containerIPv4    chan string
+	containerIPv4Mu  sync.RWMutex
 	keployNetwork    string
 	keployContainer  string
 	keployIPv4       string
@@ -92,10 +94,24 @@ func (a *App) KeployIPv4Addr() string {
 }
 
 func (a *App) ContainerIPv4Addr() string {
-	return <-a.containerIPv4
+	a.containerIPv4Mu.RLock()
+	ch := a.containerIPv4
+	a.containerIPv4Mu.RUnlock()
+
+	if ch == nil {
+		return ""
+	}
+	return <-ch
 }
+
 func (a *App) SetContainerIPv4Addr(ipAddr string) {
-	a.containerIPv4 <- ipAddr
+	a.containerIPv4Mu.RLock()
+	ch := a.containerIPv4
+	a.containerIPv4Mu.RUnlock()
+
+	if ch != nil {
+		ch <- ipAddr
+	}
 }
 
 func (a *App) SetupDocker() error {
@@ -339,7 +355,13 @@ func (a *App) getDockerMeta(ctx context.Context) <-chan error {
 		defer func() {
 			a.logger.Debug("closing err, containerIPv4 and inode channels ")
 			close(errCh)
-			close(a.containerIPv4)
+
+			a.containerIPv4Mu.RLock()
+			ch := a.containerIPv4
+			a.containerIPv4Mu.RUnlock()
+			if ch != nil {
+				close(ch)
+			}
 			close(a.inodeChan)
 		}()
 		for {
@@ -428,7 +450,10 @@ func (a *App) runDocker(ctx context.Context) models.AppError {
 
 func (a *App) Run(ctx context.Context, inodeChan chan uint64) models.AppError {
 	a.inodeChan = inodeChan
+
+	a.containerIPv4Mu.Lock()
 	a.containerIPv4 = make(chan string, 1)
+	a.containerIPv4Mu.Unlock()
 
 	if utils.IsDockerCmd(a.kind) {
 		return a.runDocker(ctx)
