@@ -59,7 +59,7 @@ func (c *Core) UnhookForTestSet(ctx context.Context, id uint64, opts models.Hook
 }
 
 func (c *Core) Reset() {
-	// No-op for non-Linux systems
+	// No-op for non-Linux system
 }
 
 func (c *Core) GetContainerIP(_ context.Context, id uint64) (string, error) {
