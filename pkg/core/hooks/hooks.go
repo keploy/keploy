@@ -529,7 +529,8 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	}
 
 	agentInfo.DNSPort = int32(h.dnsPort)
-
+	agentInfo.KeployAgentInode = clientInfo.KeployClientInode // Reuse the inode you already fetched
+	// agentInfo.KeployAgentNsPid = clientInfo.KeployClientNsPid
 	if opts.IsDocker {
 		clientInfo.IsDockerApp = uint32(1)
 	} else {
