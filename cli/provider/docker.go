@@ -31,7 +31,11 @@ var DockerConfig = DockerConfigStruct{
 func GenerateDockerEnvs(config DockerConfigStruct) string {
 	var envs []string
 	for key, value := range config.Envs {
-		envs = append(envs, fmt.Sprintf("-e %s='%s'", key, value))
+		if runtime.GOOS == "windows" {
+			envs = append(envs, fmt.Sprintf("-e %s=%s", key, value))
+		} else {
+			envs = append(envs, fmt.Sprintf("-e %s='%s'", key, value))
+		}
 	}
 	return strings.Join(envs, " ")
 }
