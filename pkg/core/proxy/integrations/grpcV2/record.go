@@ -1,10 +1,11 @@
 //go:build linux
 
-package grpc
+package grpcV2
 
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -182,6 +183,7 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 	// ── Clean metadata: gRPC forbids user-supplied pseudo headers ("*:").
 	cleanMD := metadata.New(nil)
 	for k, v := range md {
+		fmt.Printf("[MD] key: %s, value: %s\n", k, v)
 		if strings.HasPrefix(k, ":") {
 			continue // strip pseudo-headers
 		}
@@ -312,7 +314,9 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 		zap.Any("headers", respHeader),
 		zap.Any("trailers", destTrailers))
 
-	// p.logger.Debug("Response body", zap.Int("body size", len(respBuf.Bytes())), zap.Any("body", respBuf.Bytes()))
+	body64 := base64.StdEncoding.EncodeToString(respBuf.Bytes())
+
+	p.logger.Debug("Grpc Response body", zap.Int("body size", len(respBuf.Bytes())), zap.Any("body", respBuf.String()), zap.Any("body64", body64))
 	// respHeader, _ := destStream.Header()
 	grpcResp := &models.GrpcResp{
 		Body:     createLengthPrefixedMessage(respBuf.Bytes()),
