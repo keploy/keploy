@@ -51,6 +51,17 @@ func (ts *TestYaml) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
 	return yaml.ReadSessionIndices(ctx, ts.TcsPath, ts.logger)
 }
 
+func (ts *TestYaml) GetAllTestSetIDsInReport(ctx context.Context, latestRunID string) ([]string, error) {
+	if latestRunID == "" {
+		ts.logger.Warn("No latest run ID provided, returning empty test set IDs")
+		return []string{}, nil
+	}
+
+	runReportPath := filepath.Join(ts.TcsPath, "reports", latestRunID)
+
+	return yaml.ReadSessionFileIndices(ctx, runReportPath, ts.logger)
+}
+
 func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error) {
 	path := filepath.Join(ts.TcsPath, testSetID, "tests")
 

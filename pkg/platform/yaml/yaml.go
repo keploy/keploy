@@ -181,6 +181,32 @@ func ReadSessionIndices(_ context.Context, path string, Logger *zap.Logger) ([]s
 	return indices, nil
 }
 
+func ReadSessionFileIndices(_ context.Context, path string, Logger *zap.Logger) ([]string, error) {
+	var indices []string
+	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
+	if err != nil {
+		Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
+		return indices, nil
+	}
+
+	files, err := dir.ReadDir(0)
+	if err != nil {
+		return indices, err
+	}
+
+	for _, v := range files {
+		if v.Name() != "reports" && v.Name() != "testReports" && v.Name() != "schema" {
+			name := v.Name()
+			ext := filepath.Ext(name)
+			if ext != "" {
+				name = name[:len(name)-len(ext)]
+			}
+			indices = append(indices, name)
+		}
+	}
+	return indices, nil
+}
+
 func DeleteFile(_ context.Context, logger *zap.Logger, path, name string) error {
 	filePath := filepath.Join(path, name+".yaml")
 	err := os.Remove(filePath)

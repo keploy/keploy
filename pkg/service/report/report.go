@@ -33,13 +33,18 @@ func New(logger *zap.Logger, cfg *config.Config, reportDB ReportDB, testDB TestD
 
 // GenerateReport orchestrates the entire report generation process
 func (r *Report) GenerateReport(ctx context.Context) error {
+	latestRunID, err := r.getLatestTestRunID(ctx)
+
+	if err != nil {
+		return err
+	}
+
 	testSetIDs := r.extractTestSetIDs()
 	if len(testSetIDs) == 0 {
 		r.logger.Info("No test sets selected for report generation, Generating report for all test sets")
 
 		var err error
-
-		testSetIDs, err = r.testDB.GetAllTestSetIDs(ctx)
+		testSetIDs, err = r.testDB.GetAllTestSetIDsInReport(ctx, latestRunID)
 		if err != nil {
 			r.logger.Error("failed to get all test set ids", zap.Error(err))
 			return err
@@ -49,12 +54,6 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 			r.logger.Warn("No test sets found for report generation")
 			return nil
 		}
-	}
-
-	latestRunID, err := r.getLatestTestRunID(ctx)
-
-	if err != nil {
-		return err
 	}
 
 	if latestRunID == "" {
@@ -123,15 +122,17 @@ func (r *Report) collectFailedTests(ctx context.Context, runID string, testSetID
 	var failedTests []models.TestResult
 
 	for _, testSetID := range testSetIDs {
-		results, err := r.reportDB.GetReport(ctx, runID, testSetID)
+		cleanTestSetID := strings.TrimSuffix(testSetID, "-report")
+
+		results, err := r.reportDB.GetReport(ctx, runID, cleanTestSetID)
 		if err != nil {
 			r.logger.Error("failed to get test case results for test set",
-				zap.String("test_set_id", testSetID), zap.Error(err))
+				zap.String("test_set_id", cleanTestSetID), zap.Error(err))
 			continue
 		}
 
 		if results == nil {
-			r.logger.Warn("no results found for test set", zap.String("test_set_id", testSetID))
+			r.logger.Warn("no results found for test set", zap.String("test_set_id", cleanTestSetID))
 			continue
 		}
 
