@@ -2,14 +2,17 @@ package replay
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/davecgh/go-spew/spew"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
@@ -107,7 +110,9 @@ func (m *mock) download(ctx context.Context, testSetID string) error {
 	}
 
 	m.logger.Info("Downloading mock file from cloud...", zap.String("testSetID", testSetID))
-	cloudFile, err := m.storage.Download(ctx, tsConfig.MockRegistry.Mock, tsConfig.MockRegistry.App, tsConfig.MockRegistry.User, m.token)
+	spew.Dump(m.storage)
+	spew.Dump(m.token)
+	cloudFile, err := Download(ctx, m.logger, "a9cbd697b4f70278f372eca4e6133adf2a466443fd6905ed271aae25e348f733", "taa-bff", "allen", m.token)
 	if err != nil {
 		m.logger.Error("Failed to download mock file", zap.Error(err))
 		return err
@@ -275,4 +280,55 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 	}
 
 	return nil
+}
+
+func Download(ctx context.Context, logger *zap.Logger, mockName string, appName string, userName string, jwtToken string) (io.Reader, error) {
+	// Create the HTTP request
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/mock/download?appName=%s&mockName=%s&userName=%s", "https://api.keploy.io", appName, mockName, userName), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+jwtToken)
+
+	req.Header.Set("Accept-Encoding", "gzip") // Request gzip encoding
+
+	// Execute the request
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		defer func() {
+			err := resp.Body.Close()
+			if err != nil {
+				utils.LogError(logger, err, "failed to close the http response body")
+			}
+		}()
+		// Read the response body to get the error message
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response body and the resp code is: %d", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("download failed with status code: %d, message: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	// Check if the response is gzipped
+	if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
+		logger.Debug("mock response is gzipped")
+		gr, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			defer func() {
+				err := resp.Body.Close()
+				if err != nil {
+					utils.LogError(logger, err, "failed to close the http response body")
+				}
+			}()
+			return nil, fmt.Errorf("failed to create gzip reader: %w", err)
+		}
+		return gr, nil // gr is an io.Reader, decompressing transparently
+	}
+
+	return resp.Body, nil
 }

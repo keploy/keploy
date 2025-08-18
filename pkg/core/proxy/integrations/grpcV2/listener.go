@@ -1,6 +1,6 @@
 //go:build linux
 
-package grpc
+package grpcV2
 
 import (
 	"net"
