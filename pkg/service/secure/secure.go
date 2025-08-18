@@ -46,15 +46,25 @@ type SecurityResult struct {
 	Target     string `json:"target"` // "request" or "response" - where the check was applied
 }
 
+type StepSecurityResults struct {
+	StepName   string           `json:"step_name"`
+	StepMethod string           `json:"step_method"`
+	StepURL    string           `json:"step_url"`
+	Results    []SecurityResult `json:"results"`
+	Passed     int              `json:"passed"`
+	Failed     int              `json:"failed"`
+	Warnings   int              `json:"warnings"`
+}
+
 type SecurityReport struct {
-	TestSuite   string           `json:"test_suite"`
-	Timestamp   string           `json:"timestamp"`
-	TotalChecks int              `json:"total_checks"`
-	Passed      int              `json:"passed"`
-	Failed      int              `json:"failed"`
-	Warnings    int              `json:"warnings"`
-	Results     []SecurityResult `json:"results"`
-	Summary     map[string]int   `json:"summary"` // severity -> count
+	TestSuite   string                `json:"test_suite"`
+	Timestamp   string                `json:"timestamp"`
+	TotalChecks int                   `json:"total_checks"`
+	Passed      int                   `json:"passed"`
+	Failed      int                   `json:"failed"`
+	Warnings    int                   `json:"warnings"`
+	Steps       []StepSecurityResults `json:"steps"`
+	Summary     map[string]int        `json:"summary"` // severity -> count
 }
 
 type StepRequest struct {
@@ -936,7 +946,7 @@ func (s *SecurityChecker) runSecurityChecks(ctx context.Context, steps []Step) *
 	report := &SecurityReport{
 		TestSuite: s.testsuite.Name,
 		Timestamp: time.Now().Format(time.RFC3339),
-		Results:   make([]SecurityResult, 0),
+		Steps:     make([]StepSecurityResults, 0),
 		Summary:   make(map[string]int),
 	}
 
@@ -944,25 +954,43 @@ func (s *SecurityChecker) runSecurityChecks(ctx context.Context, steps []Step) *
 	enabledChecks := s.getEnabledChecks(ctx)
 
 	for _, step := range steps {
+		stepResults := StepSecurityResults{
+			StepName:   step.StepName,
+			StepMethod: step.StepRequest.Method,
+			StepURL:    step.Endpoint,
+			Results:    make([]SecurityResult, 0),
+		}
+
 		for _, check := range enabledChecks {
 			result := s.executeCheck(check, step)
 			if result != nil {
-				report.Results = append(report.Results, *result)
+				stepResults.Results = append(stepResults.Results, *result)
 				report.Summary[result.Severity]++
 
 				switch result.Status {
 				case "passed":
 					report.Passed++
+					stepResults.Passed++
 				case "failed":
 					report.Failed++
+					stepResults.Failed++
 				case "warning":
 					report.Warnings++
+					stepResults.Warnings++
 				}
 			}
 		}
+
+		report.Steps = append(report.Steps, stepResults)
 	}
 
-	report.TotalChecks = len(report.Results)
+	// Calculate total checks across all steps
+	totalChecks := 0
+	for _, stepResult := range report.Steps {
+		totalChecks += len(stepResult.Results)
+	}
+	report.TotalChecks = totalChecks
+
 	return report
 }
 

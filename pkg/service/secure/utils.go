@@ -127,35 +127,42 @@ func (s *SecurityChecker) printSecurityReport(report *SecurityReport) {
 	fmt.Printf("❌ Failed: %d\n", report.Failed)
 	fmt.Printf("⚠️  Warnings: %d\n\n", report.Warnings)
 
-	// Group by severity
-	severities := []string{"CRITICAL", "HIGH", "MEDIUM", "LOW"}
-	for _, severity := range severities {
-		results := s.filterResultsBySeverity(report.Results, severity)
-		if len(results) > 0 {
-			fmt.Printf("=== %s SEVERITY ===\n", severity)
-			for _, result := range results {
-				var status string
-				switch result.Status {
-				case "passed":
-					status = "✅"
-				case "failed":
-					status = "❌"
-				case "warning":
-					status = "⚠️"
-				default:
-					status = "❓" // Unknown status
-				}
+	// Print results grouped by step
+	for i, stepResult := range report.Steps {
+		fmt.Printf("=== STEP %d: %s ===\n", i+1, stepResult.StepName)
+		fmt.Printf("Method: %s | URL: %s\n", stepResult.StepMethod, stepResult.StepURL)
+		fmt.Printf("✅ Passed: %d | ❌ Failed: %d | ⚠️  Warnings: %d\n\n",
+			stepResult.Passed, stepResult.Failed, stepResult.Warnings)
 
-				fmt.Printf("%s [%s] %s\n", status, result.CheckID, result.CheckName)
-				fmt.Printf("   Step: %s (%s %s) [Status: %d] [Target: %s]\n",
-					result.StepName, result.StepMethod, result.StepURL, result.StatusCode, result.Target)
-				fmt.Printf("   %s\n", result.Details)
-				if result.Recommendation != "" {
-					fmt.Printf("   💡 %s\n", result.Recommendation)
+		// Group step results by severity
+		severities := []string{"CRITICAL", "HIGH", "MEDIUM", "LOW"}
+		for _, severity := range severities {
+			results := s.filterResultsBySeverity(stepResult.Results, severity)
+			if len(results) > 0 {
+				fmt.Printf("--- %s SEVERITY ---\n", severity)
+				for _, result := range results {
+					var status string
+					switch result.Status {
+					case "passed":
+						status = "✅"
+					case "failed":
+						status = "❌"
+					case "warning":
+						status = "⚠️"
+					default:
+						status = "❓" // Unknown status
+					}
+
+					fmt.Printf("%s [%s] %s\n", status, result.CheckID, result.CheckName)
+					fmt.Printf("   Target: %s | %s\n", result.Target, result.Details)
+					if result.Recommendation != "" {
+						fmt.Printf("   💡 %s\n", result.Recommendation)
+					}
+					fmt.Println()
 				}
-				fmt.Println()
 			}
 		}
+		fmt.Println("================================================")
 	}
 }
 
