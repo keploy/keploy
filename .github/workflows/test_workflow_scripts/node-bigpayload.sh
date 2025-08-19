@@ -29,7 +29,7 @@ record_traffic() {
 
     # Send a few requests to the endpoint
     curl -s ${url}
-    curl -s ${url}
+    # curl -s ${url}
     sleep 5
 
     # Gracefully stop the recording process
