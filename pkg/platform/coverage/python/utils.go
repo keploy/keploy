@@ -58,6 +58,7 @@ func mergeCoverageConfig(existingConfig string, logger *zap.Logger) string {
 		"sigterm":     "true",
 		"concurrency": "multiprocessing, thread",
 		"parallel":    "true",
+		"data_file":   ".coverage.keploy",
 	}
 
 	// If no existing config, create with Keploy defaults
@@ -76,8 +77,11 @@ func mergeCoverageConfig(existingConfig string, logger *zap.Logger) string {
 func createDefaultKeployConfig(keploySettings map[string]string) string {
 	config := "[run]\n"
 	config += "omit =\n    /usr/*\n"
-	for key, value := range keploySettings {
-		config += fmt.Sprintf("%s = %s\n", key, value)
+	// Add all Keploy settings since there are no existing settings to process
+	emptyProcessedSettings := make(map[string]bool)
+	settingLines := addMissingKeploySettings(keploySettings, emptyProcessedSettings)
+	for _, line := range settingLines {
+		config += line + "\n"
 	}
 	return config
 }
@@ -89,8 +93,9 @@ func parseAndMergeConfig(existingConfig string, keploySettings map[string]string
 	var currentSection string
 	runSectionFound := false
 	runSectionProcessed := false
+	processedSettings := make(map[string]bool) // Track which Keploy settings have been processed
 
-	for i, line := range lines {
+	for _, line := range lines {
 		trimmedLine := strings.TrimSpace(line)
 
 		// Detect section headers
@@ -100,7 +105,7 @@ func parseAndMergeConfig(existingConfig string, keploySettings map[string]string
 				runSectionFound = true
 			} else if runSectionFound && !runSectionProcessed {
 				// We're leaving the [run] section, add any missing Keploy settings
-				result = append(result, addMissingKeploySettings(keploySettings)...)
+				result = append(result, addMissingKeploySettings(keploySettings, processedSettings)...)
 				runSectionProcessed = true
 			}
 			result = append(result, line)
@@ -113,18 +118,11 @@ func parseAndMergeConfig(existingConfig string, keploySettings map[string]string
 
 			// Check if this is a Keploy required setting
 			if keployValue, isKeploySetting := keploySettings[settingName]; isKeploySetting {
-				// Special handling for omit - merge the values
-				if settingName == "omit" {
-					omitLines, skipCount := handleOmitMerging(lines, i, logger)
-					result = append(result, omitLines...)
-					// Skip ahead past the omit block
-					i += skipCount
-					continue
-				} else {
+				if settingName != "omit" {
 					// Override with Keploy value
 					result = append(result, fmt.Sprintf("%s = %s", settingName, keployValue))
 					logger.Debug("Overriding setting with Keploy requirement", zap.String("setting", settingName), zap.String("value", keployValue))
-					delete(keploySettings, settingName) // Mark as processed
+					processedSettings[settingName] = true // Mark as processed
 					continue
 				}
 			}
@@ -136,12 +134,12 @@ func parseAndMergeConfig(existingConfig string, keploySettings map[string]string
 
 	// If [run] section was found but not all Keploy settings were processed
 	if runSectionFound && !runSectionProcessed {
-		result = append(result, addMissingKeploySettings(keploySettings)...)
+		result = append(result, addMissingKeploySettings(keploySettings, processedSettings)...)
 	}
 
 	// If no [run] section was found, add it with Keploy settings
 	if !runSectionFound {
-		result = append([]string{"[run]"}, append(addMissingKeploySettings(keploySettings), result...)...)
+		result = append([]string{"[run]"}, append(addMissingKeploySettings(keploySettings, processedSettings), result...)...)
 	}
 
 	return strings.Join(result, "\n")
@@ -156,41 +154,13 @@ func extractSettingName(line string) string {
 	return ""
 }
 
-// handleOmitMerging merges existing omit patterns with Keploy's requirements
-func handleOmitMerging(lines []string, startIndex int, logger *zap.Logger) ([]string, int) {
-	var result []string
-	result = append(result, "omit =")
-
-	// Add Keploy's required omit pattern first
-	result = append(result, "    /usr/*")
-
-	skipCount := 0
-	// Add existing omit patterns (skip the "omit =" line and process continuation lines)
-	for i := startIndex + 1; i < len(lines); i++ {
-		line := lines[i]
-		trimmedLine := strings.TrimSpace(line)
-
-		// Stop if we hit a new setting or section
-		if !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") && trimmedLine != "" {
-			break
-		}
-
-		skipCount++
-		// Add non-empty continuation lines
-		if trimmedLine != "" {
-			result = append(result, line)
-		}
-	}
-
-	logger.Debug("Merged omit patterns with existing configuration")
-	return result, skipCount
-}
-
 // addMissingKeploySettings adds any Keploy settings that weren't found in the existing config
-func addMissingKeploySettings(keploySettings map[string]string) []string {
+func addMissingKeploySettings(keploySettings map[string]string, processedSettings map[string]bool) []string {
 	var result []string
 	for key, value := range keploySettings {
-		result = append(result, fmt.Sprintf("%s = %s", key, value))
+		if !processedSettings[key] {
+			result = append(result, fmt.Sprintf("%s = %s", key, value))
+		}
 	}
 	return result
 }
