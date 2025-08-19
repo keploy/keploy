@@ -17,11 +17,12 @@ runs:
     - uses: actions/download-artifact@v4
       with:
         name: ${{ inputs.src }}
+        path: ${{ inputs.src }}
 
     - name: Set binary path
       id: set-path
       shell: bash
       run: |
         ls -l
-        chmod +x keploy
-        echo "path=$PWD/keploy" >> $GITHUB_OUTPUT
+        chmod +x ${{ inputs.src }}/keploy
+        echo "path=$PWD/${{ inputs.src }}/keploy" >> $GITHUB_OUTPUT

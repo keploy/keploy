@@ -4,6 +4,7 @@ package pkg
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"encoding/xml"
@@ -15,12 +16,14 @@ import (
 	"net/url"
 	"os"
 	"sort"
-	"sync/atomic"
-
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"text/template"
+
+	"github.com/andybalholm/brotli"
 	"go.keploy.io/server/v2/pkg/models"
 
 	"go.keploy.io/server/v2/utils"
@@ -130,8 +133,19 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}
 
+	reqBody := []byte(tc.HTTPReq.Body)
+	var err error
+
+	if tc.HTTPReq.Header["Content-Encoding"] != "" {
+		reqBody, err = Compress(logger, tc.HTTPReq.Header["Content-Encoding"], reqBody)
+		if err != nil {
+			utils.LogError(logger, err, "failed to compress the request body")
+			return nil, err
+		}
+	}
+
 	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
-	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, bytes.NewBufferString(tc.HTTPReq.Body))
+	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, bytes.NewBuffer(reqBody))
 	if err != nil {
 		utils.LogError(logger, err, "failed to create a http request from the yaml document")
 		return nil, err
@@ -217,6 +231,14 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	if errReadRespBody != nil {
 		utils.LogError(logger, errReadRespBody, "failed reading response body")
 		return nil, errReadRespBody
+	}
+
+	if httpResp.Header.Get("Content-Encoding") != "" {
+		respBody, err = Decompress(logger, httpResp.Header.Get("Content-Encoding"), respBody)
+		if err != nil {
+			utils.LogError(logger, err, "failed to decode response body")
+			return nil, err
+		}
 	}
 
 	resp = &models.HTTPResp{
@@ -418,7 +440,6 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -547,4 +568,69 @@ func IsCSV(data []byte) bool {
 		return strings.Contains(lines[0], ",")
 	}
 	return false
+}
+
+func Decompress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) {
+	switch encoding {
+	case "br":
+		logger.Debug("decompressing brotli compressed data")
+		reader := brotli.NewReader(bytes.NewReader(data))
+		decodedData, err := io.ReadAll(reader)
+		if err != nil {
+			utils.LogError(logger, err, "failed to read the brotli compressed data")
+			return nil, err
+		}
+		return decodedData, nil
+	case "gzip":
+		logger.Debug("decoding gzip compressed data")
+		reader, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			utils.LogError(logger, err, "failed to create gzip reader")
+			return nil, err
+		}
+		defer reader.Close()
+		decodedData, err := io.ReadAll(reader)
+		if err != nil {
+			utils.LogError(logger, err, "failed to read the gzip compressed data")
+			return nil, err
+		}
+		return decodedData, nil
+	}
+	return data, nil
+}
+
+func Compress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) {
+	switch encoding {
+	case "gzip":
+		logger.Debug("compressing data using gzip")
+		var compressedBuffer bytes.Buffer
+		gw := gzip.NewWriter(&compressedBuffer)
+		_, err := gw.Write(data)
+		if err != nil {
+			utils.LogError(logger, err, "failed to write compressed data to gzip writer")
+			return nil, err
+		}
+		err = gw.Close()
+		if err != nil {
+			utils.LogError(logger, err, "failed to close gzip writer")
+			return nil, err
+		}
+		return compressedBuffer.Bytes(), nil
+	case "br":
+		logger.Debug("compressing data using brotli")
+		var compressedBuffer bytes.Buffer
+		bw := brotli.NewWriter(&compressedBuffer)
+		_, err := bw.Write(data)
+		if err != nil {
+			utils.LogError(logger, err, "failed to write compressed data to brotli writer")
+			return nil, err
+		}
+		err = bw.Close()
+		if err != nil {
+			utils.LogError(logger, err, "failed to close brotli writer")
+			return nil, err
+		}
+		return compressedBuffer.Bytes(), nil
+	}
+	return data, nil
 }

@@ -10,7 +10,6 @@ import (
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/mysql/wire"
-	intgUtil "go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/models/mysql"
@@ -29,24 +28,26 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *mod
 		return err
 	}
 
-	// Get the mysql mocks
-	mocks := intgUtil.GetMockByKind(unfiltered, "MySQL")
+	var configMocks []*models.Mock
+	var hasMySQLMocks bool
+	// Get the mocks having "config" metadata and check for any MySQL mocks in a single pass.
+	for _, mock := range unfiltered {
+		if mock.Kind == models.MySQL {
+			hasMySQLMocks = true
+			if mock.Spec.Metadata["type"] == "config" {
+				configMocks = append(configMocks, mock)
+			}
+		}
+	}
 
-	if len(mocks) == 0 {
+	if !hasMySQLMocks {
 		utils.LogError(logger, nil, "no mysql mocks found")
 		return nil
 	}
 
-	var configMocks []*models.Mock
-	// Get the mocks having "config" metadata
-	for _, mock := range mocks {
-		if mock.Spec.Metadata["type"] == "config" {
-			configMocks = append(configMocks, mock)
-		}
-	}
-
 	if len(configMocks) == 0 {
 		utils.LogError(logger, nil, "no mysql config mocks found for handshake")
+		return nil
 	}
 
 	go func(errCh chan error, configMocks []*models.Mock, mockDb integrations.MockMemDb, opts models.OutgoingOptions) {

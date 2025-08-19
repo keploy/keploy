@@ -57,6 +57,11 @@ func (h *Hooks) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCa
 	}
 }
 
+func (h *Hooks) BeforeTestRun(ctx context.Context, testRunID string) error {
+	h.logger.Debug("BeforeTestRun hook executed", zap.String("testRunID", testRunID))
+	return nil
+}
+
 func (h *Hooks) AfterTestSetRun(ctx context.Context, testSetID string, status bool) error {
 
 	if h.cfg.Test.DisableMockUpload {

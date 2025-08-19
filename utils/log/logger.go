@@ -2,7 +2,6 @@ package log
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"time"
 
@@ -16,13 +15,25 @@ var Emoji = "\U0001F430" + " Keploy:"
 
 var LogCfg zap.Config
 
-func New() (*zap.Logger, error) {
+func New() (*zap.Logger, *os.File, error) {
 	_ = zap.RegisterEncoder("colorConsole", func(config zapcore.EncoderConfig) (zapcore.Encoder, error) {
 		return NewColor(config, true), nil
 	})
 	_ = zap.RegisterEncoder("nonColorConsole", func(config zapcore.EncoderConfig) (zapcore.Encoder, error) {
 		return NewColor(config, false), nil
 	})
+
+	logFile, err := os.OpenFile("keploy-logs.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0777)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to open log file: %v", err)
+	}
+
+	err = os.Chmod("keploy-logs.txt", 0777)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to set the log file permission to 777: %v", err)
+	}
+
+	writer := zapcore.NewMultiWriteSyncer(zapcore.AddSync(os.Stdout), zapcore.AddSync(logFile))
 
 	LogCfg = zap.NewDevelopmentConfig()
 
@@ -32,44 +43,19 @@ func New() (*zap.Logger, error) {
 	LogCfg.EncoderConfig.EncodeTime = customTimeEncoder
 	LogCfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 
-	LogCfg.OutputPaths = []string{
-		"stdout",
-		"./keploy-logs.txt",
-	}
-
-	// Check if keploy-log.txt exists, if not create it.
-	_, err := os.Stat("keploy-logs.txt")
-	if os.IsNotExist(err) {
-		_, err := os.Create("keploy-logs.txt")
-		if err != nil {
-			return nil, fmt.Errorf("failed to create the log file: %v", err)
-		}
-	}
-
-	// Check if the permission of the log file is 777, if not set it to 777.
-	fileInfo, err := os.Stat("keploy-logs.txt")
-	if err != nil {
-		log.Println(Emoji, "failed to get the log file info", err)
-		return nil, fmt.Errorf("failed to get the log file info: %v", err)
-	}
-	if fileInfo.Mode().Perm() != 0777 {
-		// Set the permissions of the log file to 777.
-		err = os.Chmod("keploy-logs.txt", 0777)
-		if err != nil {
-			log.Println(Emoji, "failed to set the log file permission to 777", err)
-			return nil, fmt.Errorf("failed to set the log file permission to 777: %v", err)
-		}
-	}
-
 	LogCfg.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
 	LogCfg.DisableStacktrace = true
 	LogCfg.EncoderConfig.EncodeCaller = nil
 
-	logger, err := LogCfg.Build()
-	if err != nil {
-		return nil, fmt.Errorf("failed to build config for logger: %v", err)
-	}
-	return logger, nil
+	core := zapcore.NewCore(
+		zapcore.NewConsoleEncoder(LogCfg.EncoderConfig),
+		writer,
+		LogCfg.Level,
+	)
+
+	logger := zap.New(core)
+
+	return logger, logFile, nil
 }
 
 func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
