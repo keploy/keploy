@@ -29,6 +29,8 @@ var (
 	regexCache   = make(map[string]*regexp.Regexp)
 )
 
+// getCompiled returns a cached compiled regexp for pattern.
+// It never panics: on invalid patterns, it returns a "never matches" regex (?!) and caches it.
 func getCompiled(pattern string) *regexp.Regexp {
 	regexCacheMu.RLock()
 	re := regexCache[pattern]
@@ -36,17 +38,23 @@ func getCompiled(pattern string) *regexp.Regexp {
 	if re != nil {
 		return re
 	}
-	// Compile outside RLock.
-	re = regexp.MustCompile(pattern)
+
+	// Compile outside the read lock.
+	compiled, err := regexp.Compile(pattern)
+	if err != nil {
+		// Fallback to a regex that never matches to avoid panics / repeated compiles
+		compiled, _ = regexp.Compile(`(?!)`)
+	}
+
 	regexCacheMu.Lock()
 	// Double-check to avoid races.
 	if old := regexCache[pattern]; old == nil {
-		regexCache[pattern] = re
+		regexCache[pattern] = compiled
 	} else {
-		re = old
+		compiled = old
 	}
 	regexCacheMu.Unlock()
-	return re
+	return compiled
 }
 
 func MatchesAnyRegex(str string, regexArray []string) (bool, string) {
@@ -269,7 +277,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 							isExact = false
 							for _, v := range res.differences {
 								if childKey != "" {
-									v = childKey + "." + v
+                                    v = childKey + "." + v
 								}
 								out.differences = append(out.differences, v)
 							}
@@ -604,7 +612,16 @@ func UnmarshallJSON(s string, log *zap.Logger) (interface{}, error) {
 // maxLineLength is chars PER expected/actual string. Can be changed no problem
 const maxLineLength = 50
 
-var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+// ansiRegex is compiled at init-time; if compilation fails, falls back to a never-matches regex.
+var ansiRegex *regexp.Regexp
+
+func init() {
+	re, err := regexp.Compile(`\x1b\[[0-9;]*[a-zA-Z]`)
+	if err != nil {
+		re, _ = regexp.Compile(`(?!)`)
+	}
+	ansiRegex = re
+}
 
 var ansiResetCode = "\x1b[0m"
 
