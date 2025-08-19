@@ -12,14 +12,7 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        
-      - name: Checkout samples-typescript repository
-        uses: actions/checkout@v4
-        with:
-          repository: keploy/samples-typescript
-          path: samples-typescript
-          ref: bigpayload
-
+      
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -28,6 +21,13 @@ jobs:
       - name: Install Dependencies
         run: npm install
     
+      - name: Checkout samples-typescript repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-typescript
+          path: samples-typescript
+          ref: bigpayload
+
       - name: Install Go
         uses: actions/setup-go@v2
         with:
