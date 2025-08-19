@@ -18,9 +18,6 @@ jobs:
         with:
           node-version: '20' # Specify your Node.js version
 
-      - name: Install Dependencies
-        run: npm install
-    
       - name: Checkout samples-typescript repository
         uses: actions/checkout@v4
         with:
