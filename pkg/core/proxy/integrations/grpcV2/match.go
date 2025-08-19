@@ -5,6 +5,8 @@ package grpcV2
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/agnivade/levenshtein"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
@@ -12,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/matcher/grpc"
 )
 
 func FilterMocksRelatedToGrpc(mocks []*models.Mock) []*models.Mock {
@@ -60,7 +63,8 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 			logger.Debug("Here are the grpc mocks with schema match", zap.Int("len", len(schemaMatched)))
 
 			// Exact body Match
-			ok, matchedMock := exactBodyMatch(grpcReq.Body, schemaMatched)
+			expBody := grpc.CanonicalizeTopLevelBlocks(grpcReq.Body.DecodedData)
+			ok, matchedMock := exactBodyMatch(expBody, schemaMatched)
 			if ok {
 				logger.Debug("Exact body match found", zap.Any("matchedMock", matchedMock))
 				if !mockDb.DeleteFilteredMock(*matchedMock) {
@@ -141,11 +145,10 @@ func compareMap(m1, m2 map[string]string) bool {
 	return true
 }
 
-func exactBodyMatch(body models.GrpcLengthPrefixedMessage, schemaMatched []*models.Mock) (bool, *models.Mock) {
+func exactBodyMatch(expBody string, schemaMatched []*models.Mock) (bool, *models.Mock) {
 	for _, mock := range schemaMatched {
-		// The new implementation might not reconstruct the exact original prefix,
-		// so we match on the decoded data which is more reliable.
-		if mock.Spec.GRPCReq.Body.DecodedData == body.DecodedData {
+		got := grpc.CanonicalizeTopLevelBlocks(mock.Spec.GRPCReq.Body.DecodedData)
+		if got == expBody {
 			return true, mock
 		}
 	}
