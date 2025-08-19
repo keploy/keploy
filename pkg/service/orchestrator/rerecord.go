@@ -5,10 +5,13 @@ package orchestrator
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v2/pkg"
@@ -246,6 +249,48 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 	}
 
 	allTcRecorded := true
+
+	// Collect every template variable referenced anywhere (headers, urls, req/resp bodies) so we only
+	// update relevant keys and don't pollute the template map.
+	referencedTemplateVars := map[string]struct{}{}
+	varNameRegex := regexp.MustCompile(`\{\{[^}]*\.([a-zA-Z0-9_]+)[^}]*}}`)
+	scanForVars := func(s string) {
+		matches := varNameRegex.FindAllStringSubmatch(s, -1)
+		for _, m := range matches {
+			if len(m) > 1 {
+				referencedTemplateVars[m[1]] = struct{}{}
+			}
+		}
+	}
+	for _, tc := range tcs {
+		for _, hVal := range tc.HTTPReq.Header {
+			scanForVars(hVal)
+		}
+		scanForVars(tc.HTTPReq.Body)
+		scanForVars(tc.HTTPResp.Body)
+		scanForVars(tc.HTTPReq.URL)
+	}
+
+	// Helper to flatten a decoded JSON value into key->primitive entries (1-depth keys only).
+	var flatten func(prefix string, in interface{}, out map[string]interface{})
+	flatten = func(prefix string, in interface{}, out map[string]interface{}) {
+		switch v := in.(type) {
+		case map[string]interface{}:
+			for k, val := range v {
+				flatten(k, val, out)
+			}
+		case []interface{}:
+			// Skip arrays; template vars usually correspond to object keys.
+			return
+		default:
+			if prefix != "" {
+				out[prefix] = v
+			}
+		}
+	}
+
+	// Track whether any template value actually changed (to decide persistence).
+	var anyTemplateChanged bool
 	var simErr bool
 	for _, tc := range tcs {
 		if ctx.Err() != nil {
@@ -285,11 +330,62 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 			continue // Proceed with the next command
 		}
 
+		// Attempt dynamic template updates from response body for any referenced variables.
+		if resp != nil && resp.Body != "" {
+			var bodyAny interface{}
+			if err := json.Unmarshal([]byte(resp.Body), &bodyAny); err == nil {
+				flat := map[string]interface{}{}
+				flatten("", bodyAny, flat)
+				var updatedVars []string
+				for k, v := range flat {
+					if _, needed := referencedTemplateVars[k]; !needed { // only update if referenced somewhere
+						continue
+					}
+					prev, existed := utils.TemplatizedValues[k]
+					// Update if new or changed
+					if !existed || fmt.Sprint(prev) != fmt.Sprint(v) {
+						utils.TemplatizedValues[k] = v
+						updatedVars = append(updatedVars, k)
+						anyTemplateChanged = true
+						// Propagate change to composite template values containing old primitive (e.g. Authorization including token)
+						if existed {
+							oldStr := fmt.Sprint(prev)
+							newStr := fmt.Sprint(v)
+							for otherK, otherV := range utils.TemplatizedValues {
+								if otherK == k {
+									continue
+								}
+								ovStr, okStr := otherV.(string)
+								if !okStr {
+									continue
+								}
+								if strings.Contains(ovStr, oldStr) && oldStr != newStr {
+									utils.TemplatizedValues[otherK] = strings.ReplaceAll(ovStr, oldStr, newStr)
+									updatedVars = append(updatedVars, otherK)
+									anyTemplateChanged = true
+								}
+							}
+						}
+					}
+				}
+				if len(updatedVars) > 0 {
+					o.logger.Debug("updated template vars from response", zap.String("testcase", tc.Name), zap.Strings("vars", updatedVars))
+				}
+			}
+		}
+
 		o.logger.Info("Re-recorded the testcase successfully", zap.String("testcase", tc.Name), zap.String("of testset", testSet))
 	}
 
 	if simErr {
 		return allTcRecorded, fmt.Errorf("got error while simulating HTTP request. Please make sure the related services are up and running")
+	}
+
+	// Persist updated template if any value changed back to config file so subsequent re-records use latest values.
+	if anyTemplateChanged && len(utils.TemplatizedValues) > 0 {
+		if err := o.replay.UpdateTestSetTemplate(ctx, testSet, utils.TemplatizedValues); err != nil {
+			o.logger.Warn("failed to persist updated template values", zap.String("testset", testSet))
+		}
 	}
 
 	return allTcRecorded, nil

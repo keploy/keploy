@@ -33,6 +33,8 @@ type Service interface {
 	GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error)
 	GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error)
 	GetTestSetConf(ctx context.Context, testSetID string) (*models.TestSet, error)
+	// UpdateTestSetTemplate updates (overwrites) the template values for a test-set on disk.
+	UpdateTestSetTemplate(ctx context.Context, testSetID string, template map[string]interface{}) error
 	RunApplication(ctx context.Context, appID uint64, opts models.RunOptions) models.AppError
 	Normalize(ctx context.Context) error
 	DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error)
