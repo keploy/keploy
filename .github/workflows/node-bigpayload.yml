@@ -53,5 +53,5 @@ jobs:
 
       - name: Run Keploy Record and Test Script
         run: |
-          chmod +x ./.github/workflows/node-bigpayload.sh
-          ./.github/workflows/node-bigpayload.sh
+          chmod +x ./.github/workflows/test_workflow_scripts/node-bigpayload.sh
+          ./.github/workflows/test_workflow_scripts/node-bigpayload.sh
