@@ -259,6 +259,10 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		//add rest of the uncommon flags for record, test, rerecord commands
 		c.AddUncommonFlags(cmd)
 
+	case "proxy":
+		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
+		cmd.Flags().StringP("pcap-path", "c", ".", "Path to the pcap file used to replay the network packets")
+
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
 		cmd.PersistentFlags().Bool("disable-tele", c.cfg.DisableTele, "Run in telemetry mode")
@@ -475,6 +479,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 	PrintLogo(os.Stdout, disableAnsi)
+	fmt.Println("Debug mode is enabled:", c.cfg.Debug)
 	if c.cfg.Debug {
 		logger, err := log.ChangeLogLevel(zap.DebugLevel)
 		*c.logger = *logger
@@ -886,6 +891,23 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New("TestDir is not set")
 			}
 		}
+
+	case "proxy":
+		path, err := cmd.Flags().GetString("path")
+		if err != nil {
+			errMsg := "failed to get the path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Path = utils.ToAbsPath(c.logger, path)
+
+		pcapPath, err := cmd.Flags().GetString("pcap-path")
+		if err != nil {
+			errMsg := "failed to get the pcap path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Proxy.PcapPath = utils.ToAbsPath(c.logger, pcapPath)
 	}
 
 	return nil

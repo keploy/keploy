@@ -38,6 +38,7 @@ type Config struct {
 	KeployNetwork         string       `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
 	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
 	Contract              Contract     `json:"contract" yaml:"contract" mapstructure:"contract"`
+	Proxy                 Proxy        `json:"proxy" yaml:"proxy" mapstructure:"proxy"`
 
 	InCi           bool   `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
 	InstallationID string `json:"-" yaml:"-" mapstructure:"-"`
@@ -181,6 +182,10 @@ type (
 	GlobalNoise  map[string]map[string][]string
 	TestsetNoise map[string]map[string]map[string][]string
 )
+
+type Proxy struct {
+	PcapPath string `json:"pcapPath" yaml:"pcapPath" mapstructure:"pcapPath"`
+}
 
 func SetByPassPorts(conf *Config, ports []uint) {
 	for _, port := range ports {
