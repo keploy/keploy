@@ -28,6 +28,7 @@ const (
 	// HTTP2 represents HTTP/2 protocol
 	HTTP2 Protocol = 2
 )
+
 // This simplifies function signatures for the refactored logic.
 type EventMetadata struct {
 	Direction            int32
@@ -193,33 +194,31 @@ func (conn *Tracker) AddOpenEvent(event SocketOpenEvent) {
 	conn.openTimestamp = event.TimestampNano
 }
 
-func (conn *Tracker) AddDataEventBig(event SocketDataEventBig) {
+func (conn *Tracker) AddDataEvent(bigEvent *SocketDataEventBig, smallEvent *SocketDataEventSmall) {
+	if bigEvent != nil {
+		meta := EventMetadata{
+			Direction:            int32(bigEvent.Direction),
+			TimestampNano:        bigEvent.TimestampNano,
+			EntryTimestampNano:   bigEvent.EntryTimestampNano,
+			ValidateReadBytes:    bigEvent.ValidateReadBytes,
+			ValidateWrittenBytes: bigEvent.ValidateWrittenBytes,
+		}
+		data := bigEvent.Msg[:bigEvent.MsgSize]
+		conn.addDataEvent(data, meta)
+		return
+	}
 	meta := EventMetadata{
-		Direction:            int32(event.Direction),
-		TimestampNano:        event.TimestampNano,
-		EntryTimestampNano:   event.EntryTimestampNano,
-		ValidateReadBytes:    event.ValidateReadBytes,
-		ValidateWrittenBytes: event.ValidateWrittenBytes,
+		Direction:            int32(smallEvent.Direction),
+		TimestampNano:        smallEvent.TimestampNano,
+		EntryTimestampNano:   smallEvent.EntryTimestampNano,
+		ValidateReadBytes:    smallEvent.ValidateReadBytes,
+		ValidateWrittenBytes: smallEvent.ValidateWrittenBytes,
 	}
-	data := event.Msg[:event.MsgSize]
+	data := smallEvent.Msg[:smallEvent.MsgSize]
 	conn.addDataEvent(data, meta)
+
 }
-func (conn *Tracker) AddDataEventSmall(event SocketDataEventSmall) {
-	meta := EventMetadata{
-		Direction:            int32(event.Direction),
-		TimestampNano:        event.TimestampNano,
-		EntryTimestampNano:   event.EntryTimestampNano,
-		ValidateReadBytes:    event.ValidateReadBytes,
-		ValidateWrittenBytes: event.ValidateWrittenBytes,
-	}
-	// Apply the size cap specific to the small event.
-	msgLength := event.MsgSize
-	if event.MsgSize > EventBodyMaxSize {
-		msgLength = EventBodyMaxSize
-	}
-	data := event.Msg[:msgLength]
-	conn.addDataEvent(data, meta)
-}
+
 func (conn *Tracker) addDataEvent(data []byte, meta EventMetadata) {
 	conn.mutex.Lock()
 	defer conn.mutex.Unlock()
