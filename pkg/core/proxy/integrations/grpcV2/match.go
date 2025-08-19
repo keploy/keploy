@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/matcher/grpc"
 )
 
 func FilterMocksRelatedToGrpc(mocks []*models.Mock) []*models.Mock {
@@ -62,7 +63,7 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 			logger.Debug("Here are the grpc mocks with schema match", zap.Int("len", len(schemaMatched)))
 
 			// Exact body Match
-			expBody := normalizeProtoscopeForMaps(grpcReq.Body.DecodedData)
+			expBody := grpc.CanonicalizeTopLevelBlocks(grpcReq.Body.DecodedData)
 			ok, matchedMock := exactBodyMatch(expBody, schemaMatched)
 			if ok {
 				logger.Debug("Exact body match found", zap.Any("matchedMock", matchedMock))
@@ -144,38 +145,9 @@ func compareMap(m1, m2 map[string]string) bool {
 	return true
 }
 
-// relax the equality on protoscope text for patterns that are clearly map entries. 
-// A simple, effective heuristic for Struct map entries is: split top-level 1: { ... } blocks and sort them before comparing.
-func normalizeProtoscopeForMaps(s string) string {
-	// split into top-level blocks starting with "1: {" (map entries)
-	var blocks []string
-	var cur []rune
-	depth := 0
-	in := []rune(s)
-	for i := 0; i < len(in); i++ {
-		cur = append(cur, in[i])
-		if in[i] == '{' {
-			depth++
-		}
-		if in[i] == '}' {
-			depth--
-		}
-		// A block ends at depth 0 and a newline after '}'.
-		if depth == 0 && in[i] == '\n' && len(cur) > 0 {
-			blocks = append(blocks, string(cur))
-			cur = nil
-		}
-	}
-	if len(cur) > 0 {
-		blocks = append(blocks, string(cur))
-	}
-	sort.Strings(blocks)
-	return strings.Join(blocks, "")
-}
-
 func exactBodyMatch(expBody string, schemaMatched []*models.Mock) (bool, *models.Mock) {
 	for _, mock := range schemaMatched {
-		got := normalizeProtoscopeForMaps(mock.Spec.GRPCReq.Body.DecodedData)
+		got := grpc.CanonicalizeTopLevelBlocks(mock.Spec.GRPCReq.Body.DecodedData)
 		if got == expBody {
 			return true, mock
 		}
