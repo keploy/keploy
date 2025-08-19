@@ -37,7 +37,7 @@ record_traffic() {
     if [ -n "$pid" ]; then
         echo "🛑 Stopping Keploy recorder (PID: $pid)..."
         sudo kill $pid
-        wait $pid 2>/dev/null
+        # wait $pid 2>/dev/null
         echo "Recording stopped."
     else
         echo "⚠️ Keploy recorder process not found."
