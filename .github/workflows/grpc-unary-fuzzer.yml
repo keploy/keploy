@@ -1,0 +1,66 @@
+name: gRPC Unary Fuzzer
+
+on:
+  workflow_call:
+
+jobs:
+  grpc_unary_fuzzer:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # incoming mode
+          - job: incoming_record_latest_replay_build
+            mode: incoming
+            record_src: latest
+            replay_src: build
+          - job: incoming_record_build_replay_latest
+            mode: incoming
+            record_src: build
+            replay_src: latest
+          - job: incoming_record_build_replay_build
+            mode: incoming
+            record_src: build
+            replay_src: build
+          # outgoing mode
+          - job: outgoing_record_latest_replay_build
+            mode: outgoing
+            record_src: latest
+            replay_src: build
+          - job: outgoing_record_build_replay_latest
+            mode: outgoing
+            record_src: build
+            replay_src: latest
+          - job: outgoing_record_build_replay_build
+            mode: outgoing
+            record_src: build
+            replay_src: build
+    name: ${{ matrix.job }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.replay_src }}
+
+      - name: Checkout the gRPC Unary Fuzzer repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/grpc-unary-fuzzer
+          path: grpc-unary-fuzzer
+
+      - name: Run gRPC Unary Fuzzer test
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          cd grpc-unary-parser
+          source ./../../../.github/workflows/test_workflow_scripts/grpc-unary-fuzzer.sh ${{ matrix.mode }}
