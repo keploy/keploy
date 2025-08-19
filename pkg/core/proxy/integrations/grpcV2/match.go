@@ -144,7 +144,7 @@ func compareMap(m1, m2 map[string]string) bool {
 	return true
 }
 
-// relax the equality on protoscope text for patterns that are clearly map entries. 
+// relax the equality on protoscope text for patterns that are clearly map entries.
 // A simple, effective heuristic for Struct map entries is: split top-level 1: { ... } blocks and sort them before comparing.
 func normalizeProtoscopeForMaps(s string) string {
 	// split into top-level blocks starting with "1: {" (map entries)
