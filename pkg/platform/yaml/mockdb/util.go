@@ -133,6 +133,19 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			utils.LogError(logger, err, "failed to marshal gRPC of external call into yaml")
 			return nil, err
 		}
+	case models.GRPC_V2_EXPORT:
+		gRPCSpec := models.GrpcSpec{
+			Metadata:         mock.Spec.Metadata,
+			GrpcReq:          *mock.Spec.GRPCReq,
+			GrpcResp:         *mock.Spec.GRPCResp,
+			ReqTimestampMock: mock.Spec.ReqTimestampMock,
+			ResTimestampMock: mock.Spec.ResTimestampMock,
+		}
+		err := yamlDoc.Spec.Encode(gRPCSpec)
+		if err != nil {
+			utils.LogError(logger, err, "failed to marshal gRPC of external call into yaml")
+			return nil, err
+		}
 	case models.MySQL:
 		requests := []mysql.RequestYaml{}
 		for _, v := range mock.Spec.MySQLRequests {
@@ -229,6 +242,20 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			}
 			mock.Spec = *mockSpec
 		case models.GRPC_EXPORT:
+			grpcSpec := models.GrpcSpec{}
+			err := m.Spec.Decode(&grpcSpec)
+			if err != nil {
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into http mock", zap.Any("mock name", m.Name))
+				return nil, err
+			}
+			mock.Spec = models.MockSpec{
+				Metadata:         grpcSpec.Metadata,
+				GRPCResp:         &grpcSpec.GrpcResp,
+				GRPCReq:          &grpcSpec.GrpcReq,
+				ReqTimestampMock: grpcSpec.ReqTimestampMock,
+				ResTimestampMock: grpcSpec.ResTimestampMock,
+			}
+		case models.GRPC_V2_EXPORT:
 			grpcSpec := models.GrpcSpec{}
 			err := m.Spec.Decode(&grpcSpec)
 			if err != nil {

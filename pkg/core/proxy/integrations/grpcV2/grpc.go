@@ -21,9 +21,9 @@ func init() {
 	// Register the raw codec for passing raw bytes through the gRPC framework.
 	encoding.RegisterCodec(new(rawCodec))
 
-	integrations.Register(integrations.GRPC, &integrations.Parsers{
+	integrations.Register(integrations.GRPC_V2, &integrations.Parsers{
 		Initializer: New,
-		Priority:    100,
+		Priority:    150,
 	})
 }
 

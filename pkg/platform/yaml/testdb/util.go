@@ -134,6 +134,47 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		// Set the node as the spec
 		doc.Spec = node
 		logger.Debug("Successfully encoded gRPC test case")
+	case models.GRPC_V2_EXPORT:
+		logger.Debug("Encoding gRPC V2 test case")
+		// For gRPC, use the noise directly from the test case
+		noise = tc.Noise
+
+		// Create a YAML node for the gRPC schema
+		grpcSpec := models.GrpcSpec{
+			GrpcReq:  tc.GrpcReq,
+			GrpcResp: tc.GrpcResp,
+			Created:  tc.Created,
+			// need to check here for type here as well as push in other custom assertions
+			Assertions: func() map[models.AssertionType]interface{} {
+				a := map[models.AssertionType]interface{}{}
+				if len(noise) > 0 {
+					a[models.NoiseAssertion] = noise
+				}
+				// Optionally add other custom assertions if needed here
+				// Example:
+				// a[models.StatusCode] = tc.HTTPResp.StatusCode
+
+				return a
+			}(),
+		}
+
+		logger.Debug("gRPC schema created",
+			zap.Any("request_headers", grpcSpec.GrpcReq.Headers),
+			zap.Any("response_headers", grpcSpec.GrpcResp.Headers),
+			zap.Int("request_body_length", len(grpcSpec.GrpcReq.Body.DecodedData)),
+			zap.Int("response_body_length", len(grpcSpec.GrpcResp.Body.DecodedData)))
+
+		// Create a new YAML node and encode the gRPC schema
+		var node yamlLib.Node
+		err := node.Encode(grpcSpec)
+		if err != nil {
+			utils.LogError(logger, err, "failed to encode gRPC schema to YAML node")
+			return nil, err
+		}
+
+		// Set the node as the spec
+		doc.Spec = node
+		logger.Debug("Successfully encoded gRPC test case")
 	default:
 		utils.LogError(logger, nil, "failed to marshal the testcase into yaml due to invalid kind of testcase")
 		return nil, errors.New("type of testcases is invalid")
@@ -342,6 +383,40 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		}
 
 	case models.GRPC_EXPORT:
+		var grpcSpec models.GrpcSpec
+		if err := yamlTestcase.Spec.Decode(&grpcSpec); err != nil {
+			utils.LogError(logger, err, "failed to decode gRPC spec")
+			return nil, err
+		}
+		tc.Created = grpcSpec.Created
+		tc.GrpcReq = grpcSpec.GrpcReq
+		tc.GrpcResp = grpcSpec.GrpcResp
+
+		for key, raw := range grpcSpec.Assertions {
+			tc.Assertions[key] = raw
+			if key == models.NoiseAssertion {
+				noiseMap, ok := raw.(map[models.AssertionType]interface{})
+				if !ok {
+					logger.Warn("noise assertion not in expected map[AssertionType]interface{}", zap.Any("raw", raw))
+					continue
+				}
+				for kt, inner := range noiseMap {
+					field := string(kt)
+					tc.Noise[field] = []string{}
+					arr, ok := inner.([]interface{})
+					if !ok {
+						continue
+					}
+					for _, item := range arr {
+						if s, ok2 := item.(string); ok2 && s != "" {
+							tc.Noise[field] = append(tc.Noise[field], s)
+						}
+					}
+				}
+			}
+		}
+
+	case models.GRPC_V2_EXPORT:
 		var grpcSpec models.GrpcSpec
 		if err := yamlTestcase.Spec.Decode(&grpcSpec); err != nil {
 			utils.LogError(logger, err, "failed to decode gRPC spec")

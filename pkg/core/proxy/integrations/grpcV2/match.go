@@ -18,7 +18,7 @@ import (
 func FilterMocksRelatedToGrpc(mocks []*models.Mock) []*models.Mock {
 	var res []*models.Mock
 	for _, mock := range mocks {
-		if mock != nil && mock.Kind == models.GRPC_EXPORT && mock.Spec.GRPCReq != nil && mock.Spec.GRPCResp != nil {
+		if mock != nil && mock.Kind == models.GRPC_V2_EXPORT && mock.Spec.GRPCReq != nil && mock.Spec.GRPCResp != nil {
 			res = append(res, mock)
 		}
 	}

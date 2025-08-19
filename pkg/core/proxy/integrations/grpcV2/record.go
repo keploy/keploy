@@ -346,7 +346,7 @@ func (p *grpcRecordingProxy) handler(_ interface{}, clientStream grpc.ServerStre
 	p.mocks <- &models.Mock{
 		Version: models.GetVersion(),
 		Name:    "mocks",
-		Kind:    models.GRPC_EXPORT,
+		Kind:    models.GRPC_V2_EXPORT,
 		Spec: models.MockSpec{
 			Metadata:         map[string]string{"connID": connID},
 			GRPCReq:          grpcReq,
