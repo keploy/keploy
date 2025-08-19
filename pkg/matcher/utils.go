@@ -277,7 +277,7 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 							isExact = false
 							for _, v := range res.differences {
 								if childKey != "" {
-                                    v = childKey + "." + v
+									v = childKey + "." + v
 								}
 								out.differences = append(out.differences, v)
 							}
