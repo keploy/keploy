@@ -29,6 +29,11 @@ func (m *mock) setToken(token string) {
 }
 
 func (m *mock) download(ctx context.Context, testSetID string) error {
+	// Add nil check protection to prevent segmentation fault
+	if m.storage == nil {
+		m.logger.Error("Storage service is not initialized, cannot download mocks")
+		return fmt.Errorf("storage service is not initialized")
+	}
 
 	// Check if test-set config is present
 	tsConfig, err := m.tsConfigDB.Read(ctx, testSetID)
@@ -162,6 +167,11 @@ func (m *mock) download(ctx context.Context, testSetID string) error {
 }
 
 func (m *mock) upload(ctx context.Context, testSetID string) error {
+	// Add nil check protection to prevent segmentation fault
+	if m.storage == nil {
+		m.logger.Error("Storage service is not initialized, cannot upload mocks")
+		return fmt.Errorf("storage service is not initialized")
+	}
 
 	claims, err := extractClaimsWithoutVerification(m.token)
 	var role, username string
@@ -214,10 +224,12 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 		// create ts config
 		var prescript, postscript string
 		var template map[string]interface{}
+		var metadata map[string]interface{}
 		if tsConfig != nil {
 			prescript = tsConfig.PreScript
 			postscript = tsConfig.PostScript
 			template = tsConfig.Template
+			metadata = tsConfig.Metadata
 		}
 		tsConfig = &models.TestSet{
 			PreScript:  prescript,
@@ -227,7 +239,7 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 				Mock: mockHash,
 				App:  m.cfg.AppName,
 			},
-			Metadata: tsConfig.Metadata,
+			Metadata: metadata,
 		}
 
 		if plan == "Free" {
