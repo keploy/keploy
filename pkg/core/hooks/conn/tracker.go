@@ -28,6 +28,14 @@ const (
 	// HTTP2 represents HTTP/2 protocol
 	HTTP2 Protocol = 2
 )
+// This simplifies function signatures for the refactored logic.
+type EventMetadata struct {
+	Direction            int32
+	TimestampNano        uint64
+	EntryTimestampNano   uint64
+	ValidateReadBytes    int64
+	ValidateWrittenBytes int64
+}
 
 // StreamManager interface for managing protocol streams
 type StreamManager interface {
@@ -186,97 +194,135 @@ func (conn *Tracker) AddOpenEvent(event SocketOpenEvent) {
 }
 
 func (conn *Tracker) AddDataEventBig(event SocketDataEventBig) {
-	conn.mutex.Lock()
-	defer conn.mutex.Unlock()
-	conn.UpdateTimestamps()
-	msgLength := event.MsgSize
-
-	data := event.Msg[:msgLength] // trimming trailing zeros
-
-	// Check for HTTP/2 preface if we haven't detected protocol yet
-	if !conn.protocolDetected {
-		conn.logger.Debug("Connection check")
-		if isHTTP2Request(data) {
-			// Create HTTP/2 parser and stream manager
-			conn.protocol = HTTP2
-			conn.streamMgr = pkg.NewStreamManager(conn.logger)
-			conn.protocolDetected = true
-			conn.logger.Debug("Detected HTTP/2 protocol (preface received)")
-
-			// If there's more data after preface, process it as HTTP/2
-			if len(data) > 24 {
-				// Create new event with remaining data
-				newEvent := event
-				copy(newEvent.Msg[:], data[24:])
-				newEvent.MsgSize = uint32(len(data) - 24)
-				conn.handleHTTP2DataBig(newEvent)
-			}
-			return
-		}
-
-		// If we see a valid HTTP/1 request line, mark as HTTP/1
-		if isHTTP1Request(data) {
-			conn.protocolDetected = true
-			conn.logger.Debug("Detected HTTP/1.x protocol")
-		}
+	meta := EventMetadata{
+		Direction:            int32(event.Direction),
+		TimestampNano:        event.TimestampNano,
+		EntryTimestampNano:   event.EntryTimestampNano,
+		ValidateReadBytes:    event.ValidateReadBytes,
+		ValidateWrittenBytes: event.ValidateWrittenBytes,
 	}
-
-	// Process based on current protocol
-	switch conn.protocol {
-	case HTTP2:
-		conn.handleHTTP2DataBig(event)
-	default:
-		conn.handleHTTP1DataBig(event)
-	}
+	data := event.Msg[:event.MsgSize]
+	conn.addDataEvent(data, meta)
 }
-
 func (conn *Tracker) AddDataEventSmall(event SocketDataEventSmall) {
-	conn.mutex.Lock()
-	defer conn.mutex.Unlock()
-	conn.UpdateTimestamps()
+	meta := EventMetadata{
+		Direction:            int32(event.Direction),
+		TimestampNano:        event.TimestampNano,
+		EntryTimestampNano:   event.EntryTimestampNano,
+		ValidateReadBytes:    event.ValidateReadBytes,
+		ValidateWrittenBytes: event.ValidateWrittenBytes,
+	}
+	// Apply the size cap specific to the small event.
 	msgLength := event.MsgSize
-	// If the size of the message exceeds the maximum allowed size,
-	// set msgLength to the maximum allowed size instead
 	if event.MsgSize > EventBodyMaxSize {
 		msgLength = EventBodyMaxSize
 	}
-
 	data := event.Msg[:msgLength]
+	conn.addDataEvent(data, meta)
+}
+func (conn *Tracker) addDataEvent(data []byte, meta EventMetadata) {
+	conn.mutex.Lock()
+	defer conn.mutex.Unlock()
+	conn.UpdateTimestamps()
 
-	// Check for HTTP/2 preface if we haven't detected protocol yet
+	// Protocol detection http1/2
 	if !conn.protocolDetected {
 		conn.logger.Debug("Connection check")
 		if isHTTP2Request(data) {
-			// Create HTTP/2 parser and stream manager
 			conn.protocol = HTTP2
 			conn.streamMgr = pkg.NewStreamManager(conn.logger)
 			conn.protocolDetected = true
 			conn.logger.Debug("Detected HTTP/2 protocol (preface received)")
 
-			// If there's more data after preface, process it as HTTP/2
+			// If there's more data after the preface, process it as HTTP/2.
 			if len(data) > 24 {
-				// Create new event with remaining data
-				newEvent := event
-				copy(newEvent.Msg[:], data[24:])
-				newEvent.MsgSize = uint32(len(data) - 24)
-				conn.handleHTTP2DataSmall(newEvent)
+				conn.handleHTTP2Data(data[24:], meta)
 			}
 			return
 		}
 
-		// If we see a valid HTTP/1 request line, mark as HTTP/1
 		if isHTTP1Request(data) {
 			conn.protocolDetected = true
 			conn.logger.Debug("Detected HTTP/1.x protocol")
 		}
 	}
 
-	// Process based on current protocol
+	// Process based on the detected protocol.
 	switch conn.protocol {
 	case HTTP2:
-		conn.handleHTTP2DataSmall(event)
+		conn.handleHTTP2Data(data, meta)
 	default:
-		conn.handleHTTP1DataSmall(event)
+		conn.handleHTTP1Data(data, meta)
+	}
+}
+func (conn *Tracker) handleHTTP1Data(data []byte, meta EventMetadata) {
+	conn.logger.Debug(fmt.Sprintf("Got a data event from eBPF, Direction:%v || current Event Size:%v || ConnectionID:%v\n", meta.Direction, len(data), conn.connID))
+	switch meta.Direction {
+	case int32(EgressTraffic):
+		if !conn.isNewRequest {
+			conn.isNewRequest = true
+		}
+		conn.resp = append(conn.resp, data...)
+		conn.respSize += uint64(len(data))
+		if conn.firstRequest || conn.lastChunkWasReq {
+			conn.userReqSizes = append(conn.userReqSizes, conn.reqSize)
+			conn.userReqs = append(conn.userReqs, conn.req)
+			conn.req = []byte{}
+			conn.lastChunkWasReq = false
+			conn.lastChunkWasResp = true
+			conn.kernelReqSizes = append(conn.kernelReqSizes, uint64(meta.ValidateReadBytes))
+			conn.reqSize = 0
+			conn.firstRequest = false
+		}
+	case int32(IngressTraffic):
+		conn.logger.Debug("isNewRequest", zap.Any("isNewRequest", conn.isNewRequest), zap.Any("connID", conn.connID))
+		if conn.isNewRequest {
+			conn.reqTimestamps = append(conn.reqTimestamps, convertUnixNanoToTime(meta.EntryTimestampNano))
+			conn.isNewRequest = false
+		}
+		conn.req = append(conn.req, data...)
+		conn.reqSize += uint64(len(data))
+		if conn.lastChunkWasResp {
+			conn.userRespSizes = append(conn.userRespSizes, conn.respSize)
+			conn.respSize = 0
+			conn.userResps = append(conn.userResps, conn.resp)
+			conn.resp = []byte{}
+			conn.lastChunkWasReq = true
+			conn.lastChunkWasResp = false
+			conn.kernelRespSizes = append(conn.kernelRespSizes, uint64(meta.ValidateWrittenBytes))
+			conn.incRecordTestCount()
+		}
+	}
+}
+
+// handleHTTP2Data is the single, consolidated handler for HTTP/2 traffic.
+func (conn *Tracker) handleHTTP2Data(data []byte, meta EventMetadata) {
+	conn.buffer = append(conn.buffer, data...)
+
+	for len(conn.buffer) >= 9 { // Minimum frame size
+		frame, consumed, err := pkg.ExtractHTTP2Frame(conn.buffer)
+		if err != nil {
+			if strings.Contains(err.Error(), "incomplete frame") {
+				conn.logger.Debug("Incomplete frame", zap.Any("error", err))
+				break
+			}
+			conn.logger.Error("Failed to extract HTTP/2 frame", zap.Error(err))
+			if len(conn.buffer) > 9 {
+				conn.buffer = conn.buffer[1:]
+			} else {
+				conn.buffer = nil
+			}
+			break
+		}
+
+		if err := conn.streamMgr.HandleFrame(frame, meta.Direction == int32(EgressTraffic), convertUnixNanoToTime(meta.TimestampNano)); err != nil {
+			conn.logger.Error("Failed to handle HTTP/2 frame", zap.Error(err))
+		}
+		conn.buffer = conn.buffer[consumed:]
+	}
+
+	if meta.Direction == int32(IngressTraffic) {
+		conn.reqTimestamps = append(conn.reqTimestamps, convertUnixNanoToTime(meta.EntryTimestampNano))
 	}
 }
 
@@ -493,251 +539,4 @@ func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Ti
 		conn.logger.Debug(fmt.Sprintf("TestRequestTimestamp:%v || TestResponseTimestamp:%v", reqTimestamps, respTimestamp))
 	}
 	return recordTraffic, requestBuf, responseBuf, reqTimestamps, respTimestamp
-}
-
-// Add HTTP/2 specific handling
-func (conn *Tracker) handleHTTP2DataBig(event SocketDataEventBig) {
-	// Convert fixed-size array to slice
-	msgLength := event.MsgSize
-
-	// Append new data to the buffer
-	conn.buffer = append(conn.buffer, event.Msg[:msgLength]...)
-
-	// Process as many complete frames as possible
-	for len(conn.buffer) >= 9 { // Minimum frame size
-		frame, consumed, err := pkg.ExtractHTTP2Frame(conn.buffer)
-		if err != nil {
-			if strings.Contains(err.Error(), "incomplete frame") {
-				conn.logger.Debug("Incomplete frame", zap.Any("error", err))
-				// Not enough data yet, wait for more
-				break
-			}
-			// Real error, log and remove the problematic data
-			conn.logger.Error("Failed to extract HTTP/2 frame", zap.Error(err))
-			if len(conn.buffer) > 9 {
-				// Try to recover by removing the first byte and trying again next time
-				conn.buffer = conn.buffer[1:]
-			} else {
-				conn.buffer = nil
-			}
-			break
-		}
-
-		// Handle the frame
-		if err := conn.streamMgr.HandleFrame(frame, event.Direction == EgressTraffic, ConvertUnixNanoToTime(event.TimestampNano)); err != nil {
-			conn.logger.Error("Failed to handle HTTP/2 frame", zap.Error(err))
-		}
-
-		// Remove processed data from buffer
-		conn.buffer = conn.buffer[consumed:]
-	}
-
-	// Store timestamps for requests
-	if event.Direction == IngressTraffic {
-		conn.reqTimestamps = append(conn.reqTimestamps, ConvertUnixNanoToTime(event.EntryTimestampNano))
-	}
-}
-
-// Add HTTP/2 specific handling
-func (conn *Tracker) handleHTTP2DataSmall(event SocketDataEventSmall) {
-	// Convert fixed-size array to slice
-	msgLength := event.MsgSize
-	// If the size of the message exceeds the maximum allowed size,
-	// set msgLength to the maximum allowed size instead
-	if event.MsgSize > EventBodyMaxSize {
-		msgLength = EventBodyMaxSize
-	}
-	// data := event.Msg[:event.MsgSize]
-
-	// Append new data to the buffer
-	conn.buffer = append(conn.buffer, event.Msg[:msgLength]...)
-
-	// Process as many complete frames as possible
-	for len(conn.buffer) >= 9 { // Minimum frame size
-		frame, consumed, err := pkg.ExtractHTTP2Frame(conn.buffer)
-		if err != nil {
-			if strings.Contains(err.Error(), "incomplete frame") {
-				conn.logger.Debug("Incomplete frame", zap.Any("error", err))
-				// Not enough data yet, wait for more
-				break
-			}
-			// Real error, log and remove the problematic data
-			conn.logger.Error("Failed to extract HTTP/2 frame", zap.Error(err))
-			if len(conn.buffer) > 9 {
-				// Try to recover by removing the first byte and trying again next time
-				conn.buffer = conn.buffer[1:]
-			} else {
-				conn.buffer = nil
-			}
-			break
-		}
-
-		// Handle the frame
-		if err := conn.streamMgr.HandleFrame(frame, event.Direction == EgressTraffic, ConvertUnixNanoToTime(event.TimestampNano)); err != nil {
-			conn.logger.Error("Failed to handle HTTP/2 frame", zap.Error(err))
-		}
-
-		// Remove processed data from buffer
-		conn.buffer = conn.buffer[consumed:]
-	}
-
-	// Store timestamps for requests
-	if event.Direction == IngressTraffic {
-		conn.reqTimestamps = append(conn.reqTimestamps, ConvertUnixNanoToTime(event.EntryTimestampNano))
-	}
-}
-
-// Existing HTTP/1 handling
-func (conn *Tracker) handleHTTP1DataBig(event SocketDataEventBig) {
-	conn.logger.Debug(fmt.Sprintf("Got a data event from eBPF, Direction:%v || current Event Size:%v || ConnectionID:%v\n", event.Direction, event.MsgSize, event.ConnID))
-	switch event.Direction {
-	case EgressTraffic:
-		// Capturing the timestamp of response as the response just started to come.
-		// This is to ensure that we capture the response timestamp for the first chunk of the response.
-		if !conn.isNewRequest {
-			conn.isNewRequest = true
-		}
-
-		// Assign the size of the message to the variable msgLength
-		msgLength := event.MsgSize
-		data := event.Msg[:msgLength]
-
-		// Append the message (up to msgLength) to the conn's sent buffer
-		conn.resp = append(conn.resp, data...)
-		conn.respSize += uint64(event.MsgSize)
-
-		//Handling multiple request on same conn to support conn:keep-alive
-		if conn.firstRequest || conn.lastChunkWasReq {
-			conn.userReqSizes = append(conn.userReqSizes, conn.reqSize)
-
-			conn.userReqs = append(conn.userReqs, conn.req)
-			conn.req = []byte{}
-
-			conn.lastChunkWasReq = false
-			conn.lastChunkWasResp = true
-			conn.kernelReqSizes = append(conn.kernelReqSizes, uint64(event.ValidateReadBytes))
-			conn.reqSize = 0
-			conn.firstRequest = false
-		}
-
-	case IngressTraffic:
-		conn.logger.Debug("isNewRequest", zap.Any("isNewRequest", conn.isNewRequest), zap.Any("connID", conn.connID))
-		// Capturing the timestamp of request as the request just started to come.
-		if conn.isNewRequest {
-			conn.reqTimestamps = append(conn.reqTimestamps, ConvertUnixNanoToTime(event.EntryTimestampNano))
-			conn.isNewRequest = false
-		}
-
-		// Assign the size of the message to the variable msgLength
-		msgLength := event.MsgSize
-
-		data := event.Msg[:msgLength]
-
-		// Append the message (up to msgLength) to the conn's receive buffer
-		conn.req = append(conn.req, data...)
-		conn.reqSize += uint64(event.MsgSize)
-
-		//Handling multiple request on same conn to support conn:keep-alive
-		if conn.lastChunkWasResp {
-			// conn.userRespSizes is the total numner of bytes received in the user side
-			// consumer for the last response.
-			conn.userRespSizes = append(conn.userRespSizes, conn.respSize)
-			conn.respSize = 0
-
-			conn.userResps = append(conn.userResps, conn.resp)
-			conn.resp = []byte{}
-
-			conn.lastChunkWasReq = true
-			conn.lastChunkWasResp = false
-
-			conn.kernelRespSizes = append(conn.kernelRespSizes, uint64(event.ValidateWrittenBytes))
-
-			//Record a test case for the current request/
-			conn.incRecordTestCount()
-		}
-
-	default:
-	}
-}
-
-// Existing HTTP/1 handling
-func (conn *Tracker) handleHTTP1DataSmall(event SocketDataEventSmall) {
-	conn.logger.Debug(fmt.Sprintf("Got a data event from eBPF, Direction:%v || current Event Size:%v || ConnectionID:%v\n", event.Direction, event.MsgSize, event.ConnID))
-	switch event.Direction {
-	case EgressTraffic:
-		// Capturing the timestamp of response as the response just started to come.
-		// This is to ensure that we capture the response timestamp for the first chunk of the response.
-		if !conn.isNewRequest {
-			conn.isNewRequest = true
-		}
-
-		// Assign the size of the message to the variable msgLength
-		msgLength := event.MsgSize
-		// If the size of the message exceeds the maximum allowed size,
-		// set msgLength to the maximum allowed size instead
-		if event.MsgSize > EventBodyMaxSize {
-			msgLength = EventBodyMaxSize
-		}
-
-		data := event.Msg[:msgLength]
-
-		// Append the message (up to msgLength) to the conn's sent buffer
-		conn.resp = append(conn.resp, data...)
-		conn.respSize += uint64(event.MsgSize)
-
-		//Handling multiple request on same conn to support conn:keep-alive
-		if conn.firstRequest || conn.lastChunkWasReq {
-			conn.userReqSizes = append(conn.userReqSizes, conn.reqSize)
-
-			conn.userReqs = append(conn.userReqs, conn.req)
-			conn.req = []byte{}
-
-			conn.lastChunkWasReq = false
-			conn.lastChunkWasResp = true
-			conn.kernelReqSizes = append(conn.kernelReqSizes, uint64(event.ValidateReadBytes))
-			conn.reqSize = 0
-			conn.firstRequest = false
-		}
-
-	case IngressTraffic:
-		conn.logger.Debug("isNewRequest", zap.Any("isNewRequest", conn.isNewRequest), zap.Any("connID", conn.connID))
-		// Capturing the timestamp of request as the request just started to come.
-		if conn.isNewRequest {
-			conn.reqTimestamps = append(conn.reqTimestamps, ConvertUnixNanoToTime(event.EntryTimestampNano))
-			conn.isNewRequest = false
-		}
-
-		// Assign the size of the message to the variable msgLength
-		msgLength := event.MsgSize
-		// If the size of the message exceeds the maximum allowed size,
-		// set msgLength to the maximum allowed size instead
-		if event.MsgSize > EventBodyMaxSize {
-			msgLength = EventBodyMaxSize
-		}
-
-		data := event.Msg[:msgLength]
-		// Append the message (up to msgLength) to the conn's receive buffer
-		conn.req = append(conn.req, data...)
-		conn.reqSize += uint64(event.MsgSize)
-
-		//Handling multiple request on same conn to support conn:keep-alive
-		if conn.lastChunkWasResp {
-			// conn.userRespSizes is the total numner of bytes received in the user side
-			// consumer for the last response.
-			conn.userRespSizes = append(conn.userRespSizes, conn.respSize)
-
-			conn.userResps = append(conn.userResps, conn.resp)
-			conn.resp = []byte{}
-
-			conn.lastChunkWasReq = true
-			conn.lastChunkWasResp = false
-
-			conn.kernelRespSizes = append(conn.kernelRespSizes, uint64(event.ValidateWrittenBytes))
-			conn.respSize = 0
-			//Record a test case for the current request/
-			conn.incRecordTestCount()
-		}
-
-	default:
-	}
 }
