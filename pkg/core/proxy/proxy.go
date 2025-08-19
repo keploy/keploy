@@ -66,7 +66,7 @@ type Proxy struct {
 	TCPDNSServer *dns.Server
 }
 
-func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
+func New(logger *zap.Logger, info core.DestInfo, opts *config.Config, session *core.Sessions) *Proxy {
 	return &Proxy{
 		logger:       logger,
 		Port:         opts.ProxyPort, // default: 16789
@@ -76,7 +76,7 @@ func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
 		ipMutex:      &sync.Mutex{},
 		connMutex:    &sync.Mutex{},
 		DestInfo:     info,
-		sessions:     core.NewSessions(),
+		sessions:     session,
 		MockManagers: sync.Map{},
 		Integrations: make(map[integrations.IntegrationType]integrations.Integrations),
 	}
@@ -140,7 +140,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 	}
 
 	// start the TCP DNS server
-	p.logger.Debug("Starting Tcp Dns Server for handling Dns queries over TCP")
+	p.logger.Info("Starting Tcp Dns Server for handling Dns queries over TCP")
 	g.Go(func() error {
 		defer utils.Recover(p.logger)
 		errCh := make(chan error, 1)
@@ -166,7 +166,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 	})
 
 	// start the UDP DNS server
-	p.logger.Debug("Starting Udp Dns Server for handling Dns queries over UDP")
+	p.logger.Info("Starting Udp Dns Server for handling Dns queries over UDP")
 	g.Go(func() error {
 		defer utils.Recover(p.logger)
 		errCh := make(chan error, 1)
@@ -213,7 +213,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		return err
 	}
 	p.Listener = listener
-	p.logger.Debug(fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(":%v", listener.Addr())))
+	p.logger.Info(fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(":%v", listener.Addr())))
 	// Signal that the server is ready
 	readyChan <- nil
 	defer func(listener net.Listener) {
@@ -231,7 +231,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		clientConnCancel()
 		err := clientConnErrGrp.Wait()
 		if err != nil {
-			p.logger.Debug("failed to handle the client connection", zap.Error(err))
+			p.logger.Info("failed to handle the client connection", zap.Error(err))
 		}
 		//closing all the mock channels (if any in record mode)
 		for _, mc := range p.sessions.GetAllMC() {
@@ -295,7 +295,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	defer func(start time.Time) {
 		duration := time.Since(start)
-		p.logger.Debug("time taken by proxy to execute the flow", zap.Any("Client ConnectionID", clientConnID), zap.Any("Duration(ms)", duration.Milliseconds()))
+		p.logger.Info("time taken by proxy to execute the flow", zap.Any("Client ConnectionID", clientConnID), zap.Any("Duration(ms)", duration.Milliseconds()))
 	}(start)
 
 	// dstConn stores conn with actual destination for the outgoing network call
@@ -307,7 +307,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	remoteAddr := srcConn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
 
-	p.logger.Debug("Inside handleConnection of proxyServer", zap.Any("source port", sourcePort), zap.Any("Time", time.Now().Unix()))
+	p.logger.Info("Inside handleConnection of proxyServer", zap.Any("source port", sourcePort), zap.Any("Time", time.Now().Unix()))
 
 	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
 	if err != nil {
@@ -333,13 +333,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	switch destInfo.Version {
 	case 4:
-		p.logger.Debug("the destination is ipv4")
+		p.logger.Info("the destination is ipv4")
 		dstAddr = fmt.Sprintf("%v:%v", util.ToIP4AddressStr(destInfo.IPv4Addr), destInfo.Port)
-		p.logger.Debug("", zap.Any("DestIp4", destInfo.IPv4Addr), zap.Any("DestPort", destInfo.Port))
+		p.logger.Info("", zap.Any("DestIp4", destInfo.IPv4Addr), zap.Any("DestPort", destInfo.Port))
 	case 6:
-		p.logger.Debug("the destination is ipv6")
+		p.logger.Info("the destination is ipv6")
 		dstAddr = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.IPv6Addr), destInfo.Port)
-		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Any("DestPort", destInfo.Port))
+		p.logger.Info("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Any("DestPort", destInfo.Port))
 	}
 
 	// This is used to handle the parser errors
@@ -438,7 +438,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	testBuffer, err := reader.Peek(len(initialData))
 	if err != nil {
 		if err == io.EOF && len(testBuffer) == 0 {
-			p.logger.Debug("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(err))
+			p.logger.Info("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(err))
 			return nil
 		}
 		utils.LogError(p.logger, err, "failed to peek the request message in proxy", zap.Any("proxy port", p.Port))
@@ -492,7 +492,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// These cases may send partial headers in multiple chunks, so we need to read until
 		// we get the complete headers.
 
-		logger.Debug("Partial HTTP headers detected, reading more data to get complete headers")
+		logger.Info("Partial HTTP headers detected, reading more data to get complete headers")
 
 		// Read more data from the TCP connection to get the complete HTTP headers.
 		headerBuf, err := util.ReadHTTPHeadersUntilEnd(parserCtx, p.logger, srcConn)
@@ -532,7 +532,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return err
 		}
 
-		logger.Debug("the external call is tls-encrypted", zap.Any("isTLS", isTLS))
+		logger.Info("the external call is tls-encrypted", zap.Any("isTLS", isTLS))
 		cfg := &tls.Config{
 			InsecureSkipVerify: true,
 			ServerName:         dstURL,
@@ -564,8 +564,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// get the mock manager for the current app
 	m, ok := p.MockManagers.Load(destInfo.AppID)
 	if !ok {
-		utils.LogError(logger, err, "failed to fetch the mock manager", zap.Any("AppID", destInfo.AppID))
-		return err
+		// utils.LogError(logger, err, "failed to fetch the mock manager", zap.Any("AppID", destInfo.AppID))
+		// return err
 	}
 
 	generic := true
@@ -580,7 +580,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			continue // Skip if parser not found
 		}
 
-		p.logger.Debug("Checking for the parser", zap.Any("ParserType", parserPair.ParserType))
+		p.logger.Info("Checking for the parser", zap.Any("ParserType", parserPair.ParserType))
 		if parser.MatchType(parserCtx, initialBuf) {
 			matchedParser = parser
 			parserType = parserPair.ParserType
@@ -590,7 +590,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	if !generic {
-		p.logger.Debug("The external dependency is supported. Hence using the parser", zap.Any("ParserType", parserType))
+		p.logger.Info("The external dependency is supported. Hence using the parser", zap.Any("ParserType", parserType))
 		switch rule.Mode {
 		case models.MODE_RECORD:
 			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
@@ -608,7 +608,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	if generic {
-		logger.Debug("The external dependency is not supported. Hence using generic parser")
+		logger.Info("The external dependency is not supported. Hence using generic parser")
 		if rule.Mode == models.MODE_RECORD {
 			err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil {
