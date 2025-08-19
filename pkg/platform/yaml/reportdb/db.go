@@ -136,19 +136,3 @@ func (fe *TestReport) UpdateReport(ctx context.Context, testRunID string, covera
 	}
 	return nil
 }
-
-// PrintTests prints the contents of fe.tests by iterating over them.
-func (fe *TestReport) PrintTests() {
-	fe.m.Lock()
-	defer fe.m.Unlock()
-	fmt.Println("fe.tests contents:", len(fe.tests))
-	for testRunID, testSets := range fe.tests {
-		fmt.Printf("TestRunID: %s\n", testRunID)
-		for testSetID, results := range testSets {
-			fmt.Printf("  TestSetID: %s\n", testSetID)
-			for i, result := range results {
-				fmt.Printf("    Result %d: %+v\n", i+1, result)
-			}
-		}
-	}
-}

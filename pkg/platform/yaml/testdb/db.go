@@ -51,7 +51,7 @@ func (ts *TestYaml) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
 	return yaml.ReadSessionIndices(ctx, ts.TcsPath, ts.logger)
 }
 
-func (ts *TestYaml) GetAllTestSetIDsInReport(ctx context.Context, latestRunID string) ([]string, error) {
+func (ts *TestYaml) GetReportTestSets(ctx context.Context, latestRunID string) ([]string, error) {
 	if latestRunID == "" {
 		ts.logger.Warn("No latest run ID provided, returning empty test set IDs")
 		return []string{}, nil

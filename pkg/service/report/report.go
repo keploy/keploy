@@ -22,6 +22,10 @@ type Report struct {
 	testDB   TestDB
 }
 
+const (
+	ReportSuffix = "-report"
+)
+
 func New(logger *zap.Logger, cfg *config.Config, reportDB ReportDB, testDB TestDB) *Report {
 	return &Report{
 		logger:   logger,
@@ -44,7 +48,7 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 		r.logger.Info("No test sets selected for report generation, Generating report for all test sets")
 
 		var err error
-		testSetIDs, err = r.testDB.GetAllTestSetIDsInReport(ctx, latestRunID)
+		testSetIDs, err = r.testDB.GetReportTestSets(ctx, latestRunID)
 		if err != nil {
 			r.logger.Error("failed to get all test set ids", zap.Error(err))
 			return err
@@ -122,7 +126,7 @@ func (r *Report) collectFailedTests(ctx context.Context, runID string, testSetID
 	var failedTests []models.TestResult
 
 	for _, testSetID := range testSetIDs {
-		cleanTestSetID := strings.TrimSuffix(testSetID, "-report")
+		cleanTestSetID := strings.TrimSuffix(testSetID, ReportSuffix)
 
 		results, err := r.reportDB.GetReport(ctx, runID, cleanTestSetID)
 		if err != nil {
