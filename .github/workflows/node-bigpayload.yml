@@ -1,0 +1,60 @@
+name: Node.js E2E Tests
+on:
+  workflow_dispatch: # Allows manual triggering
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  node_linux_e2e:
+    runs-on: ubuntu-latest
+    name: Run Keploy E2E Tests for Node.js
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Checkout samples-typescript repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-typescript
+          path: samples-typescript
+          ref: bigpayload
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20' # Specify your Node.js version
+
+      - name: Install Dependencies
+        run: npm install
+    
+      - name: Install Go
+        uses: actions/setup-go@v2
+        with:
+            go-version: 1.24
+ 
+      - name: Installing build Essentials and gcc
+        run: |
+            sudo apt -y update
+            sudo apt -y install build-essential gcc libc-dev    
+
+      - name: Build Keploy binary
+        run: |
+          go build -tags=viper_bind_struct -ldflags="-X main.api_server_uri=https://api.keploy.io" -o keploy . && sudo mv keploy /usr/local/bin
+
+    #   # This step assumes you have a local action to download your binaries.
+    #   # It's similar to your Python workflow.
+    #   - id: record
+    #     uses: ./.github/actions/download-binary
+    #     with:
+    #       src: 'latest' # Or 'build', depending on your setup
+
+    #   - id: replay
+    #     uses: ./.github/actions/download-binary
+    #     with:
+    #       src: 'latest' # Or 'build', depending on your setup
+
+      - name: Run Keploy Record and Test Script
+        run: |
+          chmod +x ./.github/workflows/node-bigpayload.sh
+          ./.github/workflows/node-bigpayload.sh
