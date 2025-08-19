@@ -56,21 +56,23 @@ func start(ctx context.Context) {
 		fmt.Println("Failed to start the logger for the CLI", err)
 		return
 	}
+	utils.LogFile = logFile
+
 	defer func() {
-		if logFile != nil {
-			err := logFile.Close()
-			if err != nil {
-				utils.LogError(logger, err, "Failed to close log file")
+		inDocker := os.Getenv("KEPLOY_INDOCKER")
+		if inDocker != "true" {
+			if utils.LogFile != nil {
+				err := utils.LogFile.Close()
+				if err != nil {
+					utils.LogError(logger, err, "Failed to close Keploy Logs")
+				}
+			}
+			if err := utils.DeleteFileIfNotExists(logger, "keploy-logs.txt"); err != nil {
 				return
 			}
-		}
-		if err := utils.DeleteFileIfNotExists(logger, "keploy-logs.txt"); err != nil {
-			utils.LogError(logger, err, "Failed to delete Keploy Logs")
-			return
-		}
-		if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {
-			utils.LogError(logger, err, "Failed to delete Temporary Docker Compose")
-			return
+			if err := utils.DeleteFileIfNotExists(logger, "docker-compose-tmp.yaml"); err != nil {
+				return
+			}
 		}
 	}()
 	defer utils.Recover(logger)
