@@ -166,7 +166,7 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 						event.EntryTimestampNano += getRealTimeOffset()
 						l.Debug(fmt.Sprintf("Request EntryTimestamp :%v\n", convertUnixNanoToTime(event.EntryTimestampNano)))
 					}
-					c.GetOrCreate(event.ConnID).AddDataEvent(&event , nil)
+					c.GetOrCreate(event.ConnID).AddDataEvent(&event, nil)
 				} else {
 					l.Debug("Using Smaller Request Map")
 					var event SocketDataEventSmall
