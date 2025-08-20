@@ -1,4 +1,4 @@
-name: Node.js E2E Tests
+name: Node.js Big Payload
 on:
   workflow_dispatch: # Allows manual triggering
   push:
@@ -8,7 +8,7 @@ on:
 jobs:
   node_linux_e2e:
     runs-on: ubuntu-latest
-    name: Run Keploy E2E Tests for Node.js
+    name: Keploy Record and Test for big payload (Node.js)
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -16,7 +16,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20' # Specify your Node.js version
+          node-version: '20'
 
       - name: Checkout samples-typescript repository
         uses: actions/checkout@v4
@@ -38,18 +38,6 @@ jobs:
       - name: Build Keploy binary
         run: |
           go build -tags=viper_bind_struct -ldflags="-X main.api_server_uri=https://api.keploy.io" -o keploy . && sudo mv keploy /usr/local/bin
-
-    #   # This step assumes you have a local action to download your binaries.
-    #   # It's similar to your Python workflow.
-    #   - id: record
-    #     uses: ./.github/actions/download-binary
-    #     with:
-    #       src: 'latest' # Or 'build', depending on your setup
-
-    #   - id: replay
-    #     uses: ./.github/actions/download-binary
-    #     with:
-    #       src: 'latest' # Or 'build', depending on your setup
 
       - name: Run Keploy Record and Test Script
         run: |

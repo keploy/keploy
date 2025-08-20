@@ -19,10 +19,6 @@ record_traffic() {
     local url="http://127.0.0.1:3000/${endpoint}"
 
     echo "⏳ Waiting for application to start..."
-    # Wait for the app to be ready by checking for a 200 OK response
-    # while ! curl -s -o /dev/null -w "%{http_code}" ${url} | grep -E "200|405" > /dev/null; do
-    #     sleep 3
-    # done
     sleep 30
     echo "✅ Application is ready. Sending requests to ${url}"
 
@@ -32,18 +28,15 @@ record_traffic() {
         # Create a temporary file with a large JSON body
         local temp_file="large_payload.json"
         echo '{"data":"' > $temp_file
-        # Generate ~500KB of characters
+        # Generate ~1MB of characters
         head -c 1011980 /dev/zero | tr '\0' 'a' >> $temp_file
         echo '"}' >> $temp_file
 
-        echo "🚀 Sending POST request with 500KB payload..."
-        # curl -s -o /dev/null -X POST -H "Content-Type: application/json" --data @"$temp_file" ${url}
+        echo "🚀 Sending POST request with 1MB payload..."
         curl -v -i -X POST -H "Content-Type: application/json" --data @"$temp_file" ${url}
         
-        # Clean up the temporary file
         rm $temp_file
     else
-        # For small-payload, send a simple GET request
         echo "🚀 Sending GET request..."
         curl -i ${url}
     fi
@@ -62,13 +55,10 @@ record_traffic() {
 }
 
 
-# --- Function to run tests and verify results ---
-# Arguments: $1: test_log_file
 run_and_verify_tests() {
     local test_log_file="$1"
 
     echo "🚀 Running tests..."
-    # Use 'keploy' directly since it's in the system PATH
     sudo -E env PATH="$PATH" keploy test -c "node server.js" --delay 10 &> "${test_log_file}" || true
 
     echo "🔍 Checking for errors in test logs..."
@@ -98,10 +88,6 @@ run_and_verify_tests() {
 
     echo "✔️ Tests passed successfully!"
 }
-
-# =================================================================
-#              MAIN EXECUTION
-# =================================================================
 
 # --- STEP 1: Test the Small Payload Endpoint ---
 echo "--- 🧪 Starting Test for /small-payload ---"
