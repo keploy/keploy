@@ -62,8 +62,6 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 		}
 	}
 
-	fmt.Println(hardLimit) // Debugging line, can be removed later
-
 	if hardLimit != 0 {
 		userCmd = fmt.Sprintf("ulimit -S -n %d && %s", hardLimit, userCmd)
 	}
