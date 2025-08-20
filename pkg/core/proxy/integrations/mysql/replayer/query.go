@@ -21,26 +21,11 @@ import (
 func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) error {
 
 	// Log initial mock state at the start of command phase
-	unfiltered, err := mockDb.GetUnFilteredMocks()
-	if err != nil {
-		utils.LogError(logger, err, "failed to get unfiltered mocks at command phase start")
-	} else {
-		var totalMySQLMocks, configMocks, dataMocks int
-		for _, mock := range unfiltered {
-			if mock.Kind == models.MySQL {
-				totalMySQLMocks++
-				if mock.Spec.Metadata["type"] == "config" {
-					configMocks++
-				} else {
-					dataMocks++
-				}
-			}
-		}
-		logger.Info("Command phase starting",
-			zap.Int("total_mysql_mocks", totalMySQLMocks),
-			zap.Int("config_mocks", configMocks),
-			zap.Int("data_mocks_available", dataMocks))
-	}
+	total, cfg, data := mockDb.GetMySQLCounts()
+	logger.Info("Command phase starting",
+		zap.Int("total_mysql_mocks", total),
+		zap.Int("config_mocks", cfg),
+		zap.Int("data_mocks_available", data))
 
 	commandCount := 0
 	for {
@@ -52,33 +37,6 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 
 			logger.Debug("Starting new command iteration",
 				zap.Int("command_count", commandCount))
-
-			// Log mock consumption periodically every 10 commands
-			if commandCount%10 == 0 {
-				logger.Debug("Checking mock consumption at interval",
-					zap.Int("command_count", commandCount))
-				unfiltered, err := mockDb.GetUnFilteredMocks()
-				if err == nil {
-					var totalMySQLMocks, configMocks, dataMocks int
-					for _, mock := range unfiltered {
-						if mock.Kind == models.MySQL {
-							totalMySQLMocks++
-							if mock.Spec.Metadata["type"] == "config" {
-								configMocks++
-							} else {
-								dataMocks++
-							}
-						}
-					}
-					logger.Debug("Mock consumption progress",
-						zap.Int("command_count", commandCount),
-						zap.Int("remaining_data_mocks", dataMocks),
-						zap.Int("remaining_config_mocks", configMocks),
-						zap.Int("total_mysql_mocks_remaining", totalMySQLMocks))
-				} else {
-					logger.Debug("Failed to get mock stats at interval", zap.Error(err))
-				}
-			}
 
 			// Set a read deadline on the client connection
 			readTimeout := 2 * time.Second * time.Duration(opts.SQLDelay)

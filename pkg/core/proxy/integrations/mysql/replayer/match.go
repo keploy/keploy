@@ -9,6 +9,7 @@ import (
 	"io"
 	"reflect"
 	"strings"
+	"sync"
 
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
@@ -19,6 +20,19 @@ import (
 	"go.uber.org/zap"
 	"vitess.io/vitess/go/vt/sqlparser"
 )
+
+var querySigCache sync.Map // map[string]string
+
+func getQueryStructureCached(sql string) (string, error) {
+	if v, ok := querySigCache.Load(sql); ok {
+		return v.(string), nil
+	}
+	sig, err := getQueryStructure(sql)
+	if err == nil {
+		querySigCache.Store(sql, sig)
+	}
+	return sig, err
+}
 
 func matchHeader(expected, actual mysql.Header) bool {
 
@@ -141,281 +155,162 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 }
 
 func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext) (*mysql.Response, bool, error) {
+	// Precompute string constants once (avoid frequent map lookups)
+	var (
+		sCOM_QUIT       = mysql.CommandStatusToString(mysql.COM_QUIT)
+		sCOM_QUERY      = mysql.CommandStatusToString(mysql.COM_QUERY)
+		sCOM_STMT_PREP  = mysql.CommandStatusToString(mysql.COM_STMT_PREPARE)
+		sCOM_STMT_EXEC  = mysql.CommandStatusToString(mysql.COM_STMT_EXECUTE)
+		sCOM_STMT_CLOSE = mysql.CommandStatusToString(mysql.COM_STMT_CLOSE)
+		sCOM_INIT_DB    = mysql.CommandStatusToString(mysql.COM_INIT_DB)
+		sCOM_STATS      = mysql.CommandStatusToString(mysql.COM_STATISTICS)
+		sCOM_DEBUG      = mysql.CommandStatusToString(mysql.COM_DEBUG)
+		sCOM_PING       = mysql.CommandStatusToString(mysql.COM_PING)
+		sCOM_RESET_CONN = mysql.CommandStatusToString(mysql.COM_RESET_CONNECTION)
+	)
 
-	for {
+	// Fast path: QUIT may have no mock
+	if req.Header.Type == sCOM_QUIT {
+		return nil, false, io.EOF
+	}
 
+	// Single fetch; no struct copies (see MockManager changes)
+	unfiltered, err := mockDb.GetUnFilteredMocks()
+	if err != nil {
 		if ctx.Err() != nil {
 			return nil, false, ctx.Err()
 		}
+		utils.LogError(logger, err, "failed to get unfiltered mocks")
+		return nil, false, err
+	}
+	if len(unfiltered) == 0 {
+		utils.LogError(logger, nil, "no mysql mocks found")
+		return nil, false, fmt.Errorf("no mysql mocks found")
+	}
 
-		// Get the tcs mocks from the mockDb
-		unfiltered, err := mockDb.GetUnFilteredMocks()
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil, false, ctx.Err()
-			}
-			utils.LogError(logger, err, "failed to get unfiltered mocks")
-			return nil, false, err
-		}
+	var (
+		maxMatchedCount int
+		matchedResp     *mysql.Response
+		matchedMock     *models.Mock
+		queryMatched    bool
+	)
 
-		var tcsMocks []*models.Mock
-		var hasMySQLMocks bool
-		var totalMySQLMocks int
-		var configMocks int
-		var dataMocks int
-		
-		// Filter for non-config MySQL mocks in a single pass.
-		for _, mock := range unfiltered {
-			if mock.Kind == models.MySQL {
-				hasMySQLMocks = true
-				totalMySQLMocks++
-				if mock.Spec.Metadata["type"] == "config" {
-					configMocks++
-				} else {
-					dataMocks++
-					tcsMocks = append(tcsMocks, mock)
-				}
-			}
-		}
-
-		logger.Debug("Mock statistics", 
-			zap.Int("total_unfiltered_mocks", len(unfiltered)),
-			zap.Int("total_mysql_mocks", totalMySQLMocks),
-			zap.Int("config_mocks", configMocks),
-			zap.Int("data_mocks", dataMocks),
-			zap.Int("available_tcs_mocks", len(tcsMocks)),
-			zap.String("request_type", req.Header.Type),
-			zap.Bool("has_mysql_mocks", hasMySQLMocks))
-
-		if !hasMySQLMocks {
-			if ctx.Err() != nil {
-				return nil, false, ctx.Err()
-			}
-			utils.LogError(logger, nil, "no mysql mocks found")
-			logger.Debug("Connection will be closed: no mysql mocks found at all")
-			return nil, false, fmt.Errorf("no mysql mocks found")
-		}
-
-		if len(tcsMocks) == 0 {
-			logger.Debug("Connection might be closed: all data mocks exhausted",
-				zap.Int("total_mysql_mocks", totalMySQLMocks),
-				zap.Int("config_mocks", configMocks),
-				zap.Int("data_mocks", dataMocks),
-				zap.String("request_type", req.Header.Type))
-			
-			if ctx.Err() != nil {
-				return nil, false, ctx.Err()
-			}
-
-			// COM_QUIT packet can be handled separately, because there might be no mock for it
-			if req.Header.Type == mysql.CommandStatusToString(mysql.COM_QUIT) {
-				// If the command is quit, we should return EOF
-				logger.Debug("Received quit command, closing the connection by sending EOF")
-				return nil, false, io.EOF
-			}
-
-			// Handle common SQL commands with generic responses when no mocks are found
-			// This prevents premature connection closure during test replay
-			if req.Header.Type == mysql.CommandStatusToString(mysql.COM_QUERY) {
-				if queryPacket, ok := req.Message.(*mysql.QueryPacket); ok {
-					query := strings.ToUpper(strings.TrimSpace(queryPacket.Query))
-					// Handle transaction control and other non-critical commands
-					if query == "BEGIN" || query == "START TRANSACTION" || 
-					   query == "COMMIT" || query == "ROLLBACK" ||
-					   strings.HasPrefix(query, "SET ") {
-						logger.Debug("Providing generic OK response for query without mock", zap.String("query", queryPacket.Query))
-						
-						// Return a generic OK response
-						genericOKResp := &mysql.Response{
-							PacketBundle: mysql.PacketBundle{
-								Header: &mysql.PacketInfo{
-									Header: &mysql.Header{
-										PayloadLength: 7,
-										SequenceID:    1,
-									},
-									Type: "OK",
-								},
-								Message: &mysql.OKPacket{
-									Header:       mysql.OK,
-									AffectedRows: 0,
-									LastInsertID: 0,
-									StatusFlags:  0x0002, // SERVER_STATUS_AUTOCOMMIT
-									Warnings:     0,
-									Info:         "",
-								},
-							},
-						}
-						return genericOKResp, true, nil
-					}
-				}
-			}
-
-			utils.LogError(logger, nil, "no mysql mocks found for handling command phase")
-			logger.Debug("Connection will be closed: no suitable mocks found",
-				zap.String("request_type", req.Header.Type),
-				zap.Int("total_mysql_mocks", totalMySQLMocks),
-				zap.Int("config_mocks", configMocks),
-				zap.Int("data_mocks", dataMocks))
-			return nil, false, fmt.Errorf("no mysql mocks found for handling command phase")
-		}
-
-		var maxMatchedCount int
-		var matchedResp *mysql.Response
-		var matchedMock *models.Mock
-
-		queryMatched := false
-
-		// Match the request with the mock
-		for _, mock := range tcsMocks {
-
-			if ctx.Err() != nil {
-				return nil, false, ctx.Err()
-			}
-
-			for _, mockReq := range mock.Spec.MySQLRequests {
-				if ctx.Err() != nil {
-					return nil, false, ctx.Err()
-				}
-
-				switch req.Header.Type {
-				//utiltiy commands
-				case mysql.CommandStatusToString(mysql.COM_QUIT):
-					matchCount := matchQuitPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
-					if matchCount > maxMatchedCount {
-						maxMatchedCount = matchCount
-						matchedResp = &mysql.Response{} // in case if server closed the connection without sending any response
-						if len(mock.Spec.MySQLResponses) > 0 {
-							matchedResp = &mock.Spec.MySQLResponses[0] // if server responded with "error" packet
-						}
-						matchedMock = mock
-					}
-				case mysql.CommandStatusToString(mysql.COM_INIT_DB):
-					matchCount := matchInitDbPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
-					if matchCount > maxMatchedCount {
-						maxMatchedCount = matchCount
-						matchedResp = &mock.Spec.MySQLResponses[0]
-						matchedMock = mock
-					}
-				case mysql.CommandStatusToString(mysql.COM_STATISTICS):
-					matchCount := matchStatisticsPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
-					if matchCount > maxMatchedCount {
-						maxMatchedCount = matchCount
-						matchedResp = &mock.Spec.MySQLResponses[0]
-						matchedMock = mock
-					}
-				case mysql.CommandStatusToString(mysql.COM_DEBUG):
-					matchCount := matchDebugPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
-					if matchCount > maxMatchedCount {
-						maxMatchedCount = matchCount
-						matchedResp = &mock.Spec.MySQLResponses[0]
-						matchedMock = mock
-					}
-				case mysql.CommandStatusToString(mysql.COM_PING):
-					matchCount := matchPingPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
-					if matchCount > maxMatchedCount {
-						maxMatchedCount = matchCount
-						matchedResp = &mock.Spec.MySQLResponses[0]
-						matchedMock = mock
-					}
-				// case mysql.CommandStatusToString(mysql.COM_CHANGE_USER):
-				case mysql.CommandStatusToString(mysql.COM_RESET_CONNECTION):
-					matchCount := matchResetConnectionPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
-					if matchCount > maxMatchedCount {
-						maxMatchedCount = matchCount
-						matchedResp = &mock.Spec.MySQLResponses[0]
-						matchedMock = mock
-					}
-
-				//query commands
-				case mysql.CommandStatusToString(mysql.COM_STMT_CLOSE):
-					matchCount := matchClosePacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
-					if matchCount > maxMatchedCount {
-						maxMatchedCount = matchCount
-						matchedResp = &mysql.Response{}
-						matchedMock = mock
-					}
-				// case mysql.CommandStatusToString(mysql.COM_STMT_SEND_LONG_DATA):
-				case mysql.CommandStatusToString(mysql.COM_QUERY):
-					matched, matchCount := matchQueryPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
-					if matched {
-						matchedResp = &mock.Spec.MySQLResponses[0]
-						matchedMock = mock
-						queryMatched = true
-					} else if matchCount > maxMatchedCount {
-						maxMatchedCount = matchCount
-						matchedResp = &mock.Spec.MySQLResponses[0]
-						matchedMock = mock
-					}
-
-				case mysql.CommandStatusToString(mysql.COM_STMT_PREPARE):
-					matched, matchCount := matchPreparePacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
-					if matched {
-						matchedResp = &mock.Spec.MySQLResponses[0]
-						matchedMock = mock
-						queryMatched = true
-					} else if matchCount > maxMatchedCount {
-						maxMatchedCount = matchCount
-						matchedResp = &mock.Spec.MySQLResponses[0]
-						matchedMock = mock
-					}
-				case mysql.CommandStatusToString(mysql.COM_STMT_EXECUTE):
-					matchCount := matchStmtExecutePacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle)
-					if matchCount > maxMatchedCount {
-						maxMatchedCount = matchCount
-						matchedResp = &mock.Spec.MySQLResponses[0]
-						matchedMock = mock
-					}
-				}
-			}
-			if queryMatched {
-				break
-			}
-		}
-		if matchedResp == nil {
-			logger.Debug("No matching mock found for the command", zap.Any("command", req))
-
-			// COM_QUIT packet can be handled separately, because there might be no mock for it
-			if req.Header.Type == mysql.CommandStatusToString(mysql.COM_QUIT) {
-				// If the command is quit, we should return EOF
-				logger.Debug("Received quit command, closing the connection by sending EOF")
-				return nil, false, io.EOF
-			}
-
-			return nil, false, nil
-		}
-
-		//if the req was prepared statement, we should store the prepared statement response
-		if req.Header.Type == mysql.CommandStatusToString(mysql.COM_STMT_PREPARE) {
-			prepareOkResp, ok := matchedResp.Message.(*mysql.StmtPrepareOkPacket)
-			if !ok {
-				logger.Error("failed to type assert the StmtPrepareOkPacket")
-				return nil, false, fmt.Errorf("failed to type assert the StmtPrepareOkPacket")
-			}
-			// This prepared statement will be used in the further execute statement packets
-			decodeCtx.PreparedStatements[prepareOkResp.StatementID] = prepareOkResp
-		}
-
-		// Delete the matched mock from the mockDb
-		logger.Debug("Attempting to consume/update mock",
-			zap.String("mock_name", matchedMock.Name),
-			zap.String("mock_kind", string(matchedMock.Kind)),
-			zap.String("request_type", req.Header.Type),
-			zap.Int("remaining_data_mocks", dataMocks-1))
-
-		okk := updateMock(ctx, logger, matchedMock, mockDb)
-		if !okk {
-			//TODO: see what to do in case of failed deletion
-			logger.Debug("failed to update the matched mock")
+	// Single pass: filter & match on the fly.
+	for _, mock := range unfiltered {
+		if mock.Kind != models.MySQL {
 			continue
 		}
-		
-		logger.Debug("Successfully consumed mock",
-			zap.String("mock_name", matchedMock.Name),
-			zap.String("request_type", req.Header.Type),
-			zap.Int("estimated_remaining_data_mocks", dataMocks-1))
-		
-		return matchedResp, true, nil
+		if mock.Spec.Metadata["type"] == "config" {
+			continue // command-phase only wants data mocks
+		}
+		for _, mockReq := range mock.Spec.MySQLRequests {
+			select {
+			case <-ctx.Done():
+				return nil, false, ctx.Err()
+			default:
+			}
+			switch req.Header.Type {
+			case sCOM_STMT_CLOSE:
+				if c := matchClosePacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle); c > maxMatchedCount {
+					maxMatchedCount, matchedResp, matchedMock = c, &mysql.Response{}, mock
+				}
+			case sCOM_QUERY:
+				if ok, c := matchQueryPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle); ok {
+					matchedResp, matchedMock, queryMatched = &mock.Spec.MySQLResponses[0], mock, true
+				} else if c > maxMatchedCount {
+					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
+				}
+			case sCOM_STMT_PREP:
+				if ok, c := matchPreparePacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle); ok {
+					matchedResp, matchedMock, queryMatched = &mock.Spec.MySQLResponses[0], mock, true
+				} else if c > maxMatchedCount {
+					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
+				}
+			case sCOM_STMT_EXEC:
+				if c := matchStmtExecutePacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle); c > maxMatchedCount {
+					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
+				}
+			case sCOM_INIT_DB:
+				if c := matchInitDbPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle); c > maxMatchedCount {
+					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
+				}
+			case sCOM_STATS:
+				if c := matchStatisticsPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle); c > maxMatchedCount {
+					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
+				}
+			case sCOM_DEBUG:
+				if c := matchDebugPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle); c > maxMatchedCount {
+					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
+				}
+			case sCOM_PING:
+				if c := matchPingPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle); c > maxMatchedCount {
+					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
+				}
+			case sCOM_RESET_CONN:
+				if c := matchResetConnectionPacket(ctx, logger, mockReq.PacketBundle, req.PacketBundle); c > maxMatchedCount {
+					maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
+				}
+			}
+		}
+		if queryMatched {
+			break
+		}
 	}
+
+	if matchedResp == nil {
+		// Graceful generic OK for common control statements (no mocks)
+		if req.Header.Type == sCOM_QUERY {
+			if qp, ok := req.Message.(*mysql.QueryPacket); ok {
+				q := strings.TrimSpace(qp.Query)
+				// Case-insensitive checks without allocating uppercase strings
+				hasPrefixFold := func(s, p string) bool {
+					if len(s) < len(p) {
+						return false
+					}
+					return strings.EqualFold(s[:len(p)], p)
+				}
+				switch {
+				case strings.EqualFold(q, "BEGIN"),
+					strings.EqualFold(q, "START TRANSACTION"),
+					strings.EqualFold(q, "COMMIT"),
+					strings.EqualFold(q, "ROLLBACK"),
+					hasPrefixFold(q, "SET "):
+					generic := &mysql.Response{
+						PacketBundle: mysql.PacketBundle{
+							Header: &mysql.PacketInfo{
+								Header: &mysql.Header{PayloadLength: 7, SequenceID: 1},
+								Type:   "OK",
+							},
+							Message: &mysql.OKPacket{
+								Header:       mysql.OK,
+								AffectedRows: 0,
+								LastInsertID: 0,
+								StatusFlags:  0x0002,
+								Warnings:     0,
+								Info:         "",
+							},
+						},
+					}
+					return generic, true, nil
+				}
+			}
+		}
+		return nil, false, nil
+	}
+
+	// Persist prepared-statement metadata
+	if req.Header.Type == sCOM_STMT_PREP {
+		if prepareOkResp, ok := matchedResp.Message.(*mysql.StmtPrepareOkPacket); ok && prepareOkResp != nil {
+			decodeCtx.PreparedStatements[prepareOkResp.StatementID] = prepareOkResp
+		}
+	}
+
+	if okk := updateMock(ctx, logger, matchedMock, mockDb); !okk {
+		logger.Debug("failed to update the matched mock")
+		// Re-fetch once to avoid spin
+		return nil, false, fmt.Errorf("failed to update matched mock")
+	}
+	return matchedResp, true, nil
 }
 
 func matchClosePacket(_ context.Context, _ *zap.Logger, expected, actual mysql.PacketBundle) int {
@@ -512,7 +407,7 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 		zap.String("expected query", expectedQuery),
 		zap.String("actual query", actualQuery))
 
-	actualSignature, err := getQueryStructure(actualQuery)
+	actualSignature, err := getQueryStructureCached(actualQuery)
 	if err != nil {
 		log.Warn("failed to get actual query structure",
 			zap.String("actual Query", actualQuery),
@@ -520,7 +415,7 @@ func matchQuery(_ context.Context, log *zap.Logger, expected, actual mysql.Packe
 		return false, matchCount
 	}
 
-	expectedSignature, err := getQueryStructure(expectedQuery)
+	expectedSignature, err := getQueryStructureCached(expectedQuery)
 	if err != nil {
 		log.Warn("failed to get expected query structure",
 			zap.String("expected Query", expectedQuery),
@@ -596,18 +491,58 @@ func matchStmtExecutePacket(_ context.Context, _ *zap.Logger, expected, actual m
 	// Match the parameters
 	if len(expectedMessage.Parameters) == len(actualMessage.Parameters) {
 		for i := range expectedMessage.Parameters {
-			expectedParam := expectedMessage.Parameters[i]
-			actualParam := actualMessage.Parameters[i]
-			if expectedParam.Type == actualParam.Type &&
-				expectedParam.Name == actualParam.Name &&
-				expectedParam.Unsigned == actualParam.Unsigned &&
-				reflect.DeepEqual(expectedParam.Value, actualParam.Value) {
+			ep := expectedMessage.Parameters[i]
+			ap := actualMessage.Parameters[i]
+			if ep.Type == ap.Type &&
+				ep.Name == ap.Name &&
+				ep.Unsigned == ap.Unsigned &&
+				paramValueEqual(ep.Value, ap.Value) {
 				matchCount++
 			}
 		}
 	}
-
 	return matchCount
+}
+
+func paramValueEqual(a, b interface{}) bool {
+	switch av := a.(type) {
+	case []byte:
+		bv, ok := b.([]byte)
+		return ok && bytes.Equal(av, bv)
+	case string:
+		bv, ok := b.(string)
+		return ok && av == bv
+	case int:
+		bv, ok := b.(int)
+		return ok && av == bv
+	case int32:
+		bv, ok := b.(int32)
+		return ok && av == bv
+	case int64:
+		switch bv := b.(type) {
+		case int64:
+			return av == bv
+		case int:
+			return av == int64(bv)
+		}
+	case uint32:
+		bv, ok := b.(uint32)
+		return ok && av == bv
+	case uint64:
+		bv, ok := b.(uint64)
+		return ok && av == bv
+	case float32:
+		bv, ok := b.(float32)
+		return ok && av == bv
+	case float64:
+		bv, ok := b.(float64)
+		return ok && av == bv
+	case bool:
+		bv, ok := b.(bool)
+		return ok && av == bv
+	}
+	// Fallback (rare)
+	return reflect.DeepEqual(a, b)
 }
 
 // matching for utility commands
