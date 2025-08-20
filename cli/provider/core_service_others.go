@@ -19,6 +19,7 @@ import (
 	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/pkg/service/contract"
 	"go.keploy.io/server/v2/pkg/service/replay"
+	"go.keploy.io/server/v2/pkg/service/report"
 	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.uber.org/zap"
 )
@@ -38,6 +39,8 @@ func Get(ctx context.Context, cmd string, c *config.Config, logger *zap.Logger, 
 	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, auth, commonServices.Storage, c)
 
 	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, tel, auth, c)
+	reportSvc := report.New(logger, c, commonServices.YamlReportDb, commonServices.YamlTestDB)
+
 	if (cmd == "test" && c.Test.BasePath != "") || cmd == "normalize" || cmd == "mock" {
 		return replaySvc, nil
 	}
@@ -48,6 +51,10 @@ func Get(ctx context.Context, cmd string, c *config.Config, logger *zap.Logger, 
 
 	if cmd == "contract" {
 		return contractSvc, nil
+	}
+
+	if cmd == "report" {
+		return reportSvc, nil
 	}
 
 	return nil, errors.New("command not supported in non linux os. if you are on windows or mac, please use the dockerized version of your application")

@@ -41,7 +41,7 @@ func (fe *TestReport) ClearTestCaseResults(_ context.Context, testRunID string, 
 }
 
 func (fe *TestReport) GetAllTestRunIDs(ctx context.Context) ([]string, error) {
-	return yaml.ReadSessionIndices(ctx, fe.Path, fe.Logger)
+	return yaml.ReadSessionIndices(ctx, fe.Path, fe.Logger, yaml.ModeDir)
 }
 
 func (fe *TestReport) InsertTestCaseResult(_ context.Context, testRunID string, testSetID string, result *models.TestResult) error {
