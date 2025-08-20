@@ -52,42 +52,54 @@ func DecodeTextRow(_ context.Context, _ *zap.Logger, data []byte, columns []*mys
 	return row, offset, nil
 }
 
-func EncodeTextRow(_ context.Context, _ *zap.Logger, row *mysql.TextRow, columns []*mysql.ColumnDefinition41) ([]byte, error) {
-	buf := new(bytes.Buffer)
+// rowscols/textRowPacket.go
 
-	// Write the packet header
-	if err := utils.WriteUint24(buf, row.Header.PayloadLength); err != nil {
+func EncodeTextRow(_ context.Context, _ *zap.Logger, row *mysql.TextRow, columns []*mysql.ColumnDefinition41) ([]byte, error) {
+	body := new(bytes.Buffer)
+
+	// Write each column's value into the body
+	for i := range columns {
+		v := row.Values[i].Value
+		switch x := v.(type) {
+		case nil:
+			// NULL is 0xfb
+			if err := body.WriteByte(0xfb); err != nil {
+				return nil, fmt.Errorf("failed to write NULL: %w", err)
+			}
+
+		case string:
+			if err := utils.WriteLengthEncodedString(body, x); err != nil {
+				return nil, fmt.Errorf("failed to write lenenc string: %w", err)
+			}
+
+		case []byte:
+			// allow blobs as raw bytes in text rows
+			if err := utils.WriteLengthEncodedInteger(body, uint64(len(x))); err != nil {
+				return nil, fmt.Errorf("failed to write len for bytes: %w", err)
+			}
+			if _, err := body.Write(x); err != nil {
+				return nil, fmt.Errorf("failed to write bytes: %w", err)
+			}
+
+		default:
+			// fall back to the textual form (keeps old recordings working)
+			s := fmt.Sprint(x)
+			if err := utils.WriteLengthEncodedString(body, s); err != nil {
+				return nil, fmt.Errorf("failed to write fallback string: %w", err)
+			}
+		}
+	}
+
+	// Now prepend the header using the computed length
+	out := new(bytes.Buffer)
+	if err := utils.WriteUint24(out, uint32(body.Len())); err != nil {
 		return nil, fmt.Errorf("failed to write PayloadLength: %w", err)
 	}
-	if err := buf.WriteByte(row.Header.SequenceID); err != nil {
+	if err := out.WriteByte(row.Header.SequenceID); err != nil {
 		return nil, fmt.Errorf("failed to write SequenceID: %w", err)
 	}
-
-	// Write each column's value
-	for i, col := range columns {
-		value := row.Values[i].Value
-		if value == nil {
-			// Write NULL value
-			if err := buf.WriteByte(0xfb); err != nil {
-				return nil, fmt.Errorf("failed to write NULL value: %w", err)
-			}
-			continue
-		}
-
-		// Write length-encoded string
-		strValue, ok := value.(string)
-		if !ok {
-			return nil, fmt.Errorf("invalid value type for column %s", col.Name)
-		}
-		if err := utils.WriteLengthEncodedString(buf, strValue); err != nil {
-			return nil, fmt.Errorf("failed to write length-encoded string: %w", err)
-		}
+	if _, err := out.Write(body.Bytes()); err != nil {
+		return nil, err
 	}
-
-	if row.Header.PayloadLength != uint32(buf.Len()-4) {
-		return nil, fmt.Errorf("PayloadLength mismatch: expected %d, got %d for row: %v",
-			row.Header.PayloadLength, buf.Len()-4, row)
-	}
-
-	return buf.Bytes(), nil
+	return out.Bytes(), nil
 }
