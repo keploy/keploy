@@ -1430,7 +1430,22 @@ func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testS
 		if testCaseResultMap[testCase.Name].Status == models.TestStatusPassed {
 			continue
 		}
-		testCase.HTTPResp = testCaseResultMap[testCase.Name].Res
+		// Handle normalization based on test case kind
+		switch testCase.Kind {
+		case models.HTTP:
+			// Store the original timestamp to preserve it during normalization
+			originalTimestamp := testCase.HTTPResp.Timestamp
+			testCase.HTTPResp = testCaseResultMap[testCase.Name].Res
+			// Restore the original timestamp after normalization
+			testCase.HTTPResp.Timestamp = originalTimestamp
+
+		case models.GRPC_EXPORT:
+			// Store the original timestamp to preserve it during normalization
+			originalTimestamp := testCase.GrpcResp.Timestamp
+			testCase.GrpcResp = testCaseResultMap[testCase.Name].GrpcRes
+			// Restore the original timestamp after normalization
+			testCase.GrpcResp.Timestamp = originalTimestamp
+		}
 		err = r.testDB.UpdateTestCase(ctx, testCase, testSetID, true)
 		if err != nil {
 			return fmt.Errorf("failed to update test case: %w", err)
