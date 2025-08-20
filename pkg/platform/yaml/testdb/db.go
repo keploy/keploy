@@ -118,6 +118,7 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 
 func (ts *TestYaml) UpdateTestCase(ctx context.Context, tc *models.TestCase, testSetID string, enableLog bool) error {
 
+	fmt.Println("Updating test case:", tc.Name, "in test set:", testSetID)
 	tcsInfo, err := ts.upsert(ctx, testSetID, tc)
 	if err != nil {
 		return err
