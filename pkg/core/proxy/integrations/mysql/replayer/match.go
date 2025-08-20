@@ -133,14 +133,14 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 		return fmt.Errorf("auth response mismatch for handshake response, expected: %v, actual: %v", exp.AuthResponse, act.AuthResponse)
 	}
 
-	// Match the Database
-	if exp.Database != act.Database {
-		return fmt.Errorf("database mismatch for handshake response, expected: %s, actual: %s", exp.Database, act.Database)
+	// Match the Database (backward-compatible: ignore old mocks with junk bytes / off-by-one)
+	if !dbEqualCompat(exp.Database, act.Database) {
+		return fmt.Errorf("database mismatch for handshake response, expected: %s, actual: %s", printable(exp.Database), printable(act.Database))
 	}
 
-	// Match the AuthPluginName
-	if exp.AuthPluginName != act.AuthPluginName {
-		return fmt.Errorf("auth plugin name mismatch for handshake response, expected: %s, actual: %s", exp.AuthPluginName, act.AuthPluginName)
+	// Match the AuthPluginName (tolerate unknown/garbled plugin names in old mocks)
+	if !pluginEqualCompat(exp.AuthPluginName, act.AuthPluginName) {
+		return fmt.Errorf("auth plugin name mismatch for handshake response, expected: %s, actual: %s", printable(exp.AuthPluginName), printable(act.AuthPluginName))
 	}
 
 	// // Match the ConnectionAttributes
@@ -695,4 +695,55 @@ func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock,
 		logger.Debug("failed to update matched mock")
 	}
 	return updated
+}
+
+// printable strips non-printable bytes (common in legacy mocks)
+func printable(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r >= 32 && r <= 126 {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// Back-compat database compare:
+// - Strip junk bytes
+// - Treat empty on either side as OK
+// - Allow suffix match (e.g., "...uss" vs "ss") to accommodate off-by-one legacy encodes
+func dbEqualCompat(exp, act string) bool {
+	ex := printable(strings.TrimSpace(exp))
+	ac := printable(strings.TrimSpace(act))
+	if ex == ac {
+		return true
+	}
+	if ex == "" || ac == "" {
+		return true
+	}
+	return strings.HasSuffix(ex, ac) || strings.HasSuffix(ac, ex)
+}
+
+var knownPlugins = map[string]struct{}{
+	"caching_sha2_password": {},
+	"mysql_native_password": {},
+	"mysql_clear_password":  {},
+}
+
+// Back-compat plugin compare:
+// - Strip junk
+// - If both are known plugin names and differ -> mismatch
+// - Otherwise (unknown/garbled on either side) -> tolerate
+func pluginEqualCompat(exp, act string) bool {
+	ex := printable(strings.TrimSpace(exp))
+	ac := printable(strings.TrimSpace(act))
+	if ex == ac {
+		return true
+	}
+	_, exKnown := knownPlugins[ex]
+	_, acKnown := knownPlugins[ac]
+	if exKnown && acKnown {
+		return false
+	}
+	return true
 }
