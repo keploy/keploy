@@ -297,6 +297,13 @@ func ReadRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader
 		g.Go(func() error {
 			defer Recover(logger, nil, nil)
 			buf := make([]byte, numBytes)
+			
+			// Set a read deadline to prevent indefinite blocking
+			if conn, ok := reader.(net.Conn); ok {
+				conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+				defer conn.SetReadDeadline(time.Time{}) // Reset deadline
+			}
+			
 			n, err := reader.Read(buf)
 			if ctx.Err() != nil {
 				return nil
@@ -313,9 +320,9 @@ func ReadRequiredBytes(ctx context.Context, logger *zap.Logger, reader io.Reader
 		select {
 		case <-ctx.Done():
 			return buffer, ctx.Err()
-		// case <-time.After(5 * time.Second):
-		// 	logger.Error("timeout occurred while reading the packet")
-		// 	return buffer, context.DeadlineExceeded
+		case <-time.After(10 * time.Second): // Increased timeout for MySQL connections
+			logger.Debug("timeout occurred while reading the packet, connection might be idle")
+			return buffer, context.DeadlineExceeded
 		case result := <-readResult:
 			if result.n > 0 {
 				buffer = append(buffer, result.buf[:result.n]...)

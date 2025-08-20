@@ -30,13 +30,29 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
+			logger.Debug("waiting for next command from client")
 
 			// read the command from the client
 			command, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
 			if err != nil {
-				if err != io.EOF {
-					utils.LogError(logger, err, "failed to read command packet from client")
+				if err == context.DeadlineExceeded {
+					// Connection is idle, this is normal in MySQL - connections can be idle
+					// between queries. Check if context is still valid and continue monitoring.
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					default:
+						// Continue monitoring the idle connection
+						logger.Debug("connection is idle, continuing to monitor for commands")
+						continue
+					}
 				}
+				if err == io.EOF {
+					// Client closed the connection gracefully
+					logger.Debug("client closed the connection")
+					return nil
+				}
+				utils.LogError(logger, err, "failed to read command packet from client")
 				return err
 			}
 
@@ -90,6 +106,12 @@ func handleClientQueries(ctx context.Context, logger *zap.Logger, clientConn, de
 			// reset the requests and responses
 			requests = []mysql.Request{}
 			responses = []mysql.Response{}
+			
+			// Check if this was a COM_QUIT command, which should terminate the connection
+			if commandPkt.Header.Type == mysql.CommandStatusToString(mysql.COM_QUIT) {
+				logger.Debug("COM_QUIT command processed, terminating connection handler")
+				return nil
+			}
 		}
 	}
 }

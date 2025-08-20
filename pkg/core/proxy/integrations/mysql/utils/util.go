@@ -79,6 +79,10 @@ func ReadPacketBuffer(ctx context.Context, logger *zap.Logger, conn net.Conn) ([
 		if err == io.EOF {
 			return nil, err
 		}
+		if err == context.DeadlineExceeded {
+			logger.Debug("timeout occurred while reading MySQL packet header, connection might be idle")
+			return nil, err
+		}
 		// return packetBuffer, fmt.Errorf("failed to read mysql packet header: %w", err)
 		return packetBuffer, err
 	}
@@ -91,6 +95,10 @@ func ReadPacketBuffer(ctx context.Context, logger *zap.Logger, conn net.Conn) ([
 		payload, err := util.ReadRequiredBytes(ctx, logger, conn, int(payloadLength))
 		if err != nil {
 			if err == io.EOF {
+				return nil, err
+			}
+			if err == context.DeadlineExceeded {
+				logger.Debug("timeout occurred while reading MySQL packet payload")
 				return nil, err
 			}
 			// return packetBuffer, fmt.Errorf("failed to read mysql packet payload: %w", err)
