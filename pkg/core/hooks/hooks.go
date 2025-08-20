@@ -354,7 +354,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	// Open a Kprobe at the entry point of the kernel function and attach the
 	// pre-compiled program.
 	h.flagMap = objs.FlagMap
-	if utils.BigReq {
+	if utils.BigPayload {
 		err = h.UpdateFlagMap(0, 1)
 	} else {
 		err = h.UpdateFlagMap(0, 0)

@@ -152,7 +152,7 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 
 				bin := record.RawSample
 
-				if utils.BigReq {
+				if utils.BigPayload {
 					l.Debug("Using Bigger Request Map")
 					var event SocketDataEventBig
 
