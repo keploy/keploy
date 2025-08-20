@@ -381,11 +381,11 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 	if err != nil {
 		return err
 	}
-	
+
 	bigPayload, err := cmd.Flags().GetBool("bigPayload")
 	if err != nil {
 		bigPayload = false
-	}	
+	}
 	utils.BigPayload = bigPayload
 
 	defaultCfg := *c.cfg
