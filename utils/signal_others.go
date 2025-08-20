@@ -38,7 +38,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	hardLimit := 0
 	var err error
 	if username != "" {
-		// get sudoers rlimit
+		// get sudoers rlimit - (reason) https://github.com/keploy/keploy/issues/2899
 		out, err := exec.Command("sudo", "-u", username, "sh", "-c", "ulimit -Hn").Output()
 		if err != nil {
 			logger.Warn("failed to get the hard limit for the number of open file descriptors for the user", zap.String("username", username), zap.Error(err))
@@ -61,6 +61,8 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 			hardLimit = int(rlimit.Max)
 		}
 	}
+
+	fmt.Println(hardLimit) // Debugging line, can be removed later
 
 	if hardLimit != 0 {
 		userCmd = fmt.Sprintf("ulimit -S -n %d && %s", hardLimit, userCmd)
