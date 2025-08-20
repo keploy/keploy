@@ -40,7 +40,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	}
 
 	// Get the current hard limit value
-	hardLimit := 1024
+	hardLimit := 1048576
 
 	fmt.Println(hardLimit)
 
