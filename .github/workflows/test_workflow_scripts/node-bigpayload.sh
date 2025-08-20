@@ -33,18 +33,19 @@ record_traffic() {
         local temp_file="large_payload.json"
         echo '{"data":"' > $temp_file
         # Generate ~500KB of characters
-        head -c 511980 /dev/zero | tr '\0' 'a' >> $temp_file
+        head -c 1011980 /dev/zero | tr '\0' 'a' >> $temp_file
         echo '"}' >> $temp_file
 
         echo "🚀 Sending POST request with 500KB payload..."
-        curl -s -o /dev/null -X POST -H "Content-Type: application/json" --data @"$temp_file" ${url}
+        # curl -s -o /dev/null -X POST -H "Content-Type: application/json" --data @"$temp_file" ${url}
+        curl -v -i -X POST -H "Content-Type: application/json" --data @"$temp_file" ${url}
         
         # Clean up the temporary file
         rm $temp_file
     else
         # For small-payload, send a simple GET request
         echo "🚀 Sending GET request..."
-        curl -s -o /dev/null ${url}
+        curl -i ${url}
     fi
     
     sleep 5
@@ -87,7 +88,8 @@ run_and_verify_tests() {
 
     local test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
     echo "Test status found: ${test_status}"
-
+    echo "here is the test logs:"
+    cat "$test_log_file"
     if [ "$test_status" != "PASSED" ]; then
         echo "❌ Tests did not pass. Status: ${test_status}"
         cat "${test_log_file}"
