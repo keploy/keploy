@@ -96,7 +96,13 @@ func readBinaryValue(data []byte, col *mysql.ColumnDefinition41) (*binaryValueRe
 		res.value = int32(binary.LittleEndian.Uint32(data[:4]))
 		return res, 4, nil
 
-	case mysql.FieldTypeString, mysql.FieldTypeVarString, mysql.FieldTypeVarChar, mysql.FieldTypeBLOB, mysql.FieldTypeTinyBLOB, mysql.FieldTypeMediumBLOB, mysql.FieldTypeLongBLOB, mysql.FieldTypeJSON:
+	case mysql.FieldTypeString,
+		mysql.FieldTypeVarString,
+		mysql.FieldTypeVarChar,
+		mysql.FieldTypeBLOB, mysql.FieldTypeTinyBLOB, mysql.FieldTypeMediumBLOB, mysql.FieldTypeLongBLOB,
+		mysql.FieldTypeJSON,
+		mysql.FieldTypeNewDecimal, // NEWDECIMAL (0xF6 / 246) is sent as a length-encoded string in binary rows
+		mysql.FieldTypeDecimal:    // legacy DECIMAL (0) — treat same as NEWDECIMAL
 		value, _, n, err := utils.ReadLengthEncodedString(data)
 		res.value = string(value)
 		return res, n, err
@@ -207,7 +213,13 @@ func EncodeBinaryRow(_ context.Context, logger *zap.Logger, row *mysql.BinaryRow
 			if err := binary.Write(buf, binary.LittleEndian, val); err != nil {
 				return nil, fmt.Errorf("failed to write %T value: %w", val, err)
 			}
-		case mysql.FieldTypeString, mysql.FieldTypeVarString, mysql.FieldTypeVarChar, mysql.FieldTypeBLOB, mysql.FieldTypeTinyBLOB, mysql.FieldTypeMediumBLOB, mysql.FieldTypeLongBLOB, mysql.FieldTypeJSON:
+		case mysql.FieldTypeString,
+			mysql.FieldTypeVarString,
+			mysql.FieldTypeVarChar,
+			mysql.FieldTypeBLOB, mysql.FieldTypeTinyBLOB, mysql.FieldTypeMediumBLOB, mysql.FieldTypeLongBLOB,
+			mysql.FieldTypeJSON,
+			mysql.FieldTypeNewDecimal, // encode as length-encoded string
+			mysql.FieldTypeDecimal:    // encode as length-encoded string
 			strValue, ok := columnEntry.Value.(string)
 			if !ok {
 				return nil, fmt.Errorf("invalid value type for string field")
