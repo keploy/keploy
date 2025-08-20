@@ -13,8 +13,6 @@ cd "${API_DIR}"
 # --- Install dependencies for the Node.js app ---
 echo "📦 Installing Node.js dependencies..."
 npm install
-
-# --- Function to send requests and record traffic ---
 # Arguments: $1: endpoint
 record_traffic() {
     local endpoint="$1"
@@ -27,9 +25,27 @@ record_traffic() {
     done
     echo "✅ Application is ready. Sending requests to ${url}"
 
-    # Send a few requests to the endpoint
-    curl -s ${url}
-    # curl -s ${url}
+    # Conditionally send requests based on the endpoint
+    if [ "$endpoint" == "large-payload" ]; then
+        echo "📦 Generating 500KB payload for POST request..."
+        # Create a temporary file with a large JSON body
+        local temp_file="large_payload.json"
+        echo '{"data":"' > $temp_file
+        # Generate ~500KB of characters
+        head -c 511980 /dev/zero | tr '\0' 'a' >> $temp_file
+        echo '"}' >> $temp_file
+
+        echo "🚀 Sending POST request with 500KB payload..."
+        curl -s -o /dev/null -X POST -H "Content-Type: application/json" --data @"$temp_file" ${url}
+        
+        # Clean up the temporary file
+        rm $temp_file
+    else
+        # For small-payload, send a simple GET request
+        echo "🚀 Sending GET request..."
+        curl -s -o /dev/null ${url}
+    fi
+    
     sleep 5
 
     # Gracefully stop the recording process
@@ -37,12 +53,12 @@ record_traffic() {
     if [ -n "$pid" ]; then
         echo "🛑 Stopping Keploy recorder (PID: $pid)..."
         sudo kill $pid
-        # wait $pid 2>/dev/null
         echo "Recording stopped."
     else
         echo "⚠️ Keploy recorder process not found."
     fi
 }
+
 
 # --- Function to run tests and verify results ---
 # Arguments: $1: test_log_file
