@@ -7,7 +7,7 @@ on:
 
 jobs:
   node_linux_e2e:
-    runs-on: ubuntu-latest
+    runs-on: [selfhosted-linux-amd64]
     name: Run Keploy E2E Tests for Node.js
     steps:
       - name: Checkout repository
