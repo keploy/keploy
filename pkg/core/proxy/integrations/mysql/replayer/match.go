@@ -160,25 +160,49 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 
 		var tcsMocks []*models.Mock
 		var hasMySQLMocks bool
+		var totalMySQLMocks int
+		var configMocks int
+		var dataMocks int
+		
 		// Filter for non-config MySQL mocks in a single pass.
 		for _, mock := range unfiltered {
 			if mock.Kind == models.MySQL {
 				hasMySQLMocks = true
-				if mock.Spec.Metadata["type"] != "config" {
+				totalMySQLMocks++
+				if mock.Spec.Metadata["type"] == "config" {
+					configMocks++
+				} else {
+					dataMocks++
 					tcsMocks = append(tcsMocks, mock)
 				}
 			}
 		}
+
+		logger.Debug("Mock statistics", 
+			zap.Int("total_unfiltered_mocks", len(unfiltered)),
+			zap.Int("total_mysql_mocks", totalMySQLMocks),
+			zap.Int("config_mocks", configMocks),
+			zap.Int("data_mocks", dataMocks),
+			zap.Int("available_tcs_mocks", len(tcsMocks)),
+			zap.String("request_type", req.Header.Type),
+			zap.Bool("has_mysql_mocks", hasMySQLMocks))
 
 		if !hasMySQLMocks {
 			if ctx.Err() != nil {
 				return nil, false, ctx.Err()
 			}
 			utils.LogError(logger, nil, "no mysql mocks found")
+			logger.Debug("Connection will be closed: no mysql mocks found at all")
 			return nil, false, fmt.Errorf("no mysql mocks found")
 		}
 
 		if len(tcsMocks) == 0 {
+			logger.Debug("Connection might be closed: all data mocks exhausted",
+				zap.Int("total_mysql_mocks", totalMySQLMocks),
+				zap.Int("config_mocks", configMocks),
+				zap.Int("data_mocks", dataMocks),
+				zap.String("request_type", req.Header.Type))
+			
 			if ctx.Err() != nil {
 				return nil, false, ctx.Err()
 			}
@@ -190,7 +214,48 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 				return nil, false, io.EOF
 			}
 
+			// Handle common SQL commands with generic responses when no mocks are found
+			// This prevents premature connection closure during test replay
+			if req.Header.Type == mysql.CommandStatusToString(mysql.COM_QUERY) {
+				if queryPacket, ok := req.Message.(*mysql.QueryPacket); ok {
+					query := strings.ToUpper(strings.TrimSpace(queryPacket.Query))
+					// Handle transaction control and other non-critical commands
+					if query == "BEGIN" || query == "START TRANSACTION" || 
+					   query == "COMMIT" || query == "ROLLBACK" ||
+					   strings.HasPrefix(query, "SET ") {
+						logger.Debug("Providing generic OK response for query without mock", zap.String("query", queryPacket.Query))
+						
+						// Return a generic OK response
+						genericOKResp := &mysql.Response{
+							PacketBundle: mysql.PacketBundle{
+								Header: &mysql.PacketInfo{
+									Header: &mysql.Header{
+										PayloadLength: 7,
+										SequenceID:    1,
+									},
+									Type: "OK",
+								},
+								Message: &mysql.OKPacket{
+									Header:       mysql.OK,
+									AffectedRows: 0,
+									LastInsertID: 0,
+									StatusFlags:  0x0002, // SERVER_STATUS_AUTOCOMMIT
+									Warnings:     0,
+									Info:         "",
+								},
+							},
+						}
+						return genericOKResp, true, nil
+					}
+				}
+			}
+
 			utils.LogError(logger, nil, "no mysql mocks found for handling command phase")
+			logger.Debug("Connection will be closed: no suitable mocks found",
+				zap.String("request_type", req.Header.Type),
+				zap.Int("total_mysql_mocks", totalMySQLMocks),
+				zap.Int("config_mocks", configMocks),
+				zap.Int("data_mocks", dataMocks))
 			return nil, false, fmt.Errorf("no mysql mocks found for handling command phase")
 		}
 
@@ -331,6 +396,11 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		}
 
 		// Delete the matched mock from the mockDb
+		logger.Debug("Attempting to consume/update mock",
+			zap.String("mock_name", matchedMock.Name),
+			zap.String("mock_kind", string(matchedMock.Kind)),
+			zap.String("request_type", req.Header.Type),
+			zap.Int("remaining_data_mocks", dataMocks-1))
 
 		okk := updateMock(ctx, logger, matchedMock, mockDb)
 		if !okk {
@@ -338,6 +408,12 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			logger.Debug("failed to update the matched mock")
 			continue
 		}
+		
+		logger.Debug("Successfully consumed mock",
+			zap.String("mock_name", matchedMock.Name),
+			zap.String("request_type", req.Header.Type),
+			zap.Int("estimated_remaining_data_mocks", dataMocks-1))
+		
 		return matchedResp, true, nil
 	}
 }
