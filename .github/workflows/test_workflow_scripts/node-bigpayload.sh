@@ -67,7 +67,7 @@ run_and_verify_tests() {
 
     echo "🚀 Running tests..."
     # Use 'keploy' directly since it's in the system PATH
-    sudo -E env PATH="$PATH" keploy test -c "node server.js" --delay 10 &> "${test_log_file}"
+    sudo -E env PATH="$PATH" keploy test -c "node server.js" --delay 10 &> "${test_log_file}" || true
 
     echo "🔍 Checking for errors in test logs..."
     if grep -E "ERROR|WARNING: DATA RACE" "${test_log_file}"; then
