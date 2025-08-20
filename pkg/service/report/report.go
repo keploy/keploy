@@ -23,7 +23,8 @@ type Report struct {
 }
 
 const (
-	ReportSuffix = "-report"
+	ReportSuffix  = "-report"
+	TestRunPrefix = "test-run-"
 )
 
 func New(logger *zap.Logger, cfg *config.Config, reportDB ReportDB, testDB TestDB) *Report {
@@ -110,8 +111,8 @@ func (r *Report) getLatestTestRunID(ctx context.Context) (string, error) {
 	}
 
 	sort.Slice(testRunIDs, func(i, j int) bool {
-		numi, erri := strconv.Atoi(strings.TrimPrefix(testRunIDs[i], "test-run-"))
-		numj, errj := strconv.Atoi(strings.TrimPrefix(testRunIDs[j], "test-run-"))
+		numi, erri := strconv.Atoi(strings.TrimPrefix(testRunIDs[i], TestRunPrefix))
+		numj, errj := strconv.Atoi(strings.TrimPrefix(testRunIDs[j], TestRunPrefix))
 		if erri != nil || errj != nil {
 			return testRunIDs[i] < testRunIDs[j]
 		}

@@ -48,7 +48,7 @@ func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, tes
 }
 
 func (ts *TestYaml) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
-	return yaml.ReadSessionIndices(ctx, ts.TcsPath, ts.logger)
+	return yaml.ReadSessionIndices(ctx, ts.TcsPath, ts.logger, yaml.ModeDir)
 }
 
 func (ts *TestYaml) GetReportTestSets(ctx context.Context, latestRunID string) ([]string, error) {
@@ -59,7 +59,7 @@ func (ts *TestYaml) GetReportTestSets(ctx context.Context, latestRunID string) (
 
 	runReportPath := filepath.Join(ts.TcsPath, "reports", latestRunID)
 
-	return yaml.ReadSessionFileIndices(ctx, runReportPath, ts.logger)
+	return yaml.ReadSessionIndices(ctx, runReportPath, ts.logger, yaml.ModeFile)
 }
 
 func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error) {
