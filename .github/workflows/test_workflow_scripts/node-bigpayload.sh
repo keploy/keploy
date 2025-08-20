@@ -20,7 +20,7 @@ record_traffic() {
 
     echo "⏳ Waiting for application to start..."
     # Wait for the app to be ready by checking for a 200 OK response
-    while ! curl -s --head ${url} | head -n 1 | grep "200 OK" > /dev/null; do
+    while ! curl -s -o /dev/null -w "%{http_code}" ${url} | grep -E "200|405" > /dev/null; do
         sleep 3
     done
     echo "✅ Application is ready. Sending requests to ${url}"
