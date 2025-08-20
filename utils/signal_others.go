@@ -4,6 +4,7 @@ package utils
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"syscall"
@@ -31,6 +32,18 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	// Run the app as the user who invoked sudo
 	username := os.Getenv("SUDO_USER")
 
+	// Get the current hard limit for the number of open file descriptors
+	var rlimit syscall.Rlimit
+	err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rlimit)
+	if err != nil {
+		logger.Error("Failed to get RLIMIT_NOFILE", zap.Error(err))
+	}
+
+	// Get the current hard limit value
+	hardLimit := rlimit.Max
+
+	userCmd = fmt.Sprintf("ulimit -S -n %d && %s", hardLimit, userCmd)
+
 	cmd := exec.CommandContext(ctx, "sh", "-c", userCmd)
 	if username != "" {
 		// print all environment variables
@@ -55,7 +68,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 
 	logger.Debug("", zap.Any("executing cli", cmd.String()))
 
-	err := cmd.Start()
+	err = cmd.Start()
 	if err != nil {
 		return CmdError{Type: Init, Err: err}
 	}
