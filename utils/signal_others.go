@@ -44,7 +44,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 
 	fmt.Println(hardLimit)
 
-	userCmd = fmt.Sprintf("ulimit -S -n %d && %s", hardLimit, userCmd)
+	userCmd = fmt.Sprintf("ulimit -S -n %d && %s", hardLimit-1, userCmd)
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", userCmd)
 	if username != "" {
