@@ -35,7 +35,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 
 	// Get the current hard limit for the number of open file descriptors
 	var rlimit syscall.Rlimit
-	hardLimit := 102400
+	hardLimit := 0
 	var err error
 	if username != "" {
 		// get sudoers rlimit
@@ -43,14 +43,12 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 		if err != nil {
 			logger.Warn("failed to get the hard limit for the number of open file descriptors for the user", zap.String("username", username), zap.Error(err))
 		} else {
-			fmt.Println("came here")
 			output := string(out)[:len(out)-1]
 			if output != "unlimited" {
 				limit, err := strconv.Atoi(output)
 				if err != nil {
 					logger.Warn("failed to parse the hard limit for the number of open file descriptors for the user", zap.String("username", username), zap.Error(err))
 				} else {
-					fmt.Println("came here 2")
 					hardLimit = limit
 				}
 			}
@@ -58,16 +56,15 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	} else {
 		err = syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rlimit)
 		if err != nil {
-			logger.Warn("failed to get the hard limit for the number of open file descriptors for the user", zap.Error(err))
-			hardLimit = 1024
+			logger.Warn("failed to get the hard limit for the number of open file descriptors for the root user", zap.Error(err))
 		} else {
 			hardLimit = int(rlimit.Max)
 		}
 	}
 
-	fmt.Println(hardLimit)
-
-	userCmd = fmt.Sprintf("ulimit -S -n %d && %s", hardLimit, userCmd)
+	if hardLimit != 0 {
+		userCmd = fmt.Sprintf("ulimit -S -n %d && %s", hardLimit, userCmd)
+	}
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", userCmd)
 	if username != "" {
