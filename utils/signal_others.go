@@ -42,6 +42,8 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	// Get the current hard limit value
 	hardLimit := rlimit.Max
 
+	fmt.Println(hardLimit)
+
 	userCmd = fmt.Sprintf("ulimit -S -n %d && %s", hardLimit, userCmd)
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", userCmd)
