@@ -23,6 +23,14 @@ import (
 
 var querySigCache sync.Map // map[string]string
 
+// case-insensitive prefix check without allocation
+func hasPrefixFold(s, p string) bool {
+	if len(s) < len(p) {
+		return false
+	}
+	return strings.EqualFold(s[:len(p)], p)
+}
+
 func getQueryStructureCached(sql string) (string, error) {
 	if v, ok := querySigCache.Load(sql); ok {
 		return v.(string), nil
@@ -262,24 +270,33 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		if req.Header.Type == sCOM_QUERY {
 			if qp, ok := req.Message.(*mysql.QueryPacket); ok {
 				q := strings.TrimSpace(qp.Query)
-				// Case-insensitive checks without allocating uppercase strings
-				hasPrefixFold := func(s, p string) bool {
-					if len(s) < len(p) {
-						return false
-					}
-					return strings.EqualFold(s[:len(p)], p)
-				}
 				switch {
 				case strings.EqualFold(q, "BEGIN"),
 					strings.EqualFold(q, "START TRANSACTION"),
 					strings.EqualFold(q, "COMMIT"),
 					strings.EqualFold(q, "ROLLBACK"),
-					hasPrefixFold(q, "SET "):
+					hasPrefixFold(q, "SET "),
+					// NEW: DDL/control that only expects an OK from server
+					hasPrefixFold(q, "ALTER "),
+					hasPrefixFold(q, "CREATE "),
+					hasPrefixFold(q, "DROP "),
+					hasPrefixFold(q, "TRUNCATE "),
+					hasPrefixFold(q, "RENAME "),
+					hasPrefixFold(q, "LOCK TABLES"),
+					hasPrefixFold(q, "UNLOCK TABLES"),
+					hasPrefixFold(q, "SAVEPOINT "),
+					hasPrefixFold(q, "RELEASE SAVEPOINT "),
+					hasPrefixFold(q, "USE "):
+					// Build a minimal OK; encoder will set length from payload.
+					seq := byte(1)
+					if req.PacketBundle.Header != nil && req.PacketBundle.Header.Header != nil {
+						seq = req.PacketBundle.Header.Header.SequenceID + 1
+					}
 					generic := &mysql.Response{
 						PacketBundle: mysql.PacketBundle{
 							Header: &mysql.PacketInfo{
-								Header: &mysql.Header{PayloadLength: 7, SequenceID: 1},
-								Type:   "OK",
+								Header: &mysql.Header{PayloadLength: 7, SequenceID: seq},
+								Type:   mysql.StatusToString(mysql.OK),
 							},
 							Message: &mysql.OKPacket{
 								Header:       mysql.OK,
@@ -291,6 +308,8 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 							},
 						},
 					}
+					logger.Debug("Returning synthetic OK for unmocked control/DDL", zap.String("query", q))
+
 					return generic, true, nil
 				}
 			}
