@@ -21,8 +21,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"text/template"
-
 	"github.com/andybalholm/brotli"
 	"go.keploy.io/server/v2/pkg/models"
 
