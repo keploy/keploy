@@ -15,3 +15,9 @@ func (a *AutoInc) Next() (id int) {
 	a.id++
 	return
 }
+
+func (a *AutoInc) Reset() {
+	a.Lock()
+	a.id = 0
+	a.Unlock()
+}

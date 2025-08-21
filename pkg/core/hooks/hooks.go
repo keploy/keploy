@@ -32,6 +32,7 @@ func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 		logger:            logger,
 		sess:              core.NewSessions(),
 		m:                 sync.Mutex{},
+		objectsMutex:      sync.RWMutex{},
 		proxyIP4:          "127.0.0.1",
 		proxyIP6:          [4]uint32{0000, 0000, 0000, 0001},
 		proxyPort:         cfg.ProxyPort,
@@ -42,14 +43,15 @@ func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 }
 
 type Hooks struct {
-	logger    *zap.Logger
-	sess      *core.Sessions
-	proxyIP4  string
-	proxyIP6  [4]uint32
-	proxyPort uint32
-	dnsPort   uint32
-	m         sync.Mutex
-	conf      *config.Config
+	logger       *zap.Logger
+	sess         *core.Sessions
+	proxyIP4     string
+	proxyIP6     [4]uint32
+	proxyPort    uint32
+	dnsPort      uint32
+	m            sync.Mutex
+	objectsMutex sync.RWMutex // Protects eBPF objects during load/unload operations
+	conf         *config.Config
 	// eBPF C shared maps
 	clientRegistrationMap    *ebpf.Map
 	agentRegistartionMap     *ebpf.Map
@@ -105,6 +107,11 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 		ID: id,
 	})
 
+	// Set the app ID for this session with proper synchronization
+	h.m.Lock()
+	h.appID = id
+	h.m.Unlock()
+
 	err := h.load(ctx, opts)
 	if err != nil {
 		return err
@@ -147,12 +154,14 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 		return err
 	}
 
-	//getting all the ebpf maps
+	//getting all the ebpf maps with proper synchronization
+	h.objectsMutex.Lock()
 	h.clientRegistrationMap = objs.KeployClientRegistrationMap
 	h.agentRegistartionMap = objs.KeployAgentRegistrationMap
 	h.e2eAppRegistrationMap = objs.E2eInfoMap
 	h.dockerAppRegistrationMap = objs.DockerAppRegistrationMap
 	h.objects = objs
+	h.objectsMutex.Unlock()
 
 	// ---------------
 
@@ -560,7 +569,11 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 	if err := h.socket.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the socket")
 	}
+
+	// Reset the app ID with proper synchronization
+	h.m.Lock()
 	h.appID = 0
+	h.m.Unlock()
 
 	if !opts.E2E {
 		if err := h.udpp4.Close(); err != nil {
@@ -659,9 +672,13 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 	if err := h.recvfromRet.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the recvfromRet")
 	}
+
+	// Close eBPF objects with proper synchronization
+	h.objectsMutex.Lock()
 	if err := h.objects.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the objects")
 	}
+	h.objectsMutex.Unlock()
 
 	if err := h.connect.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the connect")
