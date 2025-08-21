@@ -22,12 +22,10 @@ trap die ERR
 wait_for_mongo() {
   section "Wait for Mongo readiness"
   for i in {1..90}; do
-    # prefer container check
     if docker exec mongoDb mongosh --quiet --eval "db.adminCommand('ping').ok" >/dev/null 2>&1; then
       echo "Mongo responds to ping."
       endsec; return 0
     fi
-    # fallback to TCP
     if (echo > /dev/tcp/127.0.0.1/27017) >/dev/null 2>&1; then
       echo "Mongo TCP port open."
       endsec; return 0
@@ -40,7 +38,7 @@ wait_for_mongo() {
 
 wait_for_http() {
   local url="$1" tries="${2:-60}"
-  for i in $(seq 1 "$tries"); do
+  for _ in $(seq 1 "$tries"); do
     if curl -fsS "$url" >/dev/null; then return 0; fi
     sleep 1
   done
@@ -75,6 +73,7 @@ send_request() {
 
 # ----- main -----
 
+# Load test scripts and start MongoDB container
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 section "Start Mongo"
@@ -86,12 +85,13 @@ section "Prepare app"
 npm ci || npm install
 sed -i "s/mongoDb:27017/localhost:27017/" "src/db/connection.js"
 rm -rf keploy/
-# fresh keploy.yml
-[[ -f ./keploy.yml ]] && rm ./keploy.yml
+[[ -f "./keploy.yml" ]] && rm ./keploy.yml
+
+# Generate the keploy-config file.
 sudo "$RECORD_BIN" config --generate
-# Update noise safely (only if key exists)
+
+# Update the global noise to page (ignore changes to this field)
 config_file="./keploy.yml"
-# shellcheck disable=SC2016
 sed -i 's/global: {}/global: {"body": {"page":[]}}/' "$config_file"
 endsec
 
@@ -142,7 +142,9 @@ fi
 
 # ---- Replays ----
 run_replay() {
-  local idx="$1" extra_args="${2:-}" logfile="test_logs${idx}.txt"
+  local idx="$1"
+  local extra_args="${2:-}"
+  local logfile="test_logs${idx}.txt"
 
   section "Replay #$idx (args: ${extra_args:-<none>})"
   set +e
@@ -164,13 +166,18 @@ run_replay() {
   local any_fail=false
   for rpt in "$RUN_DIR"/test-set-*-report.yaml; do
     [[ -f "$rpt" ]] || continue
+    local status
     status=$(awk '/^status:/{print $2; exit}' "$rpt")
     echo "Test status for $(basename "$rpt"): ${status:-<missing>}"
-    [[ "$status" == "PASSED" ]] || any_fail=true
+    if [[ "$status" != "PASSED" ]]; then any_fail=true; fi
   done
   endsec
 
-  $any_fail && return 1 || return "$rc"
+  if $any_fail; then
+    return 1
+  else
+    return "$rc"
+  fi
 }
 
 run_replay 1
@@ -186,3 +193,4 @@ fi
 run_replay 3 "--apiTimeout 30"
 
 echo "All replays completed. If no errors above, CI can PASS."
+exit 0

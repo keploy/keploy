@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Safe, chatty CI script for Java + Postgres + Keploy
+# Safe, chatty CI script for Java + Postgres + Keploy with auto API-prefix detection
 
 set -Eeuo pipefail
 
@@ -19,9 +19,14 @@ die() {
 }
 trap die ERR
 
+http_code() {
+  # prints HTTP status code or 000 on error
+  curl -s -o /dev/null -w "%{http_code}" "$1" 2>/dev/null || echo 000
+}
+
 wait_for_postgres() {
   section "Wait for Postgres readiness"
-  for i in {1..90}; do
+  for i in {1..120}; do
     if docker exec mypostgres pg_isready -U petclinic -d petclinic >/dev/null 2>&1; then
       echo "Postgres is ready."
       endsec; return 0
@@ -34,39 +39,100 @@ wait_for_postgres() {
   endsec; return 1
 }
 
-wait_for_http() {
-  local url="$1" tries="${2:-60}"
-  for i in $(seq 1 "$tries"); do
-    if curl -fsS "$url" >/dev/null; then return 0; fi
+wait_for_http_port() {
+  # waits for *any* HTTP response from root or actuator (not strict 200)
+  local base="http://localhost:9966"
+  section "Wait for app HTTP port"
+  for i in {1..180}; do
+    if curl -sS "${base}/" -o /dev/null || curl -sS "${base}/actuator/health" -o /dev/null; then
+      echo "HTTP port responded."
+      endsec; return 0
+    fi
     sleep 1
   done
+  echo "::error::App did not open HTTP port on 9966"
+  endsec; return 1
+}
+
+detect_api_prefix() {
+  # returns either /petclinic/api or /api (echo to stdout), otherwise empty
+  local base="http://localhost:9966"
+  local candidates=( "/petclinic/api" "/api" )
+  for p in "${candidates[@]}"; do
+    local code
+    code=$(http_code "${base}${p}/pettypes")
+    if [[ "$code" =~ ^(200|201|202|204)$ ]]; then
+      echo "$p"; return 0
+    fi
+  done
+  # If no 2xx, still check which gives *any* non-404 (e.g., 401/403 if security toggled)
+  for p in "${candidates[@]}"; do
+    local code
+    code=$(http_code "${base}${p}/pettypes")
+    if [[ "$code" != "404" && "$code" != "000" ]]; then
+      echo "$p"; return 0
+    fi
+  done
+  # Fallback to actuator presence: assume /api if actuator exists
+  if [[ "$(http_code "${base}/actuator/health")" == "200" ]]; then
+    echo "/api"; return 0
+  fi
+  echo ""
   return 1
 }
 
 send_request() {
   local kp_pid="$1"
+  local base="http://localhost:9966"
 
-  # Ensure app is up
-  if ! wait_for_http "http://localhost:9966/petclinic/api/pettypes" 120; then
-    echo "::error::App did not become healthy at /pettypes"
+  wait_for_http_port
+
+  # Try to detect API prefix dynamically
+  local API_PREFIX
+  API_PREFIX=$(detect_api_prefix || true)
+
+  if [[ -z "${API_PREFIX}" ]]; then
+    echo "::warning::Could not auto-detect API prefix. Trying both /petclinic/api and /api."
+    # Try both paths to maximize coverage
+    local paths=( "/petclinic/api" "/api" )
+    for pref in "${paths[@]}"; do
+      curl -sS "${base}${pref}/pettypes" || true
+      curl -sS --request POST \
+        --url "${base}${pref}/pettypes" \
+        --header 'content-type: application/json' \
+        --data '{"name":"John Doe"}' || true
+      curl -sS "${base}${pref}/pettypes" || true
+      curl -sS --request POST \
+        --url "${base}${pref}/pettypes" \
+        --header 'content-type: application/json' \
+        --data '{"name":"Alice Green"}' || true
+      curl -sS "${base}${pref}/pettypes" || true
+      curl -sS --request DELETE "${base}${pref}/pettypes/1" || true
+      curl -sS "${base}${pref}/pettypes" || true
+    done
   else
+    echo "Detected API prefix: ${API_PREFIX}"
     echo "good!App started"
-  fi
+    curl -sS "${base}${API_PREFIX}/pettypes" || true
 
-  # Traffic to generate tests/mocks
-  curl -sS http://localhost:9966/petclinic/api/pettypes || true
-  curl -sS --request POST \
-    --url http://localhost:9966/petclinic/api/pettypes \
-    --header 'content-type: application/json' \
-    --data '{"name":"John Doe"}' || true
-  curl -sS http://localhost:9966/petclinic/api/pettypes || true
-  curl -sS --request POST \
-    --url http://localhost:9966/petclinic/api/pettypes \
-    --header 'content-type: application/json' \
-    --data '{"name":"Alice Green"}' || true
-  curl -sS http://localhost:9966/petclinic/api/pettypes || true
-  curl -sS --request DELETE http://localhost:9966/petclinic/api/pettypes/1 || true
-  curl -sS http://localhost:9966/petclinic/api/pettypes || true
+    curl -sS --request POST \
+      --url "${base}${API_PREFIX}/pettypes" \
+      --header 'content-type: application/json' \
+      --data '{"name":"John Doe"}' || true
+
+    curl -sS "${base}${API_PREFIX}/pettypes" || true
+
+    curl -sS --request POST \
+      --url "${base}${API_PREFIX}/pettypes" \
+      --header 'content-type: application/json' \
+      --data '{"name":"Alice Green"}' || true
+
+    curl -sS "${base}${API_PREFIX}/pettypes" || true
+
+    curl -sS --request DELETE "${base}${API_PREFIX}/pettypes/1" || true
+
+    curl -sS "${base}${API_PREFIX}/pettypes" || true
+  fi
 
   # Let keploy persist, then stop it
   sleep 10
@@ -117,7 +183,7 @@ for i in 1 2; do
   # Drive traffic and stop keploy
   send_request "$KEPLOY_PID"
 
-  # Wait for keploy and capture rc
+  # Wait for keploy exit and capture code
   set +e
   wait "$KEPLOY_PID"
   rc=$?
@@ -125,10 +191,11 @@ for i in 1 2; do
   echo "Record exit code: $rc"
   [[ $rc -ne 0 ]] && echo "::warning::Keploy record exited non-zero (iteration $i)"
 
-  # Basic validation + surface issues
-  echo "== keploy artifacts (depth 3) =="
+  # Quick sanity: ensure something was written
+  echo "== keploy artifacts after record =="
   find ./keploy -maxdepth 3 -type f | sort || true
 
+  # Surface issues from record logs
   if grep -q "WARNING: DATA RACE" "${app_name}.txt"; then
     echo "::error::Data race detected in ${app_name}.txt"
     tail -n 200 "${app_name}.txt"
