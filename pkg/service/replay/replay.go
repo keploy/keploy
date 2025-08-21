@@ -234,12 +234,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	for i, testSet := range testSets {
 		testSetResult = false
-		
+
 		// Reload hooks before each test set if this is not the first test set
 		// This ensures fresh eBPF state and prevents issues between test runs
 		if i > 0 && r.instrument {
 			r.logger.Info("Reloading hooks for test set", zap.String("testSet", testSet), zap.Int("testSetIndex", i+1), zap.Int("totalTestSets", len(testSets)))
-			
+
 			// Cancel the current hooks and wait for cleanup to complete
 			if hookCancel != nil {
 				hookCancel()
@@ -247,7 +247,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 				// The cleanup goroutine needs to finish its operations before we start new setup
 				time.Sleep(2000 * time.Millisecond)
 			}
-			
+
 			// Reload hooks for the new test set with retry mechanism
 			newInst, err := r.reloadHooks(ctx, inst.AppID)
 			if err != nil {
@@ -264,7 +264,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			inst.AppID = newInst.AppID
 			r.logger.Info("Successfully reloaded hooks for test set", zap.String("testSet", testSet), zap.Uint64("newAppID", newInst.AppID))
 		}
-		
+
 		err := HookImpl.BeforeTestSetRun(ctx, testSet)
 		if err != nil {
 			stopReason = fmt.Sprintf("failed to run before test hook: %v", err)
@@ -551,17 +551,17 @@ func (r *Replayer) reloadHooks(ctx context.Context, appID uint64) (*InstrumentSt
 
 	// The challenge is that calling Hook again will set up new cleanup that deletes the app
 	// when the context is canceled. We need to create a fresh setup.
-	
+
 	// First, set up the app again since it might have been deleted during cleanup
 	newAppID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{
-		Container:     r.config.ContainerName, 
-		DockerNetwork: r.config.NetworkName, 
+		Container:     r.config.ContainerName,
+		DockerNetwork: r.config.NetworkName,
 		DockerDelay:   r.config.BuildDelay,
 	})
 	if err != nil {
 		return &InstrumentState{}, fmt.Errorf("failed to setup instrumentation during hook reload: %w", err)
 	}
-	
+
 	// Update the config with the new app ID
 	r.config.AppID = newAppID
 
@@ -569,7 +569,7 @@ func (r *Replayer) reloadHooks(ctx context.Context, appID uint64) (*InstrumentSt
 	var lastErr error
 	maxRetries := 5
 	baseDelay := 200 * time.Millisecond
-	
+
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		// Check for context cancellation
 		select {
@@ -577,21 +577,21 @@ func (r *Replayer) reloadHooks(ctx context.Context, appID uint64) (*InstrumentSt
 			return &InstrumentState{}, context.Canceled
 		default:
 		}
-		
+
 		// Add a small delay before each attempt to let any remaining cleanup finish
 		if attempt > 1 {
 			delay := baseDelay * time.Duration(attempt) // Linear backoff
 			r.logger.Debug("Retrying hook reload", zap.Int("attempt", attempt), zap.Duration("delay", delay))
 			time.Sleep(delay)
 		}
-		
+
 		// Start fresh hooks with the new app ID
 		hookCtx := context.WithoutCancel(ctx)
 		hookCtx, cancel := context.WithCancel(hookCtx)
-		
+
 		err := r.instrumentation.Hook(hookCtx, newAppID, models.HookOptions{
-			Mode:          models.MODE_TEST, 
-			EnableTesting: r.config.EnableTesting, 
+			Mode:          models.MODE_TEST,
+			EnableTesting: r.config.EnableTesting,
 			Rules:         r.config.BypassRules,
 		})
 		if err != nil {
@@ -609,12 +609,12 @@ func (r *Replayer) reloadHooks(ctx context.Context, appID uint64) (*InstrumentSt
 			}
 			return &InstrumentState{}, fmt.Errorf("failed to reload hooks after %d attempts: %w", maxRetries, lastErr)
 		}
-		
+
 		// Success - return the new hook state with the new app ID
 		r.logger.Debug("Successfully reloaded eBPF hooks", zap.Uint64("oldAppID", appID), zap.Uint64("newAppID", newAppID), zap.Int("attempt", attempt))
 		return &InstrumentState{AppID: newAppID, HookCancel: cancel}, nil
 	}
-	
+
 	// This should never be reached, but just in case
 	return &InstrumentState{}, fmt.Errorf("failed to reload hooks after %d attempts: %w", maxRetries, lastErr)
 }
