@@ -114,12 +114,15 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 			"string": utils.ToString,
 			"float":  utils.ToFloat,
 		}
+
 		tmpl, err := template.New("template").Funcs(funcMap).Parse(string(testCaseStr))
 		if err != nil || tmpl == nil {
 			utils.LogError(logger, err, "failed to parse the template", zap.Any("TestCaseString", string(testCaseStr)), zap.Any("TestCase", tc.Name), zap.Any("TestSet", testSet))
 			return nil, err
 		}
 
+		fmt.Println("Templatized Values:", utils.TemplatizedValues)
+		// spew.Dump(utils.TemplatizedValues)
 		data := make(map[string]interface{})
 
 		for k, v := range utils.TemplatizedValues {
@@ -129,7 +132,6 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		if len(utils.SecretValues) > 0 {
 			data["secret"] = utils.SecretValues
 		}
-
 		var output bytes.Buffer
 		err = tmpl.Execute(&output, data)
 		if err != nil {

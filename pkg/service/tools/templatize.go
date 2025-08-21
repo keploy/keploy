@@ -10,7 +10,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"text/template"
+	"time"
 
 	"github.com/7sDream/geko"
 	"go.keploy.io/server/v2/pkg/models"
@@ -61,7 +64,7 @@ func (t *Tools) Templatize(ctx context.Context) error {
 			t.logger.Warn("The test set is empty. Please record some test cases to templatize.", zap.String("testSet", testSetID))
 			continue
 		}
-
+		fmt.Println("Processing test cases for test set:", testSetID)
 		err = t.ProcessTestCases(ctx, tcs, testSetID)
 		if err != nil {
 			utils.LogError(t.logger, err, "failed to process test cases")
@@ -71,7 +74,70 @@ func (t *Tools) Templatize(ctx context.Context) error {
 	return nil
 }
 
+// instrumentation metrics and caches
+var (
+	templMetrics struct {
+		addTemplatesCalls        uint64
+		addTemplates1Calls       uint64
+		addTemplates1CacheHits   uint64
+		addTemplates1CacheMisses uint64
+		parseCacheHits           uint64
+		parseCacheMisses         uint64
+	}
+	addTemplates1Cache   = make(map[string]at1CacheVal)
+	addTemplates1CacheMu sync.RWMutex
+	parseCache           = make(map[string]interface{})
+	parseCacheMu         sync.RWMutex
+)
+
+func resetTemplMetrics() {
+	atomic.StoreUint64(&templMetrics.addTemplatesCalls, 0)
+	atomic.StoreUint64(&templMetrics.addTemplates1Calls, 0)
+	atomic.StoreUint64(&templMetrics.addTemplates1CacheHits, 0)
+	atomic.StoreUint64(&templMetrics.addTemplates1CacheMisses, 0)
+	atomic.StoreUint64(&templMetrics.parseCacheHits, 0)
+	atomic.StoreUint64(&templMetrics.parseCacheMisses, 0)
+	addTemplates1CacheMu.Lock()
+	addTemplates1Cache = make(map[string]at1CacheVal)
+	addTemplates1CacheMu.Unlock()
+	parseCacheMu.Lock()
+	parseCache = make(map[string]interface{})
+	parseCacheMu.Unlock()
+}
+
 func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, testSetID string) error {
+	resetTemplMetrics()
+	allStart := time.Now()
+
+	// Fast path for large test sets: avoid O(N^2) pairwise comparisons and deep recursion.
+	const largeSetThreshold = 600 // heuristic; adjust based on profiling.
+	if len(tcs) >= largeSetThreshold {
+		t.logger.Info("using large-set optimized templatization path", zap.Int("testcases", len(tcs)))
+		if err := t.fastTemplatizeLargeSet(ctx, tcs, testSetID); err != nil {
+			utils.LogError(t.logger, err, "fast templatization failed; falling back to legacy path")
+		} else {
+			// persist and return early
+			for _, tc := range tcs {
+				tc.HTTPReq.Body = removeQuotesInTemplates(tc.HTTPReq.Body)
+				tc.HTTPResp.Body = removeQuotesInTemplates(tc.HTTPResp.Body)
+				if err := t.testDB.UpdateTestCase(ctx, tc, testSetID, false); err != nil {
+					utils.LogError(t.logger, err, "failed to update test case after fast templating")
+				}
+			}
+			utils.RemoveDoubleQuotes(utils.TemplatizedValues)
+			existingTestSet, _ := t.testSetConf.Read(ctx, testSetID)
+			var existingMetadata map[string]interface{}
+			if existingTestSet != nil {
+				existingMetadata = existingTestSet.Metadata
+			}
+			if err := t.testSetConf.Write(ctx, testSetID, &models.TestSet{Template: utils.TemplatizedValues, Metadata: existingMetadata}); err != nil {
+				utils.LogError(t.logger, err, "failed to write test set (fast path)")
+			}
+			t.logger.Info("completed fast templatization", zap.Duration("duration", time.Since(allStart)),
+				zap.Int("finalTemplateVars", len(utils.TemplatizedValues)))
+			return nil
+		}
+	}
 
 	// In test cases, we often use placeholders like {{float .id}} for templatized variables. Ideally, we should wrap
 	// them in double quotes, i.e., "{{float .id}}", to prevent errors during JSON unmarshaling. However, we avoid doing
@@ -102,58 +168,86 @@ func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, te
 		tc.HTTPResp.Body = addQuotesInTemplates(tc.HTTPResp.Body)
 	}
 
+	fmt.Println("Inside process testcases .. Templatizing test cases for test set:", testSetID)
+
 	// Process test cases for different scenarios and update the tcs and utils.TemplatizedValues
 	// Case 1: Response Body of one test case to Request Headers of other test cases
 	// (use case: Authorization token)
+	stageStart := time.Now()
 	t.processRespBodyToReqHeader(ctx, tcs)
+	t.logger.Debug("templating stage done", zap.String("stage", "RespBodyToReqHeader"), zap.Duration("duration", time.Since(stageStart)))
 
 	// Case 2: Request Headers of one test case to Request Headers of other test cases
 	// (use case: Authorization token if Login API is not present in the test set)
+	stageStart = time.Now()
 	t.processReqHeadersToReqHeader(ctx, tcs)
+	t.logger.Debug("templating stage done", zap.String("stage", "ReqHeadersToReqHeader"), zap.Duration("duration", time.Since(stageStart)))
 
 	// Case 3: Response Body of one test case to Response Headers of other
 	// (use case: POST - GET scenario)
+	stageStart = time.Now()
 	t.processRespBodyToReqURL(ctx, tcs)
+	t.logger.Debug("templating stage done", zap.String("stage", "RespBodyToReqURL"), zap.Duration("duration", time.Since(stageStart)))
 
 	// Case 4: Compare the req and resp body of one to other.
 	// (use case: POST - PUT scenario)
+	stageStart = time.Now()
 	t.processRespBodyToReqBody(ctx, tcs)
+	t.logger.Debug("templating stage done", zap.String("stage", "RespBodyToReqBody"), zap.Duration("duration", time.Since(stageStart)))
 
 	// Case 5: Compare the req and resp for same test case for any common fields.
 	// (use case: POST) request and response both have same fields.
+	stageStart = time.Now()
 	t.processBody(ctx, tcs)
+	t.logger.Debug("templating stage done", zap.String("stage", "BodySameTest"), zap.Duration("duration", time.Since(stageStart)))
 
 	// Case 6: Compare the req url with the response body of same test for any common fields.
 	// (use case: GET) URL might container same fields as response body.
+	stageStart = time.Now()
 	t.processReqURLToRespBodySameTest(ctx, tcs)
+	t.logger.Debug("templating stage done", zap.String("stage", "ReqURLToRespBodySameTest"), zap.Duration("duration", time.Since(stageStart)))
 
 	// case 7: Compare the resp body of one test with the response body of other tests for any common fields.
 	// (use case: POST - GET scenario)
+	stageStart = time.Now()
 	t.processRespBodyToRespBody(ctx, tcs)
+	t.logger.Debug("templating stage done", zap.String("stage", "RespBodyToRespBody"), zap.Duration("duration", time.Since(stageStart)))
 
 	// case 7: Compare the req body of one test with the response body of other tests for any common fields.
 	// (use case: POST - GET scenario)
+	stageStart = time.Now()
 	t.processReqBodyToRespBody(ctx, tcs)
+	t.logger.Debug("templating stage done", zap.String("stage", "ReqBodyToRespBody"), zap.Duration("duration", time.Since(stageStart)))
 
 	// case 8: Compare the req body of one test with the req URL of other tests for any common fields.
 	// (use case: POST - GET scenario)
+	stageStart = time.Now()
 	t.processReqBodyToReqURL(ctx, tcs)
+	t.logger.Debug("templating stage done", zap.String("stage", "ReqBodyToReqURL"), zap.Duration("duration", time.Since(stageStart)))
 
 	// case 9: Compare the req body of one test with the req body of other tests for any common fields.
 	// (use case: POST - PUT scenario)
+	stageStart = time.Now()
 	t.processReqBodyToReqBody(ctx, tcs)
+	t.logger.Debug("templating stage done", zap.String("stage", "ReqBodyToReqBody"), zap.Duration("duration", time.Since(stageStart)))
 
 	// case 10: Compare the req URL of one test with the req body of other tests for any common fields.
 	// (use case: GET - PUT scenario)
+	stageStart = time.Now()
 	t.processReqURLToReqBody(ctx, tcs)
+	t.logger.Debug("templating stage done", zap.String("stage", "ReqURLToReqBody"), zap.Duration("duration", time.Since(stageStart)))
 
 	// case 11: Compare the req URL of one test with the req URL of other tests for any common fields
 	// (use case: GET - PUT scenario)
+	stageStart = time.Now()
 	t.processReqURLToReqURL(ctx, tcs)
+	t.logger.Debug("templating stage done", zap.String("stage", "ReqURLToReqURL"), zap.Duration("duration", time.Since(stageStart)))
 
 	// case 12: Compare the req URL of one test with the resp Body of other tests for any common fields
 	// (use case: GET - PUT scenario)
+	stageStart = time.Now()
 	t.processReqURLToRespBody(ctx, tcs)
+	t.logger.Debug("templating stage done", zap.String("stage", "ReqURLToRespBody"), zap.Duration("duration", time.Since(stageStart)))
 
 	for _, tc := range tcs {
 		tc.HTTPReq.Body = removeQuotesInTemplates(tc.HTTPReq.Body)
@@ -191,7 +285,288 @@ func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, te
 		}
 	}
 
+	t.logger.Info("templating summary",
+		zap.String("testSet", testSetID),
+		zap.Duration("totalDuration", time.Since(allStart)),
+		zap.Uint64("addTemplates_calls", atomic.LoadUint64(&templMetrics.addTemplatesCalls)),
+		zap.Uint64("addTemplates1_calls", atomic.LoadUint64(&templMetrics.addTemplates1Calls)),
+		zap.Uint64("addTemplates1_cache_hits", atomic.LoadUint64(&templMetrics.addTemplates1CacheHits)),
+		zap.Uint64("addTemplates1_cache_misses", atomic.LoadUint64(&templMetrics.addTemplates1CacheMisses)),
+		zap.Uint64("parse_cache_hits", atomic.LoadUint64(&templMetrics.parseCacheHits)),
+		zap.Uint64("parse_cache_misses", atomic.LoadUint64(&templMetrics.parseCacheMisses)),
+	)
 	return nil
+}
+
+// occurrence represents a single location of a primitive value in the test corpus.
+type occurrence struct {
+	testIdx     int
+	locType     string // header_req, header_resp, req_body, resp_body, url_path_seg, url_query
+	key         string // header key or body key
+	isAuthToken bool
+	valueType   string // string|int|float
+}
+
+// fastTemplatizeLargeSet performs scalable templatization by building an index of repeated values instead of pairwise scanning.
+func (t *Tools) fastTemplatizeLargeSet(ctx context.Context, tcs []*models.TestCase, testSetID string) error {
+	start := time.Now()
+	// Step 1: parse bodies concurrently and build value index.
+	type bodyData struct {
+		req  map[string]interface{}
+		resp map[string]interface{}
+	}
+	bodies := make([]bodyData, len(tcs))
+	valueIndex := make(map[string][]occurrence) // canonical value string -> occurrences
+	type valOcc struct {
+		val string
+		occ occurrence
+	}
+	occCh := make(chan valOcc, 10000)
+	var aggWg sync.WaitGroup
+	aggWg.Add(1)
+	go func() {
+		defer aggWg.Done()
+		for vo := range occCh {
+			if vo.val == "" {
+				continue
+			}
+			if len(vo.val) > 512 {
+				continue
+			}
+			valueIndex[vo.val] = append(valueIndex[vo.val], vo.occ)
+		}
+	}()
+	sendOcc := func(valStr string, occ occurrence) {
+		select {
+		case occCh <- valOcc{val: valStr, occ: occ}:
+		default:
+			// drop if channel saturated to avoid blocking; acceptable tradeoff for large sets
+		}
+	}
+
+	// Worker pool
+	workerCount := 8
+	if len(tcs) < workerCount {
+		workerCount = len(tcs)
+	}
+	jobs := make(chan int, len(tcs))
+	var wg sync.WaitGroup
+	parseErrCh := make(chan error, workerCount)
+	for w := 0; w < workerCount; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				tc := tcs[idx]
+				// Headers (request)
+				for hk, hv := range tc.HTTPReq.Header {
+					if hk == "Date" || hk == "User-Agent" {
+						continue
+					}
+					// Authorization: keep scheme separate
+					if strings.EqualFold(hk, "Authorization") && strings.Contains(hv, " ") {
+						parts := strings.SplitN(hv, " ", 2)
+						sendOcc(parts[1], occurrence{testIdx: idx, locType: "header_req", key: hk, isAuthToken: true, valueType: "string"})
+						continue
+					}
+					sendOcc(hv, occurrence{testIdx: idx, locType: "header_req", key: hk, valueType: "string"})
+				}
+				// Parse request body
+				if bd := tc.HTTPReq.Body; bd != "" && strings.HasPrefix(strings.TrimSpace(bd), "{") {
+					if m, err := parseIntoJSON(bd); err == nil && m != nil {
+						if obj, ok := m.(map[string]interface{}); ok {
+							bodies[idx].req = obj
+							for k, v := range obj {
+								switch val := v.(type) {
+								case string:
+									sendOcc(val, occurrence{testIdx: idx, locType: "req_body", key: k, valueType: "string"})
+								case float64:
+									sendOcc(fmt.Sprint(val), occurrence{testIdx: idx, locType: "req_body", key: k, valueType: "float"})
+								case int, int64:
+									sendOcc(fmt.Sprint(val), occurrence{testIdx: idx, locType: "req_body", key: k, valueType: "int"})
+								}
+							}
+						}
+					}
+				}
+				// Parse response body
+				if bd := tc.HTTPResp.Body; bd != "" && strings.HasPrefix(strings.TrimSpace(bd), "{") {
+					if m, err := parseIntoJSON(bd); err == nil && m != nil {
+						if obj, ok := m.(map[string]interface{}); ok {
+							bodies[idx].resp = obj
+							for k, v := range obj {
+								switch val := v.(type) {
+								case string:
+									sendOcc(val, occurrence{testIdx: idx, locType: "resp_body", key: k, valueType: "string"})
+								case float64:
+									sendOcc(fmt.Sprint(val), occurrence{testIdx: idx, locType: "resp_body", key: k, valueType: "float"})
+								case int, int64:
+									sendOcc(fmt.Sprint(val), occurrence{testIdx: idx, locType: "resp_body", key: k, valueType: "int"})
+								}
+							}
+						}
+					}
+				}
+			}
+		}()
+	}
+	for i := range tcs {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	close(occCh)
+	aggWg.Wait()
+	close(parseErrCh)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	t.logger.Debug("index built", zap.Int("uniqueValues", len(valueIndex)), zap.Duration("t", time.Since(start)))
+
+	// Step 2: choose values to templatize (appearing >=2 times and not purely constant trivial tokens).
+	templateMap := make(map[string]string) // value -> varName
+	usedNames := make(map[string]struct{})
+	nextID := 0
+	pickName := func(base string) string {
+		base = strings.TrimSpace(base)
+		if base == "" {
+			base = "var"
+		}
+		// sanitize
+		base = regexp.MustCompile(`[^a-zA-Z0-9_]`).ReplaceAllString(base, "")
+		if base == "" {
+			base = "var"
+		}
+		name := base
+		for {
+			if _, ok := usedNames[name]; !ok {
+				usedNames[name] = struct{}{}
+				return name
+			}
+			nextID++
+			name = fmt.Sprintf("%s%d", base, nextID)
+		}
+	}
+
+	for valStr, occs := range valueIndex {
+		if len(occs) < 2 {
+			continue
+		}
+		// skip numbers that look like timestamps ( > 10 digits ) to reduce noise.
+		if len(valStr) > 12 && regexp.MustCompile(`^[0-9]+$`).MatchString(valStr) {
+			continue
+		}
+		// derive base name from first occurrence key; for Authorization tokens pick access_token.
+		first := occs[0]
+		base := first.key
+		if first.isAuthToken {
+			base = "access_token"
+		}
+		if base == "" {
+			base = "val"
+		}
+		// unify some common header names
+		base = strings.ReplaceAll(strings.ToLower(base), "-", "_")
+		templateMap[valStr] = pickName(base)
+	}
+	t.logger.Debug("selected values for templating", zap.Int("count", len(templateMap)))
+
+	// Step 3: populate utils.TemplatizedValues and apply replacements.
+	for valStr, name := range templateMap {
+		// Determine sample occurrence to infer type.
+		occ := valueIndex[valStr][0]
+		switch occ.valueType {
+		case "int":
+			if i, err := strconv.Atoi(valStr); err == nil {
+				utils.TemplatizedValues[name] = i
+			} else {
+				utils.TemplatizedValues[name] = valStr
+			}
+		case "float":
+			if f, err := strconv.ParseFloat(valStr, 64); err == nil {
+				utils.TemplatizedValues[name] = f
+			} else {
+				utils.TemplatizedValues[name] = valStr
+			}
+		default:
+			utils.TemplatizedValues[name] = valStr
+		}
+	}
+
+	// Apply replacements
+	for valStr, occs := range valueIndex {
+		varName, ok := templateMap[valStr]
+		if !ok {
+			continue
+		}
+		tmplStr := func(vType string) string {
+			switch vType {
+			case "int":
+				return fmt.Sprintf("{{int .%s }}", varName)
+			case "float":
+				return fmt.Sprintf("{{float .%s }}", varName)
+			default:
+				return fmt.Sprintf("{{string .%s }}", varName)
+			}
+		}
+		for _, occ := range occs {
+			tc := tcs[occ.testIdx]
+			switch occ.locType {
+			case "header_req":
+				if occ.isAuthToken {
+					// reconstruct with scheme
+					parts := strings.SplitN(tc.HTTPReq.Header[occ.key], " ", 2)
+					if len(parts) == 2 {
+						tc.HTTPReq.Header[occ.key] = parts[0] + " " + tmplStr("string")
+					} else {
+						tc.HTTPReq.Header[occ.key] = tmplStr("string")
+					}
+				} else {
+					tc.HTTPReq.Header[occ.key] = tmplStr(occ.valueType)
+				}
+			case "req_body":
+				if bodies[occ.testIdx].req != nil {
+					bodies[occ.testIdx].req[occ.key] = wrapTemplateRaw(occ.valueType, varName)
+				}
+			case "resp_body":
+				if bodies[occ.testIdx].resp != nil {
+					bodies[occ.testIdx].resp[occ.key] = wrapTemplateRaw(occ.valueType, varName)
+				}
+			}
+		}
+	}
+
+	// Marshal modified bodies back
+	for i := range tcs {
+		if bodies[i].req != nil {
+			if b, err := json.Marshal(bodies[i].req); err == nil {
+				tcs[i].HTTPReq.Body = string(b)
+			}
+		}
+		if bodies[i].resp != nil {
+			if b, err := json.Marshal(bodies[i].resp); err == nil {
+				tcs[i].HTTPResp.Body = string(b)
+			}
+		}
+	}
+
+	t.logger.Info("fast templating result", zap.Int("templateVars", len(utils.TemplatizedValues)), zap.Duration("duration", time.Since(start)))
+	return nil
+}
+
+// wrapTemplateRaw returns the raw placeholder without quotes for numeric types so later removal logic can adjust.
+func wrapTemplateRaw(valType, name string) interface{} {
+	switch valType {
+	case "int":
+		return fmt.Sprintf("{{int .%s }}", name)
+	case "float":
+		return fmt.Sprintf("{{float .%s }}", name)
+	default:
+		return fmt.Sprintf("{{string .%s }}", name)
+	}
 }
 
 func (t *Tools) processRespBodyToReqHeader(ctx context.Context, tcs []*models.TestCase) {
@@ -202,7 +577,7 @@ func (t *Tools) processRespBodyToReqHeader(ctx context.Context, tcs []*models.Te
 			continue
 		}
 		if jsonResponse == nil {
-			t.logger.Debug("Skipping RespBodyToReqHeader Template processing for test case", zap.Any("testcase", tcs[i].Name), zap.Error(err))
+			t.logger.Warn("Skipping RespBodyToReqHeader Template processing for test case", zap.Any("testcase", tcs[i].Name), zap.Error(err))
 			continue
 		}
 		for j := i + 1; j < len(tcs); j++ {
@@ -473,11 +848,21 @@ func parseIntoJSON(response string) (interface{}, error) {
 	if response == "" {
 		return nil, nil
 	}
-	// geko lib will maintain the order of the keys in the json.
+	parseCacheMu.RLock()
+	if v, ok := parseCache[response]; ok {
+		parseCacheMu.RUnlock()
+		atomic.AddUint64(&templMetrics.parseCacheHits, 1)
+		return v, nil
+	}
+	parseCacheMu.RUnlock()
+	atomic.AddUint64(&templMetrics.parseCacheMisses, 1)
 	result, err := geko.JSONUnmarshal([]byte(response))
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal the response: %v", err)
 	}
+	parseCacheMu.Lock()
+	parseCache[response] = result
+	parseCacheMu.Unlock()
 	return result, nil
 }
 
@@ -503,190 +888,263 @@ func RenderIfTemplatized(val interface{}) (bool, interface{}, error) {
 	return true, val, nil
 }
 
+// addTemplates performs recursive template inference while guarding against deep or cyclic structures.
+// It previously recursed without any depth/visited protection which could lead to excessive CPU time on
+// large / repetitive inputs. We add a small state object to short‑circuit repeats and a max depth.
 func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 interface{}) bool {
-	switch v := interface1.(type) {
-	case geko.ObjectItems:
-		keys := v.Keys()
-		vals := v.Values()
-		for i := range keys {
-			var err error
-			var isTemplatized bool
-			original := vals[i]
-			isTemplatized, vals[i], err = RenderIfTemplatized(vals[i])
-			if err != nil {
-				return false
-			}
-			switch vals[i].(type) {
-			case string:
-				x := vals[i].(string)
-				addTemplates(logger, &x, interface2)
-				vals[i] = x
-			case float32, float64, int, int64:
-				x := interface{}(vals[i])
-				addTemplates(logger, &x, interface2)
-				vals[i] = x
-			default:
-				addTemplates(logger, vals[i], interface2)
-			}
-			if isTemplatized {
-				v.SetValueByIndex(i, original)
-			} else {
-				v.SetValueByIndex(i, vals[i])
-			}
-		}
-	case geko.Array:
-		for i, val := range v.List {
-			var err error
-			var isTemplatized bool
-			original := val
-			isTemplatized, val, err = RenderIfTemplatized(val)
-			if err != nil {
-				return false
-			}
-			switch x := val.(type) {
-			case string:
-				addTemplates(logger, &x, interface2)
-				v.List[i] = x
-			case float32, float64, int, int64:
-				x = interface{}(x)
-				addTemplates(logger, &x, interface2)
-				v.List[i] = x
-			default:
-				addTemplates(logger, v.List[i], interface2)
-			}
-			if isTemplatized {
-				v.Set(i, original)
-			} else {
-				v.Set(i, v.List[i])
-			}
-		}
-	case map[string]string:
-		for key, val := range v {
-			var isTemplatized bool
-			original := val
-			isTemplatized, val1, err := RenderIfTemplatized(val)
-			if err != nil {
-				utils.LogError(logger, err, "failed to render for template")
-				return false
-			}
-			// just a type assertion check though it should always be string.
-			val, ok := (val1).(string)
-			if !ok {
-				continue
-			}
-			// Saving the auth type to add it to the template latet.
-			authType := ""
-			if key == "Authorization" && len(strings.Split(val, " ")) > 1 {
-				authType = strings.Split(val, " ")[0]
-				val = strings.Split(val, " ")[1]
-			}
-			ok = addTemplates1(logger, &val, interface2)
-			if !ok {
-				continue
-			}
-			if key == "Authorization" && len(strings.Split(val, " ")) > 1 {
-				val = authType + " " + val
-			}
+	atomic.AddUint64(&templMetrics.addTemplatesCalls, 1)
+	const maxDepth = 25
+	visited := make(map[uintptr]struct{})
+	var recur func(cur interface{}, peer interface{}, depth int) bool
 
-			if isTemplatized {
-				v[key] = original
-			} else {
-				v[key] = val
+	mark := func(x interface{}) (uintptr, bool) {
+		// We only track pointers, maps, slices (reference types) to avoid infinite revisits.
+		rv := reflect.ValueOf(x)
+		switch rv.Kind() {
+		case reflect.Ptr, reflect.Map, reflect.Slice:
+			if rv.IsNil() {
+				return 0, false
 			}
-		}
-	case *string:
-		original := *v
-		isTemplatized, tempVal, err := RenderIfTemplatized(*v)
-		if err != nil {
-			utils.LogError(logger, err, "failed to render for template")
-			return false
-		}
-		var ok bool
-		// just a type assertion check though it should always be string.
-		*v, ok = (tempVal).(string)
-		if !ok {
-			return false
-		}
-
-		// passing this v as reference so that it can be changed in the addTemplates1 function if required.
-		ok = addTemplates1(logger, v, interface2)
-		if ok {
-			return true
-		}
-
-		originalURL, err := url.Parse(original)
-		if err != nil {
-			return false
-		}
-
-		url, err := url.Parse(*v)
-		if err != nil || url.Scheme == "" || url.Host == "" {
-			return false
-		}
-
-		// Checking the special case of the URL for path and query parameters.
-		urlParts := strings.Split(url.Path, "/")
-		originalURLParts := strings.Split(originalURL.Path, "/")
-		// checking if the last part of the URL is a template.
-		ok = addTemplates1(logger, &urlParts[len(urlParts)-1], interface2)
-		if isTemplatized {
-			urlParts[len(urlParts)-1] = originalURLParts[len(originalURLParts)-1]
-		}
-
-		url.Path = strings.Join(urlParts, "/")
-
-		if url.RawQuery != "" {
-			// Only pass the values of the query parameters to the addTemplates1 function.
-			queryParams := strings.Split(url.RawQuery, "&")
-			for i, param := range queryParams {
-				param = strings.Split(param, "=")[1]
-				addTemplates1(logger, &param, interface2)
-				// reconstruct the query parameter with the templatized value if any.
-				queryParams[i] = strings.Split(queryParams[i], "=")[0] + "=" + param
+			ptr := rv.Pointer()
+			if _, ok := visited[ptr]; ok {
+				return ptr, true
 			}
-			// reconstruct the URL with the templatized query parameters.
-			url.RawQuery = strings.Join(queryParams, "&")
-			*v = fmt.Sprintf("%s://%s%s?%s", url.Scheme, url.Host, url.Path, url.RawQuery)
-			return true
-		}
-		// reconstruct the URL with the templatized path.
-		*v = fmt.Sprintf("%s://%s%s", url.Scheme, url.Host, url.Path)
-		return ok
-	case *interface{}:
-		switch w := (*v).(type) {
-		case float64, int64, int, float32:
-			var val string
-			switch x := w.(type) {
-			case float64:
-				val = utils.ToString(x)
-			case int64:
-				val = utils.ToString(x)
-			case int:
-				val = utils.ToString(x)
-			case float32:
-				val = utils.ToString(x)
-			}
-			addTemplates1(logger, &val, interface2)
-			parts := strings.Split(val, " ")
-			if len(parts) > 1 { // if the value is a template.
-				parts1 := strings.Split(parts[0], "{{")
-				if len(parts1) > 1 {
-					val = parts1[0] + "{{" + getType(w) + " " + parts[1] + "}}"
-				}
-				*v = val
-				return true
-			}
+			visited[ptr] = struct{}{}
+			return ptr, false
 		default:
-			logger.Error("unsupported type while templatizing", zap.Any("type", w))
-			return false
+			return 0, false
 		}
 	}
-	return false
+
+	changed := false
+	recur = func(cur interface{}, peer interface{}, depth int) bool {
+		atomic.AddUint64(&templMetrics.addTemplatesCalls, 1)
+		if depth > maxDepth {
+			logger.Debug("templating depth limit reached, skipping deeper traversal", zap.Int("depth", depth))
+			return false
+		}
+		if _, already := mark(cur); already {
+			return false
+		}
+		switch v := cur.(type) {
+		case geko.ObjectItems:
+			keys := v.Keys()
+			vals := v.Values()
+			for i := range keys {
+				var err error
+				var isTemplatized bool
+				original := vals[i]
+				isTemplatized, vals[i], err = RenderIfTemplatized(vals[i])
+				if err != nil {
+					return changed
+				}
+				switch vals[i].(type) {
+				case string:
+					x := vals[i].(string)
+					if recur(&x, peer, depth+1) {
+						vals[i] = x
+					}
+				case float32, float64, int, int64:
+					x := interface{}(vals[i])
+					if recur(&x, peer, depth+1) {
+						vals[i] = x
+					}
+				default:
+					recur(vals[i], peer, depth+1)
+				}
+				if isTemplatized {
+					v.SetValueByIndex(i, original)
+				} else {
+					v.SetValueByIndex(i, vals[i])
+				}
+			}
+		case geko.Array:
+			for i, val := range v.List {
+				var err error
+				var isTemplatized bool
+				original := val
+				isTemplatized, val, err = RenderIfTemplatized(val)
+				if err != nil {
+					return changed
+				}
+				switch x := val.(type) {
+				case string:
+					if recur(&x, peer, depth+1) {
+						v.List[i] = x
+					} else {
+						v.List[i] = x
+					}
+				case float32, float64, int, int64:
+					tmp := interface{}(x)
+					recur(&tmp, peer, depth+1)
+					v.List[i] = tmp
+				default:
+					recur(v.List[i], peer, depth+1)
+				}
+				if isTemplatized {
+					v.Set(i, original)
+				} else {
+					v.Set(i, v.List[i])
+				}
+			}
+		case map[string]string:
+			for key, val := range v {
+				var isTemplatized bool
+				original := val
+				isTemplatized, val1, err := RenderIfTemplatized(val)
+				if err != nil {
+					utils.LogError(logger, err, "failed to render for template")
+					continue
+				}
+				sval, ok := val1.(string)
+				if !ok {
+					continue
+				}
+				authType := ""
+				if key == "Authorization" && len(strings.Split(sval, " ")) > 1 {
+					parts := strings.Split(sval, " ")
+					authType = parts[0]
+					sval = parts[1]
+				}
+				if addTemplates1(logger, &sval, peer) {
+					changed = true
+				}
+				if authType != "" {
+					sval = authType + " " + sval
+				}
+				if isTemplatized {
+					v[key] = original
+				} else {
+					v[key] = sval
+				}
+			}
+		case *string:
+			original := *v
+			isTemplatized, tempVal, err := RenderIfTemplatized(*v)
+			if err != nil {
+				utils.LogError(logger, err, "failed to render for template")
+				return changed
+			}
+			sval, ok := tempVal.(string)
+			if !ok {
+				return changed
+			}
+			*v = sval
+			if addTemplates1(logger, v, peer) { // direct body reuse
+				changed = true
+				return true
+			}
+			originalURL, err := url.Parse(original)
+			if err != nil {
+				return changed
+			}
+			parsed, err := url.Parse(*v)
+			if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+				return changed
+			}
+			urlParts := strings.Split(parsed.Path, "/")
+			originalURLParts := strings.Split(originalURL.Path, "/")
+			if len(urlParts) > 0 {
+				last := urlParts[len(urlParts)-1]
+				if addTemplates1(logger, &last, peer) {
+					changed = true
+				}
+				if isTemplatized && len(originalURLParts) == len(urlParts) {
+					last = originalURLParts[len(originalURLParts)-1]
+				}
+				urlParts[len(urlParts)-1] = last
+			}
+			parsed.Path = strings.Join(urlParts, "/")
+			if parsed.RawQuery != "" {
+				queryParams := strings.Split(parsed.RawQuery, "&")
+				for i, param := range queryParams {
+					parts := strings.SplitN(param, "=", 2)
+					if len(parts) != 2 {
+						continue
+					}
+					val := parts[1]
+					addTemplates1(logger, &val, peer)
+					queryParams[i] = parts[0] + "=" + val
+				}
+				parsed.RawQuery = strings.Join(queryParams, "&")
+				*v = fmt.Sprintf("%s://%s%s?%s", parsed.Scheme, parsed.Host, parsed.Path, parsed.RawQuery)
+				return true
+			}
+			*v = fmt.Sprintf("%s://%s%s", parsed.Scheme, parsed.Host, parsed.Path)
+		case *interface{}:
+			switch w := (*v).(type) {
+			case float64, int64, int, float32:
+				var val string
+				switch x := w.(type) {
+				case float64:
+					val = utils.ToString(x)
+				case int64:
+					val = utils.ToString(x)
+				case int:
+					val = utils.ToString(x)
+				case float32:
+					val = utils.ToString(x)
+				}
+				if addTemplates1(logger, &val, peer) {
+					parts := strings.Split(val, " ")
+					if len(parts) > 1 {
+						parts1 := strings.Split(parts[0], "{{")
+						if len(parts1) > 1 {
+							val = parts1[0] + "{{" + getType(w) + " " + parts[1] + "}}"
+						}
+						*v = val
+						changed = true
+					}
+				}
+			default:
+				logger.Debug("unsupported type while templatizing", zap.Any("type", w))
+			}
+		}
+		return changed
+	}
+
+	return recur(interface1, interface2, 0)
 }
 
 // TODO: add better comment here and rename this function.
 // Here we simplify the second interface and finally add the templates.
+// caching wrapper for addTemplates1Core
+type at1CacheVal struct {
+	changed bool
+	newVal  string
+}
+
+func buildAT1Key(val string, body interface{}) string {
+	return fmt.Sprintf("%T|%s|%d", body, val, len(utils.TemplatizedValues))
+}
+
 func addTemplates1(logger *zap.Logger, val1 *string, body interface{}) bool {
+	atomic.AddUint64(&templMetrics.addTemplates1Calls, 1)
+	key := buildAT1Key(*val1, body)
+	addTemplates1CacheMu.RLock()
+	if cv, ok := addTemplates1Cache[key]; ok {
+		addTemplates1CacheMu.RUnlock()
+		atomic.AddUint64(&templMetrics.addTemplates1CacheHits, 1)
+		if cv.changed {
+			*val1 = cv.newVal
+		}
+		return cv.changed
+	}
+	addTemplates1CacheMu.RUnlock()
+	atomic.AddUint64(&templMetrics.addTemplates1CacheMisses, 1)
+	orig := *val1
+	changed := addTemplates1Core(logger, val1, body)
+	addTemplates1CacheMu.Lock()
+	addTemplates1Cache[key] = at1CacheVal{changed: changed, newVal: *val1}
+	addTemplates1CacheMu.Unlock()
+	if !changed {
+		*val1 = orig
+	}
+	return changed
+}
+
+// addTemplates1Core contains the original logic (slightly refactored) so that we can memoize the wrapper above.
+func addTemplates1Core(logger *zap.Logger, val1 *string, body interface{}) bool {
 	switch b := body.(type) {
 	case geko.ObjectItems:
 		keys := b.Keys()
@@ -938,7 +1396,7 @@ func render(val string) (interface{}, error) {
 	for k, v := range utils.TemplatizedValues {
 		data[k] = v
 	}
-
+	fmt.Println("Templatized Values: ", utils.TemplatizedValues)
 	if len(utils.SecretValues) > 0 {
 		data["secret"] = utils.SecretValues
 	}

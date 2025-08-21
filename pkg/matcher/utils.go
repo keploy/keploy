@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/7sDream/geko"
 	"github.com/fatih/color"
@@ -22,6 +23,325 @@ import (
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
+
+var (
+	regexCacheMu sync.RWMutex
+	regexCache   = make(map[string]*regexp.Regexp)
+)
+
+// getCompiled returns a cached compiled regexp for pattern.
+// It never panics: on invalid patterns, it returns a "never matches" regex (?!) and caches it.
+func getCompiled(pattern string) *regexp.Regexp {
+	regexCacheMu.RLock()
+	re := regexCache[pattern]
+	regexCacheMu.RUnlock()
+	if re != nil {
+		return re
+	}
+
+	// Compile outside the read lock.
+	compiled, err := regexp.Compile(pattern)
+	if err != nil {
+		// Fallback to a regex that never matches to avoid panics / repeated compiles
+		compiled, _ = regexp.Compile(`(?!)`)
+	}
+
+	regexCacheMu.Lock()
+	// Double-check to avoid races.
+	if old := regexCache[pattern]; old == nil {
+		regexCache[pattern] = compiled
+	} else {
+		compiled = old
+	}
+	regexCacheMu.Unlock()
+	return compiled
+}
+
+func MatchesAnyRegex(str string, regexArray []string) (bool, string) {
+	for _, pattern := range regexArray {
+		if getCompiled(pattern).MatchString(str) {
+			return true, pattern
+		}
+	}
+	return false, ""
+}
+
+type noiseEntry struct {
+	keyLower string
+	regexps  []*regexp.Regexp // empty => ignore subtree
+}
+type noiseIndex struct {
+	entries []noiseEntry
+}
+
+func buildNoiseIndex(mp map[string][]string) noiseIndex {
+	if mp == nil {
+		return noiseIndex{}
+	}
+	out := noiseIndex{entries: make([]noiseEntry, 0, len(mp))}
+	for k, arr := range mp {
+		e := noiseEntry{keyLower: strings.ToLower(k)}
+		if len(arr) > 0 {
+			e.regexps = make([]*regexp.Regexp, 0, len(arr))
+			for _, p := range arr {
+				e.regexps = append(e.regexps, getCompiled(p))
+			}
+		}
+		out.entries = append(out.entries, e)
+	}
+	return out
+}
+
+func (ni noiseIndex) match(keyLower string) (regs []*regexp.Regexp, isNoisy bool) {
+	for _, e := range ni.entries {
+		if strings.Contains(keyLower, e.keyLower) {
+			return e.regexps, true
+		}
+	}
+	return nil, false
+}
+
+func JSONDiffWithNoiseControl(validatedJSON ValidatedJSON, noise map[string][]string, ignoreOrdering bool) (JSONComparisonResult, error) {
+	idx := buildNoiseIndex(noise)
+	return matchJSONWithNoiseHandlingIndexed("", validatedJSON.expected, validatedJSON.actual, idx, ignoreOrdering)
+}
+
+// Back-compat shim used by a few spots internally (if any).
+func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseMap map[string][]string, ignoreOrdering bool) (JSONComparisonResult, error) {
+	return matchJSONWithNoiseHandlingIndexed(key, expected, actual, buildNoiseIndex(noiseMap), ignoreOrdering)
+}
+
+// New optimized implementation.
+func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{}, ni noiseIndex, ignoreOrdering bool) (JSONComparisonResult, error) {
+	var out JSONComparisonResult
+	// Type check fast-path (JSON unmarshal produces these concrete types).
+	switch e := expected.(type) {
+	case nil:
+		if actual == nil {
+			out.matches, out.isExact = true, true
+		}
+		return out, nil
+
+	case string:
+		a, ok := actual.(string)
+		if !ok {
+			return out, errors.New("type not matched")
+		}
+		regs, noisy := ni.match(strings.ToLower(key))
+		if noisy && len(regs) != 0 {
+			if anyRegexpMatchStr(a, regs) {
+				out.matches, out.isExact = true, true
+				return out, nil
+			}
+		}
+		if e == a || noisy {
+			out.matches, out.isExact = true, true
+		}
+		return out, nil
+
+	case bool:
+		a, ok := actual.(bool)
+		if !ok {
+			return out, errors.New("type not matched")
+		}
+		_, noisy := ni.match(strings.ToLower(key))
+		if e == a || noisy {
+			out.matches, out.isExact = true, true
+		}
+		return out, nil
+
+	case float64:
+		a, ok := actual.(float64)
+		if !ok {
+			return out, errors.New("type not matched")
+		}
+		_, noisy := ni.match(strings.ToLower(key))
+		if e == a || noisy {
+			out.matches, out.isExact = true, true
+		}
+		return out, nil
+
+	case map[string]interface{}:
+		a, ok := actual.(map[string]interface{})
+		if !ok {
+			return out, errors.New("type not matched")
+		}
+
+		// If whole subtree is noisy (no regex guard), accept.
+		if regs, noisy := ni.match(strings.ToLower(key)); noisy && len(regs) == 0 {
+			out.matches, out.isExact = true, true
+			return out, nil
+		}
+
+		// Quick length check — allows early exit if extra/missing keys (ignoring noisy children).
+		// We still need to walk to account for noisy exclusions; so we won't return solely on len.
+		isExact := true
+
+		// Lowercased prefix once.
+		prefix := ""
+		if key != "" {
+			prefix = key + "."
+		}
+		prefixLower := strings.ToLower(prefix)
+
+		// 1) All expected keys must be present & match.
+		for k, v := range e {
+			val, ok := a[k]
+			if !ok {
+				return out, nil
+			}
+			childKeyLower := prefixLower + strings.ToLower(k)
+
+			// If child subtree is entirely noisy, skip deep compare.
+			if regs, noisy := ni.match(childKeyLower); noisy && len(regs) == 0 {
+				continue
+			}
+
+			res, err := matchJSONWithNoiseHandlingIndexed(prefix+k, v, val, ni, ignoreOrdering)
+			if err != nil || !res.matches {
+				return out, nil
+			}
+			if !res.isExact {
+				isExact = false
+				out.differences = append(out.differences, k)
+				out.differences = append(out.differences, res.differences...)
+			}
+		}
+
+		// 2) No unexpected non-noisy keys in actual.
+		for k := range a {
+			if _, ok := e[k]; ok {
+				continue
+			}
+			childKeyLower := prefixLower + strings.ToLower(k)
+			if regs, noisy := ni.match(childKeyLower); noisy && len(regs) == 0 {
+				continue // ignore unexpected but noisy subtree
+			}
+			return out, nil
+		}
+
+		out.matches, out.isExact = true, isExact
+		return out, nil
+
+	case []interface{}:
+		a, ok := actual.([]interface{})
+		if !ok {
+			return out, errors.New("type not matched")
+		}
+		if len(e) != len(a) {
+			return out, nil
+		}
+
+		// If the whole slice is marked noisy-without-regex, accept.
+		if regs, noisy := ni.match(strings.ToLower(key)); noisy && len(regs) == 0 {
+			out.matches, out.isExact = true, true
+			return out, nil
+		}
+
+		// Fast path: if ordering matters, avoid O(n²).
+		if !ignoreOrdering {
+			isExact := true
+			for i := 0; i < len(e); i++ {
+				res, err := matchJSONWithNoiseHandlingIndexed(key, e[i], a[i], ni, ignoreOrdering)
+				if err != nil || !res.matches {
+					return out, nil
+				}
+				if !res.isExact {
+					isExact = false
+				}
+			}
+			out.matches, out.isExact = true, isExact
+			return out, nil
+		}
+
+		// ignoreOrdering == true: greedy matching with "used" flags to avoid reusing elements.
+		used := make([]bool, len(a))
+		isExact := true
+
+		for i := 0; i < len(e); i++ {
+			matched := false
+			// Try primitive fast match first to reduce recursion.
+			if j, ok := findAndClaimPrimitiveEqual(e[i], a, used); ok {
+				used[j] = true
+				matched = true
+			} else {
+				// Fallback to structural match.
+				for j := 0; j < len(a); j++ {
+					if used[j] {
+						continue
+					}
+					childKey := "" // by design: no index prefix at root mixed objects
+					res, err := matchJSONWithNoiseHandlingIndexed(childKey, e[i], a[j], ni, ignoreOrdering)
+					if err == nil && res.matches {
+						if !res.isExact {
+							isExact = false
+							for _, v := range res.differences {
+								if childKey != "" {
+									v = childKey + "." + v
+								}
+								out.differences = append(out.differences, v)
+							}
+						}
+						used[j] = true
+						matched = true
+						break
+					}
+				}
+			}
+			if !matched {
+				out.matches, out.isExact = false, false
+				return out, nil
+			}
+		}
+
+		out.matches, out.isExact = true, isExact
+		return out, nil
+	}
+
+	return out, errors.New("type not registered for json")
+}
+
+func anyRegexpMatchStr(s string, regs []*regexp.Regexp) bool {
+	for _, re := range regs {
+		if re.MatchString(s) {
+			return true
+		}
+	}
+	return false
+}
+
+func findAndClaimPrimitiveEqual(x interface{}, arr []interface{}, used []bool) (int, bool) {
+	switch v := x.(type) {
+	case string:
+		for i, y := range arr {
+			if used[i] {
+				continue
+			}
+			if ys, ok := y.(string); ok && ys == v {
+				return i, true
+			}
+		}
+	case float64:
+		for i, y := range arr {
+			if used[i] {
+				continue
+			}
+			if yf, ok := y.(float64); ok && yf == v {
+				return i, true
+			}
+		}
+	case bool:
+		for i, y := range arr {
+			if used[i] {
+				continue
+			}
+			if yb, ok := y.(bool); ok && yb == v {
+				return i, true
+			}
+		}
+	}
+	return -1, false
+}
 
 type ValidatedJSON struct {
 	expected    interface{} // The expected JSON
@@ -292,7 +612,16 @@ func UnmarshallJSON(s string, log *zap.Logger) (interface{}, error) {
 // maxLineLength is chars PER expected/actual string. Can be changed no problem
 const maxLineLength = 50
 
-var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+// ansiRegex is compiled at init-time; if compilation fails, falls back to a never-matches regex.
+var ansiRegex *regexp.Regexp
+
+func init() {
+	re, err := regexp.Compile(`\x1b\[[0-9;]*[a-zA-Z]`)
+	if err != nil {
+		re, _ = regexp.Compile(`(?!)`)
+	}
+	ansiRegex = re
+}
 
 var ansiResetCode = "\x1b[0m"
 
@@ -740,16 +1069,6 @@ func SubstringKeyMatch(s string, mp map[string][]string) ([]string, bool) {
 // 	return []string{}, false
 // }
 
-func MatchesAnyRegex(str string, regexArray []string) (bool, string) {
-	for _, pattern := range regexArray {
-		re := regexp.MustCompile(pattern)
-		if re.MatchString(str) {
-			return true, pattern
-		}
-	}
-	return false, ""
-}
-
 func AddHTTPBodyToMap(body string, m map[string][]string) error {
 	// add body
 	if json.Valid([]byte(body)) {
@@ -822,165 +1141,6 @@ func Flatten(j interface{}) map[string][]string {
 		}
 	}
 	return o
-}
-
-func JSONDiffWithNoiseControl(validatedJSON ValidatedJSON, noise map[string][]string, ignoreOrdering bool) (JSONComparisonResult, error) {
-	var matchJSONComparisonResult JSONComparisonResult
-	matchJSONComparisonResult, err := matchJSONWithNoiseHandling("", validatedJSON.expected, validatedJSON.actual, noise, ignoreOrdering)
-	if err != nil {
-		return matchJSONComparisonResult, err
-	}
-
-	return matchJSONComparisonResult, nil
-}
-
-// matchJSONWithNoiseHandling returns strcut if expected and actual JSON objects matches(are equal) and in exact order(isExact).
-func matchJSONWithNoiseHandling(key string, expected, actual interface{}, noiseMap map[string][]string, ignoreOrdering bool) (JSONComparisonResult, error) {
-	var matchJSONComparisonResult JSONComparisonResult
-	if reflect.TypeOf(expected) != reflect.TypeOf(actual) {
-		return matchJSONComparisonResult, errors.New("type not matched")
-	}
-	if expected == nil && actual == nil {
-		matchJSONComparisonResult.isExact = true
-		matchJSONComparisonResult.matches = true
-		return matchJSONComparisonResult, nil
-	}
-	x := reflect.ValueOf(expected)
-	prefix := ""
-	if key != "" {
-		prefix = key + "."
-	}
-	switch x.Kind() {
-	case reflect.Float64, reflect.String, reflect.Bool:
-		regexArr, isNoisy := SubstringKeyMatch(key, noiseMap)
-		if isNoisy && len(regexArr) != 0 {
-			isNoisy, _ = MatchesAnyRegex(InterfaceToString(expected), regexArr)
-		}
-		if expected != actual && !isNoisy {
-			return matchJSONComparisonResult, nil
-		}
-
-	case reflect.Map:
-		expMap := expected.(map[string]interface{})
-		actMap := actual.(map[string]interface{})
-		copiedExpMap := make(map[string]interface{})
-		copiedActMap := make(map[string]interface{})
-
-		if regexArr, isNoisy := SubstringKeyMatch(key, noiseMap); isNoisy && len(regexArr) == 0 {
-			break
-		}
-		// Copy each key-value pair from expMap to copiedExpMap
-		for key, value := range expMap {
-			copiedExpMap[key] = value
-		}
-
-		// Repeat the same process for actual map
-		for key, value := range actMap {
-			copiedActMap[key] = value
-		}
-		isExact := true
-		differences := []string{}
-		for k, v := range expMap {
-			val, ok := actMap[k]
-			if !ok {
-				return matchJSONComparisonResult, nil
-			}
-			if valueMatchJSONComparisonResult, er := matchJSONWithNoiseHandling(strings.ToLower(prefix+k), v, val, noiseMap, ignoreOrdering); !valueMatchJSONComparisonResult.matches || er != nil {
-				return valueMatchJSONComparisonResult, nil
-			} else if !valueMatchJSONComparisonResult.isExact {
-				isExact = false
-				differences = append(differences, k)
-				differences = append(differences, valueMatchJSONComparisonResult.differences...)
-			}
-			// remove the noisy key from both expected and actual JSON.
-			// Viper bindings are case insensitive, so we need convert the key to lowercase.
-			if _, ok := SubstringKeyMatch(strings.ToLower(prefix+k), noiseMap); ok {
-				delete(copiedExpMap, prefix+k)
-				delete(copiedActMap, k)
-				continue
-			}
-		}
-		// checks if there is a key which is not present in expMap but present in actMap.
-		for k := range actMap {
-			_, ok := expMap[k]
-			if !ok {
-				return matchJSONComparisonResult, nil
-			}
-		}
-		matchJSONComparisonResult.matches = true
-		matchJSONComparisonResult.isExact = isExact
-		matchJSONComparisonResult.differences = append(matchJSONComparisonResult.differences, differences...)
-		return matchJSONComparisonResult, nil
-	case reflect.Slice:
-		if regexArr, isNoisy := SubstringKeyMatch(key, noiseMap); isNoisy && len(regexArr) == 0 {
-			break
-		}
-		expSlice := reflect.ValueOf(expected)
-		actSlice := reflect.ValueOf(actual)
-		if expSlice.Len() != actSlice.Len() {
-			return matchJSONComparisonResult, nil
-		}
-
-		isMatched := true
-		isExact := true
-		for i := 0; i < expSlice.Len(); i++ {
-			matched := false
-			for j := 0; j < actSlice.Len(); j++ {
-
-				// ­Special rule: we're at the root of the slice (key == "")
-				// and every element is a map or slice (i.e. a JSON object or array) → don’t add “[i]” prefixes.
-
-				dropPrefix := key == "" &&
-					expSlice.Len() > 0 && (reflect.TypeOf(expSlice.Index(i).Interface()).Kind() == reflect.Map || reflect.TypeOf(expSlice.Index(i).Interface()).Kind() == reflect.Slice)
-
-				childKey := ""
-				if !dropPrefix {
-					childKey = fmt.Sprintf("%s[%d]", key, j)
-				}
-
-				if valMatchJSONComparisonResult, err := matchJSONWithNoiseHandling(childKey, expSlice.Index(i).Interface(), actSlice.Index(j).Interface(), noiseMap, ignoreOrdering); err == nil && valMatchJSONComparisonResult.matches {
-					if !valMatchJSONComparisonResult.isExact {
-						for _, val := range valMatchJSONComparisonResult.differences {
-							if childKey != "" {
-								val = childKey + "." + val
-							}
-							matchJSONComparisonResult.differences = append(matchJSONComparisonResult.differences, val)
-						}
-					}
-					matched = true
-					break
-				}
-			}
-
-			if !matched {
-				isMatched = false
-				isExact = false
-				break
-			}
-		}
-		if !isMatched {
-			matchJSONComparisonResult.matches = isMatched
-			matchJSONComparisonResult.isExact = isExact
-			return matchJSONComparisonResult, nil
-		}
-		if !ignoreOrdering {
-			for i := 0; i < expSlice.Len(); i++ {
-				if valMatchJSONComparisonResult, er := matchJSONWithNoiseHandling(key, expSlice.Index(i).Interface(), actSlice.Index(i).Interface(), noiseMap, ignoreOrdering); er != nil || !valMatchJSONComparisonResult.isExact {
-					isExact = false
-					break
-				}
-			}
-		}
-		matchJSONComparisonResult.matches = isMatched
-		matchJSONComparisonResult.isExact = isExact
-
-		return matchJSONComparisonResult, nil
-	default:
-		return matchJSONComparisonResult, errors.New("type not registered for json")
-	}
-	matchJSONComparisonResult.matches = true
-	matchJSONComparisonResult.isExact = true
-	return matchJSONComparisonResult, nil
 }
 
 func ArrayToMap(arr []string) map[string]bool {

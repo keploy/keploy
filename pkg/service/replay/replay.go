@@ -663,7 +663,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if !serveTest {
 			runTestSetErrGrp.Go(func() error {
 				defer utils.Recover(r.logger)
-				appErr = r.RunApplication(runTestSetCtx, appID, models.RunOptions{})
+				appErr = r.RunApplication(runTestSetCtx, appID, models.RunOptions{
+					AppCommand: conf.AppCommand,
+				})
 				if appErr.AppErrorType == models.ErrCtxCanceled {
 					return nil
 				}
@@ -1302,6 +1304,26 @@ func (r *Replayer) RunApplication(ctx context.Context, appID uint64, opts models
 
 func (r *Replayer) GetTestSetConf(ctx context.Context, testSet string) (*models.TestSet, error) {
 	return r.testSetConf.Read(ctx, testSet)
+}
+
+// UpdateTestSetTemplate persists updated template values for a test-set. It preserves existing
+// pre/post scripts and metadata if present in the current config on disk.
+func (r *Replayer) UpdateTestSetTemplate(ctx context.Context, testSetID string, template map[string]interface{}) error {
+	if len(template) == 0 {
+		return nil
+	}
+	existing, err := r.testSetConf.Read(ctx, testSetID)
+	if err != nil || existing == nil {
+		// Create a minimal config if read fails; log and proceed.
+		r.logger.Debug("creating new test-set config while updating template", zap.String("testSet", testSetID), zap.Error(err))
+		existing = &models.TestSet{}
+	}
+	existing.Template = template
+	if err := r.testSetConf.Write(ctx, testSetID, existing); err != nil {
+		utils.LogError(r.logger, err, "failed to update test-set template", zap.String("testSet", testSetID))
+		return err
+	}
+	return nil
 }
 
 func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error) {
