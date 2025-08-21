@@ -23,7 +23,7 @@ jobs:
         with:
           repository: keploy/samples-typescript
           path: samples-typescript
-          ref: bigpayload
+          ref: main
 
       - name: Install Go
         uses: actions/setup-go@v2
