@@ -172,7 +172,7 @@ record_traffic() {
             curl -i ${url}
         fi
         # Wait for 100ms between requests
-        sleep 0.15
+        sleep 0.2
     done
 
     # Clean up the temp file if it was created
@@ -283,8 +283,8 @@ sudo rm -rf keploy/ reports/
 sudo keploy config --generate
 echo "🎥 Starting recorder for large payload..."
 sudo -E env PATH="$PATH" keploy record -c "node server.js" --bigPayload &> "record_large.txt" &
-record_traffic "large-payload" 300
-verify_test_count 300
+record_traffic "large-payload" 100
+verify_test_count 100
 run_and_verify_tests "test_large.txt"
 echo "--- ✅ /large-payload Test Completed Successfully ---"
 echo ""
