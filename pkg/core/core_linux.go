@@ -188,7 +188,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 	return nil
 }
 
-func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError {
+func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.AppError {
 	a, err := c.getApp(id)
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to get app")
@@ -229,14 +229,9 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 		return nil
 	})
 
-	originalApp := a.GetAppCommand()
 	runAppErrGrp.Go(func() error {
 		defer utils.Recover(c.logger)
 		defer close(appErrCh)
-		defer a.SetAppCommand(originalApp)
-		if opts.AppCommand != "" {
-			a.SetAppCommand(opts.AppCommand)
-		}
 		appErr := a.Run(runAppCtx, inodeChan)
 		if appErr.Err != nil {
 			utils.LogError(c.logger, appErr.Err, "error while running the app")
@@ -247,7 +242,6 @@ func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) model
 
 	select {
 	case <-runAppCtx.Done():
-		c.logger.Debug("Run context cancelled, stopping the app and reverting the app command")
 		return models.AppError{AppErrorType: models.ErrCtxCanceled, Err: nil}
 	case appErr := <-appErrCh:
 		return appErr

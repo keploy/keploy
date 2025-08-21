@@ -147,33 +147,11 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 
 	// Encode the header for the packet
 	header := make([]byte, 4)
-	// IMPORTANT:
-	// For composite (multi-packet) messages, `data` contains multiple packets where
-	// only the FIRST sub-packet lacks its 4-byte header. The recorded header's
-	// PayloadLength corresponds to that first payload only (e.g., column-count = 1).
-	// For single-packet messages, we can safely use len(data).
-	payloadLen := len(data)
-	if isCompositeMessage(packet.Message) && packet.Header != nil && packet.Header.Header != nil {
-		payloadLen = int(packet.Header.Header.PayloadLength)
-	}
-	binary.LittleEndian.PutUint32(header, uint32(payloadLen))
+	binary.LittleEndian.PutUint32(header, uint32(packet.Header.Header.PayloadLength))
 	header[3] = packet.Header.Header.SequenceID
 	data = append(header, data...)
 
 	logger.Debug("Encoded Packet", zap.String("packet", packet.Header.Type), zap.ByteString("data", data))
 
 	return data, nil
-}
-
-// isCompositeMessage tells whether the encoded `data` contains multiple packets,
-// where only the first packet should use the header we write here.
-func isCompositeMessage(msg interface{}) bool {
-	switch msg.(type) {
-	case *mysql.TextResultSet,
-		*mysql.BinaryProtocolResultSet,
-		*mysql.StmtPrepareOkPacket:
-		return true
-	default:
-		return false
-	}
 }

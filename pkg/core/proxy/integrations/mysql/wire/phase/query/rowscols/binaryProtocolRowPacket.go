@@ -6,7 +6,6 @@ package rowscols
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -97,13 +96,7 @@ func readBinaryValue(data []byte, col *mysql.ColumnDefinition41) (*binaryValueRe
 		res.value = int32(binary.LittleEndian.Uint32(data[:4]))
 		return res, 4, nil
 
-	case mysql.FieldTypeString,
-		mysql.FieldTypeVarString,
-		mysql.FieldTypeVarChar,
-		mysql.FieldTypeBLOB, mysql.FieldTypeTinyBLOB, mysql.FieldTypeMediumBLOB, mysql.FieldTypeLongBLOB,
-		mysql.FieldTypeJSON,
-		mysql.FieldTypeNewDecimal, // NEWDECIMAL (0xF6 / 246) is sent as a length-encoded string in binary rows
-		mysql.FieldTypeDecimal:    // legacy DECIMAL (0) — treat same as NEWDECIMAL
+	case mysql.FieldTypeString, mysql.FieldTypeVarString, mysql.FieldTypeVarChar, mysql.FieldTypeBLOB, mysql.FieldTypeTinyBLOB, mysql.FieldTypeMediumBLOB, mysql.FieldTypeLongBLOB, mysql.FieldTypeJSON:
 		value, _, n, err := utils.ReadLengthEncodedString(data)
 		res.value = string(value)
 		return res, n, err
@@ -172,156 +165,118 @@ func readBinaryValue(data []byte, col *mysql.ColumnDefinition41) (*binaryValueRe
 	}
 }
 
-func EncodeBinaryRow(_ context.Context, _ *zap.Logger, row *mysql.BinaryRow, columns []*mysql.ColumnDefinition41) ([]byte, error) {
-	body := new(bytes.Buffer)
+func EncodeBinaryRow(_ context.Context, logger *zap.Logger, row *mysql.BinaryRow, columns []*mysql.ColumnDefinition41) ([]byte, error) {
+	buf := new(bytes.Buffer)
 
-	// OK byte
-	if err := body.WriteByte(0x00); err != nil {
+	// Write the packet header
+	if err := utils.WriteUint24(buf, row.Header.PayloadLength); err != nil {
+		return nil, fmt.Errorf("failed to write PayloadLength: %w", err)
+	}
+	if err := buf.WriteByte(row.Header.SequenceID); err != nil {
+		return nil, fmt.Errorf("failed to write SequenceID: %w", err)
+	}
+
+	// Write the row's OK byte
+	if err := buf.WriteByte(0x00); err != nil {
 		return nil, fmt.Errorf("failed to write OK byte: %w", err)
 	}
-	// NULL bitmap
-	if _, err := body.Write(row.RowNullBuffer); err != nil {
+
+	// Write the row's NULL bitmap
+	if _, err := buf.Write(row.RowNullBuffer); err != nil {
 		return nil, fmt.Errorf("failed to write NULL bitmap: %w", err)
 	}
 
-	// Values
+	// Write each column's value
 	for i, col := range columns {
+		logger.Debug("encoding column", zap.String("name", col.Name), zap.Any("value", row.Values[i].Value))
+
 		if isNull(row.RowNullBuffer, i) {
 			continue
 		}
 
-		ce := row.Values[i]
+		columnEntry := row.Values[i]
 
-		switch ce.Type {
+		switch columnEntry.Type {
 		case mysql.FieldTypeLong:
-			if ce.Unsigned {
-				v := uint32(ce.Value.(int))
-				if err := binary.Write(body, binary.LittleEndian, v); err != nil {
-					return nil, err
-				}
+			var val any
+			if columnEntry.Unsigned {
+				val = uint32(columnEntry.Value.(int))
 			} else {
-				v := int32(ce.Value.(int))
-				if err := binary.Write(body, binary.LittleEndian, v); err != nil {
-					return nil, err
-				}
+				val = int32(columnEntry.Value.(int))
 			}
-
-		case mysql.FieldTypeString, mysql.FieldTypeVarString, mysql.FieldTypeVarChar,
-			mysql.FieldTypeNewDecimal, mysql.FieldTypeDecimal,
-			mysql.FieldTypeJSON:
-			s, ok := ce.Value.(string)
+			if err := binary.Write(buf, binary.LittleEndian, val); err != nil {
+				return nil, fmt.Errorf("failed to write %T value: %w", val, err)
+			}
+		case mysql.FieldTypeString, mysql.FieldTypeVarString, mysql.FieldTypeVarChar, mysql.FieldTypeBLOB, mysql.FieldTypeTinyBLOB, mysql.FieldTypeMediumBLOB, mysql.FieldTypeLongBLOB, mysql.FieldTypeJSON:
+			strValue, ok := columnEntry.Value.(string)
 			if !ok {
-				return nil, fmt.Errorf("string-like field %q not a string", col.Name)
+				return nil, fmt.Errorf("invalid value type for string field")
 			}
-			if err := utils.WriteLengthEncodedString(body, s); err != nil {
-				return nil, err
+			if err := utils.WriteLengthEncodedString(buf, strValue); err != nil {
+				return nil, fmt.Errorf("failed to write length-encoded string: %w", err)
 			}
-
-		case mysql.FieldTypeBLOB, mysql.FieldTypeTinyBLOB, mysql.FieldTypeMediumBLOB, mysql.FieldTypeLongBLOB:
-			switch v := ce.Value.(type) {
-			case []byte:
-				if err := writeLenEncBytes(body, v); err != nil {
-					return nil, err
-				}
-			case string:
-				// Try base64 (used by YAML !!binary). If that fails, write raw bytes of the string.
-				if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
-					if err := writeLenEncBytes(body, decoded); err != nil {
-						return nil, err
-					}
-				} else {
-					if err := writeLenEncBytes(body, []byte(v)); err != nil {
-						return nil, err
-					}
-				}
-			default:
-				return nil, fmt.Errorf("blob-like field %q has unsupported type %T", col.Name, ce.Value)
-			}
-
 		case mysql.FieldTypeTiny:
-			if ce.Unsigned {
-				if err := body.WriteByte(uint8(ce.Value.(int))); err != nil {
-					return nil, err
-				}
+			var val any
+			if columnEntry.Unsigned {
+				val = uint8(columnEntry.Value.(int))
 			} else {
-				if err := body.WriteByte(byte(int8(ce.Value.(int)))); err != nil {
-					return nil, err
-				}
+				val = int8(columnEntry.Value.(int))
+			}
+			if err := binary.Write(buf, binary.LittleEndian, val); err != nil {
+				return nil, fmt.Errorf("failed to write %T value: %w", val, err)
 			}
 
 		case mysql.FieldTypeShort, mysql.FieldTypeYear:
-			if ce.Unsigned {
-				v := uint16(ce.Value.(int))
-				if err := binary.Write(body, binary.LittleEndian, v); err != nil {
-					return nil, err
-				}
+			var val any
+			if columnEntry.Unsigned {
+				val = uint16(columnEntry.Value.(int))
 			} else {
-				v := int16(ce.Value.(int))
-				if err := binary.Write(body, binary.LittleEndian, v); err != nil {
-					return nil, err
-				}
+				val = int16(columnEntry.Value.(int))
 			}
-
+			if err := binary.Write(buf, binary.LittleEndian, val); err != nil {
+				return nil, fmt.Errorf("failed to write int16 value: %w", err)
+			}
 		case mysql.FieldTypeLongLong:
-			if ce.Unsigned {
-				v := uint64(ce.Value.(int))
-				if err := binary.Write(body, binary.LittleEndian, v); err != nil {
-					return nil, err
-				}
+			var val any
+			if columnEntry.Unsigned {
+				val = uint64(columnEntry.Value.(int))
 			} else {
-				v := int64(ce.Value.(int))
-				if err := binary.Write(body, binary.LittleEndian, v); err != nil {
-					return nil, err
-				}
+				val = int64(columnEntry.Value.(int))
 			}
 
+			if err := binary.Write(buf, binary.LittleEndian, val); err != nil {
+				return nil, fmt.Errorf("failed to write %T value: %w", val, err)
+			}
 		case mysql.FieldTypeFloat:
-			v := float32(ce.Value.(float32))
-			if err := binary.Write(body, binary.LittleEndian, v); err != nil {
-				return nil, err
+			floatValue, ok := columnEntry.Value.(float32)
+			if !ok {
+				return nil, fmt.Errorf("invalid value type for float field")
 			}
-
+			if err := binary.Write(buf, binary.LittleEndian, floatValue); err != nil {
+				return nil, fmt.Errorf("failed to write float32 value: %w", err)
+			}
 		case mysql.FieldTypeDouble:
-			v := float64(ce.Value.(float64))
-			if err := binary.Write(body, binary.LittleEndian, v); err != nil {
-				return nil, err
+			doubleValue, ok := columnEntry.Value.(float64)
+			if !ok {
+				return nil, fmt.Errorf("invalid value type for double field")
 			}
-
+			if err := binary.Write(buf, binary.LittleEndian, doubleValue); err != nil {
+				return nil, fmt.Errorf("failed to write float64 value: %w", err)
+			}
 		case mysql.FieldTypeDate, mysql.FieldTypeNewDate, mysql.FieldTypeTimestamp, mysql.FieldTypeDateTime, mysql.FieldTypeTime:
-			dt, err := encodeBinaryDateTime(ce.Type, ce.Value)
+			dateTimeBytes, err := encodeBinaryDateTime(row.Values[i].Type, columnEntry.Value)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("failed to encode date/time value: %w", err)
 			}
-			if _, err := body.Write(dt); err != nil {
-				return nil, err
+			if _, err := buf.Write(dateTimeBytes); err != nil {
+				return nil, fmt.Errorf("failed to write date/time value: %w", err)
 			}
-
 		default:
-			return nil, fmt.Errorf("unsupported column type: %v", ce.Type)
+			return nil, fmt.Errorf("unsupported column type: %v", row.Values[i].Type)
 		}
 	}
 
-	// Prepend header with computed payload length
-	final := new(bytes.Buffer)
-	if err := utils.WriteUint24(final, uint32(body.Len())); err != nil {
-		return nil, fmt.Errorf("write header length: %w", err)
-	}
-	if err := final.WriteByte(row.Header.SequenceID); err != nil {
-		return nil, fmt.Errorf("write header seq: %w", err)
-	}
-	if _, err := final.Write(body.Bytes()); err != nil {
-		return nil, err
-	}
-	return final.Bytes(), nil
-}
-
-// small helper used above
-func writeLenEncBytes(buf *bytes.Buffer, b []byte) error {
-	if err := utils.WriteLengthEncodedInteger(buf, uint64(len(b))); err != nil {
-		return err
-	}
-	_, err := buf.Write(b)
-	return err
+	return buf.Bytes(), nil
 }
 
 func encodeBinaryDateTime(fieldType mysql.FieldType, value interface{}) ([]byte, error) {

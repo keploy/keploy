@@ -91,11 +91,9 @@ func DecodeStmtExecute(_ context.Context, _ *zap.Logger, data []byte, preparedSt
 		packet.NewParamsBindFlag = data[pos]
 		pos++
 
-		// Initialize Parameters slice regardless of NewParamsBindFlag
-		packet.Parameters = make([]mysql.Parameter, packet.ParameterCount)
-
 		// Read Parameters if NewParamsBindFlag is set
 		if packet.NewParamsBindFlag == 1 {
+			packet.Parameters = make([]mysql.Parameter, packet.ParameterCount)
 			for i := 0; i < packet.ParameterCount; i++ {
 				if pos+2 > len(data) {
 					return nil, io.ErrUnexpectedEOF
@@ -104,26 +102,10 @@ func DecodeStmtExecute(_ context.Context, _ *zap.Logger, data []byte, preparedSt
 				packet.Parameters[i].Unsigned = (data[pos+1] & 0x80) != 0 // Check if the highest bit is set
 				pos += 2
 			}
-		} else {
-			// When NewParamsBindFlag is 0, we reuse the previous parameter types
-			// For now, we'll set a default type for all parameters
-			for i := 0; i < packet.ParameterCount; i++ {
-				packet.Parameters[i].Type = uint16(mysql.FieldTypeString) // Default type
-				packet.Parameters[i].Unsigned = false
-			}
 		}
 
 		// Read Parameter Values
 		for i := 0; i < packet.ParameterCount; i++ {
-			// Check if this parameter is NULL according to the NULL bitmap
-			byteIndex := i / 8
-			bitIndex := i % 8
-			if byteIndex < len(packet.NullBitmap) && (packet.NullBitmap[byteIndex]&(1<<bitIndex)) != 0 {
-				// Parameter is NULL, set value to nil and continue
-				packet.Parameters[i].Value = nil
-				continue
-			}
-
 			if pos >= len(data) {
 				return nil, io.ErrUnexpectedEOF
 			}

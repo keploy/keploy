@@ -4,7 +4,6 @@ package models
 type TestSet struct {
 	PreScript    string                 `json:"pre_script" bson:"pre_script" yaml:"preScript"`
 	PostScript   string                 `json:"post_script" bson:"post_script" yaml:"postScript"`
-	AppCommand   string                 `json:"app_command" bson:"app_command" yaml:"appCommand"`
 	Template     map[string]interface{} `json:"template" bson:"template" yaml:"template"`
 	Secret       map[string]interface{} `json:"secret" bson:"secret" yaml:"secret,omitempty"`
 	MockRegistry *MockRegistry          `yaml:"mockRegistry" bson:"mock_registry" json:"mockRegistry,omitempty"`

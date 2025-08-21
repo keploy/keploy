@@ -22,25 +22,6 @@ type DecodeContext struct {
 	ClientCapabilities uint32
 	PluginName         string
 	UseSSL             bool
-	// Capability flags
-	ServerCaps         uint32 // negotiated server caps (from HandshakeV10)
-	ClientCaps         uint32 // live client's caps (from HandshakeResponse41)
-	RecordedClientCaps uint32 // caps from the recorded config mock
-	PreferRecordedCaps bool   // if true, prefer RecordedClientCaps over ClientCaps
-}
-
-const CLIENT_DEPRECATE_EOF = 0x01000000
-
-func (d *DecodeContext) effectiveClientCaps() uint32 {
-	if d.PreferRecordedCaps && d.RecordedClientCaps != 0 {
-		return d.RecordedClientCaps
-	}
-	return d.ClientCaps
-}
-
-func (d *DecodeContext) DeprecateEOF() bool {
-	return (d.ServerCaps&CLIENT_DEPRECATE_EOF) != 0 &&
-		(d.effectiveClientCaps()&CLIENT_DEPRECATE_EOF) != 0
 }
 
 // This map is used to store the last operation that was performed on a connection.

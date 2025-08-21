@@ -15,7 +15,6 @@ import (
 	"go.keploy.io/server/v2/utils"
 	"go.keploy.io/server/v2/utils/log"
 	//pprof for debugging
-	// "net/http"
 	// _ "net/http/pprof"
 )
 

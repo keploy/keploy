@@ -65,9 +65,6 @@ func DecodeHandshakeResponse(_ context.Context, logger *zap.Logger, data []byte)
 	data = data[idx+1:]
 
 	if packet.CapabilityFlags&mysql.CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA != 0 {
-		if len(data) < 1 {
-			return nil, errors.New("handshake response packet too short for auth data length")
-		}
 		length := int(data[0])
 		data = data[1:]
 
@@ -79,17 +76,12 @@ func DecodeHandshakeResponse(_ context.Context, logger *zap.Logger, data []byte)
 			data = data[length:]
 		}
 	} else {
-		if len(data) < 2 {
-			return nil, errors.New("handshake response packet too short for auth data length")
-		}
 		authLen := int(data[0])
 		data = data[2:]
-
 		if len(data) < authLen {
 			return nil, errors.New("handshake response packet too short for auth data")
 		}
 		packet.AuthResponse = data[:authLen]
-		data = data[authLen:]
 	}
 
 	if packet.CapabilityFlags&mysql.CLIENT_CONNECT_WITH_DB != 0 {
@@ -120,40 +112,25 @@ func DecodeHandshakeResponse(_ context.Context, logger *zap.Logger, data []byte)
 		}
 		data = data[n:]
 
-		// Check if we have enough data for the total attributes length
-		if len(data) < int(totalLength) {
-			return nil, errors.New("handshake response packet too short for connection attributes data")
-		}
-
 		attributesData := data[:totalLength]
 		data = data[totalLength:]
 
 		packet.ConnectionAttributes = make(map[string]string)
 		for len(attributesData) > 0 {
 			keyLength, isNull, n := utils.ReadLengthEncodedInteger(attributesData)
-			if isNull || n == 0 {
+			if isNull {
 				return nil, errors.New("malformed handshake response packet: null length encoded integer for connection attribute key")
 			}
 			attributesData = attributesData[n:]
-
-			// Check if we have enough data for the key
-			if len(attributesData) < int(keyLength) {
-				return nil, errors.New("handshake response packet too short for connection attribute key")
-			}
 
 			key := string(attributesData[:keyLength])
 			attributesData = attributesData[keyLength:]
 
 			valueLength, isNull, n := utils.ReadLengthEncodedInteger(attributesData)
-			if isNull || n == 0 {
+			if isNull {
 				return nil, errors.New("malformed handshake response packet: null length encoded integer for connection attribute value")
 			}
 			attributesData = attributesData[n:]
-
-			// Check if we have enough data for the value
-			if len(attributesData) < int(valueLength) {
-				return nil, errors.New("handshake response packet too short for connection attribute value")
-			}
 
 			value := string(attributesData[:valueLength])
 			attributesData = attributesData[valueLength:]

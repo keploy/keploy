@@ -218,15 +218,6 @@ func (a *App) SetupCompose() error {
 	return nil
 }
 
-func (a *App) SetAppCommand(appCommand string) {
-	a.logger.Debug("Setting App Command", zap.String("cmd", appCommand))
-	a.cmd = appCommand
-}
-
-func (a *App) GetAppCommand() string {
-	return a.cmd
-}
-
 func (a *App) Kind(_ context.Context) utils.CmdType {
 	return a.kind
 }
@@ -473,6 +464,7 @@ func (a *App) waitTillExit() {
 }
 
 func (a *App) run(ctx context.Context) models.AppError {
+
 	userCmd := a.cmd
 
 	if utils.FindDockerCmd(a.cmd) == utils.DockerRun {

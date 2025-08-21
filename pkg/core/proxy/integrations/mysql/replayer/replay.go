@@ -30,27 +30,15 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *mod
 
 	var configMocks []*models.Mock
 	var hasMySQLMocks bool
-	var totalMySQLMocks int
-	var dataMocks int
 	// Get the mocks having "config" metadata and check for any MySQL mocks in a single pass.
 	for _, mock := range unfiltered {
 		if mock.Kind == models.MySQL {
 			hasMySQLMocks = true
-			totalMySQLMocks++
 			if mock.Spec.Metadata["type"] == "config" {
 				configMocks = append(configMocks, mock)
-			} else {
-				dataMocks++
 			}
 		}
 	}
-
-	logger.Info("MySQL replay session starting",
-		zap.Int("total_unfiltered_mocks", len(unfiltered)),
-		zap.Int("total_mysql_mocks", totalMySQLMocks),
-		zap.Int("config_mocks", len(configMocks)),
-		zap.Int("data_mocks", dataMocks),
-		zap.Bool("has_mysql_mocks", hasMySQLMocks))
 
 	if !hasMySQLMocks {
 		utils.LogError(logger, nil, "no mysql mocks found")
@@ -76,7 +64,6 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, _ *mod
 			// Map for storing prepared statements per connection
 			PreparedStatements: make(map[uint32]*mysql.StmtPrepareOkPacket),
 			PluginName:         string(mysql.CachingSha2), // usually a default plugin in newer versions of MySQL
-			PreferRecordedCaps: true,
 		}
 		decodeCtx.LastOp.Store(clientConn, wire.RESET) //resetting last command for new loop
 
