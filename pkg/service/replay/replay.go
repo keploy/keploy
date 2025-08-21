@@ -276,6 +276,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 				Mode:          models.MODE_TEST,
 				EnableTesting: r.config.EnableTesting,
 				Rules:         r.config.BypassRules,
+				E2E:           r.config.E2E,
+				Port:          r.config.Port,
 			})
 			if err != nil {
 				stopReason = fmt.Sprintf("failed to load eBPF hooks for test set %s: %v", testSet, err)
@@ -417,6 +419,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 				Mode:          models.MODE_TEST,
 				EnableTesting: r.config.EnableTesting,
 				Rules:         r.config.BypassRules,
+				E2E:           r.config.E2E,
+				Port:          r.config.Port,
 			})
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to unload eBPF hooks for test set", zap.String("testSet", testSet))
