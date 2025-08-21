@@ -158,7 +158,7 @@ record_traffic() {
         echo "📦 Generating 1MB payload for POST requests..."
         local temp_file="large_payload.json"
         echo '{"data":"' > $temp_file
-        head -c 1011980 /dev/zero | tr '\0' 'a' >> $temp_file
+        head -c 511980 /dev/zero | tr '\0' 'a' >> $temp_file
         echo '"}' >> $temp_file
     fi
 
