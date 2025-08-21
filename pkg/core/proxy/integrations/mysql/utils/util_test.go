@@ -9,12 +9,12 @@ import (
 
 func TestReadLengthEncodedInteger(t *testing.T) {
 	tests := []struct {
-		name        string
-		input       []byte
-		expectedNum uint64
+		name         string
+		input        []byte
+		expectedNum  uint64
 		expectedNull bool
-		expectedN   int
-		expectValid bool
+		expectedN    int
+		expectValid  bool
 	}{
 		// Test empty input
 		{
@@ -25,7 +25,7 @@ func TestReadLengthEncodedInteger(t *testing.T) {
 			expectedN:    0,
 			expectValid:  true,
 		},
-		
+
 		// Test single byte values (0-250)
 		{
 			name:         "single byte value 0",
@@ -43,7 +43,7 @@ func TestReadLengthEncodedInteger(t *testing.T) {
 			expectedN:    1,
 			expectValid:  true,
 		},
-		
+
 		// Test NULL value (251)
 		{
 			name:         "null value",
@@ -53,7 +53,7 @@ func TestReadLengthEncodedInteger(t *testing.T) {
 			expectedN:    1,
 			expectValid:  true,
 		},
-		
+
 		// Test 2-byte values (252)
 		{
 			name:         "2-byte value with sufficient data",
@@ -79,7 +79,7 @@ func TestReadLengthEncodedInteger(t *testing.T) {
 			expectedN:    0,
 			expectValid:  true, // Should not panic, returns error state
 		},
-		
+
 		// Test 3-byte values (253)
 		{
 			name:         "3-byte value with sufficient data",
@@ -105,7 +105,7 @@ func TestReadLengthEncodedInteger(t *testing.T) {
 			expectedN:    0,
 			expectValid:  true,
 		},
-		
+
 		// Test 8-byte values (254)
 		{
 			name:         "8-byte value with sufficient data",
@@ -160,12 +160,12 @@ func TestReadLengthEncodedInteger(t *testing.T) {
 func TestReadLengthEncodedIntegerEdgeCases(t *testing.T) {
 	// Test with malformed data that previously caused panics
 	edgeCases := [][]byte{
-		{0xFC},                    // 2-byte marker with no data
+		{0xFC},                   // 2-byte marker with no data
 		{0xFC, 0x01},             // 2-byte marker with only 1 byte
-		{0xFD},                    // 3-byte marker with no data
+		{0xFD},                   // 3-byte marker with no data
 		{0xFD, 0x01},             // 3-byte marker with only 1 byte
 		{0xFD, 0x01, 0x02},       // 3-byte marker with only 2 bytes
-		{0xFE},                    // 8-byte marker with no data
+		{0xFE},                   // 8-byte marker with no data
 		{0xFE, 0x01},             // 8-byte marker with only 1 byte
 		{0xFE, 0x01, 0x02, 0x03}, // 8-byte marker with only 4 bytes
 	}
@@ -179,7 +179,7 @@ func TestReadLengthEncodedIntegerEdgeCases(t *testing.T) {
 			}()
 
 			_, isNull, n := ReadLengthEncodedInteger(data)
-			
+
 			// Should return error state (isNull=true, n=0) for insufficient data
 			if len(data) > 0 && data[0] >= 0xFC {
 				if !isNull || n != 0 {
