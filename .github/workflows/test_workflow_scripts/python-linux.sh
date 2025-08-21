@@ -78,6 +78,11 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
+# Shutdown postgres before test mode - Keploy should use mocks for database interactions
+echo "Shutting down postgres before test mode..."
+docker compose down
+echo "Postgres stopped - Keploy should now use mocks for database interactions"
+
 # Testing phase
 sudo -E env PATH="$PATH" $REPLAY_BIN test -c "python3 manage.py runserver" --delay 10    &> test_logs.txt
 

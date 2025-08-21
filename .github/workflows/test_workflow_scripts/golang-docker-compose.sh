@@ -75,6 +75,11 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
+# Shutdown services before test mode - Keploy should use mocks for dependencies
+echo "Shutting down docker compose services before test mode..."
+docker compose down
+echo "Services stopped - Keploy should now use mocks for dependency interactions"
+
 # Start keploy in test mode.
 test_container="echoApp"
 sudo -E env PATH=$PATH $REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
