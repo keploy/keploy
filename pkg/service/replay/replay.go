@@ -269,21 +269,16 @@ func (r *Replayer) Start(ctx context.Context) error {
 		initIgnored = totalTestIgnored
 		initTimeTaken = totalTestTimeTaken
 
-		// Load eBPF hooks for this test set
-		if r.instrument {
-			r.logger.Info("Loading eBPF hooks for test set", zap.String("testSet", testSet))
-			err = r.instrumentation.HookForTestSet(ctx, inst.AppID, models.HookOptions{
-				Mode:          models.MODE_TEST,
-				EnableTesting: r.config.EnableTesting,
-				Rules:         r.config.BypassRules,
-				E2E:           r.config.E2E,
-				Port:          r.config.Port,
-			})
-			if err != nil {
-				stopReason = fmt.Sprintf("failed to load eBPF hooks for test set %s: %v", testSet, err)
-				utils.LogError(r.logger, err, stopReason)
-				return fmt.Errorf("%s", stopReason)
-			}
+		// pass on a new context and cancel it after the test set run completes
+		hookCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		// Load hooks for the test set
+		// use the hook function in core_linux
+		err = r.instrumentation.Hook(hookCtx, r.config.AppID, models.HookOptions{Mode: models.MODE_TEST, EnableTesting: r.config.EnableTesting, Rules: r.config.BypassRules})
+		if err != nil {
+			stopReason = fmt.Sprintf("failed to load hooks for the test set: %v", err)
+			utils.LogError(r.logger, err, stopReason)
+			return fmt.Errorf("%s", stopReason)
 		}
 
 		var initialFailedTCs map[string]bool
@@ -412,20 +407,8 @@ func (r *Replayer) Start(ctx context.Context) error {
 			attempt = 0
 		}
 
-		// Unload eBPF hooks for this test set regardless of success/failure
-		if r.instrument {
-			r.logger.Info("Unloading eBPF hooks for test set", zap.String("testSet", testSet))
-			err = r.instrumentation.UnhookForTestSet(ctx, inst.AppID, models.HookOptions{
-				Mode:          models.MODE_TEST,
-				EnableTesting: r.config.EnableTesting,
-				Rules:         r.config.BypassRules,
-				E2E:           r.config.E2E,
-				Port:          r.config.Port,
-			})
-			if err != nil {
-				utils.LogError(r.logger, err, "failed to unload eBPF hooks for test set", zap.String("testSet", testSet))
-			}
-		}
+		// cancel the hook context
+		cancel()
 
 		if abortTestRun {
 			break

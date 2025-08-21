@@ -16,6 +16,11 @@ type Core struct {
 	logger *zap.Logger
 }
 
+// Reset implements replay.Instrumentation.
+func (c *Core) Reset() {
+	panic("unimplemented")
+}
+
 var errUnsupported = errors.New("instrumentation only supported on linux. Detected OS: " + runtime.GOOS)
 
 func New(logger *zap.Logger) *Core {
@@ -48,18 +53,6 @@ func (c *Core) Run(ctx context.Context, id uint64, _ models.RunOptions) models.A
 	return models.AppError{
 		Err: errUnsupported,
 	}
-}
-
-func (c *Core) HookForTestSet(ctx context.Context, id uint64, opts models.HookOptions) error {
-	return errUnsupported
-}
-
-func (c *Core) UnhookForTestSet(ctx context.Context, id uint64, opts models.HookOptions) error {
-	return errUnsupported
-}
-
-func (c *Core) Reset() {
-	// No-op for non-Linux system
 }
 
 func (c *Core) GetContainerIP(_ context.Context, id uint64) (string, error) {
