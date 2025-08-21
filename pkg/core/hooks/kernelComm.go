@@ -5,9 +5,6 @@ package hooks
 import (
 	"context"
 	"fmt"
-	"time"
-
-	"math/rand"
 
 	"github.com/cilium/ebpf"
 	"go.keploy.io/server/v2/pkg/core"
@@ -100,9 +97,15 @@ func (h *Hooks) SendE2EInfo(pid uint32) error {
 	return nil
 }
 
-func (h *Hooks) SendDockerAppInfo(_ uint64, dockerAppInfo structs.DockerAppInfo) error {
+func (h *Hooks) SendDockerAppInfo(appID uint64, dockerAppInfo structs.DockerAppInfo) error {
 	h.m.Lock()
 	defer h.m.Unlock()
+	
+	// Use the provided app ID or the current app ID, don't generate a random one
+	dockerAppID := appID
+	if dockerAppID == 0 {
+		dockerAppID = h.appID
+	}
 	
 	if h.appID != 0 {
 		err := h.dockerAppRegistrationMap.Delete(h.appID)
@@ -111,13 +114,18 @@ func (h *Hooks) SendDockerAppInfo(_ uint64, dockerAppInfo structs.DockerAppInfo)
 			return err
 		}
 	}
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	randomNum := r.Uint64() % 10
-	h.appID = randomNum
-	err := h.dockerAppRegistrationMap.Update(h.appID, dockerAppInfo, ebpf.UpdateAny)
+	
+	// Don't override the app ID with a random number - use the real app ID
+	err := h.dockerAppRegistrationMap.Update(dockerAppID, dockerAppInfo, ebpf.UpdateAny)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to send the dockerAppInfo info to the ebpf program")
 		return err
 	}
+	
+	// Update the app ID only if we received a valid one
+	if appID != 0 {
+		h.appID = appID
+	}
+	
 	return nil
 }
