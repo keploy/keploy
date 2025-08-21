@@ -227,6 +227,7 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 				Mock: mockHash,
 				App:  m.cfg.AppName,
 			},
+			Metadata: tsConfig.Metadata,
 		}
 
 		if plan == "Free" {

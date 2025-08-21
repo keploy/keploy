@@ -38,6 +38,13 @@ func (p *Proxy) startTCPDNSServer(_ context.Context) error {
 	return nil
 }
 
+func (p *Proxy) resetDNSCache() {
+	cache.Lock()
+	defer cache.Unlock()
+	cache.m = make(map[string][]dns.RR)
+	p.logger.Debug("DNS cache has been cleared")
+}
+
 func (p *Proxy) startUDPDNSServer(_ context.Context) error {
 
 	addr := fmt.Sprintf(":%v", p.DNSPort)

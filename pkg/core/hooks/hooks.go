@@ -118,7 +118,8 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 	g.Go(func() error {
 		defer utils.Recover(h.logger)
 		<-ctx.Done()
-		h.unLoad(ctx, opts)
+		// Already done after every test set run, so we don't need to unload at the end since it is already done 
+		// h.unLoad(ctx, opts)
 
 		//deleting in order to free the memory in case of rerecord.
 		h.sess.Delete(id)
@@ -672,4 +673,37 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 	}
 
 	h.logger.Info("eBPF resources released successfully...")
+}
+
+// LoadForTestSet loads eBPF hooks for a specific test set run
+func (h *Hooks) LoadForTestSet(ctx context.Context, id uint64, opts core.HookCfg) error {
+	h.logger.Debug("Loading eBPF hooks for test set", zap.Uint64("appID", id))
+
+	h.sess.Set(id, &core.Session{
+		ID: id,
+	})
+
+	err := h.load(ctx, opts)
+	if err != nil {
+		h.logger.Error("Failed to load eBPF hooks for test set", zap.Error(err))
+		return err
+	}
+
+	h.logger.Debug("eBPF hooks loaded successfully for test set", zap.Uint64("appID", id))
+	return nil
+}
+
+// UnloadForTestSet unloads eBPF hooks for a specific test set run
+func (h *Hooks) UnloadForTestSet(ctx context.Context, id uint64, opts core.HookCfg) error {
+	h.logger.Debug("Unloading eBPF hooks for test set", zap.Uint64("appID", id))
+
+	h.unLoad(ctx, opts)
+
+	// Clean up session
+	h.sess.Delete(id)
+
+	h.appID = 0
+
+	h.logger.Debug("eBPF hooks unloaded successfully for test set", zap.Uint64("appID", id))
+	return nil
 }

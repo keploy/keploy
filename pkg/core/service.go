@@ -19,6 +19,8 @@ type Hooks interface {
 	DestInfo
 	OutgoingInfo
 	Load(ctx context.Context, id uint64, cfg HookCfg) error
+	LoadForTestSet(ctx context.Context, id uint64, cfg HookCfg) error
+	UnloadForTestSet(ctx context.Context, id uint64, cfg HookCfg) error
 	Record(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error)
 }
 
@@ -47,6 +49,7 @@ type Proxy interface {
 	Mock(ctx context.Context, id uint64, opts models.OutgoingOptions) error
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
 	GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error)
+	Reset()
 }
 
 type ProxyOptions struct {

@@ -72,7 +72,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := tc.HTTPResp.Body, actualResponse.Body
 	var jsonComparisonResult matcherUtils.JSONComparisonResult
-	if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && bodyType == models.JSON {
+	if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && bodyType == models.JSON && json.Valid([]byte(tc.HTTPResp.Body)) {
 		//validate the stored json
 		validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
 		if err != nil {

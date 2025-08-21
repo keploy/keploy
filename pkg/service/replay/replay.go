@@ -269,6 +269,21 @@ func (r *Replayer) Start(ctx context.Context) error {
 		initIgnored = totalTestIgnored
 		initTimeTaken = totalTestTimeTaken
 
+		// Load eBPF hooks for this test set
+		if r.instrument {
+			r.logger.Info("Loading eBPF hooks for test set", zap.String("testSet", testSet))
+			err = r.instrumentation.HookForTestSet(ctx, inst.AppID, models.HookOptions{
+				Mode:          models.MODE_TEST,
+				EnableTesting: r.config.EnableTesting,
+				Rules:         r.config.BypassRules,
+			})
+			if err != nil {
+				stopReason = fmt.Sprintf("failed to load eBPF hooks for test set %s: %v", testSet, err)
+				utils.LogError(r.logger, err, stopReason)
+				return fmt.Errorf("%s", stopReason)
+			}
+		}
+
 		var initialFailedTCs map[string]bool
 		flaky := false // only be changed during replay with --must-pass flag set
 		for attempt := 1; attempt <= int(r.config.Test.MaxFlakyChecks); attempt++ {
@@ -393,6 +408,19 @@ func (r *Replayer) Start(ctx context.Context) error {
 			// and if it does then delete those failing testcases and rerun it again maxFlakyChecks times
 			r.config.Test.MaxFailAttempts--
 			attempt = 0
+		}
+
+		// Unload eBPF hooks for this test set regardless of success/failure
+		if r.instrument {
+			r.logger.Info("Unloading eBPF hooks for test set", zap.String("testSet", testSet))
+			err = r.instrumentation.UnhookForTestSet(ctx, inst.AppID, models.HookOptions{
+				Mode:          models.MODE_TEST,
+				EnableTesting: r.config.EnableTesting,
+				Rules:         r.config.BypassRules,
+			})
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to unload eBPF hooks for test set", zap.String("testSet", testSet))
+			}
 		}
 
 		if abortTestRun {
@@ -543,6 +571,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "error in testLoopErrGrp")
 		}
 		close(exitLoopChan)
+		// Best-effort: clear any proxy-side mock state after a test-set completes.
+		// Use a non-cancelled ctx so the call isn't dropped during shutdown.
+		if r.instrument {
+			r.instrumentation.Reset()
+		}
 	}()
 
 	testCases, err := r.testDB.GetTestCases(runTestSetCtx, testSetID)
