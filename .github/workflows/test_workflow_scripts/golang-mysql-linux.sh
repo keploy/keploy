@@ -10,11 +10,11 @@ die() {
   rc=$?
   echo "::error::Pipeline failed (exit=$rc). Dumping context…"
   echo "== docker ps =="; docker ps || true
-  echo "== mysql logs (tail 200) =="; docker logs --tail 200 mysql-container || true
+  echo "== mysql logs (complete) =="; docker logs mysql-container || true
   echo "== workspace tree (depth 3) =="; find . -maxdepth 3 -type d -print | sort || true
   echo "== keploy tree (depth 4) =="; find ./keploy -maxdepth 4 -type f -print 2>/dev/null | sort || true
-  echo "== *.txt logs (tail 200) =="; for f in ./*.txt; do [[ -f "$f" ]] && { echo "--- $f ---"; tail -n 200 "$f"; }; done
-  [[ -f test_logs.txt ]] && { echo "== test_logs.txt (tail 200) =="; tail -n 200 test_logs.txt; }
+  echo "== *.txt logs (complete) =="; for f in ./*.txt; do [[ -f "$f" ]] && { echo "--- $f ---"; cat "$f"; }; done
+  [[ -f test_logs.txt ]] && { echo "== test_logs.txt (complete) =="; cat test_logs.txt; }
   exit "$rc"
 }
 trap die ERR
@@ -105,12 +105,12 @@ run_record_iteration() {
   # Fail on obvious errors/races in log
   if grep -q "WARNING: DATA RACE" "${app_name}.txt"; then
     echo "::error::Data race detected in ${app_name}.txt"
-    tail -n 200 "${app_name}.txt"
+    cat "${app_name}.txt"
     return 1
   fi
   if grep -q "ERROR" "${app_name}.txt"; then
     echo "::warning::Errors found in ${app_name}.txt (not fatal unless record failed)"
-    tail -n 200 "${app_name}.txt"
+    cat "${app_name}.txt"
   fi
 
   endsec
@@ -130,6 +130,13 @@ for i in 1 2; do
   echo "Recorded test case and mocks for iteration $i"
 done
 
+section "Shutdown MySQL before test mode"
+# Stop MySQL container - Keploy should use mocks for database interactions
+docker stop mysql-container || true
+docker rm mysql-container || true
+echo "MySQL stopped - Keploy should now use mocks for database interactions"
+endsec
+
 section "Replay"
 # Run replay but DON'T crash the step; capture rc and print logs
 set +e
@@ -138,7 +145,7 @@ sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "./urlShort" --delay 7 --generate
 REPLAY_RC=$?
 set -e
 echo "Replay exit code: $REPLAY_RC"
-tail -n 200 test_logs.txt || true
+cat test_logs.txt || true
 endsec
 
 # If replay failed, still try to read reports to say which set failed

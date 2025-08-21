@@ -67,6 +67,12 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
+# Shutdown mongo before test mode - Keploy should use mocks for database interactions
+echo "Shutting down mongo before test mode..."
+docker stop mongo || true
+docker rm mongo || true
+echo "MongoDB stopped - Keploy should now use mocks for database interactions"
+
 # Testing phase
 test_container="flashApp_test"
 sudo -E env PATH=$PATH $REPLAY_BIN test -c "docker run -p8080:8080 --net keploy-network --name $test_container flask-app:1.0" --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"

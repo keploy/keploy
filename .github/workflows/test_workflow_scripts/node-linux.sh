@@ -10,11 +10,11 @@ die() {
   rc=$?
   echo "::error::Pipeline failed (exit=$rc). Dumping context…"
   echo "== docker ps =="; docker ps || true
-  echo "== mongo logs (tail 200) =="; docker logs --tail 200 mongoDb || true
+  echo "== mongo logs (complete) =="; docker logs mongoDb || true
   echo "== workspace tree (depth 3) =="; find . -maxdepth 3 -type d -print | sort || true
   echo "== keploy tree (depth 4) =="; find ./keploy -maxdepth 4 -type f -print 2>/dev/null | sort || true
-  echo "== *.txt logs (tail 200) =="; for f in ./*.txt; do [[ -f "$f" ]] && { echo "--- $f ---"; tail -n 200 "$f"; }; done
-  for f in test_logs*.txt; do [[ -f "$f" ]] && { echo "== $f (tail 200) =="; tail -n 200 "$f"; }; done
+  echo "== *.txt logs (complete) =="; for f in ./*.txt; do [[ -f "$f" ]] && { echo "--- $f ---"; cat "$f"; }; done
+  for f in test_logs*.txt; do [[ -f "$f" ]] && { echo "== $f (complete) =="; cat "$f"; }; done
   exit "$rc"
 }
 trap die ERR
@@ -120,12 +120,12 @@ for i in 1 2; do
 
   if grep -q "WARNING: DATA RACE" "${app_name}.txt"; then
     echo "::error::Data race detected in ${app_name}.txt"
-    tail -n 200 "${app_name}.txt"
+    cat "${app_name}.txt"
     exit 1
   fi
   if grep -q "ERROR" "${app_name}.txt"; then
     echo "::warning::Errors found in ${app_name}.txt"
-    tail -n 200 "${app_name}.txt"
+    cat "${app_name}.txt"
   fi
 
   endsec
@@ -141,6 +141,13 @@ else
 fi
 
 # ---- Replays ----
+# Shutdown MongoDB before test mode to verify Keploy mocking works correctly
+section "Shutdown MongoDB before test mode"
+docker stop mongoDb || true
+docker rm mongoDb || true
+echo "MongoDB stopped - Keploy should now use mocks for database interactions"
+endsec
+
 run_replay() {
   local idx="$1"
   local extra_args="${2:-}"
@@ -153,7 +160,7 @@ run_replay() {
   local rc=$?
   set -e
   echo "Replay #$idx exit code: $rc"
-  tail -n 200 "$logfile" || true
+  cat "$logfile" || true
 
   # Find newest run dir and print set statuses
   local RUN_DIR

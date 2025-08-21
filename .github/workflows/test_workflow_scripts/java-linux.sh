@@ -10,11 +10,11 @@ die() {
   rc=$?
   echo "::error::Pipeline failed (exit=$rc). Dumping context…"
   echo "== docker ps =="; docker ps || true
-  echo "== postgres logs (tail 200) =="; docker logs --tail 200 mypostgres || true
+  echo "== postgres logs (complete) =="; docker logs mypostgres || true
   echo "== workspace tree (depth 3) =="; find . -maxdepth 3 -type d -print | sort || true
   echo "== keploy tree (depth 4) =="; find ./keploy -maxdepth 4 -type f -print 2>/dev/null | sort || true
-  echo "== *.txt logs (tail 200) =="; for f in ./*.txt; do [[ -f "$f" ]] && { echo "--- $f ---"; tail -n 200 "$f"; }; done
-  [[ -f test_logs.txt ]] && { echo "== test_logs.txt (tail 200) =="; tail -n 200 test_logs.txt; }
+  echo "== *.txt logs (complete) =="; for f in ./*.txt; do [[ -f "$f" ]] && { echo "--- $f ---"; cat "$f"; }; done
+  [[ -f test_logs.txt ]] && { echo "== test_logs.txt (complete) =="; cat test_logs.txt; }
   exit "$rc"
 }
 trap die ERR
@@ -198,17 +198,24 @@ for i in 1 2; do
   # Surface issues from record logs
   if grep -q "WARNING: DATA RACE" "${app_name}.txt"; then
     echo "::error::Data race detected in ${app_name}.txt"
-    tail -n 200 "${app_name}.txt"
+    cat "${app_name}.txt"
     exit 1
   fi
   if grep -q "ERROR" "${app_name}.txt"; then
     echo "::warning::Errors found in ${app_name}.txt"
-    tail -n 200 "${app_name}.txt"
+    cat "${app_name}.txt"
   fi
 
   endsec
   echo "Recorded test case and mocks for iteration ${i}"
 done
+
+section "Shutdown Postgres before test mode"
+# Stop Postgres container - Keploy should use mocks for database interactions
+docker stop mypostgres || true
+docker rm mypostgres || true
+echo "Postgres stopped - Keploy should now use mocks for database interactions"
+endsec
 
 section "Replay"
 set +e
@@ -219,7 +226,7 @@ sudo -E env PATH="$PATH" "$REPLAY_BIN" test \
 REPLAY_RC=$?
 set -e
 echo "Replay exit code: $REPLAY_RC"
-tail -n 200 test_logs.txt || true
+cat test_logs.txt || true
 endsec
 
 section "Check reports"
