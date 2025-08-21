@@ -269,18 +269,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 		initIgnored = totalTestIgnored
 		initTimeTaken = totalTestTimeTaken
 
-		// pass on a new context and cancel it after the test set run completes
-		hookCtx, cancel := context.WithCancel(ctx)
-		defer cancel()
-		// Load hooks for the test set
-		// use the hook function in core_linux
-		err = r.instrumentation.Hook(hookCtx, r.config.AppID, models.HookOptions{Mode: models.MODE_TEST, EnableTesting: r.config.EnableTesting, Rules: r.config.BypassRules})
-		if err != nil {
-			stopReason = fmt.Sprintf("failed to load hooks for the test set: %v", err)
-			utils.LogError(r.logger, err, stopReason)
-			return fmt.Errorf("%s", stopReason)
-		}
-
 		var initialFailedTCs map[string]bool
 		flaky := false // only be changed during replay with --must-pass flag set
 		for attempt := 1; attempt <= int(r.config.Test.MaxFlakyChecks); attempt++ {
@@ -406,9 +394,6 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.config.Test.MaxFailAttempts--
 			attempt = 0
 		}
-
-		// cancel the hook context
-		cancel()
 
 		if abortTestRun {
 			break

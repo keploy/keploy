@@ -128,9 +128,6 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		return nil
 	})
 
-	// in test mode hooks are loaded before every testset run
-	// if opts.Mode != models.MODE_TEST {
-	// Load hooks
 	err = c.Load(hookCtx, id, HookCfg{
 		AppID:      id,
 		Pid:        0,
@@ -145,7 +142,6 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		utils.LogError(c.logger, err, "failed to load hooks")
 		return hookErr
 	}
-	// }
 
 	if c.proxyStarted {
 		c.logger.Debug("Proxy already started")
