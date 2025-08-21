@@ -48,7 +48,18 @@ func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, tes
 }
 
 func (ts *TestYaml) GetAllTestSetIDs(ctx context.Context) ([]string, error) {
-	return yaml.ReadSessionIndices(ctx, ts.TcsPath, ts.logger)
+	return yaml.ReadSessionIndices(ctx, ts.TcsPath, ts.logger, yaml.ModeDir)
+}
+
+func (ts *TestYaml) GetReportTestSets(ctx context.Context, latestRunID string) ([]string, error) {
+	if latestRunID == "" {
+		ts.logger.Warn("No latest run ID provided, returning empty test set IDs")
+		return []string{}, nil
+	}
+
+	runReportPath := filepath.Join(ts.TcsPath, "reports", latestRunID)
+
+	return yaml.ReadSessionIndices(ctx, runReportPath, ts.logger, yaml.ModeFile)
 }
 
 func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error) {
