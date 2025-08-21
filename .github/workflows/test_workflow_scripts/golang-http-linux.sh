@@ -101,9 +101,6 @@ if grep "WARNING: DATA RACE" "test_logs.txt"; then
     cat "test_logs.txt"
     exit 1
 fi
-    cat "test_logs.txt"
-    exit 1
-fi
 
 all_passed=true
 
