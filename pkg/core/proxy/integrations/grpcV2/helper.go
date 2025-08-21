@@ -3,8 +3,8 @@
 package grpcV2
 
 import (
-	"go.keploy.io/server/v2/pkg/models"
 	"github.com/protocolbuffers/protoscope"
+	"go.keploy.io/server/v2/pkg/models"
 )
 
 // createLengthPrefixedMessage creates a GrpcLengthPrefixedMessage from a raw message payload.
