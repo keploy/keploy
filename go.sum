@@ -126,8 +126,8 @@ github.com/jsimonetti/rtnetlink/v2 v2.0.1 h1:xda7qaHDSVOsADNouv7ukSuicKZO7GgVUCX
 github.com/jsimonetti/rtnetlink/v2 v2.0.1/go.mod h1:7MoNYNbb3UaDHtF8udiJo/RH6VsTKP1pqKLUTVCvToE=
 github.com/k0kubun/pp/v3 v3.2.0 h1:h33hNTZ9nVFNP3u2Fsgz8JXiF5JINoZfFq4SvKJwNcs=
 github.com/k0kubun/pp/v3 v3.2.0/go.mod h1:ODtJQbQcIRfAD3N+theGCV1m/CBxweERz2dapdz1EwA=
-github.com/keploy/jsonDiff v1.0.6 h1:FTKIc+xbz1z6xblwuoaGgXMfiiWfJCM1HtVBvIp7IoM=
-github.com/keploy/jsonDiff v1.0.6/go.mod h1:wUuLbVs3Oe3mIQ61C7G88bppP//ArLtoDU0S9Awwv+s=
+github.com/keploy/jsonDiff v1.0.7 h1:LD+26pZNuFBE13EGY1zB6f9I9h42NVLr4u60kCn0WqE=
+github.com/keploy/jsonDiff v1.0.7/go.mod h1:wUuLbVs3Oe3mIQ61C7G88bppP//ArLtoDU0S9Awwv+s=
 github.com/keploy/pgproto3/v2 v2.0.5 h1:8spdNKZ+nOnHVxiimDsqulBRN6viPXPghkA7xppnzJ8=
 github.com/keploy/pgproto3/v2 v2.0.5/go.mod h1:WfJCnwN3HIg9Ish/j3sgWXnAfK8A9Y0bwXYU5xKaEdA=
 github.com/kisielk/errcheck v1.5.0/go.mod h1:pFxgyoBC7bSaBwPgfKdkLd5X25qrDl4LWUI2bnpBCr8=
