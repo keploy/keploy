@@ -46,7 +46,11 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 				return nil, nil
 			}
 
-			logger.Debug("Here are the grpc mocks in the db", zap.Int("len", len(grpcMocks)))
+			logger.Info("Here are the grpc mocks in the db", zap.Int("len", len(grpcMocks)))
+
+			for _, mock := range grpcMocks {
+				logger.Info("Found grpc mock", zap.String("name", mock.Name))
+			}
 
 			schemaMatched, err := schemaMatch(ctx, grpcReq, grpcMocks)
 			if err != nil {
@@ -58,13 +62,17 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 				return nil, nil
 			}
 
-			logger.Debug("Here are the grpc mocks with schema match", zap.Int("len", len(schemaMatched)))
+			logger.Info("Here are the grpc mocks with schema match", zap.Int("len", len(schemaMatched)))
+
+			for _, mock := range schemaMatched {
+				logger.Info("schema matched grpc mock", zap.String("name", mock.Name))
+			}
 
 			// Exact body Match
 			expBody := grpc.CanonicalizeTopLevelBlocks(grpcReq.Body.DecodedData)
-			ok, matchedMock := exactBodyMatch(expBody, schemaMatched)
+			ok, matchedMock := exactBodyMatch(logger, expBody, schemaMatched)
 			if ok {
-				logger.Debug("Exact body match found", zap.Any("matchedMock", matchedMock))
+				logger.Info("Exact body match found", zap.Any("matchedMock", matchedMock))
 				if !mockDb.DeleteFilteredMock(*matchedMock) {
 					continue
 				}
@@ -73,7 +81,7 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 
 			// apply fuzzy match for body with schemaMatched mocks
 
-			logger.Debug("Performing fuzzy match for decoded data in body")
+			logger.Info("Performing fuzzy match for decoded data in body")
 			// Perform fuzzy match on the request
 			isMatched, bestMatch := fuzzyMatch(schemaMatched, grpcReq.Body.DecodedData)
 			if isMatched {
@@ -143,9 +151,12 @@ func compareMap(m1, m2 map[string]string) bool {
 	return true
 }
 
-func exactBodyMatch(expBody string, schemaMatched []*models.Mock) (bool, *models.Mock) {
+func exactBodyMatch(logger *zap.Logger, expBody string, schemaMatched []*models.Mock) (bool, *models.Mock) {
 	for _, mock := range schemaMatched {
 		got := grpc.CanonicalizeTopLevelBlocks(mock.Spec.GRPCReq.Body.DecodedData)
+		logger.Info("Comparing bodies for mock", zap.String("name", mock.Name))
+		println("got:", got)
+		println("expected:", expBody)
 		if got == expBody {
 			return true, mock
 		}
