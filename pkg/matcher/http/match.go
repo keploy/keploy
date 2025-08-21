@@ -20,9 +20,16 @@ import (
 	"go.keploy.io/server/v2/utils"
 )
 
+// Assignable global variables for system and utility functions
+var jsonValid234 = json.Valid
+var fmtSprint234 = fmt.Sprint
+var ppNew234 = pp.New
+var jsonMarshal234 = json.Marshal
+var jsonUnmarshal234 = json.Unmarshal
+
 func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger) (bool, *models.Result) {
 	bodyType := models.Plain
-	if json.Valid([]byte(actualResponse.Body)) {
+	if jsonValid234([]byte(actualResponse.Body)) {
 		bodyType = models.JSON
 	}
 
@@ -72,7 +79,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	// stores the json body after removing the noise
 	cleanExp, cleanAct := tc.HTTPResp.Body, actualResponse.Body
 	var jsonComparisonResult matcherUtils.JSONComparisonResult
-	if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && bodyType == models.JSON && json.Valid([]byte(tc.HTTPResp.Body)) {
+	if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && bodyType == models.JSON && jsonValid234([]byte(tc.HTTPResp.Body)) {
 		//validate the stored json
 		validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
 		if err != nil {
@@ -117,7 +124,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		isBodyMismatch := false
 
 		logDiffs := matcherUtils.NewDiffsPrinter(tc.Name)
-		newLogger := pp.New()
+		newLogger := ppNew234()
 		newLogger.WithLineInfo = false
 		newLogger.SetColorScheme(models.GetFailingColorScheme())
 		var logs = ""
@@ -126,7 +133,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 		// ------------ DIFFS RELATED CODE -----------
 		if !res.StatusCode.Normal {
-			logDiffs.PushStatusDiff(fmt.Sprint(res.StatusCode.Expected), fmt.Sprint(res.StatusCode.Actual))
+			logDiffs.PushStatusDiff(fmtSprint234(res.StatusCode.Expected), fmtSprint234(res.StatusCode.Actual))
 			isStatusMismatch = true
 		} else {
 			isStatusMismatch = false
@@ -186,7 +193,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 		if isHeaderMismatch {
 			for i, j := range expectedHeader {
-				logDiffs.PushHeaderDiff(fmt.Sprint(j), fmt.Sprint(actualHeader[i]), i, headerNoise)
+				logDiffs.PushHeaderDiff(fmtSprint234(j), fmtSprint234(actualHeader[i]), i, headerNoise)
 			}
 		}
 
@@ -230,11 +237,11 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 						break
 					}
 					matcherUtils.CompareResponses(&expResponse, &actResponse, "")
-					jsonBytes, err := json.Marshal(expResponse)
+					jsonBytes, err := jsonMarshal234(expResponse)
 					if err != nil {
 						return false, nil
 					}
-					actJSONBytes, err := json.Marshal(actResponse)
+					actJSONBytes, err := jsonMarshal234(actResponse)
 					if err != nil {
 						return false, nil
 					}
@@ -267,13 +274,13 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 						logDiffs.SetHasarrayIndexMismatch(true)
 						logDiffs.PushFooterDiff(strings.Join(jsonComparisonResult.Differences(), ", "))
 					}
-					logDiffs.PushBodyDiff(fmt.Sprint(op.OldValue), fmt.Sprint(op.Value), bodyNoise)
+					logDiffs.PushBodyDiff(fmtSprint234(op.OldValue), fmtSprint234(op.Value), bodyNoise)
 				}
 			default: // right now for every other type we would do a simple comparison, till we don't have dedicated logic for other types.
 				if tc.HTTPResp.Body != actualResponse.Body {
 					isBodyMismatch = true
 				}
-				logDiffs.PushBodyDiff(fmt.Sprint(tc.HTTPResp.Body), fmt.Sprint(actualResponse.Body), bodyNoise)
+				logDiffs.PushBodyDiff(fmtSprint234(tc.HTTPResp.Body), fmtSprint234(actualResponse.Body), bodyNoise)
 			}
 		}
 
@@ -294,7 +301,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 	}
 
 	if !skipSuccessMsg {
-		newLogger := pp.New()
+		newLogger := ppNew234()
 		newLogger.WithLineInfo = false
 		newLogger.SetColorScheme(models.GetPassingColorScheme())
 		var log2 = ""
@@ -314,6 +321,10 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 // AssertionMatch checks the assertions in the test case against the actual response, if all of the assertions pass, it returns true, it doesn't care about other parameters of the response,
 // and make the test case pass.
+
+// Assignable global variables for system and utility functions
+var fmtSprintf234 = fmt.Sprintf
+var strconvAtoi234 = strconv.Atoi
 
 func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger *zap.Logger) (bool, *models.Result) {
 	pass := true
@@ -348,14 +359,14 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			if len(class) == 3 {
 				// handle if class given is status code without xx, e.g. 200
 				if class[1:] != "xx" {
-					classStr = fmt.Sprintf("%cxx", class[0])
+					classStr = fmtSprintf234("%cxx", class[0])
 				} else {
 					classStr = class
 				}
 			} else {
 				classStr = class
 			}
-			actualClass := fmt.Sprintf("%dxx", 200/100)
+			actualClass := fmtSprintf234("%dxx", 200/100)
 			if classStr != actualClass {
 				pass = false
 				logger.Error("status_code_class assertion failed", zap.String("expected", class), zap.String("actual", actualClass))
@@ -365,7 +376,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			codes := toStringSlice(value)
 			var ints []int
 			for _, s := range codes {
-				if i, err := strconv.Atoi(s); err == nil {
+				if i, err := strconvAtoi234(s); err == nil {
 					ints = append(ints, i)
 				}
 			}
@@ -421,7 +432,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			// a flat slice of header names
 			case []interface{}:
 				for _, item := range v {
-					hdr := fmt.Sprint(item)
+					hdr := fmtSprint234(item)
 					if _, ok := actualResponse.Header[hdr]; !ok {
 						pass = false
 						logger.Error("header_exists assertion failed", zap.String("header", hdr))
@@ -486,7 +497,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			case map[string]interface{}:
 				expectedMap = v
 			case string:
-				_ = json.Unmarshal([]byte(v), &expectedMap)
+				_ = jsonUnmarshal234([]byte(v), &expectedMap)
 			default:
 				pass = false
 				logger.Error("json_contains: unexpected format", zap.Any("value", value))

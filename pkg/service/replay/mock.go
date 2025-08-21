@@ -16,6 +16,12 @@ import (
 	"go.uber.org/zap"
 )
 
+var osReadFile224 = os.ReadFile
+var osCreate224 = os.Create
+var timeSleep224 = time.Sleep
+var extractClaimsWithoutVerification224 = extractClaimsWithoutVerification
+var getLatestPlan224 = getLatestPlan
+
 type mock struct {
 	cfg        *config.Config
 	storage    Storage
@@ -54,7 +60,7 @@ func (m *mock) download(ctx context.Context, testSetID string) error {
 
 	// Check if mock file is already downloaded by previous test runs
 	localMockPath := filepath.Join(m.cfg.Path, testSetID, "mocks.yaml")
-	mockContent, err := os.ReadFile(localMockPath)
+	mockContent, err := osReadFile224(localMockPath)
 	if err == nil {
 		if tsConfig.MockRegistry.Mock == utils.Hash(mockContent) {
 			m.logger.Info("Mock file already exists, downloading from cloud is not necessary", zap.String("testSetID", testSetID), zap.String("mockPath", localMockPath))
@@ -119,7 +125,7 @@ func (m *mock) download(ctx context.Context, testSetID string) error {
 	}
 
 	// Save the downloaded mock file to local
-	file, err := os.Create(localMockPath)
+	file, err := osCreate224(localMockPath)
 	if err != nil {
 		m.logger.Error("Failed to create local file", zap.String("path", localMockPath), zap.Error(err))
 		return err
@@ -145,7 +151,7 @@ func (m *mock) download(ctx context.Context, testSetID string) error {
 			default:
 				fmt.Printf("\rDownloading... %c", spinnerChars[i%len(spinnerChars)])
 				i++
-				time.Sleep(100 * time.Millisecond)
+				timeSleep224(100 * time.Millisecond)
 			}
 		}
 	}()
@@ -173,7 +179,7 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 		return fmt.Errorf("storage service is not initialized")
 	}
 
-	claims, err := extractClaimsWithoutVerification(m.token)
+	claims, err := extractClaimsWithoutVerification224(m.token)
 	var role, username string
 	var ok bool
 	if err != nil {
@@ -192,7 +198,7 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 	}
 
 	// get the plan of the current user
-	plan, err := getLatestPlan(ctx, m.logger, m.cfg.APIServerURL, m.token)
+	plan, err := getLatestPlan224(ctx, m.logger, m.cfg.APIServerURL, m.token)
 	if err != nil {
 		m.logger.Error("Failed to get latest plan of the user", zap.Error(err))
 		return err
@@ -202,7 +208,7 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 
 	// Inspect local mock file
 	localMockPath := filepath.Join(m.cfg.Path, testSetID, "mocks.yaml")
-	mockFileContent, err := os.ReadFile(localMockPath)
+	mockFileContent, err := osReadFile224(localMockPath)
 	if err != nil {
 		m.logger.Error("Failed to read mock file for mock upload", zap.String("path", localMockPath), zap.Error(err))
 		return err
