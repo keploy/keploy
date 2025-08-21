@@ -543,11 +543,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			utils.LogError(r.logger, err, "error in testLoopErrGrp")
 		}
 		close(exitLoopChan)
-		// Best-effort: clear any proxy-side mock state after a test-set completes.
-		// Use a non-cancelled ctx so the call isn't dropped during shutdown.
-		if r.instrument {
-			r.instrumentation.Reset()
-		}
 	}()
 
 	testCases, err := r.testDB.GetTestCases(runTestSetCtx, testSetID)

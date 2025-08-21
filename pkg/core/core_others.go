@@ -16,11 +16,6 @@ type Core struct {
 	logger *zap.Logger
 }
 
-// Reset implements replay.Instrumentation.
-func (c *Core) Reset() {
-	panic("unimplemented")
-}
-
 var errUnsupported = errors.New("instrumentation only supported on linux. Detected OS: " + runtime.GOOS)
 
 func New(logger *zap.Logger) *Core {

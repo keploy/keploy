@@ -128,6 +128,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		return nil
 	})
 
+	// Load hooks
 	err = c.Load(hookCtx, id, HookCfg{
 		AppID:      id,
 		Pid:        0,
@@ -145,7 +146,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 
 	if c.proxyStarted {
 		c.logger.Debug("Proxy already started")
-		return nil
+		// return nil
 	}
 
 	select {
@@ -264,8 +265,4 @@ func (c *Core) GetContainerIP(_ context.Context, id uint64) (string, error) {
 	}
 
 	return ip, nil
-}
-
-func (c *Core) Reset() {
-	c.Proxy.Reset()
 }

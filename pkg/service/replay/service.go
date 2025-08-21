@@ -20,8 +20,6 @@ type Instrumentation interface {
 	GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error)
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
-	// Reset resets the proxy state for a new test set
-	Reset()
 
 	GetContainerIP(ctx context.Context, id uint64) (string, error)
 }
