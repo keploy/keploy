@@ -243,9 +243,9 @@ func (r *Replayer) Start(ctx context.Context) error {
 			// Cancel the current hooks and wait for cleanup to complete
 			if hookCancel != nil {
 				hookCancel()
-				// Add a longer delay to allow the cleanup goroutine to complete
-				// This prevents race conditions with eBPF resources during cleanup
-				time.Sleep(500 * time.Millisecond)
+				// Wait for cleanup with progressive delay
+				// The cleanup goroutine needs to finish its operations before we start new setup
+				time.Sleep(2000 * time.Millisecond)
 			}
 			
 			// Reload hooks for the new test set with retry mechanism
@@ -568,7 +568,7 @@ func (r *Replayer) reloadHooks(ctx context.Context, appID uint64) (*InstrumentSt
 	// Create a retry mechanism in case of temporary race conditions
 	var lastErr error
 	maxRetries := 5
-	baseDelay := 100 * time.Millisecond
+	baseDelay := 200 * time.Millisecond
 	
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		// Check for context cancellation
@@ -576,6 +576,13 @@ func (r *Replayer) reloadHooks(ctx context.Context, appID uint64) (*InstrumentSt
 		case <-ctx.Done():
 			return &InstrumentState{}, context.Canceled
 		default:
+		}
+		
+		// Add a small delay before each attempt to let any remaining cleanup finish
+		if attempt > 1 {
+			delay := baseDelay * time.Duration(attempt) // Linear backoff
+			r.logger.Debug("Retrying hook reload", zap.Int("attempt", attempt), zap.Duration("delay", delay))
+			time.Sleep(delay)
 		}
 		
 		// Start fresh hooks with the new app ID
