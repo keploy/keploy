@@ -3,7 +3,8 @@ package conn
 
 // constant for the maximum size of the event body
 const (
-	EventBodyMaxSize = 16384 // 16 KB
+	EventBodyMaxSize    = 16384   // 16 KB
+	EventBodyMaxSizeBig = 4194304 // 4 MB
 )
 
 // ID is a conversion of the following C-Struct into GO.
@@ -34,17 +35,29 @@ type ID struct {
 //	    s64 validate_rd_bytes
 //	    s64 validate_wr_bytes
 //	};
-type SocketDataEvent struct {
+type SocketDataEventBig struct {
 	EntryTimestampNano   uint64
 	TimestampNano        uint64
 	ConnID               ID
 	Direction            TrafficDirectionEnum
 	MsgSize              uint32
 	Pos                  uint64
-	Msg                  [EventBodyMaxSize]byte
 	ValidateReadBytes    int64
 	ValidateWrittenBytes int64
 	ClientID             uint64
+	Msg                  [EventBodyMaxSizeBig]byte
+}
+type SocketDataEventSmall struct {
+	EntryTimestampNano   uint64
+	TimestampNano        uint64
+	ConnID               ID
+	Direction            TrafficDirectionEnum
+	MsgSize              uint32
+	Pos                  uint64
+	ValidateReadBytes    int64
+	ValidateWrittenBytes int64
+	ClientID             uint64
+	Msg                  [EventBodyMaxSize]byte
 }
 
 // SocketOpenEvent is a conversion of the following C-Struct into GO.

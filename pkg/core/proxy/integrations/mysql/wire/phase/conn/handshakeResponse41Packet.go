@@ -78,6 +78,9 @@ func DecodeHandshakeResponse(_ context.Context, logger *zap.Logger, data []byte)
 	} else {
 		authLen := int(data[0])
 		data = data[2:]
+		if len(data) < authLen {
+			return nil, errors.New("handshake response packet too short for auth data")
+		}
 		packet.AuthResponse = data[:authLen]
 	}
 
