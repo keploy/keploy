@@ -21,8 +21,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"text/template"
-
 	"github.com/andybalholm/brotli"
 	"go.keploy.io/server/v2/pkg/models"
 
@@ -103,43 +101,32 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	//TODO: adjust this logic in the render function in order to remove the redundant code
 	// convert testcase to string and render the template values.
+	// Render any template values in the test case before simulation.
 	if len(utils.TemplatizedValues) > 0 || len(utils.SecretValues) > 0 {
 		testCaseStr, err := json.Marshal(tc)
 		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the testcase")
-			return nil, err
-		}
-		funcMap := template.FuncMap{
-			"int":    utils.ToInt,
-			"string": utils.ToString,
-			"float":  utils.ToFloat,
-		}
-		tmpl, err := template.New("template").Funcs(funcMap).Parse(string(testCaseStr))
-		if err != nil || tmpl == nil {
-			utils.LogError(logger, err, "failed to parse the template", zap.Any("TestCaseString", string(testCaseStr)), zap.Any("TestCase", tc.Name), zap.Any("TestSet", testSet))
+			utils.LogError(logger, err, "failed to marshal the testcase for templating")
 			return nil, err
 		}
 
-		data := make(map[string]interface{})
-
+		// Prepare the data for template execution.
+		templateData := make(map[string]interface{})
 		for k, v := range utils.TemplatizedValues {
-			data[k] = v
+			templateData[k] = v
 		}
-
 		if len(utils.SecretValues) > 0 {
-			data["secret"] = utils.SecretValues
+			templateData["secret"] = utils.SecretValues
 		}
 
-		var output bytes.Buffer
-		err = tmpl.Execute(&output, data)
+		renderedStr, err := utils.RenderTemplatesInString(logger, string(testCaseStr), templateData)
 		if err != nil {
-			utils.LogError(logger, err, "failed to execute the template")
-			return nil, err
+			utils.LogError(logger, err, "failed to render some template values", zap.Any("TestCase", tc.Name), zap.Any("TestSet", testSet))
 		}
-		testCaseStr = output.Bytes()
-		err = json.Unmarshal([]byte(testCaseStr), &tc)
+
+		// Unmarshal the rendered string back into the test case struct.
+		err = json.Unmarshal([]byte(renderedStr), &tc)
 		if err != nil {
-			utils.LogError(logger, err, "failed to unmarshal the testcase")
+			utils.LogError(logger, err, "failed to unmarshal the rendered testcase", zap.Any("RenderedString", renderedStr))
 			return nil, err
 		}
 	}

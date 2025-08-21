@@ -14,6 +14,20 @@ import (
 	yamlLib "gopkg.in/yaml.v3"
 )
 
+type IndexMode string
+
+const (
+	ModeDir  IndexMode = "dir"
+	ModeFile IndexMode = "file"
+)
+
+// Ignored folders
+const (
+	FolderReports     = "reports"
+	FolderTestReports = "testReports"
+	FolderSchema      = "schema"
+)
+
 // NetworkTrafficDoc stores the request-response data of a network call (ingress or egress)
 type NetworkTrafficDoc struct {
 	Version      models.Version `json:"version" yaml:"version"`
@@ -160,11 +174,12 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 	return false, nil
 }
 
-func ReadSessionIndices(_ context.Context, path string, Logger *zap.Logger) ([]string, error) {
+func ReadSessionIndices(ctx context.Context, path string, logger *zap.Logger, mode IndexMode) ([]string, error) {
 	var indices []string
+
 	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
 	if err != nil {
-		Logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
+		logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
 		return indices, nil
 	}
 
@@ -174,10 +189,26 @@ func ReadSessionIndices(_ context.Context, path string, Logger *zap.Logger) ([]s
 	}
 
 	for _, v := range files {
-		if v.Name() != "reports" && v.Name() != "testReports" && v.Name() != "schema" && v.IsDir() {
-			indices = append(indices, v.Name())
+		// Skip ignored folders
+		if v.Name() == FolderReports || v.Name() == FolderTestReports || v.Name() == FolderSchema {
+			continue
+		}
+
+		name := v.Name()
+
+		switch mode {
+		case ModeDir:
+			if v.IsDir() {
+				indices = append(indices, name)
+			}
+		case ModeFile:
+			if ext := filepath.Ext(name); ext != "" {
+				name = name[:len(name)-len(ext)]
+			}
+			indices = append(indices, name)
 		}
 	}
+
 	return indices, nil
 }
 
