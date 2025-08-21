@@ -72,3 +72,6 @@ jobs:
   run_node_encoding:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/node_encoding.yaml
+  run_grpc_unary_fuzzer:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/grpc-unary-fuzzer.yml

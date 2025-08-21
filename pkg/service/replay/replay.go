@@ -1011,7 +1011,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 				continue
 			}
-			testPass, testResult = r.compareGRPCResp(testCase, grpcResp, testSetID)
+			testPass, testResult = r.compareGRPCResp(testCase, grpcResp, false, testSetID)
+
+		case models.GRPC_V2_EXPORT:
+			grpcResp, ok := resp.(*models.GrpcResp)
+			if !ok {
+				r.logger.Error("invalid response type for gRPC test case")
+				failure++
+				testSetStatus = models.TestSetStatusFailed
+				testCaseResult := r.CreateFailedTestResult(testCase, testSetID, started, "invalid response type for gRPC test case")
+				loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
+				if loopErr != nil {
+					utils.LogError(r.logger, loopErr, "failed to insert test case result for type assertion error")
+					break
+				}
+				continue
+			}
+			testPass, testResult = r.compareGRPCResp(testCase, grpcResp, true, testSetID)
 		}
 
 		if !testPass {
@@ -1067,6 +1083,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 				testCaseResult = &models.TestResult{
 					Kind:         models.GRPC_EXPORT,
+					Name:         testSetID,
+					Status:       testStatus,
+					Started:      started.Unix(),
+					Completed:    time.Now().UTC().Unix(),
+					TestCaseID:   testCase.Name,
+					GrpcReq:      testCase.GrpcReq,
+					GrpcRes:      *grpcResp,
+					TestCasePath: filepath.Join(r.config.Path, testSetID),
+					MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
+					Noise:        testCase.Noise,
+					Result:       *testResult,
+				}
+			case models.GRPC_V2_EXPORT:
+				grpcResp := resp.(*models.GrpcResp)
+
+				testCaseResult = &models.TestResult{
+					Kind:         models.GRPC_V2_EXPORT,
 					Name:         testSetID,
 					Status:       testStatus,
 					Started:      started.Unix(),
@@ -1301,13 +1334,13 @@ func (r *Replayer) compareHTTPResp(tc *models.TestCase, actualResponse *models.H
 	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
 }
 
-func (r *Replayer) compareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string) (bool, *models.Result) {
+func (r *Replayer) compareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, grpcV2 bool, testSetID string) (bool, *models.Result) {
 	noiseConfig := r.config.Test.GlobalNoise.Global
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
 	}
 
-	return grpcMatcher.Match(tc, actualResp, noiseConfig, r.logger)
+	return grpcMatcher.Match(tc, actualResp, noiseConfig, grpcV2, r.logger)
 
 }
 
@@ -1634,7 +1667,27 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 			},
 		}
 
-		_, result = r.compareGRPCResp(testCase, actualResponse, testSetID)
+		_, result = r.compareGRPCResp(testCase, actualResponse, false, testSetID)
+
+		testCaseResult.GrpcReq = testCase.GrpcReq
+		testCaseResult.GrpcRes = *actualResponse
+
+	case models.GRPC_V2_EXPORT:
+		actualResponse := &models.GrpcResp{
+			Headers: models.GrpcHeaders{
+				PseudoHeaders:   make(map[string]string),
+				OrdinaryHeaders: make(map[string]string),
+			},
+			Body: models.GrpcLengthPrefixedMessage{
+				DecodedData: errorMessage,
+			},
+			Trailers: models.GrpcHeaders{
+				PseudoHeaders:   make(map[string]string),
+				OrdinaryHeaders: make(map[string]string),
+			},
+		}
+
+		_, result = r.compareGRPCResp(testCase, actualResponse, true, testSetID)
 
 		testCaseResult.GrpcReq = testCase.GrpcReq
 		testCaseResult.GrpcRes = *actualResponse
@@ -1658,7 +1711,7 @@ func (r *Replayer) replaceHostInTestCase(testCase *models.TestCase, newHost, log
 		}
 		r.logger.Debug("", zap.Any(fmt.Sprintf("replaced %s", logContext), testCase.HTTPReq.URL))
 
-	case models.GRPC_EXPORT:
+	case models.GRPC_EXPORT, models.GRPC_V2_EXPORT:
 		testCase.GrpcReq.Headers.PseudoHeaders[":authority"], err = utils.ReplaceGrpcHost(testCase.GrpcReq.Headers.PseudoHeaders[":authority"], newHost)
 		if err != nil {
 			utils.LogError(r.logger, err, fmt.Sprintf("failed to replace host to %s", logContext))
@@ -1674,7 +1727,7 @@ func (r *Replayer) replacePortInTestCase(testCase *models.TestCase, newPort stri
 	switch testCase.Kind {
 	case models.HTTP:
 		testCase.HTTPReq.URL, err = utils.ReplacePort(testCase.HTTPReq.URL, newPort)
-	case models.GRPC_EXPORT:
+	case models.GRPC_EXPORT, models.GRPC_V2_EXPORT:
 		testCase.GrpcReq.Headers.PseudoHeaders[":authority"], err = utils.ReplaceGrpcPort(testCase.GrpcReq.Headers.PseudoHeaders[":authority"], newPort)
 	}
 	if err != nil {

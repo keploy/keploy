@@ -26,12 +26,12 @@ require (
 	go.uber.org/zap v1.27.0
 	golang.org/x/crypto v0.39.0 // indirect
 	golang.org/x/sys v0.33.0
-	google.golang.org/protobuf v1.36.5 // indirect
+	google.golang.org/protobuf v1.36.6
 )
 
 require (
 	github.com/containerd/log v0.1.0 // indirect
-	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
+	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
 	github.com/fsnotify/fsnotify v1.8.0 // indirect
 	github.com/getkin/kin-openapi v0.126.0
 	github.com/go-errors/errors v1.4.2 // indirect
@@ -121,6 +121,7 @@ require (
 	github.com/xdg-go/stringprep v1.0.4
 	golang.org/x/sync v0.15.0
 	golang.org/x/term v0.32.0
+	google.golang.org/grpc v1.73.0
 	gopkg.in/yaml.v2 v2.4.0
 	helm.sh/helm/v3 v3.18.3
 	sigs.k8s.io/kustomize/kyaml v0.19.0
@@ -134,8 +135,7 @@ require (
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
 	golang.org/x/exp v0.0.0-20250305212735-054e65f0b394 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20250313205543-e70fdf4c4cb4 // indirect
-	google.golang.org/grpc v1.71.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20250324211829-b45e905df463 // indirect
 )
 
 require (
