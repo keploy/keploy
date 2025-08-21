@@ -1,6 +1,6 @@
 #!/bin/bash
 
-source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
+source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Checkout to the specified branch
 git fetch origin
@@ -20,7 +20,7 @@ python3 manage.py makemigrations
 python3 manage.py migrate
 
 # Configuration and cleanup
-sudo $RECORD_BIN config --generate
+sudo $RECORD_BIN config --generate -p .
 sudo rm -rf keploy/  # Clean old test data
 config_file="./keploy.yml"
 sed -i 's/global: {}/global: {"header": {"Allow":[],}}/' "$config_file"
