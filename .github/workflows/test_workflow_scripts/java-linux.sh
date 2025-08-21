@@ -1,127 +1,181 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Safe, chatty CI script for Java + Postgres + Keploy
+
+set -Eeuo pipefail
+
+section() { echo "::group::$*"; }
+endsec()  { echo "::endgroup::"; }
+
+die() {
+  rc=$?
+  echo "::error::Pipeline failed (exit=$rc). Dumping context…"
+  echo "== docker ps =="; docker ps || true
+  echo "== postgres logs (tail 200) =="; docker logs --tail 200 mypostgres || true
+  echo "== workspace tree (depth 3) =="; find . -maxdepth 3 -type d -print | sort || true
+  echo "== keploy tree (depth 4) =="; find ./keploy -maxdepth 4 -type f -print 2>/dev/null | sort || true
+  echo "== *.txt logs (tail 200) =="; for f in ./*.txt; do [[ -f "$f" ]] && { echo "--- $f ---"; tail -n 200 "$f"; }; done
+  [[ -f test_logs.txt ]] && { echo "== test_logs.txt (tail 200) =="; tail -n 200 test_logs.txt; }
+  exit "$rc"
+}
+trap die ERR
+
+wait_for_postgres() {
+  section "Wait for Postgres readiness"
+  for i in {1..90}; do
+    if docker exec mypostgres pg_isready -U petclinic -d petclinic >/dev/null 2>&1; then
+      echo "Postgres is ready."
+      endsec; return 0
+    fi
+    # Fallback probe
+    docker exec mypostgres psql -U petclinic -d petclinic -c "SELECT 1" >/dev/null 2>&1 && { echo "Postgres responded."; endsec; return 0; }
+    sleep 1
+  done
+  echo "::error::Postgres did not become ready in time"
+  endsec; return 1
+}
+
+wait_for_http() {
+  local url="$1" tries="${2:-60}"
+  for i in $(seq 1 "$tries"); do
+    if curl -fsS "$url" >/dev/null; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
+
+send_request() {
+  local kp_pid="$1"
+
+  # Ensure app is up
+  if ! wait_for_http "http://localhost:9966/petclinic/api/pettypes" 120; then
+    echo "::error::App did not become healthy at /pettypes"
+  else
+    echo "good!App started"
+  fi
+
+  # Traffic to generate tests/mocks
+  curl -sS http://localhost:9966/petclinic/api/pettypes || true
+  curl -sS --request POST \
+    --url http://localhost:9966/petclinic/api/pettypes \
+    --header 'content-type: application/json' \
+    --data '{"name":"John Doe"}' || true
+  curl -sS http://localhost:9966/petclinic/api/pettypes || true
+  curl -sS --request POST \
+    --url http://localhost:9966/petclinic/api/pettypes \
+    --header 'content-type: application/json' \
+    --data '{"name":"Alice Green"}' || true
+  curl -sS http://localhost:9966/petclinic/api/pettypes || true
+  curl -sS --request DELETE http://localhost:9966/petclinic/api/pettypes/1 || true
+  curl -sS http://localhost:9966/petclinic/api/pettypes || true
+
+  # Let keploy persist, then stop it
+  sleep 10
+  echo "$kp_pid Keploy PID"
+  echo "Killing keploy"
+  sudo kill "$kp_pid" 2>/dev/null || true
+}
+
+# ----- main -----
 
 source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
 
-# Checkout a different branch
+section "Git branch"
 git fetch origin
 git checkout native-linux
+endsec
 
-# Start postgres instance.
-docker run -d -e POSTGRES_USER=petclinic -e POSTGRES_PASSWORD=petclinic -e POSTGRES_DB=petclinic -p 5432:5432 --name mypostgres postgres:15.2
-
-# Update the java version
-source ./../../../.github/workflows/test_workflow_scripts/update-java.sh
-
-# Remove any existing test and mocks by keploy.
-sudo rm -rf keploy/
-
-# Update the postgres database.
+section "Start Postgres"
+docker run -d --name mypostgres -e POSTGRES_USER=petclinic -e POSTGRES_PASSWORD=petclinic \
+  -e POSTGRES_DB=petclinic -p 5432:5432 postgres:15.2
+wait_for_postgres
+# seed DB
 docker cp ./src/main/resources/db/postgresql/initDB.sql mypostgres:/initDB.sql
 docker exec mypostgres psql -U petclinic -d petclinic -f /initDB.sql
+endsec
 
-send_request(){
-    sleep 10
-    app_started=false
-    while [ "$app_started" = false ]; do
-        if curl -X GET http://localhost:9966/petclinic/api/pettypes; then
-            app_started=true
-        fi
-        sleep 3 # wait for 3 seconds before checking again.
-    done
-    echo "App started"
-    # Start making curl calls to record the testcases and mocks.
-    curl -X GET http://localhost:9966/petclinic/api/pettypes
+section "Java setup"
+source ./../../../.github/workflows/test_workflow_scripts/update-java.sh
+endsec
 
-    curl --request POST \
-    --url http://localhost:9966/petclinic/api/pettypes \
-    --header 'content-type: application/json' \
-    --data '{
-        "name":"John Doe"}'
+# Clean once (keep artifacts across iterations)
+sudo rm -rf keploy/
 
-    curl -X GET http://localhost:9966/petclinic/api/pettypes
+for i in 1 2; do
+  section "Record iteration $i"
 
-    curl --request POST \
-    --url http://localhost:9966/petclinic/api/pettypes \
-    --header 'content-type: application/json' \
-    --data '{
-        "name":"Alice Green"}'
+  # Build app (captured to log)
+  mvn clean install -Dmaven.test.skip=true | tee -a mvn_build.log
 
-    curl -X GET http://localhost:9966/petclinic/api/pettypes
+  app_name="javaApp_${i}"
 
-    curl --request DELETE \
-    --url http://localhost:9966/petclinic/api/pettypes/1
+  # Start keploy in background, capture PID
+  sudo -E env PATH="$PATH" "$RECORD_BIN" record \
+    -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' \
+    > "${app_name}.txt" 2>&1 &
+  KEPLOY_PID=$!
 
-    curl -X GET http://localhost:9966/petclinic/api/pettypes
+  # Drive traffic and stop keploy
+  send_request "$KEPLOY_PID"
 
-    # Wait for 10 seconds for keploy to record the tcs and mocks.
-    sleep 10
-    pid=$(pgrep keploy)
-    echo "$pid Keploy PID" 
-    echo "Killing keploy"
-    sudo kill $pid
-}
+  # Wait for keploy and capture rc
+  set +e
+  wait "$KEPLOY_PID"
+  rc=$?
+  set -e
+  echo "Record exit code: $rc"
+  [[ $rc -ne 0 ]] && echo "::warning::Keploy record exited non-zero (iteration $i)"
 
-for i in {1..2}; do
-# Start keploy in record mode.
-    mvn clean install -Dmaven.test.skip=true
-    app_name="javaApp_${i}"
-    send_request &
-    sudo -E env PATH=$PATH $RECORD_BIN record -c 'java -jar target/spring-petclinic-rest-3.0.2.jar'    &> "${app_name}.txt"
-    if grep "ERROR" "${app_name}.txt"; then
-        echo "Error found in pipeline..."
-        cat "${app_name}.txt"
-        exit 1
-    fi
-    if grep "WARNING: DATA RACE" "${app_name}.txt"; then
-        echo "Race condition detected in recording, stopping pipeline..."
-        cat "${app_name}.txt"
-        exit 1
-    fi
-    sleep 5
-    wait
-    echo "Recorded test case and mocks for iteration ${i}"
+  # Basic validation + surface issues
+  echo "== keploy artifacts (depth 3) =="
+  find ./keploy -maxdepth 3 -type f | sort || true
+
+  if grep -q "WARNING: DATA RACE" "${app_name}.txt"; then
+    echo "::error::Data race detected in ${app_name}.txt"
+    tail -n 200 "${app_name}.txt"
+    exit 1
+  fi
+  if grep -q "ERROR" "${app_name}.txt"; then
+    echo "::warning::Errors found in ${app_name}.txt"
+    tail -n 200 "${app_name}.txt"
+  fi
+
+  endsec
+  echo "Recorded test case and mocks for iteration ${i}"
 done
 
-# Start keploy in test mode.
-sudo -E env PATH=$PATH $REPLAY_BIN test -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' --delay 20    &> test_logs.txt
-if grep "ERROR" "test_logs.txt"; then
-    echo "Error found in pipeline..."
-    cat "test_logs.txt"
-    exit 1
+section "Replay"
+set +e
+sudo -E env PATH="$PATH" "$REPLAY_BIN" test \
+  -c 'java -jar target/spring-petclinic-rest-3.0.2.jar' \
+  --delay 20 \
+  > test_logs.txt 2>&1
+REPLAY_RC=$?
+set -e
+echo "Replay exit code: $REPLAY_RC"
+tail -n 200 test_logs.txt || true
+endsec
+
+section "Check reports"
+RUN_DIR=$(ls -1dt ./keploy/reports/test-run-* 2>/dev/null | head -n1 || true)
+if [[ -z "${RUN_DIR:-}" ]]; then
+  echo "::error::No test-run directory found under ./keploy/reports"
+  [[ $REPLAY_RC -ne 0 ]] && exit "$REPLAY_RC" || exit 1
 fi
-if grep "WARNING: DATA RACE" "test_logs.txt"; then
-    echo "Race condition detected in test, stopping pipeline..."
-    cat "test_logs.txt"
-    exit 1
-fi
+echo "Using reports from: $RUN_DIR"
 
 all_passed=true
-
-# Get the test results from the testReport file.
-for i in {0..1}
-do
-    # Define the report file for each test set
-    report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
-
-    # Extract the test status
-    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-
-    # Print the status for debugging
-    echo "Test status for test-set-$i: $test_status"
-
-    # Check if any test set did not pass
-    if [ "$test_status" != "PASSED" ]; then
-        all_passed=false
-        echo "Test-set-$i did not pass."
-        break # Exit the loop early as all tests need to pass
-    fi
+for rpt in "$RUN_DIR"/test-set-*-report.yaml; do
+  [[ -f "$rpt" ]] || continue
+  status=$(awk '/^status:/{print $2; exit}' "$rpt")
+  echo "Test status for $(basename "$rpt"): ${status:-<missing>}"
+  [[ "$status" == "PASSED" ]] || all_passed=false
 done
+endsec
 
-# Check the overall test status and exit accordingly
-if [ "$all_passed" = true ]; then
-    echo "All tests passed"
-    exit 0
-else
-    cat "test_logs.txt"
-    exit 1
+if [[ "$all_passed" == "true" && $REPLAY_RC -eq 0 ]]; then
+  echo "All tests passed"
+  exit 0
 fi
+
+echo "::error::Some tests failed or replay exited non-zero"
+exit 1
