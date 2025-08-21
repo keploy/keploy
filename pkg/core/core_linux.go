@@ -149,7 +149,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 
 	if c.proxyStarted {
 		c.logger.Debug("Proxy already started")
-		// return nil
+		return nil
 	}
 
 	select {
