@@ -101,7 +101,7 @@ func (s *grpcMockServer) handler(_ interface{}, stream grpc.ServerStream) error 
 		return status.Errorf(codes.Internal, "failed to receive request message: %v", err)
 	}
 	requestBody = reqMsg.data
-	s.logger.Debug("fully received request body", zap.Int("size", len(requestBody)))
+	s.logger.Info("fully received request body", zap.Int("size", len(requestBody)))
 
 	grpcReq := &models.GrpcReq{
 		Headers: s.grpcMetadataToHeaders(md, fullMethod),

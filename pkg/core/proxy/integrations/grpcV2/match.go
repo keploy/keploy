@@ -52,7 +52,7 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 				logger.Info("Found grpc mock", zap.String("name", mock.Name))
 			}
 
-			schemaMatched, err := schemaMatch(ctx, grpcReq, grpcMocks)
+			schemaMatched, err := schemaMatch(ctx, logger, grpcReq, grpcMocks)
 			if err != nil {
 				return nil, err
 			}
@@ -95,7 +95,7 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 	}
 }
 
-func schemaMatch(ctx context.Context, req models.GrpcReq, mocks []*models.Mock) ([]*models.Mock, error) {
+func schemaMatch(ctx context.Context, logger *zap.Logger, req models.GrpcReq, mocks []*models.Mock) ([]*models.Mock, error) {
 	var schemaMatched []*models.Mock
 
 	for _, mock := range mocks {
@@ -104,8 +104,32 @@ func schemaMatch(ctx context.Context, req models.GrpcReq, mocks []*models.Mock) 
 		}
 		mockReq := mock.Spec.GRPCReq
 
-		// the pseudo headers should definitely match (:method, :path, etc.).
-		if !compareMap(mockReq.Headers.PseudoHeaders, req.Headers.PseudoHeaders) {
+		// Create copies to avoid modifying original data.
+		mockPseudoHeaders := make(map[string]string)
+		for k, v := range mockReq.Headers.PseudoHeaders {
+			mockPseudoHeaders[k] = v
+		}
+		reqPseudoHeaders := make(map[string]string)
+		for k, v := range req.Headers.PseudoHeaders {
+			reqPseudoHeaders[k] = v
+		}
+
+		// Check for authority mismatch and log a warning if it occurs.
+		mockAuthority := mockPseudoHeaders[":authority"]
+		reqAuthority := reqPseudoHeaders[":authority"]
+		if mockAuthority != reqAuthority {
+			logger.Warn("gRPC authority header mismatch, continuing match by ignoring it.",
+				zap.String("mock.name", mock.Name),
+				zap.String("mock.authority", mockAuthority),
+				zap.String("request.authority", reqAuthority),
+			)
+			// Remove the authority header from both copies for the comparison.
+			delete(mockPseudoHeaders, ":authority")
+			delete(reqPseudoHeaders, ":authority")
+		}
+
+		// The pseudo headers should definitely match (ignoring authority if it mismatched).
+		if !compareMap(mockPseudoHeaders, reqPseudoHeaders) {
 			continue
 		}
 
