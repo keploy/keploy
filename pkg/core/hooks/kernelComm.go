@@ -24,8 +24,13 @@ func (h *Hooks) Get(_ context.Context, srcPort uint16) (*core.NetworkAddress, er
 	if err != nil {
 		return nil, err
 	}
-	// TODO : need to implement eBPF code to differentiate between different apps
-	s, ok := h.sess.Get(0)
+	
+	// Use the current app ID with proper synchronization
+	h.m.Lock()
+	currentAppID := h.appID
+	h.m.Unlock()
+	
+	s, ok := h.sess.Get(currentAppID)
 	if !ok {
 		return nil, fmt.Errorf("session not found")
 	}
@@ -96,6 +101,9 @@ func (h *Hooks) SendE2EInfo(pid uint32) error {
 }
 
 func (h *Hooks) SendDockerAppInfo(_ uint64, dockerAppInfo structs.DockerAppInfo) error {
+	h.m.Lock()
+	defer h.m.Unlock()
+	
 	if h.appID != 0 {
 		err := h.dockerAppRegistrationMap.Delete(h.appID)
 		if err != nil {

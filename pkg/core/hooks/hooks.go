@@ -104,6 +104,11 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 	h.sess.Set(id, &core.Session{
 		ID: id,
 	})
+	
+	// Set the app ID for this session with proper synchronization
+	h.m.Lock()
+	h.appID = id
+	h.m.Unlock()
 
 	err := h.load(ctx, opts)
 	if err != nil {
@@ -560,7 +565,11 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 	if err := h.socket.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the socket")
 	}
+	
+	// Reset the app ID with proper synchronization
+	h.m.Lock()
 	h.appID = 0
+	h.m.Unlock()
 
 	if !opts.E2E {
 		if err := h.udpp4.Close(); err != nil {
