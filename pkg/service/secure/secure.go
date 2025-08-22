@@ -253,7 +253,7 @@ var BuiltInSecurityChecks = []SecurityCheck{
 		Type:        "header",
 		Target:      "response",
 		Key:         "Server",
-		Operation:   "exists",
+		Operation:   "not_exists",
 		Status:      "enabled",
 	},
 	{
@@ -264,7 +264,7 @@ var BuiltInSecurityChecks = []SecurityCheck{
 		Type:        "header",
 		Target:      "response",
 		Key:         "X-Powered-By",
-		Operation:   "exists",
+		Operation:   "not_exists",
 		Status:      "enabled",
 	},
 	// Request-based security checks
@@ -390,7 +390,7 @@ func (s *SecurityChecker) AddCustomCheck(ctx context.Context) error {
 	go func() {
 		select {
 		case <-signalChan:
-			fmt.Println("\n\n⚠️  Operation cancelled by user.")
+			fmt.Println("\n\n⚠️ Operation cancelled by user.")
 			cancel()
 		case <-ctx.Done():
 			return
@@ -558,7 +558,7 @@ func (s *SecurityChecker) RemoveCustomCheck(ctx context.Context) error {
 	go func() {
 		select {
 		case <-signalChan:
-			fmt.Println("\n\n⚠️  Operation cancelled by user.")
+			fmt.Println("\n\n⚠️ Operation cancelled by user.")
 			cancel()
 		case <-ctx.Done():
 			return
@@ -653,7 +653,7 @@ func (s *SecurityChecker) UpdateCustomCheck(ctx context.Context) error {
 	go func() {
 		select {
 		case <-signalChan:
-			fmt.Println("\n\n⚠️  Operation cancelled by user.")
+			fmt.Println("\n\n⚠️ Operation cancelled by user.")
 			cancel()
 		case <-ctx.Done():
 			return

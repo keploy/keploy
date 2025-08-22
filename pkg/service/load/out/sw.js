@@ -75,7 +75,8 @@ self.addEventListener('fetch', (event) => {
   // Skip API calls, WebSocket connections, and other dynamic requests
   if (
     url.pathname.startsWith('/metrics/') ||
-    event.request.headers.get('cache-control') === 'no-cache'
+    event.request.headers.get('cache-control') === 'no-cache' ||
+    event.request.headers.get('cache-control') === 'no-store'
   ) {
     console.log('🚫 Skipping service worker for:', event.request.url);
     return; // Let the browser handle these normally
