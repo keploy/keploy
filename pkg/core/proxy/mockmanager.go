@@ -29,6 +29,47 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 	}
 }
 
+func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
+	results := make([]*models.Mock, 0, 64) // small cap; grows if needed
+	m.filtered.rangeValues(func(v interface{}) bool {
+		if mock, ok := v.(*models.Mock); ok && mock != nil {
+			// Return pointers directly; callers must treat as read-only.
+			results = append(results, mock)
+		}
+		return true
+	})
+	return results, nil
+}
+
+func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
+	results := make([]*models.Mock, 0, 128)
+	m.unfiltered.rangeValues(func(v interface{}) bool {
+		if mock, ok := v.(*models.Mock); ok && mock != nil {
+			results = append(results, mock)
+		}
+		return true
+	})
+	return results, nil
+}
+
+// GetMySQLCounts computes counts without building slices.
+func (m *MockManager) GetMySQLCounts() (total, config, data int) {
+	m.unfiltered.rangeValues(func(v interface{}) bool {
+		mock, ok := v.(*models.Mock)
+		if !ok || mock == nil || mock.Kind != models.MySQL {
+			return true
+		}
+		total++
+		if mock.Spec.Metadata["type"] == "config" {
+			config++
+		} else {
+			data++
+		}
+		return true
+	})
+	return
+}
+
 func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	m.filtered.deleteAll()
 	for index, mock := range mocks {
@@ -55,42 +96,6 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 		mock.TestModeInfo.ID = index
 		m.unfiltered.insert(mock.TestModeInfo, mock)
 	}
-}
-
-func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
-	rawItems := m.filtered.getAll()
-
-	result := make([]*models.Mock, 0, len(rawItems))
-
-	for _, item := range rawItems {
-		originalMock, ok := item.(*models.Mock)
-		if !ok || originalMock == nil {
-			continue
-		}
-
-		mockCopy := *originalMock
-		result = append(result, &mockCopy)
-	}
-
-	return result, nil
-}
-
-func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
-	rawItems := m.unfiltered.getAll()
-
-	result := make([]*models.Mock, 0, len(rawItems))
-
-	for _, item := range rawItems {
-		originalMock, ok := item.(*models.Mock)
-		if !ok || originalMock == nil {
-			continue
-		}
-
-		mockCopy := *originalMock
-		result = append(result, &mockCopy)
-	}
-
-	return result, nil
 }
 
 func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool {

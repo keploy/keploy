@@ -45,6 +45,7 @@ type SetupOptions struct {
 
 type RunOptions struct {
 	//IgnoreErrors bool
+	AppCommand string // command to run the application
 }
 
 //For test bench

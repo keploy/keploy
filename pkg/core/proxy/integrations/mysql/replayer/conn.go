@@ -59,6 +59,7 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 
 	// Set the intial auth plugin
 	decodeCtx.PluginName = handshake.AuthPluginName
+	decodeCtx.ServerCaps = handshake.CapabilityFlags
 	var err error
 
 	// encode the response
@@ -173,18 +174,20 @@ func simulateInitialHandshake(ctx context.Context, logger *zap.Logger, clientCon
 		}
 	}
 
-	_, ok = pkt.Message.(*mysql.HandshakeResponse41Packet)
+	hr41, ok := pkt.Message.(*mysql.HandshakeResponse41Packet)
 	if !ok {
 		utils.LogError(logger, nil, "failed to assert actual handshake response packet")
 		return res, nil
 	}
+	decodeCtx.ClientCaps = hr41.CapabilityFlags // live client caps
 
 	// Get the handshake response from the mock
-	_, ok = req[reqIdx].Message.(*mysql.HandshakeResponse41Packet)
+	hrec, ok := req[reqIdx].Message.(*mysql.HandshakeResponse41Packet)
 	if !ok {
 		utils.LogError(logger, nil, "failed to assert mock handshake response packet")
 		return res, nil
 	}
+	decodeCtx.RecordedClientCaps = hrec.CapabilityFlags
 
 	// Match the handshake response from the client with the mock
 	logger.Debug("matching handshake response", zap.Any("actual", pkt), zap.Any("mock", req[reqIdx].PacketBundle))

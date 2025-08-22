@@ -166,7 +166,6 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 	}
 
 	if _, err := os.Stat(mockPath); err == nil {
-		var mockYamls []*yaml.NetworkTrafficDoc
 		data, err := yaml.ReadFile(ctx, ys.Logger, path, mockFileName)
 		if err != nil {
 			utils.LogError(ys.Logger, err, "failed to read the mocks from yaml file", zap.Any("session", filepath.Base(path)), zap.String("path", mockPath))
@@ -186,30 +185,31 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 			if err != nil {
 				return nil, fmt.Errorf("failed to decode the yaml file documents. error: %v", err.Error())
 			}
-			mockYamls = append(mockYamls, doc)
-		}
-		mocks, err := decodeMocks(mockYamls, ys.Logger)
-		if err != nil {
-			utils.LogError(ys.Logger, err, "failed to decode the config mocks from yaml docs", zap.Any("session", filepath.Base(path)))
-			return nil, err
-		}
 
-		for _, mock := range mocks {
-			isFilteredMock := true
-			switch mock.Kind {
-			case "Generic":
-				isFilteredMock = false
-			case "Postgres":
-				isFilteredMock = false
-			case "Http":
-				isFilteredMock = false
-			case "Redis":
-				isFilteredMock = false
-			case "MySQL":
-				isFilteredMock = false
+			// Decode each YAML document into models.Mock as it is read.
+			mocks, err := decodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
+			if err != nil {
+				utils.LogError(ys.Logger, err, "failed to decode the config mocks from yaml doc", zap.Any("session", filepath.Base(path)))
+				return nil, err
 			}
-			if mock.Spec.Metadata["type"] != "config" && isFilteredMock {
-				tcsMocks = append(tcsMocks, mock)
+
+			for _, mock := range mocks {
+				isFilteredMock := true
+				switch mock.Kind {
+				case "Generic":
+					isFilteredMock = false
+				case "Postgres":
+					isFilteredMock = false
+				case "Http":
+					isFilteredMock = false
+				case "Redis":
+					isFilteredMock = false
+				case "MySQL":
+					isFilteredMock = false
+				}
+				if mock.Spec.Metadata["type"] != "config" && isFilteredMock {
+					tcsMocks = append(tcsMocks, mock)
+				}
 			}
 		}
 	}
@@ -235,7 +235,6 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 	}
 
 	if _, err := os.Stat(mockPath); err == nil {
-		var mockYamls []*yaml.NetworkTrafficDoc
 		data, err := yaml.ReadFile(ctx, ys.Logger, path, mockName)
 		if err != nil {
 			utils.LogError(ys.Logger, err, "failed to read the mocks from config yaml", zap.Any("session", filepath.Base(path)))
@@ -251,29 +250,31 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 			if err != nil {
 				return nil, fmt.Errorf("failed to decode the yaml file documents. error: %v", err.Error())
 			}
-			mockYamls = append(mockYamls, doc)
-		}
-		mocks, err := decodeMocks(mockYamls, ys.Logger)
-		if err != nil {
-			utils.LogError(ys.Logger, err, "failed to decode the config mocks from yaml docs", zap.Any("session", filepath.Base(path)))
-			return nil, err
-		}
-		for _, mock := range mocks {
-			isUnFilteredMock := false
-			switch mock.Kind {
-			case "Generic":
-				isUnFilteredMock = true
-			case "Postgres":
-				isUnFilteredMock = true
-			case "Http":
-				isUnFilteredMock = true
-			case "Redis":
-				isUnFilteredMock = true
-			case "MySQL":
-				isUnFilteredMock = true
+
+			// Decode each YAML document into models.Mock as it is read.
+			mocks, err := decodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
+			if err != nil {
+				utils.LogError(ys.Logger, err, "failed to decode the config mocks from yaml doc", zap.Any("session", filepath.Base(path)))
+				return nil, err
 			}
-			if mock.Spec.Metadata["type"] == "config" || isUnFilteredMock {
-				configMocks = append(configMocks, mock)
+
+			for _, mock := range mocks {
+				isUnFilteredMock := false
+				switch mock.Kind {
+				case "Generic":
+					isUnFilteredMock = true
+				case "Postgres":
+					isUnFilteredMock = true
+				case "Http":
+					isUnFilteredMock = true
+				case "Redis":
+					isUnFilteredMock = true
+				case "MySQL":
+					isUnFilteredMock = true
+				}
+				if mock.Spec.Metadata["type"] == "config" || isUnFilteredMock {
+					configMocks = append(configMocks, mock)
+				}
 			}
 		}
 	}

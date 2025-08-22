@@ -125,9 +125,17 @@ func EncodeBinaryResultSet(ctx context.Context, logger *zap.Logger, resultSet *m
 
 	// Write the final EOF packet if present
 	if resultSet.FinalResponse != nil && utils.IsEOFPacket(resultSet.FinalResponse.Data) {
+		logger.Debug("Writing final EOF packet for BinaryProtocolResultSet",
+			zap.Int("final_response_length", len(resultSet.FinalResponse.Data)),
+			zap.String("final_response_hex", fmt.Sprintf("%x", resultSet.FinalResponse.Data)))
 		if _, err := buf.Write(resultSet.FinalResponse.Data); err != nil {
 			return nil, fmt.Errorf("failed to write final EOF packet: %w", err)
 		}
+		logger.Debug("Successfully wrote final EOF packet for BinaryProtocolResultSet")
+	} else {
+		logger.Debug("No final EOF packet to write for BinaryProtocolResultSet",
+			zap.Bool("has_final_response", resultSet.FinalResponse != nil),
+			zap.Bool("is_eof_packet", resultSet.FinalResponse != nil && utils.IsEOFPacket(resultSet.FinalResponse.Data)))
 	}
 
 	return buf.Bytes(), nil
