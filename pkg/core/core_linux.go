@@ -123,7 +123,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 
 		//deleting in order to free the memory in case of rerecord. otherwise different app id will be created for the same app.
 		c.apps.Delete(id)
-		c.id = utils.AutoInc{}
+		c.id.Reset()
 
 		return nil
 	})
