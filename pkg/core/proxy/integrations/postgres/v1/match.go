@@ -74,6 +74,18 @@ func IsValuePresent(connectionid string, value string) bool {
 }
 
 func matchingReadablePG(ctx context.Context, logger *zap.Logger, requestBuffers [][]byte, mockDb integrations.MockMemDb) (bool, []models.Frontend, error) {
+
+	    if len(requestBuffers) == 1 {
+        if base64.StdEncoding.EncodeToString(requestBuffers[0]) == "AAAACATSFi8=" {
+            logger.Debug("Intercepted an SSL request packet. Responding with 'N' (No SSL).")
+            response := models.Frontend{
+                Payload: "Tg==", // Base64 for "N"
+            }
+            return true, []models.Frontend{response}, nil
+        }
+    }
+
+
 OuterLoop:
 	for {
 		select {
@@ -143,11 +155,6 @@ OuterLoop:
 						}
 
 						switch {
-						case bufStr == "AAAACATSFi8=":
-							ssl := models.Frontend{
-								Payload: "Tg==",
-							}
-							return true, []models.Frontend{ssl}, nil
 						case initMock.Spec.PostgresRequests[requestIndex].Identfier == "StartupRequest" && isStartupPacket(reqBuff) && initMock.Spec.PostgresRequests[requestIndex].Payload != "AAAACATSFi8=" && initMock.Spec.PostgresResponses[requestIndex].AuthType == 10:
 							logger.Debug("CHANGING TO MD5 for Response", zap.String("mock", initMock.Name), zap.String("Req", bufStr))
 							res := make([]models.Frontend, len(initMock.Spec.PostgresResponses))
