@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -180,7 +181,14 @@ func getAlias(ctx context.Context, logger *zap.Logger) (string, error) {
 	sshSock := os.Getenv("SSH_AUTH_SOCK")
 	sshAgentMount := ""
 	if sshSock != "" {
-		sshAgentMount = "-v " + sshSock + ":/ssh-agent -e SSH_AUTH_SOCK=/ssh-agent "
+		switch osName {
+		case "darwin":
+			sshDir := filepath.Dir(sshSock)
+			sshBase := filepath.Base(sshSock)
+			sshAgentMount = fmt.Sprintf("-v %s:/ssh-agent -e SSH_AUTH_SOCK=/ssh-agent/%s ", sshDir, sshBase)
+		default:
+			sshAgentMount = fmt.Sprintf("-v %s:/ssh-agent -e SSH_AUTH_SOCK=/ssh-agent ", sshSock)
+		}
 	}
 
 	switch osName {
