@@ -46,10 +46,10 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 				return nil, nil
 			}
 
-			logger.Info("Here are the grpc mocks in the db", zap.Int("len", len(grpcMocks)))
+			logger.Debug("grpc mocks in DB", zap.Int("len", len(grpcMocks)))
 
 			for _, mock := range grpcMocks {
-				logger.Info("Found grpc mock", zap.String("name", mock.Name))
+				logger.Debug("found grpc mock", zap.String("name", mock.Name))
 			}
 
 			schemaMatched, err := schemaMatch(ctx, logger, grpcReq, grpcMocks)
@@ -62,17 +62,17 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 				return nil, nil
 			}
 
-			logger.Info("Here are the grpc mocks with schema match", zap.Int("len", len(schemaMatched)))
+			logger.Debug("grpc mocks with schema match", zap.Int("len", len(schemaMatched)))
 
 			for _, mock := range schemaMatched {
-				logger.Info("schema matched grpc mock", zap.String("name", mock.Name))
+				logger.Debug("schema matched grpc mock", zap.String("name", mock.Name))
 			}
 
 			// Exact body Match
 			expBody := grpc.CanonicalizeTopLevelBlocks(grpcReq.Body.DecodedData)
 			ok, matchedMock := exactBodyMatch(logger, expBody, schemaMatched)
 			if ok {
-				logger.Info("Exact body match found", zap.Any("matchedMock", matchedMock))
+				logger.Debug("exact body match found", zap.String("name", matchedMock.Name))
 				if !mockDb.DeleteFilteredMock(*matchedMock) {
 					continue
 				}
@@ -81,7 +81,13 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 
 			// apply fuzzy match for body with schemaMatched mocks
 
-			logger.Info("Performing fuzzy match for decoded data in body")
+			// apply fuzzy match for body with schemaMatched mocks
+			// Guard against quadratic work on very large bodies.
+			if len(expBody) > 256*1024 {
+				logger.Debug("skipping fuzzy match for large body")
+				return nil, nil
+			}
+			logger.Debug("performing fuzzy match for decoded data in body")
 			// Perform fuzzy match on the request
 			isMatched, bestMatch := fuzzyMatch(schemaMatched, grpcReq.Body.DecodedData)
 			if isMatched {
@@ -103,36 +109,25 @@ func schemaMatch(ctx context.Context, logger *zap.Logger, req models.GrpcReq, mo
 			return nil, ctx.Err()
 		}
 		mockReq := mock.Spec.GRPCReq
-
-		// Create copies to avoid modifying original data.
-		mockPseudoHeaders := make(map[string]string)
-		for k, v := range mockReq.Headers.PseudoHeaders {
-			mockPseudoHeaders[k] = v
-		}
-		reqPseudoHeaders := make(map[string]string)
-		for k, v := range req.Headers.PseudoHeaders {
-			reqPseudoHeaders[k] = v
-		}
-
-		// Check for authority mismatch and log a warning if it occurs.
-		mockAuthority := mockPseudoHeaders[":authority"]
-		reqAuthority := reqPseudoHeaders[":authority"]
-		if mockAuthority != reqAuthority {
-			logger.Warn("gRPC authority header mismatch, continuing match by ignoring it.",
-				zap.String("mock.name", mock.Name),
-				zap.String("mock.authority", mockAuthority),
-				zap.String("request.authority", reqAuthority),
-			)
-			// Remove the authority header from both copies for the comparison.
-			delete(mockPseudoHeaders, ":authority")
-			delete(reqPseudoHeaders, ":authority")
-		}
-
-		// The pseudo headers should definitely match (ignoring authority if it mismatched).
-		if !compareMap(mockPseudoHeaders, reqPseudoHeaders) {
+		// Require :method and :path to match exactly; tolerate :authority-only differences.
+		mp := mockReq.Headers.PseudoHeaders
+		rp := req.Headers.PseudoHeaders
+		// Require presence AND equality (empty means missing)
+		if mp[":method"] == "" || rp[":method"] == "" || mp[":method"] != rp[":method"] ||
+			mp[":path"] == "" || rp[":path"] == "" || mp[":path"] != rp[":path"] {
 			continue
 		}
+		if mp[":authority"] != rp[":authority"] {
+			logger.Debug("ignoring :authority mismatch for gRPC request",
+				zap.String("mock", mock.Name),
+				zap.String("mock_authority", mp[":authority"]),
+				zap.String("req_authority", rp[":authority"]))
+		}
 
+		// For the rest of pseudo-headers, compare with :authority skipped (if present).
+		if !compareMapExcept(mp, rp, map[string]struct{}{":authority": {}}) {
+			continue
+		}
 		// the ordinary headers keys should match.
 		if !compareMapKeys(mockReq.Headers.OrdinaryHeaders, req.Headers.OrdinaryHeaders) {
 			continue
@@ -147,6 +142,30 @@ func schemaMatch(ctx context.Context, logger *zap.Logger, req models.GrpcReq, mo
 	}
 
 	return schemaMatched, nil
+}
+
+// compareMapExcept compares two string maps, skipping keys in 'skip'.
+func compareMapExcept(m1, m2 map[string]string, skip map[string]struct{}) bool {
+	if len(m1) != len(m2) {
+		// Lengths may differ only due to skipped keys; check key-wise.
+	}
+	for k, v1 := range m1 {
+		if _, ok := skip[k]; ok {
+			continue
+		}
+		if v2, ok := m2[k]; !ok || v1 != v2 {
+			return false
+		}
+	}
+	for k := range m2 {
+		if _, ok := skip[k]; ok {
+			continue
+		}
+		if _, ok := m1[k]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // Check if two maps have the same keys, ignoring values.
@@ -178,9 +197,7 @@ func compareMap(m1, m2 map[string]string) bool {
 func exactBodyMatch(logger *zap.Logger, expBody string, schemaMatched []*models.Mock) (bool, *models.Mock) {
 	for _, mock := range schemaMatched {
 		got := grpc.CanonicalizeTopLevelBlocks(mock.Spec.GRPCReq.Body.DecodedData)
-		logger.Info("Comparing bodies for mock", zap.String("name", mock.Name))
-		println("got:", got)
-		println("expected:", expBody)
+		logger.Debug("Comparing bodies for mock", zap.String("name", mock.Name))
 		if got == expBody {
 			return true, mock
 		}
