@@ -47,12 +47,12 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 			}
 
 			logger.Debug("List of mocks in the database", zap.Any("Filtered Mocks", len(filteredMocks)), zap.Any("Unfiltered Mocks", len(unfilteredMocks)))
-			for i, mock := range filteredMocks {
-				logger.Debug("Filtered Mocks", zap.Any(fmt.Sprintf("Mock[%d]", i), mock.Name), zap.Any("sortOrder", mock.TestModeInfo.SortOrder))
-			}
-			for i, mock := range unfilteredMocks {
-				logger.Debug("Unfiltered Mocks", zap.Any(fmt.Sprintf("Mock[%d]", i), mock.Name), zap.Any("sortOrder", mock.TestModeInfo.SortOrder))
-			}
+			// for i, mock := range filteredMocks {
+			// 	logger.Debug("Filtered Mocks", zap.Any(fmt.Sprintf("Mock[%d]", i), mock.Name), zap.Any("sortOrder", mock.TestModeInfo.SortOrder))
+			// }
+			// for i, mock := range unfilteredMocks {
+			// 	logger.Debug("Unfiltered Mocks", zap.Any(fmt.Sprintf("Mock[%d]", i), mock.Name), zap.Any("sortOrder", mock.TestModeInfo.SortOrder))
+			// }
 
 			index := findExactMatch(filteredMocks, reqBuff)
 
