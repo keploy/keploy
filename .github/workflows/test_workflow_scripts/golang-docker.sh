@@ -81,6 +81,12 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
+# Shutdown mongo before test mode - Keploy should use mocks for database interactions
+echo "Shutting down mongo before test mode..."
+docker stop mongoDb || true
+docker rm mongoDb || true
+echo "MongoDB stopped - Keploy should now use mocks for database interactions"
+
 # Start the keploy in test mode.
 test_container="ginApp_test"
 sudo -E env PATH=$PATH $REPLAY_BIN test -c 'docker run -p8080:8080 --net keploy-network --name ginApp_test gin-mongo' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
