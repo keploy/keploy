@@ -63,7 +63,7 @@ func DecodeStmtExecute(_ context.Context, _ *zap.Logger, data []byte, preparedSt
 	if stmtPrepOk.NumParams > 0 || (clientCapabilities&mysql.CLIENT_QUERY_ATTRIBUTES > 0 && (packet.Flags&mysql.PARAMETER_COUNT_AVAILABLE > 0)) {
 		// Set the parameter count from the prepared statement
 		packet.ParameterCount = int(stmtPrepOk.NumParams)
-		
+
 		if clientCapabilities&mysql.CLIENT_QUERY_ATTRIBUTES > 0 && (packet.Flags&mysql.PARAMETER_COUNT_AVAILABLE > 0) {
 			// If query attributes are supported and parameter count is available in the packet,
 			// we could potentially override it here, but for now we use the prepared statement count

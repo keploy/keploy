@@ -15,9 +15,9 @@ func TestDecodeHandshakeResponse_BoundsChecking(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name        string
-		data        []byte
-		expectError bool
+		name          string
+		data          []byte
+		expectError   bool
 		errorContains string
 	}{
 		{
@@ -124,7 +124,7 @@ func TestDecodeHandshakeResponse_BoundsChecking(t *testing.T) {
 				// Add null terminator for username
 				data = append(data, 0x00)
 				// Add auth length = 5 but only provide 3 bytes (after skipping 2 bytes)
-				data = append(data, 0x05, 0x00) // length + filler
+				data = append(data, 0x05, 0x00)                  // length + filler
 				data = append(data, []byte{0x01, 0x02, 0x03}...) // Only 3 bytes (need 5)
 				return data
 			}(),
