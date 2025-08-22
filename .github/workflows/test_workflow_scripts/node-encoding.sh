@@ -45,13 +45,25 @@ send_request(){
     curl -v -H "Accept-Encoding: gzip" -i http://localhost:3000/proxy --output -
     node request.js &
     request_pid=$!
+    echo "Node started with pid=$request_pid"
+    if [ -z "$request_pid" ]; then
+        echo "Failed to capture PID"
+        exit 1
+    fi
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
-    echo "Killing request.js"
-    if kill -0 $request_pid 2>/dev/null; then
-        kill $request_pid
-        wait $request_pid 2>/dev/null
+    echo "Stopping request.js (pgid: ${request_pid})"
+    # if still alive, try graceful TERM on the whole group
+    if kill -0 "-${request_pid}" 2>/dev/null; then
+         kill -TERM "-${request_pid}" 2>/dev/null || true
+
+        # wait up to 5s for clean exit
+        if ! timeout 5s bash -c "while kill -0 -${request_pid} 2>/dev/null; do sleep 0.2; done"; then
+            echo "Force killing request.js (pgid: ${request_pid})"
+            kill -KILL "-${request_pid}" 2>/dev/null || true
+        fi
     fi
+
     echo "Killing node server.js"
     kill $node_pid
     wait $node_pid 2>/dev/null
