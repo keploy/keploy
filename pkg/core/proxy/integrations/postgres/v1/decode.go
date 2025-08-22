@@ -9,7 +9,6 @@ import (
 	"io"
 	"net"
 	"strings"
-	"sync"
 	"time"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
@@ -61,8 +60,7 @@ func decodePostgres(ctx context.Context, logger *zap.Logger, reqBuf []byte, clie
 			if len(pgRequests) == 0 {
 				continue
 			}
-			var mutex sync.Mutex
-			matched, pgResponses, err := matchingReadablePG(ctx, logger, &mutex, pgRequests, mockDb)
+			matched, pgResponses, err := matchingReadablePG(ctx, logger, pgRequests, mockDb)
 			if err != nil {
 				errCh <- fmt.Errorf("error while matching tcs mocks %v", err)
 				return
