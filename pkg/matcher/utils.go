@@ -245,15 +245,13 @@ func ValidateAndMarshalJSON(log *zap.Logger, exp, act *string) (ValidatedJSON, e
 	var actual interface{}
 	var err error
 	if *exp != "" {
-		// Use geko.JSONUnmarshal to preserve order
-		expected, err = geko.JSONUnmarshal([]byte(*exp))
+		expected, err = UnmarshallJSON(*exp, log)
 		if err != nil {
 			return validatedJSON, err
 		}
 	}
 	if *act != "" {
-		// Use geko.JSONUnmarshal to preserve order
-		actual, err = geko.JSONUnmarshal([]byte(*act))
+		actual, err = UnmarshallJSON(*act, log)
 		if err != nil {
 			return validatedJSON, err
 		}
@@ -264,13 +262,11 @@ func ValidateAndMarshalJSON(log *zap.Logger, exp, act *string) (ValidatedJSON, e
 		validatedJSON.isIdentical = false
 		return validatedJSON, nil
 	}
-
-	// Use order-preserving marshaling
-	cleanExp, err := marshalWithOrderPreservation(expected)
+	cleanExp, err := json.Marshal(expected)
 	if err != nil {
 		return validatedJSON, err
 	}
-	cleanAct, err := marshalWithOrderPreservation(actual)
+	cleanAct, err := json.Marshal(actual)
 	if err != nil {
 		return validatedJSON, err
 	}
@@ -278,16 +274,6 @@ func ValidateAndMarshalJSON(log *zap.Logger, exp, act *string) (ValidatedJSON, e
 	*act = string(cleanAct)
 	validatedJSON.isIdentical = true
 	return validatedJSON, nil
-}
-
-// marshalWithOrderPreservation marshals JSON while preserving key order using geko types
-func marshalWithOrderPreservation(v interface{}) ([]byte, error) {
-	// If it's a geko type that implements json.Marshaler, use its MarshalJSON method
-	if marshaler, ok := v.(json.Marshaler); ok {
-		return marshaler.MarshalJSON()
-	}
-	// Fallback to standard marshaling for non-geko types
-	return json.Marshal(v)
 }
 
 // UnmarshallJSON returns unmarshalled JSON object.

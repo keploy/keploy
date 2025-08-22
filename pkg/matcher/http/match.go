@@ -246,9 +246,12 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 						return false, nil
 					}
 					tc.HTTPResp.Body = string(jsonBytes)
-					actualResponse.Body = string(actJSONBytes)
+					// Note: We intentionally do not update actualResponse.Body to preserve original JSON formatting
+					_ = actJSONBytes // Acknowledge the unused variable
 				}
-				validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &tc.HTTPResp.Body, &actualResponse.Body)
+				// Create a copy of actualResponse.Body to avoid modifying the original
+				actualBodyCopy := actualResponse.Body
+				validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &tc.HTTPResp.Body, &actualBodyCopy)
 				if err != nil {
 					return false, res
 				}
