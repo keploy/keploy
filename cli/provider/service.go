@@ -52,7 +52,7 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 		return testsuite.NewTSExecutor(n.cfg, n.logger, false)
 	case "gen":
 		return utgen.NewUnitTestGenerator(n.cfg, tel, n.auth, n.logger)
-	case "record", "test", "mock", "normalize", "rerecord", "contract", "config", "update", "login", "export", "import", "templatize":
+	case "record", "test", "mock", "normalize", "rerecord", "contract", "config", "update", "login", "export", "import", "templatize", "report":
 		return Get(ctx, cmd, n.cfg, n.logger, tel, n.auth)
 	default:
 		return nil, errors.New("invalid command")
