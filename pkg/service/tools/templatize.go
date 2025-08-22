@@ -42,7 +42,6 @@ type ValueLocation struct {
 	OriginalType  string
 }
 
-// Struct to hold information about an API chain
 type TemplateChain struct {
 	TemplateKey string
 	Value       string
@@ -52,7 +51,7 @@ type TemplateChain struct {
 
 // --- V2 Optimized Templatization Logic ---
 
-func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, testSetID string) error {
+func (t *Tools) ProcessTestCasesV2(ctx context.Context, tcs []*models.TestCase, testSetID string) error {
 	for _, tc := range tcs {
 		tc.HTTPReq.Body = addQuotesInTemplates(tc.HTTPReq.Body)
 		tc.HTTPResp.Body = addQuotesInTemplates(tc.HTTPResp.Body)
@@ -64,7 +63,6 @@ func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, te
 		decoderReq := json.NewDecoder(strings.NewReader(tc.HTTPReq.Body))
 		decoderReq.UseNumber()
 		decoderReq.Decode(&reqBodies[i])
-
 		decoderResp := json.NewDecoder(strings.NewReader(tc.HTTPResp.Body))
 		decoderResp.UseNumber()
 		decoderResp.Decode(&respBodies[i])
@@ -82,7 +80,6 @@ func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, te
 			newBody, _ := json.Marshal(respBodies[i])
 			tc.HTTPResp.Body = string(newBody)
 		}
-
 		tc.HTTPReq.Body = removeQuotesInTemplates(tc.HTTPReq.Body)
 		tc.HTTPResp.Body = removeQuotesInTemplates(tc.HTTPResp.Body)
 		if err := t.testDB.UpdateTestCase(ctx, tc, testSetID, false); err != nil {
@@ -121,23 +118,39 @@ func (t *Tools) ProcessTestCases(ctx context.Context, tcs []*models.TestCase, te
 	return nil
 }
 
+// *** MODIFIED: This function now prints a graphical representation of the chains ***
 func (t *Tools) logAPIChains(chains []*TemplateChain, testCases []*models.TestCase) {
 	if len(chains) == 0 {
 		return
 	}
-	t.logger.Info("✨ Detected API chains from templatization ✨")
-	for _, chain := range chains {
-		var logFields []zap.Field
-		logFields = append(logFields, zap.String("template_variable", fmt.Sprintf("{{.%s}}", chain.TemplateKey)))
-		logFields = append(logFields, zap.String("original_value", chain.Value))
-		logFields = append(logFields, zap.String("producer", formatLocation(chain.Producer, testCases)))
-		var consumerStrings []string
-		for _, consumer := range chain.Consumers {
-			consumerStrings = append(consumerStrings, formatLocation(consumer, testCases))
+
+	fmt.Println("\n✨ API Chain Analysis ✨")
+	fmt.Println("========================")
+
+	for i, chain := range chains {
+		if i > 0 {
+			fmt.Println("--------------------")
 		}
-		logFields = append(logFields, zap.Strings("consumers", consumerStrings))
-		t.logger.Info("Chain Details", logFields...)
+
+		// Truncate long values like JWTs for cleaner logging
+		truncatedValue := chain.Value
+		if len(truncatedValue) > 50 {
+			truncatedValue = truncatedValue[:47] + "..."
+		}
+
+		fmt.Printf("🔗 Chain for {{.%s}} (value: \"%s\")\n", chain.TemplateKey, truncatedValue)
+		fmt.Printf("  [PRODUCER] %s\n", formatLocation(chain.Producer, testCases))
+
+		for j, consumer := range chain.Consumers {
+			if j == len(chain.Consumers)-1 {
+				// Last consumer
+				fmt.Printf("    └─> [CONSUMER] %s\n", formatLocation(consumer, testCases))
+			} else {
+				fmt.Printf("    ├─> [CONSUMER] %s\n", formatLocation(consumer, testCases))
+			}
+		}
 	}
+	fmt.Println("========================")
 }
 
 func formatLocation(loc *ValueLocation, testCases []*models.TestCase) string {
@@ -226,46 +239,34 @@ func findValuesInInterface(data interface{}, path []string, index map[string][]*
 	}
 }
 
-// *** FIXED: Function signature now includes the return type ***
 func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string][]*ValueLocation, templateConfig map[string]interface{}) []*TemplateChain {
 	var chains []*TemplateChain
-
 	for value, locations := range index {
 		if len(locations) < 2 {
 			continue
 		}
-
-		sort.Slice(locations, func(i, j int) bool {
-			return locations[i].TestCaseIndex < locations[j].TestCaseIndex
-		})
-
+		sort.Slice(locations, func(i, j int) bool { return locations[i].TestCaseIndex < locations[j].TestCaseIndex })
 		var producer *ValueLocation
 		for _, loc := range locations {
-			if loc.Part == ResponseBody {
+			if loc.Part == ResponseBody || loc.Part == ResponseHeader {
 				producer = loc
 				break
 			}
 		}
 		if producer == nil {
-			producer = locations[0]
+			continue
 		}
-		producerType := producer.OriginalType
-
 		var consumers []*ValueLocation
 		for _, loc := range locations {
-			if loc != producer && loc.TestCaseIndex >= producer.TestCaseIndex {
+			isRequestPart := loc.Part == RequestHeader || loc.Part == RequestURL || loc.Part == RequestBody
+			if isRequestPart && loc.TestCaseIndex >= producer.TestCaseIndex {
 				consumers = append(consumers, loc)
 			}
 		}
-
 		if len(consumers) == 0 {
-			if producer == locations[0] && len(locations) > 1 {
-				consumers = append(consumers, locations[1:]...)
-			} else {
-				continue
-			}
+			continue
 		}
-
+		producerType := producer.OriginalType
 		var baseKey string
 		if producer.Part == RequestURL {
 			baseKey = value
@@ -276,7 +277,6 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 			}
 		}
 		templateKey := insertUnique(baseKey, value, templateConfig)
-
 		chain := &TemplateChain{
 			TemplateKey: templateKey,
 			Value:       value,
@@ -284,9 +284,8 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 			Consumers:   consumers,
 		}
 		chains = append(chains, chain)
-
-		allLocs := append(consumers, producer)
-		for _, loc := range allLocs {
+		allLocsToModify := append(consumers, producer)
+		for _, loc := range allLocsToModify {
 			templateString := fmt.Sprintf("{{%s .%s}}", producerType, templateKey)
 			if loc.Part == RequestHeader {
 				if headerMap, ok := loc.Pointer.(*map[string]string); ok {
@@ -306,10 +305,8 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 			}
 		}
 	}
-	// *** FIXED: Added the return statement ***
 	return chains
 }
-
 func reconstructURL(urlPtr *string, segmentPath string, template string) {
 	parsedURL, err := url.Parse(*urlPtr)
 	if err != nil {

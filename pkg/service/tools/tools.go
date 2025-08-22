@@ -373,7 +373,7 @@ func (t *Tools) Templatize(ctx context.Context) error {
 			continue
 		}
 
-		err = t.ProcessTestCases(ctx, tcs, testSetID)
+		err = t.ProcessTestCasesV2(ctx, tcs, testSetID)
 		if err != nil {
 			utils.LogError(t.logger, err, "failed to process test cases")
 			return err
