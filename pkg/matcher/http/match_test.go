@@ -5,6 +5,8 @@ import (
 
 	"errors"
 
+	"encoding/json"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v2/pkg/models"
@@ -233,4 +235,67 @@ func TestMatch_BodyNoiseWildcard_789(t *testing.T) {
 	assert.True(t, result.BodyResult[0].Normal)
 	// Check that tc.Noise["body"] was initialized
 	assert.NotNil(t, tc.Noise["body"])
+}
+
+// TestMatch_BodyMismatchDifferentKeys_265 covers the case where the JSON bodies are not
+// identical, triggering the `isBodyMismatch = true` path on line 265.
+func TestMatch_BodyMismatchDifferentKeys_265(t *testing.T) {
+	logger := zap.NewNop()
+	tc := &models.TestCase{
+		Name: "test-body-mismatch-different-keys",
+		HTTPResp: models.HTTPResp{
+			StatusCode: 200,
+			Header:     map[string]string{"Content-Type": "application/json"},
+			Body:       `{"key1": "value1"}`,
+		},
+	}
+	actualResponse := &models.HTTPResp{
+		StatusCode: 200,
+		Header:     map[string]string{"Content-Type": "application/json"},
+		Body:       `{"key2": "value2"}`,
+	}
+	noiseConfig := map[string]map[string][]string{}
+	ignoreOrdering := false
+
+	pass, result := Match(tc, actualResponse, noiseConfig, ignoreOrdering, logger)
+
+	assert.False(t, pass, "Should fail because JSON bodies have different structures")
+	require.NotNil(t, result)
+	assert.False(t, result.BodyResult[0].Normal)
+}
+
+// TestMatch_JsonMarshalErrorOnActualInDiff_988 simulates a JSON marshal error for the actual response during diffing.
+func TestMatch_JsonMarshalErrorOnActualInDiff_988(t *testing.T) {
+	logger := zap.NewNop()
+	tc := &models.TestCase{
+		Name: "test-marshal-error-actual",
+		HTTPResp: models.HTTPResp{
+			StatusCode: 200,
+			Body:       `{"data": "{\"id\":1}"}`,
+		},
+	}
+	actualResponse := &models.HTTPResp{
+		StatusCode: 200,
+		Body:       `{"data": "{\"id\":2}"}`,
+	}
+	noiseConfig := map[string]map[string][]string{}
+
+	originalJSONMarshal := jsonMarshal234
+	callCount := 0
+	jsonMarshal234 = func(v interface{}) ([]byte, error) {
+		callCount++
+		// Fail on the second marshal call, which is for the actual response in the diffing logic.
+		if callCount == 2 {
+			return nil, errors.New("mock marshal error on actual")
+		}
+		// Use the real json.Marshal for other calls.
+		return json.Marshal(v)
+	}
+	defer func() { jsonMarshal234 = originalJSONMarshal }()
+
+	pass, res := Match(tc, actualResponse, noiseConfig, false, logger)
+
+	// The function returns (false, nil) on this specific error path
+	assert.False(t, pass)
+	assert.Nil(t, res)
 }
