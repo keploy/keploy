@@ -207,7 +207,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 			switch actRespBodyType {
 			case models.JSON:
-				patch, err := jsondiff.Compare(tc.HTTPResp.Body, actualResponse.Body)
+				patch, err := jsondiff.Compare(cleanExp, cleanAct)
 				if err != nil {
 					logger.Warn("failed to compute json diff", zap.Error(err))
 				}
@@ -245,24 +245,27 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 					if err != nil {
 						return false, nil
 					}
-					tc.HTTPResp.Body = string(jsonBytes)
-					actualResponse.Body = string(actJSONBytes)
+					cleanExp = string(jsonBytes)
+					cleanAct = string(actJSONBytes)
 				}
-				validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &tc.HTTPResp.Body, &actualResponse.Body)
+				validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
+				if err != nil {
+					return false, res
+				}
 				isBodyMismatch = false
 				if validatedJSON.IsIdentical() {
 					jsonComparisonResult, err = matcherUtils.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
 					if err != nil {
 						return false, res
 					}
-					if !pass {
+					if !jsonComparisonResult.IsExact() {
 						isBodyMismatch = true
-					} else {
-						isBodyMismatch = false
 					}
+				} else {
+					isBodyMismatch = true
 				}
 				// Comparing the body again after updating the expected
-				patch, err = jsondiff.Compare(tc.HTTPResp.Body, actualResponse.Body)
+				patch, err = jsondiff.Compare(cleanExp, cleanAct)
 				if err != nil {
 					logger.Warn("failed to compute json diff", zap.Error(err))
 				}
