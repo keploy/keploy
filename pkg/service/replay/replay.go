@@ -1304,6 +1304,36 @@ func (r *Replayer) GetTestSetConf(ctx context.Context, testSet string) (*models.
 	return r.testSetConf.Read(ctx, testSet)
 }
 
+// UpdateTestSetTemplate writes the updated template values to the test-set's config.
+// It preserves existing pre/post scripts, secret, mock registry and metadata fields.
+func (r *Replayer) UpdateTestSetTemplate(ctx context.Context, testSetID string, template map[string]interface{}) error {
+	if len(template) == 0 { // nothing to persist
+		return nil
+	}
+	// Read existing config to merge non-template fields.
+	existing, err := r.testSetConf.Read(ctx, testSetID)
+	if err != nil {
+		// If file missing we still attempt to write minimal config.
+		r.logger.Debug("failed reading existing test-set config while updating template; will create new", zap.String("testSetID", testSetID), zap.Error(err))
+	}
+	ts := &models.TestSet{}
+	if existing != nil {
+		ts.PreScript = existing.PreScript
+		ts.PostScript = existing.PostScript
+		ts.Secret = existing.Secret
+		ts.MockRegistry = existing.MockRegistry
+		ts.Metadata = existing.Metadata
+	} else {
+		ts.Metadata = map[string]interface{}{}
+	}
+	ts.Template = template
+	if err := r.testSetConf.Write(ctx, testSetID, ts); err != nil {
+		utils.LogError(r.logger, err, "failed to write updated template map", zap.String("testSetID", testSetID))
+		return err
+	}
+	return nil
+}
+
 func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error) {
 
 	testCases, err := r.testDB.GetTestCases(ctx, testSetID)

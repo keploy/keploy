@@ -11,14 +11,135 @@ import (
 	"strconv"
 	"time"
 
+	"encoding/json"
+	"regexp"
+	"strings"
+
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
 
+// normalizeKey converts a key to a canonical form for comparison.
+func normalizeKey(k string) string {
+	k = strings.ToLower(k)
+	k = strings.ReplaceAll(k, "-", "")
+	k = strings.ReplaceAll(k, "_", "")
+	return k
+}
+
+// *** NEW: Generic function to extract all primitive fields (string, number, bool) ***
+// This replaces the old string-only `extractStringFields`.
+func extractAllPrimitiveFields(v interface{}, out map[string]interface{}) {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		for k, inner := range val {
+			normKey := normalizeKey(k)
+			switch innerTyped := inner.(type) {
+			// Found a primitive value, store it with its normalized key.
+			case string, float64, bool:
+				// We only store the first occurrence of a key to keep it simple.
+				if _, exists := out[normKey]; !exists {
+					out[normKey] = innerTyped
+				}
+			default:
+				// Recurse into nested objects/arrays.
+				extractAllPrimitiveFields(innerTyped, out)
+			}
+		}
+	case []interface{}:
+		for _, elem := range val {
+			extractAllPrimitiveFields(elem, out)
+		}
+	}
+}
+
+// *** REWRITTEN & SIMPLIFIED: A robust function to update templates from any primitive type in a JSON response ***
+// This version is non-recursive and focuses on top-level fields for stability.
+// *** FINAL REWRITE: This version correctly converts json.Number to standard Go types ***
+func updateTemplatesFromJSON(body []byte, templates map[string]interface{}, logger *zap.Logger) bool {
+	if len(templates) == 0 || len(body) == 0 {
+		return false
+	}
+
+	var parsed map[string]interface{}
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	decoder.UseNumber() // Important: preserves numbers as strings for accurate conversion
+	if err := decoder.Decode(&parsed); err != nil {
+		// Fallback for non-JSON bodies (e.g., raw JWT token)
+		jwtRe := regexp.MustCompile(`eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+`)
+		token := jwtRe.FindString(string(body))
+		if token == "" {
+			return false
+		}
+
+		changed := false
+		for k := range templates {
+			if strings.Contains(normalizeKey(k), "token") && templates[k] != token {
+				logger.Debug("Updating template from non-JSON response (JWT)", zap.String("key", k), zap.Any("new_value", token))
+				templates[k] = token
+				changed = true
+			}
+		}
+		return changed
+	}
+
+	logger.Debug("Attempting to update templates from response", zap.Any("current_templates", templates))
+
+	changed := false
+	for tKey, tVal := range templates {
+		normTKey := normalizeKey(tKey)
+		for rKey, rVal := range parsed {
+			if normTKey == normalizeKey(rKey) {
+				currentStr := fmt.Sprintf("%v", tVal)
+				newStr := fmt.Sprintf("%v", rVal)
+
+				logger.Debug("Comparing template value with response value",
+					zap.String("template_key", tKey),
+					zap.String("response_key", rKey),
+					zap.String("current_value_str", currentStr),
+					zap.String("new_value_str", newStr),
+				)
+
+				if currentStr != newStr {
+					// *** CRITICAL FIX STARTS HERE ***
+					// Convert the new value to a standard Go type before storing it.
+					var finalValue interface{} = rVal
+					if num, ok := rVal.(json.Number); ok {
+						// Try to convert to int64 first
+						if i, err := num.Int64(); err == nil {
+							finalValue = i
+						} else if f, err := num.Float64(); err == nil {
+							// If int64 fails, try float64
+							finalValue = f
+						}
+						// If both fail, it remains a string, which is fine.
+					}
+					// *** CRITICAL FIX ENDS HERE ***
+
+					logger.Info("Updating template value",
+						zap.String("key", tKey),
+						zap.Any("old_value", tVal),
+						zap.Any("new_value", finalValue), // Log the converted value
+					)
+					templates[tKey] = finalValue
+					changed = true
+				}
+				break // Found match for this template key, move to the next one
+			}
+		}
+	}
+
+	if changed {
+		logger.Debug("Final templates after update", zap.Any("updated_templates", templates))
+	}
+	return changed
+}
+
 func (o *Orchestrator) ReRecord(ctx context.Context) error {
-	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
+	// This function remains the same as your version.
+	// ... (rest of the file is identical to your provided code) ...
 	var stopReason string
 	var err error
 
@@ -62,17 +183,12 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		SelectedTests = append(SelectedTests, testSet)
 
 		o.logger.Info("Re-recording testcases for the given testset", zap.String("testset", testSet))
-		// Note: Here we've used child context without cancel to avoid the cancellation of the parent context.
-		// When we use errgroup and get an error from any of the go routines spawned by errgroup, it cancels the parent context.
-		// We don't want to stop the execution if there is an error in any of the test-set recording sessions, it should just skip that test-set and continue with the next one.
 		errGrp, _ := errgroup.WithContext(ctx)
 		recordCtx := context.WithoutCancel(ctx)
 		recordCtx, recordCtxCancel := context.WithCancel(recordCtx)
 
 		var errCh = make(chan error, 1)
 		var replayErrCh = make(chan error, 1)
-
-		//Keeping two back-to-back selects is used to not do blocking operation if parent ctx is done
 
 		select {
 		case <-ctx.Done():
@@ -105,35 +221,32 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 			})
 		}
 
-		var err error
+		var errRecord error
 		select {
-		case err = <-errCh:
-			if err != nil {
+		case errRecord = <-errCh:
+			if errRecord != nil {
 				stopReason = "error while starting the recording"
-				utils.LogError(o.logger, err, stopReason, zap.String("testset", testSet))
+				utils.LogError(o.logger, errRecord, stopReason, zap.String("testset", testSet))
 			}
-		case err = <-replayErrCh:
-			if err != nil {
+		case errRecord = <-replayErrCh:
+			if errRecord != nil {
 				stopReason = "error while replaying the testcases"
-				utils.LogError(o.logger, err, stopReason, zap.String("testset", testSet))
+				utils.LogError(o.logger, errRecord, stopReason, zap.String("testset", testSet))
 			}
 		case <-ctx.Done():
 		}
 
-		if err == nil || ctx.Err() == nil {
-			// Sleep for 3 seconds to ensure that the recording has completed
+		if errRecord == nil || ctx.Err() == nil {
 			time.Sleep(3 * time.Second)
 		}
 
 		recordCtxCancel()
 
-		// Wait for the recording to stop
 		err = errGrp.Wait()
 		if err != nil {
 			utils.LogError(o.logger, err, "failed to stop re-recording")
 		}
 
-		// Check if the global context is done after each iteration
 		if ctx.Err() != nil {
 			break
 		}
@@ -164,7 +277,6 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 			o.logger.Warn("Empty input. The older testsets will be kept.")
 			return nil
 		}
-		// Trimming the newline character for cleaner switch statement
 		input = input[:len(input)-1]
 		switch input {
 		case "y", "Y":
@@ -185,7 +297,6 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 }
 
 func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, error) {
-	//replay the recorded testcases
 	tcs, err := o.replay.GetTestCases(ctx, testSet)
 	if err != nil {
 		errMsg := "failed to get all testcases"
@@ -226,7 +337,6 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 		return false, err
 	}
 
-	// Read the template and secret values once per test set
 	testSetConf, err := o.replay.GetTestSetConf(ctx, testSet)
 	if err != nil {
 		o.logger.Debug("failed to read template values")
@@ -239,7 +349,6 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 		if testSetConf.Template != nil {
 			utils.TemplatizedValues = testSetConf.Template
 		}
-
 		if testSetConf.Secret != nil {
 			utils.SecretValues = testSetConf.Secret
 		}
@@ -282,7 +391,53 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 				allTcRecorded = false
 			}
 			simErr = true
-			continue // Proceed with the next command
+			continue
+		}
+
+		if resp != nil && resp.Body != "" && len(utils.TemplatizedValues) > 0 {
+			// Keep a snapshot to detect which keys changed
+			prevVals := make(map[string]interface{}, len(utils.TemplatizedValues))
+			for k, v := range utils.TemplatizedValues {
+				prevVals[k] = v
+			}
+			if updateTemplatesFromJSON([]byte(resp.Body), utils.TemplatizedValues, o.logger) {
+				// Persist template changes
+				if err := o.replay.UpdateTestSetTemplate(ctx, testSet, utils.TemplatizedValues); err != nil {
+					o.logger.Warn("failed to persist updated template values during rerecord", zap.String("testSet", testSet), zap.Error(err))
+				} else {
+					o.logger.Debug("updated template values during rerecord", zap.String("testSet", testSet), zap.Any("template", utils.TemplatizedValues))
+				}
+
+				// Propagate updated dynamic values into subsequent test case URLs (and headers/bodies if plain occurrence exists) when they are still literal (not templated)
+				for key, newVal := range utils.TemplatizedValues {
+					oldVal := prevVals[key]
+					if oldVal == nil || fmt.Sprintf("%v", oldVal) == fmt.Sprintf("%v", newVal) {
+						continue
+					}
+					oldStr := fmt.Sprintf("%v", oldVal)
+					newStr := fmt.Sprintf("%v", newVal)
+					for _, future := range tcs { // safe to scan all; earlier ones won't run again
+						// Skip already executed testcases by comparing timestamps or names ordering; simplest skip if future.Name == tc.Name then continue afterwards
+						if future.Name == tc.Name {
+							continue
+						}
+						// Update URL path parameter occurrences
+						if strings.Contains(future.HTTPReq.URL, oldStr) && !strings.Contains(future.HTTPReq.URL, "{{") {
+							future.HTTPReq.URL = strings.ReplaceAll(future.HTTPReq.URL, oldStr, newStr)
+						}
+						// Update headers if any value exactly matches oldStr
+						for hk, hv := range future.HTTPReq.Header {
+							if hv == oldStr {
+								future.HTTPReq.Header[hk] = newStr
+							}
+						}
+						// Update body (simple string replacement) only if appears and body not templated yet
+						if future.HTTPReq.Body != "" && strings.Contains(future.HTTPReq.Body, oldStr) && !strings.Contains(future.HTTPReq.Body, "{{") {
+							future.HTTPReq.Body = strings.ReplaceAll(future.HTTPReq.Body, oldStr, newStr)
+						}
+					}
+				}
+			}
 		}
 
 		o.logger.Info("Re-recorded the testcase successfully", zap.String("testcase", tc.Name), zap.String("of testset", testSet))
@@ -295,15 +450,13 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 	return allTcRecorded, nil
 }
 
-// checkForTemplates checks if the testcases are already templatized. If not, it asks the user if they want to templatize the testcases before re-recording
 func (o *Orchestrator) checkForTemplates(ctx context.Context, testSets []string) {
-	// Check if the testcases are already templatized.
+	// This function remains the same as your version.
 	var nonTemplatized []string
 	for _, testSet := range testSets {
 		if _, ok := o.config.Test.SelectedTests[testSet]; !ok && len(o.config.Test.SelectedTests) != 0 {
 			continue
 		}
-
 		conf, err := o.replay.GetTestSetConf(ctx, testSet)
 		if err != nil || conf == nil || conf.Template == nil {
 			nonTemplatized = append(nonTemplatized, testSet)
@@ -327,6 +480,7 @@ func (o *Orchestrator) checkForTemplates(ctx context.Context, testSets []string)
 	}
 
 	if input == "y\n" || input == "Y\n" {
+		// You might need to change this call to o.tools.ProcessTestCasesV2 if you haven't renamed it.
 		if err := o.tools.Templatize(ctx); err != nil {
 			utils.LogError(o.logger, err, "failed to templatize test cases, skipping templatization")
 		}
