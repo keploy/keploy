@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v2/pkg"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -27,6 +28,20 @@ func normalizeKey(k string) string {
 	k = strings.ReplaceAll(k, "-", "")
 	k = strings.ReplaceAll(k, "_", "")
 	return k
+}
+
+// stripNumericSuffix removes trailing digits from a string and returns
+// the base string and whether a suffix was found
+func stripNumericSuffix(s string) (string, bool) {
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] < '0' || s[i] > '9' {
+			if i < len(s)-1 {
+				return s[:i+1], true
+			}
+			return s, false
+		}
+	}
+	return "", false
 }
 
 // *** NEW: Generic function to extract all primitive fields (string, number, bool) ***
@@ -56,8 +71,7 @@ func extractAllPrimitiveFields(v interface{}, out map[string]interface{}) {
 }
 
 // *** REWRITTEN & SIMPLIFIED: A robust function to update templates from any primitive type in a JSON response ***
-// This version is non-recursive and focuses on top-level fields for stability.
-// *** FINAL REWRITE: This version correctly converts json.Number to standard Go types ***
+// This version includes generic numeric suffix handling
 func updateTemplatesFromJSON(body []byte, templates map[string]interface{}, logger *zap.Logger) bool {
 	if len(templates) == 0 || len(body) == 0 {
 		return false
@@ -89,13 +103,87 @@ func updateTemplatesFromJSON(body []byte, templates map[string]interface{}, logg
 
 	changed := false
 	for tKey, tVal := range templates {
+		// Try exact match first
+		if rVal, exists := parsed[tKey]; exists {
+			currentStr := fmt.Sprintf("%v", tVal)
+			newStr := fmt.Sprintf("%v", rVal)
+
+			logger.Debug("Comparing template value with response value (exact match)",
+				zap.String("template_key", tKey),
+				zap.String("response_key", tKey),
+				zap.String("current_value_str", currentStr),
+				zap.String("new_value_str", newStr),
+			)
+
+			if currentStr != newStr {
+				var finalValue interface{} = rVal
+				if num, ok := rVal.(json.Number); ok {
+					// Try to convert to int64 first
+					if i, err := num.Int64(); err == nil {
+						finalValue = i
+					} else if f, err := num.Float64(); err == nil {
+						// If int64 fails, try float64
+						finalValue = f
+					}
+					// If both fail, it remains a string, which is fine.
+				}
+
+				logger.Info("Updating template value (exact match)",
+					zap.String("key", tKey),
+					zap.Any("old_value", tVal),
+					zap.Any("new_value", finalValue),
+				)
+				templates[tKey] = finalValue
+				changed = true
+			}
+			continue // Found exact match, move to next template key
+		}
+
+		// Handle numeric suffixes: if template key ends with number (like id1, token2, etc.)
+		// try matching with the base name (id, token, etc.) in the response
+		if baseKey, hasSuffix := stripNumericSuffix(tKey); hasSuffix {
+			if rVal, exists := parsed[baseKey]; exists {
+				currentStr := fmt.Sprintf("%v", tVal)
+				newStr := fmt.Sprintf("%v", rVal)
+
+				logger.Debug("Comparing template value with response value (suffix match)",
+					zap.String("template_key", tKey),
+					zap.String("response_key", baseKey),
+					zap.String("current_value_str", currentStr),
+					zap.String("new_value_str", newStr),
+				)
+
+				if currentStr != newStr {
+					var finalValue interface{} = rVal
+					if num, ok := rVal.(json.Number); ok {
+						if i, err := num.Int64(); err == nil {
+							finalValue = i
+						} else if f, err := num.Float64(); err == nil {
+							finalValue = f
+						}
+					}
+
+					logger.Info("Updating suffixed template from base response field",
+						zap.String("template_key", tKey),
+						zap.String("response_key", baseKey),
+						zap.Any("old_value", tVal),
+						zap.Any("new_value", finalValue),
+					)
+					templates[tKey] = finalValue
+					changed = true
+				}
+				continue // Found suffix match, move to next template key
+			}
+		}
+
+		// Fallback to normalized matching for backward compatibility
 		normTKey := normalizeKey(tKey)
 		for rKey, rVal := range parsed {
 			if normTKey == normalizeKey(rKey) {
 				currentStr := fmt.Sprintf("%v", tVal)
 				newStr := fmt.Sprintf("%v", rVal)
 
-				logger.Debug("Comparing template value with response value",
+				logger.Debug("Comparing template value with response value (normalized)",
 					zap.String("template_key", tKey),
 					zap.String("response_key", rKey),
 					zap.String("current_value_str", currentStr),
@@ -103,25 +191,19 @@ func updateTemplatesFromJSON(body []byte, templates map[string]interface{}, logg
 				)
 
 				if currentStr != newStr {
-					// *** CRITICAL FIX STARTS HERE ***
-					// Convert the new value to a standard Go type before storing it.
 					var finalValue interface{} = rVal
 					if num, ok := rVal.(json.Number); ok {
-						// Try to convert to int64 first
 						if i, err := num.Int64(); err == nil {
 							finalValue = i
 						} else if f, err := num.Float64(); err == nil {
-							// If int64 fails, try float64
 							finalValue = f
 						}
-						// If both fail, it remains a string, which is fine.
 					}
-					// *** CRITICAL FIX ENDS HERE ***
 
-					logger.Info("Updating template value",
+					logger.Info("Updating template value (normalized match)",
 						zap.String("key", tKey),
 						zap.Any("old_value", tVal),
-						zap.Any("new_value", finalValue), // Log the converted value
+						zap.Any("new_value", finalValue),
 					)
 					templates[tKey] = finalValue
 					changed = true
@@ -137,6 +219,8 @@ func updateTemplatesFromJSON(body []byte, templates map[string]interface{}, logg
 	return changed
 }
 
+// The rest of the file remains unchanged...
+// [ReRecord function, replayTests function, checkForTemplates function, etc.]
 func (o *Orchestrator) ReRecord(ctx context.Context) error {
 	// This function remains the same as your version.
 	// ... (rest of the file is identical to your provided code) ...
@@ -355,6 +439,80 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 	}
 
 	allTcRecorded := true
+
+	// ------------------------------------------------------------
+	// Build usage tracking: which template keys are referenced by which testcases.
+	// This allows us to update only the affected testcases when a template value changes.
+	// Tracks both placeholder usage ({{type .key}}) and literal usage (raw current value in URL/header/body).
+	usageMap := make(map[string]map[*models.TestCase]struct{})
+	placeholderRe := regexp.MustCompile(`\{\{[^{}]*?\.([a-zA-Z0-9_]+)\}\}`)
+	// Initialize set for each existing template key
+	for k := range utils.TemplatizedValues {
+		usageMap[k] = make(map[*models.TestCase]struct{})
+	}
+
+	// Track which template keys appear in any response body (treat as potential producers to avoid overwriting)
+	producerKeys := make(map[string]struct{})
+
+	for _, tc := range tcs {
+		// Scan for placeholder occurrences in URL, headers, body
+		// URL
+		for _, m := range placeholderRe.FindAllStringSubmatch(tc.HTTPReq.URL, -1) {
+			key := m[1]
+			if _, ok := usageMap[key]; !ok {
+				usageMap[key] = make(map[*models.TestCase]struct{})
+			}
+			usageMap[key][tc] = struct{}{}
+		}
+		// Headers
+		for _, hv := range tc.HTTPReq.Header {
+			for _, m := range placeholderRe.FindAllStringSubmatch(hv, -1) {
+				key := m[1]
+				if _, ok := usageMap[key]; !ok {
+					usageMap[key] = make(map[*models.TestCase]struct{})
+				}
+				usageMap[key][tc] = struct{}{}
+			}
+		}
+		// Body
+		for _, m := range placeholderRe.FindAllStringSubmatch(tc.HTTPReq.Body, -1) {
+			key := m[1]
+			if _, ok := usageMap[key]; !ok {
+				usageMap[key] = make(map[*models.TestCase]struct{})
+			}
+			usageMap[key][tc] = struct{}{}
+		}
+
+		// Response body placeholders -> mark as producer
+		for _, m := range placeholderRe.FindAllStringSubmatch(tc.HTTPResp.Body, -1) {
+			producerKeys[m[1]] = struct{}{}
+		}
+
+		// Literal usages: check each template key's current value appears without placeholders.
+		for key, val := range utils.TemplatizedValues {
+			lit := fmt.Sprintf("%v", val)
+			if lit == "" { // skip empty
+				continue
+			}
+			addIfLiteral := func(s string) {
+				if s == "" || strings.Contains(s, "{{") { // skip if already templated
+					return
+				}
+				if strings.Contains(s, lit) { // simple containment; over-match risk accepted
+					if _, ok := usageMap[key]; !ok {
+						usageMap[key] = make(map[*models.TestCase]struct{})
+					}
+					usageMap[key][tc] = struct{}{}
+				}
+			}
+			addIfLiteral(tc.HTTPReq.URL)
+			addIfLiteral(tc.HTTPReq.Body)
+			for _, hv := range tc.HTTPReq.Header {
+				addIfLiteral(hv)
+			}
+		}
+	}
+	// ------------------------------------------------------------
 	var simErr bool
 	for _, tc := range tcs {
 		if ctx.Err() != nil {
@@ -408,7 +566,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 					o.logger.Debug("updated template values during rerecord", zap.String("testSet", testSet), zap.Any("template", utils.TemplatizedValues))
 				}
 
-				// Propagate updated dynamic values into subsequent test case URLs (and headers/bodies if plain occurrence exists) when they are still literal (not templated)
+				// Propagate updated values only to tracked testcases that use the changed key (literal occurrences only; placeholders auto-render next time)
 				for key, newVal := range utils.TemplatizedValues {
 					oldVal := prevVals[key]
 					if oldVal == nil || fmt.Sprintf("%v", oldVal) == fmt.Sprintf("%v", newVal) {
@@ -416,24 +574,48 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 					}
 					oldStr := fmt.Sprintf("%v", oldVal)
 					newStr := fmt.Sprintf("%v", newVal)
-					for _, future := range tcs { // safe to scan all; earlier ones won't run again
-						// Skip already executed testcases by comparing timestamps or names ordering; simplest skip if future.Name == tc.Name then continue afterwards
-						if future.Name == tc.Name {
+					// For each testcase tracked for this key
+					// Sibling key synchronization: propagate to non-producer siblings sharing same base (strip trailing digits)
+					base := strings.TrimRightFunc(key, func(r rune) bool { return r >= '0' && r <= '9' })
+					if base == "" { // if no alpha prefix, treat full key as base
+						base = key
+					}
+					for sibling, val := range utils.TemplatizedValues {
+						if sibling == key {
 							continue
 						}
-						// Update URL path parameter occurrences
-						if strings.Contains(future.HTTPReq.URL, oldStr) && !strings.Contains(future.HTTPReq.URL, "{{") {
+						if !strings.HasPrefix(sibling, base) {
+							continue
+						}
+						if fmt.Sprintf("%v", val) == newStr {
+							continue
+						}
+						if _, isProducer := producerKeys[sibling]; isProducer {
+							continue
+						}
+						// Only update if sibling currently tracked as consumer for this resource family
+						// Heuristic: sibling value equals oldStr OR sibling value not referenced in any response bodies.
+						if fmt.Sprintf("%v", val) == oldStr {
+							utils.TemplatizedValues[sibling] = newVal
+							// update usageMap so replacements below also consider sibling key
+						}
+					}
+
+					for future := range usageMap[key] {
+						if future.Name == tc.Name { // skip current producer testcase
+							continue
+						}
+						// Replace only if field not templated already.
+						if future.HTTPReq.URL != "" && !strings.Contains(future.HTTPReq.URL, "{{") && strings.Contains(future.HTTPReq.URL, oldStr) {
 							future.HTTPReq.URL = strings.ReplaceAll(future.HTTPReq.URL, oldStr, newStr)
 						}
-						// Update headers if any value exactly matches oldStr
 						for hk, hv := range future.HTTPReq.Header {
-							if hv == oldStr {
+							if hv == oldStr { // exact match safer for headers
 								future.HTTPReq.Header[hk] = newStr
 							}
 						}
-						// Update body (simple string replacement) only if appears and body not templated yet
-						if future.HTTPReq.Body != "" && strings.Contains(future.HTTPReq.Body, oldStr) && !strings.Contains(future.HTTPReq.Body, "{{") {
-							future.HTTPReq.Body = strings.ReplaceAll(future.HTTPReq.Body, oldStr, newStr)
+						if body := future.HTTPReq.Body; body != "" && !strings.Contains(body, "{{") && strings.Contains(body, oldStr) {
+							future.HTTPReq.Body = strings.ReplaceAll(body, oldStr, newStr)
 						}
 					}
 				}
