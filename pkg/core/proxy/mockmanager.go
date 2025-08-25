@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
@@ -18,6 +19,8 @@ type MockManager struct {
 	unfiltered    *TreeDb
 	logger        *zap.Logger
 	consumedMocks sync.Map
+	rev           uint64 // monotonically increasing revision of in-memory view
+
 }
 
 func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManager {
@@ -27,6 +30,16 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 		logger:        logger,
 		consumedMocks: sync.Map{},
 	}
+}
+
+// Revision returns a monotonically increasing number that changes
+// whenever the in-memory set or sort order of mocks is mutated.
+func (m *MockManager) Revision() uint64 {
+	return atomic.LoadUint64(&m.rev)
+}
+
+func (m *MockManager) bumpRevision() {
+	atomic.AddUint64(&m.rev, 1)
 }
 
 func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
@@ -81,6 +94,7 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 		}
 		mock.TestModeInfo.ID = index
 		m.filtered.insert(mock.TestModeInfo, mock)
+		m.bumpRevision()
 	}
 }
 
@@ -95,6 +109,7 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 		}
 		mock.TestModeInfo.ID = index
 		m.unfiltered.insert(mock.TestModeInfo, mock)
+		m.bumpRevision()
 	}
 }
 
@@ -111,6 +126,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
 	}
+	m.bumpRevision()
 	return updated
 }
 
@@ -134,6 +150,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
 	}
+	m.bumpRevision()
 	return isDeleted
 }
 
@@ -149,6 +166,7 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
 	}
+	m.bumpRevision()
 	return isDeleted
 }
 
