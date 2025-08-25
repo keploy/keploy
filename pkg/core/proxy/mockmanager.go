@@ -94,8 +94,8 @@ func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 		}
 		mock.TestModeInfo.ID = index
 		m.filtered.insert(mock.TestModeInfo, mock)
-		m.bumpRevision()
 	}
+	m.bumpRevision()
 }
 
 func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
