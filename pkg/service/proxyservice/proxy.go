@@ -21,12 +21,14 @@ type ProxyService struct {
 	proxy   *proxy.Proxy
 	cfg     *config.Config
 	session *core.Sessions
+	mockDB  MockDB
 }
 
-func New(logger *zap.Logger, p *proxy.Proxy, cfg *config.Config, session *core.Sessions) *ProxyService {
+func New(logger *zap.Logger, p *proxy.Proxy, mockDB MockDB, cfg *config.Config, session *core.Sessions) *ProxyService {
 	return &ProxyService{
 		logger:  logger,
 		proxy:   p,
+		mockDB:  mockDB,
 		cfg:     cfg,
 		session: session,
 	}
@@ -52,12 +54,13 @@ func (s *ProxyService) StartProxy(ctx context.Context) {
 			// Handle testcase as needed
 		}
 	}()
-
 	// Listen for mocks
 	go func() {
 		for mock := range mockCh {
-			s.logger.Info("received mock", zap.Any("mock", mock))
-			// Handle mock as needed
+			err := s.mockDB.InsertMock(ctx, mock, "test-set-1")
+			if err != nil {
+				s.logger.Error("failed to insert mock into database", zap.Error(err))
+			}
 		}
 	}()
 

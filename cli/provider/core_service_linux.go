@@ -49,7 +49,7 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, tel, auth, cfg)
 	session := core.NewSessions()
 	p := proxy.New(logger, proxyservice.NewDestInfoDummy(), cfg, session)
-	proxySvc := proxyservice.New(logger, p, cfg, session)
+	proxySvc := proxyservice.New(logger, p, commonServices.YamlMockDb, cfg, session)
 	switch cmd {
 	case "rerecord":
 		return orchestrator.New(logger, recordSvc, toolsSvc, replaySvc, cfg), nil

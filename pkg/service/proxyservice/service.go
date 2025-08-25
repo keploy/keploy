@@ -6,6 +6,7 @@ import (
 	"context"
 
 	corePkg "go.keploy.io/server/v2/pkg/core"
+	"go.keploy.io/server/v2/pkg/models"
 )
 
 type DestInfoDummy struct{}
@@ -26,4 +27,8 @@ func (d *DestInfoDummy) Get(ctx context.Context, srcPort uint16) (*corePkg.Netwo
 
 func (d *DestInfoDummy) Delete(ctx context.Context, srcPort uint16) error {
 	return nil
+}
+
+type MockDB interface {
+	InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error
 }

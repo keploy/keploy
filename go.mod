@@ -128,6 +128,7 @@ require (
 
 require (
 	github.com/golang/glog v1.2.4 // indirect
+	github.com/gopacket/gopacket v1.4.0 // indirect
 	github.com/perimeterx/marshmallow v1.1.5 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20241121165744-79df5c4772f2 // indirect
 	golang.org/x/exp v0.0.0-20250305212735-054e65f0b394 // indirect

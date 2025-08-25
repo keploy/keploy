@@ -4,6 +4,7 @@ package utils
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"syscall"
@@ -30,6 +31,9 @@ func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration) CmdError {
 	// Run the app as the user who invoked sudo
 	username := os.Getenv("SUDO_USER")
+
+	ssh_auth_sock := os.Getenv("SSH_AUTH_SOCK")
+	fmt.Println("SSH_AUTH_SOCK:", ssh_auth_sock)
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", userCmd)
 	if username != "" {
