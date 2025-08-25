@@ -460,8 +460,11 @@ func (t *Tools) processReqURLToReqURL(ctx context.Context, tcs []*models.TestCas
 }
 
 // Utility function to safely marshal JSON and log errors
+var jsonMarshal463 = json.Marshal
+
+// Utility function to safely marshal JSON and log errors
 func marshalJSON(data interface{}, logger *zap.Logger) string {
-	jsonData, err := json.Marshal(data)
+	jsonData, err := jsonMarshal463(data)
 	if err != nil {
 		utils.LogError(logger, err, "failed to marshal JSON data")
 		return ""
