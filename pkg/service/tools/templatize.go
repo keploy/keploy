@@ -237,7 +237,6 @@ func findValuesInInterface(data interface{}, path []string, index map[string][]*
 		index[v.String()] = append(index[v.String()], loc)
 	}
 }
-
 func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string][]*ValueLocation, templateConfig map[string]interface{}) []*TemplateChain {
 	var chains []*TemplateChain
 	for value, locations := range index {
@@ -266,15 +265,38 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 			continue
 		}
 		producerType := producer.OriginalType
+
+		// ------------------ MODIFIED BLOCK (array index friendly keys) ------------------
 		var baseKey string
 		if producer.Part == RequestURL {
 			baseKey = value
 		} else {
 			baseKey = producer.Path
-			if parts := strings.Split(baseKey, "."); len(parts) > 0 {
+			parts := strings.Split(baseKey, ".")
+			if len(parts) > 0 {
 				baseKey = parts[len(parts)-1]
 			}
+			// If the baseKey is a pure number (array index), build a descriptive key:
+			// parentField_ix_<index>. Example: entity_types.0 -> entity_types_ix_0
+			if _, err := strconv.Atoi(baseKey); err == nil {
+				partsFull := strings.Split(producer.Path, ".")
+				// parent name defaults to 'arr' if we cannot infer
+				parent := "arr"
+				if len(partsFull) >= 2 {
+					parent = partsFull[len(partsFull)-2]
+					// if parent is also numeric, keep walking backwards to find a non-numeric
+					for i := len(partsFull) - 2; i >= 0; i-- {
+						if _, numErr := strconv.Atoi(partsFull[i]); numErr != nil {
+							parent = partsFull[i]
+							break
+						}
+					}
+				}
+				baseKey = fmt.Sprintf("%s_ix_%s", sanitizeKey(parent), baseKey)
+			}
 		}
+		// -------------------------------------------------------------------------------
+
 		templateKey := insertUnique(baseKey, value, templateConfig)
 		chain := &TemplateChain{
 			TemplateKey: templateKey,
@@ -306,6 +328,15 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 	}
 	return chains
 }
+
+// helper to ensure parent segment forms a valid key (reuses existing conventions)
+func sanitizeKey(k string) string {
+	k = strings.ToLower(k)
+	k = strings.ReplaceAll(k, "-", "")
+	k = strings.ReplaceAll(k, "_", "")
+	return k
+}
+
 func reconstructURL(urlPtr *string, segmentPath string, template string) {
 	parsedURL, err := url.Parse(*urlPtr)
 	if err != nil {
