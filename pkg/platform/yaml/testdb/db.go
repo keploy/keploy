@@ -2,6 +2,7 @@
 package testdb
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io/fs"
@@ -157,20 +158,23 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 		return tcsInfo{name: tcsName, path: tcsPath}, err
 	}
 	yamlTc.Name = tcsName
-	data, err := yamlLib.Marshal(&yamlTc)
+
+	var buf bytes.Buffer
+	encoder := yamlLib.NewEncoder(&buf)
+	encoder.SetIndent(2) // Set indent to 2 spaces to match the original style
+	err = encoder.Encode(&yamlTc)
 	if err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, err
 	}
+	data := buf.Bytes()
 
-	exists, err := yaml.FileExists(ctx, ts.logger, tcsPath, tcsName)
+	_, err = yaml.FileExists(ctx, ts.logger, tcsPath, tcsName)
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to find yaml file", zap.String("path directory", tcsPath), zap.String("yaml", tcsName))
 		return tcsInfo{name: tcsName, path: tcsPath}, err
 	}
 
-	if !exists {
-		data = append([]byte(utils.GetVersionAsComment()), data...)
-	}
+	data = append([]byte(utils.GetVersionAsComment()), data...)
 
 	err = yaml.WriteFile(ctx, ts.logger, tcsPath, tcsName, data, false)
 	if err != nil {
