@@ -252,18 +252,19 @@ func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 // ---------- point updates / deletes (keep per-kind in sync) ----------
 
 func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool {
-	// Update legacy/global tree
+	// Update legacy/global tree first
 	updatedGlobal := m.unfiltered.update(old.TestModeInfo, new.TestModeInfo, new)
 
 	oldK, newK := old.Kind, new.Kind
 	var updatedOldKind, updatedNewKind bool
 
 	if oldK == newK {
-		// Same kind: update that unfiltered per-kind tree
+		// Same kind: update the per-kind tree under lock
 		_, unf := m.ensureKindTrees(newK)
+		m.treesMu.Lock()
 		updatedNewKind = unf.update(old.TestModeInfo, new.TestModeInfo, new)
 
-		// Self-heal: global updated but per-kind missed (e.g., not present yet)
+		// Self-heal if global updated but per-kind missed (e.g., not present yet)
 		if updatedGlobal && !updatedNewKind {
 			if m.logger != nil {
 				m.logger.Warn("self-healing per-kind tree: global update succeeded but per-kind missed",
@@ -275,17 +276,19 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 			unf.insert(new.TestModeInfo, new)
 			updatedNewKind = true
 		}
+		m.treesMu.Unlock()
 	} else {
-		// Kind changed: remove from old kind tree, insert/update in new kind tree
+		// Kind changed: remove from old kind tree, insert/update in new kind tree under one lock
 		_, oldUnf := m.ensureKindTrees(oldK)
 		_, newUnf := m.ensureKindTrees(newK)
-
+		m.treesMu.Lock()
 		updatedOldKind = oldUnf.delete(old.TestModeInfo)
 		updatedNewKind = newUnf.update(old.TestModeInfo, new.TestModeInfo, new)
 		if !updatedNewKind {
 			newUnf.insert(new.TestModeInfo, new)
 			updatedNewKind = true
 		}
+		m.treesMu.Unlock()
 		if m.logger != nil {
 			m.logger.Info("moved mock across kinds",
 				zap.String("mockName", new.Name),
@@ -307,14 +310,20 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 		}
 	}
 
-	// Bump revisions only if something actually changed
-	if updatedGlobal || updatedOldKind || updatedNewKind {
-		if oldK != newK {
+	// Bump revisions accurately:
+	// - global only if the global tree changed
+	// - per-kind only for kinds whose per-kind tree changed
+	if oldK != newK {
+		if updatedOldKind {
 			m.bumpRevisionKind(oldK)
-			m.bumpRevisionKind(newK)
-		} else {
+		}
+		if updatedNewKind {
 			m.bumpRevisionKind(newK)
 		}
+	} else if updatedNewKind {
+		m.bumpRevisionKind(newK)
+	}
+	if updatedGlobal {
 		m.bumpRevisionAll()
 	}
 	return updatedGlobal
@@ -326,7 +335,9 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	// per-kind
 	k := mock.Kind
 	flt, _ := m.ensureKindTrees(k)
+	m.treesMu.Lock()
 	deletedKind := flt.delete(mock.TestModeInfo)
+	m.treesMu.Unlock()
 
 	if deletedGlobal {
 		if err := m.flagMockAsUsed(models.MockState{
@@ -339,8 +350,11 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 		}
 	}
 
-	if deletedGlobal || deletedKind {
+	// Bump per-kind only if that tree changed; global only if global changed
+	if deletedKind {
 		m.bumpRevisionKind(k)
+	}
+	if deletedGlobal {
 		m.bumpRevisionAll()
 	}
 	return deletedGlobal
@@ -352,7 +366,9 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 	// per-kind
 	k := mock.Kind
 	_, unf := m.ensureKindTrees(k)
+	m.treesMu.Lock()
 	deletedKind := unf.delete(mock.TestModeInfo)
+	m.treesMu.Unlock()
 
 	if deletedGlobal {
 		if err := m.flagMockAsUsed(models.MockState{
@@ -365,8 +381,11 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 		}
 	}
 
-	if deletedGlobal || deletedKind {
+	// Bump per-kind only if that tree changed; global only if global changed
+	if deletedKind {
 		m.bumpRevisionKind(k)
+	}
+	if deletedGlobal {
 		m.bumpRevisionAll()
 	}
 	return deletedGlobal
