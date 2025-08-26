@@ -79,8 +79,8 @@ func (m *MockManager) bumpRevisionKind(kind models.Kind) {
 	ptr := m.revByKind[kind]
 	if ptr == nil {
 		var v uint64
-		ptr = &v // The address of v is stored in the map, so v escapes to the heap.
-		// Safe to use ptr after unlocking; we mutate it via atomics.
+		// Store pointer in map; safe to use after unlocking as we mutate via atomics.
+		ptr = &v
 		m.revByKind[kind] = ptr
 	}
 	m.revMu.Unlock()
@@ -255,22 +255,44 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	// Update legacy/global tree
 	updatedGlobal := m.unfiltered.update(old.TestModeInfo, new.TestModeInfo, new)
 
-	// Update per-kind tree
-	k := new.Kind
-	_, unf := m.ensureKindTrees(k)
-	updatedKind := unf.update(old.TestModeInfo, new.TestModeInfo, new)
+	oldK, newK := old.Kind, new.Kind
+	var updatedOldKind, updatedNewKind bool
 
-	// If global updated but per-kind missed (e.g., not present), try to self-heal
-	if updatedGlobal && !updatedKind {
+	if oldK == newK {
+		// Same kind: update that unfiltered per-kind tree
+		_, unf := m.ensureKindTrees(newK)
+		updatedNewKind = unf.update(old.TestModeInfo, new.TestModeInfo, new)
+
+		// Self-heal: global updated but per-kind missed (e.g., not present yet)
+		if updatedGlobal && !updatedNewKind {
+			if m.logger != nil {
+				m.logger.Warn("self-healing per-kind tree: global update succeeded but per-kind missed",
+					zap.String("kind", string(newK)),
+					zap.String("mockName", new.Name),
+					zap.Any("testModeInfo", new.TestModeInfo),
+				)
+			}
+			unf.insert(new.TestModeInfo, new)
+			updatedNewKind = true
+		}
+	} else {
+		// Kind changed: remove from old kind tree, insert/update in new kind tree
+		_, oldUnf := m.ensureKindTrees(oldK)
+		_, newUnf := m.ensureKindTrees(newK)
+
+		updatedOldKind = oldUnf.delete(old.TestModeInfo)
+		updatedNewKind = newUnf.update(old.TestModeInfo, new.TestModeInfo, new)
+		if !updatedNewKind {
+			newUnf.insert(new.TestModeInfo, new)
+			updatedNewKind = true
+		}
 		if m.logger != nil {
-			m.logger.Warn("self-healing per-kind tree: global update succeeded but per-kind missed",
-				zap.String("kind", string(k)),
+			m.logger.Info("moved mock across kinds",
 				zap.String("mockName", new.Name),
-				zap.Any("testModeInfo", new.TestModeInfo),
+				zap.String("fromKind", string(oldK)),
+				zap.String("toKind", string(newK)),
 			)
 		}
-		unf.insert(new.TestModeInfo, new)
-		updatedKind = true
 	}
 
 	// Mark usage if global changed (legacy behavior)
@@ -285,9 +307,14 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 		}
 	}
 
-	// Only bump if *something* actually changed
-	if updatedGlobal || updatedKind {
-		m.bumpRevisionKind(k)
+	// Bump revisions only if something actually changed
+	if updatedGlobal || updatedOldKind || updatedNewKind {
+		if oldK != newK {
+			m.bumpRevisionKind(oldK)
+			m.bumpRevisionKind(newK)
+		} else {
+			m.bumpRevisionKind(newK)
+		}
 		m.bumpRevisionAll()
 	}
 	return updatedGlobal
@@ -358,7 +385,7 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 func (m *MockManager) GetConsumedMocks() []models.MockState {
 	var out []models.MockState
 
-	// Collect first (no deletes during Range)
+	// Snapshot & collect first (no deletes during Range). We intentionally drain only what existed at snapshot time.
 	m.consumedMocks.Range(func(key, val interface{}) bool {
 		k, ok := key.(string)
 		if !ok {
@@ -417,7 +444,7 @@ func (m *MockManager) GetConsumedMocks() []models.MockState {
 		out[i] = ws[i].st
 	}
 
-	// Now clear those entries
+	// Now clear those entries from the map we just drained
 	for _, st := range out {
 		m.consumedMocks.Delete(st.Name)
 	}
