@@ -357,34 +357,65 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 
 func (m *MockManager) GetConsumedMocks() []models.MockState {
 	var out []models.MockState
+
 	// Collect first (no deletes during Range)
 	m.consumedMocks.Range(func(key, val interface{}) bool {
-		if _, ok := key.(string); !ok {
+		k, ok := key.(string)
+		if !ok {
 			if m.logger != nil {
-				m.logger.Warn("unexpected key type in consumedMocks; skipping", zap.Any("keyType", fmt.Sprintf("%T", key)))
+				m.logger.Warn("unexpected key type in consumedMocks; skipping",
+					zap.Any("keyType", fmt.Sprintf("%T", key)))
 			}
+			return true // skip this entry
 		}
 		if st, ok := val.(models.MockState); ok {
 			out = append(out, st)
 		} else if m.logger != nil {
-			m.logger.Warn("unexpected value type in consumedMocks; skipping", zap.Any("valueType", fmt.Sprintf("%T", val)))
+			m.logger.Warn("unexpected value type in consumedMocks; skipping",
+				zap.String("key", k),
+				zap.Any("valueType", fmt.Sprintf("%T", val)))
 		}
 		return true
 	})
 
-	// Sort: prefer numeric suffix after '-', else lexicographic
-	sort.SliceStable(out, func(i, j int) bool {
-		partsI := strings.Split(out[i].Name, "-")
-		partsJ := strings.Split(out[j].Name, "-")
-		if len(partsI) >= 2 && len(partsJ) >= 2 {
-			if numI, errI := strconv.Atoi(partsI[1]); errI == nil {
-				if numJ, errJ := strconv.Atoi(partsJ[1]); errJ == nil {
-					return numI < numJ
-				}
-			}
+	// Sort: prefer numeric suffix after the last '-' (e.g., name-123); else lexicographic
+	type withSuffix struct {
+		st   models.MockState
+		name string
+		num  int
+		has  bool
+	}
+	numericSuffix := func(name string) (int, bool) {
+		i := strings.LastIndexByte(name, '-')
+		if i < 0 || i+1 >= len(name) {
+			return 0, false
 		}
-		return out[i].Name < out[j].Name
+		n, err := strconv.Atoi(name[i+1:])
+		if err != nil {
+			return 0, false
+		}
+		return n, true
+	}
+
+	ws := make([]withSuffix, len(out))
+	for i, st := range out {
+		n, ok := numericSuffix(st.Name)
+		ws[i] = withSuffix{st: st, name: st.Name, num: n, has: ok}
+	}
+	sort.SliceStable(ws, func(i, j int) bool {
+		a, b := ws[i], ws[j]
+		if a.has && b.has {
+			if a.num != b.num {
+				return a.num < b.num
+			}
+			// tie-break numerics by name for determinism
+			return a.name < b.name
+		}
+		return a.name < b.name
 	})
+	for i := range out {
+		out[i] = ws[i].st
+	}
 
 	// Now clear those entries
 	for _, st := range out {
