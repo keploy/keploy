@@ -211,7 +211,7 @@ func findStringMatch(req string, mockStrings []string) int {
 	if len(req) > 2048 {
 		req = req[:2048]
 	}
-	
+
 	minDist := int(^uint(0) >> 1)
 	bestMatch := -1
 	for idx, mock := range mockStrings {
@@ -223,7 +223,7 @@ func findStringMatch(req string, mockStrings []string) int {
 		if len(mock) > 2048 {
 			trimmedMock = mock[:2048]
 		}
-		
+
 		dist := levenshtein.ComputeDistance(req, trimmedMock)
 		if dist == 0 {
 			return 0
@@ -241,7 +241,7 @@ func findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 	if len(reqBuff) > 2048 {
 		reqBuff = reqBuff[:2048]
 	}
-	
+
 	mxSim := -1.0
 	mxIdx := -1
 	for idx, mock := range mocks {
@@ -250,7 +250,7 @@ func findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 		if len(encoded) > 2048 {
 			encoded = encoded[:2048]
 		}
-		
+
 		k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
 		shingles1 := util.CreateShingles(encoded, k)
 		shingles2 := util.CreateShingles(reqBuff, k)
@@ -270,7 +270,7 @@ func fuzzyMatch(tcsMocks []*models.Mock, reqBuff string) (bool, *models.Mock) {
 	if len(reqBuff) > 2048 {
 		trimmedReqBuff = reqBuff[:2048]
 	}
-	
+
 	mockStrings := make([]string, len(tcsMocks))
 	for i := range tcsMocks {
 		mockStrings[i] = tcsMocks[i].Spec.GRPCReq.Body.DecodedData
