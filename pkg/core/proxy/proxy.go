@@ -32,7 +32,6 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
-
 	pTls "go.keploy.io/server/v2/pkg/core/proxy/tls"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
@@ -370,7 +369,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if srcConn != nil {
 			err := srcConn.Close()
 			if err != nil {
-				utils.LogError(p.logger, err, "failed to close the source connection", zap.Any("clientConnID", clientConnID))
+				if !strings.Contains(err.Error(), "use of closed network connection") {
+					utils.LogError(p.logger, err, "failed to close the source connection", zap.Any("clientConnID", clientConnID))
+				}
 				return
 			}
 		}

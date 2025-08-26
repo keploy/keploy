@@ -34,7 +34,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 	switch tc.Kind {
 	case models.HTTP:
 		logger.Debug("Encoding HTTP test case")
-		doc.Curl = pkg.MakeCurlCommand(tc.HTTPReq)
+		doc.Curl = tc.Curl
 
 		// find noisy fields only for HTTP responses
 		m, err := FlattenHTTPResponse(pkg.ToHTTPHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)

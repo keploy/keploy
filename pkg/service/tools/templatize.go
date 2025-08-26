@@ -460,8 +460,11 @@ func (t *Tools) processReqURLToReqURL(ctx context.Context, tcs []*models.TestCas
 }
 
 // Utility function to safely marshal JSON and log errors
+var jsonMarshal987 = json.Marshal
+
+// Utility function to safely marshal JSON and log errors
 func marshalJSON(data interface{}, logger *zap.Logger) string {
-	jsonData, err := json.Marshal(data)
+	jsonData, err := jsonMarshal987(data)
 	if err != nil {
 		utils.LogError(logger, err, "failed to marshal JSON data")
 		return ""
@@ -494,13 +497,20 @@ func RenderIfTemplatized(val interface{}) (bool, interface{}, error) {
 		return false, val, nil
 	}
 
-	// Get the value from the template.
-	val, err := render(stringVal)
+	// Attempt to get the value from the template.
+	renderedVal, err := render(stringVal)
 	if err != nil {
+		// This captures execution errors from the render function.
 		return false, val, err
 	}
 
-	return true, val, nil
+	// If render() failed to parse the template, it returns the original string.
+	// We check if the value has actually changed to determine if it was a real template.
+	if reflect.DeepEqual(renderedVal, val) {
+		return false, val, nil
+	}
+
+	return true, renderedVal, nil
 }
 
 func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 interface{}) bool {
@@ -636,21 +646,26 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 interfa
 		url.Path = strings.Join(urlParts, "/")
 
 		if url.RawQuery != "" {
-			// Only pass the values of the query parameters to the addTemplates1 function.
-			queryParams := strings.Split(url.RawQuery, "&")
-			for i, param := range queryParams {
-				param = strings.Split(param, "=")[1]
-				addTemplates1(logger, &param, interface2)
-				// reconstruct the query parameter with the templatized value if any.
-				queryParams[i] = strings.Split(queryParams[i], "=")[0] + "=" + param
+			// Safely parse and templatize query parameter values.
+			queryParamsStr := strings.Split(url.RawQuery, "&")
+			for i, paramStr := range queryParamsStr {
+				// Use SplitN to safely handle params with or without values.
+				parts := strings.SplitN(paramStr, "=", 2)
+				// Only process parameters that have a value.
+				if len(parts) == 2 {
+					key, val := parts[0], parts[1]
+					addTemplates1(logger, &val, interface2) // Attempt to templatize the value.
+					queryParamsStr[i] = key + "=" + val     // Reconstruct the parameter string.
+				}
+				// If len(parts) is 1, it's a key-only parameter (e.g., "?flag"), which we leave untouched.
 			}
-			// reconstruct the URL with the templatized query parameters.
-			url.RawQuery = strings.Join(queryParams, "&")
-			*v = fmt.Sprintf("%s://%s%s?%s", url.Scheme, url.Host, url.Path, url.RawQuery)
+			// Reconstruct the raw query and update the URL.
+			url.RawQuery = strings.Join(queryParamsStr, "&")
+			*v = url.String()
 			return true
 		}
 		// reconstruct the URL with the templatized path.
-		*v = fmt.Sprintf("%s://%s%s", url.Scheme, url.Host, url.Path)
+		*v = url.String()
 		return ok
 	case *interface{}:
 		switch w := (*v).(type) {
@@ -930,7 +945,10 @@ func render(val string) (interface{}, error) {
 
 	tmpl, err := template.New("template").Funcs(funcMap).Parse(val)
 	if err != nil {
-		return val, fmt.Errorf("failed to parse the testcase using template %v", zap.Error(err))
+		// If parsing fails, it's likely not a valid template string, but a literal string
+		// that happens to contain "{{" and "}}". In this case, we should not treat it as an
+		// error but return the original value, as no substitution is possible.
+		return val, nil
 	}
 
 	data := make(map[string]interface{})
@@ -946,23 +964,18 @@ func render(val string) (interface{}, error) {
 	var output bytes.Buffer
 	err = tmpl.Execute(&output, data)
 	if err != nil {
-		return val, fmt.Errorf("failed to execute the template %v", zap.Error(err))
+		// An execution error (e.g., missing key) is a genuine problem and should be propagated.
+		return val, fmt.Errorf("failed to execute the template: %v", err)
 	}
 
-	if strings.Contains(val, "string") {
-		return output.String(), nil
-	}
+	outputString := output.String()
 
-	// Remove the double quotes from the output for rest of the values. (int, float)
-	outputString := strings.Trim(output.String(), `"`)
-
-	// TODO: why do we need this when we have already declared the funcMap.
-	// Convert this to the appropriate type and return.
+	// Convert the string output to the appropriate type based on the template function used.
 	switch {
-	case strings.Contains(val, "int"):
-		return utils.ToInt(output.String()), nil
-	case strings.Contains(val, "float"):
-		return utils.ToFloat(output.String()), nil
+	case strings.Contains(val, "{{int"):
+		return utils.ToInt(outputString), nil
+	case strings.Contains(val, "{{float"):
+		return utils.ToFloat(outputString), nil
 	}
 
 	return outputString, nil
@@ -1018,33 +1031,76 @@ func compareReqHeaders(logger *zap.Logger, req1 map[string]string, req2 map[stri
 	}
 }
 
-// Removing quotes in templates for non string types like float, int, etc. Because they interfere with the templating engine.
+// removeQuotesInTemplates removes temporary quotes from non-string template placeholders before saving the test case.
+// For example, it converts `{"id":"{{int .id}}}"` back to `{"id":{{int .id}}}`.
+// String templates like `{"name":"{{string .name}}"}` are left untouched as they represent string literals.
 func removeQuotesInTemplates(jsonStr string) string {
-	// Regular expression to find patterns with {{ and }}
-	re := regexp.MustCompile(`"\{\{[^{}]*\}\}"`)
-	// Function to replace matches by removing surrounding quotes
+	// Regular expression to find any quoted template placeholder and capture the template itself.
+	re := regexp.MustCompile(`"(\{\{[^{}]*\}\})"`)
+
 	result := re.ReplaceAllStringFunc(jsonStr, func(match string) string {
+		// If the template is explicitly a string type, keep the surrounding quotes.
 		if strings.Contains(match, "{{string") {
 			return match
 		}
-		// Remove the surrounding quotes
+
+		// For all other templates (e.g., int, float, or implicit type), remove the quotes.
+		// The first capture group (submatches[1]) contains the template part, e.g., "{{.id}}".
+		submatches := re.FindStringSubmatch(match)
+		if len(submatches) >= 2 {
+			return submatches[1]
+		}
+
+		// Fallback to simply trimming quotes, though it should not be reached with the current regex.
 		return strings.Trim(match, `"`)
 	})
 
 	return result
 }
 
-// Add quotes to the template if it is not of the type string. eg: "{{float .key}}" ,{{int .key}}
+// addQuotesInTemplates wraps template placeholders in quotes to ensure the JSON is valid for unmarshaling.
+// It carefully parses the string to only wrap templates that are outside of existing JSON string literals,
+// preventing corruption of JSON strings that contain "{{...}}" as part of their content.
 func addQuotesInTemplates(jsonStr string) string {
-	// Regular expression to find patterns with {{ and }}
-	re := regexp.MustCompile(`\{\{[^{}]*\}\}`)
-	// Function to replace matches by removing surrounding quotes
-	result := re.ReplaceAllStringFunc(jsonStr, func(match string) string {
-		if strings.Contains(match, "{{string") {
-			return match
+	var result strings.Builder
+	inString := false
+	i := 0
+	for i < len(jsonStr) {
+		char := rune(jsonStr[i])
+
+		// Check for a double quote character.
+		if char == '"' {
+			// Count preceding backslashes to determine if the quote is escaped.
+			slashes := 0
+			for k := i - 1; k >= 0 && jsonStr[k] == '\\'; k-- {
+				slashes++
+			}
+			// If the number of preceding backslashes is even, this is a non-escaped quote.
+			if slashes%2 == 0 {
+				inString = !inString
+			}
 		}
-		//Add the surrounding quotes.
-		return `"` + match + `"`
-	})
-	return result
+
+		// Check for the start of a template `{{` when not inside a string literal.
+		if !inString && char == '{' && i+1 < len(jsonStr) && jsonStr[i+1] == '{' {
+			// Find the corresponding end of the template `}}`.
+			// This simple search assumes "}}" does not appear inside a template expression.
+			endIndex := strings.Index(jsonStr[i:], "}}")
+			if endIndex != -1 {
+				endIndex += i + 2 // Adjust index to be relative to the start of jsonStr.
+				template := jsonStr[i:endIndex]
+
+				// Wrap the found template in quotes to make it a valid JSON string value for the parser.
+				result.WriteString(`"`)
+				result.WriteString(template)
+				result.WriteString(`"`)
+				i = endIndex
+				continue
+			}
+		}
+
+		result.WriteRune(char)
+		i++
+	}
+	return result.String()
 }
