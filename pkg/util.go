@@ -242,10 +242,10 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	statusMessage := http.StatusText(httpResp.StatusCode)
 
 	resp = &models.HTTPResp{
-		StatusCode: httpResp.StatusCode,
+		StatusCode:    httpResp.StatusCode,
 		StatusMessage: statusMessage,
-		Body:       string(respBody),
-		Header:     ToYamlHTTPHeader(httpResp.Header),
+		Body:          string(respBody),
+		Header:        ToYamlHTTPHeader(httpResp.Header),
 	}
 
 	return resp, errHTTPReq
