@@ -22,10 +22,7 @@ import (
 )
 
 var (
-	realTimeOffset        uint64
-	ioReadAll381          = io.ReadAll
-	multipartNewReader492 = multipart.NewReader
-	timeNow294            = time.Now
+	realTimeOffset uint64
 )
 
 // convertUnixNanoToTime takes a Unix timestamp in nanoseconds as a uint64 and returns the corresponding time.Time
@@ -169,7 +166,7 @@ func Capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 	var reqBody []byte
 	if req.Body != nil { // Read
 		var err error
-		reqBody, err = ioReadAll381(req.Body)
+		reqBody, err = io.ReadAll(req.Body)
 		if err != nil {
 			logger.Warn("failed to read the http request body", zap.Any("metadata", utils.GetReqMeta(req)), zap.Int64("of size", int64(len(reqBody))), zap.String("body", base64.StdEncoding.EncodeToString(reqBody)), zap.Error(err))
 		}
@@ -190,7 +187,7 @@ func Capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 		}
 	}()
 
-	respBody, err := ioReadAll381(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the http response body")
 		return
@@ -229,7 +226,7 @@ func Capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 		Version: models.GetVersion(),
 		Name:    pkg.ToYamlHTTPHeader(req.Header)["Keploy-Test-Name"],
 		Kind:    models.HTTP,
-		Created: timeNow294().Unix(),
+		Created: time.Now().Unix(),
 		HTTPReq: models.HTTPReq{
 			Method:     models.Method(req.Method),
 			ProtoMajor: req.ProtoMajor,
@@ -267,7 +264,7 @@ func extractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 			return nil
 		}
 	}
-	reader := multipartNewReader492(bytes.NewReader(body), boundary)
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
 	var formData []models.FormData
 
 	for {
@@ -284,7 +281,7 @@ func extractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 			continue
 		}
 
-		value, err := ioReadAll381(part)
+		value, err := io.ReadAll(part)
 		if err != nil {
 			utils.LogError(logger, err, "Error reading part value")
 			continue
@@ -299,7 +296,6 @@ func extractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 	return formData
 }
 
-// CaptureGRPC captures a gRPC request/response pair and sends it to the test case channel
 // CaptureGRPC captures a gRPC request/response pair and sends it to the test case channel
 func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream) {
 	if http2Stream == nil {
@@ -317,7 +313,7 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 		Version:  models.GetVersion(),
 		Name:     http2Stream.GRPCReq.Headers.OrdinaryHeaders["Keploy-Test-Name"],
 		Kind:     models.GRPC_EXPORT,
-		Created:  timeNow294().Unix(),
+		Created:  time.Now().Unix(),
 		GrpcReq:  *http2Stream.GRPCReq,
 		GrpcResp: *http2Stream.GRPCResp,
 		Noise:    map[string][]string{},
