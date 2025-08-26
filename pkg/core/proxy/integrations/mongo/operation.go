@@ -56,14 +56,13 @@ func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, inter
 	wmLength := len(wm)
 	// the wiremessage is at least 16 bytes long
 	length, reqID, responseTo, opCode, wmBody, ok := wiremessage.ReadHeader(wm)
-	logger.Info("decoding wire message", zap.Int("length", int(length)), zap.Int32("requestID", reqID), zap.Int32("responseTo", responseTo), zap.String("opCode", opCode.String()))
 	messageHeader := models.MongoHeader{
 		Length:     length,
 		RequestID:  reqID,
 		ResponseTo: responseTo,
 		Opcode:     wiremessage.OpCode(opCode),
 	}
-	logger.Info(fmt.Sprintf("the mongo msg header: %v", messageHeader))
+	logger.Debug(fmt.Sprintf("the mongo msg header: %v", messageHeader))
 	if !ok || int(length) > wmLength {
 		return nil, messageHeader, &models.MongoOpMessage{}, errors.New("malformed wire message: insufficient bytes")
 	}
@@ -144,7 +143,7 @@ func Decode(wm []byte, logger *zap.Logger) (Operation, models.MongoHeader, inter
 	if err != nil {
 		return nil, messageHeader, mongoMsg, err
 	}
-	logger.Info(fmt.Sprintf("the decoded string for the wiremessage: %v", op.String()))
+	logger.Debug(fmt.Sprintf("the decoded string for the wiremessage: %v", op.String()))
 	return op, messageHeader, mongoMsg, nil
 }
 
@@ -812,8 +811,6 @@ func decodeMsg(reqID int32, wm []byte, logger *zap.Logger) (*opMsg, error) {
 		if !ok {
 			return nil, errors.New("malformed wire message: insufficient bytes to read section type")
 		}
-
-		logger.Info("decoding wire message section", zap.Any("sectionType", stype))
 
 		switch stype {
 		case wiremessage.SingleDocument:
