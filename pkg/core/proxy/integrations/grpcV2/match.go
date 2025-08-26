@@ -83,8 +83,8 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 
 			// apply fuzzy match for body with schemaMatched mocks
 			// Guard against quadratic work on very large bodies.
-			if len(expBody) > 256*1024 {
-				logger.Debug("skipping fuzzy match for large body")
+			if len(expBody) > 512*1024 {
+				logger.Debug("skipping fuzzy match for large body", zap.Int("len", len(expBody)))
 				return nil, nil
 			}
 			logger.Debug("performing fuzzy match for decoded data in body")
