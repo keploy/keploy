@@ -162,14 +162,19 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 //}
 
 func Capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions) {
-	reqBody, err := io.ReadAll(req.Body)
-	if err != nil {
-		utils.LogError(logger, err, "failed to read the http request body", zap.Int64("of size", int64(len(reqBody))), zap.String("body", base64.StdEncoding.EncodeToString(reqBody)))
-		return
+
+	var reqBody []byte
+	// Skip reading body if the method is GET
+	if req.Method != "GET" {
+		reqBody, err := io.ReadAll(req.Body)
+		if err != nil {
+			utils.LogError(logger, err, "failed to read the http request body", zap.Int64("of size", int64(len(reqBody))), zap.String("body", base64.StdEncoding.EncodeToString(reqBody)))
+			return
+		}
 	}
 
 	if req.Header.Get("Content-Encoding") != "" {
-		reqBody, err = pkg.Decompress(logger, req.Header.Get("Content-Encoding"), reqBody)
+		reqBody, err := pkg.Decompress(logger, req.Header.Get("Content-Encoding"), reqBody)
 		if err != nil {
 			utils.LogError(logger, err, "failed to decompress the request body", zap.Int64("of size", int64(len(reqBody))), zap.String("body", base64.StdEncoding.EncodeToString(reqBody)))
 			return

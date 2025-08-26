@@ -122,12 +122,6 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	var reqBody []byte
 	if req.Body != nil { // Read
 		var err error
-		reqBody, err = io.ReadAll(req.Body)
-		if err != nil {
-			// TODO right way to log errors
-			utils.LogError(h.Logger, err, "failed to read the http request body", zap.Any("metadata", utils.GetReqMeta(req)))
-			return err
-		}
 
 		if req.Header.Get("Content-Encoding") != "" {
 			reqBody, err = pkg.Decompress(h.Logger, req.Header.Get("Content-Encoding"), reqBody)
