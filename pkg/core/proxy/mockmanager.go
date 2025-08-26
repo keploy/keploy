@@ -14,39 +14,90 @@ import (
 	"go.uber.org/zap"
 )
 
+// ---------------- MockManager (kind-aware) ----------------
+
 type MockManager struct {
-	filtered      *TreeDb
-	unfiltered    *TreeDb
+	// legacy "all" trees (kept for compatibility with existing callers)
+	filtered   *TreeDb
+	unfiltered *TreeDb
+
+	// global revision (legacy)
+	rev uint64
+	// NEW: per-kind revisions
+	revMu sync.RWMutex
+
+	// NEW: per-kind trees
+	filteredByKind   map[models.Kind]*TreeDb
+	unfilteredByKind map[models.Kind]*TreeDb
+	revByKind        map[models.Kind]*uint64
+
 	logger        *zap.Logger
 	consumedMocks sync.Map
-	rev           uint64 // monotonically increasing revision of in-memory view
-
 }
 
 func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManager {
+	if filtered == nil {
+		filtered = NewTreeDb(customComparator)
+	}
+	if unfiltered == nil {
+		unfiltered = NewTreeDb(customComparator)
+	}
 	return &MockManager{
-		filtered:      filtered,
-		unfiltered:    unfiltered,
-		logger:        logger,
-		consumedMocks: sync.Map{},
+		filtered:         filtered,
+		unfiltered:       unfiltered,
+		filteredByKind:   make(map[models.Kind]*TreeDb),
+		unfilteredByKind: make(map[models.Kind]*TreeDb),
+		logger:           logger,
+		revByKind:        make(map[models.Kind]*uint64),
 	}
 }
 
-// Revision returns a monotonically increasing number that changes
-// whenever the in-memory set or sort order of mocks is mutated.
+// ---------- revision helpers ----------
+
 func (m *MockManager) Revision() uint64 {
 	return atomic.LoadUint64(&m.rev)
 }
 
-func (m *MockManager) bumpRevision() {
+func (m *MockManager) bumpRevisionAll() {
 	atomic.AddUint64(&m.rev, 1)
 }
+func (m *MockManager) RevisionByKind(kind models.Kind) uint64 {
+	m.revMu.RLock()
+	ptr := m.revByKind[kind]
+	m.revMu.RUnlock()
+	if ptr == nil {
+		return 0
+	}
+	return atomic.LoadUint64(ptr)
+}
+
+func (m *MockManager) bumpRevisionKind(kind models.Kind) {
+	m.revMu.Lock()
+	ptr := m.revByKind[kind]
+	if ptr == nil {
+		var v uint64
+		ptr = &v
+		m.revByKind[kind] = ptr
+	}
+	m.revMu.Unlock()
+	atomic.AddUint64(ptr, 1)
+}
+func (m *MockManager) ensureKindTrees(kind models.Kind) (f *TreeDb, u *TreeDb) {
+	if t := m.filteredByKind[kind]; t == nil {
+		m.filteredByKind[kind] = NewTreeDb(customComparator)
+	}
+	if t := m.unfilteredByKind[kind]; t == nil {
+		m.unfilteredByKind[kind] = NewTreeDb(customComparator)
+	}
+	return m.filteredByKind[kind], m.unfilteredByKind[kind]
+}
+
+// ---------- getters ----------
 
 func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
-	results := make([]*models.Mock, 0, 64) // small cap; grows if needed
+	results := make([]*models.Mock, 0, 64)
 	m.filtered.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
-			// Return pointers directly; callers must treat as read-only.
 			results = append(results, mock)
 		}
 		return true
@@ -65,58 +116,88 @@ func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 	return results, nil
 }
 
-// GetMySQLCounts computes counts without building slices.
-func (m *MockManager) GetMySQLCounts() (total, config, data int) {
-	m.unfiltered.rangeValues(func(v interface{}) bool {
-		mock, ok := v.(*models.Mock)
-		if !ok || mock == nil || mock.Kind != models.MySQL {
-			return true
-		}
-		total++
-		if mock.Spec.Metadata["type"] == "config" {
-			config++
-		} else {
-			data++
+// NEW: kind-scoped getters used by Redis matcher
+func (m *MockManager) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	flt, _ := m.ensureKindTrees(kind)
+	results := make([]*models.Mock, 0, 64)
+	flt.rangeValues(func(v interface{}) bool {
+		if mock, ok := v.(*models.Mock); ok && mock != nil {
+			results = append(results, mock)
 		}
 		return true
 	})
-	return
+	return results, nil
 }
+
+func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock, error) {
+	_, unf := m.ensureKindTrees(kind)
+	results := make([]*models.Mock, 0, 128)
+	unf.rangeValues(func(v interface{}) bool {
+		if mock, ok := v.(*models.Mock); ok && mock != nil {
+			results = append(results, mock)
+		}
+		return true
+	})
+	return results, nil
+}
+
+// ---------- setters (populate both legacy + per-kind) ----------
 
 func (m *MockManager) SetFilteredMocks(mocks []*models.Mock) {
 	m.filtered.deleteAll()
+	// we will track which kinds were touched to bump only their revisions
+	touched := map[models.Kind]struct{}{}
 	for index, mock := range mocks {
-		// if the sortOrder is already set (!= 0) then we shouldn't override it,
-		// as this would be a consequence of the mock being matched in previous testcases,
-		// which is done to put the mock in the last when we are processing the mock list for getting a match.
 		if mock.TestModeInfo.SortOrder == 0 {
 			mock.TestModeInfo.SortOrder = int64(index) + 1
 		}
 		mock.TestModeInfo.ID = index
 		m.filtered.insert(mock.TestModeInfo, mock)
+
+		// per-kind
+		k := mock.Kind
+		flt, _ := m.ensureKindTrees(k)
+		flt.insert(mock.TestModeInfo, mock)
+		touched[k] = struct{}{}
 	}
-	m.bumpRevision()
+	for k := range touched {
+		m.bumpRevisionKind(k)
+	}
+	m.bumpRevisionAll()
 }
 
 func (m *MockManager) SetUnFilteredMocks(mocks []*models.Mock) {
 	m.unfiltered.deleteAll()
+	touched := map[models.Kind]struct{}{}
 	for index, mock := range mocks {
-		// if the sortOrder is already set (!= 0) then we shouldn't override it,
-		// as this would be a consequence of the mock being matched in previous testcases,
-		// which is done to put the mock in the last when we are processing the mock list for getting a match.
 		if mock.TestModeInfo.SortOrder == 0 {
 			mock.TestModeInfo.SortOrder = int64(index) + 1
 		}
 		mock.TestModeInfo.ID = index
 		m.unfiltered.insert(mock.TestModeInfo, mock)
+
+		// per-kind
+		k := mock.Kind
+		_, unf := m.ensureKindTrees(k)
+		unf.insert(mock.TestModeInfo, mock)
+		touched[k] = struct{}{}
 	}
-	m.bumpRevision()
+	for k := range touched {
+		m.bumpRevisionKind(k)
+	}
+	m.bumpRevisionAll()
 }
+
+// ---------- point updates / deletes (keep per-kind in sync) ----------
 
 func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool {
 	updated := m.unfiltered.update(old.TestModeInfo, new.TestModeInfo, new)
+	// per-kind
+	k := new.Kind
+	_, unf := m.ensureKindTrees(k)
+	_ = unf.update(old.TestModeInfo, new.TestModeInfo, new)
+
 	if updated {
-		// mark the unfiltered mock as used for the current simulated test-case
 		if err := m.flagMockAsUsed(models.MockState{
 			Name:       (*new).Name,
 			Usage:      models.Updated,
@@ -126,9 +207,56 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
 	}
-	m.bumpRevision()
+	m.bumpRevisionKind(k)
+	m.bumpRevisionAll()
 	return updated
 }
+
+func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
+	isDeleted := m.filtered.delete(mock.TestModeInfo)
+	// per-kind
+	k := mock.Kind
+	flt, _ := m.ensureKindTrees(k)
+	_ = flt.delete(mock.TestModeInfo)
+
+	if isDeleted {
+		if err := m.flagMockAsUsed(models.MockState{
+			Name:       mock.Name,
+			Usage:      models.Deleted,
+			IsFiltered: mock.TestModeInfo.IsFiltered,
+			SortOrder:  mock.TestModeInfo.SortOrder,
+		}); err != nil {
+			m.logger.Error("failed to flag mock as used", zap.Error(err))
+		}
+	}
+	m.bumpRevisionKind(k)
+	m.bumpRevisionAll()
+	return isDeleted
+}
+
+func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
+	isDeleted := m.unfiltered.delete(mock.TestModeInfo)
+	// per-kind
+	k := mock.Kind
+	_, unf := m.ensureKindTrees(k)
+	_ = unf.delete(mock.TestModeInfo)
+
+	if isDeleted {
+		if err := m.flagMockAsUsed(models.MockState{
+			Name:       mock.Name,
+			Usage:      models.Deleted,
+			IsFiltered: mock.TestModeInfo.IsFiltered,
+			SortOrder:  mock.TestModeInfo.SortOrder,
+		}); err != nil {
+			m.logger.Error("failed to flag mock as used", zap.Error(err))
+		}
+	}
+	m.bumpRevisionKind(k)
+	m.bumpRevisionAll()
+	return isDeleted
+}
+
+// ---------- bookkeeping ----------
 
 func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 	if mock.Name == "" {
@@ -136,38 +264,6 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState) error {
 	}
 	m.consumedMocks.Store(mock.Name, mock)
 	return nil
-}
-
-func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
-	isDeleted := m.filtered.delete(mock.TestModeInfo)
-	if isDeleted {
-		if err := m.flagMockAsUsed(models.MockState{
-			Name:       mock.Name,
-			Usage:      models.Deleted,
-			IsFiltered: mock.TestModeInfo.IsFiltered,
-			SortOrder:  mock.TestModeInfo.SortOrder,
-		}); err != nil {
-			m.logger.Error("failed to flag mock as used", zap.Error(err))
-		}
-	}
-	m.bumpRevision()
-	return isDeleted
-}
-
-func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
-	isDeleted := m.unfiltered.delete(mock.TestModeInfo)
-	if isDeleted {
-		if err := m.flagMockAsUsed(models.MockState{
-			Name:       mock.Name,
-			Usage:      models.Deleted,
-			IsFiltered: mock.TestModeInfo.IsFiltered,
-			SortOrder:  mock.TestModeInfo.SortOrder,
-		}); err != nil {
-			m.logger.Error("failed to flag mock as used", zap.Error(err))
-		}
-	}
-	m.bumpRevision()
-	return isDeleted
 }
 
 func (m *MockManager) GetConsumedMocks() []models.MockState {
@@ -188,4 +284,43 @@ func (m *MockManager) GetConsumedMocks() []models.MockState {
 		m.consumedMocks.Delete(key)
 	}
 	return keys
+}
+
+// GetMySQLCounts computes counts of MySQL mocks.
+// Uses the per-kind unfiltered tree if available, otherwise falls back
+// to scanning the legacy unfiltered tree.
+func (m *MockManager) GetMySQLCounts() (total, config, data int) {
+	// Fast path: per-kind tree present
+	if t := m.unfilteredByKind[models.MySQL]; t != nil {
+		t.rangeValues(func(v interface{}) bool {
+			mock, ok := v.(*models.Mock)
+			if !ok || mock == nil {
+				return true
+			}
+			total++
+			if mock.Spec.Metadata["type"] == "config" {
+				config++
+			} else {
+				data++
+			}
+			return true
+		})
+		return
+	}
+
+	// Fallback: legacy scan of the combined tree
+	m.unfiltered.rangeValues(func(v interface{}) bool {
+		mock, ok := v.(*models.Mock)
+		if !ok || mock == nil || mock.Kind != models.MySQL {
+			return true
+		}
+		total++
+		if mock.Spec.Metadata["type"] == "config" {
+			config++
+		} else {
+			data++
+		}
+		return true
+	})
+	return
 }
