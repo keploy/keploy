@@ -205,15 +205,26 @@ func exactBodyMatch(logger *zap.Logger, expBody string, schemaMatched []*models.
 	return false, nil
 }
 
-// fuzzyMatch logic remains the same.
+// fuzzyMatch logic with input trimming for performance.
 func findStringMatch(req string, mockStrings []string) int {
+	// Trim request to 2048 characters for performance
+	if len(req) > 2048 {
+		req = req[:2048]
+	}
+	
 	minDist := int(^uint(0) >> 1)
 	bestMatch := -1
 	for idx, mock := range mockStrings {
 		if !util.IsASCII(mock) {
 			continue
 		}
-		dist := levenshtein.ComputeDistance(req, mock)
+		// Trim mock string to 2048 characters for performance
+		trimmedMock := mock
+		if len(mock) > 2048 {
+			trimmedMock = mock[:2048]
+		}
+		
+		dist := levenshtein.ComputeDistance(req, trimmedMock)
 		if dist == 0 {
 			return 0
 		}
@@ -226,10 +237,20 @@ func findStringMatch(req string, mockStrings []string) int {
 }
 
 func findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
+	// Trim request buffer to 2048 bytes for performance
+	if len(reqBuff) > 2048 {
+		reqBuff = reqBuff[:2048]
+	}
+	
 	mxSim := -1.0
 	mxIdx := -1
 	for idx, mock := range mocks {
 		encoded := []byte(mock.Spec.GRPCReq.Body.DecodedData)
+		// Trim mock data to 2048 bytes for performance
+		if len(encoded) > 2048 {
+			encoded = encoded[:2048]
+		}
+		
 		k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
 		shingles1 := util.CreateShingles(encoded, k)
 		shingles2 := util.CreateShingles(reqBuff, k)
@@ -244,19 +265,25 @@ func findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 }
 
 func fuzzyMatch(tcsMocks []*models.Mock, reqBuff string) (bool, *models.Mock) {
+	// Trim request buffer to 2048 characters for performance
+	trimmedReqBuff := reqBuff
+	if len(reqBuff) > 2048 {
+		trimmedReqBuff = reqBuff[:2048]
+	}
+	
 	mockStrings := make([]string, len(tcsMocks))
 	for i := range tcsMocks {
 		mockStrings[i] = tcsMocks[i].Spec.GRPCReq.Body.DecodedData
 	}
 
-	if util.IsASCII(reqBuff) {
-		idx := findStringMatch(string(reqBuff), mockStrings)
+	if util.IsASCII(trimmedReqBuff) {
+		idx := findStringMatch(trimmedReqBuff, mockStrings)
 		if idx != -1 {
 			return true, tcsMocks[idx]
 		}
 	}
 
-	idx := findBinaryMatch(tcsMocks, []byte(reqBuff))
+	idx := findBinaryMatch(tcsMocks, []byte(trimmedReqBuff))
 	if idx != -1 {
 		return true, tcsMocks[idx]
 	}
