@@ -1,14 +1,17 @@
 package provider
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"strings"
 
 	"go.keploy.io/server/v2/utils"
+	"go.uber.org/zap"
 )
 
 func (c *CmdConfigurator) noCommandError() error {
@@ -98,4 +101,21 @@ func getLogoColor(i, j int) string {
 	default:
 		return gradientColors[0]
 	}
+}
+
+// Requires colima to start with --ssh-agent
+func getColimaSSHAuthSock(ctx context.Context, logger *zap.Logger) (string, error) {
+	cmd := exec.CommandContext(ctx, "colima", "ssh", "--", "printenv", "SSH_AUTH_SOCK")
+	out, err := cmd.Output()
+	if err != nil {
+		utils.LogError(logger, err, "failed to query SSH_AUTH_SOCK from colima VM")
+		return "", fmt.Errorf("colima ssh failed; ensure colima is running with --ssh-agent")
+	}
+	sock := strings.TrimSpace(string(out))
+	if sock == "" {
+		return "", fmt.Errorf("no SSH_AUTH_SOCK in colima VM; start with: colima stop && colima start --ssh-agent")
+	}
+
+	mount := fmt.Sprintf(`-v "%s":/ssh-agent -e SSH_AUTH_SOCK=/ssh-agent `, sock)
+	return mount, nil
 }
