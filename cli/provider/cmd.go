@@ -262,6 +262,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "proxy":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().StringP("pcap-path", "c", ".", "Path to the pcap file used to replay the network packets")
+		cmd.Flags().StringP("mocks-path", "m", ".", "Path to the directory where mock should be stored")
 
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
@@ -907,7 +908,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
-		c.cfg.Proxy.PcapPath = utils.ToAbsPath(c.logger, pcapPath)
+		c.cfg.Proxy.PcapPath = pcapPath
+
+		mocksPath, err := cmd.Flags().GetString("mocks-path")
+		if err != nil {
+			errMsg := "failed to get the mocks path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Proxy.MocksPath = mocksPath
 	}
 
 	return nil

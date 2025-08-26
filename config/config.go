@@ -184,7 +184,8 @@ type (
 )
 
 type Proxy struct {
-	PcapPath string `json:"pcapPath" yaml:"pcapPath" mapstructure:"pcapPath"`
+	PcapPath  string `json:"pcapPath" yaml:"pcapPath" mapstructure:"pcapPath"`
+	MocksPath string `json:"mocksPath" yaml:"mocksPath" mapstructure:"mocksPath"`
 }
 
 func SetByPassPorts(conf *Config, ports []uint) {

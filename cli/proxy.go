@@ -19,6 +19,9 @@ func Proxy(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceF
 		Use:     "proxy",
 		Short:   "Starts the proxy server",
 		Example: "keploy proxy",
+		PreRunE: func(cmd *cobra.Command, _ []string) error {
+			return cmdConfigurator.Validate(ctx, cmd)
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			svc, err := serviceFactory.GetService(ctx, "proxy")
 			if err != nil {
