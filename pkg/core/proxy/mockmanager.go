@@ -79,7 +79,8 @@ func (m *MockManager) bumpRevisionKind(kind models.Kind) {
 	ptr := m.revByKind[kind]
 	if ptr == nil {
 		var v uint64
-		ptr = &v // escapes; safe after unlock
+		ptr = &v // The address of v is stored in the map, so v escapes to the heap.
+		// Safe to use ptr after unlocking; we mutate it via atomics.
 		m.revByKind[kind] = ptr
 	}
 	m.revMu.Unlock()
@@ -261,6 +262,13 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 
 	// If global updated but per-kind missed (e.g., not present), try to self-heal
 	if updatedGlobal && !updatedKind {
+		if m.logger != nil {
+			m.logger.Warn("self-healing per-kind tree: global update succeeded but per-kind missed",
+				zap.String("kind", string(k)),
+				zap.String("mockName", new.Name),
+				zap.Any("testModeInfo", new.TestModeInfo),
+			)
+		}
 		unf.insert(new.TestModeInfo, new)
 		updatedKind = true
 	}
@@ -352,10 +360,14 @@ func (m *MockManager) GetConsumedMocks() []models.MockState {
 	// Collect first (no deletes during Range)
 	m.consumedMocks.Range(func(key, val interface{}) bool {
 		if _, ok := key.(string); !ok {
-			return true
+			if m.logger != nil {
+				m.logger.Warn("unexpected key type in consumedMocks; skipping", zap.Any("keyType", fmt.Sprintf("%T", key)))
+			}
 		}
 		if st, ok := val.(models.MockState); ok {
 			out = append(out, st)
+		} else if m.logger != nil {
+			m.logger.Warn("unexpected value type in consumedMocks; skipping", zap.Any("valueType", fmt.Sprintf("%T", val)))
 		}
 		return true
 	})
