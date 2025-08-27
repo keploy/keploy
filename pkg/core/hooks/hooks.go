@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"sync"
@@ -39,6 +40,7 @@ func NewHooks(logger *zap.Logger, cfg *config.Config) *Hooks {
 		dnsPort:           cfg.DNSPort,
 		conf:              cfg,
 		retprobeMaxActive: 1024,
+		unloadDone:        make(chan struct{}),
 	}
 }
 
@@ -52,12 +54,16 @@ type Hooks struct {
 	m            sync.Mutex
 	objectsMutex sync.RWMutex // Protects eBPF objects during load/unload operations
 	conf         *config.Config
+	// Channel to signal when unload is complete
+	unloadDone      chan struct{}
+	unloadDoneMutex sync.Mutex // Protects unloadDone channel operations
 	// eBPF C shared maps
 	clientRegistrationMap    *ebpf.Map
 	agentRegistartionMap     *ebpf.Map
 	dockerAppRegistrationMap *ebpf.Map
 	redirectProxyMap         *ebpf.Map
 	e2eAppRegistrationMap    *ebpf.Map
+	flagMap                  *ebpf.Map
 	//--------------
 
 	// eBPF C shared objectsobjects
@@ -112,6 +118,11 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 	h.appID = id
 	h.m.Unlock()
 
+	// Reset the unload done channel for this new load
+	h.unloadDoneMutex.Lock()
+	h.unloadDone = make(chan struct{})
+	h.unloadDoneMutex.Unlock()
+
 	err := h.load(ctx, opts)
 	if err != nil {
 		return err
@@ -129,10 +140,22 @@ func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
 
 		//deleting in order to free the memory in case of rerecord.
 		h.sess.Delete(id)
+
+		// Signal that unload is complete
+		h.unloadDoneMutex.Lock()
+		close(h.unloadDone)
+		h.unloadDoneMutex.Unlock()
 		return nil
 	})
 
 	return nil
+}
+
+// GetUnloadDone returns a channel that will be closed when the hooks are completely unloaded
+func (h *Hooks) GetUnloadDone() <-chan struct{} {
+	h.unloadDoneMutex.Lock()
+	defer h.unloadDoneMutex.Unlock()
+	return h.unloadDone
 }
 
 func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
@@ -360,6 +383,16 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
 	// Open a Kprobe at the entry point of the kernel function and attach the
 	// pre-compiled program.
+	h.flagMap = objs.FlagMap
+	if utils.BigPayload {
+		err = h.UpdateFlagMap(0, 1)
+	} else {
+		err = h.UpdateFlagMap(0, 0)
+	}
+
+	if err != nil {
+		log.Fatalf("Error setting flag in map: %v", err)
+	}
 	rd, err := link.Kprobe("sys_read", objs.SyscallProbeEntryRead, nil)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to attach the kprobe hook on sys_read")
@@ -526,7 +559,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	}
 
 	agentInfo.DNSPort = int32(h.dnsPort)
-
+	agentInfo.KeployAgentInode = clientInfo.KeployClientInode
 	if opts.IsDocker {
 		clientInfo.IsDockerApp = uint32(1)
 	} else {
@@ -561,6 +594,7 @@ func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOption
 	// and then use the app id to get the test cases chan
 	// and pass that to eBPF consumers/listeners
 	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
+
 }
 
 func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
@@ -689,4 +723,22 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 	}
 
 	h.logger.Info("eBPF resources released successfully...")
+}
+
+func (h *Hooks) UpdateFlagMap(key uint64, value uint64) error {
+	if h.flagMap == nil {
+		return fmt.Errorf("flag map not initialized")
+	}
+
+	// Key and value must be pointers
+	err := h.flagMap.Update(
+		&key,           // Map key (pointer)
+		&value,         // New value (pointer)
+		ebpf.UpdateAny, // Update flags
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to update flag map: %w", err)
+	}
+	return nil
 }

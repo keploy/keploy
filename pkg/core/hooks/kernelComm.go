@@ -110,7 +110,7 @@ func (h *Hooks) SendDockerAppInfo(appID uint64, dockerAppInfo structs.DockerAppI
 	if h.appID != 0 {
 		err := h.dockerAppRegistrationMap.Delete(h.appID)
 		if err != nil {
-			utils.LogError(h.logger, err, "failed to remove entry from dockerAppRegistrationMap")
+			utils.LogError(h.logger, err, "failed to remove entry from dockerAppRegistrationMap", zap.Any("(Key)/AppID", h.appID))
 			return err
 		}
 	}
@@ -118,7 +118,7 @@ func (h *Hooks) SendDockerAppInfo(appID uint64, dockerAppInfo structs.DockerAppI
 	// Don't override the app ID with a random number - use the real app ID
 	err := h.dockerAppRegistrationMap.Update(dockerAppID, dockerAppInfo, ebpf.UpdateAny)
 	if err != nil {
-		utils.LogError(h.logger, err, "failed to send the dockerAppInfo info to the ebpf program")
+		utils.LogError(h.logger, err, "failed to send the dockerAppInfo info to the ebpf program", zap.Uint64("appID", dockerAppID))
 		return err
 	}
 

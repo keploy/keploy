@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"os"
 	"time"
-	"unsafe"
 
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
@@ -24,8 +23,6 @@ import (
 	"go.uber.org/zap"
 )
 
-var eventAttributesSize = int(unsafe.Sizeof(SocketDataEvent{}))
-
 // ListenSocket starts the socket event listeners
 func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap *ebpf.Map, opts models.IncomingOptions) (<-chan *models.TestCase, error) {
 	t := make(chan *models.TestCase, 500)
@@ -34,7 +31,7 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 		utils.LogError(l, err, "failed to initialize real time offset")
 		return nil, errors.New("failed to start socket listeners")
 	}
-	c := NewFactory(time.Minute, l, opts)
+	c := NewFactory(5*time.Minute, l, opts)
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
 		return nil, errors.New("failed to get the error group from the context")
@@ -135,7 +132,6 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 		utils.LogError(l, nil, "failed to create ring buffer of socketDataEvent")
 		return err
 	}
-
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
 		return errors.New("failed to get the error group from the context")
@@ -155,29 +151,39 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 				}
 
 				bin := record.RawSample
-				if len(bin) < eventAttributesSize {
-					l.Debug(fmt.Sprintf("Buffer's for SocketDataEvent is smaller (%d) than the minimum required (%d)", len(bin), eventAttributesSize))
-					continue
-				} else if len(bin) > EventBodyMaxSize+eventAttributesSize {
-					l.Debug(fmt.Sprintf("Buffer's for SocketDataEvent is bigger (%d) than the maximum for the struct (%d)", len(bin), EventBodyMaxSize+eventAttributesSize))
-					continue
+
+				if utils.BigPayload {
+					l.Debug("Using Bigger Request Map")
+					var event SocketDataEventBig
+
+					if err := binary.Read(bytes.NewReader(bin), binary.LittleEndian, &event); err != nil {
+						utils.LogError(l, err, "failed to decode the received data from ringbuf socketDataEvent reader")
+						continue
+					}
+					event.TimestampNano += getRealTimeOffset()
+
+					if event.Direction == IngressTraffic {
+						event.EntryTimestampNano += getRealTimeOffset()
+						l.Debug(fmt.Sprintf("Request EntryTimestamp :%v\n", convertUnixNanoToTime(event.EntryTimestampNano)))
+					}
+					c.GetOrCreate(event.ConnID).AddDataEvent(&event, nil)
+				} else {
+					l.Debug("Using Smaller Request Map")
+					var event SocketDataEventSmall
+
+					if err := binary.Read(bytes.NewReader(bin), binary.LittleEndian, &event); err != nil {
+						utils.LogError(l, err, "failed to decode the received data from ringbuf socketDataEvent reader")
+						continue
+					}
+					event.TimestampNano += getRealTimeOffset()
+
+					if event.Direction == IngressTraffic {
+						event.EntryTimestampNano += getRealTimeOffset()
+						l.Debug(fmt.Sprintf("Request EntryTimestamp :%v\n", convertUnixNanoToTime(event.EntryTimestampNano)))
+					}
+					c.GetOrCreate(event.ConnID).AddDataEvent(nil, &event)
 				}
 
-				var event SocketDataEvent
-
-				if err := binary.Read(bytes.NewReader(bin), binary.LittleEndian, &event); err != nil {
-					utils.LogError(l, err, "failed to decode the received data from ringbuf socketDataEvent reader")
-					continue
-				}
-
-				event.TimestampNano += getRealTimeOffset()
-
-				if event.Direction == IngressTraffic {
-					event.EntryTimestampNano += getRealTimeOffset()
-					l.Debug(fmt.Sprintf("Request EntryTimestamp :%v\n", convertUnixNanoToTime(event.EntryTimestampNano)))
-				}
-
-				c.GetOrCreate(event.ConnID).AddDataEvent(event)
 			}
 		}()
 		<-ctx.Done() // Check for context cancellation

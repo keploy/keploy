@@ -5,26 +5,43 @@ import (
 	"strings"
 )
 
+// Hard guards to prevent pathological work on giant or adversarial inputs.
+const (
+	maxCanonDepth = 64      // reasonable for nested protos
+	maxCanonBytes = 1 << 20 // 1 MiB per side; beyond this we bail out
+	maxBlocks     = 10_000  // safety for degenerate line/block splits
+)
+
 // canonicalizeTopLevelBlocks makes protoscope-like text order-insensitive at *all* levels by:
 // - splitting into top-level field blocks
 // - recursively canonicalizing the content of each "{...}" block
 // - sorting blocks lexicographically
 // - joining them back together
 func CanonicalizeTopLevelBlocks(s string) string {
-	return canonicalizeRecursive(s)
+	if len(s) > maxCanonBytes {
+		// Too large to safely canonicalize – return normalized but otherwise unchanged.
+		return normalizeWhitespace(s)
+	}
+	return canonicalizeRecursive(s, 0)
 }
 
-func canonicalizeRecursive(s string) string {
+func canonicalizeRecursive(s string, depth int) string {
+	if depth > maxCanonDepth {
+		return normalizeWhitespace(s)
+	}
 	trimmed := strings.TrimSpace(s)
 	if trimmed == "" {
 		return ""
 	}
 
 	blocks := splitTopLevelBlocks(trimmed)
-
+	if len(blocks) > maxBlocks {
+		// Degenerate input: avoid n^2 sorts/work.
+		return normalizeWhitespace(s)
+	}
 	// Recursively canonicalize inner bodies of each block
 	for i := range blocks {
-		blocks[i] = canonicalizeBlock(blocks[i])
+		blocks[i] = canonicalizeBlock(blocks[i], depth)
 		blocks[i] = normalizeWhitespace(blocks[i])
 	}
 
@@ -75,6 +92,10 @@ func splitTopLevelBlocks(s string) []string {
 		if i == len(lines)-1 {
 			flush()
 		}
+		if len(blocks) > maxBlocks {
+			// Stop early; upstream will bail out.
+			return blocks
+		}
 	}
 	return blocks
 }
@@ -82,7 +103,7 @@ func splitTopLevelBlocks(s string) []string {
 // canonicalizeBlock finds the outermost "{...}" of this block (if any),
 // recursively canonicalizes the inside, and reassembles the block.
 // If there is no brace, returns the block as-is (after whitespace normalize by caller).
-func canonicalizeBlock(block string) string {
+func canonicalizeBlock(block string, depth int) string {
 	// Find first '{' outside strings/backticks.
 	open := indexFirstOpenBrace(block)
 	if open < 0 {
@@ -97,7 +118,7 @@ func canonicalizeBlock(block string) string {
 	}
 
 	inner := block[open+1 : closeIdx]
-	innerCanon := canonicalizeRecursive(inner)
+	innerCanon := canonicalizeRecursive(inner, depth+1)
 
 	// Reassemble: keep exactly the same outer text, replace inner with canonical form.
 	return block[:open+1] + innerCanon + block[closeIdx:]
