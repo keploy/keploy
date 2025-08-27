@@ -79,6 +79,14 @@ func parseJSONLoose(s string) (any, error) {
 	if err != nil {
 		return s, nil
 	}
+
+	// Check if there's any trailing content that would make it invalid JSON
+	var trailing any
+	if dec.Decode(&trailing) == nil {
+		// There was trailing content, so return the original string
+		return s, nil
+	}
+
 	return v, nil
 }
 
