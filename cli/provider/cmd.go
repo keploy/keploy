@@ -237,6 +237,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("model", "text-embedding-ada-002", "Model to use for embedding generation.")
 		cmd.Flags().String("llm-base-url", "", "Base URL for the AI model.")
 		cmd.Flags().String("llm-api-version", "", "API version of the llm")
+		cmd.Flags().String("embedding-service-url", "", "URL for the embedding service.")
 		err := cmd.MarkFlagRequired("source-path")
 		if err != nil {
 			errMsg := "failed to mark source-path as required flag"

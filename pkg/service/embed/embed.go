@@ -10,13 +10,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/gosuri/uiprogress"
 	"github.com/jackc/pgx/v5"
 	"github.com/pgvector/pgvector-go"
 	pgxvector "github.com/pgvector/pgvector-go/pgx"
@@ -132,13 +132,13 @@ func (e *EmbedService) Start(ctx context.Context) error {
 	}
 	sourcePath = absSourcePath
 
-	e.logger.Info("Starting embedding generation", zap.String("sourcePath", sourcePath))
-
-	// Check if source path is a file or directory
+	// Verify the source path exists
 	fileInfo, err := os.Stat(sourcePath)
 	if err != nil {
 		return fmt.Errorf("failed to stat source path: %w", err)
 	}
+
+	e.logger.Info("Starting embedding generation", zap.String("sourcePath", sourcePath), zap.Bool("isDirectory", fileInfo.IsDir()))
 
 	if fileInfo.IsDir() {
 		// Process directory using streaming approach
@@ -152,58 +152,6 @@ func (e *EmbedService) Start(ctx context.Context) error {
 		return err
 	}
 
-	if err := e.writeChunksToFile(); err != nil {
-		e.logger.Error("Failed to write chunks to file", zap.Error(err))
-	}
-
-	return nil
-}
-
-func (e *EmbedService) writeChunksToFile() error {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("failed to get current working directory: %w", err)
-	}
-	outputFile, err := os.Create(filepath.Join(cwd, "chunks.txt"))
-	if err != nil {
-		return fmt.Errorf("failed to create chunks.txt: %w", err)
-	}
-	defer outputFile.Close()
-
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	// Sort file paths for consistent output
-	filePaths := make([]string, 0, len(e.allChunks))
-	for path := range e.allChunks {
-		filePaths = append(filePaths, path)
-	}
-	sort.Strings(filePaths)
-
-	for _, path := range filePaths {
-		chunks := e.allChunks[path]
-		if _, err := outputFile.WriteString(fmt.Sprintf("--- File: %s---\n\n", path)); err != nil {
-			return err
-		}
-
-		// Sort chunk IDs for consistent output
-		chunkIDs := make([]int, 0, len(chunks))
-		for id := range chunks {
-			chunkIDs = append(chunkIDs, id)
-		}
-		sort.Ints(chunkIDs)
-
-		for _, id := range chunkIDs {
-			content := chunks[id]
-			header := fmt.Sprintf("--- Chunk %d---\n", id)
-			separator := "------------------\n\n"
-			if _, err := outputFile.WriteString(header + content + "\n" + separator); err != nil {
-				return err
-			}
-		}
-	}
-
-	e.logger.Info("Successfully wrote generated chunks to chunks.txt")
 	return nil
 }
 
@@ -420,13 +368,17 @@ func (e *EmbedService) shouldSkipDirectory(dirPath string) bool {
 }
 
 func (e *EmbedService) processDirectoryStreaming(ctx context.Context, dirPath string) error {
-	e.logger.Info("Processing directory for embeddings (streaming)", zap.String("directory", dirPath), zap.Bool("incremental", e.cfg.Embed.Incremental))
-
 	if err := e.initializeDatabase(ctx); err != nil {
 		return fmt.Errorf("failed to initialize database: %w", err)
 	}
 
-	hashesFilePath := filepath.Join(dirPath, ".keploy", "embedding_hashes.json")
+	// Resolve the absolute path to ensure consistent comparison
+	absDirPath, err := filepath.Abs(dirPath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve absolute path for %s: %w", dirPath, err)
+	}
+
+	hashesFilePath := filepath.Join(absDirPath, ".keploy", "embedding_hashes.json")
 	var filesToProcess []string
 
 	if e.cfg.Embed.Incremental {
@@ -437,7 +389,10 @@ func (e *EmbedService) processDirectoryStreaming(ctx context.Context, dirPath st
 		}
 	}
 
-	walkErr := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+	// Keep track of visited directories to prevent infinite loops
+	visitedDirs := make(map[string]bool)
+
+	walkErr := filepath.Walk(absDirPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			e.logger.Warn("Error accessing path, skipping", zap.String("path", path), zap.Error(err))
 			return nil
@@ -446,6 +401,19 @@ func (e *EmbedService) processDirectoryStreaming(ctx context.Context, dirPath st
 			return ctx.Err()
 		}
 		if info.IsDir() {
+			// Check for recursive linking or infinite traversal
+			absPath, absErr := filepath.Abs(path)
+			if absErr != nil {
+				e.logger.Warn("Failed to resolve absolute path for directory, skipping", zap.String("path", path), zap.Error(absErr))
+				return filepath.SkipDir
+			}
+
+			if visitedDirs[absPath] {
+				e.logger.Warn("Detected potential recursive directory linking, skipping", zap.String("path", path))
+				return filepath.SkipDir
+			}
+			visitedDirs[absPath] = true
+
 			if e.shouldSkipDirectory(path) {
 				e.logger.Debug("Skipping directory", zap.String("dir", path))
 				return filepath.SkipDir
@@ -453,7 +421,6 @@ func (e *EmbedService) processDirectoryStreaming(ctx context.Context, dirPath st
 			return nil
 		}
 		if e.isCodeFile(path) {
-			// path from filepath.Walk is already absolute since we start with an absolute path
 			newHash, err := calculateFileHash(path)
 			if err != nil {
 				e.logger.Warn("failed to calculate hash for file, skipping", zap.String("path", path), zap.Error(err))
@@ -464,14 +431,13 @@ func (e *EmbedService) processDirectoryStreaming(ctx context.Context, dirPath st
 			e.currentHashes[path] = newHash
 			e.hashesMutex.Unlock()
 
+			// Only add files that have changed or when not in incremental mode
 			prevHash := e.previousHashes[path]
-			shouldProcess := !e.cfg.Embed.Incremental || prevHash != newHash
-			e.logger.Debug("Hash comparison for file", zap.String("file", path), zap.String("previousHash", prevHash), zap.String("currentHash", newHash), zap.Bool("shouldProcess", shouldProcess), zap.Bool("incremental", e.cfg.Embed.Incremental))
-
-			if shouldProcess {
+			if !e.cfg.Embed.Incremental || prevHash != newHash {
 				filesToProcess = append(filesToProcess, path)
+				e.logger.Debug("File will be processed", zap.String("path", path), zap.Bool("changed", prevHash != newHash))
 			} else {
-				e.logger.Info("Skipping unchanged file", zap.String("path", path))
+				e.logger.Debug("Skipping unchanged file", zap.String("path", path))
 			}
 		}
 		return nil
@@ -497,8 +463,6 @@ func (e *EmbedService) processDirectoryStreaming(ctx context.Context, dirPath st
 	}
 
 	if len(filesToProcess) == 0 {
-		e.logger.Info("No new or modified files to process.")
-		// Still save the current state in case of deletions
 		if e.cfg.Embed.Incremental {
 			if err := saveHashes(hashesFilePath, e.currentHashes); err != nil {
 				e.logger.Error("failed to save hashes", zap.Error(err))
@@ -507,107 +471,96 @@ func (e *EmbedService) processDirectoryStreaming(ctx context.Context, dirPath st
 		return nil
 	}
 
-	e.logger.Info("Found new or modified files to process", zap.Int("count", len(filesToProcess)))
+	// Start both progress bars for parallel processing
+	uiprogress.Start()
+	defer uiprogress.Stop()
 
-	// Pipeline setup
-	numChunkWorkers := runtime.NumCPU()
-	numEmbeddingWorkers := 4 // Configurable, mindful of API rate limits
-	chunkingJobs := make(chan string, len(filesToProcess))
-	chunkChan := make(chan ChunkJob, 100)
-	embeddingJobsChan := make(chan []ChunkJob, numEmbeddingWorkers)
-	dbWriteChan := make(chan EmbeddingResult, 100)
-	var chunkingWg, embeddingWg sync.WaitGroup
-	var totalChunks, totalEmbeddings, totalStored int64
+	// Create chunking progress bar
+	chunkingBar := uiprogress.AddBar(len(filesToProcess)).AppendCompleted().PrependElapsed()
+	chunkingBar.PrependFunc(func(b *uiprogress.Bar) string {
+		return "Chunking codebase"
+	})
 
-	// Stage 1: Chunking Workers
-	for i := 0; i < numChunkWorkers; i++ {
-		chunkingWg.Add(1)
-		go func() {
-			defer chunkingWg.Done()
-			for path := range chunkingJobs {
-				e.processFileForChunking(path, chunkChan, ctx)
-			}
-		}()
+	// Add file name display below the chunking bar
+	chunkingBar.AppendFunc(func(b *uiprogress.Bar) string {
+		if b.Current() < len(filesToProcess) {
+			fileName := filepath.Base(filesToProcess[b.Current()])
+			return fmt.Sprintf("  📄 %s", fileName)
+		}
+		return ""
+	})
+
+	// Create embedding progress bar (will be updated as chunks are added)
+	embeddingBar := uiprogress.AddBar(1).AppendCompleted().PrependElapsed()
+	embeddingBar.PrependFunc(func(b *uiprogress.Bar) string {
+		return "Generating embeddings"
+	})
+
+	// Add current chunk count below the embedding bar
+	embeddingBar.AppendFunc(func(b *uiprogress.Bar) string {
+		return fmt.Sprintf("  🔢 %d chunks", b.Current())
+	})
+
+	// Validate progress bars are properly initialized
+	if chunkingBar == nil || embeddingBar == nil {
+		return fmt.Errorf("failed to initialize progress bars")
 	}
 
-	// Stage 2: Chunk Batcher
-	go func() {
-		const batchSize = 32
-		var batch []ChunkJob
-		for chunk := range chunkChan {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			atomic.AddInt64(&totalChunks, 1)
-			batch = append(batch, chunk)
-			if len(batch) >= batchSize {
-				select {
-				case embeddingJobsChan <- batch:
-				case <-ctx.Done():
-					return
-				}
-				batch = nil
-			}
-		}
-		if len(batch) > 0 {
-			select {
-			case embeddingJobsChan <- batch:
-			case <-ctx.Done():
-				return
-			}
-		}
-		close(embeddingJobsChan)
-	}()
+	// Channels for parallel processing
+	chunkChan := make(chan ChunkJob, 1000) // Buffer for chunks
+	embeddingJobsChan := make(chan []ChunkJob, 4)
+	dbWriteChan := make(chan EmbeddingResult, 100)
 
-	// Stage 3: Embedding Workers
+	var allFileChunks []ChunkJob
+	var totalChunks int32 // Use atomic for thread-safe counting
+	var chunkingWg sync.WaitGroup
+	var embeddingWg sync.WaitGroup
+	var dbWg sync.WaitGroup
+
+	// Start embedding workers
+	numEmbeddingWorkers := 4
 	for i := 0; i < numEmbeddingWorkers; i++ {
 		embeddingWg.Add(1)
 		go func() {
 			defer embeddingWg.Done()
 			for batch := range embeddingJobsChan {
-				select {
-				case <-ctx.Done():
+				if ctx.Err() != nil {
 					return
-				default:
 				}
 				results, err := e.processChunkBatchForEmbeddings(ctx, batch)
 				if err != nil {
 					e.logger.Error("Failed to process chunk batch for embeddings", zap.Error(err))
+					for range batch {
+						embeddingBar.Incr()
+					}
 					continue
 				}
-				atomic.AddInt64(&totalEmbeddings, int64(len(results)))
 				for _, res := range results {
-					select {
-					case dbWriteChan <- res:
-					case <-ctx.Done():
+					if ctx.Err() != nil {
 						return
 					}
+					dbWriteChan <- res
+					embeddingBar.Incr()
 				}
 			}
 		}()
 	}
 
-	// Stage 4: Database Writer
-	var dbWg sync.WaitGroup
+	// Start DB writer
 	dbWg.Add(1)
 	go func() {
 		defer dbWg.Done()
 		const dbBatchSize = 128
 		var dbBatch []EmbeddingResult
 		for res := range dbWriteChan {
-			select {
-			case <-ctx.Done():
+			if ctx.Err() != nil {
 				return
-			default:
 			}
 			dbBatch = append(dbBatch, res)
 			if len(dbBatch) >= dbBatchSize {
 				if err := e.storeEmbeddingsBatch(ctx, dbBatch); err != nil {
 					e.logger.Error("Failed to store embeddings batch", zap.Error(err))
 				}
-				atomic.AddInt64(&totalStored, int64(len(dbBatch)))
 				dbBatch = nil
 			}
 		}
@@ -615,43 +568,101 @@ func (e *EmbedService) processDirectoryStreaming(ctx context.Context, dirPath st
 			if err := e.storeEmbeddingsBatch(ctx, dbBatch); err != nil {
 				e.logger.Error("Failed to store remaining embeddings batch", zap.Error(err))
 			}
-			atomic.AddInt64(&totalStored, int64(len(dbBatch)))
 		}
 	}()
 
-	// Start the pipeline
-	for _, path := range filesToProcess {
-		select {
-		case <-ctx.Done():
-			close(chunkingJobs)
-			chunkingWg.Wait()
-			close(chunkChan)
-			embeddingWg.Wait()
-			close(dbWriteChan)
-			dbWg.Wait()
-			return fmt.Errorf("process cancelled by user")
-		default:
-		}
-		chunkingJobs <- path
-	}
-	close(chunkingJobs)
+	// Start chunk processor
+	chunkingWg.Add(1)
+	go func() {
+		defer chunkingWg.Done()
+		const batchSize = 32
+		var batch []ChunkJob
 
-	// Wait for pipeline to finish
-	chunkingWg.Wait()
+		for chunk := range chunkChan {
+			if ctx.Err() != nil {
+				return
+			}
+
+			batch = append(batch, chunk)
+			if len(batch) >= batchSize {
+				embeddingJobsChan <- batch
+				batch = nil
+			}
+		}
+
+		// Send remaining chunks
+		if len(batch) > 0 {
+			embeddingJobsChan <- batch
+		}
+		close(embeddingJobsChan)
+	}()
+
+	// Process files and generate chunks (this happens in parallel with embedding)
+	for _, path := range filesToProcess {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		// Check if file has changed before processing
+		if e.cfg.Embed.Incremental {
+			newHash, err := calculateFileHash(path)
+			if err != nil {
+				e.logger.Warn("failed to calculate hash for file, skipping", zap.String("path", path), zap.Error(err))
+				chunkingBar.Incr()
+				continue
+			}
+
+			prevHash := e.previousHashes[path]
+			if prevHash == newHash {
+				e.logger.Debug("Skipping unchanged file", zap.String("path", path))
+				chunkingBar.Incr()
+				continue
+			}
+
+			// Update current hash
+			e.hashesMutex.Lock()
+			e.currentHashes[path] = newHash
+			e.hashesMutex.Unlock()
+		}
+
+		chunks, err := e.processSingleFileForChunks(path)
+		if err != nil {
+			e.logger.Warn("failed to process and chunk file, skipping", zap.String("file", path), zap.Error(err))
+			chunkingBar.Incr()
+			continue
+		}
+
+		// Add chunks to the collection and send to embedding pipeline
+		for chunkID, content := range chunks {
+			chunk := ChunkJob{FilePath: path, ChunkID: chunkID, Content: content}
+			allFileChunks = append(allFileChunks, chunk)
+			chunkChan <- chunk
+
+			// Update embedding progress bar total
+			newTotal := int(atomic.AddInt32(&totalChunks, 1))
+			embeddingBar.Total = newTotal
+		}
+
+		chunkingBar.Incr()
+	}
+
+	// Close chunk channel and wait for processing to complete
 	close(chunkChan)
+	chunkingWg.Wait()
 	embeddingWg.Wait()
 	close(dbWriteChan)
 	dbWg.Wait()
 
-	e.logger.Info("Embedding generation completed (streaming)",
-		zap.Int("totalFilesProcessed", len(filesToProcess)),
-		zap.Int64("totalChunksGenerated", totalChunks),
-		zap.Int64("totalEmbeddingsGenerated", totalEmbeddings),
-		zap.Int64("totalEmbeddingsStored", totalStored))
-
 	if err := saveHashes(hashesFilePath, e.currentHashes); err != nil {
 		e.logger.Error("failed to save hashes after successful run", zap.Error(err))
 	}
+
+	// Print summary
+	fmt.Println()
+	fmt.Printf("📊 Summary: Processed %d files, generated %d embeddings\n", len(filesToProcess), totalChunks)
+
+	// Print success message
+	fmt.Println("✅ Codebase indexed successfully")
 
 	return nil
 }
@@ -743,8 +754,22 @@ func (e *EmbedService) processChunkBatchForEmbeddings(ctx context.Context, batch
 }
 
 func (e *EmbedService) processSingleFile(ctx context.Context, filePath string) error {
+	// Verify that filePath is actually a file, not a directory
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to stat file %s: %w", filePath, err)
+	}
+
+	if fileInfo.IsDir() {
+		return fmt.Errorf("expected a file but got a directory: %s", filePath)
+	}
+
 	dir := filepath.Dir(filePath)
 	hashesFilePath := filepath.Join(dir, ".keploy", "embedding_hashes.json")
+
+	fmt.Println("🔄 Processing single file...")
+	fileName := filepath.Base(filePath)
+	fmt.Printf("📄 Processing file: %s\n", fileName)
 
 	if e.cfg.Embed.Incremental {
 		previousHashes, err := loadHashes(hashesFilePath, e.logger)
@@ -757,6 +782,7 @@ func (e *EmbedService) processSingleFile(ctx context.Context, filePath string) e
 		}
 		if previousHashes[filePath] == newHash {
 			e.logger.Info("Skipping unchanged file", zap.String("path", filePath))
+			fmt.Printf("⏭️  File unchanged, skipping: %s\n", fileName)
 			return nil
 		}
 		e.currentHashes[filePath] = newHash
@@ -773,8 +799,70 @@ func (e *EmbedService) processSingleFile(ctx context.Context, filePath string) e
 		e.mu.Unlock()
 	}
 
-	err = e.GenerateEmbeddings(ctx, chunks, filePath)
-	if err != nil {
+	fmt.Printf("✅ Generated %d chunks from %s\n", len(chunks), fileName)
+
+	if len(chunks) == 0 {
+		fmt.Println("⚠️  No chunks generated")
+		if e.cfg.Embed.Incremental {
+			if err := saveHashes(hashesFilePath, e.currentHashes); err != nil {
+				e.logger.Error("failed to save hashes for single file", zap.Error(err))
+			}
+		}
+		return nil
+	}
+
+	fmt.Println("🔄 Starting embedding generation...")
+
+	// Create progress bar for single file
+	uiprogress.Start()
+	defer uiprogress.Stop()
+
+	embeddingBar := uiprogress.AddBar(len(chunks)).AppendCompleted().PrependElapsed()
+	embeddingBar.PrependFunc(func(b *uiprogress.Bar) string {
+		return "Generating embeddings"
+	})
+
+	embeddingBar.AppendFunc(func(b *uiprogress.Bar) string {
+		return fmt.Sprintf("  🔢 %d/%d", b.Current(), len(chunks))
+	})
+
+	// Process chunks in batches for embeddings
+	const batchSize = 32
+	var allResults []EmbeddingResult
+
+	for i := 0; i < len(chunks); i += batchSize {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		end := i + batchSize
+		if end > len(chunks) {
+			end = len(chunks)
+		}
+
+		batch := make([]ChunkJob, 0, end-i)
+		for j := i; j < end; j++ {
+			batch = append(batch, ChunkJob{FilePath: filePath, ChunkID: j, Content: chunks[j]})
+		}
+
+		results, err := e.processChunkBatchForEmbeddings(ctx, batch)
+		if err != nil {
+			e.logger.Error("Failed to process chunk batch for embeddings", zap.Error(err))
+			for range batch {
+				embeddingBar.Incr()
+			}
+			continue
+		}
+
+		allResults = append(allResults, results...)
+		for range results {
+			embeddingBar.Incr()
+		}
+	}
+
+	// Store all embeddings
+	if err := e.storeEmbeddingsBatch(ctx, allResults); err != nil {
+		e.logger.Error("Failed to store embeddings batch", zap.Error(err))
 		return err
 	}
 
@@ -783,6 +871,12 @@ func (e *EmbedService) processSingleFile(ctx context.Context, filePath string) e
 			e.logger.Error("failed to save hashes for single file", zap.Error(err))
 		}
 	}
+
+	// Print summary
+	fmt.Printf("📊 Summary: Processed 1 file, generated %d embeddings\n", len(chunks))
+
+	// Print success message
+	fmt.Println("✅ Codebase indexed successfully")
 
 	return nil
 }
@@ -906,7 +1000,13 @@ func (e *EmbedService) callAIService(ctx context.Context, contents []string) ([]
 		modelID = e.cfg.Embed.ModelName
 	}
 
-	url := "https://51427e8e8672.ngrok-free.app/generate_embeddings/"
+	url := e.cfg.Embed.EmbeddingServiceURL
+	if url == "" {
+		url = os.Getenv("KEPLOY_EMBEDDING_SERVICE_URL")
+	}
+	if url == "" {
+		return nil, fmt.Errorf("embedding service URL not configured. Set KEPLOY_EMBEDDING_SERVICE_URL environment variable or configure it in the config file")
+	}
 
 	type requestBody struct {
 		Sentences []string `json:"sentences"`

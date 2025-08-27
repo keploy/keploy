@@ -241,14 +241,15 @@ func SetSelectedTestsNormalize(conf *Config, value string) error {
 }
 
 type Embed struct {
-	SourcePath    string `json:"sourcePath" yaml:"sourcePath" mapstructure:"sourcePath"`
-	Model         string `json:"model" yaml:"model" mapstructure:"model"`
-	LLMBaseURL    string `json:"llmBaseUrl" yaml:"llmBaseUrl" mapstructure:"llmBaseUrl"`
-	LLMApiVersion string `json:"llmApiVersion" yaml:"llmApiVersion" mapstructure:"llmApiVersion"`
-	DatabaseURL   string `json:"databaseURL" yaml:"databaseURL" mapstructure:"databaseURL"`
-	APIKey        string `json:"apiKey" yaml:"apiKey" mapstructure:"apiKey"`
-	ModelName     string `json:"modelName" yaml:"modelName" mapstructure:"modelName"`
-	Incremental   bool   `json:"incremental" yaml:"incremental" mapstructure:"incremental"`
+	SourcePath          string `json:"sourcePath" yaml:"sourcePath" mapstructure:"sourcePath"`
+	Model               string `json:"model" yaml:"model" mapstructure:"model"`
+	LLMBaseURL          string `json:"llmBaseUrl" yaml:"llmBaseUrl" mapstructure:"llmBaseUrl"`
+	LLMApiVersion       string `json:"llmApiVersion" yaml:"llmApiVersion" mapstructure:"llmApiVersion"`
+	DatabaseURL         string `json:"databaseURL" yaml:"databaseURL" mapstructure:"databaseURL"`
+	APIKey              string `json:"apiKey" yaml:"apiKey" mapstructure:"apiKey"`
+	ModelName           string `json:"modelName" yaml:"modelName" mapstructure:"modelName"`
+	Incremental         bool   `json:"incremental" yaml:"incremental" mapstructure:"incremental"`
+	EmbeddingServiceURL string `json:"embeddingServiceUrl" yaml:"embeddingServiceUrl" mapstructure:"embeddingServiceUrl"`
 }
 
 // NewDefaultConfig returns a Config struct with sensible defaults, including incremental embedding enabled.
