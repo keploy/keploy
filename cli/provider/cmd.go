@@ -262,6 +262,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 	case "report":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to report e.g. --testsets \"test-set-1, test-set-2\"")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
+		cmd.Flags().StringP("report-path", "r", "", "Absolute path to a report file")
+		cmd.Flags().Bool("full-body", false, "Show full expected/actual body diffs (colorized for JSON) instead of compact table diff")
 
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
@@ -324,6 +326,8 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 	var flagNameMapping = map[string]string{
 		"testsets":              "test-sets",
+		"fullBody":              "full-body",
+		"reportPath":            "report-path",
 		"delay":                 "delay",
 		"apiTimeout":            "api-timeout",
 		"mongoPassword":         "mongo-password",
@@ -561,6 +565,45 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		config.SetSelectedTestSets(c.cfg, testSets)
+
+		reportPath, err := cmd.Flags().GetString("report-path")
+		if err != nil {
+			errMsg := "failed to get the report path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+
+		// validate the report path if provided
+		if reportPath != "" {
+			if !filepath.IsAbs(reportPath) {
+				errMsg := fmt.Sprintf("report-path must be an absolute file path, got: %q", reportPath)
+				utils.LogError(c.logger, nil, errMsg)
+				return errors.New(errMsg)
+			}
+			fi, statErr := os.Stat(reportPath)
+			if statErr != nil {
+				errMsg := fmt.Sprintf("failed to stat report-path %q", reportPath)
+				utils.LogError(c.logger, statErr, errMsg)
+				return errors.New(errMsg)
+			}
+			if fi.IsDir() {
+				errMsg := fmt.Sprintf("report-path must point to a file, not a directory: %q", reportPath)
+				utils.LogError(c.logger, nil, errMsg)
+				return errors.New(errMsg)
+			}
+		}
+
+		c.cfg.Report.ReportPath = reportPath
+
+		// whether to print entire body for comparison
+		fb, err := cmd.Flags().GetBool("full-body")
+		if err != nil {
+			errMsg := "failed to get the full-body flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+
+		c.cfg.Report.ShowFullBody = fb
 
 	case "generate", "download":
 

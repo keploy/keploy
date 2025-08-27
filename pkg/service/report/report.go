@@ -3,10 +3,13 @@ package report
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/invopop/yaml"
 	"github.com/k0kubun/pp/v3"
 	"go.keploy.io/server/v2/config"
 	matcherUtils "go.keploy.io/server/v2/pkg/matcher"
@@ -20,6 +23,10 @@ type Report struct {
 	config   *config.Config
 	reportDB ReportDB
 	testDB   TestDB
+}
+
+type fileReport struct {
+	Tests []models.TestResult `yaml:"tests" json:"tests"`
 }
 
 const (
@@ -38,6 +45,10 @@ func New(logger *zap.Logger, cfg *config.Config, reportDB ReportDB, testDB TestD
 
 // GenerateReport orchestrates the entire report generation process
 func (r *Report) GenerateReport(ctx context.Context) error {
+	if r.config.Report.ReportPath != "" {
+		return r.generateReportFromFile(r.config.Report.ReportPath)
+	}
+
 	latestRunID, err := r.getLatestTestRunID(ctx)
 
 	if err != nil {
@@ -66,6 +77,8 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 		return nil
 	}
 
+	r.logger.Debug("latest run id is", zap.String("latest_run_id", latestRunID))
+
 	failedTests, err := r.collectFailedTests(ctx, latestRunID, testSetIDs)
 	if err != nil {
 		return err
@@ -87,6 +100,53 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 	r.logger.Info("Report generation completed successfully")
 
 	return nil
+}
+
+// generateReportFromFile loads a report from an absolute file path and prints diffs for failed tests.
+func (r *Report) generateReportFromFile(reportPath string) error {
+	if !filepath.IsAbs(reportPath) {
+		// Should be enforced in CLI validation; keep a guard here for safety.
+		return fmt.Errorf("report-path must be absolute, got %q", reportPath)
+	}
+
+	data, err := os.ReadFile(reportPath)
+	if err != nil {
+		r.logger.Error("failed to read report file", zap.String("report_path", reportPath), zap.Error(err))
+		return err
+	}
+	r.logger.Info("Generating report from file", zap.String("report_path", reportPath))
+
+	tests, err := r.parseReportTests(data)
+	if err != nil {
+		r.logger.Error("failed to parse report file", zap.String("report_path", reportPath), zap.Error(err))
+		return err
+	}
+
+	failed := r.extractFailedTestsFromResults(tests)
+	if len(failed) == 0 {
+		r.logger.Info("No failed tests found in the provided report file")
+		return nil
+	}
+
+	if err := r.printFailedTestReports(failed); err != nil {
+		r.logger.Error("failed to print failed test reports from file", zap.Error(err))
+		return err
+	}
+
+	r.logger.Info("Report generation (from file) completed successfully")
+	return nil
+}
+
+// parseReportTests unmarshals the report data into a fileReport struct.
+func (r *Report) parseReportTests(data []byte) ([]models.TestResult, error) {
+	var fr fileReport
+	if err := yaml.Unmarshal(data, &fr); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal report: %w", err)
+	}
+	if len(fr.Tests) == 0 {
+		return nil, fmt.Errorf("invalid report: 'tests' is missing or empty (expected top-level 'tests' array)")
+	}
+	return fr.Tests, nil
 }
 
 // extractTestSetIDs extracts and cleans test set IDs from config
@@ -176,27 +236,95 @@ func (r *Report) printFailedTestReports(failedTests []models.TestResult) error {
 
 // printSingleTestReport generates and prints a report for a single failed test
 func (r *Report) printSingleTestReport(test models.TestResult) error {
-	logDiffs := matcherUtils.NewDiffsPrinter(test.Name)
+	// If full-body mode is ON, use the original pipeline (entire expected/actual bodies)
+	if r.config.Report.ShowFullBody {
+		logDiffs := matcherUtils.NewDiffsPrinter(test.Name)
+		printer := r.createFormattedPrinter()
+		logs := r.generateTestHeader(test, printer)
+
+		if err := r.addStatusCodeDiffs(test, &logDiffs); err != nil {
+			return err
+		}
+		if err := r.addHeaderDiffs(test, &logDiffs); err != nil {
+			return err
+		}
+		if err := r.addBodyDiffs(test, &logDiffs); err != nil {
+			return err
+		}
+		if err := r.printAndRenderDiffs(printer, logs, &logDiffs); err != nil {
+			return err
+		}
+		fmt.Println("\n--------------------------------------------------------------------")
+		return nil
+	}
+
 	printer := r.createFormattedPrinter()
 
-	logs := r.generateTestHeader(test, printer)
-
-	if err := r.addStatusCodeDiffs(test, &logDiffs); err != nil {
+	// Print test case header
+	header := r.generateTestHeader(test, printer)
+	if _, err := printer.Printf(header); err != nil {
+		r.logger.Error("failed to print test header", zap.Error(err))
 		return err
 	}
 
-	if err := r.addHeaderDiffs(test, &logDiffs); err != nil {
+	// Print status code and header diffs using the original method
+	statusAndHeaderDiffs := matcherUtils.NewDiffsPrinter("")
+	if err := r.addStatusCodeDiffs(test, &statusAndHeaderDiffs); err != nil {
+		return err
+	}
+	if err := r.addHeaderDiffs(test, &statusAndHeaderDiffs); err != nil {
+		return err
+	}
+	if err := statusAndHeaderDiffs.Render(); err != nil {
+		r.logger.Error("failed to render status and header diffs", zap.Error(err))
 		return err
 	}
 
-	if err := r.addBodyDiffs(test, &logDiffs); err != nil {
-		return err
+	// Print body diffs using the new method for JSON
+	for _, bodyResult := range test.Result.BodyResult {
+		if !bodyResult.Normal {
+			if strings.EqualFold(string(bodyResult.Type), "JSON") {
+				diff, err := GenerateTableDiff(bodyResult.Expected, bodyResult.Actual)
+				if err != nil {
+					r.logger.Warn("failed to generate table view for JSON diff, falling back to default diff", zap.Error(err))
+					if err := r.printDefaultBodyDiff(bodyResult); err != nil {
+						r.logger.Error("failed to print default body diff", zap.Error(err))
+					}
+				} else {
+					fmt.Println(diff)
+				}
+			} else {
+				r.logger.Info("Non-JSON body mismatch found, using default diff.", zap.String("type", string(bodyResult.Type)))
+				if err := r.printDefaultBodyDiff(bodyResult); err != nil {
+					r.logger.Error("failed to print default body diff for non-json type", zap.Error(err))
+				}
+			}
+		}
+	}
+	fmt.Println("\n--------------------------------------------------------------------")
+	return nil
+}
+
+// printDefaultBodyDiff renders a generic diff for a single failed body result.
+func (r *Report) printDefaultBodyDiff(bodyResult models.BodyResult) error {
+	logDiffs := matcherUtils.NewDiffsPrinter("")
+
+	actualValue, err := r.renderTemplateValue(bodyResult.Actual)
+	if err != nil {
+		return fmt.Errorf("failed to render actual body: %w", err)
 	}
 
-	if err := r.printAndRenderDiffs(printer, logs, &logDiffs); err != nil {
-		return err
+	expectedValue, err := r.renderTemplateValue(bodyResult.Expected)
+	if err != nil {
+		return fmt.Errorf("failed to render expected body: %w", err)
 	}
 
+	logDiffs.PushBodyDiff(fmt.Sprint(expectedValue), fmt.Sprint(actualValue), nil)
+
+	if err := logDiffs.Render(); err != nil {
+		r.logger.Error("failed to render the default body diffs", zap.Error(err))
+		return err
+	}
 	return nil
 }
 
