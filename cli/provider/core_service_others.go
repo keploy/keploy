@@ -9,6 +9,7 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/platform/storage"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb/testset"
 	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
@@ -67,6 +68,7 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 	openAPIdb := openapidb.New(logger, c.Path)
 	reportDB := reportdb.New(logger, c.Path+"/reports")
 	testSetDb := testset.New[*models.TestSet](logger, c.Path)
+	storage := storage.New(c.APIServerURL, logger)
 	return &CommonInternalService{
 		commonPlatformServices{
 			YamlTestDB:    testDB,
@@ -74,6 +76,7 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 			YamlOpenAPIDb: openAPIdb,
 			YamlReportDb:  reportDB,
 			YamlTestSetDB: testSetDb,
+			Storage:       storage,
 		},
 		instrumentation,
 	}, nil

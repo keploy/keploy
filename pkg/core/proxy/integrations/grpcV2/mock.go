@@ -91,7 +91,7 @@ func (s *grpcMockServer) handler(_ interface{}, stream grpc.ServerStream) error 
 		s.logger.Warn("failed to get metadata from context")
 	}
 
-	s.logger.Info("received gRPC request to mock", zap.String("method", fullMethod), zap.Any("metadata", md))
+	s.logger.Debug("received gRPC request to mock", zap.String("method", fullMethod), zap.Any("metadata", md))
 
 	// Read the request body.
 	var requestBody []byte
@@ -120,7 +120,7 @@ func (s *grpcMockServer) handler(_ interface{}, stream grpc.ServerStream) error 
 		return status.Errorf(codes.NotFound, "no matching keploy mock found for %s", fullMethod)
 	}
 
-	s.logger.Info("found matching mock", zap.String("mock.name", mock.Name), zap.String("mock.kind", string(mock.Kind)))
+	s.logger.Debug("found matching mock", zap.String("mock.name", mock.Name), zap.String("mock.kind", string(mock.Kind)))
 
 	// 3. Send the mocked response
 	grpcResp := mock.Spec.GRPCResp

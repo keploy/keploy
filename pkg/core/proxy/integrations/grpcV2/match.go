@@ -5,14 +5,12 @@ package grpcV2
 import (
 	"context"
 	"fmt"
-	"sort"
-	"strings"
 
 	"github.com/agnivade/levenshtein"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.uber.org/zap"
-
+	"go.keploy.io/server/v2/pkg/matcher/grpc"
 	"go.keploy.io/server/v2/pkg/models"
 )
 
@@ -47,9 +45,13 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 				return nil, nil
 			}
 
-			logger.Debug("Here are the grpc mocks in the db", zap.Int("len", len(grpcMocks)))
+			logger.Debug("grpc mocks in DB", zap.Int("len", len(grpcMocks)))
 
-			schemaMatched, err := schemaMatch(ctx, grpcReq, grpcMocks)
+			for _, mock := range grpcMocks {
+				logger.Debug("found grpc mock", zap.String("name", mock.Name))
+			}
+
+			schemaMatched, err := schemaMatch(ctx, logger, grpcReq, grpcMocks)
 			if err != nil {
 				return nil, err
 			}
@@ -59,13 +61,17 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 				return nil, nil
 			}
 
-			logger.Debug("Here are the grpc mocks with schema match", zap.Int("len", len(schemaMatched)))
+			logger.Debug("grpc mocks with schema match", zap.Int("len", len(schemaMatched)))
+
+			for _, mock := range schemaMatched {
+				logger.Debug("schema matched grpc mock", zap.String("name", mock.Name))
+			}
 
 			// Exact body Match
-			expBody := normalizeProtoscopeForMaps(grpcReq.Body.DecodedData)
-			ok, matchedMock := exactBodyMatch(expBody, schemaMatched)
+			expBody := grpc.CanonicalizeTopLevelBlocks(grpcReq.Body.DecodedData)
+			ok, matchedMock := exactBodyMatch(logger, expBody, schemaMatched)
 			if ok {
-				logger.Debug("Exact body match found", zap.Any("matchedMock", matchedMock))
+				logger.Debug("exact body match found", zap.String("name", matchedMock.Name))
 				if !mockDb.DeleteFilteredMock(*matchedMock) {
 					continue
 				}
@@ -73,8 +79,12 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 			}
 
 			// apply fuzzy match for body with schemaMatched mocks
-
-			logger.Debug("Performing fuzzy match for decoded data in body")
+			// Guard against quadratic work on very large bodies.
+			if len(expBody) > 512*1024 {
+				logger.Debug("skipping fuzzy match for large body", zap.Int("len", len(expBody)))
+				return nil, nil
+			}
+			logger.Debug("performing fuzzy match for decoded data in body")
 			// Perform fuzzy match on the request
 			isMatched, bestMatch := fuzzyMatch(schemaMatched, grpcReq.Body.DecodedData)
 			if isMatched {
@@ -88,7 +98,7 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 	}
 }
 
-func schemaMatch(ctx context.Context, req models.GrpcReq, mocks []*models.Mock) ([]*models.Mock, error) {
+func schemaMatch(ctx context.Context, logger *zap.Logger, req models.GrpcReq, mocks []*models.Mock) ([]*models.Mock, error) {
 	var schemaMatched []*models.Mock
 
 	for _, mock := range mocks {
@@ -97,11 +107,25 @@ func schemaMatch(ctx context.Context, req models.GrpcReq, mocks []*models.Mock) 
 		}
 		mockReq := mock.Spec.GRPCReq
 
-		// the pseudo headers should definitely match (:method, :path, etc.).
-		if !compareMap(mockReq.Headers.PseudoHeaders, req.Headers.PseudoHeaders) {
+		// Require :method and :path to match exactly; tolerate :authority-only differences.
+		mp := mockReq.Headers.PseudoHeaders
+		rp := req.Headers.PseudoHeaders
+		// Require presence AND equality (empty means missing)
+		if mp[":method"] == "" || rp[":method"] == "" || mp[":method"] != rp[":method"] ||
+			mp[":path"] == "" || rp[":path"] == "" || mp[":path"] != rp[":path"] {
 			continue
 		}
+		if mp[":authority"] != rp[":authority"] {
+			logger.Debug("ignoring :authority mismatch for gRPC request",
+				zap.String("mock", mock.Name),
+				zap.String("mock_authority", mp[":authority"]),
+				zap.String("req_authority", rp[":authority"]))
+		}
 
+		// For the rest of pseudo-headers, compare with :authority skipped (if present).
+		if !compareMapExcept(mp, rp, map[string]struct{}{":authority": {}}) {
+			continue
+		}
 		// the ordinary headers keys should match.
 		if !compareMapKeys(mockReq.Headers.OrdinaryHeaders, req.Headers.OrdinaryHeaders) {
 			continue
@@ -116,6 +140,30 @@ func schemaMatch(ctx context.Context, req models.GrpcReq, mocks []*models.Mock) 
 	}
 
 	return schemaMatched, nil
+}
+
+// compareMapExcept compares two string maps, skipping keys in 'skip'.
+func compareMapExcept(m1, m2 map[string]string, skip map[string]struct{}) bool {
+	if len(m1) != len(m2) {
+		// Lengths may differ only due to skipped keys; check key-wise.
+	}
+	for k, v1 := range m1 {
+		if _, ok := skip[k]; ok {
+			continue
+		}
+		if v2, ok := m2[k]; !ok || v1 != v2 {
+			return false
+		}
+	}
+	for k := range m2 {
+		if _, ok := skip[k]; ok {
+			continue
+		}
+		if _, ok := m1[k]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // Check if two maps have the same keys, ignoring values.
@@ -144,38 +192,10 @@ func compareMap(m1, m2 map[string]string) bool {
 	return true
 }
 
-// relax the equality on protoscope text for patterns that are clearly map entries.
-// A simple, effective heuristic for Struct map entries is: split top-level 1: { ... } blocks and sort them before comparing.
-func normalizeProtoscopeForMaps(s string) string {
-	// split into top-level blocks starting with "1: {" (map entries)
-	var blocks []string
-	var cur []rune
-	depth := 0
-	in := []rune(s)
-	for i := 0; i < len(in); i++ {
-		cur = append(cur, in[i])
-		if in[i] == '{' {
-			depth++
-		}
-		if in[i] == '}' {
-			depth--
-		}
-		// A block ends at depth 0 and a newline after '}'.
-		if depth == 0 && in[i] == '\n' && len(cur) > 0 {
-			blocks = append(blocks, string(cur))
-			cur = nil
-		}
-	}
-	if len(cur) > 0 {
-		blocks = append(blocks, string(cur))
-	}
-	sort.Strings(blocks)
-	return strings.Join(blocks, "")
-}
-
-func exactBodyMatch(expBody string, schemaMatched []*models.Mock) (bool, *models.Mock) {
+func exactBodyMatch(logger *zap.Logger, expBody string, schemaMatched []*models.Mock) (bool, *models.Mock) {
 	for _, mock := range schemaMatched {
-		got := normalizeProtoscopeForMaps(mock.Spec.GRPCReq.Body.DecodedData)
+		got := grpc.CanonicalizeTopLevelBlocks(mock.Spec.GRPCReq.Body.DecodedData)
+		logger.Debug("Comparing bodies for mock", zap.String("name", mock.Name))
 		if got == expBody {
 			return true, mock
 		}
@@ -183,15 +203,26 @@ func exactBodyMatch(expBody string, schemaMatched []*models.Mock) (bool, *models
 	return false, nil
 }
 
-// fuzzyMatch logic remains the same.
+// fuzzyMatch logic with input trimming for performance.
 func findStringMatch(req string, mockStrings []string) int {
+	// Trim request to 2048 characters for performance
+	if len(req) > 2048 {
+		req = req[:2048]
+	}
+
 	minDist := int(^uint(0) >> 1)
 	bestMatch := -1
 	for idx, mock := range mockStrings {
 		if !util.IsASCII(mock) {
 			continue
 		}
-		dist := levenshtein.ComputeDistance(req, mock)
+		// Trim mock string to 2048 characters for performance
+		trimmedMock := mock
+		if len(mock) > 2048 {
+			trimmedMock = mock[:2048]
+		}
+
+		dist := levenshtein.ComputeDistance(req, trimmedMock)
 		if dist == 0 {
 			return 0
 		}
@@ -204,10 +235,21 @@ func findStringMatch(req string, mockStrings []string) int {
 }
 
 func findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
+	// Trim request buffer to 2048 bytes for performance
+	if len(reqBuff) > 2048 {
+		reqBuff = reqBuff[:2048]
+	}
+
 	mxSim := -1.0
 	mxIdx := -1
 	for idx, mock := range mocks {
 		encoded := []byte(mock.Spec.GRPCReq.Body.DecodedData)
+
+		// Trim mock data to 2048 bytes for performance
+		if len(encoded) > 2048 {
+			encoded = encoded[:2048]
+		}
+
 		k := util.AdaptiveK(len(reqBuff), 3, 8, 5)
 		shingles1 := util.CreateShingles(encoded, k)
 		shingles2 := util.CreateShingles(reqBuff, k)
@@ -222,19 +264,25 @@ func findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 }
 
 func fuzzyMatch(tcsMocks []*models.Mock, reqBuff string) (bool, *models.Mock) {
+	// Trim request buffer to 2048 characters for performance
+	trimmedReqBuff := reqBuff
+	if len(reqBuff) > 2048 {
+		trimmedReqBuff = reqBuff[:2048]
+	}
+
 	mockStrings := make([]string, len(tcsMocks))
 	for i := range tcsMocks {
 		mockStrings[i] = tcsMocks[i].Spec.GRPCReq.Body.DecodedData
 	}
 
-	if util.IsASCII(reqBuff) {
-		idx := findStringMatch(string(reqBuff), mockStrings)
+	if util.IsASCII(trimmedReqBuff) {
+		idx := findStringMatch(trimmedReqBuff, mockStrings)
 		if idx != -1 {
 			return true, tcsMocks[idx]
 		}
 	}
 
-	idx := findBinaryMatch(tcsMocks, []byte(reqBuff))
+	idx := findBinaryMatch(tcsMocks, []byte(trimmedReqBuff))
 	if idx != -1 {
 		return true, tcsMocks[idx]
 	}

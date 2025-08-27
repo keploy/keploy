@@ -2,6 +2,7 @@ package utils
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"debug/elf"
@@ -21,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"text/template"
 	"time"
 
 	"golang.org/x/text/cases"
@@ -1226,6 +1228,50 @@ func ParseMetadata(metadataStr string) (map[string]interface{}, error) {
 		return nil, fmt.Errorf("cannot parse metadata: %w", err)
 	}
 	return m, nil
+}
+
+// RenderTemplatesInString finds all template placeholders (e.g., {{.name}} or {{string .name}}) in a string,
+// executes them with the provided data, and replaces them with the result.
+// It is robust against strings that contain non-template curly braces by using a strict regex.
+func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[string]interface{}) (string, error) {
+	// This regex is specifically designed to match valid Keploy templates:
+	// - It must start with {{ and optional whitespace.
+	// - It can optionally have a function call ("string", "int", "float") followed by whitespace.
+	// - It MUST contain a dot (.) to indicate a field access.
+	// - It non-greedily matches characters until the closing braces.
+	// This prevents it from matching invalid syntax like {{u^2}}.
+	re := regexp.MustCompile(`\{\{\s*(?:string\s+|int\s+|float\s+)?\.[^{}]*?\}\}`)
+
+	funcMap := template.FuncMap{
+		"int":    ToInt,
+		"string": ToString,
+		"float":  ToFloat,
+	}
+
+	var firstErr error
+
+	result := re.ReplaceAllStringFunc(input, func(match string) string {
+		// Only parse and execute the matched placeholder, not the entire string.
+		tmpl, err := template.New("sub").Funcs(funcMap).Parse(match)
+		if err != nil {
+
+			logger.Debug("failed to parse a valid-looking template placeholder", zap.String("placeholder", match), zap.Error(err))
+			return match
+		}
+
+		var output bytes.Buffer
+		err = tmpl.Execute(&output, templateData)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("failed to execute template placeholder '%s': %v", match, err)
+			}
+			return match
+		}
+
+		return output.String()
+	})
+
+	return result, firstErr
 }
 
 // // XMLToMap converts an XML string into a map[string]interface{}
