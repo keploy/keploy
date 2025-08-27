@@ -291,7 +291,7 @@ func (r *Report) printSingleTestReport(test models.TestResult) error {
 						r.logger.Error("failed to print default body diff", zap.Error(err))
 					}
 				} else {
-					fmt.Println(diff)
+					fmt.Println(applyCliColorsToDiff(diff))
 				}
 			} else {
 				r.logger.Info("Non-JSON body mismatch found, using default diff.", zap.String("type", string(bodyResult.Type)))
@@ -408,4 +408,37 @@ func (r *Report) printAndRenderDiffs(printer *pp.PrettyPrinter, logs string, log
 	}
 
 	return nil
+}
+
+// applyCliColorsToDiff adds ANSI colors to labels in the JSON diff block.
+// - "Path:" label is yellow
+// - "Old:" label is red
+// - "New:" label is green
+func applyCliColorsToDiff(diff string) string {
+	const (
+		ansiReset  = "\x1b[0m"
+		ansiYellow = "\x1b[33m"
+		ansiRed    = "\x1b[31m"
+		ansiGreen  = "\x1b[32m"
+	)
+
+	lines := strings.Split(diff, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "Path: ") {
+			// Color the entire "Path: <value>" segment in yellow
+			lines[i] = ansiYellow + "Path: " + strings.TrimPrefix(line, "Path: ") + ansiReset
+			continue
+		}
+		if strings.HasPrefix(line, "  Old: ") {
+			// Color the entire "Old: <value>" segment in red
+			lines[i] = "  " + ansiRed + "Old: " + strings.TrimPrefix(line, "  Old: ") + ansiReset
+			continue
+		}
+		if strings.HasPrefix(line, "  New: ") {
+			// Color the entire "New: <value>" segment in green
+			lines[i] = "  " + ansiGreen + "New: " + strings.TrimPrefix(line, "  New: ") + ansiReset
+			continue
+		}
+	}
+	return strings.Join(lines, "\n")
 }
