@@ -53,7 +53,7 @@ type AIClient struct {
 func NewAIClient(cfg *config.Config, logger *zap.Logger, auth service.Auth) (*AIClient, error) {
 	apiKey := os.Getenv("API_KEY")
 	if apiKey == "" {
-		return nil, fmt.Errorf("API key not found. Please set API_KEY environment variable")
+		return nil, fmt.Errorf("api key not found; set API_KEY environment variable")
 	}
 
 	return &AIClient{
@@ -114,7 +114,7 @@ func (ac *AIClient) GenerateResponse(ctx context.Context, prompt *Prompt) (strin
 		}
 
 		if !aiResponse.IsSuccess {
-			return "", fmt.Errorf("Keploy AI service returned an error: %s", aiResponse.Error)
+			return "", fmt.Errorf("keploy AI service returned an error: %s", aiResponse.Error)
 		}
 
 		return ac.unmarshalYAML(aiResponse.FinalContent)
@@ -187,7 +187,7 @@ func (ac *AIClient) GenerateResponse(ctx context.Context, prompt *Prompt) (strin
 
 func (ac *AIClient) getKeployToken(ctx context.Context) (string, error) {
 	if ac.Auth == nil {
-		return "", fmt.Errorf("Auth is not configured for Keploy token retrieval")
+		return "", fmt.Errorf("auth is not configured for Keploy token retrieval")
 	}
 	return ac.Auth.GetToken(ctx)
 }

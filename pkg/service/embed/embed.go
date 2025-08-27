@@ -511,8 +511,7 @@ func (e *EmbedService) processDirectoryStreaming(ctx context.Context, dirPath st
 	embeddingJobsChan := make(chan []ChunkJob, 4)
 	dbWriteChan := make(chan EmbeddingResult, 100)
 
-	var allFileChunks []ChunkJob
-	var totalChunks int32 // Use atomic for thread-safe counting
+	var totalChunks int32
 	var chunkingWg sync.WaitGroup
 	var embeddingWg sync.WaitGroup
 	var dbWg sync.WaitGroup
@@ -635,7 +634,6 @@ func (e *EmbedService) processDirectoryStreaming(ctx context.Context, dirPath st
 		// Add chunks to the collection and send to embedding pipeline
 		for chunkID, content := range chunks {
 			chunk := ChunkJob{FilePath: path, ChunkID: chunkID, Content: content}
-			allFileChunks = append(allFileChunks, chunk)
 			chunkChan <- chunk
 
 			// Update embedding progress bar total
