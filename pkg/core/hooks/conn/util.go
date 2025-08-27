@@ -3,6 +3,7 @@ package conn
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -161,17 +162,21 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 //}
 
 func Capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions) {
-	reqBody, err := io.ReadAll(req.Body)
-	if err != nil {
-		utils.LogError(logger, err, "failed to read the http request body")
-		return
-	}
 
-	if req.Header.Get("Content-Encoding") != "" {
-		reqBody, err = pkg.Decompress(logger, req.Header.Get("Content-Encoding"), reqBody)
+	var reqBody []byte
+	if req.Body != nil { // Read
+		var err error
+		reqBody, err = io.ReadAll(req.Body)
 		if err != nil {
-			utils.LogError(logger, err, "failed to decompress the request body")
-			return
+			logger.Warn("failed to read the http request body", zap.Any("metadata", utils.GetReqMeta(req)), zap.Int64("of size", int64(len(reqBody))), zap.String("body", base64.StdEncoding.EncodeToString(reqBody)), zap.Error(err))
+		}
+
+		if req.Header.Get("Content-Encoding") != "" {
+			reqBody, err = pkg.Decompress(logger, req.Header.Get("Content-Encoding"), reqBody)
+			if err != nil {
+				utils.LogError(logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(req)))
+				return
+			}
 		}
 	}
 

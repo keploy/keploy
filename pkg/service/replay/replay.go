@@ -232,21 +232,26 @@ func (r *Replayer) Start(ctx context.Context) error {
 		utils.LogError(r.logger, err, stopReason)
 	}
 
+	// setting the appId for the first test-set.
+	inst.AppID = r.config.AppID
 	for i, testSet := range testSets {
 		testSetResult = false
 
 		// Reload hooks before each test set if this is not the first test set
 		// This ensures fresh eBPF state and prevents issues between test runs
 		if i > 0 && r.instrument {
-			r.logger.Info("Reloading hooks for test set", zap.String("testSet", testSet), zap.Int("testSetIndex", i+1), zap.Int("totalTestSets", len(testSets)))
 
 			// Cancel the current hooks and wait for cleanup to complete
 			if hookCancel != nil {
 				hookCancel()
-				// Wait for cleanup with progressive delay
-				// The cleanup goroutine needs to finish its operations before we start new setup
-				time.Sleep(2000 * time.Millisecond)
+				// Wait for hooks to be completely unloaded using the channel signal
+				// This ensures that all eBPF resources are properly released before we reload
+				r.logger.Debug("Waiting for hooks to be completely unloaded", zap.String("testSet", testSet))
+				<-inst.UnloadDone
+				r.logger.Debug("Hooks unload completed", zap.String("testSet", testSet))
 			}
+
+			r.logger.Info("Reloading hooks for test set", zap.String("testSet", testSet), zap.Int("testSetIndex", i+1), zap.Int("totalTestSets", len(testSets)))
 
 			// Reload hooks for the new test set with retry mechanism
 			newInst, err := r.reloadHooks(ctx, inst.AppID)
@@ -259,9 +264,10 @@ func (r *Replayer) Start(ctx context.Context) error {
 				return fmt.Errorf("%s", stopReason)
 			}
 			hookCancel = newInst.HookCancel
-			// Update the inst with the new hook cancel function and app ID
+			// Update the inst with the new hook cancel function, app ID, and unload done channel
 			inst.HookCancel = newInst.HookCancel
 			inst.AppID = newInst.AppID
+			inst.UnloadDone = newInst.UnloadDone
 			r.logger.Info("Successfully reloaded hooks for test set", zap.String("testSet", testSet), zap.Uint64("newAppID", newInst.AppID))
 		}
 
@@ -535,7 +541,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 			return &InstrumentState{}, fmt.Errorf("failed to start the hooks and proxy: %w", err)
 		}
 	}
-	return &InstrumentState{AppID: appID, HookCancel: cancel}, nil
+	return &InstrumentState{AppID: appID, HookCancel: cancel, UnloadDone: r.instrumentation.GetHookUnloadDone(appID)}, nil
 }
 
 // reloadHooks cancels existing hooks and reloads them for the next test set.
@@ -612,7 +618,7 @@ func (r *Replayer) reloadHooks(ctx context.Context, appID uint64) (*InstrumentSt
 
 		// Success - return the new hook state with the new app ID
 		r.logger.Debug("Successfully reloaded eBPF hooks", zap.Uint64("oldAppID", appID), zap.Uint64("newAppID", newAppID), zap.Int("attempt", attempt))
-		return &InstrumentState{AppID: newAppID, HookCancel: cancel}, nil
+		return &InstrumentState{AppID: newAppID, HookCancel: cancel, UnloadDone: r.instrumentation.GetHookUnloadDone(newAppID)}, nil
 	}
 
 	// This should never be reached, but just in case
@@ -775,7 +781,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if !serveTest {
 			runTestSetErrGrp.Go(func() error {
 				defer utils.Recover(r.logger)
-				appErr = r.RunApplication(runTestSetCtx, appID, models.RunOptions{})
+				appErr = r.RunApplication(runTestSetCtx, appID, models.RunOptions{
+					AppCommand: conf.AppCommand,
+				})
 				if appErr.AppErrorType == models.ErrCtxCanceled {
 					return nil
 				}
