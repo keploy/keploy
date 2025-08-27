@@ -79,6 +79,7 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 			}
 
 			// apply fuzzy match for body with schemaMatched mocks
+
 			// Guard against quadratic work on very large bodies.
 			if len(expBody) > 512*1024 {
 				logger.Debug("skipping fuzzy match for large body", zap.Int("len", len(expBody)))
@@ -244,7 +245,6 @@ func findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 	mxIdx := -1
 	for idx, mock := range mocks {
 		encoded := []byte(mock.Spec.GRPCReq.Body.DecodedData)
-
 		// Trim mock data to 2048 bytes for performance
 		if len(encoded) > 2048 {
 			encoded = encoded[:2048]
