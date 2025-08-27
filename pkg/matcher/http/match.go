@@ -236,7 +236,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 						utils.LogError(logger, err, "failed to parse the act response into json")
 						break
 					}
-          
+
 					matcherUtils.CompareResponses(&expResponse, &actResponse, "")
 					jsonBytes, err := jsonMarshal234(expResponse)
 					if err != nil {

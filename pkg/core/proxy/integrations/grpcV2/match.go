@@ -9,9 +9,9 @@ import (
 	"github.com/agnivade/levenshtein"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
-	"go.uber.org/zap"
 	"go.keploy.io/server/v2/pkg/matcher/grpc"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.uber.org/zap"
 )
 
 func FilterMocksRelatedToGrpc(mocks []*models.Mock) []*models.Mock {
