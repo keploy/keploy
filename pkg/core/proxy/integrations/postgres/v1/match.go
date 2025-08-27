@@ -301,14 +301,14 @@ OuterLoop:
 
 			if matched {
 				logger.Debug("Matched mock", zap.String("mock", matchedMock.Name))
-				originalMatchedMock := *matchedMock
-				matchedMock.TestModeInfo.IsFiltered = false
-				matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
-				updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
+				finalMock := matchedMock.DeepCopy()
+				finalMock.TestModeInfo.IsFiltered = false
+                finalMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+				updated := mockDb.UpdateUnFilteredMock(matchedMock, matchedMock)
 				if !updated {
 					logger.Debug("failed to update matched mock", zap.Error(err))
 				}
-				return true, matchedMock.Spec.PostgresResponses, nil
+				return true, finalMock.Spec.PostgresResponses, nil
 			}
 			return false, nil, nil
 		}
