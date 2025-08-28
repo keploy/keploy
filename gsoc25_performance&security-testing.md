@@ -112,8 +112,8 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 # Execute a test suite
 keploy testsuite --base-url "http://localhost:8080" --ts-path ./keploy/testsuite --ts-file suite-0.yaml
 
-# With custom configuration
-keploy testsuite --base-url "http://localhost:8080" --config-path ./config
+# Or simply passing the base URL keeping the defalut value.
+keploy testsuite --base-url "http://localhost:8080"
 ```
 
 ---
@@ -184,7 +184,7 @@ The Load Testing feature enables performance testing by executing test suites un
 
 The system collects comprehensive metrics:
 - **Request metrics**: Count, failure rate, response times
-- **Performance metrics**: P95 latency, throughput
+- **Performance metrics**: P90,95,99 latency, throughput
 - **Data transfer**: Bytes sent/received
 
 Thresholds provide pass/fail criteria:
@@ -232,7 +232,6 @@ func Load(ctx context.Context, logger *zap.Logger, _ *config.Config,
 - **Auto-Browser Launch**: Automatically opens browser to dashboard URL when load test starts
 - **DashboardExposer** (`pkg/service/load/dashboard_exposer.go`): 
   - Serves embedded React dashboard from Go binary
-  - Handles cross-platform browser launching (Windows, Linux, macOS, WSL)
   - Provides real-time metrics API endpoints
 - **Exporter** (`pkg/service/load/exporter.go`): Real-time metrics streaming to dashboard
 - **Live Monitoring**: Real-time updates of VU count, RPS, response times, and threshold status
@@ -262,7 +261,6 @@ func (de *DashboardExposer) fileSystem() http.FileSystem {
 2. **Integrated Dashboard**: Built-in web dashboard that automatically launches in browser
    - **Embedded Server**: Dashboard server runs within Keploy binary (no external dependencies)
    - **Auto-Launch**: Browser automatically opens to `http://localhost:3000` when load test starts
-   - **Cross-Platform**: Supports Windows, Linux, macOS, and WSL browser launching
    - **Real-time Monitoring**: Live metrics updates including VU count, RPS, response times
    - **Threshold Visualization**: Real-time pass/fail status of performance thresholds
 3. **Report Generation**: JSON and CLI-formatted comprehensive reports
@@ -272,13 +270,10 @@ func (de *DashboardExposer) fileSystem() http.FileSystem {
 ### Usage
 ```bash
 # Basic load test (automatically opens dashboard in browser)
-keploy load -f suite-0.yaml --base-url "http://localhost:8080"
+keploy load -f ./keploy/suite-0.yaml --base-url "http://localhost:8080"
 
 # With CLI overrides (dashboard launches at http://localhost:3000)
-keploy load -f suite-0.yaml --base-url "http://localhost:8080" --vus 20 --duration 10m --rps 100
-
-# Generate JSON report while monitoring via dashboard
-keploy load -f suite-0.yaml --out json > load_report.json
+keploy load -f ./keploy/suite-0.yaml --base-url "http://localhost:8080" --vus 20 --duration 10m --rps 100
 ```
 
 ---
