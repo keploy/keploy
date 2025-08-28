@@ -580,9 +580,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	// get the mock manager for the current app
 	m, ok := p.MockManagers.Load(destInfo.AppID)
-	if !ok {
-		// utils.LogError(logger, err, "failed to fetch the mock manager", zap.Any("AppID", destInfo.AppID))
-		// return err
+	if !ok && rule.Mode == models.MODE_TEST {
+		utils.LogError(logger, err, "failed to fetch the mock manager", zap.Any("AppID", destInfo.AppID))
+		return err
 	}
 
 	generic := true
