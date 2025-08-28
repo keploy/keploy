@@ -405,6 +405,45 @@ func (e *TSExecutor) processAssertion(assertion TSAssertion, resp *http.Response
 			return false, fmt.Sprintf("for key %s, expected value '%s' but got '%s'",
 				assertion.Key, assertion.ExpectedString, actualString)
 		}
+	case "json_array_contains":
+		var jsonData interface{}
+		if err := json.Unmarshal(body, &jsonData); err != nil {
+			return false, fmt.Sprintf("failed to parse JSON response: %v", err)
+		}
+
+		arrayValue, err := extractJsonValue(jsonData, assertion.Key)
+		if err != nil {
+			return false, fmt.Sprintf("failed to extract JSON value for key %s: %v", assertion.Key, err)
+		}
+
+		// Check if the extracted value is an array
+		array, ok := arrayValue.([]interface{})
+		if !ok {
+			return false, fmt.Sprintf("value at key %s is not an array", assertion.Key)
+		}
+
+		// Parse the expected string as JSON
+		var expectedJSON interface{}
+		if err := json.Unmarshal([]byte(assertion.ExpectedString), &expectedJSON); err != nil {
+			return false, fmt.Sprintf("failed to parse expected JSON: %v", err)
+		}
+
+		// Check if any element in the array matches the expected JSON
+		for _, element := range array {
+			elementBytes, err := json.Marshal(element)
+			if err != nil {
+				continue
+			}
+			expectedBytes, err := json.Marshal(expectedJSON)
+			if err != nil {
+				continue
+			}
+			if string(elementBytes) == string(expectedBytes) {
+				return true, ""
+			}
+		}
+
+		return false, fmt.Sprintf("array at key %s does not contain expected JSON object: %s", assertion.Key, assertion.ExpectedString)
 	default:
 		return false, fmt.Sprintf("unsupported assertion type: %s", assertion.Type)
 	}

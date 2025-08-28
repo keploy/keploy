@@ -44,6 +44,11 @@ func TSParser(path string) (TestSuite, error) {
 
 // Helper function to extract JSON values using dot notation
 func extractJsonValue(data interface{}, path string) (interface{}, error) {
+	// Handle special case for root path ($)
+	if path == "$" {
+		return data, nil
+	}
+
 	parts := strings.Split(path, ".")
 	current := data
 
