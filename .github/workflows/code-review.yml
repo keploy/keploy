@@ -1,4 +1,4 @@
-name: Advanced KeployAI Code Review
+name: KeployAI Code Review
 
 on:
   pull_request:
@@ -15,13 +15,9 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0 # Required to get the full git history for diffing
 
       - name: Run Smart AI Code Review
         uses: euclidstellar/code-review-agent@v1
         with:
-          github-token: ${{ secrets.GH_TOKEN }}
-          model: 'gpt-4o'
-          ollama-model: 'gemma3n:e4b'
-          temperature: 0.1
-          ignore-patterns: '*.md,*.lock,dist/**'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
