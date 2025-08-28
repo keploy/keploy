@@ -40,19 +40,12 @@ type Config struct {
 	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
 	Contract              Contract     `json:"contract" yaml:"contract" mapstructure:"contract"`
 	TestSuite             TestSuite    `json:"testSuite" yaml:"testSuite" mapstructure:"testSuite"`
-	Load                  LoadTest     `json:"load" yaml:"load" mapstructure:"load"`
 
 	InCi           bool   `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
 	InstallationID string `json:"-" yaml:"-" mapstructure:"-"`
 	Version        string `json:"-" yaml:"-" mapstructure:"-"`
 	APIServerURL   string `json:"-" yaml:"-" mapstructure:"-"`
 	GitHubClientID string `json:"-" yaml:"-" mapstructure:"-"`
-}
-
-type LoadTest struct {
-	VUs      int    `json:"vus" yaml:"vus" mapstructure:"vus"`
-	Duration string `json:"duration" yaml:"duration" mapstructure:"duration"`
-	RPS      int    `json:"rps" yaml:"rps" mapstructure:"rps"`
 }
 
 type TestSuite struct {
