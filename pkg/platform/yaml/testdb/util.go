@@ -118,8 +118,8 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		}
 
 		logger.Debug("gRPC schema created",
-			zap.Any("request_headers", grpcSpec.GrpcReq.Headers),
-			zap.Any("response_headers", grpcSpec.GrpcResp.Headers),
+			zap.Reflect("request_headers", grpcSpec.GrpcReq.Headers),
+			zap.Reflect("response_headers", grpcSpec.GrpcResp.Headers),
 			zap.Int("request_body_length", len(grpcSpec.GrpcReq.Body.DecodedData)),
 			zap.Int("response_body_length", len(grpcSpec.GrpcResp.Body.DecodedData)))
 
@@ -321,7 +321,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 			if key == models.NoiseAssertion {
 				noiseMap, ok := raw.(map[models.AssertionType]interface{})
 				if !ok {
-					logger.Warn("noise assertion not in expected map[AssertionType]interface{}", zap.Any("raw", raw))
+					logger.Warn("noise assertion not in expected map[AssertionType]interface{}", zap.Reflect("raw", raw))
 					continue
 				}
 				for kt, inner := range noiseMap {
@@ -356,7 +356,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 			if key == models.NoiseAssertion {
 				noiseMap, ok := raw.(map[models.AssertionType]interface{})
 				if !ok {
-					logger.Warn("noise assertion not in expected map[AssertionType]interface{}", zap.Any("raw", raw))
+					logger.Warn("noise assertion not in expected map[AssertionType]interface{}", zap.Reflect("raw", raw))
 					continue
 				}
 				for kt, inner := range noiseMap {

@@ -168,13 +168,13 @@ func Capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 		var err error
 		reqBody, err = io.ReadAll(req.Body)
 		if err != nil {
-			logger.Warn("failed to read the http request body", zap.Any("metadata", utils.GetReqMeta(req)), zap.Int64("of size", int64(len(reqBody))), zap.String("body", base64.StdEncoding.EncodeToString(reqBody)), zap.Error(err))
+			logger.Warn("failed to read the http request body", zap.Reflect("metadata", utils.GetReqMeta(req)), zap.Int64("of size", int64(len(reqBody))), zap.String("body", base64.StdEncoding.EncodeToString(reqBody)), zap.Error(err))
 		}
 
 		if req.Header.Get("Content-Encoding") != "" {
 			reqBody, err = pkg.Decompress(logger, req.Header.Get("Content-Encoding"), reqBody)
 			if err != nil {
-				utils.LogError(logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(req)))
+				utils.LogError(logger, err, "failed to decode the http request body", zap.Reflect("metadata", utils.GetReqMeta(req)))
 				return
 			}
 		}

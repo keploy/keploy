@@ -57,12 +57,12 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 				if stream != nil {
 					// Skip HTTP gateway requests
 					if pkg.IsGRPCGatewayRequest(stream) {
-						factory.logger.Debug("Skipping internal gRPC request proxied by gRPC-gateway", zap.Any("stream", stream))
+						factory.logger.Debug("Skipping internal gRPC request proxied by gRPC-gateway", zap.Reflect("stream", stream))
 						continue
 					}
 
-					factory.logger.Debug("Processing HTTP2/gRPC request",
-						zap.Any("connection_id", connID))
+			factory.logger.Debug("Processing HTTP2/gRPC request",
+				zap.Reflect("connection_id", connID))
 
 					// Get timestamps from the stream
 					CaptureGRPC(ctx, factory.logger, t, stream)
@@ -73,17 +73,17 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 				if ok {
 
 					if len(requestBuf) == 0 || len(responseBuf) == 0 {
-						factory.logger.Warn("failed processing a request due to invalid request or response", zap.Any("Request Size", len(requestBuf)), zap.Any("Response Size", len(responseBuf)))
+						factory.logger.Warn("failed processing a request due to invalid request or response", zap.Int("Request Size", len(requestBuf)), zap.Int("Response Size", len(responseBuf)))
 						continue
 					}
 					parsedHTTPReq, err := pkg.ParseHTTPRequest(requestBuf)
 					if err != nil {
-						utils.LogError(factory.logger, err, "failed to parse the http request from byte array", zap.Any("requestBuf", requestBuf))
+						utils.LogError(factory.logger, err, "failed to parse the http request from byte array", zap.Reflect("requestBuf", requestBuf))
 						continue
 					}
 					parsedHTTPRes, err := pkg.ParseHTTPResponse(responseBuf, parsedHTTPReq)
 					if err != nil {
-						utils.LogError(factory.logger, err, "failed to parse the http response from byte array", zap.Any("responseBuf", responseBuf))
+						utils.LogError(factory.logger, err, "failed to parse the http response from byte array", zap.Reflect("responseBuf", responseBuf))
 						continue
 					}
 					basePath := factory.incomingOpts.BasePath

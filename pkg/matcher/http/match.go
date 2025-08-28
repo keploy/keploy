@@ -96,8 +96,8 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		}
 
 		// debug log for cleanExp and cleanAct
-		logger.Debug("cleanExp", zap.Any("", cleanExp))
-		logger.Debug("cleanAct", zap.Any("", cleanAct))
+	logger.Debug("cleanExp", zap.Reflect("cleanExp", cleanExp))
+	logger.Debug("cleanAct", zap.Reflect("cleanAct", cleanAct))
 	} else {
 		if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && tc.HTTPResp.Body != actualResponse.Body {
 			pass = false
@@ -389,7 +389,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			}
 			if !found {
 				pass = false
-				logger.Error("status_code_in assertion failed", zap.Any("expectedCodes", ints), zap.Int("actual", actualResponse.StatusCode))
+				logger.Error("status_code_in assertion failed", zap.Ints("expectedCodes", ints), zap.Int("actual", actualResponse.StatusCode))
 			}
 
 		case models.HeaderEqual:
@@ -459,7 +459,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 
 			default:
 				pass = false
-				logger.Error("header_exists: unsupported format, expected slice or map", zap.Any("value", value))
+				logger.Error("header_exists: unsupported format, expected slice or map", zap.Reflect("value", value))
 			}
 
 		case models.HeaderMatches:
@@ -500,12 +500,12 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 				_ = jsonUnmarshal234([]byte(v), &expectedMap)
 			default:
 				pass = false
-				logger.Error("json_contains: unexpected format", zap.Any("value", value))
+				logger.Error("json_contains: unexpected format", zap.Reflect("value", value))
 				continue
 			}
 			if ok, _ := matcherUtils.JsonContains(actualResponse.Body, expectedMap); !ok {
 				pass = false
-				logger.Error("json_contains assertion failed", zap.Any("expected", expectedMap))
+				logger.Error("json_contains assertion failed", zap.Reflect("expected", expectedMap))
 			}
 
 		default:

@@ -152,7 +152,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 
 	stopReason = "Re-recorded all the selected testsets successfully"
 	if !o.config.InCi {
-		o.logger.Info("Re-record was successfull. Do you want to remove the older testsets? (y/n)", zap.Any("testsets", SelectedTests))
+		o.logger.Info("Re-record was successfull. Do you want to remove the older testsets? (y/n)", zap.Reflect("testsets", SelectedTests))
 		reader := bufio.NewReader(os.Stdin)
 		input, err := reader.ReadString('\n')
 		if err != nil {
@@ -219,7 +219,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 	}
 	timeout := time.Duration(120+delay) * time.Second
 
-	o.logger.Debug("", zap.String("host", host), zap.String("port", port), zap.Any("WaitTimeout", timeout), zap.Any("CommandType", cmdType))
+	o.logger.Debug("", zap.String("host", host), zap.String("port", port), zap.Duration("WaitTimeout", timeout), zap.String("CommandType", string(cmdType)))
 
 	if err := pkg.WaitForPort(ctx, host, port, timeout); err != nil {
 		utils.LogError(o.logger, err, "Waiting for port failed", zap.String("host", host), zap.String("port", port))
@@ -257,7 +257,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 				utils.LogError(o.logger, err, "failed to replace host to docker container's IP")
 				break
 			}
-			o.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HTTPReq.URL))
+			o.logger.Debug("", zap.String("replaced_url_in_docker_env", tc.HTTPReq.URL))
 		}
 
 		if o.config.ReRecord.Host != "" {
@@ -315,7 +315,7 @@ func (o *Orchestrator) checkForTemplates(ctx context.Context, testSets []string)
 	}
 
 	o.config.Templatize.TestSets = nonTemplatized
-	o.logger.Warn("The following testSets are not templatized. Do you want to templatize them to handle noisy fields?(y/n)", zap.Any("testSets:", nonTemplatized))
+	o.logger.Warn("The following testSets are not templatized. Do you want to templatize them to handle noisy fields?(y/n)", zap.Reflect("testSets", nonTemplatized))
 	reader := bufio.NewReader(os.Stdin)
 	input, err := reader.ReadString('\n')
 	if err != nil {

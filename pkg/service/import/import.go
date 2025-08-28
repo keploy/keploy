@@ -115,14 +115,14 @@ func (pi *PostmanImporter) extractGlobalVariables(variables []map[string]interfa
 		// Extract and validate variable key
 		key, ok := variable["key"].(string)
 		if !ok {
-			pi.logger.Error("Global variable key is not a string", zap.Any("key", variable["key"]))
+			pi.logger.Error("Global variable key is not a string", zap.Reflect("key", variable["key"]))
 			continue
 		}
 
 		// Extract and validate variable value
 		value, ok := variable["value"].(string)
 		if !ok {
-			pi.logger.Error("Global variable value is not a string", zap.Any("value", variable["value"]))
+			pi.logger.Error("Global variable value is not a string", zap.Reflect("value", variable["value"]))
 			continue
 		}
 

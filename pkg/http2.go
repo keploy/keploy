@@ -402,7 +402,7 @@ func (sm *DefaultStreamManager) checkStreamCompletion(streamID uint32) {
 	if !stream.isRequest && stream.requestComplete {
 		if stream.endStreamReceived && stream.headersReceived && stream.trailersReceived { // For gRPC, ensure trailers are received
 
-			sm.logger.Debug("Stream completed", zap.Any("stream", stream))
+			sm.logger.Debug("Stream completed", zap.Reflect("stream", stream))
 
 			stream.isComplete = true
 		}
@@ -453,7 +453,7 @@ func IsGRPCGatewayRequest(stream *HTTP2Stream) bool {
 func SimulateGRPC(_ context.Context, tc *models.TestCase, testSetID string, logger *zap.Logger) (*models.GrpcResp, error) {
 	grpcReq := tc.GrpcReq
 
-	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSetID)))
+	logger.Info("starting test for of", zap.String("test case", models.HighlightString(tc.Name)), zap.String("test set", models.HighlightString(testSetID)))
 
 	// Create a TCP connection
 	conn, err := net.Dial("tcp", grpcReq.Headers.PseudoHeaders[":authority"])

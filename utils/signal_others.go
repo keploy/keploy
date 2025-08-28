@@ -69,7 +69,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	cmd := exec.CommandContext(ctx, "sh", "-c", userCmd)
 	if username != "" {
 		// print all environment variables
-		logger.Debug("env inherited from the cmd", zap.Any("env", os.Environ()))
+		logger.Debug("env inherited from the cmd", zap.Reflect("env", os.Environ()))
 		// Run the command as the user who invoked sudo to preserve the user environment variables and PATH
 		cmd = exec.CommandContext(ctx, "sudo", "-E", "-u", os.Getenv("SUDO_USER"), "env", "PATH="+os.Getenv("PATH"), "sh", "-c", userCmd)
 	}
@@ -88,7 +88,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	logger.Debug("", zap.Any("executing cli", cmd.String()))
+	logger.Debug("", zap.String("executing_cli", cmd.String()))
 
 	err = cmd.Start()
 	if err != nil {

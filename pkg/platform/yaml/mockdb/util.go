@@ -203,7 +203,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			httpSpec := models.HTTPSchema{}
 			err := m.Spec.Decode(&httpSpec)
 			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal a yaml doc into http mock", zap.Any("mock name", m.Name))
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into http mock", zap.String("mock name", m.Name))
 				return nil, err
 			}
 
@@ -219,7 +219,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			mongoSpec := models.MongoSpec{}
 			err := m.Spec.Decode(&mongoSpec)
 			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal a yaml doc into mongo mock", zap.Any("mock name", m.Name))
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into mongo mock", zap.String("mock name", m.Name))
 				return nil, err
 			}
 
@@ -232,7 +232,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			grpcSpec := models.GrpcSpec{}
 			err := m.Spec.Decode(&grpcSpec)
 			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal a yaml doc into http mock", zap.Any("mock name", m.Name))
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into http mock", zap.String("mock name", m.Name))
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
@@ -246,7 +246,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			genericSpec := models.GenericSchema{}
 			err := m.Spec.Decode(&genericSpec)
 			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal a yaml doc into generic mock", zap.Any("mock name", m.Name))
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into generic mock", zap.String("mock name", m.Name))
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
@@ -260,7 +260,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			redisSpec := models.RedisSchema{}
 			err := m.Spec.Decode(&redisSpec)
 			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal a yaml doc into redis mock", zap.Any("mock name", m.Name))
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into redis mock", zap.String("mock name", m.Name))
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
@@ -278,7 +278,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			err := m.Spec.Decode(&PostSpec)
 
 			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal a yaml doc into generic mock", zap.Any("mock name", m.Name))
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into generic mock", zap.String("mock name", m.Name))
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{
@@ -293,7 +293,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			mySQLSpec := mysql.Spec{}
 			err := m.Spec.Decode(&mySQLSpec)
 			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal a yaml doc into mysql mock", zap.Any("mock name", m.Name))
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into mysql mock", zap.String("mock name", m.Name))
 				return nil, err
 			}
 
@@ -303,7 +303,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			}
 			mock.Spec = *mockSpec
 		default:
-			utils.LogError(logger, nil, "failed to unmarshal a mock yaml doc of unknown type", zap.Any("type", m.Kind))
+			utils.LogError(logger, nil, "failed to unmarshal a mock yaml doc of unknown type", zap.String("type", string(m.Kind)))
 			continue
 		}
 		mocks = append(mocks, &mock)

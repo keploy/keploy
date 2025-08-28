@@ -360,7 +360,7 @@ func (idc *Impl) GetHostWorkingDirectory() (string, error) {
 	// Loop through container mounts and find the mount for current directory in the container
 	for _, mount := range containerMounts {
 		if mount.Destination == curDir {
-			idc.logger.Debug(fmt.Sprintf("found mount for %s in keploy-v2 container", curDir), zap.Any("mount", mount))
+				idc.logger.Debug(fmt.Sprintf("found mount for %s in keploy-v2 container", curDir), zap.Reflect("mount", mount))
 			return mount.Source, nil
 		}
 	}
@@ -380,7 +380,7 @@ func (idc *Impl) ForceAbsolutePath(c *Compose, basePath string) error {
 		return err
 	}
 	dockerComposeContext = filepath.Dir(dockerComposeContext)
-	idc.logger.Debug("docker compose file location in host filesystem", zap.Any("dockerComposeContext", dockerComposeContext))
+	idc.logger.Debug("docker compose file location in host filesystem", zap.String("dockerComposeContext", dockerComposeContext))
 
 	// Loop through all services in compose file
 	for _, service := range c.Services.Content {
@@ -554,10 +554,10 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate b
 	}
 
 	if len(volumeList.Volumes) > 0 {
-		if !recreate {
-			idc.logger.Info("volume already exists", zap.Any("volume", volumeName))
-			return err
-		}
+			if !recreate {
+				idc.logger.Info("volume already exists", zap.String("volume", volumeName))
+				return err
+			}
 
 		err := idc.VolumeRemove(ctx, volumeName, false)
 		if err != nil {
@@ -575,11 +575,11 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate b
 			"device": volumeName,
 		},
 	})
-	if err != nil {
-		idc.logger.Error("failed to create volume", zap.Any("volume", volumeName), zap.Error(err))
-		return err
-	}
+		if err != nil {
+			idc.logger.Error("failed to create volume", zap.String("volume", volumeName), zap.Error(err))
+			return err
+		}
 
-	idc.logger.Debug("volume created", zap.Any("volume", volumeName))
+	idc.logger.Debug("volume created", zap.String("volume", volumeName))
 	return nil
 }

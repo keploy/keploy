@@ -51,12 +51,12 @@ func (ts *OpenAPIYaml) GetTestCasesSchema(ctx context.Context, testSetID string,
 	}
 	dir, err := yaml.ReadDir(TestPath, fs.ModePerm)
 	if err != nil {
-		utils.LogError(ts.logger, err, "failed to open the directory containing yaml testcases", zap.Any("path", TestPath))
+		utils.LogError(ts.logger, err, "failed to open the directory containing yaml testcases", zap.String("path", TestPath))
 		return nil, err
 	}
 	files, err := dir.ReadDir(0)
 	if err != nil {
-		utils.LogError(ts.logger, err, "failed to read the file names of yaml testcases", zap.Any("path", TestPath))
+		utils.LogError(ts.logger, err, "failed to read the file names of yaml testcases", zap.String("path", TestPath))
 		return nil, err
 	}
 	for _, j := range files {
@@ -94,10 +94,10 @@ func (ts *OpenAPIYaml) GetMocksSchemas(ctx context.Context, testSetID string, mo
 	if _, err := os.Stat(mockPath); err == nil {
 		var mockYamls []*models.OpenAPI
 		data, err := yaml.ReadFile(ctx, ts.logger, path, mockFileName)
-		if err != nil {
-			utils.LogError(ts.logger, err, "failed to read the mocks from config yaml", zap.Any("session", filepath.Base(path)))
-			return nil, err
-		}
+			if err != nil {
+				utils.LogError(ts.logger, err, "failed to read the mocks from config yaml", zap.String("session", filepath.Base(path)))
+				return nil, err
+			}
 		dec := yamlLib.NewDecoder(bytes.NewReader(data))
 		for {
 			var doc *models.OpenAPI
@@ -111,7 +111,7 @@ func (ts *OpenAPIYaml) GetMocksSchemas(ctx context.Context, testSetID string, mo
 			mockYamls = append(mockYamls, doc)
 		}
 		if err != nil {
-			utils.LogError(ts.logger, err, "failed to decode the config mocks from yaml docs", zap.Any("session", filepath.Base(path)))
+			utils.LogError(ts.logger, err, "failed to decode the config mocks from yaml docs", zap.String("session", filepath.Base(path)))
 			return nil, err
 		}
 		tcsMocks = mockYamls
