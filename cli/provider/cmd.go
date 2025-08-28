@@ -386,12 +386,6 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 		return err
 	}
 
-	bigPayload, err := cmd.Flags().GetBool("bigPayload")
-	if err != nil {
-		bigPayload = false
-	}
-	utils.BigPayload = bigPayload
-
 	defaultCfg := *c.cfg
 	err = c.PreProcessFlags(cmd)
 	if err != nil {

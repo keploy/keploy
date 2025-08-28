@@ -23,8 +23,7 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-
-			svc, err := serviceFactory.GetService(ctx, cmd.Name())
+			svc, err := serviceFactory.GetService(ctx, cmd)
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
 				return nil
@@ -35,7 +34,6 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 				utils.LogError(logger, nil, "service doesn't satisfy record service interface")
 				return nil
 			}
-
 			err = record.Start(ctx, false)
 			if err != nil {
 				utils.LogError(logger, err, "failed to record")

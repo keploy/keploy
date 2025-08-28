@@ -61,7 +61,7 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 		utils.LogError(l, err, "failed to start open socket listener")
 		return nil, errors.New("failed to start socket listeners")
 	}
-	err = data(ctx, c, l, dataMap)
+	err = data(ctx, c, l, dataMap, opts)
 	if err != nil {
 		utils.LogError(l, err, "failed to start data socket listener")
 		return nil, errors.New("failed to start socket listeners")
@@ -126,7 +126,7 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 	return nil
 }
 
-func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
+func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map, opts models.IncomingOptions) error {
 	r, err := ringbuf.NewReader(m)
 	if err != nil {
 		utils.LogError(l, nil, "failed to create ring buffer of socketDataEvent")
@@ -152,7 +152,7 @@ func data(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 
 				bin := record.RawSample
 
-				if utils.BigPayload {
+				if opts.BigPayload {
 					l.Debug("Using Bigger Request Map")
 					var event SocketDataEventBig
 

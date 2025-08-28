@@ -23,7 +23,7 @@ func ReRecord(ctx context.Context, logger *zap.Logger, _ *config.Config, service
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			svc, err := serviceFactory.GetService(ctx, cmd.Name())
+			svc, err := serviceFactory.GetService(ctx, cmd)
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
 				return nil

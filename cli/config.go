@@ -46,7 +46,7 @@ func Config(ctx context.Context, logger *zap.Logger, cfg *config.Config, service
 						return nil
 					}
 				}
-				svc, err := servicefactory.GetService(ctx, cmd.Name())
+				svc, err := servicefactory.GetService(ctx, cmd)
 				if err != nil {
 					utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
 					return err
