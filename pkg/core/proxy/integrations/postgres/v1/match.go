@@ -824,7 +824,6 @@ func LaevensteinDistance(str1, str2 string) bool {
 
 // make this in such a way if it returns -1 then we will continue with the original mock
 func validateMock(tcsMocks []*models.Mock, idx int, requestBuffers [][]byte, logger *zap.Logger) (bool, *models.Mock) {
-
 	actualPgReq := decodePgRequest(requestBuffers[0], logger)
 	if actualPgReq == nil {
 		return true, nil
