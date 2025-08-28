@@ -236,7 +236,7 @@ func (r *Report) printFailedTestReports(failedTests []models.TestResult) error {
 
 // printSingleTestReport generates and prints a report for a single failed test
 func (r *Report) printSingleTestReport(test models.TestResult) error {
-	// If full-body mode is ON, use the original pipeline (entire expected/actual bodies)
+	// If full mode is ON, use the original pipeline (entire expected/actual bodies)
 	if r.config.Report.ShowFullBody {
 		logDiffs := matcherUtils.NewDiffsPrinter(test.Name)
 		printer := r.createFormattedPrinter()
