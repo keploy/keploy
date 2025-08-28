@@ -393,26 +393,6 @@ func replaySequence(
 			// otherwise we might close early and the proxy gets RST.
 			feeder.push(ev.payload)
 			logger.Debug(fmt.Sprintf("[REPLAY %03d] proxy→app queued %d bytes (server will respond on next request)", i+1, len(ev.payload)))
-
-			// Read/discard exactly len(ev.payload) from proxyConn
-			// (proxy forwards server’s response back to this client).
-			need := len(ev.payload)
-			buf := make([]byte, 32<<10) // 32KB scratch
-			deadline := time.Now().Add(30 * time.Second)
-			_ = proxyConn.SetReadDeadline(deadline)
-			readTotal := 0
-			for readTotal < need {
-				n, rerr := proxyConn.Read(buf)
-				if n > 0 {
-					readTotal += n
-				}
-				if rerr != nil {
-					return fmt.Errorf("read from proxy (expect %d, got %d): %w", need, readTotal, rerr)
-				}
-			}
-			// Clear read deadline for subsequent events
-			_ = proxyConn.SetReadDeadline(time.Time{})
-			logger.Debug(fmt.Sprintf("[CLIENT] drained %d/%d bytes from proxy", readTotal, need))
 		}
 	}
 
