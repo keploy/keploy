@@ -267,18 +267,10 @@ func (r *Report) printSingleTestReport(test models.TestResult) error {
 		return err
 	}
 
-	// Print status code and header diffs using the original method
-	statusAndHeaderDiffs := matcherUtils.NewDiffsPrinter("")
-	if err := r.addStatusCodeDiffs(test, &statusAndHeaderDiffs); err != nil {
-		return err
-	}
-	if err := r.addHeaderDiffs(test, &statusAndHeaderDiffs); err != nil {
-		return err
-	}
-	if err := statusAndHeaderDiffs.Render(); err != nil {
-		r.logger.Error("failed to render status and header diffs", zap.Error(err))
-		return err
-	}
+	// Print status code and header diffs in the same table-style format
+	metaDiff := GenerateStatusAndHeadersTableDiff(test)
+	fmt.Println(applyCliColorsToDiff(metaDiff))
+	fmt.Println()
 
 	// Print body diffs using the new method for JSON
 	for _, bodyResult := range test.Result.BodyResult {
@@ -410,10 +402,10 @@ func (r *Report) printAndRenderDiffs(printer *pp.PrettyPrinter, logs string, log
 	return nil
 }
 
-// applyCliColorsToDiff adds ANSI colors to labels in the JSON diff block.
-// - "Path:" label is yellow
-// - "Old:" label is red
-// - "New:" label is green
+// applyCliColorsToDiff adds ANSI colors to values in the JSON diff block.
+// - Value after "Path:" is yellow
+// - Value after "Old:" is red
+// - Value after "New:" is green
 func applyCliColorsToDiff(diff string) string {
 	const (
 		ansiReset  = "\x1b[0m"
@@ -425,20 +417,96 @@ func applyCliColorsToDiff(diff string) string {
 	lines := strings.Split(diff, "\n")
 	for i, line := range lines {
 		if strings.HasPrefix(line, "Path: ") {
-			// Color the entire "Path: <value>" segment in yellow
-			lines[i] = ansiYellow + "Path: " + strings.TrimPrefix(line, "Path: ") + ansiReset
+			// Color only the value after "Path: " in yellow
+			value := strings.TrimPrefix(line, "Path: ")
+			lines[i] = "Path: " + ansiYellow + value + ansiReset
 			continue
 		}
 		if strings.HasPrefix(line, "  Old: ") {
-			// Color the entire "Old: <value>" segment in red
-			lines[i] = "  " + ansiRed + "Old: " + strings.TrimPrefix(line, "  Old: ") + ansiReset
+			// Color only the value after "  Old: " in red
+			value := strings.TrimPrefix(line, "  Old: ")
+			lines[i] = "  Old: " + ansiRed + value + ansiReset
 			continue
 		}
 		if strings.HasPrefix(line, "  New: ") {
-			// Color the entire "New: <value>" segment in green
-			lines[i] = "  " + ansiGreen + "New: " + strings.TrimPrefix(line, "  New: ") + ansiReset
+			// Color only the value after "  New: " in green
+			value := strings.TrimPrefix(line, "  New: ")
+			lines[i] = "  New: " + ansiGreen + value + ansiReset
 			continue
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// GenerateStatusAndHeadersTableDiff builds a table-style diff for status code, headers,
+// trailer headers, and synthetic content-length when body differs and header is absent.
+func GenerateStatusAndHeadersTableDiff(test models.TestResult) string {
+	var sb strings.Builder
+	sb.WriteString("=== CHANGES IN STATUS AND HEADERS ===\n")
+
+	hasDiff := false
+
+	// Status code
+	if !test.Result.StatusCode.Normal {
+		hasDiff = true
+		sb.WriteString("Path: status_code\n")
+		sb.WriteString(fmt.Sprintf("  Old: %d\n", test.Result.StatusCode.Expected))
+		sb.WriteString(fmt.Sprintf("  New: %d\n\n", test.Result.StatusCode.Actual))
+	}
+
+	// Headers
+	for _, hr := range test.Result.HeadersResult {
+		if hr.Normal {
+			continue
+		}
+		hasDiff = true
+		expected := strings.Join(hr.Expected.Value, ", ")
+		actual := strings.Join(hr.Actual.Value, ", ")
+		sb.WriteString(fmt.Sprintf("Path: header.%s\n", hr.Actual.Key))
+		sb.WriteString(fmt.Sprintf("  Old: %s\n", expected))
+		sb.WriteString(fmt.Sprintf("  New: %s\n\n", actual))
+	}
+
+	// Trailer headers
+	for _, tr := range test.Result.TrailerResult {
+		if tr.Normal {
+			continue
+		}
+		hasDiff = true
+		expected := strings.Join(tr.Expected.Value, ", ")
+		actual := strings.Join(tr.Actual.Value, ", ")
+		sb.WriteString(fmt.Sprintf("Path: trailer.%s\n", tr.Actual.Key))
+		sb.WriteString(fmt.Sprintf("  Old: %s\n", expected))
+		sb.WriteString(fmt.Sprintf("  New: %s\n\n", actual))
+	}
+
+	// Synthetic content length if body differs and content-length header wasn't already reported
+	hasContentLengthHeaderChange := false
+	for _, hr := range test.Result.HeadersResult {
+		if strings.EqualFold(hr.Actual.Key, "Content-Length") || strings.EqualFold(hr.Expected.Key, "Content-Length") {
+			hasContentLengthHeaderChange = !hr.Normal
+			break
+		}
+	}
+	if !hasContentLengthHeaderChange {
+		for _, br := range test.Result.BodyResult {
+			if br.Normal {
+				continue
+			}
+			expLen := len(br.Expected)
+			actLen := len(br.Actual)
+			if expLen != actLen {
+				hasDiff = true
+				sb.WriteString("Path: content_length\n")
+				sb.WriteString(fmt.Sprintf("  Old: %d\n", expLen))
+				sb.WriteString(fmt.Sprintf("  New: %d\n\n", actLen))
+				break
+			}
+		}
+	}
+
+	if !hasDiff {
+		return "No differences found in status or headers."
+	}
+	return strings.TrimSpace(sb.String())
 }
