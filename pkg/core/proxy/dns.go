@@ -123,7 +123,7 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 						Hdr:  dns.RR_Header{Name: question.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
 						AAAA: net.ParseIP(p.IP6),
 					}}
-					p.logger.Debug("failed to resolve dns query hence sending proxy ip6", zap.Reflect("proxy Ip", p.IP6))
+					p.logger.Debug("failed to resolve dns query hence sending proxy ip6", zap.Any("proxy Ip", p.IP6))
 				case dns.TypeSRV:
 					// Special handling for MongoDB SRV queries
 					if strings.HasPrefix(question.Name, "_mongodb._tcp.") {

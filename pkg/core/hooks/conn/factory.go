@@ -58,12 +58,12 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 				if stream != nil {
 					// Skip HTTP gateway requests
 					if pkg.IsGRPCGatewayRequest(stream) {
-						factory.logger.Debug("Skipping internal gRPC request proxied by gRPC-gateway", zap.Reflect("stream", stream))
+						factory.logger.Debug("Skipping internal gRPC request proxied by gRPC-gateway", zap.Any("stream", stream))
 						continue
 					}
 
 					factory.logger.Debug("Processing HTTP2/gRPC request",
-						zap.Reflect("connection_id", connID))
+						zap.Any("connection_id", connID))
 
 					// Get timestamps from the stream
 					CaptureGRPC(ctx, factory.logger, t, stream)

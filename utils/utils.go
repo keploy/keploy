@@ -171,7 +171,7 @@ func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 		if bypass.Host != "" {
 			regex, err := regexp.Compile(bypass.Host)
 			if err != nil {
-				LogError(logger, err, "failed to compile the host regex", zap.Reflect("metadata", GetReqMeta(req)))
+				LogError(logger, err, "failed to compile the host regex", zap.Any("metadata", GetReqMeta(req)))
 				continue
 			}
 			passThrough = regex.MatchString(req.Host)
@@ -182,7 +182,7 @@ func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 		if bypass.Path != "" {
 			regex, err := regexp.Compile(bypass.Path)
 			if err != nil {
-				LogError(logger, err, "failed to compile the path regex", zap.Reflect("metadata", GetReqMeta(req)))
+				LogError(logger, err, "failed to compile the path regex", zap.Any("metadata", GetReqMeta(req)))
 				continue
 			}
 			passThrough = regex.MatchString(req.URL.String())

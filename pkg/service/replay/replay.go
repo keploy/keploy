@@ -1025,7 +1025,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if !testPass {
 			// log the consumed mocks during the test run of the test case for test set
 			r.logger.Info("result", zap.String("testcase id", models.HighlightFailingString(testCase.Name)), zap.String("testset id", models.HighlightFailingString(testSetID)), zap.String("passed", models.HighlightFailingString(testPass)))
-			r.logger.Debug("Consumed Mocks", zap.Reflect("mocks", consumedMocks))
+			r.logger.Debug("Consumed Mocks", zap.Any("mocks", consumedMocks))
 		} else {
 			r.logger.Info("result", zap.String("testcase id", models.HighlightPassingString(testCase.Name)), zap.String("testset id", models.HighlightPassingString(testSetID)), zap.String("passed", models.HighlightPassingString(testPass)))
 		}
@@ -1169,7 +1169,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	// remove the unused mocks by the test cases of a testset (if the base path is not provided )
 	if r.config.Test.RemoveUnusedMocks && testSetStatus == models.TestSetStatusPassed && r.instrument {
-		r.logger.Debug("consumed mocks from the completed testset", zap.String("for test-set", testSetID), zap.Reflect("consumed mocks", totalConsumedMocks))
+		r.logger.Debug("consumed mocks from the completed testset", zap.String("for test-set", testSetID), zap.Any("consumed mocks", totalConsumedMocks))
 		// delete the unused mocks from the data store
 		r.logger.Info("deleting unused mocks from the data store", zap.String("for test-set", testSetID))
 		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, totalConsumedMocks)

@@ -84,7 +84,7 @@ func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
 func (p *Proxy) InitIntegrations(_ context.Context) error {
 	// initialize the integrations
 	for parserType, parser := range integrations.Registered {
-		logger := p.logger.With(zap.Reflect("Type", parserType))
+		logger := p.logger.With(zap.Any("Type", parserType))
 		prs := parser.Initializer(logger)
 		p.Integrations[parserType] = prs
 		p.integrationsPriority = append(p.integrationsPriority, ParserPriority{Priority: parser.Priority, ParserType: parserType})
@@ -294,7 +294,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	defer func(start time.Time) {
 		duration := time.Since(start)
-		p.logger.Debug("time taken by proxy to execute the flow", zap.Reflect("Client ConnectionID", clientConnID), zap.Int64("Duration(ms)", duration.Milliseconds()))
+		p.logger.Debug("time taken by proxy to execute the flow", zap.Any("Client ConnectionID", clientConnID), zap.Int64("Duration(ms)", duration.Milliseconds()))
 	}(start)
 
 	// dstConn stores conn with actual destination for the outgoing network call
@@ -338,7 +338,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	case 6:
 		p.logger.Debug("the destination is ipv6")
 		dstAddr = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.IPv6Addr), destInfo.Port)
-		p.logger.Debug("", zap.Reflect("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
+		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
 	}
 
 	// This is used to handle the parser errors
@@ -354,7 +354,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			err := srcConn.Close()
 			if err != nil {
 				if !strings.Contains(err.Error(), "use of closed network connection") {
-					utils.LogError(p.logger, err, "failed to close the source connection", zap.Reflect("clientConnID", clientConnID))
+					utils.LogError(p.logger, err, "failed to close the source connection", zap.Any("clientConnID", clientConnID))
 				}
 				return
 			}
@@ -439,7 +439,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	testBuffer, err := reader.Peek(len(initialData))
 	if err != nil {
 		if err == io.EOF && len(testBuffer) == 0 {
-			p.logger.Debug("received EOF, closing conn", zap.Reflect("connectionID", clientConnID), zap.Error(err))
+			p.logger.Debug("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(err))
 			return nil
 		}
 		utils.LogError(p.logger, err, "failed to peek the request message in proxy", zap.Uint32("proxy port", p.Port))

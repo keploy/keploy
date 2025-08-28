@@ -45,7 +45,7 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		mockFileName = ys.MockName
 	}
 	path := filepath.Join(ys.MockPath, testSetID)
-	ys.Logger.Debug("logging the names of the unused mocks to be removed", zap.Reflect("mockNames", mockNames), zap.String("for testset", testSetID), zap.String("at_path", filepath.Join(path, mockFileName+".yaml")))
+	ys.Logger.Debug("logging the names of the unused mocks to be removed", zap.Any("mockNames", mockNames), zap.String("for testset", testSetID), zap.String("at_path", filepath.Join(path, mockFileName+".yaml")))
 
 	// Read the mocks from the yaml file
 	mockPath, err := yaml.ValidatePath(filepath.Join(path, mockFileName+".yaml"))
@@ -89,7 +89,7 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 			continue
 		}
 	}
-	ys.Logger.Debug("logging the names of the used mocks", zap.Reflect("mockNames", newMocks), zap.String("for testset", testSetID))
+	ys.Logger.Debug("logging the names of the used mocks", zap.Any("mockNames", newMocks), zap.String("for testset", testSetID))
 
 	// remove the old mock yaml file
 	err = os.Remove(filepath.Join(path, mockFileName+".yaml"))

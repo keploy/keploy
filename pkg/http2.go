@@ -402,7 +402,7 @@ func (sm *DefaultStreamManager) checkStreamCompletion(streamID uint32) {
 	if !stream.isRequest && stream.requestComplete {
 		if stream.endStreamReceived && stream.headersReceived && stream.trailersReceived { // For gRPC, ensure trailers are received
 
-			sm.logger.Debug("Stream completed", zap.Reflect("stream", stream))
+			sm.logger.Debug("Stream completed", zap.Any("stream", stream))
 
 			stream.isComplete = true
 		}

@@ -204,7 +204,7 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 		return err
 	}
 
-	m.logger.Debug("The latest plan", zap.Reflect("Plan", plan))
+	m.logger.Debug("The latest plan", zap.Any("Plan", plan))
 
 	// Inspect local mock file
 	localMockPath := filepath.Join(m.cfg.Path, testSetID, "mocks.yaml")

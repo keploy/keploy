@@ -45,11 +45,11 @@ func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, 
 func (h *Hooks) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCase, testSetID string) (interface{}, error) {
 	switch tc.Kind {
 	case models.HTTP:
-		h.logger.Debug("Simulating HTTP request", zap.Reflect("Test case", tc))
+		h.logger.Debug("Simulating HTTP request", zap.Any("Test case", tc))
 		return pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, h.cfg.Test.APITimeout)
 
 	case models.GRPC_EXPORT:
-		h.logger.Debug("Simulating gRPC request", zap.Reflect("Test case", tc))
+		h.logger.Debug("Simulating gRPC request", zap.Any("Test case", tc))
 		return pkg.SimulateGRPC(ctx, tc, testSetID, h.logger)
 
 	default:
@@ -199,7 +199,7 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 }
 
 func (h *Hooks) AfterTestRun(_ context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error {
-	h.logger.Debug("AfterTestRun hook executed", zap.String("testRunID", testRunID), zap.Reflect("testSetIDs", testSetIDs), zap.Reflect("coverage", coverage))
+	h.logger.Debug("AfterTestRun hook executed", zap.String("testRunID", testRunID), zap.Any("testSetIDs", testSetIDs), zap.Any("coverage", coverage))
 	return nil
 }
 
@@ -274,7 +274,7 @@ func getLatestPlan(ctx context.Context, logger *zap.Logger, serverUrl, token str
 	}
 
 	if res.Plan.Type == "" {
-		logger.Error("plan type missing in successful response", zap.Reflect("plan", res.Plan))
+		logger.Error("plan type missing in successful response", zap.Any("plan", res.Plan))
 		return "", fmt.Errorf("plan not found")
 	}
 

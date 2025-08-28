@@ -574,7 +574,7 @@ func (s *contract) DownloadMocks(ctx context.Context, _ string) error {
 				// Marshal the mock data to YAML format
 				mockYAML, err := yamlLib.Marshal(mock)
 				if err != nil {
-					utils.LogError(s.logger, err, "failed to marshal mock data", zap.Reflect("mock", mock))
+					utils.LogError(s.logger, err, "failed to marshal mock data", zap.Any("mock", mock))
 					return err
 				}
 

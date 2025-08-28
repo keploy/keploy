@@ -692,7 +692,7 @@ func addTemplates(logger *zap.Logger, interface1 interface{}, interface2 interfa
 				return true
 			}
 		default:
-			logger.Error("unsupported type while templatizing", zap.Reflect("type", w))
+			logger.Error("unsupported type while templatizing", zap.Any("type", w))
 			return false
 		}
 	}
