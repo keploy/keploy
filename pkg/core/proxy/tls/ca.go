@@ -158,7 +158,7 @@ func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error
 		storePass := "changeit"
 		alias := "keployCA"
 
-	logger.Debug("", zap.String("java_home", javaHome), zap.String("caCertsPath", cacertsPath), zap.String("caPath", caPath))
+		logger.Debug("", zap.String("java_home", javaHome), zap.String("caCertsPath", cacertsPath), zap.String("caPath", caPath))
 
 		if isJavaCAExist(ctx, alias, storePass, cacertsPath) {
 			logger.Debug("Java detected and CA already exists", zap.String("path", cacertsPath))
@@ -179,7 +179,7 @@ func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error
 		}
 
 		logger.Debug("Java detected and successfully imported CA", zap.String("path", cacertsPath), zap.String("output", string(cmdOutput)))
-	logger.Debug("Successfully imported CA", zap.ByteString("output", cmdOutput))
+		logger.Debug("Successfully imported CA", zap.ByteString("output", cmdOutput))
 	} else {
 		logger.Debug("Java is not installed on the system")
 	}

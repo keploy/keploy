@@ -253,7 +253,7 @@ func (conn *Tracker) AddCloseEvent(event SocketCloseEvent) {
 	defer conn.mutex.Unlock()
 	conn.UpdateTimestamps()
 	if conn.closeTimestamp != 0 && conn.closeTimestamp != event.TimestampNano {
-	conn.logger.Debug("Changed close info timestamp due to new request", zap.Uint64("from", conn.closeTimestamp), zap.Uint64("to", event.TimestampNano))
+		conn.logger.Debug("Changed close info timestamp due to new request", zap.Uint64("from", conn.closeTimestamp), zap.Uint64("to", event.TimestampNano))
 	}
 	conn.closeTimestamp = event.TimestampNano
 	conn.logger.Debug(fmt.Sprintf("Got a close event from eBPF on connectionId:%v\n", event.ConnID))
@@ -369,11 +369,11 @@ func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Ti
 			recordTraffic = false
 		}
 
-	conn.logger.Debug(fmt.Sprintf("recording traffic after verifying the request and reponse data:%v", recordTraffic))
+		conn.logger.Debug(fmt.Sprintf("recording traffic after verifying the request and reponse data:%v", recordTraffic))
 
 		// // decrease the recTestCounter
 		conn.decRecordTestCount()
-	conn.logger.Debug("verified recording", zap.Bool("recordTraffic", recordTraffic))
+		conn.logger.Debug("verified recording", zap.Bool("recordTraffic", recordTraffic))
 	} else if conn.lastChunkWasResp && elapsedTime >= uint64(time.Second*2) { // Check if 2 seconds has passed since the last activity.
 		conn.logger.Debug("might be last request on the conn")
 
@@ -458,8 +458,8 @@ func (conn *Tracker) handleHTTP2Data(event SocketDataEvent) {
 	for len(conn.buffer) >= 9 { // Minimum frame size
 		frame, consumed, err := pkg.ExtractHTTP2Frame(conn.buffer)
 		if err != nil {
-				if strings.Contains(err.Error(), "incomplete frame") {
-					conn.logger.Debug("Incomplete frame", zap.Error(err))
+			if strings.Contains(err.Error(), "incomplete frame") {
+				conn.logger.Debug("Incomplete frame", zap.Error(err))
 				// Not enough data yet, wait for more
 				break
 			}
@@ -528,7 +528,7 @@ func (conn *Tracker) handleHTTP1Data(event SocketDataEvent) {
 		}
 
 	case IngressTraffic:
-	conn.logger.Debug("isNewRequest", zap.Bool("isNewRequest", conn.isNewRequest), zap.Reflect("connID", conn.connID))
+		conn.logger.Debug("isNewRequest", zap.Bool("isNewRequest", conn.isNewRequest), zap.Reflect("connID", conn.connID))
 		// Capturing the timestamp of request as the request just started to come.
 		if conn.isNewRequest {
 			conn.reqTimestamps = append(conn.reqTimestamps, ConvertUnixNanoToTime(event.EntryTimestampNano))

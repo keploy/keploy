@@ -96,8 +96,8 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		}
 
 		// debug log for cleanExp and cleanAct
-	logger.Debug("cleanExp", zap.Reflect("cleanExp", cleanExp))
-	logger.Debug("cleanAct", zap.Reflect("cleanAct", cleanAct))
+		logger.Debug("cleanExp", zap.Reflect("cleanExp", cleanExp))
+		logger.Debug("cleanAct", zap.Reflect("cleanAct", cleanAct))
 	} else {
 		if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && tc.HTTPResp.Body != actualResponse.Body {
 			pass = false

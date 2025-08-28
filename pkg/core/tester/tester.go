@@ -56,7 +56,7 @@ func (t *Tester) setupReplay(ctx context.Context) error {
 	recordPid, err := utils.GetPIDFromPort(ctx, t.logger, recordPort)
 	if err != nil {
 		t.logger.Error("failed to get the keployRecord pid", zap.Error(err))
-				utils.LogError(t.logger, err, "failed to get the keployRecord pid from port", zap.Uint32("port", recordPort))
+		utils.LogError(t.logger, err, "failed to get the keployRecord pid from port", zap.Uint32("port", recordPort))
 		return setUpErr
 	}
 

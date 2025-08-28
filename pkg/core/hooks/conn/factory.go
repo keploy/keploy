@@ -61,8 +61,8 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 						continue
 					}
 
-			factory.logger.Debug("Processing HTTP2/gRPC request",
-				zap.Reflect("connection_id", connID))
+					factory.logger.Debug("Processing HTTP2/gRPC request",
+						zap.Reflect("connection_id", connID))
 
 					// Get timestamps from the stream
 					CaptureGRPC(ctx, factory.logger, t, stream)

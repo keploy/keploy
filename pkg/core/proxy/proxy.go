@@ -84,7 +84,7 @@ func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
 func (p *Proxy) InitIntegrations(_ context.Context) error {
 	// initialize the integrations
 	for parserType, parser := range integrations.Registered {
-	logger := p.logger.With(zap.Reflect("Type", parserType))
+		logger := p.logger.With(zap.Reflect("Type", parserType))
 		prs := parser.Initializer(logger)
 		p.Integrations[parserType] = prs
 		p.integrationsPriority = append(p.integrationsPriority, ParserPriority{Priority: parser.Priority, ParserType: parserType})
@@ -294,7 +294,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	defer func(start time.Time) {
 		duration := time.Since(start)
-	p.logger.Debug("time taken by proxy to execute the flow", zap.Reflect("Client ConnectionID", clientConnID), zap.Int64("Duration(ms)", duration.Milliseconds()))
+		p.logger.Debug("time taken by proxy to execute the flow", zap.Reflect("Client ConnectionID", clientConnID), zap.Int64("Duration(ms)", duration.Milliseconds()))
 	}(start)
 
 	// dstConn stores conn with actual destination for the outgoing network call
@@ -310,21 +310,21 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
 	if err != nil {
-	utils.LogError(p.logger, err, "failed to fetch the destination info", zap.Int("Source port", sourcePort))
+		utils.LogError(p.logger, err, "failed to fetch the destination info", zap.Int("Source port", sourcePort))
 		return err
 	}
 
 	// releases the occupied source port when done fetching the destination info
 	err = p.DestInfo.Delete(ctx, uint16(sourcePort))
 	if err != nil {
-	utils.LogError(p.logger, err, "failed to delete the destination info", zap.Int("Source port", sourcePort))
+		utils.LogError(p.logger, err, "failed to delete the destination info", zap.Int("Source port", sourcePort))
 		return err
 	}
 
 	//get the session rule
 	rule, ok := p.sessions.Get(destInfo.AppID)
 	if !ok {
-	utils.LogError(p.logger, nil, "failed to fetch the session rule", zap.Uint64("AppID", destInfo.AppID))
+		utils.LogError(p.logger, nil, "failed to fetch the session rule", zap.Uint64("AppID", destInfo.AppID))
 		return err
 	}
 
@@ -334,11 +334,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	case 4:
 		p.logger.Debug("the destination is ipv4")
 		dstAddr = fmt.Sprintf("%v:%v", util.ToIP4AddressStr(destInfo.IPv4Addr), destInfo.Port)
-	p.logger.Debug("", zap.Uint32("DestIp4", destInfo.IPv4Addr), zap.Uint32("DestPort", destInfo.Port))
+		p.logger.Debug("", zap.Uint32("DestIp4", destInfo.IPv4Addr), zap.Uint32("DestPort", destInfo.Port))
 	case 6:
 		p.logger.Debug("the destination is ipv6")
 		dstAddr = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.IPv6Addr), destInfo.Port)
-	p.logger.Debug("", zap.Reflect("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
+		p.logger.Debug("", zap.Reflect("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
 	}
 
 	// This is used to handle the parser errors
@@ -420,7 +420,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		m, ok := p.MockManagers.Load(destInfo.AppID)
 		if !ok {
-		utils.LogError(p.logger, nil, "failed to fetch the mock manager", zap.Uint64("AppID", destInfo.AppID))
+			utils.LogError(p.logger, nil, "failed to fetch the mock manager", zap.Uint64("AppID", destInfo.AppID))
 			return err
 		}
 
@@ -442,7 +442,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			p.logger.Debug("received EOF, closing conn", zap.Reflect("connectionID", clientConnID), zap.Error(err))
 			return nil
 		}
-	utils.LogError(p.logger, err, "failed to peek the request message in proxy", zap.Uint32("proxy port", p.Port))
+		utils.LogError(p.logger, err, "failed to peek the request message in proxy", zap.Uint32("proxy port", p.Port))
 		return err
 	}
 
@@ -533,7 +533,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return err
 		}
 
-	logger.Debug("the external call is tls-encrypted", zap.Bool("isTLS", isTLS))
+		logger.Debug("the external call is tls-encrypted", zap.Bool("isTLS", isTLS))
 		cfg := &tls.Config{
 			InsecureSkipVerify: true,
 			ServerName:         dstURL,
@@ -542,10 +542,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = tls.Dial("tcp", addr, cfg)
-				if err != nil {
-					utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
-					return err
-				}
+			if err != nil {
+				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
+				return err
+			}
 		}
 
 		dstCfg.TLSCfg = cfg
@@ -554,10 +554,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	} else {
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = net.Dial("tcp", dstAddr)
-				if err != nil {
-					utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
-					return err
-				}
+			if err != nil {
+				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
+				return err
+			}
 		}
 		dstCfg.Addr = dstAddr
 	}
@@ -581,7 +581,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			continue // Skip if parser not found
 		}
 
-	p.logger.Debug("Checking for the parser", zap.String("ParserType", string(parserPair.ParserType)))
+		p.logger.Debug("Checking for the parser", zap.String("ParserType", string(parserPair.ParserType)))
 		if parser.MatchType(parserCtx, initialBuf) {
 			matchedParser = parser
 			parserType = parserPair.ParserType
@@ -591,7 +591,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	if !generic {
-	p.logger.Debug("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
+		p.logger.Debug("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
 		switch rule.Mode {
 		case models.MODE_RECORD:
 			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)

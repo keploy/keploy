@@ -256,7 +256,7 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 			tsConfig.MockRegistry.User = username
 		}
 
-	m.logger.Info("uploading mock file...", zap.String("testSet", testSetID))
+		m.logger.Info("uploading mock file...", zap.String("testSet", testSetID))
 
 		err = m.storage.Upload(ctx, mockFileReader, mockHash, m.cfg.AppName, m.token)
 		if err != nil {

@@ -94,10 +94,10 @@ func (ts *OpenAPIYaml) GetMocksSchemas(ctx context.Context, testSetID string, mo
 	if _, err := os.Stat(mockPath); err == nil {
 		var mockYamls []*models.OpenAPI
 		data, err := yaml.ReadFile(ctx, ts.logger, path, mockFileName)
-			if err != nil {
-				utils.LogError(ts.logger, err, "failed to read the mocks from config yaml", zap.String("session", filepath.Base(path)))
-				return nil, err
-			}
+		if err != nil {
+			utils.LogError(ts.logger, err, "failed to read the mocks from config yaml", zap.String("session", filepath.Base(path)))
+			return nil, err
+		}
 		dec := yamlLib.NewDecoder(bytes.NewReader(data))
 		for {
 			var doc *models.OpenAPI

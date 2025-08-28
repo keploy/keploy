@@ -45,11 +45,11 @@ func NewHooks(logger *zap.Logger, cfg *config.Config, tsConfigDB TestSetConfig, 
 func (h *Hooks) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCase, testSetID string) (interface{}, error) {
 	switch tc.Kind {
 	case models.HTTP:
-	h.logger.Debug("Simulating HTTP request", zap.Reflect("Test case", tc))
+		h.logger.Debug("Simulating HTTP request", zap.Reflect("Test case", tc))
 		return pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, h.cfg.Test.APITimeout)
 
 	case models.GRPC_EXPORT:
-	h.logger.Debug("Simulating gRPC request", zap.Reflect("Test case", tc))
+		h.logger.Debug("Simulating gRPC request", zap.Reflect("Test case", tc))
 		return pkg.SimulateGRPC(ctx, tc, testSetID, h.logger)
 
 	default:

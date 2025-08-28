@@ -110,7 +110,7 @@ func (h *Hooks) SendDockerAppInfo(appID uint64, dockerAppInfo structs.DockerAppI
 	if h.appID != 0 {
 		err := h.dockerAppRegistrationMap.Delete(h.appID)
 		if err != nil {
-				utils.LogError(h.logger, err, "failed to remove entry from dockerAppRegistrationMap", zap.Uint64("(Key)/AppID", h.appID))
+			utils.LogError(h.logger, err, "failed to remove entry from dockerAppRegistrationMap", zap.Uint64("(Key)/AppID", h.appID))
 			return err
 		}
 	}

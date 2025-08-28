@@ -33,7 +33,7 @@ func (p *Proxy) startTCPDNSServer(_ context.Context) error {
 	p.logger.Info(fmt.Sprintf("starting TCP DNS server at addr %v", server.Addr))
 	err := server.ListenAndServe()
 	if err != nil {
-	utils.LogError(p.logger, err, "failed to start tcp dns server", zap.String("addr", server.Addr))
+		utils.LogError(p.logger, err, "failed to start tcp dns server", zap.String("addr", server.Addr))
 	}
 	return nil
 }
@@ -56,7 +56,7 @@ func (p *Proxy) startUDPDNSServer(_ context.Context) error {
 	p.logger.Info(fmt.Sprintf("starting UDP DNS server at addr %v", server.Addr))
 	err := server.ListenAndServe()
 	if err != nil {
-	utils.LogError(p.logger, err, "failed to start udp dns server", zap.String("addr", server.Addr))
+		utils.LogError(p.logger, err, "failed to start udp dns server", zap.String("addr", server.Addr))
 		return err
 	}
 	return nil
@@ -84,7 +84,7 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	msg.Authoritative = true
 	p.logger.Debug("Got some Dns queries")
 	for _, question := range r.Question {
-	p.logger.Debug("", zap.Int("Record Type", int(question.Qtype)), zap.String("Received Query", question.Name))
+		p.logger.Debug("", zap.Int("Record Type", int(question.Qtype)), zap.String("Received Query", question.Name))
 
 		key := generateCacheKey(question.Name, question.Qtype)
 
