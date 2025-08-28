@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"time"
 
-	"encoding/json"
 	"regexp"
 	"strings"
 
@@ -21,203 +20,6 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
-
-// normalizeKey converts a key to a canonical form for comparison.
-func normalizeKey(k string) string {
-	k = strings.ToLower(k)
-	k = strings.ReplaceAll(k, "-", "")
-	k = strings.ReplaceAll(k, "_", "")
-	return k
-}
-
-// stripNumericSuffix removes trailing digits from a string and returns
-// the base string and whether a suffix was found
-func stripNumericSuffix(s string) (string, bool) {
-	for i := len(s) - 1; i >= 0; i-- {
-		if s[i] < '0' || s[i] > '9' {
-			if i < len(s)-1 {
-				return s[:i+1], true
-			}
-			return s, false
-		}
-	}
-	return "", false
-}
-
-// *** NEW: Generic function to extract all primitive fields (string, number, bool) ***
-// This replaces the old string-only `extractStringFields`.
-func extractAllPrimitiveFields(v interface{}, out map[string]interface{}) {
-	switch val := v.(type) {
-	case map[string]interface{}:
-		for k, inner := range val {
-			normKey := normalizeKey(k)
-			switch innerTyped := inner.(type) {
-			// Found a primitive value, store it with its normalized key.
-			case string, float64, bool:
-				// We only store the first occurrence of a key to keep it simple.
-				if _, exists := out[normKey]; !exists {
-					out[normKey] = innerTyped
-				}
-			default:
-				// Recurse into nested objects/arrays.
-				extractAllPrimitiveFields(innerTyped, out)
-			}
-		}
-	case []interface{}:
-		for _, elem := range val {
-			extractAllPrimitiveFields(elem, out)
-		}
-	}
-}
-
-// *** REWRITTEN & SIMPLIFIED: A robust function to update templates from any primitive type in a JSON response ***
-// This version includes generic numeric suffix handling
-func updateTemplatesFromJSON(body []byte, templates map[string]interface{}, logger *zap.Logger) bool {
-	if len(templates) == 0 || len(body) == 0 {
-		return false
-	}
-
-	var parsed map[string]interface{}
-	decoder := json.NewDecoder(strings.NewReader(string(body)))
-	decoder.UseNumber() // Important: preserves numbers as strings for accurate conversion
-	if err := decoder.Decode(&parsed); err != nil {
-		// Fallback for non-JSON bodies (e.g., raw JWT token)
-		jwtRe := regexp.MustCompile(`eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+`)
-		token := jwtRe.FindString(string(body))
-		if token == "" {
-			return false
-		}
-
-		changed := false
-		for k := range templates {
-			if strings.Contains(normalizeKey(k), "token") && templates[k] != token {
-				logger.Debug("Updating template from non-JSON response (JWT)", zap.String("key", k), zap.Any("new_value", token))
-				templates[k] = token
-				changed = true
-			}
-		}
-		return changed
-	}
-
-	logger.Debug("Attempting to update templates from response", zap.Any("current_templates", templates))
-
-	changed := false
-	for tKey, tVal := range templates {
-		// Try exact match first
-		if rVal, exists := parsed[tKey]; exists {
-			currentStr := fmt.Sprintf("%v", tVal)
-			newStr := fmt.Sprintf("%v", rVal)
-
-			logger.Debug("Comparing template value with response value (exact match)",
-				zap.String("template_key", tKey),
-				zap.String("response_key", tKey),
-				zap.String("current_value_str", currentStr),
-				zap.String("new_value_str", newStr),
-			)
-
-			if currentStr != newStr {
-				var finalValue interface{} = rVal
-				if num, ok := rVal.(json.Number); ok {
-					// Try to convert to int64 first
-					if i, err := num.Int64(); err == nil {
-						finalValue = i
-					} else if f, err := num.Float64(); err == nil {
-						// If int64 fails, try float64
-						finalValue = f
-					}
-					// If both fail, it remains a string, which is fine.
-				}
-
-				logger.Info("Updating template value (exact match)",
-					zap.String("key", tKey),
-					zap.Any("old_value", tVal),
-					zap.Any("new_value", finalValue),
-				)
-				templates[tKey] = finalValue
-				changed = true
-			}
-			continue // Found exact match, move to next template key
-		}
-
-		// Handle numeric suffixes: if template key ends with number (like id1, token2, etc.)
-		// try matching with the base name (id, token, etc.) in the response
-		if baseKey, hasSuffix := stripNumericSuffix(tKey); hasSuffix {
-			if rVal, exists := parsed[baseKey]; exists {
-				currentStr := fmt.Sprintf("%v", tVal)
-				newStr := fmt.Sprintf("%v", rVal)
-
-				logger.Debug("Comparing template value with response value (suffix match)",
-					zap.String("template_key", tKey),
-					zap.String("response_key", baseKey),
-					zap.String("current_value_str", currentStr),
-					zap.String("new_value_str", newStr),
-				)
-
-				if currentStr != newStr {
-					var finalValue interface{} = rVal
-					if num, ok := rVal.(json.Number); ok {
-						if i, err := num.Int64(); err == nil {
-							finalValue = i
-						} else if f, err := num.Float64(); err == nil {
-							finalValue = f
-						}
-					}
-
-					logger.Info("Updating suffixed template from base response field",
-						zap.String("template_key", tKey),
-						zap.String("response_key", baseKey),
-						zap.Any("old_value", tVal),
-						zap.Any("new_value", finalValue),
-					)
-					templates[tKey] = finalValue
-					changed = true
-				}
-				continue // Found suffix match, move to next template key
-			}
-		}
-
-		// Fallback to normalized matching for backward compatibility
-		normTKey := normalizeKey(tKey)
-		for rKey, rVal := range parsed {
-			if normTKey == normalizeKey(rKey) {
-				currentStr := fmt.Sprintf("%v", tVal)
-				newStr := fmt.Sprintf("%v", rVal)
-
-				logger.Debug("Comparing template value with response value (normalized)",
-					zap.String("template_key", tKey),
-					zap.String("response_key", rKey),
-					zap.String("current_value_str", currentStr),
-					zap.String("new_value_str", newStr),
-				)
-
-				if currentStr != newStr {
-					var finalValue interface{} = rVal
-					if num, ok := rVal.(json.Number); ok {
-						if i, err := num.Int64(); err == nil {
-							finalValue = i
-						} else if f, err := num.Float64(); err == nil {
-							finalValue = f
-						}
-					}
-
-					logger.Info("Updating template value (normalized match)",
-						zap.String("key", tKey),
-						zap.Any("old_value", tVal),
-						zap.Any("new_value", finalValue),
-					)
-					templates[tKey] = finalValue
-					changed = true
-				}
-				break // Found match for this template key, move to the next one
-			}
-		}
-	}
-
-	if changed {
-		logger.Debug("Final templates after update", zap.Any("updated_templates", templates))
-	}
-	return changed
-}
 
 // The rest of the file remains unchanged...
 // [ReRecord function, replayTests function, checkForTemplates function, etc.]
@@ -542,6 +344,12 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 				break
 			}
 		}
+		// Snapshot current template values before simulating request; SimulateHTTP may update them.
+		prevVals := make(map[string]interface{}, len(utils.TemplatizedValues))
+		for k, v := range utils.TemplatizedValues {
+			prevVals[k] = v
+		}
+
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSet, o.logger, o.config.Test.APITimeout)
 		if err != nil {
 			utils.LogError(o.logger, err, "failed to simulate HTTP request")
@@ -551,74 +359,56 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 			simErr = true
 			continue
 		}
-
+		fmt.Println("Response received for testcase ", tc.Name, " response code ", resp.StatusCode)
 		if resp != nil && resp.Body != "" && len(utils.TemplatizedValues) > 0 {
-			// Keep a snapshot to detect which keys changed
-			prevVals := make(map[string]interface{}, len(utils.TemplatizedValues))
-			for k, v := range utils.TemplatizedValues {
-				prevVals[k] = v
-			}
-			if updateTemplatesFromJSON([]byte(resp.Body), utils.TemplatizedValues, o.logger) {
-				// Persist template changes
-				if err := o.replay.UpdateTestSetTemplate(ctx, testSet, utils.TemplatizedValues); err != nil {
-					o.logger.Warn("failed to persist updated template values during rerecord", zap.String("testSet", testSet), zap.Error(err))
-				} else {
-					o.logger.Debug("updated template values during rerecord", zap.String("testSet", testSet), zap.Any("template", utils.TemplatizedValues))
+			// SimulateHTTP already updated templates; now perform propagation if any changed.
+			for key, newVal := range utils.TemplatizedValues {
+				oldVal, existed := prevVals[key]
+				if !existed { // newly introduced key -> skip propagation (no literal users yet tracked)
+					continue
 				}
-
-				// Propagate updated values only to tracked testcases that use the changed key (literal occurrences only; placeholders auto-render next time)
-				for key, newVal := range utils.TemplatizedValues {
-					oldVal := prevVals[key]
-					if oldVal == nil || fmt.Sprintf("%v", oldVal) == fmt.Sprintf("%v", newVal) {
+				if fmt.Sprintf("%v", oldVal) == fmt.Sprintf("%v", newVal) {
+					continue
+				}
+				oldStr := fmt.Sprintf("%v", oldVal)
+				newStr := fmt.Sprintf("%v", newVal)
+				base := strings.TrimRightFunc(key, func(r rune) bool { return r >= '0' && r <= '9' })
+				if base == "" {
+					base = key
+				}
+				for sibling, val := range utils.TemplatizedValues {
+					if sibling == key || !strings.HasPrefix(sibling, base) {
 						continue
 					}
-					oldStr := fmt.Sprintf("%v", oldVal)
-					newStr := fmt.Sprintf("%v", newVal)
-					// For each testcase tracked for this key
-					// Sibling key synchronization: propagate to non-producer siblings sharing same base (strip trailing digits)
-					base := strings.TrimRightFunc(key, func(r rune) bool { return r >= '0' && r <= '9' })
-					if base == "" { // if no alpha prefix, treat full key as base
-						base = key
+					if _, isProducer := producerKeys[sibling]; isProducer {
+						continue
 					}
-					for sibling, val := range utils.TemplatizedValues {
-						if sibling == key {
-							continue
-						}
-						if !strings.HasPrefix(sibling, base) {
-							continue
-						}
-						if fmt.Sprintf("%v", val) == newStr {
-							continue
-						}
-						if _, isProducer := producerKeys[sibling]; isProducer {
-							continue
-						}
-						// Only update if sibling currently tracked as consumer for this resource family
-						// Heuristic: sibling value equals oldStr OR sibling value not referenced in any response bodies.
-						if fmt.Sprintf("%v", val) == oldStr {
-							utils.TemplatizedValues[sibling] = newVal
-							// update usageMap so replacements below also consider sibling key
-						}
-					}
-
-					for future := range usageMap[key] {
-						if future.Name == tc.Name { // skip current producer testcase
-							continue
-						}
-						// Replace only if field not templated already.
-						if future.HTTPReq.URL != "" && !strings.Contains(future.HTTPReq.URL, "{{") && strings.Contains(future.HTTPReq.URL, oldStr) {
-							future.HTTPReq.URL = strings.ReplaceAll(future.HTTPReq.URL, oldStr, newStr)
-						}
-						for hk, hv := range future.HTTPReq.Header {
-							if hv == oldStr { // exact match safer for headers
-								future.HTTPReq.Header[hk] = newStr
-							}
-						}
-						if body := future.HTTPReq.Body; body != "" && !strings.Contains(body, "{{") && strings.Contains(body, oldStr) {
-							future.HTTPReq.Body = strings.ReplaceAll(body, oldStr, newStr)
-						}
+					if fmt.Sprintf("%v", val) == oldStr {
+						utils.TemplatizedValues[sibling] = newVal
 					}
 				}
+				for future := range usageMap[key] {
+					if future.Name == tc.Name {
+						continue
+					}
+					if future.HTTPReq.URL != "" && !strings.Contains(future.HTTPReq.URL, "{{") && strings.Contains(future.HTTPReq.URL, oldStr) {
+						future.HTTPReq.URL = strings.ReplaceAll(future.HTTPReq.URL, oldStr, newStr)
+					}
+					for hk, hv := range future.HTTPReq.Header {
+						if hv == oldStr {
+							future.HTTPReq.Header[hk] = newStr
+						}
+					}
+					if body := future.HTTPReq.Body; body != "" && !strings.Contains(body, "{{") && strings.Contains(body, oldStr) {
+						future.HTTPReq.Body = strings.ReplaceAll(body, oldStr, newStr)
+					}
+				}
+			}
+			// Persist any template changes (best-effort) after propagation
+			if err := o.replay.UpdateTestSetTemplate(ctx, testSet, utils.TemplatizedValues); err != nil {
+				o.logger.Warn("failed to persist updated template values during rerecord", zap.String("testSet", testSet), zap.Error(err))
+			} else {
+				o.logger.Debug("updated template values during rerecord", zap.String("testSet", testSet), zap.Any("template", utils.TemplatizedValues))
 			}
 		}
 
