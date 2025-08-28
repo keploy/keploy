@@ -1,0 +1,23 @@
+name: KeployAI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  ai-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Required to get the full git history for diffing
+
+      - name: Run Smart AI Code Review
+        uses: euclidstellar/code-review-agent@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}

@@ -9,10 +9,9 @@ import (
 	"github.com/agnivade/levenshtein"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
-	"go.uber.org/zap"
-
 	"go.keploy.io/server/v2/pkg/matcher/grpc"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.uber.org/zap"
 )
 
 func FilterMocksRelatedToGrpc(mocks []*models.Mock) []*models.Mock {
@@ -80,8 +79,6 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 			}
 
 			// apply fuzzy match for body with schemaMatched mocks
-
-			// apply fuzzy match for body with schemaMatched mocks
 			// Guard against quadratic work on very large bodies.
 			if len(expBody) > 512*1024 {
 				logger.Debug("skipping fuzzy match for large body", zap.Int("len", len(expBody)))
@@ -109,6 +106,7 @@ func schemaMatch(ctx context.Context, logger *zap.Logger, req models.GrpcReq, mo
 			return nil, ctx.Err()
 		}
 		mockReq := mock.Spec.GRPCReq
+
 		// Require :method and :path to match exactly; tolerate :authority-only differences.
 		mp := mockReq.Headers.PseudoHeaders
 		rp := req.Headers.PseudoHeaders
@@ -246,6 +244,7 @@ func findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 	mxIdx := -1
 	for idx, mock := range mocks {
 		encoded := []byte(mock.Spec.GRPCReq.Body.DecodedData)
+
 		// Trim mock data to 2048 bytes for performance
 		if len(encoded) > 2048 {
 			encoded = encoded[:2048]
