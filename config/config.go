@@ -147,6 +147,8 @@ type Test struct {
 
 type Report struct {
 	SelectedTestSets map[string][]string `json:"selectedTestSets" yaml:"selectedTestSets" mapstructure:"selectedTestSets"`
+	ShowFullBody     bool                `json:"showFullBody" yaml:"showFullBody" mapstructure:"showFullBody"`
+	ReportPath       string              `json:"reportPath" yaml:"reportPath" mapstructure:"reportPath"`
 }
 
 type Language string
