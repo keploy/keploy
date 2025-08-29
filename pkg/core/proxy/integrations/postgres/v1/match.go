@@ -62,8 +62,8 @@ func getTestPS(reqBuff [][]byte, logger *zap.Logger, ConnectionID string) {
 
 func IsValuePresent(connectionid string, value string) bool {
 
-	testmapMux.RLock() 
-    defer testmapMux.RUnlock() 
+	testmapMux.RLock()
+	defer testmapMux.RUnlock()
 
 	if testmap != nil {
 		for _, v := range testmap[connectionid] {
@@ -303,7 +303,7 @@ OuterLoop:
 				logger.Debug("Matched mock", zap.String("mock", matchedMock.Name))
 				finalMock := matchedMock.DeepCopy()
 				finalMock.TestModeInfo.IsFiltered = false
-                finalMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+				finalMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
 				updated := mockDb.UpdateUnFilteredMock(matchedMock, matchedMock)
 				if !updated {
 					logger.Debug("failed to update matched mock", zap.Error(err))
@@ -497,8 +497,8 @@ func findPGStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger 
 // postgres data types acc to result set format
 func changeResToPS(mock *models.Mock, actualPgReq *models.Backend, logger *zap.Logger, connectionID string) (bool, *models.Mock) {
 
-	testmapMux.RLock() 
-    defer testmapMux.RUnlock() 
+	testmapMux.RLock()
+	defer testmapMux.RUnlock()
 
 	actualpackets := actualPgReq.PacketTypes
 	mockPackets := mock.Spec.PostgresRequests[0].PacketTypes
@@ -598,8 +598,8 @@ func changeResToPS(mock *models.Mock, actualPgReq *models.Backend, logger *zap.L
 
 func PreparedStatementMatch(mock *models.Mock, actualPgReq *models.Backend, logger *zap.Logger, ConnectionID string, recordedPrep PrepMap) (bool, []string, error) {
 
-	testmapMux.RLock() 
-    defer testmapMux.RUnlock() 
+	testmapMux.RLock()
+	defer testmapMux.RUnlock()
 
 	// logger.Debug("Inside PreparedStatementMatch")
 

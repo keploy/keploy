@@ -126,7 +126,7 @@ func (m *Mock) DeepCopy() *Mock {
 
 	c.Spec.MongoRequests = make([]MongoRequest, len(m.Spec.MongoRequests))
 	copy(c.Spec.MongoRequests, m.Spec.MongoRequests)
-	
+
 	c.Spec.MongoResponses = make([]MongoResponse, len(m.Spec.MongoResponses))
 	copy(c.Spec.MongoResponses, m.Spec.MongoResponses)
 
@@ -138,7 +138,7 @@ func (m *Mock) DeepCopy() *Mock {
 
 	c.Spec.MySQLRequests = make([]mysql.Request, len(m.Spec.MySQLRequests))
 	copy(c.Spec.MySQLRequests, m.Spec.MySQLRequests)
-	
+
 	c.Spec.MySQLResponses = make([]mysql.Response, len(m.Spec.MySQLResponses))
 	copy(c.Spec.MySQLResponses, m.Spec.MySQLResponses)
 
