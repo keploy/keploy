@@ -60,7 +60,7 @@ send_request(){
 for i in {1..2}; do
     container_name="echoApp"
     send_request &
-    sudo -E env PATH=$PATH $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --buildDelay 35s &> "${container_name}.txt"
+    sudo -E env PATH=$PATH $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false &> "${container_name}.txt"
 
     echo "--- Start of Recording Logs for Iteration ${i} ---"
     cat "${container_name}.txt"
