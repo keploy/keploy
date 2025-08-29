@@ -96,8 +96,8 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		}
 
 		// debug log for cleanExp and cleanAct
-		logger.Debug("cleanExp", zap.Any("", cleanExp))
-		logger.Debug("cleanAct", zap.Any("", cleanAct))
+		logger.Debug("cleanExp", zap.Any("cleanExp", cleanExp))
+		logger.Debug("cleanAct", zap.Any("cleanAct", cleanAct))
 	} else {
 		if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && tc.HTTPResp.Body != actualResponse.Body {
 			pass = false
@@ -389,7 +389,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			}
 			if !found {
 				pass = false
-				logger.Error("status_code_in assertion failed", zap.Any("expectedCodes", ints), zap.Int("actual", actualResponse.StatusCode))
+				logger.Error("status_code_in assertion failed", zap.Ints("expectedCodes", ints), zap.Int("actual", actualResponse.StatusCode))
 			}
 
 		case models.HeaderEqual:
