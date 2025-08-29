@@ -41,7 +41,7 @@ func Import(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 				path = "output.json"
 			}
 			basePath, _ := cmd.Flags().GetString("base-path")
-			svc, err := serviceFactory.GetService(ctx, cmd)
+			svc, err := serviceFactory.GetService(ctx, "import")
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
 				return nil

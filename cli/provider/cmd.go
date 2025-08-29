@@ -635,6 +635,11 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 	case "record", "test", "rerecord":
+		bigPayload, err := cmd.Flags().GetBool("bigPayload")
+		if err != nil {
+			bigPayload = false
+		}
+		c.cfg.Record.BigPayload = bigPayload
 
 		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
 			path, err := cmd.Flags().GetString("path")
@@ -731,7 +736,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 		}
-		err := StartInDocker(ctx, c.logger, c.cfg)
+		err = StartInDocker(ctx, c.logger, c.cfg)
 		if err != nil {
 			return err
 		}

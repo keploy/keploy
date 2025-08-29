@@ -7,7 +7,7 @@ import (
 )
 
 type ServiceFactory interface {
-	GetService(ctx context.Context, cmd *cobra.Command) (interface{}, error)
+	GetService(ctx context.Context, cmd string) (interface{}, error)
 }
 
 type CmdConfigurator interface {

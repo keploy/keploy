@@ -63,7 +63,7 @@ type Hooks struct {
 	dockerAppRegistrationMap *ebpf.Map
 	redirectProxyMap         *ebpf.Map
 	e2eAppRegistrationMap    *ebpf.Map
-	flagMap                  *ebpf.Map
+	structChoiceMap          *ebpf.Map
 	//--------------
 
 	// eBPF C shared objectsobjects
@@ -383,11 +383,11 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
 	// Open a Kprobe at the entry point of the kernel function and attach the
 	// pre-compiled program.
-	h.flagMap = objs.FlagMap
+	h.structChoiceMap = objs.StructChoiceMap
 	if opts.BigPayload {
-		err = h.UpdateFlagMap(0, 1)
+		err = h.UpdateStructChoiceMap(0, 1)
 	} else {
-		err = h.UpdateFlagMap(0, 0)
+		err = h.UpdateStructChoiceMap(0, 0)
 	}
 
 	if err != nil {
@@ -725,13 +725,13 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 	h.logger.Info("eBPF resources released successfully...")
 }
 
-func (h *Hooks) UpdateFlagMap(key uint64, value uint64) error {
-	if h.flagMap == nil {
+func (h *Hooks) UpdateStructChoiceMap(key uint64, value uint64) error {
+	if h.structChoiceMap == nil {
 		return fmt.Errorf("flag map not initialized")
 	}
 
 	// Key and value must be pointers
-	err := h.flagMap.Update(
+	err := h.structChoiceMap.Update(
 		&key,           // Map key (pointer)
 		&value,         // New value (pointer)
 		ebpf.UpdateAny, // Update flags

@@ -102,7 +102,6 @@ type bpfMapSpecs struct {
 	DestInfoMap                 *ebpf.MapSpec `ebpf:"dest_info_map"`
 	DockerAppRegistrationMap    *ebpf.MapSpec `ebpf:"docker_app_registration_map"`
 	E2eInfoMap                  *ebpf.MapSpec `ebpf:"e2e_info_map"`
-	FlagMap                     *ebpf.MapSpec `ebpf:"flag_map"`
 	KeployAgentKernelPidMap     *ebpf.MapSpec `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.MapSpec `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.MapSpec `ebpf:"keploy_client_kernel_pid_map"`
@@ -111,9 +110,9 @@ type bpfMapSpecs struct {
 	OutgoingConnectArgsMap      *ebpf.MapSpec `ebpf:"outgoing_connect_args_map"`
 	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
 	SocketCloseEvents           *ebpf.MapSpec `ebpf:"socket_close_events"`
-	SocketDataEventBufferHeap   *ebpf.MapSpec `ebpf:"socket_data_event_buffer_heap"`
 	SocketDataEvents            *ebpf.MapSpec `ebpf:"socket_data_events"`
 	SocketOpenEvents            *ebpf.MapSpec `ebpf:"socket_open_events"`
+	StructChoiceMap             *ebpf.MapSpec `ebpf:"struct_choice_map"`
 	TaskStructMap               *ebpf.MapSpec `ebpf:"task_struct_map"`
 }
 
@@ -153,7 +152,6 @@ type bpfMaps struct {
 	DestInfoMap                 *ebpf.Map `ebpf:"dest_info_map"`
 	DockerAppRegistrationMap    *ebpf.Map `ebpf:"docker_app_registration_map"`
 	E2eInfoMap                  *ebpf.Map `ebpf:"e2e_info_map"`
-	FlagMap                     *ebpf.Map `ebpf:"flag_map"`
 	KeployAgentKernelPidMap     *ebpf.Map `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.Map `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.Map `ebpf:"keploy_client_kernel_pid_map"`
@@ -162,9 +160,9 @@ type bpfMaps struct {
 	OutgoingConnectArgsMap      *ebpf.Map `ebpf:"outgoing_connect_args_map"`
 	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
 	SocketCloseEvents           *ebpf.Map `ebpf:"socket_close_events"`
-	SocketDataEventBufferHeap   *ebpf.Map `ebpf:"socket_data_event_buffer_heap"`
 	SocketDataEvents            *ebpf.Map `ebpf:"socket_data_events"`
 	SocketOpenEvents            *ebpf.Map `ebpf:"socket_open_events"`
+	StructChoiceMap             *ebpf.Map `ebpf:"struct_choice_map"`
 	TaskStructMap               *ebpf.Map `ebpf:"task_struct_map"`
 }
 
@@ -180,7 +178,6 @@ func (m *bpfMaps) Close() error {
 		m.DestInfoMap,
 		m.DockerAppRegistrationMap,
 		m.E2eInfoMap,
-		m.FlagMap,
 		m.KeployAgentKernelPidMap,
 		m.KeployAgentRegistrationMap,
 		m.KeployClientKernelPidMap,
@@ -189,9 +186,9 @@ func (m *bpfMaps) Close() error {
 		m.OutgoingConnectArgsMap,
 		m.RedirectProxyMap,
 		m.SocketCloseEvents,
-		m.SocketDataEventBufferHeap,
 		m.SocketDataEvents,
 		m.SocketOpenEvents,
+		m.StructChoiceMap,
 		m.TaskStructMap,
 	)
 }

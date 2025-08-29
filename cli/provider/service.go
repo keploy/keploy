@@ -5,7 +5,6 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/service"
@@ -31,7 +30,7 @@ func NewServiceProvider(logger *zap.Logger, cfg *config.Config, auth service.Aut
 	}
 }
 
-func (n *ServiceProvider) GetService(ctx context.Context, cmd *cobra.Command) (interface{}, error) {
+func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface{}, error) {
 
 	tel := telemetry.NewTelemetry(n.logger, telemetry.Options{
 		Enabled:        !n.cfg.DisableTele,
@@ -41,16 +40,11 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd *cobra.Command) (i
 	})
 	tel.Ping()
 
-	switch cmd.Name() {
+	switch cmd {
 	case "gen":
 		return utgen.NewUnitTestGenerator(n.cfg, tel, n.auth, n.logger)
 	case "record", "test", "mock", "normalize", "rerecord", "contract", "config", "update", "login", "export", "import", "templatize", "report":
-		bigPayload, err := cmd.Flags().GetBool("bigPayload")
-		if err != nil {
-			bigPayload = false
-		}
-		n.cfg.Record.BigPayload = bigPayload
-		return Get(ctx, cmd.Name(), n.cfg, n.logger, tel, n.auth)
+		return Get(ctx, cmd, n.cfg, n.logger, tel, n.auth)
 	default:
 		return nil, errors.New("invalid command")
 	}
