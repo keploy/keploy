@@ -3,9 +3,7 @@
 package conn
 
 import (
-	"bytes"
 	"context"
-	"io"
 	"net/url"
 	"strings"
 	"sync"
@@ -84,19 +82,10 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 						continue
 					}
 
-					if parsedHTTPReq.Body != nil {
-						reqBodyBytes, _ := io.ReadAll(parsedHTTPReq.Body)
-						parsedHTTPReq.Body = io.NopCloser(bytes.NewReader(reqBodyBytes))
-					}
-
 					parsedHTTPRes, err := pkg.ParseHTTPResponse(responseBuf, parsedHTTPReq)
 					if err != nil {
 						utils.LogError(factory.logger, err, "failed to parse the http response from byte array", zap.Any("responseBuf", responseBuf))
 						continue
-					}
-					if parsedHTTPRes.Body != nil {
-						respBodyBytes, _ := io.ReadAll(parsedHTTPRes.Body)
-						parsedHTTPRes.Body = io.NopCloser(bytes.NewReader(respBodyBytes))
 					}
 
 					basePath := factory.incomingOpts.BasePath

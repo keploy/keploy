@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"sync"
@@ -383,16 +382,6 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
 	// Open a Kprobe at the entry point of the kernel function and attach the
 	// pre-compiled program.
-	h.structChoiceMap = objs.StructChoiceMap
-	if opts.BigPayload {
-		err = h.UpdateStructChoiceMap(0, 1)
-	} else {
-		err = h.UpdateStructChoiceMap(0, 0)
-	}
-
-	if err != nil {
-		log.Fatalf("Error setting flag in map: %v", err)
-	}
 	rd, err := link.Kprobe("sys_read", objs.SyscallProbeEntryRead, nil)
 	if err != nil {
 		utils.LogError(h.logger, err, "failed to attach the kprobe hook on sys_read")
@@ -586,6 +575,15 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 		return err
 	}
 
+	h.structChoiceMap = objs.StructChoiceMap
+	if opts.BigPayload {
+		err = h.UpdateStructChoiceMap(0, 1)
+	} else {
+		err = h.UpdateStructChoiceMap(0, 0)
+	}
+	if err != nil {
+		h.logger.Error("Error setting struct choice info in map", zap.Error(err))
+	}
 	return nil
 }
 
