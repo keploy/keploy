@@ -160,6 +160,7 @@
 # echo "🎉 All tests for all endpoints passed successfully!"
 # exit 0
 #!/bin/bash
+#!/bin/bash
 
 # Exit on error, undefined variable, or pipe failure.
 set -Eeuo pipefail
@@ -201,10 +202,33 @@ record_traffic() {
     local num_requests="$2"
     local url="http://127.0.0.1:3000/${endpoint}"
     local temp_file="large_payload.json"
+    local keploy_pid
+
+    # Capture the PID of the Keploy process
+    keploy_pid=$(pgrep keploy)
+    if [ -z "$keploy_pid" ]; then
+        echo "::error::Keploy process not found after starting record!"
+        exit 1
+    fi
+    echo "✅ Keploy recorder started with PID: $keploy_pid"
+
 
     echo "⏳ Waiting for application to start (30s)..."
-    sleep 30
-    echo "✅ Application is ready. Sending ${num_requests} requests to ${url}"
+    # Use a more robust wait mechanism
+    for i in {1..30}; do
+        if curl -s "http://127.0.0.1:3000/"; then
+            echo "✅ Application is ready."
+            break
+        fi
+        sleep 1
+    done
+    if ! curl -s "http://127.0.0.1:3000/"; then
+        echo "::error::Application did not start in time."
+        exit 1
+    fi
+
+
+    echo "🚀 Sending ${num_requests} requests to ${url}"
 
     if [ "$endpoint" == "large-payload" ]; then
         echo "📦 Generating 1MB payload for POST requests..."
@@ -214,11 +238,12 @@ record_traffic() {
     fi
 
     for (( i=1; i<=num_requests; i++ )); do
-        echo "🚀 Sending request ${i}/${num_requests}..."
+        echo "Sending request ${i}/${num_requests}..."
+        # **CORRECTION**: Added `|| true` to prevent the script from exiting on a failed curl request.
         if [ "$endpoint" == "large-payload" ]; then
-            curl -sS -o /dev/null -w "Status: %{http_code}\n" -X POST -H "Content-Type: application/json" --data @"$temp_file" "${url}"
+            curl -sS -o /dev/null -w "Status: %{http_code}\n" -X POST -H "Content-Type: application/json" --data @"$temp_file" "${url}" || true
         else
-            curl -sS -o /dev/null -w "Status: %{http_code}\n" "${url}"
+            curl -sS -o /dev/null -w "Status: %{http_code}\n" "${url}" || true
         fi
         sleep 0.2
     done
@@ -231,14 +256,18 @@ record_traffic() {
     echo "Waiting for final recordings to complete..."
     sleep 10
 
-    pid=$(pgrep keploy)
-    if [ -n "$pid" ]; then
-        echo "🛑 Stopping Keploy recorder (PID: $pid)..."
-        sudo kill "$pid" || true
-        # Wait for the process to terminate
-        sleep 5
+    if ps -p "$keploy_pid" > /dev/null; then
+        echo "🛑 Stopping Keploy recorder (PID: $keploy_pid)..."
+        sudo kill "$keploy_pid"
+        # Wait for the process to terminate gracefully
+        for i in {1..5}; do
+            if ! ps -p "$keploy_pid" > /dev/null; then
+                break
+            fi
+            sleep 1
+        done
     else
-        echo "⚠️ Keploy recorder process not found."
+        echo "⚠️ Keploy recorder process (PID: $keploy_pid) already stopped."
     fi
 }
 
@@ -253,7 +282,9 @@ verify_test_count() {
         exit 1
     fi
 
-    local actual_count=$(ls -1q ${test_dir}/test-*.yaml | wc -l)
+    local actual_count
+    actual_count=$(find "$test_dir" -type f -name 'test-*.yaml' | wc -l)
+
     echo "Found ${actual_count} recorded test cases. Expected ${expected_count}."
 
     if [ "$actual_count" -ne "$expected_count" ]; then
@@ -278,14 +309,19 @@ run_and_verify_tests() {
         exit 1
     fi
 
-    local report_file="./keploy/reports/test-run-0/test-set-0-report.yaml"
-    if [ ! -f "$report_file" ]; then
-        echo "🚨 Test report file not found at ${report_file}!"
+    local report_file
+    report_file=$(find ./keploy/reports -type f -name "test-set-0-report.yaml" | sort | tail -n 1)
+
+    if [ -z "$report_file" ] || [ ! -f "$report_file" ]; then
+        echo "🚨 Test report file not found!"
         cat "${test_log_file}"
         exit 1
     fi
+    echo "Found report file: $report_file"
 
-    local test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+
+    local test_status
+    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
     echo "Test status found: ${test_status}"
 
     if [ "$test_status" != "PASSED" ]; then
@@ -309,8 +345,8 @@ sudo "${RECORD_BIN}" config --generate
 echo "🎥 Starting recorder for small payload..."
 # Use RECORD_BIN for recording
 sudo -E env PATH="$PATH" "${RECORD_BIN}" record -c "node server.js" &> "record_small.txt" &
-record_traffic "small-payload" 10
-verify_test_count 10
+record_traffic "small-payload" 100
+verify_test_count 100
 run_and_verify_tests "test_small.txt"
 endsec
 
@@ -322,8 +358,8 @@ sudo "${RECORD_BIN}" config --generate
 echo "🎥 Starting recorder for large payload..."
 # Use RECORD_BIN for recording
 sudo -E env PATH="$PATH" "${RECORD_BIN}" record -c "node server.js" --bigPayload &> "record_large.txt" &
-record_traffic "large-payload" 10
-verify_test_count 10
+record_traffic "large-payload" 100
+verify_test_count 100
 run_and_verify_tests "test_large.txt"
 endsec
 
