@@ -22,6 +22,7 @@ import (
 )
 
 var testmap TestPrepMap
+var testmapMux sync.RWMutex
 
 func getTestPS(reqBuff [][]byte, logger *zap.Logger, ConnectionID string) {
 	// maintain a map of current prepared statements and their corresponding connection id
@@ -50,14 +51,20 @@ func getTestPS(reqBuff [][]byte, logger *zap.Logger, ConnectionID string) {
 
 	// also append the query data for the prepared statement
 	if len(querydata) > 0 {
+		testmapMux.Lock()
 		testmap2[ConnectionID] = append(testmap2[ConnectionID], querydata...)
 		// logger.Debug("Test Prepared statement Map", testmap2)
 		testmap = testmap2
+		testmapMux.Unlock()
 	}
 
 }
 
 func IsValuePresent(connectionid string, value string) bool {
+
+	testmapMux.RLock()
+	defer testmapMux.RUnlock()
+
 	if testmap != nil {
 		for _, v := range testmap[connectionid] {
 			if v.PrepIdentifier == value {
@@ -294,14 +301,14 @@ OuterLoop:
 
 			if matched {
 				logger.Debug("Matched mock", zap.String("mock", matchedMock.Name))
-				originalMatchedMock := *matchedMock
-				matchedMock.TestModeInfo.IsFiltered = false
-				matchedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
-				updated := mockDb.UpdateUnFilteredMock(&originalMatchedMock, matchedMock)
+				finalMock := matchedMock.DeepCopy()
+				finalMock.TestModeInfo.IsFiltered = false
+				finalMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
+				updated := mockDb.UpdateUnFilteredMock(matchedMock, matchedMock)
 				if !updated {
 					logger.Debug("failed to update matched mock", zap.Error(err))
 				}
-				return true, matchedMock.Spec.PostgresResponses, nil
+				return true, finalMock.Spec.PostgresResponses, nil
 			}
 			return false, nil, nil
 		}
@@ -313,20 +320,23 @@ func findBinaryStreamMatch(logger *zap.Logger, tcsMocks []*models.Mock, requestB
 	mxIdx := -1
 
 	for idx, mock := range tcsMocks {
-		// merging the mocks as well before comparing
-		mock.Spec.PostgresRequests = mergeMocks(mock.Spec.PostgresRequests, logger)
 
-		if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
+		mockCopy := mock.DeepCopy()
+
+		// merging the mocks as well before comparing
+		mockCopy.Spec.PostgresRequests = mergeMocks(mockCopy.Spec.PostgresRequests, logger)
+
+		if len(mockCopy.Spec.PostgresRequests) == len(requestBuffers) {
 			for requestIndex, reqBuf := range requestBuffers {
 
-				expectedPgReq := mock.Spec.PostgresRequests[requestIndex]
+				expectedPgReq := mockCopy.Spec.PostgresRequests[requestIndex]
 				encoded, err := postgresDecoderBackend(expectedPgReq)
 				if err != nil {
 					logger.Debug("Error while decoding postgres request", zap.Error(err))
 				}
 				var encoded64 []byte
 				if expectedPgReq.Payload != "" {
-					encoded64, err = util.DecodeBase64(mock.Spec.PostgresRequests[requestIndex].Payload)
+					encoded64, err = util.DecodeBase64(mockCopy.Spec.PostgresRequests[requestIndex].Payload)
 					if err != nil {
 						logger.Debug("Error while decoding postgres request", zap.Error(err))
 						return -1
@@ -381,17 +391,18 @@ func findPGStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger 
 	match := false
 	// loop for the exact match of the request
 	for idx, mock := range tcsMocks {
+		mockCopy := mock.DeepCopy()
 		// merging the mocks as well before comparing
-		mock.Spec.PostgresRequests = mergeMocks(mock.Spec.PostgresRequests, logger)
+		mockCopy.Spec.PostgresRequests = mergeMocks(mockCopy.Spec.PostgresRequests, logger)
 
-		if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
+		if len(mockCopy.Spec.PostgresRequests) == len(requestBuffers) {
 			for _, reqBuff := range requestBuffers {
 				actualPgReq := decodePgRequest(reqBuff, logger)
 				if actualPgReq == nil {
 					return -1, nil
 				}
 				// here handle cases of prepared statement very carefully
-				match, err := compareExactMatch(mock, actualPgReq, logger)
+				match, err := compareExactMatch(mockCopy, actualPgReq, logger)
 				if err != nil {
 					logger.Error("Error while matching exact match", zap.Error(err))
 					continue
@@ -408,28 +419,31 @@ func findPGStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger 
 	// loop for the ps match of the request
 	if !match {
 		for idx, mock := range tcsMocks {
-			// merging the mocks as well before comparing
-			mock.Spec.PostgresRequests = mergeMocks(mock.Spec.PostgresRequests, logger)
 
-			if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
+			mockCopy := mock.DeepCopy()
+
+			// merging the mocks as well before comparing
+			mockCopy.Spec.PostgresRequests = mergeMocks(mockCopy.Spec.PostgresRequests, logger)
+
+			if len(mockCopy.Spec.PostgresRequests) == len(requestBuffers) {
 				for _, reqBuff := range requestBuffers {
 					actualPgReq := decodePgRequest(reqBuff, logger)
 					if actualPgReq == nil {
 						return -1, nil
 					}
 					// just matching the corresponding PS in this case there is no need to edit the mock
-					match, newBindPs, err := PreparedStatementMatch(mock, actualPgReq, logger, connectionID, recordedPrep)
+					match, newBindPs, err := PreparedStatementMatch(mockCopy, actualPgReq, logger, connectionID, recordedPrep)
 					if err != nil {
 						logger.Error("Error while matching prepared statements", zap.Error(err))
 					}
 
 					if match {
-						logger.Debug("New Bind Prepared Statement", zap.Any("New Bind Prepared Statement", newBindPs), zap.String("ConnectionId", connectionID), zap.String("Mock Name", mock.Name))
+						logger.Debug("New Bind Prepared Statement", zap.Any("New Bind Prepared Statement", newBindPs), zap.String("ConnectionId", connectionID), zap.String("Mock Name", mockCopy.Name))
 						return idx, nil
 					}
 					// just check the query
-					if reflect.DeepEqual(actualPgReq.PacketTypes, []string{"P", "B", "D", "E"}) && reflect.DeepEqual(mock.Spec.PostgresRequests[0].PacketTypes, []string{"P", "B", "D", "E"}) {
-						if mock.Spec.PostgresRequests[0].Parses[0].Query == actualPgReq.Parses[0].Query {
+					if reflect.DeepEqual(actualPgReq.PacketTypes, []string{"P", "B", "D", "E"}) && reflect.DeepEqual(mockCopy.Spec.PostgresRequests[0].PacketTypes, []string{"P", "B", "D", "E"}) {
+						if mockCopy.Spec.PostgresRequests[0].Parses[0].Query == actualPgReq.Parses[0].Query {
 							return idx, nil
 						}
 					}
@@ -441,10 +455,12 @@ func findPGStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger 
 	if !match {
 
 		for idx, mock := range tcsMocks {
-			// merging the mocks as well before comparing
-			mock.Spec.PostgresRequests = mergeMocks(mock.Spec.PostgresRequests, logger)
 
-			if len(mock.Spec.PostgresRequests) == len(requestBuffers) {
+			mockCopy := mock.DeepCopy()
+			// merging the mocks as well before comparing
+			mockCopy.Spec.PostgresRequests = mergeMocks(mockCopy.Spec.PostgresRequests, logger)
+
+			if len(mockCopy.Spec.PostgresRequests) == len(requestBuffers) {
 				for _, reqBuff := range requestBuffers {
 					actualPgReq := decodePgRequest(reqBuff, logger)
 					if actualPgReq == nil {
@@ -453,11 +469,11 @@ func findPGStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger 
 
 					// have to ignore first parse message of begin read only
 					// should compare only query in the parse message
-					if len(actualPgReq.PacketTypes) != len(mock.Spec.PostgresRequests[0].PacketTypes) {
+					if len(actualPgReq.PacketTypes) != len(mockCopy.Spec.PostgresRequests[0].PacketTypes) {
 						//check for begin read only
-						if len(actualPgReq.PacketTypes) > 0 && len(mock.Spec.PostgresRequests[0].PacketTypes) > 0 {
+						if len(actualPgReq.PacketTypes) > 0 && len(mockCopy.Spec.PostgresRequests[0].PacketTypes) > 0 {
 
-							ischanged, newMock := changeResToPS(mock, actualPgReq, logger, connectionID)
+							ischanged, newMock := changeResToPS(mockCopy, actualPgReq, logger, connectionID)
 
 							if ischanged {
 								return idx, newMock
@@ -480,6 +496,10 @@ func findPGStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger 
 // mark that mock true and return the response by changing the res format like
 // postgres data types acc to result set format
 func changeResToPS(mock *models.Mock, actualPgReq *models.Backend, logger *zap.Logger, connectionID string) (bool, *models.Mock) {
+
+	testmapMux.RLock()
+	defer testmapMux.RUnlock()
+
 	actualpackets := actualPgReq.PacketTypes
 	mockPackets := mock.Spec.PostgresRequests[0].PacketTypes
 
@@ -577,6 +597,10 @@ func changeResToPS(mock *models.Mock, actualPgReq *models.Backend, logger *zap.L
 }
 
 func PreparedStatementMatch(mock *models.Mock, actualPgReq *models.Backend, logger *zap.Logger, ConnectionID string, recordedPrep PrepMap) (bool, []string, error) {
+
+	testmapMux.RLock()
+	defer testmapMux.RUnlock()
+
 	// logger.Debug("Inside PreparedStatementMatch")
 
 	if !reflect.DeepEqual(mock.Spec.PostgresRequests[0].PacketTypes, actualPgReq.PacketTypes) {
@@ -800,7 +824,6 @@ func LaevensteinDistance(str1, str2 string) bool {
 
 // make this in such a way if it returns -1 then we will continue with the original mock
 func validateMock(tcsMocks []*models.Mock, idx int, requestBuffers [][]byte, logger *zap.Logger) (bool, *models.Mock) {
-
 	actualPgReq := decodePgRequest(requestBuffers[0], logger)
 	if actualPgReq == nil {
 		return true, nil
@@ -860,7 +883,6 @@ func isTimestamp(byteArray []byte) bool {
 func isBcryptHash(byteArray []byte) bool {
 	// Convert byte array to string
 	s := string(byteArray)
-
 	// Define a regex for bcrypt hashes
 	bcryptRegex := regexp.MustCompile(`^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$`)
 	return bcryptRegex.MatchString(s)
