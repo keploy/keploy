@@ -106,39 +106,40 @@ all_passed=true
 
 for i in {0..1}
 do
-    # Define the report file for each test set
     report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
+    echo "----------------------------------------"
+    echo "Verifying report file: ${report_file}"
 
-     echo "----------------------------------------"
-    echo "Looking for report file: ${report_file}"
+    # First, check if the report file actually exists
     if [ -f "$report_file" ]; then
-        echo "File found. Contents:"
-        cat "$report_file"
+        echo "Report file found."
+        # If it exists, then grep its status
+        test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+        echo "Status found: $test_status"
+
+        if [ "$test_status" != "PASSED" ]; then
+            all_passed=false
+            echo "Error: Test set status was NOT 'PASSED'."
+            break
+        fi
     else
         echo "Error: Report file NOT FOUND at this path!"
-        ls -lR ./keploy # List all files in the keploy directory for debugging
-    fi
-    echo "----------------------------------------"
-
-    # Extract the test status
-    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-
-    # Print the status for debugging
-    echo "Test status for test-set-$i: $test_status"
-
-    # Check if any test set did not pass
-    if [ "$test_status" != "PASSED" ]; then
         all_passed=false
-        echo "Test-set-$i did not pass."
-        break # Exit the loop early as all tests need to pass
+        break
     fi
 done
+
+# Add a final debug step to see all generated files
+echo "----------------------------------------"
+echo "Final check of all files in the keploy directory:"
+ls -lR ./keploy
 
 # Check the overall test status and exit accordingly
 if [ "$all_passed" = true ]; then
     echo "All tests passed"
     exit 0
 else
+    echo "Pipeline failed during verification step."
     cat "${test_container}.txt"
     exit 1
 fi
