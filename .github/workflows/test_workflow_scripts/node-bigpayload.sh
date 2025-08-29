@@ -99,7 +99,7 @@ run_and_verify_tests() {
     local test_log_file="$1"
 
     echo "🚀 Running tests..."
-    sudo -E env PATH="$PATH" "${REPLAY_BIN}" test -c "node server.js" --delay 10 &> "${test_log_file}" || true
+    sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "node server.js" --delay 10 &> "${test_log_file}" || true
 
     echo "🔍 Checking for errors in test logs..."
     if grep -E "ERROR|WARNING: DATA RACE" "${test_log_file}"; then
@@ -135,9 +135,9 @@ run_and_verify_tests() {
 echo "--- 🧪 Starting Test for /small-payload ---"
 sudo rm -rf keploy/ reports/
 sudo keploy config --generate
-sudo "${RECORD_BIN}" config --generate
+sudo "$RECORD_BIN" config --generate
 echo "🎥 Starting recorder for small payload..."
-sudo -E env PATH="$PATH" "${RECORD_BIN}" record -c "node server.js" &> "record_small.txt" &
+sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "node server.js" &> "record_small.txt" &
 record_traffic "small-payload" 100
 verify_test_count 100
 run_and_verify_tests "test_small.txt"
@@ -149,9 +149,9 @@ echo "--- 🧪 Starting Test for /large-payload ---"
 echo "🧹 Cleaning up for the next test run..."
 sudo rm -rf keploy/ reports/
 sudo keploy config --generate
-sudo "${RECORD_BIN}" config --generate
+sudo "$RECORD_BIN" config --generate
 echo "🎥 Starting recorder for large payload..."
-sudo -E env PATH="$PATH" "${RECORD_BIN}" record -c "node server.js" --bigPayload &> "record_large.txt" &
+sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "node server.js" --bigPayload &> "record_large.txt" &
 record_traffic "large-payload" 100
 verify_test_count 100
 run_and_verify_tests "test_large.txt"
