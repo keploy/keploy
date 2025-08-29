@@ -47,9 +47,6 @@
 
 name: Node.js Big Payload Matrix
 on:
-  workflow_dispatch: # Allows manual triggering
-  push:
-    branches: [ main ]
   pull_request:
 
 jobs:
@@ -78,14 +75,12 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Download Keploy Binary for Recording
-        id: record
+      - id: record
         uses: ./.github/actions/download-binary
         with:
           src: ${{ matrix.record_src }}
 
-      - name: Download Keploy Binary for Replaying
-        id: replay
+      - id: replay
         uses: ./.github/actions/download-binary
         with:
           src: ${{ matrix.replay_src }}
