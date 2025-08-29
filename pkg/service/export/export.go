@@ -142,13 +142,13 @@ func Export(_ context.Context, logger *zap.Logger) error {
 	}
 	dir, err := yaml.ReadDir(keployDir, fs.FileMode(os.O_RDONLY))
 	if err != nil {
-		utils.LogError(logger, err, "failed to open the directory containing yaml testcases", zap.Any("path", keployDir))
+		utils.LogError(logger, err, "failed to open the directory containing yaml testcases", zap.String("path", keployDir))
 		return err
 	}
 
 	files, err := dir.ReadDir(0)
 	if err != nil {
-		utils.LogError(logger, err, "failed to read the file names of yaml testcases", zap.Any("path", keployDir))
+		utils.LogError(logger, err, "failed to read the file names of yaml testcases", zap.String("path", keployDir))
 		return err
 
 	}

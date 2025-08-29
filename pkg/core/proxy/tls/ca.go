@@ -158,7 +158,7 @@ func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error
 		storePass := "changeit"
 		alias := "keployCA"
 
-		logger.Debug("", zap.Any("java_home", javaHome), zap.Any("caCertsPath", cacertsPath), zap.Any("caPath", caPath))
+		logger.Debug("", zap.String("java_home", javaHome), zap.String("caCertsPath", cacertsPath), zap.String("caPath", caPath))
 
 		if isJavaCAExist(ctx, alias, storePass, cacertsPath) {
 			logger.Debug("Java detected and CA already exists", zap.String("path", cacertsPath))
@@ -179,7 +179,7 @@ func installJavaCA(ctx context.Context, logger *zap.Logger, caPath string) error
 		}
 
 		logger.Debug("Java detected and successfully imported CA", zap.String("path", cacertsPath), zap.String("output", string(cmdOutput)))
-		logger.Debug("Successfully imported CA", zap.Any("", cmdOutput))
+		logger.Debug("Successfully imported CA", zap.ByteString("output", cmdOutput))
 	} else {
 		logger.Debug("Java is not installed on the system")
 	}
@@ -333,7 +333,7 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 		return nil, fmt.Errorf("failed to sign server certificate: %v", err)
 	}
 
-	logger.Debug("signed the certificate for a duration of 2 years", zap.Any("notBefore", signReq.NotBefore.String()), zap.Any("notAfter", signReq.NotAfter.String()))
+	logger.Debug("signed the certificate for a duration of 2 years", zap.String("notBefore", signReq.NotBefore.String()), zap.String("notAfter", signReq.NotAfter.String()))
 
 	// Load the server certificate and private key
 	serverTLSCert, err := tls.X509KeyPair(serverCert, serverKey)

@@ -33,7 +33,7 @@ func (p *Proxy) startTCPDNSServer(_ context.Context) error {
 	p.logger.Info(fmt.Sprintf("starting TCP DNS server at addr %v", server.Addr))
 	err := server.ListenAndServe()
 	if err != nil {
-		utils.LogError(p.logger, err, "failed to start tcp dns server", zap.Any("addr", server.Addr))
+		utils.LogError(p.logger, err, "failed to start tcp dns server", zap.String("addr", server.Addr))
 	}
 	return nil
 }
@@ -56,7 +56,7 @@ func (p *Proxy) startUDPDNSServer(_ context.Context) error {
 	p.logger.Info(fmt.Sprintf("starting UDP DNS server at addr %v", server.Addr))
 	err := server.ListenAndServe()
 	if err != nil {
-		utils.LogError(p.logger, err, "failed to start udp dns server", zap.Any("addr", server.Addr))
+		utils.LogError(p.logger, err, "failed to start udp dns server", zap.String("addr", server.Addr))
 		return err
 	}
 	return nil
@@ -78,13 +78,13 @@ func generateCacheKey(name string, qtype uint16) string {
 
 func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
-	p.logger.Debug("", zap.Any("Source socket info", w.RemoteAddr().String()))
+	p.logger.Debug("", zap.String("Source socket info", w.RemoteAddr().String()))
 	msg := new(dns.Msg)
 	msg.SetReply(r)
 	msg.Authoritative = true
 	p.logger.Debug("Got some Dns queries")
 	for _, question := range r.Question {
-		p.logger.Debug("", zap.Any("Record Type", question.Qtype), zap.Any("Received Query", question.Name))
+		p.logger.Debug("", zap.Int("Record Type", int(question.Qtype)), zap.String("Received Query", question.Name))
 
 		key := generateCacheKey(question.Name, question.Qtype)
 
@@ -117,7 +117,7 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 						Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
 						A:   net.ParseIP(p.IP4),
 					}}
-					p.logger.Debug("failed to resolve dns query hence sending proxy ip4", zap.Any("proxy Ip", p.IP4))
+					p.logger.Debug("failed to resolve dns query hence sending proxy ip4", zap.String("proxy Ip", p.IP4))
 				case dns.TypeAAAA:
 					answers = []dns.RR{&dns.AAAA{
 						Hdr:  dns.RR_Header{Name: question.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 3600},
@@ -146,7 +146,7 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 					}
 					p.logger.Debug("sending default SRV record response")
 				default:
-					p.logger.Error("Unsupported DNS query type", zap.Any("query type", question.Qtype))
+					p.logger.Error("Unsupported DNS query type", zap.Int("query type", int(question.Qtype)))
 				}
 
 			}

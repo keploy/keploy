@@ -198,11 +198,11 @@ func (t *Tools) processRespBodyToReqHeader(ctx context.Context, tcs []*models.Te
 	for i := 0; i < len(tcs)-1; i++ {
 		jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 		if err != nil {
-			t.logger.Error("failed to parse response body, skipping RespBodyToReqHeader Template processing", zap.Any("testcase", tcs[i].Name), zap.Error(err))
+			t.logger.Error("failed to parse response body, skipping RespBodyToReqHeader Template processing", zap.String("testcase", tcs[i].Name), zap.Error(err))
 			continue
 		}
 		if jsonResponse == nil {
-			t.logger.Debug("Skipping RespBodyToReqHeader Template processing for test case", zap.Any("testcase", tcs[i].Name), zap.Error(err))
+			t.logger.Debug("Skipping RespBodyToReqHeader Template processing for test case", zap.String("testcase", tcs[i].Name), zap.Error(err))
 			continue
 		}
 		for j := i + 1; j < len(tcs); j++ {
@@ -234,7 +234,7 @@ func (t *Tools) processRespBodyToReqURL(ctx context.Context, tcs []*models.TestC
 	for i := 0; i < len(tcs)-1; i++ {
 		jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 		if err != nil || jsonResponse == nil {
-			t.logger.Debug("Skipping response to URL processing for test case", zap.Any("testcase", tcs[i].Name), zap.Error(err))
+			t.logger.Debug("Skipping response to URL processing for test case", zap.String("testcase", tcs[i].Name), zap.Error(err))
 			continue
 		}
 		for j := i + 1; j < len(tcs); j++ {
@@ -253,7 +253,7 @@ func (t *Tools) processRespBodyToReqBody(ctx context.Context, tcs []*models.Test
 	for i := 0; i < len(tcs)-1; i++ {
 		jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 		if err != nil || jsonResponse == nil {
-			t.logger.Debug("Skipping response to request body processing for test case", zap.Any("testcase", tcs[i].Name), zap.Error(err))
+			t.logger.Debug("Skipping response to request body processing for test case", zap.String("testcase", tcs[i].Name), zap.Error(err))
 			continue
 		}
 		for j := i + 1; j < len(tcs); j++ {
@@ -264,7 +264,7 @@ func (t *Tools) processRespBodyToReqBody(ctx context.Context, tcs []*models.Test
 			}
 			jsonRequest, err := parseIntoJSON(tcs[j].HTTPReq.Body)
 			if err != nil || jsonRequest == nil {
-				t.logger.Debug("Skipping request body processing for test case", zap.Any("testcase", tcs[j].Name), zap.Error(err))
+				t.logger.Debug("Skipping request body processing for test case", zap.String("testcase", tcs[j].Name), zap.Error(err))
 				continue
 			}
 			addTemplates(t.logger, jsonRequest, jsonResponse)
@@ -283,12 +283,12 @@ func (t *Tools) processBody(ctx context.Context, tcs []*models.TestCase) {
 		}
 		jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 		if err != nil || jsonResponse == nil {
-			t.logger.Debug("Skipping response to request body processing for test case", zap.Any("testcase", tcs[i].Name), zap.Error(err))
+			t.logger.Debug("Skipping response to request body processing for test case", zap.String("testcase", tcs[i].Name), zap.Error(err))
 			continue
 		}
 		jsonRequest, err := parseIntoJSON(tcs[i].HTTPReq.Body)
 		if err != nil || jsonRequest == nil {
-			t.logger.Debug("Skipping request body processing for test case", zap.Any("testcase", tcs[i].Name), zap.Error(err))
+			t.logger.Debug("Skipping request body processing for test case", zap.String("testcase", tcs[i].Name), zap.Error(err))
 			continue
 		}
 		addTemplates(t.logger, jsonResponse, jsonRequest)
@@ -306,7 +306,7 @@ func (t *Tools) processReqURLToRespBodySameTest(ctx context.Context, tcs []*mode
 		}
 		jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 		if err != nil || jsonResponse == nil {
-			t.logger.Debug("Skipping response to URL processing for test case", zap.Any("testcase", tcs[i].Name), zap.Error(err))
+			t.logger.Debug("Skipping response to URL processing for test case", zap.String("testcase", tcs[i].Name), zap.Error(err))
 			continue
 		}
 		addTemplates(t.logger, &tcs[i].HTTPReq.URL, jsonResponse)
@@ -318,7 +318,7 @@ func (t *Tools) processRespBodyToRespBody(ctx context.Context, tcs []*models.Tes
 	for i := 0; i < len(tcs)-1; i++ {
 		jsonResponse, err := parseIntoJSON(tcs[i].HTTPResp.Body)
 		if err != nil || jsonResponse == nil {
-			t.logger.Debug("Skipping response to request body processing for test case", zap.Any("testcase", tcs[i].Name), zap.Error(err))
+			t.logger.Debug("Skipping response to request body processing for test case", zap.String("testcase", tcs[i].Name), zap.Error(err))
 			continue
 		}
 		for j := i + 1; j < len(tcs); j++ {
@@ -328,8 +328,8 @@ func (t *Tools) processRespBodyToRespBody(ctx context.Context, tcs []*models.Tes
 			default:
 			}
 			jsonResponse2, err := parseIntoJSON(tcs[j].HTTPResp.Body)
-			if err != nil || jsonResponse2 == nil {
-				t.logger.Debug("Skipping request body processing for test case", zap.Any("testcase", tcs[j].Name), zap.Error(err))
+			if err != nil || jsonResponse == nil {
+				t.logger.Debug("Skipping request body processing for test case", zap.String("testcase", tcs[j].Name), zap.Error(err))
 				continue
 			}
 			addTemplates(t.logger, jsonResponse2, jsonResponse)
@@ -343,7 +343,7 @@ func (t *Tools) processReqBodyToRespBody(ctx context.Context, tcs []*models.Test
 	for i := 0; i < len(tcs)-1; i++ {
 		jsonRequest, err := parseIntoJSON(tcs[i].HTTPReq.Body)
 		if err != nil || jsonRequest == nil {
-			t.logger.Debug("Skipping response to request body processing for test case", zap.Any("testcase", tcs[i].Name), zap.Error(err))
+			t.logger.Debug("Skipping response to request body processing for test case", zap.String("testcase", tcs[i].Name), zap.Error(err))
 			continue
 		}
 		for j := i + 1; j < len(tcs); j++ {
@@ -354,7 +354,7 @@ func (t *Tools) processReqBodyToRespBody(ctx context.Context, tcs []*models.Test
 			}
 			jsonResponse, err := parseIntoJSON(tcs[j].HTTPResp.Body)
 			if err != nil || jsonResponse == nil {
-				t.logger.Debug("Skipping request body processing for test case", zap.Any("testcase", tcs[j].Name), zap.Error(err))
+				t.logger.Debug("Skipping request body processing for test case", zap.String("testcase", tcs[j].Name), zap.Error(err))
 				continue
 			}
 			addTemplates(t.logger, jsonResponse, jsonRequest)
@@ -368,7 +368,7 @@ func (t *Tools) processReqBodyToReqURL(ctx context.Context, tcs []*models.TestCa
 	for i := 0; i < len(tcs)-1; i++ {
 		jsonRequest, err := parseIntoJSON(tcs[i].HTTPReq.Body)
 		if err != nil || jsonRequest == nil {
-			t.logger.Debug("Skipping response to URL processing for test case", zap.Any("testcase", tcs[i].Name), zap.Error(err))
+			t.logger.Debug("Skipping response to URL processing for test case", zap.String("testcase", tcs[i].Name), zap.Error(err))
 			continue
 		}
 		for j := i + 1; j < len(tcs); j++ {
@@ -387,7 +387,7 @@ func (t *Tools) processReqBodyToReqBody(ctx context.Context, tcs []*models.TestC
 	for i := 0; i < len(tcs)-1; i++ {
 		jsonRequest, err := parseIntoJSON(tcs[i].HTTPReq.Body)
 		if err != nil || jsonRequest == nil {
-			t.logger.Debug("Skipping response to request body processing for test case", zap.Any("testcase", tcs[i].Name), zap.Error(err))
+			t.logger.Debug("Skipping response to request body processing for test case", zap.String("testcase", tcs[i].Name), zap.Error(err))
 			continue
 		}
 		for j := i + 1; j < len(tcs); j++ {
@@ -398,7 +398,7 @@ func (t *Tools) processReqBodyToReqBody(ctx context.Context, tcs []*models.TestC
 			}
 			jsonRequest2, err := parseIntoJSON(tcs[j].HTTPReq.Body)
 			if err != nil || jsonRequest2 == nil {
-				t.logger.Debug("Skipping request body processing for test case", zap.Any("testcase", tcs[j].Name), zap.Error(err))
+				t.logger.Debug("Skipping request body processing for test case", zap.String("testcase", tcs[j].Name), zap.Error(err))
 				continue
 			}
 			addTemplates(t.logger, jsonRequest2, jsonRequest)
@@ -418,7 +418,7 @@ func (t *Tools) processReqURLToReqBody(ctx context.Context, tcs []*models.TestCa
 			}
 			jsonRequest, err := parseIntoJSON(tcs[j].HTTPReq.Body)
 			if err != nil || jsonRequest == nil {
-				t.logger.Debug("Skipping request body processing for test case", zap.Any("testcase", tcs[j].Name), zap.Error(err))
+				t.logger.Debug("Skipping request body processing for test case", zap.String("testcase", tcs[j].Name), zap.Error(err))
 				continue
 			}
 			addTemplates(t.logger, jsonRequest, &tcs[i].HTTPReq.URL)
@@ -437,7 +437,7 @@ func (t *Tools) processReqURLToRespBody(ctx context.Context, tcs []*models.TestC
 			}
 			jsonResponse, err := parseIntoJSON(tcs[j].HTTPResp.Body)
 			if err != nil || jsonResponse == nil {
-				t.logger.Debug("Skipping request body processing for test case", zap.Any("testcase", tcs[j].Name), zap.Error(err))
+				t.logger.Debug("Skipping request body processing for test case", zap.String("testcase", tcs[j].Name), zap.Error(err))
 				continue
 			}
 			addTemplates(t.logger, jsonResponse, &tcs[i].HTTPReq.URL)

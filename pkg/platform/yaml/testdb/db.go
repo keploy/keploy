@@ -78,12 +78,12 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 	}
 	dir, err := yaml.ReadDir(TestPath, fs.ModePerm)
 	if err != nil {
-		utils.LogError(ts.logger, err, "failed to open the directory containing yaml testcases", zap.Any("path", TestPath))
+		utils.LogError(ts.logger, err, "failed to open the directory containing yaml testcases", zap.String("path", TestPath))
 		return nil, err
 	}
 	files, err := dir.ReadDir(0)
 	if err != nil {
-		utils.LogError(ts.logger, err, "failed to read the file names of yaml testcases", zap.Any("path", TestPath))
+		utils.LogError(ts.logger, err, "failed to read the file names of yaml testcases", zap.String("path", TestPath))
 		return nil, err
 	}
 	for _, j := range files {

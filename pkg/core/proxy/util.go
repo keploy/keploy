@@ -28,7 +28,11 @@ func writeNsswitchConfig(logger *zap.Logger, nsSwitchConfig string, data []byte,
 
 func (p *Proxy) globalPassThrough(ctx context.Context, client, dest net.Conn) error {
 
-	logger := p.logger.With(zap.Any("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)), zap.Any("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)), zap.Any("Client IP Address", client.RemoteAddr().String()))
+	logger := p.logger.With(
+		zap.String("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)),
+		zap.String("Destination ConnectionID", ctx.Value(models.DestConnectionIDKey).(string)),
+		zap.String("Client IP Address", client.RemoteAddr().String()),
+	)
 
 	clientBuffChan := make(chan []byte)
 	destBuffChan := make(chan []byte)
