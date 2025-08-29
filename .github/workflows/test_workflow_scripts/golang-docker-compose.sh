@@ -62,6 +62,10 @@ for i in {1..2}; do
     send_request &
     sudo -E env PATH=$PATH $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false --language go --buildDelay 35s &> "${container_name}.txt"
 
+    echo "--- Start of Recording Logs for Iteration ${i} ---"
+    cat "${container_name}.txt"
+    echo "--- End of Recording Logs for Iteration ${i} ---"
+
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
         cat "${container_name}.txt"
