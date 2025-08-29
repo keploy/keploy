@@ -162,6 +162,7 @@
 #!/bin/bash
 #!/bin/bash
 #!/bin/bash
+#!/bin/bash
 
 # Exit on error, undefined variable, or pipe failure.
 set -Eeuo pipefail
@@ -179,7 +180,8 @@ die() {
   echo "== Keploy Artifacts (depth 4) =="
   find ./keploy -maxdepth 4 -type f -print 2>/dev/null | sort || true
   echo "== Log Files (*.txt) =="
-  for f in ./*.txt; do
+  # Note: We are inside the app directory, so logs are in the parent.
+  for f in ../*.txt; do
     [[ -f "$f" ]] && { echo "--- Log: $f ---"; cat "$f"; }
   done
   exit "$rc"
@@ -206,9 +208,7 @@ record_traffic() {
     local temp_file="large_payload.json"
 
     echo "⏳ Waiting for application to start (30s)..."
-    # Use a more robust wait mechanism
     for i in {1..30}; do
-        # FIX: Corrected the IP address from 1227.0.0.1 to 127.0.0.1
         if curl -s "http://127.0.0.1:3000/"; then
             echo "✅ Application is ready."
             break
@@ -225,21 +225,25 @@ record_traffic() {
     if [ "$endpoint" == "large-payload" ]; then
         echo "📦 Generating 1MB payload for POST requests..."
         echo '{"data":"' > "$temp_file"
-        head -c 512000 /dev/zero | tr '\0' 'a' >> "$temp_file" # Approx 1MB
+        head -c 1048500 /dev/zero | tr '\0' 'a' >> "$temp_file"
         echo '"}' >> "$temp_file"
     fi
 
     for (( i=1; i<=num_requests; i++ )); do
+        # Liveness check: Ensure Keploy is still running before sending a request.
+        if ! ps -p "$keploy_pid" > /dev/null; then
+            echo "::warning::Keploy process (PID: $keploy_pid) stopped unexpectedly. Halting traffic generation."
+            break
+        fi
         echo "Sending request ${i}/${num_requests}..."
         if [ "$endpoint" == "large-payload" ]; then
             curl -sS -o /dev/null -w "Status: %{http_code}\n" -X POST -H "Content-Type: application/json" --data @"$temp_file" "${url}" || true
         else
             curl -sS -o /dev/null -w "Status: %{http_code}\n" "${url}" || true
         fi
-        sleep 0.2
+        sleep 0.4
     done
 
-    # Clean up temp file
     if [ -f "$temp_file" ]; then
         rm "$temp_file"
     fi
@@ -250,36 +254,33 @@ record_traffic() {
     if ps -p "$keploy_pid" > /dev/null; then
         echo "🛑 Stopping Keploy recorder (PID: $keploy_pid)..."
         sudo kill "$keploy_pid"
-        # Wait for the process to terminate gracefully
-        for i in {1..5}; do
-            if ! ps -p "$keploy_pid" > /dev/null; then
-                break
-            fi
-            sleep 1
-        done
-    else
-        echo "⚠️ Keploy recorder process (PID: $keploy_pid) already stopped."
     fi
 }
 
 # --- Function to verify the number of recorded test cases ---
+# Arguments: $1: expected_count, $2: log_file
 verify_test_count() {
     local expected_count="$1"
+    local log_file="$2"
     local test_dir="./keploy/test-set-0/tests"
 
     section "🔎 Verifying number of recorded test cases..."
     if [ ! -d "$test_dir" ]; then
-        echo "🚨 Test directory ${test_dir} not found! Recording may have failed."
+        echo "🚨 Test directory ${test_dir} not found!"
+        echo "--- 📋 Displaying Recorder Log (${log_file}) ---"
+        cat "${log_file}"
         exit 1
     fi
 
     local actual_count
     actual_count=$(find "$test_dir" -type f -name 'test-*.yaml' | wc -l)
 
-    echo "Found ${actual_count} recorded test cases. Expected ${expected_count}."
+    echo "Found ${actual_count} recorded test cases. Expected at least ${expected_count}."
 
     if [ "$actual_count" -lt "$expected_count" ]; then
         echo "❌ Test case count is less than expected!"
+        echo "--- 📋 Displaying Recorder Log (${log_file}) ---"
+        cat "${log_file}"
         exit 1
     fi
     echo "✔️ Correct number of test cases recorded."
@@ -291,7 +292,6 @@ run_and_verify_tests() {
     local test_log_file="$1"
     section "🚀 Running tests and verifying results..."
 
-    # Use REPLAY_BIN for testing
     sudo -E env PATH="$PATH" "${REPLAY_BIN}" test -c "node server.js" --delay 10 &> "${test_log_file}" || true
 
     if grep -E "ERROR|WARNING: DATA RACE" "${test_log_file}"; then
@@ -309,7 +309,6 @@ run_and_verify_tests() {
         exit 1
     fi
     echo "Found report file: $report_file"
-
 
     local test_status
     test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
@@ -332,11 +331,12 @@ run_and_verify_tests() {
 # STEP 1: Test the Small Payload Endpoint
 section "--- 🧪 Starting Test for /small-payload ---"
 sudo rm -rf keploy/ reports/
+# FIX: Explicitly remove the config file to prevent interactive prompts in CI
+sudo rm -f keploy.yml
 sudo "${RECORD_BIN}" config --generate
 echo "🎥 Starting recorder for small payload..."
 sudo -E env PATH="$PATH" "${RECORD_BIN}" record -c "node server.js" &> "record_small.txt" &
 
-# FIX: Wait for Keploy to start by polling for its PID to prevent a race condition.
 echo "Waiting for Keploy to initialize..."
 KEPLOY_PID=""
 for i in {1..15}; do
@@ -355,7 +355,7 @@ fi
 echo "✅ Keploy recorder started with PID: $KEPLOY_PID"
 
 record_traffic "small-payload" 100 "$KEPLOY_PID"
-verify_test_count 100
+verify_test_count 100 "record_small.txt"
 run_and_verify_tests "test_small.txt"
 endsec
 
@@ -363,11 +363,12 @@ endsec
 section "--- 🧪 Starting Test for /large-payload ---"
 echo "🧹 Cleaning up for the next test run..."
 sudo rm -rf keploy/ reports/
+# FIX: Explicitly remove the config file to prevent interactive prompts in CI
+sudo rm -f keploy.yml
 sudo "${RECORD_BIN}" config --generate
 echo "🎥 Starting recorder for large payload..."
 sudo -E env PATH="$PATH" "${RECORD_BIN}" record -c "node server.js" --bigPayload &> "record_large.txt" &
 
-# FIX: Wait for Keploy to start by polling for its PID to prevent a race condition.
 echo "Waiting for Keploy to initialize..."
 KEPLOY_PID=""
 for i in {1..15}; do
@@ -386,7 +387,7 @@ fi
 echo "✅ Keploy recorder started with PID: $KEPLOY_PID"
 
 record_traffic "large-payload" 100 "$KEPLOY_PID"
-verify_test_count 100
+verify_test_count 100 "record_large.txt"
 run_and_verify_tests "test_large.txt"
 endsec
 
