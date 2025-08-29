@@ -47,7 +47,7 @@
 
 name: Node.js Big Payload Matrix
 on:
-  pull_request:
+  workflow_call:
 
 jobs:
   node_linux_e2e_matrix:
