@@ -43,7 +43,7 @@ record_traffic() {
             curl -i ${url}
         fi
         # Wait for 100ms between requests
-        sleep 0.2
+        sleep 2
     done
 
     # Clean up the temp file if it was created
