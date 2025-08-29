@@ -420,10 +420,10 @@ func (r *Replayer) Start(ctx context.Context) error {
 				continue
 			}
 
-			r.logger.Info("deleting failing testcases", zap.String("testSet", testSet), zap.Any("testCaseIDs", failedTcIDs))
+			r.logger.Info("deleting failing testcases", zap.String("testSet", testSet), zap.Strings("testCaseIDs", failedTcIDs))
 
 			if err := r.testDB.DeleteTests(ctx, testSet, failedTcIDs); err != nil {
-				utils.LogError(r.logger, err, "failed to delete failing testcases", zap.String("testSet", testSet), zap.Any("testCaseIDs", failedTcIDs))
+				utils.LogError(r.logger, err, "failed to delete failing testcases", zap.String("testSet", testSet), zap.Strings("testCaseIDs", failedTcIDs))
 				break
 			}
 			// after deleting rerun it maxFlakyChecks times to be sure that no further testcase fails
@@ -438,7 +438,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 		err = HookImpl.AfterTestSetRun(ctx, testSet, testSetResult)
 		if err != nil {
-			utils.LogError(r.logger, err, "failed to execute after test set run hook", zap.Any("testSet", testSet))
+			utils.LogError(r.logger, err, "failed to execute after test set run hook", zap.String("testSet", testSet))
 		}
 
 		if i == 0 && !r.config.Test.SkipCoverage {
@@ -462,7 +462,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 
 	if len(flakyTestSets) > 0 {
-		r.logger.Warn("flaky testsets detected, please rerun the specific testsets with --must-pass flag to remove flaky testcases", zap.Any("testSets", flakyTestSets))
+		r.logger.Warn("flaky testsets detected, please rerun the specific testsets with --must-pass flag to remove flaky testcases", zap.Strings("testSets", flakyTestSets))
 	}
 
 	testRunStatus := "fail"
@@ -491,7 +491,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 				}
 
 			} else {
-				r.logger.Warn("failed to calculate coverage for the test run", zap.Any("error", err))
+				r.logger.Warn("failed to calculate coverage for the test run", zap.Error(err))
 			}
 		}
 
@@ -512,7 +512,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 	if !r.instrument {
-		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.Any("base path", r.config.Test.BasePath))
+		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.String("base path", r.config.Test.BasePath))
 		return &InstrumentState{}, nil
 	}
 	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
@@ -992,7 +992,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 
-		r.logger.Debug("test case kind", zap.Any("kind", testCase.Kind))
+		r.logger.Debug("test case kind", zap.String("kind", string(testCase.Kind)), zap.String("testcase", testCase.Name), zap.String("testset", testSetID))
 
 		switch testCase.Kind {
 		case models.HTTP:
@@ -1030,10 +1030,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 		if !testPass {
 			// log the consumed mocks during the test run of the test case for test set
-			r.logger.Info("result", zap.Any("testcase id", models.HighlightFailingString(testCase.Name)), zap.Any("testset id", models.HighlightFailingString(testSetID)), zap.Any("passed", models.HighlightFailingString(testPass)))
+			r.logger.Info("result", zap.String("testcase id", models.HighlightFailingString(testCase.Name)), zap.String("testset id", models.HighlightFailingString(testSetID)), zap.String("passed", models.HighlightFailingString(testPass)))
 			r.logger.Debug("Consumed Mocks", zap.Any("mocks", consumedMocks))
 		} else {
-			r.logger.Info("result", zap.Any("testcase id", models.HighlightPassingString(testCase.Name)), zap.Any("testset id", models.HighlightPassingString(testSetID)), zap.Any("passed", models.HighlightPassingString(testPass)))
+			r.logger.Info("result", zap.String("testcase id", models.HighlightPassingString(testCase.Name)), zap.String("testset id", models.HighlightPassingString(testSetID)), zap.String("passed", models.HighlightPassingString(testPass)))
 		}
 		if testPass {
 			testStatus = models.TestStatusPassed
@@ -1178,9 +1178,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	// remove the unused mocks by the test cases of a testset (if the base path is not provided )
 	if r.config.Test.RemoveUnusedMocks && testSetStatus == models.TestSetStatusPassed && r.instrument {
-		r.logger.Debug("consumed mocks from the completed testset", zap.Any("for test-set", testSetID), zap.Any("consumed mocks", totalConsumedMocks))
+		r.logger.Debug("consumed mocks from the completed testset", zap.String("for test-set", testSetID), zap.Any("consumed mocks", totalConsumedMocks))
 		// delete the unused mocks from the data store
-		r.logger.Info("deleting unused mocks from the data store", zap.Any("for test-set", testSetID))
+		r.logger.Info("deleting unused mocks from the data store", zap.String("for test-set", testSetID))
 		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, totalConsumedMocks)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
@@ -1259,7 +1259,7 @@ func (r *Replayer) GetMocks(ctx context.Context, testSetID string, afterTime tim
 
 func (r *Replayer) FilterAndSetMocks(ctx context.Context, appID uint64, filtered, unfiltered []*models.Mock, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState) error {
 	if !r.instrument {
-		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.Any("base path", r.config.Test.BasePath))
+		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
 		return nil
 	}
 
@@ -1675,7 +1675,7 @@ func (r *Replayer) replaceHostInTestCase(testCase *models.TestCase, newHost, log
 			utils.LogError(r.logger, err, fmt.Sprintf("failed to replace host to %s", logContext))
 			return err
 		}
-		r.logger.Debug("", zap.Any(fmt.Sprintf("replaced %s", logContext), testCase.HTTPReq.URL))
+		r.logger.Debug("", zap.String(fmt.Sprintf("replaced %s", logContext), testCase.HTTPReq.URL))
 
 	case models.GRPC_EXPORT:
 		testCase.GrpcReq.Headers.PseudoHeaders[":authority"], err = utils.ReplaceGrpcHost(testCase.GrpcReq.Headers.PseudoHeaders[":authority"], newHost)
@@ -1683,7 +1683,7 @@ func (r *Replayer) replaceHostInTestCase(testCase *models.TestCase, newHost, log
 			utils.LogError(r.logger, err, fmt.Sprintf("failed to replace host to %s", logContext))
 			return err
 		}
-		r.logger.Debug("", zap.Any(fmt.Sprintf("replaced %s", logContext), testCase.GrpcReq.Headers.PseudoHeaders[":authority"]))
+		r.logger.Debug("", zap.String(fmt.Sprintf("replaced %s", logContext), testCase.GrpcReq.Headers.PseudoHeaders[":authority"]))
 	}
 	return nil
 }
@@ -1765,7 +1765,7 @@ func (r *Replayer) DownloadMocks(ctx context.Context) error {
 			if errors.Is(err, context.Canceled) {
 				return err
 			}
-			utils.LogError(r.logger, err, "failed to download mocks", zap.Any("testset", testSetID))
+			utils.LogError(r.logger, err, "failed to download mocks", zap.String("testset", testSetID))
 			continue
 		}
 
@@ -1794,7 +1794,7 @@ func (r *Replayer) UploadMocks(ctx context.Context) error {
 			if errors.Is(err, context.Canceled) {
 				return err
 			}
-			utils.LogError(r.logger, err, "failed to upload mocks", zap.Any("testset", testSetID))
+			utils.LogError(r.logger, err, "failed to upload mocks", zap.String("testset", testSetID))
 			continue
 		}
 

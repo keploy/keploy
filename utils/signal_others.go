@@ -88,7 +88,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	logger.Debug("", zap.Any("executing cli", cmd.String()))
+	logger.Debug("", zap.String("executing_cli", cmd.String()))
 
 	err = cmd.Start()
 	if err != nil {
