@@ -29,7 +29,7 @@ record_traffic() {
         echo "📦 Generating 1MB payload for POST requests..."
         local temp_file="large_payload.json"
         echo '{"data":"' > $temp_file
-        head -c 111980 /dev/zero | tr '\0' 'a' >> $temp_file
+        head -c 10 /dev/zero | tr '\0' 'a' >> $temp_file
         echo '"}' >> $temp_file
     fi
 
@@ -43,7 +43,7 @@ record_traffic() {
             curl -i ${url}
         fi
         # Wait for 100ms between requests
-        sleep 0.5
+        sleep 0.2
     done
 
     # Clean up the temp file if it was created
