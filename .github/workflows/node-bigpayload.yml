@@ -1,4 +1,51 @@
-name: Node.js Big Payload
+# name: Node.js Big Payload
+# on:
+#   workflow_dispatch: # Allows manual triggering
+#   push:
+#     branches: [ main ]
+#   pull_request:
+
+# jobs:
+#   node_linux_e2e:
+#     runs-on: ubuntu-latest
+#     name: Keploy Record and Test for big payload (Node.js)
+#     steps:
+#       - name: Checkout repository
+#         uses: actions/checkout@v4
+      
+#       - name: Setup Node.js
+#         uses: actions/setup-node@v4
+#         with:
+#           node-version: '20'
+
+#       - name: Checkout samples-typescript repository
+#         uses: actions/checkout@v4
+#         with:
+#           repository: keploy/samples-typescript
+#           path: samples-typescript
+#           ref: main
+
+#       - name: Install Go
+#         uses: actions/setup-go@v2
+#         with:
+#             go-version: 1.24
+ 
+#       - name: Installing build Essentials and gcc
+#         run: |
+#             sudo apt -y update
+#             sudo apt -y install build-essential gcc libc-dev    
+
+#       - name: Build Keploy binary
+#         run: |
+#           go build -tags=viper_bind_struct -ldflags="-X main.api_server_uri=https://api.keploy.io" -o keploy . && sudo mv keploy /usr/local/bin
+
+#       - name: Run Keploy Record and Test Script
+#         run: |
+#           chmod +x ./.github/workflows/test_workflow_scripts/node-bigpayload.sh
+#           ./.github/workflows/test_workflow_scripts/node-bigpayload.sh
+
+
+name: Node.js Big Payload Matrix
 on:
   workflow_dispatch: # Allows manual triggering
   push:
@@ -6,17 +53,42 @@ on:
   pull_request:
 
 jobs:
-  node_linux_e2e:
+  node_linux_e2e_matrix:
     runs-on: ubuntu-latest
-    name: Keploy Record and Test for big payload (Node.js)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_latest
+            record_src: build
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: ${{ matrix.job }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      - name: Download Keploy Binary for Recording
+        id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.record_src }}
+
+      - name: Download Keploy Binary for Replaying
+        id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.replay_src }}
 
       - name: Checkout samples-typescript repository
         uses: actions/checkout@v4
@@ -25,21 +97,15 @@ jobs:
           path: samples-typescript
           ref: main
 
-      - name: Install Go
-        uses: actions/setup-go@v2
-        with:
-            go-version: 1.24
- 
-      - name: Installing build Essentials and gcc
+      - name: Install build-essentials
         run: |
-            sudo apt -y update
-            sudo apt -y install build-essential gcc libc-dev    
-
-      - name: Build Keploy binary
-        run: |
-          go build -tags=viper_bind_struct -ldflags="-X main.api_server_uri=https://api.keploy.io" -o keploy . && sudo mv keploy /usr/local/bin
+          sudo apt-get -y update
+          sudo apt-get -y install build-essential
 
       - name: Run Keploy Record and Test Script
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
         run: |
           chmod +x ./.github/workflows/test_workflow_scripts/node-bigpayload.sh
           ./.github/workflows/test_workflow_scripts/node-bigpayload.sh
