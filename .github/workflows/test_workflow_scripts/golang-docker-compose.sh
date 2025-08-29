@@ -109,6 +109,17 @@ do
     # Define the report file for each test set
     report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
 
+     echo "----------------------------------------"
+    echo "Looking for report file: ${report_file}"
+    if [ -f "$report_file" ]; then
+        echo "File found. Contents:"
+        cat "$report_file"
+    else
+        echo "Error: Report file NOT FOUND at this path!"
+        ls -lR ./keploy # List all files in the keploy directory for debugging
+    fi
+    echo "----------------------------------------"
+
     # Extract the test status
     test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
 
