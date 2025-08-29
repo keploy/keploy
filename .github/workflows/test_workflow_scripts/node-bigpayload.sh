@@ -225,7 +225,7 @@ record_traffic() {
     if [ "$endpoint" == "large-payload" ]; then
         echo "📦 Generating 1MB payload for POST requests..."
         echo '{"data":"' > "$temp_file"
-        head -c 1048500 /dev/zero | tr '\0' 'a' >> "$temp_file" # Approx 1MB
+        head -c 512000 /dev/zero | tr '\0' 'a' >> "$temp_file" # Approx 1MB
         echo '"}' >> "$temp_file"
     fi
 
