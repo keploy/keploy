@@ -161,6 +161,7 @@
 # exit 0
 #!/bin/bash
 #!/bin/bash
+#!/bin/bash
 
 # Exit on error, undefined variable, or pipe failure.
 set -Eeuo pipefail
@@ -196,26 +197,18 @@ npm install
 endsec
 
 # --- Function to record traffic ---
-# Arguments: $1: endpoint, $2: number of requests
+# Arguments: $1: endpoint, $2: number of requests, $3: keploy_pid
 record_traffic() {
     local endpoint="$1"
     local num_requests="$2"
+    local keploy_pid="$3"
     local url="http://127.0.0.1:3000/${endpoint}"
     local temp_file="large_payload.json"
-    local keploy_pid
-
-    # Capture the PID of the Keploy process
-    keploy_pid=$(pgrep keploy)
-    if [ -z "$keploy_pid" ]; then
-        echo "::error::Keploy process not found after starting record!"
-        exit 1
-    fi
-    echo "✅ Keploy recorder started with PID: $keploy_pid"
-
 
     echo "⏳ Waiting for application to start (30s)..."
     # Use a more robust wait mechanism
     for i in {1..30}; do
+        # FIX: Corrected the IP address from 1227.0.0.1 to 127.0.0.1
         if curl -s "http://127.0.0.1:3000/"; then
             echo "✅ Application is ready."
             break
@@ -226,7 +219,6 @@ record_traffic() {
         echo "::error::Application did not start in time."
         exit 1
     fi
-
 
     echo "🚀 Sending ${num_requests} requests to ${url}"
 
@@ -239,7 +231,6 @@ record_traffic() {
 
     for (( i=1; i<=num_requests; i++ )); do
         echo "Sending request ${i}/${num_requests}..."
-        # **CORRECTION**: Added `|| true` to prevent the script from exiting on a failed curl request.
         if [ "$endpoint" == "large-payload" ]; then
             curl -sS -o /dev/null -w "Status: %{http_code}\n" -X POST -H "Content-Type: application/json" --data @"$temp_file" "${url}" || true
         else
@@ -343,9 +334,27 @@ section "--- 🧪 Starting Test for /small-payload ---"
 sudo rm -rf keploy/ reports/
 sudo "${RECORD_BIN}" config --generate
 echo "🎥 Starting recorder for small payload..."
-# Use RECORD_BIN for recording
 sudo -E env PATH="$PATH" "${RECORD_BIN}" record -c "node server.js" &> "record_small.txt" &
-record_traffic "small-payload" 100
+
+# FIX: Wait for Keploy to start by polling for its PID to prevent a race condition.
+echo "Waiting for Keploy to initialize..."
+KEPLOY_PID=""
+for i in {1..15}; do
+    KEPLOY_PID=$(pgrep keploy || true)
+    if [ -n "$KEPLOY_PID" ]; then
+        break
+    fi
+    sleep 1
+done
+
+if [ -z "$KEPLOY_PID" ]; then
+    echo "::error::Keploy process failed to start in time. Check logs."
+    cat record_small.txt
+    exit 1
+fi
+echo "✅ Keploy recorder started with PID: $KEPLOY_PID"
+
+record_traffic "small-payload" 100 "$KEPLOY_PID"
 verify_test_count 100
 run_and_verify_tests "test_small.txt"
 endsec
@@ -356,9 +365,27 @@ echo "🧹 Cleaning up for the next test run..."
 sudo rm -rf keploy/ reports/
 sudo "${RECORD_BIN}" config --generate
 echo "🎥 Starting recorder for large payload..."
-# Use RECORD_BIN for recording
 sudo -E env PATH="$PATH" "${RECORD_BIN}" record -c "node server.js" --bigPayload &> "record_large.txt" &
-record_traffic "large-payload" 100
+
+# FIX: Wait for Keploy to start by polling for its PID to prevent a race condition.
+echo "Waiting for Keploy to initialize..."
+KEPLOY_PID=""
+for i in {1..15}; do
+    KEPLOY_PID=$(pgrep keploy || true)
+    if [ -n "$KEPLOY_PID" ]; then
+        break
+    fi
+    sleep 1
+done
+
+if [ -z "$KEPLOY_PID" ]; then
+    echo "::error::Keploy process failed to start in time. Check logs."
+    cat record_large.txt
+    exit 1
+fi
+echo "✅ Keploy recorder started with PID: $KEPLOY_PID"
+
+record_traffic "large-payload" 100 "$KEPLOY_PID"
 verify_test_count 100
 run_and_verify_tests "test_large.txt"
 endsec
