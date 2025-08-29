@@ -138,6 +138,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		Rules:      opts.Rules,
 		E2E:        opts.E2E,
 		Port:       opts.Port,
+		BigPayload: opts.BigPayload,
 	})
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to load hooks")

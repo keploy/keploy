@@ -62,6 +62,7 @@ type Hooks struct {
 	dockerAppRegistrationMap *ebpf.Map
 	redirectProxyMap         *ebpf.Map
 	e2eAppRegistrationMap    *ebpf.Map
+	structChoiceMap          *ebpf.Map
 	//--------------
 
 	// eBPF C shared objectsobjects
@@ -547,7 +548,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	}
 
 	agentInfo.DNSPort = int32(h.dnsPort)
-
+	agentInfo.KeployAgentInode = clientInfo.KeployClientInode
 	if opts.IsDocker {
 		clientInfo.IsDockerApp = uint32(1)
 	} else {
@@ -574,6 +575,15 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 		return err
 	}
 
+	h.structChoiceMap = objs.StructChoiceMap
+	if opts.BigPayload {
+		err = h.UpdateStructChoiceMap(0, 1)
+	} else {
+		err = h.UpdateStructChoiceMap(0, 0)
+	}
+	if err != nil {
+		h.logger.Error("Error setting struct choice info in map", zap.Error(err))
+	}
 	return nil
 }
 
@@ -582,6 +592,7 @@ func (h *Hooks) Record(ctx context.Context, _ uint64, opts models.IncomingOption
 	// and then use the app id to get the test cases chan
 	// and pass that to eBPF consumers/listeners
 	return conn.ListenSocket(ctx, h.logger, h.objects.SocketOpenEvents, h.objects.SocketDataEvents, h.objects.SocketCloseEvents, opts)
+
 }
 
 func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
@@ -710,4 +721,22 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 	}
 
 	h.logger.Info("eBPF resources released successfully...")
+}
+
+func (h *Hooks) UpdateStructChoiceMap(key uint64, value uint64) error {
+	if h.structChoiceMap == nil {
+		return fmt.Errorf("flag map not initialized")
+	}
+
+	// Key and value must be pointers
+	err := h.structChoiceMap.Update(
+		&key,           // Map key (pointer)
+		&value,         // New value (pointer)
+		ebpf.UpdateAny, // Update flags
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to update flag map: %w", err)
+	}
+	return nil
 }

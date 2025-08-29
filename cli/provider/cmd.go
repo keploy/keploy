@@ -242,7 +242,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			cmd.Flags().String("driven", c.cfg.Contract.Driven, "Specify the driven flag to validate contracts")
 			return nil
 		}
-
+		cmd.Flags().Bool("bigPayload", false, "Specify whether the requests are bigger in size or not")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
@@ -389,6 +389,7 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 	if err != nil {
 		return err
 	}
+
 	defaultCfg := *c.cfg
 	err = c.PreProcessFlags(cmd)
 	if err != nil {
@@ -677,6 +678,11 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 	case "record", "test", "rerecord":
+		bigPayload, err := cmd.Flags().GetBool("bigPayload")
+		if err != nil {
+			bigPayload = false
+		}
+		c.cfg.Record.BigPayload = bigPayload
 
 		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
 			path, err := cmd.Flags().GetString("path")
@@ -773,7 +779,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 		}
-		err := StartInDocker(ctx, c.logger, c.cfg)
+		err = StartInDocker(ctx, c.logger, c.cfg)
 		if err != nil {
 			return err
 		}

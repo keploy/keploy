@@ -60,6 +60,9 @@ jobs:
   run_node_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/node_linux.yml  
+  run_node_bigpayload:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/node_bigpayload.yml
   run_node_docker:
     needs: [build-and-upload, upload-latest, build-docker-image]
     uses: ./.github/workflows/node_docker.yml

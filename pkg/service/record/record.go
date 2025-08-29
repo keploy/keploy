@@ -263,6 +263,7 @@ func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
 			Rules:         r.config.BypassRules,
 			E2E:           r.config.E2E,
 			Port:          r.config.Port,
+			BigPayload:    r.config.Record.BigPayload,
 		}
 		err = r.instrumentation.Hook(ctx, appID, hooks)
 		if err != nil {
@@ -279,8 +280,9 @@ func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
 
 func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (FrameChan, error) {
 	incomingOpts := models.IncomingOptions{
-		Filters:  r.config.Record.Filters,
-		BasePath: r.config.Record.BasePath,
+		Filters:    r.config.Record.Filters,
+		BasePath:   r.config.Record.BasePath,
+		BigPayload: r.config.Record.BigPayload,
 	}
 	incomingChan, err := r.instrumentation.GetIncoming(ctx, appID, incomingOpts)
 	if err != nil {

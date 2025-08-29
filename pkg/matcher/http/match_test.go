@@ -5,6 +5,8 @@ import (
 
 	"errors"
 
+	"net/http"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v2/pkg/models"
@@ -233,4 +235,120 @@ func TestMatch_BodyNoiseWildcard_789(t *testing.T) {
 	assert.True(t, result.BodyResult[0].Normal)
 	// Check that tc.Noise["body"] was initialized
 	assert.NotNil(t, tc.Noise["body"])
+}
+
+// TestFlattenHTTPResponse_001 ensures that the `FlattenHTTPResponse` function correctly flattens HTTP headers and body into a map.
+func TestFlattenHTTPResponse_001(t *testing.T) {
+	// Arrange
+	headers := http.Header{
+		"Content-Type":  []string{"application/json"},
+		"Authorization": []string{"Bearer token"},
+	}
+	body := `{"key": "value"}`
+
+	// Act
+	result, err := FlattenHTTPResponse(headers, body)
+
+	// Assert
+	require.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.Equal(t, []string{"application/json"}, result["header.Content-Type"])
+	assert.Equal(t, []string{"Bearer token"}, result["header.Authorization"])
+	assert.Contains(t, result, "body.key")
+}
+
+// TestAssertionMatch_JsonContainsFailure_456 ensures that the `JsonContains` assertion fails when the actual response body does not contain the expected keys.
+func TestAssertionMatch_JsonContainsFailure_456(t *testing.T) {
+	logger := zap.NewNop()
+	tc := &models.TestCase{
+		Assertions: map[models.AssertionType]interface{}{
+			models.JsonContains: map[string]interface{}{
+				"key":        "value",
+				"missingKey": "expectedValue",
+			},
+		},
+		HTTPResp: models.HTTPResp{
+			Body: `{"key": "value"}`,
+		},
+	}
+	actualResponse := &models.HTTPResp{
+		Body: `{"key": "value"}`,
+	}
+
+	pass, res := AssertionMatch(tc, actualResponse, logger)
+
+	assert.False(t, pass, "Should fail because the actual response body is missing expected keys")
+	require.NotNil(t, res)
+	assert.False(t, res.BodyResult[0].Normal)
+}
+
+// TestAssertionMatch_HeaderMatchesFailure_321 ensures that the `HeaderMatches` assertion fails when the actual header value does not match the expected regex pattern.
+func TestAssertionMatch_HeaderMatchesFailure_321(t *testing.T) {
+	logger := zap.NewNop()
+	tc := &models.TestCase{
+		Assertions: map[models.AssertionType]interface{}{
+			models.HeaderMatches: map[string]interface{}{
+				"Content-Type": "^application/xml$",
+			},
+		},
+		HTTPResp: models.HTTPResp{
+			Header: map[string]string{
+				"Content-Type": "application/json",
+			},
+		},
+	}
+	actualResponse := &models.HTTPResp{
+		Header: map[string]string{
+			"Content-Type": "application/json",
+		},
+	}
+
+	pass, res := AssertionMatch(tc, actualResponse, logger)
+
+	assert.False(t, pass, "Should fail because the actual header value does not match the expected regex pattern")
+	require.NotNil(t, res)
+}
+
+// TestMatch_TemplatizedJSONMarshalError_243 tests error handling for json.Marshal in the diff logic.
+func TestMatch_TemplatizedJSONMarshalError_243(t *testing.T) {
+	logger := zap.NewNop()
+	tc := &models.TestCase{
+		Name: "test-templatized-json-marshal-error",
+		HTTPResp: models.HTTPResp{
+			StatusCode: 200,
+			Body:       `{"data": "{\"id\": 1}"}`,
+		},
+	}
+	actualResponse := &models.HTTPResp{
+		StatusCode: 200,
+		Body:       `{"data": "{\"id\": 2}"}`,
+	}
+	noiseConfig := map[string]map[string][]string{}
+
+	originalJSONMarshal := jsonMarshal234
+	defer func() { jsonMarshal234 = originalJSONMarshal }()
+
+	// Test failure on first marshal (line 242)
+	jsonMarshal234 = func(v interface{}) ([]byte, error) {
+		return nil, errors.New("mock marshal error")
+	}
+
+	pass, res := Match(tc, actualResponse, noiseConfig, false, logger)
+	assert.False(t, pass)
+	assert.Nil(t, res, "Result should be nil on this specific error path")
+
+	// Test failure on second marshal (line 245)
+	callCount := 0
+	jsonMarshal234 = func(v interface{}) ([]byte, error) {
+		callCount++
+		if callCount == 2 {
+			return nil, errors.New("mock marshal error 2")
+		}
+		// Correctly use the original marshal function for the first call
+		return originalJSONMarshal(v)
+	}
+
+	pass, res = Match(tc, actualResponse, noiseConfig, false, logger)
+	assert.False(t, pass)
+	assert.Nil(t, res, "Result should be nil on this specific error path")
 }
