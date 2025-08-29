@@ -68,9 +68,9 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					return
 				}
 
-				logger.Debug("the genericRequests before pass through are", zap.Any("length", len(genericRequests)))
+				logger.Debug("the genericRequests before pass through are", zap.Int("length", len(genericRequests)))
 				for _, genReq := range genericRequests {
-					logger.Debug("the genericRequests are:", zap.Any("h", string(genReq)))
+					logger.Debug("the genericRequests are:", zap.String("h", string(genReq)))
 				}
 
 				reqBuffer, err := pUtil.PassThrough(ctx, logger, clientConn, dstCfg, genericRequests)
@@ -80,11 +80,11 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				}
 
 				genericRequests = [][]byte{}
-				logger.Debug("the request buffer after pass through in generic", zap.Any("buffer", string(reqBuffer)))
+				logger.Debug("the request buffer after pass through in generic", zap.String("buffer", string(reqBuffer)))
 				if len(reqBuffer) > 0 {
 					genericRequests = [][]byte{reqBuffer}
 				}
-				logger.Debug("the length of genericRequests after passThrough ", zap.Any("length", len(genericRequests)))
+				logger.Debug("the length of genericRequests after passThrough ", zap.Int("length", len(genericRequests)))
 				continue
 			}
 			for _, genericResponse := range genericResponses {
@@ -108,7 +108,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 
 			// Clear the genericRequests buffer for the next dependency call
 			genericRequests = [][]byte{}
-			logger.Debug("the genericRequests after the iteration", zap.Any("length", len(genericRequests)))
+			logger.Debug("the genericRequests after the iteration", zap.Int("length", len(genericRequests)))
 		}
 	}(errCh, genericRequests)
 
