@@ -1,5 +1,3 @@
-// In report.go
-
 package report
 
 import (
@@ -199,10 +197,7 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 			var failedList []string
 			for _, t := range rep.Tests {
 				if t.Status == models.TestStatusFailed {
-					label := t.TestCaseID
-					if t.Name != "" {
-						label = fmt.Sprintf("%s", t.TestCaseID)
-					}
+					label := fmt.Sprintf("%s", t.TestCaseID)
 					failedList = append(failedList, label)
 				}
 			}
