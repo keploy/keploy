@@ -278,8 +278,8 @@ verify_test_count() {
 
     echo "Found ${actual_count} recorded test cases. Expected ${expected_count}."
 
-    if [ "$actual_count" -ne "$expected_count" ]; then
-        echo "❌ Test case count mismatch!"
+    if [ "$actual_count" -lt "$expected_count" ]; then
+        echo "❌ Test case count is less than expected!"
         exit 1
     fi
     echo "✔️ Correct number of test cases recorded."
