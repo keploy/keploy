@@ -1,3 +1,5 @@
+// In report.go
+
 package report
 
 import (
@@ -8,14 +10,16 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"text/tabwriter"
+	"time"
 
-	"github.com/invopop/yaml"
 	"github.com/k0kubun/pp/v3"
 	"go.keploy.io/server/v2/config"
 	matcherUtils "go.keploy.io/server/v2/pkg/matcher"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.uber.org/zap"
+	"gopkg.in/yaml.v3"
 )
 
 type Report struct {
@@ -43,72 +47,248 @@ func New(logger *zap.Logger, cfg *config.Config, reportDB ReportDB, testDB TestD
 	}
 }
 
+// collectReports loads whole test-set reports for summary.
+func (r *Report) collectReports(ctx context.Context, runID string, testSetIDs []string) (map[string]*models.TestReport, error) {
+	res := make(map[string]*models.TestReport, len(testSetIDs))
+	for _, ts := range testSetIDs {
+		clean := strings.TrimSuffix(ts, ReportSuffix)
+		rep, err := r.reportDB.GetReport(ctx, runID, clean)
+		if err != nil {
+			r.logger.Error("failed to get report for test-set", zap.String("test_set_id", clean), zap.Error(err))
+			continue
+		}
+		if rep != nil {
+			res[clean] = rep
+		}
+	}
+	if len(res) == 0 {
+		return nil, fmt.Errorf("no reports found for summary")
+	}
+	return res, nil
+}
+
+// print only selected test-cases (failed => with diff, passed => compact notice)
+func (r *Report) printSpecificTestCases(ctx context.Context, runID string, testSetIDs []string, ids []string) error {
+	any := false
+	for _, ts := range testSetIDs {
+		clean := strings.TrimSuffix(ts, ReportSuffix)
+		rep, err := r.reportDB.GetReport(ctx, runID, clean)
+		if err != nil || rep == nil {
+			if err != nil {
+				r.logger.Error("failed to get report for test-set", zap.String("test_set_id", clean), zap.Error(err))
+			}
+			continue
+		}
+		sel := filterTestsByIDs(rep.Tests, ids)
+		if len(sel) == 0 {
+			continue
+		}
+		any = true
+		if err := r.printTests(sel); err != nil {
+			return err
+		}
+	}
+	if !any {
+		r.logger.Warn("No matching test-cases found in the selected test-sets", zap.Strings("ids", ids))
+	}
+	return nil
+}
+
+// helper used by both file and DB paths
+func (r *Report) printTests(tests []models.TestResult) error {
+	// Respect full/compact body setting when printing failures
+	for _, t := range tests {
+		if t.Status == models.TestStatusFailed {
+			if err := r.printSingleTestReport(t); err != nil {
+				return err
+			}
+			continue
+		}
+		// Passed — print a small header so users see it was found and green
+		printer := r.createFormattedPrinter()
+		header := r.generateTestHeader(t, printer)
+		if _, err := printer.Printf(header); err != nil {
+			r.logger.Error("failed to print test header", zap.Error(err))
+			return err
+		}
+		fmt.Printf("Testcase %q (%s) PASSED ✅ (%s)\n", t.TestCaseID, t.Name, t.TimeTaken)
+		fmt.Println("\n--------------------------------------------------------------------")
+	}
+	return nil
+}
+
+// printSummary prints the grand summary + per test-set table.
+// Time Taken uses the TimeTaken field from TestReport if available, otherwise estimates from tests.
+func (r *Report) printSummary(reports map[string]*models.TestReport) error {
+	var total, passed, failed int
+	type row struct {
+		name              string
+		total, pass, fail int
+		dur               time.Duration
+		timeTaken         string
+	}
+	rows := make([]row, 0, len(reports))
+
+	for name, rep := range reports {
+		total += rep.Total
+		passed += rep.Success
+		failed += rep.Failure
+
+		// Use TimeTaken from TestReport if available, otherwise estimate from tests
+		var dur time.Duration
+		if rep.TimeTaken != "" {
+			if parsedDur, err := parseTimeString(rep.TimeTaken); err == nil {
+				dur = parsedDur
+			}
+		}
+		if dur == 0 {
+			dur = estimateDuration(rep.Tests)
+		}
+
+		rows = append(rows, row{name: name, total: rep.Total, pass: rep.Success, fail: rep.Failure, dur: dur, timeTaken: rep.TimeTaken})
+	}
+
+	// Sort by name for determinism
+	sort.Slice(rows, func(i, j int) bool { return rows[i].name < rows[j].name })
+
+	grandDur := time.Duration(0)
+	for _, r := range rows {
+		grandDur += r.dur
+	}
+
+	fmt.Println("<=========================================>")
+	fmt.Println(" COMPLETE TESTRUN SUMMARY.")
+	fmt.Printf("\tTotal tests: %d\n", total)
+	fmt.Printf("\tTotal test passed: %d\n", passed)
+	fmt.Printf("\tTotal test failed: %d\n", failed)
+	if grandDur > 0 {
+		fmt.Printf("\tTotal time taken: %q\n", fmtDuration(grandDur))
+	} else {
+		fmt.Printf("\tTotal time taken: %q\n", "N/A")
+	}
+
+	// Initialize a new tabwriter.
+	// The parameters are: output, minwidth, tabwidth, padding, padchar, flags
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+
+	// Write the header to the tabwriter buffer. Use \t as a separator.
+	fmt.Fprintln(w, "\tTest Suite\tTotal\tPassed\tFailed\tTime Taken\t")
+
+	// Write each row of data to the buffer.
+	for _, rrow := range rows {
+		tt := "N/A"
+		if rrow.dur > 0 {
+			tt = fmtDuration(rrow.dur)
+		}
+		fmt.Fprintf(w, "\t%s\t%d\t%d\t%d\t%s\t\n",
+			rrow.name, rrow.total, rrow.pass, rrow.fail, tt)
+	}
+
+	// Flush the buffer to standard output to print the formatted table.
+	w.Flush()
+
+	fmt.Println("\nFAILED TEST CASES:")
+	if failed == 0 {
+		fmt.Println("\t(none)")
+	} else {
+		for _, rrow := range rows {
+			rep := reports[rrow.name]
+			if rep == nil {
+				continue
+			}
+			var failedList []string
+			for _, t := range rep.Tests {
+				if t.Status == models.TestStatusFailed {
+					label := t.TestCaseID
+					if t.Name != "" {
+						label = fmt.Sprintf("%s", t.TestCaseID)
+					}
+					failedList = append(failedList, label)
+				}
+			}
+			if len(failedList) == 0 {
+				continue
+			}
+			fmt.Printf("\t%s\n", rrow.name)
+			for _, fc := range failedList {
+				fmt.Printf("\t  - %s\n", fc)
+			}
+		}
+	}
+
+	fmt.Println("<=========================================>")
+	return nil
+}
+
 // GenerateReport orchestrates the entire report generation process
 func (r *Report) GenerateReport(ctx context.Context) error {
 	if r.config.Report.ReportPath != "" {
+		// File mode (single test-set file)
 		return r.generateReportFromFile(r.config.Report.ReportPath)
 	}
 
 	latestRunID, err := r.getLatestTestRunID(ctx)
-
 	if err != nil {
 		return err
 	}
+	if latestRunID == "" {
+		r.logger.Warn("no test runs found")
+		return nil
+	}
+	r.logger.Debug("latest run id is", zap.String("latest_run_id", latestRunID))
 
 	testSetIDs := r.extractTestSetIDs()
 	if len(testSetIDs) == 0 {
 		r.logger.Info("No test sets selected for report generation, Generating report for all test sets")
-
-		var err error
 		testSetIDs, err = r.testDB.GetReportTestSets(ctx, latestRunID)
 		if err != nil {
 			r.logger.Error("failed to get all test set ids", zap.Error(err))
 			return err
 		}
-
 		if len(testSetIDs) == 0 {
 			r.logger.Warn("No test sets found for report generation")
 			return nil
 		}
 	}
 
-	if latestRunID == "" {
-		r.logger.Warn("no test runs found")
-		return nil
+	if r.config.Report.SummaryOnly {
+		reports, err := r.collectReports(ctx, latestRunID, testSetIDs)
+		if err != nil {
+			return err
+		}
+		return r.printSummary(reports)
 	}
 
-	r.logger.Debug("latest run id is", zap.String("latest_run_id", latestRunID))
+	// Specific test-case(s)
+	if len(r.config.Report.TestCaseIDs) > 0 {
+		return r.printSpecificTestCases(ctx, latestRunID, testSetIDs, r.config.Report.TestCaseIDs)
+	}
 
+	// Original path: print only FAILED tests
 	failedTests, err := r.collectFailedTests(ctx, latestRunID, testSetIDs)
 	if err != nil {
 		return err
 	}
-
 	if len(failedTests) == 0 {
 		r.logger.Info("No failed tests found in the latest test run")
 		return nil
 	}
 
-	err = r.printFailedTestReports(failedTests)
-	if err != nil {
+	if err := r.printFailedTestReports(failedTests); err != nil {
 		r.logger.Error("failed to print failed test reports", zap.Error(err))
 		return err
 	}
-
 	r.logger.Info(fmt.Sprintf("✂️ CLI output truncated - see the %s report file for the complete diff.", latestRunID))
-
 	r.logger.Info("Report generation completed successfully")
-
 	return nil
 }
 
-// generateReportFromFile loads a report from an absolute file path and prints diffs for failed tests.
+// generateReportFromFile loads a report from an absolute file path and prints diffs for failed tests
+// OR summary / specific test cases if flags are set.
 func (r *Report) generateReportFromFile(reportPath string) error {
 	if !filepath.IsAbs(reportPath) {
-		// Should be enforced in CLI validation; keep a guard here for safety.
 		return fmt.Errorf("report-path must be absolute, got %q", reportPath)
 	}
-
 	data, err := os.ReadFile(reportPath)
 	if err != nil {
 		r.logger.Error("failed to read report file", zap.String("report_path", reportPath), zap.Error(err))
@@ -116,25 +296,76 @@ func (r *Report) generateReportFromFile(reportPath string) error {
 	}
 	r.logger.Info("Generating report from file", zap.String("report_path", reportPath))
 
-	tests, err := r.parseReportTests(data)
-	if err != nil {
-		r.logger.Error("failed to parse report file", zap.String("report_path", reportPath), zap.Error(err))
-		return err
+	// Attempt to parse the file into the canonical TestReport struct.
+	var tr models.TestReport
+	if err := yaml.Unmarshal(data, &tr); err == nil {
+		// This is the successful, correct path.
+
+		// Summary-only
+		if r.config.Report.SummaryOnly {
+			m := map[string]*models.TestReport{tr.Name: &tr}
+			return r.printSummary(m)
+		}
+		// Test-case filtering
+		if len(r.config.Report.TestCaseIDs) > 0 {
+			sel := filterTestsByIDs(tr.Tests, r.config.Report.TestCaseIDs)
+			if len(sel) == 0 {
+				r.logger.Warn("No matching test-cases found in file", zap.Strings("ids", r.config.Report.TestCaseIDs))
+				return nil
+			}
+			return r.printTests(sel)
+		}
+		// Default: only failed tests
+		failed := r.extractFailedTestsFromResults(tr.Tests)
+		if len(failed) == 0 {
+			r.logger.Info("No failed tests found in the provided report file")
+			return nil
+		}
+		return r.printFailedTestReports(failed)
 	}
 
+	// Fallback for older/simpler report formats that only contain a 'tests' array.
+	r.logger.Debug("Could not parse as full TestReport, falling back to legacy test array parser", zap.Error(err))
+	tests, err := r.parseReportTests(data)
+	if err != nil {
+		r.logger.Error("failed to parse report file with legacy parser", zap.String("report_path", reportPath), zap.Error(err))
+		return err
+	}
+	if r.config.Report.SummaryOnly {
+		// We don't have totals; print a compact synthetic summary of the array we have.
+		total, pass, fail := len(tests), 0, 0
+		var failedCases []string
+		for _, t := range tests {
+			if t.Status == models.TestStatusFailed {
+				fail++
+				label := t.TestCaseID
+				if t.Name != "" {
+					label = fmt.Sprintf("%s (%s)", t.TestCaseID, t.Name)
+				}
+				failedCases = append(failedCases, label)
+			} else {
+				pass++
+			}
+		}
+		// Calculate total time from individual test results
+		totalTime := estimateDuration(tests)
+		printSingleSummary("file", total, pass, fail, totalTime, failedCases)
+		return nil
+	}
+	if len(r.config.Report.TestCaseIDs) > 0 {
+		sel := filterTestsByIDs(tests, r.config.Report.TestCaseIDs)
+		if len(sel) == 0 {
+			r.logger.Warn("No matching test-cases found in file (tests-only parse)", zap.Strings("ids", r.config.Report.TestCaseIDs))
+			return nil
+		}
+		return r.printTests(sel)
+	}
 	failed := r.extractFailedTestsFromResults(tests)
 	if len(failed) == 0 {
 		r.logger.Info("No failed tests found in the provided report file")
 		return nil
 	}
-
-	if err := r.printFailedTestReports(failed); err != nil {
-		r.logger.Error("failed to print failed test reports from file", zap.Error(err))
-		return err
-	}
-
-	r.logger.Info("Report generation (from file) completed successfully")
-	return nil
+	return r.printFailedTestReports(failed)
 }
 
 // parseReportTests unmarshals the report data into a fileReport struct.
@@ -330,8 +561,7 @@ func (r *Report) createFormattedPrinter() *pp.PrettyPrinter {
 
 // generateTestHeader creates the test report header
 func (r *Report) generateTestHeader(test models.TestResult, printer *pp.PrettyPrinter) string {
-	return printer.Sprintf("Testrun failed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n",
-		test.TestCaseID)
+	return printer.Sprintf("Testrun failed for %s/%s\n\n", test.Name, test.TestCaseID)
 }
 
 // addStatusCodeDiffs adds status code differences to the diff printer
@@ -400,113 +630,4 @@ func (r *Report) printAndRenderDiffs(printer *pp.PrettyPrinter, logs string, log
 	}
 
 	return nil
-}
-
-// applyCliColorsToDiff adds ANSI colors to values in the JSON diff block.
-// - Value after "Path:" is yellow
-// - Value after "Old:" is red
-// - Value after "New:" is green
-func applyCliColorsToDiff(diff string) string {
-	const (
-		ansiReset  = "\x1b[0m"
-		ansiYellow = "\x1b[33m"
-		ansiRed    = "\x1b[31m"
-		ansiGreen  = "\x1b[32m"
-	)
-
-	lines := strings.Split(diff, "\n")
-	for i, line := range lines {
-		if strings.HasPrefix(line, "Path: ") {
-			// Color only the value after "Path: " in yellow
-			value := strings.TrimPrefix(line, "Path: ")
-			lines[i] = "Path: " + ansiYellow + value + ansiReset
-			continue
-		}
-		if strings.HasPrefix(line, "  Old: ") {
-			// Color only the value after "  Old: " in red
-			value := strings.TrimPrefix(line, "  Old: ")
-			lines[i] = "  Old: " + ansiRed + value + ansiReset
-			continue
-		}
-		if strings.HasPrefix(line, "  New: ") {
-			// Color only the value after "  New: " in green
-			value := strings.TrimPrefix(line, "  New: ")
-			lines[i] = "  New: " + ansiGreen + value + ansiReset
-			continue
-		}
-	}
-	return strings.Join(lines, "\n")
-}
-
-// GenerateStatusAndHeadersTableDiff builds a table-style diff for status code, headers,
-// trailer headers, and synthetic content-length when body differs and header is absent.
-func GenerateStatusAndHeadersTableDiff(test models.TestResult) string {
-	var sb strings.Builder
-	sb.WriteString("=== CHANGES IN STATUS AND HEADERS ===\n")
-
-	hasDiff := false
-
-	// Status code
-	if !test.Result.StatusCode.Normal {
-		hasDiff = true
-		sb.WriteString("Path: status_code\n")
-		sb.WriteString(fmt.Sprintf("  Old: %d\n", test.Result.StatusCode.Expected))
-		sb.WriteString(fmt.Sprintf("  New: %d\n\n", test.Result.StatusCode.Actual))
-	}
-
-	// Headers
-	for _, hr := range test.Result.HeadersResult {
-		if hr.Normal {
-			continue
-		}
-		hasDiff = true
-		expected := strings.Join(hr.Expected.Value, ", ")
-		actual := strings.Join(hr.Actual.Value, ", ")
-		sb.WriteString(fmt.Sprintf("Path: header.%s\n", hr.Actual.Key))
-		sb.WriteString(fmt.Sprintf("  Old: %s\n", expected))
-		sb.WriteString(fmt.Sprintf("  New: %s\n\n", actual))
-	}
-
-	// Trailer headers
-	for _, tr := range test.Result.TrailerResult {
-		if tr.Normal {
-			continue
-		}
-		hasDiff = true
-		expected := strings.Join(tr.Expected.Value, ", ")
-		actual := strings.Join(tr.Actual.Value, ", ")
-		sb.WriteString(fmt.Sprintf("Path: trailer.%s\n", tr.Actual.Key))
-		sb.WriteString(fmt.Sprintf("  Old: %s\n", expected))
-		sb.WriteString(fmt.Sprintf("  New: %s\n\n", actual))
-	}
-
-	// Synthetic content length if body differs and content-length header wasn't already reported
-	hasContentLengthHeaderChange := false
-	for _, hr := range test.Result.HeadersResult {
-		if strings.EqualFold(hr.Actual.Key, "Content-Length") || strings.EqualFold(hr.Expected.Key, "Content-Length") {
-			hasContentLengthHeaderChange = !hr.Normal
-			break
-		}
-	}
-	if !hasContentLengthHeaderChange {
-		for _, br := range test.Result.BodyResult {
-			if br.Normal {
-				continue
-			}
-			expLen := len(br.Expected)
-			actLen := len(br.Actual)
-			if expLen != actLen {
-				hasDiff = true
-				sb.WriteString("Path: content_length\n")
-				sb.WriteString(fmt.Sprintf("  Old: %d\n", expLen))
-				sb.WriteString(fmt.Sprintf("  New: %d\n\n", actLen))
-				break
-			}
-		}
-	}
-
-	if !hasDiff {
-		return "No differences found in status or headers."
-	}
-	return strings.TrimSpace(sb.String())
 }
