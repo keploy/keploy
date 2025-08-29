@@ -134,7 +134,6 @@ run_and_verify_tests() {
 # --- STEP 1: Test the Small Payload Endpoint ---
 echo "--- 🧪 Starting Test for /small-payload ---"
 sudo rm -rf keploy/ reports/
-sudo keploy config --generate
 sudo "$RECORD_BIN" config --generate
 echo "🎥 Starting recorder for small payload..."
 sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "node server.js" &> "record_small.txt" &
@@ -148,7 +147,6 @@ echo ""
 echo "--- 🧪 Starting Test for /large-payload ---"
 echo "🧹 Cleaning up for the next test run..."
 sudo rm -rf keploy/ reports/
-sudo keploy config --generate
 sudo "$RECORD_BIN" config --generate
 echo "🎥 Starting recorder for large payload..."
 sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "node server.js" --bigPayload &> "record_large.txt" &
