@@ -15,6 +15,7 @@ type TestReport struct {
 	Tests     []TestResult `json:"tests" yaml:"tests,omitempty"`
 	TestSet   string       `json:"testSet" yaml:"test_set"`
 	CreatedAt int64        `json:"created_at" yaml:"created_at"`
+	TimeTaken string       `json:"time_taken" yaml:"time_taken"`
 }
 
 type TestCoverage struct {
@@ -47,6 +48,7 @@ type TestResult struct {
 	GrpcRes      GrpcResp   `json:"grpcRes,omitempty" yaml:"grpcRes,omitempty"`
 	Noise        Noise      `json:"noise" yaml:"noise,omitempty"`
 	Result       Result     `json:"result" yaml:"result"`
+	TimeTaken    string     `json:"time_taken" yaml:"time_taken"`
 }
 
 func (tr *TestResult) GetKind() string {
