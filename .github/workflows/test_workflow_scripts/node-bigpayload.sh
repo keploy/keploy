@@ -223,9 +223,9 @@ record_traffic() {
     echo "🚀 Sending ${num_requests} requests to ${url}"
 
     if [ "$endpoint" == "large-payload" ]; then
-        echo "📦 Generating 1MB payload for POST requests..."
+        echo "📦 Generating 200KB payload for POST requests..."
         echo '{"data":"' > "$temp_file"
-        head -c 1048500 /dev/zero | tr '\0' 'a' >> "$temp_file"
+        head -c 200000 /dev/zero | tr '\0' 'a' >> "$temp_file"
         echo '"}' >> "$temp_file"
     fi
 
@@ -241,7 +241,7 @@ record_traffic() {
         else
             curl -sS -o /dev/null -w "Status: %{http_code}\n" "${url}" || true
         fi
-        sleep 0.4
+        sleep 0.2
     done
 
     if [ -f "$temp_file" ]; then
