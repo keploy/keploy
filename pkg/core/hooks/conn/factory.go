@@ -4,6 +4,7 @@ package conn
 
 import (
 	"context"
+	"encoding/base64"
 	"net/url"
 	"strings"
 	"sync"
@@ -73,18 +74,18 @@ func (factory *Factory) ProcessActiveTrackers(ctx context.Context, t chan *model
 				if ok {
 
 					if len(requestBuf) == 0 || len(responseBuf) == 0 {
-						factory.logger.Warn("failed processing a request due to invalid request or response", zap.Any("Request Size", len(requestBuf)), zap.Any("Response Size", len(responseBuf)))
+						factory.logger.Warn("failed processing a request due to invalid request or response", zap.Int("Request Size", len(requestBuf)), zap.Int("Response Size", len(responseBuf)))
 						continue
 					}
 					parsedHTTPReq, err := pkg.ParseHTTPRequest(requestBuf)
 					if err != nil {
-						utils.LogError(factory.logger, err, "failed to parse the http request from byte array", zap.Any("requestBuf", requestBuf))
+						utils.LogError(factory.logger, err, "failed to parse the http request from byte array", zap.String("requestBuf", base64.StdEncoding.EncodeToString(requestBuf)))
 						continue
 					}
 
 					parsedHTTPRes, err := pkg.ParseHTTPResponse(responseBuf, parsedHTTPReq)
 					if err != nil {
-						utils.LogError(factory.logger, err, "failed to parse the http response from byte array", zap.Any("responseBuf", responseBuf))
+						utils.LogError(factory.logger, err, "failed to parse the http response from byte array", zap.String("responseBuf", base64.StdEncoding.EncodeToString(responseBuf)))
 						continue
 					}
 

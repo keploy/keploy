@@ -101,7 +101,7 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 				}
 
 				if rec.LostSamples != 0 {
-					l.Debug("Unable to add samples to the socketOpenEvent array due to its full capacity", zap.Any("samples", rec.LostSamples))
+					l.Debug("Unable to add samples to the socketOpenEvent array due to its full capacity", zap.Uint64("samples", uint64(rec.LostSamples)))
 					continue
 				}
 				data := rec.RawSample
