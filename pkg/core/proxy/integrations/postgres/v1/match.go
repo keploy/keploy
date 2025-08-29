@@ -883,7 +883,6 @@ func isTimestamp(byteArray []byte) bool {
 func isBcryptHash(byteArray []byte) bool {
 	// Convert byte array to string
 	s := string(byteArray)
-
 	// Define a regex for bcrypt hashes
 	bcryptRegex := regexp.MustCompile(`^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$`)
 	return bcryptRegex.MatchString(s)
