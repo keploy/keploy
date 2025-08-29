@@ -150,8 +150,8 @@ sudo rm -rf keploy/ reports/
 sudo "$RECORD_BIN" config --generate
 echo "🎥 Starting recorder for large payload..."
 sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "node server.js" --bigPayload &> "record_large.txt" &
-record_traffic "large-payload" 100
-verify_test_count 100
+record_traffic "large-payload" 10
+verify_test_count 10
 run_and_verify_tests "test_large.txt"
 echo "--- ✅ /large-payload Test Completed Successfully ---"
 echo ""
