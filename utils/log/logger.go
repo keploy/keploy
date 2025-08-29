@@ -34,12 +34,12 @@ func (e ansiConsoleEncoder) EncodeEntry(ent zapcore.Entry, fields []zapcore.Fiel
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Convert escaped unicode sequences back to raw ANSI codes
 	bytes := buf.Bytes()
 	bytes = replaceAll(bytes, []byte("\\u001b"), []byte("\u001b"))
 	bytes = replaceAll(bytes, []byte("\\u001B"), []byte("\u001b"))
-	
+
 	buf.Reset()
 	buf.AppendString(string(bytes))
 	return buf, nil
@@ -100,7 +100,6 @@ func New() (*zap.Logger, *os.File, error) {
 	return logger, logFile, nil
 }
 
-
 func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 	LogCfg.Level = zap.NewAtomicLevelAt(level)
 	if level == zap.DebugLevel {
@@ -127,7 +126,7 @@ func AddMode(mode string) (*zap.Logger, error) {
 		modeStr := fmt.Sprintf("Keploy(%s):", mode)
 		enc.AppendString(emoji + " " + modeStr + " " + t.Format(time.RFC3339))
 	}
-	
+
 	encoder := NewANSIConsoleEncoder(cfg.EncoderConfig)
 	core := zapcore.NewCore(
 		encoder,
@@ -143,7 +142,7 @@ func ChangeColorEncoding() (*zap.Logger, error) {
 	// For non-color mode, use the standard console encoder
 	LogCfg.Encoding = "console"
 	LogCfg.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
-	
+
 	logger, err := LogCfg.Build()
 	if err != nil {
 		return nil, fmt.Errorf("failed to build config for logger: %v", err)
