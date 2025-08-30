@@ -47,7 +47,6 @@ type Tracker struct {
 	lastActivityTimestamp uint64
 
 	// Queues to handle multiple ingress traffic on the same conn (keep-alive)
-
 	// kernelRespSizes is a slice of the total number of Response bytes received in the kernel side
 	kernelRespSizes []uint64
 
@@ -180,7 +179,7 @@ func (conn *Tracker) AddOpenEvent(event SocketOpenEvent) {
 	conn.UpdateTimestamps()
 	conn.addr = event.Addr
 	if conn.openTimestamp != 0 && conn.openTimestamp != event.TimestampNano {
-		conn.logger.Debug("Changed open info timestamp due to new request", zap.Any("from", conn.openTimestamp), zap.Any("to", event.TimestampNano))
+		conn.logger.Debug("Changed open info timestamp due to new request", zap.Uint64("from", conn.openTimestamp), zap.Uint64("to", event.TimestampNano))
 	}
 	conn.openTimestamp = event.TimestampNano
 }
@@ -254,7 +253,7 @@ func (conn *Tracker) AddCloseEvent(event SocketCloseEvent) {
 	defer conn.mutex.Unlock()
 	conn.UpdateTimestamps()
 	if conn.closeTimestamp != 0 && conn.closeTimestamp != event.TimestampNano {
-		conn.logger.Debug("Changed close info timestamp due to new request", zap.Any("from", conn.closeTimestamp), zap.Any("to", event.TimestampNano))
+		conn.logger.Debug("Changed close info timestamp due to new request", zap.Uint64("from", conn.closeTimestamp), zap.Uint64("to", event.TimestampNano))
 	}
 	conn.closeTimestamp = event.TimestampNano
 	conn.logger.Debug(fmt.Sprintf("Got a close event from eBPF on connectionId:%v\n", event.ConnID))
@@ -326,7 +325,7 @@ func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Ti
 			actualRecvBytes := conn.kernelReqSizes[0]
 
 			if expectedRecvBytes == 0 || actualRecvBytes == 0 {
-				conn.logger.Warn("Malformed request", zap.Any("ExpectedRecvBytes", expectedRecvBytes), zap.Any("ActualRecvBytes", actualRecvBytes))
+				conn.logger.Warn("Malformed request", zap.Uint64("ExpectedRecvBytes", expectedRecvBytes), zap.Uint64("ActualRecvBytes", actualRecvBytes))
 			}
 
 			//popping out the current request info
@@ -336,7 +335,7 @@ func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Ti
 			if conn.verifyRequestData(expectedRecvBytes, actualRecvBytes) {
 				validReq = true
 			} else {
-				conn.logger.Debug("Malformed request", zap.Any("ExpectedRecvBytes", expectedRecvBytes), zap.Any("ActualRecvBytes", actualRecvBytes))
+				conn.logger.Debug("Malformed request", zap.Uint64("ExpectedRecvBytes", expectedRecvBytes), zap.Uint64("ActualRecvBytes", actualRecvBytes))
 			}
 
 			expectedSentBytes := conn.userRespSizes[0]
@@ -350,7 +349,7 @@ func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Ti
 				validRes = true
 				respTimestamp = time.Now()
 			} else {
-				conn.logger.Debug("Malformed response", zap.Any("ExpectedSentBytes", expectedSentBytes), zap.Any("ActualSentBytes", actualSentBytes))
+				conn.logger.Debug("Malformed response", zap.Uint64("ExpectedSentBytes", expectedSentBytes), zap.Uint64("ActualSentBytes", actualSentBytes))
 			}
 
 			if len(conn.userReqs) > 0 && len(conn.userResps) > 0 { //validated request, response
@@ -361,7 +360,7 @@ func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Ti
 				conn.userReqs = conn.userReqs[1:]
 				conn.userResps = conn.userResps[1:]
 			} else {
-				conn.logger.Debug("no data buffer for request or response", zap.Any("Length of RecvBufQueue", len(conn.userReqs)), zap.Any("Length of SentBufQueue", len(conn.userResps)))
+				conn.logger.Debug("no data buffer for request or response", zap.Int("Length of RecvBufQueue", len(conn.userReqs)), zap.Int("Length of SentBufQueue", len(conn.userResps)))
 			}
 
 			recordTraffic = validReq && validRes
@@ -374,7 +373,7 @@ func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Ti
 
 		// // decrease the recTestCounter
 		conn.decRecordTestCount()
-		conn.logger.Debug("verified recording", zap.Any("recordTraffic", recordTraffic))
+		conn.logger.Debug("verified recording", zap.Bool("recordTraffic", recordTraffic))
 	} else if conn.lastChunkWasResp && elapsedTime >= uint64(time.Second*2) { // Check if 2 seconds has passed since the last activity.
 		conn.logger.Debug("might be last request on the conn")
 
@@ -388,13 +387,13 @@ func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Ti
 			conn.kernelReqSizes = conn.kernelReqSizes[1:]
 
 			if expectedRecvBytes == 0 || actualRecvBytes == 0 {
-				conn.logger.Warn("Malformed request", zap.Any("ExpectedRecvBytes", expectedRecvBytes), zap.Any("ActualRecvBytes", actualRecvBytes))
+				conn.logger.Warn("Malformed request", zap.Uint64("ExpectedRecvBytes", expectedRecvBytes), zap.Uint64("ActualRecvBytes", actualRecvBytes))
 			}
 
 			if conn.verifyRequestData(expectedRecvBytes, actualRecvBytes) {
 				recordTraffic = true
 			} else {
-				conn.logger.Debug("Malformed request", zap.Any("ExpectedRecvBytes", expectedRecvBytes), zap.Any("ActualRecvBytes", actualRecvBytes))
+				conn.logger.Debug("Malformed request", zap.Uint64("ExpectedRecvBytes", expectedRecvBytes), zap.Uint64("ActualRecvBytes", actualRecvBytes))
 				recordTraffic = false
 			}
 
@@ -406,7 +405,7 @@ func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Ti
 				responseBuf = conn.resp
 				respTimestamp = time.Now()
 			} else {
-				conn.logger.Debug("no data buffer for request", zap.Any("Length of RecvBufQueue", len(conn.userReqs)))
+				conn.logger.Debug("no data buffer for request", zap.Int("Length of RecvBufQueue", len(conn.userReqs)))
 				recordTraffic = false
 			}
 
@@ -420,7 +419,7 @@ func (conn *Tracker) isHTTP1Complete() (bool, []byte, []byte, time.Time, time.Ti
 		// this can be to avoid potential corruption in the conn
 		conn.reset()
 
-		conn.logger.Debug("unverified recording", zap.Any("recordTraffic", recordTraffic))
+		conn.logger.Debug("unverified recording", zap.Bool("recordTraffic", recordTraffic))
 	}
 
 	// Checking if record traffic is recorded and request & response timestamp is captured or not.
@@ -460,7 +459,7 @@ func (conn *Tracker) handleHTTP2Data(event SocketDataEvent) {
 		frame, consumed, err := pkg.ExtractHTTP2Frame(conn.buffer)
 		if err != nil {
 			if strings.Contains(err.Error(), "incomplete frame") {
-				conn.logger.Debug("Incomplete frame", zap.Any("error", err))
+				conn.logger.Debug("Incomplete frame", zap.Error(err))
 				// Not enough data yet, wait for more
 				break
 			}
@@ -529,7 +528,7 @@ func (conn *Tracker) handleHTTP1Data(event SocketDataEvent) {
 		}
 
 	case IngressTraffic:
-		conn.logger.Debug("isNewRequest", zap.Any("isNewRequest", conn.isNewRequest), zap.Any("connID", conn.connID))
+		conn.logger.Debug("isNewRequest", zap.Bool("isNewRequest", conn.isNewRequest), zap.Any("connID", conn.connID))
 		// Capturing the timestamp of request as the request just started to come.
 		if conn.isNewRequest {
 			conn.reqTimestamps = append(conn.reqTimestamps, ConvertUnixNanoToTime(event.EntryTimestampNano))

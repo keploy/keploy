@@ -256,7 +256,7 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 			tsConfig.MockRegistry.User = username
 		}
 
-		m.logger.Info("uploading mock file...", zap.Any("testSet", testSetID))
+		m.logger.Info("uploading mock file...", zap.String("testSet", testSetID))
 
 		err = m.storage.Upload(ctx, mockFileReader, mockHash, m.cfg.AppName, m.token)
 		if err != nil {
@@ -281,7 +281,7 @@ func (m *mock) upload(ctx context.Context, testSetID string) error {
 	// If mock file is changed, upload the new mock file
 	m.logger.Debug("Mock file has changed, uploading new mock", zap.String("testSetID", testSetID), zap.String("mockPath", localMockPath))
 
-	m.logger.Info("uploading mock file...", zap.Any("testSet", testSetID))
+	m.logger.Info("uploading mock file...", zap.String("testSet", testSetID))
 	err = m.storage.Upload(ctx, mockFileReader, mockHash, m.cfg.AppName, m.token)
 	if err != nil {
 		m.logger.Error("Failed to upload mock file", zap.Error(err))
