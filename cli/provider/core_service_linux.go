@@ -25,6 +25,7 @@ import (
 	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/pkg/service/contract"
 	"go.keploy.io/server/v2/pkg/service/orchestrator"
+	"go.keploy.io/server/v2/pkg/service/proxyservice"
 	"go.keploy.io/server/v2/pkg/service/record"
 	"go.keploy.io/server/v2/pkg/service/replay"
 	"go.keploy.io/server/v2/pkg/service/report"
@@ -48,6 +49,7 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, auth, commonServices.Storage, cfg)
 	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, tel, auth, cfg)
 	reportSvc := report.New(logger, cfg, commonServices.YamlReportDb, commonServices.YamlTestDB)
+	proxySvc := proxyservice.New(logger, cfg, commonServices.YamlMockDb)
 	switch cmd {
 	case "rerecord":
 		return orchestrator.New(logger, recordSvc, toolsSvc, replaySvc, cfg), nil
@@ -61,6 +63,8 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 		return contractSvc, nil
 	case "report":
 		return reportSvc, nil
+	case "proxy":
+		return proxySvc, nil
 	default:
 		return nil, errors.New("invalid command")
 	}
@@ -70,7 +74,7 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) (*CommonInternalService, error) {
 
 	h := hooks.NewHooks(logger, c)
-	p := proxy.New(logger, h, c)
+	p := proxy.New(logger, h, c, core.NewSessions())
 	//for keploy test bench
 	t := tester.New(logger, h)
 

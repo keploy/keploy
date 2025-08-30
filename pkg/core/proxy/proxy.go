@@ -13,13 +13,21 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"os/signal"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/gopacket/gopacket"
+	"github.com/gopacket/gopacket/afpacket"
+	"github.com/gopacket/gopacket/layers"
+	"github.com/gopacket/gopacket/pcapgo"
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
@@ -39,10 +47,12 @@ type ParserPriority struct {
 type Proxy struct {
 	logger *zap.Logger
 
-	IP4     string
-	IP6     string
-	Port    uint32
-	DNSPort uint32
+	IP4                   string
+	IP6                   string
+	Port                  uint32
+	DNSPort               uint32
+	Debug                 bool
+	CaptureNetworkPackets bool
 
 	DestInfo     core.DestInfo
 	Integrations map[integrations.IntegrationType]integrations.Integrations
@@ -65,19 +75,21 @@ type Proxy struct {
 	TCPDNSServer *dns.Server
 }
 
-func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
+func New(logger *zap.Logger, info core.DestInfo, opts *config.Config, session *core.Sessions) *Proxy {
 	return &Proxy{
-		logger:       logger,
-		Port:         opts.ProxyPort, // default: 16789
-		DNSPort:      opts.DNSPort,   // default: 26789
-		IP4:          "127.0.0.1",    // default: "127.0.0.1" <-> (2130706433)
-		IP6:          "::1",          //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
-		ipMutex:      &sync.Mutex{},
-		connMutex:    &sync.Mutex{},
-		DestInfo:     info,
-		sessions:     core.NewSessions(),
-		MockManagers: sync.Map{},
-		Integrations: make(map[integrations.IntegrationType]integrations.Integrations),
+		logger:                logger,
+		Port:                  opts.ProxyPort, // default: 16789
+		DNSPort:               opts.DNSPort,   // default: 26789
+		IP4:                   "127.0.0.1",    // default: "127.0.0.1" <-> (2130706433)
+		IP6:                   "::1",          //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
+		Debug:                 opts.Debug,
+		CaptureNetworkPackets: opts.CapturePackets,
+		ipMutex:               &sync.Mutex{},
+		connMutex:             &sync.Mutex{},
+		DestInfo:              info,
+		sessions:              session,
+		MockManagers:          sync.Map{},
+		Integrations:          make(map[integrations.IntegrationType]integrations.Integrations),
 	}
 }
 
@@ -139,7 +151,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 	}
 
 	// start the TCP DNS server
-	p.logger.Debug("Starting Tcp Dns Server for handling Dns queries over TCP")
+	p.logger.Info("Starting Tcp Dns Server for handling Dns queries over TCP")
 	g.Go(func() error {
 		defer utils.Recover(p.logger)
 		errCh := make(chan error, 1)
@@ -165,7 +177,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 	})
 
 	// start the UDP DNS server
-	p.logger.Debug("Starting Udp Dns Server for handling Dns queries over UDP")
+	p.logger.Info("Starting Udp Dns Server for handling Dns queries over UDP")
 	g.Go(func() error {
 		defer utils.Recover(p.logger)
 		errCh := make(chan error, 1)
@@ -212,9 +224,15 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		return err
 	}
 	p.Listener = listener
-	p.logger.Debug(fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(":%v", listener.Addr())))
+	p.logger.Info(fmt.Sprintf("Proxy server is listening on %s", fmt.Sprintf(":%v", listener.Addr())))
 	// Signal that the server is ready
 	readyChan <- nil
+
+	if p.Debug && p.CaptureNetworkPackets {
+		p.logger.Info("Debug mode is ON — starting packet capture on loopback for proxy port 16789 → traffic.pcap")
+		go p.recordNetworkPacketsForProxy()
+	}
+
 	defer func(listener net.Listener) {
 		err := listener.Close()
 
@@ -230,7 +248,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 		clientConnCancel()
 		err := clientConnErrGrp.Wait()
 		if err != nil {
-			p.logger.Debug("failed to handle the client connection", zap.Error(err))
+			p.logger.Info("failed to handle the client connection", zap.Error(err))
 		}
 		//closing all the mock channels (if any in record mode)
 		for _, mc := range p.sessions.GetAllMC() {
@@ -332,11 +350,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	switch destInfo.Version {
 	case 4:
-		p.logger.Debug("the destination is ipv4")
+		p.logger.Info("the destination is ipv4")
 		dstAddr = fmt.Sprintf("%v:%v", util.ToIP4AddressStr(destInfo.IPv4Addr), destInfo.Port)
 		p.logger.Debug("", zap.Uint32("DestIp4", destInfo.IPv4Addr), zap.Uint32("DestPort", destInfo.Port))
 	case 6:
-		p.logger.Debug("the destination is ipv6")
+		p.logger.Info("the destination is ipv6")
 		dstAddr = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.IPv6Addr), destInfo.Port)
 		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
 	}
@@ -439,7 +457,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	testBuffer, err := reader.Peek(len(initialData))
 	if err != nil {
 		if err == io.EOF && len(testBuffer) == 0 {
-			p.logger.Debug("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(err))
+			p.logger.Info("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(err))
 			return nil
 		}
 		utils.LogError(p.logger, err, "failed to peek the request message in proxy", zap.Uint32("proxy port", p.Port))
@@ -493,7 +511,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// These cases may send partial headers in multiple chunks, so we need to read until
 		// we get the complete headers.
 
-		logger.Debug("Partial HTTP headers detected, reading more data to get complete headers")
+		logger.Info("Partial HTTP headers detected, reading more data to get complete headers")
 
 		// Read more data from the TCP connection to get the complete HTTP headers.
 		headerBuf, err := util.ReadHTTPHeadersUntilEnd(parserCtx, p.logger, srcConn)
@@ -564,7 +582,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	// get the mock manager for the current app
 	m, ok := p.MockManagers.Load(destInfo.AppID)
-	if !ok {
+	if !ok && rule.Mode == models.MODE_TEST {
 		utils.LogError(logger, err, "failed to fetch the mock manager", zap.Uint64("AppID", destInfo.AppID))
 		return err
 	}
@@ -609,7 +627,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	if generic {
-		logger.Debug("The external dependency is not supported. Hence using generic parser")
+		logger.Info("The external dependency is not supported. Hence using generic parser")
 		if rule.Mode == models.MODE_RECORD {
 			err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
 			if err != nil {
@@ -728,4 +746,187 @@ func (p *Proxy) GetConsumedMocks(_ context.Context, id uint64) ([]models.MockSta
 		return nil, fmt.Errorf("mock manager not found to get consumed filtered mocks")
 	}
 	return m.(*MockManager).GetConsumedMocks(), nil
+}
+
+func (p *Proxy) recordNetworkPacketsForProxy() {
+	const (
+		iface        = "lo"
+		outPath      = "traffic.pcap"
+		snaplen      = 65535
+		matchPort    = uint16(16789)
+		pollTO       = 300 * time.Millisecond
+		blockTO      = 200 * time.Millisecond
+		frameSizePow = 11 // 2^11 = 2048
+		numBlocks    = 64
+	)
+
+	p.logger.Info("capturing packets",
+		zap.String("iface", iface),
+		zap.String("outPath", outPath),
+		zap.Uint16("port", matchPort),
+	)
+
+	// Prepare output PCAP (pure Go writer)
+	f, err := os.Create(outPath)
+	if err != nil {
+		p.logger.Error("creating output pcap", zap.Error(err))
+		return
+	}
+	defer f.Close()
+
+	w := pcapgo.NewWriter(f)
+	if err := w.WriteFileHeader(uint32(snaplen), layers.LinkTypeEthernet); err != nil {
+		p.logger.Error("writing pcap header", zap.Error(err))
+		return
+	}
+	p.logger.Info("writing packets", zap.String("outPath", outPath))
+
+	// AF_PACKET config
+	frameSize := 1 << frameSizePow
+	blockSize := 1 << 20 // 1 MiB per block
+	if blockSize%frameSize != 0 {
+		p.logger.Error("block size must be multiple of frame size",
+			zap.Int("blockSize", blockSize),
+			zap.Int("frameSize", frameSize),
+		)
+		return
+	}
+
+	// Open a TPacket on the loopback iface
+	tp, err := afpacket.NewTPacket(
+		afpacket.OptInterface(iface),
+		afpacket.OptFrameSize(frameSize),
+		afpacket.OptBlockSize(blockSize),
+		afpacket.OptNumBlocks(numBlocks),
+		afpacket.OptBlockTimeout(blockTO),
+		afpacket.OptPollTimeout(pollTO),
+		afpacket.OptAddVLANHeader(false),
+		afpacket.SocketRaw, // L2 frames
+		afpacket.OptTPacketVersion(afpacket.TPacketVersion3),
+	)
+	if err != nil {
+		p.logger.Error("open interface error", zap.String("iface", iface), zap.Error(err))
+		return
+	}
+	defer tp.Close()
+
+	// Graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+		s := <-ch
+		p.logger.Info("received signal, stopping", zap.String("signal", s.String()))
+		cancel()
+	}()
+
+	var (
+		wg      sync.WaitGroup
+		writeMu sync.Mutex
+		seen    uint64
+		total   uint64
+		start   = time.Now()
+	)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for ctx.Err() == nil {
+			data, ci, err := tp.ZeroCopyReadPacketData()
+			atomic.AddUint64(&seen, 1)
+
+			if err != nil {
+				// Ignore benign timeouts/again
+				if errors.Is(err, afpacket.ErrTimeout) || errors.Is(err, syscall.EAGAIN) {
+					continue
+				}
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					p.logger.Error("read error", zap.String("iface", iface), zap.Error(err))
+					continue
+				}
+			}
+
+			// Decode minimal headers to test ports
+			pkt := gopacket.NewPacket(data, layers.LinkTypeEthernet, gopacket.NoCopy)
+			tl := pkt.TransportLayer()
+			if tl == nil {
+				continue
+			}
+
+			keep := false
+			var srcPort, dstPort uint16
+			switch t := tl.(type) {
+			case *layers.TCP:
+
+				if t.RST {
+					continue // Skip RST packets
+				}
+
+				srcPort = uint16(t.SrcPort)
+				dstPort = uint16(t.DstPort)
+				keep = (srcPort == matchPort || dstPort == matchPort)
+			case *layers.UDP:
+				srcPort = uint16(t.SrcPort)
+				dstPort = uint16(t.DstPort)
+				keep = (srcPort == matchPort || dstPort == matchPort)
+			default:
+				keep = false
+			}
+			if !keep {
+				continue
+			}
+
+			// Optional concise log
+			if nl := pkt.NetworkLayer(); nl != nil {
+				p.logger.Info("packet captured",
+					zap.String("iface", iface),
+					zap.String("src", fmt.Sprintf("%v:%d", nl.NetworkFlow().Src(), srcPort)),
+					zap.String("dst", fmt.Sprintf("%v:%d", nl.NetworkFlow().Dst(), dstPort)),
+					zap.Int("len", len(data)),
+				)
+			} else {
+				p.logger.Info("packet captured (no net layer)",
+					zap.String("iface", iface),
+					zap.Int("len", len(data)),
+				)
+			}
+
+			// Snaplen enforcement
+			if len(data) > snaplen {
+				data = data[:snaplen]
+			}
+
+			// Write the entire frame as captured
+			writeMu.Lock()
+			if err := w.WritePacket(ci, data); err != nil {
+				p.logger.Error("pcap write error", zap.Error(err))
+			}
+			writeMu.Unlock()
+
+			if n := atomic.AddUint64(&total, 1); n%10000 == 0 {
+				elapsed := time.Since(start).Truncate(time.Second)
+				p.logger.Info("captured matching packets",
+					zap.Uint64("matchingPackets", n),
+					zap.Uint64("totalSeen", atomic.LoadUint64(&seen)),
+					zap.Duration("elapsed", elapsed),
+				)
+			}
+		}
+	}()
+
+	wg.Wait()
+
+	p.logger.Info("value seen", zap.Uint64("seen", atomic.LoadUint64(&seen)))
+	if stats, err := tp.Stats(); err == nil {
+		p.logger.Info("stats",
+			zap.String("iface", iface),
+			zap.Int64("received", stats.Packets),
+			zap.String("dropped", "N/A w/TPACKETv3"),
+		)
+	}
+	p.logger.Info("done", zap.Uint64("totalPacketsWritten", atomic.LoadUint64(&total)))
 }
