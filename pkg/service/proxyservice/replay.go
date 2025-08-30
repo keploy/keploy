@@ -3,6 +3,7 @@
 package proxyservice
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -25,7 +26,10 @@ Protocol:
     it pops the next "fromProxy" payload and writes it back as the response.
   - It keeps doing this (read -> respond) in sequence until the feeder is closed.
 */
-func startAppSideServer(logger *zap.Logger, listenAddr string, feeder *responseFeeder) (stop func(), err error) {
+func startAppSideServer(logger *zap.Logger, listenPort int, feeder *responseFeeder) (stop func(), err error) {
+
+	listenAddr := fmt.Sprintf(":%d", listenPort)
+
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("listen %s: %w", listenAddr, err)
@@ -203,6 +207,23 @@ func replaySequence(
 	// Sort by original time to preserve order
 	sort.Slice(events, func(i, j int) bool { return events[i].ts.Before(events[j].ts) })
 
+	readDone := make(chan struct{})
+
+	go func() {
+		defer close(readDone)
+		buf := make([]byte, 32<<10)
+		for {
+			_ = proxyConn.SetReadDeadline(time.Now().Add(2 * time.Minute))
+			n, err := proxyConn.Read(buf)
+			if n > 0 {
+				logger.Debug("drained", zap.Int("bytes", n))
+			}
+			if err != nil {
+				return // EOF or error stops the reader
+			}
+		}
+	}()
+
 	var prev time.Time
 	// lastToProxyIdx := -1
 	for i, ev := range events {
@@ -234,12 +255,30 @@ func replaySequence(
 		}
 	}
 
-	// Tell proxy we’re done sending, but keep reading until it closes (if it wants).
+	feeder.close()
+
 	if tcpC != nil {
-		_ = tcpC.Close()
+		if err := tcpC.CloseWrite(); err != nil {
+			logger.Warn("replay: CloseWrite error", zap.Error(err))
+		} else {
+			logger.Info("replay: CloseWrite done (sent FIN to proxy)")
+		}
+	} else {
+		logger.Info("replay: non-TCPConn, cannot CloseWrite, will Close after wait")
 	}
 
+	waitCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	select {
+	case <-readDone:
+		logger.Info("replay: proxy closed its write side (EOF observed)")
+	case <-waitCtx.Done():
+		logger.Warn("replay: timeout waiting for proxy to finish reading/sending", zap.Error(waitCtx.Err()))
+	}
+
+	_ = proxyConn.Close()
 	logger.Info("replay sequence finished")
+
 	return nil
 }
 

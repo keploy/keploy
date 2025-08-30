@@ -47,11 +47,12 @@ type ParserPriority struct {
 type Proxy struct {
 	logger *zap.Logger
 
-	IP4     string
-	IP6     string
-	Port    uint32
-	DNSPort uint32
-	Debug   bool
+	IP4                   string
+	IP6                   string
+	Port                  uint32
+	DNSPort               uint32
+	Debug                 bool
+	CaptureNetworkPackets bool
 
 	DestInfo     core.DestInfo
 	Integrations map[integrations.IntegrationType]integrations.Integrations
@@ -76,18 +77,19 @@ type Proxy struct {
 
 func New(logger *zap.Logger, info core.DestInfo, opts *config.Config, session *core.Sessions) *Proxy {
 	return &Proxy{
-		logger:       logger,
-		Port:         opts.ProxyPort, // default: 16789
-		DNSPort:      opts.DNSPort,   // default: 26789
-		IP4:          "127.0.0.1",    // default: "127.0.0.1" <-> (2130706433)
-		IP6:          "::1",          //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
-		Debug:        opts.Debug,
-		ipMutex:      &sync.Mutex{},
-		connMutex:    &sync.Mutex{},
-		DestInfo:     info,
-		sessions:     session,
-		MockManagers: sync.Map{},
-		Integrations: make(map[integrations.IntegrationType]integrations.Integrations),
+		logger:                logger,
+		Port:                  opts.ProxyPort, // default: 16789
+		DNSPort:               opts.DNSPort,   // default: 26789
+		IP4:                   "127.0.0.1",    // default: "127.0.0.1" <-> (2130706433)
+		IP6:                   "::1",          //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
+		Debug:                 opts.Debug,
+		CaptureNetworkPackets: opts.CapturePackets,
+		ipMutex:               &sync.Mutex{},
+		connMutex:             &sync.Mutex{},
+		DestInfo:              info,
+		sessions:              session,
+		MockManagers:          sync.Map{},
+		Integrations:          make(map[integrations.IntegrationType]integrations.Integrations),
 	}
 }
 
@@ -226,7 +228,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	// Signal that the server is ready
 	readyChan <- nil
 
-	if p.Debug {
+	if p.Debug && p.CaptureNetworkPackets {
 		p.logger.Info("Debug mode is ON — starting packet capture on loopback for proxy port 16789 → traffic.pcap")
 		go p.recordNetworkPacketsForProxy()
 	}
@@ -746,9 +748,7 @@ func (p *Proxy) GetConsumedMocks(_ context.Context, id uint64) ([]models.MockSta
 	return m.(*MockManager).GetConsumedMocks(), nil
 }
 
-// Call this from main() to start recording.
 func (p *Proxy) recordNetworkPacketsForProxy() {
-	// --- Defaults matching: -i lo -port 16789 -out traffic.pcap ---
 	const (
 		iface        = "lo"
 		outPath      = "traffic.pcap"

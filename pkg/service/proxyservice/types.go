@@ -12,7 +12,7 @@ import (
 
 const (
 	DefaultProxyPort = 16789
-	DefaultDestPort  = ":16790"
+	DefaultDestPort  = 16790
 	DefaultProxyAddr = "127.0.0.1:16789"
 	PreserveTiming   = false
 	WriteDelay       = 10 * time.Millisecond
@@ -61,7 +61,7 @@ func (f *FakeDestInfo) Get(ctx context.Context, srcPort uint16) (*corePkg.Networ
 		Version:  4,
 		IPv4Addr: 0x7F000001,            // 127.0.0.1
 		IPv6Addr: [4]uint32{0, 0, 0, 1}, // ::1
-		Port:     16790,
+		Port:     DefaultDestPort,
 	}, nil
 }
 

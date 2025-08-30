@@ -40,6 +40,7 @@ type Config struct {
 	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
 	Contract              Contract     `json:"contract" yaml:"contract" mapstructure:"contract"`
 	Proxy                 Proxy        `json:"proxy" yaml:"proxy" mapstructure:"proxy"`
+	CapturePackets        bool         `json:"capturePackets" yaml:"capturePackets" mapstructure:"capturePackets"`
 
 	InCi           bool   `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
 	InstallationID string `json:"-" yaml:"-" mapstructure:"-"`
