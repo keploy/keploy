@@ -225,7 +225,6 @@ func replaySequence(
 	}()
 
 	var prev time.Time
-	// lastToProxyIdx := -1
 	for i, ev := range events {
 		// Timing controls
 		if preserveTiming {

@@ -489,7 +489,6 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command) error {
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 	PrintLogo(os.Stdout, disableAnsi)
-	fmt.Println("Debug mode is enabled:", c.cfg.Debug)
 	if c.cfg.Debug {
 		logger, err := log.ChangeLogLevel(zap.DebugLevel)
 		*c.logger = *logger
