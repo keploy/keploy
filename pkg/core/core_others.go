@@ -32,6 +32,12 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 	return errUnsupported
 }
 
+func (c *Core) GetHookUnloadDone(id uint64) <-chan struct{} {
+	ch := make(chan struct{})
+	close(ch) // Immediately close since no actual hooks are loaded
+	return ch
+}
+
 func (c *Core) MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error {
 	return errUnsupported
 }

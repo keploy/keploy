@@ -96,8 +96,8 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 		}
 
 		// debug log for cleanExp and cleanAct
-		logger.Debug("cleanExp", zap.Any("", cleanExp))
-		logger.Debug("cleanAct", zap.Any("", cleanAct))
+		logger.Debug("cleanExp", zap.Any("cleanExp", cleanExp))
+		logger.Debug("cleanAct", zap.Any("cleanAct", cleanAct))
 	} else {
 		if !matcherUtils.Contains(matcherUtils.MapToArray(noise), "body") && tc.HTTPResp.Body != actualResponse.Body {
 			pass = false
@@ -207,7 +207,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 
 			switch actRespBodyType {
 			case models.JSON:
-				patch, err := jsondiff.Compare(tc.HTTPResp.Body, actualResponse.Body)
+				patch, err := jsondiff.Compare(cleanExp, cleanAct)
 				if err != nil {
 					logger.Warn("failed to compute json diff", zap.Error(err))
 				}
@@ -245,10 +245,10 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 					if err != nil {
 						return false, nil
 					}
-					tc.HTTPResp.Body = string(jsonBytes)
-					actualResponse.Body = string(actJSONBytes)
+					cleanExp = string(jsonBytes)
+					cleanAct = string(actJSONBytes)
 				}
-				validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &tc.HTTPResp.Body, &actualResponse.Body)
+				validatedJSON, err := matcherUtils.ValidateAndMarshalJSON(logger, &cleanExp, &cleanAct)
 				if err != nil {
 					return false, res
 				}
@@ -258,14 +258,14 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 					if err != nil {
 						return false, res
 					}
-					if !pass {
+					if !jsonComparisonResult.IsExact() {
 						isBodyMismatch = true
-					} else {
-						isBodyMismatch = false
 					}
+				} else {
+					isBodyMismatch = true
 				}
 				// Comparing the body again after updating the expected
-				patch, err = jsondiff.Compare(tc.HTTPResp.Body, actualResponse.Body)
+				patch, err = jsondiff.Compare(cleanExp, cleanAct)
 				if err != nil {
 					logger.Warn("failed to compute json diff", zap.Error(err))
 				}
@@ -389,7 +389,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			}
 			if !found {
 				pass = false
-				logger.Error("status_code_in assertion failed", zap.Any("expectedCodes", ints), zap.Int("actual", actualResponse.StatusCode))
+				logger.Error("status_code_in assertion failed", zap.Ints("expectedCodes", ints), zap.Int("actual", actualResponse.StatusCode))
 			}
 
 		case models.HeaderEqual:
