@@ -12,10 +12,14 @@ type UTResult struct {
 }
 
 type UTDetails struct {
-	Language             string `yaml:"language"`
-	TestSignature        string `yaml:"existing_test_function_signature"`
-	NewTests             []UT   `yaml:"new_tests"`
-	RefactoredSourceCode string `yaml:"refactored_source_code,omitempty"`
+	Language      string `yaml:"language"`
+	TestSignature string `yaml:"existing_test_function_signature"`
+	NewTests      []UT   `yaml:"new_tests"`
+}
+
+type RefactorDetails struct {
+	Language             string `yaml:"language" json:"language"`
+	RefactoredSourceCode string `yaml:"refactored_source_code" json:"refactored_source_code"`
 }
 
 type UT struct {
