@@ -47,6 +47,11 @@ type Service interface {
 
 	DownloadMocks(ctx context.Context) error
 	UploadMocks(ctx context.Context) error
+	
+	// CompareHTTPResp compares HTTP responses and returns match result with detailed diffs
+	CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string) (bool, *models.Result)
+	// CompareGRPCResp compares gRPC responses and returns match result with detailed diffs
+	CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string) (bool, *models.Result)
 }
 
 type TestDB interface {
