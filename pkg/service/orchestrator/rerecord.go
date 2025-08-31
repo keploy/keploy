@@ -350,6 +350,37 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 			prevVals[k] = v
 		}
 
+		// Create a rendered copy of testcase with current template/secret values
+		// so that comparison uses concrete expected values (not the templatized form)
+		renderedTC, renderErr := pkg.RenderTestCaseWithTemplates(tc)
+		if renderErr != nil {
+			utils.LogError(o.logger, renderErr, "failed to render testcase with templates")
+			// fallback to using the original testcase
+			renderedTC = tc
+		}
+
+		// Store the original test case response for comparison using the rendered copy
+		originalTestCase := *renderedTC
+
+		// Detect noise fields introduced by templating and mark them on the testcase
+		if len(utils.TemplatizedValues) > 0 {
+			detected := pkg.DetectNoiseFieldsInResp(&models.HTTPResp{
+				StatusCode: renderedTC.HTTPResp.StatusCode,
+				Body:       renderedTC.HTTPResp.Body,
+				Header:     renderedTC.HTTPResp.Header,
+			})
+			fmt.Println("Detected noise fields:", detected)
+			// merge detected into originalTestCase.Noise
+			if originalTestCase.Noise == nil {
+				originalTestCase.Noise = map[string][]string{}
+			}
+			for k := range detected {
+				if _, ok := originalTestCase.Noise[k]; !ok {
+					originalTestCase.Noise[k] = []string{}
+				}
+			}
+		}
+
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSet, o.logger, o.config.Test.APITimeout)
 		if err != nil {
 			utils.LogError(o.logger, err, "failed to simulate HTTP request")
@@ -360,6 +391,12 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 			continue
 		}
 		fmt.Println("Response received for testcase ", tc.Name, " response code ", resp.StatusCode)
+
+		// Compare the new response with the original test case response and show diff
+		if resp != nil {
+			o.showResponseDiff(&originalTestCase, resp, testSet)
+		}
+
 		if resp != nil && resp.Body != "" && len(utils.TemplatizedValues) > 0 {
 			// SimulateHTTP already updated templates; now perform propagation if any changed.
 			for key, newVal := range utils.TemplatizedValues {
@@ -420,6 +457,39 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 	}
 
 	return allTcRecorded, nil
+}
+
+// showResponseDiff compares the original test case response with the newly recorded response
+// and displays the differences using the existing replay service functions
+func (o *Orchestrator) showResponseDiff(originalTC *models.TestCase, newResp *models.HTTPResp, testSetID string) {
+	// Use the existing replay service comparison functions
+	switch originalTC.Kind {
+	case models.HTTP:
+		// Use the HTTP matcher to compare responses - this will automatically show diffs
+		matched, _ := o.replay.CompareHTTPResp(originalTC, newResp, testSetID)
+		if !matched {
+			o.logger.Info("Response differences detected during re-record",
+				zap.String("testcase", originalTC.Name),
+				zap.String("testset", testSetID))
+		} else {
+			o.logger.Debug("No response differences detected during re-record",
+				zap.String("testcase", originalTC.Name),
+				zap.String("testset", testSetID))
+		}
+	case models.GRPC_EXPORT:
+		// For gRPC, we need to handle the case where SimulateHTTP returns HTTP response
+		// but we want to compare with gRPC response. We'll log this limitation.
+		o.logger.Info("gRPC response comparison during re-record",
+			zap.String("testcase", originalTC.Name),
+			zap.String("testset", testSetID),
+			zap.String("note", "gRPC test cases are simulated as HTTP during re-record, comparison limited"))
+
+		// For gRPC, we'll do a basic comparison since SimulateHTTP returns HTTP response
+		o.logger.Info("gRPC Response differences detected during re-record",
+			zap.String("testcase", originalTC.Name),
+			zap.String("testset", testSetID),
+			zap.String("note", "Detailed gRPC comparison not available during re-record"))
+	}
 }
 
 func (o *Orchestrator) checkForTemplates(ctx context.Context, testSets []string) {
