@@ -53,6 +53,7 @@ type Proxy struct {
 	DNSPort               uint32
 	Debug                 bool
 	CaptureNetworkPackets bool
+	DisableMocking        bool
 
 	DestInfo     core.DestInfo
 	Integrations map[integrations.IntegrationType]integrations.Integrations
@@ -84,6 +85,7 @@ func New(logger *zap.Logger, info core.DestInfo, opts *config.Config, session *c
 		IP6:                   "::1",          //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
 		Debug:                 opts.Debug,
 		CaptureNetworkPackets: opts.CapturePackets,
+		DisableMocking:        opts.Record.DisableMocking,
 		ipMutex:               &sync.Mutex{},
 		connMutex:             &sync.Mutex{},
 		DestInfo:              info,
@@ -396,8 +398,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}()
 
+	isGlobalPassthrough := (!rule.Mocking && rule.Mode == models.MODE_TEST) || (rule.Mode == models.MODE_RECORD && p.DisableMocking)
+
 	//check for global passthrough in test mode
-	if !rule.Mocking && rule.Mode == models.MODE_TEST {
+	if isGlobalPassthrough {
 
 		dstConn, err = net.Dial("tcp", dstAddr)
 		if err != nil {

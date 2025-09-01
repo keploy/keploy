@@ -39,7 +39,7 @@ type Config struct {
 	KeployNetwork         string       `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
 	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
 	Contract              Contract     `json:"contract" yaml:"contract" mapstructure:"contract"`
-	Proxy                 Proxy        `json:"proxy" yaml:"proxy" mapstructure:"proxy"`
+	PacketReplay          PacketReplay `json:"packetReplay" yaml:"packetReplay" mapstructure:"packetReplay"`
 	CapturePackets        bool         `json:"capturePackets" yaml:"capturePackets" mapstructure:"capturePackets"`
 
 	InCi           bool   `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
@@ -70,10 +70,11 @@ type Templatize struct {
 }
 
 type Record struct {
-	Filters     []Filter      `json:"filters" yaml:"filters" mapstructure:"filters"`
-	BasePath    string        `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
-	RecordTimer time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
-	Metadata    string        `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
+	Filters        []Filter      `json:"filters" yaml:"filters" mapstructure:"filters"`
+	BasePath       string        `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
+	RecordTimer    time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
+	Metadata       string        `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
+	DisableMocking bool          `json:"disableMocking" yaml:"disableMocking" mapstructure:"disableMocking"`
 }
 
 type ReRecord struct {
@@ -193,7 +194,7 @@ type (
 	TestsetNoise map[string]map[string]map[string][]string
 )
 
-type Proxy struct {
+type PacketReplay struct {
 	PcapPath  string `json:"pcapPath" yaml:"pcapPath" mapstructure:"pcapPath"`
 	MocksPath string `json:"mocksPath" yaml:"mocksPath" mapstructure:"mocksPath"`
 }

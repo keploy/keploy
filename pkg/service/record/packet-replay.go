@@ -62,7 +62,7 @@ func (r *Recorder) StartNetworkPacketReplay(ctx context.Context) error {
 			PreserveTiming: packetreplay.PreserveTiming,
 			WriteDelay:     packetreplay.WriteDelay,
 		},
-		r.config.Proxy.PcapPath,
+		r.config.PacketReplay.PcapPath,
 	)
 	if err != nil {
 		r.logger.Error("failed to start replay", zap.Error(err))
