@@ -77,7 +77,7 @@ func (r *Report) printSpecificTestCases(ctx context.Context, runID string, testS
 			}
 			continue
 		}
-		sel := filterTestsByIDs(rep.Tests, ids)
+		sel := r.filterTestsByIDs(rep.Tests, ids)
 		if len(sel) == 0 {
 			continue
 		}
@@ -215,6 +215,21 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 	return nil
 }
 
+func (r *Report) filterTestsByIDs(tests []models.TestResult, ids []string) []models.TestResult {
+	set := map[string]struct{}{}
+	for _, id := range ids {
+		set[strings.TrimSpace(id)] = struct{}{}
+	}
+	out := make([]models.TestResult, 0, len(ids))
+	for _, t := range tests {
+		if _, ok := set[t.TestCaseID]; ok {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+
 // GenerateReport orchestrates the entire report generation process
 func (r *Report) GenerateReport(ctx context.Context) error {
 	if r.config.Report.ReportPath != "" {
@@ -303,7 +318,7 @@ func (r *Report) generateReportFromFile(reportPath string) error {
 		}
 		// Test-case filtering
 		if len(r.config.Report.TestCaseIDs) > 0 {
-			sel := filterTestsByIDs(tr.Tests, r.config.Report.TestCaseIDs)
+			sel := r.filterTestsByIDs(tr.Tests, r.config.Report.TestCaseIDs)
 			if len(sel) == 0 {
 				r.logger.Warn("No matching test-cases found in file", zap.Strings("ids", r.config.Report.TestCaseIDs))
 				return nil
@@ -348,7 +363,7 @@ func (r *Report) generateReportFromFile(reportPath string) error {
 		return nil
 	}
 	if len(r.config.Report.TestCaseIDs) > 0 {
-		sel := filterTestsByIDs(tests, r.config.Report.TestCaseIDs)
+		sel := r.filterTestsByIDs(tests, r.config.Report.TestCaseIDs)
 		if len(sel) == 0 {
 			r.logger.Warn("No matching test-cases found in file (tests-only parse)", zap.Strings("ids", r.config.Report.TestCaseIDs))
 			return nil

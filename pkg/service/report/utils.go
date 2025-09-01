@@ -8,20 +8,6 @@ import (
 	"go.keploy.io/server/v2/pkg/models"
 )
 
-func filterTestsByIDs(tests []models.TestResult, ids []string) []models.TestResult {
-	set := map[string]struct{}{}
-	for _, id := range ids {
-		set[strings.TrimSpace(id)] = struct{}{}
-	}
-	out := make([]models.TestResult, 0, len(ids))
-	for _, t := range tests {
-		if _, ok := set[t.TestCaseID]; ok {
-			out = append(out, t)
-		}
-	}
-	return out
-}
-
 // estimateDuration tries to compute sum of TimeTaken across tests if those fields exist.
 func estimateDuration(tests []models.TestResult) time.Duration {
 	var sum time.Duration
