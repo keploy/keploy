@@ -124,7 +124,7 @@ do
     fi
 done
 
-# Check the overall test status and exit accordingly
+# Check the overall test status and exit.
 if [ "$all_passed" = true ]; then
     echo "All tests passed"
     exit 0
