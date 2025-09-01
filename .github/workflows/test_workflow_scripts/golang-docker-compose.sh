@@ -1,7 +1,5 @@
 #!/bin/bash
 
-set -x
-
 source ./../../.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Build Docker Image
@@ -9,8 +7,6 @@ docker compose build
 
 # Remove any preexisting keploy tests and mocks.
 sudo rm -rf keploy/
-
-mkdir -p keploy/reports
 
 # Generate the keploy-config file.
 sudo -E env PATH=$PATH $RECORD_BIN config --generate
@@ -64,10 +60,6 @@ for i in {1..2}; do
     send_request &
     sudo -E env PATH=$PATH $RECORD_BIN record -c "docker compose up" --container-name "$container_name" --generateGithubActions=false &> "${container_name}.txt"
 
-    echo "--- Start of Recording Logs for Iteration ${i} ---"
-    cat "${container_name}.txt"
-    echo "--- End of Recording Logs for Iteration ${i} ---"
-
     if grep "WARNING: DATA RACE" "${container_name}.txt"; then
         echo "Race condition detected in recording, stopping pipeline..."
         cat "${container_name}.txt"
@@ -90,7 +82,7 @@ echo "Services stopped - Keploy should now use mocks for dependency interactions
 
 # Start keploy in test mode.
 test_container="echoApp"
-sudo -E env PATH=$PATH $REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false --debug &> "${test_container}.txt"
+sudo -E env PATH=$PATH $REPLAY_BIN test -c 'docker compose up' --containerName "$test_container" --apiTimeout 60 --delay 20 --generate-github-actions=false &> "${test_container}.txt"
 
 if grep "ERROR" "${test_container}.txt"; then
     echo "Error found in pipeline..."
@@ -108,40 +100,28 @@ all_passed=true
 
 for i in {0..1}
 do
+    # Define the report file for each test set
     report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
-    echo "----------------------------------------"
-    echo "Verifying report file: ${report_file}"
 
-    # First, check if the report file actually exists
-    if [ -f "$report_file" ]; then
-        echo "Report file found."
-        # If it exists, then grep its status
-        test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-        echo "Status found: $test_status"
+    # Extract the test status
+    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
 
-        if [ "$test_status" != "PASSED" ]; then
-            all_passed=false
-            echo "Error: Test set status was NOT 'PASSED'."
-            break
-        fi
-    else
-        echo "Error: Report file NOT FOUND at this path!"
+    # Print the status for debugging
+    echo "Test status for test-set-$i: $test_status"
+
+    # Check if any test set did not pass
+    if [ "$test_status" != "PASSED" ]; then
         all_passed=false
-        break
+        echo "Test-set-$i did not pass."
+        break # Exit the loop early as all tests need to pass
     fi
 done
-
-# Add a final debug step to see all generated files
-echo "----------------------------------------"
-echo "Final check of all files in the keploy directory:"
-ls -lR ./keploy
 
 # Check the overall test status and exit accordingly
 if [ "$all_passed" = true ]; then
     echo "All tests passed"
     exit 0
 else
-    echo "Pipeline failed during verification step."
     cat "${test_container}.txt"
     exit 1
 fi
