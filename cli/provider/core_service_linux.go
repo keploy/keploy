@@ -28,6 +28,7 @@ import (
 	"go.keploy.io/server/v2/pkg/service/record"
 	"go.keploy.io/server/v2/pkg/service/replay"
 	"go.keploy.io/server/v2/pkg/service/report"
+	"go.keploy.io/server/v2/pkg/service/sanitize"
 	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -48,6 +49,7 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, auth, commonServices.Storage, cfg)
 	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, tel, auth, cfg)
 	reportSvc := report.New(logger, cfg, commonServices.YamlReportDb, commonServices.YamlTestDB)
+	sanitizeSvc := sanitize.New(logger, commonServices.YamlTestDB, cfg)
 	switch cmd {
 	case "rerecord":
 		return orchestrator.New(logger, recordSvc, toolsSvc, replaySvc, cfg), nil
@@ -61,6 +63,8 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 		return contractSvc, nil
 	case "report":
 		return reportSvc, nil
+	case "sanitize":
+		return sanitizeSvc, nil
 	default:
 		return nil, errors.New("invalid command")
 	}
