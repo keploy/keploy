@@ -35,7 +35,7 @@ func Sanitize(ctx context.Context, logger *zap.Logger, _ *config.Config, service
 				return nil
 			}
 
-			err = sanitizeService.Sanitize(ctx, nil)
+			err = sanitizeService.Sanitize(ctx)
 			if err != nil {
 				utils.LogError(logger, err, "failed to sanitize test cases")
 				return nil
