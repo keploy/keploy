@@ -150,6 +150,8 @@ type Report struct {
 	SelectedTestSets map[string][]string `json:"selectedTestSets" yaml:"selectedTestSets" mapstructure:"selectedTestSets"`
 	ShowFullBody     bool                `json:"showFullBody" yaml:"showFullBody" mapstructure:"showFullBody"`
 	ReportPath       string              `json:"reportPath" yaml:"reportPath" mapstructure:"reportPath"`
+	Summary          bool                `json:"summary" yaml:"summary" mapstructure:"summary"`
+	TestCaseIDs      []string            `json:"testCaseIDs" yaml:"testCaseIDs" mapstructure:"testCaseIDs"`
 }
 
 type Language string

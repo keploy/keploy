@@ -265,6 +265,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().StringP("report-path", "r", "", "Absolute path to a report file")
 		cmd.Flags().Bool("full", false, "Show full diffs (colorized for JSON) instead of compact table diff")
+		cmd.Flags().Bool("summary", false, "Print only the summary of the test run (optionally restrict with --test-sets)")
+		cmd.Flags().StringSlice("test-case", nil, "Filter to specific test case IDs (repeat or comma-separated). Alias: --tc")
 
 	case "packet-replay":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
@@ -334,6 +336,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"testsets":              "test-sets",
 		"fullBody":              "full",
 		"reportPath":            "report-path",
+		"tc":                    "test-case",
 		"delay":                 "delay",
 		"apiTimeout":            "api-timeout",
 		"mongoPassword":         "mongo-password",
@@ -610,6 +613,30 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 
 		c.cfg.Report.ShowFullBody = fb
+
+		summary, err := cmd.Flags().GetBool("summary")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get the summary flag")
+			return errors.New("failed to get the summary flag")
+		}
+		c.cfg.Report.Summary = summary
+
+		tcIDs, err := cmd.Flags().GetStringSlice("test-case")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get the test-case flag")
+			return errors.New("failed to get the test-case flag")
+		}
+		// Allow comma-separated or repeated flags
+		cleaned := make([]string, 0, len(tcIDs))
+		for _, x := range tcIDs {
+			for _, y := range strings.Split(x, ",") {
+				y = strings.TrimSpace(y)
+				if y != "" {
+					cleaned = append(cleaned, y)
+				}
+			}
+		}
+		c.cfg.Report.TestCaseIDs = cleaned
 
 	case "generate", "download":
 
