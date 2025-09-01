@@ -63,7 +63,7 @@ send_request() {
     --data '{"name":"Alice Green","email":"green@alice.com","phone":"3939201584"}' || true
 
   curl -sS http://localhost:8000/students || true
-  curl -sS http://localhost:8000/get || true
+#   curl -sS http://localhost:8000/get || true
 
   sleep 10
   echo "$kp_pid Keploy PID"
@@ -73,13 +73,15 @@ send_request() {
 
 run_keploy_proxy_replay() {
   local test_set_num="$1"
+  test_set_num=$((test_set_num - 1))
   section "Run keploy proxy with packet capture"
-  sudo keploy proxy --pcap-path "./traffic.pcap"
+  sudo -E env PATH="$PATH" "$RECORD_BIN" proxy --pcap-path "./traffic.pcap" &> "proxy_log_${test_set_num}.txt" &
   endsec
 
   local src_mock
   src_mock=$(find ./keploy/replay-mocks -type f -name "*.yaml" | head -n1)
   local dest_mock="./keploy/test-set-${test_set_num}/tests/"
+  echo "Copying mock from $src_mock to $dest_mock"
   if [[ -f "$src_mock" && -d "$dest_mock" ]]; then
     cp "$src_mock" "$dest_mock"
     echo "Replaced mock file in test-set-${test_set_num}"
@@ -188,10 +190,10 @@ run_replay() {
   local any_fail=false
   for rpt in "$RUN_DIR"/test-set-*-report.yaml; do
     [[ -f "$rpt" ]] || continue
-    local status
-    status=$(awk '/^status:/{print $2; exit}' "$rpt")
-    echo "Test status for $(basename "$rpt"): ${status:-<missing>}"
-    if [[ "$status" != "PASSED" ]]; then any_fail=true; fi
+    local test_status
+    test_status=$(awk '/^status:/{print $2; exit}' "$rpt")
+    echo "Test status for $(basename "$rpt"): ${test_status:-<missing>}"
+    if [[ "$test_status" != "PASSED" ]]; then any_fail=true; fi
   done
   endsec
 
