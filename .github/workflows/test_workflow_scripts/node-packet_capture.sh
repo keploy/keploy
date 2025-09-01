@@ -75,7 +75,7 @@ run_keploy_proxy_replay() {
   local test_set_num="$1"
   test_set_num=$((test_set_num - 1))
   section "Run keploy proxy with packet capture"
-  sudo -E env PATH="$PATH" "$RECORD_BIN" proxy --pcap-path "./traffic.pcap"
+  sudo -E env PATH="$PATH" "$RECORD_BIN" packet-replay --pcap-path "./traffic.pcap"
   endsec
 
   local src_mock
