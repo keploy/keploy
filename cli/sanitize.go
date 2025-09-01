@@ -47,7 +47,7 @@ func Sanitize(ctx context.Context, logger *zap.Logger, _ *config.Config, service
 
 	err := cmdConfigurator.AddFlags(cmd)
 	if err != nil {
-		utils.LogError(logger, err, "failed to add report flags")
+		utils.LogError(logger, err, "failed to add sanitize flags")
 		return nil
 	}
 

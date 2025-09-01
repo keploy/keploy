@@ -56,7 +56,7 @@ func (s *service) Sanitize(ctx context.Context) error {
 
 		// if secret.yaml exists in the testSetDir then skip sanitization
 		if _, err := os.Stat(filepath.Join(testSetDir, "secret.yaml")); err == nil {
-			s.logger.Info("Secret.yaml found in the test set directory, skipping sanitization",
+			s.logger.Info("secret.yaml found in the test set directory, skipping sanitization",
 				zap.String("testSetID", testSetID),
 				zap.String("dir", testSetDir))
 			continue
