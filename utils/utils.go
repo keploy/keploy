@@ -71,14 +71,14 @@ func ReplaceGrpcHost(authority string, ipAddress string) (string, error) {
 		return authority, fmt.Errorf("failed to replace authority in case of docker env: empty IP address")
 	}
 
-	// Split authority into host and port
-	parts := strings.Split(authority, ":")
-	if len(parts) != 2 {
-		return authority, fmt.Errorf("invalid authority format, expected host:port but got %s", authority)
+	// Use net.SplitHostPort to properly handle IPv6 addresses
+	_, port, err := net.SplitHostPort(authority)
+	if err != nil {
+		return authority, fmt.Errorf("invalid authority format: %v", err)
 	}
 
 	// Replace the host part with ipAddress, keeping the port
-	return ipAddress + ":" + parts[1], nil
+	return net.JoinHostPort(ipAddress, port), nil
 }
 
 func ReplaceGrpcPort(authority string, port string) (string, error) {
@@ -87,19 +87,15 @@ func ReplaceGrpcPort(authority string, port string) (string, error) {
 		return authority, fmt.Errorf("failed to replace port in case of docker env: empty port")
 	}
 
-	// Split authority into host and port
-	parts := strings.Split(authority, ":")
-	if len(parts) == 0 {
-		return authority, fmt.Errorf("invalid authority format, got empty string")
-	}
-
-	// If there's no port in the authority, append the new port
-	if len(parts) == 1 {
-		return parts[0] + ":" + port, nil
+	// Use net.SplitHostPort to properly handle IPv6 addresses
+	host, _, err := net.SplitHostPort(authority)
+	if err != nil {
+		// If splitting fails, assume it's just a host without port
+		return net.JoinHostPort(authority, port), nil
 	}
 
 	// Replace the port part, keeping the host
-	return parts[0] + ":" + port, nil
+	return net.JoinHostPort(host, port), nil
 }
 
 // ReplaceBaseURL replaces the base URL (scheme + host) of the given URL with the provided baseURL.

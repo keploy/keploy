@@ -346,3 +346,174 @@ func TestAskForConfirmation_AllCases_122(t *testing.T) {
 		assert.False(t, got)
 	})
 }
+
+// TestReplaceGrpcHost_AllCases_123 tests the ReplaceGrpcHost function with various authority formats including IPv6.
+func TestReplaceGrpcHost_AllCases_123(t *testing.T) {
+	tests := []struct {
+		name        string
+		authority   string
+		ipAddress   string
+		expected    string
+		expectError bool
+	}{
+		{
+			name:        "IPv4 host with port",
+			authority:   "192.168.1.1:8080",
+			ipAddress:   "10.0.0.1",
+			expected:    "10.0.0.1:8080",
+			expectError: false,
+		},
+		{
+			name:        "IPv6 host with port",
+			authority:   "[::1]:8080",
+			ipAddress:   "127.0.0.1",
+			expected:    "127.0.0.1:8080",
+			expectError: false,
+		},
+		{
+			name:        "hostname with port",
+			authority:   "localhost:9090",
+			ipAddress:   "192.168.1.100",
+			expected:    "192.168.1.100:9090",
+			expectError: false,
+		},
+		{
+			name:        "IPv6 address replacement with IPv6",
+			authority:   "[2001:db8::1]:8080",
+			ipAddress:   "2001:db8::2",
+			expected:    "[2001:db8::2]:8080",
+			expectError: false,
+		},
+		{
+			name:        "empty IP address",
+			authority:   "localhost:8080",
+			ipAddress:   "",
+			expected:    "localhost:8080",
+			expectError: true,
+		},
+		{
+			name:        "invalid authority format - no port",
+			authority:   "localhost",
+			ipAddress:   "127.0.0.1",
+			expected:    "localhost",
+			expectError: true,
+		},
+		{
+			name:        "invalid authority format - malformed IPv6",
+			authority:   "[::1:8080",
+			ipAddress:   "127.0.0.1",
+			expected:    "[::1:8080",
+			expectError: true,
+		},
+		{
+			name:        "IPv6 host with non-standard port",
+			authority:   "[fe80::1%lo0]:3000",
+			ipAddress:   "192.168.1.1",
+			expected:    "192.168.1.1:3000",
+			expectError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := ReplaceGrpcHost(tt.authority, tt.ipAddress)
+
+			if tt.expectError {
+				require.Error(t, err)
+				assert.Equal(t, tt.expected, result)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.expected, result)
+			}
+		})
+	}
+}
+
+// TestReplaceGrpcPort_AllCases_124 tests the ReplaceGrpcPort function with various authority formats including IPv6.
+func TestReplaceGrpcPort_AllCases_124(t *testing.T) {
+	tests := []struct {
+		name        string
+		authority   string
+		port        string
+		expected    string
+		expectError bool
+	}{
+		{
+			name:        "IPv4 host with existing port",
+			authority:   "192.168.1.1:8080",
+			port:        "9090",
+			expected:    "192.168.1.1:9090",
+			expectError: false,
+		},
+		{
+			name:        "IPv6 host with existing port",
+			authority:   "[::1]:8080",
+			port:        "9090",
+			expected:    "[::1]:9090",
+			expectError: false,
+		},
+		{
+			name:        "hostname with existing port",
+			authority:   "localhost:8080",
+			port:        "3000",
+			expected:    "localhost:3000",
+			expectError: false,
+		},
+		{
+			name:        "IPv6 address with complex format",
+			authority:   "[2001:db8::1]:8080",
+			port:        "9090",
+			expected:    "[2001:db8::1]:9090",
+			expectError: false,
+		},
+		{
+			name:        "host without port - should add port",
+			authority:   "localhost",
+			port:        "8080",
+			expected:    "localhost:8080",
+			expectError: false,
+		},
+		{
+			name:        "IPv6 host without port - should add port",
+			authority:   "::1",
+			port:        "8080",
+			expected:    "[::1]:8080",
+			expectError: false,
+		},
+		{
+			name:        "empty port",
+			authority:   "localhost:8080",
+			port:        "",
+			expected:    "localhost:8080",
+			expectError: true,
+		},
+		{
+			name:        "IPv6 with zone identifier",
+			authority:   "[fe80::1%lo0]:3000",
+			port:        "9090",
+			expected:    "[fe80::1%lo0]:9090",
+			expectError: false,
+		},
+		{
+			name:        "hostname without port, add port",
+			authority:   "example.com",
+			port:        "443",
+			expected:    "example.com:443",
+			expectError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := ReplaceGrpcPort(tt.authority, tt.port)
+
+			if tt.expectError {
+				require.Error(t, err)
+				assert.Equal(t, tt.expected, result)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.expected, result)
+			}
+		})
+	}
+}
