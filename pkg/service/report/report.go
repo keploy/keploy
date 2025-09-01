@@ -229,7 +229,6 @@ func (r *Report) filterTestsByIDs(tests []models.TestResult, ids []string) []mod
 	return out
 }
 
-
 // GenerateReport orchestrates the entire report generation process
 func (r *Report) GenerateReport(ctx context.Context) error {
 	if r.config.Report.ReportPath != "" {
@@ -261,7 +260,7 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 		}
 	}
 
-	if r.config.Report.SummaryOnly {
+	if r.config.Report.Summary {
 		reports, err := r.collectReports(ctx, latestRunID, testSetIDs)
 		if err != nil {
 			return err
@@ -312,7 +311,7 @@ func (r *Report) generateReportFromFile(reportPath string) error {
 		// This is the successful, correct path.
 
 		// Summary-only
-		if r.config.Report.SummaryOnly {
+		if r.config.Report.Summary {
 			m := map[string]*models.TestReport{tr.Name: &tr}
 			return r.printSummary(m)
 		}
@@ -341,7 +340,7 @@ func (r *Report) generateReportFromFile(reportPath string) error {
 		r.logger.Error("failed to parse report file with legacy parser", zap.String("report_path", reportPath), zap.Error(err))
 		return err
 	}
-	if r.config.Report.SummaryOnly {
+	if r.config.Report.Summary {
 		// We don't have totals; print a compact synthetic summary of the array we have.
 		total, pass, fail := len(tests), 0, 0
 		var failedCases []string

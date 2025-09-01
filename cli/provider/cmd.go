@@ -331,9 +331,6 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"fullBody":              "full",
 		"reportPath":            "report-path",
 		"tc":                    "test-case",
-		"testcase":              "test-case",
-		"testCases":             "test-case",
-		"summaryOnly":           "summary",
 		"delay":                 "delay",
 		"apiTimeout":            "api-timeout",
 		"mongoPassword":         "mongo-password",
@@ -611,12 +608,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		c.cfg.Report.ShowFullBody = fb
 
-		sum, err := cmd.Flags().GetBool("summary")
+		summary, err := cmd.Flags().GetBool("summary")
 		if err != nil {
 			utils.LogError(c.logger, err, "failed to get the summary flag")
 			return errors.New("failed to get the summary flag")
 		}
-		c.cfg.Report.SummaryOnly = sum
+		c.cfg.Report.Summary = summary
 
 		tcIDs, err := cmd.Flags().GetStringSlice("test-case")
 		if err != nil {
