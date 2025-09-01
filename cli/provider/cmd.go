@@ -300,7 +300,8 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 	case "test", "rerecord":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
 		cmd.Flags().String("host", c.cfg.Test.Host, "Custom host to replace the actual host in the testcases")
-		cmd.Flags().Uint32("port", c.cfg.Test.Port, "Custom port to replace the actual port in the testcases")
+		cmd.Flags().Uint32("port", c.cfg.Test.Port, "Custom http port to replace the actual port in the testcases")
+		cmd.Flags().Uint32("grpc-port", c.cfg.Test.GRPCPort, "Custom grpc port to replace the actual port in the testcases")
 		cmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 		if cmd.Name() == "test" {
 			cmd.Flags().Uint64("api-timeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
@@ -357,6 +358,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"configPath":            "config-path",
 		"path":                  "path",
 		"port":                  "port",
+		"grpcPort":              "grpc-port",
 		"proxyPort":             "proxy-port",
 		"dnsPort":               "dns-port",
 		"command":               "command",
@@ -869,6 +871,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					return errors.New(errMsg)
 				}
 				c.cfg.ReRecord.Port = port
+
+				grpcPort, err := cmd.Flags().GetUint32("grpc-port")
+				if err != nil {
+					errMsg := "failed to get the provided grpcPort"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.ReRecord.GRPCPort = grpcPort
+
 				c.cfg.Test.Delay, err = cmd.Flags().GetUint64("delay")
 				if err != nil {
 					errMsg := "failed to get the provided delay"
