@@ -21,6 +21,7 @@ type Instrumentation interface {
 type Service interface {
 	Start(ctx context.Context, reRecord bool) error
 	GetContainerIP(ctx context.Context, id uint64) (string, error)
+	StartNetworkPacketReplay(ctx context.Context) error
 }
 
 type TestDB interface {

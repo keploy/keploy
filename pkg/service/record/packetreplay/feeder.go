@@ -1,6 +1,4 @@
-//go:build linux
-
-package proxyservice
+package packetreplay
 
 import "sync"
 

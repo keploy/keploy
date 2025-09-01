@@ -1,6 +1,4 @@
-//go:build linux
-
-package proxyservice
+package packetreplay
 
 import (
 	"context"
@@ -31,8 +29,8 @@ type ReplayOptions struct {
 type direction int
 
 const (
-	dirToProxy direction = iota
-	dirFromProxy
+	DirToProxy direction = iota
+	DirFromProxy
 )
 
 type flowKeyDup struct {
@@ -45,7 +43,7 @@ type flowKeyDup struct {
 	dir     direction
 }
 
-type streamSeq struct {
+type StreamSeq struct {
 	port    uint16
 	events  []flowKeyDup
 	firstTS time.Time

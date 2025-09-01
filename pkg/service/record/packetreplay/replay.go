@@ -1,12 +1,11 @@
-//go:build linux
-
-package proxyservice
+package packetreplay
 
 import (
 	"context"
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -171,7 +170,7 @@ replaySequence sequentially executes:
 - If event.dir == dirFromProxy: enqueue payload so the :16790 server returns it on next client request
 Optionally respects preserveTiming and writeDelay using the original timestamps.
 */
-func replaySequence(
+func ReplaySequence(
 	logger *zap.Logger,
 	events []flowKeyDup,
 	proxyAddr string,
@@ -240,14 +239,14 @@ func replaySequence(
 		}
 
 		switch ev.dir {
-		case dirToProxy:
+		case DirToProxy:
 			_, err := proxyConn.Write(ev.payload)
 			if err != nil {
 				return fmt.Errorf("write to proxy (event %d): %w", i+1, err)
 			}
 			logger.Debug(fmt.Sprintf("[REPLAY %03d] →proxy wrote %d bytes", i+1, len(ev.payload)))
 
-		case dirFromProxy:
+		case DirFromProxy:
 			// Enqueue for :16790 server so proxy can fetch it
 			feeder.push(ev.payload)
 			logger.Debug(fmt.Sprintf("[REPLAY %03d] proxy→app queued %d bytes (server will respond on next request)", i+1, len(ev.payload)))
@@ -281,9 +280,9 @@ func replaySequence(
 	return nil
 }
 
-// readSrcPortEvents iterates packets, filters on proxy port, dedups by TCP seq,
+// ReadSrcPortEvents iterates packets, filters on proxy port, dedups by TCP seq,
 // and groups events by the peer (non-proxy) port.
-func readSrcPortEvents(r *pcapgo.Reader, proxyPort int, log *zap.Logger) (map[uint16][]flowKeyDup, error) {
+func ReadSrcPortEvents(r *pcapgo.Reader, proxyPort int, log *zap.Logger) (map[uint16][]flowKeyDup, error) {
 	srcPorts := make(map[uint16][]flowKeyDup)
 	seenSeq := make(map[uint32]bool)
 
@@ -333,9 +332,9 @@ func readSrcPortEvents(r *pcapgo.Reader, proxyPort int, log *zap.Logger) (map[ui
 			ts:      ci.Timestamp,
 		}
 		if int(tcp.DstPort) == proxyPort {
-			ev.dir = dirToProxy
+			ev.dir = DirToProxy
 		} else {
-			ev.dir = dirFromProxy
+			ev.dir = DirFromProxy
 		}
 
 		// group by the peer (non-proxy) port
@@ -355,4 +354,91 @@ func readSrcPortEvents(r *pcapgo.Reader, proxyPort int, log *zap.Logger) (map[ui
 
 func isProxySideTCP(tcp *layers.TCP, proxyPort int) bool {
 	return int(tcp.SrcPort) == proxyPort || int(tcp.DstPort) == proxyPort
+}
+
+func StartReplay(logger *zap.Logger, opts ReplayOptions, pcapPath string) error {
+
+	if pcapPath == "" {
+		return ErrMissingPCAP
+	}
+
+	proxyAddr, proxyPort, preserveTiming, writeDelay, err := prepareReplayInputs(opts)
+	if err != nil {
+		return err
+	}
+
+	var streams []StreamSeq
+
+	// Open PCAP
+	f, err := os.Open(pcapPath)
+	if err != nil {
+		logger.Error("failed to open pcap file", zap.Error(err))
+		return fmt.Errorf("failed to open pcap: %w", err)
+	}
+	defer f.Close()
+
+	pcapReader, err := pcapgo.NewReader(f)
+	if err != nil {
+		logger.Error("pcap reader", zap.Error(err))
+		return fmt.Errorf("failed to create pcap reader: %w", err)
+	}
+
+	srcPorts, err := ReadSrcPortEvents(pcapReader, proxyPort, logger)
+	if err != nil {
+		return err
+	}
+
+	if len(srcPorts) == 0 {
+		return ErrNoProxyRelatedFlows
+	}
+
+	for port, seq := range srcPorts {
+		if len(seq) == 0 {
+			continue
+		}
+		// Sort each stream strictly by original packet time
+		sort.Slice(seq, func(i, j int) bool { return seq[i].ts.Before(seq[j].ts) })
+
+		first := seq[0].ts
+		streams = append(streams, StreamSeq{
+			port:    port,
+			events:  seq,
+			firstTS: first,
+		})
+	}
+	// Sort strictly by original packet time
+	sort.Slice(streams, func(i, j int) bool { return streams[i].firstTS.Before(streams[j].firstTS) })
+
+	logger.Info(fmt.Sprintf("Discovered %d stream(s). Replaying sequentially.", len(streams)))
+
+	for sidx, st := range streams {
+		logger.Info(fmt.Sprintf("---- Stream %d (peer port %d) ----", sidx+1, st.port))
+		logger.Info(fmt.Sprintf("Sequence length: %d", len(st.events)))
+		for i, ev := range st.events {
+			dirStr := "→proxy"
+			if ev.dir == DirFromProxy {
+				dirStr = "proxy→app"
+			}
+			logger.Info(fmt.Sprintf("  [%03d] %s t=%s bytes=%d", i+1, dirStr, ev.ts.Format(time.RFC3339Nano), len(ev.payload)))
+		}
+
+		// REPLAY this stream (sequential as captured)
+		if err := ReplaySequence(logger, st.events, proxyAddr, preserveTiming, writeDelay); err != nil {
+			logger.Error(fmt.Sprintf("replay failed for stream %d (port %d)", sidx+1, st.port), zap.Error(err))
+			return fmt.Errorf("replay failed for stream %d (port %d): %w", sidx+1, st.port, err)
+		}
+
+		// tiny gap between streams so the proxy/app can settle
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	return nil
+}
+
+func prepareReplayInputs(opts ReplayOptions) (proxyAddr string, proxyPort int, preserveTiming bool, writeDelay time.Duration, err error) {
+	proxyAddr = DefaultProxyAddr
+	proxyPort = DefaultProxyPort
+	preserveTiming = opts.PreserveTiming
+	writeDelay = opts.WriteDelay
+	return
 }
