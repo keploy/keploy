@@ -266,7 +266,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().StringP("report-path", "r", "", "Absolute path to a report file")
 		cmd.Flags().Bool("full", false, "Show full diffs (colorized for JSON) instead of compact table diff")
 
-	case "proxy":
+	case "packet-replay":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().StringP("pcap-path", "c", ".", "Path to the pcap file used to replay the network packets")
 		cmd.Flags().StringP("mocks-path", "m", ".", "Path to the directory where mock should be stored")
@@ -957,7 +957,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 
-	case "proxy":
+	case "packet-replay":
 		path, err := cmd.Flags().GetString("path")
 		if err != nil {
 			errMsg := "failed to get the path"

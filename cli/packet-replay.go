@@ -13,29 +13,29 @@ import (
 )
 
 func init() {
-	Registered["proxy"] = Proxy
+	Registered["packet-replay"] = Proxy
 }
 
 func Proxy(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
 	var proxyCmd = &cobra.Command{
-		Use:     "proxy",
-		Short:   "Starts the proxy server",
-		Example: "keploy proxy",
+		Use:     "packet-replay",
+		Short:   "Replay the recorded network packets",
+		Example: "keploy packet-replay --pcap-path ./traffic.pcap",
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			svc, err := serviceFactory.GetService(ctx, "proxy")
+			svc, err := serviceFactory.GetService(ctx, "packet-replay")
 			if err != nil {
-				utils.LogError(logger, err, "failed to get proxy service")
+				utils.LogError(logger, err, "failed to get packet-replay service")
 				return err
 			}
-			proxySvc, ok := svc.(*proxyservice.ProxyService)
+			packetReplaySvc, ok := svc.(*proxyservice.ProxyService)
 			if !ok {
-				utils.LogError(logger, nil, "failed to typecast proxy service")
+				utils.LogError(logger, nil, "failed to typecast packet-replay service")
 				return err
 			}
-			proxySvc.StartProxy(ctx)
+			packetReplaySvc.StartProxy(ctx)
 			return nil
 		},
 	}
