@@ -13,11 +13,11 @@ import (
 )
 
 func init() {
-	Registered["packet-replay"] = Proxy
+	Registered["packet-replay"] = PacketReplay
 }
 
-func Proxy(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
-	var proxyCmd = &cobra.Command{
+func PacketReplay(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceFactory ServiceFactory, cmdConfigurator CmdConfigurator) *cobra.Command {
+	var packetReplayCmd = &cobra.Command{
 		Use:     "packet-replay",
 		Short:   "Replay the recorded network packets",
 		Example: "keploy packet-replay --pcap-path ./traffic.pcap",
@@ -39,10 +39,10 @@ func Proxy(ctx context.Context, logger *zap.Logger, cfg *config.Config, serviceF
 			return nil
 		},
 	}
-	err := cmdConfigurator.AddFlags(proxyCmd)
+	err := cmdConfigurator.AddFlags(packetReplayCmd)
 	if err != nil {
-		utils.LogError(logger, err, "failed to add flags to proxy command")
+		utils.LogError(logger, err, "failed to add flags to packet-replay command")
 		return nil
 	}
-	return proxyCmd
+	return packetReplayCmd
 }
