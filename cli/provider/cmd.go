@@ -613,7 +613,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 
 		c.cfg.Report.ShowFullBody = fb
-		
+
 		summary, err := cmd.Flags().GetBool("summary")
 		if err != nil {
 			utils.LogError(c.logger, err, "failed to get the summary flag")
