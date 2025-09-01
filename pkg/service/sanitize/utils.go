@@ -368,11 +368,6 @@ func keyToSecretKey(field string) string {
 		parts[i] = string(runes)
 	}
 	key := strings.Join(parts, "")
-	// Acronym normalization
-	repls := map[string]string{"Url": "URL", "Ip": "IP", "Id": "ID", "Api": "API", "Aws": "AWS"}
-	for k, v := range repls {
-		key = strings.ReplaceAll(key, k, v)
-	}
 	if key == "" {
 		key = "Secret"
 	}
