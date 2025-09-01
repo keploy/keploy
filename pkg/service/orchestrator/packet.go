@@ -1,6 +1,6 @@
 //go:build linux
 
-package record
+package orchestrator
 
 import (
 	"context"
@@ -8,15 +8,15 @@ import (
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/core/proxy"
 	"go.keploy.io/server/v2/pkg/models"
-	"go.keploy.io/server/v2/pkg/service/record/packetreplay"
+	"go.keploy.io/server/v2/pkg/service/orchestrator/packet"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
 
-func (r *Recorder) StartNetworkPacketReplay(ctx context.Context) error {
+func (o *Orchestrator) StartNetworkPacketReplay(ctx context.Context) error {
 
 	session := core.NewSessions()
-	proxy := proxy.New(r.logger, packetreplay.NewFakeDestInfo(), r.config, session)
+	proxy := proxy.New(o.logger, packet.NewFakeDestInfo(), o.config, session)
 
 	// Create channels for testcases and mocks
 	testcaseCh := make(chan *models.TestCase, 10)
@@ -31,11 +31,9 @@ func (r *Recorder) StartNetworkPacketReplay(ctx context.Context) error {
 
 	// Listen for mocks
 	go func() {
-		for mock := range mockCh {
-			err := r.mockDB.InsertMock(ctx, mock, "replay-mocks")
-			if err != nil {
-				r.logger.Error("failed to insert mock into database", zap.Error(err))
-			}
+		err := o.record.InsertMocks(ctx, "replay-mocks", mockCh)
+		if err != nil {
+			o.logger.Error("failed to store mocks", zap.Error(err))
 		}
 	}()
 
@@ -46,29 +44,29 @@ func (r *Recorder) StartNetworkPacketReplay(ctx context.Context) error {
 	proxyCtx = context.WithValue(proxyCtx, models.ErrGroupKey, proxyErrGrp)
 
 	if err := proxy.StartProxy(proxyCtx, core.ProxyOptions{}); err != nil {
-		r.logger.Error("failed to start proxy", zap.Error(err))
+		o.logger.Error("failed to start proxy", zap.Error(err))
 	}
 
 	defer func() {
-		r.logger.Info("shutting down proxy server")
+		o.logger.Info("shutting down proxy server")
 		proxyCtxCancel()
 	}()
 
-	r.logger.Info("proxy started", zap.Uint32("port", r.config.ProxyPort))
+	o.logger.Info("proxy started", zap.Uint32("port", o.config.ProxyPort))
 
-	err := packetreplay.StartReplay(
-		r.logger,
-		packetreplay.ReplayOptions{
-			PreserveTiming: packetreplay.PreserveTiming,
-			WriteDelay:     packetreplay.WriteDelay,
+	err := packet.StartReplay(
+		o.logger,
+		packet.ReplayOptions{
+			PreserveTiming: packet.PreserveTiming,
+			WriteDelay:     packet.WriteDelay,
 		},
-		r.config.PacketReplay.PcapPath,
+		o.config.PacketReplay.PcapPath,
 	)
 	if err != nil {
-		r.logger.Error("failed to start replay", zap.Error(err))
+		o.logger.Error("failed to start replay", zap.Error(err))
 	}
 
-	r.logger.Info("Replay finished, stopping proxy server")
+	o.logger.Info("Replay finished, stopping proxy server")
 
 	return nil
 }

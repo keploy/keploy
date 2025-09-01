@@ -70,11 +70,11 @@ type Templatize struct {
 }
 
 type Record struct {
-	Filters        []Filter      `json:"filters" yaml:"filters" mapstructure:"filters"`
-	BasePath       string        `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
-	RecordTimer    time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
-	Metadata       string        `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
-	DisableMocking bool          `json:"disableMocking" yaml:"disableMocking" mapstructure:"disableMocking"`
+	Filters           []Filter      `json:"filters" yaml:"filters" mapstructure:"filters"`
+	BasePath          string        `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
+	RecordTimer       time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
+	Metadata          string        `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
+	GlobalPassthrough bool          `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
 }
 
 type ReRecord struct {

@@ -388,3 +388,13 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 
 	r.logger.Info("Created test-set config file with metadata")
 }
+
+func (r *Recorder) InsertMocks(ctx context.Context, testSetID string, mockCh <-chan *models.Mock) error {
+	for mock := range mockCh {
+		err := r.mockDB.InsertMock(ctx, mock, testSetID)
+		if err != nil {
+			return fmt.Errorf("failed to insert mock into database: %w", err)
+		}
+	}
+	return nil
+}

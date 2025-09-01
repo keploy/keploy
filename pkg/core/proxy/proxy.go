@@ -53,7 +53,7 @@ type Proxy struct {
 	DNSPort               uint32
 	Debug                 bool
 	CaptureNetworkPackets bool
-	DisableMocking        bool
+	GlobalPassthrough     bool
 
 	DestInfo     core.DestInfo
 	Integrations map[integrations.IntegrationType]integrations.Integrations
@@ -85,7 +85,7 @@ func New(logger *zap.Logger, info core.DestInfo, opts *config.Config, session *c
 		IP6:                   "::1",          //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
 		Debug:                 opts.Debug,
 		CaptureNetworkPackets: opts.CapturePackets,
-		DisableMocking:        opts.Record.DisableMocking,
+		GlobalPassthrough:     opts.Record.GlobalPassthrough,
 		ipMutex:               &sync.Mutex{},
 		connMutex:             &sync.Mutex{},
 		DestInfo:              info,
@@ -230,7 +230,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 	// Signal that the server is ready
 	readyChan <- nil
 
-	if p.Debug && p.CaptureNetworkPackets {
+	if p.CaptureNetworkPackets {
 		p.logger.Info("Debug mode is ON — starting packet capture on loopback for proxy port 16789 → traffic.pcap")
 		go p.recordNetworkPacketsForProxy()
 	}
@@ -398,7 +398,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}()
 
-	isGlobalPassthrough := (!rule.Mocking && rule.Mode == models.MODE_TEST) || (rule.Mode == models.MODE_RECORD && p.DisableMocking)
+	isGlobalPassthrough := (!rule.Mocking && rule.Mode == models.MODE_TEST) || (rule.Mode == models.MODE_RECORD && p.GlobalPassthrough)
 
 	//check for global passthrough in test mode
 	if isGlobalPassthrough {

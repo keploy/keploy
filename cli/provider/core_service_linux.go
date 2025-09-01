@@ -49,7 +49,7 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, tel, auth, cfg)
 	reportSvc := report.New(logger, cfg, commonServices.YamlReportDb, commonServices.YamlTestDB)
 	switch cmd {
-	case "rerecord":
+	case "rerecord", "packet-replay":
 		return orchestrator.New(logger, recordSvc, toolsSvc, replaySvc, cfg), nil
 	case "record":
 		return recordSvc, nil

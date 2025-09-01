@@ -1,6 +1,6 @@
 //go:build linux
 
-package packetreplay
+package packet
 
 import (
 	"context"
