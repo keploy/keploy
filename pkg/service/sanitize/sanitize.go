@@ -54,6 +54,14 @@ func (s *service) Sanitize(ctx context.Context) error {
 			zap.String("testSetID", testSetID),
 			zap.String("dir", testSetDir))
 
+		// if secret.yaml exists in the testSetDir then skip sanitization
+		if _, err := os.Stat(filepath.Join(testSetDir, "secret.yaml")); err == nil {
+			s.logger.Info("Secret.yaml found in the test set directory, skipping sanitization",
+				zap.String("testSetID", testSetID),
+				zap.String("dir", testSetDir))
+			continue
+		}
+
 		if err := s.sanitizeTestSetDir(testSetDir); err != nil {
 			s.logger.Error("Sanitize failed for test set",
 				zap.String("testSetID", testSetID),
@@ -78,27 +86,12 @@ func (s *service) extractTestSetIDs() []string {
 	return ids
 }
 
-// locateTestSetDir resolves ./keploy/<testSetID> by walking upward from CWD
-// (so you can run the server in a subdir and it still finds the repo root).
+// locateTestSetDir resolves ./keploy/<testSetID> at the current working directory
 func (s *service) locateTestSetDir(testSetID string) (string, error) {
-	// Fast path: ./keploy/<id>
 	if p := filepath.Join(".", "keploy", testSetID); isDir(p) {
 		return p, nil
 	}
-	// Walk upwards to find a keploy root
-	dir, _ := os.Getwd()
-	for {
-		try := filepath.Join(dir, "keploy", testSetID)
-		if isDir(try) {
-			return try, nil
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	return "", fmt.Errorf("keploy/%s not found (starting from CWD)", testSetID)
+	return "", fmt.Errorf("keploy/%s not found in current directory", testSetID)
 }
 
 func isDir(p string) bool {
@@ -130,48 +123,24 @@ func (s *service) sanitizeTestSetDir(testSetDir string) error {
 			files = append(files, filepath.Join(testsDir, name))
 		}
 	} else {
-		// Fallback: scan keploy/<set> (will skip mocks.yaml below anyway)
-		ents, err := os.ReadDir(testSetDir)
-		if err != nil {
-			return fmt.Errorf("read test-set dir: %w", err)
-		}
-		for _, e := range ents {
-			if e.IsDir() {
-				continue
-			}
-			name := e.Name()
-			if !strings.HasSuffix(strings.ToLower(name), ".yaml") {
-				continue
-			}
-			files = append(files, filepath.Join(testSetDir, name))
-		}
+		s.logger.Info("No tests directory found")
+		return nil
 	}
-
-	// Filter out files we never want to touch
-	out := files[:0]
-	for _, f := range files {
-		l := strings.ToLower(filepath.Base(f))
-		if l == "mocks.yaml" || l == "secret.yaml" || strings.HasSuffix(l, "-report.yaml") {
-			continue
-		}
-		out = append(out, f)
-	}
-	files = out
 
 	if len(files) == 0 {
-		// Not an error — just nothing to sanitize
+		s.logger.Info("No files to sanitize")
 		return nil
 	}
 
 	for _, f := range files {
 		if err := SanitizeFileInPlace(f, aggSecrets); err != nil {
-			// Continue to next file; log the failure
+			// Continue to next file
 			s.logger.Error("Failed to sanitize file", zap.String("file", f), zap.Error(err))
 			continue
 		}
 	}
 
-	// Write/overwrite keploy/<set>/secret.yaml
+	// Write keploy/<set>/secret.yaml
 	secretPath := filepath.Join(testSetDir, "secret.yaml")
 	if err := WriteSecretsYAML(secretPath, aggSecrets); err != nil {
 		return fmt.Errorf("write secret.yaml: %w", err)
