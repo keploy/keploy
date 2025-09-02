@@ -27,10 +27,8 @@ Protocol:
     it pops the next "fromProxy" payload and writes it back as the response.
   - It keeps doing this (read -> respond) in sequence until the feeder is closed.
 */
-func startAppSideServer(logger *zap.Logger, listenPort int, feeder *responseFeeder) (stop func(), err error) {
-
+func startAppSideServer(logger *zap.Logger, listenPort int, mgr *FeederManager) (stop func(), err error) {
 	listenAddr := fmt.Sprintf(":%d", listenPort)
-
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("listen %s: %w", listenAddr, err)
@@ -40,38 +38,42 @@ func startAppSideServer(logger *zap.Logger, listenPort int, feeder *responseFeed
 	var wg sync.WaitGroup
 	shutdown := make(chan struct{})
 
-	// drainUntilEOF keeps reading until EOF or shutdown
 	drainUntilEOF := func(c net.Conn, shutdown <-chan struct{}) {
 		buf := make([]byte, 8<<10)
 		for {
-			// Keep a soft deadline so we don't hang forever if peer misbehaves.
 			_ = c.SetReadDeadline(time.Now().Add(2 * time.Minute))
 			select {
 			case <-shutdown:
 				return
 			default:
 			}
-			_, err := c.Read(buf)
-			if err != nil {
+			if _, err := c.Read(buf); err != nil {
 				if ne, ok := err.(net.Error); ok && ne.Timeout() {
-					// Keep looping; extend grace period.
 					continue
 				}
-				// io.EOF (peer FIN) or any other read error -> stop draining.
 				return
 			}
 		}
 	}
 
 	serveConn := func(c net.Conn) {
-		// If we can, get TCPConn to use half-close
 		tcp, _ := c.(*net.TCPConn)
 		defer c.Close()
 
-		// Indicate that the TCP connection is established
-		logger.Info("server: tcp connection established")
+		// Claim a feeder exclusively.
+		srcPort, feeder, err := mgr.Acquire()
+		if err != nil {
+			logger.Error("server: acquire feeder failed", zap.Error(err))
+			return
+		}
+		logger.Info("server: tcp connection established and feeder acquired", zap.Uint16("srcPort", srcPort))
 
-		// Push responses as they become available.
+		// Ensure cleanup when this conn finishes.
+		defer func() {
+			mgr.Release(srcPort)
+			logger.Info("server: released feeder", zap.Uint16("srcPort", srcPort))
+		}()
+
 		for {
 			select {
 			case <-shutdown:
@@ -91,33 +93,25 @@ func startAppSideServer(logger *zap.Logger, listenPort int, feeder *responseFeed
 					logger.Error("server: write error", zap.Error(err))
 					goto afterWrites
 				}
-				logger.Debug("server: proxy->app wrote response", zap.Int("bytes", len(resp)))
+				logger.Debug("server: proxy->app wrote response", zap.Int("bytes", len(resp)), zap.Uint16("srcPort", srcPort))
 			}
 		}
 
 	afterWrites:
-		// === Graceful close sequence ===
-		// 1) Half-close write side to signal "no more bytes coming".
 		if tcp != nil {
 			if err := tcp.CloseWrite(); err != nil {
 				logger.Warn("server: CloseWrite error", zap.Error(err))
 			} else {
 				logger.Info("server: CloseWrite done (sent FIN)")
 			}
-		} else {
-			// Fallback: set a tiny read deadline to avoid hanging forever.
-			logger.Info("server: non-TCPConn, skipping CloseWrite")
 		}
-
-		// 2) Drain until the peer closes their write side (we see EOF) or shutdown.
 		drainUntilEOF(c, shutdown)
-		// 3) defer will Close() the socket now.
 	}
 
 	acceptLoop := func() {
 		for {
 			select {
-			case <-shutdown: // This ensures that shutdown signal is processed
+			case <-shutdown:
 				logger.Info("server: acceptLoop exiting")
 				return
 			default:
@@ -134,10 +128,7 @@ func startAppSideServer(logger *zap.Logger, listenPort int, feeder *responseFeed
 				}
 				wg.Add(1)
 				go func() {
-					defer func() {
-						logger.Debug("server: goroutine for serveConn(conn) exiting, calling wg.Done()")
-						wg.Done()
-					}()
+					defer wg.Done()
 					serveConn(conn)
 				}()
 			}
@@ -146,21 +137,14 @@ func startAppSideServer(logger *zap.Logger, listenPort int, feeder *responseFeed
 
 	wg.Add(1)
 	go func() {
-		defer func() {
-			logger.Debug("server: goroutine for acceptLoop() exiting, calling wg.Done()")
-			wg.Done()
-		}()
+		defer wg.Done()
 		acceptLoop()
 	}()
 
 	stop = func() {
 		close(shutdown)
-		// Wake any handlers waiting in pop()
-		feeder.close()
-		err = ln.Close()
-		if err != nil {
-			logger.Error("server close error", zap.Error(err))
-		}
+		_ = ln.Close()
+		mgr.Close()
 		logger.Info("server stopped")
 	}
 	return stop, nil
@@ -179,55 +163,21 @@ func ReplaySequence(
 	preserveTiming bool,
 	writeDelay time.Duration,
 ) error {
-	feeder := newResponseFeeder()
-	stopServer, err := startAppSideServer(logger, DefaultDestPort, feeder)
+	mgr := NewFeederManager()
+	stopServer, err := startAppSideServer(logger, DefaultDestPort, mgr)
 	if err != nil {
 		return err
 	}
-	defer func() { stopServer() }()
+	defer stopServer()
 
-	// Connect to proxy
-	if proxyAddr == "" {
-		proxyAddr = DefaultProxyAddr
-	}
-	proxyConn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
-	if err != nil {
-		return fmt.Errorf("dial proxy %s: %w", proxyAddr, err)
-	}
+	srcPortsTcpWriterMap := map[uint16]*net.TCPConn{}
+	var connCount int
+	var mu sync.Mutex
 
-	defer func() { proxyConn.Close() }()
-
-	logger.Info("replay: connected to proxy", zap.String("addr", proxyAddr))
-
-	// For graceful half-close later
-	var tcpC *net.TCPConn
-	if tc, ok := proxyConn.(*net.TCPConn); ok {
-		tcpC = tc
-	}
-
-	// Sort by original time to preserve order
 	sort.Slice(events, func(i, j int) bool { return events[i].ts.Before(events[j].ts) })
-
-	readDone := make(chan struct{})
-
-	go func() {
-		defer close(readDone)
-		buf := make([]byte, 32<<10)
-		for {
-			_ = proxyConn.SetReadDeadline(time.Now().Add(2 * time.Minute))
-			n, err := proxyConn.Read(buf)
-			if n > 0 {
-				logger.Debug("drained", zap.Int("bytes", n))
-			}
-			if err != nil {
-				return // EOF or error stops the reader
-			}
-		}
-	}()
 
 	var prev time.Time
 	for i, ev := range events {
-		// Timing controls
 		if preserveTiming {
 			if !prev.IsZero() {
 				if d := ev.ts.Sub(prev); d > 0 {
@@ -236,56 +186,110 @@ func ReplaySequence(
 			}
 			prev = ev.ts
 		}
+
+		// Can remove this
 		if writeDelay > 0 {
 			time.Sleep(writeDelay)
 		}
 
 		switch ev.dir {
 		case DirToProxy:
-			_, err := proxyConn.Write(ev.payload)
-			if err != nil {
-				return fmt.Errorf("write to proxy (event %d): %w", i+1, err)
+			if _, exists := srcPortsTcpWriterMap[ev.srcPort]; !exists {
+				conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
+				if err != nil {
+					return fmt.Errorf("dial proxy %s for srcPort %d: %w", proxyAddr, ev.srcPort, err)
+				}
+
+				// Increase the connection count with mutex lock
+				mu.Lock()
+				connCount++
+				mu.Unlock()
+
+				go func() {
+					defer func() {
+						// Decrease the connection count when the goroutine is done
+						mu.Lock()
+						connCount--
+						mu.Unlock()
+					}()
+
+					buf := make([]byte, 32<<10)
+					for {
+						_ = conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
+						_, err := conn.Read(buf)
+						if err != nil {
+							return // EOF or error stops the reader
+						}
+					}
+				}()
+
+				var tcpC *net.TCPConn
+				if tc, ok := conn.(*net.TCPConn); ok {
+					tcpC = tc
+				}
+				srcPortsTcpWriterMap[ev.srcPort] = tcpC
+				logger.Info("replay: connected to proxy for srcPort", zap.Uint16("srcPort", ev.srcPort))
+
+				// IMPORTANT: create/register feeder for this srcPort NOW so that
+				// the app-side server can acquire it when the proxy connects.
+				_ = mgr.GetOrCreate(ev.srcPort)
 			}
-			logger.Debug(fmt.Sprintf("[REPLAY %03d] →proxy wrote %d bytes", i+1, len(ev.payload)))
+
+			writer := srcPortsTcpWriterMap[ev.srcPort]
+			if _, err := writer.Write(ev.payload); err != nil {
+				return fmt.Errorf("write to proxy (event %d, srcPort %d): %w", i+1, ev.srcPort, err)
+			}
+			logger.Debug(fmt.Sprintf("[REPLAY %03d] →proxy wrote %d bytes", i+1, len(ev.payload)), zap.Uint16("srcPort", ev.srcPort))
 
 		case DirFromProxy:
-			// Enqueue for :16790 server so proxy can fetch it
+			feeder := mgr.GetOrCreate(ev.dstPt)
 			feeder.push(ev.payload)
-			logger.Debug(fmt.Sprintf("[REPLAY %03d] proxy→app queued %d bytes (server will respond on next request)", i+1, len(ev.payload)))
+			logger.Debug(fmt.Sprintf("[REPLAY %03d] proxy→app queued %d bytes", i+1, len(ev.payload)), zap.Uint16("srcPort", ev.srcPort))
+
+			// Optional: If you truly need to ensure the app side has drained the item
+			// before proceeding, you can busy-wait on isEmpty(). Consider adding a condition var
+			// inside responseFeeder instead of sleeping.
+			for !feeder.isEmpty() {
+				time.Sleep(50 * time.Millisecond)
+			}
 		}
 	}
 
-	feeder.close()
+	// Close the FeederManager to unblock the app-side server if waiting.
+	mgr.Close()
 
-	if tcpC != nil {
-		if err := tcpC.CloseWrite(); err != nil {
-			logger.Warn("replay: CloseWrite error", zap.Error(err))
-		} else {
-			logger.Info("replay: CloseWrite done (sent FIN to proxy)")
-		}
-	} else {
-		logger.Info("replay: non-TCPConn, cannot CloseWrite, will Close after wait")
+	// Close per-srcPort conns
+	for sp, c := range srcPortsTcpWriterMap {
+		_ = c.CloseWrite()
+		logger.Info("replay: closed proxy conn writer", zap.Uint16("srcPort", sp))
 	}
 
+	// Wait for all connections to finish
 	waitCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	select {
-	case <-readDone:
-		logger.Info("replay: proxy closed its write side (EOF observed)")
-	case <-waitCtx.Done():
-		logger.Warn("replay: timeout waiting for proxy to finish reading/sending", zap.Error(waitCtx.Err()))
+
+	// Polling for the connection count in a safe manner
+	for {
+		mu.Lock()
+		if connCount == 0 {
+			mu.Unlock()
+			return nil
+		}
+		mu.Unlock()
+
+		select {
+		case <-waitCtx.Done():
+			logger.Warn("replay: timeout waiting for proxy to finish reading/sending", zap.Error(waitCtx.Err()))
+			return nil
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
-
-	_ = proxyConn.Close()
-	logger.Info("replay sequence finished")
-
-	return nil
 }
 
 // ReadSrcPortEvents iterates packets, filters on proxy port, dedups by TCP seq,
 // and groups events by the peer (non-proxy) port.
-func ReadSrcPortEvents(r *pcapgo.Reader, proxyPort int, log *zap.Logger) (map[uint16][]flowKeyDup, error) {
-	srcPorts := make(map[uint16][]flowKeyDup)
+func ReadSrcPortEvents(r *pcapgo.Reader, proxyPort int, log *zap.Logger) ([]flowKeyDup, error) {
+	var srcPorts []flowKeyDup
 	seenSeq := make(map[uint32]bool)
 
 	for {
@@ -341,9 +345,9 @@ func ReadSrcPortEvents(r *pcapgo.Reader, proxyPort int, log *zap.Logger) (map[ui
 
 		// group by the peer (non-proxy) port
 		if ev.srcPort != uint16(proxyPort) {
-			srcPorts[ev.srcPort] = append(srcPorts[ev.srcPort], ev)
+			srcPorts = append(srcPorts, ev)
 		} else {
-			srcPorts[ev.dstPt] = append(srcPorts[ev.dstPt], ev)
+			srcPorts = append(srcPorts, ev)
 		}
 	}
 
@@ -369,7 +373,7 @@ func StartReplay(logger *zap.Logger, opts ReplayOptions, pcapPath string) error 
 		return err
 	}
 
-	var streams []StreamSeq
+	// var streams []StreamSeq
 
 	// Open PCAP
 	f, err := os.Open(pcapPath)
@@ -385,54 +389,68 @@ func StartReplay(logger *zap.Logger, opts ReplayOptions, pcapPath string) error 
 		return fmt.Errorf("failed to create pcap reader: %w", err)
 	}
 
-	srcPorts, err := ReadSrcPortEvents(pcapReader, proxyPort, logger)
+	packetEvents, err := ReadSrcPortEvents(pcapReader, proxyPort, logger)
 	if err != nil {
 		return err
 	}
 
-	if len(srcPorts) == 0 {
+	if len(packetEvents) == 0 {
 		return ErrNoProxyRelatedFlows
 	}
 
-	for port, seq := range srcPorts {
-		if len(seq) == 0 {
-			continue
+	for index, ev := range packetEvents {
+		if ev.dir == DirToProxy {
+			logger.Info(fmt.Sprintf("index %d , →proxy srcPort=%d dstPort=%d bytes=%d", index+1, ev.srcPort, ev.dstPt, len(ev.payload)))
+		} else {
+			logger.Info(fmt.Sprintf("index %d , proxy→app srcPort=%d dstPort=%d bytes=%d", index+1, ev.srcPort, ev.dstPt, len(ev.payload)))
 		}
-		// Sort each stream strictly by original packet time
-		sort.Slice(seq, func(i, j int) bool { return seq[i].ts.Before(seq[j].ts) })
-
-		first := seq[0].ts
-		streams = append(streams, StreamSeq{
-			port:    port,
-			events:  seq,
-			firstTS: first,
-		})
 	}
+
+	err = ReplaySequence(logger, packetEvents, proxyAddr, preserveTiming, writeDelay)
+	if err != nil {
+		logger.Error("replay sequence failed", zap.Error(err))
+		return err
+	}
+
+	// for port, seq := range srcPorts {
+	// 	if len(seq) == 0 {
+	// 		continue
+	// 	}
+	// 	// Sort each stream strictly by original packet time
+	// 	sort.Slice(seq, func(i, j int) bool { return seq[i].ts.Before(seq[j].ts) })
+
+	// 	first := seq[0].ts
+	// 	streams = append(streams, StreamSeq{
+	// 		port:    port,
+	// 		events:  seq,
+	// 		firstTS: first,
+	// 	})
+	// }
 	// Sort strictly by original packet time
-	sort.Slice(streams, func(i, j int) bool { return streams[i].firstTS.Before(streams[j].firstTS) })
+	// sort.Slice(streams, func(i, j int) bool { return streams[i].firstTS.Before(streams[j].firstTS) })
 
-	logger.Info(fmt.Sprintf("Discovered %d stream(s). Replaying sequentially.", len(streams)))
+	// logger.Info(fmt.Sprintf("Discovered %d stream(s). Replaying sequentially.", len(streams)))
 
-	for sidx, st := range streams {
-		logger.Info(fmt.Sprintf("---- Stream %d (peer port %d) ----", sidx+1, st.port))
-		logger.Info(fmt.Sprintf("Sequence length: %d", len(st.events)))
-		for i, ev := range st.events {
-			dirStr := "→proxy"
-			if ev.dir == DirFromProxy {
-				dirStr = "proxy→app"
-			}
-			logger.Info(fmt.Sprintf("  [%03d] %s t=%s bytes=%d", i+1, dirStr, ev.ts.Format(time.RFC3339Nano), len(ev.payload)))
-		}
+	// for sidx, st := range streams {
+	// 	logger.Info(fmt.Sprintf("---- Stream %d (peer port %d) ----", sidx+1, st.port))
+	// 	logger.Info(fmt.Sprintf("Sequence length: %d", len(st.events)))
+	// 	for i, ev := range st.events {
+	// 		dirStr := "→proxy"
+	// 		if ev.dir == DirFromProxy {
+	// 			dirStr = "proxy→app"
+	// 		}
+	// 		logger.Info(fmt.Sprintf("  [%03d] %s t=%s bytes=%d", i+1, dirStr, ev.ts.Format(time.RFC3339Nano), len(ev.payload)))
+	// 	}
 
-		// REPLAY this stream (sequential as captured)
-		if err := ReplaySequence(logger, st.events, proxyAddr, preserveTiming, writeDelay); err != nil {
-			logger.Error(fmt.Sprintf("replay failed for stream %d (port %d)", sidx+1, st.port), zap.Error(err))
-			return fmt.Errorf("replay failed for stream %d (port %d): %w", sidx+1, st.port, err)
-		}
+	// 	// REPLAY this stream (sequential as captured)
+	// 	if err := ReplaySequence(logger, st.events, proxyAddr, preserveTiming, writeDelay); err != nil {
+	// 		logger.Error(fmt.Sprintf("replay failed for stream %d (port %d)", sidx+1, st.port), zap.Error(err))
+	// 		return fmt.Errorf("replay failed for stream %d (port %d): %w", sidx+1, st.port, err)
+	// 	}
 
-		// tiny gap between streams so the proxy/app can settle
-		time.Sleep(100 * time.Millisecond)
-	}
+	// 	// tiny gap between streams so the proxy/app can settle
+	// 	time.Sleep(100 * time.Millisecond)
+	// }
 
 	return nil
 }
@@ -440,7 +458,7 @@ func StartReplay(logger *zap.Logger, opts ReplayOptions, pcapPath string) error 
 func prepareReplayInputs(opts ReplayOptions) (proxyAddr string, proxyPort int, preserveTiming bool, writeDelay time.Duration, err error) {
 	proxyAddr = DefaultProxyAddr
 	proxyPort = DefaultProxyPort
-	preserveTiming = opts.PreserveTiming
+	preserveTiming = false
 	writeDelay = opts.WriteDelay
 	return
 }

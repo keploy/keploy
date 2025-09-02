@@ -14,7 +14,7 @@ const (
 	DefaultProxyPort = 16789
 	DefaultDestPort  = 16790
 	DefaultProxyAddr = "127.0.0.1:16789"
-	PreserveTiming   = false
+	PreserveTiming   = true
 	WriteDelay       = 10 * time.Millisecond
 )
 
