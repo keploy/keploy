@@ -4,8 +4,10 @@ package utils
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -31,6 +33,39 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	// Run the app as the user who invoked sudo
 	username := os.Getenv("SUDO_USER")
 
+	// Get the current hard limit for the number of open file descriptors
+	var rlimit syscall.Rlimit
+	hardLimit := 0
+	var err error
+	if username != "" {
+		// get sudoers rlimit - (reason) https://github.com/keploy/keploy/issues/2899
+		out, err := exec.Command("sudo", "-u", username, "sh", "-c", "ulimit -Hn").Output()
+		if err != nil {
+			logger.Warn("failed to get the hard limit for the number of open file descriptors for the user", zap.String("username", username), zap.Error(err))
+		} else {
+			output := string(out)[:len(out)-1]
+			if output != "unlimited" {
+				limit, err := strconv.Atoi(output)
+				if err != nil {
+					logger.Warn("failed to parse the hard limit for the number of open file descriptors for the user", zap.String("username", username), zap.Error(err))
+				} else {
+					hardLimit = limit
+				}
+			}
+		}
+	} else {
+		err = syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rlimit)
+		if err != nil {
+			logger.Warn("failed to get the hard limit for the number of open file descriptors for the root user", zap.Error(err))
+		} else {
+			hardLimit = int(rlimit.Max)
+		}
+	}
+
+	if hardLimit != 0 {
+		userCmd = fmt.Sprintf("ulimit -S -n %d && %s", hardLimit, userCmd)
+	}
+
 	cmd := exec.CommandContext(ctx, "sh", "-c", userCmd)
 	if username != "" {
 		// print all environment variables
@@ -53,9 +88,9 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, can
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	logger.Debug("", zap.Any("executing cli", cmd.String()))
+	logger.Debug("", zap.String("executing_cli", cmd.String()))
 
-	err := cmd.Start()
+	err = cmd.Start()
 	if err != nil {
 		return CmdError{Type: Init, Err: err}
 	}

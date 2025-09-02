@@ -20,6 +20,7 @@ type Hooks interface {
 	OutgoingInfo
 	Load(ctx context.Context, id uint64, cfg HookCfg) error
 	Record(ctx context.Context, id uint64, opts models.IncomingOptions) (<-chan *models.TestCase, error)
+	GetUnloadDone() <-chan struct{}
 }
 
 type HookCfg struct {

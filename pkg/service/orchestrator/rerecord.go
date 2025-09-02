@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v2/pkg"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -219,7 +220,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 	}
 	timeout := time.Duration(120+delay) * time.Second
 
-	o.logger.Debug("", zap.String("host", host), zap.String("port", port), zap.Any("WaitTimeout", timeout), zap.Any("CommandType", cmdType))
+	o.logger.Debug("", zap.String("host", host), zap.String("port", port), zap.Duration("WaitTimeout", timeout), zap.String("CommandType", string(cmdType)))
 
 	if err := pkg.WaitForPort(ctx, host, port, timeout); err != nil {
 		utils.LogError(o.logger, err, "Waiting for port failed", zap.String("host", host), zap.String("port", port))
@@ -257,7 +258,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 				utils.LogError(o.logger, err, "failed to replace host to docker container's IP")
 				break
 			}
-			o.logger.Debug("", zap.Any("replaced URL in case of docker env", tc.HTTPReq.URL))
+			o.logger.Debug("", zap.String("replaced_url_in_docker_env", tc.HTTPReq.URL))
 		}
 
 		if o.config.ReRecord.Host != "" {
@@ -268,13 +269,22 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 			}
 		}
 
-		if o.config.ReRecord.Port != 0 {
+		if o.config.ReRecord.Port != 0 && tc.Kind == models.HTTP {
 			tc.HTTPReq.URL, err = utils.ReplacePort(tc.HTTPReq.URL, strconv.Itoa(int(o.config.ReRecord.Port)))
 			if err != nil {
-				utils.LogError(o.logger, err, "failed to replace port to provided port by the user")
+				utils.LogError(o.logger, err, "failed to replace http port to provided port by the user")
 				break
 			}
 		}
+
+		if o.config.ReRecord.GRPCPort != 0 && tc.Kind == models.GRPC_EXPORT {
+			tc.GrpcReq.Headers.PseudoHeaders[":authority"], err = utils.ReplaceGrpcPort(tc.GrpcReq.Headers.PseudoHeaders[":authority"], strconv.Itoa(int(o.config.ReRecord.GRPCPort)))
+			if err != nil {
+				utils.LogError(o.logger, err, "failed to replace grpc port to provided grpc port by the user")
+				break
+			}
+		}
+
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSet, o.logger, o.config.Test.APITimeout)
 		if err != nil {
 			utils.LogError(o.logger, err, "failed to simulate HTTP request")
@@ -315,7 +325,7 @@ func (o *Orchestrator) checkForTemplates(ctx context.Context, testSets []string)
 	}
 
 	o.config.Templatize.TestSets = nonTemplatized
-	o.logger.Warn("The following testSets are not templatized. Do you want to templatize them to handle noisy fields?(y/n)", zap.Any("testSets:", nonTemplatized))
+	o.logger.Warn("The following testSets are not templatized. Do you want to templatize them to handle noisy fields?(y/n)", zap.Any("testSets", nonTemplatized))
 	reader := bufio.NewReader(os.Stdin)
 	input, err := reader.ReadString('\n')
 	if err != nil {
