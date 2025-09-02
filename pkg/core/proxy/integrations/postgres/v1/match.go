@@ -378,9 +378,21 @@ func findPGStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger 
 
 	mxIdx := -1
 
+	// Filter mocks upfront to avoid duplication in multiple loops
+	var filteredMocks []*models.Mock
+	var mockIndexMap []int // Maps filtered mock index to original index
+	for idx, mock := range tcsMocks {
+		if mock.TestModeInfo.IsFiltered {
+			filteredMocks = append(filteredMocks, mock)
+			mockIndexMap = append(mockIndexMap, idx)
+		} else {
+			logger.Debug("Skipping unfiltered mock", zap.String("mockName", mock.Name))
+		}
+	}
+
 	match := false
 	// loop for the exact match of the request
-	for idx, mock := range tcsMocks {
+	for filteredIdx, mock := range filteredMocks {
 		// merging the mocks as well before comparing
 		mock.Spec.PostgresRequests = mergeMocks(mock.Spec.PostgresRequests, logger)
 
@@ -397,7 +409,7 @@ func findPGStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger 
 					continue
 				}
 				if match {
-					return idx, nil
+					return mockIndexMap[filteredIdx], nil
 				}
 			}
 		}
@@ -407,7 +419,7 @@ func findPGStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger 
 	}
 	// loop for the ps match of the request
 	if !match {
-		for idx, mock := range tcsMocks {
+		for filteredIdx, mock := range filteredMocks {
 			// merging the mocks as well before comparing
 			mock.Spec.PostgresRequests = mergeMocks(mock.Spec.PostgresRequests, logger)
 
@@ -425,12 +437,12 @@ func findPGStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger 
 
 					if match {
 						logger.Debug("New Bind Prepared Statement", zap.Any("New Bind Prepared Statement", newBindPs), zap.String("ConnectionId", connectionID), zap.String("Mock Name", mock.Name))
-						return idx, nil
+						return mockIndexMap[filteredIdx], nil
 					}
 					// just check the query
 					if reflect.DeepEqual(actualPgReq.PacketTypes, []string{"P", "B", "D", "E"}) && reflect.DeepEqual(mock.Spec.PostgresRequests[0].PacketTypes, []string{"P", "B", "D", "E"}) {
 						if mock.Spec.PostgresRequests[0].Parses[0].Query == actualPgReq.Parses[0].Query {
-							return idx, nil
+							return mockIndexMap[filteredIdx], nil
 						}
 					}
 				}
@@ -439,8 +451,7 @@ func findPGStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger 
 	}
 
 	if !match {
-
-		for idx, mock := range tcsMocks {
+		for filteredIdx, mock := range filteredMocks {
 			// merging the mocks as well before comparing
 			mock.Spec.PostgresRequests = mergeMocks(mock.Spec.PostgresRequests, logger)
 
@@ -460,7 +471,7 @@ func findPGStreamMatch(tcsMocks []*models.Mock, requestBuffers [][]byte, logger 
 							ischanged, newMock := changeResToPS(mock, actualPgReq, logger, connectionID)
 
 							if ischanged {
-								return idx, newMock
+								return mockIndexMap[filteredIdx], newMock
 							}
 							continue
 
