@@ -672,11 +672,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		r.logger.Warn("no valid test cases found to run for test set", zap.String("test-set", testSetID))
 
 		testReport := &models.TestReport{
-			Version: models.GetVersion(),
-			TestSet: testSetID,
-			Status:  string(models.TestSetStatusNoTestsToRun),
-			Total:   0,
-			Ignored: 0,
+			Version:   models.GetVersion(),
+			TestSet:   testSetID,
+			Status:    string(models.TestSetStatusNoTestsToRun),
+			Total:     0,
+			Ignored:   0,
+			TimeTaken: time.Since(startTime).String(),
 		}
 		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
 		if err != nil {
@@ -687,12 +688,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if _, ok := r.config.Test.IgnoredTests[testSetID]; ok && len(r.config.Test.IgnoredTests[testSetID]) == 0 {
+		timeTaken := time.Since(startTime)
 		testReport := &models.TestReport{
-			Version: models.GetVersion(),
-			TestSet: testSetID,
-			Status:  string(models.TestSetStatusIgnored),
-			Total:   len(testCases),
-			Ignored: len(testCases),
+			Version:   models.GetVersion(),
+			TestSet:   testSetID,
+			Status:    string(models.TestSetStatusIgnored),
+			Total:     len(testCases),
+			Ignored:   len(testCases),
+			TimeTaken: timeTaken.String(),
 		}
 
 		err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
@@ -702,17 +705,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		verdict := TestReportVerdict{
-			total:    testReport.Total,
-			failed:   0,
-			passed:   0,
-			ignored:  testReport.Ignored,
-			status:   true,
-			duration: time.Duration(0),
+			total:     testReport.Total,
+			failed:    0,
+			passed:    0,
+			ignored:   testReport.Ignored,
+			status:    true,
+			duration:  timeTaken,
+			timeTaken: timeTaken.String(),
 		}
 
 		completeTestReport[testSetID] = verdict
 		totalTests += testReport.Total
 		totalTestIgnored += testReport.Ignored
+		totalTestTimeTaken += timeTaken
 
 		return models.TestSetStatusIgnored, nil
 	}
@@ -846,9 +851,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	// Inserting the initial report for the test set
 	testReport := &models.TestReport{
-		Version: models.GetVersion(),
-		Total:   testCasesCount,
-		Status:  string(models.TestStatusRunning),
+		Version:   models.GetVersion(),
+		Total:     testCasesCount,
+		Status:    string(models.TestStatusRunning),
+		TimeTaken: time.Since(startTime).String(),
 	}
 
 	err = r.reportDB.InsertReport(runTestSetCtx, testRunID, testSetID, testReport)
@@ -952,9 +958,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 
-		// Handle user-provided port replacement
-		if r.config.Test.Port != 0 {
+		// Handle user-provided http port replacement
+		if r.config.Test.Port != 0 && testCase.Kind == models.HTTP {
 			err = r.replacePortInTestCase(testCase, strconv.Itoa(int(r.config.Test.Port)))
+			if err != nil {
+				break
+			}
+		}
+
+		// Handle user-provided grpc port replacement
+		if r.config.Test.GRPCPort != 0 && testCase.Kind == models.GRPC_EXPORT {
+			err = r.replacePortInTestCase(testCase, strconv.Itoa(int(r.config.Test.GRPCPort)))
 			if err != nil {
 				break
 			}
@@ -1069,6 +1083,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
 					Noise:        testCase.Noise,
 					Result:       *testResult,
+					TimeTaken:    time.Since(started).String(),
 				}
 			case models.GRPC_EXPORT:
 				grpcResp := resp.(*models.GrpcResp)
@@ -1086,6 +1101,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
 					Noise:        testCase.Noise,
 					Result:       *testResult,
+					TimeTaken:    time.Since(started).String(),
 				}
 			}
 
@@ -1120,7 +1136,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	timeTaken := time.Since((startTime))
+	timeTaken := time.Since(startTime)
 
 	testCaseResults, err := r.reportDB.GetTestCaseResults(runTestSetCtx, testRunID, testSetID)
 	if err != nil {
@@ -1144,14 +1160,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	testReport = &models.TestReport{
-		Version: models.GetVersion(),
-		TestSet: testSetID,
-		Status:  string(testSetStatus),
-		Total:   testCasesCount,
-		Success: success,
-		Failure: failure,
-		Ignored: ignored,
-		Tests:   testCaseResults,
+		Version:   models.GetVersion(),
+		TestSet:   testSetID,
+		Status:    string(testSetStatus),
+		Total:     testCasesCount,
+		Success:   success,
+		Failure:   failure,
+		Ignored:   ignored,
+		Tests:     testCaseResults,
+		TimeTaken: timeTaken.String(),
 	}
 
 	// final report should have reason for sudden stop of the test run so this should get canceled
@@ -1180,12 +1197,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	// TODO Need to decide on whether to use global variable or not
 	verdict := TestReportVerdict{
-		total:    testReport.Total,
-		failed:   testReport.Failure,
-		passed:   testReport.Success,
-		ignored:  testReport.Ignored,
-		status:   testSetStatus == models.TestSetStatusPassed,
-		duration: timeTaken,
+		total:     testReport.Total,
+		failed:    testReport.Failure,
+		passed:    testReport.Success,
+		ignored:   testReport.Ignored,
+		status:    testSetStatus == models.TestSetStatusPassed,
+		duration:  timeTaken,
+		timeTaken: timeTaken.String(),
 	}
 
 	completeTestReport[testSetID] = verdict
@@ -1599,6 +1617,7 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 		TestCasePath: filepath.Join(r.config.Path, testSetID),
 		MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
 		Noise:        testCase.Noise,
+		TimeTaken:    time.Since(started).String(),
 	}
 
 	var result *models.Result

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v2/pkg"
+	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -268,13 +269,22 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 			}
 		}
 
-		if o.config.ReRecord.Port != 0 {
+		if o.config.ReRecord.Port != 0 && tc.Kind == models.HTTP {
 			tc.HTTPReq.URL, err = utils.ReplacePort(tc.HTTPReq.URL, strconv.Itoa(int(o.config.ReRecord.Port)))
 			if err != nil {
-				utils.LogError(o.logger, err, "failed to replace port to provided port by the user")
+				utils.LogError(o.logger, err, "failed to replace http port to provided port by the user")
 				break
 			}
 		}
+
+		if o.config.ReRecord.GRPCPort != 0 && tc.Kind == models.GRPC_EXPORT {
+			tc.GrpcReq.Headers.PseudoHeaders[":authority"], err = utils.ReplaceGrpcPort(tc.GrpcReq.Headers.PseudoHeaders[":authority"], strconv.Itoa(int(o.config.ReRecord.GRPCPort)))
+			if err != nil {
+				utils.LogError(o.logger, err, "failed to replace grpc port to provided grpc port by the user")
+				break
+			}
+		}
+
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSet, o.logger, o.config.Test.APITimeout)
 		if err != nil {
 			utils.LogError(o.logger, err, "failed to simulate HTTP request")
