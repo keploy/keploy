@@ -237,7 +237,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 						break
 					}
 
-					matcherUtils.CompareResponses(&expResponse, &actResponse, "")
+					matcherUtils.CompareResponses(&expResponse, &actResponse)
 					jsonBytes, err := jsonMarshal234(expResponse)
 					if err != nil {
 						return false, nil
