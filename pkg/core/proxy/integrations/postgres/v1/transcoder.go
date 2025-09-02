@@ -175,24 +175,36 @@ const ProtocolVersionNumber uint32 = 196608
 
 func (b *BackendWrapper) decodeStartupMessage(buf []byte) (pgproto3.FrontendMessage, error) {
 
+	// Check buffer length
+	if len(buf) < 8 {
+		return nil, fmt.Errorf("Startup packet length is too short: %d", len(buf))
+	}
+
+	// Read the message size
 	reader := pgproto3.NewByteReader(buf)
-	buf, err := reader.Next(4)
-
+	lengthBuf, err := reader.Next(4)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Failed to read message size: %v", err)
 	}
-	msgSize := int(binary.BigEndian.Uint32(buf) - 4)
 
+	msgSize := int(binary.BigEndian.Uint32(lengthBuf) - 4)
+
+	// Check if message is valid
 	if msgSize < minStartupPacketLen || msgSize > maxStartupPacketLen {
-		return nil, fmt.Errorf("invalid length of startup packet: %d", msgSize)
+		return nil, fmt.Errorf("Invalid length of startup packet: %d", msgSize)
 	}
 
-	buf, err = reader.Next(msgSize)
+	// Check if enough bytes for message
+	if len(buf) < msgSize+4 {
+		return nil, fmt.Errorf("Buffer too short for message size: %d", msgSize)
+	}
+
+	contentBuf, err := reader.Next(msgSize)
 	if err != nil {
-		return nil, fmt.Errorf("invalid length of startup packet: %d", msgSize)
+		return nil, fmt.Errorf("Failed to read message content: %v", err)
 	}
 
-	code := binary.BigEndian.Uint32(buf)
+	code := binary.BigEndian.Uint32(contentBuf)
 
 	switch code {
 	case ProtocolVersionNumber:
