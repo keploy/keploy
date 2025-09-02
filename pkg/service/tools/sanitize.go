@@ -1,18 +1,145 @@
-package sanitize
+package tools
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"unicode"
 
 	"github.com/zricethezav/gitleaks/v8/detect"
 	"github.com/zricethezav/gitleaks/v8/report"
+	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
+
+func (t *Tools) Sanitize(ctx context.Context) error {
+	t.logger.Info("Starting sanitize process...")
+
+	// From CLI: SelectedTests
+	testSets := t.extractTestSetIDs()
+	if len(testSets) == 0 {
+		var err error
+		testSets, err = t.testDB.GetAllTestSetIDs(ctx)
+		if err != nil {
+			t.logger.Error("Failed to get test sets", zap.Error(err))
+			return fmt.Errorf("failed to get test sets: %w", err)
+		}
+		t.logger.Info("No test sets specified, processing all test sets", zap.Int("count", len(testSets)))
+	} else {
+		t.logger.Info("Processing specified test sets", zap.Strings("testSets", testSets))
+	}
+
+	for _, testSetID := range testSets {
+		// keploy/<testSetID>
+		testSetDir, err := t.locateTestSetDir(testSetID)
+		if err != nil {
+			t.logger.Error("Could not locate test set directory; skipping",
+				zap.String("testSetID", testSetID), zap.Error(err))
+			continue
+		}
+		t.logger.Info("Sanitizing test set",
+			zap.String("testSetID", testSetID),
+			zap.String("dir", testSetDir))
+
+		// if secret.yaml exists in the testSetDir then skip sanitization
+		if _, err := os.Stat(filepath.Join(testSetDir, "secret.yaml")); err == nil {
+			t.logger.Info("secret.yaml found in the test set directory, skipping sanitization",
+				zap.String("testSetID", testSetID),
+				zap.String("dir", testSetDir))
+			continue
+		}
+
+		if err := t.sanitizeTestSetDir(testSetDir); err != nil {
+			t.logger.Error("Sanitize failed for test set",
+				zap.String("testSetID", testSetID),
+				zap.String("dir", testSetDir),
+				zap.Error(err))
+			continue
+		}
+	}
+
+	t.logger.Info("Sanitize process completed")
+	return nil
+}
+
+func (t *Tools) extractTestSetIDs() []string {
+	var ids []string
+	if t.config == nil || t.config.Test.SelectedTests == nil {
+		return ids
+	}
+	for ts := range t.config.Test.SelectedTests {
+		ids = append(ids, ts)
+	}
+	return ids
+}
+
+// locateTestSetDir resolves ./keploy/<testSetID> at the current working directory
+func (t *Tools) locateTestSetDir(testSetID string) (string, error) {
+	if p := filepath.Join(".", "keploy", testSetID); isDir(p) {
+		return p, nil
+	}
+	return "", fmt.Errorf("keploy/%s not found in current directory", testSetID)
+}
+
+func isDir(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
+}
+
+func (t *Tools) sanitizeTestSetDir(testSetDir string) error {
+	// Aggregate secrets across ALL files in this test set
+	aggSecrets := map[string]string{}
+
+	testsDir := filepath.Join(testSetDir, "tests")
+	var files []string
+
+	// Prefer keploy/<set>/tests/*.yaml
+	if isDir(testsDir) {
+		ents, err := os.ReadDir(testsDir)
+		if err != nil {
+			return fmt.Errorf("read tests dir: %w", err)
+		}
+		for _, e := range ents {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if !strings.HasSuffix(strings.ToLower(name), ".yaml") {
+				continue
+			}
+			files = append(files, filepath.Join(testsDir, name))
+		}
+	} else {
+		t.logger.Info("No tests directory found")
+		return nil
+	}
+
+	if len(files) == 0 {
+		t.logger.Info("No files to sanitize")
+		return nil
+	}
+
+	for _, f := range files {
+		if err := SanitizeFileInPlace(f, aggSecrets); err != nil {
+			// Continue to next file
+			t.logger.Error("Failed to sanitize file", zap.String("file", f), zap.Error(err))
+			continue
+		}
+	}
+
+	// Write keploy/<set>/secret.yaml
+	secretPath := filepath.Join(testSetDir, "secret.yaml")
+	if err := WriteSecretsYAML(secretPath, aggSecrets); err != nil {
+		return fmt.Errorf("write secret.yaml: %w", err)
+	}
+	t.logger.Info("Wrote secret.yaml", zap.String("path", secretPath))
+	return nil
+}
 
 type replacement struct {
 	old string

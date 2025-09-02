@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
-	sanitizeSvc "go.keploy.io/server/v2/pkg/service/sanitize"
+	toolsSvc "go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
@@ -28,10 +28,10 @@ func Sanitize(ctx context.Context, logger *zap.Logger, _ *config.Config, service
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
 				return nil
 			}
-			var sanitizeService sanitizeSvc.Service
+			var sanitizeService toolsSvc.Service
 			var ok bool
-			if sanitizeService, ok = svc.(sanitizeSvc.Service); !ok {
-				utils.LogError(logger, nil, "service doesn't satisfy sanitize service interface")
+			if sanitizeService, ok = svc.(toolsSvc.Service); !ok {
+				utils.LogError(logger, nil, "service doesn't satisfy tools service interface")
 				return nil
 			}
 
