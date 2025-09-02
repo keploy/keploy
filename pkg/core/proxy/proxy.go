@@ -20,6 +20,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	// Add this import
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
@@ -34,6 +35,9 @@ import (
 type ParserPriority struct {
 	Priority   int
 	ParserType integrations.IntegrationType
+}
+type BPFHook interface {
+	UpdateSockmap(listenerFD int) error
 }
 
 type Proxy struct {
@@ -63,12 +67,22 @@ type Proxy struct {
 	nsswitchData []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
 	UDPDNSServer *dns.Server
 	TCPDNSServer *dns.Server
+
+	hooks        BPFHook      // Store the hooks instance
+	eBPFListener net.Listener // Listener for eBPF-redirected INCOMING connections
 }
 
 func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
+	h, ok := info.(BPFHook)
+	if !ok {
+		// This case should ideally not happen if a valid Hooks object is always passed.
+		// You might want to log a fatal error or handle it gracefully.
+		logger.Fatal("provided DestInfo does not implement BPFHook interface")
+	}
 	return &Proxy{
 		logger:       logger,
 		Port:         opts.ProxyPort, // default: 16789
+		hooks:        h,              // Store the hooks instance
 		DNSPort:      opts.DNSPort,   // default: 26789
 		IP4:          "127.0.0.1",    // default: "127.0.0.1" <-> (2130706433)
 		IP6:          "::1",          //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
@@ -115,7 +129,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 		return errors.New("failed to get the error group from the context")
 	}
 	// Create a channel to signal readiness of each server
-	readyChan := make(chan error, 1)
+	readyChan := make(chan error, 2)
 
 	// start the proxy server
 	g.Go(func() error {
@@ -189,11 +203,33 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 			return err
 		}
 	})
-	// Wait for the proxy server to be ready or fail
-	err = <-readyChan
-	if err != nil {
-		return err
+
+	g.Go(func() error {
+		defer utils.Recover(p.logger)
+		p.startEBPFListener(ctx, readyChan)
+		return nil
+	})
+	for i := 0; i < 2; i++ {
+		if err := <-readyChan; err != nil {
+			return err
+		}
 	}
+	tcpListener := p.eBPFListener.(*net.TCPListener)
+	listenerFDFile, err := tcpListener.File()
+	if err != nil {
+		return fmt.Errorf("getting eBPF listener FD failed: %w", err)
+	}
+	defer listenerFDFile.Close()
+	if err := p.hooks.UpdateSockmap(int(listenerFDFile.Fd())); err != nil {
+        return fmt.Errorf("failed to update sockmap via hooks: %w", err)
+    }
+
+	// Wait for the proxy server to be ready or fail
+	// err = <-readyChan
+	// if err != nil {
+	// 	return err
+	// }
+
 	p.logger.Info("Keploy has taken control of the DNS resolution mechanism, your application may misbehave if you have provided wrong domain name in your application code.")
 
 	p.logger.Info(fmt.Sprintf("Proxy started at port:%v", p.Port))
@@ -728,4 +764,71 @@ func (p *Proxy) GetConsumedMocks(_ context.Context, id uint64) ([]models.MockSta
 		return nil, fmt.Errorf("mock manager not found to get consumed filtered mocks")
 	}
 	return m.(*MockManager).GetConsumedMocks(), nil
+}
+
+// startEBPFListener starts a dedicated listener for incoming connections redirected by eBPF.
+func (p *Proxy) startEBPFListener(ctx context.Context, readyChan chan<- error) {
+	// This listener will receive the INCOMING connections.
+	// Let's use a different port to avoid confusion with your main proxy port.
+	ebpfListenAddr := fmt.Sprintf(":%d", 9090) // Or any other free port
+
+	listener, err := net.Listen("tcp", ebpfListenAddr)
+	if err != nil {
+		utils.LogError(p.logger, err, "failed to start eBPF listener", zap.String("addr", ebpfListenAddr))
+		readyChan <- err
+		return
+	}
+	p.eBPFListener = listener
+	p.logger.Info("✅ eBPF ingress listener started", zap.String("addr", ebpfListenAddr))
+
+	// Signal that this listener is ready.
+	readyChan <- nil
+
+	defer func() {
+		p.eBPFListener.Close()
+		p.logger.Info("eBPF ingress listener stopped.")
+	}()
+
+	for {
+		conn, err := p.eBPFListener.Accept()
+		if err != nil {
+			// When the context is cancelled, the listener will be closed, causing an error.
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				utils.LogError(p.logger, err, "failed to accept eBPF connection")
+			}
+			return
+		}
+		// Handle each incoming connection in its own goroutine.
+		go p.handleEBPFConnection(conn)
+	}
+}
+
+// handleEBPFConnection is where you read the data from the redirected incoming connection.
+func (p *Proxy) handleEBPFConnection(conn net.Conn) {
+	remoteAddr := conn.RemoteAddr().String()
+	p.logger.Info("[eBPF Ingress] Accepted redirected connection", zap.String("from", remoteAddr))
+	defer conn.Close()
+	defer p.logger.Info("[eBPF Ingress] Closed connection", zap.String("from", remoteAddr))
+
+	// This is the answer to "how do I read the data?".
+	// You use a standard bufio.Reader or conn.Read() just like any other Go TCP server.
+	reader := bufio.NewReader(conn)
+	for {
+		// Read data line by line
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err != io.EOF {
+				utils.LogError(p.logger, err, "failed to read data from eBPF-redirected connection")
+			}
+			return // Close connection on error or EOF
+		}
+
+		p.logger.Info("[eBPF Ingress] <<< Received Data", zap.String("data", strings.TrimSpace(line)))
+
+		// Echo the response back to the original client.
+		conn.Write([]byte("Keploy proxy acknowledges: " + line))
+	}
 }

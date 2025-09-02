@@ -54,6 +54,7 @@ type bpfSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfProgramSpecs struct {
+	BpfSockopsRedirFiltered          *ebpf.ProgramSpec `ebpf:"bpf_sockops_redir_filtered"`
 	K_connect4                       *ebpf.ProgramSpec `ebpf:"k_connect4"`
 	K_connect6                       *ebpf.ProgramSpec `ebpf:"k_connect6"`
 	K_getpeername4                   *ebpf.ProgramSpec `ebpf:"k_getpeername4"`
@@ -109,6 +110,7 @@ type bpfMapSpecs struct {
 	OutgoingConnCheckMap        *ebpf.MapSpec `ebpf:"outgoing_conn_check_map"`
 	OutgoingConnectArgsMap      *ebpf.MapSpec `ebpf:"outgoing_connect_args_map"`
 	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
+	SockMap                     *ebpf.MapSpec `ebpf:"sock_map"`
 	SocketCloseEvents           *ebpf.MapSpec `ebpf:"socket_close_events"`
 	SocketDataEventBufferHeap   *ebpf.MapSpec `ebpf:"socket_data_event_buffer_heap"`
 	SocketDataEvents            *ebpf.MapSpec `ebpf:"socket_data_events"`
@@ -159,6 +161,7 @@ type bpfMaps struct {
 	OutgoingConnCheckMap        *ebpf.Map `ebpf:"outgoing_conn_check_map"`
 	OutgoingConnectArgsMap      *ebpf.Map `ebpf:"outgoing_connect_args_map"`
 	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
+	SockMap                     *ebpf.Map `ebpf:"sock_map"`
 	SocketCloseEvents           *ebpf.Map `ebpf:"socket_close_events"`
 	SocketDataEventBufferHeap   *ebpf.Map `ebpf:"socket_data_event_buffer_heap"`
 	SocketDataEvents            *ebpf.Map `ebpf:"socket_data_events"`
@@ -185,6 +188,7 @@ func (m *bpfMaps) Close() error {
 		m.OutgoingConnCheckMap,
 		m.OutgoingConnectArgsMap,
 		m.RedirectProxyMap,
+		m.SockMap,
 		m.SocketCloseEvents,
 		m.SocketDataEventBufferHeap,
 		m.SocketDataEvents,
@@ -203,6 +207,7 @@ type bpfVariables struct {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfPrograms struct {
+	BpfSockopsRedirFiltered          *ebpf.Program `ebpf:"bpf_sockops_redir_filtered"`
 	K_connect4                       *ebpf.Program `ebpf:"k_connect4"`
 	K_connect6                       *ebpf.Program `ebpf:"k_connect6"`
 	K_getpeername4                   *ebpf.Program `ebpf:"k_getpeername4"`
@@ -239,6 +244,7 @@ type bpfPrograms struct {
 
 func (p *bpfPrograms) Close() error {
 	return _BpfClose(
+		p.BpfSockopsRedirFiltered,
 		p.K_connect4,
 		p.K_connect6,
 		p.K_getpeername4,

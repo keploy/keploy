@@ -103,6 +103,7 @@ type Hooks struct {
 	readvRet          link.Link
 	retprobeMaxActive int
 	appID             uint64
+	sockops           link.Link
 }
 
 func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
@@ -233,7 +234,17 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 			utils.LogError(h.logger, err, "failed to detect the cgroup path")
 			return err
 		}
-
+		so, err := link.AttachCgroup(link.CgroupOptions{
+			Path:    cGroupPath,
+			Attach:  ebpf.AttachCGroupSockOps,     // Use the modern, correct constant
+			Program: objs.BpfSockopsRedirFiltered, // This is the function name from your eBPF C code
+		})
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to attach the sockops cgroup hook")
+			return err
+		}
+		h.sockops = so
+		
 		c4, err := link.AttachCgroup(link.CgroupOptions{
 			Path:    cGroupPath,
 			Attach:  ebpf.AttachCGroupInet4Connect,
@@ -675,6 +686,11 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 		utils.LogError(h.logger, err, "failed to close the readvRet")
 	}
 
+	if h.sockops != nil {
+        if err := h.sockops.Close(); err != nil {
+            utils.LogError(h.logger, err, "failed to close the sockops hook")
+        }
+    }
 	if err := h.close.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the close")
 	}
@@ -710,4 +726,27 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 	}
 
 	h.logger.Info("eBPF resources released successfully...")
+}
+
+
+// in hooks.go
+
+func (h *Hooks) UpdateSockmap(listenerFD int) error {
+	// Lock to safely access the eBPF objects
+	h.objectsMutex.Lock()
+	sockMap := h.objects.SockMap
+	h.objectsMutex.Unlock()
+
+	if sockMap == nil {
+		return errors.New("sock_map not found in eBPF objects")
+	}
+
+	key := uint32(0)
+	val := uint32(listenerFD)
+	if err := sockMap.Update(&key, &val, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("failed to update sockmap with fd %d: %w", listenerFD, err)
+	}
+
+	h.logger.Info("✅ Populated sockmap with proxy listener FD.", zap.Int("fd", listenerFD))
+	return nil
 }
