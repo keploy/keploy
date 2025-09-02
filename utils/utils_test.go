@@ -19,7 +19,6 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest"
 )
 
 // TestReplaceHost_ValidAndInvalidInputs_001 tests ReplaceHost function with valid and invalid inputs.
