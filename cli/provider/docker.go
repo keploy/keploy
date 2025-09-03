@@ -93,9 +93,9 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	if err != nil {
 		return err
 	}
-	logger.Info("keployAlias", zap.String("keployAlias", keployAlias))
+	logger.Debug("keployAlias", zap.String("keployAlias", keployAlias))
 
-	logger.Info("volume mounts", zap.Any("volumeMounts", DockerConfig.VolumeMounts))
+	logger.Debug("volume mounts", zap.Any("volumeMounts", DockerConfig.VolumeMounts))
 	if len(DockerConfig.VolumeMounts) > 0 {
 		for _, volumeMount := range DockerConfig.VolumeMounts {
 			mountArg := strings.TrimSpace(volumeMount)
@@ -106,7 +106,7 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 		}
 	}
 
-	logger.Info("keployAlias after adding volume mounts", zap.String("keployAlias", keployAlias))
+	logger.Debug("keployAlias after adding volume mounts", zap.String("keployAlias", keployAlias))
 
 	var quotedArgs []string
 

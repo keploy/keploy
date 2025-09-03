@@ -150,6 +150,7 @@ func (a *App) SetupCompose() error {
 
 	// hook: allow compose mutation before further processing
 	if RuntimeHooks != nil {
+		a.logger.Info("running before setup hook")
 		changed, err := RuntimeHooks.BeforeSetup(a.logger, compose, a.container)
 		if err != nil {
 			utils.LogError(a.logger, err, "hook failed during compose mutation")
@@ -159,9 +160,6 @@ func (a *App) SetupCompose() error {
 			composeChanged = true
 		}
 	}
-
-	// print the compose file 
-	a.logger.Info("compose file", zap.String("compose", fmt.Sprintf("%+v", compose)))
 
 	// Check if docker compose file uses relative file names for bind mounts
 	ok := a.docker.HasRelativePath(compose)

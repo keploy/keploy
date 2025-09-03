@@ -16,7 +16,7 @@ var RuntimeHooks AppRuntimeHooks = defaultAppRuntimeHooks{}
 
 type defaultAppRuntimeHooks struct{}
 
-func (defaultAppRuntimeHooks) BeforeSetup(_ *zap.Logger, _ *docker.Compose, _ string) (bool, error) {
+func (defaultAppRuntimeHooks) BeforeSetup(logger *zap.Logger, _ *docker.Compose, _ string) (bool, error) {
 	// no-op
 	return false, nil
 }
