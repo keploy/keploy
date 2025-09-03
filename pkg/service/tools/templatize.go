@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"reflect"
 	"regexp"
 	"sort"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/invopop/yaml"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -49,6 +51,27 @@ type TemplateChain struct {
 	Consumers   []*ValueLocation
 }
 
+// --- Canonical Structs for Assertion ---
+
+type CanonicalChain struct {
+	VariableName string              `yaml:"variable_name"`
+	Value        string              `yaml:"value"`
+	Producer     CanonicalProducer   `yaml:"producer"`
+	Consumers    []CanonicalConsumer `yaml:"consumers"`
+}
+
+type CanonicalProducer struct {
+	RequestID string `yaml:"request_id"`
+	Part      string `yaml:"part"`
+	Path      string `yaml:"path"`
+}
+
+type CanonicalConsumer struct {
+	RequestID string `yaml:"request_id"`
+	Part      string `yaml:"part"`
+	Path      string `yaml:"path"`
+}
+
 // --- V2 Optimized Templatization Logic ---
 func (t *Tools) ProcessTestCasesV2(ctx context.Context, tcs []*models.TestCase, testSetID string) error {
 	for _, tc := range tcs {
@@ -61,10 +84,10 @@ func (t *Tools) ProcessTestCasesV2(ctx context.Context, tcs []*models.TestCase, 
 	for i, tc := range tcs {
 		decoderReq := json.NewDecoder(strings.NewReader(tc.HTTPReq.Body))
 		decoderReq.UseNumber()
-		decoderReq.Decode(&reqBodies[i])
+		_ = decoderReq.Decode(&reqBodies[i])
 		decoderResp := json.NewDecoder(strings.NewReader(tc.HTTPResp.Body))
 		decoderResp.UseNumber()
-		decoderResp.Decode(&respBodies[i])
+		_ = decoderResp.Decode(&respBodies[i])
 	}
 
 	valueIndex := t.buildValueIndexV2(ctx, tcs, reqBodies, respBodies)
@@ -114,39 +137,37 @@ func (t *Tools) ProcessTestCasesV2(ctx context.Context, tcs []*models.TestCase, 
 	}
 
 	t.logAPIChains(chains, tcs)
+
+	if fuzzerYamlPath := os.Getenv("ASSERT_CHAINS_WITH"); fuzzerYamlPath != "" {
+		fmt.Println("Asserting chains with fuzzer YAML:", fuzzerYamlPath)
+		t.AssertChains(chains, tcs, fuzzerYamlPath)
+	}
 	return nil
 }
 
-// *** MODIFIED: This function now prints a graphical representation of the chains ***
+// ... (logAPIChains, formatLocation, buildValueIndexV2, findValuesInInterface remain the same)
 func (t *Tools) logAPIChains(chains []*TemplateChain, testCases []*models.TestCase) {
 	if len(chains) == 0 {
 		return
 	}
-
 	fmt.Println("\n✨ API Chain Analysis ✨")
 	fmt.Println("========================")
-
 	for i, chain := range chains {
 		if i > 0 {
 			fmt.Println("--------------------")
 		}
-
-		// Truncate long values like JWTs for cleaner logging
 		truncatedValue := chain.Value
 		if len(truncatedValue) > 50 {
 			truncatedValue = truncatedValue[:47] + "..."
 		}
-
 		fmt.Printf("🔗 Chain for {{.%s}} (value: \"%s\")\n", chain.TemplateKey, truncatedValue)
 		fmt.Printf("  [PRODUCER] %s\n", formatLocation(chain.Producer, testCases))
-
 		for j, consumer := range chain.Consumers {
+			branch := "├─>"
 			if j == len(chain.Consumers)-1 {
-				// Last consumer
-				fmt.Printf("    └─> [CONSUMER] %s\n", formatLocation(consumer, testCases))
-			} else {
-				fmt.Printf("    ├─> [CONSUMER] %s\n", formatLocation(consumer, testCases))
+				branch = "    └─>"
 			}
+			fmt.Printf("    %s [CONSUMER] %s\n", branch, formatLocation(consumer, testCases))
 		}
 	}
 	fmt.Println("========================")
@@ -237,13 +258,20 @@ func findValuesInInterface(data interface{}, path []string, index map[string][]*
 		index[v.String()] = append(index[v.String()], loc)
 	}
 }
+
+
+// In your tools package (tools.go)
+// REPLACE this entire function.
+
 func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string][]*ValueLocation, templateConfig map[string]interface{}) []*TemplateChain {
 	var chains []*TemplateChain
 	for value, locations := range index {
 		if len(locations) < 2 {
 			continue
 		}
+
 		sort.Slice(locations, func(i, j int) bool { return locations[i].TestCaseIndex < locations[j].TestCaseIndex })
+
 		var producer *ValueLocation
 		for _, loc := range locations {
 			if loc.Part == ResponseBody || loc.Part == ResponseHeader {
@@ -251,22 +279,45 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 				break
 			}
 		}
+
 		if producer == nil {
 			continue
 		}
-		var consumers []*ValueLocation
+
+		var subsequentConsumers []*ValueLocation
 		for _, loc := range locations {
-			isRequestPart := loc.Part == RequestHeader || loc.Part == RequestURL || loc.Part == RequestBody
-			if isRequestPart && loc.TestCaseIndex >= producer.TestCaseIndex {
-				consumers = append(consumers, loc)
+			if (loc.Part == RequestHeader || loc.Part == RequestURL || loc.Part == RequestBody) && loc.TestCaseIndex > producer.TestCaseIndex {
+				subsequentConsumers = append(subsequentConsumers, loc)
 			}
 		}
-		if len(consumers) == 0 {
+
+		if len(subsequentConsumers) == 0 {
 			continue
 		}
-		producerType := producer.OriginalType
+		
+		// --- THIS IS THE CRITICAL FIX ---
+		// Instead of just templatizing the first producer and consumers,
+		// we will templatize ALL occurrences of this value that are either
+		// a producer or a valid consumer.
+		var allOccurrencesToTemplatize []*ValueLocation
+		for _, loc := range locations {
+			isProducer := loc.Part == ResponseBody || loc.Part == ResponseHeader
+			isConsumer := (loc.Part == RequestHeader || loc.Part == RequestURL || loc.Part == RequestBody) && loc.TestCaseIndex >= producer.TestCaseIndex
+			
+			if isProducer || isConsumer {
+				allOccurrencesToTemplatize = append(allOccurrencesToTemplatize, loc)
+			}
+		}
+		// --- END OF FIX ---
 
-		// ------------------ MODIFIED BLOCK (array index friendly keys) ------------------
+		chain := &TemplateChain{
+			TemplateKey: "", // Will be generated later
+			Value:       value,
+			Producer:    producer,
+			Consumers:   subsequentConsumers,
+		}
+
+		producerType := producer.OriginalType
 		var baseKey string
 		if producer.Part == RequestURL {
 			baseKey = value
@@ -276,15 +327,11 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 			if len(parts) > 0 {
 				baseKey = parts[len(parts)-1]
 			}
-			// If the baseKey is a pure number (array index), build a descriptive key:
-			// parentField_ix_<index>. Example: entity_types.0 -> entity_types_ix_0
 			if _, err := strconv.Atoi(baseKey); err == nil {
 				partsFull := strings.Split(producer.Path, ".")
-				// parent name defaults to 'arr' if we cannot infer
 				parent := "arr"
 				if len(partsFull) >= 2 {
 					parent = partsFull[len(partsFull)-2]
-					// if parent is also numeric, keep walking backwards to find a non-numeric
 					for i := len(partsFull) - 2; i >= 0; i-- {
 						if _, numErr := strconv.Atoi(partsFull[i]); numErr != nil {
 							parent = partsFull[i]
@@ -295,18 +342,13 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 				baseKey = fmt.Sprintf("%s_ix_%s", sanitizeKey(parent), baseKey)
 			}
 		}
-		// -------------------------------------------------------------------------------
 
 		templateKey := insertUnique(baseKey, value, templateConfig)
-		chain := &TemplateChain{
-			TemplateKey: templateKey,
-			Value:       value,
-			Producer:    producer,
-			Consumers:   consumers,
-		}
+		chain.TemplateKey = templateKey
 		chains = append(chains, chain)
-		allLocsToModify := append(consumers, producer)
-		for _, loc := range allLocsToModify {
+
+		// Use the new, complete list of all occurrences to modify.
+		for _, loc := range allOccurrencesToTemplatize {
 			templateString := fmt.Sprintf("{{%s .%s}}", producerType, templateKey)
 			if loc.Part == RequestHeader {
 				if headerMap, ok := loc.Pointer.(*map[string]string); ok {
@@ -328,6 +370,288 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 	}
 	return chains
 }
+
+
+// In your tools package (tools.go)
+// REPLACE the AssertChains function and ADD the new buildCanonicalChainsFromMap helper.
+// AssertChains is the main entry point for the verification process.
+func (t *Tools) AssertChains(keployChains []*TemplateChain, testCases []*models.TestCase, fuzzerYamlPath string) {
+	fmt.Println("\n🔎 Chain Assertion against Fuzzer Output")
+	fmt.Println("==========================================")
+
+	// 1. Load fuzzer's baseline chains from the YAML file.
+	yamlFile, err := os.ReadFile(fuzzerYamlPath)
+	if err != nil {
+		fmt.Printf("🔴 ERROR: Could not read fuzzer's chain file at %s: %v\n", fuzzerYamlPath, err)
+		return
+	}
+
+	// Use a generic map to bypass struct tag parsing issues.
+	var genericFuzzerData map[string]interface{}
+	if err := yaml.Unmarshal(yamlFile, &genericFuzzerData); err != nil {
+		fmt.Printf("🔴 ERROR: Could not parse fuzzer's YAML file into a generic map: %v\n", err)
+		return
+	}
+
+	// Manually build the canonical chains from the generic map. This is the FIX.
+	fuzzerChains, err := buildCanonicalChainsFromMap(genericFuzzerData)
+	if err != nil {
+		fmt.Printf("🔴 ERROR: Could not process the parsed fuzzer data: %v\n", err)
+		return
+	}
+	fmt.Printf("✅ Loaded %d chains from fuzzer baseline file.\n", len(fuzzerChains))
+
+	// 2. Convert and Normalize Keploy's detected chains.
+	canonicalKeployChains := t.convertToCanonical(keployChains, testCases)
+	normalizeCanonicalChains(canonicalKeployChains)
+	fmt.Printf("✅ Converted and Normalized %d detected Keploy chains for comparison.\n", len(canonicalKeployChains))
+
+	// 3. Perform the comparison.
+	passed, report := t.compareChainSets(fuzzerChains, canonicalKeployChains)
+
+	// 4. Print the result.
+	fmt.Println("\n--- Comparison Report ---")
+	fmt.Print(report)
+	if passed {
+		fmt.Println("\n✅ PASSED: Keploy's detected chains match the fuzzer's baseline.")
+	} else {
+		fmt.Println("\n❌ FAILED: Keploy's detected chains DO NOT match the fuzzer's baseline.")
+	}
+	fmt.Println("==========================================")
+}
+
+// buildCanonicalChainsFromMap manually constructs the chain structs from a generic map,
+// avoiding any reliance on struct tags which were failing.
+func buildCanonicalChainsFromMap(data map[string]interface{}) ([]CanonicalChain, error) {
+	var chains []CanonicalChain
+
+	chainsData, ok := data["chains"].([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("could not find 'chains' array in fuzzer YAML")
+	}
+
+	for _, chainInterface := range chainsData {
+		chainMap, ok := chainInterface.(map[string]interface{})
+		if !ok {
+			continue // Skip malformed entries
+		}
+
+		var canonicalChain CanonicalChain
+		if val, ok := chainMap["variable_name"].(string); ok {
+			canonicalChain.VariableName = val
+		}
+		if val, ok := chainMap["value"].(string); ok {
+			canonicalChain.Value = val
+		}
+
+		// Manually parse the producer
+		if prodInterface, ok := chainMap["producer"].(map[string]interface{}); ok {
+			if val, ok := prodInterface["request_id"].(string); ok {
+				canonicalChain.Producer.RequestID = val
+			}
+			if val, ok := prodInterface["part"].(string); ok {
+				canonicalChain.Producer.Part = val
+			}
+			if val, ok := prodInterface["path"].(string); ok {
+				canonicalChain.Producer.Path = val
+			}
+		}
+
+		// Manually parse consumers
+		if consumersInterface, ok := chainMap["consumers"].([]interface{}); ok {
+			for _, consInterface := range consumersInterface {
+				consMap, ok := consInterface.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				var consumer CanonicalConsumer
+				if val, ok := consMap["request_id"].(string); ok {
+					consumer.RequestID = val
+				}
+				if val, ok := consMap["part"].(string); ok {
+					consumer.Part = val
+				}
+				if val, ok := consMap["path"].(string); ok {
+					consumer.Path = val
+				}
+				canonicalChain.Consumers = append(canonicalChain.Consumers, consumer)
+			}
+		}
+		chains = append(chains, canonicalChain)
+	}
+
+	return chains, nil
+}
+
+
+// convertToCanonical transforms Keploy's internal chain representation to the common format.
+func (t *Tools) convertToCanonical(chains []*TemplateChain, tcs []*models.TestCase) []CanonicalChain {
+	var canonicalChains []CanonicalChain
+	for _, chain := range chains {
+		producerReqID := fmt.Sprintf("test-%d", chain.Producer.TestCaseIndex+1)
+		producer := CanonicalProducer{
+			RequestID: producerReqID,
+			Part:      chain.Producer.Part.String(),
+			Path:      chain.Producer.Path,
+		}
+		var consumers []CanonicalConsumer
+		for _, c := range chain.Consumers {
+			consumerReqID := fmt.Sprintf("test-%d", c.TestCaseIndex+1)
+			consumers = append(consumers, CanonicalConsumer{
+				RequestID: consumerReqID,
+				Part:      c.Part.String(),
+				Path:      c.Path,
+			})
+		}
+		canonicalChains = append(canonicalChains, CanonicalChain{
+			VariableName: "{{" + chain.TemplateKey + "}}",
+			Value:        chain.Value,
+			Producer:     producer,
+			Consumers:    consumers,
+		})
+	}
+	return canonicalChains
+}
+
+// normalizeCanonicalChains standardizes the representation of chains in-place.
+func normalizeCanonicalChains(chains []CanonicalChain) {
+	for i := range chains {
+		// Normalize producer
+		chains[i].Producer.Part = strings.ReplaceAll(chains[i].Producer.Part, " ", "")
+
+		// Normalize consumers
+		for j := range chains[i].Consumers {
+			chains[i].Consumers[j].Part = strings.ReplaceAll(chains[i].Consumers[j].Part, " ", "")
+			if chains[i].Consumers[j].Part == "RequestURL" {
+				// Standardize all specific URL paths (e.g., path.1) to a generic one.
+				chains[i].Consumers[j].Path = "URL_PATH"
+			}
+		}
+	}
+}
+
+// In your tools package (tools.go)
+// REPLACE this entire function.
+
+func (t *Tools) compareChainSets(fuzzerChains, keployChains []CanonicalChain) (bool, string) {
+	var report strings.Builder
+	passed := true
+
+	fuzzerChains = filterInsignificantChains(fuzzerChains)
+	keployChains = filterInsignificantChains(keployChains)
+
+	fuzzerMap := make(map[string]CanonicalChain)
+	for _, c := range fuzzerChains {
+		fuzzerMap[c.Value] = c
+	}
+	keployMap := make(map[string]CanonicalChain)
+	for _, c := range keployChains {
+		keployMap[c.Value] = c
+	}
+
+	normalizeConsumer := func(c CanonicalConsumer) string {
+		part := strings.ReplaceAll(c.Part, " ", "")
+		path := c.Path
+		if part == "RequestURL" {
+			path = "URL_PATH"
+		}
+		return fmt.Sprintf("%s|%s|%s", c.RequestID, part, path)
+	}
+
+	// Check 1: Does Keploy find every chain the fuzzer found?
+	for value, fChain := range fuzzerMap {
+		kChain, exists := keployMap[value]
+		if !exists {
+			report.WriteString(fmt.Sprintf("❌ MISSING CHAIN: Fuzzer found chain for value '%s', but Keploy did not.\n", value))
+			passed = false
+			continue
+		}
+
+		// --- NEW, MORE ROBUST PRODUCER COMPARISON ---
+		producersMatch := false
+		// Normalize part names for comparison
+		fProducerPart := strings.ReplaceAll(fChain.Producer.Part, " ", "")
+		kProducerPart := strings.ReplaceAll(kChain.Producer.Part, " ", "")
+
+		if fChain.Producer.RequestID == kChain.Producer.RequestID && fProducerPart == kProducerPart {
+			// Paths are identical, this is a clear match.
+			if fChain.Producer.Path == kChain.Producer.Path {
+				producersMatch = true
+			} else {
+				// Handle cases like "id" vs "data.id". If one path is a suffix of the other,
+				// consider it a match because they refer to the same value semantically.
+				if strings.HasSuffix(fChain.Producer.Path, "."+kChain.Producer.Path) || strings.HasSuffix(kChain.Producer.Path, "."+fChain.Producer.Path) {
+					producersMatch = true
+				}
+			}
+		}
+
+		if !producersMatch {
+			report.WriteString(fmt.Sprintf("❌ PRODUCER MISMATCH for value '%s':\n", value))
+			report.WriteString(fmt.Sprintf("  - Expected (Fuzzer): %+v\n", fChain.Producer))
+			report.WriteString(fmt.Sprintf("  - Actual (Keploy):   %+v\n", kChain.Producer))
+			passed = false
+		}
+		// --- END OF NEW PRODUCER COMPARISON ---
+
+		fConsumerSet := make(map[string]bool)
+		for _, c := range fChain.Consumers {
+			fConsumerSet[normalizeConsumer(c)] = true
+		}
+		kConsumerSet := make(map[string]bool)
+		for _, c := range kChain.Consumers {
+			kConsumerSet[normalizeConsumer(c)] = true
+		}
+
+		if !reflect.DeepEqual(fConsumerSet, kConsumerSet) {
+			report.WriteString(fmt.Sprintf("❌ CONSUMER MISMATCH for value '%s':\n", value))
+			for cKey := range fConsumerSet {
+				if !kConsumerSet[cKey] {
+					report.WriteString(fmt.Sprintf("  - Keploy MISSED consumer: %s\n", cKey))
+				}
+			}
+			for cKey := range kConsumerSet {
+				if !fConsumerSet[cKey] {
+					report.WriteString(fmt.Sprintf("  - Keploy found EXTRA consumer: %s\n", cKey))
+				}
+			}
+			passed = false
+		}
+	}
+
+	// Check 2: Did Keploy find any extra chains the fuzzer didn't?
+	for value, kChain := range keployMap {
+		if _, exists := fuzzerMap[value]; !exists {
+			report.WriteString(fmt.Sprintf("❌ EXTRA CHAIN: Keploy found chain for value '%s' (var: %s), but fuzzer did not.\n", value, kChain.VariableName))
+			passed = false
+		}
+	}
+
+	if passed {
+		report.WriteString("All checks passed.\n")
+	}
+	return passed, report.String()
+}
+
+// filterInsignificantChains removes chains based on short, numeric values that are likely coincidental.
+func filterInsignificantChains(chains []CanonicalChain) []CanonicalChain {
+	var significantChains []CanonicalChain
+	for _, chain := range chains {
+		// Keep the chain if the value is long, or if it's not a simple number.
+		if len(chain.Value) >= 4 {
+			significantChains = append(significantChains, chain)
+			continue
+		}
+		if _, err := strconv.ParseFloat(chain.Value, 64); err != nil {
+			// It's not a number, so it's significant (e.g., "true", "v1")
+			significantChains = append(significantChains, chain)
+		}
+	}
+	return significantChains
+}
+
+// --- Utility and Helper Functions ---
+// (These remain unchanged)
 
 // helper to ensure parent segment forms a valid key (reuses existing conventions)
 func sanitizeKey(k string) string {
@@ -390,8 +714,6 @@ func setValueByPath(root interface{}, path string, value interface{}) {
 		}
 	}
 }
-
-// --- Kept Helper Functions ---
 
 func RenderIfTemplatized(val interface{}) (bool, interface{}, error) {
 	stringVal, ok := val.(string)
