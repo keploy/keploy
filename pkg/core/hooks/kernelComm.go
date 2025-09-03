@@ -5,9 +5,6 @@ package hooks
 import (
 	"context"
 	"fmt"
-	"time"
-
-	"math/rand"
 
 	"github.com/cilium/ebpf"
 	"go.keploy.io/server/v2/pkg/core"
@@ -24,8 +21,13 @@ func (h *Hooks) Get(_ context.Context, srcPort uint16) (*core.NetworkAddress, er
 	if err != nil {
 		return nil, err
 	}
-	// TODO : need to implement eBPF code to differentiate between different apps
-	s, ok := h.sess.Get(0)
+
+	// Use the current app ID with proper synchronization
+	h.m.Lock()
+	currentAppID := h.appID
+	h.m.Unlock()
+
+	s, ok := h.sess.Get(currentAppID)
 	if !ok {
 		return nil, fmt.Errorf("session not found")
 	}
@@ -62,7 +64,7 @@ func (h *Hooks) CleanProxyEntry(srcPort uint16) error {
 		utils.LogError(h.logger, err, "failed to remove entry from redirect proxy map")
 		return err
 	}
-	h.logger.Debug("successfully removed entry from redirect proxy map", zap.Any("(Key)/SourcePort", srcPort))
+	h.logger.Debug("successfully removed entry from redirect proxy map", zap.Uint16("(Key)/SourcePort", srcPort))
 	return nil
 }
 
@@ -95,21 +97,35 @@ func (h *Hooks) SendE2EInfo(pid uint32) error {
 	return nil
 }
 
-func (h *Hooks) SendDockerAppInfo(_ uint64, dockerAppInfo structs.DockerAppInfo) error {
+func (h *Hooks) SendDockerAppInfo(appID uint64, dockerAppInfo structs.DockerAppInfo) error {
+	h.m.Lock()
+	defer h.m.Unlock()
+
+	// Use the provided app ID or the current app ID, don't generate a random one
+	dockerAppID := appID
+	if dockerAppID == 0 {
+		dockerAppID = h.appID
+	}
+
 	if h.appID != 0 {
 		err := h.dockerAppRegistrationMap.Delete(h.appID)
 		if err != nil {
-			utils.LogError(h.logger, err, "failed to remove entry from dockerAppRegistrationMap")
+			utils.LogError(h.logger, err, "failed to remove entry from dockerAppRegistrationMap", zap.Uint64("(Key)/AppID", h.appID))
 			return err
 		}
 	}
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	randomNum := r.Uint64() % 10
-	h.appID = randomNum
-	err := h.dockerAppRegistrationMap.Update(h.appID, dockerAppInfo, ebpf.UpdateAny)
+
+	// Don't override the app ID with a random number - use the real app ID
+	err := h.dockerAppRegistrationMap.Update(dockerAppID, dockerAppInfo, ebpf.UpdateAny)
 	if err != nil {
-		utils.LogError(h.logger, err, "failed to send the dockerAppInfo info to the ebpf program")
+		utils.LogError(h.logger, err, "failed to send the dockerAppInfo info to the ebpf program", zap.Uint64("appID", dockerAppID))
 		return err
 	}
+
+	// Update the app ID only if we received a valid one
+	if appID != 0 {
+		h.appID = appID
+	}
+
 	return nil
 }

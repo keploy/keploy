@@ -116,23 +116,26 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	})
 
 	// Compare decoded data
-	decodedDataNormal := expectedResp.Body.DecodedData == actualResp.Body.DecodedData
+	expCanon := CanonicalizeTopLevelBlocks(expectedResp.Body.DecodedData)
+	actCanon := CanonicalizeTopLevelBlocks(actualResp.Body.DecodedData)
+	decodedDataNormal := expCanon == actCanon
+
 	if !decodedDataNormal {
 		differences["body.decoded_data"] = struct {
 			Expected string
 			Actual   string
 			Message  string
 		}{
-			Expected: expectedResp.Body.DecodedData,
-			Actual:   actualResp.Body.DecodedData,
+			Expected: expCanon,
+			Actual:   actCanon,
 			Message:  "decoded data mismatch",
 		}
 	}
 	result.BodyResult = append(result.BodyResult, models.BodyResult{
 		Normal:   decodedDataNormal,
 		Type:     models.GrpcData,
-		Expected: expectedResp.Body.DecodedData,
-		Actual:   actualResp.Body.DecodedData,
+		Expected: expCanon,
+		Actual:   actCanon,
 	})
 
 	// Handle noise configuration

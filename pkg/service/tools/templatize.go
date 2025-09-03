@@ -159,6 +159,7 @@ func (t *Tools) logAPIChains(chains []*TemplateChain, testCases []*models.TestCa
 		truncatedValue := chain.Value
 		if len(truncatedValue) > 50 {
 			truncatedValue = truncatedValue[:47] + "..."
+
 		}
 		fmt.Printf("🔗 Chain for {{.%s}} (value: \"%s\")\n", chain.TemplateKey, truncatedValue)
 		fmt.Printf("  [PRODUCER] %s\n", formatLocation(chain.Producer, testCases))
@@ -190,6 +191,7 @@ func formatLocation(loc *ValueLocation, testCases []*models.TestCase) string {
 	}
 }
 
+
 func (t *Tools) buildValueIndexV2(ctx context.Context, tcs []*models.TestCase, reqBodies, respBodies []interface{}) map[string][]*ValueLocation {
 	valueIndex := make(map[string][]*ValueLocation)
 	for i := range tcs {
@@ -200,8 +202,10 @@ func (t *Tools) buildValueIndexV2(ctx context.Context, tcs []*models.TestCase, r
 				valueIndex[token] = append(valueIndex[token], loc)
 			} else {
 				valueIndex[val] = append(valueIndex[val], loc)
+
 			}
 		}
+
 		parsedURL, err := url.Parse(tcs[i].HTTPReq.URL)
 		if err == nil {
 			pathSegments := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
@@ -211,13 +215,16 @@ func (t *Tools) buildValueIndexV2(ctx context.Context, tcs []*models.TestCase, r
 					loc := &ValueLocation{TestCaseIndex: i, Part: RequestURL, Path: path, Pointer: &tcs[i].HTTPReq.URL, OriginalType: "string"}
 					valueIndex[segment] = append(valueIndex[segment], loc)
 				}
+
 			}
 		}
 		if reqBodies[i] != nil {
 			findValuesInInterface(reqBodies[i], []string{}, valueIndex, i, RequestBody, &reqBodies[i])
 		}
+
 		if respBodies[i] != nil {
 			findValuesInInterface(respBodies[i], []string{}, valueIndex, i, ResponseBody, &respBodies[i])
+
 		}
 	}
 	return valueIndex
@@ -232,15 +239,18 @@ func findValuesInInterface(data interface{}, path []string, index map[string][]*
 			newPath := append(path, k)
 			findValuesInInterface(v, newPath, index, tcIndex, part, containerPtr)
 		}
+
 		return
 	}
 	if s, ok := data.([]interface{}); ok {
 		for i, v := range s {
 			newPath := append(path, strconv.Itoa(i))
 			findValuesInInterface(v, newPath, index, tcIndex, part, containerPtr)
+
 		}
 		return
 	}
+
 	currentPath := strings.Join(path, ".")
 	switch v := data.(type) {
 	case string:
@@ -254,10 +264,12 @@ func findValuesInInterface(data interface{}, path []string, index map[string][]*
 			loc.OriginalType = "float"
 		} else {
 			loc.OriginalType = "int"
+
 		}
 		index[v.String()] = append(index[v.String()], loc)
 	}
 }
+
 
 
 // In your tools package (tools.go)
@@ -277,10 +289,13 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 			if loc.Part == ResponseBody || loc.Part == ResponseHeader {
 				producer = loc
 				break
+
 			}
 		}
 
+
 		if producer == nil {
+
 			continue
 		}
 
@@ -290,6 +305,7 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 				subsequentConsumers = append(subsequentConsumers, loc)
 			}
 		}
+
 
 		if len(subsequentConsumers) == 0 {
 			continue
@@ -340,8 +356,10 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 					}
 				}
 				baseKey = fmt.Sprintf("%s_ix_%s", sanitizeKey(parent), baseKey)
+
 			}
 		}
+
 
 		templateKey := insertUnique(baseKey, value, templateConfig)
 		chain.TemplateKey = templateKey
@@ -365,11 +383,13 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 				}
 			} else {
 				setValueByPath(loc.Pointer, loc.Path, templateString)
+
 			}
 		}
 	}
 	return chains
 }
+
 
 
 // In your tools package (tools.go)
@@ -381,6 +401,7 @@ func (t *Tools) AssertChains(keployChains []*TemplateChain, testCases []*models.
 
 	// 1. Load fuzzer's baseline chains from the YAML file.
 	yamlFile, err := os.ReadFile(fuzzerYamlPath)
+
 	if err != nil {
 		fmt.Printf("🔴 ERROR: Could not read fuzzer's chain file at %s: %v\n", fuzzerYamlPath, err)
 		return
@@ -420,6 +441,7 @@ func (t *Tools) AssertChains(keployChains []*TemplateChain, testCases []*models.
 	fmt.Println("==========================================")
 }
 
+
 // buildCanonicalChainsFromMap manually constructs the chain structs from a generic map,
 // avoiding any reliance on struct tags which were failing.
 func buildCanonicalChainsFromMap(data map[string]interface{}) ([]CanonicalChain, error) {
@@ -435,6 +457,7 @@ func buildCanonicalChainsFromMap(data map[string]interface{}) ([]CanonicalChain,
 		if !ok {
 			continue // Skip malformed entries
 		}
+
 
 		var canonicalChain CanonicalChain
 		if val, ok := chainMap["variable_name"].(string); ok {
@@ -525,6 +548,7 @@ func normalizeCanonicalChains(chains []CanonicalChain) {
 			if chains[i].Consumers[j].Part == "RequestURL" {
 				// Standardize all specific URL paths (e.g., path.1) to a generic one.
 				chains[i].Consumers[j].Path = "URL_PATH"
+
 			}
 		}
 	}
@@ -738,7 +762,10 @@ func render(val string) (interface{}, error) {
 	}
 	tmpl, err := template.New("template").Funcs(funcMap).Parse(val)
 	if err != nil {
-		return val, fmt.Errorf("failed to parse the testcase using template %v", zap.Error(err))
+		// If parsing fails, it's likely not a valid template string, but a literal string
+		// that happens to contain "{{" and "}}". In this case, we should not treat it as an
+		// error but return the original value, as no substitution is possible.
+		return val, nil
 	}
 	data := make(map[string]interface{})
 	for k, v := range utils.TemplatizedValues {
@@ -750,8 +777,10 @@ func render(val string) (interface{}, error) {
 	var output bytes.Buffer
 	err = tmpl.Execute(&output, data)
 	if err != nil {
-		return val, fmt.Errorf("failed to execute the template %v", zap.Error(err))
+		// An execution error (e.g., missing key) is a genuine problem and should be propagated.
+		return val, fmt.Errorf("failed to execute the template: %v", err)
 	}
+
 	if strings.Contains(val, "string") {
 		return output.String(), nil
 	}
@@ -760,6 +789,7 @@ func render(val string) (interface{}, error) {
 	case strings.Contains(val, "int"):
 		return utils.ToInt(outputString), nil
 	case strings.Contains(val, "float"):
+
 		return utils.ToFloat(outputString), nil
 	}
 	return outputString, nil
@@ -787,15 +817,18 @@ func insertUnique(baseKey, value string, myMap map[string]interface{}) string {
 	return key
 }
 
+
 func removeQuotesInTemplates(jsonStr string) string {
 	re := regexp.MustCompile(`"\{\{[^{}]*\}\}"`)
 	return re.ReplaceAllStringFunc(jsonStr, func(match string) string {
 		if strings.Contains(match, "{{string") {
 			return match
 		}
+
 		return strings.Trim(match, `"`)
 	})
 }
+
 
 func addQuotesInTemplates(jsonStr string) string {
 	if jsonStr == "" {
@@ -808,4 +841,5 @@ func addQuotesInTemplates(jsonStr string) string {
 		}
 		return `"` + match + `"`
 	})
+
 }

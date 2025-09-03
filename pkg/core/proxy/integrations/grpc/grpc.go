@@ -14,12 +14,12 @@ import (
 	"go.uber.org/zap"
 )
 
-func init() {
-	integrations.Register(integrations.GRPC, &integrations.Parsers{
-		Initializer: New,
-		Priority:    100,
-	})
-}
+// func init() {
+// 	integrations.Register(integrations.GRPC, &integrations.Parsers{
+// 		Initializer: New,
+// 		Priority:    100,
+// 	})
+// }
 
 type Grpc struct {
 	logger *zap.Logger

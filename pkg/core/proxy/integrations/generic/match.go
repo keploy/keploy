@@ -46,12 +46,12 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 				}
 			}
 
-			logger.Debug("List of mocks in the database", zap.Any("Filtered Mocks", len(filteredMocks)), zap.Any("Unfiltered Mocks", len(unfilteredMocks)))
+			logger.Debug("List of mocks in the database", zap.Int("Filtered Mocks", len(filteredMocks)), zap.Int("Unfiltered Mocks", len(unfilteredMocks)))
 			for i, mock := range filteredMocks {
-				logger.Debug("Filtered Mocks", zap.Any(fmt.Sprintf("Mock[%d]", i), mock.Name), zap.Any("sortOrder", mock.TestModeInfo.SortOrder))
+				logger.Debug("Filtered Mocks", zap.String(fmt.Sprintf("Mock[%d]", i), mock.Name), zap.Int64("sortOrder", mock.TestModeInfo.SortOrder))
 			}
 			for i, mock := range unfilteredMocks {
-				logger.Debug("Unfiltered Mocks", zap.Any(fmt.Sprintf("Mock[%d]", i), mock.Name), zap.Any("sortOrder", mock.TestModeInfo.SortOrder))
+				logger.Debug("Unfiltered Mocks", zap.String(fmt.Sprintf("Mock[%d]", i), mock.Name), zap.Int64("sortOrder", mock.TestModeInfo.SortOrder))
 			}
 
 			index := findExactMatch(filteredMocks, reqBuff)
@@ -70,7 +70,7 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 				if !isUpdated {
 					continue
 				}
-				logger.Debug("Filtered mock found for generic request", zap.Any("Mock", filteredMocks[index].Name), zap.Any("sortOrder", filteredMocks[index].TestModeInfo.SortOrder))
+				logger.Debug("Filtered mock found for generic request", zap.String("Mock", filteredMocks[index].Name), zap.Int64("sortOrder", filteredMocks[index].TestModeInfo.SortOrder))
 				return true, responseMock, nil
 			}
 
@@ -89,7 +89,7 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 				if !isUpdated {
 					continue
 				}
-				logger.Debug("Unfiltered mock found for generic request", zap.Any("Mock", unfilteredMocks[index].Name), zap.Any("sortOrder", unfilteredMocks[index].TestModeInfo.SortOrder))
+				logger.Debug("Unfiltered mock found for generic request", zap.String("Mock", unfilteredMocks[index].Name), zap.Int64("sortOrder", unfilteredMocks[index].TestModeInfo.SortOrder))
 				return true, responseMock, nil
 			}
 			return false, nil, nil

@@ -90,6 +90,12 @@ for i in {1..2}; do
     echo "Recorded test case and mocks for iteration ${i}"
 done
 
+# Shutdown mongo before test mode - Keploy should use mocks for database interactions
+echo "Shutting down mongo before test mode..."
+docker stop mongoDb || true
+docker rm mongoDb || true
+echo "MongoDB stopped - Keploy should now use mocks for database interactions"
+
 # Start the gin-mongo app in test mode.
 sudo -E env PATH="$PATH" $REPLAY_BIN test -c "./ginApp" --delay 7    &> test_logs.txt
 
