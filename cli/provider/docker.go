@@ -20,8 +20,9 @@ import (
 )
 
 type DockerConfigStruct struct {
-	DockerImage string
-	Envs        map[string]string
+	DockerImage  string
+	Envs         map[string]string
+	VolumeMounts []string
 }
 
 var DockerConfig = DockerConfigStruct{
