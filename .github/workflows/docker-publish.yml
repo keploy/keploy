@@ -34,7 +34,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: ">=1.24"
+          go-version: ">=1.23"
 
       - name: Add Private Parsers for Docker Release
         run: |
