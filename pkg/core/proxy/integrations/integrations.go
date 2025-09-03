@@ -19,6 +19,7 @@ type IntegrationType string
 const (
 	HTTP        IntegrationType = "http"
 	GRPC        IntegrationType = "grpc"
+	GRPC_V2     IntegrationType = "grpc_v2"
 	GENERIC     IntegrationType = "generic"
 	MYSQL       IntegrationType = "mysql"
 	POSTGRES_V1 IntegrationType = "postgres_v1"
