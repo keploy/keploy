@@ -98,7 +98,11 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	logger.Info("volume mounts", zap.Any("volumeMounts", DockerConfig.VolumeMounts))
 	if len(DockerConfig.VolumeMounts) > 0 {
 		for _, volumeMount := range DockerConfig.VolumeMounts {
-			keployAlias = strings.Replace(keployAlias, " --rm ", volumeMount+" --rm ", 1)
+			mountArg := strings.TrimSpace(volumeMount)
+			if !strings.HasPrefix(mountArg, "-v ") {
+				mountArg = "-v " + mountArg
+			}
+			keployAlias = strings.Replace(keployAlias, " --rm ", " "+mountArg+" --rm ", 1)
 		}
 	}
 

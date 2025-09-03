@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v2/utils"
-	"go.uber.org/zap"
 )
 
 func (c *CmdConfigurator) noCommandError() error {
@@ -99,11 +98,4 @@ func getLogoColor(i, j int) string {
 	default:
 		return gradientColors[0]
 	}
-}
-
-// volume mounts has something like this: []string{"keploy:/xyz"}
-func AddVolumeMounts(keployAlias string, dockerConfig *DockerConfigStruct, logger *zap.Logger) string {
-	// append it before rm flag
-	
-	return keployAlias
 }
