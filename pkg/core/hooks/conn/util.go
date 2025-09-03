@@ -45,6 +45,10 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 		}
 	}
 
+	if opts.FilterAll {
+		return true
+	}
+
 	var passThrough bool
 
 	type cond struct {
