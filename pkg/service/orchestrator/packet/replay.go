@@ -27,7 +27,7 @@ Protocol:
     it pops the next "fromProxy" payload and writes it back as the response.
   - It keeps doing this (read -> respond) in sequence until the feeder is closed.
 */
-func startAppSideServer(logger *zap.Logger, listenPort int, mgr *FeederManager) (stop func(), err error) {
+func startAppSideServer(ctx context.Context, logger *zap.Logger, listenPort int, mgr *FeederManager) (stop func(), err error) {
 	listenAddr := fmt.Sprintf(":%d", listenPort)
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
@@ -37,6 +37,12 @@ func startAppSideServer(logger *zap.Logger, listenPort int, mgr *FeederManager) 
 
 	var wg sync.WaitGroup
 	shutdown := make(chan struct{})
+
+	// Cancel the shutdown channel when the context is done
+	go func() {
+		<-ctx.Done()
+		close(shutdown)
+	}()
 
 	drainUntilEOF := func(c net.Conn, shutdown <-chan struct{}) {
 		buf := make([]byte, 8<<10)
@@ -93,7 +99,7 @@ func startAppSideServer(logger *zap.Logger, listenPort int, mgr *FeederManager) 
 					logger.Error("server: write error", zap.Error(err))
 					goto afterWrites
 				}
-				logger.Debug("server: proxy->app wrote response", zap.Int("bytes", len(resp)), zap.Uint16("srcPort", srcPort))
+				logger.Info("server: proxy->app wrote response", zap.Int("bytes", len(resp)), zap.Uint16("srcPort", srcPort))
 			}
 		}
 
@@ -156,134 +162,111 @@ replaySequence sequentially executes:
 - If event.dir == dirFromProxy: enqueue payload so the :16790 server returns it on next client request
 Optionally respects preserveTiming and writeDelay using the original timestamps.
 */
-func ReplaySequence(
+func replaySequence(
+	ctx context.Context,
 	logger *zap.Logger,
 	events []flowKeyDup,
 	proxyAddr string,
 	preserveTiming bool,
 	writeDelay time.Duration,
 ) error {
+	connTracker := NewConnectionTracker(ctx, logger)
+	defer func() {
+		if err := connTracker.Shutdown(2 * time.Minute); err != nil {
+			logger.Error("replay: failed to shutdown connection tracker", zap.Error(err))
+		}
+	}()
+
+	// Start the app-side server
 	mgr := NewFeederManager()
-	stopServer, err := startAppSideServer(logger, DefaultDestPort, mgr)
+	stopServer, err := startAppSideServer(ctx, logger, DefaultDestPort, mgr)
 	if err != nil {
 		return err
 	}
 	defer stopServer()
 
-	srcPortsTcpWriterMap := map[uint16]*net.TCPConn{}
-	var connCount int
-	var mu sync.Mutex
-
+	// Sort events by timestamp
 	sort.Slice(events, func(i, j int) bool { return events[i].ts.Before(events[j].ts) })
 
+	// Process events sequentially
 	var prev time.Time
 	for i, ev := range events {
-		if preserveTiming {
-			if !prev.IsZero() {
-				if d := ev.ts.Sub(prev); d > 0 {
-					time.Sleep(d)
+		// Handle timing preservation
+		if preserveTiming && !prev.IsZero() {
+			if d := ev.ts.Sub(prev); d > 0 {
+				select {
+				case <-time.After(d):
+				case <-ctx.Done():
+					logger.Warn("replay: context cancelled during timing preservation")
+					return ctx.Err()
 				}
 			}
-			prev = ev.ts
 		}
+		prev = ev.ts
 
-		// Can remove this
+		// Handle write delay
 		if writeDelay > 0 {
-			time.Sleep(writeDelay)
+			select {
+			case <-time.After(writeDelay):
+			case <-ctx.Done():
+				logger.Warn("replay: context cancelled during write delay")
+				return ctx.Err()
+			}
 		}
 
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			logger.Warn("replay: context cancelled, aborting replay")
+			return ctx.Err()
+		default:
+		}
+
+		// Process the event
 		switch ev.dir {
 		case DirToProxy:
-			if _, exists := srcPortsTcpWriterMap[ev.srcPort]; !exists {
-				conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
+			// Get or create connection
+			writer := connTracker.GetConnection(ev.srcPort)
+			if writer == nil {
+				newWriter, err := connTracker.CreateConnection(ev.srcPort, proxyAddr)
 				if err != nil {
-					return fmt.Errorf("dial proxy %s for srcPort %d: %w", proxyAddr, ev.srcPort, err)
+					return fmt.Errorf("failed to create connection for srcPort %d: %w", ev.srcPort, err)
 				}
+				writer = newWriter
 
-				// Increase the connection count with mutex lock
-				mu.Lock()
-				connCount++
-				mu.Unlock()
-
-				go func() {
-					defer func() {
-						// Decrease the connection count when the goroutine is done
-						mu.Lock()
-						connCount--
-						mu.Unlock()
-					}()
-
-					buf := make([]byte, 32<<10)
-					for {
-						_ = conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
-						_, err := conn.Read(buf)
-						if err != nil {
-							return // EOF or error stops the reader
-						}
-					}
-				}()
-
-				var tcpC *net.TCPConn
-				if tc, ok := conn.(*net.TCPConn); ok {
-					tcpC = tc
-				}
-				srcPortsTcpWriterMap[ev.srcPort] = tcpC
-				logger.Info("replay: connected to proxy for srcPort", zap.Uint16("srcPort", ev.srcPort))
-
-				// IMPORTANT: create/register feeder for this srcPort NOW so that
-				// the app-side server can acquire it when the proxy connects.
+				// Create/register feeder for this srcPort
 				_ = mgr.GetOrCreate(ev.srcPort)
 			}
 
-			writer := srcPortsTcpWriterMap[ev.srcPort]
+			// Write payload to proxy
+			if err := writer.SetWriteDeadline(time.Now().Add(30 * time.Second)); err != nil {
+				logger.Warn("replay: failed to set write deadline", zap.Error(err))
+			}
+
 			if _, err := writer.Write(ev.payload); err != nil {
 				return fmt.Errorf("write to proxy (event %d, srcPort %d): %w", i+1, ev.srcPort, err)
 			}
-			logger.Debug(fmt.Sprintf("[REPLAY %03d] →proxy wrote %d bytes", i+1, len(ev.payload)), zap.Uint16("srcPort", ev.srcPort))
+
+			logger.Info(fmt.Sprintf("[REPLAY %03d] →proxy wrote %d bytes", i+1, len(ev.payload)),
+				zap.Uint16("srcPort", ev.srcPort))
 
 		case DirFromProxy:
+			// Queue payload for app-side server
 			feeder := mgr.GetOrCreate(ev.dstPt)
 			feeder.push(ev.payload)
-			logger.Debug(fmt.Sprintf("[REPLAY %03d] proxy→app queued %d bytes", i+1, len(ev.payload)), zap.Uint16("srcPort", ev.srcPort))
 
-			// Optional: If you truly need to ensure the app side has drained the item
-			// before proceeding, you can busy-wait on isEmpty(). Consider adding a condition var
-			// inside responseFeeder instead of sleeping.
-			for !feeder.isEmpty() {
-				time.Sleep(50 * time.Millisecond)
-			}
+			logger.Info(fmt.Sprintf("[REPLAY %03d] proxy→app queued %d bytes to feeder %d", i+1, len(ev.payload), ev.dstPt),
+				zap.Uint16("srcPort", ev.srcPort))
 		}
 	}
 
-	// Close the FeederManager to unblock the app-side server if waiting.
+	// Close the FeederManager to unblock any waiting operations
 	mgr.Close()
 
-	// Close per-srcPort conns
-	for sp, c := range srcPortsTcpWriterMap {
-		_ = c.CloseWrite()
-		logger.Info("replay: closed proxy conn writer", zap.Uint16("srcPort", sp))
-	}
+	logger.Info("replay: finished processing events, shutting down connections",
+		zap.Int("active_connections", connTracker.GetActiveConnectionCount()))
 
-	// Wait for all connections to finish
-	waitCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	// Polling for the connection count in a safe manner
-	for {
-		mu.Lock()
-		if connCount == 0 {
-			mu.Unlock()
-			return nil
-		}
-		mu.Unlock()
-
-		select {
-		case <-waitCtx.Done():
-			logger.Warn("replay: timeout waiting for proxy to finish reading/sending", zap.Error(waitCtx.Err()))
-			return nil
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
+	return nil
 }
 
 // ReadSrcPortEvents iterates packets, filters on proxy port, dedups by TCP seq,
@@ -362,7 +345,7 @@ func isProxySideTCP(tcp *layers.TCP, proxyPort int) bool {
 	return int(tcp.SrcPort) == proxyPort || int(tcp.DstPort) == proxyPort
 }
 
-func StartReplay(logger *zap.Logger, opts ReplayOptions, pcapPath string) error {
+func StartReplay(ctx context.Context, logger *zap.Logger, opts ReplayOptions, pcapPath string) error {
 
 	if pcapPath == "" {
 		return ErrMissingPCAP
@@ -372,8 +355,6 @@ func StartReplay(logger *zap.Logger, opts ReplayOptions, pcapPath string) error 
 	if err != nil {
 		return err
 	}
-
-	// var streams []StreamSeq
 
 	// Open PCAP
 	f, err := os.Open(pcapPath)
@@ -406,51 +387,11 @@ func StartReplay(logger *zap.Logger, opts ReplayOptions, pcapPath string) error 
 		}
 	}
 
-	err = ReplaySequence(logger, packetEvents, proxyAddr, preserveTiming, writeDelay)
+	err = replaySequence(ctx, logger, packetEvents, proxyAddr, preserveTiming, writeDelay)
 	if err != nil {
 		logger.Error("replay sequence failed", zap.Error(err))
 		return err
 	}
-
-	// for port, seq := range srcPorts {
-	// 	if len(seq) == 0 {
-	// 		continue
-	// 	}
-	// 	// Sort each stream strictly by original packet time
-	// 	sort.Slice(seq, func(i, j int) bool { return seq[i].ts.Before(seq[j].ts) })
-
-	// 	first := seq[0].ts
-	// 	streams = append(streams, StreamSeq{
-	// 		port:    port,
-	// 		events:  seq,
-	// 		firstTS: first,
-	// 	})
-	// }
-	// Sort strictly by original packet time
-	// sort.Slice(streams, func(i, j int) bool { return streams[i].firstTS.Before(streams[j].firstTS) })
-
-	// logger.Info(fmt.Sprintf("Discovered %d stream(s). Replaying sequentially.", len(streams)))
-
-	// for sidx, st := range streams {
-	// 	logger.Info(fmt.Sprintf("---- Stream %d (peer port %d) ----", sidx+1, st.port))
-	// 	logger.Info(fmt.Sprintf("Sequence length: %d", len(st.events)))
-	// 	for i, ev := range st.events {
-	// 		dirStr := "→proxy"
-	// 		if ev.dir == DirFromProxy {
-	// 			dirStr = "proxy→app"
-	// 		}
-	// 		logger.Info(fmt.Sprintf("  [%03d] %s t=%s bytes=%d", i+1, dirStr, ev.ts.Format(time.RFC3339Nano), len(ev.payload)))
-	// 	}
-
-	// 	// REPLAY this stream (sequential as captured)
-	// 	if err := ReplaySequence(logger, st.events, proxyAddr, preserveTiming, writeDelay); err != nil {
-	// 		logger.Error(fmt.Sprintf("replay failed for stream %d (port %d)", sidx+1, st.port), zap.Error(err))
-	// 		return fmt.Errorf("replay failed for stream %d (port %d): %w", sidx+1, st.port, err)
-	// 	}
-
-	// 	// tiny gap between streams so the proxy/app can settle
-	// 	time.Sleep(100 * time.Millisecond)
-	// }
 
 	return nil
 }
@@ -458,7 +399,7 @@ func StartReplay(logger *zap.Logger, opts ReplayOptions, pcapPath string) error 
 func prepareReplayInputs(opts ReplayOptions) (proxyAddr string, proxyPort int, preserveTiming bool, writeDelay time.Duration, err error) {
 	proxyAddr = DefaultProxyAddr
 	proxyPort = DefaultProxyPort
-	preserveTiming = false
+	preserveTiming = opts.PreserveTiming
 	writeDelay = opts.WriteDelay
 	return
 }

@@ -63,11 +63,28 @@ func (r *responseFeeder) close() {
 	r.cond.Broadcast()
 }
 
-func (r *responseFeeder) isEmpty() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.queue) == 0
-}
+// func (r *responseFeeder) isEmpty() bool {
+// 	r.mu.Lock()
+// 	defer r.mu.Unlock()
+// 	return len(r.queue) == 0
+// }
+
+// func (r *responseFeeder) waitUntilEmpty(ctx context.Context) error {
+// 	r.mu.Lock()
+// 	defer r.mu.Unlock()
+
+// 	for !r.isEmpty() {
+// 		select {
+// 		case <-ctx.Done():
+// 			return ctx.Err()
+// 		case <-r.done:
+// 			return nil
+// 		default:
+// 			r.cond.Wait()
+// 		}
+// 	}
+// 	return nil
+// }
 
 // FeederManager manages multiple feeders identified by srcPort.
 type FeederManager struct {

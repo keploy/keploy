@@ -55,6 +55,7 @@ func (o *Orchestrator) StartNetworkPacketReplay(ctx context.Context) error {
 	o.logger.Info("proxy started", zap.Uint32("port", o.config.ProxyPort))
 
 	err := packet.StartReplay(
+		ctx,
 		o.logger,
 		packet.ReplayOptions{
 			PreserveTiming: packet.PreserveTiming,
