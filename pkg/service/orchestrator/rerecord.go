@@ -380,6 +380,8 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 					originalTestCase.Noise[k] = []string{}
 				}
 
+			}
+		}
 
 		if o.config.ReRecord.GRPCPort != 0 && tc.Kind == models.GRPC_EXPORT {
 			tc.GrpcReq.Headers.PseudoHeaders[":authority"], err = utils.ReplaceGrpcPort(tc.GrpcReq.Headers.PseudoHeaders[":authority"], strconv.Itoa(int(o.config.ReRecord.GRPCPort)))

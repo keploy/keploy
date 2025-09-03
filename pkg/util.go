@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"html/template"
 	"io"
 	"io/fs"
 	"net"
@@ -125,7 +126,6 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 		data := make(map[string]interface{})
 
-
 		// Prepare the data for template execution.
 		templateData := make(map[string]interface{})
 		for k, v := range utils.TemplatizedValues {
@@ -143,9 +143,10 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 
 		// Unmarshal the rendered string back into the test case struct.
-		err = json.Unmarshal([]byte(renderedStr), &tc)
+		renderedBytes := output.Bytes()
+		err = json.Unmarshal(renderedBytes, &tc)
 		if err != nil {
-			utils.LogError(logger, err, "failed to unmarshal the rendered testcase", zap.String("RenderedString", renderedStr))
+			utils.LogError(logger, err, "failed to unmarshal the rendered testcase", zap.String("RenderedString", string(renderedBytes)))
 			return nil, err
 		}
 	}
