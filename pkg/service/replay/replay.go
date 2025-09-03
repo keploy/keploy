@@ -958,9 +958,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 
-		// Handle user-provided port replacement
-		if r.config.Test.Port != 0 {
+		// Handle user-provided http port replacement
+		if r.config.Test.Port != 0 && testCase.Kind == models.HTTP {
 			err = r.replacePortInTestCase(testCase, strconv.Itoa(int(r.config.Test.Port)))
+			if err != nil {
+				break
+			}
+		}
+
+		// Handle user-provided grpc port replacement
+		if r.config.Test.GRPCPort != 0 && testCase.Kind == models.GRPC_EXPORT {
+			err = r.replacePortInTestCase(testCase, strconv.Itoa(int(r.config.Test.GRPCPort)))
 			if err != nil {
 				break
 			}
