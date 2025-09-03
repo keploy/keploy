@@ -32,6 +32,7 @@ type HookCfg struct {
 	Rules      []config.BypassRule
 	E2E        bool
 	Port       uint32
+	BigPayload bool
 }
 
 type App interface {

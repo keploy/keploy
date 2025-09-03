@@ -110,9 +110,9 @@ type bpfMapSpecs struct {
 	OutgoingConnectArgsMap      *ebpf.MapSpec `ebpf:"outgoing_connect_args_map"`
 	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
 	SocketCloseEvents           *ebpf.MapSpec `ebpf:"socket_close_events"`
-	SocketDataEventBufferHeap   *ebpf.MapSpec `ebpf:"socket_data_event_buffer_heap"`
 	SocketDataEvents            *ebpf.MapSpec `ebpf:"socket_data_events"`
 	SocketOpenEvents            *ebpf.MapSpec `ebpf:"socket_open_events"`
+	StructChoiceMap             *ebpf.MapSpec `ebpf:"struct_choice_map"`
 	TaskStructMap               *ebpf.MapSpec `ebpf:"task_struct_map"`
 }
 
@@ -160,9 +160,9 @@ type bpfMaps struct {
 	OutgoingConnectArgsMap      *ebpf.Map `ebpf:"outgoing_connect_args_map"`
 	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
 	SocketCloseEvents           *ebpf.Map `ebpf:"socket_close_events"`
-	SocketDataEventBufferHeap   *ebpf.Map `ebpf:"socket_data_event_buffer_heap"`
 	SocketDataEvents            *ebpf.Map `ebpf:"socket_data_events"`
 	SocketOpenEvents            *ebpf.Map `ebpf:"socket_open_events"`
+	StructChoiceMap             *ebpf.Map `ebpf:"struct_choice_map"`
 	TaskStructMap               *ebpf.Map `ebpf:"task_struct_map"`
 }
 
@@ -186,9 +186,9 @@ func (m *bpfMaps) Close() error {
 		m.OutgoingConnectArgsMap,
 		m.RedirectProxyMap,
 		m.SocketCloseEvents,
-		m.SocketDataEventBufferHeap,
 		m.SocketDataEvents,
 		m.SocketOpenEvents,
+		m.StructChoiceMap,
 		m.TaskStructMap,
 	)
 }

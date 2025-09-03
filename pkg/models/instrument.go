@@ -13,6 +13,7 @@ type HookOptions struct {
 	EnableTesting bool
 	E2E           bool
 	Port          uint32 // used for e2e filtering
+	BigPayload    bool   // to enable big payload recording
 }
 
 type OutgoingOptions struct {
@@ -33,8 +34,9 @@ type ConditionalDstCfg struct {
 }
 
 type IncomingOptions struct {
-	Filters  []config.Filter
-	BasePath string
+	Filters    []config.Filter
+	BasePath   string
+	BigPayload bool
 }
 
 type SetupOptions struct {
