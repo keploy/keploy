@@ -160,6 +160,9 @@ func (a *App) SetupCompose() error {
 		}
 	}
 
+	// print the compose file 
+	a.logger.Info("compose file", zap.String("compose", fmt.Sprintf("%+v", compose)))
+
 	// Check if docker compose file uses relative file names for bind mounts
 	ok := a.docker.HasRelativePath(compose)
 	if ok {
