@@ -95,19 +95,14 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	}
 	logger.Info("keployAlias", zap.String("keployAlias", keployAlias))
 
-	logger.Info("here is what hooks is ", zap.Any("hooks", Hooks))
-	// Allow enterprise hooks to modify the docker command before execution
-	if Hooks != nil {
-		logger.Info("inside hooks for docker in oss")
-		modified, hookErr := Hooks.ModifyDockerCommand(ctx, keployAlias)
-		if hookErr != nil {
-			utils.LogError(logger, hookErr, "hook ModifyDockerCommand failed; proceeding with original command")
-		} else if modified != "" {
-			keployAlias = modified
+	logger.Info("volume mounts", zap.Any("volumeMounts", DockerConfig.VolumeMounts))
+	if len(DockerConfig.VolumeMounts) > 0 {
+		for _, volumeMount := range DockerConfig.VolumeMounts {
+			keployAlias = strings.Replace(keployAlias, " --rm ", volumeMount+" --rm ", 1)
 		}
 	}
 
-	logger.Info("keployAlias after hooks", zap.String("keployAlias", keployAlias))
+	logger.Info("keployAlias after adding volume mounts", zap.String("keployAlias", keployAlias))
 
 	var quotedArgs []string
 
