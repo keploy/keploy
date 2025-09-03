@@ -30,6 +30,29 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ">=1.24"
+
+      - name: Add Private Parsers for Docker Release
+        run: |
+          go get github.com/keploy/integrations
+          
+          mkdir -p pkg/core/proxy
+          cat <<'EOF' > pkg/core/proxy/extraparsers.go
+          //go:build linux
+
+          package proxy
+
+          import (
+            _ "github.com/keploy/integrations/pkg/grpc"
+            _ "github.com/keploy/integrations/pkg/grpcV2"
+            _ "github.com/keploy/integrations/pkg/postgres/v1"
+            _ "github.com/keploy/integrations/pkg/mongo"
+          )
+          EOF
 
       # Install the cosign tool except on PR
       # https://github.com/sigstore/cosign-installer
