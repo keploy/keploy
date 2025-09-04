@@ -754,7 +754,6 @@ func (p *Proxy) GetConsumedMocks(_ context.Context, id uint64) ([]models.MockSta
 
 func (p *Proxy) recordNetworkPacketsForProxy() {
 	const (
-		iface        = "lo"
 		outPath      = "traffic.pcap"
 		snaplen      = 65535
 		matchPort    = uint16(16789)
@@ -764,11 +763,7 @@ func (p *Proxy) recordNetworkPacketsForProxy() {
 		numBlocks    = 64
 	)
 
-	p.logger.Info("capturing packets",
-		zap.String("iface", iface),
-		zap.String("outPath", outPath),
-		zap.Uint16("port", matchPort),
-	)
+	p.logger.Info("capturing packets", zap.String("outPath", outPath), zap.Uint16("port", matchPort))
 
 	// Prepare output PCAP (pure Go writer)
 	f, err := os.Create(outPath)
@@ -789,30 +784,19 @@ func (p *Proxy) recordNetworkPacketsForProxy() {
 	frameSize := 1 << frameSizePow
 	blockSize := 1 << 20 // 1 MiB per block
 	if blockSize%frameSize != 0 {
-		p.logger.Error("block size must be multiple of frame size",
-			zap.Int("blockSize", blockSize),
-			zap.Int("frameSize", frameSize),
-		)
+		p.logger.Error("block size must be multiple of frame size", zap.Int("blockSize", blockSize), zap.Int("frameSize", frameSize))
 		return
 	}
 
-	// Open a TPacket on the loopback iface
-	tp, err := afpacket.NewTPacket(
-		afpacket.OptInterface(iface),
-		afpacket.OptFrameSize(frameSize),
-		afpacket.OptBlockSize(blockSize),
-		afpacket.OptNumBlocks(numBlocks),
-		afpacket.OptBlockTimeout(blockTO),
-		afpacket.OptPollTimeout(pollTO),
-		afpacket.OptAddVLANHeader(false),
-		afpacket.SocketRaw, // L2 frames
-		afpacket.OptTPacketVersion(afpacket.TPacketVersion3),
-	)
+	// Get list of interfaces
+	interfaces, err := net.Interfaces()
 	if err != nil {
-		p.logger.Error("open interface error", zap.String("iface", iface), zap.Error(err))
+		p.logger.Error("failed to get interfaces", zap.Error(err))
 		return
 	}
-	defer tp.Close()
+
+	// Initialize a wait group for concurrent packet capture on all interfaces
+	var wg sync.WaitGroup
 
 	// Graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -825,112 +809,123 @@ func (p *Proxy) recordNetworkPacketsForProxy() {
 		cancel()
 	}()
 
-	var (
-		wg      sync.WaitGroup
-		writeMu sync.Mutex
-		seen    uint64
-		total   uint64
-		start   = time.Now()
-	)
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for ctx.Err() == nil {
-			data, ci, err := tp.ZeroCopyReadPacketData()
-			atomic.AddUint64(&seen, 1)
-
-			if err != nil {
-				// Ignore benign timeouts/again
-				if errors.Is(err, afpacket.ErrTimeout) || errors.Is(err, syscall.EAGAIN) {
-					continue
-				}
-				select {
-				case <-ctx.Done():
-					return
-				default:
-					p.logger.Error("read error", zap.String("iface", iface), zap.Error(err))
-					continue
-				}
-			}
-
-			// Decode minimal headers to test ports
-			pkt := gopacket.NewPacket(data, layers.LinkTypeEthernet, gopacket.NoCopy)
-			tl := pkt.TransportLayer()
-			if tl == nil {
-				continue
-			}
-
-			keep := false
-			var srcPort, dstPort uint16
-			switch t := tl.(type) {
-			case *layers.TCP:
-
-				if t.RST {
-					continue // Skip RST packets
-				}
-
-				srcPort = uint16(t.SrcPort)
-				dstPort = uint16(t.DstPort)
-				keep = (srcPort == matchPort || dstPort == matchPort)
-			case *layers.UDP:
-				srcPort = uint16(t.SrcPort)
-				dstPort = uint16(t.DstPort)
-				keep = (srcPort == matchPort || dstPort == matchPort)
-			default:
-				keep = false
-			}
-			if !keep {
-				continue
-			}
-
-			// Optional concise log
-			if nl := pkt.NetworkLayer(); nl != nil {
-				p.logger.Info("packet captured",
-					zap.String("iface", iface),
-					zap.String("src", fmt.Sprintf("%v:%d", nl.NetworkFlow().Src(), srcPort)),
-					zap.String("dst", fmt.Sprintf("%v:%d", nl.NetworkFlow().Dst(), dstPort)),
-					zap.Int("len", len(data)),
-				)
-			} else {
-				p.logger.Info("packet captured (no net layer)",
-					zap.String("iface", iface),
-					zap.Int("len", len(data)),
-				)
-			}
-
-			// Snaplen enforcement
-			if len(data) > snaplen {
-				data = data[:snaplen]
-			}
-
-			// Write the entire frame as captured
-			writeMu.Lock()
-			if err := w.WritePacket(ci, data); err != nil {
-				p.logger.Error("pcap write error", zap.Error(err))
-			}
-			writeMu.Unlock()
-
-			if n := atomic.AddUint64(&total, 1); n%10000 == 0 {
-				elapsed := time.Since(start).Truncate(time.Second)
-				p.logger.Info("captured matching packets",
-					zap.Uint64("matchingPackets", n),
-					zap.Uint64("totalSeen", atomic.LoadUint64(&seen)),
-					zap.Duration("elapsed", elapsed),
-				)
-			}
+	// Capture packets from each interface
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			// Skip down or loopback interfaces
+			continue
 		}
-	}()
 
+		wg.Add(1)
+		go func(ifaceName string) {
+			defer wg.Done()
+			p.logger.Info("capturing packets", zap.String("iface", ifaceName))
+
+			// Open a TPacket on the interface
+			tp, err := afpacket.NewTPacket(
+				afpacket.OptInterface(ifaceName),
+				afpacket.OptFrameSize(frameSize),
+				afpacket.OptBlockSize(blockSize),
+				afpacket.OptNumBlocks(numBlocks),
+				afpacket.OptBlockTimeout(blockTO),
+				afpacket.OptPollTimeout(pollTO),
+				afpacket.OptAddVLANHeader(false),
+				afpacket.SocketRaw, // L2 frames
+				afpacket.OptTPacketVersion(afpacket.TPacketVersion3),
+			)
+			if err != nil {
+				p.logger.Error("open interface error", zap.String("iface", ifaceName), zap.Error(err))
+				return
+			}
+			defer tp.Close()
+
+			var writeMu sync.Mutex
+			var seen uint64
+			var total uint64
+			start := time.Now()
+
+			for ctx.Err() == nil {
+				data, ci, err := tp.ZeroCopyReadPacketData()
+				atomic.AddUint64(&seen, 1)
+
+				if err != nil {
+					if errors.Is(err, afpacket.ErrTimeout) || errors.Is(err, syscall.EAGAIN) {
+						continue
+					}
+					select {
+					case <-ctx.Done():
+						return
+					default:
+						p.logger.Error("read error", zap.String("iface", ifaceName), zap.Error(err))
+						continue
+					}
+				}
+
+				pkt := gopacket.NewPacket(data, layers.LinkTypeEthernet, gopacket.NoCopy)
+				tl := pkt.TransportLayer()
+				if tl == nil {
+					continue
+				}
+
+				keep := false
+				var srcPort, dstPort uint16
+				switch t := tl.(type) {
+				case *layers.TCP:
+					if t.RST {
+						continue
+					}
+					srcPort = uint16(t.SrcPort)
+					dstPort = uint16(t.DstPort)
+					keep = (srcPort == matchPort || dstPort == matchPort)
+				case *layers.UDP:
+					srcPort = uint16(t.SrcPort)
+					dstPort = uint16(t.DstPort)
+					keep = (srcPort == matchPort || dstPort == matchPort)
+				default:
+					keep = false
+				}
+				if !keep {
+					continue
+				}
+
+				if nl := pkt.NetworkLayer(); nl != nil {
+					p.logger.Info("packet captured",
+						zap.String("iface", ifaceName),
+						zap.String("src", fmt.Sprintf("%v:%d", nl.NetworkFlow().Src(), srcPort)),
+						zap.String("dst", fmt.Sprintf("%v:%d", nl.NetworkFlow().Dst(), dstPort)),
+						zap.Int("len", len(data)),
+					)
+				} else {
+					p.logger.Info("packet captured (no net layer)",
+						zap.String("iface", ifaceName),
+						zap.Int("len", len(data)),
+					)
+				}
+
+				if len(data) > snaplen {
+					data = data[:snaplen]
+				}
+
+				writeMu.Lock()
+				if err := w.WritePacket(ci, data); err != nil {
+					p.logger.Error("pcap write error", zap.Error(err))
+				}
+				writeMu.Unlock()
+
+				if n := atomic.AddUint64(&total, 1); n%10000 == 0 {
+					elapsed := time.Since(start).Truncate(time.Second)
+					p.logger.Info("captured matching packets",
+						zap.Uint64("matchingPackets", n),
+						zap.Uint64("totalSeen", atomic.LoadUint64(&seen)),
+						zap.Duration("elapsed", elapsed),
+					)
+				}
+			}
+		}(iface.Name)
+	}
+
+	// Wait for all captures to complete
 	wg.Wait()
 
-	p.logger.Info("value seen", zap.Uint64("seen", atomic.LoadUint64(&seen)))
-	if stats, err := tp.Stats(); err == nil {
-		p.logger.Info("stats",
-			zap.String("iface", iface),
-			zap.Int64("received", stats.Packets),
-			zap.String("dropped", "N/A w/TPACKETv3"),
-		)
-	}
-	p.logger.Info("done", zap.Uint64("totalPacketsWritten", atomic.LoadUint64(&total)))
+	p.logger.Info("capture completed")
 }
