@@ -202,7 +202,6 @@ func (t *Tools) buildValueIndexV2(ctx context.Context, tcs []*models.TestCase, r
 				valueIndex[token] = append(valueIndex[token], loc)
 			} else {
 				valueIndex[val] = append(valueIndex[val], loc)
-
 			}
 		}
 
@@ -269,11 +268,6 @@ func findValuesInInterface(data interface{}, path []string, index map[string][]*
 		index[v.String()] = append(index[v.String()], loc)
 	}
 }
-
-
-
-// In your tools package (tools.go)
-// REPLACE this entire function.
 
 func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string][]*ValueLocation, templateConfig map[string]interface{}) []*TemplateChain {
 	var chains []*TemplateChain
