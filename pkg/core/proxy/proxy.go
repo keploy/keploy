@@ -811,7 +811,7 @@ func (p *Proxy) recordNetworkPacketsForProxy() {
 
 	// Capture packets from each interface
 	for _, iface := range interfaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+		if iface.Flags&net.FlagUp == 0 {
 			// Skip down or loopback interfaces
 			continue
 		}
