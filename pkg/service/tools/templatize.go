@@ -191,7 +191,6 @@ func formatLocation(loc *ValueLocation, testCases []*models.TestCase) string {
 	}
 }
 
-
 func (t *Tools) buildValueIndexV2(ctx context.Context, tcs []*models.TestCase, reqBodies, respBodies []interface{}) map[string][]*ValueLocation {
 	valueIndex := make(map[string][]*ValueLocation)
 	for i := range tcs {
@@ -287,7 +286,6 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 			}
 		}
 
-
 		if producer == nil {
 
 			continue
@@ -300,11 +298,10 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 			}
 		}
 
-
 		if len(subsequentConsumers) == 0 {
 			continue
 		}
-		
+
 		// --- THIS IS THE CRITICAL FIX ---
 		// Instead of just templatizing the first producer and consumers,
 		// we will templatize ALL occurrences of this value that are either
@@ -313,7 +310,7 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 		for _, loc := range locations {
 			isProducer := loc.Part == ResponseBody || loc.Part == ResponseHeader
 			isConsumer := (loc.Part == RequestHeader || loc.Part == RequestURL || loc.Part == RequestBody) && loc.TestCaseIndex >= producer.TestCaseIndex
-			
+
 			if isProducer || isConsumer {
 				allOccurrencesToTemplatize = append(allOccurrencesToTemplatize, loc)
 			}
@@ -354,7 +351,6 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 			}
 		}
 
-
 		templateKey := insertUnique(baseKey, value, templateConfig)
 		chain.TemplateKey = templateKey
 		chains = append(chains, chain)
@@ -383,8 +379,6 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 	}
 	return chains
 }
-
-
 
 // In your tools package (tools.go)
 // REPLACE the AssertChains function and ADD the new buildCanonicalChainsFromMap helper.
@@ -435,7 +429,6 @@ func (t *Tools) AssertChains(keployChains []*TemplateChain, testCases []*models.
 	fmt.Println("==========================================")
 }
 
-
 // buildCanonicalChainsFromMap manually constructs the chain structs from a generic map,
 // avoiding any reliance on struct tags which were failing.
 func buildCanonicalChainsFromMap(data map[string]interface{}) ([]CanonicalChain, error) {
@@ -451,7 +444,6 @@ func buildCanonicalChainsFromMap(data map[string]interface{}) ([]CanonicalChain,
 		if !ok {
 			continue // Skip malformed entries
 		}
-
 
 		var canonicalChain CanonicalChain
 		if val, ok := chainMap["variable_name"].(string); ok {
@@ -499,7 +491,6 @@ func buildCanonicalChainsFromMap(data map[string]interface{}) ([]CanonicalChain,
 
 	return chains, nil
 }
-
 
 // convertToCanonical transforms Keploy's internal chain representation to the common format.
 func (t *Tools) convertToCanonical(chains []*TemplateChain, tcs []*models.TestCase) []CanonicalChain {
@@ -811,7 +802,6 @@ func insertUnique(baseKey, value string, myMap map[string]interface{}) string {
 	return key
 }
 
-
 func removeQuotesInTemplates(jsonStr string) string {
 	re := regexp.MustCompile(`"\{\{[^{}]*\}\}"`)
 	return re.ReplaceAllStringFunc(jsonStr, func(match string) string {
@@ -822,7 +812,6 @@ func removeQuotesInTemplates(jsonStr string) string {
 		return strings.Trim(match, `"`)
 	})
 }
-
 
 func addQuotesInTemplates(jsonStr string) string {
 	if jsonStr == "" {
