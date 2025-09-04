@@ -120,13 +120,13 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 		renderedStr, err := utils.RenderTemplatesInString(logger, string(testCaseStr), templateData)
 		if err != nil {
-			utils.LogError(logger, err, "failed to render some template values", zap.Any("TestCase", tc.Name), zap.Any("TestSet", testSet))
+			utils.LogError(logger, err, "failed to render some template values", zap.String("TestCase", tc.Name), zap.String("TestSet", testSet))
 		}
 
 		// Unmarshal the rendered string back into the test case struct.
 		err = json.Unmarshal([]byte(renderedStr), &tc)
 		if err != nil {
-			utils.LogError(logger, err, "failed to unmarshal the rendered testcase", zap.Any("RenderedString", renderedStr))
+			utils.LogError(logger, err, "failed to unmarshal the rendered testcase", zap.String("RenderedString", renderedStr))
 			return nil, err
 		}
 	}
@@ -142,7 +142,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}
 
-	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
+	logger.Info("starting test for of", zap.String("test case", models.HighlightString(tc.Name)), zap.String("test set", models.HighlightString(testSet)))
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, bytes.NewBuffer(reqBody))
 	if err != nil {
 		utils.LogError(logger, err, "failed to create a http request from the yaml document")
@@ -239,10 +239,13 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}
 
+	statusMessage := http.StatusText(httpResp.StatusCode)
+
 	resp = &models.HTTPResp{
-		StatusCode: httpResp.StatusCode,
-		Body:       string(respBody),
-		Header:     ToYamlHTTPHeader(httpResp.Header),
+		StatusCode:    httpResp.StatusCode,
+		StatusMessage: statusMessage,
+		Body:          string(respBody),
+		Header:        ToYamlHTTPHeader(httpResp.Header),
 	}
 
 	return resp, errHTTPReq
