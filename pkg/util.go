@@ -25,7 +25,6 @@ import (
 	"text/template"
 
 	"github.com/andybalholm/brotli"
-	"github.com/davecgh/go-spew/spew"
 	"go.keploy.io/server/v2/pkg/models"
 
 	"go.keploy.io/server/v2/utils"
@@ -227,10 +226,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 			},
 		}
 	}
-	fmt.Println("Request Body:")
-	spew.Dump(req.Body)
-	fmt.Println("With Headers:", req.Header)
-	fmt.Println("To URL:", req.URL.String())
+
 	httpResp, errHTTPReq := client.Do(req)
 	if errHTTPReq != nil {
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
@@ -267,8 +263,8 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	// Centralized template update: if response body present and templates exist, update them.
 	if len(utils.TemplatizedValues) > 0 && len(respBody) > 0 {
-		fmt.Println("Received response from user app:", resp)
-		// Snapshot for logging only (no propagation here; replay handles its own propagation logic)
+		logger.Debug("Received response from user app", zap.Any("response", resp))
+
 		prev := make(map[string]interface{}, len(utils.TemplatizedValues))
 		for k, v := range utils.TemplatizedValues {
 			prev[k] = v
