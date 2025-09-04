@@ -312,7 +312,7 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	testCase := &models.TestCase{
 		Version:  models.GetVersion(),
 		Name:     http2Stream.GRPCReq.Headers.OrdinaryHeaders["Keploy-Test-Name"],
-		Kind:     models.GRPC_V2_EXPORT,
+		Kind:     models.GRPC_EXPORT,
 		Created:  time.Now().Unix(),
 		GrpcReq:  *http2Stream.GRPCReq,
 		GrpcResp: *http2Stream.GRPCResp,

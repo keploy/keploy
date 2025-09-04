@@ -48,7 +48,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, _ uint64, tc *models.TestCa
 		h.logger.Debug("Simulating HTTP request", zap.Any("Test case", tc))
 		return pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, h.cfg.Test.APITimeout)
 
-	case models.GRPC_EXPORT, models.GRPC_V2_EXPORT:
+	case models.GRPC_EXPORT:
 		h.logger.Debug("Simulating gRPC request", zap.Any("Test case", tc))
 		return pkg.SimulateGRPC(ctx, tc, testSetID, h.logger)
 

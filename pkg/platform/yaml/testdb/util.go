@@ -93,7 +93,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 			utils.LogError(logger, err, "failed to encode testcase into a yaml doc")
 			return nil, err
 		}
-	case models.GRPC_EXPORT, models.GRPC_V2_EXPORT:
+	case models.GRPC_EXPORT:
 		logger.Debug("Encoding gRPC test case")
 		// For gRPC, use the noise directly from the test case
 		noise = tc.Noise
@@ -341,7 +341,7 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 			}
 		}
 
-	case models.GRPC_EXPORT, models.GRPC_V2_EXPORT:
+	case models.GRPC_EXPORT:
 		var grpcSpec models.GrpcSpec
 		if err := yamlTestcase.Spec.Decode(&grpcSpec); err != nil {
 			utils.LogError(logger, err, "failed to decode gRPC spec")

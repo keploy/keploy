@@ -14,7 +14,7 @@ import (
 
 // Match compares an expected gRPC response with an actual response and returns whether they match
 // along with detailed comparison results
-func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[string]map[string][]string, canonise bool, logger *zap.Logger) (bool, *models.Result) {
+func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[string]map[string][]string, logger *zap.Logger) (bool, *models.Result) {
 	expectedResp := tc.GrpcResp
 	result := &models.Result{
 		HeadersResult: make([]models.HeaderResult, 0),
@@ -116,13 +116,9 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	})
 
 	// Compare decoded data
-	exp := expectedResp.Body.DecodedData
-	act := actualResp.Body.DecodedData
-	if canonise {
-		exp = CanonicalizeTopLevelBlocks(expectedResp.Body.DecodedData)
-		act = CanonicalizeTopLevelBlocks(actualResp.Body.DecodedData)
-	}
-	decodedDataNormal := exp == act
+	expCanon := CanonicalizeTopLevelBlocks(expectedResp.Body.DecodedData)
+	actCanon := CanonicalizeTopLevelBlocks(actualResp.Body.DecodedData)
+	decodedDataNormal := expCanon == actCanon
 
 	if !decodedDataNormal {
 		differences["body.decoded_data"] = struct {
@@ -130,16 +126,16 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 			Actual   string
 			Message  string
 		}{
-			Expected: exp,
-			Actual:   act,
+			Expected: expCanon,
+			Actual:   actCanon,
 			Message:  "decoded data mismatch",
 		}
 	}
 	result.BodyResult = append(result.BodyResult, models.BodyResult{
 		Normal:   decodedDataNormal,
 		Type:     models.GrpcData,
-		Expected: exp,
-		Actual:   act,
+		Expected: expCanon,
+		Actual:   actCanon,
 	})
 
 	// Handle noise configuration

@@ -120,7 +120,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 			utils.LogError(logger, err, "failed to marshal the postgres input-output as yaml")
 			return nil, err
 		}
-	case models.GRPC_EXPORT, models.GRPC_V2_EXPORT:
+	case models.GRPC_EXPORT:
 		gRPCSpec := models.GrpcSpec{
 			Metadata:         mock.Spec.Metadata,
 			GrpcReq:          *mock.Spec.GRPCReq,
@@ -228,11 +228,11 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 				return nil, err
 			}
 			mock.Spec = *mockSpec
-		case models.GRPC_EXPORT, models.GRPC_V2_EXPORT:
+		case models.GRPC_EXPORT:
 			grpcSpec := models.GrpcSpec{}
 			err := m.Spec.Decode(&grpcSpec)
 			if err != nil {
-				utils.LogError(logger, err, "failed to unmarshal a yaml doc into grpc mock", zap.String("mock name", m.Name))
+				utils.LogError(logger, err, "failed to unmarshal a yaml doc into http mock", zap.String("mock name", m.Name))
 				return nil, err
 			}
 			mock.Spec = models.MockSpec{

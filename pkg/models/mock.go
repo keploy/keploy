@@ -9,14 +9,13 @@ import (
 type Kind string
 
 const (
-	HTTP           Kind = "Http"
-	GENERIC        Kind = "Generic"
-	REDIS          Kind = "Redis"
-	MySQL          Kind = "MySQL"
-	Postgres       Kind = "Postgres"
-	GRPC_EXPORT    Kind = "gRPC"
-	GRPC_V2_EXPORT Kind = "gRPC_V2"
-	Mongo          Kind = "Mongo"
+	HTTP        Kind = "Http"
+	GENERIC     Kind = "Generic"
+	REDIS       Kind = "Redis"
+	MySQL       Kind = "MySQL"
+	Postgres    Kind = "Postgres"
+	GRPC_EXPORT Kind = "gRPC"
+	Mongo       Kind = "Mongo"
 )
 
 type Mock struct {
