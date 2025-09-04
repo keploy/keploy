@@ -11,7 +11,6 @@ import (
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations/util"
 	"go.uber.org/zap"
 
-	"go.keploy.io/server/v2/pkg/matcher/grpc"
 	"go.keploy.io/server/v2/pkg/models"
 )
 
@@ -69,7 +68,7 @@ func FilterMocksBasedOnGrpcRequest(ctx context.Context, logger *zap.Logger, grpc
 			}
 
 			// Exact body Match
-			expBody := grpc.CanonicalizeTopLevelBlocks(grpcReq.Body.DecodedData)
+			expBody := CanonicalizeTopLevelBlocks(grpcReq.Body.DecodedData)
 			ok, matchedMock := exactBodyMatch(logger, expBody, schemaMatched)
 			if ok {
 				logger.Debug("exact body match found", zap.String("name", matchedMock.Name))
@@ -196,7 +195,7 @@ func compareMap(m1, m2 map[string]string) bool {
 
 func exactBodyMatch(logger *zap.Logger, expBody string, schemaMatched []*models.Mock) (bool, *models.Mock) {
 	for _, mock := range schemaMatched {
-		got := grpc.CanonicalizeTopLevelBlocks(mock.Spec.GRPCReq.Body.DecodedData)
+		got := CanonicalizeTopLevelBlocks(mock.Spec.GRPCReq.Body.DecodedData)
 		logger.Debug("Comparing bodies for mock", zap.String("name", mock.Name))
 		if got == expBody {
 			return true, mock
