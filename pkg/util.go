@@ -159,6 +159,12 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}
 	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
+
+	fmt.Println("Request body:", string(reqBody))
+	fmt.Println("Request URL:", tc.HTTPReq.URL)
+	fmt.Println("Request Method:", string(tc.HTTPReq.Method))
+	fmt.Println("Request Headers:", tc.HTTPReq.Header)
+
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, bytes.NewBuffer(reqBody))
 	if err != nil {
 		utils.LogError(logger, err, "failed to create a http request from the yaml document")

@@ -49,17 +49,44 @@ func updateTemplatesFromJSON(logger *zap.Logger, body []byte, allowedKeys map[st
 
 	changed := false
 	for tKey, oldVal := range utils.TemplatizedValues {
-		// if allowedKeys is provided, skip keys not present in it
-		if len(allowedKeys) > 0 {
-			if _, ok := allowedKeys[tKey]; !ok {
-				// also allow numeric-suffix base keys to match the allowed set
+		// Determine whether this template key should be considered for update.
+		// If allowedKeys is empty, all keys are considered. Otherwise we allow
+		// the key if any of the following are true:
+		//  - the exact templated key is present in allowedKeys
+		//  - the numeric-suffix base key is present in allowedKeys
+		//  - the exact key appears in the parsed JSON response
+		//  - the numeric-suffix base key appears in the parsed JSON response
+		// This lets producer-only keys (e.g. id115 -> base "id") update when
+		// the response contains the produced value even if the request didn't
+		// reference that template key.
+		consider := false
+		if len(allowedKeys) == 0 {
+			consider = true
+		} else {
+			if _, ok := allowedKeys[tKey]; ok {
+				consider = true
+			}
+			if !consider {
 				if base, has := stripNumericSuffix(tKey); has {
-					if _, ok2 := allowedKeys[base]; !ok2 {
-						continue
+					if _, ok2 := allowedKeys[base]; ok2 {
+						consider = true
 					}
-				} else {
-					continue
 				}
+			}
+			// Also allow if the key (or its numeric-suffix base) actually appears
+			// in the parsed response JSON -- this covers produced values present
+			// only in the response.
+			if !consider {
+				if _, inParsed := parsed[tKey]; inParsed {
+					consider = true
+				} else if base, has := stripNumericSuffix(tKey); has {
+					if _, inParsedBase := parsed[base]; inParsedBase {
+						consider = true
+					}
+				}
+			}
+			if !consider {
+				continue
 			}
 		}
 		// Exact key
