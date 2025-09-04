@@ -1,282 +1,601 @@
 package grpc
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"reflect"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
-// Hard guards to prevent pathological work on giant or adversarial inputs.
-const (
-	maxCanonDepth = 64      // reasonable for nested protos
-	maxCanonBytes = 1 << 20 // 1 MiB per side; beyond this we bail out
-	maxBlocks     = 10_000  // safety for degenerate line/block splits
-)
-
-// canonicalizeTopLevelBlocks makes protoscope-like text order-insensitive at *all* levels by:
-// - splitting into top-level field blocks
-// - recursively canonicalizing the content of each "{...}" block
-// - sorting blocks lexicographically
-// - joining them back together
-func CanonicalizeTopLevelBlocks(s string) string {
-	if len(s) > maxCanonBytes {
-		// Too large to safely canonicalize – return normalized but otherwise unchanged.
-		return normalizeWhitespace(s)
+func EqualProtoscope(a, b string) (bool, string, error) {
+	na, err := ParseProtoscope(a)
+	if err != nil {
+		return false, "", fmt.Errorf("parse A: %w", err)
 	}
-	return canonicalizeRecursive(s, 0)
+	nb, err := ParseProtoscope(b)
+	if err != nil {
+		return false, "", fmt.Errorf("parse B: %w", err)
+	}
+	ca := Canonicalize(na)
+	cb := Canonicalize(nb)
+	if reflect.DeepEqual(ca, cb) {
+		return true, "", nil
+	}
+	ja := mustPrettyJSON(ca)
+	jb := mustPrettyJSON(cb)
+	return false, unifiedStringDiff(ja, jb), nil
 }
 
-func canonicalizeRecursive(s string, depth int) string {
-	if depth > maxCanonDepth {
-		return normalizeWhitespace(s)
+func ParseProtoscope(s string) (any, error) {
+	p := newParser(s)
+	// top-level message: sequence of fieldNumber ":" value
+	obj := map[string]any{}
+	for {
+		p.skipSpaceAndComments()
+		if p.eof() {
+			break
+		}
+		key, ok := p.readFieldNumber()
+		if !ok {
+			return nil, p.errHere("expected field number")
+		}
+		p.skipSpaceAndComments()
+		if !p.consume(':') {
+			return nil, p.errHere("expected ':' after field number")
+		}
+		p.skipSpaceAndComments()
+		val, err := p.readValue()
+		if err != nil {
+			return nil, err
+		}
+		addMulti(obj, key, val)
 	}
-	trimmed := strings.TrimSpace(s)
-	if trimmed == "" {
-		return ""
-	}
-
-	blocks := splitTopLevelBlocks(trimmed)
-	if len(blocks) > maxBlocks {
-		// Degenerate input: avoid n^2 sorts/work.
-		return normalizeWhitespace(s)
-	}
-	// Recursively canonicalize inner bodies of each block
-	for i := range blocks {
-		blocks[i] = canonicalizeBlock(blocks[i], depth)
-		blocks[i] = normalizeWhitespace(blocks[i])
-	}
-
-	// Order-insensitive among siblings
-	sort.Strings(blocks)
-	return strings.Join(blocks, "\n")
+	return obj, nil
 }
 
-// splitTopLevelBlocks groups lines into top-level "field blocks".
-// A new block starts when depth==0 and the line matches ^\s*\d+:
-// Bare tokens like "64", "ai64", etc. stay with the preceding block.
-func splitTopLevelBlocks(s string) []string {
-	lines := strings.Split(s, "\n")
-	var blocks []string
-	var cur []string
+func Canonicalize(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, vv := range t {
+			out[k] = Canonicalize(vv)
+		}
+		return out
+	case []any:
+		tmp := make([]any, len(t))
+		for i := range t {
+			tmp[i] = Canonicalize(t[i])
+		}
+		sort.Slice(tmp, func(i, j int) bool {
+			return mustCompactJSON(tmp[i]) < mustCompactJSON(tmp[j])
+		})
+		return tmp
+	case json.Number, string, bool, nil:
+		return t
+	default:
+		// normalize numeric ints to json.Number
+		switch x := t.(type) {
+		case int, int32, int64, uint, uint32, uint64, float64:
+			return jsonNumber(x)
+		}
+		var out any
+		b, _ := json.Marshal(t)
+		_ = json.Unmarshal(b, &out)
+		return out
+	}
+}
+
+// ===================== Parser =====================
+
+type parser struct {
+	data []byte
+	i    int
+	line int
+	col  int
+}
+
+func newParser(s string) *parser { return &parser{data: []byte(s), line: 1, col: 1} }
+
+func (p *parser) eof() bool { return p.i >= len(p.data) }
+
+func (p *parser) peek() rune {
+	if p.eof() {
+		return 0
+	}
+	r, _ := utf8.DecodeRune(p.data[p.i:])
+	return r
+}
+
+func (p *parser) advance() rune {
+	if p.eof() {
+		return 0
+	}
+	r, w := utf8.DecodeRune(p.data[p.i:])
+	p.i += w
+	if r == '\n' {
+		p.line++
+		p.col = 1
+	} else {
+		p.col++
+	}
+	return r
+}
+
+func (p *parser) skipSpaceAndComments() {
+loop:
+	for !p.eof() {
+		r := p.peek()
+		if unicode.IsSpace(r) {
+			p.advance()
+			continue
+		}
+		// line comments: // ... or # ...
+		if r == '/' && p.i+1 < len(p.data) && p.data[p.i+1] == '/' {
+			p.i += 2
+			p.col += 2
+			for !p.eof() && p.advance() != '\n' {
+			}
+			continue
+		}
+		if r == '#' {
+			for !p.eof() && p.advance() != '\n' {
+			}
+			continue
+		}
+		break loop
+	}
+}
+
+func (p *parser) consume(ch rune) bool {
+	if p.peek() == ch {
+		p.advance()
+		return true
+	}
+	return false
+}
+
+func (p *parser) readFieldNumber() (string, bool) {
+	start := p.i
+	for !p.eof() && unicode.IsDigit(p.peek()) {
+		p.advance()
+	}
+	if p.i == start {
+		return "", false
+	}
+	return string(p.data[start:p.i]), true
+}
+
+func (p *parser) readValue() (any, error) {
+	p.skipSpaceAndComments()
+	switch p.peek() {
+	case '{':
+		p.advance()
+		inner := p.readUntilMatchingBrace()
+		if inner == nil {
+			return nil, p.errHere("unclosed '{'")
+		}
+		text := strings.TrimSpace(*inner)
+		if text == "" {
+			// empty block -> empty message/map
+			return map[string]any{}, nil
+		}
+		// Decide: nested message (has "digits:" at top-level) vs list
+		if hasTopLevelFieldColon(text) {
+			return ParseProtoscope(text)
+		}
+		return parseList(text)
+	case '"':
+		return p.readQuoted()
+	default:
+		// number (with optional i32/i64) or bare identifier
+		tok := p.readToken()
+		if tok == "" {
+			return nil, p.errHere("expected value")
+		}
+		// Try number (allow suffix i32/i64)
+		if n, ok := tryParseNumberWithSuffix(tok); ok {
+			return n, nil
+		}
+		// Bare identifier → keep as string
+		return tok, nil
+	}
+}
+
+func (p *parser) readToken() string {
+	var b strings.Builder
+	// optional sign
+	if p.peek() == '+' || p.peek() == '-' {
+		b.WriteRune(p.advance())
+	}
+	for !p.eof() {
+		r := p.peek()
+		// token terminators: space, brace, colon, quote, comment
+		if unicode.IsSpace(r) || r == '{' || r == '}' || r == ':' || r == '"' || r == '#' ||
+			(r == '/' && p.i+1 < len(p.data) && p.data[p.i+1] == '/') {
+			break
+		}
+		b.WriteRune(p.advance())
+	}
+	return b.String()
+}
+
+func (p *parser) readQuoted() (string, error) {
+	if !p.consume('"') {
+		return "", p.errHere(`expected '"'`)
+	}
+	var out strings.Builder
+	escaped := false
+	for !p.eof() {
+		r := p.advance()
+		if escaped {
+			out.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			escaped = true
+			continue
+		}
+		if r == '"' {
+			return out.String(), nil
+		}
+		out.WriteRune(r)
+	}
+	return "", p.errHere("unterminated string")
+}
+
+func (p *parser) readUntilMatchingBrace() *string {
+	depth := 1
+	start := p.i
+	for !p.eof() {
+		r := p.advance()
+		if r == '"' { // skip quoted strings entirely
+			// rewind one (we already advanced over the quote)
+			p.i -= 1
+			p.col -= 1
+			if _, err := p.readQuoted(); err != nil {
+				return nil
+			}
+			continue
+		}
+		if r == '{' {
+			depth++
+		} else if r == '}' {
+			depth--
+			if depth == 0 {
+				s := string(p.data[start : p.i-1])
+				return &s
+			}
+		}
+	}
+	return nil
+}
+
+func (p *parser) errHere(msg string) error {
+	return fmt.Errorf("%s at line %d, col %d (byte %d)", msg, p.line, p.col, p.i)
+}
+
+// ===================== List & helpers =====================
+
+func hasTopLevelFieldColon(s string) bool {
 	depth := 0
-
-	isFieldLine := func(line string) bool {
-		line = strings.TrimLeft(line, " \t")
-		if line == "" {
-			return false
+	reader := bufio.NewReader(strings.NewReader(s))
+	var i int
+	for {
+		r, w, err := readRune(reader)
+		if err != nil {
+			break
 		}
-		i := 0
-		for i < len(line) && line[i] >= '0' && line[i] <= '9' {
-			i++
-		}
-		return i > 0 && i < len(line) && line[i] == ':'
-	}
-
-	flush := func() {
-		if len(cur) == 0 {
-			return
-		}
-		blk := strings.TrimRight(strings.Join(cur, "\n"), "\n")
-		if blk != "" {
-			blocks = append(blocks, blk)
-		}
-		cur = cur[:0]
-	}
-
-	for i, ln := range lines {
-		// If we see a new top-level field start, flush previous block
-		if depth == 0 && isFieldLine(ln) && len(cur) > 0 {
-			flush()
-		}
-		cur = append(cur, ln)
-		depth += braceDeltaIgnoringStrings(ln)
-		if i == len(lines)-1 {
-			flush()
-		}
-		if len(blocks) > maxBlocks {
-			// Stop early; upstream will bail out.
-			return blocks
-		}
-	}
-	return blocks
-}
-
-// canonicalizeBlock finds the outermost "{...}" of this block (if any),
-// recursively canonicalizes the inside, and reassembles the block.
-// If there is no brace, returns the block as-is (after whitespace normalize by caller).
-func canonicalizeBlock(block string, depth int) string {
-	// Find first '{' outside strings/backticks.
-	open := indexFirstOpenBrace(block)
-	if open < 0 {
-		return block
-	}
-
-	// Find its matching '}' (depth-aware, strings-safe).
-	closeIdx := findMatchingCloseBrace(block, open)
-	if closeIdx < 0 {
-		// Unbalanced; fallback to original to avoid mangling.
-		return block
-	}
-
-	inner := block[open+1 : closeIdx]
-	innerCanon := canonicalizeRecursive(inner, depth+1)
-
-	// Reassemble: keep exactly the same outer text, replace inner with canonical form.
-	return block[:open+1] + innerCanon + block[closeIdx:]
-}
-
-// indexFirstOpenBrace returns the index of the first '{' not inside quotes/backticks.
-func indexFirstOpenBrace(s string) int {
-	inDq := false // "
-	inBt := false // `
-	esc := false
-
-	for i := 0; i < len(s); i++ {
-		ch := s[i]
-
-		if inBt {
-			if ch == '`' {
-				inBt = false
-			}
-			continue
-		}
-		if inDq {
-			if esc {
-				esc = false
-				continue
-			}
-			if ch == '\\' {
-				esc = true
-				continue
-			}
-			if ch == '"' {
-				inDq = false
-			}
-			continue
-		}
-
-		// Not in string
-		if ch == '`' {
-			inBt = true
-			continue
-		}
-		if ch == '"' {
-			inDq = true
-			continue
-		}
-		if ch == '{' {
-			return i
-		}
-	}
-	return -1
-}
-
-// findMatchingCloseBrace finds the matching '}' for the '{' at openIdx,
-// counting only braces that are outside quotes/backticks.
-func findMatchingCloseBrace(s string, openIdx int) int {
-	inDq := false
-	inBt := false
-	esc := false
-	depth := 0
-
-	for i := openIdx; i < len(s); i++ {
-		ch := s[i]
-
-		if inBt {
-			if ch == '`' {
-				inBt = false
-			}
-			continue
-		}
-		if inDq {
-			if esc {
-				esc = false
-				continue
-			}
-			if ch == '\\' {
-				esc = true
-				continue
-			}
-			if ch == '"' {
-				inDq = false
-			}
-			continue
-		}
-
-		switch ch {
-		case '`':
-			inBt = true
+		i += w
+		switch r {
 		case '"':
-			inDq = true
+			// skip quoted
+			txt := consumeQuoted(reader)
+			i += len(txt) + 2
 		case '{':
 			depth++
 		case '}':
 			depth--
+		case ':':
 			if depth == 0 {
-				return i
+				// look back for digits
+				k := i - 2
+				for k >= 0 && unicode.IsSpace(rune(s[k])) {
+					k--
+				}
+				did := false
+				for k >= 0 && s[k] >= '0' && s[k] <= '9' {
+					did = true
+					k--
+				}
+				if did {
+					return true
+				}
 			}
 		}
 	}
-	return -1
+	return false
 }
 
-// braceDeltaIgnoringStrings returns net brace count change for the line,
-// ignoring any braces that appear inside quotes/backticks.
-func braceDeltaIgnoringStrings(line string) int {
-	inDq := false
-	inBt := false
-	esc := false
-	delta := 0
-
-	for i := 0; i < len(line); i++ {
-		ch := line[i]
-
-		if inBt {
-			if ch == '`' {
-				inBt = false
+func parseList(s string) (any, error) {
+	var items []any
+	r := bufio.NewReader(strings.NewReader(s))
+	for {
+		skipSpacesAndCommentsReader(r)
+		rn, _, err := r.ReadRune()
+		if err != nil {
+			break
+		}
+		if rn == '"' {
+			// read quoted
+			str := consumeQuoted(r)
+			items = append(items, str)
+			continue
+		}
+		if rn == '{' {
+			// nested block within list: read until matching then decide message/list
+			inner := readUntilMatchingBraceReader(r)
+			if inner == "" {
+				items = append(items, map[string]any{})
+				continue
+			}
+			inner = strings.TrimSpace(inner)
+			if hasTopLevelFieldColon(inner) {
+				obj, err := ParseProtoscope(inner)
+				if err != nil {
+					return nil, err
+				}
+				items = append(items, obj)
+			} else {
+				v, err := parseList(inner)
+				if err != nil {
+					return nil, err
+				}
+				items = append(items, v)
 			}
 			continue
 		}
-		if inDq {
-			if esc {
-				esc = false
-				continue
+		// token: number/ident possibly starting with +/-
+		var tok strings.Builder
+		tok.WriteRune(rn)
+		for {
+			r2, _, err2 := r.ReadRune()
+			if err2 != nil {
+				break
 			}
-			if ch == '\\' {
-				esc = true
-				continue
+			if unicode.IsSpace(rune(r2)) || r2 == '{' || r2 == '}' || r2 == '"' || r2 == '#' ||
+				(r2 == '/' && peekSlash(r)) {
+				r.UnreadRune()
+				break
 			}
-			if ch == '"' {
-				inDq = false
-			}
-			continue
+			tok.WriteRune(r2)
 		}
-
-		switch ch {
-		case '`':
-			inBt = true
-		case '"':
-			inDq = true
-		case '{':
-			delta++
-		case '}':
-			delta--
+		word := tok.String()
+		if n, ok := tryParseNumberWithSuffix(word); ok {
+			items = append(items, n)
+		} else {
+			items = append(items, word)
 		}
 	}
-	return delta
+	return items, nil
 }
 
-func normalizeWhitespace(s string) string {
-	lines := strings.Split(s, "\n")
-	out := make([]string, 0, len(lines))
-	prevBlank := false
-	for _, ln := range lines {
-		ln = strings.TrimRight(ln, " \t")
-		blank := strings.TrimSpace(ln) == ""
-		if blank && prevBlank {
+func tryParseNumberWithSuffix(tok string) (json.Number, bool) {
+	// Strip trailing i32/i64 if present.
+	raw := tok
+	l := strings.ToLower(raw)
+	if strings.HasSuffix(l, "i32") {
+		raw = raw[:len(raw)-3]
+	} else if strings.HasSuffix(l, "i64") {
+		raw = raw[:len(raw)-3]
+	}
+	// Must be a valid Go float/int in decimal or scientific notation.
+	if _, err := strconv.ParseFloat(raw, 64); err == nil {
+		return json.Number(raw), true
+	}
+	// integers like "90"
+	if _, err := strconv.ParseInt(raw, 10, 64); err == nil {
+		return json.Number(raw), true
+	}
+	if _, err := strconv.ParseUint(raw, 10, 64); err == nil {
+		return json.Number(raw), true
+	}
+	return "", false
+}
+
+func addMulti(m map[string]any, k string, v any) {
+	if old, ok := m[k]; ok {
+		if sl, ok := old.([]any); ok {
+			m[k] = append(sl, v)
+			return
+		}
+		m[k] = []any{old, v}
+		return
+	}
+	m[k] = v
+}
+
+// ===================== Small utilities =====================
+
+func readRune(r *bufio.Reader) (rune, int, error) {
+	b, err := r.ReadByte()
+	if err != nil {
+		return 0, 0, err
+	}
+	if b < 0x80 {
+		return rune(b), 1, nil
+	}
+	_ = r.UnreadByte()
+	ru, size, err := r.ReadRune()
+	return ru, size, err
+}
+
+func consumeQuoted(r *bufio.Reader) string {
+	var out strings.Builder
+	escaped := false
+	for {
+		ch, _, err := r.ReadRune()
+		if err != nil {
+			break
+		}
+		if escaped {
+			out.WriteRune(ch)
+			escaped = false
 			continue
 		}
-		out = append(out, ln)
-		prevBlank = blank
+		if ch == '\\' {
+			escaped = true
+			continue
+		}
+		if ch == '"' {
+			break
+		}
+		out.WriteRune(ch)
 	}
-	return strings.Join(out, "\n")
+	return out.String()
+}
+
+func readUntilMatchingBraceReader(r *bufio.Reader) string {
+	depth := 1
+	var out strings.Builder
+	for {
+		ch, _, err := r.ReadRune()
+		if err != nil {
+			break
+		}
+		if ch == '"' {
+			out.WriteRune(ch)
+			out.WriteString(consumeQuoted(r))
+			out.WriteRune('"')
+			continue
+		}
+		if ch == '{' {
+			depth++
+		} else if ch == '}' {
+			depth--
+			if depth == 0 {
+				break
+			}
+		}
+		out.WriteRune(ch)
+	}
+	return out.String()
+}
+
+func skipSpacesAndCommentsReader(r *bufio.Reader) {
+	for {
+		// peek
+		b, err := r.Peek(1)
+		if err != nil {
+			return
+		}
+		if unicode.IsSpace(rune(b[0])) {
+			r.ReadByte()
+			continue
+		}
+		// // comment
+		if b[0] == '/' {
+			if bb, err := r.Peek(2); err == nil && len(bb) == 2 && bb[1] == '/' {
+				// consume to EOL
+				r.ReadByte()
+				r.ReadByte()
+				for {
+					c, err := r.ReadByte()
+					if err != nil || c == '\n' {
+						break
+					}
+				}
+				continue
+			}
+		}
+		// # comment
+		if b[0] == '#' {
+			r.ReadByte()
+			for {
+				c, err := r.ReadByte()
+				if err != nil || c == '\n' {
+					break
+				}
+			}
+			continue
+		}
+		return
+	}
+}
+
+func peekSlash(r *bufio.Reader) bool {
+	b, err := r.Peek(1)
+	return err == nil && len(b) == 1 && b[0] == '/'
+}
+
+func mustCompactJSON(v any) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+func mustPrettyJSON(v any) string {
+	b, _ := json.MarshalIndent(v, "", "  ")
+	return string(b)
+}
+
+func jsonNumber(v any) json.Number {
+	switch x := v.(type) {
+	case int:
+		return json.Number(strconv.FormatInt(int64(x), 10))
+	case int32:
+		return json.Number(strconv.FormatInt(int64(x), 10))
+	case int64:
+		return json.Number(strconv.FormatInt(x, 10))
+	case uint:
+		return json.Number(strconv.FormatUint(uint64(x), 10))
+	case uint32:
+		return json.Number(strconv.FormatUint(uint64(x), 10))
+	case uint64:
+		return json.Number(strconv.FormatUint(x, 10))
+	case float64:
+		// keep as-is; no forced formatting
+		return json.Number(strconv.FormatFloat(x, 'g', -1, 64))
+	default:
+		return "0"
+	}
+}
+
+// tiny unified diff for readability
+func unifiedStringDiff(a, b string) string {
+	if a == b {
+		return ""
+	}
+	var buf bytes.Buffer
+	buf.WriteString("--- A\n+++ B\n")
+	la := strings.Split(a, "\n")
+	lb := strings.Split(b, "\n")
+	i, j := 0, 0
+	for i < len(la) || j < len(lb) {
+		var sa, sb string
+		if i < len(la) {
+			sa = la[i]
+		}
+		if j < len(lb) {
+			sb = lb[j]
+		}
+		if sa == sb {
+			i++
+			j++
+			continue
+		}
+		if i < len(la) {
+			fmt.Fprintf(&buf, "-%s\n", sa)
+			i++
+		}
+		if j < len(lb) {
+			fmt.Fprintf(&buf, "+%s\n", sb)
+			j++
+		}
+	}
+	return buf.String()
 }
