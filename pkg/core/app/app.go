@@ -111,6 +111,8 @@ func (a *App) SetupDocker() error {
 		}
 	}
 
+	a.logger.Info("inside setup docker", zap.String("cmd", a.cmd))
+
 	//injecting appNetwork to keploy.
 	err := a.injectNetwork(a.containerNetwork)
 	if err != nil {
