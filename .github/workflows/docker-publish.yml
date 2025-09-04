@@ -36,29 +36,8 @@ jobs:
         with:
           go-version: ">=1.23"
 
-      - name: Load Private SSH Key for Integrations Repo
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
-
-      - name: Add Private Parsers for Docker Release
-        run: |
-          git config --global url."git@github.com:".insteadOf "https://github.com/"
-          GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations
-          
-          mkdir -p pkg/core/proxy
-          cat <<'EOF' > pkg/core/proxy/extraparsers.go
-          //go:build linux
-
-          package proxy
-
-          import (
-            _ "github.com/keploy/integrations/pkg/grpc"
-            _ "github.com/keploy/integrations/pkg/grpcV2"
-            _ "github.com/keploy/integrations/pkg/postgres/v1"
-            _ "github.com/keploy/integrations/pkg/mongo"
-          )
-          EOF
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
 
       # Install the cosign tool except on PR
       # https://github.com/sigstore/cosign-installer
