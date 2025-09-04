@@ -381,4 +381,3 @@ func (t *Tools) Templatize(ctx context.Context) error {
 	}
 	return nil
 }
-

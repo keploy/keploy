@@ -290,7 +290,7 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 		if len(subsequentConsumers) == 0 {
 			continue
 		}
-		
+
 		// --- THIS IS THE CRITICAL FIX ---
 		// Instead of just templatizing the first producer and consumers,
 		// we will templatize ALL occurrences of this value that are either
@@ -299,7 +299,7 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 		for _, loc := range locations {
 			isProducer := loc.Part == ResponseBody || loc.Part == ResponseHeader
 			isConsumer := (loc.Part == RequestHeader || loc.Part == RequestURL || loc.Part == RequestBody) && loc.TestCaseIndex >= producer.TestCaseIndex
-			
+
 			if isProducer || isConsumer {
 				allOccurrencesToTemplatize = append(allOccurrencesToTemplatize, loc)
 			}
@@ -366,7 +366,6 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 	}
 	return chains
 }
-
 
 // In your tools package (tools.go)
 // REPLACE the AssertChains function and ADD the new buildCanonicalChainsFromMap helper.
@@ -478,7 +477,6 @@ func buildCanonicalChainsFromMap(data map[string]interface{}) ([]CanonicalChain,
 
 	return chains, nil
 }
-
 
 // convertToCanonical transforms Keploy's internal chain representation to the common format.
 func (t *Tools) convertToCanonical(chains []*TemplateChain, tcs []*models.TestCase) []CanonicalChain {
