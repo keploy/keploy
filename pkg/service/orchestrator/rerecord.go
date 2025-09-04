@@ -370,7 +370,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 				Body:       renderedTC.HTTPResp.Body,
 				Header:     renderedTC.HTTPResp.Header,
 			})
-			fmt.Println("Detected noise fields:", detected)
+			o.logger.Debug("Detected noise fields", zap.Any("fields", detected))
 			// merge detected into originalTestCase.Noise
 			if originalTestCase.Noise == nil {
 				originalTestCase.Noise = map[string][]string{}
@@ -401,8 +401,10 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 			simErr = true
 			continue
 		}
-		fmt.Println("Response received for testcase ", tc.Name, " response code ", resp.StatusCode)
-
+		o.logger.Debug("Response received for testcase",
+			zap.String("testcase", tc.Name),
+			zap.Int("response_code", resp.StatusCode),
+		)
 		// Compare the new response with the original test case response and show diff
 		if resp != nil {
 			o.showResponseDiff(&originalTestCase, resp, testSet)
