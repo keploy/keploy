@@ -15,6 +15,7 @@ const (
 	DefaultDestPort  = 16790
 	DefaultProxyAddr = "127.0.0.1:16789"
 	PreserveTiming   = true
+	WriteDelay       = 10 * time.Millisecond
 )
 
 var (
@@ -24,6 +25,8 @@ var (
 
 type ReplayOptions struct {
 	PreserveTiming bool
+	WriteDelay     time.Duration
+	DestPort       uint16
 }
 
 type direction int
@@ -49,9 +52,11 @@ type StreamSeq struct {
 	firstTS time.Time
 }
 
-type FakeDestInfo struct{}
+type FakeDestInfo struct {
+	destPort uint32
+}
 
-func NewFakeDestInfo() *FakeDestInfo { return &FakeDestInfo{} }
+func NewFakeDestInfo(destPort uint32) *FakeDestInfo { return &FakeDestInfo{destPort: destPort} }
 
 func (f *FakeDestInfo) Get(ctx context.Context, srcPort uint16) (*corePkg.NetworkAddress, error) {
 	return &corePkg.NetworkAddress{
@@ -59,7 +64,7 @@ func (f *FakeDestInfo) Get(ctx context.Context, srcPort uint16) (*corePkg.Networ
 		Version:  4,
 		IPv4Addr: 0x7F000001,            // 127.0.0.1
 		IPv6Addr: [4]uint32{0, 0, 0, 1}, // ::1
-		Port:     DefaultDestPort,
+		Port:     f.destPort,
 	}, nil
 }
 

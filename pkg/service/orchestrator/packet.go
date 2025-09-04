@@ -13,10 +13,14 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+const (
+	ReplayedMocksFolder = "replay-mocks"
+)
+
 func (o *Orchestrator) StartNetworkPacketReplay(ctx context.Context) error {
 
 	session := core.NewSessions()
-	proxy := proxy.New(o.logger, packet.NewFakeDestInfo(), o.config, session)
+	proxy := proxy.New(o.logger, packet.NewFakeDestInfo(o.config.PacketReplay.DestPort), o.config, session)
 
 	// Create channels for testcases and mocks
 	testcaseCh := make(chan *models.TestCase, 10)
@@ -31,7 +35,7 @@ func (o *Orchestrator) StartNetworkPacketReplay(ctx context.Context) error {
 
 	// Listen for mocks
 	go func() {
-		err := o.record.InsertMocks(ctx, "replay-mocks", mockCh)
+		err := o.record.InsertMocks(ctx, ReplayedMocksFolder, mockCh)
 		if err != nil {
 			o.logger.Error("failed to store mocks", zap.Error(err))
 		}
@@ -59,6 +63,8 @@ func (o *Orchestrator) StartNetworkPacketReplay(ctx context.Context) error {
 		o.logger,
 		packet.ReplayOptions{
 			PreserveTiming: packet.PreserveTiming,
+			WriteDelay:     packet.WriteDelay,
+			DestPort:       uint16(o.config.PacketReplay.DestPort),
 		},
 		o.config.PacketReplay.PcapPath,
 	)

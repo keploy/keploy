@@ -370,6 +370,8 @@ func replaySequence(
 	logger *zap.Logger,
 	events []flowKeyDup,
 	proxyAddr string,
+	writeDelay time.Duration,
+	destPort int,
 	preserveTiming bool,
 ) error {
 	replayFields := LogFields{
@@ -406,7 +408,7 @@ func replaySequence(
 
 	// Start the app-side server
 	mgr := NewFeederManager()
-	stopServer, err := startAppSideServer(ctx, logger, DefaultDestPort, mgr)
+	stopServer, err := startAppSideServer(ctx, logger, destPort, mgr)
 	if err != nil {
 		logger.Error("failed to start app-side server",
 			append(replayFields.ToZapFields(),
@@ -458,6 +460,19 @@ func replaySequence(
 			}
 		}
 		prev = ev.ts
+
+		if writeDelay > 0 {
+			select {
+			case <-time.After(writeDelay):
+			case <-ctx.Done():
+				logger.Warn("context cancelled during write delay",
+					append(eventFields.ToZapFields(),
+						zap.Duration("write_delay", writeDelay),
+						zap.Error(ctx.Err()),
+					)...)
+				return ctx.Err()
+			}
+		}
 
 		// Check for context cancellation
 		select {
@@ -671,7 +686,7 @@ func StartReplay(ctx context.Context, logger *zap.Logger, opts ReplayOptions, pc
 		return ErrMissingPCAP
 	}
 
-	proxyAddr, proxyPort, preserveTiming, err := prepareReplayInputs(opts)
+	proxyAddr, proxyPort, writeDelay, destPort, preserveTiming, err := prepareReplayInputs(opts)
 	if err != nil {
 		return err
 	}
@@ -707,7 +722,7 @@ func StartReplay(ctx context.Context, logger *zap.Logger, opts ReplayOptions, pc
 	// 	}
 	// }
 
-	err = replaySequence(ctx, logger, packetEvents, proxyAddr, preserveTiming)
+	err = replaySequence(ctx, logger, packetEvents, proxyAddr, writeDelay, destPort, preserveTiming)
 	if err != nil {
 		logger.Error("replay sequence failed", zap.Error(err))
 		return err
@@ -716,9 +731,14 @@ func StartReplay(ctx context.Context, logger *zap.Logger, opts ReplayOptions, pc
 	return nil
 }
 
-func prepareReplayInputs(opts ReplayOptions) (proxyAddr string, proxyPort int, preserveTiming bool, err error) {
+func prepareReplayInputs(opts ReplayOptions) (proxyAddr string, proxyPort int, writeDelay time.Duration, destPort int, preserveTiming bool, err error) {
 	proxyAddr = DefaultProxyAddr
 	proxyPort = DefaultProxyPort
+	destPort = int(opts.DestPort)
+	if destPort == 0 {
+		destPort = DefaultDestPort
+	}
 	preserveTiming = opts.PreserveTiming
+	writeDelay = opts.WriteDelay
 	return
 }

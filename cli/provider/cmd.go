@@ -272,6 +272,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().StringP("pcap-path", "c", ".", "Path to the pcap file used to replay the network packets")
 		cmd.Flags().StringP("mocks-path", "m", ".", "Path to the directory where mock should be stored")
+		cmd.Flags().Uint32("dest-port", 16790, "Port used by the mock server to replay the db network packets")
 
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
@@ -1020,6 +1021,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.PacketReplay.MocksPath = mocksPath
+
+		destPort, err := cmd.Flags().GetUint32("dest-port")
+		if err != nil {
+			errMsg := "failed to get the dest port"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.PacketReplay.DestPort = destPort
 	}
 
 	return nil
