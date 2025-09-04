@@ -64,6 +64,8 @@ jobs:
 
       - name: Add Private Parsers
         uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
 
 #      - name: Checkout UI
 #        uses: actions/checkout@v4

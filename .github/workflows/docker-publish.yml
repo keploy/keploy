@@ -38,6 +38,8 @@ jobs:
 
       - name: Add Private Parsers
         uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
 
       # Install the cosign tool except on PR
       # https://github.com/sigstore/cosign-installer

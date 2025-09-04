@@ -1,8 +1,13 @@
 name: 'Setup Private Parsers'
-description: 'Sets up Go, loads the SSH deploy key, fetches private Go dependencies, and creates the extraparsers.go file.'
+description: 'Sets up Go, loads an SSH key, fetches private Go dependencies, and creates the extraparsers.go file.'
+
+inputs:
+  ssh-private-key:
+    description: 'The private SSH deploy key for the integrations repository.'
+    required: true
 
 runs:
-  using: "composite"
+  using: composite
   steps:
     - name: Set up Go
       uses: actions/setup-go@v5
@@ -12,12 +17,11 @@ runs:
     - name: Load Private SSH Key
       uses: webfactory/ssh-agent@v0.9.0
       with:
-        ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+        ssh-private-key: ${{ inputs.ssh-private-key }}
 
     - name: Configure Git, Fetch Dependencies, and Create Parsers File
       shell: bash
       run: |
-        # Force git to use SSH for github.com, so 'go get' uses the loaded deploy key
         git config --global url."git@github.com:".insteadOf "https://github.com/"
         
         echo "Fetching private integrations dependency via SSH..."
