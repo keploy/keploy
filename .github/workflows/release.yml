@@ -3,6 +3,7 @@ on:
   push:
     tags:
     - 'v*.*.*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -60,9 +61,17 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ">=1.23"
+      - name: Load Private SSH Key for Integrations Repo
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+
       - name: Add Private Parsers for Release
         run: |
-          go get github.com/keploy/integrations
+          # Force git to use SSH for github.com, so 'go get' uses the loaded deploy key
+          git config --global url."git@github.com:".insteadOf "https://github.com/"
+          
+          GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations
           
           cat <<'EOF' > pkg/core/proxy/extraparsers.go
           //go:build linux
@@ -107,7 +116,7 @@ jobs:
         with:
           distribution: goreleaser
           version: v1.26.2
-          args: release --rm-dist
+          args: release --rm-dist --skip-validate
         env:
           AC_PROVIDER: ${{ secrets.APPLE_ACCOUNT_TEAM_ID }}
           AC_PASSWORD: ${{ secrets.APPLE_ACCOUNT_PASSWORD }}

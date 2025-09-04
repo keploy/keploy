@@ -36,9 +36,15 @@ jobs:
         with:
           go-version: ">=1.23"
 
+      - name: Load Private SSH Key for Integrations Repo
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+
       - name: Add Private Parsers for Docker Release
         run: |
-          go get github.com/keploy/integrations
+          git config --global url."git@github.com:".insteadOf "https://github.com/"
+          GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations
           
           mkdir -p pkg/core/proxy
           cat <<'EOF' > pkg/core/proxy/extraparsers.go
