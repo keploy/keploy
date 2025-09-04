@@ -111,7 +111,13 @@ func (a *App) SetupDocker() error {
 		}
 	}
 
-	a.logger.Info("inside setup docker", zap.String("cmd", a.cmd))
+	a.logger.Debug("inside setup docker", zap.String("cmd", a.cmd))
+
+	if RuntimeHooks != nil {
+		a.cmd, _ = RuntimeHooks.BeforeDockerSetup(a.logger, a.cmd)
+	}
+
+	a.logger.Debug("after before docker setup hook", zap.String("cmd", a.cmd))
 
 	//injecting appNetwork to keploy.
 	err := a.injectNetwork(a.containerNetwork)
@@ -152,8 +158,7 @@ func (a *App) SetupCompose() error {
 
 	// hook: allow compose mutation before further processing
 	if RuntimeHooks != nil {
-		a.logger.Info("running before setup hook")
-		changed, err := RuntimeHooks.BeforeSetup(a.logger, compose, a.container)
+		changed, err := RuntimeHooks.BeforeDockerComposeSetup(a.logger, compose, a.container)
 		if err != nil {
 			utils.LogError(a.logger, err, "hook failed during compose mutation")
 			return err
