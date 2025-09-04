@@ -177,7 +177,7 @@ func startAppSideServer(ctx context.Context, logger *zap.Logger, listenPort int,
 		tcp, _ := c.(*net.TCPConn)
 		defer func() {
 			c.Close()
-			logger.Info("connection closed",
+			logger.Info("app side server connection closed",
 				connFields.ToZapFields()...)
 		}()
 
@@ -358,7 +358,7 @@ func startAppSideServer(ctx context.Context, logger *zap.Logger, listenPort int,
 		select {
 		case <-done:
 			logger.Info("server shutdown completed successfully")
-		case <-time.After(30 * time.Second):
+		case <-time.After(1 * time.Minute):
 			logger.Warn("server shutdown timeout reached")
 		}
 	}
@@ -371,7 +371,6 @@ func replaySequence(
 	events []flowKeyDup,
 	proxyAddr string,
 	preserveTiming bool,
-	writeDelay time.Duration,
 ) error {
 	replayFields := LogFields{
 		Component: "replay_sequence",
@@ -383,7 +382,6 @@ func replaySequence(
 			zap.Int("total_events", len(events)),
 			zap.String("proxy_addr", proxyAddr),
 			zap.Bool("preserve_timing", preserveTiming),
-			zap.Duration("write_delay", writeDelay),
 		)...)
 
 	metrics := &ReplayMetrics{}
@@ -460,20 +458,6 @@ func replaySequence(
 			}
 		}
 		prev = ev.ts
-
-		// Handle write delay
-		if writeDelay > 0 {
-			select {
-			case <-time.After(writeDelay):
-			case <-ctx.Done():
-				logger.Warn("context cancelled during write delay",
-					append(eventFields.ToZapFields(),
-						zap.Duration("write_delay", writeDelay),
-						zap.Error(ctx.Err()),
-					)...)
-				return ctx.Err()
-			}
-		}
 
 		// Check for context cancellation
 		select {
@@ -585,7 +569,7 @@ func replaySequence(
 	}
 
 	// Close the FeederManager to unblock any waiting operations
-	mgr.Close()
+	// mgr.Close()
 
 	replayDuration := time.Since(startTime)
 
@@ -687,7 +671,7 @@ func StartReplay(ctx context.Context, logger *zap.Logger, opts ReplayOptions, pc
 		return ErrMissingPCAP
 	}
 
-	proxyAddr, proxyPort, preserveTiming, writeDelay, err := prepareReplayInputs(opts)
+	proxyAddr, proxyPort, preserveTiming, err := prepareReplayInputs(opts)
 	if err != nil {
 		return err
 	}
@@ -723,7 +707,7 @@ func StartReplay(ctx context.Context, logger *zap.Logger, opts ReplayOptions, pc
 	// 	}
 	// }
 
-	err = replaySequence(ctx, logger, packetEvents, proxyAddr, preserveTiming, writeDelay)
+	err = replaySequence(ctx, logger, packetEvents, proxyAddr, preserveTiming)
 	if err != nil {
 		logger.Error("replay sequence failed", zap.Error(err))
 		return err
@@ -732,10 +716,9 @@ func StartReplay(ctx context.Context, logger *zap.Logger, opts ReplayOptions, pc
 	return nil
 }
 
-func prepareReplayInputs(opts ReplayOptions) (proxyAddr string, proxyPort int, preserveTiming bool, writeDelay time.Duration, err error) {
+func prepareReplayInputs(opts ReplayOptions) (proxyAddr string, proxyPort int, preserveTiming bool, err error) {
 	proxyAddr = DefaultProxyAddr
 	proxyPort = DefaultProxyPort
 	preserveTiming = opts.PreserveTiming
-	writeDelay = opts.WriteDelay
 	return
 }

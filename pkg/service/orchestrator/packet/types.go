@@ -15,7 +15,6 @@ const (
 	DefaultDestPort  = 16790
 	DefaultProxyAddr = "127.0.0.1:16789"
 	PreserveTiming   = true
-	WriteDelay       = 10 * time.Millisecond
 )
 
 var (
@@ -25,7 +24,6 @@ var (
 
 type ReplayOptions struct {
 	PreserveTiming bool
-	WriteDelay     time.Duration
 }
 
 type direction int

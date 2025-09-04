@@ -14,7 +14,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/signal"
 	"sort"
 	"strings"
 	"sync"
@@ -232,7 +231,7 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 
 	if p.CaptureNetworkPackets {
 		p.logger.Info("Debug mode is ON — starting packet capture on loopback for proxy port 16789 → traffic.pcap")
-		go p.recordNetworkPacketsForProxy()
+		go p.recordNetworkPacketsForProxy(ctx)
 	}
 
 	defer func(listener net.Listener) {
@@ -752,7 +751,7 @@ func (p *Proxy) GetConsumedMocks(_ context.Context, id uint64) ([]models.MockSta
 	return m.(*MockManager).GetConsumedMocks(), nil
 }
 
-func (p *Proxy) recordNetworkPacketsForProxy() {
+func (p *Proxy) recordNetworkPacketsForProxy(ctx context.Context) {
 	const (
 		outPath      = "traffic.pcap"
 		snaplen      = 65535
@@ -797,17 +796,6 @@ func (p *Proxy) recordNetworkPacketsForProxy() {
 
 	// Initialize a wait group for concurrent packet capture on all interfaces
 	var wg sync.WaitGroup
-
-	// Graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() {
-		ch := make(chan os.Signal, 1)
-		signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
-		s := <-ch
-		p.logger.Info("received signal, stopping", zap.String("signal", s.String()))
-		cancel()
-	}()
 
 	// Capture packets from each interface
 	for _, iface := range interfaces {
