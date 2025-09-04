@@ -39,6 +39,8 @@ type Config struct {
 	KeployNetwork         string       `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
 	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
 	Contract              Contract     `json:"contract" yaml:"contract" mapstructure:"contract"`
+	PacketReplay          PacketReplay `json:"packetReplay" yaml:"packetReplay" mapstructure:"packetReplay"`
+	CapturePackets        bool         `json:"capturePackets" yaml:"capturePackets" mapstructure:"capturePackets"`
 
 	InCi           bool   `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
 	InstallationID string `json:"-" yaml:"-" mapstructure:"-"`
@@ -68,10 +70,11 @@ type Templatize struct {
 }
 
 type Record struct {
-	Filters     []Filter      `json:"filters" yaml:"filters" mapstructure:"filters"`
-	BasePath    string        `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
-	RecordTimer time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
-	Metadata    string        `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
+	Filters           []Filter      `json:"filters" yaml:"filters" mapstructure:"filters"`
+	BasePath          string        `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
+	RecordTimer       time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
+	Metadata          string        `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
+	GlobalPassthrough bool          `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
 }
 
 type ReRecord struct {
@@ -192,6 +195,13 @@ type (
 	GlobalNoise  map[string]map[string][]string
 	TestsetNoise map[string]map[string]map[string][]string
 )
+
+type PacketReplay struct {
+	PcapPath       string `json:"pcapPath" yaml:"pcapPath" mapstructure:"pcapPath"`
+	MocksPath      string `json:"mocksPath" yaml:"mocksPath" mapstructure:"mocksPath"`
+	DestPort       uint32 `json:"appPort" yaml:"appPort" mapstructure:"appPort"`
+	PreserveTiming bool   `json:"preserveTiming" yaml:"preserveTiming" mapstructure:"preserveTiming"`
+}
 
 func SetByPassPorts(conf *Config, ports []uint) {
 	for _, port := range ports {

@@ -256,6 +256,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
 		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
+		cmd.Flags().Bool("capture-packets", c.cfg.CapturePackets, "Should capture the network packets and store in file")
 		//add rest of the uncommon flags for record, test, rerecord commands
 		c.AddUncommonFlags(cmd)
 
@@ -266,6 +267,13 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("full", false, "Show full diffs (colorized for JSON) instead of compact table diff")
 		cmd.Flags().Bool("summary", false, "Print only the summary of the test run (optionally restrict with --test-sets)")
 		cmd.Flags().StringSlice("test-case", nil, "Filter to specific test case IDs (repeat or comma-separated). Alias: --tc")
+
+	case "packet-replay":
+		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
+		cmd.Flags().StringP("pcap-path", "c", ".", "Path to the pcap file used to replay the network packets")
+		cmd.Flags().StringP("mocks-path", "m", ".", "Path to the directory where mock should be stored")
+		cmd.Flags().Uint32("dest-port", 16790, "Port used by the mock server to replay the db network packets")
+		cmd.Flags().Bool("no-preserve-timing", false, "Disable preserve the timing between the packets while replaying")
 
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
@@ -297,6 +305,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Duration("record-timer", 0, "User provided time to record its application (e.g., \"5s\" for 5 seconds, \"1m\" for 1 minute)")
 		cmd.Flags().String("base-path", c.cfg.Record.BasePath, "Base URL to hit the server while recording the testcases")
 		cmd.Flags().String("metadata", c.cfg.Record.Metadata, "Metadata to be stored in config.yaml as key-value pairs (e.g., \"key1=value1,key2=value2\")")
+		cmd.Flags().Bool("global-passthrough", c.cfg.Record.GlobalPassthrough, "Enable global passthrough for all outgoing requests")
 	case "test", "rerecord":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
 		cmd.Flags().String("host", c.cfg.Test.Host, "Custom host to replace the actual host in the testcases")
@@ -988,6 +997,47 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				return errors.New("TestDir is not set")
 			}
 		}
+
+	case "packet-replay":
+		path, err := cmd.Flags().GetString("path")
+		if err != nil {
+			errMsg := "failed to get the path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Path = utils.ToAbsPath(c.logger, path)
+
+		pcapPath, err := cmd.Flags().GetString("pcap-path")
+		if err != nil {
+			errMsg := "failed to get the pcap path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.PacketReplay.PcapPath = pcapPath
+
+		mocksPath, err := cmd.Flags().GetString("mocks-path")
+		if err != nil {
+			errMsg := "failed to get the mocks path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.PacketReplay.MocksPath = mocksPath
+
+		destPort, err := cmd.Flags().GetUint32("dest-port")
+		if err != nil {
+			errMsg := "failed to get the dest port"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.PacketReplay.DestPort = destPort
+
+		disablePreserveTime, err := cmd.Flags().GetBool("no-preserve-timing")
+		if err != nil {
+			errMsg := "failed to get the disable preserve time flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.PacketReplay.PreserveTiming = !disablePreserveTime
 	}
 
 	return nil

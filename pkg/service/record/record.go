@@ -279,8 +279,9 @@ func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
 
 func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (FrameChan, error) {
 	incomingOpts := models.IncomingOptions{
-		Filters:  r.config.Record.Filters,
-		BasePath: r.config.Record.BasePath,
+		Filters:   r.config.Record.Filters,
+		BasePath:  r.config.Record.BasePath,
+		FilterAll: r.config.Record.GlobalPassthrough && r.config.CapturePackets,
 	}
 	incomingChan, err := r.instrumentation.GetIncoming(ctx, appID, incomingOpts)
 	if err != nil {
@@ -387,4 +388,14 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 	}
 
 	r.logger.Info("Created test-set config file with metadata")
+}
+
+func (r *Recorder) InsertMocks(ctx context.Context, testSetID string, mockCh <-chan *models.Mock) error {
+	for mock := range mockCh {
+		err := r.mockDB.InsertMock(ctx, mock, testSetID)
+		if err != nil {
+			return fmt.Errorf("failed to insert mock into database: %w", err)
+		}
+	}
+	return nil
 }
