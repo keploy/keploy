@@ -581,7 +581,7 @@ func SanitizeFileInPlace(path string, aggSecrets map[string]string) error {
 	}
 	_ = enc.Close()
 
-	if err := os.WriteFile(path, out.Bytes(), 0600); err != nil {
+	if err := os.WriteFile(path, out.Bytes(), 0644); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
@@ -593,5 +593,5 @@ func WriteSecretsYAML(path string, secrets map[string]string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0600)
+	return os.WriteFile(path, b, 0644)
 }
