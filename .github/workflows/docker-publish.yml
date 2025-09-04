@@ -75,6 +75,14 @@ jobs:
         run: |
           echo "VERSION=$(echo ${GITHUB_REF#refs/tags/v})" >> $GITHUB_ENV
 
+      - name: Prepare Dockerfile for Release Build
+        run: |
+          # Add the SSH host key to trust github.com and configure git to use SSH
+          sed -i '/COPY go.mod go.sum \/app\//a RUN git config --global url."ssh:\/\/git@github.com\/".insteadOf "https:\/\/github.com\/" \&\& mkdir -p -m 0700 ~\/.ssh \&\& ssh-keyscan github.com >> ~\/.ssh\/known_hosts' ./Dockerfile
+          
+          # Ensure the go mod download command uses the SSH agent mount
+          sed -i 's/RUN go mod download/RUN --mount=type=ssh go mod download/' ./Dockerfile
+
       # Build and push Docker image with Buildx (don't push on PR)
       # https://github.com/docker/build-push-action
       - name: Build and push Docker image
@@ -82,6 +90,7 @@ jobs:
         uses: docker/build-push-action@ad44023a93711e3deb337508980b4b5e9bcdc5dc
         with:
           context: .
+          ssh: default
           platforms: linux/amd64, linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
