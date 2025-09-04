@@ -16,7 +16,11 @@ import (
 // It supports:
 //  1. JSON bodies (exact key match, numeric suffix base-key match, normalized key match)
 //  2. Raw JWT tokens when body isn't JSON (updates keys containing 'token')
-func updateTemplatesFromJSON(logger *zap.Logger, body []byte) bool {
+//
+// allowedKeys, if non-nil and non-empty, restricts updates to only those template keys
+// referenced by the request that produced this response. This prevents unrelated
+// template keys from being overwritten during re-record.
+func updateTemplatesFromJSON(logger *zap.Logger, body []byte, allowedKeys map[string]struct{}) bool {
 	if len(utils.TemplatizedValues) == 0 || len(body) == 0 {
 		return false
 	}
@@ -45,6 +49,19 @@ func updateTemplatesFromJSON(logger *zap.Logger, body []byte) bool {
 
 	changed := false
 	for tKey, oldVal := range utils.TemplatizedValues {
+		// if allowedKeys is provided, skip keys not present in it
+		if len(allowedKeys) > 0 {
+			if _, ok := allowedKeys[tKey]; !ok {
+				// also allow numeric-suffix base keys to match the allowed set
+				if base, has := stripNumericSuffix(tKey); has {
+					if _, ok2 := allowedKeys[base]; !ok2 {
+						continue
+					}
+				} else {
+					continue
+				}
+			}
+		}
 		// Exact key
 		if rVal, ok := parsed[tKey]; ok {
 			if applyTemplateValue(logger, tKey, oldVal, rVal) {

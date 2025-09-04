@@ -259,10 +259,6 @@ func findValuesInInterface(data interface{}, path []string, index map[string][]*
 	}
 }
 
-
-// In your tools package (tools.go)
-// REPLACE this entire function.
-
 func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string][]*ValueLocation, templateConfig map[string]interface{}) []*TemplateChain {
 	var chains []*TemplateChain
 	for value, locations := range index {

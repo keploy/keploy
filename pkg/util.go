@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -123,8 +124,8 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 		// fmt.Println("Templatized Values:", utils.TemplatizedValues)
 
-		data := make(map[string]interface{})
-
+		// Prepare the data for template execution.
+		templateData := make(map[string]interface{})
 		for k, v := range utils.TemplatizedValues {
 			data[k] = v
 		}
@@ -133,7 +134,9 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 			data["secret"] = utils.SecretValues
 		}
 		var output bytes.Buffer
-		err = tmpl.Execute(&output, data)
+		// Execute template with the populated templateData (previously an empty data map was passed here)
+		err = tmpl.Execute(&output, templateData)
+
 		if err != nil {
 			utils.LogError(logger, err, "failed to execute the template")
 			return nil, err
@@ -270,7 +273,51 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		for k, v := range utils.TemplatizedValues {
 			prev[k] = v
 		}
-		if updateTemplatesFromJSON(logger, respBody) {
+
+		// Build allowedKeys: only keys referenced in this test case's request (placeholders or literal occurrences)
+		allowedKeys := make(map[string]struct{})
+		// placeholder pattern like {{... .key}}
+		placeholderRe := regexp.MustCompile(`\{\{[^{}]*?\.([a-zA-Z0-9_]+)\}\}`)
+		for _, m := range placeholderRe.FindAllStringSubmatch(tc.HTTPReq.URL, -1) {
+			if len(m) > 1 {
+				allowedKeys[m[1]] = struct{}{}
+			}
+		}
+		for _, hv := range tc.HTTPReq.Header {
+			for _, m := range placeholderRe.FindAllStringSubmatch(hv, -1) {
+				if len(m) > 1 {
+					allowedKeys[m[1]] = struct{}{}
+				}
+			}
+		}
+		for _, m := range placeholderRe.FindAllStringSubmatch(tc.HTTPReq.Body, -1) {
+			if len(m) > 1 {
+				allowedKeys[m[1]] = struct{}{}
+			}
+		}
+
+		// Also add keys whose literal current value appears in the request (for non-templated literal usage)
+		for k, v := range utils.TemplatizedValues {
+			lit := fmt.Sprintf("%v", v)
+			if lit == "" || strings.Contains(lit, "{{") {
+				continue
+			}
+			addIfLiteral := func(s string) {
+				if s == "" || strings.Contains(s, "{{") {
+					return
+				}
+				if strings.Contains(s, lit) {
+					allowedKeys[k] = struct{}{}
+				}
+			}
+			addIfLiteral(tc.HTTPReq.URL)
+			addIfLiteral(tc.HTTPReq.Body)
+			for _, hv := range tc.HTTPReq.Header {
+				addIfLiteral(hv)
+			}
+		}
+
+		if updateTemplatesFromJSON(logger, respBody, allowedKeys) {
 			// Persist change to testset template if replay layer provided such a method via context (optional future extension)
 			logger.Info("templates updated inside SimulateHTTP", zap.String("testSet", testSet), zap.Any("templates", utils.TemplatizedValues))
 		}
