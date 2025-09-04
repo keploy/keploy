@@ -273,6 +273,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().StringP("pcap-path", "c", ".", "Path to the pcap file used to replay the network packets")
 		cmd.Flags().StringP("mocks-path", "m", ".", "Path to the directory where mock should be stored")
 		cmd.Flags().Uint32("dest-port", 16790, "Port used by the mock server to replay the db network packets")
+		cmd.Flags().Bool("no-preserve-timing", false, "Disable preserve the timing between the packets while replaying")
 
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
@@ -1029,6 +1030,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.PacketReplay.DestPort = destPort
+
+		disablePreserveTime, err := cmd.Flags().GetBool("no-preserve-timing")
+		if err != nil {
+			errMsg := "failed to get the disable preserve time flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.PacketReplay.PreserveTiming = !disablePreserveTime
 	}
 
 	return nil

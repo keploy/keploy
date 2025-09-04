@@ -62,7 +62,7 @@ func (o *Orchestrator) StartNetworkPacketReplay(ctx context.Context) error {
 		ctx,
 		o.logger,
 		packet.ReplayOptions{
-			PreserveTiming: packet.PreserveTiming,
+			PreserveTiming: o.config.PacketReplay.PreserveTiming,
 			WriteDelay:     packet.WriteDelay,
 			DestPort:       uint16(o.config.PacketReplay.DestPort),
 		},
