@@ -5,12 +5,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/google/go-cmp/cmp"
 )
 
 func EqualProtoscope(a, b string) (bool, string, error) {
@@ -24,7 +25,7 @@ func EqualProtoscope(a, b string) (bool, string, error) {
 	}
 	ca := Canonicalize(na)
 	cb := Canonicalize(nb)
-	if reflect.DeepEqual(ca, cb) {
+	if cmp.Equal(ca, cb) {
 		return true, "", nil
 	}
 	ja := mustPrettyJSON(ca)
