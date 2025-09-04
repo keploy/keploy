@@ -391,7 +391,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 
 			}
 		}
-
+		// time.Sleep(100 * time.Millisecond)
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSet, o.logger, o.config.Test.APITimeout)
 		if err != nil {
 			utils.LogError(o.logger, err, "failed to simulate HTTP request")
