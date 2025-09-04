@@ -39,12 +39,19 @@ type Config struct {
 	KeployNetwork         string       `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
 	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
 	Contract              Contract     `json:"contract" yaml:"contract" mapstructure:"contract"`
+	TestSuite             TestSuite    `json:"testSuite" yaml:"testSuite" mapstructure:"testSuite"`
 
 	InCi           bool   `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
 	InstallationID string `json:"-" yaml:"-" mapstructure:"-"`
 	Version        string `json:"-" yaml:"-" mapstructure:"-"`
 	APIServerURL   string `json:"-" yaml:"-" mapstructure:"-"`
 	GitHubClientID string `json:"-" yaml:"-" mapstructure:"-"`
+}
+
+type TestSuite struct {
+	TSPath  string `json:"tsPath" yaml:"tsPath" mapstructure:"tsPath"`
+	TSFile  string `json:"tsFile" yaml:"tsFile" mapstructure:"tsFile"`
+	BaseURL string `json:"baseUrl" yaml:"baseUrl" mapstructure:"baseUrl"`
 }
 
 type UtGen struct {
