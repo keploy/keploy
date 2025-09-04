@@ -35,7 +35,6 @@ runs:
         package proxy
 
         import (
-          _ "github.com/keploy/integrations/pkg/grpc"
           _ "github.com/keploy/integrations/pkg/grpcV2"
           _ "github.com/keploy/integrations/pkg/postgres/v1"
           _ "github.com/keploy/integrations/pkg/mongo"

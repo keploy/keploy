@@ -130,6 +130,7 @@ require (
 
 require (
 	github.com/golang/glog v1.2.4 // indirect
+	github.com/keploy/integrations v0.0.0-20250904095617-c10f41356ff9 // indirect
 	github.com/perimeterx/marshmallow v1.1.5 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20241121165744-79df5c4772f2 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
