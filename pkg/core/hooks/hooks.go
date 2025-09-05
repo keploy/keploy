@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -106,7 +107,9 @@ type Hooks struct {
 	cgBind4           link.Link
 	cgBind6           link.Link
 	skLookup          link.Link
-
+	// bind              link.Link
+	bindEnter link.Link
+	// bindExit  kprobe.Link
 	// Maps needed by the proxy
 	InboundMeta *ebpf.Map
 	Events      *ebpf.Map
@@ -190,7 +193,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	h.dockerAppRegistrationMap = objs.DockerAppRegistrationMap
 	h.objects = objs
 	h.objectsMutex.Unlock()
-
+	h.objects.BindFilterResults = objs.BindFilterResults
 	// ---------------
 
 	// ----- used in case of wsl -----
@@ -200,6 +203,44 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 		return err
 	}
 	h.socket = socket
+
+
+	switch runtime.GOARCH {
+	case "amd64":
+		h.logger.Info("Attaching x86_64 (amd64) kprobes for bind syscall.")
+		// Attach the kprobe for bind syscall entry on x86
+		h.bindEnter, err = link.Kprobe("__x64_sys_bind", objs.HandleBindEnterX86, nil)
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to attach kprobe to __x64_sys_bind")
+			return err
+		}
+		// Attach the kretprobe for bind syscall exit on x86
+		// h.bindExit, err = link.Kretprobe("__x64_sys_bind", objs.HandleBindExitX86, nil)
+		// if err != nil {
+		// 	utils.LogError(h.logger, err, "failed to attach kretprobe to __x64_sys_bind")
+		// 	return err
+		// }
+
+	case "arm64":
+		h.logger.Info("Attaching arm64 kprobes for bind syscall.")
+		// Attach the kprobe for bind syscall entry on arm64
+		h.bindEnter, err = link.Kprobe("__arm64_sys_bind", objs.HandleBindEnterArm, nil)
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to attach kprobe to __arm64_sys_bind")
+			return err
+		}
+		// Attach the kretprobe for bind syscall exit on arm64
+		// h.bindExit, err = link.Kretprobe("__arm64_sys_bind", objs.HandleBindExitArm, nil)
+		// if err != nil {
+		// 	utils.LogError(h.logger, err, "failed to attach kretprobe to __arm64_sys_bind")
+		// 	return err
+		// }
+
+	default:
+		err = fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
+		utils.LogError(h.logger, err, "failed to attach bind hooks")
+		return err
+	}
 
 	if !opts.E2E {
 		h.redirectProxyMap = objs.RedirectProxyMap
@@ -373,6 +414,12 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	}
 	h.connect = cnt
 
+	// bind,err := link.Kprobe("__x64_sys_bind", objs.HandleBindEnter, nil)
+	// if err != nil {
+	// 	utils.LogError(h.logger, err, "failed to attach the kprobe hook on sys_bind")
+	// }
+
+	// h.bind = bind
 	//Opening a kretprobe at the exit of connect syscall
 	cntr, err := link.Kretprobe("sys_connect", objs.SyscallProbeRetConnect, &link.KprobeOptions{RetprobeMaxActive: h.retprobeMaxActive})
 	if err != nil {
@@ -760,6 +807,14 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 	if err := h.connect.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the connect")
 	}
+	// if err := h.bind.Close(); err != nil {
+	// 	utils.LogError(h.logger, err, "failed to close the connect")
+	// }
+	if h.bindEnter != nil {
+        if err := h.bindEnter.Close(); err != nil {
+            utils.LogError(h.logger, err, "failed to close the bind enter kprobe")
+        }
+    }
 
 	if err := h.connectRet.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the connectRet")

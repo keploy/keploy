@@ -54,6 +54,8 @@ type bpfSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfProgramSpecs struct {
+	HandleBindEnterArm               *ebpf.ProgramSpec `ebpf:"handle_bind_enter_arm"`
+	HandleBindEnterX86               *ebpf.ProgramSpec `ebpf:"handle_bind_enter_x86"`
 	K_bind4                          *ebpf.ProgramSpec `ebpf:"k_bind4"`
 	K_bind6                          *ebpf.ProgramSpec `ebpf:"k_bind6"`
 	K_connect4                       *ebpf.ProgramSpec `ebpf:"k_connect4"`
@@ -101,6 +103,7 @@ type bpfMapSpecs struct {
 	ActiveWriteArgsMap          *ebpf.MapSpec `ebpf:"active_write_args_map"`
 	AllowedPids                 *ebpf.MapSpec `ebpf:"allowed_pids"`
 	AppChildKernelPidMap        *ebpf.MapSpec `ebpf:"app_child_kernel_pid_map"`
+	BindFilterResults           *ebpf.MapSpec `ebpf:"bind_filter_results"`
 	Cfg                         *ebpf.MapSpec `ebpf:"cfg"`
 	ConnInfoMap                 *ebpf.MapSpec `ebpf:"conn_info_map"`
 	CurrentSockMap              *ebpf.MapSpec `ebpf:"current_sock_map"`
@@ -157,6 +160,7 @@ type bpfMaps struct {
 	ActiveWriteArgsMap          *ebpf.Map `ebpf:"active_write_args_map"`
 	AllowedPids                 *ebpf.Map `ebpf:"allowed_pids"`
 	AppChildKernelPidMap        *ebpf.Map `ebpf:"app_child_kernel_pid_map"`
+	BindFilterResults           *ebpf.Map `ebpf:"bind_filter_results"`
 	Cfg                         *ebpf.Map `ebpf:"cfg"`
 	ConnInfoMap                 *ebpf.Map `ebpf:"conn_info_map"`
 	CurrentSockMap              *ebpf.Map `ebpf:"current_sock_map"`
@@ -189,6 +193,7 @@ func (m *bpfMaps) Close() error {
 		m.ActiveWriteArgsMap,
 		m.AllowedPids,
 		m.AppChildKernelPidMap,
+		m.BindFilterResults,
 		m.Cfg,
 		m.ConnInfoMap,
 		m.CurrentSockMap,
@@ -224,6 +229,8 @@ type bpfVariables struct {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfPrograms struct {
+	HandleBindEnterArm               *ebpf.Program `ebpf:"handle_bind_enter_arm"`
+	HandleBindEnterX86               *ebpf.Program `ebpf:"handle_bind_enter_x86"`
 	K_bind4                          *ebpf.Program `ebpf:"k_bind4"`
 	K_bind6                          *ebpf.Program `ebpf:"k_bind6"`
 	K_connect4                       *ebpf.Program `ebpf:"k_connect4"`
@@ -263,6 +270,8 @@ type bpfPrograms struct {
 
 func (p *bpfPrograms) Close() error {
 	return _BpfClose(
+		p.HandleBindEnterArm,
+		p.HandleBindEnterX86,
 		p.K_bind4,
 		p.K_bind6,
 		p.K_connect4,
