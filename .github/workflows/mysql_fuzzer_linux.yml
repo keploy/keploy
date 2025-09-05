@@ -32,13 +32,20 @@ jobs:
         uses: ./.github/actions/download-binary
         with:
           src: ${{ matrix.replay_src }}
+      
+      - name: Print Variables for Debugging
+        run: |
+          echo "AWS Access Key ID: ${{ vars.AWS_ACCESS_KEY_ID }}"
+          echo "AWS Region: ${{ vars.AWS_DEFAULT_REGION }}"
+          echo "AWS S3 Bucket: ${{ vars.AWS_S3_BUCKET }}"
+
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION }}
+          aws-secret-access-key: "sjfdlaksf"
+          aws-region: ${{ vars.AWS_DEFAULT_REGION }}
 
       - name: Download and Extract Fuzzer
         id: fuzzer
