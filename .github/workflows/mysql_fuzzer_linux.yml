@@ -1,6 +1,9 @@
 name: MySQL Fuzzer On Linux
 on:
   workflow_call:
+    secrets:
+      AWS_SECRET_ACCESS_KEY:
+        required: true
 
 jobs:
   mysql_fuzzer_linux:
@@ -43,8 +46,8 @@ jobs:
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: "sjfdlaksf"
           aws-region: ${{ vars.AWS_DEFAULT_REGION }}
 
       - name: Download and Extract Fuzzer
@@ -62,5 +65,5 @@ jobs:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
         run: |
-          cd samples-go/echo-mysql
-          source ./../../.github/workflows/test_workflow_scripts/mysql-fuzzer-linux.sh
+          tree
+          source ./.github/workflows/test_workflow_scripts/mysql-fuzzer-linux.sh
