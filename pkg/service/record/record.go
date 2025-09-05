@@ -145,6 +145,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 
 	errGrp.Go(func() error {
 		for testCase := range frames.Incoming {
+			testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
 			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
 			if err != nil {
 				if ctx.Err() == context.Canceled {

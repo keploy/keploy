@@ -42,7 +42,7 @@ require (
 	github.com/google/certificate-transparency-go v1.2.1 // indirect
 	github.com/google/gnostic-models v0.6.9 // indirect
 	github.com/hashicorp/hcl v1.0.1-vault-7 // indirect
-	github.com/invopop/yaml v0.3.1 // indirect
+	github.com/invopop/yaml v0.3.1
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/magiconair/properties v1.8.9 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
