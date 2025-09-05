@@ -137,7 +137,7 @@ func applyTemplateValue(logger *zap.Logger, key string, oldVal, newVal interface
 	if currentStr == newStr {
 		return false
 	}
-	logger.Info("updating template value", zap.String("key", key), zap.Any("old_value", oldVal), zap.Any("new_value", final))
+	logger.Debug("updating template value", zap.String("key", key), zap.Any("old_value", oldVal), zap.Any("new_value", final))
 	utils.TemplatizedValues[key] = final
 	return true
 }

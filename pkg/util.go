@@ -104,12 +104,14 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	//TODO: adjust this logic in the render function in order to remove the redundant code
 	// convert testcase to string and render the template values.
+	// Render any template values in the test case before simulation.
 	if len(utils.TemplatizedValues) > 0 || len(utils.SecretValues) > 0 {
 		testCaseStr, err := json.Marshal(tc)
 		if err != nil {
-			utils.LogError(logger, err, "failed to marshal the testcase")
+			utils.LogError(logger, err, "failed to marshal the testcase for templating")
 			return nil, err
 		}
+
 		funcMap := template.FuncMap{
 			"int":    utils.ToInt,
 			"string": utils.ToString,
@@ -126,24 +128,25 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		// Prepare the data for template execution.
 		templateData := make(map[string]interface{})
 		for k, v := range utils.TemplatizedValues {
-			data[k] = v
+			templateData[k] = v
+		}
+		if len(utils.SecretValues) > 0 {
+			templateData["secret"] = utils.SecretValues
 		}
 
-		if len(utils.SecretValues) > 0 {
-			data["secret"] = utils.SecretValues
-		}
 		var output bytes.Buffer
 		// Execute template with the populated templateData (previously an empty data map was passed here)
 		err = tmpl.Execute(&output, templateData)
 
 		if err != nil {
-			utils.LogError(logger, err, "failed to execute the template")
-			return nil, err
+			utils.LogError(logger, err, "failed to render some template values", zap.String("TestCase", tc.Name), zap.String("TestSet", testSet))
 		}
-		testCaseStr = output.Bytes()
-		err = json.Unmarshal([]byte(testCaseStr), &tc)
+
+		// Unmarshal the rendered string back into the test case struct.
+		renderedBytes := output.Bytes()
+		err = json.Unmarshal(renderedBytes, &tc)
 		if err != nil {
-			utils.LogError(logger, err, "failed to unmarshal the testcase")
+			utils.LogError(logger, err, "failed to unmarshal the rendered testcase", zap.String("RenderedString", string(renderedBytes)))
 			return nil, err
 		}
 	}
@@ -158,12 +161,13 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 			return nil, err
 		}
 	}
+
 	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
 
-	fmt.Println("Request body:", string(reqBody))
-	fmt.Println("Request URL:", tc.HTTPReq.URL)
-	fmt.Println("Request Method:", string(tc.HTTPReq.Method))
-	fmt.Println("Request Headers:", tc.HTTPReq.Header)
+	// fmt.Println("Request body:", string(reqBody))
+	// fmt.Println("Request URL:", tc.HTTPReq.URL)
+	// fmt.Println("Request Method:", string(tc.HTTPReq.Method))
+	// fmt.Println("Request Headers:", tc.HTTPReq.Header)
 
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, bytes.NewBuffer(reqBody))
 	if err != nil {
@@ -261,10 +265,13 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}
 
+	statusMessage := http.StatusText(httpResp.StatusCode)
+
 	resp = &models.HTTPResp{
-		StatusCode: httpResp.StatusCode,
-		Body:       string(respBody),
-		Header:     ToYamlHTTPHeader(httpResp.Header),
+		StatusCode:    httpResp.StatusCode,
+		StatusMessage: statusMessage,
+		Body:          string(respBody),
+		Header:        ToYamlHTTPHeader(httpResp.Header),
 	}
 
 	// Centralized template update: if response body present and templates exist, update them.
@@ -321,7 +328,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 		if updateTemplatesFromJSON(logger, respBody, allowedKeys) {
 			// Persist change to testset template if replay layer provided such a method via context (optional future extension)
-			logger.Info("templates updated inside SimulateHTTP", zap.String("testSet", testSet), zap.Any("templates", utils.TemplatizedValues))
+			logger.Debug("templates updated inside SimulateHTTP", zap.String("testSet", testSet), zap.Any("templates", utils.TemplatizedValues))
 		}
 	}
 
