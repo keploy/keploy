@@ -49,6 +49,10 @@ func New(logger *zap.Logger, cfg *config.Config, reportDB ReportDB, testDB TestD
 func (r *Report) collectReports(ctx context.Context, runID string, testSetIDs []string) (map[string]*models.TestReport, error) {
 	res := make(map[string]*models.TestReport, len(testSetIDs))
 	for _, ts := range testSetIDs {
+		err := ctx.Err(); 
+		if err != nil {
+			return nil, err
+		}
 		clean := strings.TrimSuffix(ts, ReportSuffix)
 		rep, err := r.reportDB.GetReport(ctx, runID, clean)
 		if err != nil {
@@ -69,6 +73,10 @@ func (r *Report) collectReports(ctx context.Context, runID string, testSetIDs []
 func (r *Report) printSpecificTestCases(ctx context.Context, runID string, testSetIDs []string, ids []string) error {
 	any := false
 	for _, ts := range testSetIDs {
+		err := ctx.Err(); 
+		if err != nil {
+			return err
+		}
 		clean := strings.TrimSuffix(ts, ReportSuffix)
 		rep, err := r.reportDB.GetReport(ctx, runID, clean)
 		if err != nil || rep == nil {
@@ -82,7 +90,7 @@ func (r *Report) printSpecificTestCases(ctx context.Context, runID string, testS
 			continue
 		}
 		any = true
-		if err := r.printTests(sel); err != nil {
+		if err := r.printTests(ctx, sel); err != nil {
 			return err
 		}
 	}
@@ -93,9 +101,13 @@ func (r *Report) printSpecificTestCases(ctx context.Context, runID string, testS
 }
 
 // helper used by both file and DB paths
-func (r *Report) printTests(tests []models.TestResult) error {
+func (r *Report) printTests(ctx context.Context, tests []models.TestResult) error {
 	// Respect full/compact body setting when printing failures
 	for _, t := range tests {
+		err := ctx.Err(); 
+		if err != nil {
+			return err
+		}
 		if t.Status == models.TestStatusFailed {
 			if err := r.printSingleTestReport(t); err != nil {
 				return err
@@ -233,7 +245,7 @@ func (r *Report) filterTestsByIDs(tests []models.TestResult, ids []string) []mod
 func (r *Report) GenerateReport(ctx context.Context) error {
 	if r.config.Report.ReportPath != "" {
 		// File mode (single test-set file)
-		return r.generateReportFromFile(r.config.Report.ReportPath)
+		return r.generateReportFromFile(ctx, r.config.Report.ReportPath)
 	}
 
 	latestRunID, err := r.getLatestTestRunID(ctx)
@@ -283,7 +295,7 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 		return nil
 	}
 
-	if err := r.printFailedTestReports(failedTests); err != nil {
+	if err := r.printFailedTestReports(ctx, failedTests); err != nil {
 		r.logger.Error("failed to print failed test reports", zap.Error(err))
 		return err
 	}
@@ -294,7 +306,7 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 
 // generateReportFromFile loads a report from an absolute file path and prints diffs for failed tests
 // OR summary / specific test cases if flags are set.
-func (r *Report) generateReportFromFile(reportPath string) error {
+func (r *Report) generateReportFromFile(ctx context.Context, reportPath string) error {
 	if !filepath.IsAbs(reportPath) {
 		return fmt.Errorf("report-path must be absolute, got %q", reportPath)
 	}
@@ -322,7 +334,7 @@ func (r *Report) generateReportFromFile(reportPath string) error {
 				r.logger.Warn("No matching test-cases found in file", zap.Strings("ids", r.config.Report.TestCaseIDs))
 				return nil
 			}
-			return r.printTests(sel)
+			return r.printTests(ctx, sel)
 		}
 		// Default: only failed tests
 		failed := r.extractFailedTestsFromResults(tr.Tests)
@@ -330,7 +342,7 @@ func (r *Report) generateReportFromFile(reportPath string) error {
 			r.logger.Info("No failed tests found in the provided report file")
 			return nil
 		}
-		return r.printFailedTestReports(failed)
+		return r.printFailedTestReports(ctx, failed)
 	}
 
 	// Fallback for older/simpler report formats that only contain a 'tests' array.
@@ -367,14 +379,14 @@ func (r *Report) generateReportFromFile(reportPath string) error {
 			r.logger.Warn("No matching test-cases found in file (tests-only parse)", zap.Strings("ids", r.config.Report.TestCaseIDs))
 			return nil
 		}
-		return r.printTests(sel)
+		return r.printTests(ctx, sel)
 	}
 	failed := r.extractFailedTestsFromResults(tests)
 	if len(failed) == 0 {
 		r.logger.Info("No failed tests found in the provided report file")
 		return nil
 	}
-	return r.printFailedTestReports(failed)
+	return r.printFailedTestReports(ctx, failed)
 }
 
 // parseReportTests unmarshals the report data into a fileReport struct.
@@ -433,6 +445,10 @@ func (r *Report) collectFailedTests(ctx context.Context, runID string, testSetID
 	var failedTests []models.TestResult
 
 	for _, testSetID := range testSetIDs {
+		err := ctx.Err(); 
+		if err != nil {
+			return nil, err
+		}
 		cleanTestSetID := strings.TrimSuffix(testSetID, ReportSuffix)
 
 		results, err := r.reportDB.GetReport(ctx, runID, cleanTestSetID)
@@ -465,8 +481,11 @@ func (r *Report) extractFailedTestsFromResults(tests []models.TestResult) []mode
 }
 
 // printFailedTestReports generates and prints reports for all failed tests
-func (r *Report) printFailedTestReports(failedTests []models.TestResult) error {
+func (r *Report) printFailedTestReports(ctx context.Context, failedTests []models.TestResult) error {
 	for _, test := range failedTests {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := r.printSingleTestReport(test); err != nil {
 			return err
 		}
