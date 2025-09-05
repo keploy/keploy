@@ -88,6 +88,21 @@ func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config)
 }
 
 func RunInDocker(ctx context.Context, logger *zap.Logger) error {
+	client, err := docker.New(logger)
+	if err != nil {
+		utils.LogError(logger, err, "failed to initalise docker")
+		return err
+	}
+
+	// create all the volumes from DockerConfig.VolumeMounts
+	for _, volume := range DockerConfig.VolumeMounts {
+		err := client.CreateVolume(ctx, volume, true)
+		if err != nil {
+			utils.LogError(logger, err, "failed to create volume "+volume)
+			return err
+		}
+	}
+
 	//Get the correct keploy alias.
 	keployAlias, err := getAlias(ctx, logger)
 	if err != nil {
@@ -100,11 +115,7 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	for _, arg := range os.Args[1:] {
 		quotedArgs = append(quotedArgs, strconv.Quote(arg))
 	}
-	client, err := docker.New(logger)
-	if err != nil {
-		utils.LogError(logger, err, "failed to initalise docker")
-		return err
-	}
+
 	addKeployNetwork(ctx, logger, client)
 	err = client.CreateVolume(ctx, "debugfs", true)
 	if err != nil {
