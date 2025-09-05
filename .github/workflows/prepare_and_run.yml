@@ -85,3 +85,5 @@ jobs:
   run_mysql_fuzzer_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/mysql_fuzzer_linux.yml
+    secrets:
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
