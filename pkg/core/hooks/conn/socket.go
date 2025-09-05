@@ -64,11 +64,11 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 		utils.LogError(l, err, "failed to start open socket listener")
 		return nil, errors.New("failed to start socket listeners")
 	}
-	err = data(ctx, c, l, dataMap)
-	if err != nil {
-		utils.LogError(l, err, "failed to start data socket listener")
-		return nil, errors.New("failed to start socket listeners")
-	}
+	// err = data(ctx, c, l, dataMap)
+	// if err != nil {
+	// 	utils.LogError(l, err, "failed to start data socket listener")
+	// 	return nil, errors.New("failed to start socket listeners")
+	// }
 	err = exit(ctx, c, l, closeMap)
 	if err != nil {
 		utils.LogError(l, err, "failed to start close socket listener")

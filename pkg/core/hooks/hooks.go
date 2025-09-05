@@ -103,7 +103,13 @@ type Hooks struct {
 	readvRet          link.Link
 	retprobeMaxActive int
 	appID             uint64
-	sockops           link.Link
+	cgBind4           link.Link
+	cgBind6           link.Link
+	skLookup          link.Link
+
+	// Maps needed by the proxy
+	InboundMeta *ebpf.Map
+	Events      *ebpf.Map
 }
 
 func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
@@ -228,23 +234,62 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 		}
 		h.tcpv4Ret = tcpRC4
 
+		//////////////////////////////////////////////////////////////////////////////
+		//////////////////////////////////////////////////////////////////////////////
+
+		h.InboundMeta = objs.InboundMeta
+		h.Events = objs.Events
 		// Get the first-mounted cgroupv2 path.
 		cGroupPath, err := detectCgroupPath(h.logger)
 		if err != nil {
 			utils.LogError(h.logger, err, "failed to detect the cgroup path")
 			return err
 		}
-		so, err := link.AttachCgroup(link.CgroupOptions{
+
+		cg4, err := link.AttachCgroup(link.CgroupOptions{
 			Path:    cGroupPath,
-			Attach:  ebpf.AttachCGroupSockOps,     // Use the modern, correct constant
-			Program: objs.BpfSockopsRedirFiltered, // This is the function name from your eBPF C code
+			Attach:  ebpf.AttachCGroupInet4Bind,
+			Program: objs.K_bind4,
 		})
 		if err != nil {
-			utils.LogError(h.logger, err, "failed to attach the sockops cgroup hook")
+			utils.LogError(h.logger, err, "failed to attach the bind4 cgroup hook")
 			return err
 		}
-		h.sockops = so
-		
+		h.cgBind4 = cg4
+
+		cg6, err := link.AttachCgroup(link.CgroupOptions{
+			Path:    cGroupPath,
+			Attach:  ebpf.AttachCGroupInet6Bind,
+			Program: objs.K_bind6,
+		})
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to attach the bind6 cgroup hook")
+			return err
+		}
+		h.cgBind6 = cg6
+
+		netnsPath := "/proc/self/ns/net" // Or make this configurable
+		netns, err := os.Open(netnsPath)
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to open netns", zap.String("path", netnsPath))
+			return err
+		}
+		defer netns.Close()
+
+		sk, err := link.AttachRawLink(link.RawLinkOptions{
+			Target:  int(netns.Fd()),
+			Program: objs.SteerIngress,
+			Attach:  ebpf.AttachSkLookup,
+		})
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to attach sk_lookup hook")
+			return err
+		}
+		h.skLookup = sk
+		h.logger.Info("Attached ingress redirection hooks.")
+
+		//////////////////////////////////////////////////////////////////////////////
+		//////////////////////////////////////////////////////////////////////////////
 		c4, err := link.AttachCgroup(link.CgroupOptions{
 			Path:    cGroupPath,
 			Attach:  ebpf.AttachCGroupInet4Connect,
@@ -686,11 +731,6 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 		utils.LogError(h.logger, err, "failed to close the readvRet")
 	}
 
-	if h.sockops != nil {
-        if err := h.sockops.Close(); err != nil {
-            utils.LogError(h.logger, err, "failed to close the sockops hook")
-        }
-    }
 	if err := h.close.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the close")
 	}
@@ -724,29 +764,14 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 	if err := h.connectRet.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the connectRet")
 	}
-
+	if h.cgBind4 != nil {
+		h.cgBind4.Close()
+	}
+	if h.cgBind6 != nil {
+		h.cgBind6.Close()
+	}
+	if h.skLookup != nil {
+		h.skLookup.Close()
+	}
 	h.logger.Info("eBPF resources released successfully...")
-}
-
-
-// in hooks.go
-
-func (h *Hooks) UpdateSockmap(listenerFD int) error {
-	// Lock to safely access the eBPF objects
-	h.objectsMutex.Lock()
-	sockMap := h.objects.SockMap
-	h.objectsMutex.Unlock()
-
-	if sockMap == nil {
-		return errors.New("sock_map not found in eBPF objects")
-	}
-
-	key := uint32(0)
-	val := uint32(listenerFD)
-	if err := sockMap.Update(&key, &val, ebpf.UpdateAny); err != nil {
-		return fmt.Errorf("failed to update sockmap with fd %d: %w", listenerFD, err)
-	}
-
-	h.logger.Info("✅ Populated sockmap with proxy listener FD.", zap.Int("fd", listenerFD))
-	return nil
 }
