@@ -42,6 +42,7 @@ var totalTestFailed int
 var totalTestIgnored int
 var totalTestTimeTaken time.Duration
 var failedTCsBySetID = make(map[string][]string)
+var mockMismatchFailures = []string{}
 
 var HookImpl TestHooks
 
@@ -477,6 +478,12 @@ func (r *Replayer) Start(ctx context.Context) error {
 	r.telemetry.TestRun(totalTestPassed, totalTestFailed, len(testSets), testRunStatus)
 
 	if !abortTestRun {
+
+		if !testRunResult && len(mockMismatchFailures) > 0 {
+			testSets := strings.Join(mockMismatchFailures, ", ")
+			r.logger.Warn("Some testsets failed due to mock differences. Please kindly rerecord these testsets to update the mocks.", zap.String("command", fmt.Sprintf("keploy rerecord -c '%s' -t %s", r.config.Command, testSets)))
+		}
+
 		r.printSummary(ctx, testRunResult)
 		coverageData := models.TestCoverage{}
 		var err error
@@ -761,6 +768,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusFailed, err
 	}
 
+	var expectedTestMockMappings = make(map[string][]string)
+	for _, mock := range filteredMocks {
+		for _, tc := range mock.UsedByTests {
+			expectedTestMockMappings[tc] = append(expectedTestMockMappings[tc], mock.Name)
+		}
+	}
+
+	for _, mock := range unfilteredMocks {
+		for _, tc := range mock.UsedByTests {
+			expectedTestMockMappings[tc] = append(expectedTestMockMappings[tc], mock.Name)
+		}
+	}
+
 	pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
 
 	err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{
@@ -877,6 +897,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.logger.Warn("Failed to add secret files to .gitignore", zap.Error(err))
 		}
 	}
+
+	var actualTestMockMappings = make(map[string][]string)
 
 	for idx, testCase := range testCases {
 
@@ -1036,6 +1058,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			testPass, testResult = r.compareGRPCResp(testCase, grpcResp, testSetID)
 		}
 
+		for _, m := range consumedMocks {
+			if _, ok := actualTestMockMappings[testCase.Name]; !ok {
+				actualTestMockMappings[testCase.Name] = []string{m.Name}
+			} else {
+				actualTestMockMappings[testCase.Name] = append(actualTestMockMappings[testCase.Name], m.Name)
+			}
+		}
+
 		if !testPass {
 			// log the consumed mocks during the test run of the test case for test set
 			r.logger.Info("result", zap.String("testcase id", models.HighlightFailingString(testCase.Name)), zap.String("testset id", models.HighlightFailingString(testSetID)), zap.String("passed", models.HighlightFailingString(testPass)))
@@ -1193,6 +1223,35 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
 		}
+	}
+
+	if testSetStatus == models.TestSetStatusPassed && r.instrument {
+		err = r.mockDB.UpdateTestMockReferences(runTestSetCtx, testSetID, actualTestMockMappings)
+		if err != nil {
+			r.logger.Error("Error updating mocks consumed by tests", zap.Error(err))
+		}
+	}
+
+	var failedDueToMockChange bool
+
+	if testSetStatus == models.TestSetStatusFailed {
+
+		for tc, expectedMocks := range expectedTestMockMappings {
+
+			actualMocks, ok := actualTestMockMappings[tc]
+			if !ok || len(expectedMocks) != len(actualMocks) || !CompareMockArrays(expectedMocks, actualMocks) {
+				failedDueToMockChange = true
+				r.logger.Debug("Mock difference for test case",
+					zap.String("testCase", tc),
+					zap.Strings("expectedMocks", expectedMocks),
+					zap.Strings("actualMocks", actualMocks),
+				)
+			}
+		}
+	}
+
+	if failedDueToMockChange {
+		mockMismatchFailures = append(mockMismatchFailures, testSetID)
 	}
 
 	// TODO Need to decide on whether to use global variable or not
@@ -1809,4 +1868,34 @@ func (r *Replayer) UploadMocks(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func CompareMockArrays(arr1, arr2 []string) bool {
+	// Create maps to store the count of each mock in both arrays
+	counts1 := make(map[string]int)
+	counts2 := make(map[string]int)
+
+	// Count occurrences of mocks in the first array
+	for _, mock := range arr1 {
+		counts1[mock]++
+	}
+
+	// Count occurrences of mocks in the second array
+	for _, mock := range arr2 {
+		counts2[mock]++
+	}
+
+	// Compare the counts of mocks in both arrays
+	if len(counts1) != len(counts2) {
+		return false
+	}
+
+	// Check if both maps have identical counts for each mock
+	for mock, count := range counts1 {
+		if counts2[mock] != count {
+			return false
+		}
+	}
+
+	return true
 }

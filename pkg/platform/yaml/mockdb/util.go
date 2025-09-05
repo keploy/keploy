@@ -20,6 +20,7 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		Kind:         mock.Kind,
 		Name:         mock.Name,
 		ConnectionID: mock.ConnectionID,
+		UsedByTests:  mock.UsedByTests,
 	}
 	switch mock.Kind {
 	case models.Mongo:
@@ -192,6 +193,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger) ([]*mo
 			Name:         m.Name,
 			Kind:         m.Kind,
 			ConnectionID: m.ConnectionID,
+			UsedByTests:  m.UsedByTests,
 		}
 		mockCheck := strings.Split(string(m.Kind), "-")
 		if len(mockCheck) > 1 {

@@ -25,6 +25,7 @@ type Mock struct {
 	Spec         MockSpec     `json:"Spec,omitempty" bson:"Spec,omitempty"`
 	TestModeInfo TestModeInfo `json:"TestModeInfo,omitempty"  bson:"TestModeInfo,omitempty"` // Map for additional test mode information
 	ConnectionID string       `json:"ConnectionId,omitempty" bson:"ConnectionId,omitempty"`
+	UsedByTests  []string     `json:"UsedByTests,omitempty" bson:"UsedByTests,omitempty"` // List of test case names which have consumed this mock
 }
 
 type TestModeInfo struct {
