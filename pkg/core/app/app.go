@@ -70,6 +70,8 @@ func (a *App) Setup(_ context.Context) error {
 		return fmt.Errorf("application could not be started in detached mode")
 	}
 
+	a.logger.Info("dedup is enabled", zap.String("cmd is", a.cmd))
+
 	switch a.kind {
 	case utils.DockerRun, utils.DockerStart:
 		err := a.SetupDocker()
