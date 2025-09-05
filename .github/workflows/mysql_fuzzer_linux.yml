@@ -20,10 +20,8 @@ jobs:
             replay_src: build
     name: ${{ matrix.job }}
     steps:
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.24'
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - id: record
         uses: ./.github/actions/download-binary
