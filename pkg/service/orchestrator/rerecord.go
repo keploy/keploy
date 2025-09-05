@@ -391,7 +391,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 
 			}
 		}
-		// time.Sleep(100 * time.Millisecond)
+		
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSet, o.logger, o.config.Test.APITimeout)
 		if err != nil {
 			utils.LogError(o.logger, err, "failed to simulate HTTP request")
@@ -458,7 +458,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 			if err := o.replay.UpdateTestSetTemplate(ctx, testSet, utils.TemplatizedValues); err != nil {
 				o.logger.Warn("failed to persist updated template values during rerecord", zap.String("testSet", testSet), zap.Error(err))
 			} else {
-				o.logger.Debug("updated template values during rerecord", zap.String("testSet", testSet), zap.Any("template", utils.TemplatizedValues))
+				o.logger.Info("updated template values during rerecord", zap.String("testSet", testSet), zap.Any("template", utils.TemplatizedValues))
 			}
 		}
 

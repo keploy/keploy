@@ -72,7 +72,7 @@ type CanonicalConsumer struct {
 	Path      string `yaml:"path"`
 }
 
-// --- V2 Optimized Templatization Logic ---
+// ProcessTestCasesV2 performs templatization on the provided test cases using an optimized approach.
 func (t *Tools) ProcessTestCasesV2(ctx context.Context, tcs []*models.TestCase, testSetID string) error {
 	for _, tc := range tcs {
 		tc.HTTPReq.Body = addQuotesInTemplates(tc.HTTPReq.Body)
@@ -145,7 +145,7 @@ func (t *Tools) ProcessTestCasesV2(ctx context.Context, tcs []*models.TestCase, 
 	return nil
 }
 
-// ... (logAPIChains, formatLocation, buildValueIndexV2, findValuesInInterface remain the same)
+// logAPIChains prints a human-readable representation of the detected template chains.
 func (t *Tools) logAPIChains(chains []*TemplateChain, testCases []*models.TestCase) {
 	if len(chains) == 0 {
 		return
@@ -174,6 +174,7 @@ func (t *Tools) logAPIChains(chains []*TemplateChain, testCases []*models.TestCa
 	fmt.Println("========================")
 }
 
+// UpdateTemplateValues updates the global template values map with values from the HTTP response.
 func formatLocation(loc *ValueLocation, testCases []*models.TestCase) string {
 	if loc == nil || loc.TestCaseIndex >= len(testCases) {
 		return "unknown location"
@@ -191,43 +192,67 @@ func formatLocation(loc *ValueLocation, testCases []*models.TestCase) string {
 	}
 }
 
+// buildValueIndexV2 constructs an index of observed values to their locations in test cases.
 func (t *Tools) buildValueIndexV2(ctx context.Context, tcs []*models.TestCase, reqBodies, respBodies []interface{}) map[string][]*ValueLocation {
+	// Build an inverted index mapping observed values -> list of locations
+	// where that value occurs across all testcases. Locations include
+	// request headers, request URL path segments, request bodies and
+	// response bodies. This index is used later to detect producer ->
+	// consumer chains.
 	valueIndex := make(map[string][]*ValueLocation)
 	for i := range tcs {
-		for k, val := range tcs[i].HTTPReq.Header {
-			loc := &ValueLocation{TestCaseIndex: i, Part: RequestHeader, Path: k, Pointer: &tcs[i].HTTPReq.Header, OriginalType: "string"}
-			if k == "Authorization" && strings.HasPrefix(val, "Bearer ") {
-				token := strings.TrimPrefix(val, "Bearer ")
-				valueIndex[token] = append(valueIndex[token], loc)
-			} else {
-				valueIndex[val] = append(valueIndex[val], loc)
-			}
-		}
+		tc := tcs[i]
+		// collect header values
+		t.addHeaderValuesToIndex(tc, i, valueIndex)
 
-		parsedURL, err := url.Parse(tcs[i].HTTPReq.URL)
-		if err == nil {
-			pathSegments := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
-			for j, segment := range pathSegments {
-				if segment != "" {
-					path := fmt.Sprintf("path.%d", j)
-					loc := &ValueLocation{TestCaseIndex: i, Part: RequestURL, Path: path, Pointer: &tcs[i].HTTPReq.URL, OriginalType: "string"}
-					valueIndex[segment] = append(valueIndex[segment], loc)
-				}
+		// collect URL path segment values
+		t.addURLSegmentsToIndex(tc, i, valueIndex)
 
-			}
-		}
+		// collect values from parsed JSON bodies (request and response)
 		if reqBodies[i] != nil {
 			findValuesInInterface(reqBodies[i], []string{}, valueIndex, i, RequestBody, &reqBodies[i])
 		}
-
 		if respBodies[i] != nil {
 			findValuesInInterface(respBodies[i], []string{}, valueIndex, i, ResponseBody, &respBodies[i])
-
 		}
 	}
 	return valueIndex
 }
 
+// addHeaderValuesToIndex extracts header values and indexes them. For
+// Authorization headers we special-case Bearer tokens and index the token
+// value instead of the full header value.
+func (t *Tools) addHeaderValuesToIndex(tc *models.TestCase, tcIndex int, index map[string][]*ValueLocation) {
+	for k, val := range tc.HTTPReq.Header {
+		loc := &ValueLocation{TestCaseIndex: tcIndex, Part: RequestHeader, Path: k, Pointer: &tc.HTTPReq.Header, OriginalType: "string"}
+		if k == "Authorization" && strings.HasPrefix(val, "Bearer ") {
+			token := strings.TrimPrefix(val, "Bearer ")
+			index[token] = append(index[token], loc)
+		} else {
+			index[val] = append(index[val], loc)
+		}
+	}
+}
+
+// addURLSegmentsToIndex parses the request URL and indexes each non-empty
+// segment as a potential value. Each segment is given a path like
+// "path.0", "path.1" which is later used to reconstruct templated URLs.
+func (t *Tools) addURLSegmentsToIndex(tc *models.TestCase, tcIndex int, index map[string][]*ValueLocation) {
+	parsedURL, err := url.Parse(tc.HTTPReq.URL)
+	if err != nil {
+		return
+	}
+	pathSegments := strings.Split(strings.Trim(parsedURL.Path, "/"), "/")
+	for j, segment := range pathSegments {
+		if segment != "" {
+			path := fmt.Sprintf("path.%d", j)
+			loc := &ValueLocation{TestCaseIndex: tcIndex, Part: RequestURL, Path: path, Pointer: &tc.HTTPReq.URL, OriginalType: "string"}
+			index[segment] = append(index[segment], loc)
+		}
+	}
+}
+
+// findValuesInInterface recursively traverses a JSON-like structure (maps, slices)
 func findValuesInInterface(data interface{}, path []string, index map[string][]*ValueLocation, tcIndex int, part PartType, containerPtr interface{}) {
 	if data == nil {
 		return
@@ -268,116 +293,137 @@ func findValuesInInterface(data interface{}, path []string, index map[string][]*
 	}
 }
 
+// applyTemplatesFromIndexV2 applies templates based on the value index and updates the global template values map.
 func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string][]*ValueLocation, templateConfig map[string]interface{}) []*TemplateChain {
 	var chains []*TemplateChain
 	for value, locations := range index {
+		// We need at least two occurrences to form a producer -> consumer chain
 		if len(locations) < 2 {
 			continue
 		}
 
+		// Sort locations by testcase index so we reliably find a producer
 		sort.Slice(locations, func(i, j int) bool { return locations[i].TestCaseIndex < locations[j].TestCaseIndex })
 
-		var producer *ValueLocation
-		for _, loc := range locations {
-			if loc.Part == ResponseBody || loc.Part == ResponseHeader {
-				producer = loc
-				break
-
-			}
-		}
-
+		// The producer is assumed to be the first occurrence in a response
+		// (response body or response header). If none exist, skip.
+		producer := selectProducer(locations)
 		if producer == nil {
-
 			continue
 		}
 
+		// Consumers are request-side occurrences that happen after the producer
 		var subsequentConsumers []*ValueLocation
 		for _, loc := range locations {
 			if (loc.Part == RequestHeader || loc.Part == RequestURL || loc.Part == RequestBody) && loc.TestCaseIndex > producer.TestCaseIndex {
 				subsequentConsumers = append(subsequentConsumers, loc)
 			}
 		}
-
 		if len(subsequentConsumers) == 0 {
 			continue
 		}
 
-		// --- THIS IS THE CRITICAL FIX ---
-		// Instead of just templatizing the first producer and consumers,
-		// we will templatize ALL occurrences of this value that are either
-		// a producer or a valid consumer.
-		var allOccurrencesToTemplatize []*ValueLocation
-		for _, loc := range locations {
-			isProducer := loc.Part == ResponseBody || loc.Part == ResponseHeader
-			isConsumer := (loc.Part == RequestHeader || loc.Part == RequestURL || loc.Part == RequestBody) && loc.TestCaseIndex >= producer.TestCaseIndex
-
-			if isProducer || isConsumer {
-				allOccurrencesToTemplatize = append(allOccurrencesToTemplatize, loc)
-			}
-		}
-		// --- END OF FIX ---
+		// We will templatize all producer occurrences and any consumer
+		// occurrences that happen at or after the producer's test index.
+		allOccurrencesToTemplatize := gatherAllOccurrencesToTemplatize(locations, producer)
 
 		chain := &TemplateChain{
-			TemplateKey: "", // Will be generated later
+			TemplateKey: "", // generated next
 			Value:       value,
 			Producer:    producer,
 			Consumers:   subsequentConsumers,
 		}
 
+		// Build a base key for the template name from the producer context
 		producerType := producer.OriginalType
-		var baseKey string
-		if producer.Part == RequestURL {
-			baseKey = value
-		} else {
-			baseKey = producer.Path
-			parts := strings.Split(baseKey, ".")
-			if len(parts) > 0 {
-				baseKey = parts[len(parts)-1]
-			}
-			if _, err := strconv.Atoi(baseKey); err == nil {
-				partsFull := strings.Split(producer.Path, ".")
-				parent := "arr"
-				if len(partsFull) >= 2 {
-					parent = partsFull[len(partsFull)-2]
-					for i := len(partsFull) - 2; i >= 0; i-- {
-						if _, numErr := strconv.Atoi(partsFull[i]); numErr != nil {
-							parent = partsFull[i]
-							break
-						}
-					}
-				}
-				baseKey = fmt.Sprintf("%s_ix_%s", sanitizeKey(parent), baseKey)
-
-			}
-		}
+		baseKey := baseKeyFromProducer(producer, value)
 
 		templateKey := insertUnique(baseKey, value, templateConfig)
 		chain.TemplateKey = templateKey
 		chains = append(chains, chain)
 
-		// Use the new, complete list of all occurrences to modify.
+		// Compose the template string and apply it to every occurrence
+		templateString := fmt.Sprintf("{{%s .%s}}", producerType, templateKey)
 		for _, loc := range allOccurrencesToTemplatize {
-			templateString := fmt.Sprintf("{{%s .%s}}", producerType, templateKey)
-			if loc.Part == RequestHeader {
-				if headerMap, ok := loc.Pointer.(*map[string]string); ok {
-					originalHeaderValue := (*headerMap)[loc.Path]
-					if loc.Path == "Authorization" && strings.HasPrefix(originalHeaderValue, "Bearer ") {
-						(*headerMap)[loc.Path] = "Bearer " + templateString
-					} else {
-						(*headerMap)[loc.Path] = templateString
-					}
-				}
-			} else if loc.Part == RequestURL {
-				if urlPtr, ok := loc.Pointer.(*string); ok {
-					reconstructURL(urlPtr, loc.Path, templateString)
-				}
-			} else {
-				setValueByPath(loc.Pointer, loc.Path, templateString)
-
-			}
+			applyTemplateToLocation(templateString, loc)
 		}
 	}
 	return chains
+}
+
+// selectProducer picks the first response occurrence from locations.
+func selectProducer(locations []*ValueLocation) *ValueLocation {
+	for _, loc := range locations {
+		if loc.Part == ResponseBody || loc.Part == ResponseHeader {
+			return loc
+		}
+	}
+	return nil
+}
+
+// gatherAllOccurrencesToTemplatize returns every location which is either a
+// producer or a consumer (request-side) occurring at or after the producer.
+func gatherAllOccurrencesToTemplatize(locations []*ValueLocation, producer *ValueLocation) []*ValueLocation {
+	var out []*ValueLocation
+	for _, loc := range locations {
+		isProducer := loc.Part == ResponseBody || loc.Part == ResponseHeader
+		isConsumer := (loc.Part == RequestHeader || loc.Part == RequestURL || loc.Part == RequestBody) && loc.TestCaseIndex >= producer.TestCaseIndex
+		if isProducer || isConsumer {
+			out = append(out, loc)
+		}
+	}
+	return out
+}
+
+// baseKeyFromProducer derives a sensible base key for template naming from
+// the producer location. It mirrors the original code's heuristics for
+// array indices and parent names.
+func baseKeyFromProducer(producer *ValueLocation, value string) string {
+	if producer.Part == RequestURL {
+		return value
+	}
+	baseKey := producer.Path
+	parts := strings.Split(baseKey, ".")
+	if len(parts) > 0 {
+		baseKey = parts[len(parts)-1]
+	}
+	if _, err := strconv.Atoi(baseKey); err == nil {
+		partsFull := strings.Split(producer.Path, ".")
+		parent := "arr"
+		if len(partsFull) >= 2 {
+			parent = partsFull[len(partsFull)-2]
+			for i := len(partsFull) - 2; i >= 0; i-- {
+				if _, numErr := strconv.Atoi(partsFull[i]); numErr != nil {
+					parent = partsFull[i]
+					break
+				}
+			}
+		}
+		baseKey = fmt.Sprintf("%s_ix_%s", sanitizeKey(parent), baseKey)
+	}
+	return baseKey
+}
+
+// applyTemplateToLocation updates the underlying container referenced by loc
+// to replace the matched value with the provided template string. Different
+// handling is required for headers, URL segments and JSON body values.
+func applyTemplateToLocation(templateString string, loc *ValueLocation) {
+	if loc.Part == RequestHeader {
+		if headerMap, ok := loc.Pointer.(*map[string]string); ok {
+			originalHeaderValue := (*headerMap)[loc.Path]
+			if loc.Path == "Authorization" && strings.HasPrefix(originalHeaderValue, "Bearer ") {
+				(*headerMap)[loc.Path] = "Bearer " + templateString
+			} else {
+				(*headerMap)[loc.Path] = templateString
+			}
+		}
+	} else if loc.Part == RequestURL {
+		if urlPtr, ok := loc.Pointer.(*string); ok {
+			reconstructURL(urlPtr, loc.Path, templateString)
+		}
+	} else {
+		setValueByPath(loc.Pointer, loc.Path, templateString)
+	}
 }
 
 // In your tools package (tools.go)
@@ -539,9 +585,7 @@ func normalizeCanonicalChains(chains []CanonicalChain) {
 	}
 }
 
-// In your tools package (tools.go)
-// REPLACE this entire function.
-
+// compareChainSets compares the fuzzer's chains with Keploy's detected chains and generates a report.
 func (t *Tools) compareChainSets(fuzzerChains, keployChains []CanonicalChain) (bool, string) {
 	var report strings.Builder
 	passed := true
@@ -670,6 +714,7 @@ func sanitizeKey(k string) string {
 	return k
 }
 
+// reconstructURL replaces the specified path segment in the URL with the template string.
 func reconstructURL(urlPtr *string, segmentPath string, template string) {
 	parsedURL, err := url.Parse(*urlPtr)
 	if err != nil {
@@ -691,6 +736,7 @@ func reconstructURL(urlPtr *string, segmentPath string, template string) {
 	*urlPtr = reconstructed
 }
 
+// setValueByPath sets a value in a nested structure (map/slice) given a dot-separated path.
 func setValueByPath(root interface{}, path string, value interface{}) {
 	parts := strings.Split(path, ".")
 	var current interface{} = root
@@ -724,6 +770,7 @@ func setValueByPath(root interface{}, path string, value interface{}) {
 	}
 }
 
+// RenderIfTemplatized checks if the value is a string containing template markers and renders it if so.
 func RenderIfTemplatized(val interface{}) (bool, interface{}, error) {
 	stringVal, ok := val.(string)
 	if !ok {
@@ -739,6 +786,7 @@ func RenderIfTemplatized(val interface{}) (bool, interface{}, error) {
 	return true, val, nil
 }
 
+// render processes the template string and returns the rendered value.
 func render(val string) (interface{}, error) {
 	funcMap := template.FuncMap{
 		"int":    utils.ToInt,
@@ -780,6 +828,7 @@ func render(val string) (interface{}, error) {
 	return outputString, nil
 }
 
+// insertUnique adds the baseKey to myMap with the given value, ensuring uniqueness by appending an index if necessary.
 func insertUnique(baseKey, value string, myMap map[string]interface{}) string {
 	baseKey = strings.ToLower(baseKey)
 	baseKey = strings.ReplaceAll(baseKey, "-", "")
@@ -802,6 +851,7 @@ func insertUnique(baseKey, value string, myMap map[string]interface{}) string {
 	return key
 }
 
+// removeQuotesInTemplates removes extraneous quotes around template expressions in JSON strings.
 func removeQuotesInTemplates(jsonStr string) string {
 	re := regexp.MustCompile(`"\{\{[^{}]*\}\}"`)
 	return re.ReplaceAllStringFunc(jsonStr, func(match string) string {
@@ -813,6 +863,7 @@ func removeQuotesInTemplates(jsonStr string) string {
 	})
 }
 
+// addQuotesInTemplates adds quotes around template expressions in JSON strings where missing.
 func addQuotesInTemplates(jsonStr string) string {
 	if jsonStr == "" {
 		return ""
