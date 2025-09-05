@@ -317,3 +317,92 @@ func (ys *MockYaml) GetHTTPMocks(ctx context.Context, testSetID string, mockPath
 
 	return httpMocks, nil
 }
+
+func (ys *MockYaml) UpdateTestMockReferences(ctx context.Context, testSetID string, usedMocksByTests map[string][]string) error {
+	mockFileName := "mocks"
+	if ys.MockName != "" {
+		mockFileName = ys.MockName
+	}
+	path := filepath.Join(ys.MockPath, testSetID)
+	ys.Logger.Debug("logging the names of the unused mocks to be removed", zap.Any("usedMocksByTests", usedMocksByTests), zap.String("for testset", testSetID), zap.String("at_path", filepath.Join(path, mockFileName+".yaml")))
+
+	// Read the mocks from the yaml file
+	mockPath, err := yaml.ValidatePath(filepath.Join(path, mockFileName+".yaml"))
+	if err != nil {
+		utils.LogError(ys.Logger, err, "failed to read mocks due to inaccessible path", zap.String("at_path", filepath.Join(path, mockFileName+".yaml")))
+		return err
+	}
+	if _, err := os.Stat(mockPath); err != nil {
+		utils.LogError(ys.Logger, err, "failed to find the mocks yaml file")
+		return err
+	}
+	data, err := yaml.ReadFile(ctx, ys.Logger, path, mockFileName)
+	if err != nil {
+		utils.LogError(ys.Logger, err, "failed to read the mocks from yaml file", zap.String("at_path", filepath.Join(path, mockFileName+".yaml")))
+		return err
+	}
+
+	// decode the mocks read from the yaml file
+	dec := yamlLib.NewDecoder(bytes.NewReader(data))
+	var mockYamls []*yaml.NetworkTrafficDoc
+	for {
+		var doc *yaml.NetworkTrafficDoc
+		err := dec.Decode(&doc)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			utils.LogError(ys.Logger, err, "failed to decode the yaml file documents", zap.String("at_path", filepath.Join(path, mockFileName+".yaml")))
+			return fmt.Errorf("failed to decode the yaml file documents. error: %v", err.Error())
+		}
+		mockYamls = append(mockYamls, doc)
+	}
+	mocks, err := decodeMocks(mockYamls, ys.Logger)
+	if err != nil {
+		return err
+	}
+
+	var mocksTestCases = make(map[string][]string)
+	for testName, mockState := range usedMocksByTests {
+		for _, state := range mockState {
+			if _, ok := mocksTestCases[state]; !ok {
+				mocksTestCases[state] = []string{testName}
+			} else {
+				mocksTestCases[state] = append(mocksTestCases[state], testName)
+			}
+		}
+	}
+
+	for _, mock := range mocks {
+		if testCases, ok := mocksTestCases[mock.Name]; ok {
+			mock.UsedByTests = testCases
+		}
+	}
+
+	// remove the old mock yaml file
+	err = os.Remove(filepath.Join(path, mockFileName+".yaml"))
+	if err != nil {
+		return err
+	}
+
+	// write the new mocks to the new yaml file
+	for _, newMock := range mocks {
+		mockYaml, err := EncodeMock(newMock, ys.Logger)
+		if err != nil {
+			utils.LogError(ys.Logger, err, "failed to encode the mock to yaml", zap.String("mock", newMock.Name), zap.String("for testset", testSetID))
+			return err
+		}
+		data, err = yamlLib.Marshal(&mockYaml)
+		if err != nil {
+			utils.LogError(ys.Logger, err, "failed to marshal the mock to yaml", zap.String("mock", newMock.Name), zap.String("for testset", testSetID))
+			return err
+		}
+		err = yaml.WriteFile(ctx, ys.Logger, path, mockFileName, data, true)
+		if err != nil {
+			utils.LogError(ys.Logger, err, "failed to write the mock to yaml", zap.String("mock", newMock.Name), zap.String("for testset", testSetID))
+			return err
+		}
+	}
+
+	return nil
+}

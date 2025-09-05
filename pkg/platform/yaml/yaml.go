@@ -36,6 +36,7 @@ type NetworkTrafficDoc struct {
 	Spec         yamlLib.Node   `json:"spec" yaml:"spec"`
 	Curl         string         `json:"curl" yaml:"curl,omitempty"`
 	ConnectionID string         `json:"connectionId" yaml:"connectionId,omitempty"`
+	UsedByTests  []string       `json:"usedByTests,omitempty" yaml:"usedByTests,omitempty"` // List of test case names which have consumed this mock
 }
 
 // ctxReader wraps an io.Reader with a context for cancellation support
