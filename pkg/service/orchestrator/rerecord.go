@@ -394,8 +394,8 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 			zap.String("testcase", tc.Name),
 			zap.Int("response_code", resp.StatusCode),
 		)
-		// Compare the new response with the original test case response and show diff
-		if resp != nil {
+		// Compare the new response with the original test case response and show diff (optional via flag)
+		if o.config.ReRecord.ShowDiff && resp != nil {
 			o.showResponseDiff(&originalTestCase, resp, testSet)
 		}
 
