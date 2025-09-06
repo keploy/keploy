@@ -15,6 +15,7 @@ type HookOptions struct {
 	Port          uint32 // used for e2e filtering
 	Persister     TestCasePersister
 	Incoming      IncomingOptions
+	BigPayload    bool
 }
 
 type OutgoingOptions struct {

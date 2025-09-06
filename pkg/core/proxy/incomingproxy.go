@@ -13,18 +13,19 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/cilium/ebpf/ringbuf"
+	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 )
 
-// --- Structs (must match BPF) ---
-// --- Structs (must match BPF) ---
 type IngressEvent struct {
 	PID     uint32
 	Family  uint16
@@ -33,23 +34,16 @@ type IngressEvent struct {
 	_       uint16 // Padding
 }
 type TestCaseCreator interface {
-	// The signature now includes the channel and other context.
 	Create(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, reqData, respData []byte, reqTime, respTime time.Time, opts models.IncomingOptions) error
+	CreateGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, stream *pkg.HTTP2Stream) error
 }
 
-// type TestCasePersister func(ctx context.Context, testCase *models.TestCase) error
-
-// ProxyDependencies holds everything the proxy needs to run and record.
 type ProxyDependencies struct {
 	Logger    *zap.Logger
 	Persister models.TestCasePersister
 }
 
-// --- Ingress Proxy Manager ---
-
 type proxyStop func() error
-
-// IngressProxyManager manages the lifecycle of individual ingress proxies.
 
 type IngressProxyManager struct {
 	mu        sync.Mutex
@@ -63,15 +57,10 @@ type IngressProxyManager struct {
 	incomingOpts models.IncomingOptions
 }
 
-// NewIngressProxyManager creates a new manager for ingress proxies.
-
 func NewIngressProxyManager(ctx context.Context, logger *zap.Logger, deps ProxyDependencies, tcCreator TestCaseCreator, incomingOpts models.IncomingOptions) *IngressProxyManager {
 
 	pm := &IngressProxyManager{
-		// active: make(map[uint16]proxyStop),
-		logger: logger,
-		// tcChan:    tcChan,
-		// tcCreator: tcCreator,
+		logger:       logger,
 		tcChan:       make(chan *models.TestCase, 100),
 		active:       make(map[uint16]proxyStop),
 		deps:         deps,
@@ -152,8 +141,6 @@ func ListenForIngressEvents(ctx context.Context, h *hooks.Hooks, pm *IngressProx
 	}
 }
 
-// --- TCP Forwarder Logic ---
-
 // runTCPForwarder starts a basic proxy that forwards traffic and logs data.
 
 func runTCPForwarder(logger *zap.Logger, listenAddr, upstreamAddr string, pm *IngressProxyManager, tcCreator TestCaseCreator, opts models.IncomingOptions) func() error {
@@ -190,7 +177,7 @@ func runTCPForwarder(logger *zap.Logger, listenAddr, upstreamAddr string, pm *In
 				logger.Debug("Stopping ingress accept loop.", zap.Error(err))
 				return
 			}
-			go handleConnection(pm.ctx, clientConn, upstreamAddr, logger, pm.tcChan, pm, tcCreator, opts)
+			go handleConnection(pm.ctx, clientConn, upstreamAddr, logger, pm.tcChan, tcCreator, opts)
 		}
 	}()
 	return func() error {
@@ -201,10 +188,29 @@ func runTCPForwarder(logger *zap.Logger, listenAddr, upstreamAddr string, pm *In
 	}
 }
 
-func handleConnection(ctx context.Context, clientConn net.Conn, upstreamAddr string, logger *zap.Logger, t chan *models.TestCase, pm *IngressProxyManager, tcCreator TestCaseCreator, opts models.IncomingOptions) {
+const clientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+
+func handleConnection(ctx context.Context, clientConn net.Conn, upstreamAddr string, logger *zap.Logger, t chan *models.TestCase, tcCreator TestCaseCreator, opts models.IncomingOptions) {
 	defer clientConn.Close()
 	logger.Debug("Accepted ingress connection", zap.String("client", clientConn.RemoteAddr().String()))
 
+	clientReader := bufio.NewReader(clientConn)
+	preface, err := clientReader.Peek(len(clientPreface))
+	if err != nil {
+		logger.Debug("Could not peek for HTTP/2 preface, assuming HTTP/1.x", zap.Error(err))
+		handleHttp1Connection(ctx, clientConn, clientReader, upstreamAddr, logger, t, tcCreator, opts)
+		return
+	}
+
+	if bytes.Equal(preface, []byte(clientPreface)) {
+		logger.Info("Detected HTTP/2 (gRPC) connection")
+		handleHttp2ConnectionWithProxy(ctx, clientConn, upstreamAddr, logger, t, tcCreator)
+	} else {
+		logger.Info("Detected HTTP/1.x connection")
+		handleHttp1Connection(ctx, clientConn, clientReader, upstreamAddr, logger, t, tcCreator, opts)
+	}
+}
+func handleHttp1Connection(ctx context.Context, clientConn net.Conn, clientReader *bufio.Reader, upstreamAddr string, logger *zap.Logger, t chan *models.TestCase, tcCreator TestCaseCreator, opts models.IncomingOptions) {
 	upConn, err := net.DialTimeout("tcp4", upstreamAddr, 3*time.Second)
 	if err != nil {
 		logger.Warn("Failed to dial upstream backend", zap.String("backend", upstreamAddr), zap.Error(err))
@@ -212,74 +218,8 @@ func handleConnection(ctx context.Context, clientConn net.Conn, upstreamAddr str
 	}
 	defer upConn.Close()
 
-	// 1. Capture Request
-	// reqTimestamp := time.Now()
-
-	// reqData, err := captureAndForward(upConn, clientConn, 500*time.Millisecond) // 500ms timeout to detect end of request
-	// if err != nil {
-	// 	logger.Warn("Error capturing request data", zap.Error(err))
-	// 	return
-	// }
-	// if len(reqData) == 0 {
-	// 	logger.Debug("Client connected but sent no data.")
-	// 	return
-	// }
-
-	// // 2. Capture Response
-
-	// respData, err := captureAndForward(clientConn, upConn, 500*time.Millisecond) // 500ms timeout for response
-	// if err != nil {
-	// 	logger.Warn("Error capturing response data", zap.Error(err))
-	// 	// We still have the request, so we could potentially proceed if that's desired.
-	// }
-	// var reqCapture bytes.Buffer
-	// var respCapture bytes.Buffer
-
-	// // Use a WaitGroup to wait for both forwarding goroutines to finish.
-	// var wg sync.WaitGroup
-	// wg.Add(2)
-
-	// // Goroutine 1: Forward data from client to upstream, capturing it along the way.
-	// go func() {
-	// 	defer wg.Done()
-	// 	// TeeReader captures all data read from clientConn into reqCapture.
-	// 	tee := io.TeeReader(clientConn, &reqCapture)
-	// 	// Copy forwards the data to the upstream connection.
-	// 	// This will block until the client closes the connection or an error occurs.
-	// 	io.Copy(upConn, tee)
-	// 	// Signal the upstream connection that we are done writing.
-	// 	if tcpConn, ok := upConn.(*net.TCPConn); ok {
-	// 		tcpConn.CloseWrite()
-	// 	}
-	// }()
-
-	// // Goroutine 2: Forward data from upstream to client, capturing it along the way.
-	// go func() {
-	// 	defer wg.Done()
-	// 	// TeeReader captures all data read from upConn into respCapture.
-	// 	tee := io.TeeReader(upConn, &respCapture)
-	// 	// Copy forwards the data to the client.
-	// 	// This will block until the upstream server closes the connection or an error occurs.
-	// 	io.Copy(clientConn, tee)
-	// 	// Signal the client connection that we are done writing.
-	// 	if tcpConn, ok := clientConn.(*net.TCPConn); ok {
-	// 		tcpConn.CloseWrite()
-	// 	}
-	// }()
-	// respTimestamp := time.Now()
-	// // Wait for both directions to be closed.
-	// wg.Wait()
-
-	// reqData := reqCapture.Bytes()
-	// respData := respCapture.Bytes()
-	// if len(reqData) == 0 && len(respData) == 0 {
-	// 	logger.Debug("Connection closed without any data exchanged.")
-	// 	return
-	// }
-	clientReader := bufio.NewReader(clientConn)
 	upstreamReader := bufio.NewReader(upConn)
 
-	// Loop to handle multiple request-response cycles on the same connection.
 	for {
 		reqTimestamp := time.Now()
 
@@ -294,23 +234,17 @@ func handleConnection(ctx context.Context, clientConn net.Conn, upstreamAddr str
 			}
 			return // Exit the loop and close the connection.
 		}
-
-		// 2. Dump the parsed request back into a byte slice for your test case creator.
-		// `httputil.DumpRequest` is perfect for this. The `false` means don't dump the body.
-		// We handle the body separately to ensure it can be re-read.
 		reqData, err := httputil.DumpRequest(req, true)
 		if err != nil {
 			logger.Error("Failed to dump request for capturing", zap.Error(err))
 			return
 		}
 
-		// 3. Forward the request to the upstream server.
 		if err := req.Write(upConn); err != nil {
 			logger.Error("Failed to forward request to upstream", zap.Error(err))
 			return
 		}
 
-		// 4. Read the corresponding response from the upstream server.
 		resp, err := http.ReadResponse(upstreamReader, req)
 		if err != nil {
 			logger.Error("Failed to read upstream response", zap.Error(err))
@@ -319,14 +253,12 @@ func handleConnection(ctx context.Context, clientConn net.Conn, upstreamAddr str
 		respTimestamp := time.Now()
 		defer resp.Body.Close()
 
-		// 5. Dump the response to a byte slice.
 		respData, err := httputil.DumpResponse(resp, true)
 		if err != nil {
 			logger.Error("Failed to dump response for capturing", zap.Error(err))
 			return
 		}
 
-		// 6. Forward the response back to the client.
 		if err := resp.Write(clientConn); err != nil {
 			logger.Error("Failed to forward response to client", zap.Error(err))
 			return
@@ -337,78 +269,12 @@ func handleConnection(ctx context.Context, clientConn net.Conn, upstreamAddr str
 			zap.String("request_preview", asciiPreview(reqData)),
 		)
 
-		// 3. Create TestCase using the provided decoder
-		// err = tcCreator.Create(ctx, logger, t, reqData, respData, reqTimestamp, respTimestamp, opts)
-		// if err != nil {
-		// 	logger.Error("Failed to create test case from captured data", zap.Error(err))
-		// 	return
-		// }
 		go func() {
 			err := tcCreator.Create(ctx, logger, t, reqData, respData, reqTimestamp, respTimestamp, opts)
 			if err != nil {
 				logger.Error("Failed to create test case from captured data", zap.Error(err))
 			}
 		}()
-	}
-}
-
-// func captureAndForward(dst io.Writer, src net.Conn, readTimeout time.Duration) ([]byte, error) {
-// 	var capturedData bytes.Buffer
-// 	buf := make([]byte, 32*1024)
-// 	for {
-// 		// Set a deadline to detect the end of a message (e.g., end of an HTTP request)
-// 		err := src.SetReadDeadline(time.Now().Add(readTimeout))
-// 		if err != nil {
-// 			return nil, fmt.Errorf("failed to set read deadline: %w", err)
-// 		}
-
-// 		n, err := src.Read(buf)
-// 		if n > 0 {
-// 			// Write captured chunk to the destination
-// 			if _, werr := dst.Write(buf[:n]); werr != nil {
-// 				return capturedData.Bytes(), werr
-// 			}
-// 			// Append captured chunk to our buffer
-// 			capturedData.Write(buf[:n])
-// 		}
-// 		if err != nil {
-// 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-// 				// Timeout is expected, it means the client/server stopped sending data.
-// 				break
-// 			}
-// 			if err == io.EOF {
-// 				break
-// 			}
-// 			return capturedData.Bytes(), err
-// 		}
-// 	}
-// 	// Clear the deadline for subsequent operations
-// 	_ = src.SetReadDeadline(time.Time{})
-// 	return capturedData.Bytes(), nil
-// }
-
-// copyAndLog copies data from src to dst and logs it.
-func copyAndLog(tag string, dst io.Writer, src io.Reader, logger *zap.Logger) error {
-	buf := make([]byte, 32*1024)
-	for {
-		n, err := src.Read(buf)
-		if n > 0 {
-			// Using zap.String for structured logging
-			logger.Info("Ingress Traffic",
-				zap.String("direction", tag),
-				zap.Int("bytes", n),
-				zap.String("data", asciiPreview(buf[:n])),
-			)
-			if _, werr := dst.Write(buf[:n]); werr != nil {
-				return werr
-			}
-		}
-		if err != nil {
-			if err != io.EOF {
-				return err
-			}
-			return nil
-		}
 	}
 }
 
@@ -439,4 +305,74 @@ func (pm *IngressProxyManager) persistTestCases() {
 			}
 		}
 	}
+}
+
+func handleHttp2ConnectionWithProxy(ctx context.Context, clientConn net.Conn, upstreamAddr string, logger *zap.Logger, t chan *models.TestCase, tcCreator TestCaseCreator) {
+	// Parse the upstream URL
+	upstreamURL, err := url.Parse("http://" + upstreamAddr)
+	if err != nil {
+		logger.Error("Failed to parse upstream URL", zap.Error(err))
+		return
+	}
+
+	// Create a reverse proxy
+	proxy := httputil.NewSingleHostReverseProxy(upstreamURL)
+
+	conn := &httpConn{
+		Conn: clientConn,
+		r:    bufio.NewReader(clientConn),
+	}
+
+	server := &http.Server{
+		ConnState: func(conn net.Conn, state http.ConnState) {
+			if state == http.StateClosed {
+				conn.Close()
+			}
+		},
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.ProtoMajor == 2 && strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
+				proxy.ServeHTTP(w, r)
+				return
+			}
+			http.Error(w, "Only gRPC requests are supported", http.StatusBadRequest)
+		}),
+	}
+
+	go server.Serve(conn)
+
+	select {
+	case <-ctx.Done():
+		server.Shutdown(context.Background())
+	case <-conn.closed:
+		// Connection closed naturally
+	}
+}
+
+// httpConn wraps net.Conn to implement net.Listener interface
+type httpConn struct {
+	net.Conn
+	r      *bufio.Reader
+	closed chan struct{}
+}
+
+func (c *httpConn) Read(b []byte) (int, error) {
+	return c.r.Read(b)
+}
+
+func (c *httpConn) Close() error {
+	close(c.closed)
+	return c.Conn.Close()
+}
+
+func (c *httpConn) Accept() (net.Conn, error) {
+	if c.closed == nil {
+		c.closed = make(chan struct{})
+		return c, nil
+	}
+	<-c.closed
+	return nil, io.EOF
+}
+
+func (c *httpConn) Addr() net.Addr {
+	return c.Conn.LocalAddr()
 }

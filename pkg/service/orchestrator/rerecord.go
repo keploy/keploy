@@ -80,7 +80,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		default:
 			errGrp.Go(func() error {
 				defer utils.Recover(o.logger)
-				err := o.record.Start(recordCtx, true)
+				err := o.record.Start(recordCtx, true, false)
 				errCh <- err
 				return nil
 			})

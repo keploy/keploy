@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"go.keploy.io/server/v2/pkg"
 	utils "go.keploy.io/server/v2/pkg/core/hooks/conn"
 	"go.keploy.io/server/v2/pkg/models" // Assuming this is the models package
 	"go.uber.org/zap"
@@ -43,5 +44,11 @@ func (d *MyDecoder) Create(ctx context.Context, logger *zap.Logger, t chan *mode
 	// 4. Call your original, unmodified Capture function to do the heavy lifting.
 	utils.Capture(ctx, logger, t, req, resp, reqTime, respTime, opts)
 
+	return nil
+}
+
+func (d *MyDecoder) CreateGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, stream *pkg.HTTP2Stream) error {
+
+	utils.CaptureGRPC(ctx, logger, t, stream)
 	return nil
 }

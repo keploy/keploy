@@ -34,8 +34,8 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 				utils.LogError(logger, nil, "service doesn't satisfy record service interface")
 				return nil
 			}
-
-			err = record.Start(ctx, false)
+			bigPaylaod, err := cmd.Flags().GetBool("bigPayload")
+			err = record.Start(ctx, false, bigPaylaod)
 			if err != nil {
 				utils.LogError(logger, err, "failed to record")
 				return nil

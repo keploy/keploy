@@ -32,6 +32,7 @@ type HookCfg struct {
 	Rules      []config.BypassRule
 	E2E        bool
 	Port       uint32
+	BigPayload bool
 }
 
 type App interface {
@@ -43,7 +44,7 @@ type App interface {
 
 // Proxy listens on all available interfaces and forwards traffic to the destination
 type Proxy interface {
-	StartProxy(ctx context.Context, opts ProxyOptions, incomingOpts models.IncomingOptions) error
+	StartProxy(ctx context.Context, opts ProxyOptions, incomingOpts models.IncomingOptions, mode models.Mode, bigPaylaod bool) error
 	Record(ctx context.Context, id uint64, mocks chan<- *models.Mock, opts models.OutgoingOptions) error
 	Mock(ctx context.Context, id uint64, opts models.OutgoingOptions) error
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error

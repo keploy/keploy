@@ -96,7 +96,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 	}
 
 	hookErrGrp, hookCtx := errgroup.WithContext(ctx)
-    proxyErrGrp, proxyCtx := errgroup.WithContext(ctx)
+	proxyErrGrp, proxyCtx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
 		<-ctx.Done()
@@ -129,6 +129,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		Rules:      opts.Rules,
 		E2E:        opts.E2E,
 		Port:       opts.Port,
+		BigPayload: opts.BigPayload,
 	})
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to load hooks")
@@ -154,7 +155,8 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		DNSIPv4Addr: a.KeployIPv4Addr(),
 		Persister:   opts.Persister,
 		//DnsIPv6Addr: ""
-	}, opts.Incoming)
+	}, opts.Incoming, opts.Mode, opts.BigPayload)
+
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to start proxy")
 		return hookErr

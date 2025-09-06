@@ -109,7 +109,7 @@ func (p *Proxy) InitIntegrations(_ context.Context) error {
 
 // In proxy.go
 
-func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions, incomingOpts models.IncomingOptions) error {
+func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions, incomingOpts models.IncomingOptions, mode models.Mode, bigPaylaod bool) error {
 
 	//first initialize the integrations
 	err := p.InitIntegrations(ctx)
@@ -208,36 +208,39 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions, incoming
 		return err
 	}
 	p.inboundMetaMap = p.hooks.InboundMeta
-	persister := opts.Persister
-	if persister == nil {
-		// Create a "noop" persister that does nothing, to prevent nil pointer errors.
-		persister = func(ctx context.Context, testCase *models.TestCase) error {
-			p.logger.Debug("Proxy is not in record mode, dropping test case.")
-			return nil
+	
+	if mode != models.MODE_TEST && bigPaylaod{
+		persister := opts.Persister
+		if persister == nil {
+			// Create a "noop" persister that does nothing, to prevent nil pointer errors.
+			persister = func(ctx context.Context, testCase *models.TestCase) error {
+				p.logger.Debug("Proxy is not in record mode, dropping test case.")
+				return nil
+			}
 		}
-	}
-	deps := ProxyDependencies{
-		Logger:    p.logger,
-		Persister: persister,
-	}
-	decoder := proxy_test.NewMyDecoder()
-	// // Start the eBPF listener for bind events
-	ingressProxyManager := NewIngressProxyManager(ctx, p.logger, deps, decoder, incomingOpts)
-	go func() {
-		defer utils.Recover(p.logger)
-		ListenForIngressEvents(ctx, p.hooks, ingressProxyManager)
-	}()
+		deps := ProxyDependencies{
+			Logger:    p.logger,
+			Persister: persister,
+		}
+		decoder := proxy_test.NewMyDecoder()
+		// // Start the eBPF listener for bind events
+		ingressProxyManager := NewIngressProxyManager(ctx, p.logger, deps, decoder, incomingOpts)
+		go func() {
+			defer utils.Recover(p.logger)
+			ListenForIngressEvents(ctx, p.hooks, ingressProxyManager)
+		}()
 
-	// Setup a graceful shutdown for the ingress proxies.
-	g.Go(func() error {
-		<-ctx.Done()
-		p.logger.Info("Shutting down all dynamic ingress proxies...")
-		ingressProxyManager.StopAll()
-		fmt.Println("All ingress proxies shut down.")
-		return nil
-	})
-	p.logger.Info("✅ Successfully pinned proxy listener socket to eBPF sockmap.")
-
+		// Setup a graceful shutdown for the ingress proxies.
+		g.Go(func() error {
+			<-ctx.Done()
+			p.logger.Info("Shutting down all dynamic ingress proxies...")
+			ingressProxyManager.StopAll()
+			fmt.Println("All ingress proxies shut down.")
+			return nil
+		})
+		p.logger.Info("✅ Successfully pinned proxy listener socket to eBPF sockmap.")
+	}
+	
 	p.logger.Info("Keploy has taken control of the DNS resolution mechanism, your application may misbehave if you have provided wrong domain name in your application code.")
 
 	p.logger.Info(fmt.Sprintf("Proxy started at port:%v", p.Port))
