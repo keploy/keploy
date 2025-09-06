@@ -3,6 +3,7 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -10,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httputil"
 	"strconv"
 	"sync"
 	"time"
@@ -210,7 +213,7 @@ func handleConnection(ctx context.Context, clientConn net.Conn, upstreamAddr str
 	defer upConn.Close()
 
 	// 1. Capture Request
-	reqTimestamp := time.Now()
+	// reqTimestamp := time.Now()
 
 	// reqData, err := captureAndForward(upConn, clientConn, 500*time.Millisecond) // 500ms timeout to detect end of request
 	// if err != nil {
@@ -229,104 +232,160 @@ func handleConnection(ctx context.Context, clientConn net.Conn, upstreamAddr str
 	// 	logger.Warn("Error capturing response data", zap.Error(err))
 	// 	// We still have the request, so we could potentially proceed if that's desired.
 	// }
-	var reqCapture bytes.Buffer
-	var respCapture bytes.Buffer
+	// var reqCapture bytes.Buffer
+	// var respCapture bytes.Buffer
 
-	// Use a WaitGroup to wait for both forwarding goroutines to finish.
-	var wg sync.WaitGroup
-	wg.Add(2)
+	// // Use a WaitGroup to wait for both forwarding goroutines to finish.
+	// var wg sync.WaitGroup
+	// wg.Add(2)
 
-	// Goroutine 1: Forward data from client to upstream, capturing it along the way.
-	go func() {
-		defer wg.Done()
-		// TeeReader captures all data read from clientConn into reqCapture.
-		tee := io.TeeReader(clientConn, &reqCapture)
-		// Copy forwards the data to the upstream connection.
-		// This will block until the client closes the connection or an error occurs.
-		io.Copy(upConn, tee)
-		// Signal the upstream connection that we are done writing.
-		if tcpConn, ok := upConn.(*net.TCPConn); ok {
-			tcpConn.CloseWrite()
-		}
-	}()
+	// // Goroutine 1: Forward data from client to upstream, capturing it along the way.
+	// go func() {
+	// 	defer wg.Done()
+	// 	// TeeReader captures all data read from clientConn into reqCapture.
+	// 	tee := io.TeeReader(clientConn, &reqCapture)
+	// 	// Copy forwards the data to the upstream connection.
+	// 	// This will block until the client closes the connection or an error occurs.
+	// 	io.Copy(upConn, tee)
+	// 	// Signal the upstream connection that we are done writing.
+	// 	if tcpConn, ok := upConn.(*net.TCPConn); ok {
+	// 		tcpConn.CloseWrite()
+	// 	}
+	// }()
 
-	// Goroutine 2: Forward data from upstream to client, capturing it along the way.
-	go func() {
-		defer wg.Done()
-		// TeeReader captures all data read from upConn into respCapture.
-		tee := io.TeeReader(upConn, &respCapture)
-		// Copy forwards the data to the client.
-		// This will block until the upstream server closes the connection or an error occurs.
-		io.Copy(clientConn, tee)
-		// Signal the client connection that we are done writing.
-		if tcpConn, ok := clientConn.(*net.TCPConn); ok {
-			tcpConn.CloseWrite()
-		}
-	}()
-	respTimestamp := time.Now()
-	// Wait for both directions to be closed.
-	wg.Wait()
+	// // Goroutine 2: Forward data from upstream to client, capturing it along the way.
+	// go func() {
+	// 	defer wg.Done()
+	// 	// TeeReader captures all data read from upConn into respCapture.
+	// 	tee := io.TeeReader(upConn, &respCapture)
+	// 	// Copy forwards the data to the client.
+	// 	// This will block until the upstream server closes the connection or an error occurs.
+	// 	io.Copy(clientConn, tee)
+	// 	// Signal the client connection that we are done writing.
+	// 	if tcpConn, ok := clientConn.(*net.TCPConn); ok {
+	// 		tcpConn.CloseWrite()
+	// 	}
+	// }()
+	// respTimestamp := time.Now()
+	// // Wait for both directions to be closed.
+	// wg.Wait()
 
-	reqData := reqCapture.Bytes()
-	respData := respCapture.Bytes()
-	if len(reqData) == 0 && len(respData) == 0 {
-		logger.Debug("Connection closed without any data exchanged.")
-		return
-	}
-	logger.Info("Ingress Traffic Captured",
-		zap.Int("request_bytes", len(reqData)),
-		zap.Int("response_bytes", len(respData)),
-		zap.String("request_preview", asciiPreview(reqData)),
-	)
-
-	// 3. Create TestCase using the provided decoder
-	// err = tcCreator.Create(ctx, logger, t, reqData, respData, reqTimestamp, respTimestamp, opts)
-	// if err != nil {
-	// 	logger.Error("Failed to create test case from captured data", zap.Error(err))
+	// reqData := reqCapture.Bytes()
+	// respData := respCapture.Bytes()
+	// if len(reqData) == 0 && len(respData) == 0 {
+	// 	logger.Debug("Connection closed without any data exchanged.")
 	// 	return
 	// }
-	go func() {
-		err := tcCreator.Create(ctx, logger, t, reqData, respData, reqTimestamp, respTimestamp, opts)
-		if err != nil {
-			logger.Error("Failed to create test case from captured data", zap.Error(err))
-		}
-	}()
-}
+	clientReader := bufio.NewReader(clientConn)
+	upstreamReader := bufio.NewReader(upConn)
 
-func captureAndForward(dst io.Writer, src net.Conn, readTimeout time.Duration) ([]byte, error) {
-	var capturedData bytes.Buffer
-	buf := make([]byte, 32*1024)
+	// Loop to handle multiple request-response cycles on the same connection.
 	for {
-		// Set a deadline to detect the end of a message (e.g., end of an HTTP request)
-		err := src.SetReadDeadline(time.Now().Add(readTimeout))
+		reqTimestamp := time.Now()
+
+		// 1. Read a single request from the client connection.
+		req, err := http.ReadRequest(clientReader)
 		if err != nil {
-			return nil, fmt.Errorf("failed to set read deadline: %w", err)
+			// io.EOF is the expected error when the client closes the keep-alive connection.
+			if errors.Is(err, io.EOF) {
+				logger.Debug("Client closed the keep-alive connection.", zap.String("client", clientConn.RemoteAddr().String()))
+			} else {
+				logger.Warn("Failed to read client request", zap.Error(err))
+			}
+			return // Exit the loop and close the connection.
 		}
 
-		n, err := src.Read(buf)
-		if n > 0 {
-			// Write captured chunk to the destination
-			if _, werr := dst.Write(buf[:n]); werr != nil {
-				return capturedData.Bytes(), werr
-			}
-			// Append captured chunk to our buffer
-			capturedData.Write(buf[:n])
-		}
+		// 2. Dump the parsed request back into a byte slice for your test case creator.
+		// `httputil.DumpRequest` is perfect for this. The `false` means don't dump the body.
+		// We handle the body separately to ensure it can be re-read.
+		reqData, err := httputil.DumpRequest(req, true)
 		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				// Timeout is expected, it means the client/server stopped sending data.
-				break
-			}
-			if err == io.EOF {
-				break
-			}
-			return capturedData.Bytes(), err
+			logger.Error("Failed to dump request for capturing", zap.Error(err))
+			return
 		}
+
+		// 3. Forward the request to the upstream server.
+		if err := req.Write(upConn); err != nil {
+			logger.Error("Failed to forward request to upstream", zap.Error(err))
+			return
+		}
+
+		// 4. Read the corresponding response from the upstream server.
+		resp, err := http.ReadResponse(upstreamReader, req)
+		if err != nil {
+			logger.Error("Failed to read upstream response", zap.Error(err))
+			return
+		}
+		respTimestamp := time.Now()
+		defer resp.Body.Close()
+
+		// 5. Dump the response to a byte slice.
+		respData, err := httputil.DumpResponse(resp, true)
+		if err != nil {
+			logger.Error("Failed to dump response for capturing", zap.Error(err))
+			return
+		}
+
+		// 6. Forward the response back to the client.
+		if err := resp.Write(clientConn); err != nil {
+			logger.Error("Failed to forward response to client", zap.Error(err))
+			return
+		}
+		logger.Info("Ingress Traffic Captured",
+			zap.Int("request_bytes", len(reqData)),
+			zap.Int("response_bytes", len(respData)),
+			zap.String("request_preview", asciiPreview(reqData)),
+		)
+
+		// 3. Create TestCase using the provided decoder
+		// err = tcCreator.Create(ctx, logger, t, reqData, respData, reqTimestamp, respTimestamp, opts)
+		// if err != nil {
+		// 	logger.Error("Failed to create test case from captured data", zap.Error(err))
+		// 	return
+		// }
+		go func() {
+			err := tcCreator.Create(ctx, logger, t, reqData, respData, reqTimestamp, respTimestamp, opts)
+			if err != nil {
+				logger.Error("Failed to create test case from captured data", zap.Error(err))
+			}
+		}()
 	}
-	// Clear the deadline for subsequent operations
-	_ = src.SetReadDeadline(time.Time{})
-	return capturedData.Bytes(), nil
 }
+
+// func captureAndForward(dst io.Writer, src net.Conn, readTimeout time.Duration) ([]byte, error) {
+// 	var capturedData bytes.Buffer
+// 	buf := make([]byte, 32*1024)
+// 	for {
+// 		// Set a deadline to detect the end of a message (e.g., end of an HTTP request)
+// 		err := src.SetReadDeadline(time.Now().Add(readTimeout))
+// 		if err != nil {
+// 			return nil, fmt.Errorf("failed to set read deadline: %w", err)
+// 		}
+
+// 		n, err := src.Read(buf)
+// 		if n > 0 {
+// 			// Write captured chunk to the destination
+// 			if _, werr := dst.Write(buf[:n]); werr != nil {
+// 				return capturedData.Bytes(), werr
+// 			}
+// 			// Append captured chunk to our buffer
+// 			capturedData.Write(buf[:n])
+// 		}
+// 		if err != nil {
+// 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+// 				// Timeout is expected, it means the client/server stopped sending data.
+// 				break
+// 			}
+// 			if err == io.EOF {
+// 				break
+// 			}
+// 			return capturedData.Bytes(), err
+// 		}
+// 	}
+// 	// Clear the deadline for subsequent operations
+// 	_ = src.SetReadDeadline(time.Time{})
+// 	return capturedData.Bytes(), nil
+// }
 
 // copyAndLog copies data from src to dst and logs it.
 func copyAndLog(tag string, dst io.Writer, src io.Reader, logger *zap.Logger) error {
