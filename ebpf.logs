@@ -1,0 +1,392 @@
+            sudo-167589  [003] d..21 43193.393549: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:167589]
+            sudo-167589  [003] d..21 43193.393575: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+            sudo-167589  [003] d..21 43193.394141: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:167589]
+            sudo-167589  [003] d..21 43193.394146: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-168618  [002] d..21 43194.265711: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:168618]
+        iptables-168618  [002] d..21 43194.265720: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-168633  [002] d..21 43197.272357: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:168633]
+        iptables-168633  [002] d..21 43197.272368: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-168643  [000] d..21 43200.265358: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:168643]
+        iptables-168643  [000] d..21 43200.265363: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-168647  [003] d..21 43203.267319: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:168647]
+        iptables-168647  [003] d..21 43203.267323: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+ systemd-network-705     [003] d..21 43204.501758: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:705]
+ systemd-network-705     [003] d..21 43204.501763: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+ systemd-timesyn-398     [001] d..21 43204.503094: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:398]
+ systemd-timesyn-398     [001] d..21 43204.503101: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-168648  [003] d..21 43206.272963: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:168648]
+        iptables-168648  [003] d..21 43206.272973: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-168650  [000] d..21 43209.274849: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:168650]
+        iptables-168650  [000] d..21 43209.274860: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-168651  [003] d..21 43212.267190: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:168651]
+        iptables-168651  [003] d..21 43212.267197: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-168652  [003] d..21 43215.276414: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:168652]
+          keploy-167720  [001] d..21 43217.373714: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-167720  [001] d..31 43217.373766: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+        iptables-168711  [000] d..21 43221.268642: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:168711]
+        iptables-168711  [000] d..21 43221.268654: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-168724  [000] d..21 43224.273651: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:168724]
+        iptables-168724  [000] d..21 43224.273656: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-168737  [001] d..21 43227.276553: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:168737]
+        iptables-168737  [001] d..21 43227.276561: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-168738  [000] d..21 43230.274860: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:168738]
+        iptables-168738  [000] d..21 43230.274868: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+      (fwupdmgr)-168739  [000] d..21 43231.826156: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:168739]
+      (fwupdmgr)-168739  [000] d..21 43231.826161: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+      (fwupdmgr)-168739  [000] d..21 43231.827409: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:168739]
+      (fwupdmgr)-168739  [000] d..21 43231.827412: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+      (fwupdmgr)-168739  [000] d..21 43231.827451: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:168739]
+      (fwupdmgr)-168739  [000] d..21 43231.827452: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+      (fwupdmgr)-168739  [000] d..21 43231.827605: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:168739]
+      (fwupdmgr)-168739  [000] d..21 43231.827607: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+      (fwupdmgr)-168739  [000] d..21 43231.827624: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:168739]
+          pool-0-168743  [002] d..21 43231.898377: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:168739]
+          pool-0-168743  [002] d..21 43231.898380: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        modprobe-168745  [001] d..21 43231.906289: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:168745]
+        modprobe-168745  [001] d..21 43231.906291: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        modprobe-168745  [001] d..21 43231.911308: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:168745]
+        modprobe-168745  [001] d..21 43231.911309: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          pool-0-168755  [002] d..21 43231.996759: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:168747]
+          pool-0-168755  [002] d..21 43231.996760: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+         systemd-1       [002] d..21 43232.073856: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:1]
+         systemd-1       [002] d..21 43232.073857: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-168763  [001] d..21 43248.277701: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:168763]
+        iptables-168763  [001] d..21 43248.277720: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-168767  [001] d..21 43257.273468: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:168767]
+        iptables-168767  [001] d..21 43257.273476: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          keploy-167720  [001] d..21 43263.191702: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-167720  [001] d..31 43263.191807: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+          keploy-167720  [001] d..21 43263.193639: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-167720  [001] d..31 43263.193757: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+          keploy-167720  [001] d..21 43263.194072: bpf_trace_printk: [sys_close_entry]:filtered the egress system call from Keploy-CLI
+CPU:3 [LOST 5018 EVENTS]
+        iptables-228714  [003] d..21 64463.365344: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228716  [003] d..21 64469.371026: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228716]
+        iptables-228716  [003] d..21 64469.371037: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          keploy-224359  [003] d..21 64485.179230: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224359  [003] d..31 64485.179268: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+CPU:1 [LOST 4707 EVENTS]
+          keploy-224364  [001] d..21 64485.179326: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224364  [001] d..31 64485.179337: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224364  [001] d..21 64489.188278: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224364  [001] d..31 64489.188308: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+CPU:2 [LOST 5143 EVENTS]
+        iptables-228724  [002] d..21 64490.372182: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228724]
+        iptables-228724  [002] d..21 64490.372190: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+ systemd-resolve-391     [001] d..21 64491.070640: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:391]
+ systemd-resolve-391     [001] d..21 64491.070657: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228725  [003] d..21 64493.368275: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228725]
+        iptables-228725  [003] d..21 64493.368286: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          keploy-224364  [002] d..21 64499.202029: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224364  [002] d..31 64499.202053: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+        iptables-228728  [001] d..21 64499.371270: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228728]
+        iptables-228728  [001] d..21 64499.371291: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          keploy-224364  [002] d..21 64503.206599: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224364  [002] d..31 64503.206651: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+CPU:0 [LOST 4948 EVENTS]
+          keploy-224359  [000] d..31 64503.206731: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+        iptables-228730  [000] d..21 64505.364211: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228730]
+        iptables-228730  [000] d..21 64505.364221: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228731  [003] d..21 64508.368492: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228731]
+        iptables-228731  [003] d..21 64508.368509: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          keploy-224359  [000] d..21 64509.223764: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224359  [000] d..31 64509.223822: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224364  [002] d..21 64509.223882: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224364  [002] d..31 64509.223901: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+        iptables-228732  [001] d..21 64511.374137: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228732]
+        iptables-228732  [001] d..21 64511.374148: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228734  [001] d..21 64514.369937: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228734]
+        iptables-228734  [001] d..21 64514.369946: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228735  [000] d..21 64517.370969: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228735]
+        iptables-228735  [000] d..21 64517.370980: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228736  [003] d..21 64520.369912: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228736]
+        iptables-228736  [003] d..21 64520.369919: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          keploy-224364  [001] d..21 64521.242022: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224364  [001] d..31 64521.242079: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224359  [003] d..21 64521.242133: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224359  [003] d..31 64521.242148: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224364  [001] d..21 64522.630600: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224364  [001] d..31 64522.630622: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224359  [003] d..21 64522.630645: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224359  [003] d..31 64522.630651: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+        iptables-228737  [000] d..21 64523.366206: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228737]
+        iptables-228737  [000] d..21 64523.366213: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228738  [000] d..21 64526.366363: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228738]
+        iptables-228738  [000] d..21 64526.366373: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228739  [000] d..21 64529.370941: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228739]
+        iptables-228739  [000] d..21 64529.370946: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+ systemd-timesyn-398     [002] d..21 64531.068576: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:398]
+ systemd-timesyn-398     [002] d..21 64531.068590: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228741  [001] d..21 64532.365582: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228741]
+        iptables-228741  [001] d..21 64532.365591: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228743  [001] d..21 64535.359393: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228743]
+        iptables-228743  [001] d..21 64535.359396: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          keploy-224359  [003] d..21 64537.270468: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224359  [003] d..31 64537.270519: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224364  [001] d..21 64537.270588: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224364  [001] d..31 64537.270606: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+        iptables-228744  [002] d..21 64538.361773: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228744]
+        iptables-228744  [002] d..21 64538.361775: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228746  [003] d..21 64541.372847: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228746]
+        iptables-228746  [003] d..21 64541.372857: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228747  [001] d..21 64544.368739: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228747]
+        iptables-228747  [001] d..21 64544.368748: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          keploy-224364  [003] d..21 64545.278985: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224364  [003] d..31 64545.279034: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224359  [000] d..21 64545.279067: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224359  [000] d..31 64545.279086: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+        iptables-228748  [001] d..21 64547.371769: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228748]
+        iptables-228748  [001] d..21 64547.371790: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228749  [003] d..21 64550.370968: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228749]
+        iptables-228749  [003] d..21 64550.370981: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+  systemd-logind-791     [000] d..21 64551.063273: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:791]
+  systemd-logind-791     [000] d..21 64551.063283: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+ systemd-network-705     [003] d..21 64551.063352: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:705]
+ systemd-network-705     [003] d..21 64551.063357: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+   systemd-udevd-408     [002] d..21 64551.063448: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:408]
+   systemd-udevd-408     [002] d..21 64551.063456: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+              sh-228750  [003] d..21 64551.096715: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228750]
+              sh-228750  [003] d..21 64551.096717: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+              sh-228750  [003] d..21 64551.115988: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228750]
+              sh-228750  [003] d..21 64551.115990: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+            sadc-228752  [001] d..21 64551.126964: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228752]
+            sadc-228752  [001] d..21 64551.126966: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+            sadc-228752  [001] d..21 64551.145982: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228752]
+            sadc-228752  [001] d..21 64551.145984: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228755  [001] d..21 64553.366685: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228755]
+        iptables-228755  [001] d..21 64553.366695: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228757  [001] d..21 64556.368043: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228757]
+        iptables-228757  [001] d..21 64556.368059: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          keploy-224362  [000] d..21 64557.304973: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224362  [000] d..31 64557.305010: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224360  [002] d..21 64557.305066: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224360  [002] d..31 64557.305077: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224360  [002] d..21 64559.311222: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224360  [002] d..31 64559.311265: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224362  [000] d..21 64559.311300: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224362  [000] d..31 64559.311311: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+        iptables-228758  [003] d..21 64559.372300: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228758]
+        iptables-228758  [003] d..21 64559.372306: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          keploy-224362  [000] d..21 64561.313415: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224362  [000] d..31 64561.313451: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224360  [002] d..21 64561.313506: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224360  [002] d..31 64561.313516: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+        iptables-228759  [002] d..21 64562.369195: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228759]
+        iptables-228759  [002] d..21 64562.369204: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228760  [002] d..21 64565.369569: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228760]
+        iptables-228760  [002] d..21 64565.369577: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228761  [000] d..21 64568.367280: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228761]
+        iptables-228761  [000] d..21 64568.367295: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228762  [000] d..21 64571.367321: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228762]
+        iptables-228762  [000] d..21 64571.367336: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          keploy-224362  [000] d..21 64573.333986: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224362  [000] d..31 64573.334053: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224360  [002] d..21 64573.334112: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224360  [002] d..31 64573.334132: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+        iptables-228764  [001] d..21 64574.367457: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228764]
+        iptables-228764  [001] d..21 64574.367466: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          keploy-224360  [002] d..21 64575.335784: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224360  [002] d..31 64575.335879: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224364  [003] d..21 64575.335934: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224364  [003] d..31 64575.335949: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+ systemd-timesyn-398     [002] d..21 64576.316546: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:398]
+ systemd-timesyn-398     [002] d..21 64576.316557: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+ systemd-timesyn-398     [002] d..21 64576.316980: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:398]
+ systemd-timesyn-398     [002] d..21 64576.316983: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228765  [001] d..21 64577.366533: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228765]
+        iptables-228765  [001] d..21 64577.366543: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          keploy-224360  [001] d..21 64579.338617: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224360  [001] d..31 64579.338667: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224364  [003] d..21 64579.338717: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224364  [003] d..31 64579.338730: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+        iptables-228766  [001] d..21 64580.366745: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228766]
+        iptables-228766  [001] d..21 64580.366755: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          keploy-224360  [001] d..21 64582.624440: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224360  [001] d..31 64582.624481: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224364  [003] d..21 64582.624535: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224364  [003] d..31 64582.624548: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+        iptables-228769  [003] d..21 64583.363744: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228769]
+        iptables-228769  [003] d..21 64583.363755: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228770  [001] d..21 64586.364314: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228770]
+        iptables-228770  [001] d..21 64586.364327: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          keploy-224360  [002] d..21 64587.347435: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224360  [002] d..31 64587.347474: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224362  [000] d..21 64587.347584: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224362  [000] d..31 64587.347599: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+        iptables-228771  [001] d..21 64589.366322: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228771]
+        iptables-228771  [001] d..21 64589.366328: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228772  [000] d..21 64592.368028: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228772]
+        iptables-228772  [000] d..21 64592.368037: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228774  [002] d..21 64595.368879: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228774]
+        iptables-228774  [002] d..21 64595.368892: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228775  [003] d..21 64598.362234: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228775]
+        iptables-228775  [003] d..21 64598.362243: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228776  [000] d..21 64601.365963: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228776]
+        iptables-228776  [000] d..21 64601.365976: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          keploy-224362  [000] d..21 64601.376044: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224362  [000] d..31 64601.376110: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224360  [002] d..21 64601.376253: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224360  [002] d..31 64601.376272: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+        iptables-228777  [003] d..21 64604.371127: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228777]
+        iptables-228777  [003] d..21 64604.371138: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228778  [003] d..21 64607.363378: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228778]
+        iptables-228778  [003] d..21 64607.363396: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          keploy-224360  [002] d..21 64607.388757: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224360  [002] d..31 64607.388787: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224362  [000] d..21 64607.388820: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224362  [000] d..31 64607.388830: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+        iptables-228779  [000] d..21 64610.375413: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228779]
+        iptables-228779  [000] d..21 64610.375421: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+ systemd-resolve-391     [001] d..21 64611.068474: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:391]
+ systemd-resolve-391     [001] d..21 64611.068491: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228780  [001] d..21 64613.363188: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228780]
+        iptables-228780  [001] d..21 64613.363193: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          keploy-224360  [002] d..21 64615.406965: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224360  [002] d..31 64615.407021: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224362  [000] d..21 64615.407069: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224362  [000] d..31 64615.407099: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+        iptables-228782  [003] d..21 64616.366628: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228782]
+        iptables-228782  [003] d..21 64616.366646: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228783  [002] d..21 64619.368759: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228783]
+        iptables-228783  [002] d..21 64619.368768: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228784  [003] d..21 64622.366027: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228784]
+        iptables-228784  [003] d..21 64622.366039: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228785  [003] d..21 64625.369810: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228785]
+        iptables-228785  [003] d..21 64625.369816: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          keploy-224360  [002] d..21 64627.423430: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224360  [002] d..31 64627.423450: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224362  [000] d..21 64627.423474: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224362  [000] d..31 64627.423479: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+        iptables-228786  [003] d..21 64628.373440: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228786]
+        iptables-228786  [003] d..21 64628.373449: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228787  [003] d..21 64631.369720: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228787]
+        iptables-228787  [003] d..21 64631.369729: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          keploy-224362  [000] d..21 64631.429951: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224362  [000] dN.31 64631.429990: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224360  [000] d..21 64631.430006: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224360  [000] d..31 64631.430019: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+        iptables-228789  [001] d..21 64634.368984: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228789]
+        iptables-228789  [001] d..21 64634.368997: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228790  [002] d..21 64637.368406: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228790]
+        iptables-228790  [002] d..21 64637.368416: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228791  [000] d..21 64640.373160: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228791]
+        iptables-228791  [000] d..21 64640.373174: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+ systemd-timesyn-398     [002] d..21 64641.066329: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:398]
+ systemd-timesyn-398     [002] d..21 64641.066336: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228792  [000] d..21 64643.363486: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228792]
+        iptables-228792  [000] d..21 64643.363490: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+    libuv-worker-199385  [003] d..21 64644.925436: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:199377]
+    libuv-worker-199385  [003] d..21 64644.925441: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+    libuv-worker-199385  [003] d..21 64644.926071: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:199377]
+    libuv-worker-199385  [003] d..21 64644.926072: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+    libuv-worker-199385  [003] d..21 64644.926166: bpf_trace_printk: [udp_pre_connect]: called with host [TGID:199377]
+    libuv-worker-199385  [003] ...11 64644.926199: bpf_trace_printk: [connect4]:called with host pid: 199377
+ systemd-resolve-391     [001] d..21 64644.927166: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:391]
+ systemd-resolve-391     [001] d..21 64644.927169: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+ systemd-resolve-391     [001] d..21 64644.927240: bpf_trace_printk: [udp_pre_connect]: called with host [TGID:391]
+ systemd-resolve-391     [001] ...11 64644.927242: bpf_trace_printk: [connect4]:called with host pid: 391
+ systemd-resolve-391     [001] d..21 64644.927499: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:391]
+ systemd-resolve-391     [001] d..21 64644.927500: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+ systemd-resolve-391     [001] d..21 64644.927512: bpf_trace_printk: [udp_pre_connect]: called with host [TGID:391]
+ systemd-resolve-391     [001] ...11 64644.927513: bpf_trace_printk: [connect4]:called with host pid: 391
+            node-199377  [000] d..21 64644.978511: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:199377]
+            node-199377  [000] d..21 64644.978513: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+            node-199377  [000] d..21 64644.978588: bpf_trace_printk: [tcp_v4_pre_connect]: called with host [TGID:199377]
+            node-199377  [000] ...11 64644.978590: bpf_trace_printk: [connect4]:called with host pid: 199377
+        iptables-228793  [001] d..21 64646.369100: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228793]
+        iptables-228793  [001] d..21 64646.369108: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+    libuv-worker-199384  [003] d..21 64648.259102: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:199377]
+    libuv-worker-199384  [003] d..21 64648.259109: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+    libuv-worker-199384  [003] d..21 64648.259592: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:199377]
+    libuv-worker-199384  [003] d..21 64648.259594: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+    libuv-worker-199384  [003] d..21 64648.259623: bpf_trace_printk: [udp_pre_connect]: called with host [TGID:199377]
+    libuv-worker-199384  [003] ...11 64648.259629: bpf_trace_printk: [connect4]:called with host pid: 199377
+ systemd-resolve-391     [001] d..21 64648.259947: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:391]
+ systemd-resolve-391     [001] d..21 64648.259950: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+ systemd-resolve-391     [001] d..21 64648.259983: bpf_trace_printk: [udp_pre_connect]: called with host [TGID:391]
+ systemd-resolve-391     [001] ...11 64648.259985: bpf_trace_printk: [connect4]:called with host pid: 391
+ systemd-resolve-391     [001] d..21 64648.260155: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:391]
+ systemd-resolve-391     [001] d..21 64648.260156: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+ systemd-resolve-391     [001] d..21 64648.260167: bpf_trace_printk: [udp_pre_connect]: called with host [TGID:391]
+ systemd-resolve-391     [001] ...11 64648.260168: bpf_trace_printk: [connect4]:called with host pid: 391
+            node-199377  [002] d..21 64648.262608: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:199377]
+            node-199377  [002] d..21 64648.262614: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+            node-199377  [002] d..21 64648.262688: bpf_trace_printk: [tcp_v4_pre_connect]: called with host [TGID:199377]
+            node-199377  [002] ...11 64648.262690: bpf_trace_printk: [connect4]:called with host pid: 199377
+        iptables-228794  [002] d..21 64649.372653: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228794]
+        iptables-228794  [002] d..21 64649.372662: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          keploy-224360  [003] d..21 64649.467914: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224360  [003] dN.31 64649.467968: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224362  [003] d..21 64649.468009: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224362  [003] d..31 64649.468017: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+        iptables-228795  [001] d..21 64652.371381: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228795]
+        iptables-228795  [001] d..21 64652.371387: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+        iptables-228800  [000] d..21 64655.374854: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228800]
+        iptables-228800  [000] d..21 64655.374864: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          keploy-224362  [001] d..21 64655.477049: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224362  [001] d..31 64655.477077: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224364  [003] d..21 64655.477110: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224364  [003] d..31 64655.477122: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+            sudo-228804  [002] d..21 64656.623553: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228804]
+            sudo-228804  [002] d..21 64656.623558: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+            sudo-228804  [002] d..21 64656.623722: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228804]
+            sudo-228804  [002] d..21 64656.623724: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+            sudo-228804  [002] d..21 64656.625205: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228804]
+            sudo-228804  [002] d..21 64656.625207: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+            sudo-228804  [002] d..21 64656.628032: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228804]
+            sudo-228804  [002] d..21 64656.628034: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+            sudo-228804  [002] d..21 64656.628100: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228804]
+            sudo-228804  [002] d..21 64656.628101: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+            sudo-228804  [002] d..21 64656.628285: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228804]
+            sudo-228804  [002] d..21 64656.628286: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+            sudo-228804  [002] d..21 64656.628329: bpf_trace_printk: [udp_pre_connect]: called with host [TGID:228804]
+            sudo-228804  [002] ...11 64656.628334: bpf_trace_printk: [connect4]:called with host pid: 228804
+ systemd-resolve-391     [001] d..21 64656.628574: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:391]
+ systemd-resolve-391     [001] d..21 64656.628579: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+ systemd-resolve-391     [001] d..21 64656.628920: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:391]
+ systemd-resolve-391     [001] d..21 64656.628922: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+ systemd-resolve-391     [001] d..21 64656.628947: bpf_trace_printk: [udp_pre_connect]: called with host [TGID:391]
+ systemd-resolve-391     [001] ...11 64656.628949: bpf_trace_printk: [connect4]:called with host pid: 391
+ systemd-resolve-391     [001] d..21 64656.629161: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:391]
+ systemd-resolve-391     [001] d..21 64656.629163: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+ systemd-resolve-391     [001] d..21 64656.629184: bpf_trace_printk: [udp_pre_connect]: called with host [TGID:391]
+ systemd-resolve-391     [001] ...11 64656.629187: bpf_trace_printk: [connect4]:called with host pid: 391
+            sudo-228804  [000] d..21 64656.631316: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228804]
+            sudo-228804  [000] d..21 64656.631318: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+            sudo-228804  [000] d..21 64656.631332: bpf_trace_printk: [udp_pre_connect]: called with host [TGID:228804]
+            sudo-228804  [000] ...11 64656.631334: bpf_trace_printk: [connect4]:called with host pid: 228804
+            sudo-228804  [000] d..21 64656.631933: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228804]
+            sudo-228804  [000] d..21 64656.631935: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+            sudo-228804  [000] d..21 64656.632015: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228804]
+            sudo-228804  [000] d..21 64656.632016: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+            sudo-228804  [000] d..21 64656.632024: bpf_trace_printk: [udp_pre_connect]: called with host [TGID:228804]
+            sudo-228804  [000] ...11 64656.632026: bpf_trace_printk: [connect4]:called with host pid: 228804
+            sudo-228804  [000] d..21 64656.632039: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228804]
+            sudo-228804  [000] d..21 64656.632040: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+            sudo-228804  [000] ...11 64656.632114: bpf_trace_printk: [connect6]:called with host pid: 228804
+            sudo-228804  [000] d..21 64656.632395: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228804]
+            sudo-228804  [000] d..21 64656.632397: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+            sudo-228804  [000] d..21 64656.632433: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228804]
+            sudo-228804  [000] d..21 64656.632434: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+            sudo-228804  [000] d..21 64656.636812: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228804]
+            sudo-228804  [000] d..21 64656.636856: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+            sudo-228804  [000] d..21 64656.637500: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228804]
+            sudo-228804  [000] d..21 64656.637502: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+            sudo-228804  [000] d..21 64656.637658: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228804]
+            sudo-228804  [000] d..21 64656.637659: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+            sudo-228804  [000] d..21 64656.639147: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228804]
+            sudo-228804  [000] d..21 64656.639150: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+            sudo-228804  [000] d..21 64656.640192: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228804]
+            sudo-228804  [000] d..21 64656.640194: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          keploy-224364  [003] d..21 64657.479606: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224364  [003] d..31 64657.479696: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224362  [001] d..21 64657.479720: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224362  [001] d..31 64657.479728: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI
+           <...>-228819  [000] d..21 64658.371057: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228819]
+           <...>-228819  [000] d..21 64658.371082: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+           <...>-228846  [001] d..21 64661.369051: bpf_trace_printk: [sys_socket_entry]: called with host [TGID:228846]
+           <...>-228846  [001] d..21 64661.369092: bpf_trace_printk: [check_and_register_agent]: Unable to find namespace pid & tgid for current process for inode: 0
+          keploy-224364  [003] d..21 64661.481162: bpf_trace_printk: [sys_write_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224364  [003] d..31 64661.481209: bpf_trace_printk: [sys_write_exit]:filtered the egress system call from Keploy-CLI
+          keploy-224362  [001] d..21 64661.481247: bpf_trace_printk: [sys_read_entry]:filtered the egress system call from Keploy-CLI
+          keploy-224362  [001] d..31 64661.481257: bpf_trace_printk: [sys_read_exit]:filtered the egress system call from Keploy-CLI

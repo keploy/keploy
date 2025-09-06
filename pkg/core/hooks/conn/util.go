@@ -172,7 +172,7 @@ func Capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 		}
 
 		if req.Header.Get("Content-Encoding") != "" {
-			reqBody, err = pkg.Decompress(logger, req.Header.Get("Content-Encoding"), reqBody)
+			reqBody, err = pkg.Decompress(req.Header.Get("Content-Encoding"), reqBody)
 			if err != nil {
 				utils.LogError(logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(req)))
 				return
@@ -215,7 +215,7 @@ func Capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 	}
 
 	if resp.Header.Get("Content-Encoding") != "" {
-		respBody, err = pkg.Decompress(logger, resp.Header.Get("Content-Encoding"), respBody)
+		respBody, err = pkg.Decompress( resp.Header.Get("Content-Encoding"), respBody)
 		if err != nil {
 			utils.LogError(logger, err, "failed to decompress the response body")
 			return

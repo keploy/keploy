@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -103,6 +104,15 @@ type Hooks struct {
 	readvRet          link.Link
 	retprobeMaxActive int
 	appID             uint64
+	cgBind4           link.Link
+	cgBind6           link.Link
+	skLookup          link.Link
+	// bind              link.Link
+	bindEnter link.Link
+	// bindExit  kprobe.Link
+	// Maps needed by the proxy
+	InboundMeta *ebpf.Map
+	Events      *ebpf.Map
 }
 
 func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
@@ -183,7 +193,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	h.dockerAppRegistrationMap = objs.DockerAppRegistrationMap
 	h.objects = objs
 	h.objectsMutex.Unlock()
-
+	h.objects.BindFilterResults = objs.BindFilterResults
 	// ---------------
 
 	// ----- used in case of wsl -----
@@ -193,6 +203,44 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 		return err
 	}
 	h.socket = socket
+
+
+	switch runtime.GOARCH {
+	case "amd64":
+		h.logger.Info("Attaching x86_64 (amd64) kprobes for bind syscall.")
+		// Attach the kprobe for bind syscall entry on x86
+		h.bindEnter, err = link.Kprobe("__x64_sys_bind", objs.HandleBindEnterX86, nil)
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to attach kprobe to __x64_sys_bind")
+			return err
+		}
+		// Attach the kretprobe for bind syscall exit on x86
+		// h.bindExit, err = link.Kretprobe("__x64_sys_bind", objs.HandleBindExitX86, nil)
+		// if err != nil {
+		// 	utils.LogError(h.logger, err, "failed to attach kretprobe to __x64_sys_bind")
+		// 	return err
+		// }
+
+	case "arm64":
+		h.logger.Info("Attaching arm64 kprobes for bind syscall.")
+		// Attach the kprobe for bind syscall entry on arm64
+		h.bindEnter, err = link.Kprobe("__arm64_sys_bind", objs.HandleBindEnterArm, nil)
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to attach kprobe to __arm64_sys_bind")
+			return err
+		}
+		// Attach the kretprobe for bind syscall exit on arm64
+		// h.bindExit, err = link.Kretprobe("__arm64_sys_bind", objs.HandleBindExitArm, nil)
+		// if err != nil {
+		// 	utils.LogError(h.logger, err, "failed to attach kretprobe to __arm64_sys_bind")
+		// 	return err
+		// }
+
+	default:
+		err = fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
+		utils.LogError(h.logger, err, "failed to attach bind hooks")
+		return err
+	}
 
 	if !opts.E2E {
 		h.redirectProxyMap = objs.RedirectProxyMap
@@ -227,6 +275,11 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 		}
 		h.tcpv4Ret = tcpRC4
 
+		//////////////////////////////////////////////////////////////////////////////
+		//////////////////////////////////////////////////////////////////////////////
+
+		h.InboundMeta = objs.InboundMeta
+		h.Events = objs.Events
 		// Get the first-mounted cgroupv2 path.
 		cGroupPath, err := detectCgroupPath(h.logger)
 		if err != nil {
@@ -234,6 +287,50 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 			return err
 		}
 
+		cg4, err := link.AttachCgroup(link.CgroupOptions{
+			Path:    cGroupPath,
+			Attach:  ebpf.AttachCGroupInet4Bind,
+			Program: objs.K_bind4,
+		})
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to attach the bind4 cgroup hook")
+			return err
+		}
+		h.cgBind4 = cg4
+
+		cg6, err := link.AttachCgroup(link.CgroupOptions{
+			Path:    cGroupPath,
+			Attach:  ebpf.AttachCGroupInet6Bind,
+			Program: objs.K_bind6,
+		})
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to attach the bind6 cgroup hook")
+			return err
+		}
+		h.cgBind6 = cg6
+
+		netnsPath := "/proc/self/ns/net" // Or make this configurable
+		netns, err := os.Open(netnsPath)
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to open netns", zap.String("path", netnsPath))
+			return err
+		}
+		defer netns.Close()
+
+		sk, err := link.AttachRawLink(link.RawLinkOptions{
+			Target:  int(netns.Fd()),
+			Program: objs.SteerIngress,
+			Attach:  ebpf.AttachSkLookup,
+		})
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to attach sk_lookup hook")
+			return err
+		}
+		h.skLookup = sk
+		h.logger.Info("Attached ingress redirection hooks.")
+
+		//////////////////////////////////////////////////////////////////////////////
+		//////////////////////////////////////////////////////////////////////////////
 		c4, err := link.AttachCgroup(link.CgroupOptions{
 			Path:    cGroupPath,
 			Attach:  ebpf.AttachCGroupInet4Connect,
@@ -317,6 +414,12 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	}
 	h.connect = cnt
 
+	// bind,err := link.Kprobe("__x64_sys_bind", objs.HandleBindEnter, nil)
+	// if err != nil {
+	// 	utils.LogError(h.logger, err, "failed to attach the kprobe hook on sys_bind")
+	// }
+
+	// h.bind = bind
 	//Opening a kretprobe at the exit of connect syscall
 	cntr, err := link.Kretprobe("sys_connect", objs.SyscallProbeRetConnect, &link.KprobeOptions{RetprobeMaxActive: h.retprobeMaxActive})
 	if err != nil {
@@ -704,10 +807,26 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 	if err := h.connect.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the connect")
 	}
+	// if err := h.bind.Close(); err != nil {
+	// 	utils.LogError(h.logger, err, "failed to close the connect")
+	// }
+	if h.bindEnter != nil {
+        if err := h.bindEnter.Close(); err != nil {
+            utils.LogError(h.logger, err, "failed to close the bind enter kprobe")
+        }
+    }
 
 	if err := h.connectRet.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the connectRet")
 	}
-
+	if h.cgBind4 != nil {
+		h.cgBind4.Close()
+	}
+	if h.cgBind6 != nil {
+		h.cgBind6.Close()
+	}
+	if h.skLookup != nil {
+		h.skLookup.Close()
+	}
 	h.logger.Info("eBPF resources released successfully...")
 }

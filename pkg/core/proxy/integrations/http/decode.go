@@ -99,7 +99,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			}
 
 			if input.header.Get("Content-Encoding") != "" {
-				input.body, err = pkg.Decompress(h.Logger, input.header.Get("Content-Encoding"), input.body)
+				input.body, err = pkg.Decompress( input.header.Get("Content-Encoding"), input.body)
 				if err != nil {
 					utils.LogError(h.Logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(request)))
 					errCh <- err

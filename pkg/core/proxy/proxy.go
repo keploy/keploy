@@ -20,9 +20,15 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	// Add this import
+	"github.com/cilium/ebpf"
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
+	Hooks "go.keploy.io/server/v2/pkg/core/hooks"
+	proxy_test "go.keploy.io/server/v2/pkg/core/proxyTest"
+
+	// "go.keploy.io/server/v2/pkg/core/proxy"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	pTls "go.keploy.io/server/v2/pkg/core/proxy/tls"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
@@ -60,18 +66,24 @@ type Proxy struct {
 	Listener net.Listener
 
 	//to store the nsswitch.conf file data
-	nsswitchData []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
-	UDPDNSServer *dns.Server
-	TCPDNSServer *dns.Server
+	nsswitchData   []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
+	UDPDNSServer   *dns.Server
+	TCPDNSServer   *dns.Server
+	portMapping    sync.Map // A thread-safe map to store port mappings [uint16 -> uint16]
+	inboundMetaMap *ebpf.Map
+	hooks          *Hooks.Hooks
 }
 
 func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
+	h := info.(*Hooks.Hooks)
 	return &Proxy{
 		logger:       logger,
 		Port:         opts.ProxyPort, // default: 16789
-		DNSPort:      opts.DNSPort,   // default: 26789
-		IP4:          "127.0.0.1",    // default: "127.0.0.1" <-> (2130706433)
-		IP6:          "::1",          //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
+		hooks:        h,
+		portMapping:  sync.Map{},
+		DNSPort:      opts.DNSPort, // default: 26789
+		IP4:          "127.0.0.1",  // default: "127.0.0.1" <-> (2130706433)
+		IP6:          "::1",        //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
 		ipMutex:      &sync.Mutex{},
 		connMutex:    &sync.Mutex{},
 		DestInfo:     info,
@@ -95,7 +107,9 @@ func (p *Proxy) InitIntegrations(_ context.Context) error {
 	return nil
 }
 
-func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
+// In proxy.go
+
+func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions, incomingOpts models.IncomingOptions) error {
 
 	//first initialize the integrations
 	err := p.InitIntegrations(ctx)
@@ -189,11 +203,41 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions) error {
 			return err
 		}
 	})
-	// Wait for the proxy server to be ready or fail
-	err = <-readyChan
-	if err != nil {
+
+	if err := <-readyChan; err != nil {
 		return err
 	}
+	p.inboundMetaMap = p.hooks.InboundMeta
+	persister := opts.Persister
+	if persister == nil {
+		// Create a "noop" persister that does nothing, to prevent nil pointer errors.
+		persister = func(ctx context.Context, testCase *models.TestCase) error {
+			p.logger.Debug("Proxy is not in record mode, dropping test case.")
+			return nil
+		}
+	}
+	deps := ProxyDependencies{
+		Logger:    p.logger,
+		Persister: persister,
+	}
+	decoder := proxy_test.NewMyDecoder()
+	// // Start the eBPF listener for bind events
+	ingressProxyManager := NewIngressProxyManager(ctx, p.logger, deps, decoder, incomingOpts)
+	go func() {
+		defer utils.Recover(p.logger)
+		ListenForIngressEvents(ctx, p.hooks, ingressProxyManager)
+	}()
+
+	// Setup a graceful shutdown for the ingress proxies.
+	g.Go(func() error {
+		<-ctx.Done()
+		p.logger.Info("Shutting down all dynamic ingress proxies...")
+		ingressProxyManager.StopAll()
+		fmt.Println("All ingress proxies shut down.")
+		return nil
+	})
+	p.logger.Info("✅ Successfully pinned proxy listener socket to eBPF sockmap.")
+
 	p.logger.Info("Keploy has taken control of the DNS resolution mechanism, your application may misbehave if you have provided wrong domain name in your application code.")
 
 	p.logger.Info(fmt.Sprintf("Proxy started at port:%v", p.Port))
@@ -307,7 +351,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	sourcePort := remoteAddr.Port
 
 	p.logger.Debug("Inside handleConnection of proxyServer", zap.Int("source port", sourcePort), zap.Int64("Time", time.Now().Unix()))
-
 	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
 	if err != nil {
 		utils.LogError(p.logger, err, "failed to fetch the destination info", zap.Int("Source port", sourcePort))

@@ -121,9 +121,11 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		return nil
 	default:
 	}
-
+	var persister models.TestCasePersister = func(ctx context.Context, testCase *models.TestCase) error {
+		return r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
+	}
 	// Instrument will setup the environment and start the hooks and proxy
-	appID, err = r.Instrument(hookCtx)
+	appID, err = r.Instrument(hookCtx, persister)
 	if err != nil {
 		stopReason = "failed to instrument the application"
 		utils.LogError(r.logger, err, stopReason)
@@ -143,6 +145,22 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		return fmt.Errorf("%s", stopReason)
 	}
 
+	// errGrp.Go(func() error {
+	// 	// 1. Create an instance of your decoder.
+	// 	decoder := proxy_test.NewMyDecoder()
+
+	// 	// 2. Create the proxy manager, passing it the recorder's test case channel.
+	// 	// The 'h' variable for hooks should be available from your `Instrument` call.
+	// 	proxyManager := proxy.NewIngressProxyManager(r.logger, frames.Incoming, decoder)
+
+	// 	// 3. Start the event listener which will, in turn, start the proxies.
+	// 	proxy.ListenForIngressEvents(hookCtx, r.hooks, proxyManager) // Assuming r.hooks is accessible
+
+	// 	// 4. Ensure cleanup when context is done.
+	// 	<-hookCtx.Done()
+	// 	proxyManager.StopAll()
+	// 	return nil
+	// })
 	errGrp.Go(func() error {
 		for testCase := range frames.Incoming {
 			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
@@ -240,7 +258,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	return fmt.Errorf("%s", stopReason)
 }
 
-func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
+func (r *Recorder) Instrument(ctx context.Context, persister models.TestCasePersister) (uint64, error) {
 	var stopReason string
 	// setting up the environment for recording
 	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
@@ -263,7 +281,16 @@ func (r *Recorder) Instrument(ctx context.Context) (uint64, error) {
 			Rules:         r.config.BypassRules,
 			E2E:           r.config.E2E,
 			Port:          r.config.Port,
+			Persister:     persister,
+			Incoming: models.IncomingOptions{
+				Filters:  r.config.Record.Filters,
+				BasePath: r.config.Record.BasePath,
+			},
 		}
+		// incomingOpts := models.IncomingOptions{
+		// 	Filters:  r.config.Record.Filters,
+		// 	BasePath: r.config.Record.BasePath,
+		// }
 		err = r.instrumentation.Hook(ctx, appID, hooks)
 		if err != nil {
 			stopReason = "failed to start the hooks and proxy"

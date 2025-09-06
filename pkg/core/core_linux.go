@@ -95,27 +95,18 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 		return errors.New("failed to get the error group from the context")
 	}
 
-	// Create a new error group for the hooks (Always required)
-	hookErrGrp, _ := errgroup.WithContext(ctx)
-	hookCtx := context.WithoutCancel(ctx) //so that main context doesn't cancel the hookCtx to control the lifecycle of the hooks
-	hookCtx, hookCtxCancel := context.WithCancel(hookCtx)
-	hookCtx = context.WithValue(hookCtx, models.ErrGroupKey, hookErrGrp)
-
-	// create a new error group for the proxy
-	proxyErrGrp, _ := errgroup.WithContext(ctx)
-	proxyCtx := context.WithoutCancel(ctx) //so that main context doesn't cancel the proxyCtx to control the lifecycle of the proxy
-	proxyCtx, proxyCtxCancel := context.WithCancel(proxyCtx)
-	proxyCtx = context.WithValue(proxyCtx, models.ErrGroupKey, proxyErrGrp)
+	hookErrGrp, hookCtx := errgroup.WithContext(ctx)
+    proxyErrGrp, proxyCtx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
 		<-ctx.Done()
-		proxyCtxCancel()
+		// proxyCtxCancel()
 		err = proxyErrGrp.Wait()
 		if err != nil {
 			utils.LogError(c.logger, err, "failed to stop the proxy")
 		}
 
-		hookCtxCancel()
+		// hookCtxCancel()
 		err := hookErrGrp.Wait()
 		if err != nil {
 			utils.LogError(c.logger, err, "failed to unload the hooks")
@@ -161,8 +152,9 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 	// start proxy
 	err = c.StartProxy(proxyCtx, ProxyOptions{
 		DNSIPv4Addr: a.KeployIPv4Addr(),
+		Persister:   opts.Persister,
 		//DnsIPv6Addr: ""
-	})
+	}, opts.Incoming)
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to start proxy")
 		return hookErr
