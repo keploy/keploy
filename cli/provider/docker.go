@@ -90,15 +90,20 @@ func StartInDocker(ctx context.Context, logger *zap.Logger, conf *config.Config)
 func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	client, err := docker.New(logger)
 	if err != nil {
-		utils.LogError(logger, err, "failed to initalise docker")
+		utils.LogError(logger, err, "failed to initialize docker")
 		return err
 	}
 
 	// create all the volumes from DockerConfig.VolumeMounts
 	for _, volume := range DockerConfig.VolumeMounts {
-		err := client.CreateVolume(ctx, volume, true)
+		volumeName := volume
+		if strings.Contains(volume, ":") {
+			volumeName = strings.Split(volume, ":")[0]
+		}
+		logger.Debug("creating volume", zap.String("volume", volumeName))
+		err := client.CreateVolume(ctx, volumeName, true)
 		if err != nil {
-			utils.LogError(logger, err, "failed to create volume "+volume)
+			utils.LogError(logger, err, "failed to create volume "+volumeName)
 			return err
 		}
 	}
