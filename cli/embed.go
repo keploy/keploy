@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v2/config"
@@ -50,7 +49,6 @@ func EmbedCommand(ctx context.Context, logger *zap.Logger, cfg *config.Config, s
 				return nil
 			}
 
-			fmt.Println("✅ Codebase indexed successfully")
 			return nil
 		},
 	}

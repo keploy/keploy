@@ -131,7 +131,7 @@ func formatSection(content, templateText string) (string, error) {
 }
 
 func (pb *PromptBuilder) BuildPrompt(file, failedTestRuns string) (*Prompt, error) {
-	pb.Logger.Debug("Building prompt", zap.String("file", file), zap.String("language", pb.Language))
+	// pb.Logger.Debug("Building prompt", zap.String("file", file), zap.String("language", pb.Language))
 
 	pb.Src.CodeNumbered = numberLines(pb.Src.Code)
 	pb.Test.CodeNumbered = numberLines(pb.Test.Code)
