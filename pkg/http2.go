@@ -110,26 +110,30 @@ type HTTP2StreamState struct {
 	ID        uint32
 	RequestID string
 	ParentID  string
-	isRequest bool
 
 	// Timing
 	startTime time.Time
 	endTime   time.Time
 
-	// Message state
-	headerBlockFragments [][]byte
-	dataFrames           [][]byte
-	isComplete           bool
-	endStreamReceived    bool
-	requestComplete      bool
+	// ===== Request (incoming frames) =====
+	reqHeaderFrags       [][]byte
+	reqHeadersReceived   bool
+	reqDataFrames        [][]byte
+	reqEndStreamReceived bool
+
+	// ===== Response (outgoing frames) =====
+	respHeaderFrags       [][]byte
+	respHeadersReceived   bool
+	respTrailersReceived  bool
+	respDataFrames        [][]byte
+	respEndStreamReceived bool
 
 	// gRPC specific state
 	grpcReq  *models.GrpcReq
 	grpcResp *models.GrpcResp
 
-	// Header state
-	headersReceived  bool
-	trailersReceived bool
+	// Completion
+	isComplete bool
 }
 
 // HTTP2Stream represents a complete HTTP/2 stream
@@ -143,105 +147,39 @@ type HTTP2Stream struct {
 type DefaultStreamManager struct {
 	mutex   sync.RWMutex
 	streams map[uint32]*HTTP2StreamState
-	// completed []*HTTP2Stream
 	buffer  []byte
 	logger  *zap.Logger
-	decoder *hpack.Decoder
-	// Context-aware header tables
-	requestHeaders  map[string]string // For request headers
-	responseHeaders map[string]string // For response headers
-	trailerHeaders  map[string]string // For trailer headers
+
+	// Two separate HPACK decoders: one per direction
+	decoderIn  *hpack.Decoder // incoming (client -> server)
+	decoderOut *hpack.Decoder // outgoing (server -> client)
 }
 
 // NewStreamManager creates a new stream manager
 func NewStreamManager(logger *zap.Logger) *DefaultStreamManager {
 	return &DefaultStreamManager{
-		streams: make(map[uint32]*HTTP2StreamState),
-		buffer:  make([]byte, 0, DefaultMaxFrameSize),
-		logger:  logger,
-		decoder: hpack.NewDecoder(MaxDynamicTableSize, nil),
-		// Initialize separate header tables
-		requestHeaders:  make(map[string]string),
-		responseHeaders: make(map[string]string),
-		trailerHeaders:  make(map[string]string),
-	}
-}
-
-// storeHeaders stores headers in the appropriate connection header table based on context
-func (sm *DefaultStreamManager) storeHeaders(headers *models.GrpcHeaders, isRequest bool, isTrailer bool) {
-	if headers == nil {
-		return
-	}
-
-	// Select the appropriate header table
-	var headerTable map[string]string
-	if isTrailer {
-		headerTable = sm.trailerHeaders
-	} else if isRequest {
-		headerTable = sm.requestHeaders
-	} else {
-		headerTable = sm.responseHeaders
-	}
-
-	// Store pseudo headers
-	for k, v := range headers.PseudoHeaders {
-		headerTable[k] = v
-	}
-
-	// Store ordinary headers
-	for k, v := range headers.OrdinaryHeaders {
-		headerTable[k] = v
-	}
-}
-
-// rehydrateHeaders adds missing headers from the appropriate connection header table
-func (sm *DefaultStreamManager) rehydrateHeaders(headers *models.GrpcHeaders, isRequest bool, isTrailer bool) {
-	if headers == nil {
-		return
-	}
-
-	// Select the appropriate header table
-	var headerTable map[string]string
-	if isTrailer {
-		headerTable = sm.trailerHeaders
-	} else if isRequest {
-		headerTable = sm.requestHeaders
-	} else {
-		headerTable = sm.responseHeaders
-	}
-
-	// Initialize maps if nil
-	if headers.PseudoHeaders == nil {
-		headers.PseudoHeaders = make(map[string]string)
-	}
-	if headers.OrdinaryHeaders == nil {
-		headers.OrdinaryHeaders = make(map[string]string)
-	}
-
-	// Add missing headers from the connection's header table
-	for k, v := range headerTable {
-		if strings.HasPrefix(k, ":") {
-			// This is a pseudo-header
-			if _, exists := headers.PseudoHeaders[k]; !exists {
-				headers.PseudoHeaders[k] = v
-			}
-		} else {
-			// This is an ordinary header
-			if _, exists := headers.OrdinaryHeaders[k]; !exists {
-				headers.OrdinaryHeaders[k] = v
-			}
-		}
+		streams:    make(map[uint32]*HTTP2StreamState),
+		buffer:     make([]byte, 0, DefaultMaxFrameSize),
+		logger:     logger,
+		decoderIn:  hpack.NewDecoder(MaxDynamicTableSize, nil),
+		decoderOut: hpack.NewDecoder(MaxDynamicTableSize, nil),
 	}
 }
 
 // HandleFrame processes an HTTP/2 frame
+// isOutgoing=false => incoming (client->server) => REQUEST side
+// isOutgoing=true  => outgoing (server->client) => RESPONSE side
 func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, frameTime time.Time) error {
 	sm.mutex.Lock()
 	defer sm.mutex.Unlock()
 
 	streamID := frame.Header().StreamID
+	if streamID == 0 {
+		// connection control; ignore here
+		return nil
+	}
 
-	// Initialize stream if it doesn't exist
+	// Init stream
 	if _, exists := sm.streams[streamID]; !exists {
 		prefix := "Incoming_"
 		if isOutgoing {
@@ -251,115 +189,153 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 		sm.streams[streamID] = &HTTP2StreamState{
 			ID:        streamID,
 			RequestID: requestID,
-			isRequest: streamID != 0, // Stream 0 is for connection control
 			startTime: frameTime,
 		}
 	}
-
-	stream := sm.streams[streamID]
+	s := sm.streams[streamID]
 
 	switch f := frame.(type) {
+
 	case *http2.HeadersFrame:
-		// Store header block fragments for later processing
-		stream.headerBlockFragments = append(stream.headerBlockFragments, f.HeaderBlockFragment())
-
-		if f.HeadersEnded() {
-			// Process complete headers
-			headerBlock := bytes.Join(stream.headerBlockFragments, nil)
-			stream.headerBlockFragments = nil
-			fields, err := sm.decoder.DecodeFull(headerBlock)
-			if err != nil {
-				return fmt.Errorf("failed to decode headers: %v", err)
-			}
-
-			for _, field := range fields {
-				if field.Name == ":status" {
-					stream.isRequest = false
+		if isOutgoing {
+			s.respHeaderFrags = append(s.respHeaderFrags, f.HeaderBlockFragment())
+			if f.HeadersEnded() {
+				if err := sm.processHeaderBlock(s /*isOutgoing=*/, true); err != nil {
+					return err
 				}
 			}
-
-			headers := ProcessHeaders(fields)
-
-			if !stream.headersReceived {
-				// These are initial headers
-				if stream.isRequest {
-					// Rehydrate from request headers
-					sm.rehydrateHeaders(headers, true, false)
-
-					stream.grpcReq = &models.GrpcReq{
-						Headers: *headers,
-					}
-					// Store headers for future requests
-					sm.storeHeaders(headers, true, false)
-				} else {
-					// Rehydrate from response headers
-					sm.rehydrateHeaders(headers, false, false)
-
-					stream.grpcResp = &models.GrpcResp{
-						Headers: *headers,
-					}
-					// Store headers for future responses
-					sm.storeHeaders(headers, false, false)
+			if f.StreamEnded() {
+				s.respEndStreamReceived = true
+				if err := sm.processCompleteMessage(s /*isOutgoing=*/, true); err != nil {
+					return err
 				}
-				stream.headersReceived = true
-			} else if !stream.trailersReceived && !stream.isRequest {
-				// These are trailers (only for responses)
-				// Rehydrate from trailer headers
-				sm.rehydrateHeaders(headers, false, true)
-
-				if stream.grpcResp != nil {
-					stream.grpcResp.Trailers = *headers
-					// Store headers for future trailers
-					sm.storeHeaders(headers, false, true)
+				s.endTime = frameTime
+				sm.checkStreamCompletion(streamID)
+			}
+		} else {
+			s.reqHeaderFrags = append(s.reqHeaderFrags, f.HeaderBlockFragment())
+			if f.HeadersEnded() {
+				if err := sm.processHeaderBlock(s /*isOutgoing=*/, false); err != nil {
+					return err
 				}
-				stream.trailersReceived = true
+			}
+			if f.StreamEnded() {
+				s.reqEndStreamReceived = true
+				if err := sm.processCompleteMessage(s /*isOutgoing=*/, false); err != nil {
+					return err
+				}
+				sm.checkStreamCompletion(streamID)
 			}
 		}
 
-		if f.StreamEnded() {
-			stream.endStreamReceived = true
-			// Process the complete message
-			if err := sm.processCompleteMessage(stream); err != nil {
-				return err
+	case *http2.ContinuationFrame:
+		if isOutgoing {
+			s.respHeaderFrags = append(s.respHeaderFrags, f.HeaderBlockFragment())
+			if f.HeadersEnded() {
+				if err := sm.processHeaderBlock(s /*isOutgoing=*/, true); err != nil {
+					return err
+				}
 			}
-			sm.checkStreamCompletion(streamID)
-
-			// Clear header fragments and data frames after processing request part
-			if stream.isRequest {
-				stream.headerBlockFragments = nil
-				stream.endStreamReceived = false
-				stream.headersReceived = false
-				stream.trailersReceived = false
-			} else {
-				stream.endTime = frameTime
+		} else {
+			s.reqHeaderFrags = append(s.reqHeaderFrags, f.HeaderBlockFragment())
+			if f.HeadersEnded() {
+				if err := sm.processHeaderBlock(s /*isOutgoing=*/, false); err != nil {
+					return err
+				}
 			}
 		}
 
 	case *http2.DataFrame:
-		// Store data frames for later processing
-		stream.dataFrames = append(stream.dataFrames, f.Data())
-
-		if f.StreamEnded() {
-			stream.endStreamReceived = true
-			// Process the complete message
-			if err := sm.processCompleteMessage(stream); err != nil {
-				return err
+		if isOutgoing {
+			s.respDataFrames = append(s.respDataFrames, f.Data())
+			if f.StreamEnded() {
+				s.respEndStreamReceived = true
+				if err := sm.processCompleteMessage(s /*isOutgoing=*/, true); err != nil {
+					return err
+				}
+				s.endTime = frameTime
+				sm.checkStreamCompletion(streamID)
 			}
-			sm.checkStreamCompletion(streamID)
-
-			// Clear header fragments and data frames after processing request part
-			if stream.isRequest {
-				stream.headerBlockFragments = nil
-				stream.endStreamReceived = false
-				stream.headersReceived = false
-				stream.trailersReceived = false
-			} else {
-				stream.endTime = frameTime
+		} else {
+			s.reqDataFrames = append(s.reqDataFrames, f.Data())
+			if f.StreamEnded() {
+				s.reqEndStreamReceived = true
+				if err := sm.processCompleteMessage(s /*isOutgoing=*/, false); err != nil {
+					return err
+				}
+				sm.checkStreamCompletion(streamID)
 			}
 		}
 	}
 
 	return nil
+}
+
+// processHeaderBlock decodes accumulated header fragments for the given side
+func (sm *DefaultStreamManager) processHeaderBlock(s *HTTP2StreamState, isOutgoing bool) error {
+	var headerBlock []byte
+	var fields []hpack.HeaderField
+	var err error
+
+	if isOutgoing {
+		if len(s.respHeaderFrags) == 0 {
+			return nil
+		}
+		headerBlock = bytes.Join(s.respHeaderFrags, nil)
+		s.respHeaderFrags = nil
+
+		fields, err = sm.decoderOut.DecodeFull(headerBlock)
+		if err != nil {
+			return fmt.Errorf("failed to decode response headers: %v", err)
+		}
+
+		h := ProcessHeaders(fields)
+
+		if !s.respHeadersReceived {
+			// Initial response headers
+			if s.grpcResp == nil {
+				s.grpcResp = &models.GrpcResp{}
+			}
+			s.grpcResp.Headers = *h
+			s.respHeadersReceived = true
+			return nil
+		}
+
+		// Subsequent headers on response side are trailers
+		if s.grpcResp == nil {
+			s.grpcResp = &models.GrpcResp{}
+		}
+		s.grpcResp.Trailers = *h
+		s.respTrailersReceived = true
+		return nil
+
+	} else {
+		if len(s.reqHeaderFrags) == 0 {
+			return nil
+		}
+		headerBlock = bytes.Join(s.reqHeaderFrags, nil)
+		s.reqHeaderFrags = nil
+
+		fields, err = sm.decoderIn.DecodeFull(headerBlock)
+		if err != nil {
+			return fmt.Errorf("failed to decode request headers: %v", err)
+		}
+
+		h := ProcessHeaders(fields)
+
+		// gRPC client rarely sends request trailers; treat first block as headers
+		if !s.reqHeadersReceived {
+			if s.grpcReq == nil {
+				s.grpcReq = &models.GrpcReq{}
+			}
+			s.grpcReq.Headers = *h
+			s.reqHeadersReceived = true
+			return nil
+		}
+
+		// If you want to store client trailers, add a Trailers field to GrpcReq in your model and set it here.
+		return nil
+	}
 }
 
 // GetCompleteStreams returns all completed HTTP/2 streams
@@ -392,59 +368,49 @@ func (sm *DefaultStreamManager) CleanupStream(streamID uint32) {
 	delete(sm.streams, streamID)
 }
 
-// processCompleteMessage processes a complete HTTP/2 message
-func (sm *DefaultStreamManager) processCompleteMessage(stream *HTTP2StreamState) error {
-	if stream == nil {
-		return fmt.Errorf("nil stream")
-	}
+// processCompleteMessage assembles DATA frames for the given side and parses gRPC payload
+func (sm *DefaultStreamManager) processCompleteMessage(s *HTTP2StreamState, isOutgoing bool) error {
+	if isOutgoing {
+		if len(s.respDataFrames) == 0 {
+			return nil
+		}
+		data := bytes.Join(s.respDataFrames, nil)
+		s.respDataFrames = nil
 
-	if len(stream.dataFrames) == 0 {
+		if s.grpcResp == nil {
+			s.grpcResp = &models.GrpcResp{}
+		}
+		s.grpcResp.Body = CreateLengthPrefixedMessageFromPayload(data)
+		return nil
+
+	} else {
+		if len(s.reqDataFrames) == 0 {
+			return nil
+		}
+		data := bytes.Join(s.reqDataFrames, nil)
+		s.reqDataFrames = nil
+
+		if s.grpcReq == nil {
+			s.grpcReq = &models.GrpcReq{}
+		}
+		s.grpcReq.Body = CreateLengthPrefixedMessageFromPayload(data)
 		return nil
 	}
-
-	// Combine all data frame fragments
-	data := bytes.Join(stream.dataFrames, nil)
-
-	// Process the complete gRPC message
-	msg := CreateLengthPrefixedMessageFromPayload(data)
-
-	if stream.isRequest {
-		if stream.grpcReq == nil {
-			stream.grpcReq = &models.GrpcReq{}
-		}
-		stream.grpcReq.Body = msg
-	} else {
-		if stream.grpcResp == nil {
-			stream.grpcResp = &models.GrpcResp{}
-		}
-		stream.grpcResp.Body = msg
-	}
-
-	// Clear the data frames after processing
-	stream.dataFrames = nil
-	return nil
 }
 
-// checkStreamCompletion checks if a stream is complete and processes it accordingly
+// checkStreamCompletion decides when a stream is complete (request done + response done with trailers)
 func (sm *DefaultStreamManager) checkStreamCompletion(streamID uint32) {
-	stream := sm.streams[streamID]
+	s := sm.streams[streamID]
+	if s == nil || s.isComplete == false {
+		// Request considered "done" once END_STREAM seen on request side and headers received.
+		reqDone := s.reqHeadersReceived && s.reqEndStreamReceived
 
-	// For requests: mark the message part as complete but don't complete the stream
-	if stream.isRequest {
-		if stream.endStreamReceived && stream.headersReceived {
-			// Mark request part as complete but keep stream open for response
-			stream.requestComplete = true
-		}
-		return // Don't mark stream as complete yet
-	}
+		// Response considered "done" once headers + trailers received and END_STREAM on response.
+		respDone := s.respHeadersReceived && s.respTrailersReceived && s.respEndStreamReceived
 
-	// For responses: check if both request and response are complete
-	if !stream.isRequest && stream.requestComplete {
-		if stream.endStreamReceived && stream.headersReceived && stream.trailersReceived { // For gRPC, ensure trailers are received
-
-			sm.logger.Debug("Stream completed", zap.Any("stream", stream))
-
-			stream.isComplete = true
+		if reqDone && respDone {
+			sm.logger.Debug("Stream completed", zap.Any("stream", s))
+			s.isComplete = true
 		}
 	}
 }
