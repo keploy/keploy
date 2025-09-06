@@ -123,7 +123,6 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 			return nil, err
 		}
 
-		// fmt.Println("Templatized Values:", utils.TemplatizedValues)
 
 		// Prepare the data for template execution.
 		templateData := make(map[string]interface{})
@@ -163,11 +162,6 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	}
 
 	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
-
-	// fmt.Println("Request body:", string(reqBody))
-	// fmt.Println("Request URL:", tc.HTTPReq.URL)
-	// fmt.Println("Request Method:", string(tc.HTTPReq.Method))
-	// fmt.Println("Request Headers:", tc.HTTPReq.Header)
 
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, bytes.NewBuffer(reqBody))
 	if err != nil {
@@ -264,8 +258,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 			return nil, err
 		}
 	}
-	// Req -> render before simulate
-	// Res -> parse the keys -> update the utils.TemplatizedValues
+
 	statusMessage := http.StatusText(httpResp.StatusCode)
 
 	resp = &models.HTTPResp{
@@ -274,12 +267,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		Body:          string(respBody),
 		Header:        ToYamlHTTPHeader(httpResp.Header),
 	}
-	fmt.Println("Request URL:", tc.HTTPReq.URL)
-	fmt.Println("Request Method:", string(tc.HTTPReq.Method))
-	fmt.Println("Request body:", tc.HTTPReq.Body)
-	fmt.Println("Response body of testcase", tc.HTTPResp.Body)
-	fmt.Println("Response body now:", resp.Body)
-	fmt.Println("Response status:", resp.StatusCode, resp.StatusMessage)
+
 	// Centralized template update: if response body present and templates exist, update them.
 	if len(utils.TemplatizedValues) > 0 && len(respBody) > 0 {
 		logger.Debug("Received response from user app", zap.Any("response", resp))
@@ -293,7 +281,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		if len(utils.TemplatizedValues) > 0 && len(respBody) > 0 {
 			updated := UpdateTemplateValuesFromHTTPResp(logger, templatedResponse, *resp, utils.TemplatizedValues)
 			if updated {
-				fmt.Println("Updated template values:", utils.TemplatizedValues)
+				logger.Debug("Updated template values", zap.Any("templatized_values", utils.TemplatizedValues))
 			}
 		}
 	}
@@ -308,9 +296,8 @@ func UpdateTemplateValuesFromHTTPResp(logger *zap.Logger, templatedResponse, res
 	// and then recursively locating the same JSON path in the new response to fetch
 	// the concrete value. This avoids relying on updateTemplatesFromJSON and gives
 	// deterministic path-based updates.
-	fmt.Println("Updating template values from HTTP response")
 	if len(utils.TemplatizedValues) == 0 { // nothing to update
-		fmt.Println("no templatized values present, nothing to update")
+		logger.Debug("no templatized values present, nothing to update")
 		return false
 	}
 
@@ -326,12 +313,8 @@ func UpdateTemplateValuesFromHTTPResp(logger *zap.Logger, templatedResponse, res
 	sanitizedTemplatedBody := sanitizeTemplatedJSON(templatedResponse.Body, placeholderRe)
 	templatedIsJSON := json.Valid([]byte(sanitizedTemplatedBody))
 	actualIsJSON := json.Valid([]byte(resp.Body))
-	fmt.Println("THEQ EPKrper")
-	fmt.Println("Templated body (raw):", templatedResponse.Body)
-	fmt.Println("Templated body (sanitized):", sanitizedTemplatedBody)
-	fmt.Println("Actual body:", resp.Body)
+
 	if templatedIsJSON && actualIsJSON {
-		fmt.Println("Both templated (sanitized) and actual response bodies are JSON")
 		if err := json.Unmarshal([]byte(sanitizedTemplatedBody), &templatedParsed); err == nil {
 			if err2 := json.Unmarshal([]byte(resp.Body), &actualParsed); err2 == nil {
 				if traverseAndUpdateTemplates(logger, templatedParsed, actualParsed, "", placeholderRe, prevTemplatedValues) {
@@ -340,7 +323,7 @@ func UpdateTemplateValuesFromHTTPResp(logger *zap.Logger, templatedResponse, res
 			}
 		}
 	} else {
-		fmt.Println("Either templated (after sanitization) or actual body is not JSON; skipping JSON-based template updates")
+		logger.Debug("response body or templated body is not JSON, skipping body path-based template updates", zap.Bool("templatedIsJSON", templatedIsJSON), zap.Bool("actualIsJSON", actualIsJSON))
 	}
 	return changed
 }
@@ -407,7 +390,7 @@ func traverseAndUpdateTemplates(logger *zap.Logger, templatedNode, actualNode in
 			if !(strings.HasPrefix(trimT, "{{") && strings.HasSuffix(trimT, "}}") && len(matches) == 1) {
 				continue
 			}
-			logger.Info("updating template value from JSON path", zap.String("key", key), zap.String("path", path), zap.String("old_value", prevStr), zap.String("new_value", concrete))
+			logger.Debug("updating template value from JSON path", zap.String("key", key), zap.String("path", path), zap.String("old_value", prevStr), zap.String("new_value", concrete))
 			utils.TemplatizedValues[key] = concrete
 			changed = true
 		}
@@ -434,9 +417,6 @@ func RenderTestCaseWithTemplates(tc *models.TestCase) (*models.TestCase, error) 
 		return nil, err
 	}
 
-	fmt.Println("Rendering testcase with templates:", string(testCaseStr))
-	fmt.Println("current tc request with templates:", tc.HTTPReq.Body)
-	fmt.Println("current tc response body with templates:", tc.HTTPResp.Body)
 	funcMap := template.FuncMap{
 		"int":    utils.ToInt,
 		"string": utils.ToString,
@@ -449,7 +429,6 @@ func RenderTestCaseWithTemplates(tc *models.TestCase) (*models.TestCase, error) 
 
 	data := make(map[string]interface{})
 	for k, v := range utils.TemplatizedValues {
-		// fmt.Println("Using template value:", k, "=", v)
 		data[k] = v
 	}
 	if len(utils.SecretValues) > 0 {

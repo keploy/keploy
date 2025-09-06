@@ -368,7 +368,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 				Body:       renderedTC.HTTPResp.Body,
 				Header:     renderedTC.HTTPResp.Header,
 			})
-			o.logger.Info("Detected noise fields", zap.Any("fields", detected))
+			o.logger.Debug("Detected noise fields", zap.Any("fields", detected))
 			// merge detected into originalTestCase.Noise
 			if originalTestCase.Noise == nil {
 				originalTestCase.Noise = map[string][]string{}
