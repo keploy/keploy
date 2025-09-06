@@ -260,9 +260,30 @@ func findValuesInInterface(data interface{}, path []string, index map[string][]*
 }
 
 func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string][]*ValueLocation, templateConfig map[string]interface{}) []*TemplateChain {
-	var chains []*TemplateChain
+	// We need deterministic variable naming so that earlier producer test cases
+	// receive the base key without suffix and later ones get incremental suffixes.
+	// Strategy:
+	// 1. Build candidate chains first (without assigning template keys).
+	// 2. Group candidates by their derived base key.
+	// 3. Sort each group by producer test index (ascending).
+	// 4. Assign template keys deterministically (base, base1, base2 ...) within each group.
+	// 5. Apply the template substitutions using the assigned keys.
+
+	type candidate struct {
+		value        string
+		locations    []*ValueLocation
+		producer     *ValueLocation
+		consumers    []*ValueLocation
+		occurrences  []*ValueLocation // all producer+consumer occurrences to templatize
+		baseKey      string
+		producerType string
+	}
+
+	var candidates []*candidate
+
+	// Step 1: collect candidates.
 	for value, locations := range index {
-		if len(locations) < 2 {
+		if len(locations) < 2 { // need at least producer + consumer
 			continue
 		}
 
@@ -270,13 +291,12 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 
 		var producer *ValueLocation
 		for _, loc := range locations {
-			if loc.Part == ResponseBody || loc.Part == ResponseHeader {
+			if loc.Part == ResponseBody || loc.Part == ResponseHeader { // allow response headers future
 				producer = loc
 				break
 			}
 		}
-
-		if producer == nil {
+		if producer == nil { // can't form a chain without a producer
 			continue
 		}
 
@@ -286,34 +306,21 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 				subsequentConsumers = append(subsequentConsumers, loc)
 			}
 		}
-
-		if len(subsequentConsumers) == 0 {
+		if len(subsequentConsumers) == 0 { // no data flow
 			continue
 		}
 
-		// --- THIS IS THE CRITICAL FIX ---
-		// Instead of just templatizing the first producer and consumers,
-		// we will templatize ALL occurrences of this value that are either
-		// a producer or a valid consumer.
-		var allOccurrencesToTemplatize []*ValueLocation
+		// Determine all occurrences (producers + valid consumers at/after producer index)
+		var occurrences []*ValueLocation
 		for _, loc := range locations {
 			isProducer := loc.Part == ResponseBody || loc.Part == ResponseHeader
 			isConsumer := (loc.Part == RequestHeader || loc.Part == RequestURL || loc.Part == RequestBody) && loc.TestCaseIndex >= producer.TestCaseIndex
-
 			if isProducer || isConsumer {
-				allOccurrencesToTemplatize = append(allOccurrencesToTemplatize, loc)
+				occurrences = append(occurrences, loc)
 			}
 		}
-		// --- END OF FIX ---
 
-		chain := &TemplateChain{
-			TemplateKey: "", // Will be generated later
-			Value:       value,
-			Producer:    producer,
-			Consumers:   subsequentConsumers,
-		}
-
-		producerType := producer.OriginalType
+		// Derive base key (replicating previous logic for stability)
 		var baseKey string
 		if producer.Part == RequestURL {
 			baseKey = value
@@ -323,12 +330,12 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 			if len(parts) > 0 {
 				baseKey = parts[len(parts)-1]
 			}
-			if _, err := strconv.Atoi(baseKey); err == nil {
+			if _, err := strconv.Atoi(baseKey); err == nil { // numeric leaf => use parent context
 				partsFull := strings.Split(producer.Path, ".")
 				parent := "arr"
 				if len(partsFull) >= 2 {
 					parent = partsFull[len(partsFull)-2]
-					for i := len(partsFull) - 2; i >= 0; i-- {
+					for i := len(partsFull) - 2; i >= 0; i-- { // find first non-numeric ancestor
 						if _, numErr := strconv.Atoi(partsFull[i]); numErr != nil {
 							parent = partsFull[i]
 							break
@@ -339,32 +346,104 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 			}
 		}
 
-		templateKey := insertUnique(baseKey, value, templateConfig)
-		chain.TemplateKey = templateKey
-		chains = append(chains, chain)
+		candidates = append(candidates, &candidate{
+			value:        value,
+			locations:    locations,
+			producer:     producer,
+			consumers:    subsequentConsumers,
+			occurrences:  occurrences,
+			baseKey:      baseKey,
+			producerType: producer.OriginalType,
+		})
+	}
 
-		// Use the new, complete list of all occurrences to modify.
-		for _, loc := range allOccurrencesToTemplatize {
-			templateString := fmt.Sprintf("{{%s .%s}}", producerType, templateKey)
-			if loc.Part == RequestHeader {
-				if headerMap, ok := loc.Pointer.(*map[string]string); ok {
-					originalHeaderValue := (*headerMap)[loc.Path]
-					if loc.Path == "Authorization" && strings.HasPrefix(originalHeaderValue, "Bearer ") {
-						(*headerMap)[loc.Path] = "Bearer " + templateString
-					} else {
-						(*headerMap)[loc.Path] = templateString
-					}
-				}
-			} else if loc.Part == RequestURL {
-				if urlPtr, ok := loc.Pointer.(*string); ok {
-					reconstructURL(urlPtr, loc.Path, templateString)
-				}
+	// Step 2: group by baseKey
+	groups := make(map[string][]*candidate)
+	for _, c := range candidates {
+		groups[c.baseKey] = append(groups[c.baseKey], c)
+	}
+
+	// To keep overall deterministic ordering across different base keys, create sorted list of base keys.
+	baseKeys := make([]string, 0, len(groups))
+	for k := range groups {
+		baseKeys = append(baseKeys, k)
+	}
+	sort.Strings(baseKeys)
+
+	var resultChains []*TemplateChain
+
+	for _, bk := range baseKeys {
+		cs := groups[bk]
+		// Step 3: sort candidates in this group by producer test index (ascending)
+		sort.Slice(cs, func(i, j int) bool { return cs[i].producer.TestCaseIndex < cs[j].producer.TestCaseIndex })
+
+		// Maintain a counter for suffix assignment within this base key group.
+		occurrenceIdx := 0
+		for _, cand := range cs {
+			// Determine deterministic key: first gets baseKey, subsequent get baseKey + number (skipping existing collisions with different value)
+			var desiredKey string
+			if occurrenceIdx == 0 {
+				desiredKey = bk
 			} else {
-				setValueByPath(loc.Pointer, loc.Path, templateString)
+				desiredKey = fmt.Sprintf("%s%d", bk, occurrenceIdx)
+			}
+			occurrenceIdx++
+
+			// Ensure uniqueness versus existing templateConfig but deterministic for this ordering.
+			// If the key already exists with same value -> reuse. If exists different value -> find next free suffix.
+			finalKey := desiredKey
+			if existingVal, exists := templateConfig[finalKey]; exists && existingVal != cand.value {
+				// find next available with incrementing suffix while preserving ordering.
+				suffix := 1
+				for {
+					try := fmt.Sprintf("%s%d", bk, suffix)
+					if existingVal2, exists2 := templateConfig[try]; !exists2 || existingVal2 == cand.value {
+						finalKey = try
+						break
+					}
+					suffix++
+				}
+			}
+			// Record in templateConfig if not present
+			if existingVal, exists := templateConfig[finalKey]; !exists {
+				templateConfig[finalKey] = cand.value
+			} else if existingVal != cand.value {
+				// Extremely unlikely due to above handling; fallback to insertUnique just in case.
+				finalKey = insertUnique(bk, cand.value, templateConfig)
+			}
+
+			// Build chain and apply substitutions
+			chain := &TemplateChain{
+				TemplateKey: finalKey,
+				Value:       cand.value,
+				Producer:    cand.producer,
+				Consumers:   cand.consumers,
+			}
+			resultChains = append(resultChains, chain)
+
+			templateString := fmt.Sprintf("{{%s .%s}}", cand.producerType, finalKey)
+			for _, loc := range cand.occurrences {
+				if loc.Part == RequestHeader {
+					if headerMap, ok := loc.Pointer.(*map[string]string); ok {
+						originalHeaderValue := (*headerMap)[loc.Path]
+						if loc.Path == "Authorization" && strings.HasPrefix(originalHeaderValue, "Bearer ") {
+							(*headerMap)[loc.Path] = "Bearer " + templateString
+						} else {
+							(*headerMap)[loc.Path] = templateString
+						}
+					}
+				} else if loc.Part == RequestURL {
+					if urlPtr, ok := loc.Pointer.(*string); ok {
+						reconstructURL(urlPtr, loc.Path, templateString)
+					}
+				} else {
+					setValueByPath(loc.Pointer, loc.Path, templateString)
+				}
 			}
 		}
 	}
-	return chains
+
+	return resultChains
 }
 
 // In your tools package (tools.go)
