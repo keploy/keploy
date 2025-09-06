@@ -66,13 +66,13 @@ func updateTemplatesFromJSON(logger *zap.Logger, body []byte, allowedKeys map[st
 			if _, ok := allowedKeys[tKey]; ok {
 				consider = true
 			}
-			if !consider {
-				if base, has := stripNumericSuffix(tKey); has {
-					if _, ok2 := allowedKeys[base]; ok2 {
-						consider = true
-					}
-				}
-			}
+			// if !consider {
+			// 	if base, has := stripNumericSuffix(tKey); has {
+			// 		if _, ok2 := allowedKeys[base]; ok2 {
+			// 			consider = true
+			// 		}
+			// 	}
+			// }
 			// Also allow if the key (or its numeric-suffix base) actually appears
 			// in the parsed response JSON -- this covers produced values present
 			// only in the response.
@@ -89,6 +89,10 @@ func updateTemplatesFromJSON(logger *zap.Logger, body []byte, allowedKeys map[st
 				continue
 			}
 		}
+		fmt.Println("Considering template key:", tKey)
+		fmt.Println("Old value:", oldVal)
+		fmt.Println("Allowed keys:", allowedKeys)
+		fmt.Println("Parsed response keys:", parsed)
 		// Exact key
 		if rVal, ok := parsed[tKey]; ok {
 			if applyTemplateValue(logger, tKey, oldVal, rVal) {
@@ -97,14 +101,15 @@ func updateTemplatesFromJSON(logger *zap.Logger, body []byte, allowedKeys map[st
 			continue
 		}
 		// Numeric suffix base key (e.g. id1 -> id)
-		if base, has := stripNumericSuffix(tKey); has {
-			if rVal, ok := parsed[base]; ok {
-				if applyTemplateValue(logger, tKey, oldVal, rVal) {
-					changed = true
-				}
-				continue
-			}
-		}
+		
+		// if base, has := stripNumericSuffix(tKey); has {
+		// 	if rVal, ok := parsed[base]; ok {
+		// 		if applyTemplateValue(logger, tKey, oldVal, rVal) {
+		// 			changed = true
+		// 		}
+		// 		continue
+		// 	}
+		// }
 		// Normalized key comparison
 		normT := normalizeKey(tKey)
 		for rKey, rVal := range parsed {
@@ -137,7 +142,7 @@ func applyTemplateValue(logger *zap.Logger, key string, oldVal, newVal interface
 	if currentStr == newStr {
 		return false
 	}
-	logger.Debug("updating template value", zap.String("key", key), zap.Any("old_value", oldVal), zap.Any("new_value", final))
+	logger.Info("updating template value", zap.String("key", key), zap.Any("old_value", oldVal), zap.Any("new_value", final))
 	utils.TemplatizedValues[key] = final
 	return true
 }

@@ -101,7 +101,7 @@ func IsTime(stringDate string) bool {
 
 func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logger *zap.Logger, apiTimeout uint64) (*models.HTTPResp, error) {
 	var resp *models.HTTPResp
-
+	templatedResponse := tc.HTTPResp // keep a copy of the original templatized response
 	//TODO: adjust this logic in the render function in order to remove the redundant code
 	// convert testcase to string and render the template values.
 	// Render any template values in the test case before simulation.
@@ -264,7 +264,8 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 			return nil, err
 		}
 	}
-
+	// Req -> render before simulate
+	// Res -> parse the keys -> update the utils.TemplatizedValues
 	statusMessage := http.StatusText(httpResp.StatusCode)
 
 	resp = &models.HTTPResp{
@@ -273,7 +274,12 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		Body:          string(respBody),
 		Header:        ToYamlHTTPHeader(httpResp.Header),
 	}
-
+	fmt.Println("Request URL:", tc.HTTPReq.URL)
+	fmt.Println("Request Method:", string(tc.HTTPReq.Method))
+	fmt.Println("Request body:", tc.HTTPReq.Body)
+	fmt.Println("Response body of testcase", tc.HTTPResp.Body)
+	fmt.Println("Response body now:", resp.Body)
+	fmt.Println("Response status:", resp.StatusCode, resp.StatusMessage)
 	// Centralized template update: if response body present and templates exist, update them.
 	if len(utils.TemplatizedValues) > 0 && len(respBody) > 0 {
 		logger.Debug("Received response from user app", zap.Any("response", resp))
@@ -283,56 +289,132 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 			prev[k] = v
 		}
 
-		// Build allowedKeys: only keys referenced in this test case's request (placeholders or literal occurrences)
-		allowedKeys := make(map[string]struct{})
-		// placeholder pattern like {{... .key}}
-		placeholderRe := regexp.MustCompile(`\{\{[^{}]*?\.([a-zA-Z0-9_]+)\}\}`)
-		for _, m := range placeholderRe.FindAllStringSubmatch(tc.HTTPReq.URL, -1) {
-			if len(m) > 1 {
-				allowedKeys[m[1]] = struct{}{}
+		// Compare the current response with previous template values and update if needed
+		if len(utils.TemplatizedValues) > 0 && len(respBody) > 0 {
+			updated := UpdateTemplateValuesFromHTTPResp(logger, templatedResponse, *resp, utils.TemplatizedValues)
+			if updated {
+				fmt.Println("Updated template values:", utils.TemplatizedValues)
 			}
-		}
-		for _, hv := range tc.HTTPReq.Header {
-			for _, m := range placeholderRe.FindAllStringSubmatch(hv, -1) {
-				if len(m) > 1 {
-					allowedKeys[m[1]] = struct{}{}
-				}
-			}
-		}
-		for _, m := range placeholderRe.FindAllStringSubmatch(tc.HTTPReq.Body, -1) {
-			if len(m) > 1 {
-				allowedKeys[m[1]] = struct{}{}
-			}
-		}
-
-		// Also add keys whose literal current value appears in the request (for non-templated literal usage)
-		for k, v := range utils.TemplatizedValues {
-			lit := fmt.Sprintf("%v", v)
-			if lit == "" || strings.Contains(lit, "{{") {
-				continue
-			}
-			addIfLiteral := func(s string) {
-				if s == "" || strings.Contains(s, "{{") {
-					return
-				}
-				if strings.Contains(s, lit) {
-					allowedKeys[k] = struct{}{}
-				}
-			}
-			addIfLiteral(tc.HTTPReq.URL)
-			addIfLiteral(tc.HTTPReq.Body)
-			for _, hv := range tc.HTTPReq.Header {
-				addIfLiteral(hv)
-			}
-		}
-
-		if updateTemplatesFromJSON(logger, respBody, allowedKeys) {
-			// Persist change to testset template if replay layer provided such a method via context (optional future extension)
-			logger.Debug("templates updated inside SimulateHTTP", zap.String("testSet", testSet), zap.Any("templates", utils.TemplatizedValues))
 		}
 	}
-
 	return resp, errHTTPReq
+}
+
+// UpdateTemplateValuesFromHTTPResp checks the HTTP response body and the previous templatized response body
+// it updates the template values if it finds any changes in the response body's fields which were previously templatized
+func UpdateTemplateValuesFromHTTPResp(logger *zap.Logger, templatedResponse, resp models.HTTPResp, prevTemplatedValues map[string]interface{}) bool {
+	// We derive template keys directly from the templated response body & headers by
+	// scanning for placeholder patterns like {{key}} (go text/template simple identifiers)
+	// and then recursively locating the same JSON path in the new response to fetch
+	// the concrete value. This avoids relying on updateTemplatesFromJSON and gives
+	// deterministic path-based updates.
+	fmt.Println("Updating template values from HTTP response")
+	if len(utils.TemplatizedValues) == 0 { // nothing to update
+		fmt.Println("no templatized values present, nothing to update")
+		return false
+	}
+
+	// Capture entire inner expression (supports: {{string .token}}, {{ .id }}, {{token}}, {{ float .price | printf "%f" }})
+	placeholderRe := regexp.MustCompile(`{{\s*([^{}]+?)\s*}}`)
+	changed := false
+
+	// --- 1. Handle JSON body path-based updates ---
+	// Problem: templated response can contain raw placeholders (e.g. array: [{{int .x}},{{int .y}}]) which is not valid JSON.
+	// Solution: produce a sanitized JSON by wrapping any unquoted placeholder token in quotes so that the body becomes parseable.
+	var templatedParsed interface{}
+	var actualParsed interface{}
+	sanitizedTemplatedBody := sanitizeTemplatedJSON(templatedResponse.Body, placeholderRe)
+	templatedIsJSON := json.Valid([]byte(sanitizedTemplatedBody))
+	actualIsJSON := json.Valid([]byte(resp.Body))
+	fmt.Println("THEQ EPKrper")
+	fmt.Println("Templated body (raw):", templatedResponse.Body)
+	fmt.Println("Templated body (sanitized):", sanitizedTemplatedBody)
+	fmt.Println("Actual body:", resp.Body)
+	if templatedIsJSON && actualIsJSON {
+		fmt.Println("Both templated (sanitized) and actual response bodies are JSON")
+		if err := json.Unmarshal([]byte(sanitizedTemplatedBody), &templatedParsed); err == nil {
+			if err2 := json.Unmarshal([]byte(resp.Body), &actualParsed); err2 == nil {
+				if traverseAndUpdateTemplates(logger, templatedParsed, actualParsed, "", placeholderRe, prevTemplatedValues) {
+					changed = true
+				}
+			}
+		}
+	} else {
+		fmt.Println("Either templated (after sanitization) or actual body is not JSON; skipping JSON-based template updates")
+	}
+	return changed
+}
+
+// traverseAndUpdateTemplates walks the templated JSON tree in lock-step with the actual JSON.
+// Whenever it finds a string containing a placeholder, it extracts the template key(s) and updates
+// utils.TemplatizedValues with the concrete value from the actual JSON at the same path.
+func traverseAndUpdateTemplates(logger *zap.Logger, templatedNode, actualNode interface{}, path string, placeholderRe *regexp.Regexp, prevTemplatedValues map[string]interface{}) bool {
+	changed := false
+	switch t := templatedNode.(type) {
+	case map[string]interface{}:
+		actMap, _ := actualNode.(map[string]interface{})
+		for k, v := range t {
+			p := k
+			if path != "" {
+				p = path + "." + k
+			}
+			if traverseAndUpdateTemplates(logger, v, actMap[k], p, placeholderRe, prevTemplatedValues) {
+				changed = true
+			}
+		}
+	case []interface{}:
+		actArr, _ := actualNode.([]interface{})
+		for i, v := range t {
+			var actElem interface{}
+			if i < len(actArr) {
+				actElem = actArr[i]
+			}
+			p := fmt.Sprintf("%s[%d]", path, i)
+			if path == "" {
+				p = fmt.Sprintf("[%d]", i)
+			}
+			if traverseAndUpdateTemplates(logger, v, actElem, p, placeholderRe, prevTemplatedValues) {
+				changed = true
+			}
+		}
+	case string:
+		matches := placeholderRe.FindAllStringSubmatch(t, -1)
+		if len(matches) == 0 {
+			return changed
+		}
+		concrete := fmt.Sprintf("%v", actualNode)
+		if concrete == "<nil>" || concrete == "" {
+			return changed
+		}
+		trimT := strings.TrimSpace(t)
+		for _, m := range matches {
+			if len(m) < 2 {
+				continue
+			}
+			keys := extractTemplateKeys(m[1])
+			if len(keys) != 1 {
+				continue
+			}
+			key := keys[0]
+			if _, ok := utils.TemplatizedValues[key]; !ok {
+				continue
+			}
+			prevStr := fmt.Sprintf("%v", prevTemplatedValues[key])
+			if prevStr == concrete {
+				continue
+			}
+			// Update only if original value is a single placeholder expression (no static mix)
+			if !(strings.HasPrefix(trimT, "{{") && strings.HasSuffix(trimT, "}}") && len(matches) == 1) {
+				continue
+			}
+			logger.Info("updating template value from JSON path", zap.String("key", key), zap.String("path", path), zap.String("old_value", prevStr), zap.String("new_value", concrete))
+			utils.TemplatizedValues[key] = concrete
+			changed = true
+		}
+	default:
+		// non-string primitives can't contain placeholders; nothing to do
+	}
+	return changed
 }
 
 // RenderTestCaseWithTemplates returns a copy of the provided TestCase with
@@ -352,6 +434,9 @@ func RenderTestCaseWithTemplates(tc *models.TestCase) (*models.TestCase, error) 
 		return nil, err
 	}
 
+	fmt.Println("Rendering testcase with templates:", string(testCaseStr))
+	fmt.Println("current tc request with templates:", tc.HTTPReq.Body)
+	fmt.Println("current tc response body with templates:", tc.HTTPResp.Body)
 	funcMap := template.FuncMap{
 		"int":    utils.ToInt,
 		"string": utils.ToString,
@@ -364,6 +449,7 @@ func RenderTestCaseWithTemplates(tc *models.TestCase) (*models.TestCase, error) 
 
 	data := make(map[string]interface{})
 	for k, v := range utils.TemplatizedValues {
+		// fmt.Println("Using template value:", k, "=", v)
 		data[k] = v
 	}
 	if len(utils.SecretValues) > 0 {
@@ -869,4 +955,107 @@ func Compress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) 
 		return compressedBuffer.Bytes(), nil
 	}
 	return data, nil
+}
+
+// extractTemplateKeys parses the inner segment of a template placeholder and returns variable keys.
+// Supports patterns like:
+//
+//	token
+//	.token
+//	string .token
+//	int .id
+//	float .price
+//	.user.id  (returns last path segment id)
+//
+// Only the first pipeline segment is considered (text before |).
+func extractTemplateKeys(inner string) []string {
+	inner = strings.TrimSpace(inner)
+	if inner == "" {
+		return nil
+	}
+	if idx := strings.Index(inner, "|"); idx >= 0 {
+		inner = inner[:idx]
+	}
+	parts := strings.Fields(inner)
+	if len(parts) == 0 {
+		return nil
+	}
+	funcNames := map[string]struct{}{"int": {}, "string": {}, "float": {}}
+	varToken := parts[0]
+	if _, isFunc := funcNames[varToken]; isFunc {
+		if len(parts) < 2 {
+			return nil
+		}
+		varToken = parts[1]
+	}
+	varToken = strings.TrimSpace(varToken)
+	if varToken == "" {
+		return nil
+	}
+	varToken = strings.TrimLeft(varToken, ".")
+	if varToken == "" {
+		return nil
+	}
+	segs := strings.Split(varToken, ".")
+	key := segs[len(segs)-1]
+	return []string{key}
+}
+
+// sanitizeTemplatedJSON makes a JSON string containing go-template placeholders parseable by wrapping
+// any placeholder tokens that appear in value positions without surrounding quotes with quotes.
+// Example: {"arr":[{{int .a}},{{int .b}}]} => {"arr":["{{int .a}}","{{int .b}}"]}
+// This lets us unmarshal while still preserving the placeholder text for later extraction.
+func sanitizeTemplatedJSON(raw string, placeholderRe *regexp.Regexp) string {
+	if raw == "" {
+		return raw
+	}
+	// Precompute which byte positions are inside JSON string literals.
+	inString := make([]bool, len(raw))
+	escaped := false
+	inside := false
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if c == '\\' && !escaped { // potential escape for next char
+			escaped = true
+			if inside {
+				inString[i] = true
+			}
+			continue
+		}
+		if c == '"' && !escaped { // toggle string state
+			inside = !inside
+			inString[i] = inside
+			continue
+		}
+		if inside {
+			inString[i] = true
+		}
+		escaped = false
+	}
+
+	matches := placeholderRe.FindAllStringIndex(raw, -1)
+	if len(matches) == 0 {
+		return raw
+	}
+
+	// Build sanitized output.
+	var b strings.Builder
+	last := 0
+	for _, m := range matches {
+		start, end := m[0], m[1]
+		// Determine if this placeholder starts inside a string literal.
+		insideString := start < len(inString) && inString[start]
+		b.WriteString(raw[last:start])
+		if !insideString {
+			// Insert quotes to force valid JSON token.
+			b.WriteByte('"')
+			b.WriteString(raw[start:end])
+			b.WriteByte('"')
+		} else {
+			b.WriteString(raw[start:end])
+		}
+		last = end
+	}
+	b.WriteString(raw[last:])
+	return b.String()
 }

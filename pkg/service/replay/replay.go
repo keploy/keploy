@@ -1312,6 +1312,7 @@ func (r *Replayer) UpdateTestSetTemplate(ctx context.Context, testSetID string, 
 	if len(template) == 0 { // nothing to persist
 		return nil
 	}
+	fmt.Println("Updating the template values in the test-set config...")
 	// Read existing config to merge non-template fields.
 	existing, err := r.testSetConf.Read(ctx, testSetID)
 	if err != nil {

@@ -361,7 +361,6 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 
 		// Store the original test case response for comparison using the rendered copy
 		originalTestCase := *renderedTC
-
 		// Detect noise fields introduced by templating and mark them on the testcase
 		if len(utils.TemplatizedValues) > 0 {
 			detected := pkg.DetectNoiseFieldsInResp(&models.HTTPResp{
@@ -369,7 +368,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 				Body:       renderedTC.HTTPResp.Body,
 				Header:     renderedTC.HTTPResp.Header,
 			})
-			o.logger.Debug("Detected noise fields", zap.Any("fields", detected))
+			o.logger.Info("Detected noise fields", zap.Any("fields", detected))
 			// merge detected into originalTestCase.Noise
 			if originalTestCase.Noise == nil {
 				originalTestCase.Noise = map[string][]string{}
@@ -380,7 +379,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 				}
 			}
 		}
-		// time.Sleep(100 * time.Millisecond)
+
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSet, o.logger, o.config.Test.APITimeout)
 		if err != nil {
 			utils.LogError(o.logger, err, "failed to simulate HTTP request")
