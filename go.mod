@@ -117,9 +117,6 @@ require (
 	github.com/spf13/viper v1.19.0
 	github.com/stretchr/testify v1.10.0
 	github.com/wI2L/jsondiff v0.5.0
-	github.com/xdg-go/pbkdf2 v1.0.0
-	github.com/xdg-go/scram v1.1.1
-	github.com/xdg-go/stringprep v1.0.4
 	golang.org/x/sync v0.15.0
 	golang.org/x/term v0.32.0
 	google.golang.org/grpc v1.71.0
@@ -135,6 +132,9 @@ require (
 	github.com/planetscale/vtprotobuf v0.6.1-0.20241121165744-79df5c4772f2 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
+	github.com/xdg-go/pbkdf2 v1.0.0 // indirect
+	github.com/xdg-go/scram v1.1.1 // indirect
+	github.com/xdg-go/stringprep v1.0.4 // indirect
 	golang.org/x/exp v0.0.0-20250305212735-054e65f0b394 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250313205543-e70fdf4c4cb4 // indirect
 )
