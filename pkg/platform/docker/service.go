@@ -29,7 +29,7 @@ type Client interface {
 	WriteComposeFile(compose *Compose, path string) error
 
 	IsContainerRunning(containerName string) (bool, error)
-	CreateVolume(ctx context.Context, volumeName string, recreate bool) error
+	CreateVolume(ctx context.Context, volumeName string, recreate bool, withOpts bool) error
 }
 
 type NetworkInfo struct {
