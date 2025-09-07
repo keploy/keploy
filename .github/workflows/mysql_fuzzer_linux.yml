@@ -65,5 +65,4 @@ jobs:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
         run: |
-          tree
           source ./.github/workflows/test_workflow_scripts/mysql-fuzzer-linux.sh

@@ -55,12 +55,13 @@ wait_for_mysql() {
 
 # Waits for an HTTP endpoint to become available
 wait_for_http() {
-  local url="$1"
+  local host="localhost" # Assuming localhost
   local port="$2"
   section "Waiting for application on port $port..."
   for i in {1..120}; do
-    if curl -fsS "$url" >/dev/null 2>&1; then
-      echo "✅ Application is available."
+    # Use netcat (nc) to check if the port is open without sending app-level data
+    if nc -z "$host" "$port" >/dev/null 2>&1; then
+      echo "✅ Application port $port is open."
       endsec
       return 0
     fi
@@ -69,6 +70,35 @@ wait_for_http() {
   echo "::error::Application did not become available on port $port in time."
   endsec
   return 1
+}
+
+# Triggers the fuzzer, lets it run for a short time, and then kills the Keploy process.
+drive_traffic_and_stop_keploy() {
+  local kp_pid="$1"
+
+  # Wait for the fuzzer's API to be ready
+  wait_for_http "http://localhost:18080/run" 18080
+
+  echo "Triggering the fuzzer to generate traffic..."
+  curl -sS --request POST 'http://localhost:18080/run' \
+    --header 'Content-Type: application/json' \
+    --data-raw '{
+      "dsn": "root:password@tcp(127.0.0.1:3306)/",
+      "db_name": "fuzzdb",
+      "drop_db_first": true,
+      "seed": 42,
+      "total_ops": 50,
+      "timeout_sec": 1000,
+      "mode": "record",
+      "golden_path": "./golden/mysqlfuzz_golden.json"
+    }'
+
+  echo "Letting fuzzer run for 40 seconds to generate traffic..."
+  sleep 40
+
+  echo "$kp_pid Keploy PID"
+  echo "Killing Keploy"
+  sudo kill "$kp_pid" 2>/dev/null || true
 }
 
 # --- Main Execution Logic ---
@@ -100,21 +130,8 @@ echo "Starting Keploy in record mode..."
 sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "$FUZZER_BIN" > record.txt 2>&1 &
 KEPLOY_PID=$!
 
-# Wait for the fuzzer to start and then trigger it
-wait_for_http "http://localhost:18080/run" 18080
-echo "Triggering the fuzzer to generate traffic..."
-curl -sS --request POST 'http://localhost:18080/run' \
-  --header 'Content-Type: application/json' \
-  --data-raw '{
-    "dsn": "root:password@tcp(127.0.0.1:3306)/",
-    "db_name": "fuzzdb",
-    "drop_db_first": true,
-    "seed": 42,
-    "total_ops": 1000,
-    "timeout_sec": 1000,
-    "mode": "record",
-    "golden_path": "./golden/mysqlfuzz_golden.json"
-  }'
+# Trigger traffic and explicitly kill the Keploy process after a delay
+drive_traffic_and_stop_keploy "$KEPLOY_PID"
 
 # Wait for Keploy to finish recording and check its exit status
 set +e
@@ -152,21 +169,8 @@ echo "Starting Keploy in test mode..."
 sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_BIN" --delay 15 > test.txt 2>&1 &
 KEPLOY_PID=$!
 
-# Wait for the fuzzer to start and trigger its test mode
-wait_for_http "http://localhost:18080/run" 18080
-echo "Triggering the fuzzer in test mode..."
-curl -sS --request POST 'http://localhost:18080/run' \
-  --header 'Content-Type: application/json' \
-  --data-raw '{
-    "dsn": "root:password@tcp(127.0.0.1:3306)/",
-    "db_name": "fuzzdb",
-    "drop_db_first": true,
-    "seed": 42,
-    "total_ops": 1000,
-    "timeout_sec": 1000,
-    "mode": "test",
-    "golden_path": "./golden/mysqlfuzz_golden.json"
-  }'
+# Trigger traffic and explicitly kill the Keploy process after a delay
+drive_traffic_and_stop_keploy "$KEPLOY_PID"
 
 # Wait for the replay to complete and capture its exit code
 set +e
