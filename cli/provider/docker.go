@@ -101,7 +101,7 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 			volumeName = strings.Split(volume, ":")[0]
 		}
 		logger.Debug("creating volume", zap.String("volume", volumeName))
-		err := client.CreateVolume(ctx, volumeName, true, false)
+		err := client.CreateVolume(ctx, volumeName, true, nil)
 		if err != nil {
 			utils.LogError(logger, err, "failed to create volume "+volumeName)
 			return err
@@ -122,7 +122,10 @@ func RunInDocker(ctx context.Context, logger *zap.Logger) error {
 	}
 
 	addKeployNetwork(ctx, logger, client)
-	err = client.CreateVolume(ctx, "debugfs", true, true)
+	err = client.CreateVolume(ctx, "debugfs", true, map[string]string{
+		"type":   "debugfs",
+		"device": "debugfs",
+	})
 	if err != nil {
 		utils.LogError(logger, err, "failed to debugfs volume")
 		return err

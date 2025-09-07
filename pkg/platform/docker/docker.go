@@ -539,7 +539,7 @@ func (idc *Impl) IsContainerRunning(containerName string) (bool, error) {
 	return false, nil
 }
 
-func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate bool, withOpts bool) error {
+func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate bool, driverOpts map[string]string) error {
 	// Set a timeout for the context
 	ctx, cancel := context.WithTimeout(ctx, idc.timeoutForDockerQuery)
 	defer cancel()
@@ -567,22 +567,18 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate b
 	}
 
 	// Create the volume,
-	// set driver opts if withOpts is true
-	if withOpts {
-		_, err = idc.VolumeCreate(ctx, volume.CreateOptions{
-			Name:   volumeName,
-			Driver: "local",
-			DriverOpts: map[string]string{
-				"type":   volumeName, // Use "none" for local driver
-				"device": volumeName,
-			},
-		})
-	} else {
-		_, err = idc.VolumeCreate(ctx, volume.CreateOptions{
-			Name:   volumeName,
-			Driver: "local",
-		})
+	// Create volume with provided driver options or default
+	createOptions := volume.CreateOptions{
+		Name:   volumeName,
+		Driver: "local",
 	}
+
+	// If driverOpts is provided and not empty, use them; otherwise use default
+	if len(driverOpts) > 0 {
+		createOptions.DriverOpts = driverOpts
+	}
+
+	_, err = idc.VolumeCreate(ctx, createOptions)
 	if err != nil {
 		idc.logger.Error("failed to create volume", zap.String("volume", volumeName), zap.Error(err))
 		return err
