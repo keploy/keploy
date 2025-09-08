@@ -324,8 +324,7 @@ func (ys *MockYaml) UpdateTestMockReferences(ctx context.Context, testSetID stri
 		mockFileName = ys.MockName
 	}
 	path := filepath.Join(ys.MockPath, testSetID)
-	ys.Logger.Debug("logging the names of the unused mocks to be removed", zap.Any("usedMocksByTests", usedMocksByTests), zap.String("for testset", testSetID), zap.String("at_path", filepath.Join(path, mockFileName+".yaml")))
-
+	ys.Logger.Debug("updating mock test references", zap.Any("usedMocksByTests", usedMocksByTests), zap.String("for testset", testSetID), zap.String("at_path", filepath.Join(path, mockFileName+".yaml")))
 	// Read the mocks from the yaml file
 	mockPath, err := yaml.ValidatePath(filepath.Join(path, mockFileName+".yaml"))
 	if err != nil {

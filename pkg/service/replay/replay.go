@@ -1059,11 +1059,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		for _, m := range consumedMocks {
-			if _, ok := actualTestMockMappings[testCase.Name]; !ok {
-				actualTestMockMappings[testCase.Name] = []string{m.Name}
-			} else {
-				actualTestMockMappings[testCase.Name] = append(actualTestMockMappings[testCase.Name], m.Name)
-			}
+			actualTestMockMappings[testCase.Name] = append(actualTestMockMappings[testCase.Name], m.Name)
 		}
 
 		if !testPass {
