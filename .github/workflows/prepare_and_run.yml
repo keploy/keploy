@@ -8,6 +8,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+
       - name: Build Keploy (PR)
         run: go build -race -tags=viper_bind_struct -o keploy
       - uses: actions/upload-artifact@v4
@@ -30,6 +35,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Add Private Parsers
+        uses: ./.github/actions/setup-private-parsers
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
 
       - name: Build image
         run: |
