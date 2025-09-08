@@ -83,7 +83,7 @@ drive_traffic_and_stop_keploy() {
   curl -sS --request POST 'http://localhost:18080/run' \
     --header 'Content-Type: application/json' \
     --data-raw '{
-      "dsn": "root:password@tcp(127.0.0.1:3306)/",
+      "dsn": "root:password@tcp(127.0.0.1:3306)",
       "db_name": "fuzzdb",
       "drop_db_first": true,
       "seed": 42,
