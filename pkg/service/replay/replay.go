@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -289,6 +290,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	// setting the appId for the first test-set.
 	inst.AppID = r.config.AppID
 	for i, testSet := range testSets {
+		var backupCreated bool
 		testSetResult = false
 
 		// Reload hooks before each test set if this is not the first test set
@@ -472,6 +474,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 			if len(failedTcIDs) == 0 {
 				// if no testcase failed in this attempt move to next attempt
 				continue
+			}
+
+			if !backupCreated {
+				if err := r.createBackup(testSet); err != nil {
+					utils.LogError(r.logger, err, "failed to create backup, proceeding with test case deletion", zap.String("testSet", testSet))
+				}
+				backupCreated = true
 			}
 
 			r.logger.Info("deleting failing testcases", zap.String("testSet", testSet), zap.Strings("testCaseIDs", failedTcIDs))
@@ -2075,5 +2084,84 @@ func (r *Replayer) UploadMocks(ctx context.Context) error {
 
 	}
 
+	return nil
+}
+
+// createBackup creates a timestamped backup of a test set directory before modification.
+func (r *Replayer) createBackup(testSetID string) error {
+	srcPath := filepath.Join(r.config.Path, testSetID)
+	timestamp := time.Now().Format("20060102T150405")
+	backupDestPath := filepath.Join(srcPath, ".backup", timestamp)
+
+	if _, err := os.Stat(srcPath); os.IsNotExist(err) {
+		return fmt.Errorf("source directory for backup does not exist: %s", srcPath)
+	}
+
+	if err := os.MkdirAll(backupDestPath, 0755); err != nil {
+		return fmt.Errorf("failed to create backup directory: %w", err)
+	}
+
+	err := r.copyDirContents(srcPath, backupDestPath)
+	if err != nil {
+		// Clean up the failed backup attempt
+		_ = os.RemoveAll(backupDestPath)
+		return fmt.Errorf("failed to copy contents for backup: %w", err)
+	}
+
+	r.logger.Info("Successfully created a backup of the test set before modification.", zap.String("testSet", testSetID), zap.String("location", backupDestPath))
+	return nil
+}
+
+// copyDirContents recursively copies contents from src to dst, excluding the .backup directory.
+func (r *Replayer) copyDirContents(src, dst string) error {
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		srcPath := filepath.Join(src, entry.Name())
+		dstPath := filepath.Join(dst, entry.Name())
+
+		// CRITICAL: Exclude the backup directory itself to prevent recursion.
+		if entry.Name() == ".backup" {
+			continue
+		}
+
+		fileInfo, err := os.Stat(srcPath)
+		if err != nil {
+			return err
+		}
+
+		if fileInfo.IsDir() {
+			if err := os.MkdirAll(dstPath, fileInfo.Mode()); err != nil {
+				return err
+			}
+			if err := r.copyDirContents(srcPath, dstPath); err != nil {
+				return err
+			}
+		} else {
+			// It's a file, copy it.
+			srcFile, err := os.Open(srcPath)
+			if err != nil {
+				return err
+			}
+			defer srcFile.Close()
+
+			dstFile, err := os.Create(dstPath)
+			if err != nil {
+				return err
+			}
+			defer dstFile.Close()
+
+			if _, err := io.Copy(dstFile, srcFile); err != nil {
+				return err
+			}
+
+			if err := os.Chmod(dstPath, fileInfo.Mode()); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
