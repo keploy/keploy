@@ -10,6 +10,9 @@ import (
 	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/utils"
 
+	"go.keploy.io/server/v2/pkg/service/load"
+	"go.keploy.io/server/v2/pkg/service/secure"
+	"go.keploy.io/server/v2/pkg/service/testsuite"
 	"go.keploy.io/server/v2/pkg/service/utgen"
 	"go.uber.org/zap"
 )
@@ -41,6 +44,12 @@ func (n *ServiceProvider) GetService(ctx context.Context, cmd string) (interface
 	tel.Ping()
 
 	switch cmd {
+	case "secure":
+		return secure.NewSecurityChecker(n.cfg, n.logger)
+	case "load":
+		return load.NewLoadTester(n.cfg, n.logger)
+	case "testsuite":
+		return testsuite.NewTSExecutor(n.cfg, n.logger, false)
 	case "gen":
 		return utgen.NewUnitTestGenerator(n.cfg, tel, n.auth, n.logger)
 	case "record", "test", "mock", "normalize", "rerecord", "contract", "config", "update", "login", "export", "import", "templatize", "report":
