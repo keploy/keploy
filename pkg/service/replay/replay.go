@@ -42,7 +42,7 @@ var totalTestFailed int
 var totalTestIgnored int
 var totalTestTimeTaken time.Duration
 var failedTCsBySetID = make(map[string][]string)
-var mockMismatchFailures = []string{}
+var mockMismatchFailures = NewTestFailureStore()
 
 var HookImpl TestHooks
 
@@ -478,13 +478,25 @@ func (r *Replayer) Start(ctx context.Context) error {
 	r.telemetry.TestRun(totalTestPassed, totalTestFailed, len(testSets), testRunStatus)
 
 	if !abortTestRun {
-
-		if !testRunResult && len(mockMismatchFailures) > 0 {
-			testSets := strings.Join(mockMismatchFailures, ", ")
-			r.logger.Warn("Some testsets failed due to mock differences. Please kindly rerecord these testsets to update the mocks.", zap.String("command", fmt.Sprintf("keploy rerecord -c '%s' -t %s", r.config.Command, testSets)))
-		}
-
 		r.printSummary(ctx, testRunResult)
+
+		if !testRunResult && len(mockMismatchFailures.GetFailures()) > 0 {
+			failuresByTestSet := make(map[string]bool)
+			for _, failure := range mockMismatchFailures.GetFailures() {
+				failuresByTestSet[failure.TestSetID] = true
+			}
+
+			var testSetIDs []string
+			for testSetID := range failuresByTestSet {
+				testSetIDs = append(testSetIDs, testSetID)
+			}
+			testSets := strings.Join(testSetIDs, ", ")
+			r.logger.Warn("Some testsets failed due to mock differences. Please kindly rerecord these testsets to update the mocks.", zap.String("command", fmt.Sprintf("keploy rerecord -c '%s' -t %s", r.config.Command, testSets)))
+
+			if r.config.Debug {
+				mockMismatchFailures.PrintFailuresTable()
+			}
+		}
 		coverageData := models.TestCoverage{}
 		var err error
 		if !r.config.Test.SkipCoverage {
@@ -1058,8 +1070,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			testPass, testResult = r.compareGRPCResp(testCase, grpcResp, testSetID)
 		}
 
-		for _, m := range consumedMocks {
-			actualTestMockMappings[testCase.Name] = append(actualTestMockMappings[testCase.Name], m.Name)
+		if len(consumedMocks) > 0 {
+			for _, m := range consumedMocks {
+				actualTestMockMappings[testCase.Name] = append(actualTestMockMappings[testCase.Name], m.Name)
+			}
+		} else {
+			actualTestMockMappings[testCase.Name] = []string{}
 		}
 
 		if !testPass {
@@ -1228,9 +1244,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	var failedDueToMockChange bool
-
-	if testSetStatus == models.TestSetStatusFailed {
+	if testSetStatus == models.TestSetStatusFailed && r.instrument {
 
 		for tc, expectedMocks := range expectedTestMockMappings {
 
@@ -1241,18 +1255,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 
 			if len(expectedMocks) != len(actualMocks) || !compareMockArrays(expectedMocks, actualMocks) {
-				failedDueToMockChange = true
-				r.logger.Debug("Mock difference for test case",
-					zap.String("testCase", tc),
-					zap.Strings("expectedMocks", expectedMocks),
-					zap.Strings("actualMocks", actualMocks),
-				)
+				mockMismatchFailures.AddFailure(testSetID, tc, expectedMocks, actualMocks)
 			}
 		}
-	}
-
-	if failedDueToMockChange {
-		mockMismatchFailures = append(mockMismatchFailures, testSetID)
 	}
 
 	// TODO Need to decide on whether to use global variable or not

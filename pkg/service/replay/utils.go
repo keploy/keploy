@@ -3,9 +3,13 @@ package replay
 import (
 	"fmt"
 	"net/url"
+	"os"
 	"path"
+	"sort"
+	"strings"
 	"time"
 
+	"github.com/olekukonko/tablewriter"
 	// "encoding/json"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
@@ -141,4 +145,191 @@ func compareMockArrays(arr1, arr2 []string) bool {
 	}
 
 	return true
+}
+
+type TestFailure struct {
+	TestSetID     string
+	TestID        string
+	ExpectedMocks []string
+	ActualMocks   []string
+	FailureReason string
+}
+
+type TestFailureStore struct {
+	failures []TestFailure
+}
+
+func NewTestFailureStore() *TestFailureStore {
+	return &TestFailureStore{
+		failures: make([]TestFailure, 0),
+	}
+}
+
+func (tfs *TestFailureStore) AddFailure(testSetID, testID string, expectedMocks, actualMocks []string) {
+	failure := TestFailure{
+		TestSetID:     testSetID,
+		TestID:        testID,
+		ExpectedMocks: expectedMocks,
+		ActualMocks:   actualMocks,
+	}
+	tfs.failures = append(tfs.failures, failure)
+}
+
+func (tfs *TestFailureStore) GetFailures() []TestFailure {
+	return tfs.failures
+}
+
+func (tfs *TestFailureStore) GetFailuresByTestSet(testSetID string) []TestFailure {
+	var filtered []TestFailure
+	for _, failure := range tfs.failures {
+		if failure.TestSetID == testSetID {
+			filtered = append(filtered, failure)
+		}
+	}
+	return filtered
+}
+
+type MockDifference struct {
+	Key            string
+	ExpectedValues []string
+	ActualValues   []string
+	DiffType       string // "missing", "extra", "different"
+}
+
+// CompareMockSlices compares two mock slices and returns the differences
+func CompareMockSlices(expected, actual []string) []MockDifference {
+	var differences []MockDifference
+
+	// Convert slices to maps for easier comparison
+	expectedMap := make(map[string]bool)
+	actualMap := make(map[string]bool)
+
+	for _, mock := range expected {
+		expectedMap[mock] = true
+	}
+	for _, mock := range actual {
+		actualMap[mock] = true
+	}
+
+	// Get all unique keys
+	allKeys := make(map[string]bool)
+	for mock := range expectedMap {
+		allKeys[mock] = true
+	}
+	for mock := range actualMap {
+		allKeys[mock] = true
+	}
+
+	// Sort keys for consistent output
+	var keys []string
+	for key := range allKeys {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		_, expectedExists := expectedMap[key]
+		_, actualExists := actualMap[key]
+
+		if !expectedExists && actualExists {
+			differences = append(differences, MockDifference{
+				Key:            key,
+				ExpectedValues: []string{},
+				ActualValues:   []string{key},
+				DiffType:       "extra",
+			})
+		} else if expectedExists && !actualExists {
+			differences = append(differences, MockDifference{
+				Key:            key,
+				ExpectedValues: []string{key},
+				ActualValues:   []string{},
+				DiffType:       "missing",
+			})
+		}
+	}
+
+	return differences
+}
+
+// PrintFailuresTable prints all failures in a formatted table
+func (tfs *TestFailureStore) PrintFailuresTable() {
+	if len(tfs.failures) == 0 {
+		fmt.Println("No test failures recorded.")
+		return
+	}
+
+	fmt.Println("\n======================= MOCKS MISMATCH SUMMARY =======================")
+
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetHeader([]string{"TEST SET", "TEST ID", "MOCK DIFFERENCES"})
+	table.SetBorder(true)
+	table.SetRowLine(true)
+	table.SetCenterSeparator("|")
+	table.SetColumnSeparator("|")
+	table.SetRowSeparator("-")
+	table.SetAutoWrapText(true)
+	table.SetReflowDuringAutoWrap(false)
+	table.SetHeaderAlignment(tablewriter.ALIGN_CENTER)
+	table.SetAlignment(tablewriter.ALIGN_CENTER)
+	table.SetColWidth(120)
+	table.SetTablePadding(" ")
+	table.SetColMinWidth(0, 15) // TEST SET column min width
+	table.SetColMinWidth(1, 12) // TEST ID column min width
+	table.SetColMinWidth(2, 50) // MOCK DIFFERENCES column min width
+
+	// Group failures by test set for better presentation
+	testSetGroups := make(map[string][]TestFailure)
+	for _, failure := range tfs.failures {
+		testSetGroups[failure.TestSetID] = append(testSetGroups[failure.TestSetID], failure)
+	}
+
+	// Sort test set IDs for consistent output
+	var testSetIDs []string
+	for testSetID := range testSetGroups {
+		testSetIDs = append(testSetIDs, testSetID)
+	}
+	sort.Strings(testSetIDs)
+
+	for _, testSetID := range testSetIDs {
+		failures := testSetGroups[testSetID]
+		testSetPrinted := false
+
+		for _, failure := range failures {
+			differences := CompareMockSlices(failure.ExpectedMocks, failure.ActualMocks)
+
+			var missingMocks []string
+			var extraMocks []string
+
+			for _, diff := range differences {
+				switch diff.DiffType {
+				case "missing":
+					missingMocks = append(missingMocks, diff.Key)
+				case "extra":
+					extraMocks = append(extraMocks, diff.Key)
+				}
+			}
+
+			var diffStrings []string
+			if len(missingMocks) > 0 {
+				diffStrings = append(diffStrings, fmt.Sprintf("Missing: %s", strings.Join(missingMocks, ", ")))
+			}
+			if len(extraMocks) > 0 {
+				diffStrings = append(diffStrings, fmt.Sprintf("Extra: %s", strings.Join(extraMocks, ", ")))
+			}
+
+			diffText := strings.Join(diffStrings, "; ")
+			if diffText == "" {
+				diffText = "No differences"
+			}
+
+			if !testSetPrinted {
+				table.Append([]string{testSetID, failure.TestID, diffText})
+				testSetPrinted = true
+			} else {
+				table.Append([]string{"", failure.TestID, diffText})
+			}
+		}
+	}
+
+	table.Render()
 }
