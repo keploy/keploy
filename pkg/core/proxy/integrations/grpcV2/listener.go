@@ -27,9 +27,7 @@ func newSingleConnListener(conn net.Conn) *singleConnListener {
 func (l *singleConnListener) Accept() (net.Conn, error) {
 	var first bool
 	l.once.Do(func() { first = true })
-
 	if first {
-		// Wrap the conn so that closing it notifies the listener.
 		return &trackedConn{
 			Conn: l.conn,
 			onClose: func() {
@@ -38,7 +36,6 @@ func (l *singleConnListener) Accept() (net.Conn, error) {
 		}, nil
 	}
 
-	// After the first connection, Serve() may call Accept() again.
 	<-l.done // block until the trackedConn is closed
 	return nil, net.ErrClosed
 }

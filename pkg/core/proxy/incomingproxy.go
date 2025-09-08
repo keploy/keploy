@@ -13,15 +13,17 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/cilium/ebpf/ringbuf"
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/core/hooks"
+	"go.keploy.io/server/v2/utils"
+
+	grpcV2 "go.keploy.io/server/v2/pkg/core/proxy/integrations/grpcV2"
+	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 )
@@ -194,24 +196,53 @@ func handleConnection(ctx context.Context, clientConn net.Conn, upstreamAddr str
 	defer clientConn.Close()
 	logger.Debug("Accepted ingress connection", zap.String("client", clientConn.RemoteAddr().String()))
 
-	clientReader := bufio.NewReader(clientConn)
-	preface, err := clientReader.Peek(len(clientPreface))
+
+	preface, err := util.ReadInitialBuf(ctx, logger, clientConn)
 	if err != nil {
-		logger.Debug("Could not peek for HTTP/2 preface, assuming HTTP/1.x", zap.Error(err))
-		handleHttp1Connection(ctx, clientConn, clientReader, upstreamAddr, logger, t, tcCreator, opts)
+		utils.LogError(logger, err, "error 1")
 		return
 	}
-
-	if bytes.Equal(preface, []byte(clientPreface)) {
+	if bytes.HasPrefix(preface, []byte(clientPreface)) {
 		logger.Info("Detected HTTP/2 (gRPC) connection")
-		handleHttp2ConnectionWithProxy(ctx, clientConn, upstreamAddr, logger, t, tcCreator)
+		upConn, err := net.DialTimeout("tcp4", upstreamAddr, 3*time.Second)
+		if err != nil {
+			logger.Error("Failed to connect to upstream gRPC server",
+				zap.String("upstream_addr", upstreamAddr),
+				zap.Error(err))
+			clientConn.Close() // Close the client connection as we can't proceed
+			return
+		}
+
+		grpcV2.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t)
+		fmt.Println(err)
 	} else {
 		logger.Info("Detected HTTP/1.x connection")
-		handleHttp1Connection(ctx, clientConn, clientReader, upstreamAddr, logger, t, tcCreator, opts)
+		handleHttp1Connection(ctx, newReplayConn(preface, clientConn), upstreamAddr, logger, t, tcCreator, opts)
 	}
 }
-func handleHttp1Connection(ctx context.Context, clientConn net.Conn, clientReader *bufio.Reader, upstreamAddr string, logger *zap.Logger, t chan *models.TestCase, tcCreator TestCaseCreator, opts models.IncomingOptions) {
+
+type replayConn struct {
+	net.Conn
+	buf *bytes.Reader
+}
+
+func newReplayConn(initial []byte, c net.Conn) net.Conn {
+	return &replayConn{
+		Conn: c,
+		buf:  bytes.NewReader(initial),
+	}
+}
+
+func (r *replayConn) Read(p []byte) (int, error) {
+	if r.buf.Len() > 0 {
+		return r.buf.Read(p)
+	}
+	return r.Conn.Read(p)
+}
+
+func handleHttp1Connection(ctx context.Context, clientConn net.Conn, upstreamAddr string, logger *zap.Logger, t chan *models.TestCase, tcCreator TestCaseCreator, opts models.IncomingOptions) {
 	upConn, err := net.DialTimeout("tcp4", upstreamAddr, 3*time.Second)
+	clientReader := bufio.NewReader(clientConn)
 	if err != nil {
 		logger.Warn("Failed to dial upstream backend", zap.String("backend", upstreamAddr), zap.Error(err))
 		return
@@ -223,10 +254,8 @@ func handleHttp1Connection(ctx context.Context, clientConn net.Conn, clientReade
 	for {
 		reqTimestamp := time.Now()
 
-		// 1. Read a single request from the client connection.
 		req, err := http.ReadRequest(clientReader)
 		if err != nil {
-			// io.EOF is the expected error when the client closes the keep-alive connection.
 			if errors.Is(err, io.EOF) {
 				logger.Debug("Client closed the keep-alive connection.", zap.String("client", clientConn.RemoteAddr().String()))
 			} else {
@@ -305,74 +334,4 @@ func (pm *IngressProxyManager) persistTestCases() {
 			}
 		}
 	}
-}
-
-func handleHttp2ConnectionWithProxy(ctx context.Context, clientConn net.Conn, upstreamAddr string, logger *zap.Logger, t chan *models.TestCase, tcCreator TestCaseCreator) {
-	// Parse the upstream URL
-	upstreamURL, err := url.Parse("http://" + upstreamAddr)
-	if err != nil {
-		logger.Error("Failed to parse upstream URL", zap.Error(err))
-		return
-	}
-
-	// Create a reverse proxy
-	proxy := httputil.NewSingleHostReverseProxy(upstreamURL)
-
-	conn := &httpConn{
-		Conn: clientConn,
-		r:    bufio.NewReader(clientConn),
-	}
-
-	server := &http.Server{
-		ConnState: func(conn net.Conn, state http.ConnState) {
-			if state == http.StateClosed {
-				conn.Close()
-			}
-		},
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.ProtoMajor == 2 && strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
-				proxy.ServeHTTP(w, r)
-				return
-			}
-			http.Error(w, "Only gRPC requests are supported", http.StatusBadRequest)
-		}),
-	}
-
-	go server.Serve(conn)
-
-	select {
-	case <-ctx.Done():
-		server.Shutdown(context.Background())
-	case <-conn.closed:
-		// Connection closed naturally
-	}
-}
-
-// httpConn wraps net.Conn to implement net.Listener interface
-type httpConn struct {
-	net.Conn
-	r      *bufio.Reader
-	closed chan struct{}
-}
-
-func (c *httpConn) Read(b []byte) (int, error) {
-	return c.r.Read(b)
-}
-
-func (c *httpConn) Close() error {
-	close(c.closed)
-	return c.Conn.Close()
-}
-
-func (c *httpConn) Accept() (net.Conn, error) {
-	if c.closed == nil {
-		c.closed = make(chan struct{})
-		return c, nil
-	}
-	<-c.closed
-	return nil, io.EOF
-}
-
-func (c *httpConn) Addr() net.Addr {
-	return c.Conn.LocalAddr()
 }
