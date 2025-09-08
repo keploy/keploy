@@ -117,3 +117,28 @@ func getFailedTCs(results []models.TestResult) []string {
 	}
 	return ids
 }
+
+func compareMockArrays(arr1, arr2 []string) bool {
+	counts1 := make(map[string]int)
+	counts2 := make(map[string]int)
+
+	for _, mock := range arr1 {
+		counts1[mock]++
+	}
+
+	for _, mock := range arr2 {
+		counts2[mock]++
+	}
+
+	if len(counts1) != len(counts2) {
+		return false
+	}
+
+	for mock, count := range counts1 {
+		if counts2[mock] != count {
+			return false
+		}
+	}
+
+	return true
+}

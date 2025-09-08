@@ -1239,7 +1239,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		for tc, expectedMocks := range expectedTestMockMappings {
 
 			actualMocks, ok := actualTestMockMappings[tc]
-			if !ok || len(expectedMocks) != len(actualMocks) || !CompareMockArrays(expectedMocks, actualMocks) {
+
+			if !ok {
+				continue
+			}
+
+			if len(expectedMocks) != len(actualMocks) || !compareMockArrays(expectedMocks, actualMocks) {
 				failedDueToMockChange = true
 				r.logger.Debug("Mock difference for test case",
 					zap.String("testCase", tc),
@@ -1868,34 +1873,4 @@ func (r *Replayer) UploadMocks(ctx context.Context) error {
 	}
 
 	return nil
-}
-
-func CompareMockArrays(arr1, arr2 []string) bool {
-	// Create maps to store the count of each mock in both arrays
-	counts1 := make(map[string]int)
-	counts2 := make(map[string]int)
-
-	// Count occurrences of mocks in the first array
-	for _, mock := range arr1 {
-		counts1[mock]++
-	}
-
-	// Count occurrences of mocks in the second array
-	for _, mock := range arr2 {
-		counts2[mock]++
-	}
-
-	// Compare the counts of mocks in both arrays
-	if len(counts1) != len(counts2) {
-		return false
-	}
-
-	// Check if both maps have identical counts for each mock
-	for mock, count := range counts1 {
-		if counts2[mock] != count {
-			return false
-		}
-	}
-
-	return true
 }
