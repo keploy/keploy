@@ -134,7 +134,7 @@ func ListenForIngressEvents(ctx context.Context, h *hooks.Hooks, pm *IngressProx
 				pm.logger.Warn("Failed to decode ingress event", zap.Error(err))
 				continue
 			}
-			pm.logger.Info("Intercepted application bind event",
+			pm.logger.Debug("Intercepted application bind event",
 				zap.Uint32("pid", e.PID),
 				zap.Uint16("public_port", e.Pub),
 				zap.Uint16("backend_port", e.Backend))
@@ -160,7 +160,7 @@ func runTCPForwarder(logger *zap.Logger, listenAddr, upstreamAddr string, pm *In
 		return func() error { return err }
 	}
 
-	logger.Info("✅ Started ingress forwarder", zap.String("listening_on", listenAddr), zap.String("forwarding_to", upstreamAddr))
+	logger.Debug("Started Ingress forwarder", zap.String("listening_on", listenAddr), zap.String("forwarding_to", upstreamAddr))
 	ctx, cancel := context.WithCancel(pm.ctx)
 	done := make(chan struct{})
 	go func() {
@@ -200,11 +200,11 @@ func handleConnection(ctx context.Context, clientConn net.Conn, upstreamAddr str
 
 	preface, err := util.ReadInitialBuf(ctx, logger, clientConn)
 	if err != nil {
-		utils.LogError(logger, err, "error 1")
+		utils.LogError(logger, err, "error reading initial bytes from client connection")
 		return
 	}
 	if bytes.HasPrefix(preface, []byte(clientPreface)) {
-		logger.Info("Detected HTTP/2 (gRPC) connection")
+		logger.Debug("Detected HTTP/2 connection")
 		upConn, err := net.DialTimeout("tcp4", upstreamAddr, 3*time.Second)
 		if err != nil {
 			logger.Error("Failed to connect to upstream gRPC server",
@@ -215,10 +215,8 @@ func handleConnection(ctx context.Context, clientConn net.Conn, upstreamAddr str
 		}
 
 		grpcV2.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t)
-		
-		fmt.Println(err)
 	} else {
-		logger.Info("Detected HTTP/1.x connection")
+		logger.Debug("Detected HTTP/1.x connection")
 		handleHttp1Connection(ctx, newReplayConn(preface, clientConn), upstreamAddr, logger, t, tcCreator, opts)
 	}
 }
