@@ -11,6 +11,9 @@ jobs:
           - name: django-postgres
             path: django-postgres/django_postgres
             script_dir: django_postgres
+          - name: flask-secret
+            path: flask-secret
+            script_dir: flask-secret
         config:
           - job: record_latest_replay_build
             record_src: latest
