@@ -1,7 +1,9 @@
 package report
 
 import (
+	"bufio"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -32,34 +34,42 @@ func fmtDuration(d time.Duration) string {
 	return fmt.Sprintf("%.2f s", secs)
 }
 
-// printSingleSummary prints a compact summary for a single report source
+// printSingleSummary prints a compact summary for a single report source (legacy helper).
+// Kept for backward compatibility (prints to os.Stdout).
 func printSingleSummary(name string, total, pass, fail int, dur time.Duration, failedCases []string) {
-	fmt.Println("<=========================================>")
-	fmt.Println(" COMPLETE TESTRUN SUMMARY.")
-	fmt.Printf("\tTotal tests: %d\n", total)
-	fmt.Printf("\tTotal test passed: %d\n", pass)
-	fmt.Printf("\tTotal test failed: %d\n", fail)
+	bw := bufio.NewWriterSize(os.Stdout, 1<<20)
+	printSingleSummaryTo(bw, name, total, pass, fail, dur, failedCases)
+	_ = bw.Flush()
+}
+
+// printSingleSummaryTo is the buffered variant used internally.
+func printSingleSummaryTo(w *bufio.Writer, name string, total, pass, fail int, dur time.Duration, failedCases []string) {
+	fmt.Fprintln(w, "<=========================================>")
+	fmt.Fprintln(w, " COMPLETE TESTRUN SUMMARY.")
+	fmt.Fprintf(w, "\tTotal tests: %d\n", total)
+	fmt.Fprintf(w, "\tTotal test passed: %d\n", pass)
+	fmt.Fprintf(w, "\tTotal test failed: %d\n", fail)
 	if dur > 0 {
-		fmt.Printf("\tTotal time taken: %q\n", fmtDuration(dur))
+		fmt.Fprintf(w, "\tTotal time taken: %q\n", fmtDuration(dur))
 	} else {
-		fmt.Printf("\tTotal time taken: %q\n", "N/A")
+		fmt.Fprintf(w, "\tTotal time taken: %q\n", "N/A")
 	}
-	fmt.Println("\tTest Suite\t\tTotal\tPassed\t\tFailed\t\tTime Taken\t")
+	fmt.Fprintln(w, "\tTest Suite\t\tTotal\tPassed\t\tFailed\t\tTime Taken\t")
 	tt := "N/A"
 	if dur > 0 {
 		tt = fmtDuration(dur)
 	}
-	fmt.Printf("\t%q\t\t%d\t\t%d\t\t%d\t\t%q\n", name, total, pass, fail, tt)
+	fmt.Fprintf(w, "\t%q\t\t%d\t\t%d\t\t%d\t\t%q\n", name, total, pass, fail, tt)
 
-	fmt.Println("\nFAILED TEST CASES:")
+	fmt.Fprintln(w, "\nFAILED TEST CASES:")
 	if fail == 0 || len(failedCases) == 0 {
-		fmt.Println("\t(none)")
+		fmt.Fprintln(w, "\t(none)")
 	} else {
 		for _, fc := range failedCases {
-			fmt.Printf("\t- %s\n", fc)
+			fmt.Fprintf(w, "\t- %s\n", fc)
 		}
 	}
-	fmt.Println("<=========================================>")
+	fmt.Fprintln(w, "<=========================================>")
 }
 
 // applyCliColorsToDiff adds ANSI colors to values in the JSON diff block.
@@ -67,6 +77,14 @@ func printSingleSummary(name string, total, pass, fail int, dur time.Duration, f
 // - Value after "Old:" is red
 // - Value after "New:" is green
 func applyCliColorsToDiff(diff string) string {
+	if diff == "" {
+		return diff
+	}
+	// Fast guard: only try to colorize our compact blocks.
+	if !strings.Contains(diff, "Path: ") && !strings.Contains(diff, "  Old: ") && !strings.Contains(diff, "  New: ") {
+		return diff
+	}
+
 	const (
 		ansiReset  = "\x1b[0m"
 		ansiYellow = "\x1b[33m"
@@ -77,19 +95,16 @@ func applyCliColorsToDiff(diff string) string {
 	lines := strings.Split(diff, "\n")
 	for i, line := range lines {
 		if strings.HasPrefix(line, "Path: ") {
-			// Color only the value after "Path: " in yellow
 			value := strings.TrimPrefix(line, "Path: ")
 			lines[i] = "Path: " + ansiYellow + value + ansiReset
 			continue
 		}
 		if strings.HasPrefix(line, "  Old: ") {
-			// Color only the value after "  Old: " in red
 			value := strings.TrimPrefix(line, "  Old: ")
 			lines[i] = "  Old: " + ansiRed + value + ansiReset
 			continue
 		}
 		if strings.HasPrefix(line, "  New: ") {
-			// Color only the value after "  New: " in green
 			value := strings.TrimPrefix(line, "  New: ")
 			lines[i] = "  New: " + ansiGreen + value + ansiReset
 			continue
