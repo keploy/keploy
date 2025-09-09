@@ -141,7 +141,7 @@ func TestCompressDecompress_AllEncodings_555(t *testing.T) {
 		compressedData, err := Compress(logger, "gzip", originalData)
 		require.NoError(t, err)
 		assert.NotEqual(t, originalData, compressedData)
-		decompressedData, err := Decompress("gzip", compressedData)
+		decompressedData, err := Decompress(logger, "gzip", compressedData)
 		require.NoError(t, err)
 		assert.Equal(t, originalData, decompressedData)
 	})
@@ -151,7 +151,7 @@ func TestCompressDecompress_AllEncodings_555(t *testing.T) {
 		compressedData, err := Compress(logger, "br", originalData)
 		require.NoError(t, err)
 		assert.NotEqual(t, originalData, compressedData)
-		decompressedData, err := Decompress("br", compressedData)
+		decompressedData, err := Decompress(logger, "br", compressedData)
 		require.NoError(t, err)
 		assert.Equal(t, originalData, decompressedData)
 	})
@@ -161,18 +161,18 @@ func TestCompressDecompress_AllEncodings_555(t *testing.T) {
 		compressedData, err := Compress(logger, "unknown", originalData)
 		require.NoError(t, err)
 		assert.Equal(t, originalData, compressedData)
-		decompressedData, err := Decompress( "unknown", originalData)
+		decompressedData, err := Decompress(logger, "unknown", originalData)
 		require.NoError(t, err)
 		assert.Equal(t, originalData, decompressedData)
 	})
 
 	t.Run("DecompressError", func(t *testing.T) {
 		invalidGzipData := []byte("not gzip")
-		_, err := Decompress("gzip", invalidGzipData)
+		_, err := Decompress(logger, "gzip", invalidGzipData)
 		require.Error(t, err)
 
 		invalidBrotliData := []byte{0xce, 0xb2, 0xcf, 0x81}
-		_, err = Decompress("br", invalidBrotliData)
+		_, err = Decompress(logger, "br", invalidBrotliData)
 		require.Error(t, err)
 	})
 }

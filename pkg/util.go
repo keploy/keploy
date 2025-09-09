@@ -232,7 +232,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	}
 
 	if httpResp.Header.Get("Content-Encoding") != "" {
-		respBody, err = Decompress(httpResp.Header.Get("Content-Encoding"), respBody)
+		respBody, err = Decompress(logger, httpResp.Header.Get("Content-Encoding"), respBody)
 		if err != nil {
 			utils.LogError(logger, err, "failed to decode response body")
 			return nil, err
@@ -571,28 +571,28 @@ func IsCSV(data []byte) bool {
 	return false
 }
 
-func Decompress( encoding string, data []byte) ([]byte, error) {
+func Decompress(logger *zap.Logger, encoding string, data []byte) ([]byte, error) {
 	switch encoding {
 	case "br":
-		// logger.Debug("decompressing brotli compressed data")
+		logger.Debug("decompressing brotli compressed data")
 		reader := brotli.NewReader(bytes.NewReader(data))
 		decodedData, err := io.ReadAll(reader)
 		if err != nil {
-			// utils.LogError(logger, err, "failed to read the brotli compressed data")
+			utils.LogError(logger, err, "failed to read the brotli compressed data")
 			return nil, err
 		}
 		return decodedData, nil
 	case "gzip":
-		// logger.Debug("decoding gzip compressed data")
+		logger.Debug("decoding gzip compressed data")
 		reader, err := gzip.NewReader(bytes.NewReader(data))
 		if err != nil {
-			// utils.LogError(logger, err, "failed to create gzip reader")
+			utils.LogError(logger, err, "failed to create gzip reader")
 			return nil, err
 		}
 		defer reader.Close()
 		decodedData, err := io.ReadAll(reader)
 		if err != nil {
-			// utils.LogError(logger, err, "failed to read the gzip compressed data")
+			utils.LogError(logger, err, "failed to read the gzip compressed data")
 			return nil, err
 		}
 		return decodedData, nil
