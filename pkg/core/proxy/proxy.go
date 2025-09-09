@@ -19,16 +19,13 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
-
-	// Add this import
 	"github.com/cilium/ebpf"
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
 	Hooks "go.keploy.io/server/v2/pkg/core/hooks"
-	proxy_test "go.keploy.io/server/v2/pkg/core/proxyTest"
+	incomingTestCase "go.keploy.io/server/v2/pkg/core/incoming"
 
-	// "go.keploy.io/server/v2/pkg/core/proxy"
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	pTls "go.keploy.io/server/v2/pkg/core/proxy/tls"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
@@ -212,7 +209,6 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions, incoming
 	if mode != models.MODE_TEST && bigPaylaod{
 		persister := opts.Persister
 		if persister == nil {
-			// Create a "noop" persister that does nothing, to prevent nil pointer errors.
 			persister = func(ctx context.Context, testCase *models.TestCase) error {
 				p.logger.Debug("Proxy is not in record mode, dropping test case.")
 				return nil
@@ -222,7 +218,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions, incoming
 			Logger:    p.logger,
 			Persister: persister,
 		}
-		decoder := proxy_test.NewMyDecoder()
+		decoder := incomingTestCase.NewTCdecoder()
 		// // Start the eBPF listener for bind events
 		ingressProxyManager := NewIngressProxyManager(ctx, p.logger, deps, decoder, incomingOpts)
 		go func() {

@@ -263,6 +263,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 		h.tcpv4Ret = tcpRC4
 
 		//////////////////////////////////////////////////////////////////////////////
+		////////////////////    BIG PAYLOAD HOOKS START //////////////////////////////
 		//////////////////////////////////////////////////////////////////////////////
 
 		// Get the first-mounted cgroupv2 path.
@@ -319,6 +320,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 		}
 
 		//////////////////////////////////////////////////////////////////////////////
+		////////////////////    BIG PAYLOAD HOOKS END ////////////////////////////////
 		//////////////////////////////////////////////////////////////////////////////
 		c4, err := link.AttachCgroup(link.CgroupOptions{
 			Path:    cGroupPath,
@@ -403,12 +405,6 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	}
 	h.connect = cnt
 
-	// bind,err := link.Kprobe("__x64_sys_bind", objs.HandleBindEnter, nil)
-	// if err != nil {
-	// 	utils.LogError(h.logger, err, "failed to attach the kprobe hook on sys_bind")
-	// }
-
-	// h.bind = bind
 	//Opening a kretprobe at the exit of connect syscall
 	cntr, err := link.Kretprobe("sys_connect", objs.SyscallProbeRetConnect, &link.KprobeOptions{RetprobeMaxActive: h.retprobeMaxActive})
 	if err != nil {
@@ -796,9 +792,7 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 	if err := h.connect.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the connect")
 	}
-	// if err := h.bind.Close(); err != nil {
-	// 	utils.LogError(h.logger, err, "failed to close the connect")
-	// }
+
 	if err := h.connectRet.Close(); err != nil {
 		utils.LogError(h.logger, err, "failed to close the connectRet")
 	}

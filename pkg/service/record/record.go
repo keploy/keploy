@@ -274,10 +274,6 @@ func (r *Recorder) Instrument(ctx context.Context, persister models.TestCasePers
 			},
 			BigPayload: bigPayload,
 		}
-		// incomingOpts := models.IncomingOptions{
-		// 	Filters:  r.config.Record.Filters,
-		// 	BasePath: r.config.Record.BasePath,
-		// }
 		err = r.instrumentation.Hook(ctx, appID, hooks)
 		if err != nil {
 			stopReason = "failed to start the hooks and proxy"

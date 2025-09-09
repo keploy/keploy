@@ -1,5 +1,3 @@
-// In a file like models/persister.go
-
 package models
 
 import "context"

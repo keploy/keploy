@@ -37,7 +37,7 @@ type IngressEvent struct {
 	_       uint16 // Padding
 }
 type TestCaseCreator interface {
-	Create(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, reqData, respData []byte, reqTime, respTime time.Time, opts models.IncomingOptions) error
+	CreateHTTP(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, reqData, respData []byte, reqTime, respTime time.Time, opts models.IncomingOptions) error
 	CreateGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, stream *pkg.HTTP2Stream) error
 }
 
@@ -301,7 +301,7 @@ func handleHttp1Connection(ctx context.Context, clientConn net.Conn, upstreamAdd
 		)
 
 		go func() {
-			err := tcCreator.Create(ctx, logger, t, reqData, respData, reqTimestamp, respTimestamp, opts)
+			err := tcCreator.CreateHTTP(ctx, logger, t, reqData, respData, reqTimestamp, respTimestamp, opts)
 			if err != nil {
 				logger.Error("Failed to create test case from captured data", zap.Error(err))
 			}
