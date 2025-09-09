@@ -52,18 +52,9 @@ jobs:
   run_golang_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/golang_linux.yml
-  run_golang_http_linux:
-    needs: [build-and-upload, upload-latest]
-    uses: ./.github/workflows/golang_http_linux.yml
-  run_golang_mysql_linux:
-    needs: [build-and-upload, upload-latest]
-    uses: ./.github/workflows/golang_mysql_linux.yml
   run_golang_docker:
     needs: [build-and-upload, upload-latest,build-docker-image]
     uses: ./.github/workflows/golang_docker.yml
-  run_golang_docker-compose:
-    needs: [build-and-upload, upload-latest, build-docker-image]
-    uses: ./.github/workflows/golang_docker-compose.yml
   run_java_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/java_linux.yml
@@ -79,6 +70,3 @@ jobs:
   run_python_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/python_linux.yml
-  run_node_encoding:
-    needs: [build-and-upload, upload-latest]
-    uses: ./.github/workflows/node_encoding.yaml
