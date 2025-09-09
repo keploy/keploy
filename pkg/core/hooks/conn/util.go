@@ -226,7 +226,7 @@ func Capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 		Version: models.GetVersion(),
 		Name:    pkg.ToYamlHTTPHeader(req.Header)["Keploy-Test-Name"],
 		Kind:    models.HTTP,
-		Created: time.Now().Unix(),
+		Created: reqTimeTest.Unix(),
 		HTTPReq: models.HTTPReq{
 			Method:     models.Method(req.Method),
 			ProtoMajor: req.ProtoMajor,
