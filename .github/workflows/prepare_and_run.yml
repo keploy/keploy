@@ -52,9 +52,6 @@ jobs:
   run_golang_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/golang_linux.yml
-  run_golang_docker:
-    needs: [build-and-upload, upload-latest,build-docker-image]
-    uses: ./.github/workflows/golang_docker.yml
   run_java_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/java_linux.yml
@@ -70,3 +67,6 @@ jobs:
   run_python_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/python_linux.yml
+  run_golang_docker:
+    needs: [build-and-upload, upload-latest,build-docker-image]
+    uses: ./.github/workflows/golang_docker.yml
