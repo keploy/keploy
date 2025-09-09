@@ -74,13 +74,19 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		var replayErrCh = make(chan error, 1)
 
 		//Keeping two back-to-back selects is used to not do blocking operation if parent ctx is done
-
+		cfg := models.ReRecordCfg{
+			Rerecord: true,
+			TestSet:  testSet,
+		}
+		if o.config.ReRecord.CreateTestSet {
+			cfg.TestSet = ""
+		}
 		select {
 		case <-ctx.Done():
 		default:
 			errGrp.Go(func() error {
 				defer utils.Recover(o.logger)
-				err := o.record.Start(recordCtx, true)
+				err := o.record.Start(recordCtx, cfg)
 				errCh <- err
 				return nil
 			})
@@ -150,9 +156,8 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		o.logger.Warn("Re-record was cancelled, keploy might have not recorded few test cases")
 		return nil
 	}
-
 	stopReason = "Re-recorded all the selected testsets successfully"
-	if !o.config.InCi {
+	if !o.config.InCi && o.config.ReRecord.CreateTestSet {
 		o.logger.Info("Re-record was successfull. Do you want to remove the older testsets? (y/n)", zap.Any("testsets", SelectedTests))
 		reader := bufio.NewReader(os.Stdin)
 		input, err := reader.ReadString('\n')
