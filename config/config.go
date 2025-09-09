@@ -197,10 +197,11 @@ type (
 )
 
 type PacketReplay struct {
-	PcapPath       string `json:"pcapPath" yaml:"pcapPath" mapstructure:"pcapPath"`
-	MocksPath      string `json:"mocksPath" yaml:"mocksPath" mapstructure:"mocksPath"`
-	DestPort       uint32 `json:"appPort" yaml:"appPort" mapstructure:"appPort"`
-	PreserveTiming bool   `json:"preserveTiming" yaml:"preserveTiming" mapstructure:"preserveTiming"`
+	PcapPath        string `json:"pcapPath" yaml:"pcapPath" mapstructure:"pcapPath"`
+	MocksPath       string `json:"mocksPath" yaml:"mocksPath" mapstructure:"mocksPath"`
+	DestPort        uint32 `json:"appPort" yaml:"appPort" mapstructure:"appPort"`
+	PreserveTiming  bool   `json:"preserveTiming" yaml:"preserveTiming" mapstructure:"preserveTiming"`
+	ProxyReplayMode bool   `json:"proxyReplayMode" yaml:"proxyReplayMode" mapstructure:"proxyReplayMode"`
 }
 
 func SetByPassPorts(conf *Config, ports []uint) {

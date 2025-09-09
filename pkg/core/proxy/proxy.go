@@ -53,6 +53,7 @@ type Proxy struct {
 	Debug                 bool
 	CaptureNetworkPackets bool
 	GlobalPassthrough     bool
+	ProxyReplayMode       bool
 
 	DestInfo     core.DestInfo
 	Integrations map[integrations.IntegrationType]integrations.Integrations
@@ -84,6 +85,7 @@ func New(logger *zap.Logger, info core.DestInfo, opts *config.Config, session *c
 		IP6:                   "::1",          //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
 		Debug:                 opts.Debug,
 		CaptureNetworkPackets: opts.CapturePackets,
+		ProxyReplayMode:       opts.PacketReplay.ProxyReplayMode,
 		GlobalPassthrough:     opts.Record.GlobalPassthrough,
 		ipMutex:               &sync.Mutex{},
 		connMutex:             &sync.Mutex{},
@@ -415,9 +417,24 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 		return nil
 	}
+	isMySQL := false
+
+	if !p.ProxyReplayMode {
+		// Old condition: trust the destination port.
+		isMySQL = (destInfo.Port == 3306)
+	} else {
+		// Replay mode: feature-detect server-first in ~100ms.
+		ok, err := isServerFirst(dstAddr, 100*time.Millisecond, p.logger)
+		if err != nil {
+			utils.LogError(p.logger, err, "failed to sniff server-first data for mysql detection", zap.String("dst", dstAddr))
+			// On sniff failure, be conservative and let other parsers decide.
+			ok = false
+		}
+		isMySQL = ok
+	}
 
 	//checking for the destination port of "mysql"
-	if destInfo.Port == 3306 {
+	if isMySQL {
 		if rule.Mode != models.MODE_TEST {
 			dstConn, err = net.Dial("tcp", dstAddr)
 			if err != nil {
@@ -916,4 +933,34 @@ func (p *Proxy) recordNetworkPacketsForProxy(ctx context.Context) {
 	wg.Wait()
 
 	p.logger.Info("capture completed")
+}
+
+// isServerFirst tries to detect a server-first protocol by peeking for any
+// bytes within the given window. It closes the conn before returning.
+func isServerFirst(addr string, wait time.Duration, logger *zap.Logger) (bool, error) {
+	// Keep the sniff connection separate so we don't consume real traffic.
+	sniff, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		return false, err
+	}
+	defer sniff.Close()
+
+	_ = sniff.SetReadDeadline(time.Now().Add(wait))
+	buf := make([]byte, 1)
+	n, readErr := sniff.Read(buf)
+	// Clear the deadline for cleanliness (not strictly needed since we close).
+	_ = sniff.SetReadDeadline(time.Time{})
+
+	// If any byte arrived within the window, we treat it as server-first.
+	if n > 0 {
+		logger.Info("server-first protocol detected")
+		return true, nil
+	}
+
+	// No data arrived in the window. For timeouts, that’s fine — just means "not server-first".
+	// Only log unexpected errors.
+	if readErr != nil && !errors.Is(readErr, os.ErrDeadlineExceeded) && !errors.Is(readErr, net.ErrClosed) {
+		utils.LogError(logger, readErr, "sniff read failed")
+	}
+	return false, nil
 }

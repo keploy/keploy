@@ -1038,6 +1038,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.PacketReplay.PreserveTiming = !disablePreserveTime
+
+		c.cfg.PacketReplay.ProxyReplayMode = true
 	}
 
 	return nil
