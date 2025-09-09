@@ -7,7 +7,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
+        app:
+          - name: django-postgres
+            path: django-postgres/django_postgres
+            script_dir: django_postgres
+        config:
           - job: record_latest_replay_build
             record_src: latest
             replay_src: build
@@ -17,7 +21,7 @@ jobs:
           - job: record_build_replay_build
             record_src: build
             replay_src: build
-    name: ${{ matrix.job }}
+    name: ${{ matrix.app.name }} (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -28,22 +32,23 @@ jobs:
       - id: record
         uses: ./.github/actions/download-binary
         with:
-          src: ${{ matrix.record_src }}
+          src: ${{ matrix.config.record_src }}
 
       - id: replay
         uses: ./.github/actions/download-binary
         with:
-          src: ${{ matrix.replay_src }}
+          src: ${{ matrix.config.replay_src }}
 
       - name: Checkout the samples-python repository
         uses: actions/checkout@v4
         with:
           repository: keploy/samples-python
           path: samples-python
-      - name: Run the flask-mongo application
+
+      - name: Run the ${{ matrix.app.name }} application
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
         run: |
-          cd samples-python/flask-mongo
-          source ./../../.github/workflows/test_workflow_scripts/python-docker.sh
+          cd samples-python/${{ matrix.app.path }}
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/${{ matrix.app.script_dir }}/python-docker.sh
