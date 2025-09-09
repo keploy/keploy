@@ -37,7 +37,7 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 			}
 			cfg := models.ReRecordCfg{
 				Rerecord: false,
-				TestSet: "",
+				TestSet:  "",
 			}
 			err = record.Start(ctx, cfg)
 			if err != nil {

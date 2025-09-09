@@ -958,8 +958,8 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 
-		createTestSet, _ := cmd.Flags().GetBool("create-test-set")      //this flag is only for rerecord command
-		c.cfg.ReRecord.CreateTestSet = createTestSet //hence ignoring error
+		createTestSet, _ := cmd.Flags().GetBool("create-test-set") //this flag is only for rerecord command
+		c.cfg.ReRecord.CreateTestSet = createTestSet               //hence ignoring error
 
 	case "normalize":
 		c.cfg.Path = utils.ToAbsPath(c.logger, c.cfg.Path)
