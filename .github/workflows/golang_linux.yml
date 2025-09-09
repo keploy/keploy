@@ -11,6 +11,12 @@ jobs:
           - name: gin-mongo
             path: gin-mongo
             script_dir: gin_mongo
+          - name: echo-mysql
+            path: echo-mysql
+            script_dir: echo_mysql
+          - name: http-pokeapi
+            path: http-pokeapi
+            script_dir: http_pokeapi
         config:
           - job: record_latest_replay_build
             record_src: latest
