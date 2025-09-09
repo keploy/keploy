@@ -235,10 +235,9 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions, incoming
 			<-ctx.Done()
 			p.logger.Info("Shutting down all dynamic ingress proxies...")
 			ingressProxyManager.StopAll()
-			fmt.Println("All ingress proxies shut down.")
 			return nil
 		})
-		p.logger.Info("✅ Successfully pinned proxy listener socket to eBPF sockmap.")
+		p.logger.Debug("Successfully pinned proxy listener socket to eBPF sockmap.")
 	}
 	
 	p.logger.Info("Keploy has taken control of the DNS resolution mechanism, your application may misbehave if you have provided wrong domain name in your application code.")

@@ -22,7 +22,8 @@ import (
 	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/utils"
 
-	grpcV2 "go.keploy.io/server/v2/pkg/core/proxy/integrations/grpcV2"
+	// grpcV2 "go.keploy.io/server/v2/pkg/core/proxy/integrations/grpcV2"
+	grpcV2 "github.com/keploy/integrations/pkg/grpcV2" 
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
@@ -214,6 +215,7 @@ func handleConnection(ctx context.Context, clientConn net.Conn, upstreamAddr str
 		}
 
 		grpcV2.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t)
+		
 		fmt.Println(err)
 	} else {
 		logger.Info("Detected HTTP/1.x connection")
@@ -292,7 +294,7 @@ func handleHttp1Connection(ctx context.Context, clientConn net.Conn, upstreamAdd
 			logger.Error("Failed to forward response to client", zap.Error(err))
 			return
 		}
-		logger.Info("Ingress Traffic Captured",
+		logger.Debug("Ingress Traffic Captured",
 			zap.Int("request_bytes", len(reqData)),
 			zap.Int("response_bytes", len(respData)),
 			zap.String("request_preview", asciiPreview(reqData)),
@@ -330,7 +332,7 @@ func (pm *IngressProxyManager) persistTestCases() {
 			if err := pm.deps.Persister(pm.ctx, tc); err != nil {
 				pm.deps.Logger.Error("Failed to persist captured test case", zap.Error(err))
 			} else {
-				pm.deps.Logger.Info("Successfully captured and persisted a test case.", zap.String("kind", string(tc.Kind)))
+				pm.deps.Logger.Debug("Successfully captured and persisted a test case.", zap.String("kind", string(tc.Kind)))
 			}
 		}
 	}
