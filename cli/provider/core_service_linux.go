@@ -10,6 +10,7 @@ import (
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
+	"go.keploy.io/server/v2/pkg/core/app"
 	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/core/proxy"
 	"go.keploy.io/server/v2/pkg/core/tester"
@@ -73,6 +74,8 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 	p := proxy.New(logger, h, c, core.NewSessions())
 	//for keploy test bench
 	t := tester.New(logger, h)
+	app.HookImpl = app.NewHooks(logger)
+	logger.Debug("app hooks initialized - oss")
 
 	var client docker.Client
 	var err error

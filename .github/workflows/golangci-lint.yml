@@ -28,6 +28,14 @@ jobs:
           go-version: ">=1.23"
           cache: false
 
+      - name: Setup SSH for private modules
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+
+      - name: Configure Git to use SSH
+        run: git config --global url."git@github.com:".insteadOf "https://github.com/"
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
@@ -44,5 +52,7 @@ jobs:
           fi
 
       - name: Check for Deprecated Dependencies
+        env:
+          GOPRIVATE: github.com/keploy/*
         run: |
           source ./.github/workflows/test_workflow_scripts/check-deprecated-deps.sh
