@@ -116,24 +116,9 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 	})
 
 	// Compare decoded data
-	// expCanon := CanonicalizeTopLevelBlocks(expectedResp.Body.DecodedData)
-	// actCanon := CanonicalizeTopLevelBlocks(actualResp.Body.DecodedData)
-	// decodedDataNormal := expCanon == actCanon
-
-	exp := expectedResp.Body.DecodedData
-	act := actualResp.Body.DecodedData
-
-	ok, diff, err := EqualProtoscope(exp, act)
-	if err != nil {
-		utils.LogError(logger, err, "failed to compare decoded data using protoscope")
-		ok = false
-	}
-
-	if !ok {
-		logger.Debug("decoded data mismatch", zap.String("diff", diff))
-	}
-
-	decodedDataNormal := ok
+	expCanon := CanonicalizeTopLevelBlocks(expectedResp.Body.DecodedData)
+	actCanon := CanonicalizeTopLevelBlocks(actualResp.Body.DecodedData)
+	decodedDataNormal := expCanon == actCanon
 
 	if !decodedDataNormal {
 		differences["body.decoded_data"] = struct {
@@ -141,16 +126,16 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 			Actual   string
 			Message  string
 		}{
-			Expected: exp,
-			Actual:   act,
+			Expected: expCanon,
+			Actual:   actCanon,
 			Message:  "decoded data mismatch",
 		}
 	}
 	result.BodyResult = append(result.BodyResult, models.BodyResult{
 		Normal:   decodedDataNormal,
 		Type:     models.GrpcData,
-		Expected: exp,
-		Actual:   act,
+		Expected: expCanon,
+		Actual:   actCanon,
 	})
 
 	// Handle noise configuration
