@@ -35,9 +35,16 @@ check_for_errors() {
   local logfile=$1
   if [ -f "$logfile" ]; then
     if grep -q "ERROR" "$logfile"; then
-      echo "Error found in $logfile"
-      cat "$logfile"
-      exit 1
+      # Ignore benign coverage-symbol errors from stripped binaries
+      if grep -Eq 'failed to read symbols, skipping coverage calculation|no symbol section' "$logfile"; then
+        echo "Ignoring benign coverage-symbol error in $logfile"
+      else
+        echo "Error found in $logfile"
+        # show only ERROR lines for quick triage
+        grep -n "ERROR" "$logfile" || true
+        cat "$logfile"
+        exit 1
+      fi
     fi
     if grep -q "WARNING: DATA RACE" "$logfile"; then
       echo "Race condition detected in $logfile"
