@@ -93,6 +93,8 @@ if [ "$MODE" = "incoming" ]; then
 
   sleep 120
 
+ echo "Stopping keploy record and server"
+
   # Stop keploy record
   pid=$(pgrep keploy || true)
   echo "$pid Keploy PID"
@@ -101,12 +103,18 @@ if [ "$MODE" = "incoming" ]; then
     sudo kill "$pid" || true
   fi
 
+  echo "Waiting for processes to settle"
+
   check_for_errors record_incoming.txt
   check_for_errors client_incoming.txt
 
+  echo "Replaying incoming requests"
+
   # Replay
   sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$FUZZER_SERVER_BIN" &> test_incoming.txt
+  echo "checking for errors"
   check_for_errors test_incoming.txt
+  echo "Checking for success phrase"
   ensure_success_phrase test_incoming.txt
   echo "✅ Incoming mode passed."
 
