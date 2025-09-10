@@ -798,9 +798,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
 
-	proxyErrChan := make(chan models.ParserError, 1)
-	defer close(proxyErrChan)
-
 	err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{
 		Rules:          r.config.BypassRules,
 		MongoPassword:  r.config.Test.MongoPassword,
@@ -808,7 +805,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		FallBackOnMiss: r.config.Test.FallBackOnMiss,
 		Mocking:        r.config.Test.Mocking,
 		Backdate:       testCases[0].HTTPReq.Timestamp,
-		ProxyErrChan:   proxyErrChan,
 	})
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to mock outgoing")
@@ -861,23 +857,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 			exitLoopChan <- true
 			runTestSetCtxCancel()
-			return nil
-		})
-
-		// Listen for errors in proxyErrChan and handle them
-		runTestSetErrGrp.Go(func() error {
-			defer utils.Recover(r.logger)
-			select {
-			case proxyErr := <-proxyErrChan:
-				switch proxyErr.ParserErrorType {
-				case models.ErrMockNotFound:
-
-				default:
-					// Ignoring the other errors as of now
-				}
-			case <-runTestSetCtx.Done():
-				// Context canceled, exit goroutine
-			}
 			return nil
 		})
 
@@ -1033,7 +1012,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		started := time.Now().UTC()
+
+		testCaseProxyErrCtx, testCaseProxyErrCancel := context.WithCancel(runTestSetCtx)
+		go r.monitorProxyErrors(testCaseProxyErrCtx, testSetID, testCase.Name)
+
 		resp, loopErr := HookImpl.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
+
+		// Stop monitoring for this specific test case
+		testCaseProxyErrCancel()
+
 		if loopErr != nil {
 			utils.LogError(r.logger, loopErr, "failed to simulate request")
 			failure++
@@ -1904,4 +1891,57 @@ func (r *Replayer) UploadMocks(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// monitorProxyErrors monitors the proxy error channel and logs errors
+func (r *Replayer) monitorProxyErrors(ctx context.Context, testSetID string, testCaseID string) {
+	defer utils.Recover(r.logger)
+
+	errorChannel := r.instrumentation.GetErrorChannel()
+	if errorChannel == nil {
+		r.logger.Debug("Proxy error channel is nil, skipping error monitoring")
+		return
+	}
+
+	r.logger.Debug("Starting proxy error monitoring",
+		zap.String("testSetID", testSetID),
+		zap.String("testCaseID", testCaseID))
+
+	for {
+		select {
+		case <-ctx.Done():
+			r.logger.Debug("Stopping proxy error monitoring",
+				zap.String("testSetID", testSetID),
+				zap.String("testCaseID", testCaseID))
+			return
+		case proxyErr, ok := <-errorChannel:
+			if !ok {
+				r.logger.Debug("Proxy error channel closed",
+					zap.String("testSetID", testSetID),
+					zap.String("testCaseID", testCaseID))
+				return
+			}
+
+			// Determine effective test case ID
+			effectiveTestCaseID := testCaseID
+			if effectiveTestCaseID == "" {
+				effectiveTestCaseID = "UNKNOWN_TEST"
+			}
+
+			var isMockError bool
+
+			if parserErr, ok := proxyErr.(models.ParserError); ok {
+				// Handle typed ParserError
+				switch parserErr.ParserErrorType {
+				case models.ErrMockNotFound:
+					isMockError = true
+				}
+			}
+
+			// Add to mock mismatch failures for reporting only if it's a mock-related error
+			if isMockError {
+				mockMismatchFailures.AddProxyErrorForTest(testSetID, effectiveTestCaseID, proxyErr)
+			}
+		}
+	}
 }

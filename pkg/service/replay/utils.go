@@ -175,6 +175,40 @@ func (tfs *TestFailureStore) AddFailure(testSetID, testID string, expectedMocks,
 	tfs.failures = append(tfs.failures, failure)
 }
 
+func (tfs *TestFailureStore) AddProxyError(testSetID string, proxyErr error) {
+	failure := TestFailure{
+		TestSetID:     testSetID,
+		TestID:        "PROXY_ERROR",
+		ExpectedMocks: []string{},
+		ActualMocks:   []string{},
+		FailureReason: fmt.Sprintf("Proxy error: %s", proxyErr.Error()),
+	}
+	tfs.failures = append(tfs.failures, failure)
+}
+
+func (tfs *TestFailureStore) AddProxyErrorForTest(testSetID string, testCaseID string, proxyErr error) {
+	var errorType string
+	var errorDetail string
+
+	// Check if this is a ParserError with specific type
+	if parserErr, ok := proxyErr.(models.ParserError); ok {
+		errorType = string(parserErr.ParserErrorType)
+		errorDetail = parserErr.Error()
+	} else {
+		errorType = "GENERAL_PROXY_ERROR"
+		errorDetail = proxyErr.Error()
+	}
+
+	failure := TestFailure{
+		TestSetID:     testSetID,
+		TestID:        testCaseID,
+		ExpectedMocks: []string{},
+		ActualMocks:   []string{},
+		FailureReason: fmt.Sprintf("[%s] %s", errorType, errorDetail),
+	}
+	tfs.failures = append(tfs.failures, failure)
+}
+
 func (tfs *TestFailureStore) GetFailures() []TestFailure {
 	return tfs.failures
 }
@@ -187,6 +221,17 @@ func (tfs *TestFailureStore) GetFailuresByTestSet(testSetID string) []TestFailur
 		}
 	}
 	return filtered
+}
+
+func (tfs *TestFailureStore) GetProxyErrorsByTestSet(testSetID string) []TestFailure {
+	var proxyErrors []TestFailure
+	for _, failure := range tfs.failures {
+		if failure.TestSetID == testSetID && (strings.Contains(failure.FailureReason, "Proxy error:") ||
+			(strings.Contains(failure.FailureReason, "[") && strings.Contains(failure.FailureReason, "]"))) {
+			proxyErrors = append(proxyErrors, failure)
+		}
+	}
+	return proxyErrors
 }
 
 type MockDifference struct {
@@ -295,31 +340,41 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 		testSetPrinted := false
 
 		for _, failure := range failures {
-			differences := CompareMockSlices(failure.ExpectedMocks, failure.ActualMocks)
+			var diffText string
 
-			var missingMocks []string
-			var extraMocks []string
+			if strings.Contains(failure.FailureReason, "Proxy error:") {
+				// Fallback for old format proxy errors
+				diffText = fmt.Sprintf("🔴 Mock matching was failed - %s", failure.FailureReason)
+			} else {
+				// Regular mock comparison failures
+				differences := CompareMockSlices(failure.ExpectedMocks, failure.ActualMocks)
 
-			for _, diff := range differences {
-				switch diff.DiffType {
-				case "missing":
-					missingMocks = append(missingMocks, diff.Key)
-				case "extra":
-					extraMocks = append(extraMocks, diff.Key)
+				var missingMocks []string
+				var extraMocks []string
+
+				for _, diff := range differences {
+					switch diff.DiffType {
+					case "missing":
+						missingMocks = append(missingMocks, diff.Key)
+					case "extra":
+						extraMocks = append(extraMocks, diff.Key)
+					}
 				}
-			}
 
-			var diffStrings []string
-			if len(missingMocks) > 0 {
-				diffStrings = append(diffStrings, fmt.Sprintf("Missing: %s", strings.Join(missingMocks, ", ")))
-			}
-			if len(extraMocks) > 0 {
-				diffStrings = append(diffStrings, fmt.Sprintf("Extra: %s", strings.Join(extraMocks, ", ")))
-			}
+				var diffStrings []string
+				if len(missingMocks) > 0 {
+					diffStrings = append(diffStrings, fmt.Sprintf("Missing: %s", strings.Join(missingMocks, ", ")))
+				}
+				if len(extraMocks) > 0 {
+					diffStrings = append(diffStrings, fmt.Sprintf("Extra: %s", strings.Join(extraMocks, ", ")))
+				}
 
-			diffText := strings.Join(diffStrings, "; ")
-			if diffText == "" {
-				diffText = "No differences"
+				// Add "Mock matching was failed" for regular mock failures too
+				if len(diffStrings) > 0 {
+					diffText = fmt.Sprintf("Mock matching was failed - %s", strings.Join(diffStrings, "; "))
+				} else {
+					diffText = "No differences"
+				}
 			}
 
 			if !testSetPrinted {

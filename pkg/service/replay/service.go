@@ -22,6 +22,8 @@ type Instrumentation interface {
 	GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error)
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
+	// GetErrorChannel returns the error channel from the proxy for monitoring proxy errors
+	GetErrorChannel() <-chan error
 
 	GetContainerIP(ctx context.Context, id uint64) (string, error)
 }

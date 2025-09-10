@@ -41,5 +41,9 @@ func (e ParserError) Error() string {
 }
 
 const (
-	ErrMockNotFound ParserErrorType = "mock not found"
+	ErrMockNotFound        ParserErrorType = "mock not found"
+	ErrMockMismatch        ParserErrorType = "mock mismatch"
+	ErrProxyConnection     ParserErrorType = "proxy connection failed"
+	ErrProxyTimeout        ParserErrorType = "proxy timeout"
+	ErrGenericParserFailed ParserErrorType = "generic parser failed"
 )
