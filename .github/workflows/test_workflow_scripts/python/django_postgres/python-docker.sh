@@ -27,10 +27,18 @@ send_request(){
     local container_name=$1
     sleep 10
     app_started=false
+
+    deadline=$((SECONDS+120))
+
     while [ "$app_started" = false ]; do
-        if curl --silent http://localhost:8000/students; then
+        if curl --silent http://localhost:8000/students >/dev/null 2>&1; then
             app_started=true
         else
+            if [ $SECONDS -ge $deadline ]; then
+                echo "Timed out waiting for app to start on :8000"
+                docker logs "$container_name" || true
+                return 1
+            fi
             sleep 3  # Check every 3 seconds
         fi
     done
@@ -51,7 +59,7 @@ send_request(){
 # Record sessions
 for i in {1..2}; do
     container_name="flaskApp_${i}"
-    send_request &
+    send_request "$container_name" &
     sudo -E env PATH=$PATH $RECORD_BIN record -c "docker run -p8000:8000 --net keploy-network --rm --name $container_name flask-app:1.0" --container-name "$container_name" &> "${container_name}.txt"
     if grep "ERROR" "${container_name}.txt"; then
         echo "Error found in pipeline..."
