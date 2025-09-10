@@ -50,6 +50,7 @@ type Replayer struct {
 	logger          *zap.Logger
 	testDB          TestDB
 	mockDB          MockDB
+	mappingDB       MappingDB
 	reportDB        ReportDB
 	testSetConf     TestSetConfig
 	telemetry       Telemetry
@@ -62,7 +63,7 @@ type Replayer struct {
 	isLastTestCase  bool
 }
 
-func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
+func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
 
 	// TODO: add some comment.
 	mock := &mock{
@@ -82,6 +83,7 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 		logger:          logger,
 		testDB:          testDB,
 		mockDB:          mockDB,
+		mappingDB:       mappingDB,
 		reportDB:        reportDB,
 		testSetConf:     testSetConf,
 		telemetry:       telemetry,
@@ -780,20 +782,24 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusFailed, err
 	}
 
-	var expectedTestMockMappings = make(map[string][]string)
-	for _, mock := range filteredMocks {
-		for _, tc := range mock.UsedByTests {
-			expectedTestMockMappings[tc] = append(expectedTestMockMappings[tc], mock.Name)
+	// Try to get expected test-mock mappings from mapping file first
+	var expectedTestMockMappings map[string][]string
+	if r.mappingDB != nil {
+		expectedTestMockMappings, err = r.mappingDB.GetMappings(ctx, testSetID)
+		if err != nil {
+			r.logger.Warn("Failed to read mappings from file, falling back to mock metadata",
+				zap.String("testSetID", testSetID),
+				zap.Error(err))
+			expectedTestMockMappings = make(map[string][]string)
 		}
-	}
-
-	for _, mock := range unfilteredMocks {
-		for _, tc := range mock.UsedByTests {
-			expectedTestMockMappings[tc] = append(expectedTestMockMappings[tc], mock.Name)
-		}
+	} else {
+		expectedTestMockMappings = make(map[string][]string)
 	}
 
 	pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
+
+	proxyErrChan := make(chan models.ParserError, 1)
+	defer close(proxyErrChan)
 
 	err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{
 		Rules:          r.config.BypassRules,
@@ -802,6 +808,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		FallBackOnMiss: r.config.Test.FallBackOnMiss,
 		Mocking:        r.config.Test.Mocking,
 		Backdate:       testCases[0].HTTPReq.Timestamp,
+		ProxyErrChan:   proxyErrChan,
 	})
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to mock outgoing")
@@ -854,6 +861,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 			exitLoopChan <- true
 			runTestSetCtxCancel()
+			return nil
+		})
+
+		// Listen for errors in proxyErrChan and handle them
+		runTestSetErrGrp.Go(func() error {
+			defer utils.Recover(r.logger)
+			select {
+			case proxyErr := <-proxyErrChan:
+				switch proxyErr.ParserErrorType {
+				case models.ErrMockNotFound:
+
+				default:
+					// Ignoring the other errors as of now
+				}
+			case <-runTestSetCtx.Done():
+				// Context canceled, exit goroutine
+			}
 			return nil
 		})
 
@@ -1238,9 +1262,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if testSetStatus == models.TestSetStatusPassed && r.instrument {
-		err = r.mockDB.UpdateTestMockReferences(runTestSetCtx, testSetID, actualTestMockMappings)
+
+		// Save test-mock mappings to YAML file
+		err = r.mappingDB.InsertMappings(runTestSetCtx, testSetID, actualTestMockMappings)
 		if err != nil {
-			r.logger.Error("Error updating mocks consumed by tests", zap.Error(err))
+			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
+		} else {
+			r.logger.Info("Successfully saved test-mock mappings",
+				zap.String("testSetID", testSetID),
+				zap.Int("numTests", len(actualTestMockMappings)))
 		}
 	}
 

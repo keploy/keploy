@@ -23,7 +23,8 @@ type OutgoingOptions struct {
 	FallBackOnMiss bool          // this enables to pass the request to the actual server if no mock is found during test mode.
 	Mocking        bool          // used to enable/disable mocking
 	DstCfg         *ConditionalDstCfg
-	Backdate       time.Time // used to set backdate in cacert request
+	Backdate       time.Time          // used to set backdate in cacert request
+	ProxyErrChan   chan<- ParserError // used to send parser errors to the proxy
 }
 
 type ConditionalDstCfg struct {

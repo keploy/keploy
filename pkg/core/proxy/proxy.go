@@ -341,6 +341,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
 	}
 
+	proxyErrChan := rule.OutgoingOptions.ProxyErrChan
+
 	// This is used to handle the parser errors
 	parserErrGrp, parserCtx := errgroup.WithContext(ctx)
 	parserCtx = context.WithValue(parserCtx, models.ErrGroupKey, parserErrGrp)
@@ -428,6 +430,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		err := p.Integrations[integrations.MYSQL].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), rule.OutgoingOptions)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to mock the outgoing message")
+			proxyErrChan <- models.ParserError{ParserErrorType: models.ErrMockNotFound, Err: err}
 			return err
 		}
 		return nil
@@ -603,6 +606,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			err := matchedParser.MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
 			if err != nil && err != io.EOF {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
+				proxyErrChan <- models.ParserError{ParserErrorType: models.ErrMockNotFound, Err: err}
 				return err
 			}
 		}
@@ -620,6 +624,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
 			if err != nil {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
+				proxyErrChan <- models.ParserError{ParserErrorType: models.ErrMockNotFound, Err: err}
 				return err
 			}
 		}

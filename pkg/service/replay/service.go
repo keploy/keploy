@@ -58,7 +58,6 @@ type MockDB interface {
 	GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
 	GetUnFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error)
 	UpdateMocks(ctx context.Context, testSetID string, mockNames map[string]models.MockState) error
-	UpdateTestMockReferences(ctx context.Context, testSetID string, mockNames map[string][]string) error
 }
 
 type ReportDB interface {
@@ -101,4 +100,9 @@ type InstrumentState struct {
 	AppID      uint64
 	HookCancel context.CancelFunc
 	UnloadDone <-chan struct{} // Channel that will be closed when hooks are completely unloaded
+}
+
+type MappingDB interface {
+	InsertMappings(ctx context.Context, testSetID string, testMockMappings map[string][]string) error
+	GetMappings(ctx context.Context, testSetID string) (map[string][]string, error)
 }
