@@ -35,6 +35,14 @@ func (t *Tools) Sanitize(ctx context.Context) error {
 	}
 
 	for _, testSetID := range testSets {
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			t.logger.Info("Sanitize process cancelled by context")
+			return ctx.Err()
+		default:
+		}
+
 		// keploy/<testSetID>
 		testSetDir, err := t.locateTestSetDir(testSetID)
 		if err != nil {
@@ -54,7 +62,7 @@ func (t *Tools) Sanitize(ctx context.Context) error {
 			continue
 		}
 
-		if err := t.sanitizeTestSetDir(testSetDir); err != nil {
+		if err := t.sanitizeTestSetDir(ctx, testSetDir); err != nil {
 			t.logger.Error("Sanitize failed for test set",
 				zap.String("testSetID", testSetID),
 				zap.String("dir", testSetDir),
@@ -91,7 +99,7 @@ func isDir(p string) bool {
 	return err == nil && fi.IsDir()
 }
 
-func (t *Tools) sanitizeTestSetDir(testSetDir string) error {
+func (t *Tools) sanitizeTestSetDir(ctx context.Context, testSetDir string) error {
 	// Aggregate secrets across ALL files in this test set
 	aggSecrets := map[string]string{}
 
@@ -125,6 +133,14 @@ func (t *Tools) sanitizeTestSetDir(testSetDir string) error {
 	}
 
 	for _, f := range files {
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			t.logger.Info("File sanitization cancelled by context")
+			return ctx.Err()
+		default:
+		}
+
 		if err := SanitizeFileInPlace(f, aggSecrets); err != nil {
 			// Continue to next file
 			t.logger.Error("Failed to sanitize file", zap.String("file", f), zap.Error(err))

@@ -7,7 +7,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
+        app:
+          - name: spring-petclinic-rest
+            path: spring-petclinic/spring-petclinic-rest
+            script_dir: spring_petclinic
+        config:
           - job: record_latest_replay_build
             record_src: latest
             replay_src: build
@@ -17,7 +21,7 @@ jobs:
           - job: record_build_replay_build
             record_src: build
             replay_src: build
-    name: ${{ matrix.job }}
+    name: ${{ matrix.app.name }} (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -25,12 +29,12 @@ jobs:
       - id: record
         uses: ./.github/actions/download-binary
         with:
-          src: ${{ matrix.record_src }}
+          src: ${{ matrix.config.record_src }}
 
       - id: replay
         uses: ./.github/actions/download-binary
         with:
-          src: ${{ matrix.replay_src }}
+          src: ${{ matrix.config.replay_src }}
 
       - name: Checkout samples-java repository
         uses: actions/checkout@v4
@@ -40,19 +44,19 @@ jobs:
 
       - name: Installing the necessary dependencies
         run: |
-          cd samples-java/spring-petclinic/spring-petclinic-rest
+          cd samples-java/${{ matrix.app.path }}
           ./mvnw dependency:resolve
 
       - name: Compile the project
         run: |
-          cd samples-java/spring-petclinic/spring-petclinic-rest
-           source ./../../../.github/workflows/test_workflow_scripts/update-java.sh
-           ./mvnw compile
+          cd samples-java/${{ matrix.app.path }}
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/update-java.sh
+          ./mvnw compile
 
-      - name: Run the spring-petclinic-rest app
+      - name: Run the ${{ matrix.app.name }} app
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
         run: |
-          cd samples-java/spring-petclinic/spring-petclinic-rest
-          source ./../../../.github/workflows/test_workflow_scripts/java-linux.sh
+          cd samples-java/${{ matrix.app.path }}
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/java/${{ matrix.app.script_dir }}/java-linux.sh
