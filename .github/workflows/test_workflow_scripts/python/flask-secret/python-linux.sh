@@ -1,6 +1,6 @@
 #!/bin/bash
 
-source ./../../../.github/workflows/test_workflow_scripts/test-iid.sh
+source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-iid.sh
 
 # Install dependencies
 pip3 install -r requirements.txt
@@ -56,7 +56,7 @@ done
 
 echo "Shutting down flask before test mode..."
 
-# Sanitize the testcases and mocks
+# Sanitize the testcases
 sudo -E env PATH="$PATH" $RECORD_BIN sanitize
 
 sleep 5
