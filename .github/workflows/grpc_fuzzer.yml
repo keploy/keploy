@@ -76,7 +76,7 @@ jobs:
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
-          GRPC_CLIENT_BIN: ${{ steps.fuzzer.outputs.client }}
-          GRPC_SERVER_BIN: ${{ steps.fuzzer.outputs.server }}
+          FUZZER_CLIENT_BIN: ${{ steps.fuzzer.outputs.client }}
+          FUZZER_SERVER_BIN: ${{ steps.fuzzer.outputs.server }}
         run: |
           source ./.github/workflows/test_workflow_scripts/grpc-fuzzer.sh ${{ matrix.mode }}
