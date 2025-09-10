@@ -80,6 +80,7 @@ type ReRecord struct {
 	Host          string   `json:"host" yaml:"host" mapstructure:"host"`
 	Port          uint32   `json:"port" yaml:"port" mapstructure:"port"`
 	GRPCPort      uint32   `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
+	CITimeout     int64    `json:"ciTimeout" yaml:"ciTimeout" mapstructure:"ciTimeout"`
 }
 type Contract struct {
 	Services []string `json:"services" yaml:"services" mapstructure:"services"`

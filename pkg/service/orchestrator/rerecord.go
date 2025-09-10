@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"syscall"
 	"time"
 
 	"go.keploy.io/server/v2/pkg"
@@ -18,10 +19,52 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+func (o *Orchestrator) waitForSignal(timeoutMinutes int64) error {
+	pipeName := "/tmp/re-record.pipe"
+
+	// Create the named pipe. The 0666 permission makes it accessible.
+	err := syscall.Mkfifo(pipeName, 0666)
+	if err != nil && !os.IsExist(err) {
+		o.logger.Fatal("Failed to create named pipe", zap.Error(err))
+	}
+	defer os.Remove(pipeName)
+
+	o.logger.Info(fmt.Sprintf("From another terminal, run: echo 'go' > %s", pipeName), zap.String("pipeName", pipeName))
+	// This channel will receive the result of the blocking pipe read
+	resultChan := make(chan error)
+
+	go func() {
+		pipe, err := os.OpenFile(pipeName, os.O_RDONLY, os.ModeNamedPipe)
+		if err != nil {
+			resultChan <- err
+			return
+		}
+		defer pipe.Close()
+
+		buffer := make([]byte, 1)
+		_, readErr := pipe.Read(buffer)
+		resultChan <- readErr
+	}()
+
+	timeoutDuration := time.Duration(timeoutMinutes) * time.Minute
+
+	select {
+	case <-resultChan:
+		o.logger.Info("Signal received. Starting re-recording...")
+		return nil
+	case <-time.After(timeoutDuration):
+		o.logger.Warn(fmt.Sprintf("Timeout! No signal received after %d minutes. Exiting.\n", timeoutMinutes))
+		return fmt.Errorf("timeout! no signal received after %d minutes", timeoutMinutes)
+	}
+}
 func (o *Orchestrator) ReRecord(ctx context.Context) error {
-	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
+	if o.config.ReRecord.CITimeout > 0 {
+		err := o.waitForSignal(o.config.ReRecord.CITimeout)
+		if err != nil {
+			return err
+		}
+	}
 	var stopReason string
-	var err error
 
 	defer func() {
 		select {
