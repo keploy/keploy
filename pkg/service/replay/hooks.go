@@ -94,6 +94,10 @@ func (h *Hooks) AfterTestSetRun(ctx context.Context, testSetID string, status bo
 
 func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 
+	if h.cfg.Test.DisableMockUpload {
+		return nil
+	}
+
 	if h.cfg.Test.BasePath != "" {
 		h.logger.Debug("Mocking is disabled when basePath is given", zap.String("testSetID", testSetID), zap.String("basePath", h.cfg.Test.BasePath))
 		return nil
