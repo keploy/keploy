@@ -441,116 +441,213 @@ func ParseIntoJSON(response string) (interface{}, error) {
 	return result, nil
 }
 
-// CompareResponses compares the two responses, if there is any difference in the values,
-// It checks in the templatized values map if the value is already present, it will update the value in the map.
-// It also changes the expected value to the actual value in the response1 (expected body)
+// CompareResponses compares response1 (expected) and response2 (actual),
+// updating utils.TemplatizedValues and mutating response1 where appropriate.
 func CompareResponses(response1, response2 *interface{}, key string) {
-	switch v1 := (*response1).(type) {
-	case geko.Array:
-		for _, val1 := range v1.List {
-			CompareResponses(&val1, response2, "")
-		}
+	rev := reverseMap(utils.TemplatizedValues) // build once
+	compareZip(response1, response2, key, rev)
+}
+
+// compareZip walks expected & actual in lock-step, updating expected in place.
+func compareZip(exp *interface{}, act *interface{}, key string, rev map[interface{}]string) {
+	if exp == nil || act == nil {
+		return
+	}
+
+	switch ev := (*exp).(type) {
+
 	case geko.ObjectItems:
-		keys := v1.Keys()
-		vals := v1.Values()
-		for i := range keys {
-			CompareResponses(&vals[i], response2, keys[i])
-			v1.SetValueByIndex(i, vals[i]) // in order to change the expected value if required
+		// Build index for actual object once
+		av, ok := (*act).(geko.ObjectItems)
+		if !ok {
+			// type mismatch; nothing to normalize here
+			return
 		}
+		actIdx := buildGekoIndex(av)
+		ekeys := ev.Keys()
+		evals := ev.Values()
+		for i := range ekeys {
+			k := ekeys[i]
+			childKey := k
+			// find actual by key
+			j, ok := actIdx[k]
+			if ok {
+				// recurse into pair
+				compareZip(&evals[i], &av.List[j].Value, childKey, rev)
+				ev.SetValueByIndex(i, evals[i])
+			}
+		}
+
 	case map[string]interface{}:
-		for key, val := range v1 {
-			CompareResponses(&val, response2, key)
-			v1[key] = val // in order to change the expected value if required
+		am, ok := (*act).(map[string]interface{})
+		if !ok {
+			return
 		}
+		for k, v := range ev {
+			av, ok := am[k]
+			if ok {
+				child := v
+				compareZip(&child, &av, k, rev)
+				ev[k] = child
+			}
+		}
+
+	case geko.Array:
+		aa, ok := (*act).(geko.Array)
+		if !ok {
+			return
+		}
+		// Walk by index. We only normalize where both sides have an element.
+		n := len(ev.List)
+		if len(aa.List) < n {
+			n = len(aa.List)
+		}
+		for i := 0; i < n; i++ {
+			child := ev.List[i]
+			compareZip(&child, &aa.List[i], "", rev)
+			ev.List[i] = child
+		}
+
+	case []interface{}:
+		aarr, ok := (*act).([]interface{})
+		if !ok {
+			return
+		}
+		n := len(ev)
+		if len(aarr) < n {
+			n = len(aarr)
+		}
+		for i := 0; i < n; i++ {
+			child := ev[i]
+			compareZip(&child, &aarr[i], "", rev)
+			ev[i] = child
+		}
+
 	case string:
-		compareSecondResponse(&v1, response2, key, "")
-		*response1 = v1
-	case float64, int64, int, float32:
-		v1String := utils.ToString(v1)
-		compareSecondResponse(&(v1String), response2, key, "")
-		// Retain the original type
-		switch (*response1).(type) {
-		case float64:
-			*response1 = utils.ToFloat(v1String)
-		case int:
-			*response1 = utils.ToInt(v1String)
-		case int64:
-			*response1 = utils.ToInt(v1String)
-		case float32:
-			f := utils.ToFloat(v1String)
-			*response1 = float32(f)
-		default:
-			*response1 = v1 // Keep it unchanged if it’s an unexpected type
+		normalizeLeaf(&ev, act, key, rev)
+		*exp = ev
+
+	case float64, int64, int, float32, bool:
+		// Convert expected to string for matching with template map,
+		// then restore original type if we change it.
+		orig := *exp
+		s := utils.ToString(ev)
+		if normalizeLeaf(&s, act, key, rev) {
+			// restore original numeric/bool type if possible
+			switch orig.(type) {
+			case float64:
+				*exp = utils.ToFloat(s)
+			case float32:
+				f := utils.ToFloat(s)
+				*exp = float32(f)
+			case int, int64:
+				*exp = utils.ToInt(s)
+			case bool:
+				// utils.ToString(true/false) -> "true"/"false"; try parse back
+				if s == "true" || s == "false" {
+					*exp = (s == "true")
+				} else {
+					*exp = s // fallback
+				}
+			default:
+				*exp = s
+			}
 		}
+		// else unchanged
+
+	default:
+		// Unknown leaf type; nothing to do.
 	}
 }
 
-// Simplify the second response into type string for comparison.
-func compareSecondResponse(val1 *string, response2 *interface{}, key1 string, key2 string) {
-	switch v2 := (*response2).(type) {
-	case geko.Array:
-		for _, val2 := range v2.List {
-			compareSecondResponse(val1, &val2, key1, "")
-		}
-
+// normalizeLeaf tries to update a single expected leaf (as string) from actual.
+// Returns true if it mutated the expected leaf string.
+func normalizeLeaf(expStr *string, act *interface{}, key string, rev map[interface{}]string) bool {
+	switch av := (*act).(type) {
 	case geko.ObjectItems:
-		keys := v2.Keys()
-		vals := v2.Values()
-		for i := range keys {
-			compareSecondResponse(val1, &vals[i], key1, keys[i])
+		// find same field in actual by key
+		if key == "" {
+			return false
+		}
+		idx, ok := buildGekoIndex(av)[key]
+		if ok {
+			val := av.List[idx].Value
+			return assignFromActual(expStr, &val, key, rev)
 		}
 	case map[string]interface{}:
-		for key, val := range v2 {
-			compareSecondResponse(val1, &val, key1, key)
+		if key == "" {
+			return false
 		}
-	case string:
-		if *val1 != v2 {
-			// Reverse the templatized values map.
-			revMap := reverseMap(utils.TemplatizedValues)
-			if _, ok := revMap[*val1]; ok && key1 == key2 {
-				key := revMap[*val1]
-				utils.TemplatizedValues[key] = v2
-				*val1 = v2
-			}
+		v, ok := av[key]
+		if ok {
+			return assignFromActual(expStr, &v, key, rev)
 		}
-	case float64, int64, int, float32:
-		if *val1 != v2 {
+	case geko.Array:
+		// arrays don’t have keyed fields; keep behavior: do nothing here
+		return false
+	case []interface{}:
+		return false
+	default:
+		// actual itself is a primitive at the same path
+		return assignFromActual(expStr, act, key, rev)
+	}
+	return false
+}
 
-			// Reverse the templatized values map.
-			revMap := reverseMap(utils.TemplatizedValues)
-			if _, ok := revMap[*val1]; ok && key1 == key2 {
-				key := revMap[*val1]
-				utils.TemplatizedValues[key] = v2
-				*val1 = utils.ToString(v2)
-				return
-			}
-			// 1) try integer parse
-			if i, err := strconv.Atoi(*val1); err == nil {
-				if _, ok := revMap[i]; ok && key1 == key2 {
-					key := revMap[i]
-					utils.TemplatizedValues[key] = v2
-					*val1 = utils.ToString(v2)
-				}
-			}
-			if f, err := strconv.ParseFloat(*val1, 32); err == nil {
-				if _, ok := revMap[f]; ok && key1 == key2 {
-					key := revMap[f]
-					utils.TemplatizedValues[key] = v2
-					*val1 = utils.ToString(v2)
-				}
-			}
-			if f, err := strconv.ParseFloat(*val1, 64); err == nil {
-				if _, ok := revMap[f]; ok && key1 == key2 {
+// assignFromActual updates expStr (expected) from actual if expStr corresponds
+// to a template placeholder in utils.TemplatizedValues (via rev map).
+func assignFromActual(expStr *string, act *interface{}, key string, rev map[interface{}]string) bool {
+	// direct string
+	k, ok := rev[*expStr]
+	if ok {
+		utils.TemplatizedValues[k] = *act
+		*expStr = utils.ToString(*act)
+		return true
+	}
 
-					key := revMap[*val1]
-					utils.TemplatizedValues[key] = v2
-					*val1 = utils.ToString(v2)
-				}
-			}
-
+	// Try integer form
+	i, err := strconv.Atoi(*expStr)
+	if err == nil {
+		k, ok := rev[i]
+		if ok {
+			utils.TemplatizedValues[k] = *act
+			*expStr = utils.ToString(*act)
+			return true
 		}
 	}
+	// Try float32
+	f, err := strconv.ParseFloat(*expStr, 32)
+	if err == nil {
+		k, ok := rev[float32(f)]
+		if ok {
+			utils.TemplatizedValues[k] = *act
+			*expStr = utils.ToString(*act)
+			return true
+		}
+	}
+	// Try float64
+	f64, err := strconv.ParseFloat(*expStr, 64)
+	if err == nil {
+		k, ok := rev[f64]
+		if ok {
+			utils.TemplatizedValues[k] = *act
+			*expStr = utils.ToString(*act)
+			return true
+		}
+	}
+	return false
 }
+
+// buildGekoIndex builds key->index for a geko.ObjectItems once.
+func buildGekoIndex(obj geko.ObjectItems) map[string]int {
+	idx := make(map[string]int, len(obj.List))
+	keys := obj.Keys()
+	for i := range keys {
+		idx[keys[i]] = i
+	}
+	return idx
+}
+
 func reverseMap(m map[string]interface{}) map[interface{}]string {
 	var reverseMap = make(map[interface{}]string)
 	for key, val := range m {
