@@ -112,18 +112,6 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 			return nil, err
 		}
 
-		funcMap := template.FuncMap{
-			"int":    utils.ToInt,
-			"string": utils.ToString,
-			"float":  utils.ToFloat,
-		}
-		tmpl, err := template.New("template").Funcs(funcMap).Parse(string(testCaseStr))
-		if err != nil || tmpl == nil {
-			utils.LogError(logger, err, "failed to parse the template", zap.Any("TestCaseString", string(testCaseStr)), zap.Any("TestCase", tc.Name), zap.Any("TestSet", testSet))
-			return nil, err
-		}
-
-
 		// Prepare the data for template execution.
 		templateData := make(map[string]interface{})
 		for k, v := range utils.TemplatizedValues {
@@ -133,19 +121,15 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 			templateData["secret"] = utils.SecretValues
 		}
 
-		var output bytes.Buffer
-		// Execute template with the populated templateData (previously an empty data map was passed here)
-		err = tmpl.Execute(&output, templateData)
-
+		renderedStr, err := utils.RenderTemplatesInString(logger, string(testCaseStr), templateData)
 		if err != nil {
 			utils.LogError(logger, err, "failed to render some template values", zap.String("TestCase", tc.Name), zap.String("TestSet", testSet))
 		}
 
 		// Unmarshal the rendered string back into the test case struct.
-		renderedBytes := output.Bytes()
-		err = json.Unmarshal(renderedBytes, &tc)
+		err = json.Unmarshal([]byte(renderedStr), &tc)
 		if err != nil {
-			utils.LogError(logger, err, "failed to unmarshal the rendered testcase", zap.String("RenderedString", string(renderedBytes)))
+			utils.LogError(logger, err, "failed to unmarshal the rendered testcase", zap.String("RenderedString", renderedStr))
 			return nil, err
 		}
 	}
@@ -161,8 +145,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}
 
-	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
-
+	logger.Info("starting test for of", zap.String("test case", models.HighlightString(tc.Name)), zap.String("test set", models.HighlightString(testSet)))
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, bytes.NewBuffer(reqBody))
 	if err != nil {
 		utils.LogError(logger, err, "failed to create a http request from the yaml document")

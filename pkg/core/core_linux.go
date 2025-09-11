@@ -123,7 +123,7 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 
 		//deleting in order to free the memory in case of rerecord. otherwise different app id will be created for the same app.
 		c.apps.Delete(id)
-		c.id = utils.AutoInc{}
+		c.id.Reset()
 
 		return nil
 	})
@@ -186,6 +186,11 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 	}
 
 	return nil
+}
+
+// GetHookUnloadDone returns a channel that signals when hooks are completely unloaded
+func (c *Core) GetHookUnloadDone(id uint64) <-chan struct{} {
+	return c.GetUnloadDone()
 }
 
 func (c *Core) Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError {

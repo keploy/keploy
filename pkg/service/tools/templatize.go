@@ -446,6 +446,9 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 	return resultChains
 }
 
+// Utility function to safely marshal JSON and log errors
+var jsonMarshal987 = json.Marshal
+
 // In your tools package (tools.go)
 // REPLACE the AssertChains function and ADD the new buildCanonicalChainsFromMap helper.
 // AssertChains is the main entry point for the verification process.
@@ -811,7 +814,10 @@ func render(val string) (interface{}, error) {
 	}
 	tmpl, err := template.New("template").Funcs(funcMap).Parse(val)
 	if err != nil {
-		return val, fmt.Errorf("failed to parse the testcase using template %v", zap.Error(err))
+		// If parsing fails, it's likely not a valid template string, but a literal string
+		// that happens to contain "{{" and "}}". In this case, we should not treat it as an
+		// error but return the original value, as no substitution is possible.
+		return val, nil
 	}
 	data := make(map[string]interface{})
 	for k, v := range utils.TemplatizedValues {

@@ -380,7 +380,7 @@ func (idc *Impl) ForceAbsolutePath(c *Compose, basePath string) error {
 		return err
 	}
 	dockerComposeContext = filepath.Dir(dockerComposeContext)
-	idc.logger.Debug("docker compose file location in host filesystem", zap.Any("dockerComposeContext", dockerComposeContext))
+	idc.logger.Debug("docker compose file location in host filesystem", zap.String("dockerComposeContext", dockerComposeContext))
 
 	// Loop through all services in compose file
 	for _, service := range c.Services.Content {
@@ -539,7 +539,7 @@ func (idc *Impl) IsContainerRunning(containerName string) (bool, error) {
 	return false, nil
 }
 
-func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate bool) error {
+func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate bool, driverOpts map[string]string) error {
 	// Set a timeout for the context
 	ctx, cancel := context.WithTimeout(ctx, idc.timeoutForDockerQuery)
 	defer cancel()
@@ -555,7 +555,7 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate b
 
 	if len(volumeList.Volumes) > 0 {
 		if !recreate {
-			idc.logger.Info("volume already exists", zap.Any("volume", volumeName))
+			idc.logger.Info("volume already exists", zap.String("volume", volumeName))
 			return err
 		}
 
@@ -566,20 +566,24 @@ func (idc *Impl) CreateVolume(ctx context.Context, volumeName string, recreate b
 		}
 	}
 
-	// Create the 'debugfs' volume if it doesn't exist
-	_, err = idc.VolumeCreate(ctx, volume.CreateOptions{
+	// Create the volume,
+	// Create volume with provided driver options or default
+	createOptions := volume.CreateOptions{
 		Name:   volumeName,
 		Driver: "local",
-		DriverOpts: map[string]string{
-			"type":   volumeName, // Use "none" for local driver
-			"device": volumeName,
-		},
-	})
+	}
+
+	// If driverOpts is provided and not empty, use them; otherwise use default
+	if len(driverOpts) > 0 {
+		createOptions.DriverOpts = driverOpts
+	}
+
+	_, err = idc.VolumeCreate(ctx, createOptions)
 	if err != nil {
-		idc.logger.Error("failed to create volume", zap.Any("volume", volumeName), zap.Error(err))
+		idc.logger.Error("failed to create volume", zap.String("volume", volumeName), zap.Error(err))
 		return err
 	}
 
-	idc.logger.Debug("volume created", zap.Any("volume", volumeName))
+	idc.logger.Debug("volume created", zap.String("volume", volumeName))
 	return nil
 }

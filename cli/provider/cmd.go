@@ -243,6 +243,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			return nil
 		}
 
+		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
+		cmd.Flags().Bool("create-test-set", false, "For creating a fresh test-set for each test-set during rerecording. By default it is false")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
@@ -258,6 +260,18 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
 		//add rest of the uncommon flags for record, test, rerecord commands
 		c.AddUncommonFlags(cmd)
+
+	case "report":
+		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to report e.g. --testsets \"test-set-1, test-set-2\"")
+		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
+		cmd.Flags().StringP("report-path", "r", "", "Absolute path to a report file")
+		cmd.Flags().Bool("full", false, "Show full diffs (colorized for JSON) instead of compact table diff")
+		cmd.Flags().Bool("summary", false, "Print only the summary of the test run (optionally restrict with --test-sets)")
+		cmd.Flags().StringSlice("test-case", nil, "Filter to specific test case IDs (repeat or comma-separated). Alias: --tc")
+
+	case "sanitize":
+		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to sanitize e.g. -t \"test-set-1, test-set-2\"")
+		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
@@ -292,7 +306,8 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 	case "test", "rerecord":
 		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to run e.g. --testsets \"test-set-1, test-set-2\"")
 		cmd.Flags().String("host", c.cfg.Test.Host, "Custom host to replace the actual host in the testcases")
-		cmd.Flags().Uint32("port", c.cfg.Test.Port, "Custom port to replace the actual port in the testcases")
+		cmd.Flags().Uint32("port", c.cfg.Test.Port, "Custom http port to replace the actual port in the testcases")
+		cmd.Flags().Uint32("grpc-port", c.cfg.Test.GRPCPort, "Custom grpc port to replace the actual port in the testcases")
 		cmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
 		if cmd.Name() == "rerecord" { 
 			cmd.Flags().Bool("show-diff", c.cfg.ReRecord.ShowDiff, "Show response differences during rerecord (disabled by default)")
@@ -323,6 +338,9 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 	var flagNameMapping = map[string]string{
 		"testsets":              "test-sets",
+		"fullBody":              "full",
+		"reportPath":            "report-path",
+		"tc":                    "test-case",
 		"delay":                 "delay",
 		"apiTimeout":            "api-timeout",
 		"mongoPassword":         "mongo-password",
@@ -349,6 +367,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"configPath":            "config-path",
 		"path":                  "path",
 		"port":                  "port",
+		"grpcPort":              "grpc-port",
 		"proxyPort":             "proxy-port",
 		"dnsPort":               "dns-port",
 		"command":               "command",
@@ -528,6 +547,103 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	switch cmd.Name() {
 
 	case "upload": //for uploading mocks
+		path, err := cmd.Flags().GetString("path")
+		if err != nil {
+			errMsg := "failed to get the path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Path = utils.ToAbsPath(c.logger, path)
+
+		testSets, err := cmd.Flags().GetStringSlice("test-sets")
+		if err != nil {
+			errMsg := "failed to get the test-sets"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		config.SetSelectedTests(c.cfg, testSets)
+
+	case "report":
+		path, err := cmd.Flags().GetString("path")
+		if err != nil {
+			errMsg := "failed to get the path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Path = utils.ToAbsPath(c.logger, path)
+
+		testSets, err := cmd.Flags().GetStringSlice("test-sets")
+		if err != nil {
+			errMsg := "failed to get the test-sets"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		config.SetSelectedTestSets(c.cfg, testSets)
+
+		reportPath, err := cmd.Flags().GetString("report-path")
+		if err != nil {
+			errMsg := "failed to get the report path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+
+		// validate the report path if provided
+		if reportPath != "" {
+			if !filepath.IsAbs(reportPath) {
+				errMsg := fmt.Sprintf("report-path must be an absolute file path, got: %q", reportPath)
+				utils.LogError(c.logger, nil, errMsg)
+				return errors.New(errMsg)
+			}
+			fi, statErr := os.Stat(reportPath)
+			if statErr != nil {
+				errMsg := fmt.Sprintf("failed to stat report-path %q", reportPath)
+				utils.LogError(c.logger, statErr, errMsg)
+				return errors.New(errMsg)
+			}
+			if fi.IsDir() {
+				errMsg := fmt.Sprintf("report-path must point to a file, not a directory: %q", reportPath)
+				utils.LogError(c.logger, nil, errMsg)
+				return errors.New(errMsg)
+			}
+		}
+
+		c.cfg.Report.ReportPath = reportPath
+
+		// whether to print entire body for comparison
+		fb, err := cmd.Flags().GetBool("full")
+		if err != nil {
+			errMsg := "failed to get the full flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+
+		c.cfg.Report.ShowFullBody = fb
+
+		summary, err := cmd.Flags().GetBool("summary")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get the summary flag")
+			return errors.New("failed to get the summary flag")
+		}
+		c.cfg.Report.Summary = summary
+
+		tcIDs, err := cmd.Flags().GetStringSlice("test-case")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get the test-case flag")
+			return errors.New("failed to get the test-case flag")
+		}
+		// Allow comma-separated or repeated flags
+		cleaned := make([]string, 0, len(tcIDs))
+		for _, x := range tcIDs {
+			for _, y := range strings.Split(x, ",") {
+				y = strings.TrimSpace(y)
+				if y != "" {
+					cleaned = append(cleaned, y)
+				}
+			}
+		}
+		c.cfg.Report.TestCaseIDs = cleaned
+
+	case "sanitize":
 		path, err := cmd.Flags().GetString("path")
 		if err != nil {
 			errMsg := "failed to get the path"
@@ -781,6 +897,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					return errors.New(errMsg)
 				}
 				c.cfg.ReRecord.Port = port
+
+				grpcPort, err := cmd.Flags().GetUint32("grpc-port")
+				if err != nil {
+					errMsg := "failed to get the provided grpcPort"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.ReRecord.GRPCPort = grpcPort
+
 				c.cfg.Test.Delay, err = cmd.Flags().GetUint64("delay")
 				if err != nil {
 					errMsg := "failed to get the provided delay"
@@ -865,6 +990,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 		}
+
+		createTestSet, _ := cmd.Flags().GetBool("create-test-set") //this flag is only for rerecord command
+		c.cfg.ReRecord.CreateTestSet = createTestSet               //hence ignoring error
+
+		globalPassthrough, _ := cmd.Flags().GetBool("global-passthrough")
+		c.cfg.Record.GlobalPassthrough = globalPassthrough //hence ignoring error
 
 	case "normalize":
 		c.cfg.Path = utils.ToAbsPath(c.logger, c.cfg.Path)
