@@ -2016,20 +2016,14 @@ func (r *Replayer) monitorProxyErrors(ctx context.Context, testSetID string, tes
 				effectiveTestCaseID = "UNKNOWN_TEST"
 			}
 
-			var isMockError bool
-
 			if parserErr, ok := proxyErr.(models.ParserError); ok {
 				// Handle typed ParserError
 				switch parserErr.ParserErrorType {
 				case models.ErrMockNotFound:
-					isMockError = true
+					mockMismatchFailures.AddProxyErrorForTest(testSetID, effectiveTestCaseID, parserErr)
 				}
 			}
 
-			// Add to mock mismatch failures for reporting only if it's a mock-related error
-			if isMockError {
-				mockMismatchFailures.AddProxyErrorForTest(testSetID, effectiveTestCaseID, proxyErr)
-			}
 		}
 	}
 }

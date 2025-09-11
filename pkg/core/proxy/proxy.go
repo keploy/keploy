@@ -613,7 +613,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				// Send specific error type to error channel for external monitoring
 				proxyErr := models.ParserError{
-					ParserErrorType: models.ErrMockMismatch,
+					ParserErrorType: models.ErrMockNotFound,
 					Err:             err,
 				}
 				p.SendError(proxyErr)
@@ -636,7 +636,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				// Send specific error type to error channel for external monitoring
 				proxyErr := models.ParserError{
-					ParserErrorType: models.ErrGenericParserFailed,
+					ParserErrorType: models.ErrMockNotFound,
 					Err:             err,
 				}
 				p.SendError(proxyErr)

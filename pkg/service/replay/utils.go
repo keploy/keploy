@@ -152,7 +152,7 @@ type TestFailure struct {
 	TestID        string
 	ExpectedMocks []string
 	ActualMocks   []string
-	FailureReason string
+	FailureReason models.ParserErrorType
 }
 
 type TestFailureStore struct {
@@ -175,25 +175,14 @@ func (tfs *TestFailureStore) AddFailure(testSetID, testID string, expectedMocks,
 	tfs.failures = append(tfs.failures, failure)
 }
 
-func (tfs *TestFailureStore) AddProxyErrorForTest(testSetID string, testCaseID string, proxyErr error) {
-	var errorType string
-	var errorDetail string
-
-	// Check if this is a ParserError with specific type
-	if parserErr, ok := proxyErr.(models.ParserError); ok {
-		errorType = string(parserErr.ParserErrorType)
-		errorDetail = parserErr.Error()
-	} else {
-		errorType = "GENERAL_PROXY_ERROR"
-		errorDetail = proxyErr.Error()
-	}
+func (tfs *TestFailureStore) AddProxyErrorForTest(testSetID string, testCaseID string, proxyErr models.ParserError) {
 
 	failure := TestFailure{
 		TestSetID:     testSetID,
 		TestID:        testCaseID,
 		ExpectedMocks: []string{},
 		ActualMocks:   []string{},
-		FailureReason: fmt.Sprintf("[%s] %s", errorType, errorDetail),
+		FailureReason: proxyErr.ParserErrorType,
 	}
 	tfs.failures = append(tfs.failures, failure)
 }
@@ -326,7 +315,7 @@ func (tfs *TestFailureStore) PrintFailuresTable() {
 			var allDiffStrings []string
 
 			for _, failure := range testFailures {
-				if failure.FailureReason != "" {
+				if failure.FailureReason == models.ErrMockNotFound {
 					allDiffStrings = append(allDiffStrings, "Outgoing call mock was not matched")
 				}
 
