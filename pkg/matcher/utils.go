@@ -783,7 +783,9 @@ func (d *DiffsPrinter) Render() error {
 			}
 			diffs = append(diffs, difference)
 		} else {
-			diffs = append(diffs, sprintDiff(d.bodyExp, d.bodyAct, "body"))
+			// If either body is not valid JSON, show expected as green and actual as red
+			difference := expectActualTableWithColors(d.bodyExp, d.bodyAct, "body", false)
+			diffs = append(diffs, difference)
 		}
 
 	}
@@ -873,7 +875,9 @@ func (d *DiffsPrinter) RenderAppender() error {
 			}
 			diffs = append(diffs, difference)
 		} else {
-			diffs = append(diffs, sprintDiff(d.bodyExp, d.bodyAct, "response"))
+			// If either body is not valid JSON, show expected as green and actual as red
+			difference := expectActualTableWithColors(d.bodyExp, d.bodyAct, "response", false)
+			diffs = append(diffs, difference)
 		}
 	}
 	if !pass {
@@ -995,6 +999,37 @@ func expectActualTable(exp string, act string, field string, centerize bool) str
 	table.SetColMinWidth(0, maxLineLength)
 	table.SetColMinWidth(1, maxLineLength)
 	table.Append([]string{exp, act})
+	table.Render()
+	return buf.String()
+}
+
+// expectActualTableWithColors creates a table with colored expected (green) and actual (red) values
+func expectActualTableWithColors(exp string, act string, field string, centerize bool) string {
+	buf := &bytes.Buffer{}
+	table := tablewriter.NewWriter(buf)
+
+	if centerize {
+		table.SetAlignment(tablewriter.ALIGN_CENTER)
+	} else {
+		table.SetAlignment(tablewriter.ALIGN_LEFT)
+	}
+
+	// Apply colors: green for expected, red for actual
+	greenPaint := color.New(color.FgGreen).SprintFunc()
+	redPaint := color.New(color.FgRed).SprintFunc()
+
+	coloredExp := redPaint(exp)
+	coloredAct := greenPaint(act)
+
+	coloredExp = wrapTextWithAnsi(coloredExp)
+	coloredAct = wrapTextWithAnsi(coloredAct)
+
+	table.SetHeader([]string{fmt.Sprintf("Expect %v", field), fmt.Sprintf("Actual %v", field)})
+	table.SetAutoWrapText(false)
+	table.SetBorder(false)
+	table.SetColMinWidth(0, maxLineLength)
+	table.SetColMinWidth(1, maxLineLength)
+	table.Append([]string{coloredExp, coloredAct})
 	table.Render()
 	return buf.String()
 }
