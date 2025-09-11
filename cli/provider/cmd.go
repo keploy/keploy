@@ -243,6 +243,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			return nil
 		}
 
+		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
 		cmd.Flags().Bool("create-test-set", false, "For creating a fresh test-set for each test-set during rerecording. By default it is false")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
@@ -981,6 +982,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 		createTestSet, _ := cmd.Flags().GetBool("create-test-set") //this flag is only for rerecord command
 		c.cfg.ReRecord.CreateTestSet = createTestSet               //hence ignoring error
+
+		globalPassthrough, _ := cmd.Flags().GetBool("global-passthrough")
+		c.cfg.Record.GlobalPassthrough = globalPassthrough //hence ignoring error
 
 	case "normalize":
 		c.cfg.Path = utils.ToAbsPath(c.logger, c.cfg.Path)
