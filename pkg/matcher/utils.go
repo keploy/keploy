@@ -783,7 +783,7 @@ func (d *DiffsPrinter) Render() error {
 			}
 			diffs = append(diffs, difference)
 		} else {
-			// If either body is not valid JSON, show expected as tred and actual as green
+			// If either body is not valid JSON, show expected as red and actual as green
 			difference := expectActualTableWithColors(d.bodyExp, d.bodyAct, "body", false)
 			diffs = append(diffs, difference)
 		}
@@ -1079,7 +1079,7 @@ func expectActualTable(exp string, act string, field string, centerize bool) str
 	return buf.String()
 }
 
-// expectActualTableWithColors creates a table with colored expected (green) and actual (red) values
+// expectActualTableWithColors creates a table with colored expected (red) and actual (green) values
 func expectActualTableWithColors(exp string, act string, field string, centerize bool) string {
 	buf := &bytes.Buffer{}
 	table := tablewriter.NewWriter(buf)
