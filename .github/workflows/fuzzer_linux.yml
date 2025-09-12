@@ -15,6 +15,7 @@ jobs:
         fuzzer:
           - name: Go Rerecord Fuzzer
             script_dir: rerecord
+            s3_path: "releases/rerecord-fuzzer/latest/rerecord-fuzzer-linux-amd64.tar.gz"
         config:
           - job: record_latest_rerecord_build
             record_src: latest
@@ -25,11 +26,8 @@ jobs:
           - job: record_build_rerecord_build
             record_src: build
             rerecord_src: build
-        fuzzer_version:
-          - job: test_latest_fuzzer
-            s3_path: "releases/rerecord-fuzzer/latest/rerecord-fuzzer-linux-amd64.tar.gz"
 
-    name: ${{ matrix.fuzzer.name }} (${{ matrix.config.job }})
+    name: ${{ matrix.fuzzer.name }} ${{ matrix.config.job }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -62,7 +60,7 @@ jobs:
         id: rerecord_fuzzer
         run: |
           set -euo pipefail
-          KEY="${{ matrix.fuzzer_version.s3_path }}"
+          KEY="${{ matrix.fuzzer.s3_path }}"
           echo "Downloading fuzzer from s3://${{ vars.AWS_S3_BUCKET }}/${KEY}"
           aws s3 cp "s3://${{ vars.AWS_S3_BUCKET }}/${KEY}" .
           tar -xzf rerecord-fuzzer-linux-amd64.tar.gz
