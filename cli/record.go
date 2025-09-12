@@ -35,11 +35,14 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 				utils.LogError(logger, nil, "service doesn't satisfy record service interface")
 				return nil
 			}
+
 			cfg := models.ReRecordCfg{
 				Rerecord: false,
 				TestSet:  "",
 			}
+      
 			err = record.Start(ctx, cfg)
+
 			if err != nil {
 				utils.LogError(logger, err, "failed to record")
 				return nil

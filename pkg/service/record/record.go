@@ -27,6 +27,7 @@ type Recorder struct {
 	instrumentation Instrumentation
 	testSetConf     TestSetConfig
 	config          *config.Config
+	globalMockCh    chan<- *models.Mock
 }
 
 func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, config *config.Config) Service {
@@ -41,8 +42,8 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, 
 	}
 }
 
-func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) error {
 
+func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) error {
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	errGrp, _ := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
@@ -76,6 +77,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		case <-ctx.Done():
 		default:
 			if !reRecordCfg.Rerecord {
+
 				err := utils.Stop(r.logger, stopReason)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to stop recording")
@@ -180,6 +182,17 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 
 	errGrp.Go(func() error {
 		for mock := range frames.Outgoing {
+			// Send a copy to global mock channel for correlation manager if available
+			if r.globalMockCh != nil {
+				// Create a deep copy of the mock to avoid race conditions
+				mockCopy := *mock
+				select {
+				case r.globalMockCh <- &mockCopy:
+					r.logger.Debug("Mock sent to correlation manager", zap.String("mockKind", mock.GetKind()))
+				default:
+					r.logger.Warn("Global mock channel full, dropping mock for correlation", zap.String("mockKind", mock.GetKind()))
+				}
+			}
 			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
 			if err != nil {
 				if ctx.Err() == context.Canceled {
@@ -406,4 +419,10 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 	}
 
 	r.logger.Info("Created test-set config file with metadata")
+}
+
+// SetGlobalMockChannel sets the global mock channel for sending mocks to correlation manager
+func (r *Recorder) SetGlobalMockChannel(mockCh chan<- *models.Mock) {
+	r.globalMockCh = mockCh
+	r.logger.Info("Global mock channel set for record service")
 }
