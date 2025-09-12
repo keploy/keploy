@@ -21,11 +21,8 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// The rest of the file remains unchanged...
-// [ReRecord function, replayTests function, checkForTemplates function, etc.]
+
 func (o *Orchestrator) ReRecord(ctx context.Context) error {
-	// This function remains the same as your version.
-	// ... (rest of the file is identical to your provided code) ...
 	var stopReason string
 	var err error
 
@@ -502,7 +499,6 @@ func (o *Orchestrator) showResponseDiff(originalTC *models.TestCase, newResp *mo
 }
 
 func (o *Orchestrator) checkForTemplates(ctx context.Context, testSets []string) {
-	// This function remains the same as your version.
 	var nonTemplatized []string
 	for _, testSet := range testSets {
 		if _, ok := o.config.Test.SelectedTests[testSet]; !ok && len(o.config.Test.SelectedTests) != 0 {
@@ -531,7 +527,6 @@ func (o *Orchestrator) checkForTemplates(ctx context.Context, testSets []string)
 	}
 
 	if input == "y\n" || input == "Y\n" {
-		// You might need to change this call to o.tools.ProcessTestCasesV2 if you haven't renamed it.
 		if err := o.tools.Templatize(ctx); err != nil {
 			utils.LogError(o.logger, err, "failed to templatize test cases, skipping templatization")
 		}

@@ -140,7 +140,6 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 		if err != nil {
 			utils.LogError(logger, err, "failed to render some template values", zap.String("TestCase", tc.Name), zap.String("TestSet", testSet))
-			utils.LogError(logger, err, "failed to render some template values", zap.String("TestCase", tc.Name), zap.String("TestSet", testSet))
 		}
 
 		// Unmarshal the rendered string back into the test case struct.

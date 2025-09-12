@@ -145,7 +145,6 @@ func (t *Tools) ProcessTestCasesV2(ctx context.Context, tcs []*models.TestCase, 
 	return nil
 }
 
-// ... (logAPIChains, formatLocation, buildValueIndexV2, findValuesInInterface remain the same)
 func (t *Tools) logAPIChains(chains []*TemplateChain, testCases []*models.TestCase) {
 	if len(chains) == 0 {
 		return
@@ -449,9 +448,7 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 // Utility function to safely marshal JSON and log errors
 var jsonMarshal987 = json.Marshal
 
-// In your tools package (tools.go)
-// REPLACE the AssertChains function and ADD the new buildCanonicalChainsFromMap helper.
-// AssertChains is the main entry point for the verification process.
+
 func (t *Tools) AssertChains(keployChains []*TemplateChain, testCases []*models.TestCase, fuzzerYamlPath string) {
 	fmt.Println("\n🔎 Chain Assertion against Fuzzer Output")
 	fmt.Println("==========================================")
@@ -605,9 +602,6 @@ func normalizeCanonicalChains(chains []CanonicalChain) {
 		}
 	}
 }
-
-// In your tools package (tools.go)
-// REPLACE this entire function.
 
 func (t *Tools) compareChainSets(fuzzerChains, keployChains []CanonicalChain) (bool, string) {
 	var report strings.Builder
