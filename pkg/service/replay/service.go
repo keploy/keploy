@@ -22,6 +22,8 @@ type Instrumentation interface {
 	GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error)
 	// Run is blocking call and will execute until error
 	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
+	// GetErrorChannel returns the error channel from the proxy for monitoring proxy errors
+	GetErrorChannel() <-chan error
 
 	GetContainerIP(ctx context.Context, id uint64) (string, error)
 }
@@ -44,6 +46,7 @@ type Service interface {
 
 	DownloadMocks(ctx context.Context) error
 	UploadMocks(ctx context.Context) error
+	StoreMappings(ctx context.Context, testSetID string, testMockMappings map[string][]string) error
 }
 
 type TestDB interface {
@@ -100,4 +103,9 @@ type InstrumentState struct {
 	AppID      uint64
 	HookCancel context.CancelFunc
 	UnloadDone <-chan struct{} // Channel that will be closed when hooks are completely unloaded
+}
+
+type MappingDB interface {
+	InsertMappings(ctx context.Context, testSetID string, testMockMappings map[string][]string) error
+	GetMappings(ctx context.Context, testSetID string) (map[string][]string, error)
 }

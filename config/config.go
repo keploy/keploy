@@ -68,10 +68,11 @@ type Templatize struct {
 }
 
 type Record struct {
-	Filters     []Filter      `json:"filters" yaml:"filters" mapstructure:"filters"`
-	BasePath    string        `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
-	RecordTimer time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
-	Metadata    string        `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
+	Filters           []Filter      `json:"filters" yaml:"filters" mapstructure:"filters"`
+	BasePath          string        `json:"basePath" yaml:"basePath" mapstructure:"basePath"`
+	RecordTimer       time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
+	Metadata          string        `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
+	GlobalPassthrough bool          `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
 }
 
 type ReRecord struct {
@@ -80,6 +81,7 @@ type ReRecord struct {
 	Host          string   `json:"host" yaml:"host" mapstructure:"host"`
 	Port          uint32   `json:"port" yaml:"port" mapstructure:"port"`
 	GRPCPort      uint32   `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
+	CreateTestSet bool     `json:"createTestSet" yaml:"createTestSet" mapstructure:"createTestSet"`
 }
 type Contract struct {
 	Services []string `json:"services" yaml:"services" mapstructure:"services"`

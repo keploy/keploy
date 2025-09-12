@@ -43,6 +43,7 @@ var totalTestFailed int
 var totalTestIgnored int
 var totalTestTimeTaken time.Duration
 var failedTCsBySetID = make(map[string][]string)
+var mockMismatchFailures = NewTestFailureStore()
 
 var HookImpl TestHooks
 
@@ -50,6 +51,7 @@ type Replayer struct {
 	logger          *zap.Logger
 	testDB          TestDB
 	mockDB          MockDB
+	mappingDB       MappingDB
 	reportDB        ReportDB
 	testSetConf     TestSetConfig
 	telemetry       Telemetry
@@ -62,7 +64,7 @@ type Replayer struct {
 	isLastTestCase  bool
 }
 
-func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
+func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, mappingDB MappingDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
 
 	// TODO: add some comment.
 	mock := &mock{
@@ -82,6 +84,7 @@ func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB Repo
 		logger:          logger,
 		testDB:          testDB,
 		mockDB:          mockDB,
+		mappingDB:       mappingDB,
 		reportDB:        reportDB,
 		testSetConf:     testSetConf,
 		telemetry:       telemetry,
@@ -487,6 +490,24 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
+
+		if !testRunResult && len(mockMismatchFailures.GetFailures()) > 0 {
+			failuresByTestSet := make(map[string]bool)
+			for _, failure := range mockMismatchFailures.GetFailures() {
+				failuresByTestSet[failure.TestSetID] = true
+			}
+
+			var testSetIDs []string
+			for testSetID := range failuresByTestSet {
+				testSetIDs = append(testSetIDs, testSetID)
+			}
+			testSets := strings.Join(testSetIDs, ", ")
+			r.logger.Warn("Some testsets failed due to mock differences. Please kindly rerecord these testsets to update the mocks.", zap.String("command", fmt.Sprintf("keploy rerecord -c '%s' -t %s", r.config.Command, testSets)))
+
+			if r.config.Debug {
+				mockMismatchFailures.PrintFailuresTable()
+			}
+		}
 		coverageData := models.TestCoverage{}
 		var err error
 		if !r.config.Test.SkipCoverage {
@@ -770,6 +791,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusFailed, err
 	}
 
+	// Try to get expected test-mock mappings from mapping file first
+	var expectedTestMockMappings map[string][]string
+	if r.mappingDB != nil {
+		expectedTestMockMappings, err = r.mappingDB.GetMappings(ctx, testSetID)
+		if err != nil {
+			r.logger.Warn("Failed to read mappings from file, falling back to mock metadata",
+				zap.String("testSetID", testSetID),
+				zap.Error(err))
+			expectedTestMockMappings = make(map[string][]string)
+		}
+	} else {
+		expectedTestMockMappings = make(map[string][]string)
+	}
+
 	pkg.InitSortCounter(int64(max(len(filteredMocks), len(unfilteredMocks))))
 
 	err = r.instrumentation.MockOutgoing(runTestSetCtx, appID, models.OutgoingOptions{
@@ -887,6 +922,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
+	var actualTestMockMappings = make(map[string][]string)
+
 	for idx, testCase := range testCases {
 
 		// check if its the last test case running
@@ -984,7 +1021,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		started := time.Now().UTC()
+
+		testCaseProxyErrCtx, testCaseProxyErrCancel := context.WithCancel(runTestSetCtx)
+		go r.monitorProxyErrors(testCaseProxyErrCtx, testSetID, testCase.Name)
+
 		resp, loopErr := HookImpl.SimulateRequest(runTestSetCtx, appID, testCase, testSetID)
+
+		// Stop monitoring for this specific test case
+		testCaseProxyErrCancel()
+
 		if loopErr != nil {
 			utils.LogError(r.logger, loopErr, "failed to simulate request")
 			failure++
@@ -1043,6 +1088,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				continue
 			}
 			testPass, testResult = r.compareGRPCResp(testCase, grpcResp, testSetID)
+		}
+
+		if len(consumedMocks) > 0 {
+			for _, m := range consumedMocks {
+				actualTestMockMappings[testCase.Name] = append(actualTestMockMappings[testCase.Name], m.Name)
+			}
+		} else {
+			actualTestMockMappings[testCase.Name] = []string{}
 		}
 
 		if !testPass {
@@ -1201,6 +1254,33 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, totalConsumedMocks)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
+		}
+	}
+
+	if testSetStatus == models.TestSetStatusPassed && r.instrument {
+		err := r.StoreMappings(ctx, testSetID, actualTestMockMappings)
+		if err != nil {
+			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
+		} else {
+			r.logger.Info("Successfully saved test-mock mappings",
+				zap.String("testSetID", testSetID),
+				zap.Int("numTests", len(actualTestMockMappings)))
+		}
+	}
+
+	if testSetStatus == models.TestSetStatusFailed && r.instrument {
+
+		for tc, expectedMocks := range expectedTestMockMappings {
+
+			actualMocks, ok := actualTestMockMappings[tc]
+
+			if !ok {
+				continue
+			}
+
+			if len(expectedMocks) != len(actualMocks) || !compareMockArrays(expectedMocks, actualMocks) {
+				mockMismatchFailures.AddFailure(testSetID, tc, expectedMocks, actualMocks)
+			}
 		}
 	}
 
@@ -1820,6 +1900,12 @@ func (r *Replayer) UploadMocks(ctx context.Context) error {
 	return nil
 }
 
+func (r *Replayer) StoreMappings(ctx context.Context, testSetID string, mappings map[string][]string) error {
+	// Save test-mock mappings to YAML file
+	err := r.mappingDB.InsertMappings(ctx, testSetID, mappings)
+	return err
+}
+
 // createBackup creates a timestamped backup of a test set directory before modification.
 func (r *Replayer) createBackup(testSetID string) error {
 	srcPath := filepath.Join(r.config.Path, testSetID)
@@ -1897,4 +1983,51 @@ func (r *Replayer) copyDirContents(src, dst string) error {
 		}
 	}
 	return nil
+}
+
+// monitorProxyErrors monitors the proxy error channel and logs errors
+func (r *Replayer) monitorProxyErrors(ctx context.Context, testSetID string, testCaseID string) {
+	defer utils.Recover(r.logger)
+
+	errorChannel := r.instrumentation.GetErrorChannel()
+	if errorChannel == nil {
+		r.logger.Debug("Proxy error channel is nil, skipping error monitoring")
+		return
+	}
+
+	r.logger.Debug("Starting proxy error monitoring",
+		zap.String("testSetID", testSetID),
+		zap.String("testCaseID", testCaseID))
+
+	for {
+		select {
+		case <-ctx.Done():
+			r.logger.Debug("Stopping proxy error monitoring",
+				zap.String("testSetID", testSetID),
+				zap.String("testCaseID", testCaseID))
+			return
+		case proxyErr, ok := <-errorChannel:
+			if !ok {
+				r.logger.Debug("Proxy error channel closed",
+					zap.String("testSetID", testSetID),
+					zap.String("testCaseID", testCaseID))
+				return
+			}
+
+			// Determine effective test case ID
+			effectiveTestCaseID := testCaseID
+			if effectiveTestCaseID == "" {
+				effectiveTestCaseID = "UNKNOWN_TEST"
+			}
+
+			if parserErr, ok := proxyErr.(models.ParserError); ok {
+				// Handle typed ParserError
+				switch parserErr.ParserErrorType {
+				case models.ErrMockNotFound:
+					mockMismatchFailures.AddProxyErrorForTest(testSetID, effectiveTestCaseID, parserErr)
+				}
+			}
+
+		}
+	}
 }
