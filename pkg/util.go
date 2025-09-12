@@ -22,8 +22,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"text/template"
-
 	"github.com/andybalholm/brotli"
 	"go.keploy.io/server/v2/pkg/models"
 
@@ -105,6 +103,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	//TODO: adjust this logic in the render function in order to remove the redundant code
 	// convert testcase to string and render the template values.
 	// Render any template values in the test case before simulation.
+	// Render any template values in the test case before simulation.
 	if len(utils.TemplatizedValues) > 0 || len(utils.SecretValues) > 0 {
 		testCaseStr, err := json.Marshal(tc)
 		if err != nil {
@@ -128,8 +127,10 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		templateData := make(map[string]interface{})
 		for k, v := range utils.TemplatizedValues {
 			templateData[k] = v
+			templateData[k] = v
 		}
 		if len(utils.SecretValues) > 0 {
+			templateData["secret"] = utils.SecretValues
 			templateData["secret"] = utils.SecretValues
 		}
 
@@ -138,6 +139,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		err = tmpl.Execute(&output, templateData)
 
 		if err != nil {
+			utils.LogError(logger, err, "failed to render some template values", zap.String("TestCase", tc.Name), zap.String("TestSet", testSet))
 			utils.LogError(logger, err, "failed to render some template values", zap.String("TestCase", tc.Name), zap.String("TestSet", testSet))
 		}
 
@@ -261,7 +263,13 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	statusMessage := http.StatusText(httpResp.StatusCode)
 
+	statusMessage := http.StatusText(httpResp.StatusCode)
+
 	resp = &models.HTTPResp{
+		StatusCode:    httpResp.StatusCode,
+		StatusMessage: statusMessage,
+		Body:          string(respBody),
+		Header:        ToYamlHTTPHeader(httpResp.Header),
 		StatusCode:    httpResp.StatusCode,
 		StatusMessage: statusMessage,
 		Body:          string(respBody),

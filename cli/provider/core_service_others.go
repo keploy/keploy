@@ -9,6 +9,7 @@ import (
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/platform/storage"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb/testset"
 	mockdb "go.keploy.io/server/v2/pkg/platform/yaml/mockdb"
@@ -19,6 +20,7 @@ import (
 	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/pkg/service/contract"
 	"go.keploy.io/server/v2/pkg/service/replay"
+	"go.keploy.io/server/v2/pkg/service/report"
 	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.uber.org/zap"
 )
@@ -38,16 +40,22 @@ func Get(ctx context.Context, cmd string, c *config.Config, logger *zap.Logger, 
 	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, auth, commonServices.Storage, c)
 
 	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, tel, auth, c)
+	reportSvc := report.New(logger, c, commonServices.YamlReportDb, commonServices.YamlTestDB)
+
 	if (cmd == "test" && c.Test.BasePath != "") || cmd == "normalize" || cmd == "mock" {
 		return replaySvc, nil
 	}
 
-	if cmd == "templatize" || cmd == "config" || cmd == "update" || cmd == "login" || cmd == "export" || cmd == "import" {
+	if cmd == "templatize" || cmd == "config" || cmd == "update" || cmd == "login" || cmd == "export" || cmd == "import" || cmd == "sanitize" {
 		return toolsSvc, nil
 	}
 
 	if cmd == "contract" {
 		return contractSvc, nil
+	}
+
+	if cmd == "report" {
+		return reportSvc, nil
 	}
 
 	return nil, errors.New("command not supported in non linux os. if you are on windows or mac, please use the dockerized version of your application")
@@ -60,6 +68,7 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 	openAPIdb := openapidb.New(logger, c.Path)
 	reportDB := reportdb.New(logger, c.Path+"/reports")
 	testSetDb := testset.New[*models.TestSet](logger, c.Path)
+	storage := storage.New(c.APIServerURL, logger)
 	return &CommonInternalService{
 		commonPlatformServices{
 			YamlTestDB:    testDB,
@@ -67,6 +76,7 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 			YamlOpenAPIDb: openAPIdb,
 			YamlReportDb:  reportDB,
 			YamlTestSetDB: testSetDb,
+			Storage:       storage,
 		},
 		instrumentation,
 	}, nil

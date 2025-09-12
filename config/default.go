@@ -34,6 +34,7 @@ test:
   delay: 5
   host: ""
   port: 0
+  grpcPort: 0
   apiTimeout: 5
   skipCoverage: false
   coverageReportPath: ""

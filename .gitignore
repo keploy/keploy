@@ -52,6 +52,9 @@ test-reports
 #Ignore the test reports
 test-reports
 
+#Ignore the test data
+testdata
+
 #Ignore the c and header files
 *.c
 *.h
@@ -59,3 +62,4 @@ test-reports
 # Ignore the debug_bin
 __debug_bin*
 keploy
+extraparsers.go

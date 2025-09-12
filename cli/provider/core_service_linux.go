@@ -10,6 +10,7 @@ import (
 
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
+	"go.keploy.io/server/v2/pkg/core/app"
 	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/pkg/core/proxy"
 	"go.keploy.io/server/v2/pkg/core/tester"
@@ -27,6 +28,7 @@ import (
 	"go.keploy.io/server/v2/pkg/service/orchestrator"
 	"go.keploy.io/server/v2/pkg/service/record"
 	"go.keploy.io/server/v2/pkg/service/replay"
+	"go.keploy.io/server/v2/pkg/service/report"
 	"go.keploy.io/server/v2/pkg/service/tools"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -46,6 +48,7 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 	recordSvc := record.New(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, tel, commonServices.Instrumentation, commonServices.YamlTestSetDB, cfg)
 	replaySvc := replay.NewReplayer(logger, commonServices.YamlTestDB, commonServices.YamlMockDb, commonServices.YamlReportDb, commonServices.YamlTestSetDB, tel, commonServices.Instrumentation, auth, commonServices.Storage, cfg)
 	toolsSvc := tools.NewTools(logger, commonServices.YamlTestSetDB, commonServices.YamlTestDB, tel, auth, cfg)
+	reportSvc := report.New(logger, cfg, commonServices.YamlReportDb, commonServices.YamlTestDB)
 	switch cmd {
 	case "rerecord":
 		return orchestrator.New(logger, recordSvc, toolsSvc, replaySvc, cfg), nil
@@ -53,10 +56,12 @@ func Get(ctx context.Context, cmd string, cfg *config.Config, logger *zap.Logger
 		return recordSvc, nil
 	case "test", "normalize", "mock":
 		return replaySvc, nil
-	case "templatize", "config", "update", "login", "export", "import":
+	case "templatize", "config", "update", "login", "export", "import", "sanitize":
 		return toolsSvc, nil
 	case "contract":
 		return contractSvc, nil
+	case "report":
+		return reportSvc, nil
 	default:
 		return nil, errors.New("invalid command")
 	}
@@ -69,6 +74,8 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 	p := proxy.New(logger, h, c)
 	//for keploy test bench
 	t := tester.New(logger, h)
+	app.HookImpl = app.NewHooks(logger)
+	logger.Debug("app hooks initialized - oss")
 
 	var client docker.Client
 	var err error

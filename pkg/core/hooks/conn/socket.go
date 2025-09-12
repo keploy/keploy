@@ -34,7 +34,7 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 		utils.LogError(l, err, "failed to initialize real time offset")
 		return nil, errors.New("failed to start socket listeners")
 	}
-	c := NewFactory(time.Minute, l, opts)
+	c := NewFactory(5*time.Minute, l, opts)
 	g, ok := ctx.Value(models.ErrGroupKey).(*errgroup.Group)
 	if !ok {
 		return nil, errors.New("failed to get the error group from the context")
@@ -104,7 +104,7 @@ func open(ctx context.Context, c *Factory, l *zap.Logger, m *ebpf.Map) error {
 				}
 
 				if rec.LostSamples != 0 {
-					l.Debug("Unable to add samples to the socketOpenEvent array due to its full capacity", zap.Any("samples", rec.LostSamples))
+					l.Debug("Unable to add samples to the socketOpenEvent array due to its full capacity", zap.Uint64("samples", uint64(rec.LostSamples)))
 					continue
 				}
 				data := rec.RawSample

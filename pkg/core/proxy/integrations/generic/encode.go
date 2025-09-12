@@ -70,7 +70,7 @@ func encodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 	var resTimestampMock time.Time
 
 	// ticker := time.NewTicker(1 * time.Second)
-	logger.Debug("the iteration for the generic request starts", zap.Any("genericReqs", len(genericRequests)), zap.Any("genericResps", len(genericResponses)))
+	logger.Debug("the iteration for the generic request starts", zap.Int("genericReqs", len(genericRequests)), zap.Int("genericResps", len(genericResponses)))
 	for {
 		select {
 		case <-ctx.Done():

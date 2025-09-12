@@ -7,7 +7,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
+        app:
+          - name: express-mongoose
+            path: express-mongoose
+            script_dir: express_mongoose
+        config:
           - job: record_latest_replay_build
             record_src: latest
             replay_src: build
@@ -17,7 +21,7 @@ jobs:
           - job: record_build_replay_build
             record_src: build
             replay_src: build
-    name: ${{ matrix.job }}
+    name: ${{ matrix.app.name }} (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -28,12 +32,12 @@ jobs:
       - id: record
         uses: ./.github/actions/download-binary
         with:
-          src: ${{ matrix.record_src }}
+          src: ${{ matrix.config.record_src }}
 
       - id: replay
         uses: ./.github/actions/download-binary
         with:
-          src: ${{ matrix.replay_src }}
+          src: ${{ matrix.config.replay_src }}
 
       - name: Checkout samples-typescript repository
         uses: actions/checkout@v4
@@ -41,10 +45,10 @@ jobs:
           repository: keploy/samples-typescript
           path: samples-typescript
 
-      - name: Run the express-mongoose app
+      - name: Run the ${{ matrix.app.name }} app
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
         run: |
-          cd samples-typescript/express-mongoose
-          source ./../../.github/workflows/test_workflow_scripts/node-docker.sh
+          cd samples-typescript/${{ matrix.app.path }}
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/node/${{ matrix.app.script_dir }}/node-docker.sh

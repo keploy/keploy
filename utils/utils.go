@@ -2,6 +2,7 @@ package utils
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"debug/elf"
@@ -21,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"text/template"
 	"time"
 
 	"golang.org/x/text/cases"
@@ -69,14 +71,14 @@ func ReplaceGrpcHost(authority string, ipAddress string) (string, error) {
 		return authority, fmt.Errorf("failed to replace authority in case of docker env: empty IP address")
 	}
 
-	// Split authority into host and port
-	parts := strings.Split(authority, ":")
-	if len(parts) != 2 {
-		return authority, fmt.Errorf("invalid authority format, expected host:port but got %s", authority)
+	// Use net.SplitHostPort to properly handle IPv6 addresses
+	_, port, err := net.SplitHostPort(authority)
+	if err != nil {
+		return authority, fmt.Errorf("invalid authority format: %v", err)
 	}
 
 	// Replace the host part with ipAddress, keeping the port
-	return ipAddress + ":" + parts[1], nil
+	return net.JoinHostPort(ipAddress, port), nil
 }
 
 func ReplaceGrpcPort(authority string, port string) (string, error) {
@@ -85,19 +87,15 @@ func ReplaceGrpcPort(authority string, port string) (string, error) {
 		return authority, fmt.Errorf("failed to replace port in case of docker env: empty port")
 	}
 
-	// Split authority into host and port
-	parts := strings.Split(authority, ":")
-	if len(parts) == 0 {
-		return authority, fmt.Errorf("invalid authority format, got empty string")
-	}
-
-	// If there's no port in the authority, append the new port
-	if len(parts) == 1 {
-		return parts[0] + ":" + port, nil
+	// Use net.SplitHostPort to properly handle IPv6 addresses
+	host, _, err := net.SplitHostPort(authority)
+	if err != nil {
+		// If splitting fails, assume it's just a host without port
+		return net.JoinHostPort(authority, port), nil
 	}
 
 	// Replace the port part, keeping the host
-	return parts[0] + ":" + port, nil
+	return net.JoinHostPort(host, port), nil
 }
 
 // ReplaceBaseURL replaces the base URL (scheme + host) of the given URL with the provided baseURL.
@@ -1238,6 +1236,50 @@ func ParseMetadata(metadataStr string) (map[string]interface{}, error) {
 		return nil, fmt.Errorf("cannot parse metadata: %w", err)
 	}
 	return m, nil
+}
+
+// RenderTemplatesInString finds all template placeholders (e.g., {{.name}} or {{string .name}}) in a string,
+// executes them with the provided data, and replaces them with the result.
+// It is robust against strings that contain non-template curly braces by using a strict regex.
+func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[string]interface{}) (string, error) {
+	// This regex is specifically designed to match valid Keploy templates:
+	// - It must start with {{ and optional whitespace.
+	// - It can optionally have a function call ("string", "int", "float") followed by whitespace.
+	// - It MUST contain a dot (.) to indicate a field access.
+	// - It non-greedily matches characters until the closing braces.
+	// This prevents it from matching invalid syntax like {{u^2}}.
+	re := regexp.MustCompile(`\{\{\s*(?:string\s+|int\s+|float\s+)?\.[^{}]*?\}\}`)
+
+	funcMap := template.FuncMap{
+		"int":    ToInt,
+		"string": ToString,
+		"float":  ToFloat,
+	}
+
+	var firstErr error
+
+	result := re.ReplaceAllStringFunc(input, func(match string) string {
+		// Only parse and execute the matched placeholder, not the entire string.
+		tmpl, err := template.New("sub").Funcs(funcMap).Parse(match)
+		if err != nil {
+
+			logger.Debug("failed to parse a valid-looking template placeholder", zap.String("placeholder", match), zap.Error(err))
+			return match
+		}
+
+		var output bytes.Buffer
+		err = tmpl.Execute(&output, templateData)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("failed to execute template placeholder '%s': %v", match, err)
+			}
+			return match
+		}
+
+		return output.String()
+	})
+
+	return result, firstErr
 }
 
 // // XMLToMap converts an XML string into a map[string]interface{}
