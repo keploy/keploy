@@ -448,7 +448,6 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 // Utility function to safely marshal JSON and log errors
 var jsonMarshal987 = json.Marshal
 
-
 func (t *Tools) AssertChains(keployChains []*TemplateChain, testCases []*models.TestCase, fuzzerYamlPath string) {
 	fmt.Println("\n🔎 Chain Assertion against Fuzzer Output")
 	fmt.Println("==========================================")

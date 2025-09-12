@@ -253,7 +253,7 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 			// Decode each YAML document into models.Mock as it is read.
 			mocks, err := decodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
 			if err != nil {
-				utils.LogError(ys.Logger, err, "failed to decode the config mocks from yaml doc", zap.Any("session", filepath.Base(path)))
+				utils.LogError(ys.Logger, err, "failed to decode the config mocks from yaml doc", zap.String("session", filepath.Base(path)))
 				return nil, err
 			}
 

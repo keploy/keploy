@@ -21,8 +21,8 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-
 func (o *Orchestrator) ReRecord(ctx context.Context) error {
+	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	var stopReason string
 	var err error
 
