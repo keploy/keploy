@@ -1,0 +1,62 @@
+name: Rerecord Fuzzer On Linux
+on:
+  workflow_call:
+    secrets:
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+
+jobs:
+  rerecord_fuzzer_linux:
+    runs-on: ubuntu-latest
+    name: Rerecord Fuzzer Test
+    steps:
+      - name: Checkout repository (PR branch)
+        uses: actions/checkout@v4
+
+      - name: Checkout 'templatizeV2' branch for building
+        uses: actions/checkout@v4
+        with:
+          ref: templatizeV2
+          path: templatizeV2-src
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Build Keploy CLI from source
+        id: build_keploy
+        run: |
+          cd templatizeV2-src
+          go build -o ../keploy-templatize .
+          cd ..
+          echo "path=$(realpath ./keploy-templatize)" >> $GITHUB_OUTPUT
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
+          aws-region: ${{ vars.AWS_DEFAULT_REGION }}
+
+      - name: Download and Extract Rerecord Fuzzer
+        id: rerecord_fuzzer
+        run: |
+          set -euo pipefail
+          # Use "latest"; switch to a versioned path by replacing this key:
+          #   s3://${{ vars.AWS_S3_BUCKET }}/releases/rerecord-fuzzer/${VERSION}/rerecord-fuzzer-linux-amd64.tar.gz
+          KEY="releases/rerecord-fuzzer/latest/rerecord-fuzzer-linux-amd64.tar.gz"
+          aws s3 cp "s3://${{ vars.AWS_S3_BUCKET }}/${KEY}" .
+          tar -xzf rerecord-fuzzer-linux-amd64.tar.gz
+          chmod +x ./rerecord-client ./rerecord-server
+          echo "client=$(realpath ./rerecord-client)" >> $GITHUB_OUTPUT
+          echo "server=$(realpath ./rerecord-server)" >> $GITHUB_OUTPUT
+
+      - name: Run Rerecord Fuzzer Test
+        env:
+          KEPLOY_BIN:           ${{ steps.build_keploy.outputs.path }}
+          RERECORD_CLIENT_BIN:  ${{ steps.rerecord_fuzzer.outputs.client }}
+          RERECORD_SERVER_BIN:  ${{ steps.rerecord_fuzzer.outputs.server }}
+        run: |
+          chmod +x ./.github/workflows/test_workflow_scripts/rerecord-fuzzer-linux.sh
+          source ./.github/workflows/test_workflow_scripts/rerecord-fuzzer-linux.sh
