@@ -131,7 +131,6 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 		if len(utils.SecretValues) > 0 {
 			templateData["secret"] = utils.SecretValues
-			templateData["secret"] = utils.SecretValues
 		}
 
 		var output bytes.Buffer
@@ -162,7 +161,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		}
 	}
 
-	logger.Info("starting test for of", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
+	logger.Info("starting test for", zap.Any("test case", models.HighlightString(tc.Name)), zap.Any("test set", models.HighlightString(testSet)))
 
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), tc.HTTPReq.URL, bytes.NewBuffer(reqBody))
 	if err != nil {
