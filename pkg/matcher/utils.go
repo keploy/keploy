@@ -783,7 +783,7 @@ func (d *DiffsPrinter) Render() error {
 			}
 			diffs = append(diffs, difference)
 		} else {
-			// If either body is not valid JSON, show expected as green and actual as red
+			// If either body is not valid JSON, show expected as tred and actual as green
 			difference := expectActualTableWithColors(d.bodyExp, d.bodyAct, "body", false)
 			diffs = append(diffs, difference)
 		}
@@ -875,7 +875,7 @@ func (d *DiffsPrinter) RenderAppender() error {
 			}
 			diffs = append(diffs, difference)
 		} else {
-			// If either body is not valid JSON, show expected as green and actual as red
+			// If either body is not valid JSON, show expected as red and actual as green
 			difference := expectActualTableWithColors(d.bodyExp, d.bodyAct, "response", false)
 			diffs = append(diffs, difference)
 		}
