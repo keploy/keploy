@@ -357,7 +357,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 
 		o.logger.Info("Re-recorded the testcase successfully", zap.String("testcase", tc.Name), zap.String("of testset", testSet))
 
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 
 		// Unregister test case and collect mocks
 		o.mockCorrelationManager.UnregisterTest(testCaseID)

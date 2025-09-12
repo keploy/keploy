@@ -34,6 +34,7 @@ type TestDB interface {
 type MockDB interface {
 	InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error
 	DeleteMocksForSet(ctx context.Context, testSetID string) error
+	GetCurrMockID() int64
 }
 
 type TestSetConfig interface {

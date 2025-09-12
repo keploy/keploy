@@ -42,7 +42,6 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, 
 	}
 }
 
-
 func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) error {
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	errGrp, _ := errgroup.WithContext(ctx)
@@ -184,8 +183,10 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		for mock := range frames.Outgoing {
 			// Send a copy to global mock channel for correlation manager if available
 			if r.globalMockCh != nil {
+				currMockID := r.mockDB.GetCurrMockID()
 				// Create a deep copy of the mock to avoid race conditions
 				mockCopy := *mock
+				mockCopy.Name = fmt.Sprintf("%s-%d", "mock", currMockID+1)
 				select {
 				case r.globalMockCh <- &mockCopy:
 					r.logger.Debug("Mock sent to correlation manager", zap.String("mockKind", mock.GetKind()))

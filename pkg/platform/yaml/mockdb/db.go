@@ -343,3 +343,7 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 	ys.Logger.Info("Successfully cleared old mocks for refresh.", zap.String("testSet", testSetID))
 	return nil
 }
+
+func (ys *MockYaml) GetCurrMockID() int64 {
+	return atomic.LoadInt64(&ys.idCounter)
+}
