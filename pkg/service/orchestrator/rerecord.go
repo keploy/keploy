@@ -80,11 +80,6 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		var errCh = make(chan error, 1)
 		var replayErrCh = make(chan error, 1)
 
-		reRecordCfg := models.ReRecordConfig{
-			Enabled:   true,
-			TestSetID: testSet,
-		}
-
 		//Keeping two back-to-back selects is used to not do blocking operation if parent ctx is done
 		cfg := models.ReRecordCfg{
 			Rerecord: true,
