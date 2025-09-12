@@ -981,6 +981,78 @@ func wrapTextWithAnsi(input string) string {
 	return wrappedBuilder.String()
 }
 
+// truncateStrings applies truncation logic to expected and actual strings
+// If both exceed 10000 bytes, truncate both to 10000 bytes
+// If difference between them is more than 1000 bytes, limit the larger one
+func truncateStrings(exp, act string) (string, string) {
+	const maxBytes = 10000
+	const maxDiff = 1000
+
+	expLen := len(exp)
+	actLen := len(act)
+	expTruncated := false
+	actTruncated := false
+
+	// If both exceed max bytes, truncate both to max bytes
+	if expLen > maxBytes && actLen > maxBytes {
+		exp = exp[:maxBytes]
+		act = act[:maxBytes]
+		expTruncated = true
+		actTruncated = true
+	} else {
+		// Calculate the difference
+		diff := expLen - actLen
+		if diff < 0 {
+			diff = -diff // Get absolute difference
+		}
+
+		// If difference is more than maxDiff, adjust the larger one
+		if diff > maxDiff {
+			if expLen > actLen {
+				// Expected is larger, truncate it
+				newExpLen := actLen + maxDiff
+				if newExpLen > maxBytes {
+					newExpLen = maxBytes
+				}
+				if newExpLen < expLen {
+					exp = exp[:newExpLen]
+					expTruncated = true
+				}
+			} else {
+				// Actual is larger, truncate it
+				newActLen := expLen + maxDiff
+				if newActLen > maxBytes {
+					newActLen = maxBytes
+				}
+				if newActLen < actLen {
+					act = act[:newActLen]
+					actTruncated = true
+				}
+			}
+		} else {
+			// If either exceeds maxBytes individually, truncate it
+			if expLen > maxBytes {
+				exp = exp[:maxBytes]
+				expTruncated = true
+			}
+			if actLen > maxBytes {
+				act = act[:maxBytes]
+				actTruncated = true
+			}
+		}
+	}
+
+	// Add truncation indicators
+	if expTruncated {
+		exp += "\n...(truncated, original length " + strconv.Itoa(expLen) + " bytes)"
+	}
+	if actTruncated {
+		act += "\n...(truncated, original length " + strconv.Itoa(actLen) + " bytes)"
+	}
+
+	return exp, act
+}
+
 func expectActualTable(exp string, act string, field string, centerize bool) string {
 	buf := &bytes.Buffer{}
 	table := tablewriter.NewWriter(buf)
@@ -990,6 +1062,10 @@ func expectActualTable(exp string, act string, field string, centerize bool) str
 	} else {
 		table.SetAlignment(tablewriter.ALIGN_LEFT)
 	}
+
+	// Apply truncation logic before processing
+	exp, act = truncateStrings(exp, act)
+
 	// jsonDiff.JsonDiff()
 	exp = wrapTextWithAnsi(exp)
 	act = wrapTextWithAnsi(act)
@@ -1013,6 +1089,9 @@ func expectActualTableWithColors(exp string, act string, field string, centerize
 	} else {
 		table.SetAlignment(tablewriter.ALIGN_LEFT)
 	}
+
+	// Apply truncation logic before processing
+	exp, act = truncateStrings(exp, act)
 
 	// Apply colors: green for expected, red for actual
 	greenPaint := color.New(color.FgGreen).SprintFunc()
