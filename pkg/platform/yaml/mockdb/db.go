@@ -150,7 +150,6 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	}
 	return nil
 }
-
 func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error) {
 
 	var tcsMocks = make([]*models.Mock, 0)
@@ -189,27 +188,10 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 			// Decode each YAML document into models.Mock as it is read.
 			mocks, err := decodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
 			if err != nil {
-				utils.LogError(ys.Logger, err, "failed to decode the config mocks from yaml doc", zap.Any("session", filepath.Base(path)))
+				utils.LogError(ys.Logger, err, "failed to decode the config mocks from yaml doc", zap.String("session", filepath.Base(path)))
 				return nil, err
 			}
 
-			for _, mock := range mocks {
-				isFilteredMock := true
-				switch mock.Kind {
-				case "Generic":
-					isFilteredMock = false
-				case "Postgres":
-					isFilteredMock = false
-				case "Http":
-					isFilteredMock = false
-				case "Redis":
-					isFilteredMock = false
-				case "MySQL":
-					isFilteredMock = false
-				}
-				if mock.Spec.Metadata["type"] != "config" && isFilteredMock {
-					tcsMocks = append(tcsMocks, mock)
-				}
 			for _, mock := range mocks {
 				isFilteredMock := true
 				switch mock.Kind {

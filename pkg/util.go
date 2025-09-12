@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"html/template"
 	"io"
 	"io/fs"
 	"net"
@@ -121,7 +122,6 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 			utils.LogError(logger, err, "failed to parse the template", zap.Any("TestCaseString", string(testCaseStr)), zap.Any("TestCase", tc.Name), zap.Any("TestSet", testSet))
 			return nil, err
 		}
-
 
 		// Prepare the data for template execution.
 		templateData := make(map[string]interface{})
@@ -263,13 +263,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	statusMessage := http.StatusText(httpResp.StatusCode)
 
-	statusMessage := http.StatusText(httpResp.StatusCode)
-
 	resp = &models.HTTPResp{
-		StatusCode:    httpResp.StatusCode,
-		StatusMessage: statusMessage,
-		Body:          string(respBody),
-		Header:        ToYamlHTTPHeader(httpResp.Header),
 		StatusCode:    httpResp.StatusCode,
 		StatusMessage: statusMessage,
 		Body:          string(respBody),
