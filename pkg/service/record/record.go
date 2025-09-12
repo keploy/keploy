@@ -42,8 +42,8 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, 
 	}
 }
 
-func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordConfig) error {
 
+func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) error {
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	errGrp, _ := errgroup.WithContext(ctx)
 	ctx = context.WithValue(ctx, models.ErrGroupKey, errGrp)
@@ -76,7 +76,8 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordConfig)
 		select {
 		case <-ctx.Done():
 		default:
-			if !reRecordCfg.Enabled {
+			if !reRecordCfg.Rerecord {
+
 				err := utils.Stop(r.logger, stopReason)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to stop recording")
@@ -104,11 +105,20 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordConfig)
 	defer close(insertTestErrChan)
 	defer close(insertMockErrChan)
 
-	var err error
+	if reRecordCfg.TestSet != "" {
+		// --- TARGETING AN EXISTING TEST SET ---
+		newTestSetID = reRecordCfg.TestSet
+		r.logger.Info("Starting mocks-only refresh for existing test set.", zap.String("testSet", newTestSetID))
 
-	if reRecordCfg.Enabled {
-		newTestSetID = reRecordCfg.TestSetID
+		// Delete ONLY the old mocks.
+		err := r.mockDB.DeleteMocksForSet(ctx, newTestSetID) // We will create this new function
+		if err != nil {
+			stopReason = "failed to clear existing mocks for refresh"
+			utils.LogError(r.logger, err, stopReason)
+			return fmt.Errorf("%s", stopReason)
+		}
 	} else {
+		var err error
 		newTestSetID, err = r.GetNextTestSetID(ctx)
 		if err != nil {
 			stopReason = "failed to get new test-set id"
@@ -130,7 +140,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordConfig)
 	}
 
 	// Instrument will setup the environment and start the hooks and proxy
-	appID, err = r.Instrument(hookCtx)
+	appID, err := r.Instrument(hookCtx)
 	if err != nil {
 		stopReason = "failed to instrument the application"
 		utils.LogError(r.logger, err, stopReason)
@@ -149,18 +159,22 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordConfig)
 		}
 		return fmt.Errorf("%s", stopReason)
 	}
-
 	errGrp.Go(func() error {
 		for testCase := range frames.Incoming {
-			err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
-			if err != nil {
-				if ctx.Err() == context.Canceled {
-					continue
+			testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
+			if reRecordCfg.TestSet == "" {
+				err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
+				if err != nil {
+					if ctx.Err() == context.Canceled {
+						continue
+					}
+					insertTestErrChan <- err
+				} else {
+					testCount++
+					r.telemetry.RecordedTestAndMocks()
 				}
-				insertTestErrChan <- err
 			} else {
-				testCount++
-				r.telemetry.RecordedTestAndMocks()
+				r.logger.Info("🟠 Keploy has re-recorded test case for the user's application.")
 			}
 		}
 		return nil

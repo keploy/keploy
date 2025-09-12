@@ -36,7 +36,13 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 				return nil
 			}
 
-			err = record.Start(ctx, models.ReRecordConfig{Enabled: false, TestSetID: ""})
+			cfg := models.ReRecordCfg{
+				Rerecord: false,
+				TestSet:  "",
+			}
+      
+			err = record.Start(ctx, cfg)
+
 			if err != nil {
 				utils.LogError(logger, err, "failed to record")
 				return nil
