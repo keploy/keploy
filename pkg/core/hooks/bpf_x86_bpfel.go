@@ -54,10 +54,15 @@ type bpfSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfProgramSpecs struct {
+	HandleBindEnterArm               *ebpf.ProgramSpec `ebpf:"handle_bind_enter_arm"`
+	HandleBindEnterX86               *ebpf.ProgramSpec `ebpf:"handle_bind_enter_x86"`
+	K_bind4                          *ebpf.ProgramSpec `ebpf:"k_bind4"`
+	K_bind6                          *ebpf.ProgramSpec `ebpf:"k_bind6"`
 	K_connect4                       *ebpf.ProgramSpec `ebpf:"k_connect4"`
 	K_connect6                       *ebpf.ProgramSpec `ebpf:"k_connect6"`
 	K_getpeername4                   *ebpf.ProgramSpec `ebpf:"k_getpeername4"`
 	K_getpeername6                   *ebpf.ProgramSpec `ebpf:"k_getpeername6"`
+	SteerIngress                     *ebpf.ProgramSpec `ebpf:"steer_ingress"`
 	SyscallProbeEntryAccept          *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_accept"`
 	SyscallProbeEntryAccept4         *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_accept4"`
 	SyscallProbeEntryClose           *ebpf.ProgramSpec `ebpf:"syscall__probe_entry_close"`
@@ -96,18 +101,25 @@ type bpfMapSpecs struct {
 	ActiveCloseArgsMap          *ebpf.MapSpec `ebpf:"active_close_args_map"`
 	ActiveReadArgsMap           *ebpf.MapSpec `ebpf:"active_read_args_map"`
 	ActiveWriteArgsMap          *ebpf.MapSpec `ebpf:"active_write_args_map"`
+	AllowedPids                 *ebpf.MapSpec `ebpf:"allowed_pids"`
 	AppChildKernelPidMap        *ebpf.MapSpec `ebpf:"app_child_kernel_pid_map"`
+	BindFilterResults           *ebpf.MapSpec `ebpf:"bind_filter_results"`
+	Cfg                         *ebpf.MapSpec `ebpf:"cfg"`
 	ConnInfoMap                 *ebpf.MapSpec `ebpf:"conn_info_map"`
 	CurrentSockMap              *ebpf.MapSpec `ebpf:"current_sock_map"`
 	DestInfoMap                 *ebpf.MapSpec `ebpf:"dest_info_map"`
 	DockerAppRegistrationMap    *ebpf.MapSpec `ebpf:"docker_app_registration_map"`
 	E2eInfoMap                  *ebpf.MapSpec `ebpf:"e2e_info_map"`
+	Events                      *ebpf.MapSpec `ebpf:"events"`
+	InboundMeta                 *ebpf.MapSpec `ebpf:"inbound_meta"`
+	InboundSvc                  *ebpf.MapSpec `ebpf:"inbound_svc"`
 	KeployAgentKernelPidMap     *ebpf.MapSpec `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.MapSpec `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.MapSpec `ebpf:"keploy_client_kernel_pid_map"`
 	KeployClientRegistrationMap *ebpf.MapSpec `ebpf:"keploy_client_registration_map"`
 	OutgoingConnCheckMap        *ebpf.MapSpec `ebpf:"outgoing_conn_check_map"`
 	OutgoingConnectArgsMap      *ebpf.MapSpec `ebpf:"outgoing_connect_args_map"`
+	PubPortsAny                 *ebpf.MapSpec `ebpf:"pub_ports_any"`
 	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
 	SocketCloseEvents           *ebpf.MapSpec `ebpf:"socket_close_events"`
 	SocketDataEventBufferHeap   *ebpf.MapSpec `ebpf:"socket_data_event_buffer_heap"`
@@ -146,18 +158,25 @@ type bpfMaps struct {
 	ActiveCloseArgsMap          *ebpf.Map `ebpf:"active_close_args_map"`
 	ActiveReadArgsMap           *ebpf.Map `ebpf:"active_read_args_map"`
 	ActiveWriteArgsMap          *ebpf.Map `ebpf:"active_write_args_map"`
+	AllowedPids                 *ebpf.Map `ebpf:"allowed_pids"`
 	AppChildKernelPidMap        *ebpf.Map `ebpf:"app_child_kernel_pid_map"`
+	BindFilterResults           *ebpf.Map `ebpf:"bind_filter_results"`
+	Cfg                         *ebpf.Map `ebpf:"cfg"`
 	ConnInfoMap                 *ebpf.Map `ebpf:"conn_info_map"`
 	CurrentSockMap              *ebpf.Map `ebpf:"current_sock_map"`
 	DestInfoMap                 *ebpf.Map `ebpf:"dest_info_map"`
 	DockerAppRegistrationMap    *ebpf.Map `ebpf:"docker_app_registration_map"`
 	E2eInfoMap                  *ebpf.Map `ebpf:"e2e_info_map"`
+	Events                      *ebpf.Map `ebpf:"events"`
+	InboundMeta                 *ebpf.Map `ebpf:"inbound_meta"`
+	InboundSvc                  *ebpf.Map `ebpf:"inbound_svc"`
 	KeployAgentKernelPidMap     *ebpf.Map `ebpf:"keploy_agent_kernel_pid_map"`
 	KeployAgentRegistrationMap  *ebpf.Map `ebpf:"keploy_agent_registration_map"`
 	KeployClientKernelPidMap    *ebpf.Map `ebpf:"keploy_client_kernel_pid_map"`
 	KeployClientRegistrationMap *ebpf.Map `ebpf:"keploy_client_registration_map"`
 	OutgoingConnCheckMap        *ebpf.Map `ebpf:"outgoing_conn_check_map"`
 	OutgoingConnectArgsMap      *ebpf.Map `ebpf:"outgoing_connect_args_map"`
+	PubPortsAny                 *ebpf.Map `ebpf:"pub_ports_any"`
 	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
 	SocketCloseEvents           *ebpf.Map `ebpf:"socket_close_events"`
 	SocketDataEventBufferHeap   *ebpf.Map `ebpf:"socket_data_event_buffer_heap"`
@@ -172,18 +191,25 @@ func (m *bpfMaps) Close() error {
 		m.ActiveCloseArgsMap,
 		m.ActiveReadArgsMap,
 		m.ActiveWriteArgsMap,
+		m.AllowedPids,
 		m.AppChildKernelPidMap,
+		m.BindFilterResults,
+		m.Cfg,
 		m.ConnInfoMap,
 		m.CurrentSockMap,
 		m.DestInfoMap,
 		m.DockerAppRegistrationMap,
 		m.E2eInfoMap,
+		m.Events,
+		m.InboundMeta,
+		m.InboundSvc,
 		m.KeployAgentKernelPidMap,
 		m.KeployAgentRegistrationMap,
 		m.KeployClientKernelPidMap,
 		m.KeployClientRegistrationMap,
 		m.OutgoingConnCheckMap,
 		m.OutgoingConnectArgsMap,
+		m.PubPortsAny,
 		m.RedirectProxyMap,
 		m.SocketCloseEvents,
 		m.SocketDataEventBufferHeap,
@@ -203,10 +229,15 @@ type bpfVariables struct {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfPrograms struct {
+	HandleBindEnterArm               *ebpf.Program `ebpf:"handle_bind_enter_arm"`
+	HandleBindEnterX86               *ebpf.Program `ebpf:"handle_bind_enter_x86"`
+	K_bind4                          *ebpf.Program `ebpf:"k_bind4"`
+	K_bind6                          *ebpf.Program `ebpf:"k_bind6"`
 	K_connect4                       *ebpf.Program `ebpf:"k_connect4"`
 	K_connect6                       *ebpf.Program `ebpf:"k_connect6"`
 	K_getpeername4                   *ebpf.Program `ebpf:"k_getpeername4"`
 	K_getpeername6                   *ebpf.Program `ebpf:"k_getpeername6"`
+	SteerIngress                     *ebpf.Program `ebpf:"steer_ingress"`
 	SyscallProbeEntryAccept          *ebpf.Program `ebpf:"syscall__probe_entry_accept"`
 	SyscallProbeEntryAccept4         *ebpf.Program `ebpf:"syscall__probe_entry_accept4"`
 	SyscallProbeEntryClose           *ebpf.Program `ebpf:"syscall__probe_entry_close"`
@@ -239,10 +270,15 @@ type bpfPrograms struct {
 
 func (p *bpfPrograms) Close() error {
 	return _BpfClose(
+		p.HandleBindEnterArm,
+		p.HandleBindEnterX86,
+		p.K_bind4,
+		p.K_bind6,
 		p.K_connect4,
 		p.K_connect6,
 		p.K_getpeername4,
 		p.K_getpeername6,
+		p.SteerIngress,
 		p.SyscallProbeEntryAccept,
 		p.SyscallProbeEntryAccept4,
 		p.SyscallProbeEntryClose,
