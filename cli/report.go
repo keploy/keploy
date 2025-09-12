@@ -35,6 +35,16 @@ func Report(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 				return nil
 			}
 
+			// defering the stop function to stop keploy in case of any error in report or in case of context cancellation
+			defer func() {
+				select {
+				case <-ctx.Done():
+					break
+				default:
+					utils.ExecCancel()
+				}
+			}()
+
 			err = report.GenerateReport(ctx)
 			if err != nil {
 				utils.LogError(logger, err, "failed to generate report")
