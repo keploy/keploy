@@ -328,3 +328,56 @@ func (t *Tools) IgnoreTestSet(_ context.Context, _ string) error {
 func (t *Tools) Login(ctx context.Context) bool {
 	return t.auth.Login(ctx)
 }
+
+func (t *Tools) Templatize(ctx context.Context) error {
+
+	testSets := t.config.Templatize.TestSets
+	if len(testSets) == 0 {
+		all, err := t.testDB.GetAllTestSetIDs(ctx)
+		if err != nil {
+			utils.LogError(t.logger, err, "failed to get all test sets")
+			return err
+		}
+		testSets = all
+	}
+
+	if len(testSets) == 0 {
+		t.logger.Warn("No test sets found to templatize")
+		return nil
+	}
+
+	for _, testSetID := range testSets {
+
+		testSet, err := t.testSetConf.Read(ctx, testSetID)
+		if err == nil && (testSet != nil && testSet.Template != nil) {
+			utils.TemplatizedValues = testSet.Template
+		} else {
+			utils.TemplatizedValues = make(map[string]interface{})
+		}
+
+		if err == nil && (testSet != nil && testSet.Secret != nil) {
+			utils.SecretValues = testSet.Secret
+		} else {
+			utils.SecretValues = make(map[string]interface{})
+		}
+
+		// Get test cases from the database
+		tcs, err := t.testDB.GetTestCases(ctx, testSetID)
+		if err != nil {
+			utils.LogError(t.logger, err, "failed to get test cases")
+			return err
+		}
+
+		if len(tcs) == 0 {
+			t.logger.Warn("The test set is empty. Please record some test cases to templatize.", zap.String("testSet", testSetID))
+			continue
+		}
+
+		err = t.ProcessTestCasesV2(ctx, tcs, testSetID)
+		if err != nil {
+			utils.LogError(t.logger, err, "failed to process test cases")
+			return err
+		}
+	}
+	return nil
+}
