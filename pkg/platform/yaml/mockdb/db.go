@@ -150,7 +150,6 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	}
 	return nil
 }
-
 func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time) ([]*models.Mock, error) {
 
 	var tcsMocks = make([]*models.Mock, 0)

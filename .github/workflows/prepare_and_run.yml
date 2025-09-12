@@ -70,3 +70,8 @@ jobs:
   run_golang_docker:
     needs: [build-and-upload, upload-latest,build-docker-image]
     uses: ./.github/workflows/golang_docker.yml
+  run_fuzzer_linux:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/fuzzer_linux.yml
+    secrets:
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}

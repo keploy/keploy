@@ -1026,7 +1026,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 				continue
 			}
-			testPass, testResult = r.compareHTTPResp(testCase, httpResp, testSetID)
+			testPass, testResult = r.CompareHTTPResp(testCase, httpResp, testSetID)
 
 		case models.GRPC_EXPORT:
 			grpcResp, ok := resp.(*models.GrpcResp)
@@ -1042,7 +1042,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 				continue
 			}
-			testPass, testResult = r.compareGRPCResp(testCase, grpcResp, testSetID)
+			testPass, testResult = r.CompareGRPCResp(testCase, grpcResp, testSetID)
 		}
 
 		if !testPass {
@@ -1328,7 +1328,7 @@ func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testS
 	return status, nil
 }
 
-func (r *Replayer) compareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string) (bool, *models.Result) {
+func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string) (bool, *models.Result) {
 	noiseConfig := r.config.Test.GlobalNoise.Global
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
@@ -1336,7 +1336,7 @@ func (r *Replayer) compareHTTPResp(tc *models.TestCase, actualResponse *models.H
 	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
 }
 
-func (r *Replayer) compareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string) (bool, *models.Result) {
+func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string) (bool, *models.Result) {
 	noiseConfig := r.config.Test.GlobalNoise.Global
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
@@ -1449,6 +1449,35 @@ func (r *Replayer) RunApplication(ctx context.Context, appID uint64, opts models
 
 func (r *Replayer) GetTestSetConf(ctx context.Context, testSet string) (*models.TestSet, error) {
 	return r.testSetConf.Read(ctx, testSet)
+}
+
+// UpdateTestSetTemplate writes the updated template values to the test-set's config.
+// It preserves existing pre/post scripts, secret, mock registry and metadata fields.
+func (r *Replayer) UpdateTestSetTemplate(ctx context.Context, testSetID string, template map[string]interface{}) error {
+	if len(template) == 0 { // nothing to persist
+		return nil
+	}
+	existing, err := r.testSetConf.Read(ctx, testSetID)
+	if err != nil {
+		// If file missing we still attempt to write minimal config.
+		r.logger.Debug("failed reading existing test-set config while updating template; will create new", zap.String("testSetID", testSetID), zap.Error(err))
+	}
+	ts := &models.TestSet{}
+	if existing != nil {
+		ts.PreScript = existing.PreScript
+		ts.PostScript = existing.PostScript
+		ts.Secret = existing.Secret
+		ts.MockRegistry = existing.MockRegistry
+		ts.Metadata = existing.Metadata
+	} else {
+		ts.Metadata = map[string]interface{}{}
+	}
+	ts.Template = template
+	if err := r.testSetConf.Write(ctx, testSetID, ts); err != nil {
+		utils.LogError(r.logger, err, "failed to write updated template map", zap.String("testSetID", testSetID))
+		return err
+	}
+	return nil
 }
 
 func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error) {
@@ -1639,7 +1668,7 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 			Body:       errorMessage,
 		}
 
-		_, result = r.compareHTTPResp(testCase, actualResponse, testSetID)
+		_, result = r.CompareHTTPResp(testCase, actualResponse, testSetID)
 
 		testCaseResult.Req = models.HTTPReq{
 			Method:     testCase.HTTPReq.Method,
@@ -1670,7 +1699,7 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 			},
 		}
 
-		_, result = r.compareGRPCResp(testCase, actualResponse, testSetID)
+		_, result = r.CompareGRPCResp(testCase, actualResponse, testSetID)
 
 		testCaseResult.GrpcReq = testCase.GrpcReq
 		testCaseResult.GrpcRes = *actualResponse

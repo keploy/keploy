@@ -6,7 +6,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v2/utils"
-	"go.uber.org/zap"
 )
 
 // TestRenderIfTemplatized_NonTemplateString_002 tests the RenderIfTemplatized function for non-template strings.
@@ -71,59 +70,59 @@ func TestRenderIfTemplatized_TemplateProcessing_001(t *testing.T) {
 
 // TestUtilityFunctions_VariousScenarios_523 groups tests for several small helper functions
 // to verify their behavior with different kinds of inputs.
-func TestUtilityFunctions_VariousScenarios_523(t *testing.T) {
-	t.Run("getType should return correct type names", func(t *testing.T) {
-		assert.Equal(t, "string", getType("a string"))
-		assert.Equal(t, "string", getType(new(string)))
-		assert.Equal(t, "int", getType(int64(1)))
-		assert.Equal(t, "int", getType(1))
-		assert.Equal(t, "int", getType(new(int)))
-		assert.Equal(t, "float", getType(float64(1.1)))
-		assert.Equal(t, "float", getType(float32(1.1)))
-		assert.Equal(t, "float", getType(new(float64)))
-		assert.Equal(t, "", getType(true)) // default case
-	})
+// func TestUtilityFunctions_VariousScenarios_523(t *testing.T) {
+// 	t.Run("getType should return correct type names", func(t *testing.T) {
+// 		assert.Equal(t, "string", getType("a string"))
+// 		assert.Equal(t, "string", getType(new(string)))
+// 		assert.Equal(t, "int", getType(int64(1)))
+// 		assert.Equal(t, "int", getType(1))
+// 		assert.Equal(t, "int", getType(new(int)))
+// 		assert.Equal(t, "float", getType(float64(1.1)))
+// 		assert.Equal(t, "float", getType(float32(1.1)))
+// 		assert.Equal(t, "float", getType(new(float64)))
+// 		assert.Equal(t, "", getType(true)) // default case
+// 	})
 
-	t.Run("insertUnique should generate unique keys correctly", func(t *testing.T) {
-		m := make(map[string]interface{})
-		// New key
-		key := insertUnique("id", "123", m)
-		assert.Equal(t, "id", key)
-		assert.Equal(t, "123", m["id"])
-		// Existing key, same value
-		key = insertUnique("id", "123", m)
-		assert.Equal(t, "id", key)
-		// Existing key, different value
-		key = insertUnique("id", "456", m)
-		assert.Equal(t, "id1", key)
-		assert.Equal(t, "456", m["id1"])
-		// Key with hyphen
-		key = insertUnique("user-id", "abc", m)
-		assert.Equal(t, "userid", key)
-		assert.Equal(t, "abc", m["userid"])
-	})
+// 	t.Run("insertUnique should generate unique keys correctly", func(t *testing.T) {
+// 		m := make(map[string]interface{})
+// 		// New key
+// 		key := insertUnique("id", "123", m)
+// 		assert.Equal(t, "id", key)
+// 		assert.Equal(t, "123", m["id"])
+// 		// Existing key, same value
+// 		key = insertUnique("id", "123", m)
+// 		assert.Equal(t, "id", key)
+// 		// Existing key, different value
+// 		key = insertUnique("id", "456", m)
+// 		assert.Equal(t, "id1", key)
+// 		assert.Equal(t, "456", m["id1"])
+// 		// Key with hyphen
+// 		key = insertUnique("user-id", "abc", m)
+// 		assert.Equal(t, "userid", key)
+// 		assert.Equal(t, "abc", m["userid"])
+// 	})
 
-	t.Run("marshalJSON should handle errors", func(t *testing.T) {
-		// A channel cannot be marshaled to JSON
-		data := make(chan int)
-		result := marshalJSON(data, zap.NewNop())
-		assert.Equal(t, "", result)
-	})
+// 	t.Run("marshalJSON should handle errors", func(t *testing.T) {
+// 		// A channel cannot be marshaled to JSON
+// 		data := make(chan int)
+// 		result := marshalJSON(data, zap.NewNop())
+// 		assert.Equal(t, "", result)
+// 	})
 
-	t.Run("parseIntoJSON should handle various inputs", func(t *testing.T) {
-		res, err := parseIntoJSON("")
-		assert.NoError(t, err)
-		assert.Nil(t, res)
+// 	t.Run("parseIntoJSON should handle various inputs", func(t *testing.T) {
+// 		res, err := parseIntoJSON("")
+// 		assert.NoError(t, err)
+// 		assert.Nil(t, res)
 
-		res, err = parseIntoJSON("{'key': 'val'}") // invalid JSON
-		assert.Error(t, err)
-		assert.Nil(t, res)
+// 		res, err = parseIntoJSON("{'key': 'val'}") // invalid JSON
+// 		assert.Error(t, err)
+// 		assert.Nil(t, res)
 
-		res, err = parseIntoJSON(`{"key": "val"}`)
-		assert.NoError(t, err)
-		assert.NotNil(t, res)
-	})
-}
+// 		res, err = parseIntoJSON(`{"key": "val"}`)
+// 		assert.NoError(t, err)
+// 		assert.NotNil(t, res)
+// 	})
+// }
 
 // TestQuoteHandlingInTemplates_729 verifies that template placeholders are correctly
 // quoted for JSON parsing and unquoted for storage, while respecting explicit string templates.

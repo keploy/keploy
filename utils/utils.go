@@ -570,6 +570,12 @@ func ToInt(value interface{}) int {
 	switch v := value.(type) {
 	case int:
 		return v
+	case int64:
+		return int(v)
+	case int32:
+		return int(v)
+	case float32:
+		return int(v)
 	case string:
 		i, err := strconv.Atoi(v)
 		if err != nil {
@@ -579,6 +585,14 @@ func ToInt(value interface{}) int {
 		return i
 	case float64:
 		return int(v)
+	case json.Number:
+		// Try int64 first
+		if i, err := v.Int64(); err == nil {
+			return int(i)
+		}
+		if f, err := v.Float64(); err == nil {
+			return int(f)
+		}
 
 	}
 	return 0
