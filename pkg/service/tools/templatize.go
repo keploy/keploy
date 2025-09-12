@@ -719,9 +719,6 @@ func filterInsignificantChains(chains []CanonicalChain) []CanonicalChain {
 	return significantChains
 }
 
-// --- Utility and Helper Functions ---
-// (These remain unchanged)
-
 // helper to ensure parent segment forms a valid key (reuses existing conventions)
 func sanitizeKey(k string) string {
 	k = strings.ToLower(k)
