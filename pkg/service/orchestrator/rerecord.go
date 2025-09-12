@@ -66,12 +66,17 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		SelectedTests = append(SelectedTests, testSet)
 
 		o.logger.Info("Re-recording testcases for the given testset", zap.String("testset", testSet))
+		// Note: Here we've used child context without cancel to avoid the cancellation of the parent context.
+		// When we use errgroup and get an error from any of the go routines spawned by errgroup, it cancels the parent context.
+		// We don't want to stop the execution if there is an error in any of the test-set recording sessions, it should just skip that test-set and continue with the next one.
 		errGrp, _ := errgroup.WithContext(ctx)
 		recordCtx := context.WithoutCancel(ctx)
 		recordCtx, recordCtxCancel := context.WithCancel(recordCtx)
 
 		var errCh = make(chan error, 1)
 		var replayErrCh = make(chan error, 1)
+
+		//Keeping two back-to-back selects is used to not do blocking operation if parent ctx is done
 
 		select {
 		case <-ctx.Done():
@@ -120,6 +125,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		}
 
 		if errRecord == nil || ctx.Err() == nil {
+			// Sleep for 3 seconds to ensure that the recording has completed
 			time.Sleep(3 * time.Second)
 		}
 
@@ -130,6 +136,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 			utils.LogError(o.logger, err, "failed to stop re-recording")
 		}
 
+		// Check if the global context is done after each iteration
 		if ctx.Err() != nil {
 			break
 		}
@@ -160,6 +167,8 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 			o.logger.Warn("Empty input. The older testsets will be kept.")
 			return nil
 		}
+
+		// Trimming the newline character for cleaner switch statement
 		input = input[:len(input)-1]
 		switch input {
 		case "y", "Y":
@@ -180,6 +189,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 }
 
 func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, error) {
+	//replay the recorded testcases
 	tcs, err := o.replay.GetTestCases(ctx, testSet)
 	if err != nil {
 		errMsg := "failed to get all testcases"
@@ -220,6 +230,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 		return false, err
 	}
 
+	// Read the template and secret values once per test set
 	testSetConf, err := o.replay.GetTestSetConf(ctx, testSet)
 	if err != nil {
 		o.logger.Debug("failed to read template values")
