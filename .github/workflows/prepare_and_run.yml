@@ -70,3 +70,8 @@ jobs:
   run_golang_docker:
     needs: [build-and-upload, upload-latest,build-docker-image]
     uses: ./.github/workflows/golang_docker.yml
+  run_grpc_fuzzer:
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/grpc_fuzzer.yml
+    secrets:
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
