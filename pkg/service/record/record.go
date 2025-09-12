@@ -27,6 +27,7 @@ type Recorder struct {
 	instrumentation Instrumentation
 	testSetConf     TestSetConfig
 	config          *config.Config
+	globalMockCh    chan<- *models.Mock
 }
 
 func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, config *config.Config) Service {
@@ -41,7 +42,7 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, 
 	}
 }
 
-func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
+func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordConfig) error {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	errGrp, _ := errgroup.WithContext(ctx)
@@ -75,7 +76,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		select {
 		case <-ctx.Done():
 		default:
-			if !reRecord {
+			if !reRecordCfg.Enabled {
 				err := utils.Stop(r.logger, stopReason)
 				if err != nil {
 					utils.LogError(r.logger, err, "failed to stop recording")
@@ -103,11 +104,17 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	defer close(insertTestErrChan)
 	defer close(insertMockErrChan)
 
-	newTestSetID, err := r.GetNextTestSetID(ctx)
-	if err != nil {
-		stopReason = "failed to get new test-set id"
-		utils.LogError(r.logger, err, stopReason)
-		return fmt.Errorf("%s", stopReason)
+	var err error
+
+	if reRecordCfg.Enabled {
+		newTestSetID = reRecordCfg.TestSetID
+	} else {
+		newTestSetID, err = r.GetNextTestSetID(ctx)
+		if err != nil {
+			stopReason = "failed to get new test-set id"
+			utils.LogError(r.logger, err, stopReason)
+			return fmt.Errorf("%s", stopReason)
+		}
 	}
 
 	// Create config.yaml if metadata is provided
@@ -161,6 +168,17 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 
 	errGrp.Go(func() error {
 		for mock := range frames.Outgoing {
+			// Send a copy to global mock channel for correlation manager if available
+			if r.globalMockCh != nil {
+				// Create a deep copy of the mock to avoid race conditions
+				mockCopy := *mock
+				select {
+				case r.globalMockCh <- &mockCopy:
+					r.logger.Debug("Mock sent to correlation manager", zap.String("mockKind", mock.GetKind()))
+				default:
+					r.logger.Warn("Global mock channel full, dropping mock for correlation", zap.String("mockKind", mock.GetKind()))
+				}
+			}
 			err := r.mockDB.InsertMock(ctx, mock, newTestSetID)
 			if err != nil {
 				if ctx.Err() == context.Canceled {
@@ -387,4 +405,10 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 	}
 
 	r.logger.Info("Created test-set config file with metadata")
+}
+
+// SetGlobalMockChannel sets the global mock channel for sending mocks to correlation manager
+func (r *Recorder) SetGlobalMockChannel(mockCh chan<- *models.Mock) {
+	r.globalMockCh = mockCh
+	r.logger.Info("Global mock channel set for record service")
 }

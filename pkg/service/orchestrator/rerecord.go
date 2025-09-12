@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"go.keploy.io/server/v2/pkg"
@@ -19,6 +20,12 @@ import (
 )
 
 func (o *Orchestrator) ReRecord(ctx context.Context) error {
+	// Initialize mock correlation manager for this rerecord session
+	o.InitializeMockCorrelationManager(ctx)
+
+	// Set the global mock channel on the record service
+	o.record.SetGlobalMockChannel(o.GetGlobalMockChannel())
+
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	var stopReason string
 	var err error
@@ -73,6 +80,11 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		var errCh = make(chan error, 1)
 		var replayErrCh = make(chan error, 1)
 
+		reRecordCfg := models.ReRecordConfig{
+			Enabled:   true,
+			TestSetID: testSet,
+		}
+
 		//Keeping two back-to-back selects is used to not do blocking operation if parent ctx is done
 
 		select {
@@ -80,7 +92,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		default:
 			errGrp.Go(func() error {
 				defer utils.Recover(o.logger)
-				err := o.record.Start(recordCtx, true)
+				err := o.record.Start(recordCtx, reRecordCfg)
 				errCh <- err
 				return nil
 			})
@@ -186,6 +198,9 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 }
 
 func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, error) {
+
+	var mappings = make(map[string][]string)
+
 	//replay the recorded testcases
 	tcs, err := o.replay.GetTestCases(ctx, testSet)
 	if err != nil {
@@ -252,6 +267,51 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 		if ctx.Err() != nil {
 			return false, ctx.Err()
 		}
+
+		// Generate unique test case execution ID
+		testCaseID := tc.Name
+
+		// Register test case with correlation manager
+		testCaseCtx := TestContext{
+			TestID:    testCaseID,
+			TestName:  tc.Name,
+			TestSet:   testSet,
+			StartTime: time.Now(),
+		}
+
+		o.mockCorrelationManager.RegisterTest(testCaseCtx)
+
+		// Start mock collection for this test case in background
+		collectedMocks := make([]*models.Mock, 0)
+		mockCollectionDone := make(chan struct{})
+		var mockMutex sync.Mutex
+
+		go func(tcID string) {
+			defer close(mockCollectionDone)
+			mockCh := o.mockCorrelationManager.GetTestMocks(tcID)
+			if mockCh == nil {
+				return
+			}
+
+			for {
+				select {
+				case mock, ok := <-mockCh:
+					if !ok {
+						return // Channel closed
+					}
+					mockMutex.Lock()
+					collectedMocks = append(collectedMocks, mock)
+					mockMutex.Unlock()
+					o.logger.Info("Collected mock for test case",
+						zap.String("testCaseID", tcID),
+						zap.String("testCaseName", tc.Name),
+						zap.String("mockType", mock.GetKind()))
+				case <-ctx.Done():
+					return
+				}
+			}
+		}(testCaseID)
+
 		if utils.IsDockerCmd(cmdType) {
 			tc.HTTPReq.URL, err = utils.ReplaceHost(tc.HTTPReq.URL, userIP)
 			if err != nil {
@@ -296,6 +356,37 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 		}
 
 		o.logger.Info("Re-recorded the testcase successfully", zap.String("testcase", tc.Name), zap.String("of testset", testSet))
+
+		time.Sleep(10 * time.Millisecond)
+
+		// Unregister test case and collect mocks
+		o.mockCorrelationManager.UnregisterTest(testCaseID)
+
+		// Wait a bit for any remaining mocks to be collected
+		<-mockCollectionDone
+
+		// Store collected mocks for this test case
+		mockMutex.Lock()
+		finalMocks := make([]*models.Mock, len(collectedMocks))
+		copy(finalMocks, collectedMocks)
+		mockMutex.Unlock()
+		o.storeMocksForTestCase(testCaseID, tc.Name, testSet, finalMocks)
+		mappings[tc.Name] = make([]string, 0)
+		for _, mock := range finalMocks {
+			mappings[tc.Name] = append(mappings[tc.Name], mock.Name)
+		}
+	}
+
+	// Save the test-mock mappings to YAML file
+	if len(mappings) > 0 {
+		err := o.replay.StoreMappings(ctx, testSet, mappings)
+		if err != nil {
+			o.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
+		} else {
+			o.logger.Info("Successfully saved test-mock mappings",
+				zap.String("testSetID", testSet),
+				zap.Int("numTests", len(mappings)))
+		}
 	}
 
 	if simErr {
@@ -303,6 +394,34 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 	}
 
 	return allTcRecorded, nil
+}
+
+// storeMocksForTestCase stores the collected mocks for a specific test case
+func (o *Orchestrator) storeMocksForTestCase(testCaseID string, testCaseName string, testSet string, mocks []*models.Mock) {
+	if len(mocks) > 0 {
+		o.logger.Info("Collected mocks for test case",
+			zap.String("testCaseID", testCaseID),
+			zap.String("testCaseName", testCaseName),
+			zap.String("testSet", testSet),
+			zap.Any("mocksCount", len(mocks)))
+
+		// Here you can implement storage logic for the collected mocks
+		// For example, save to database, file, or process them
+		for i, mock := range mocks {
+			o.logger.Info("Mock details",
+				zap.String("testCaseID", testCaseID),
+				zap.String("testCaseName", testCaseName),
+				zap.String("testSet", testSet),
+				zap.Int("mockIndex", i),
+				zap.String("mockKind", mock.GetKind()),
+				zap.String("mockName", mock.Name))
+		}
+	} else {
+		o.logger.Debug("No mocks collected for test case",
+			zap.String("testCaseID", testCaseID),
+			zap.String("testCaseName", testCaseName),
+			zap.String("testSet", testSet))
+	}
 }
 
 // checkForTemplates checks if the testcases are already templatized. If not, it asks the user if they want to templatize the testcases before re-recording

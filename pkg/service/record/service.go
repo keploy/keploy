@@ -19,8 +19,10 @@ type Instrumentation interface {
 }
 
 type Service interface {
-	Start(ctx context.Context, reRecord bool) error
+	Start(ctx context.Context, reRecord models.ReRecordConfig) error
 	GetContainerIP(ctx context.Context, id uint64) (string, error)
+	SetGlobalMockChannel(mockCh chan<- *models.Mock)
+	GetNextTestSetID(ctx context.Context) (string, error)
 }
 
 type TestDB interface {

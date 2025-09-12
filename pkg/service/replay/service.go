@@ -46,6 +46,7 @@ type Service interface {
 
 	DownloadMocks(ctx context.Context) error
 	UploadMocks(ctx context.Context) error
+	StoreMappings(ctx context.Context, testSetID string, testMockMappings map[string][]string) error
 }
 
 type TestDB interface {

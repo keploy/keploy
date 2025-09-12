@@ -1258,9 +1258,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	if testSetStatus == models.TestSetStatusPassed && r.instrument {
-
-		// Save test-mock mappings to YAML file
-		err = r.mappingDB.InsertMappings(runTestSetCtx, testSetID, actualTestMockMappings)
+		err := r.StoreMappings(ctx, testSetID, actualTestMockMappings)
 		if err != nil {
 			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
 		} else {
@@ -1900,6 +1898,12 @@ func (r *Replayer) UploadMocks(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (r *Replayer) StoreMappings(ctx context.Context, testSetID string, mappings map[string][]string) error {
+	// Save test-mock mappings to YAML file
+	err := r.mappingDB.InsertMappings(ctx, testSetID, mappings)
+	return err
 }
 
 // createBackup creates a timestamped backup of a test set directory before modification.
