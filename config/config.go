@@ -79,6 +79,7 @@ type ReRecord struct {
 	Filters       []Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
 	Host          string   `json:"host" yaml:"host" mapstructure:"host"`
 	Port          uint32   `json:"port" yaml:"port" mapstructure:"port"`
+	ShowDiff      bool     `json:"showDiff" yaml:"showDiff" mapstructure:"showDiff"` // show response diff during rerecord (disabled by default)
 	GRPCPort      uint32   `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
 }
 type Contract struct {
