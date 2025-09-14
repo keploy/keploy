@@ -309,6 +309,9 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Uint32("port", c.cfg.Test.Port, "Custom http port to replace the actual port in the testcases")
 		cmd.Flags().Uint32("grpc-port", c.cfg.Test.GRPCPort, "Custom grpc port to replace the actual port in the testcases")
 		cmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
+		if cmd.Name() == "rerecord" {
+			cmd.Flags().Bool("show-diff", c.cfg.ReRecord.ShowDiff, "Show response differences during rerecord (disabled by default)")
+		}
 		if cmd.Name() == "test" {
 			cmd.Flags().Uint64("api-timeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
 			cmd.Flags().String("mongo-password", c.cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")
@@ -909,6 +912,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					utils.LogError(c.logger, err, errMsg)
 					return errors.New(errMsg)
 				}
+				// optional flag to show response diffs during rerecord
+				showDiff, err := cmd.Flags().GetBool("show-diff")
+				if err != nil {
+					errMsg := "failed to get the show-diff flag"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.ReRecord.ShowDiff = showDiff
 				return nil
 			}
 
