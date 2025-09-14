@@ -1042,7 +1042,43 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 				continue
 			}
-			testPass, testResult = r.CompareGRPCResp(testCase, grpcResp, testSetID)
+
+			respCopy := *grpcResp
+
+			if r.config.Test.ProtoFile != "" || r.config.Test.ProtoDir != "" {
+				// get the :path header from the request
+				method, ok := testCase.GrpcReq.Headers.PseudoHeaders[":path"]
+				if !ok {
+					utils.LogError(r.logger, nil, "failed to get :path header from the request, cannot convert grpc response to json")
+					goto compareResp
+				}
+
+				pc := ProtoConfig{
+					ProtoFile:    r.config.Test.ProtoFile,
+					ProtoDir:     r.config.Test.ProtoDir,
+					ProtoInclude: r.config.Test.ProtoInclude,
+					RequestURI:   method,
+				}
+
+				// get the proto message descriptor
+				md, err := GetProtoMessageDescriptor(context.Background(), r.logger, pc)
+				if err != nil {
+					utils.LogError(r.logger, err, "failed to get proto message descriptor, cannot convert grpc response to json")
+					goto compareResp
+				}
+
+				// convert both actual and expected using the same path (protoscope-text -> wire -> json)
+				actJSON, actOK := ProtoTextToJSON(md, respCopy.Body.DecodedData, r.logger)
+				testJSON, testOK := ProtoTextToJSON(md, testCase.GrpcResp.Body.DecodedData, r.logger)
+
+				if actOK && testOK {
+					respCopy.Body.DecodedData = string(actJSON)
+					testCase.GrpcResp.Body.DecodedData = string(testJSON)
+				}
+			}
+
+		compareResp:
+			testPass, testResult = r.CompareGRPCResp(testCase, &respCopy, testSetID)
 		}
 
 		if !testPass {
@@ -1699,7 +1735,42 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 			},
 		}
 
-		_, result = r.CompareGRPCResp(testCase, actualResponse, testSetID)
+		respCopy := *actualResponse
+
+		if r.config.Test.ProtoFile != "" || r.config.Test.ProtoDir != "" {
+			// get the :path header from the request
+			method, ok := testCase.GrpcReq.Headers.PseudoHeaders[":path"]
+			if !ok {
+				utils.LogError(r.logger, nil, "failed to get :path header from the request, cannot convert grpc response to json")
+				goto compareResp
+			}
+
+			pc := ProtoConfig{
+				ProtoFile:    r.config.Test.ProtoFile,
+				ProtoDir:     r.config.Test.ProtoDir,
+				ProtoInclude: r.config.Test.ProtoInclude,
+				RequestURI:   method,
+			}
+
+			// get the proto message descriptor
+			md, err := GetProtoMessageDescriptor(context.Background(), r.logger, pc)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to get proto message descriptor, cannot convert grpc response to json")
+				goto compareResp
+			}
+
+			// convert both actual and expected using the same path (protoscope-text -> wire -> json)
+			actJSON, actOK := ProtoTextToJSON(md, respCopy.Body.DecodedData, r.logger)
+			testJSON, testOK := ProtoTextToJSON(md, testCase.GrpcResp.Body.DecodedData, r.logger)
+
+			if actOK && testOK {
+				respCopy.Body.DecodedData = string(actJSON)
+				testCase.GrpcResp.Body.DecodedData = string(testJSON)
+			}
+		}
+
+	compareResp:
+		_, result = r.CompareGRPCResp(testCase, &respCopy, testSetID)
 
 		testCaseResult.GrpcReq = testCase.GrpcReq
 		testCaseResult.GrpcRes = *actualResponse
