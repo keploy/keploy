@@ -417,12 +417,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		dstBR = bufio.NewReader(dstConn)
 	}
 
-	// Peek both sides (bounded); larger than 10ms because server greetings can be slow
+	// Peek both sides concurrently; larger than 10ms because server greetings can be slow
 	const sniffN = 5
-	const sniffDeadline = 300 * time.Millisecond
+	const sniffDeadline = 10 * time.Millisecond
 
-	srcPeek, srcPeekErr := peekN(srcConn, srcBR, sniffN, sniffDeadline)
-	dstPeek, dstPeekErr := peekN(dstConn, dstBR, sniffN, sniffDeadline)
+	srcPeek, srcPeekErr, _, dstPeekErr, isServerFirst := peekNConcurrent(srcConn, srcBR, dstConn, dstBR, sniffN, sniffDeadline)
 
 	if srcPeekErr != nil && srcPeekErr != io.EOF {
 		p.logger.Debug("source peek error (non-fatal)", zap.Error(srcPeekErr))
@@ -432,7 +431,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	// Decide who spoke first (server-first if dst has data and src doesn’t)
-	isServerFirst := len(dstPeek) > 0 && len(srcPeek) == 0
+	// isServerFirst := len(dstPeek) > 0 && len(srcPeek) == 0
 
 	// In test mode, we replay the dest packet that's why we can judge only based on srcPeek
 	if rule.Mode == models.MODE_TEST {

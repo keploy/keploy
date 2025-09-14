@@ -511,15 +511,22 @@ func replaySequence(
 				writer = newWriter
 				metrics.ConnectionsCreated++
 
-				// Create/register feeder for this srcPort
-				_ = mgr.GetOrCreate(ev.srcPort)
-
 				logger.Info("new connection established to proxy",
 					append(eventFields.ToZapFields(),
 						zap.String("proxy_addr", proxyAddr),
 						zap.Int64("total_connections_created", metrics.ConnectionsCreated),
 						zap.String("local_addr", writer.LocalAddr().String()),
 					)...)
+
+				// Create/register feeder for this srcPort
+				feeder := mgr.GetOrCreate(ev.srcPort)
+
+				if feeder != nil {
+					for !feeder.isEmpty() {
+						time.Sleep(10 * time.Millisecond)
+					}
+				}
+
 			}
 
 			// Write payload to proxy

@@ -63,11 +63,11 @@ func (r *responseFeeder) close() {
 	r.cond.Broadcast()
 }
 
-// func (r *responseFeeder) isEmpty() bool {
-// 	r.mu.Lock()
-// 	defer r.mu.Unlock()
-// 	return len(r.queue) == 0
-// }
+func (r *responseFeeder) isEmpty() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.queue) == 0
+}
 
 // func (r *responseFeeder) waitUntilEmpty(ctx context.Context) error {
 // 	r.mu.Lock()
