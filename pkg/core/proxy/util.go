@@ -3,12 +3,16 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"time"
 
+	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	pUtil "go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
@@ -75,5 +79,33 @@ func (p *Proxy) globalPassThrough(ctx context.Context, client, dest net.Conn) er
 			}
 			return err
 		}
+	}
+}
+
+// peekN peeks up to n bytes from br with a read deadline on c, returns a COPY of bytes (non-consuming).
+func peekN(c net.Conn, br *bufio.Reader, n int, d time.Duration) ([]byte, error) {
+	if c == nil || br == nil || n <= 0 {
+		return nil, nil
+	}
+	_ = c.SetReadDeadline(time.Now().Add(d))
+	b, err := br.Peek(n)
+	_ = c.SetReadDeadline(time.Time{})
+	// Common non-fatal cases: EOF (empty), ErrBufferFull (we still got some), nil
+	if err != nil && err != io.EOF && !errors.Is(err, bufio.ErrBufferFull) {
+		return nil, err
+	}
+	cp := make([]byte, len(b))
+	copy(cp, b)
+	return cp, nil
+}
+
+// mkUtilConn builds a util.Conn from conn, br, logger.
+func mkUtilConn(conn net.Conn, br *bufio.Reader, logger *zap.Logger) *util.Conn {
+	var r io.Reader = br
+
+	return &util.Conn{
+		Conn:   conn,
+		Reader: r,
+		Logger: logger,
 	}
 }

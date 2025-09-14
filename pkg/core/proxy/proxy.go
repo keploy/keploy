@@ -38,6 +38,11 @@ import (
 	"go.uber.org/zap"
 )
 
+var (
+	ErrSrcConnTimeout = errors.New("timeout reading from source connection")
+	ErrDstConnTimeout = errors.New("timeout reading from destination connection")
+)
+
 type ParserPriority struct {
 	Priority   int
 	ParserType integrations.IntegrationType
@@ -305,50 +310,44 @@ func (p *Proxy) start(ctx context.Context, readyChan chan<- error) error {
 
 // handleConnection function executes the actual outgoing network call and captures/forwards the request and response messages.
 func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
-	//checking how much time proxy takes to execute the flow.
 	start := time.Now()
-
-	// making a new client connection id for each client connection
 	clientConnID := util.GetNextID()
 
 	defer func(start time.Time) {
-		duration := time.Since(start)
-		p.logger.Debug("time taken by proxy to execute the flow", zap.Any("Client ConnectionID", clientConnID), zap.Int64("Duration(ms)", duration.Milliseconds()))
+		p.logger.Debug("time taken by proxy to execute the flow",
+			zap.Any("Client ConnectionID", clientConnID),
+			zap.Int64("Duration(ms)", time.Since(start).Milliseconds()))
 	}(start)
 
-	// dstConn stores conn with actual destination for the outgoing network call
 	var dstConn net.Conn
-
-	//Dialing for tls conn
 	destConnID := util.GetNextID()
 
 	remoteAddr := srcConn.RemoteAddr().(*net.TCPAddr)
 	sourcePort := remoteAddr.Port
+	p.logger.Debug("Inside handleConnection of proxyServer",
+		zap.Int("source port", sourcePort),
+		zap.Int64("Time", time.Now().Unix()))
 
-	p.logger.Debug("Inside handleConnection of proxyServer", zap.Int("source port", sourcePort), zap.Int64("Time", time.Now().Unix()))
-
+	// Destination lookup
 	destInfo, err := p.DestInfo.Get(ctx, uint16(sourcePort))
 	if err != nil {
 		utils.LogError(p.logger, err, "failed to fetch the destination info", zap.Int("Source port", sourcePort))
 		return err
 	}
-
-	// releases the occupied source port when done fetching the destination info
-	err = p.DestInfo.Delete(ctx, uint16(sourcePort))
-	if err != nil {
+	if err := p.DestInfo.Delete(ctx, uint16(sourcePort)); err != nil {
 		utils.LogError(p.logger, err, "failed to delete the destination info", zap.Int("Source port", sourcePort))
 		return err
 	}
 
-	//get the session rule
+	// Session rule
 	rule, ok := p.sessions.Get(destInfo.AppID)
 	if !ok {
 		utils.LogError(p.logger, nil, "failed to fetch the session rule", zap.Uint64("AppID", destInfo.AppID))
-		return err
+		return errors.New("session rule not found")
 	}
 
+	// Build dstAddr
 	var dstAddr string
-
 	switch destInfo.Version {
 	case 4:
 		p.logger.Info("the destination is ipv4")
@@ -358,9 +357,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		p.logger.Info("the destination is ipv6")
 		dstAddr = fmt.Sprintf("[%v]:%v", util.ToIPv6AddressStr(destInfo.IPv6Addr), destInfo.Port)
 		p.logger.Debug("", zap.Any("DestIp6", destInfo.IPv6Addr), zap.Uint32("DestPort", destInfo.Port))
+	default:
+		return fmt.Errorf("unsupported ip version: %d", destInfo.Version)
 	}
 
-	// This is used to handle the parser errors
+	// Parser ctx / cleanup
 	parserErrGrp, parserCtx := errgroup.WithContext(ctx)
 	parserCtx = context.WithValue(parserCtx, models.ErrGroupKey, parserErrGrp)
 	parserCtx = context.WithValue(parserCtx, models.ClientConnectionIDKey, fmt.Sprint(clientConnID))
@@ -370,279 +371,246 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		parserCtxCancel()
 
 		if srcConn != nil {
-			err := srcConn.Close()
-			if err != nil {
-				if !strings.Contains(err.Error(), "use of closed network connection") {
-					utils.LogError(p.logger, err, "failed to close the source connection", zap.Any("clientConnID", clientConnID))
-				}
-				return
+			if err := srcConn.Close(); err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
+				utils.LogError(p.logger, err, "failed to close the source connection", zap.Any("clientConnID", clientConnID))
 			}
 		}
-
 		if dstConn != nil {
-			err = dstConn.Close()
-			if err != nil {
-				// Use string matching as a last resort to check for the specific error
-				if !strings.Contains(err.Error(), "use of closed network connection") {
-					// Log other errors
-					utils.LogError(p.logger, err, "failed to close the destination connection")
-				}
-				return
+			if err := dstConn.Close(); err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
+				utils.LogError(p.logger, err, "failed to close the destination connection")
 			}
 		}
-
-		err = parserErrGrp.Wait()
-		if err != nil {
+		if err := parserErrGrp.Wait(); err != nil {
 			utils.LogError(p.logger, err, "failed to handle the parser cleanUp")
 		}
 	}()
 
 	isGlobalPassthrough := (!rule.Mocking && rule.Mode == models.MODE_TEST) || (rule.Mode == models.MODE_RECORD && p.GlobalPassthrough)
-
-	//check for global passthrough in test mode
 	if isGlobalPassthrough {
-
-		dstConn, err = net.Dial("tcp", dstAddr)
+		dst, err := net.Dial("tcp", dstAddr)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
 			return err
 		}
-
-		err = p.globalPassThrough(parserCtx, srcConn, dstConn)
-		if err != nil {
+		dstConn = dst
+		if err := p.globalPassThrough(parserCtx, srcConn, dstConn); err != nil {
 			utils.LogError(p.logger, err, "failed to handle the global pass through")
 			return err
 		}
 		return nil
 	}
 
-	//checking for the destination port of "mysql"
-	if destInfo.Port == 3306 {
-		if rule.Mode != models.MODE_TEST {
-			dstConn, err = net.Dial("tcp", dstAddr)
-			if err != nil {
-				utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
-				return err
-			}
-
-			dstCfg := &models.ConditionalDstCfg{
-				Port: uint(destInfo.Port),
-			}
-			rule.DstCfg = dstCfg
-
-			// Record the outgoing message into a mock
-			err := p.Integrations[integrations.MYSQL].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
-			if err != nil {
-				utils.LogError(p.logger, err, "failed to record the outgoing message")
-				return err
-			}
-			return nil
-		}
-
-		m, ok := p.MockManagers.Load(destInfo.AppID)
-		if !ok {
-			utils.LogError(p.logger, nil, "failed to fetch the mock manager", zap.Uint64("AppID", destInfo.AppID))
-			return err
-		}
-
-		//mock the outgoing message
-		err := p.Integrations[integrations.MYSQL].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), rule.OutgoingOptions)
+	// Establish destination upfront (except in MODE_TEST)
+	if rule.Mode != models.MODE_TEST {
+		dst, err := net.Dial("tcp", dstAddr)
 		if err != nil {
-			utils.LogError(p.logger, err, "failed to mock the outgoing message")
+			utils.LogError(p.logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
 			return err
 		}
-		return nil
+		dstConn = dst
 	}
 
-	reader := bufio.NewReader(srcConn)
-	initialData := make([]byte, 5)
-	// reading the initial data from the client connection to determine if the connection is a TLS handshake
-	testBuffer, err := reader.Peek(len(initialData))
-	if err != nil {
-		if err == io.EOF && len(testBuffer) == 0 {
-			p.logger.Info("received EOF, closing conn", zap.Any("connectionID", clientConnID), zap.Error(err))
-			return nil
-		}
-		utils.LogError(p.logger, err, "failed to peek the request message in proxy", zap.Uint32("proxy port", p.Port))
-		return err
+	// SINGLE readers per side (no one reads raw net.Conn elsewhere)
+	srcBR := bufio.NewReader(srcConn)
+	var dstBR *bufio.Reader
+	if dstConn != nil {
+		dstBR = bufio.NewReader(dstConn)
 	}
 
-	multiReader := io.MultiReader(reader, srcConn)
-	srcConn = &util.Conn{
-		Conn:   srcConn,
-		Reader: multiReader,
-		Logger: p.logger,
+	// Peek both sides (bounded); larger than 10ms because server greetings can be slow
+	const sniffN = 5
+	const sniffDeadline = 300 * time.Millisecond
+
+	srcPeek, srcPeekErr := peekN(srcConn, srcBR, sniffN, sniffDeadline)
+	dstPeek, dstPeekErr := peekN(dstConn, dstBR, sniffN, sniffDeadline)
+
+	if srcPeekErr != nil && srcPeekErr != io.EOF {
+		p.logger.Debug("source peek error (non-fatal)", zap.Error(srcPeekErr))
+	}
+	if dstPeekErr != nil && dstPeekErr != io.EOF {
+		p.logger.Debug("destination peek error (non-fatal)", zap.Error(dstPeekErr))
 	}
 
-	isTLS := pTls.IsTLSHandshake(testBuffer)
-	if isTLS {
-		srcConn, err = pTls.HandleTLSConnection(ctx, p.logger, srcConn, rule.Backdate)
+	// Decide who spoke first (server-first if dst has data and src doesn’t)
+	isServerFirst := len(dstPeek) > 0 && len(srcPeek) == 0
+
+	// Build util.Conn ONCE per side; prepend peeked bytes back into the stream
+	srcUC := mkUtilConn(srcConn, srcBR, p.logger)
+	var dstUC *util.Conn
+	if dstConn != nil {
+		dstUC = mkUtilConn(dstConn, dstBR, p.logger)
+	}
+
+	// TLS detection on client-first only (we have client hello)
+	var isTLS bool
+	if !isServerFirst && len(srcPeek) != 0 && pTls.IsTLSHandshake(srcPeek) {
+		isTLS = true
+		dec, err := pTls.HandleTLSConnection(parserCtx, p.logger, srcUC, rule.Backdate)
 		if err != nil {
 			utils.LogError(p.logger, err, "failed to handle TLS conn")
 			return err
 		}
+		// Recreate single reader/conn for decrypted client side
+		srcConn = dec
+		srcBR = bufio.NewReader(dec)
+		srcUC = &util.Conn{Conn: dec, Reader: srcBR, Logger: p.logger}
 	}
 
-	clientID, ok := parserCtx.Value(models.ClientConnectionIDKey).(string)
-	if !ok {
-		utils.LogError(p.logger, err, "failed to fetch the client connection id")
-		return err
+	// Logger with IDs
+	clientID, _ := parserCtx.Value(models.ClientConnectionIDKey).(string)
+	destID, _ := parserCtx.Value(models.DestConnectionIDKey).(string)
+	logger := p.logger.With(
+		zap.String("Client ConnectionID", clientID),
+		zap.String("Destination ConnectionID", destID),
+		zap.String("Destination IP Address", dstAddr),
+		zap.String("Client IP Address", srcConn.RemoteAddr().String()),
+	)
+
+	// If TLS, or for HTTP completeness, read initial bytes from SAME reader path
+	var initial []byte
+	if !isServerFirst {
+		var err error
+		initial, err = util.ReadInitialBuf(parserCtx, p.logger, srcUC)
+		if err != nil && err != io.EOF {
+			utils.LogError(logger, err, "failed to read the initial buffer")
+			return err
+		}
 	}
-	destID, ok := parserCtx.Value(models.DestConnectionIDKey).(string)
-	if !ok {
-		utils.LogError(p.logger, err, "failed to fetch the destination connection id")
-		return err
-	}
 
-	logger := p.logger.With(zap.String("Client ConnectionID", clientID), zap.String("Destination ConnectionID", destID), zap.String("Destination IP Address", dstAddr), zap.String("Client IP Address", srcConn.RemoteAddr().String()))
-
-	var initialBuf []byte
-	// attempt to read conn until buffer is either filled or conn is closed
-	initialBuf, err = util.ReadInitialBuf(parserCtx, p.logger, srcConn)
-	if err != nil {
-		utils.LogError(logger, err, "failed to read the initial buffer")
-		return err
-	}
-
-	if util.IsHTTPReq(initialBuf) && !util.HasCompleteHTTPHeaders(initialBuf) {
-		// HTTP headers are never chunked according to the HTTP protocol,
-		// but at the TCP layer, we cannot be sure if we have received the entire
-		// header in the first buffer chunk. This is why we check if the headers are complete
-		// and read more data if needed.
-
-		// Some HTTP requests, like AWS SQS, may require special handling in Keploy Enterprise.
-		// These cases may send partial headers in multiple chunks, so we need to read until
-		// we get the complete headers.
-
+	// HTTP header completion (still on the SAME srcUC)
+	if util.IsHTTPReq(initial) && !util.HasCompleteHTTPHeaders(initial) {
 		logger.Info("Partial HTTP headers detected, reading more data to get complete headers")
-
-		// Read more data from the TCP connection to get the complete HTTP headers.
-		headerBuf, err := util.ReadHTTPHeadersUntilEnd(parserCtx, p.logger, srcConn)
+		more, err := util.ReadHTTPHeadersUntilEnd(parserCtx, p.logger, srcUC)
 		if err != nil {
-			// Log the error if we fail to read the complete HTTP headers.
 			utils.LogError(logger, err, "failed to read the complete HTTP headers from client")
 			return err
 		}
-		// Append the additional data to the initial buffer.
-		initialBuf = append(initialBuf, headerBuf...)
+		initial = append(initial, more...)
+	}
+	// If we accumulated 'initial', prepend it back for parsers
+	if len(initial) > 0 {
+		srcUC = &util.Conn{
+			Conn:   srcUC.Conn,
+			Reader: io.MultiReader(bytes.NewReader(initial), srcBR),
+			Logger: p.logger,
+		}
 	}
 
-	//update the src connection to have the initial buffer
-	srcConn = &util.Conn{
-		Conn:   srcConn,
-		Reader: io.MultiReader(bytes.NewReader(initialBuf), srcConn),
-		Logger: p.logger,
-	}
-
-	dstCfg := &models.ConditionalDstCfg{
-		Port: uint(destInfo.Port),
-	}
-
-	//make new connection to the destination server
+	// Prepare dst config (plain or TLS)
+	dstCfg := &models.ConditionalDstCfg{Port: uint(destInfo.Port)}
 	if isTLS {
-
-		// get the destinationUrl from the map for the tls connection
-		url, ok := pTls.SrcPortToDstURL.Load(sourcePort)
+		// map client sourcePort -> SNI/host
+		urlVal, ok := pTls.SrcPortToDstURL.Load(sourcePort)
 		if !ok {
-			utils.LogError(logger, err, "failed to fetch the destination url")
-			return err
+			utils.LogError(logger, nil, "failed to fetch the destination url")
+			return errors.New("tls dst url not found")
 		}
-		//type case the dstUrl to string
-		dstURL, ok := url.(string)
+		dstURL, ok := urlVal.(string)
 		if !ok {
-			utils.LogError(logger, err, "failed to type cast the destination url")
-			return err
+			utils.LogError(logger, nil, "failed to type cast the destination url")
+			return errors.New("tls dst url wrong type")
 		}
-
-		logger.Debug("the external call is tls-encrypted", zap.Bool("isTLS", isTLS))
 		cfg := &tls.Config{
 			InsecureSkipVerify: true,
 			ServerName:         dstURL,
 		}
-
 		addr := fmt.Sprintf("%v:%v", dstURL, destInfo.Port)
+
 		if rule.Mode != models.MODE_TEST {
-			dstConn, err = tls.Dial("tcp", addr, cfg)
+			tlsDst, err := tls.Dial("tcp", addr, cfg)
 			if err != nil {
 				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
 				return err
 			}
+			dstConn = tlsDst
+			dstBR = bufio.NewReader(tlsDst)
+			// rebuild dstUC preserving any earlier peek (usually empty under TLS)
+			dstUC = &util.Conn{Conn: tlsDst, Reader: dstBR, Logger: p.logger}
 		}
-
 		dstCfg.TLSCfg = cfg
 		dstCfg.Addr = addr
-
 	} else {
-		if rule.Mode != models.MODE_TEST {
-			dstConn, err = net.Dial("tcp", dstAddr)
-			if err != nil {
-				utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Uint32("proxy port", p.Port), zap.String("server address", dstAddr))
-				return err
-			}
-		}
 		dstCfg.Addr = dstAddr
 	}
 
-	// get the mock manager for the current app
+	// Mock manager (if needed)
 	m, ok := p.MockManagers.Load(destInfo.AppID)
 	if !ok && rule.Mode == models.MODE_TEST {
-		utils.LogError(logger, err, "failed to fetch the mock manager", zap.Uint64("AppID", destInfo.AppID))
-		return err
+		utils.LogError(logger, nil, "failed to fetch the mock manager", zap.Uint64("AppID", destInfo.AppID))
+		return errors.New("mock manager not found")
 	}
 
-	generic := true
+	// Parser selection:
+	// - server-first: decide using dstPeek (e.g., MySQL greeting)
+	// - client-first: decide using 'initial' (or srcPeek when initial empty)
+	var (
+		generic       = true
+		matchedParser integrations.Integrations
+		parserType    integrations.IntegrationType
+	)
 
-	var matchedParser integrations.Integrations
-	var parserType integrations.IntegrationType
-
-	//Checking for all the parsers according to their priority.
-	for _, parserPair := range p.integrationsPriority { // Iterate over ordered priority list
-		parser, exists := p.Integrations[parserPair.ParserType]
-		if !exists {
-			continue // Skip if parser not found
+	for _, pr := range p.integrationsPriority {
+		parser := p.Integrations[pr.ParserType]
+		if parser == nil {
+			continue
 		}
+		p.logger.Info("Checking for the parser",
+			zap.String("ParserType", string(pr.ParserType)),
+			zap.Bool("isServerFirst", isServerFirst))
 
-		p.logger.Debug("Checking for the parser", zap.String("ParserType", string(parserPair.ParserType)))
-		if parser.MatchType(parserCtx, initialBuf) {
+		if pr.ParserType == integrations.MYSQL && isServerFirst {
+			// MySQL greeting is server-first (0x0a for 5.x+ etc.)
 			matchedParser = parser
-			parserType = parserPair.ParserType
+			parserType = pr.ParserType
+			generic = false
+			logger.Debug("Matched MySQL protocol based on server greeting")
+			break
+		}
+		// client-first or other protocols
+		cand := initial
+		if len(cand) == 0 {
+			cand = srcPeek
+		}
+		if parser.MatchType(parserCtx, cand) {
+			matchedParser = parser
+			parserType = pr.ParserType
 			generic = false
 			break
 		}
 	}
 
+	// Dispatch
 	if !generic {
-		p.logger.Debug("The external dependency is supported. Hence using the parser", zap.String("ParserType", string(parserType)))
+		p.logger.Info("The external dependency is supported. Hence using the parser",
+			zap.String("ParserType", string(parserType)),
+			zap.Bool("isServerFirst", isServerFirst))
+
 		switch rule.Mode {
 		case models.MODE_RECORD:
-			err := matchedParser.RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
-			if err != nil {
+			if err := matchedParser.RecordOutgoing(parserCtx, srcUC, dstUC, rule.MC, rule.OutgoingOptions); err != nil {
 				utils.LogError(logger, err, "failed to record the outgoing message")
 				return err
 			}
 		case models.MODE_TEST:
-			err := matchedParser.MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
-			if err != nil && err != io.EOF {
+			if err := matchedParser.MockOutgoing(parserCtx, srcUC, dstCfg, m.(*MockManager), rule.OutgoingOptions); err != nil && err != io.EOF {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
 				return err
 			}
 		}
+		return nil
 	}
 
-	if generic {
-		logger.Info("The external dependency is not supported. Hence using generic parser")
-		if rule.Mode == models.MODE_RECORD {
-			err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, srcConn, dstConn, rule.MC, rule.OutgoingOptions)
-			if err != nil {
-				utils.LogError(logger, err, "failed to record the outgoing message")
-				return err
-			}
-		} else {
-			err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
-			if err != nil {
-				utils.LogError(logger, err, "failed to mock the outgoing message")
-				return err
-			}
+	// Fallback generic
+	logger.Info("The external dependency is not supported. Hence using generic parser")
+	if rule.Mode == models.MODE_RECORD {
+		if err := p.Integrations[integrations.GENERIC].RecordOutgoing(parserCtx, srcUC, dstUC, rule.MC, rule.OutgoingOptions); err != nil {
+			utils.LogError(logger, err, "failed to record the outgoing message")
+			return err
+		}
+	} else {
+		if err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcUC, dstCfg, m.(*MockManager), rule.OutgoingOptions); err != nil && err != io.EOF {
+			utils.LogError(logger, err, "failed to mock the outgoing message")
+			return err
 		}
 	}
 	return nil
