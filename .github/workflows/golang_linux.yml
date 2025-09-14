@@ -7,7 +7,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
+        app:
+          - name: gin-mongo
+            path: gin-mongo
+            script_dir: gin_mongo
+          - name: echo-mysql
+            path: echo-mysql
+            script_dir: echo_mysql
+          - name: http-pokeapi
+            path: http-pokeapi
+            script_dir: http_pokeapi
+        config:
           - job: record_latest_replay_build
             record_src: latest
             replay_src: build
@@ -17,7 +27,7 @@ jobs:
           - job: record_build_replay_build
             record_src: build
             replay_src: build
-    name: ${{ matrix.job }}
+    name: ${{ matrix.app.name }} (${{ matrix.config.job }})
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -25,22 +35,22 @@ jobs:
       - id: record
         uses: ./.github/actions/download-binary
         with:
-          src: ${{ matrix.record_src }}
+          src: ${{ matrix.config.record_src }}
 
       - id: replay
         uses: ./.github/actions/download-binary
         with:
-          src: ${{ matrix.replay_src }}
+          src: ${{ matrix.config.replay_src }}
 
       - name: Checkout the samples-go repository
         uses: actions/checkout@v4
         with:
           repository: keploy/samples-go
           path: samples-go
-      - name: Run samples-go application
+      - name: Run ${{ matrix.app.name }} application
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
         run: |
-          cd samples-go/gin-mongo
-          source ./../../.github/workflows/test_workflow_scripts/golang-linux.sh
+          cd samples-go/${{ matrix.app.path }}
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-linux.sh

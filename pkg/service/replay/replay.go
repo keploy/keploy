@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -235,6 +236,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	// setting the appId for the first test-set.
 	inst.AppID = r.config.AppID
 	for i, testSet := range testSets {
+		var backupCreated bool
 		testSetResult = false
 
 		// Reload hooks before each test set if this is not the first test set
@@ -418,6 +420,13 @@ func (r *Replayer) Start(ctx context.Context) error {
 			if len(failedTcIDs) == 0 {
 				// if no testcase failed in this attempt move to next attempt
 				continue
+			}
+
+			if !backupCreated {
+				if err := r.createBackup(testSet); err != nil {
+					utils.LogError(r.logger, err, "failed to create backup, proceeding with test case deletion", zap.String("testSet", testSet))
+				}
+				backupCreated = true
 			}
 
 			r.logger.Info("deleting failing testcases", zap.String("testSet", testSet), zap.Strings("testCaseIDs", failedTcIDs))
@@ -1017,7 +1026,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 				continue
 			}
-			testPass, testResult = r.compareHTTPResp(testCase, httpResp, testSetID)
+			testPass, testResult = r.CompareHTTPResp(testCase, httpResp, testSetID)
 
 		case models.GRPC_EXPORT:
 			grpcResp, ok := resp.(*models.GrpcResp)
@@ -1033,7 +1042,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 				continue
 			}
-			testPass, testResult = r.compareGRPCResp(testCase, grpcResp, testSetID)
+			testPass, testResult = r.CompareGRPCResp(testCase, grpcResp, testSetID)
 		}
 
 		if !testPass {
@@ -1319,7 +1328,7 @@ func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testS
 	return status, nil
 }
 
-func (r *Replayer) compareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string) (bool, *models.Result) {
+func (r *Replayer) CompareHTTPResp(tc *models.TestCase, actualResponse *models.HTTPResp, testSetID string) (bool, *models.Result) {
 	noiseConfig := r.config.Test.GlobalNoise.Global
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
@@ -1327,7 +1336,7 @@ func (r *Replayer) compareHTTPResp(tc *models.TestCase, actualResponse *models.H
 	return httpMatcher.Match(tc, actualResponse, noiseConfig, r.config.Test.IgnoreOrdering, r.logger)
 }
 
-func (r *Replayer) compareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string) (bool, *models.Result) {
+func (r *Replayer) CompareGRPCResp(tc *models.TestCase, actualResp *models.GrpcResp, testSetID string) (bool, *models.Result) {
 	noiseConfig := r.config.Test.GlobalNoise.Global
 	if tsNoise, ok := r.config.Test.GlobalNoise.Testsets[testSetID]; ok {
 		noiseConfig = LeftJoinNoise(r.config.Test.GlobalNoise.Global, tsNoise)
@@ -1440,6 +1449,35 @@ func (r *Replayer) RunApplication(ctx context.Context, appID uint64, opts models
 
 func (r *Replayer) GetTestSetConf(ctx context.Context, testSet string) (*models.TestSet, error) {
 	return r.testSetConf.Read(ctx, testSet)
+}
+
+// UpdateTestSetTemplate writes the updated template values to the test-set's config.
+// It preserves existing pre/post scripts, secret, mock registry and metadata fields.
+func (r *Replayer) UpdateTestSetTemplate(ctx context.Context, testSetID string, template map[string]interface{}) error {
+	if len(template) == 0 { // nothing to persist
+		return nil
+	}
+	existing, err := r.testSetConf.Read(ctx, testSetID)
+	if err != nil {
+		// If file missing we still attempt to write minimal config.
+		r.logger.Debug("failed reading existing test-set config while updating template; will create new", zap.String("testSetID", testSetID), zap.Error(err))
+	}
+	ts := &models.TestSet{}
+	if existing != nil {
+		ts.PreScript = existing.PreScript
+		ts.PostScript = existing.PostScript
+		ts.Secret = existing.Secret
+		ts.MockRegistry = existing.MockRegistry
+		ts.Metadata = existing.Metadata
+	} else {
+		ts.Metadata = map[string]interface{}{}
+	}
+	ts.Template = template
+	if err := r.testSetConf.Write(ctx, testSetID, ts); err != nil {
+		utils.LogError(r.logger, err, "failed to write updated template map", zap.String("testSetID", testSetID))
+		return err
+	}
+	return nil
 }
 
 func (r *Replayer) DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error) {
@@ -1630,7 +1668,7 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 			Body:       errorMessage,
 		}
 
-		_, result = r.compareHTTPResp(testCase, actualResponse, testSetID)
+		_, result = r.CompareHTTPResp(testCase, actualResponse, testSetID)
 
 		testCaseResult.Req = models.HTTPReq{
 			Method:     testCase.HTTPReq.Method,
@@ -1661,7 +1699,7 @@ func (r *Replayer) CreateFailedTestResult(testCase *models.TestCase, testSetID s
 			},
 		}
 
-		_, result = r.compareGRPCResp(testCase, actualResponse, testSetID)
+		_, result = r.CompareGRPCResp(testCase, actualResponse, testSetID)
 
 		testCaseResult.GrpcReq = testCase.GrpcReq
 		testCaseResult.GrpcRes = *actualResponse
@@ -1808,5 +1846,84 @@ func (r *Replayer) UploadMocks(ctx context.Context) error {
 
 	}
 
+	return nil
+}
+
+// createBackup creates a timestamped backup of a test set directory before modification.
+func (r *Replayer) createBackup(testSetID string) error {
+	srcPath := filepath.Join(r.config.Path, testSetID)
+	timestamp := time.Now().Format("20060102T150405")
+	backupDestPath := filepath.Join(srcPath, ".backup", timestamp)
+
+	if _, err := os.Stat(srcPath); os.IsNotExist(err) {
+		return fmt.Errorf("source directory for backup does not exist: %s", srcPath)
+	}
+
+	if err := os.MkdirAll(backupDestPath, 0755); err != nil {
+		return fmt.Errorf("failed to create backup directory: %w", err)
+	}
+
+	err := r.copyDirContents(srcPath, backupDestPath)
+	if err != nil {
+		// Clean up the failed backup attempt
+		_ = os.RemoveAll(backupDestPath)
+		return fmt.Errorf("failed to copy contents for backup: %w", err)
+	}
+
+	r.logger.Info("Successfully created a backup of the test set before modification.", zap.String("testSet", testSetID), zap.String("location", backupDestPath))
+	return nil
+}
+
+// copyDirContents recursively copies contents from src to dst, excluding the .backup directory.
+func (r *Replayer) copyDirContents(src, dst string) error {
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		srcPath := filepath.Join(src, entry.Name())
+		dstPath := filepath.Join(dst, entry.Name())
+
+		// CRITICAL: Exclude the backup directory itself to prevent recursion.
+		if entry.Name() == ".backup" {
+			continue
+		}
+
+		fileInfo, err := os.Stat(srcPath)
+		if err != nil {
+			return err
+		}
+
+		if fileInfo.IsDir() {
+			if err := os.MkdirAll(dstPath, fileInfo.Mode()); err != nil {
+				return err
+			}
+			if err := r.copyDirContents(srcPath, dstPath); err != nil {
+				return err
+			}
+		} else {
+			// It's a file, copy it.
+			srcFile, err := os.Open(srcPath)
+			if err != nil {
+				return err
+			}
+			defer srcFile.Close()
+
+			dstFile, err := os.Create(dstPath)
+			if err != nil {
+				return err
+			}
+			defer dstFile.Close()
+
+			if _, err := io.Copy(dstFile, srcFile); err != nil {
+				return err
+			}
+
+			if err := os.Chmod(dstPath, fileInfo.Mode()); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
