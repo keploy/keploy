@@ -434,6 +434,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// Decide who spoke first (server-first if dst has data and src doesn’t)
 	isServerFirst := len(dstPeek) > 0 && len(srcPeek) == 0
 
+	// In test mode, we replay the dest packet that's why we can judge only based on srcPeek
+	if rule.Mode == models.MODE_TEST {
+		isServerFirst = len(srcPeek) == 0
+	}
+
 	// Build util.Conn ONCE per side; prepend peeked bytes back into the stream
 	srcUC := mkUtilConn(srcConn, srcBR, p.logger)
 	var dstUC *util.Conn
