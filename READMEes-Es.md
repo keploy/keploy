@@ -3,12 +3,13 @@
 </p>
 <h3 align="center">
 <b>
-⚡️ Backend tests faster than unit-tests, from user traffic ⚡️
+⚡️ Pruebas de backend más rápidas que los unit tests, a partir del tráfico de usuarios ⚡️
 </b>
-</h3 >
+</h3>
 <p align="center">
-🌟 The must-have tool for developers in the AI-Gen era 🌟
+🌟 La herramienta imprescindible para desarrolladores en la era de la IA-Gen 🌟
 </p>
+
 
 ---
 
