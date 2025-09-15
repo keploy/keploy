@@ -1466,7 +1466,7 @@ func (r *Replayer) FilterAndSetMocksWithFallback(ctx context.Context, appID uint
 		return nil
 	}
 
-	if useMappingBased {
+	if useMappingBased && len(expectedMockMapping) > 0 {
 		r.logger.Debug("Using mapping-based mock filtering",
 			zap.Strings("expectedMocks", expectedMockMapping))
 		return r.FilterAndSetMocksMapping(ctx, appID, filtered, unfiltered, expectedMockMapping, totalConsumedMocks)
