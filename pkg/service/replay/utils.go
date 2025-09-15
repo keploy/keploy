@@ -7,6 +7,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/olekukonko/tablewriter"
@@ -156,6 +157,7 @@ type TestFailure struct {
 }
 
 type TestFailureStore struct {
+	mu       sync.Mutex
 	failures []TestFailure
 }
 
@@ -166,6 +168,9 @@ func NewTestFailureStore() *TestFailureStore {
 }
 
 func (tfs *TestFailureStore) AddFailure(testSetID, testID string, expectedMocks, actualMocks []string) {
+	tfs.mu.Lock()
+	defer tfs.mu.Unlock()
+
 	failure := TestFailure{
 		TestSetID:     testSetID,
 		TestID:        testID,
@@ -176,6 +181,8 @@ func (tfs *TestFailureStore) AddFailure(testSetID, testID string, expectedMocks,
 }
 
 func (tfs *TestFailureStore) AddProxyErrorForTest(testSetID string, testCaseID string, proxyErr models.ParserError) {
+	tfs.mu.Lock()
+	defer tfs.mu.Unlock()
 
 	failure := TestFailure{
 		TestSetID:     testSetID,
@@ -188,7 +195,13 @@ func (tfs *TestFailureStore) AddProxyErrorForTest(testSetID string, testCaseID s
 }
 
 func (tfs *TestFailureStore) GetFailures() []TestFailure {
-	return tfs.failures
+	tfs.mu.Lock()
+	defer tfs.mu.Unlock()
+
+	// Return a copy to prevent external modifications
+	failures := make([]TestFailure, len(tfs.failures))
+	copy(failures, tfs.failures)
+	return failures
 }
 
 type MockDifference struct {
@@ -255,6 +268,9 @@ func CompareMockSlices(expected, actual []string) []MockDifference {
 
 // PrintFailuresTable prints all failures in a formatted table
 func (tfs *TestFailureStore) PrintFailuresTable() {
+	tfs.mu.Lock()
+	defer tfs.mu.Unlock()
+
 	if len(tfs.failures) == 0 {
 		fmt.Println("No test failures recorded.")
 		return

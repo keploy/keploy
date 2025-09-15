@@ -75,7 +75,8 @@ func (db *MappingDb) InsertMappings(ctx context.Context, testSetID string, testM
 }
 
 // GetMappings reads test-mock mappings from a YAML file
-func (db *MappingDb) GetMappings(ctx context.Context, testSetID string) (map[string][]string, error) {
+// Returns: testMockMappings, mappingFilePresent, error
+func (db *MappingDb) GetMappings(ctx context.Context, testSetID string) (map[string][]string, bool, error) {
 	// Create the file path
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
@@ -89,14 +90,14 @@ func (db *MappingDb) GetMappings(ctx context.Context, testSetID string) (map[str
 		utils.LogError(db.logger, err, "failed to check if mapping file exists",
 			zap.String("path", mappingPath),
 			zap.String("fileName", fileName))
-		return nil, err
+		return nil, false, err
 	}
 
 	if !exists {
 		db.logger.Debug("Mapping file does not exist, returning empty mappings",
 			zap.String("testSetID", testSetID),
 			zap.String("path", mappingPath))
-		return make(map[string][]string), nil
+		return make(map[string][]string), false, nil
 	}
 
 	// Read the file
@@ -106,7 +107,7 @@ func (db *MappingDb) GetMappings(ctx context.Context, testSetID string) (map[str
 			zap.String("testSetID", testSetID),
 			zap.String("path", mappingPath),
 			zap.String("fileName", fileName))
-		return nil, err
+		return nil, false, err
 	}
 
 	// Decode the YAML data
@@ -114,16 +115,26 @@ func (db *MappingDb) GetMappings(ctx context.Context, testSetID string) (map[str
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to decode mapping from yaml",
 			zap.String("testSetID", testSetID))
-		return nil, err
+		return nil, false, err
 	}
 
 	// Convert to map format
 	testMockMappings := ConvertMappingToTestMockMappings(mapping, db.logger)
 
+	// Check if we have any meaningful mappings (non-empty test cases with mocks)
+	hasMeaningfulMappings := false
+	for _, mocks := range testMockMappings {
+		if len(mocks) > 0 {
+			hasMeaningfulMappings = true
+			break
+		}
+	}
+
 	db.logger.Info("Successfully loaded test-mock mappings",
 		zap.String("testSetID", testSetID),
 		zap.String("filePath", filepath.Join(mappingPath, fileName+".yaml")),
-		zap.Int("numTests", len(testMockMappings)))
+		zap.Int("numTests", len(testMockMappings)),
+		zap.Bool("hasMeaningfulMappings", hasMeaningfulMappings))
 
-	return testMockMappings, nil
+	return testMockMappings, hasMeaningfulMappings, nil
 }

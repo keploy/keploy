@@ -214,7 +214,7 @@ func (ys *MockYaml) GetFilteredMocks(ctx context.Context, testSetID string, afte
 		}
 	}
 
-	filtered := pkg.FilterTcsMocks(ctx, ys.Logger, tcsMocks, afterTime, beforeTime)
+	filtered := pkg.FilterTcsMocksMapping(ctx, ys.Logger, tcsMocks, []string{})
 	return filtered, nil
 }
 
@@ -279,7 +279,7 @@ func (ys *MockYaml) GetUnFilteredMocks(ctx context.Context, testSetID string, af
 		}
 	}
 
-	unfiltered := pkg.FilterConfigMocks(ctx, ys.Logger, configMocks, afterTime, beforeTime)
+	unfiltered := pkg.FilterConfigMocksMapping(ctx, ys.Logger, configMocks, []string{})
 
 	return unfiltered, nil
 }

@@ -786,22 +786,43 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	cmdType := utils.CmdType(r.config.CommandType)
 	var userIP string
 
-	filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now())
+	// Get all mocks for mapping-based filtering
+	filteredMocks, unfilteredMocks, err := r.GetAllMocks(ctx, testSetID)
 	if err != nil {
 		return models.TestSetStatusFailed, err
 	}
 
-	// Try to get expected test-mock mappings from mapping file first
+	// Check if mappings are present and decide filtering strategy
 	var expectedTestMockMappings map[string][]string
+	var useMappingBased bool
+
 	if r.mappingDB != nil {
-		expectedTestMockMappings, err = r.mappingDB.GetMappings(ctx, testSetID)
+		// Get mappings and check if meaningful mappings are present
+		var hasMeaningfulMappings bool
+		expectedTestMockMappings, hasMeaningfulMappings, err = r.mappingDB.GetMappings(ctx, testSetID)
 		if err != nil {
-			r.logger.Warn("Failed to read mappings from file, falling back to mock metadata",
+			r.logger.Warn("Failed to get mappings, falling back to timestamp-based filtering",
 				zap.String("testSetID", testSetID),
 				zap.Error(err))
+			useMappingBased = false
+			expectedTestMockMappings = make(map[string][]string)
+		} else if hasMeaningfulMappings {
+			// Meaningful mappings are present, use mapping-based approach
+			r.logger.Info("Using mapping-based mock filtering strategy",
+				zap.String("testSetID", testSetID),
+				zap.Int("totalMappings", len(expectedTestMockMappings)))
+			useMappingBased = true
+		} else {
+			// No meaningful mappings present, use timestamp-based approach
+			r.logger.Info("No meaningful mappings found, using timestamp-based mock filtering strategy (legacy approach)",
+				zap.String("testSetID", testSetID))
+			useMappingBased = false
 			expectedTestMockMappings = make(map[string][]string)
 		}
 	} else {
+		// No mapping DB available, use timestamp-based approach
+		r.logger.Debug("No mapping database available, using timestamp-based mock filtering strategy")
+		useMappingBased = false
 		expectedTestMockMappings = make(map[string][]string)
 	}
 
@@ -820,8 +841,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		return models.TestSetStatusFailed, err
 	}
 
-	// filtering is redundant, but we need to set the mocks
-	err = r.FilterAndSetMocks(ctx, appID, filteredMocks, unfilteredMocks, models.BaseTime, time.Now(), totalConsumedMocks)
+	// Initial mock setup - use empty mapping for initial setup
+	// For the initial setup, we always use mapping-based with empty mapping to get all unfiltered mocks
+	err = r.FilterAndSetMocksWithFallback(ctx, appID, filteredMocks, unfilteredMocks, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, useMappingBased)
 	if err != nil {
 		return models.TestSetStatusFailed, err
 	}
@@ -982,7 +1004,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		var testPass bool
 		var loopErr error
 
-		err = r.FilterAndSetMocks(runTestSetCtx, appID, filteredMocks, unfilteredMocks, testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp, totalConsumedMocks)
+		err = r.FilterAndSetMocksWithFallback(runTestSetCtx, appID, filteredMocks, unfilteredMocks, expectedTestMockMappings[testCase.Name], testCase.HTTPReq.Timestamp, testCase.HTTPResp.Timestamp, totalConsumedMocks, useMappingBased)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to filter and set mocks")
 			break
@@ -1394,6 +1416,64 @@ func (r *Replayer) FilterAndSetMocks(ctx context.Context, appID uint64, filtered
 	}
 
 	return nil
+}
+
+func (r *Replayer) FilterAndSetMocksMapping(ctx context.Context, appID uint64, filtered, unfiltered []*models.Mock, mapping []string, totalConsumedMocks map[string]models.MockState) error {
+	if !r.instrument {
+		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
+		return nil
+	}
+
+	filtered = pkg.FilterTcsMocksMapping(ctx, r.logger, filtered, mapping)
+	unfiltered = pkg.FilterConfigMocksMapping(ctx, r.logger, unfiltered, mapping)
+
+	filterOutDeleted := func(in []*models.Mock) []*models.Mock {
+		out := make([]*models.Mock, 0, len(in))
+		for _, m := range in {
+			// treat empty/missing names as never consumed
+			if m == nil || m.Name == "" {
+				out = append(out, m)
+				continue
+			}
+			// we are picking mocks that are not consumed till now (not present in map),
+			// and, mocks that are updated.
+			if k, ok := totalConsumedMocks[m.Name]; !ok || k.Usage != models.Deleted {
+				if ok {
+					m.TestModeInfo.IsFiltered = k.IsFiltered
+					m.TestModeInfo.SortOrder = k.SortOrder
+				}
+				out = append(out, m)
+			}
+		}
+		return out
+	}
+
+	filtered = filterOutDeleted(filtered)
+	unfiltered = filterOutDeleted(unfiltered)
+
+	err := r.instrumentation.SetMocks(ctx, appID, filtered, unfiltered)
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to set mocks")
+		return err
+	}
+
+	return nil
+}
+
+func (r *Replayer) FilterAndSetMocksWithFallback(ctx context.Context, appID uint64, filtered, unfiltered []*models.Mock, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool) error {
+	if !r.instrument {
+		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
+		return nil
+	}
+
+	if useMappingBased {
+		r.logger.Debug("Using mapping-based mock filtering",
+			zap.Strings("expectedMocks", expectedMockMapping))
+		return r.FilterAndSetMocksMapping(ctx, appID, filtered, unfiltered, expectedMockMapping, totalConsumedMocks)
+	} else {
+		return r.FilterAndSetMocks(ctx, appID, filtered, unfiltered, afterTime, beforeTime, totalConsumedMocks)
+	}
+
 }
 
 func (r *Replayer) GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error) {
@@ -2030,4 +2110,18 @@ func (r *Replayer) monitorProxyErrors(ctx context.Context, testSetID string, tes
 
 		}
 	}
+}
+
+func (r *Replayer) GetAllMocks(ctx context.Context, testSetID string) ([]*models.Mock, []*models.Mock, error) {
+	filtered, err := r.mockDB.GetFilteredMocks(ctx, testSetID, models.BaseTime, time.Now())
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to get filtered mocks")
+		return nil, nil, err
+	}
+	unfiltered, err := r.mockDB.GetUnFilteredMocks(ctx, testSetID, models.BaseTime, time.Now())
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to get unfiltered mocks")
+		return nil, nil, err
+	}
+	return filtered, unfiltered, nil
 }

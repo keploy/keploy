@@ -107,5 +107,5 @@ type InstrumentState struct {
 
 type MappingDB interface {
 	InsertMappings(ctx context.Context, testSetID string, testMockMappings map[string][]string) error
-	GetMappings(ctx context.Context, testSetID string) (map[string][]string, error)
+	GetMappings(ctx context.Context, testSetID string) (map[string][]string, bool, error)
 }
