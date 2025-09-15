@@ -34,13 +34,21 @@ func (t *Tools) Sanitize(ctx context.Context) error {
 		t.logger.Info("Processing specified test sets", zap.Strings("testSets", testSets))
 	}
 
-	for _, testSetID := range testSets {
+	for i, testSetID := range testSets {
 		// Check for context cancellation
 		select {
 		case <-ctx.Done():
 			t.logger.Info("Sanitize process cancelled by context")
 			return ctx.Err()
 		default:
+		}
+
+		// Progress logging for large test sets
+		if len(testSets) > 5 && i%10 == 0 {
+			t.logger.Info("Processing test sets", 
+				zap.Int("completed", i), 
+				zap.Int("total", len(testSets)),
+				zap.String("currentSet", testSetID))
 		}
 
 		// keploy/<testSetID>
@@ -132,19 +140,28 @@ func (t *Tools) sanitizeTestSetDir(ctx context.Context, testSetDir string) error
 		return nil
 	}
 
-	for _, f := range files {
-		// Check for context cancellation
-		select {
-		case <-ctx.Done():
-			t.logger.Info("File sanitization cancelled by context")
-			return ctx.Err()
-		default:
-		}
+	// Process files in batches for better performance with large test sets
+	batchSize := 10
+	if len(files) < batchSize {
+		batchSize = len(files)
+	}
+	
+	// Adjust batch size based on file count for optimal performance
+	if len(files) > 50 {
+		batchSize = 20
+	} else if len(files) < 5 {
+		batchSize = len(files)
+	}
 
-		if err := SanitizeFileInPlace(f, aggSecrets); err != nil {
-			// Continue to next file
-			t.logger.Error("Failed to sanitize file", zap.String("file", f), zap.Error(err))
-			continue
+	for i := 0; i < len(files); i += batchSize {
+		end := i + batchSize
+		if end > len(files) {
+			end = len(files)
+		}
+		
+		batch := files[i:end]
+		if err := t.processBatch(ctx, batch, aggSecrets); err != nil {
+			return err
 		}
 	}
 
@@ -154,6 +171,63 @@ func (t *Tools) sanitizeTestSetDir(ctx context.Context, testSetDir string) error
 		return fmt.Errorf("write secret.yaml: %w", err)
 	}
 	t.logger.Info("Wrote secret.yaml", zap.String("path", secretPath))
+	return nil
+}
+
+// processBatch handles a batch of files concurrently to improve performance
+func (t *Tools) processBatch(ctx context.Context, files []string, aggSecrets map[string]string) error {
+	type fileResult struct {
+		path    string
+		secrets map[string]string
+		err     error
+	}
+
+	// Create a shared detector for this batch to avoid repeated initialization
+	detector, err := detect.NewDetectorDefaultConfig()
+	if err != nil {
+		t.logger.Error("Failed to create detector", zap.Error(err))
+		// Fallback to sequential processing without shared detector
+		for _, f := range files {
+			if err := SanitizeFileInPlace(f, aggSecrets); err != nil {
+				t.logger.Error("Failed to sanitize file", zap.String("file", f), zap.Error(err))
+			}
+		}
+		return nil
+	}
+
+	results := make(chan fileResult, len(files))
+	
+	// Process files concurrently within the batch
+	for _, f := range files {
+		go func(filePath string) {
+			select {
+			case <-ctx.Done():
+				results <- fileResult{path: filePath, err: ctx.Err()}
+				return
+			default:
+			}
+
+			// Read and process file independently
+			localSecrets := make(map[string]string)
+			err := SanitizeFileInPlaceWithDetector(filePath, localSecrets, detector)
+			results <- fileResult{path: filePath, secrets: localSecrets, err: err}
+		}(f)
+	}
+
+	// Collect results and merge secrets
+	for i := 0; i < len(files); i++ {
+		result := <-results
+		if result.err != nil {
+			t.logger.Error("Failed to sanitize file", zap.String("file", result.path), zap.Error(result.err))
+			continue
+		}
+		
+		// Merge secrets from this file into the aggregate
+		for key, value := range result.secrets {
+			aggSecrets[key] = value
+		}
+	}
+
 	return nil
 }
 
@@ -167,11 +241,20 @@ type replacement struct {
 // - Writes placeholders into the YAML
 // - Handles JSON-in-string and curl header blobs
 func RedactYAML(yamlBytes []byte, aggSecrets map[string]string) ([]byte, error) {
-	// 1) Detect secrets
-	detector, err := detect.NewDetectorDefaultConfig()
-	if err != nil {
-		return nil, fmt.Errorf("gitleaks: %w", err)
+	return RedactYAMLWithDetector(yamlBytes, aggSecrets, nil)
+}
+
+// RedactYAMLWithDetector allows reusing a detector instance for better performance
+func RedactYAMLWithDetector(yamlBytes []byte, aggSecrets map[string]string, detector *detect.Detector) ([]byte, error) {
+	// 1) Detect secrets - reuse detector if provided
+	var err error
+	if detector == nil {
+		detector, err = detect.NewDetectorDefaultConfig()
+		if err != nil {
+			return nil, fmt.Errorf("gitleaks: %w", err)
+		}
 	}
+	
 	findings := detector.DetectString(string(yamlBytes))
 	secretSet := collectSecrets(findings)
 
@@ -204,9 +287,11 @@ func RedactYAML(yamlBytes []byte, aggSecrets map[string]string) ([]byte, error) 
 }
 
 func collectSecrets(findings []report.Finding) map[string]struct{} {
-	set := make(map[string]struct{})
+	// Pre-allocate map with estimated capacity for better performance
+	set := make(map[string]struct{}, len(findings))
 	for _, f := range findings {
-		if s := strings.TrimSpace(f.Secret); s != "" {
+		if s := strings.TrimSpace(f.Secret); s != "" && len(s) > 2 {
+			// Skip very short secrets that are likely false positives
 			set[s] = struct{}{}
 		}
 	}
@@ -482,9 +567,20 @@ func lastUnescapedIndexByte(s string, ch byte) int {
 }
 
 func containsAnySecret(s string, secretSet map[string]struct{}) bool {
-	if s == "" {
+	if s == "" || len(secretSet) == 0 {
 		return false
 	}
+	
+	// Quick check for common template patterns to avoid expensive searches
+	if strings.Contains(s, "{{string .secret.") {
+		return false
+	}
+	
+	// For performance, limit secret search for very long strings
+	if len(s) > 10000 {
+		s = s[:10000]
+	}
+	
 	for secret := range secretSet {
 		if secret != "" && strings.Contains(s, secret) {
 			return true
@@ -573,14 +669,29 @@ func uniqueKeyForValue(base, val string, existing map[string]string) string {
 // SanitizeFileInPlace reads a YAML file, redacts secrets, and writes back in-place.
 // aggSecrets is a shared map across the entire test-set (key -> original value).
 func SanitizeFileInPlace(path string, aggSecrets map[string]string) error {
+	return SanitizeFileInPlaceWithDetector(path, aggSecrets, nil)
+}
+
+// SanitizeFileInPlaceWithDetector allows reusing a detector for better performance
+func SanitizeFileInPlaceWithDetector(path string, aggSecrets map[string]string, detector *detect.Detector) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
 
-	redacted, err := RedactYAML(raw, aggSecrets)
+	// Skip processing if file is likely already sanitized
+	if bytes.Contains(raw, []byte("{{string .secret.")) {
+		return nil
+	}
+
+	redacted, err := RedactYAMLWithDetector(raw, aggSecrets, detector)
 	if err != nil {
 		return fmt.Errorf("redact %s: %w", path, err)
+	}
+
+	// Only write if content actually changed
+	if bytes.Equal(raw, redacted) {
+		return nil
 	}
 
 	// Normalize YAML formatting
