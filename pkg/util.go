@@ -10,7 +10,6 @@ import (
 	"encoding/xml"
 	"fmt"
 	"html/template"
-	txttmpl "text/template"
 	"io"
 	"io/fs"
 	"net"
@@ -22,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	txttmpl "text/template"
 	"time"
 
 	"github.com/andybalholm/brotli"
