@@ -243,10 +243,8 @@ func findValuesInInterface(data interface{}, path []string, index map[string][]*
 	currentPath := strings.Join(path, ".")
 	switch v := data.(type) {
 	case string:
-		if len(v) > 2 {
 			loc := &ValueLocation{TestCaseIndex: tcIndex, Part: part, Path: currentPath, Pointer: containerPtr, OriginalType: "string"}
 			index[v] = append(index[v], loc)
-		}
 	case json.Number:
 		loc := &ValueLocation{TestCaseIndex: tcIndex, Part: part, Path: currentPath, Pointer: containerPtr}
 		if strings.Contains(v.String(), ".") {
@@ -286,7 +284,7 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 		if strings.EqualFold(value, "true") || strings.EqualFold(value, "false") {
 			continue // Do not templatize boolean values.
 		}
-		
+
 		if floatVal, err := strconv.ParseFloat(value, 64); err == nil && floatVal == 0 {
 			continue // Do not templatize zero.
 		}
