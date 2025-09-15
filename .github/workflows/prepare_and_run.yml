@@ -9,9 +9,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Add Private Parsers
+        if: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE != '' }}
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+      
+      - name: Add Private Parsers (fallback)
+        if: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE == '' }}
+        uses: ./.github/actions/setup-private-parsers
 
       - name: Build Keploy (PR)
         run: go build -race -tags=viper_bind_struct -o keploy
@@ -37,9 +42,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Add Private Parsers
+        if: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE != '' }}
         uses: ./.github/actions/setup-private-parsers
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
+      
+      - name: Add Private Parsers (fallback)
+        if: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE == '' }}
+        uses: ./.github/actions/setup-private-parsers
 
       - name: Build image
         run: |

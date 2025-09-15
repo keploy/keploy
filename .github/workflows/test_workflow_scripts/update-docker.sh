@@ -8,7 +8,7 @@ update_dockerfile() {
     echo "Updating Dockerfile to include the -race flag in the go build command..."
 
     # Use sed to update the Dockerfile
-    sed -i 's/RUN go build -tags=viper_bind_struct -ldflags="-X main.dsn=$SENTRY_DSN_DOCKER -X main.version=$VERSION" -o keploy ./RUN go build -race -tags=viper_bind_struct -ldflags="-X main.dsn=$SENTRY_DSN_DOCKER -X main.version=$VERSION" -o keploy ./' "$DOCKERFILE_PATH"
+    sed -i 's/RUN go build -tags=viper_bind_struct -ldflags="-X main\.dsn=\$SENTRY_DSN_DOCKER -X main\.version=\$VERSION" -o keploy \./RUN go build -race -tags=viper_bind_struct -ldflags="-X main\.dsn=\$SENTRY_DSN_DOCKER -X main\.version=\$VERSION" -o keploy \./' "$DOCKERFILE_PATH"
     
     # Configure Git to use SSH and add GitHub's SSH key to known_hosts in a single layer.
     # This prevents the "Host key verification failed" error.
