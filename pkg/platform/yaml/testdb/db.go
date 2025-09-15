@@ -13,6 +13,7 @@ import (
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/yaml"
+	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
@@ -36,6 +37,7 @@ type tcsInfo struct {
 }
 
 func (ts *TestYaml) InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string, enableLog bool) error {
+	tc.Curl = pkg.MakeCurlCommand(tc.HTTPReq)
 	tcsInfo, err := ts.upsert(ctx, testSetID, tc)
 	if err != nil {
 		return err
