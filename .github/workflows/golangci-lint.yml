@@ -29,13 +29,13 @@ jobs:
           cache: false
 
       - name: Setup SSH for private modules
-        if: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE != '' }}
+        if: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE && secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE != '' }}
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE }}
 
       - name: Configure Git to use SSH
-        if: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE != '' }}
+        if: ${{ secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE && secrets.INTEGRATIONS_REPO_DEPLOY_KEY_PRIVATE != '' }}
         run: git config --global url."git@github.com:".insteadOf "https://github.com/"
 
       - name: golangci-lint

@@ -15,7 +15,7 @@ runs:
         go-version: ">=1.24"
 
     - name: Load Private SSH Key
-      if: ${{ inputs.ssh-private-key != '' }}
+      if: ${{ inputs.ssh-private-key && inputs.ssh-private-key != '' }}
       uses: webfactory/ssh-agent@v0.9.0
       with:
         ssh-private-key: ${{ inputs.ssh-private-key }}
@@ -23,7 +23,7 @@ runs:
     - name: Configure Git, Fetch Dependencies, and Create Parsers File
       shell: bash
       run: |
-        if [ -n "${{ inputs.ssh-private-key }}" ]; then
+        if [ -n "${{ inputs.ssh-private-key || '' }}" ]; then
           git config --global url."git@github.com:".insteadOf "https://github.com/"
           
           echo "Fetching private integrations dependency via SSH..."
