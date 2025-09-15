@@ -282,6 +282,15 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 
 	// Step 1: collect candidates.
 	for value, locations := range index {
+
+		if strings.EqualFold(value, "true") || strings.EqualFold(value, "false") {
+			continue // Do not templatize boolean values.
+		}
+		
+		if floatVal, err := strconv.ParseFloat(value, 64); err == nil && floatVal == 0 {
+			continue // Do not templatize zero.
+		}
+
 		if len(locations) < 2 { // need at least producer + consumer
 			continue
 		}
