@@ -267,7 +267,8 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 		Body:          string(respBody),
 		Header:        ToYamlHTTPHeader(httpResp.Header),
 	}
-
+	fmt.Println(tc.Name)
+	fmt.Println(resp)
 	// Centralized template update: if response body present and templates exist, update them.
 	if len(utils.TemplatizedValues) > 0 && len(respBody) > 0 {
 		logger.Debug("Received response from user app", zap.Any("response", resp))
