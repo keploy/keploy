@@ -173,7 +173,7 @@ for i in 1 2; do
   app_name="nodeApp_${i}"
 
   # Start keploy recording in background, capture PID
-  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c 'npm start' --globalPassthrough \
+  sudo -E env PATH="$PATH" "$RECORD_BIN" record -c 'npm start' --global-passthrough \
     > "${app_name}.txt" 2>&1 &
   KEPLOY_PID=$!
 
