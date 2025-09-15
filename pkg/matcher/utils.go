@@ -1093,12 +1093,15 @@ func expectActualTableWithColors(exp string, act string, field string, centerize
 	// Apply truncation logic before processing
 	exp, act = truncateStrings(exp, act)
 
-	// Apply colors: green for expected, red for actual
-	greenPaint := color.New(color.FgGreen).SprintFunc()
-	redPaint := color.New(color.FgRed).SprintFunc()
+	// Apply colors: red for expected, green for actual
+	// Force color output even when piping to files
+	greenPaint := color.New(color.FgGreen)
+	greenPaint.EnableColor()
+	redPaint := color.New(color.FgRed)
+	redPaint.EnableColor()
 
-	coloredExp := redPaint(exp)
-	coloredAct := greenPaint(act)
+	coloredExp := redPaint.SprintFunc()(exp)
+	coloredAct := greenPaint.SprintFunc()(act)
 
 	coloredExp = wrapTextWithAnsi(coloredExp)
 	coloredAct = wrapTextWithAnsi(coloredAct)
