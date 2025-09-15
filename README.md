@@ -33,6 +33,16 @@
 [![X](https://img.shields.io/badge/X-%231DA1F2.svg?style=for-the-badge&logo=X&logoColor=white)](https://x.com/Keployio)
 
 <a href="https://trendshift.io/repositories/3262" target="_blank"><img src="https://trendshift.io/api/badge/repositories/3262" alt="keploy%2Fkeploy | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
+
+<!-- Keep these links. Translations will automatically update with the README. -->
+[Deutsch](https://zdoc.app/de/keploy/keploy) | 
+[Español](https://zdoc.app/es/keploy/keploy) | 
+[français](https://zdoc.app/fr/keploy/keploy) | 
+[日本語](https://zdoc.app/ja/keploy/keploy) | 
+[한국어](https://zdoc.app/ko/keploy/keploy) | 
+[Português](https://zdoc.app/pt/keploy/keploy) | 
+[Русский](https://zdoc.app/ru/keploy/keploy) | 
+[中文](https://zdoc.app/zh/keploy/keploy)
 </h4>
 
 
