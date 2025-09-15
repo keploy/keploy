@@ -81,7 +81,7 @@ func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
 		MockManagers:      sync.Map{},
 		Integrations:      make(map[integrations.IntegrationType]integrations.Integrations),
 		GlobalPassthrough: opts.Record.GlobalPassthrough,
-    errChannel:   make(chan error, 100), // buffered channel to prevent blocking
+		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
 	}
 }
 
@@ -383,7 +383,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}()
 
 	//check for global passthrough in test mode
-	if (p.GlobalPassthrough || (!rule.Mocking && (rule.Mode == models.MODE_TEST))) {
+	if p.GlobalPassthrough || (!rule.Mocking && (rule.Mode == models.MODE_TEST)) {
 
 		dstConn, err = net.Dial("tcp", dstAddr)
 		if err != nil {

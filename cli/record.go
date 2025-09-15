@@ -40,7 +40,7 @@ func Record(ctx context.Context, logger *zap.Logger, _ *config.Config, serviceFa
 				Rerecord: false,
 				TestSet:  "",
 			}
-      
+
 			err = record.Start(ctx, cfg)
 
 			if err != nil {
