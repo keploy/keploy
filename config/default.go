@@ -53,6 +53,9 @@ test:
   mustPass: false
   maxFailAttempts: 5
   maxFlakyChecks: 1
+  protoFile: ""
+  protoDir: ""
+  protoInclude: []
 record:
   recordTimer: 0s
   filters: []
