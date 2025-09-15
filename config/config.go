@@ -146,6 +146,9 @@ type Test struct {
 	MustPass            bool                `json:"mustPass" yaml:"mustPass" mapstructure:"mustPass"`
 	MaxFailAttempts     uint32              `json:"maxFailAttempts" yaml:"maxFailAttempts" mapstructure:"maxFailAttempts"`
 	MaxFlakyChecks      uint32              `json:"maxFlakyChecks" yaml:"maxFlakyChecks" mapstructure:"maxFlakyChecks"`
+	ProtoFile           string              `json:"protoFile" yaml:"protoFile" mapstructure:"protoFile"`
+	ProtoDir            string              `json:"protoDir" yaml:"protoDir" mapstructure:"protoDir"`
+	ProtoInclude        []string            `json:"protoInclude" yaml:"protoInclude" mapstructure:"protoInclude"`
 }
 
 type Report struct {

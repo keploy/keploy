@@ -53,12 +53,9 @@ test:
   mustPass: false
   maxFailAttempts: 5
   maxFlakyChecks: 1
-normalize:
-  selectedTests: []
-  testReport: ""
-  fields:          // fields to be normalized
-    - "resp.status_code"
-    - "resp.body"
+  protoFile: ""
+  protoDir: ""
+  protoInclude: []
 record:
   recordTimer: 0s
   filters: []
