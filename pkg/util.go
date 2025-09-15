@@ -10,6 +10,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"html/template"
+	txttmpl "text/template"
 	"io"
 	"io/fs"
 	"net"
@@ -112,12 +113,12 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 			return nil, err
 		}
 
-		funcMap := template.FuncMap{
+		funcMap := txttmpl.FuncMap{
 			"int":    utils.ToInt,
 			"string": utils.ToString,
 			"float":  utils.ToFloat,
 		}
-		tmpl, err := template.New("template").Funcs(funcMap).Parse(string(testCaseStr))
+		tmpl, err := txttmpl.New("template").Funcs(funcMap).Parse(string(testCaseStr))
 		if err != nil || tmpl == nil {
 			utils.LogError(logger, err, "failed to parse the template", zap.Any("TestCaseString", string(testCaseStr)), zap.Any("TestCase", tc.Name), zap.Any("TestSet", testSet))
 			return nil, err
