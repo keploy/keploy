@@ -12,6 +12,9 @@ import (
 	"sync"
 	"time"
 
+	"regexp"
+	"strings"
+
 	"go.keploy.io/server/v2/pkg"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
@@ -119,29 +122,28 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 			})
 		}
 
-		var err error
+		var errRecord error
 		select {
-		case err = <-errCh:
-			if err != nil {
+		case errRecord = <-errCh:
+			if errRecord != nil {
 				stopReason = "error while starting the recording"
-				utils.LogError(o.logger, err, stopReason, zap.String("testset", testSet))
+				utils.LogError(o.logger, errRecord, stopReason, zap.String("testset", testSet))
 			}
-		case err = <-replayErrCh:
-			if err != nil {
+		case errRecord = <-replayErrCh:
+			if errRecord != nil {
 				stopReason = "error while replaying the testcases"
-				utils.LogError(o.logger, err, stopReason, zap.String("testset", testSet))
+				utils.LogError(o.logger, errRecord, stopReason, zap.String("testset", testSet))
 			}
 		case <-ctx.Done():
 		}
 
-		if err == nil || ctx.Err() == nil {
+		if errRecord == nil || ctx.Err() == nil {
 			// Sleep for 3 seconds to ensure that the recording has completed
 			time.Sleep(3 * time.Second)
 		}
 
 		recordCtxCancel()
 
-		// Wait for the recording to stop
 		err = errGrp.Wait()
 		if err != nil {
 			utils.LogError(o.logger, err, "failed to stop re-recording")
@@ -177,6 +179,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 			o.logger.Warn("Empty input. The older testsets will be kept.")
 			return nil
 		}
+
 		// Trimming the newline character for cleaner switch statement
 		input = input[:len(input)-1]
 		switch input {
@@ -255,13 +258,86 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 		if testSetConf.Template != nil {
 			utils.TemplatizedValues = testSetConf.Template
 		}
-
 		if testSetConf.Secret != nil {
 			utils.SecretValues = testSetConf.Secret
 		}
 	}
 
 	allTcRecorded := true
+
+	// ------------------------------------------------------------
+	// Build usage tracking: which template keys are referenced by which testcases.
+	// This allows us to update only the affected testcases when a template value changes.
+	// Tracks both placeholder usage ({{type .key}}) and literal usage (raw current value in URL/header/body).
+	usageMap := make(map[string]map[*models.TestCase]struct{})
+	placeholderRe := regexp.MustCompile(`\{\{[^{}]*?\.([a-zA-Z0-9_]+)\}\}`)
+	// Initialize set for each existing template key
+	for k := range utils.TemplatizedValues {
+		usageMap[k] = make(map[*models.TestCase]struct{})
+	}
+
+	// Track which template keys appear in any response body (treat as potential producers to avoid overwriting)
+	producerKeys := make(map[string]struct{})
+
+	for _, tc := range tcs {
+		// Scan for placeholder occurrences in URL, headers, body
+		// URL
+		for _, m := range placeholderRe.FindAllStringSubmatch(tc.HTTPReq.URL, -1) {
+			key := m[1]
+			if _, ok := usageMap[key]; !ok {
+				usageMap[key] = make(map[*models.TestCase]struct{})
+			}
+			usageMap[key][tc] = struct{}{}
+		}
+		// Headers
+		for _, hv := range tc.HTTPReq.Header {
+			for _, m := range placeholderRe.FindAllStringSubmatch(hv, -1) {
+				key := m[1]
+				if _, ok := usageMap[key]; !ok {
+					usageMap[key] = make(map[*models.TestCase]struct{})
+				}
+				usageMap[key][tc] = struct{}{}
+			}
+		}
+		// Body
+		for _, m := range placeholderRe.FindAllStringSubmatch(tc.HTTPReq.Body, -1) {
+			key := m[1]
+			if _, ok := usageMap[key]; !ok {
+				usageMap[key] = make(map[*models.TestCase]struct{})
+			}
+			usageMap[key][tc] = struct{}{}
+		}
+
+		// Response body placeholders -> mark as producer
+		for _, m := range placeholderRe.FindAllStringSubmatch(tc.HTTPResp.Body, -1) {
+			producerKeys[m[1]] = struct{}{}
+		}
+
+		// Literal usages: check each template key's current value appears without placeholders.
+		for key, val := range utils.TemplatizedValues {
+			lit := fmt.Sprintf("%v", val)
+			if lit == "" { // skip empty
+				continue
+			}
+			addIfLiteral := func(s string) {
+				if s == "" || strings.Contains(s, "{{") { // skip if already templated
+					return
+				}
+				if strings.Contains(s, lit) { // simple containment; over-match risk accepted
+					if _, ok := usageMap[key]; !ok {
+						usageMap[key] = make(map[*models.TestCase]struct{})
+					}
+					usageMap[key][tc] = struct{}{}
+				}
+			}
+			addIfLiteral(tc.HTTPReq.URL)
+			addIfLiteral(tc.HTTPReq.Body)
+			for _, hv := range tc.HTTPReq.Header {
+				addIfLiteral(hv)
+			}
+		}
+	}
+	// ------------------------------------------------------------
 	var simErr bool
 	for _, tc := range tcs {
 		if ctx.Err() != nil {
@@ -344,6 +420,41 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 				break
 			}
 		}
+		// Snapshot current template values before simulating request; SimulateHTTP may update them.
+		prevVals := make(map[string]interface{}, len(utils.TemplatizedValues))
+		for k, v := range utils.TemplatizedValues {
+			prevVals[k] = v
+		}
+
+		// Create a rendered copy of testcase with current template/secret values
+		// so that comparison uses concrete expected values (not the templatized form)
+		renderedTC, renderErr := pkg.RenderTestCaseWithTemplates(tc)
+		if renderErr != nil {
+			utils.LogError(o.logger, renderErr, "failed to render testcase with templates")
+			// fallback to using the original testcase
+			renderedTC = tc
+		}
+
+		// Store the original test case response for comparison using the rendered copy
+		originalTestCase := *renderedTC
+		// Detect noise fields introduced by templating and mark them on the testcase
+		if len(utils.TemplatizedValues) > 0 {
+			detected := pkg.DetectNoiseFieldsInResp(&models.HTTPResp{
+				StatusCode: renderedTC.HTTPResp.StatusCode,
+				Body:       renderedTC.HTTPResp.Body,
+				Header:     renderedTC.HTTPResp.Header,
+			})
+			o.logger.Debug("Detected noise fields", zap.Any("fields", detected))
+			// merge detected into originalTestCase.Noise
+			if originalTestCase.Noise == nil {
+				originalTestCase.Noise = map[string][]string{}
+			}
+			for k := range detected {
+				if _, ok := originalTestCase.Noise[k]; !ok {
+					originalTestCase.Noise[k] = []string{}
+				}
+			}
+		}
 
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSet, o.logger, o.config.Test.APITimeout)
 		if err != nil {
@@ -352,7 +463,67 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 				allTcRecorded = false
 			}
 			simErr = true
-			continue // Proceed with the next command
+			continue
+		}
+		o.logger.Debug("Response received for testcase",
+			zap.String("testcase", tc.Name),
+			zap.Int("response_code", resp.StatusCode),
+		)
+		// Compare the new response with the original test case response and show diff (optional via flag)
+		if o.config.ReRecord.ShowDiff && resp != nil {
+			o.showResponseDiff(&originalTestCase, resp, testSet)
+		}
+
+		if resp != nil && resp.Body != "" && len(utils.TemplatizedValues) > 0 {
+			// SimulateHTTP already updated templates; now perform propagation if any changed.
+			for key, newVal := range utils.TemplatizedValues {
+				oldVal, existed := prevVals[key]
+				if !existed { // newly introduced key -> skip propagation (no literal users yet tracked)
+					continue
+				}
+				if fmt.Sprintf("%v", oldVal) == fmt.Sprintf("%v", newVal) {
+					continue
+				}
+				oldStr := fmt.Sprintf("%v", oldVal)
+				newStr := fmt.Sprintf("%v", newVal)
+				base := strings.TrimRightFunc(key, func(r rune) bool { return r >= '0' && r <= '9' })
+				if base == "" {
+					base = key
+				}
+				for sibling, val := range utils.TemplatizedValues {
+					if sibling == key || !strings.HasPrefix(sibling, base) {
+						continue
+					}
+					if _, isProducer := producerKeys[sibling]; isProducer {
+						continue
+					}
+					if fmt.Sprintf("%v", val) == oldStr {
+						utils.TemplatizedValues[sibling] = newVal
+					}
+				}
+				for future := range usageMap[key] {
+					if future.Name == tc.Name {
+						continue
+					}
+					if future.HTTPReq.URL != "" && !strings.Contains(future.HTTPReq.URL, "{{") && strings.Contains(future.HTTPReq.URL, oldStr) {
+						future.HTTPReq.URL = strings.ReplaceAll(future.HTTPReq.URL, oldStr, newStr)
+					}
+					for hk, hv := range future.HTTPReq.Header {
+						if hv == oldStr {
+							future.HTTPReq.Header[hk] = newStr
+						}
+					}
+					if body := future.HTTPReq.Body; body != "" && !strings.Contains(body, "{{") && strings.Contains(body, oldStr) {
+						future.HTTPReq.Body = strings.ReplaceAll(body, oldStr, newStr)
+					}
+				}
+			}
+			// Persist any template changes (best-effort) after propagation
+			if err := o.replay.UpdateTestSetTemplate(ctx, testSet, utils.TemplatizedValues); err != nil {
+				o.logger.Warn("failed to persist updated template values during rerecord", zap.String("testSet", testSet), zap.Error(err))
+			} else {
+				o.logger.Debug("updated template values during rerecord", zap.String("testSet", testSet), zap.Any("template", utils.TemplatizedValues))
+			}
 		}
 
 		o.logger.Info("Re-recorded the testcase successfully", zap.String("testcase", tc.Name), zap.String("of testset", testSet))
@@ -425,14 +596,45 @@ func (o *Orchestrator) storeMocksForTestCase(testCaseID string, testCaseName str
 }
 
 // checkForTemplates checks if the testcases are already templatized. If not, it asks the user if they want to templatize the testcases before re-recording
+// showResponseDiff compares the original test case response with the newly recorded response
+// and displays the differences using the existing replay service functions
+func (o *Orchestrator) showResponseDiff(originalTC *models.TestCase, newResp *models.HTTPResp, testSetID string) {
+	// Use the existing replay service comparison functions
+	switch originalTC.Kind {
+	case models.HTTP:
+		// Use the HTTP matcher to compare responses - this will automatically show diffs
+		matched, _ := o.replay.CompareHTTPResp(originalTC, newResp, testSetID)
+		if !matched {
+			o.logger.Info("Response differences detected during re-record",
+				zap.String("testcase", originalTC.Name),
+				zap.String("testset", testSetID))
+		} else {
+			o.logger.Debug("No response differences detected during re-record",
+				zap.String("testcase", originalTC.Name),
+				zap.String("testset", testSetID))
+		}
+	case models.GRPC_EXPORT:
+		// For gRPC, we need to handle the case where SimulateHTTP returns HTTP response
+		// but we want to compare with gRPC response. We'll log this limitation.
+		o.logger.Info("gRPC response comparison during re-record",
+			zap.String("testcase", originalTC.Name),
+			zap.String("testset", testSetID),
+			zap.String("note", "gRPC test cases are simulated as HTTP during re-record, comparison limited"))
+
+		// For gRPC, we'll do a basic comparison since SimulateHTTP returns HTTP response
+		o.logger.Info("gRPC Response differences detected during re-record",
+			zap.String("testcase", originalTC.Name),
+			zap.String("testset", testSetID),
+			zap.String("note", "Detailed gRPC comparison not available during re-record"))
+	}
+}
+
 func (o *Orchestrator) checkForTemplates(ctx context.Context, testSets []string) {
-	// Check if the testcases are already templatized.
 	var nonTemplatized []string
 	for _, testSet := range testSets {
 		if _, ok := o.config.Test.SelectedTests[testSet]; !ok && len(o.config.Test.SelectedTests) != 0 {
 			continue
 		}
-
 		conf, err := o.replay.GetTestSetConf(ctx, testSet)
 		if err != nil || conf == nil || conf.Template == nil {
 			nonTemplatized = append(nonTemplatized, testSet)

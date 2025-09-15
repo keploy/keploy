@@ -158,6 +158,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		}
 		return fmt.Errorf("%s", stopReason)
 	}
+  
 	errGrp.Go(func() error {
 		for testCase := range frames.Incoming {
 			testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
