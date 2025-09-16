@@ -541,7 +541,6 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 		finalMocks := make([]*models.Mock, len(collectedMocks))
 		copy(finalMocks, collectedMocks)
 		mockMutex.Unlock()
-		o.storeMocksForTestCase(testCaseID, tc.Name, testSet, finalMocks)
 		mappings[tc.Name] = make([]string, 0)
 		for _, mock := range finalMocks {
 			mappings[tc.Name] = append(mappings[tc.Name], mock.Name)
@@ -565,34 +564,6 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 	}
 
 	return allTcRecorded, nil
-}
-
-// storeMocksForTestCase stores the collected mocks for a specific test case
-func (o *Orchestrator) storeMocksForTestCase(testCaseID string, testCaseName string, testSet string, mocks []*models.Mock) {
-	if len(mocks) > 0 {
-		o.logger.Info("Collected mocks for test case",
-			zap.String("testCaseID", testCaseID),
-			zap.String("testCaseName", testCaseName),
-			zap.String("testSet", testSet),
-			zap.Any("mocksCount", len(mocks)))
-
-		// Here you can implement storage logic for the collected mocks
-		// For example, save to database, file, or process them
-		for i, mock := range mocks {
-			o.logger.Info("Mock details",
-				zap.String("testCaseID", testCaseID),
-				zap.String("testCaseName", testCaseName),
-				zap.String("testSet", testSet),
-				zap.Int("mockIndex", i),
-				zap.String("mockKind", mock.GetKind()),
-				zap.String("mockName", mock.Name))
-		}
-	} else {
-		o.logger.Debug("No mocks collected for test case",
-			zap.String("testCaseID", testCaseID),
-			zap.String("testCaseName", testCaseName),
-			zap.String("testSet", testSet))
-	}
 }
 
 // checkForTemplates checks if the testcases are already templatized. If not, it asks the user if they want to templatize the testcases before re-recording

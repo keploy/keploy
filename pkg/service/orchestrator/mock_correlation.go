@@ -89,7 +89,6 @@ func (mcm *MockCorrelationManager) routeMocks() {
 		case mock := <-mcm.globalMockCh:
 			mcm.routeMockToTest(mock)
 		case <-mcm.ctx.Done():
-			mcm.logger.Info("Mock correlation manager shutting down")
 			mcm.closeAllChannels()
 			return
 		}
