@@ -18,13 +18,13 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sync/errgroup"
 	"github.com/cilium/ebpf"
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
 	Hooks "go.keploy.io/server/v2/pkg/core/hooks"
 	incomingTestCase "go.keploy.io/server/v2/pkg/core/incoming"
+	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v2/pkg/core/proxy/integrations"
 	pTls "go.keploy.io/server/v2/pkg/core/proxy/tls"
@@ -205,8 +205,8 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions, incoming
 		return err
 	}
 	p.inboundMetaMap = p.hooks.InboundMeta
-	
-	if mode != models.MODE_TEST && bigPaylaod{
+
+	if mode != models.MODE_TEST && bigPaylaod {
 		persister := opts.Persister
 		if persister == nil {
 			persister = func(ctx context.Context, testCase *models.TestCase) error {
@@ -235,7 +235,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions, incoming
 		})
 		p.logger.Debug("Successfully pinned proxy listener socket to eBPF sockmap.")
 	}
-	
+
 	p.logger.Info("Keploy has taken control of the DNS resolution mechanism, your application may misbehave if you have provided wrong domain name in your application code.")
 
 	p.logger.Info(fmt.Sprintf("Proxy started at port:%v", p.Port))

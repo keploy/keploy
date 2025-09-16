@@ -10,7 +10,7 @@ import (
 
 	"go.keploy.io/server/v2/pkg"
 	utils "go.keploy.io/server/v2/pkg/core/hooks/conn"
-	"go.keploy.io/server/v2/pkg/models" 
+	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
 )
 

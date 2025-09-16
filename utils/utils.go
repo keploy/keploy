@@ -1302,7 +1302,6 @@ func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[
 // 	return string(xmlBytes), nil
 // }
 
-
 func NetworkToHostShort(net uint16) uint16 {
 	b := make([]byte, 2)
 	binary.BigEndian.PutUint16(b, net)

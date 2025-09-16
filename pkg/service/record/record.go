@@ -145,7 +145,6 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool, bigPayload bool) er
 		return fmt.Errorf("%s", stopReason)
 	}
 
-
 	if !bigPayload {
 		errGrp.Go(func() error {
 			for testCase := range frames.Incoming {
