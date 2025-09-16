@@ -100,9 +100,10 @@ if [[ $RERECORD_RC -ne 0 ]]; then
   echo "::error::Keploy rerecord process exited with non-zero status: $RERECORD_RC"
   exit $RERECORD_RC
 fi
+
 if grep -i "ERROR" rerecord.log; then
     echo "::error::Error found in rerecord log."
-    cat rerecord.log
+    grep -i "ERROR" rerecord.log
     exit 1
 fi
 
