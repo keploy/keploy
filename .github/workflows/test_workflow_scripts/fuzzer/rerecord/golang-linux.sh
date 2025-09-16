@@ -102,6 +102,7 @@ if [[ $RERECORD_RC -ne 0 ]]; then
 fi
 if grep -i "ERROR" rerecord.log; then
     echo "::error::Error found in rerecord log."
+    cat rerecord.log
     exit 1
 fi
 
