@@ -106,7 +106,7 @@ func (p *Proxy) InitIntegrations(_ context.Context) error {
 
 // In proxy.go
 
-func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions, incomingOpts models.IncomingOptions, mode models.Mode, bigPaylaod bool) error {
+func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions, incomingOpts models.IncomingOptions) error {
 
 	//first initialize the integrations
 	err := p.InitIntegrations(ctx)
@@ -206,11 +206,11 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions, incoming
 	}
 	p.inboundMetaMap = p.hooks.InboundMeta
 
-	if mode != models.MODE_TEST && bigPaylaod {
+	if opts.Mode != models.MODE_TEST && opts.BigPayload {
 		persister := opts.Persister
 		if persister == nil {
 			persister = func(ctx context.Context, testCase *models.TestCase) error {
-				p.logger.Debug("Proxy is not in record mode, dropping test case.")
+				p.logger.Debug("Proxy is not in record mode.")
 				return nil
 			}
 		}
@@ -218,9 +218,9 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions, incoming
 			Logger:    p.logger,
 			Persister: persister,
 		}
-		decoder := incomingTestCase.NewTCdecoder()
-		// // Start the eBPF listener for bind events
-		ingressProxyManager := NewIngressProxyManager(ctx, p.logger, deps, decoder, incomingOpts)
+		tcCapture := incomingTestCase.NewTestcaseCapture()
+		// Start the eBPF listener for bind events
+		ingressProxyManager := NewIngressProxyManager(ctx, p.logger, deps, tcCapture, incomingOpts)
 		go func() {
 			defer utils.Recover(p.logger)
 			ListenForIngressEvents(ctx, p.hooks, ingressProxyManager)

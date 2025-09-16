@@ -41,7 +41,7 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, 
 	}
 }
 
-func (r *Recorder) Start(ctx context.Context, reRecord bool, bigPayload bool) error {
+func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 
 	// creating error group to manage proper shutdown of all the go routines and to propagate the error to the caller
 	errGrp, _ := errgroup.WithContext(ctx)
@@ -125,7 +125,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool, bigPayload bool) er
 		return r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
 	}
 	// Instrument will setup the environment and start the hooks and proxy
-	appID, err = r.Instrument(hookCtx, persister, bigPayload)
+	appID, err = r.Instrument(hookCtx, persister)
 	if err != nil {
 		stopReason = "failed to instrument the application"
 		utils.LogError(r.logger, err, stopReason)
@@ -135,7 +135,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool, bigPayload bool) er
 	r.config.AppID = appID
 
 	// fetching test cases and mocks from the application and inserting them into the database
-	frames, err := r.GetTestAndMockChans(ctx, appID, bigPayload)
+	frames, err := r.GetTestAndMockChans(ctx, appID)
 	if err != nil {
 		stopReason = "failed to get data frames"
 		utils.LogError(r.logger, err, stopReason)
@@ -145,7 +145,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool, bigPayload bool) er
 		return fmt.Errorf("%s", stopReason)
 	}
 
-	if !bigPayload {
+	if !r.config.Record.BigPayload {
 		errGrp.Go(func() error {
 			for testCase := range frames.Incoming {
 				err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
@@ -244,7 +244,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool, bigPayload bool) er
 	return fmt.Errorf("%s", stopReason)
 }
 
-func (r *Recorder) Instrument(ctx context.Context, persister models.TestCasePersister, bigPayload bool) (uint64, error) {
+func (r *Recorder) Instrument(ctx context.Context, persister models.TestCasePersister) (uint64, error) {
 	var stopReason string
 	// setting up the environment for recording
 	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
@@ -272,7 +272,7 @@ func (r *Recorder) Instrument(ctx context.Context, persister models.TestCasePers
 				Filters:  r.config.Record.Filters,
 				BasePath: r.config.Record.BasePath,
 			},
-			BigPayload: bigPayload,
+			BigPayload: r.config.Record.BigPayload,
 		}
 		err = r.instrumentation.Hook(ctx, appID, hooks)
 		if err != nil {
@@ -287,7 +287,7 @@ func (r *Recorder) Instrument(ctx context.Context, persister models.TestCasePers
 	return appID, nil
 }
 
-func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64, bigPayload bool) (FrameChan, error) {
+func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64) (FrameChan, error) {
 	outgoingOpts := models.OutgoingOptions{
 		Rules:          r.config.BypassRules,
 		MongoPassword:  r.config.Test.MongoPassword,
@@ -299,7 +299,8 @@ func (r *Recorder) GetTestAndMockChans(ctx context.Context, appID uint64, bigPay
 	if err != nil {
 		return FrameChan{}, fmt.Errorf("failed to get outgoing mocks: %w", err)
 	}
-	if !bigPayload {
+
+	if !r.config.Record.BigPayload { // for big payload we will trigger the incoming proxy
 		incomingOpts := models.IncomingOptions{
 			Filters:  r.config.Record.Filters,
 			BasePath: r.config.Record.BasePath,

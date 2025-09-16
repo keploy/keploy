@@ -14,13 +14,13 @@ import (
 	"go.uber.org/zap"
 )
 
-type TestcaseDecoder struct{}
+type TestcaseCapture struct{}
 
-func NewTCdecoder() *TestcaseDecoder {
-	return &TestcaseDecoder{}
+func NewTestcaseCapture() *TestcaseCapture {
+	return &TestcaseCapture{}
 }
 
-func (d *TestcaseDecoder) CreateHTTP(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, reqData, respData []byte, reqTime, respTime time.Time, opts models.IncomingOptions) error {
+func (d *TestcaseCapture) CreateHTTP(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, reqData, respData []byte, reqTime, respTime time.Time, opts models.IncomingOptions) error {
 
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(reqData)))
 	if err != nil {
@@ -40,7 +40,7 @@ func (d *TestcaseDecoder) CreateHTTP(ctx context.Context, logger *zap.Logger, t 
 	return nil
 }
 
-func (d *TestcaseDecoder) CreateGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, stream *pkg.HTTP2Stream) error {
+func (d *TestcaseCapture) CreateGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, stream *pkg.HTTP2Stream) error {
 
 	utils.CaptureGRPC(ctx, logger, t, stream)
 	return nil

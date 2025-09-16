@@ -1048,6 +1048,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 
+		bigPayload, _ := cmd.Flags().GetBool("bigPayload")
+		c.cfg.Record.BigPayload = bigPayload
+
 	case "normalize":
 		c.cfg.Path = utils.ToAbsPath(c.logger, c.cfg.Path)
 		tests, err := cmd.Flags().GetString("tests")

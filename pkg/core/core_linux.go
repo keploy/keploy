@@ -154,8 +154,10 @@ func (c *Core) Hook(ctx context.Context, id uint64, opts models.HookOptions) err
 	err = c.StartProxy(proxyCtx, ProxyOptions{
 		DNSIPv4Addr: a.KeployIPv4Addr(),
 		Persister:   opts.Persister,
+		Mode:        opts.Mode,
+		BigPayload:  opts.BigPayload,
 		//DnsIPv6Addr: ""
-	}, opts.Incoming, opts.Mode, opts.BigPayload)
+	}, opts.Incoming)
 
 	if err != nil {
 		utils.LogError(c.logger, err, "failed to start proxy")
