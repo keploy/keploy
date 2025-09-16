@@ -79,6 +79,7 @@ type ReRecord struct {
 	Filters       []Filter `json:"filters" yaml:"filters" mapstructure:"filters"`
 	Host          string   `json:"host" yaml:"host" mapstructure:"host"`
 	Port          uint32   `json:"port" yaml:"port" mapstructure:"port"`
+	ShowDiff      bool     `json:"showDiff" yaml:"showDiff" mapstructure:"showDiff"` // show response diff during rerecord (disabled by default)
 	GRPCPort      uint32   `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
 }
 type Contract struct {
@@ -144,6 +145,9 @@ type Test struct {
 	MustPass            bool                `json:"mustPass" yaml:"mustPass" mapstructure:"mustPass"`
 	MaxFailAttempts     uint32              `json:"maxFailAttempts" yaml:"maxFailAttempts" mapstructure:"maxFailAttempts"`
 	MaxFlakyChecks      uint32              `json:"maxFlakyChecks" yaml:"maxFlakyChecks" mapstructure:"maxFlakyChecks"`
+	ProtoFile           string              `json:"protoFile" yaml:"protoFile" mapstructure:"protoFile"`
+	ProtoDir            string              `json:"protoDir" yaml:"protoDir" mapstructure:"protoDir"`
+	ProtoInclude        []string            `json:"protoInclude" yaml:"protoInclude" mapstructure:"protoInclude"`
 }
 
 type Report struct {

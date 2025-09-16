@@ -267,6 +267,10 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("summary", false, "Print only the summary of the test run (optionally restrict with --test-sets)")
 		cmd.Flags().StringSlice("test-case", nil, "Filter to specific test case IDs (repeat or comma-separated). Alias: --tc")
 
+	case "sanitize":
+		cmd.Flags().StringSliceP("test-sets", "t", utils.Keys(c.cfg.Test.SelectedTests), "Testsets to sanitize e.g. -t \"test-set-1, test-set-2\"")
+		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
+
 	case "keploy":
 		cmd.PersistentFlags().Bool("debug", c.cfg.Debug, "Run in debug mode")
 		cmd.PersistentFlags().Bool("disable-tele", c.cfg.DisableTele, "Run in telemetry mode")
@@ -303,6 +307,12 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Uint32("port", c.cfg.Test.Port, "Custom http port to replace the actual port in the testcases")
 		cmd.Flags().Uint32("grpc-port", c.cfg.Test.GRPCPort, "Custom grpc port to replace the actual port in the testcases")
 		cmd.Flags().Uint64P("delay", "d", 5, "User provided time to run its application")
+		cmd.Flags().String("proto-file", c.cfg.Test.ProtoFile, "Path of main proto file")
+		cmd.Flags().String("proto-dir", c.cfg.Test.ProtoDir, "Path of the directory where all protos of a service are located")
+		cmd.Flags().StringArray("proto-include", c.cfg.Test.ProtoInclude, "Path of directories to be included while parsing import statements in proto files")
+		if cmd.Name() == "rerecord" {
+			cmd.Flags().Bool("show-diff", c.cfg.ReRecord.ShowDiff, "Show response differences during rerecord (disabled by default)")
+		}
 		if cmd.Name() == "test" {
 			cmd.Flags().Uint64("api-timeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
 			cmd.Flags().String("mongo-password", c.cfg.Test.MongoPassword, "Authentication password for mocking MongoDB conn")
@@ -381,6 +391,9 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"recordTimer":           "record-timer",
 		"urlMethods":            "url-methods",
 		"inCi":                  "in-ci",
+		"protoFile":             "proto-file",
+		"protoDir":              "proto-dir",
+		"protoInclude":          "proto-include",
 	}
 
 	if newName, ok := flagNameMapping[name]; ok {
@@ -634,6 +647,23 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.Report.TestCaseIDs = cleaned
 
+	case "sanitize":
+		path, err := cmd.Flags().GetString("path")
+		if err != nil {
+			errMsg := "failed to get the path"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Path = utils.ToAbsPath(c.logger, path)
+
+		testSets, err := cmd.Flags().GetStringSlice("test-sets")
+		if err != nil {
+			errMsg := "failed to get the test-sets"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		config.SetSelectedTests(c.cfg, testSets)
+
 	case "generate", "download":
 
 		if cmd.Name() == "download" && cmd.Parent() != nil && cmd.Parent().Name() == "mock" {
@@ -886,6 +916,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					utils.LogError(c.logger, err, errMsg)
 					return errors.New(errMsg)
 				}
+				// optional flag to show response diffs during rerecord
+				showDiff, err := cmd.Flags().GetBool("show-diff")
+				if err != nil {
+					errMsg := "failed to get the show-diff flag"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.ReRecord.ShowDiff = showDiff
 				return nil
 			}
 
@@ -953,6 +991,59 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					c.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
 				} else {
 					c.logger.Info("Example usage: " + cmd.Example)
+				}
+			}
+
+			// parse and set proto related flags
+
+			protoFile, err := cmd.Flags().GetString("proto-file")
+			if err != nil {
+				errMsg := "failed to get the proto-file flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+
+			if protoFile != "" {
+				c.cfg.Test.ProtoFile, err = utils.GetAbsPath(protoFile)
+				if err != nil {
+					errMsg := "failed to get the absolute path of proto-file"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+			}
+
+			protoDir, err := cmd.Flags().GetString("proto-dir")
+			if err != nil {
+				errMsg := "failed to get the proto-dir flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+
+			if protoDir != "" {
+				c.cfg.Test.ProtoDir, err = utils.GetAbsPath(protoDir)
+				if err != nil {
+					errMsg := "failed to get the absolute path of proto-dir"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+			}
+
+			protoInclude, err := cmd.Flags().GetStringArray("proto-include")
+			if err != nil {
+				errMsg := "failed to get the proto-include flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+
+			if len(protoInclude) > 0 {
+				for _, dir := range protoInclude {
+					absDir, err := utils.GetAbsPath(dir)
+					if err != nil {
+						errMsg := "failed to get the absolute path of proto-include"
+						utils.LogError(c.logger, err, errMsg)
+						return errors.New(errMsg)
+					}
+					c.cfg.Test.ProtoInclude = append(c.cfg.Test.ProtoInclude, absDir)
 				}
 			}
 		}

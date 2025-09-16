@@ -46,7 +46,7 @@ func Get(ctx context.Context, cmd string, c *config.Config, logger *zap.Logger, 
 		return replaySvc, nil
 	}
 
-	if cmd == "templatize" || cmd == "config" || cmd == "update" || cmd == "login" || cmd == "export" || cmd == "import" {
+	if cmd == "templatize" || cmd == "config" || cmd == "update" || cmd == "login" || cmd == "export" || cmd == "import" || cmd == "sanitize" {
 		return toolsSvc, nil
 	}
 

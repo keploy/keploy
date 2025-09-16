@@ -2,6 +2,7 @@
 package grpc
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -14,7 +15,7 @@ import (
 
 // Match compares an expected gRPC response with an actual response and returns whether they match
 // along with detailed comparison results
-func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[string]map[string][]string, logger *zap.Logger) (bool, *models.Result) {
+func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[string]map[string][]string, ignoreOrdering bool, logger *zap.Logger) (bool, *models.Result) {
 	expectedResp := tc.GrpcResp
 	result := &models.Result{
 		HeadersResult: make([]models.HeaderResult, 0),
@@ -115,25 +116,68 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 		Actual:   fmt.Sprintf("%d", actualResp.Body.MessageLength),
 	})
 
-	// Compare decoded data
-	// expCanon := CanonicalizeTopLevelBlocks(expectedResp.Body.DecodedData)
-	// actCanon := CanonicalizeTopLevelBlocks(actualResp.Body.DecodedData)
-	// decodedDataNormal := expCanon == actCanon
+	// Handle noise configuration first - needed for JSON comparison
 
-	exp := expectedResp.Body.DecodedData
-	act := actualResp.Body.DecodedData
+	//TODO: Need to implement and test noisy feature for grpc
+	var (
+		bodyNoise   = noiseConfig["body"]
+		headerNoise = noiseConfig["header"] // need to handle noisy header separately (not implemented yet for grpc)
+	)
 
-	ok, diff, err := EqualProtoscope(exp, act)
-	if err != nil {
-		utils.LogError(logger, err, "failed to compare decoded data using protoscope")
-		ok = false
+	if bodyNoise == nil {
+		bodyNoise = map[string][]string{}
 	}
 
-	if !ok {
-		logger.Debug("decoded data mismatch", zap.String("diff", diff))
+	if headerNoise == nil {
+		headerNoise = map[string][]string{}
 	}
 
-	decodedDataNormal := ok
+	// Compare decoded data - use JSON comparison if both are valid JSON, otherwise use canonicalization
+	decodedDataNormal := true
+	expectedDecodedData := expectedResp.Body.DecodedData
+	actualDecodedData := actualResp.Body.DecodedData
+	var jsonComparisonResult matcher.JSONComparisonResult
+
+	// Check if both decoded data are valid JSON
+	if json.Valid([]byte(expectedDecodedData)) && json.Valid([]byte(actualDecodedData)) {
+		// Both are JSON - use proper JSON comparison like HTTP matcher
+		logger.Debug("Both gRPC decoded data are valid JSON, using JSON comparison",
+			zap.String("expectedDecodedData", expectedDecodedData),
+			zap.String("actualDecodedData", actualDecodedData))
+
+		validatedJSON, err := matcher.ValidateAndMarshalJSON(logger, &expectedDecodedData, &actualDecodedData)
+		if err != nil {
+			logger.Error("Failed to validate and marshal JSON for gRPC decoded data", zap.Error(err))
+			decodedDataNormal = false
+		} else if validatedJSON.IsIdentical() {
+			jsonComparisonResult, err = matcher.JSONDiffWithNoiseControl(validatedJSON, bodyNoise, ignoreOrdering)
+			decodedDataNormal = jsonComparisonResult.IsExact()
+			if err != nil {
+				logger.Error("Failed to perform JSON diff with noise control", zap.Error(err))
+				decodedDataNormal = false
+			}
+			if !decodedDataNormal {
+				logger.Debug("JSON comparison found differences",
+					zap.Bool("isExact", jsonComparisonResult.IsExact()),
+					zap.Bool("matches", jsonComparisonResult.Matches()))
+			}
+		} else {
+			logger.Debug("JSON structures are not identical, marking as mismatch")
+			decodedDataNormal = false
+		}
+	} else {
+		// At least one is not JSON - fall back to canonicalization approach
+		logger.Debug("At least one gRPC decoded data is not valid JSON, using canonicalization",
+			zap.Bool("expectedIsJSON", json.Valid([]byte(expectedDecodedData))),
+			zap.Bool("actualIsJSON", json.Valid([]byte(actualDecodedData))))
+
+		expCanon := CanonicalizeTopLevelBlocks(expectedDecodedData)
+		actCanon := CanonicalizeTopLevelBlocks(actualDecodedData)
+		decodedDataNormal = expCanon == actCanon
+		// Update the data for result reporting
+		expectedDecodedData = expCanon
+		actualDecodedData = actCanon
+	}
 
 	if !decodedDataNormal {
 		differences["body.decoded_data"] = struct {
@@ -141,30 +185,17 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 			Actual   string
 			Message  string
 		}{
-			Expected: exp,
-			Actual:   act,
+			Expected: expectedDecodedData,
+			Actual:   actualDecodedData,
 			Message:  "decoded data mismatch",
 		}
 	}
 	result.BodyResult = append(result.BodyResult, models.BodyResult{
 		Normal:   decodedDataNormal,
 		Type:     models.GrpcData,
-		Expected: exp,
-		Actual:   act,
+		Expected: expectedDecodedData,
+		Actual:   actualDecodedData,
 	})
-
-	// Handle noise configuration
-	var (
-		bodyNoise   = noiseConfig["body"]
-		headerNoise = noiseConfig["header"]
-	)
-
-	if bodyNoise == nil {
-		bodyNoise = map[string][]string{}
-	}
-	if headerNoise == nil {
-		headerNoise = map[string][]string{}
-	}
 
 	// Apply noise configuration to ignore specified differences
 	for path := range differences {
@@ -211,6 +242,13 @@ func Match(tc *models.TestCase, actualResp *models.GrpcResp, noiseConfig map[str
 					case "compression_flag":
 						// Compression flag
 						logDiffs.PushHeaderDiff(diff.Expected, diff.Actual, "compression_flag (body)", bodyNoise)
+					case "decoded_data":
+						// Handle decoded data differences - could be JSON or canonical format
+						if jsonComparisonResult.Matches() {
+							logDiffs.SetHasarrayIndexMismatch(true)
+							logDiffs.PushFooterDiff(strings.Join(jsonComparisonResult.Differences(), ", "))
+						}
+						logDiffs.PushBodyDiff(diff.Expected, diff.Actual, bodyNoise)
 					default:
 						// Any other body differences
 						logDiffs.PushBodyDiff(diff.Expected, diff.Actual, bodyNoise)
