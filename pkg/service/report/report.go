@@ -483,12 +483,24 @@ func (r *Report) extractFailedTestsFromResults(tests []models.TestResult) []mode
 	return failedTests
 }
 
-// printFailedTestReports generates and prints reports for all failed tests
-// In non-full-body mode, we parallelize rendering and then flush in order.
 func (r *Report) printFailedTestReports(ctx context.Context, failedTests []models.TestResult) error {
 	if r.config.Report.ShowFullBody {
-		for _, test := range failedTests {
-			// Check for context cancellation
+		type item struct {
+			idx int
+			sb  strings.Builder
+			err error
+		}
+
+		workers := runtime.GOMAXPROCS(0)
+		if workers < 2 {
+			workers = 2
+		}
+		sem := make(chan struct{}, workers)
+		results := make([]item, len(failedTests))
+		var wg sync.WaitGroup
+
+		for i := range failedTests {
+			// check cancellation early
 			select {
 			case <-ctx.Done():
 				r.logger.Info("Report generation cancelled by user")
@@ -496,7 +508,26 @@ func (r *Report) printFailedTestReports(ctx context.Context, failedTests []model
 			default:
 			}
 
-			if err := r.printSingleTestReport(test); err != nil {
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(i int) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				var sb strings.Builder
+				if err := r.renderSingleFullBodyFailedTest(&sb, failedTests[i]); err != nil {
+					results[i] = item{idx: i, err: err}
+					return
+				}
+				results[i] = item{idx: i, sb: sb}
+			}(i)
+		}
+		wg.Wait()
+
+		for i := range results {
+			if results[i].err != nil {
+				return results[i].err
+			}
+			if _, err := r.out.WriteString(results[i].sb.String()); err != nil {
 				return err
 			}
 		}
@@ -587,31 +618,19 @@ type writerAdapter struct{ sb *strings.Builder }
 
 func (w *writerAdapter) Write(p []byte) (int, error) { return w.sb.Write(p) }
 
-// printSingleTestReport generates and prints a report for a single failed test
 func (r *Report) printSingleTestReport(test models.TestResult) error {
-	// Full-body mode: use the original printer/diff pipeline.
 	if r.config.Report.ShowFullBody {
-		logDiffs := matcherUtils.NewDiffsPrinter(test.Name)
-		printer := r.printer
-		logs := r.generateTestHeader(test, printer)
-
-		if err := r.addStatusCodeDiffs(test, &logDiffs); err != nil {
+		var sb strings.Builder
+		if err := r.renderSingleFullBodyFailedTest(&sb, test); err != nil {
 			return err
 		}
-		if err := r.addHeaderDiffs(test, &logDiffs); err != nil {
+		if _, err := r.out.WriteString(sb.String()); err != nil {
 			return err
 		}
-		if err := r.addBodyDiffs(test, &logDiffs); err != nil {
-			return err
-		}
-		if err := r.printAndRenderDiffs(printer, logs, &logDiffs); err != nil {
-			return err
-		}
-		fmt.Fprintln(r.out, "\n--------------------------------------------------------------------")
 		return r.out.Flush()
 	}
 
-	// Non-full-body mode: use the faster renderer into a local buffer and flush.
+	// Non-full-body: unchanged
 	var sb strings.Builder
 	if err := r.renderSingleFailedTest(&sb, test); err != nil {
 		return err
@@ -620,6 +639,35 @@ func (r *Report) printSingleTestReport(test models.TestResult) error {
 		return err
 	}
 	return r.out.Flush()
+}
+
+// renderSingleFullBodyFailedTest renders a single failed test in full-body mode into sb.
+func (r *Report) renderSingleFullBodyFailedTest(sb *strings.Builder, test models.TestResult) error {
+	// Write header via printer.Sprintf (no stdout)
+	header := r.generateTestHeader(test, r.printer) // returns string via Sprintf already
+	sb.WriteString(header)
+
+	// Route DiffsPrinter output into this builder (no os.Stdout)
+	localOut := &writerAdapter{sb: sb}
+	logDiffs := matcherUtils.NewDiffsPrinterOut(localOut, test.Name)
+
+	// status/header/body diffs
+	if err := r.addStatusCodeDiffs(test, &logDiffs); err != nil {
+		return err
+	}
+	if err := r.addHeaderDiffs(test, &logDiffs); err != nil {
+		return err
+	}
+	if err := r.addBodyDiffs(test, &logDiffs); err != nil {
+		return err
+	}
+
+	if err := logDiffs.Render(); err != nil {
+		r.logger.Error("failed to render the diffs", zap.Error(err))
+		return err
+	}
+	sb.WriteString("\n--------------------------------------------------------------------\n")
+	return nil
 }
 
 // createFormattedPrinter: use r.printer (initialized in New)
