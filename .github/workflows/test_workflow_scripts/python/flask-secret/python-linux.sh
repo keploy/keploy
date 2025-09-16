@@ -20,11 +20,15 @@ send_request(){
         sleep 3 # wait for 3 seconds before checking again.
     done
     echo "App started"
-    curl -s http://localhost:8000/secret1
 
-    curl -s http://localhost:8000/secret2
+    for i in {1..30}; do
+        curl -s http://localhost:8000/secret1
 
-    curl -s http://localhost:8000/secret3
+        curl -s http://localhost:8000/secret2
+
+        curl -s http://localhost:8000/secret3
+    done
+
 
     # Wait for 10 seconds for keploy to record the tcs and mocks.
     sleep 10
@@ -35,7 +39,7 @@ send_request(){
 }
 
 # Record and Test cycles
-for i in {1..2}; do
+for i in {1..50}; do
     app_name="flaskSecret_${i}"
     send_request &
     sudo -E env PATH="$PATH" $RECORD_BIN record -c "python3 main.py" --metadata "x=y"  &> "${app_name}.txt"
@@ -77,7 +81,7 @@ fi
 
 all_passed=true
 
-for i in {0..1}
+for i in {0..49}
 do
     # Define the report file for each test set
     report_file="./keploy/reports/test-run-0/test-set-$i-report.yaml"
