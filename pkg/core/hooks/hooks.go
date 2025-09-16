@@ -112,7 +112,7 @@ type Hooks struct {
 	// bindExit  kprobe.Link
 	// Maps needed by the proxy
 	InboundMeta *ebpf.Map
-	Events      *ebpf.Map
+	BindEvents      *ebpf.Map
 }
 
 func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
@@ -275,7 +275,7 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 
 		if opts.Mode != models.MODE_TEST && opts.BigPayload {
 			h.InboundMeta = objs.InboundMeta
-			h.Events = objs.Events
+			h.BindEvents = objs.BindEvents
 			cg4, err := link.AttachCgroup(link.CgroupOptions{
 				Path:    cGroupPath,
 				Attach:  ebpf.AttachCGroupInet4Bind,

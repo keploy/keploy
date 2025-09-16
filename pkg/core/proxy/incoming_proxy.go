@@ -106,7 +106,7 @@ func (pm *IngressProxyManager) StopAll() {
 }
 
 func ListenForIngressEvents(ctx context.Context, h *hooks.Hooks, pm *IngressProxyManager) {
-	rb, err := ringbuf.NewReader(h.Events)
+	rb, err := ringbuf.NewReader(h.BindEvents)
 	if err != nil {
 		pm.logger.Error("Failed to create ringbuf reader for ingress events", zap.Error(err))
 		return

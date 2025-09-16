@@ -101,8 +101,8 @@ type bpfMapSpecs struct {
 	ActiveCloseArgsMap          *ebpf.MapSpec `ebpf:"active_close_args_map"`
 	ActiveReadArgsMap           *ebpf.MapSpec `ebpf:"active_read_args_map"`
 	ActiveWriteArgsMap          *ebpf.MapSpec `ebpf:"active_write_args_map"`
-	AllowedPids                 *ebpf.MapSpec `ebpf:"allowed_pids"`
 	AppChildKernelPidMap        *ebpf.MapSpec `ebpf:"app_child_kernel_pid_map"`
+	BindEvents                  *ebpf.MapSpec `ebpf:"bind_events"`
 	BindFilterResults           *ebpf.MapSpec `ebpf:"bind_filter_results"`
 	Cfg                         *ebpf.MapSpec `ebpf:"cfg"`
 	ConnInfoMap                 *ebpf.MapSpec `ebpf:"conn_info_map"`
@@ -110,7 +110,6 @@ type bpfMapSpecs struct {
 	DestInfoMap                 *ebpf.MapSpec `ebpf:"dest_info_map"`
 	DockerAppRegistrationMap    *ebpf.MapSpec `ebpf:"docker_app_registration_map"`
 	E2eInfoMap                  *ebpf.MapSpec `ebpf:"e2e_info_map"`
-	Events                      *ebpf.MapSpec `ebpf:"events"`
 	InboundMeta                 *ebpf.MapSpec `ebpf:"inbound_meta"`
 	InboundSvc                  *ebpf.MapSpec `ebpf:"inbound_svc"`
 	KeployAgentKernelPidMap     *ebpf.MapSpec `ebpf:"keploy_agent_kernel_pid_map"`
@@ -158,8 +157,8 @@ type bpfMaps struct {
 	ActiveCloseArgsMap          *ebpf.Map `ebpf:"active_close_args_map"`
 	ActiveReadArgsMap           *ebpf.Map `ebpf:"active_read_args_map"`
 	ActiveWriteArgsMap          *ebpf.Map `ebpf:"active_write_args_map"`
-	AllowedPids                 *ebpf.Map `ebpf:"allowed_pids"`
 	AppChildKernelPidMap        *ebpf.Map `ebpf:"app_child_kernel_pid_map"`
+	BindEvents                  *ebpf.Map `ebpf:"bind_events"`
 	BindFilterResults           *ebpf.Map `ebpf:"bind_filter_results"`
 	Cfg                         *ebpf.Map `ebpf:"cfg"`
 	ConnInfoMap                 *ebpf.Map `ebpf:"conn_info_map"`
@@ -167,7 +166,6 @@ type bpfMaps struct {
 	DestInfoMap                 *ebpf.Map `ebpf:"dest_info_map"`
 	DockerAppRegistrationMap    *ebpf.Map `ebpf:"docker_app_registration_map"`
 	E2eInfoMap                  *ebpf.Map `ebpf:"e2e_info_map"`
-	Events                      *ebpf.Map `ebpf:"events"`
 	InboundMeta                 *ebpf.Map `ebpf:"inbound_meta"`
 	InboundSvc                  *ebpf.Map `ebpf:"inbound_svc"`
 	KeployAgentKernelPidMap     *ebpf.Map `ebpf:"keploy_agent_kernel_pid_map"`
@@ -191,8 +189,8 @@ func (m *bpfMaps) Close() error {
 		m.ActiveCloseArgsMap,
 		m.ActiveReadArgsMap,
 		m.ActiveWriteArgsMap,
-		m.AllowedPids,
 		m.AppChildKernelPidMap,
+		m.BindEvents,
 		m.BindFilterResults,
 		m.Cfg,
 		m.ConnInfoMap,
@@ -200,7 +198,6 @@ func (m *bpfMaps) Close() error {
 		m.DestInfoMap,
 		m.DockerAppRegistrationMap,
 		m.E2eInfoMap,
-		m.Events,
 		m.InboundMeta,
 		m.InboundSvc,
 		m.KeployAgentKernelPidMap,
