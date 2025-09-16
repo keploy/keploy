@@ -44,7 +44,7 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
 		defer close(t)
-		
+
 		for {
 			select {
 			case <-ctx.Done():
