@@ -187,8 +187,8 @@ for i in 1 2; do
   echo "== keploy artifacts (depth 3) =="
   find ./keploy -maxdepth 3 -type f | sort || true
 
-  if [[ ! -d "./keploy/test" ]]; then
-  echo "::error::keploy/test folder does not exist. Failing pipeline."
+  if [[ ! -d "./keploy/test-set-$((i-1))" ]]; then
+  echo "::error::keploy/test-set-$((i-1)) folder does not exist. Failing pipeline."
   exit 1
   fi
 
