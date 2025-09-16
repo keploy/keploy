@@ -187,6 +187,11 @@ for i in 1 2; do
   echo "== keploy artifacts (depth 3) =="
   find ./keploy -maxdepth 3 -type f | sort || true
 
+  if [[ ! -d "./keploy/test" ]]; then
+  echo "::error::keploy/test folder does not exist. Failing pipeline."
+  exit 1
+  fi
+
   if grep -q "WARNING: DATA RACE" "${app_name}.txt"; then
     echo "::error::Data race detected in ${app_name}.txt"
     cat "${app_name}.txt"
