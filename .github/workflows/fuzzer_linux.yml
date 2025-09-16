@@ -49,7 +49,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: ">=1.23"
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
