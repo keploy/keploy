@@ -82,7 +82,7 @@ for i in {1..100}; do
       cat "${app_name}.txt"
       exit 1
     fi
-    sleep 5
+    sleep 20
     wait
     echo "Recorded test case and mocks for iteration ${i}"
 done
