@@ -34,10 +34,6 @@ type Report struct {
 	printer *pp.PrettyPrinter
 }
 
-type fileReport struct {
-	Tests []models.TestResult `yaml:"tests" json:"tests"`
-}
-
 const (
 	ReportSuffix  = "-report"
 	TestRunPrefix = "test-run-"
@@ -570,7 +566,6 @@ func (r *Report) renderSingleFailedTest(sb *strings.Builder, test models.TestRes
 				sb.WriteString(applyCliColorsToDiff(diff))
 				sb.WriteString("\n")
 			} else {
-				// Very rare: fallback to default renderer, but write into sb via adapter.
 				tmp := *r
 				tmp.out = bufio.NewWriterSize(&writerAdapter{sb: sb}, 64<<10)
 				_ = tmp.printDefaultBodyDiff(bodyResult)
@@ -580,7 +575,7 @@ func (r *Report) renderSingleFailedTest(sb *strings.Builder, test models.TestRes
 			// Force the old compact format for non-JSON bodies (fast).
 			diff := GeneratePlainOldNewDiff(bodyResult.Expected, bodyResult.Actual, bodyResult.Type)
 			sb.WriteString(applyCliColorsToDiff(diff))
-			sb.WriteString("\n")
+			sb.WriteString("\n\n")
 		}
 	}
 	sb.WriteString("\n--------------------------------------------------------------------\n")

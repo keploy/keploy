@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 
 	"go.keploy.io/server/v2/pkg/models"
@@ -39,7 +38,6 @@ func GenerateTableDiff(expected, actual string) (string, error) {
 	sort.Strings(keys)
 
 	var sb strings.Builder
-	sb.WriteString("=== CHANGES WITHIN THE RESPONSE BODY ===\n")
 
 	hasDiffs := false
 	for _, k := range keys {
@@ -154,47 +152,7 @@ func GeneratePlainOldNewDiff(expected, actual string, bodyType models.BodyType) 
 	sb.WriteString(fmt.Sprintf("Path: %s\n", bodyType))
 	sb.WriteString(fmt.Sprintf("  Old: %s\n", escapeOneLine(expected)))
 	sb.WriteString(fmt.Sprintf("  New: %s\n", escapeOneLine(actual)))
-	// write an empty line after the diff
-	sb.WriteString("\n")
 	return strings.TrimSpace(sb.String())
-}
-
-// firstDiff returns the first byte offset where a and b differ (or min(len(a),len(b)) if only length differs).
-func firstDiff(a, b string) int {
-	max := len(a)
-	if len(b) < max {
-		max = len(b)
-	}
-	for i := 0; i < max; i++ {
-		if a[i] != b[i] {
-			return i
-		}
-	}
-	return max
-}
-
-// previewAt returns a short escaped window around pos.
-func previewAt(s string, pos, ctx int) string {
-	if pos < 0 {
-		pos = 0
-	}
-	start := pos - ctx
-	if start < 0 {
-		start = 0
-	}
-	end := pos + ctx
-	if end > len(s) {
-		end = len(s)
-	}
-	head := ""
-	tail := ""
-	if start > 0 {
-		head = "…"
-	}
-	if end < len(s) {
-		tail = "…"
-	}
-	return head + escapeOneLine(s[start:end]) + tail
 }
 
 // escapeOneLine keeps output single-line and safe for terminals.
@@ -218,48 +176,4 @@ func escapeOneLine(s string) string {
 		}
 	}
 	return b.String()
-}
-
-func quote(s string) string { return strconv.Quote(s) }
-
-// GeneratePlainBodyChangeSummary emits a terse, old-style summary for non-JSON bodies.
-// It never prints body contents; it only reports whether the body was added/removed/modified
-// plus lengths and the first differing offset (when applicable).
-func GeneratePlainBodyChangeSummary(expected, actual string) string {
-	const header = "=== CHANGES WITHIN THE RESPONSE BODY ===\n"
-	const path = "body"
-
-	if expected == actual {
-		return "No differences found in body."
-	}
-
-	expLen, actLen := len(expected), len(actual)
-
-	change := "modified"
-	switch {
-	case expLen == 0 && actLen > 0:
-		change = "added"
-	case expLen > 0 && actLen == 0:
-		change = "removed"
-	}
-
-	// Only compute first-diff when both sides are non-empty.
-	first := 0
-	if expLen > 0 && actLen > 0 {
-		first = firstDiff(expected, actual)
-	}
-
-	var sb strings.Builder
-	sb.WriteString(header)
-	sb.WriteString(fmt.Sprintf("Path: %s\n", path))
-
-	if expLen > 0 && actLen > 0 {
-		// modified (both present)
-		sb.WriteString(fmt.Sprintf("  Change: %s (len=%d -> %d, firstDiff@%d)\n", change, expLen, actLen, first))
-	} else {
-		// added / removed
-		sb.WriteString(fmt.Sprintf("  Change: %s (len=%d -> %d)\n", change, expLen, actLen))
-	}
-
-	return strings.TrimSpace(sb.String())
 }
