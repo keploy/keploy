@@ -173,26 +173,19 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.logger.Warn("python command not python or python3, skipping coverage calculation")
 			r.config.Test.SkipCoverage = true
 		}
-		cov = python.New(ctx, r.logger, r.reportDB, r.config.Command, executable)
+		cov = python.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.CommandType, executable)
+
 	case models.Javascript:
-		cov = javascript.New(ctx, r.logger, r.reportDB, r.config.Command)
+		cov = javascript.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.CommandType)
 	case models.Java:
-		cov = java.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.JacocoAgentPath, executable)
+		cov = java.New(ctx, r.logger, r.reportDB, r.config.Command, r.config.Test.JacocoAgentPath, executable, r.config.CommandType)
 	default:
 		r.config.Test.SkipCoverage = true
 	}
 	if !r.config.Test.SkipCoverage {
-		if utils.CmdType(r.config.CommandType) == utils.Native {
-			r.config.Command, err = cov.PreProcess(r.config.Test.DisableLineCoverage)
-
-			if err != nil {
-				r.config.Test.SkipCoverage = true
-			}
-		}
-		err = os.Setenv("CLEAN", "true") // related to javascript coverage calculation
+		r.config.Command, err = cov.PreProcess(r.config.Test.DisableLineCoverage)
 		if err != nil {
 			r.config.Test.SkipCoverage = true
-			r.logger.Warn("failed to set CLEAN env variable, skipping coverage caluclation", zap.Error(err))
 		}
 	}
 
@@ -524,7 +517,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.String("base path", r.config.Test.BasePath))
 		return &InstrumentState{}, nil
 	}
-	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
+	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay, Language: r.config.Test.Language, SkipCoverage: r.config.Test.SkipCoverage})
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return &InstrumentState{}, err

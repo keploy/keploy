@@ -12,34 +12,50 @@ import (
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/platform/coverage"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
 type Python struct {
-	ctx        context.Context
-	logger     *zap.Logger
-	reportDB   coverage.ReportDB
-	cmd        string
-	executable string
+	ctx         context.Context
+	logger      *zap.Logger
+	reportDB    coverage.ReportDB
+	cmd         string
+	commandType string
+	executable  string
 }
 
-func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cmd, executable string) *Python {
+func New(ctx context.Context, logger *zap.Logger, reportDB coverage.ReportDB, cmd, commandType, executable string) *Python {
 	return &Python{
-		ctx:        ctx,
-		logger:     logger,
-		reportDB:   reportDB,
-		cmd:        cmd,
-		executable: executable,
+		ctx:         ctx,
+		logger:      logger,
+		reportDB:    reportDB,
+		cmd:         cmd,
+		commandType: commandType,
+		executable:  executable,
 	}
 }
 
 func (p *Python) PreProcess(_ bool) (string, error) {
+	createPyCoverageConfig(p.logger)
+	if utils.CmdType(p.commandType) == utils.DockerRun {
+		index := strings.Index(p.cmd, "docker run")
+		return p.cmd[:index+len("docker run")] +
+			" -v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") +
+			" -w " + os.Getenv("PWD") +
+			" -e APPEND=$APPEND " +
+			p.cmd[index+len("docker run"):], nil
+	}
+	if utils.CmdType(p.commandType) != utils.Native {
+		return p.cmd, nil
+	}
 	cmd := exec.Command("coverage")
 	err := cmd.Run()
 	if err != nil {
-		p.logger.Warn("coverage tool not found, skipping coverage caluclation. Please install coverage tool using 'pip install coverage'")
+		p.logger.Warn("coverage tool not found, skipping coverage caluclation. Please install coverage tool using 'pip install coverage'", zap.Error(err))
 		return p.cmd, err
 	}
+
 	createPyCoverageConfig(p.logger)
 
 	// Split the command into parts to handle environment variables and other prefixes
@@ -144,6 +160,7 @@ func (p *Python) GetCoverage() (models.TestCoverage, error) {
 	generateCovJSONCmd.Stdout = os.Stdout
 	generateCovJSONCmd.Stderr = os.Stderr
 	err = generateCovJSONCmd.Run()
+
 	if err != nil {
 		return testCov, err
 	}
