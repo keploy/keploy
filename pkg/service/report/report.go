@@ -34,6 +34,12 @@ type Report struct {
 	printer *pp.PrettyPrinter
 }
 
+type item struct {
+	idx int
+	sb  strings.Builder
+	err error
+}
+
 const (
 	ReportSuffix  = "-report"
 	TestRunPrefix = "test-run-"
@@ -110,13 +116,17 @@ func (r *Report) printSpecificTestCases(ctx context.Context, runID string, testS
 		}
 		any = true
 		if err := r.printTests(sel); err != nil {
-			return err
+			return fmt.Errorf("printSpecificTestCases failed with error: %w", err)
 		}
 	}
 	if !any {
 		r.logger.Warn("No matching test-cases found in the selected test-sets", zap.Strings("ids", ids))
 	}
-	return r.out.Flush()
+	err := r.out.Flush()
+	if err != nil {
+		return fmt.Errorf("printSpecificTestCases failed with error: %w", err)
+	}
+	return nil
 }
 
 // helper used by both file and DB paths
@@ -124,7 +134,7 @@ func (r *Report) printTests(tests []models.TestResult) error {
 	for _, t := range tests {
 		if t.Status == models.TestStatusFailed {
 			if err := r.printSingleTestReport(t); err != nil {
-				return err
+				return fmt.Errorf("printTests failed with error: %w", err)
 			}
 			continue
 		}
@@ -132,7 +142,11 @@ func (r *Report) printTests(tests []models.TestResult) error {
 		fmt.Fprintf(r.out, "Testcase %q (%s) PASSED ✅ (%s)\n", t.TestCaseID, t.Name, t.TimeTaken)
 		fmt.Fprintln(r.out, "\n--------------------------------------------------------------------")
 	}
-	return r.out.Flush()
+	err := r.out.Flush()
+	if err != nil {
+		return fmt.Errorf("printTests failed with error: %w", err)
+	}
+	return nil
 }
 
 // printSummary prints the grand summary + per test-set table.
@@ -222,7 +236,11 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 	}
 
 	fmt.Fprintln(r.out, "<=========================================>")
-	return r.out.Flush()
+	err := r.out.Flush()
+	if err != nil {
+		return fmt.Errorf("printSummary failed with error: %w", err)
+	}
+	return nil
 }
 
 func (r *Report) filterTestsByIDs(tests []models.TestResult, ids []string) []models.TestResult {
@@ -256,7 +274,7 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 
 	latestRunID, err := r.getLatestTestRunID(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("getLatestTestRunID failed with error: %w", err)
 	}
 	if latestRunID == "" {
 		r.logger.Warn("no test runs found")
@@ -270,7 +288,7 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 		testSetIDs, err = r.testDB.GetReportTestSets(ctx, latestRunID)
 		if err != nil {
 			r.logger.Error("failed to get all test set ids", zap.Error(err))
-			return err
+			return fmt.Errorf("getLatestTestRunID failed with error: %w", err)
 		}
 		if len(testSetIDs) == 0 {
 			r.logger.Warn("No test sets found for report generation")
@@ -281,7 +299,7 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 	if r.config.Report.Summary {
 		reports, err := r.collectReports(ctx, latestRunID, testSetIDs)
 		if err != nil {
-			return err
+			return fmt.Errorf("printSummary failed with error: %w", err)
 		}
 		return r.printSummary(reports)
 	}
@@ -353,55 +371,84 @@ func (r *Report) generateReportFromFile(ctx context.Context, reportPath string) 
 	}
 
 	// Fallback for older/simpler report formats that only contain a 'tests' array.
-	// Reopen and stream again for a clean decoder.
-	if err := f.Close(); err != nil {
-		// non-fatal
-	}
-	f2, err := os.Open(reportPath)
+	return r.parseAndProcessLegacyReportFormat(ctx, reportPath)
+}
+
+// parseAndProcessLegacyReportFormat handles parsing and processing of legacy report formats
+func (r *Report) parseAndProcessLegacyReportFormat(ctx context.Context, reportPath string) error {
+	// Reopen the file for a clean decoder
+	f, err := os.Open(reportPath)
 	if err != nil {
 		return err
 	}
-	defer f2.Close()
+	defer f.Close()
+
+	// Define legacy report structure
 	type legacy struct {
 		Tests []models.TestResult `yaml:"tests"`
 	}
+
 	var lg legacy
-	dec2 := yaml.NewDecoder(f2)
-	if err := dec2.Decode(&lg); err != nil {
+	dec := yaml.NewDecoder(f)
+	if err := dec.Decode(&lg); err != nil {
 		r.logger.Error("failed to parse report file with legacy parser", zap.String("report_path", reportPath), zap.Error(err))
 		return err
 	}
 
+	// Handle summary request for legacy format
 	if r.config.Report.Summary {
-		total, pass, fail := len(lg.Tests), 0, 0
-		var failedCases []string
-		for _, t := range lg.Tests {
-			if t.Status == models.TestStatusFailed {
-				fail++
-				label := t.TestCaseID
-				if t.Name != "" {
-					label = fmt.Sprintf("%s (%s)", t.TestCaseID, t.Name)
-				}
-				failedCases = append(failedCases, label)
-			} else {
-				pass++
-			}
-		}
-		totalTime := estimateDuration(lg.Tests)
-		printSingleSummaryTo(r.out, "file", total, pass, fail, totalTime, failedCases)
-		return r.out.Flush()
+		return r.processLegacySummary(lg.Tests)
 	}
 
+	// Handle specific test case filtering for legacy format
 	if len(r.config.Report.TestCaseIDs) > 0 {
-		sel := r.filterTestsByIDs(lg.Tests, r.config.Report.TestCaseIDs)
-		if len(sel) == 0 {
-			r.logger.Warn("No matching test-cases found in file (tests-only parse)", zap.Strings("ids", r.config.Report.TestCaseIDs))
-			return nil
-		}
-		return r.printTests(sel)
+		return r.processLegacyTestCaseFiltering(lg.Tests)
 	}
 
-	failed := r.extractFailedTestsFromResults(lg.Tests)
+	// Default: process failed tests for legacy format
+	return r.processLegacyFailedTests(ctx, lg.Tests)
+}
+
+// processLegacySummary generates a summary report for legacy format
+func (r *Report) processLegacySummary(tests []models.TestResult) error {
+	total, pass, fail := len(tests), 0, 0
+	var failedCases []string
+
+	for _, t := range tests {
+		if t.Status == models.TestStatusFailed {
+			fail++
+			label := t.TestCaseID
+			if t.Name != "" {
+				label = fmt.Sprintf("%s (%s)", t.TestCaseID, t.Name)
+			}
+			failedCases = append(failedCases, label)
+		} else {
+			pass++
+		}
+	}
+
+	totalTime := estimateDuration(tests)
+	printSingleSummaryTo(r.out, "file", total, pass, fail, totalTime, failedCases)
+	err := r.out.Flush()
+	if err != nil {
+		return fmt.Errorf("processSummaryLegacy failed with error: %w", err)
+	}
+	return nil
+}
+
+// processLegacyTestCaseFiltering filters and displays specific test cases from legacy format
+func (r *Report) processLegacyTestCaseFiltering(tests []models.TestResult) error {
+	sel := r.filterTestsByIDs(tests, r.config.Report.TestCaseIDs)
+	if len(sel) == 0 {
+		r.logger.Warn("No matching test-cases found in file (tests-only parse)", zap.Strings("ids", r.config.Report.TestCaseIDs))
+		return nil
+	}
+	return r.printTests(sel)
+}
+
+// processLegacyFailedTests processes and displays failed tests from legacy format
+func (r *Report) processLegacyFailedTests(ctx context.Context, tests []models.TestResult) error {
+	failed := r.extractFailedTestsFromResults(tests)
 	if len(failed) == 0 {
 		r.logger.Info("No failed tests found in the provided report file")
 		return nil
@@ -485,11 +532,6 @@ func (r *Report) extractFailedTestsFromResults(tests []models.TestResult) []mode
 
 func (r *Report) printFailedTestReports(ctx context.Context, failedTests []models.TestResult) error {
 	if r.config.Report.ShowFullBody {
-		type item struct {
-			idx int
-			sb  strings.Builder
-			err error
-		}
 
 		workers := runtime.GOMAXPROCS(0)
 		if workers < 2 {
@@ -525,20 +567,19 @@ func (r *Report) printFailedTestReports(ctx context.Context, failedTests []model
 
 		for i := range results {
 			if results[i].err != nil {
-				return results[i].err
+				return fmt.Errorf("printFailedTestReports failed with error: %w", results[i].err)
 			}
 			if _, err := r.out.WriteString(results[i].sb.String()); err != nil {
-				return err
+				return fmt.Errorf("printFailedTestReports failed with error: %w", err)
 			}
 		}
-		return r.out.Flush()
+		err := r.out.Flush()
+		if err != nil {
+			return fmt.Errorf("printFailedTestReports failed with error: %w", err)
+		}
+		return nil
 	}
 
-	type item struct {
-		idx int
-		sb  strings.Builder
-		err error
-	}
 	workers := runtime.GOMAXPROCS(0)
 	if workers < 2 {
 		workers = 2
@@ -565,13 +606,17 @@ func (r *Report) printFailedTestReports(ctx context.Context, failedTests []model
 
 	for i := range results {
 		if results[i].err != nil {
-			return results[i].err
+			return fmt.Errorf("printFailedTestReports failed with error: %w", results[i].err)
 		}
 		if _, err := r.out.WriteString(results[i].sb.String()); err != nil {
-			return err
+			return fmt.Errorf("printFailedTestReports failed with error: %w", err)
 		}
 	}
-	return r.out.Flush()
+	err := r.out.Flush()
+	if err != nil {
+		return fmt.Errorf("printFailedTestReports failed with error: %w", err)
+	}
+	return nil
 }
 
 // renderSingleFailedTest writes the failed test report into sb (non-full-body mode).
@@ -622,23 +667,31 @@ func (r *Report) printSingleTestReport(test models.TestResult) error {
 	if r.config.Report.ShowFullBody {
 		var sb strings.Builder
 		if err := r.renderSingleFullBodyFailedTest(&sb, test); err != nil {
-			return err
+			return fmt.Errorf("printSingleTestReport failed with error: %w", err)
 		}
 		if _, err := r.out.WriteString(sb.String()); err != nil {
-			return err
+			return fmt.Errorf("printSingleTestReport failed with error: %w", err)
 		}
-		return r.out.Flush()
+		err := r.out.Flush()
+		if err != nil {
+			return fmt.Errorf("printSingleTestReport failed with error: %w", err)
+		}
+		return nil
 	}
 
 	// Non-full-body: unchanged
 	var sb strings.Builder
 	if err := r.renderSingleFailedTest(&sb, test); err != nil {
-		return err
+		return fmt.Errorf("printSingleTestReport failed with error: %w", err)
 	}
 	if _, err := r.out.WriteString(sb.String()); err != nil {
-		return err
+		return fmt.Errorf("printSingleTestReport failed with error: %w", err)
 	}
-	return r.out.Flush()
+	err := r.out.Flush()
+	if err != nil {
+		return fmt.Errorf("printSingleTestReport failed with error: %w", err)
+	}
+	return nil
 }
 
 // renderSingleFullBodyFailedTest renders a single failed test in full-body mode into sb.
@@ -653,18 +706,18 @@ func (r *Report) renderSingleFullBodyFailedTest(sb *strings.Builder, test models
 
 	// status/header/body diffs
 	if err := r.addStatusCodeDiffs(test, &logDiffs); err != nil {
-		return err
+		return fmt.Errorf("renderSingleFullBodyFailedTest failed with error: %w", err)
 	}
 	if err := r.addHeaderDiffs(test, &logDiffs); err != nil {
-		return err
+		return fmt.Errorf("renderSingleFullBodyFailedTest failed with error: %w", err)
 	}
 	if err := r.addBodyDiffs(test, &logDiffs); err != nil {
-		return err
+		return fmt.Errorf("renderSingleFullBodyFailedTest failed with error: %w", err)
 	}
 
 	if err := logDiffs.Render(); err != nil {
 		r.logger.Error("failed to render the diffs", zap.Error(err))
-		return err
+		return fmt.Errorf("renderSingleFullBodyFailedTest failed with error: %w", err)
 	}
 	sb.WriteString("\n--------------------------------------------------------------------\n")
 	return nil
@@ -704,12 +757,12 @@ func (r *Report) addBodyDiffs(test models.TestResult, logDiffs *matcherUtils.Dif
 		if !bodyResult.Normal {
 			actualValue, err := r.renderTemplateValue(bodyResult.Actual)
 			if err != nil {
-				return fmt.Errorf("failed to render actual body: %w", err)
+				return fmt.Errorf("addBodyDiffs failed with error: %w", err)
 			}
 
 			expectedValue, err := r.renderTemplateValue(bodyResult.Expected)
 			if err != nil {
-				return fmt.Errorf("failed to render expected body: %w", err)
+				return fmt.Errorf("addBodyDiffs failed with error: %w", err)
 			}
 
 			logDiffs.PushBodyDiff(fmt.Sprint(expectedValue), fmt.Sprint(actualValue), nil)
@@ -732,12 +785,12 @@ func (r *Report) renderTemplateValue(value interface{}) (interface{}, error) {
 func (r *Report) printAndRenderDiffs(printer *pp.PrettyPrinter, logs string, logDiffs *matcherUtils.DiffsPrinter) error {
 	if _, err := printer.Printf(logs); err != nil {
 		r.logger.Error("failed to print the logs", zap.Error(err))
-		return err
+		return fmt.Errorf("printAndRenderDiffs failed with error: %w", err)
 	}
 
 	if err := logDiffs.Render(); err != nil {
 		r.logger.Error("failed to render the diffs", zap.Error(err))
-		return err
+		return fmt.Errorf("printAndRenderDiffs failed with error: %w", err)
 	}
 
 	return nil
@@ -758,19 +811,19 @@ func (r *Report) printDefaultBodyDiff(bodyResult models.BodyResult) error {
 
 	actualValue, err := r.renderTemplateValue(bodyResult.Actual)
 	if err != nil {
-		return fmt.Errorf("failed to render actual body: %w", err)
+		return fmt.Errorf("printDefaultBodyDiff failed with error: %w", err)
 	}
 
 	expectedValue, err := r.renderTemplateValue(bodyResult.Expected)
 	if err != nil {
-		return fmt.Errorf("failed to render expected body: %w", err)
+		return fmt.Errorf("printDefaultBodyDiff failed with error: %w", err)
 	}
 
 	logDiffs.PushBodyDiff(fmt.Sprint(expectedValue), fmt.Sprint(actualValue), nil)
 
 	if err := logDiffs.Render(); err != nil {
 		r.logger.Error("failed to render the default body diffs", zap.Error(err))
-		return err
+		return fmt.Errorf("printDefaultBodyDiff failed with error: %w", err)
 	}
 	return nil
 }

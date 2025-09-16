@@ -3,7 +3,6 @@ package report
 import (
 	"bufio"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -32,14 +31,6 @@ func fmtDuration(d time.Duration) string {
 	// 28.54 s style
 	secs := float64(d) / float64(time.Second)
 	return fmt.Sprintf("%.2f s", secs)
-}
-
-// printSingleSummary prints a compact summary for a single report source (legacy helper).
-// Kept for backward compatibility (prints to os.Stdout).
-func printSingleSummary(name string, total, pass, fail int, dur time.Duration, failedCases []string) {
-	bw := bufio.NewWriterSize(os.Stdout, 1<<20)
-	printSingleSummaryTo(bw, name, total, pass, fail, dur, failedCases)
-	_ = bw.Flush()
 }
 
 // printSingleSummaryTo is the buffered variant used internally.
@@ -80,8 +71,16 @@ func applyCliColorsToDiff(diff string) string {
 	if diff == "" {
 		return diff
 	}
-	// Fast guard: only try to colorize our compact blocks.
-	if !strings.Contains(diff, "Path: ") && !strings.Contains(diff, "  Old: ") && !strings.Contains(diff, "  New: ") {
+
+	mustProcess := false
+	for _, prefix := range []string{"Path: ", "  Old: ", "  New: "} {
+		if strings.Contains(diff, prefix) {
+			mustProcess = true
+			break
+		}
+	}
+
+	if !mustProcess {
 		return diff
 	}
 
