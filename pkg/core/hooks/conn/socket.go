@@ -41,22 +41,19 @@ func ListenSocket(ctx context.Context, l *zap.Logger, openMap, dataMap, closeMap
 	}
 	g.Go(func() error {
 		defer utils.Recover(l)
-		go func() {
-			defer utils.Recover(l)
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				default:
-					// TODO refactor this to directly consume the events from the maps
-					c.ProcessActiveTrackers(ctx, t, opts)
-					time.Sleep(100 * time.Millisecond)
-				}
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		defer close(t)
+		
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-ticker.C:
+				// TODO refactor this to directly consume the events from the maps
+				c.ProcessActiveTrackers(ctx, t, opts)
 			}
-		}()
-		<-ctx.Done()
-		close(t)
-		return nil
+		}
 	})
 
 	err = open(ctx, c, l, openMap)
