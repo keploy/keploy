@@ -18,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cilium/ebpf"
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/core"
@@ -63,12 +62,11 @@ type Proxy struct {
 	Listener net.Listener
 
 	//to store the nsswitch.conf file data
-	nsswitchData   []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
-	UDPDNSServer   *dns.Server
-	TCPDNSServer   *dns.Server
-	portMapping    sync.Map // A thread-safe map to store port mappings [uint16 -> uint16]
-	inboundMetaMap *ebpf.Map
-	hooks          *Hooks.Hooks
+	nsswitchData []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
+	UDPDNSServer *dns.Server
+	TCPDNSServer *dns.Server
+	portMapping  sync.Map // A thread-safe map to store port mappings [uint16 -> uint16]
+	hooks        *Hooks.Hooks
 }
 
 func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
@@ -204,7 +202,6 @@ func (p *Proxy) StartProxy(ctx context.Context, opts core.ProxyOptions, incoming
 	if err := <-readyChan; err != nil {
 		return err
 	}
-	p.inboundMetaMap = p.hooks.InboundMeta
 
 	if opts.Mode != models.MODE_TEST && opts.BigPayload {
 		persister := opts.Persister

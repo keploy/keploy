@@ -106,13 +106,8 @@ type Hooks struct {
 	appID             uint64
 	cgBind4           link.Link
 	cgBind6           link.Link
-	skLookup          link.Link
-	// bind              link.Link
-	bindEnter link.Link
-	// bindExit  kprobe.Link
-	// Maps needed by the proxy
-	InboundMeta *ebpf.Map
-	BindEvents      *ebpf.Map
+	bindEnter         link.Link
+	BindEvents        *ebpf.Map
 }
 
 func (h *Hooks) Load(ctx context.Context, id uint64, opts core.HookCfg) error {
@@ -193,7 +188,6 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 	h.dockerAppRegistrationMap = objs.DockerAppRegistrationMap
 	h.objects = objs
 	h.objectsMutex.Unlock()
-	h.objects.BindFilterResults = objs.BindFilterResults
 	// ---------------
 
 	// ----- used in case of wsl -----
@@ -274,7 +268,6 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 		}
 
 		if opts.Mode != models.MODE_TEST && opts.BigPayload {
-			h.InboundMeta = objs.InboundMeta
 			h.BindEvents = objs.BindEvents
 			cg4, err := link.AttachCgroup(link.CgroupOptions{
 				Path:    cGroupPath,
@@ -305,17 +298,6 @@ func (h *Hooks) load(ctx context.Context, opts core.HookCfg) error {
 				return err
 			}
 			defer netns.Close()
-
-			sk, err := link.AttachRawLink(link.RawLinkOptions{
-				Target:  int(netns.Fd()),
-				Program: objs.SteerIngress,
-				Attach:  ebpf.AttachSkLookup,
-			})
-			if err != nil {
-				utils.LogError(h.logger, err, "failed to attach sk_lookup hook")
-				return err
-			}
-			h.skLookup = sk
 			h.logger.Info("Attached ingress redirection hooks.")
 		}
 
@@ -803,9 +785,6 @@ func (h *Hooks) unLoad(_ context.Context, opts core.HookCfg) {
 		}
 		if h.cgBind6 != nil {
 			h.cgBind6.Close()
-		}
-		if h.skLookup != nil {
-			h.skLookup.Close()
 		}
 		if h.bindEnter != nil {
 			if err := h.bindEnter.Close(); err != nil {
