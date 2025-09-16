@@ -379,7 +379,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}()
 
 	//check for global passthrough in test mode
-	if !rule.Mocking && rule.Mode == models.MODE_TEST {
+	if true || (!rule.Mocking && rule.Mode == models.MODE_TEST) {
 
 		dstConn, err = net.Dial("tcp", dstAddr)
 		if err != nil {

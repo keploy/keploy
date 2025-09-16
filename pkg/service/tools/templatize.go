@@ -295,73 +295,144 @@ func (t *Tools) applyTemplatesFromIndexV2(ctx context.Context, index map[string]
 		}
 
 		sort.Slice(locations, func(i, j int) bool { return locations[i].TestCaseIndex < locations[j].TestCaseIndex })
+		var producers []*ValueLocation
+        for _, loc := range locations {
+            if loc.Part == ResponseBody || loc.Part == ResponseHeader {
+                producers = append(producers, loc)
+            }
+        }
 
-		var producer *ValueLocation
-		for _, loc := range locations {
-			if loc.Part == ResponseBody || loc.Part == ResponseHeader { // allow response headers future
-				producer = loc
-				break
-			}
-		}
-		if producer == nil { // can't form a chain without a producer
-			continue
-		}
+        // If there are no producers for this value, we can't create any chains.
+        if len(producers) == 0 {
+            continue
+        }
 
-		var subsequentConsumers []*ValueLocation
-		for _, loc := range locations {
-			if (loc.Part == RequestHeader || loc.Part == RequestURL || loc.Part == RequestBody) && loc.TestCaseIndex > producer.TestCaseIndex {
-				subsequentConsumers = append(subsequentConsumers, loc)
-			}
-		}
-		if len(subsequentConsumers) == 0 { // no data flow
-			continue
-		}
+        // Now, iterate over EACH producer and create a separate candidate chain for it.
+        // This ensures that two identical values in the same response are treated as
+        // two independent sources.
+        for _, producer := range producers {
+            var subsequentConsumers []*ValueLocation
+            for _, loc := range locations {
+                // A consumer must be in a request and must appear in a test case *after* the producer.
+                if (loc.Part == RequestHeader || loc.Part == RequestURL || loc.Part == RequestBody) && loc.TestCaseIndex > producer.TestCaseIndex {
+                    subsequentConsumers = append(subsequentConsumers, loc)
+                }
+            }
 
-		// Determine all occurrences (producers + valid consumers at/after producer index)
-		var occurrences []*ValueLocation
-		for _, loc := range locations {
-			isProducer := loc.Part == ResponseBody || loc.Part == ResponseHeader
-			isConsumer := (loc.Part == RequestHeader || loc.Part == RequestURL || loc.Part == RequestBody) && loc.TestCaseIndex >= producer.TestCaseIndex
-			if isProducer || isConsumer {
-				occurrences = append(occurrences, loc)
-			}
-		}
+            // If this specific producer has no subsequent consumers, it doesn't form a chain.
+            if len(subsequentConsumers) == 0 {
+                continue
+            }
+            
+            // The occurrences to be templatized for THIS chain are this one producer
+            // and all of its valid consumers.
+            var occurrences []*ValueLocation
+            occurrences = append(occurrences, producer)
+            occurrences = append(occurrences, subsequentConsumers...)
 
-		// Derive base key (replicating previous logic for stability)
-		var baseKey string
-		if producer.Part == RequestURL {
-			baseKey = value
-		} else {
-			baseKey = producer.Path
-			parts := strings.Split(baseKey, ".")
-			if len(parts) > 0 {
-				baseKey = parts[len(parts)-1]
-			}
-			if _, err := strconv.Atoi(baseKey); err == nil { // numeric leaf => use parent context
-				partsFull := strings.Split(producer.Path, ".")
-				parent := "arr"
-				if len(partsFull) >= 2 {
-					parent = partsFull[len(partsFull)-2]
-					for i := len(partsFull) - 2; i >= 0; i-- { // find first non-numeric ancestor
-						if _, numErr := strconv.Atoi(partsFull[i]); numErr != nil {
-							parent = partsFull[i]
-							break
-						}
-					}
-				}
-				baseKey = fmt.Sprintf("%s_ix_%s", sanitizeKey(parent), baseKey)
-			}
-		}
+            // Derive base key (logic is the same, but now applied per-producer)
+            var baseKey string
+            if producer.Part == RequestURL {
+                baseKey = value
+            } else {
+                baseKey = producer.Path
+                parts := strings.Split(baseKey, ".")
+                if len(parts) > 0 {
+                    baseKey = parts[len(parts)-1]
+                }
+                if _, err := strconv.Atoi(baseKey); err == nil { // numeric leaf => use parent context
+                    partsFull := strings.Split(producer.Path, ".")
+                    parent := "arr"
+                    if len(partsFull) >= 2 {
+                        parent = partsFull[len(partsFull)-2]
+                        for i := len(partsFull) - 2; i >= 0; i-- { // find first non-numeric ancestor
+                            if _, numErr := strconv.Atoi(partsFull[i]); numErr != nil {
+                                parent = partsFull[i]
+                                break
+                            }
+                        }
+                    }
+                    baseKey = fmt.Sprintf("%s_ix_%s", sanitizeKey(parent), baseKey)
+                }
+            }
+            
+            // Append a new, unique candidate for this producer-consumer chain.
+            candidates = append(candidates, &candidate{
+                value:        value,
+                locations:    locations, // This is kept for context but not directly used
+                producer:     producer,
+                consumers:    subsequentConsumers,
+                occurrences:  occurrences,
+                baseKey:      baseKey,
+                producerType: producer.OriginalType,
+            })
+        }
+		// var producer *ValueLocation
+		// for _, loc := range locations {
+		// 	if loc.Part == ResponseBody || loc.Part == ResponseHeader { // allow response headers future
+		// 		producer = loc
+		// 		break
+		// 	}
+		// }
+		// if producer == nil { // can't form a chain without a producer
+		// 	continue
+		// }
 
-		candidates = append(candidates, &candidate{
-			value:        value,
-			locations:    locations,
-			producer:     producer,
-			consumers:    subsequentConsumers,
-			occurrences:  occurrences,
-			baseKey:      baseKey,
-			producerType: producer.OriginalType,
-		})
+		// var subsequentConsumers []*ValueLocation
+		// for _, loc := range locations {
+		// 	if (loc.Part == RequestHeader || loc.Part == RequestURL || loc.Part == RequestBody) && loc.TestCaseIndex > producer.TestCaseIndex {
+		// 		subsequentConsumers = append(subsequentConsumers, loc)
+		// 	}
+		// }
+		// if len(subsequentConsumers) == 0 { // no data flow
+		// 	continue
+		// }
+
+		// // Determine all occurrences (producers + valid consumers at/after producer index)
+		// var occurrences []*ValueLocation
+		// for _, loc := range locations {
+		// 	isProducer := loc.Part == ResponseBody || loc.Part == ResponseHeader
+		// 	isConsumer := (loc.Part == RequestHeader || loc.Part == RequestURL || loc.Part == RequestBody) && loc.TestCaseIndex >= producer.TestCaseIndex
+		// 	if isProducer || isConsumer {
+		// 		occurrences = append(occurrences, loc)
+		// 	}
+		// }
+
+		// // Derive base key (replicating previous logic for stability)
+		// var baseKey string
+		// if producer.Part == RequestURL {
+		// 	baseKey = value
+		// } else {
+		// 	baseKey = producer.Path
+		// 	parts := strings.Split(baseKey, ".")
+		// 	if len(parts) > 0 {
+		// 		baseKey = parts[len(parts)-1]
+		// 	}
+		// 	if _, err := strconv.Atoi(baseKey); err == nil { // numeric leaf => use parent context
+		// 		partsFull := strings.Split(producer.Path, ".")
+		// 		parent := "arr"
+		// 		if len(partsFull) >= 2 {
+		// 			parent = partsFull[len(partsFull)-2]
+		// 			for i := len(partsFull) - 2; i >= 0; i-- { // find first non-numeric ancestor
+		// 				if _, numErr := strconv.Atoi(partsFull[i]); numErr != nil {
+		// 					parent = partsFull[i]
+		// 					break
+		// 				}
+		// 			}
+		// 		}
+		// 		baseKey = fmt.Sprintf("%s_ix_%s", sanitizeKey(parent), baseKey)
+		// 	}
+		// }
+
+		// candidates = append(candidates, &candidate{
+		// 	value:        value,
+		// 	locations:    locations,
+		// 	producer:     producer,
+		// 	consumers:    subsequentConsumers,
+		// 	occurrences:  occurrences,
+		// 	baseKey:      baseKey,
+		// 	producerType: producer.OriginalType,
+		// })
 	}
 
 	// Step 2: group by baseKey
