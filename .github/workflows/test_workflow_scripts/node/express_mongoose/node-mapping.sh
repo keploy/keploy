@@ -56,18 +56,17 @@ send_request() {
 
   curl "http://localhost:8000/students" || true
 
-  curl -sS --request POST --url http://localhost:8000/students \                                                                                 ─╯
+  curl -sS --request POST --url http://localhost:8000/students \
     --header 'content-type: application/json' \
     --data '{"_id":"68c81060905efc883765d155","name":"John Doe","email":"john@xyiz.com","phone":"0123456799"}' || true
 
-  curl -sS --request PATCH --url http://localhost:8000/student/68c81060905efc883765d155 \                                                        ─╯
+  curl -sS --request PATCH --url http://localhost:8000/student/68c81060905efc883765d155 \
     --header 'content-type: application/json' \
     --data '{"_id":"68c81060905efc883765d155","name":"John Doe","email":"ayush@xyiz.com","phone":"012345679999"}' || true
 
   curl -sS --request DELETE --url http://localhost:8000/student/68c81060905efc883765d155 || true
 
   curl -sS http://localhost:8000/students || true
-  curl -sS http://localhost:8000/get || true
 
   sleep 10
   echo "$kp_pid Keploy PID"
@@ -111,9 +110,6 @@ run_rerecord() {
   sudo -E env PATH="$PATH" "$RECORD_BIN" rerecord -c 'npm start' $extra_args \
     > "$logfile" 2>&1 &
   local KEPLOY_PID=$!
-
-  # Drive traffic and stop keploy
-  send_request "$KEPLOY_PID"
 
   # Wait + capture rc
   wait "$KEPLOY_PID"
@@ -240,10 +236,10 @@ run_replay() {
   local any_fail=false
   for rpt in "$RUN_DIR"/test-set-*-report.yaml; do
     [[ -f "$rpt" ]] || continue
-    local status
-    status=$(awk '/^status:/{print $2; exit}' "$rpt")
-    echo "Test status for $(basename "$rpt"): ${status:-<missing>}"
-    if [[ "$status" != "PASSED" ]]; then any_fail=true; fi
+    local test_status
+    test_status=$(awk '/^status:/{print $2; exit}' "$rpt")
+    echo "Test status for $(basename "$rpt"): ${test_status:-<missing>}"
+    if [[ "$test_status" != "PASSED" ]]; then any_fail=true; fi
   done
   endsec
 
@@ -256,11 +252,11 @@ run_replay() {
 
 run_templatize 1
 
-run_replay 1
-
-echo "Starting MongoDB for rerecord operation"
+echo "Starting MongoDB for replay operation because of global passthrough"
 docker run --name mongoDb --rm -p 27017:27017 -d mongo
 wait_for_mongo
+run_replay 1 --global-passthrough
+
 run_rerecord 1
 
 section "Shutdown MongoDB before test mode"
@@ -278,7 +274,7 @@ else
   echo "::warning::keploy.yml missing; cannot set selectedTests"
 fi
 
-run_replay 3 "--apiTimeout 30"
+run_replay 3
 
 echo "All replays completed. If no errors above, CI can PASS."
 exit 0
