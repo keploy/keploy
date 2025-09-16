@@ -116,7 +116,7 @@ func (r *Report) printSpecificTestCases(ctx context.Context, runID string, testS
 		}
 		any = true
 		if err := r.printTests(sel); err != nil {
-			return fmt.Errorf("printSpecificTestCases failed with error: %w", err)
+			return fmt.Errorf("failed to print tests in printSpecificTestCases: %w", err)
 		}
 	}
 	if !any {
@@ -124,7 +124,7 @@ func (r *Report) printSpecificTestCases(ctx context.Context, runID string, testS
 	}
 	err := r.out.Flush()
 	if err != nil {
-		return fmt.Errorf("printSpecificTestCases failed with error: %w", err)
+		return fmt.Errorf("failed while flushing in printSpecificTestCases: %w", err)
 	}
 	return nil
 }
@@ -134,7 +134,7 @@ func (r *Report) printTests(tests []models.TestResult) error {
 	for _, t := range tests {
 		if t.Status == models.TestStatusFailed {
 			if err := r.printSingleTestReport(t); err != nil {
-				return fmt.Errorf("printTests failed with error: %w", err)
+				return fmt.Errorf("failed to print single test report in printTests: %w", err)
 			}
 			continue
 		}
@@ -144,7 +144,7 @@ func (r *Report) printTests(tests []models.TestResult) error {
 	}
 	err := r.out.Flush()
 	if err != nil {
-		return fmt.Errorf("printTests failed with error: %w", err)
+		return fmt.Errorf("failed while flushing in printTests: %w", err)
 	}
 	return nil
 }
@@ -238,7 +238,7 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 	fmt.Fprintln(r.out, "<=========================================>")
 	err := r.out.Flush()
 	if err != nil {
-		return fmt.Errorf("printSummary failed with error: %w", err)
+		return fmt.Errorf("failed while flushing in printSummary: %w", err)
 	}
 	return nil
 }
@@ -274,7 +274,7 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 
 	latestRunID, err := r.getLatestTestRunID(ctx)
 	if err != nil {
-		return fmt.Errorf("getLatestTestRunID failed with error: %w", err)
+		return fmt.Errorf("failed to get latest test run ID: %w", err)
 	}
 	if latestRunID == "" {
 		r.logger.Warn("no test runs found")
@@ -288,7 +288,7 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 		testSetIDs, err = r.testDB.GetReportTestSets(ctx, latestRunID)
 		if err != nil {
 			r.logger.Error("failed to get all test set ids", zap.Error(err))
-			return fmt.Errorf("getLatestTestRunID failed with error: %w", err)
+			return fmt.Errorf("failed to get test sets for report: %w", err)
 		}
 		if len(testSetIDs) == 0 {
 			r.logger.Warn("No test sets found for report generation")
@@ -299,7 +299,7 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 	if r.config.Report.Summary {
 		reports, err := r.collectReports(ctx, latestRunID, testSetIDs)
 		if err != nil {
-			return fmt.Errorf("printSummary failed with error: %w", err)
+			return fmt.Errorf("failed to collect reports for summary: %w", err)
 		}
 		return r.printSummary(reports)
 	}
@@ -431,7 +431,7 @@ func (r *Report) processLegacySummary(tests []models.TestResult) error {
 	printSingleSummaryTo(r.out, "file", total, pass, fail, totalTime, failedCases)
 	err := r.out.Flush()
 	if err != nil {
-		return fmt.Errorf("processSummaryLegacy failed with error: %w", err)
+		return fmt.Errorf("failed while flushing in processLegacySummary: %w", err)
 	}
 	return nil
 }
@@ -567,15 +567,15 @@ func (r *Report) printFailedTestReports(ctx context.Context, failedTests []model
 
 		for i := range results {
 			if results[i].err != nil {
-				return fmt.Errorf("printFailedTestReports failed with error: %w", results[i].err)
+				return fmt.Errorf("failed to render full body test report: %w", results[i].err)
 			}
 			if _, err := r.out.WriteString(results[i].sb.String()); err != nil {
-				return fmt.Errorf("printFailedTestReports failed with error: %w", err)
+				return fmt.Errorf("failed to write test report to output: %w", err)
 			}
 		}
 		err := r.out.Flush()
 		if err != nil {
-			return fmt.Errorf("printFailedTestReports failed with error: %w", err)
+			return fmt.Errorf("failed while flushing in printFailedTestReports (full body mode): %w", err)
 		}
 		return nil
 	}
@@ -606,15 +606,15 @@ func (r *Report) printFailedTestReports(ctx context.Context, failedTests []model
 
 	for i := range results {
 		if results[i].err != nil {
-			return fmt.Errorf("printFailedTestReports failed with error: %w", results[i].err)
+			return fmt.Errorf("failed to render test report: %w", results[i].err)
 		}
 		if _, err := r.out.WriteString(results[i].sb.String()); err != nil {
-			return fmt.Errorf("printFailedTestReports failed with error: %w", err)
+			return fmt.Errorf("failed to write test report to output: %w", err)
 		}
 	}
 	err := r.out.Flush()
 	if err != nil {
-		return fmt.Errorf("printFailedTestReports failed with error: %w", err)
+		return fmt.Errorf("failed while flushing in printFailedTestReports: %w", err)
 	}
 	return nil
 }
@@ -667,14 +667,14 @@ func (r *Report) printSingleTestReport(test models.TestResult) error {
 	if r.config.Report.ShowFullBody {
 		var sb strings.Builder
 		if err := r.renderSingleFullBodyFailedTest(&sb, test); err != nil {
-			return fmt.Errorf("printSingleTestReport failed with error: %w", err)
+			return fmt.Errorf("failed to render full body test: %w", err)
 		}
 		if _, err := r.out.WriteString(sb.String()); err != nil {
-			return fmt.Errorf("printSingleTestReport failed with error: %w", err)
+			return fmt.Errorf("failed to write full body test to output: %w", err)
 		}
 		err := r.out.Flush()
 		if err != nil {
-			return fmt.Errorf("printSingleTestReport failed with error: %w", err)
+			return fmt.Errorf("failed to flush output for full body test: %w", err)
 		}
 		return nil
 	}
@@ -682,14 +682,14 @@ func (r *Report) printSingleTestReport(test models.TestResult) error {
 	// Non-full-body: unchanged
 	var sb strings.Builder
 	if err := r.renderSingleFailedTest(&sb, test); err != nil {
-		return fmt.Errorf("printSingleTestReport failed with error: %w", err)
+		return fmt.Errorf("failed to render test report: %w", err)
 	}
 	if _, err := r.out.WriteString(sb.String()); err != nil {
-		return fmt.Errorf("printSingleTestReport failed with error: %w", err)
+		return fmt.Errorf("failed to write test report to output: %w", err)
 	}
 	err := r.out.Flush()
 	if err != nil {
-		return fmt.Errorf("printSingleTestReport failed with error: %w", err)
+		return fmt.Errorf("failed to flush output for test report: %w", err)
 	}
 	return nil
 }
@@ -706,18 +706,18 @@ func (r *Report) renderSingleFullBodyFailedTest(sb *strings.Builder, test models
 
 	// status/header/body diffs
 	if err := r.addStatusCodeDiffs(test, &logDiffs); err != nil {
-		return fmt.Errorf("renderSingleFullBodyFailedTest failed with error: %w", err)
+		return fmt.Errorf("failed to add status code diffs: %w", err)
 	}
 	if err := r.addHeaderDiffs(test, &logDiffs); err != nil {
-		return fmt.Errorf("renderSingleFullBodyFailedTest failed with error: %w", err)
+		return fmt.Errorf("failed to add header diffs: %w", err)
 	}
 	if err := r.addBodyDiffs(test, &logDiffs); err != nil {
-		return fmt.Errorf("renderSingleFullBodyFailedTest failed with error: %w", err)
+		return fmt.Errorf("failed to add body diffs: %w", err)
 	}
 
 	if err := logDiffs.Render(); err != nil {
 		r.logger.Error("failed to render the diffs", zap.Error(err))
-		return fmt.Errorf("renderSingleFullBodyFailedTest failed with error: %w", err)
+		return fmt.Errorf("failed to render diffs: %w", err)
 	}
 	sb.WriteString("\n--------------------------------------------------------------------\n")
 	return nil
@@ -757,12 +757,12 @@ func (r *Report) addBodyDiffs(test models.TestResult, logDiffs *matcherUtils.Dif
 		if !bodyResult.Normal {
 			actualValue, err := r.renderTemplateValue(bodyResult.Actual)
 			if err != nil {
-				return fmt.Errorf("addBodyDiffs failed with error: %w", err)
+				return fmt.Errorf("failed to render actual body value: %w", err)
 			}
 
 			expectedValue, err := r.renderTemplateValue(bodyResult.Expected)
 			if err != nil {
-				return fmt.Errorf("addBodyDiffs failed with error: %w", err)
+				return fmt.Errorf("failed to render expected body value: %w", err)
 			}
 
 			logDiffs.PushBodyDiff(fmt.Sprint(expectedValue), fmt.Sprint(actualValue), nil)
@@ -781,21 +781,6 @@ func (r *Report) renderTemplateValue(value interface{}) (interface{}, error) {
 	return renderedValue, nil
 }
 
-// printAndRenderDiffs prints the logs and renders the differences
-func (r *Report) printAndRenderDiffs(printer *pp.PrettyPrinter, logs string, logDiffs *matcherUtils.DiffsPrinter) error {
-	if _, err := printer.Printf(logs); err != nil {
-		r.logger.Error("failed to print the logs", zap.Error(err))
-		return fmt.Errorf("printAndRenderDiffs failed with error: %w", err)
-	}
-
-	if err := logDiffs.Render(); err != nil {
-		r.logger.Error("failed to render the diffs", zap.Error(err))
-		return fmt.Errorf("printAndRenderDiffs failed with error: %w", err)
-	}
-
-	return nil
-}
-
 // extractTestSetIDs extracts and cleans test set IDs from config
 func (r *Report) extractTestSetIDs() []string {
 	var testSetIDs []string
@@ -811,19 +796,19 @@ func (r *Report) printDefaultBodyDiff(bodyResult models.BodyResult) error {
 
 	actualValue, err := r.renderTemplateValue(bodyResult.Actual)
 	if err != nil {
-		return fmt.Errorf("printDefaultBodyDiff failed with error: %w", err)
+		return fmt.Errorf("failed to render actual value for default body diff: %w", err)
 	}
 
 	expectedValue, err := r.renderTemplateValue(bodyResult.Expected)
 	if err != nil {
-		return fmt.Errorf("printDefaultBodyDiff failed with error: %w", err)
+		return fmt.Errorf("failed to render expected value for default body diff: %w", err)
 	}
 
 	logDiffs.PushBodyDiff(fmt.Sprint(expectedValue), fmt.Sprint(actualValue), nil)
 
 	if err := logDiffs.Render(); err != nil {
 		r.logger.Error("failed to render the default body diffs", zap.Error(err))
-		return fmt.Errorf("printDefaultBodyDiff failed with error: %w", err)
+		return fmt.Errorf("failed to render default body diffs: %w", err)
 	}
 	return nil
 }
