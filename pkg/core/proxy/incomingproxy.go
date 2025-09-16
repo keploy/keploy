@@ -22,8 +22,7 @@ import (
 	"go.keploy.io/server/v2/pkg/core/hooks"
 	"go.keploy.io/server/v2/utils"
 
-	// grpcV2 "go.keploy.io/server/v2/pkg/core/proxy/integrations/grpcV2"
-	grpcV2 "github.com/keploy/integrations/pkg/grpcV2" 
+	grpc "go.keploy.io/server/v2/pkg/core/proxy/gRPCincoming"
 	"go.keploy.io/server/v2/pkg/core/proxy/util"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
@@ -197,7 +196,6 @@ func handleConnection(ctx context.Context, clientConn net.Conn, upstreamAddr str
 	defer clientConn.Close()
 	logger.Debug("Accepted ingress connection", zap.String("client", clientConn.RemoteAddr().String()))
 
-
 	preface, err := util.ReadInitialBuf(ctx, logger, clientConn)
 	if err != nil {
 		utils.LogError(logger, err, "error reading initial bytes from client connection")
@@ -214,7 +212,7 @@ func handleConnection(ctx context.Context, clientConn net.Conn, upstreamAddr str
 			return
 		}
 
-		grpcV2.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t)
+		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t)
 	} else {
 		logger.Debug("Detected HTTP/1.x connection")
 		handleHttp1Connection(ctx, newReplayConn(preface, clientConn), upstreamAddr, logger, t, tcCreator, opts)
