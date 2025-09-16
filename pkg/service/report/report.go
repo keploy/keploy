@@ -557,6 +557,8 @@ func (r *Report) renderSingleFailedTest(sb *strings.Builder, test models.TestRes
 	sb.WriteString(applyCliColorsToDiff(metaDiff))
 	sb.WriteString("\n\n")
 
+	sb.WriteString("=== CHANGES WITHIN THE RESPONSE BODY ===\n\n")
+
 	// Body diffs
 	for _, bodyResult := range test.Result.BodyResult {
 		if bodyResult.Normal {
@@ -576,7 +578,7 @@ func (r *Report) renderSingleFailedTest(sb *strings.Builder, test models.TestRes
 			}
 		} else {
 			// Force the old compact format for non-JSON bodies (fast).
-			diff := GeneratePlainOldNewDiff(bodyResult.Expected, bodyResult.Actual)
+			diff := GeneratePlainOldNewDiff(bodyResult.Expected, bodyResult.Actual, bodyResult.Type)
 			sb.WriteString(applyCliColorsToDiff(diff))
 			sb.WriteString("\n")
 		}

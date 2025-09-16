@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"go.keploy.io/server/v2/pkg/models"
 )
 
 // GenerateTableDiff creates a human-readable key-value diff for two JSON strings.
@@ -143,40 +145,17 @@ func pathWithDollar(base string) string {
 // GeneratePlainOldNewDiff emits the old compact "Path / Old / New" diff for non-JSON bodies.
 // For large payloads it prints short previews around the first difference, plus lengths,
 // so we avoid spewing megabytes while keeping the exact original lines/labels.
-func GeneratePlainOldNewDiff(expected, actual string) string {
-	const (
-		header = "=== CHANGES WITHIN THE RESPONSE BODY ===\n"
-		path   = "body"
-		ctx    = 96       // bytes of context on each side for previews
-		limit  = 32 << 10 // if both sides <= 32 KiB, print full strings
-	)
-
+func GeneratePlainOldNewDiff(expected, actual string, bodyType models.BodyType) string {
 	if expected == actual {
 		return "No differences found in body."
 	}
 
-	expLen, actLen := len(expected), len(actual)
-	first := firstDiff(expected, actual)
-
-	// Small bodies → print full strings (historical behavior).
-	if expLen <= limit && actLen <= limit {
-		var sb strings.Builder
-		sb.WriteString(header)
-		sb.WriteString(fmt.Sprintf("Path: %s\n", path))
-		sb.WriteString(fmt.Sprintf("  Old: %s\n", escapeOneLine(expected)))
-		sb.WriteString(fmt.Sprintf("  New: %s\n", escapeOneLine(actual)))
-		return strings.TrimSpace(sb.String())
-	}
-
-	// Large bodies → compact previews but same line format.
-	expPrev := previewAt(expected, first, ctx)
-	actPrev := previewAt(actual, first, ctx)
-
 	var sb strings.Builder
-	sb.WriteString(header)
-	sb.WriteString(fmt.Sprintf("Path: %s\n", path))
-	sb.WriteString(fmt.Sprintf("  Old: %s (len=%d, firstDiff@%d)\n", quote(expPrev), expLen, first))
-	sb.WriteString(fmt.Sprintf("  New: %s (len=%d, firstDiff@%d)\n", quote(actPrev), actLen, first))
+	sb.WriteString(fmt.Sprintf("Path: %s\n", bodyType))
+	sb.WriteString(fmt.Sprintf("  Old: %s\n", escapeOneLine(expected)))
+	sb.WriteString(fmt.Sprintf("  New: %s\n", escapeOneLine(actual)))
+	// write an empty line after the diff
+	sb.WriteString("\n")
 	return strings.TrimSpace(sb.String())
 }
 
