@@ -104,7 +104,7 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 			// If not found in cache, resolve the DNS query only in case of record mode
 			//TODO: Add support for passThrough here using the src<->dst mapping
 			println("models.GetMode():", models.GetMode())
-			if models.GetMode() == models.MODE_RECORD || models.GetMode() == models.MODE_TEST {
+			if true {
 				println("global passthrough is enabled hence resolving the dns query for:", question.Name)
 				answers = resolveDNSQuery(p.logger, question.Name)
 			}
