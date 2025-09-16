@@ -103,12 +103,14 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		if !found {
 			// If not found in cache, resolve the DNS query only in case of record mode
 			//TODO: Add support for passThrough here using the src<->dst mapping
+			println("models.GetMode():", models.GetMode())
 			if models.GetMode() == models.MODE_RECORD || models.GetMode() == models.MODE_TEST {
+				println("global passthrough is enabled hence resolving the dns query for:", question.Name)
 				answers = resolveDNSQuery(p.logger, question.Name)
 			}
 
 			if len(answers) == 0 {
-
+				println("global passthrough didn't worked hence sending default response for:", question.Name)
 				switch question.Qtype {
 				// If the resolution failed, return a default A record with Proxy IP
 				// or AAAA record with Proxy IP6
