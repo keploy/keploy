@@ -262,7 +262,7 @@ docker run --name mongoDb --rm -p 27017:27017 -d mongo
 wait_for_mongo
 run_replay 1 --global-passthrough
 
-run_rerecord 1
+run_rerecord 1 --amend-testset
 
 section "Shutdown MongoDB before test mode"
 docker stop mongoDb || true
