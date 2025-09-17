@@ -29,11 +29,11 @@ import (
 )
 
 type IngressEvent struct {
-	PID     uint32
-	Family  uint16
-	Pub     uint16
-	Backend uint16
-	_       uint16 // Padding
+	PID         uint32
+	Family      uint16
+	OrigAppPort uint16
+	NewAppPort  uint16
+	_           uint16 // Padding
 }
 type TestCaseCreator interface {
 	CreateHTTP(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, reqData, respData []byte, reqTime, respTime time.Time, opts models.IncomingOptions) error
@@ -74,21 +74,21 @@ func NewIngressProxyManager(ctx context.Context, logger *zap.Logger, deps ProxyD
 	return pm
 }
 
-// Ensure starts a new ingress proxy on the given public port if it's not already running.
+// Ensure starts a new ingress proxy on the given original app pory if it's not already running.
 
-func (pm *IngressProxyManager) Ensure(port, backend uint16) {
+func (pm *IngressProxyManager) Ensure(origAppPort, newAppPort uint16) {
 	pm.mu.Lock()
-	_, ok := pm.active[port]
+	_, ok := pm.active[origAppPort]
 	pm.mu.Unlock()
 	if ok {
 		return
 	}
-	addrPub := "0.0.0.0:" + strconv.Itoa(int(port))
-	addrBack := "127.0.0.1:" + strconv.Itoa(int(backend))
+	origAppAddr := "0.0.0.0:" + strconv.Itoa(int(origAppPort))
+	newAppAddr := "127.0.0.1:" + strconv.Itoa(int(newAppPort))
 	// Start the basic TCP forwarder
-	stop := runTCPForwarder(pm.logger, addrPub, addrBack, pm, pm.tcCreator, pm.incomingOpts)
+	stop := runTCPForwarder(pm.logger, origAppAddr, newAppAddr, pm, pm.tcCreator, pm.incomingOpts)
 	pm.mu.Lock()
-	pm.active[port] = stop
+	pm.active[origAppPort] = stop
 	pm.mu.Unlock()
 }
 
@@ -135,31 +135,31 @@ func ListenForIngressEvents(ctx context.Context, h *hooks.Hooks, pm *IngressProx
 			}
 			pm.logger.Debug("Intercepted application bind event",
 				zap.Uint32("pid", e.PID),
-				zap.Uint16("public_port", e.Pub),
-				zap.Uint16("backend_port", e.Backend))
+				zap.Uint16("Orig_App_Port", e.OrigAppPort),
+				zap.Uint16("New_App_Port", e.NewAppPort))
 
-			pm.Ensure(e.Pub, e.Backend)
+			pm.Ensure(e.OrigAppPort, e.NewAppPort)
 		}
 	}
 }
 
 // runTCPForwarder starts a basic proxy that forwards traffic and logs data.
 
-func runTCPForwarder(logger *zap.Logger, listenAddr, upstreamAddr string, pm *IngressProxyManager, tcCreator TestCaseCreator, opts models.IncomingOptions) func() error {
-	ln, err := net.Listen("tcp4", listenAddr)
+func runTCPForwarder(logger *zap.Logger, origAppAddr, newAppAddr string, pm *IngressProxyManager, tcCreator TestCaseCreator, opts models.IncomingOptions) func() error {
+	listener, err := net.Listen("tcp4", origAppAddr)
 	if err != nil {
-		logger.Error("Ingress proxy failed to listen", zap.String("addr", listenAddr), zap.Error(err))
+		logger.Error("Ingress proxy failed to listen", zap.String("original_addr", origAppAddr), zap.Error(err))
 		return func() error { return err }
 	}
-	tcpListener, ok := ln.(*net.TCPListener)
+	tcpListener, ok := listener.(*net.TCPListener)
 	if !ok {
 		err := fmt.Errorf("listener was not a TCP listener, which is unexpected")
 		logger.Error("Ingress proxy setup failed", zap.Error(err))
-		ln.Close()
+		listener.Close()
 		return func() error { return err }
 	}
 
-	logger.Debug("Started Ingress forwarder", zap.String("listening_on", listenAddr), zap.String("forwarding_to", upstreamAddr))
+	logger.Debug("Started Ingress forwarder", zap.String("listening_on", origAppAddr), zap.String("forwarding_to", newAppAddr))
 	ctx, cancel := context.WithCancel(pm.ctx)
 	done := make(chan struct{})
 	go func() {
@@ -171,7 +171,7 @@ func runTCPForwarder(logger *zap.Logger, listenAddr, upstreamAddr string, pm *In
 			default:
 			}
 			_ = tcpListener.SetDeadline(time.Now().Add(1 * time.Second))
-			clientConn, err := ln.Accept()
+			clientConn, err := listener.Accept()
 			if err != nil {
 				if ne, ok := err.(net.Error); ok && ne.Timeout() {
 					continue
@@ -179,12 +179,12 @@ func runTCPForwarder(logger *zap.Logger, listenAddr, upstreamAddr string, pm *In
 				logger.Debug("Stopping ingress accept loop.", zap.Error(err))
 				return
 			}
-			go handleConnection(pm.ctx, clientConn, upstreamAddr, logger, pm.tcChan, tcCreator, opts)
+			go handleConnection(pm.ctx, clientConn, newAppAddr, logger, pm.tcChan, tcCreator, opts)
 		}
 	}()
 	return func() error {
 		cancel()
-		_ = ln.Close()
+		_ = listener.Close()
 		<-done
 		return nil
 	}
@@ -192,7 +192,7 @@ func runTCPForwarder(logger *zap.Logger, listenAddr, upstreamAddr string, pm *In
 
 const clientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 
-func handleConnection(ctx context.Context, clientConn net.Conn, upstreamAddr string, logger *zap.Logger, t chan *models.TestCase, tcCreator TestCaseCreator, opts models.IncomingOptions) {
+func handleConnection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, tcCreator TestCaseCreator, opts models.IncomingOptions) {
 	defer clientConn.Close()
 	logger.Debug("Accepted ingress connection", zap.String("client", clientConn.RemoteAddr().String()))
 
@@ -203,10 +203,10 @@ func handleConnection(ctx context.Context, clientConn net.Conn, upstreamAddr str
 	}
 	if bytes.HasPrefix(preface, []byte(clientPreface)) {
 		logger.Debug("Detected HTTP/2 connection")
-		upConn, err := net.DialTimeout("tcp4", upstreamAddr, 3*time.Second)
+		upConn, err := net.DialTimeout("tcp4", newAppAddr, 3*time.Second)
 		if err != nil {
 			logger.Error("Failed to connect to upstream gRPC server",
-				zap.String("upstream_addr", upstreamAddr),
+				zap.String("New_App_Address", newAppAddr),
 				zap.Error(err))
 			clientConn.Close() // Close the client connection as we can't proceed
 			return
@@ -215,7 +215,7 @@ func handleConnection(ctx context.Context, clientConn net.Conn, upstreamAddr str
 		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t)
 	} else {
 		logger.Debug("Detected HTTP/1.x connection")
-		handleHttp1Connection(ctx, newReplayConn(preface, clientConn), upstreamAddr, logger, t, tcCreator, opts)
+		handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, tcCreator, opts)
 	}
 }
 
@@ -238,11 +238,11 @@ func (r *replayConn) Read(p []byte) (int, error) {
 	return r.Conn.Read(p)
 }
 
-func handleHttp1Connection(ctx context.Context, clientConn net.Conn, upstreamAddr string, logger *zap.Logger, t chan *models.TestCase, tcCreator TestCaseCreator, opts models.IncomingOptions) {
-	upConn, err := net.DialTimeout("tcp4", upstreamAddr, 3*time.Second)
+func handleHttp1Connection(ctx context.Context, clientConn net.Conn, newAppAddr string, logger *zap.Logger, t chan *models.TestCase, tcCreator TestCaseCreator, opts models.IncomingOptions) {
+	upConn, err := net.DialTimeout("tcp4", newAppAddr, 3*time.Second)
 	clientReader := bufio.NewReader(clientConn)
 	if err != nil {
-		logger.Warn("Failed to dial upstream backend", zap.String("backend", upstreamAddr), zap.Error(err))
+		logger.Warn("Failed to dial upstream new app port", zap.String("New_App_Port", newAppAddr), zap.Error(err))
 		return
 	}
 	defer upConn.Close()
