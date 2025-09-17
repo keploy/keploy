@@ -24,6 +24,7 @@ type Instrumentation interface {
 	Run(ctx context.Context, id uint64, opts models.RunOptions) models.AppError
 
 	GetContainerIP(ctx context.Context, id uint64) (string, error)
+	UnregisterClient(ctx context.Context, opts models.UnregisterReq) error
 }
 
 type Service interface {

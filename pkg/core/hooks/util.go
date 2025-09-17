@@ -1,4 +1,4 @@
-//go:build linux
+//go:build !windows
 
 package hooks
 
@@ -29,6 +29,21 @@ func IPv4ToUint32(ipStr string) (uint32, error) {
 		return 0, errors.New("not a valid IPv4 address")
 	}
 	return 0, errors.New("failed to parse IP address")
+}
+
+func GetSelfInodeNumber() (uint64, error) {
+	p := filepath.Join("/proc", "self", "ns", "pid")
+
+	f, err := os.Stat(p)
+	if err != nil {
+		return 0, errors.New("failed to get inode of the keploy process")
+	}
+	// Dev := (f.Sys().(*syscall.Stat_t)).Dev
+	Ino := (f.Sys().(*syscall.Stat_t)).Ino
+	if Ino != 0 {
+		return Ino, nil
+	}
+	return 0, nil
 }
 
 // ToIPv4MappedIPv6 converts an IPv4 address to an IPv4-mapped IPv6 address.

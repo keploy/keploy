@@ -1,4 +1,4 @@
-//go:build linux
+//go:build !windows
 
 // Package app provides functionality for managing applications.
 package app
@@ -22,8 +22,6 @@ import (
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
-
-
 
 func NewApp(logger *zap.Logger, id uint64, cmd string, client docker.Client, opts Options) *App {
 	app := &App{
