@@ -541,9 +541,11 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 		finalMocks := make([]*models.Mock, len(collectedMocks))
 		copy(finalMocks, collectedMocks)
 		mockMutex.Unlock()
-		mappings[tc.Name] = make([]string, 0)
-		for _, mock := range finalMocks {
-			mappings[tc.Name] = append(mappings[tc.Name], mock.Name)
+		if len(finalMocks) > 0 {
+			mappings[tc.Name] = make([]string, 0)
+			for _, mock := range finalMocks {
+				mappings[tc.Name] = append(mappings[tc.Name], mock.Name)
+			}
 		}
 	}
 
