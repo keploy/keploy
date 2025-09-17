@@ -101,7 +101,7 @@ func (mcm *MockCorrelationManager) routeMockToTest(mock *models.Mock) {
 	defer mcm.mutex.RUnlock()
 
 	if len(mcm.activeTests) == 0 {
-		mcm.logger.Info("No active tests to route mock to", zap.String("mockKind", mock.GetKind()))
+		mcm.logger.Debug("No active tests to route mock to", zap.String("mockKind", mock.GetKind()))
 		return
 	}
 
@@ -109,14 +109,14 @@ func (mcm *MockCorrelationManager) routeMockToTest(mock *models.Mock) {
 	targetTestID := mcm.router.RouteToTest(mock, mcm.activeTests)
 
 	if targetTestID == "" {
-		mcm.logger.Info("No suitable test found for mock", zap.String("mockKind", mock.GetKind()))
+		mcm.logger.Debug("No suitable test found for mock", zap.String("mockKind", mock.GetKind()))
 		return
 	}
 
 	if mockCh, exists := mcm.testMockChannels[targetTestID]; exists {
 		select {
 		case mockCh <- mock:
-			mcm.logger.Info("Mock routed to test",
+			mcm.logger.Debug("Mock routed to test",
 				zap.String("testID", targetTestID),
 				zap.String("mockKind", mock.GetKind()))
 		default:
@@ -140,7 +140,7 @@ func (mcm *MockCorrelationManager) RegisterTest(testCtx TestContext) {
 	mcm.testMockChannels[testCtx.TestID] = mockCh
 	mcm.activeTests[testCtx.TestID] = testCtx
 
-	mcm.logger.Info("Test registered for mock correlation",
+	mcm.logger.Debug("Test registered for mock correlation",
 		zap.String("testID", testCtx.TestID),
 		zap.String("testName", testCtx.TestName))
 }
@@ -162,7 +162,7 @@ func (mcm *MockCorrelationManager) UnregisterTest(testID string) {
 
 		delete(mcm.activeTests, testID)
 
-		mcm.logger.Info("Test unregistered from mock correlation",
+		mcm.logger.Debug("Test unregistered from mock correlation",
 			zap.String("testID", testID))
 	}
 }
@@ -218,5 +218,5 @@ func (mcm *MockCorrelationManager) SetRouter(router MockRouter) {
 	defer mcm.mutex.Unlock()
 
 	mcm.router = router
-	mcm.logger.Info("Mock routing strategy updated")
+	mcm.logger.Debug("Mock routing strategy updated")
 }

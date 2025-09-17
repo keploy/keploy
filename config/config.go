@@ -31,6 +31,7 @@ type Config struct {
 	Gen                   UtGen        `json:"gen" yaml:"-" mapstructure:"gen"`
 	Normalize             Normalize    `json:"normalize" yaml:"-" mapstructure:"normalize"`
 	ReRecord              ReRecord     `json:"rerecord" yaml:"-" mapstructure:"rerecord"`
+	DisableMapping        bool         `json:"disableMapping" yaml:"disableMapping" mapstructure:"disableMapping"`
 	ConfigPath            string       `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
 	BypassRules           []BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
 	EnableTesting         bool         `json:"enableTesting" yaml:"-" mapstructure:"enableTesting"`

@@ -83,14 +83,25 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		var errCh = make(chan error, 1)
 		var replayErrCh = make(chan error, 1)
 
-		//Keeping two back-to-back selects is used to not do blocking operation if parent ctx is done
+		mappingTestSet := testSet // Test set to store the mapping , have to get a new test set id if we are creating a new test set
+
 		cfg := models.ReRecordCfg{
 			Rerecord: true,
 			TestSet:  testSet,
 		}
+
 		if o.config.ReRecord.CreateTestSet {
 			cfg.TestSet = ""
+			mappingTestSet, err = o.record.GetNextTestSetID(recordCtx)
+			if err != nil {
+				errMsg := "failed to get next testset id"
+				utils.LogError(o.logger, err, errMsg)
+			}
 		}
+
+		isMappingEnabled := !o.config.DisableMapping
+
+		//Keeping two back-to-back selects is used to not do blocking operation if parent ctx is done
 		select {
 		case <-ctx.Done():
 		default:
@@ -107,7 +118,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		default:
 			errGrp.Go(func() error {
 				defer utils.Recover(o.logger)
-				allRecorded, err := o.replayTests(recordCtx, testSet)
+				allRecorded, err := o.replayTests(recordCtx, testSet, mappingTestSet, isMappingEnabled)
 
 				if allRecorded && err == nil {
 					o.logger.Info("Re-recorded testcases successfully for the given testset", zap.String("testset", testSet))
@@ -200,7 +211,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 	return nil
 }
 
-func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, error) {
+func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingTestSet string, isMappingEnabled bool) (bool, error) {
 
 	var mappings = make(map[string][]string)
 
@@ -378,10 +389,6 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 					mockMutex.Lock()
 					collectedMocks = append(collectedMocks, mock)
 					mockMutex.Unlock()
-					o.logger.Info("Collected mock for test case",
-						zap.String("testCaseID", tcID),
-						zap.String("testCaseName", tc.Name),
-						zap.String("mockType", mock.GetKind()))
 				case <-ctx.Done():
 					return
 				}
@@ -550,13 +557,13 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 	}
 
 	// Save the test-mock mappings to YAML file
-	if len(mappings) > 0 {
-		err := o.replay.StoreMappings(ctx, testSet, mappings)
+	if len(mappings) > 0 && isMappingEnabled {
+		err := o.replay.StoreMappings(ctx, mappingTestSet, mappings)
 		if err != nil {
 			o.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
 		} else {
 			o.logger.Info("Successfully saved test-mock mappings",
-				zap.String("testSetID", testSet),
+				zap.String("testSetID", mappingTestSet),
 				zap.Int("numTests", len(mappings)))
 		}
 	}

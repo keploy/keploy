@@ -493,7 +493,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
 
-		if !testRunResult && len(mockMismatchFailures.GetFailures()) > 0 {
+		if !testRunResult && len(mockMismatchFailures.GetFailures()) > 0 && !r.config.DisableMapping {
 			failuresByTestSet := make(map[string]bool)
 			for _, failure := range mockMismatchFailures.GetFailures() {
 				failuresByTestSet[failure.TestSetID] = true
@@ -797,8 +797,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// Check if mappings are present and decide filtering strategy
 	var expectedTestMockMappings map[string][]string
 	var useMappingBased bool
+	isMappingEnabled := !r.config.DisableMapping
 
-	if r.mappingDB != nil {
+	if !isMappingEnabled {
+		r.logger.Info("Mapping-based mock filtering strategy is disabled, using timestamp-based mock filtering strategy")
+	}
+
+	if r.mappingDB != nil && isMappingEnabled {
 		// Get mappings and check if meaningful mappings are present
 		var hasMeaningfulMappings bool
 		expectedTestMockMappings, hasMeaningfulMappings, err = r.mappingDB.GetMappings(ctx, testSetID)
@@ -1317,7 +1322,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	if testSetStatus == models.TestSetStatusPassed && r.instrument {
+	if testSetStatus == models.TestSetStatusPassed && r.instrument && isMappingEnabled {
 		err := r.StoreMappings(ctx, testSetID, actualTestMockMappings)
 		if err != nil {
 			r.logger.Error("Error saving test-mock mappings to YAML file", zap.Error(err))
@@ -1328,7 +1333,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 
-	if testSetStatus == models.TestSetStatusFailed && r.instrument {
+	if testSetStatus == models.TestSetStatusFailed && r.instrument && isMappingEnabled {
 
 		for tc, expectedMocks := range expectedTestMockMappings {
 

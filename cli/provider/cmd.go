@@ -244,7 +244,6 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		}
 
 		cmd.Flags().Bool("global-passthrough", false, "Allow all outgoing calls to be mocked if set to true")
-		cmd.Flags().Bool("amend-testset", false, "For updating the current test-set for each test-set during rerecording. By default it is false")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
@@ -312,8 +311,10 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().String("proto-file", c.cfg.Test.ProtoFile, "Path of main proto file")
 		cmd.Flags().String("proto-dir", c.cfg.Test.ProtoDir, "Path of the directory where all protos of a service are located")
 		cmd.Flags().StringArray("proto-include", c.cfg.Test.ProtoInclude, "Path of directories to be included while parsing import statements in proto files")
+		cmd.Flags().Bool("disable-mapping", c.cfg.DisableMapping, "Disable mapping of testcases during test and rerecord mode")
 		if cmd.Name() == "rerecord" {
 			cmd.Flags().Bool("show-diff", c.cfg.ReRecord.ShowDiff, "Show response differences during rerecord (disabled by default)")
+			cmd.Flags().Bool("amend-testset", false, "For updating the current test-set for each test-set during rerecording. By default it is false")
 		}
 		if cmd.Name() == "test" {
 			cmd.Flags().Uint64("api-timeout", c.cfg.Test.APITimeout, "User provided timeout for calling its application")
