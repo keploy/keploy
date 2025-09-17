@@ -234,7 +234,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 
 	// setting the appId for the first test-set.
-	inst.AppID = r.config.AppID
+	inst.AppID = r.config.ClientID
 	for i, testSet := range testSets {
 		var backupCreated bool
 		testSetResult = false
@@ -531,7 +531,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		}
 		return &InstrumentState{}, fmt.Errorf("failed to setup instrumentation: %w", err)
 	}
-	r.config.AppID = appID
+	r.config.ClientID = appID
 
 	var cancel context.CancelFunc
 	// starting the hooks and proxy
@@ -577,8 +577,8 @@ func (r *Replayer) reloadHooks(ctx context.Context, appID uint64) (*InstrumentSt
 		return &InstrumentState{}, fmt.Errorf("failed to setup instrumentation during hook reload: %w", err)
 	}
 
-	// Update the config with the new app ID
-	r.config.AppID = newAppID
+	// Update the config with the new client ID
+	r.config.ClientID = newAppID
 
 	// Create a retry mechanism in case of temporary race conditions
 	var lastErr error

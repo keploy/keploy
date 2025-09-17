@@ -245,6 +245,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("bigPayload", false, "Enable the instrumentation hook to capture test cases and mocks.")
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks are stored")
 		cmd.Flags().Uint32("proxy-port", c.cfg.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
+		cmd.Flags().Uint32("server-port", c.cfg.ServerPort, "Port used by the Keploy Agent server to intercept traffic")
 		cmd.Flags().Uint32("dns-port", c.cfg.DNSPort, "Port used by the Keploy DNS server to intercept the DNS queries")
 		cmd.Flags().StringP("command", "c", c.cfg.Command, "Command to start the user application")
 		cmd.Flags().String("cmd-type", c.cfg.CommandType, "Type of command to start the user application (native/docker/docker-compose)")
@@ -252,7 +253,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
 		cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the application's docker network")
 		cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server and ignore the traffic")
-		cmd.Flags().Uint64P("app-id", "a", c.cfg.AppID, "A unique name for the user's application")
+		cmd.Flags().Uint64P("client-id", "a", c.cfg.ClientID, "A unique name for the user's application")
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
 		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
@@ -288,6 +289,10 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
+	case "agent":
+		cmd.Flags().Bool("is-docker", c.cfg.Agent.IsDocker, "Flag to check if the application is running in docker")
+		cmd.Flags().Uint32("port", c.cfg.Agent.Port, "Port used by the Keploy agent to communicate with Keploy's clients")
+		cmd.Flags().Uint32("proxy-port", c.cfg.Agent.ProxyPort, "Port used by the Keploy proxy server to intercept the outgoing dependency calls")
 	default:
 		return errors.New("unknown command name")
 	}
@@ -832,11 +837,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 		}
-		err := StartInDocker(ctx, c.logger, c.cfg)
-		if err != nil {
-			return err
-		}
-
+		
 		absPath, err := utils.GetAbsPath(c.cfg.Path)
 		if err != nil {
 			utils.LogError(c.logger, err, "error while getting absolute path")

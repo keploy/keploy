@@ -132,7 +132,7 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 		return fmt.Errorf("%s", stopReason)
 	}
 
-	r.config.AppID = appID
+	r.config.ClientID = appID
 
 	// fetching test cases and mocks from the application and inserting them into the database
 	frames, err := r.GetTestAndMockChans(ctx, appID)
@@ -253,7 +253,7 @@ func (r *Recorder) Instrument(ctx context.Context, persister models.TestCasePers
 		utils.LogError(r.logger, err, stopReason)
 		return 0, fmt.Errorf("%s", stopReason)
 	}
-	r.config.AppID = appID
+	r.config.ClientID = appID
 
 	// checking for context cancellation as we don't want to start the hooks and proxy if the context is cancelled
 	select {

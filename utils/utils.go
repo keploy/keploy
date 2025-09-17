@@ -30,6 +30,7 @@ import (
 	"golang.org/x/text/language"
 
 	"github.com/getsentry/sentry-go"
+	"github.com/google/uuid"
 	netLib "github.com/shirou/gopsutil/v3/net"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -677,6 +678,31 @@ func GetAbsPath(path string) (string, error) {
 		return "", err
 	}
 	return absPath, nil
+}
+
+func GenerateID() uint64 {
+	// Random AppId uint64 will be generated and maintain in a map and return the id to client
+	newUUID := uuid.New()
+
+	// app id will be sent by the client.
+	// Convert the first 8 bytes of the UUID to an int64
+	id := int64(binary.BigEndian.Uint64(newUUID[:8]))
+	return uint64(id)
+}
+
+func GetCurrentBinaryPath() (string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+
+	// Resolve the full path (to avoid issues with symbolic links)
+	executablePath, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		return "", err
+	}
+
+	return executablePath, nil
 }
 
 func ToAbsPath(logger *zap.Logger, originalPath string) string {

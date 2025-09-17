@@ -215,7 +215,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string) (bool, e
 	time.Sleep(time.Duration(delay) * time.Second)
 	if utils.IsDockerCmd(cmdType) {
 		host = o.config.ContainerName
-		userIP, err = o.record.GetContainerIP(ctx, o.config.AppID)
+		userIP, err = o.record.GetContainerIP(ctx, o.config.ClientID)
 		if err != nil {
 			utils.LogError(o.logger, err, "failed to get the app ip")
 			return false, err
