@@ -331,7 +331,6 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 		return err
 	}
 
-	fmt.Println("here is the mock path", mockPath)
 	// Delete all contents of the mocks directory
 	err = os.RemoveAll(mockPath)
 	if err != nil {

@@ -45,6 +45,8 @@ var totalTestTimeTaken time.Duration
 var failedTCsBySetID = make(map[string][]string)
 var mockMismatchFailures = NewTestFailureStore()
 
+const UNKNOWN_TEST = "UNKNOWN_TEST"
+
 var HookImpl TestHooks
 
 type Replayer struct {
@@ -787,7 +789,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var userIP string
 
 	// Get all mocks for mapping-based filtering
-	filteredMocks, unfilteredMocks, err := r.GetAllMocks(ctx, testSetID)
+	filteredMocks, unfilteredMocks, err := r.GetMocks(ctx, testSetID, models.BaseTime, time.Now())
 	if err != nil {
 		return models.TestSetStatusFailed, err
 	}
@@ -2197,7 +2199,7 @@ func (r *Replayer) monitorProxyErrors(ctx context.Context, testSetID string, tes
 			// Determine effective test case ID
 			effectiveTestCaseID := testCaseID
 			if effectiveTestCaseID == "" {
-				effectiveTestCaseID = "UNKNOWN_TEST"
+				effectiveTestCaseID = UNKNOWN_TEST
 			}
 
 			if parserErr, ok := proxyErr.(models.ParserError); ok {
@@ -2210,18 +2212,4 @@ func (r *Replayer) monitorProxyErrors(ctx context.Context, testSetID string, tes
 
 		}
 	}
-}
-
-func (r *Replayer) GetAllMocks(ctx context.Context, testSetID string) ([]*models.Mock, []*models.Mock, error) {
-	filtered, err := r.mockDB.GetFilteredMocks(ctx, testSetID, models.BaseTime, time.Now())
-	if err != nil {
-		utils.LogError(r.logger, err, "failed to get filtered mocks")
-		return nil, nil, err
-	}
-	unfiltered, err := r.mockDB.GetUnFilteredMocks(ctx, testSetID, models.BaseTime, time.Now())
-	if err != nil {
-		utils.LogError(r.logger, err, "failed to get unfiltered mocks")
-		return nil, nil, err
-	}
-	return filtered, unfiltered, nil
 }
