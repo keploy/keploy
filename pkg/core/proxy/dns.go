@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/utils"
@@ -109,6 +110,8 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 				answers = resolveDNSQuery(p.logger, question.Name)
 			}
 
+			spew.Dump(answers)
+
 			if len(answers) == 0 {
 				println("global passthrough didn't worked hence sending default response for:", question.Name)
 				switch question.Qtype {
@@ -188,9 +191,12 @@ func resolveDNSQuery(logger *zap.Logger, domain string) []dns.RR {
 	var answers []dns.RR
 
 	// For SRV records, handle MongoDB specific queries
+	println("Resolving SRV record for domain:", domain)
 	if strings.HasPrefix(domain, "_mongodb._tcp.") {
 		baseDomain := strings.TrimPrefix(domain, "_mongodb._tcp.")
+		println("Base domain for MongoDB SRV:", baseDomain)
 		_, addrs, err := resolver.LookupSRV(ctx, "mongodb", "tcp", baseDomain)
+		println("Resolved SRV addresses:", addrs, "Error:", err)
 		if err == nil && len(addrs) > 0 {
 			for _, addr := range addrs {
 				answers = append(answers, &dns.SRV{
@@ -203,6 +209,7 @@ func resolveDNSQuery(logger *zap.Logger, domain string) []dns.RR {
 			}
 			return answers
 		}
+		println("failed to resolve the mongodb srv record hence sending default response for:", domain)
 		// If resolution fails, return a default SRV record with a target that matches the domain suffix
 		return []dns.RR{&dns.SRV{
 			Hdr:      dns.RR_Header{Name: dns.Fqdn(domain), Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 3600},
