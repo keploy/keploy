@@ -174,37 +174,37 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 		// Content type check
 		if input.header.Get("Content-Type") != "" {
 			if input.header.Get("Content-Type") != mock.Spec.HTTPReq.Header["Content-Type"] {
-				h.Logger.Debug("The content type of mock and request aren't the same", zap.String("mock name", mock.Name))
+				h.Logger.Debug("The content type of mock and request aren't the same", zap.String("mock name", mock.Name), zap.Any("input header", input.header), zap.Any("mock header", mock.Spec.HTTPReq.Header))
 				continue
 			}
 		}
 		// Body type check
 		if !h.MatchBodyType(mock.Spec.HTTPReq.Body, input.body) {
-			h.Logger.Debug("The body of mock and request aren't of same type", zap.String("mock name", mock.Name))
+			h.Logger.Debug("The body of mock and request aren't of same type", zap.String("mock name", mock.Name), zap.Any("input body", input.body), zap.Any("mock body", mock.Spec.HTTPReq.Body))
 			continue
 		}
 
 		// URL path match
 		if !h.MatchURLPath(mock.Spec.HTTPReq.URL, input.url.Path) {
-			h.Logger.Debug("The url path of mock and request aren't the same", zap.String("mock name", mock.Name))
+			h.Logger.Debug("The url path of mock and request aren't the same", zap.String("mock name", mock.Name), zap.Any("input url", input.url.Path), zap.Any("mock url", mock.Spec.HTTPReq.URL))
 			continue
 		}
 
 		// HTTP method match
 		if mock.Spec.HTTPReq.Method != models.Method(input.method) {
-			h.Logger.Debug("The method of mock and request aren't the same", zap.String("mock name", mock.Name))
+			h.Logger.Debug("The method of mock and request aren't the same", zap.String("mock name", mock.Name), zap.Any("input method", input.method), zap.Any("mock method", mock.Spec.HTTPReq.Method))
 			continue
 		}
 
 		// Header key match
 		if !h.MapsHaveSameKeys(mock.Spec.HTTPReq.Header, input.header) {
-			h.Logger.Debug("The header keys of mock and request aren't the same", zap.String("mock name", mock.Name))
+			h.Logger.Debug("The header keys of mock and request aren't the same", zap.String("mock name", mock.Name), zap.Any("input header", input.header), zap.Any("mock header", mock.Spec.HTTPReq.Header))
 			continue
 		}
 
 		// Query parameter match
 		if !h.MapsHaveSameKeys(mock.Spec.HTTPReq.URLParams, input.url.Query()) {
-			h.Logger.Debug("The query params of mock and request aren't the same", zap.String("mock name", mock.Name))
+			h.Logger.Debug("The query params of mock and request aren't the same", zap.String("mock name", mock.Name), zap.Any("input url params", input.url.Query()), zap.Any("mock url params", mock.Spec.HTTPReq.URLParams))
 			continue
 		}
 
