@@ -141,7 +141,7 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		return r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
 	}
 	// Instrument will setup the environment and start the hooks and proxy
-	appID, err = r.Instrument(hookCtx, persister)
+	appID, err := r.Instrument(hookCtx, persister)
 
 	if err != nil {
 		stopReason = "failed to instrument the application"
@@ -162,25 +162,26 @@ func (r *Recorder) Start(ctx context.Context, reRecordCfg models.ReRecordCfg) er
 		return fmt.Errorf("%s", stopReason)
 	}
 
-
 	if !r.config.Record.BigPayload {
-	r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
-	errGrp.Go(func() error {
-		for testCase := range frames.Incoming {
-			testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
-			if reRecordCfg.TestSet == "" {
-				err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
-				if err != nil {
-					if ctx.Err() == context.Canceled {
-						continue
+		r.mockDB.ResetCounterID() // Reset mock ID counter for each recording session
+		errGrp.Go(func() error {
+			for testCase := range frames.Incoming {
+				testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
+				if reRecordCfg.TestSet == "" {
+					err := r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
+					if err != nil {
+						if ctx.Err() == context.Canceled {
+							continue
+						}
+						insertTestErrChan <- err
+					} else {
+						testCount++
+						r.telemetry.RecordedTestAndMocks()
 					}
-					insertTestErrChan <- err
 				} else {
-					testCount++
-					r.telemetry.RecordedTestAndMocks()
+					r.logger.Info("🟠 Keploy has re-recorded test case for the user's application.")
 				}
-			} else {
-				r.logger.Info("🟠 Keploy has re-recorded test case for the user's application.")
+				return nil
 			}
 			return nil
 		})

@@ -74,7 +74,7 @@ type Record struct {
 	RecordTimer       time.Duration `json:"recordTimer" yaml:"recordTimer" mapstructure:"recordTimer"`
 	Metadata          string        `json:"metadata" yaml:"metadata" mapstructure:"metadata"`
 	GlobalPassthrough bool          `json:"globalPassthrough" yaml:"globalPassthrough" mapstructure:"globalPassthrough"`
-  BigPayload        bool          `json:"bigPayload" yaml:"bigPayload" mapstructure:"bigPayload"`
+	BigPayload        bool          `json:"bigPayload" yaml:"bigPayload" mapstructure:"bigPayload"`
 }
 
 type ReRecord struct {

@@ -67,7 +67,7 @@ type Proxy struct {
 	UDPDNSServer      *dns.Server
 	TCPDNSServer      *dns.Server
 	GlobalPassthrough bool
-  hooks             *Hooks.Hooks
+	hooks             *Hooks.Hooks
 }
 
 func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
@@ -75,10 +75,10 @@ func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
 	return &Proxy{
 		logger:            logger,
 		Port:              opts.ProxyPort, // default: 16789
-    hooks:             h,
-		DNSPort:           opts.DNSPort,   // default: 26789
-		IP4:               "127.0.0.1",    // default: "127.0.0.1" <-> (2130706433)
-		IP6:               "::1",          //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
+		hooks:             h,
+		DNSPort:           opts.DNSPort, // default: 26789
+		IP4:               "127.0.0.1",  // default: "127.0.0.1" <-> (2130706433)
+		IP6:               "::1",        //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
 		ipMutex:           &sync.Mutex{},
 		connMutex:         &sync.Mutex{},
 		DestInfo:          info,

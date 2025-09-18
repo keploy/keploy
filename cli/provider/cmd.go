@@ -1062,7 +1062,6 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 
-
 		bigPayload, _ := cmd.Flags().GetBool("bigPayload")
 		c.cfg.Record.BigPayload = bigPayload
 
