@@ -53,6 +53,12 @@ test:
   mustPass: false
   maxFailAttempts: 5
   maxFlakyChecks: 1
+normalize:
+  selectedTests: []
+  testReport: ""
+  fields:          // fields to be normalized
+    - "resp.status_code"
+    - "resp.body"
 record:
   recordTimer: 0s
   filters: []
