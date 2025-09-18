@@ -2,9 +2,11 @@
 package record
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -17,6 +19,7 @@ import (
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/term"
 )
 
 type Recorder struct {
@@ -27,9 +30,15 @@ type Recorder struct {
 	instrumentation Instrumentation
 	testSetConf     TestSetConfig
 	config          *config.Config
+	tools           ToolsSvc
 }
 
-func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, config *config.Config) Service {
+const (
+	promptTimeout   = 30 * time.Second
+	templatizeLimit = 2 * time.Minute
+)
+
+func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, instrumentation Instrumentation, testSetConf TestSetConfig, config *config.Config, tools ToolsSvc) Service {
 	return &Recorder{
 		logger:          logger,
 		testDB:          testDB,
@@ -38,6 +47,7 @@ func New(logger *zap.Logger, testDB TestDB, mockDB MockDB, telemetry Telemetry, 
 		instrumentation: instrumentation,
 		testSetConf:     testSetConf,
 		config:          config,
+		tools:           tools,
 	}
 }
 
@@ -206,6 +216,21 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 			return nil
 		})
 	}
+
+	defer func() {
+		if !reRecord && !r.config.InCi {
+			areTestsPresent, err := r.testDB.CheckForTests(ctx, newTestSetID)
+			if err != nil {
+				utils.LogError(r.logger, err, "failed to check for tests")
+			}
+			if areTestsPresent {
+				err := r.PromptToTemplatize(ctx, newTestSetID)
+				if err != nil {
+					utils.LogError(r.logger, err, "failed while templatization")
+				}
+			}
+		}
+	}()
 
 	// Waiting for the error to occur in any of the go routines
 	select {
@@ -388,4 +413,73 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 	}
 
 	r.logger.Info("Created test-set config file with metadata")
+}
+
+func (r *Recorder) PromptToTemplatize(ctx context.Context, testSetID string) error {
+	// Don’t prompt in CI or when stdin isn’t a terminal
+	if r.config.InCi || !term.IsTerminal(int(os.Stdin.Fd())) {
+		r.logger.Debug("Non-interactive mode detected; skipping templatize prompt",
+			zap.String("testset", testSetID))
+		return nil
+	}
+
+	// Show prompt
+	r.logger.Info("Recorded test case successfully. Templatize this test set? [y/n]",
+		zap.String("testset", testSetID))
+
+	// Read stdin on a goroutine (since ReadString blocks and ignores ctx)
+	inputCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+
+	go func() {
+		reader := bufio.NewReader(os.Stdin)
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			errCh <- err
+			return
+		}
+		inputCh <- strings.TrimSpace(line)
+	}()
+
+	// Local timeout for the prompt itself
+	promptCtx, promptCancel := context.WithTimeout(context.Background(), promptTimeout)
+	defer promptCancel()
+
+	select {
+	case <-promptCtx.Done():
+		r.logger.Info("No input received; skipping templatize",
+			zap.String("testset", testSetID))
+		return nil
+
+	case err := <-errCh:
+		r.logger.Warn("Failed to read input; keeping older test sets", zap.Error(err))
+		return nil
+
+	case input := <-inputCh:
+		switch strings.ToLower(input) {
+		case "y", "Y":
+			r.config.Templatize.TestSets = []string{testSetID}
+			runCtx, cancel := context.WithTimeout(context.Background(), templatizeLimit)
+			defer cancel()
+
+			if err := r.tools.Templatize(runCtx); err != nil {
+				r.logger.Error("Failed to templatize test set",
+					zap.String("testset", testSetID), zap.Error(err))
+			} else {
+				r.logger.Info("Templatized test set successfully",
+					zap.String("testset", testSetID))
+			}
+			return nil
+
+		case "n", "N":
+			r.logger.Info("Skipping templatize of newer test sets",
+				zap.String("testset", testSetID))
+			return nil
+
+		default:
+			r.logger.Warn("Invalid input; skipping templatize of newer test sets",
+				zap.String("input", input))
+			return nil
+		}
+	}
 }
