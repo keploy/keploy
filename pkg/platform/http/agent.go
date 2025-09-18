@@ -682,7 +682,7 @@ func (a *AgentClient) Initcontainer(ctx context.Context, opts app.Options) (uint
 
 	// Start the Docker events listener in a separate goroutine
 	go func() {
-		events, errs := a.dockerClient.Events(ctx, types.NetworkListOptions{})
+		events, errs := a.dockerClient.Events(ctx, types.EventsOptions{})
 		for {
 			select {
 			case event := <-events:
