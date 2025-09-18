@@ -215,3 +215,6 @@ Prefer a calendar invite? Mention your availability in the email—we’ll send 
 Whether you're new or experienced, your input matters. Help us improve Keploy by contributing code, reporting issues, or sharing feedback.
 
 Together, let's build better testing tools for modern applications.
+
+
+> This project was explored and tested by Jahnavi as a first GitHub contribution.
