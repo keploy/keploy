@@ -39,6 +39,7 @@ type Config struct {
 	KeployNetwork         string       `json:"keployNetwork" yaml:"keployNetwork" mapstructure:"keployNetwork"`
 	CommandType           string       `json:"cmdType" yaml:"cmdType" mapstructure:"cmdType"`
 	Contract              Contract     `json:"contract" yaml:"contract" mapstructure:"contract"`
+	Secrets               map[string]interface{} `json:"secrets" yaml:"-" mapstructure:"secrets"` // Command-line provided secrets
 
 	InCi           bool   `json:"inCi" yaml:"inCi" mapstructure:"inCi"`
 	InstallationID string `json:"-" yaml:"-" mapstructure:"-"`

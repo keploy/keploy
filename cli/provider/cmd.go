@@ -256,6 +256,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
 		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
+		cmd.Flags().StringToString("secrets", nil, "Provide secrets as key-value pairs (e.g., --secrets key1=value1,key2=value2)")
 		//add rest of the uncommon flags for record, test, rerecord commands
 		c.AddUncommonFlags(cmd)
 
@@ -858,6 +859,21 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		config.SetByPassPorts(c.cfg, bypassPorts)
+
+		// Process secrets flag if provided
+		secrets, err := cmd.Flags().GetStringToString("secrets")
+		if err != nil {
+			errMsg := "failed to read the secrets flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		if len(secrets) > 0 {
+			c.cfg.Secrets = make(map[string]interface{})
+			for key, value := range secrets {
+				c.cfg.Secrets[key] = value
+			}
+			c.logger.Info("Using command-line provided secrets")
+		}
 
 		if cmd.Name() == "record" {
 			metadata, err := cmd.Flags().GetString("metadata")
