@@ -161,7 +161,7 @@ func isFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptio
 //	return nil
 //}
 
-func Capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions) {
+func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions) {
 
 	var reqBody []byte
 	if req.Body != nil { // Read
@@ -222,7 +222,7 @@ func Capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 		}
 	}
 
-	t <- &models.TestCase{
+	testCase := &models.TestCase{
 		Version: models.GetVersion(),
 		Name:    pkg.ToYamlHTTPHeader(req.Header)["Keploy-Test-Name"],
 		Kind:    models.HTTP,
@@ -250,6 +250,13 @@ func Capture(_ context.Context, logger *zap.Logger, t chan *models.TestCase, req
 		},
 		Noise: map[string][]string{},
 		// Mocks: mocks,
+	}
+
+	select {
+	case <-ctx.Done():
+		return
+	case t <- testCase:
+		// Successfully sent test case
 	}
 }
 
