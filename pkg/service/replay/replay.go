@@ -952,6 +952,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	}
 
 	var actualTestMockMappings = make(map[string][]string)
+	var consumedMocks []models.MockState
+	consumedMocks, err = HookImpl.GetConsumedMocks(runTestSetCtx, appID) // Getting mocks consumed during initial setup
+	if err != nil {
+		utils.LogError(r.logger, err, "failed to get consumed filtered mocks")
+	}
+	for _, m := range consumedMocks {
+		totalConsumedMocks[m.Name] = m
+	}
 
 	for idx, testCase := range testCases {
 
@@ -1072,7 +1080,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			continue
 		}
 
-		var consumedMocks []models.MockState
 		if r.instrument {
 			consumedMocks, err = HookImpl.GetConsumedMocks(runTestSetCtx, appID)
 			if err != nil {
@@ -1159,8 +1166,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			for _, m := range consumedMocks {
 				actualTestMockMappings[testCase.Name] = append(actualTestMockMappings[testCase.Name], m.Name)
 			}
-		} else {
-			actualTestMockMappings[testCase.Name] = []string{}
 		}
 
 		if !testPass {
