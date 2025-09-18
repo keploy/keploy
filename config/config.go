@@ -29,7 +29,7 @@ type Config struct {
 	Record                Record       `json:"record" yaml:"record" mapstructure:"record"`
 	Report                Report       `json:"report" yaml:"report" mapstructure:"report"`
 	Gen                   UtGen        `json:"gen" yaml:"-" mapstructure:"gen"`
-	Normalize             Normalize    `json:"normalize" yaml:"-" mapstructure:"normalize"`
+	Normalize             Normalize    `json:"normalize" yaml:"normalize" mapstructure:"normalize"`
 	ReRecord              ReRecord     `json:"rerecord" yaml:"-" mapstructure:"rerecord"`
 	ConfigPath            string       `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
 	BypassRules           []BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
