@@ -457,7 +457,7 @@ func (r *Recorder) PromptToTemplatize(ctx context.Context, testSetID string) err
 
 	case input := <-inputCh:
 		switch strings.ToLower(input) {
-		case "y", "Y":
+		case "y":
 			r.config.Templatize.TestSets = []string{testSetID}
 			runCtx, cancel := context.WithTimeout(context.Background(), templatizeLimit)
 			defer cancel()
@@ -471,7 +471,7 @@ func (r *Recorder) PromptToTemplatize(ctx context.Context, testSetID string) err
 			}
 			return nil
 
-		case "n", "N":
+		case "n":
 			r.logger.Info("Skipping templatize of newer test sets",
 				zap.String("testset", testSetID))
 			return nil
