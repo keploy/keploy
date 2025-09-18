@@ -1058,7 +1058,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		err = config.SetSelectedTestsNormalize(c.cfg, tests)
 		if err != nil {
-			errMsg := "failed to normalize the selected tests"
+			errMsg := "failed to normalize the selected test"
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
 		}
