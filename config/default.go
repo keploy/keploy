@@ -56,6 +56,8 @@ test:
   protoFile: ""
   protoDir: ""
   protoInclude: []
+normalize:
+  fields: []
 record:
   recordTimer: 0s
   filters: []

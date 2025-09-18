@@ -29,7 +29,7 @@ type Config struct {
 	Record                Record       `json:"record" yaml:"record" mapstructure:"record"`
 	Report                Report       `json:"report" yaml:"report" mapstructure:"report"`
 	Gen                   UtGen        `json:"gen" yaml:"-" mapstructure:"gen"`
-	Normalize             Normalize    `json:"normalize" yaml:"-" mapstructure:"normalize"`
+	Normalize             Normalize    `json:"normalize" yaml:"normalize" mapstructure:"normalize"`
 	ReRecord              ReRecord     `json:"rerecord" yaml:"-" mapstructure:"rerecord"`
 	ConfigPath            string       `json:"configPath" yaml:"configPath" mapstructure:"configPath"`
 	BypassRules           []BypassRule `json:"bypassRules" yaml:"bypassRules" mapstructure:"bypassRules"`
@@ -99,6 +99,7 @@ type Mappings struct {
 type Normalize struct {
 	SelectedTests []SelectedTests `json:"selectedTests" yaml:"selectedTests" mapstructure:"selectedTests"`
 	TestRun       string          `json:"testReport" yaml:"testReport" mapstructure:"testReport"`
+	Fields        []string        `json:"fields" yaml:"fields" mapstructure:"fields"`
 }
 
 type BypassRule struct {
