@@ -5,10 +5,12 @@ package provider
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"go.keploy.io/server/v2/config"
-	"go.keploy.io/server/v2/pkg/core"
 	"go.keploy.io/server/v2/pkg/models"
+	"go.keploy.io/server/v2/pkg/platform/docker"
+	"go.keploy.io/server/v2/pkg/platform/http"
 	"go.keploy.io/server/v2/pkg/platform/storage"
 	"go.keploy.io/server/v2/pkg/platform/telemetry"
 	"go.keploy.io/server/v2/pkg/platform/yaml/configdb/testset"
@@ -16,18 +18,18 @@ import (
 	openapidb "go.keploy.io/server/v2/pkg/platform/yaml/openapidb"
 	reportdb "go.keploy.io/server/v2/pkg/platform/yaml/reportdb"
 	testdb "go.keploy.io/server/v2/pkg/platform/yaml/testdb"
-
 	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/pkg/service/contract"
 	"go.keploy.io/server/v2/pkg/service/replay"
 	"go.keploy.io/server/v2/pkg/service/report"
 	"go.keploy.io/server/v2/pkg/service/tools"
+	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
 )
 
 type CommonInternalService struct {
 	commonPlatformServices
-	Instrumentation *core.Core
+	Instrumentation *http.AgentClient
 }
 
 func Get(ctx context.Context, cmd string, c *config.Config, logger *zap.Logger, tel *telemetry.Telemetry, auth service.Auth) (interface{}, error) {
@@ -62,7 +64,41 @@ func Get(ctx context.Context, cmd string, c *config.Config, logger *zap.Logger, 
 }
 
 func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) (*CommonInternalService, error) {
-	instrumentation := core.New(logger)
+
+	var client docker.Client
+	var err error
+
+	c.Agent.Port = 8086
+	if utils.IsDockerCmd(utils.CmdType(c.CommandType)) {
+		client, err = docker.New(logger)
+		if err != nil {
+			utils.LogError(logger, err, "failed to create docker client")
+		}
+		c.Agent.IsDocker = true
+		c.Agent.Port = 8096
+
+		//parse docker command only in case of docker start or docker run commands
+		if utils.CmdType(c.CommandType) != utils.DockerCompose {
+			cont, net, err := docker.ParseDockerCmd(c.Command, utils.CmdType(c.CommandType), client)
+			logger.Debug("container and network parsed from command", zap.String("container", cont), zap.String("network", net), zap.String("command", c.Command))
+			if err != nil {
+				utils.LogError(logger, err, "failed to parse container name from given docker command", zap.String("cmd", c.Command))
+			}
+			if c.ContainerName != "" && c.ContainerName != cont {
+				logger.Warn(fmt.Sprintf("given app container:(%v) is different from parsed app container:(%v), taking parsed value", c.ContainerName, cont))
+			}
+			c.ContainerName = cont
+
+			if c.NetworkName != "" && c.NetworkName != net {
+				logger.Warn(fmt.Sprintf("given docker network:(%v) is different from parsed docker network:(%v), taking parsed value", c.NetworkName, net))
+			}
+			c.NetworkName = net
+
+			logger.Debug("Using container and network", zap.String("container", c.ContainerName), zap.String("network", c.NetworkName))
+		}
+	}
+
+	instrumentation := http.New(logger, client, c)
 	testDB := testdb.New(logger, c.Path)
 	mockDB := mockdb.New(logger, c.Path, "")
 	openAPIdb := openapidb.New(logger, c.Path)
@@ -80,4 +116,8 @@ func GetCommonServices(_ context.Context, c *config.Config, logger *zap.Logger) 
 		},
 		instrumentation,
 	}, nil
+}
+
+func GetAgent(ctx context.Context, cmd string, c *config.Config, logger *zap.Logger, auth service.Auth) (interface{}, error) {
+	return nil, errors.New("command not supported in non linux os")
 }

@@ -18,7 +18,7 @@ func TestReplay_UnloadDoneChannelUsage(t *testing.T) {
 	// Get initial instrument state
 	unloadCh := mockInstr.GetHookUnloadDone(appID)
 	inst := &InstrumentState{
-		AppID:      appID,
+		ClientID:      appID,
 		HookCancel: func() {}, // Mock cancel function
 		UnloadDone: unloadCh,
 	}
@@ -73,7 +73,7 @@ func TestReplay_MultipleTestSetReload(t *testing.T) {
 		// Get new instrument state for this test set
 		unloadCh := mockInstr.GetHookUnloadDone(appID)
 		newInst := &InstrumentState{
-			AppID:      appID,
+			ClientID:      appID,
 			HookCancel: func() {},
 			UnloadDone: unloadCh,
 		}
@@ -90,7 +90,7 @@ func TestReplay_MultipleTestSetReload(t *testing.T) {
 
 			// Simulate canceling previous hooks
 			// In real code: hookCancel() would trigger the unload
-			mockInstr.CloseUnloadChannel(currentInst.AppID)
+			mockInstr.CloseUnloadChannel(currentInst.ClientID)
 
 			// Wait for unload to complete
 			select {
@@ -123,7 +123,7 @@ func TestReplay_ConcurrentUnloadWaiters(t *testing.T) {
 
 	unloadCh := mockInstr.GetHookUnloadDone(appID)
 	inst := &InstrumentState{
-		AppID:      appID,
+		ClientID:      appID,
 		HookCancel: func() {},
 		UnloadDone: unloadCh,
 	}
@@ -173,7 +173,7 @@ func TestReplay_UnloadDoneChannelTimeout(t *testing.T) {
 
 	unloadCh := mockInstr.GetHookUnloadDone(appID)
 	inst := &InstrumentState{
-		AppID:      appID,
+		ClientID:      appID,
 		HookCancel: func() {},
 		UnloadDone: unloadCh,
 	}
@@ -205,7 +205,7 @@ func TestReplay_UnloadDoneChannelImmediate(t *testing.T) {
 	mockInstr.CloseUnloadChannel(appID)
 
 	inst := &InstrumentState{
-		AppID:      appID,
+		ClientID:      appID,
 		HookCancel: func() {},
 		UnloadDone: unloadCh,
 	}
@@ -233,7 +233,7 @@ func TestReplay_InstrumentStateChannelIntegrity(t *testing.T) {
 
 	unloadCh := mockInstr.GetHookUnloadDone(appID)
 	inst := &InstrumentState{
-		AppID:      appID,
+		ClientID:      appID,
 		HookCancel: func() {},
 		UnloadDone: unloadCh,
 	}

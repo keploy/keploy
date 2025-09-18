@@ -234,7 +234,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 	}
 
 	// setting the appId for the first test-set.
-	inst.AppID = r.config.ClientID
+	inst.ClientID = r.config.ClientID
 	for i, testSet := range testSets {
 		var backupCreated bool
 		testSetResult = false
@@ -256,21 +256,21 @@ func (r *Replayer) Start(ctx context.Context) error {
 			r.logger.Info("Reloading hooks for test set", zap.String("testSet", testSet), zap.Int("testSetIndex", i+1), zap.Int("totalTestSets", len(testSets)))
 
 			// Reload hooks for the new test set with retry mechanism
-			newInst, err := r.reloadHooks(ctx, inst.AppID)
-			if err != nil {
-				stopReason = fmt.Sprintf("failed to reload hooks for test set %s: %v", testSet, err)
-				utils.LogError(r.logger, err, stopReason)
-				if ctx.Err() == context.Canceled {
-					return err
-				}
-				return fmt.Errorf("%s", stopReason)
-			}
-			hookCancel = newInst.HookCancel
-			// Update the inst with the new hook cancel function, app ID, and unload done channel
-			inst.HookCancel = newInst.HookCancel
-			inst.AppID = newInst.AppID
-			inst.UnloadDone = newInst.UnloadDone
-			r.logger.Info("Successfully reloaded hooks for test set", zap.String("testSet", testSet), zap.Uint64("newAppID", newInst.AppID))
+			// newInst, err := r.reloadHooks(ctx, inst.ClientID)
+			// if err != nil {
+			// 	stopReason = fmt.Sprintf("failed to reload hooks for test set %s: %v", testSet, err)
+			// 	utils.LogError(r.logger, err, stopReason)
+			// 	if ctx.Err() == context.Canceled {
+			// 		return err
+			// 	}
+			// 	return fmt.Errorf("%s", stopReason)
+			// }
+			// hookCancel = newInst.HookCancel
+			// // Update the inst with the new hook cancel function, app ID, and unload done channel
+			// inst.HookCancel = newInst.HookCancel
+			// inst.ClientID = newInst.ClientID
+			// inst.UnloadDone = newInst.UnloadDone
+			r.logger.Info("Successfully reloaded hooks for test set", zap.String("testSet", testSet), zap.Uint64("newAppID", inst.ClientID))
 		}
 
 		err := HookImpl.BeforeTestSetRun(ctx, testSet)
@@ -329,7 +329,7 @@ func (r *Replayer) Start(ctx context.Context) error {
 			totalTestTimeTaken = initTimeTaken
 
 			r.logger.Info("running", zap.String("test-set", models.HighlightString(testSet)), zap.Int("attempt", attempt))
-			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.AppID, false)
+			testSetStatus, err := r.RunTestSet(ctx, testSet, testRunID, inst.ClientID, false)
 			if err != nil {
 				stopReason = fmt.Sprintf("failed to run test set: %v", err)
 				utils.LogError(r.logger, err, stopReason)
@@ -521,36 +521,21 @@ func (r *Replayer) Start(ctx context.Context) error {
 
 func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 	if !r.instrument {
-		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.String("base path", r.config.Test.BasePath))
+		r.logger.Info("Keploy will not mock the outgoing calls when base path is provided", zap.Any("base path", r.config.Test.BasePath))
 		return &InstrumentState{}, nil
 	}
-	appID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, DockerDelay: r.config.BuildDelay})
+	// Instrument will setup the environment and start the hooks and proxy
+	fmt.Println("Instrumenting the environment", r.config.EnableTesting)
+	clientID, err := r.instrumentation.Setup(ctx, r.config.Command, models.SetupOptions{Container: r.config.ContainerName, DockerNetwork: r.config.NetworkName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, EnableTesting: r.config.EnableTesting})
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return &InstrumentState{}, err
-		}
-		return &InstrumentState{}, fmt.Errorf("failed to setup instrumentation: %w", err)
+		stopReason := "failed setting up the environment"
+		utils.LogError(r.logger, err, stopReason)
+		return &InstrumentState{}, fmt.Errorf(stopReason)
 	}
-	r.config.ClientID = appID
 
-	var cancel context.CancelFunc
-	// starting the hooks and proxy
-	select {
-	case <-ctx.Done():
-		return &InstrumentState{}, context.Canceled
-	default:
-		hookCtx := context.WithoutCancel(ctx)
-		hookCtx, cancel = context.WithCancel(hookCtx)
-		err = r.instrumentation.Hook(hookCtx, appID, models.HookOptions{Mode: models.MODE_TEST, EnableTesting: r.config.EnableTesting, Rules: r.config.BypassRules})
-		if err != nil {
-			cancel()
-			if errors.Is(err, context.Canceled) {
-				return &InstrumentState{}, err
-			}
-			return &InstrumentState{}, fmt.Errorf("failed to start the hooks and proxy: %w", err)
-		}
-	}
-	return &InstrumentState{AppID: appID, HookCancel: cancel, UnloadDone: r.instrumentation.GetHookUnloadDone(appID)}, nil
+	r.config.ClientID = clientID
+
+	return &InstrumentState{ClientID: clientID}, nil
 }
 
 // reloadHooks cancels existing hooks and reloads them for the next test set.
@@ -604,11 +589,11 @@ func (r *Replayer) reloadHooks(ctx context.Context, appID uint64) (*InstrumentSt
 		hookCtx := context.WithoutCancel(ctx)
 		hookCtx, cancel := context.WithCancel(hookCtx)
 
-		err := r.instrumentation.Hook(hookCtx, newAppID, models.HookOptions{
-			Mode:          models.MODE_TEST,
-			EnableTesting: r.config.EnableTesting,
-			Rules:         r.config.BypassRules,
-		})
+		// err := r.instrumentation.Hook(hookCtx, newAppID, models.HookOptions{
+		// 	Mode:          models.MODE_TEST,
+		// 	EnableTesting: r.config.EnableTesting,
+		// 	Rules:         r.config.BypassRules,
+		// })
 		if err != nil {
 			cancel()
 			lastErr = err
@@ -627,7 +612,7 @@ func (r *Replayer) reloadHooks(ctx context.Context, appID uint64) (*InstrumentSt
 
 		// Success - return the new hook state with the new app ID
 		r.logger.Debug("Successfully reloaded eBPF hooks", zap.Uint64("oldAppID", appID), zap.Uint64("newAppID", newAppID), zap.Int("attempt", attempt))
-		return &InstrumentState{AppID: newAppID, HookCancel: cancel, UnloadDone: r.instrumentation.GetHookUnloadDone(newAppID)}, nil
+		return &InstrumentState{ClientID: newAppID, HookCancel: cancel, UnloadDone: r.instrumentation.GetHookUnloadDone(newAppID)}, nil
 	}
 
 	// This should never be reached, but just in case

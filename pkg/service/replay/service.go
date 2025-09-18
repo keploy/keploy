@@ -12,7 +12,7 @@ type Instrumentation interface {
 	//Setup prepares the environment for the recording
 	Setup(ctx context.Context, cmd string, opts models.SetupOptions) (uint64, error)
 	//Hook will load hooks and start the proxy server.
-	Hook(ctx context.Context, id uint64, opts models.HookOptions) error
+	// Hook(ctx context.Context, id uint64, opts models.HookOptions) error
 	// GetHookUnloadDone returns a channel that signals when hooks are completely unloaded
 	GetHookUnloadDone(id uint64) <-chan struct{}
 	MockOutgoing(ctx context.Context, id uint64, opts models.OutgoingOptions) error
@@ -108,7 +108,7 @@ type Storage interface {
 }
 
 type InstrumentState struct {
-	AppID      uint64
+	ClientID      uint64
 	HookCancel context.CancelFunc
 	UnloadDone <-chan struct{} // Channel that will be closed when hooks are completely unloaded
 }

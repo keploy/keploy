@@ -20,7 +20,7 @@ func TestChannelVsDelayComparison(t *testing.T) {
 
 	unloadCh := mockInstr.GetHookUnloadDone(appID)
 	inst := &InstrumentState{
-		AppID:      appID,
+		ClientID:      appID,
 		HookCancel: func() {},
 		UnloadDone: unloadCh,
 	}
@@ -108,7 +108,7 @@ func TestHookReloadSequence(t *testing.T) {
 			// Simulate the unload happening
 			go func() {
 				time.Sleep(20 * time.Millisecond) // Simulate unload time
-				mockInstr.CloseUnloadChannel(currentInst.AppID)
+				mockInstr.CloseUnloadChannel(currentInst.ClientID)
 			}()
 
 			// Wait for unload completion
@@ -128,12 +128,12 @@ func TestHookReloadSequence(t *testing.T) {
 		// Step 3: Create new instrument state for new test set
 		unloadCh := mockInstr.GetHookUnloadDone(testSet.appID)
 		currentInst = &InstrumentState{
-			AppID:      testSet.appID,
+			ClientID:      testSet.appID,
 			HookCancel: func() {},
 			UnloadDone: unloadCh,
 		}
 
-		t.Logf("New instrument state created for %s with AppID: %d", testSet.name, testSet.appID)
+		t.Logf("New instrument state created for %s with ClientID: %d", testSet.name, testSet.appID)
 
 		// Verify new channel is not closed
 		select {
@@ -165,7 +165,7 @@ func TestProperResourceCleanup(t *testing.T) {
 
 	unloadCh := mockInstr.GetHookUnloadDone(appID)
 	inst := &InstrumentState{
-		AppID:      appID,
+		ClientID:      appID,
 		HookCancel: func() {},
 		UnloadDone: unloadCh,
 	}
@@ -215,7 +215,7 @@ func TestRaceConditionPrevention(t *testing.T) {
 	// First operation
 	unloadCh1 := mockInstr.GetHookUnloadDone(appID1)
 	inst1 := &InstrumentState{
-		AppID:      appID1,
+		ClientID:      appID1,
 		HookCancel: func() {},
 		UnloadDone: unloadCh1,
 	}
@@ -241,7 +241,7 @@ func TestRaceConditionPrevention(t *testing.T) {
 		// Create second instrument state
 		unloadCh2 := mockInstr.GetHookUnloadDone(appID2)
 		_ = &InstrumentState{
-			AppID:      appID2,
+			ClientID:      appID2,
 			HookCancel: func() {},
 			UnloadDone: unloadCh2,
 		}

@@ -282,7 +282,7 @@ func (a *AgentClient) SetMocks(ctx context.Context, id uint64, filtered []*model
 	return nil
 }
 
-func (a *AgentClient) GetConsumedMocks(ctx context.Context, id uint64) ([]string, error) {
+func (a *AgentClient) GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error) {
 	// Create the URL with query parameters
 	url := fmt.Sprintf("http://localhost:%d/agent/consumedmocks?id=%d", a.conf.Agent.Port, id)
 
@@ -306,7 +306,7 @@ func (a *AgentClient) GetConsumedMocks(ctx context.Context, id uint64) ([]string
 		}
 	}()
 
-	var consumedMocks []string
+	var consumedMocks []models.MockState
 	err = json.NewDecoder(res.Body).Decode(&consumedMocks)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode response body: %s", err.Error())
@@ -341,12 +341,12 @@ func (a *AgentClient) Run(ctx context.Context, clientID uint64, _ models.RunOpti
 	}
 
 	runAppErrGrp, runAppCtx := errgroup.WithContext(ctx)
-
+	inodeErrCh := make(chan error, 1)
 	appErrCh := make(chan models.AppError, 1)
-
+	inodeChan := make(chan uint64, 1) //send inode to the hook
 	defer func() {
 		err := runAppErrGrp.Wait()
-
+		defer close(inodeErrCh)
 		if err != nil {
 			utils.LogError(a.logger, err, "failed to stop the app")
 		}
@@ -355,7 +355,7 @@ func (a *AgentClient) Run(ctx context.Context, clientID uint64, _ models.RunOpti
 	runAppErrGrp.Go(func() error {
 		defer utils.Recover(a.logger)
 		defer close(appErrCh)
-		appErr := app.Run(runAppCtx)
+		appErr := app.Run(runAppCtx, inodeChan)
 		if appErr.Err != nil {
 			utils.LogError(a.logger, appErr.Err, "error while running the app")
 			appErrCh <- appErr
@@ -775,4 +775,10 @@ func (a *AgentClient) isAgentRunning(ctx context.Context) bool {
 	}
 	a.logger.Info("Setup request sent to the server", zap.String("status", resp.Status))
 	return true
+}
+
+func (a *AgentClient) GetHookUnloadDone(id uint64) <-chan struct{} {
+	ch := make(chan struct{})
+	close(ch) // Immediately close since no actual hooks are loaded
+	return ch
 }

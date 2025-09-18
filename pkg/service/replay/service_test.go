@@ -70,7 +70,7 @@ func TestInstrumentState_UnloadDoneChannel(t *testing.T) {
 	unloadCh := make(chan struct{})
 
 	state := &InstrumentState{
-		AppID:      12345,
+		ClientID:      12345,
 		HookCancel: func() {}, // dummy cancel function
 		UnloadDone: unloadCh,
 	}
@@ -170,7 +170,7 @@ func TestInstrument_ChannelIntegration(t *testing.T) {
 	// Simulate getting the instrument state
 	unloadCh := mockInstr.GetHookUnloadDone(appID)
 	state := &InstrumentState{
-		AppID:      appID,
+		ClientID:      appID,
 		HookCancel: func() {},
 		UnloadDone: unloadCh,
 	}

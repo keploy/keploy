@@ -143,9 +143,10 @@ func (r *Recorder) Start(ctx context.Context, reRecord bool) error {
 	default:
 	}
 
-	var persister models.TestCasePersister = func(ctx context.Context, testCase *models.TestCase) error {
-		return r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
-	}
+	// TODO: Ask this persister usecase and integrate 
+	// var persister models.TestCasePersister = func(ctx context.Context, testCase *models.TestCase) error {
+	// 	return r.testDB.InsertTestCase(ctx, testCase, newTestSetID, true)
+	// }
 	// Instrument will setup the environment and start the hooks and proxy
 	// appID, err = r.Instrument(hookCtx, persister)
 

@@ -175,9 +175,9 @@ func (a *Agent) SetMocks(ctx context.Context, id uint64, filtered []*models.Mock
 	return a.Proxy.SetMocks(ctx, id, filtered, unFiltered)
 }
 
-// func (a *Agent) GetConsumedMocks(ctx context.Context, id uint64) ([]string, error) {
-// 	return a.Proxy.GetConsumedMocks(ctx, id)
-// }
+func (a *Agent) GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error) {
+	return a.Proxy.GetConsumedMocks(ctx, id)
+}
 
 func (a *Agent) DeRegisterClient(ctx context.Context, unregister models.UnregisterReq) error {
 	// send the info of the mode if its test mode we dont need to send the last mock
