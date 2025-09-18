@@ -345,3 +345,7 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 func (ys *MockYaml) GetCurrMockID() int64 {
 	return atomic.LoadInt64(&ys.idCounter)
 }
+
+func (ys *MockYaml) ResetCounterID() {
+	atomic.StoreInt64(&ys.idCounter, -1)
+}

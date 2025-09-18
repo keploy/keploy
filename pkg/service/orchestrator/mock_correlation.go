@@ -5,7 +5,6 @@ package orchestrator
 import (
 	"context"
 	"sync"
-	"time"
 
 	"go.keploy.io/server/v2/pkg/models"
 	"go.uber.org/zap"
@@ -14,9 +13,7 @@ import (
 // TestContext represents the context of a test execution
 type TestContext struct {
 	TestID      string
-	TestName    string
 	TestSet     string
-	StartTime   time.Time
 	MockChannel chan *models.Mock
 	Done        chan struct{}
 }

@@ -360,9 +360,8 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 
 		// Register test case with correlation manager
 		testCaseCtx := TestContext{
-			TestID:    tc.Name,
-			TestSet:   testSet,
-			StartTime: time.Now(),
+			TestID:  tc.Name,
+			TestSet: testSet,
 		}
 
 		o.mockCorrelationManager.RegisterTest(testCaseCtx)
