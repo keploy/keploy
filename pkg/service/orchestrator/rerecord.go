@@ -23,8 +23,11 @@ import (
 )
 
 func (o *Orchestrator) ReRecord(ctx context.Context) error {
-	// Initialize mock correlation manager for this rerecord session
-	o.InitializeMockCorrelationManager(ctx)
+
+	o.mockCorrelationManager = NewMockCorrelationManager(ctx, o.globalMockCh, o.logger)
+
+	// Start the mock routing goroutine
+	go o.mockCorrelationManager.routeMocks()
 
 	// Set the global mock channel on the record service
 	o.record.SetGlobalMockChannel(o.GetGlobalMockChannel())
@@ -90,7 +93,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 			TestSet:  testSet,
 		}
 
-		if o.config.ReRecord.CreateTestSet {
+		if !o.config.ReRecord.AmendTestSet {
 			cfg.TestSet = ""
 			mappingTestSet, err = o.record.GetNextTestSetID(recordCtx)
 			if err != nil {
@@ -177,7 +180,7 @@ func (o *Orchestrator) ReRecord(ctx context.Context) error {
 		return nil
 	}
 	stopReason = "Re-recorded all the selected testsets successfully"
-	if !o.config.InCi && o.config.ReRecord.CreateTestSet {
+	if !o.config.InCi && !o.config.ReRecord.AmendTestSet {
 		o.logger.Info("Re-record was successfull. Do you want to remove the older testsets? (y/n)", zap.Any("testsets", SelectedTests))
 		reader := bufio.NewReader(os.Stdin)
 		input, err := reader.ReadString('\n')
@@ -355,13 +358,9 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 			return false, ctx.Err()
 		}
 
-		// Generate unique test case execution ID
-		testCaseID := tc.Name
-
 		// Register test case with correlation manager
 		testCaseCtx := TestContext{
-			TestID:    testCaseID,
-			TestName:  tc.Name,
+			TestID:    tc.Name,
 			TestSet:   testSet,
 			StartTime: time.Now(),
 		}
@@ -393,7 +392,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 					return
 				}
 			}
-		}(testCaseID)
+		}(tc.Name)
 
 		if utils.IsDockerCmd(cmdType) {
 			tc.HTTPReq.URL, err = utils.ReplaceHost(tc.HTTPReq.URL, userIP)
@@ -538,7 +537,7 @@ func (o *Orchestrator) replayTests(ctx context.Context, testSet string, mappingT
 		time.Sleep(100 * time.Millisecond)
 
 		// Unregister test case and collect mocks
-		o.mockCorrelationManager.UnregisterTest(testCaseID)
+		o.mockCorrelationManager.UnregisterTest(tc.Name)
 
 		// Wait a bit for any remaining mocks to be collected
 		<-mockCollectionDone

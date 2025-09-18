@@ -23,10 +23,10 @@ func New(logger *zap.Logger, path string, mapFileName string) *MappingDb {
 	}
 }
 
-// InsertMappings saves test-mock mappings to a YAML file
-func (db *MappingDb) InsertMappings(ctx context.Context, testSetID string, testMockMappings map[string][]string) error {
+// Insert saves test-mock mappings to a YAML file
+func (db *MappingDb) Insert(ctx context.Context, testSetID string, testMockMappings map[string][]string) error {
 	// Create mapping structure from the test-mock mappings
-	mapping := CreateMappingFromTestMockMappings(testSetID, testMockMappings, db.logger)
+	mapping := CreateMappingStructure(testSetID, testMockMappings, db.logger)
 
 	// Encode mapping to YAML
 	yamlData, err := EncodeMapping(mapping, db.logger)
@@ -74,9 +74,9 @@ func (db *MappingDb) InsertMappings(ctx context.Context, testSetID string, testM
 	return nil
 }
 
-// GetMappings reads test-mock mappings from a YAML file
+// Get reads test-mock mappings from a YAML file
 // Returns: testMockMappings, mappingFilePresent, error
-func (db *MappingDb) GetMappings(ctx context.Context, testSetID string) (map[string][]string, bool, error) {
+func (db *MappingDb) Get(ctx context.Context, testSetID string) (map[string][]string, bool, error) {
 	// Create the file path
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
@@ -119,7 +119,7 @@ func (db *MappingDb) GetMappings(ctx context.Context, testSetID string) (map[str
 	}
 
 	// Convert to map format
-	testMockMappings := ConvertMappingToTestMockMappings(mapping, db.logger)
+	testMockMappings := GetMappings(mapping, db.logger)
 
 	// Check if we have any meaningful mappings (non-empty test cases with mocks)
 	hasMeaningfulMappings := false

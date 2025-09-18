@@ -27,8 +27,8 @@ func DecodeMapping(yamlData []byte, logger *zap.Logger) (*models.Mapping, error)
 	return &mapping, nil
 }
 
-// ConvertMappingToTestMockMappings converts models.Mapping to map[string][]string
-func ConvertMappingToTestMockMappings(mapping *models.Mapping, logger *zap.Logger) map[string][]string {
+// GetMappings converts models.Mapping to map[string][]string
+func GetMappings(mapping *models.Mapping, logger *zap.Logger) map[string][]string {
 	testMockMappings := make(map[string][]string)
 
 	for _, test := range mapping.Tests {
@@ -42,8 +42,8 @@ func ConvertMappingToTestMockMappings(mapping *models.Mapping, logger *zap.Logge
 	return testMockMappings
 }
 
-// CreateMappingFromTestMockMappings converts map[string][]string to models.Mapping
-func CreateMappingFromTestMockMappings(testSetID string, testMockMappings map[string][]string, logger *zap.Logger) *models.Mapping {
+// CreateMappings converts map[string][]string to models.Mapping
+func CreateMappingStructure(testSetID string, testMockMappings map[string][]string, logger *zap.Logger) *models.Mapping {
 	mapping := &models.Mapping{
 		Version:   string(models.V1Beta1),
 		Kind:      models.MappingKind,
@@ -58,10 +58,6 @@ func CreateMappingFromTestMockMappings(testSetID string, testMockMappings map[st
 		}
 		mapping.Tests = append(mapping.Tests, test)
 	}
-
-	logger.Debug("Created mapping structure",
-		zap.String("testSetID", testSetID),
-		zap.Int("numTests", len(testMockMappings)))
 
 	return mapping
 }

@@ -741,8 +741,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 	case "record", "test", "rerecord":
 
 		if cmd.Name() == "rerecord" {
-			updateTestSet, _ := cmd.Flags().GetBool("amend-testset")
-			c.cfg.ReRecord.CreateTestSet = !updateTestSet
+			updateTestSet, err := cmd.Flags().GetBool("amend-testset")
+			if err != nil {
+				errMsg := "failed to get the amend-testset flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.ReRecord.AmendTestSet = updateTestSet
 		}
 
 		if cmd.Parent() != nil && cmd.Parent().Name() == "contract" {
@@ -1056,8 +1061,13 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 
-		globalPassthrough, _ := cmd.Flags().GetBool("global-passthrough")
-		c.cfg.Record.GlobalPassthrough = globalPassthrough //hence ignoring error
+		globalPassthrough, err := cmd.Flags().GetBool("global-passthrough")
+		if err != nil {
+			errMsg := "failed to read the global passthrough flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		c.cfg.Record.GlobalPassthrough = globalPassthrough
 
 	case "normalize":
 		c.cfg.Path = utils.ToAbsPath(c.logger, c.cfg.Path)

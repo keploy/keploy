@@ -806,7 +806,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if r.mappingDB != nil && isMappingEnabled {
 		// Get mappings and check if meaningful mappings are present
 		var hasMeaningfulMappings bool
-		expectedTestMockMappings, hasMeaningfulMappings, err = r.mappingDB.GetMappings(ctx, testSetID)
+		expectedTestMockMappings, hasMeaningfulMappings, err = r.mappingDB.Get(ctx, testSetID)
 		if err != nil {
 			r.logger.Warn("Failed to get mappings, falling back to timestamp-based filtering",
 				zap.String("testSetID", testSetID),
@@ -2089,7 +2089,7 @@ func (r *Replayer) UploadMocks(ctx context.Context) error {
 
 func (r *Replayer) StoreMappings(ctx context.Context, testSetID string, mappings map[string][]string) error {
 	// Save test-mock mappings to YAML file
-	err := r.mappingDB.InsertMappings(ctx, testSetID, mappings)
+	err := r.mappingDB.Insert(ctx, testSetID, mappings)
 	return err
 }
 

@@ -76,9 +76,6 @@ func NewMockCorrelationManager(ctx context.Context, globalMockCh chan *models.Mo
 		router:           &TimeBasedRouter{},
 	}
 
-	// Start the mock routing goroutine
-	go mcm.routeMocks()
-
 	return mcm
 }
 
@@ -141,8 +138,7 @@ func (mcm *MockCorrelationManager) RegisterTest(testCtx TestContext) {
 	mcm.activeTests[testCtx.TestID] = testCtx
 
 	mcm.logger.Debug("Test registered for mock correlation",
-		zap.String("testID", testCtx.TestID),
-		zap.String("testName", testCtx.TestName))
+		zap.String("testID", testCtx.TestID))
 }
 
 // UnregisterTest removes a test from active tracking and closes its mock channel

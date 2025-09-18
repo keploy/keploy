@@ -4,8 +4,6 @@
 package orchestrator
 
 import (
-	"context"
-
 	"go.keploy.io/server/v2/config"
 	"go.keploy.io/server/v2/pkg/models"
 	"go.keploy.io/server/v2/pkg/service/record"
@@ -37,14 +35,6 @@ func New(logger *zap.Logger, record record.Service, tools tools.Service, replay 
 		config:                 config,
 		globalMockCh:           globalMockCh,
 		mockCorrelationManager: nil, // Will be initialized when needed
-	}
-}
-
-// InitializeMockCorrelationManager initializes the mock correlation manager
-func (o *Orchestrator) InitializeMockCorrelationManager(ctx context.Context) {
-	if o.mockCorrelationManager == nil {
-		o.mockCorrelationManager = NewMockCorrelationManager(ctx, o.globalMockCh, o.logger)
-		o.logger.Info("Mock correlation manager initialized")
 	}
 }
 
