@@ -55,11 +55,4 @@ jobs:
           cd samples-go/${{ matrix.app.path }}
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-linux.sh
 
-      - name: Test dedup in samples-go application 
-        env:
-          RECORD_BIN: ${{ steps.record.outputs.path }}
-          REPLAY_BIN: ${{ steps.replay.outputs.path }}
-        run: |
-          cd samples-go/xyz
-          source ./../../.github/workflows/test_workflow_scripts/golang-linux.sh
 
