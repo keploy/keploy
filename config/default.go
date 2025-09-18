@@ -59,7 +59,7 @@ test:
 normalize:
   selectedTests: []
   testReport: ""
-  fields:          // fields to be normalized
+  fields:          // fields to be normalized 
     - "resp.status_code"
     - "resp.body"
 record:
