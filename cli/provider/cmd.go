@@ -256,6 +256,8 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
 		cmd.Flags().Bool("in-ci", c.cfg.InCi, "is CI Running or not")
+		cmd.Flags().Int64("ci-timeout", -1, "Timeout in minutes for re-record to wait for a signal in CI mode. -1 means no wait and proceed immediately")
+
 		//add rest of the uncommon flags for record, test, rerecord commands
 		c.AddUncommonFlags(cmd)
 
@@ -1046,6 +1048,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					c.cfg.Test.ProtoInclude = append(c.cfg.Test.ProtoInclude, absDir)
 				}
 			}
+		}
+		c.cfg.ReRecord.CITimeout, err = cmd.Flags().GetInt64("ci-timeout")
+		if err != nil {
+			errMsg := "failed to get the ci-timeout"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
 		}
 
 	case "normalize":
