@@ -56,12 +56,12 @@ test:
   protoFile: ""
   protoDir: ""
   protoInclude: []
-normalize:
-  selectedTests: []
-  testReport: ""
-  fields:          // fields to be normalized 
-    - "resp.status_code"
-    - "resp.body"
+// normalize:
+//   selectedTests: []
+//   testReport: ""
+//   fields:          // fields to be normalized 
+//     - "resp.status_code"
+//     - "resp.body"
 record:
   recordTimer: 0s
   filters: []
