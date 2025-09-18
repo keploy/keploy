@@ -43,26 +43,14 @@ type MockRouter interface {
 	RouteToTest(mock *models.Mock, activeTests map[string]TestContext) string
 }
 
-// TimeBasedRouter routes mocks based on timestamp correlation
-type TimeBasedRouter struct{}
+type ActiveTestRouter struct{}
 
-// RouteToTest routes mock to the test that was active when the mock was received
-func (tbr *TimeBasedRouter) RouteToTest(mock *models.Mock, activeTests map[string]TestContext) string {
-	now := time.Now()
-
-	// For time-based routing, route to the most recent active test
-	var mostRecentTestID string
-	var mostRecentTime time.Time
-
-	for testID, testCtx := range activeTests {
-		// Check if mock was received during test execution window
-		if testCtx.StartTime.Before(now) && testCtx.StartTime.After(mostRecentTime) {
-			mostRecentTestID = testID
-			mostRecentTime = testCtx.StartTime
-		}
+// activeTestRouter routes mocks to only one active test (if any), because it is running serially
+func (atr *ActiveTestRouter) RouteToTest(mock *models.Mock, activeTests map[string]TestContext) string {
+	for testID := range activeTests {
+		return testID
 	}
-
-	return mostRecentTestID
+	return ""
 }
 
 // NewMockCorrelationManager creates a new mock correlation manager
@@ -73,7 +61,7 @@ func NewMockCorrelationManager(ctx context.Context, globalMockCh chan *models.Mo
 		globalMockCh:     globalMockCh,
 		ctx:              ctx,
 		logger:           logger,
-		router:           &TimeBasedRouter{},
+		router:           &ActiveTestRouter{},
 	}
 
 	return mcm
