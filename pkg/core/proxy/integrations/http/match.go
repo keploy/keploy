@@ -58,6 +58,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		// Exact body match
 		ok, bestMatch := h.ExactBodyMatch(input.body, schemaMatched)
 		if ok {
+			h.Logger.Debug("exact body match found", zap.String("mock name", bestMatch.Name))
 			if !h.updateMock(ctx, bestMatch, mockDb) {
 				continue
 			}
@@ -78,6 +79,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 			}
 
 			if len(bodyMatched) == 1 {
+				h.Logger.Debug("body match found", zap.String("mock name", bodyMatched[0].Name))
 				if !h.updateMock(ctx, bodyMatched[0], mockDb) {
 					continue
 				}
@@ -92,6 +94,7 @@ func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMe
 		// Perform fuzzy match on the request
 		isMatched, bestMatch := h.PerformFuzzyMatch(shortListed, input.raw)
 		if isMatched {
+			h.Logger.Debug("fuzzy match foudn a matching mock", zap.String("mock name", bestMatch.Name))
 			if !h.updateMock(ctx, bestMatch, mockDb) {
 				continue
 			}
@@ -171,37 +174,37 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 		// Content type check
 		if input.header.Get("Content-Type") != "" {
 			if input.header.Get("Content-Type") != mock.Spec.HTTPReq.Header["Content-Type"] {
-				h.Logger.Debug("The content type of mock and request aren't the same")
+				h.Logger.Debug("The content type of mock and request aren't the same", zap.String("mock name", mock.Name))
 				continue
 			}
 		}
 		// Body type check
 		if !h.MatchBodyType(mock.Spec.HTTPReq.Body, input.body) {
-			h.Logger.Debug("The body of mock and request aren't of same type")
+			h.Logger.Debug("The body of mock and request aren't of same type", zap.String("mock name", mock.Name))
 			continue
 		}
 
 		// URL path match
 		if !h.MatchURLPath(mock.Spec.HTTPReq.URL, input.url.Path) {
-			h.Logger.Debug("The url path of mock and request aren't the same")
+			h.Logger.Debug("The url path of mock and request aren't the same", zap.String("mock name", mock.Name))
 			continue
 		}
 
 		// HTTP method match
 		if mock.Spec.HTTPReq.Method != models.Method(input.method) {
-			h.Logger.Debug("The method of mock and request aren't the same")
+			h.Logger.Debug("The method of mock and request aren't the same", zap.String("mock name", mock.Name))
 			continue
 		}
 
 		// Header key match
 		if !h.MapsHaveSameKeys(mock.Spec.HTTPReq.Header, input.header) {
-			h.Logger.Debug("The header keys of mock and request aren't the same")
+			h.Logger.Debug("The header keys of mock and request aren't the same", zap.String("mock name", mock.Name))
 			continue
 		}
 
 		// Query parameter match
 		if !h.MapsHaveSameKeys(mock.Spec.HTTPReq.URLParams, input.url.Query()) {
-			h.Logger.Debug("The query params of mock and request aren't the same")
+			h.Logger.Debug("The query params of mock and request aren't the same", zap.String("mock name", mock.Name))
 			continue
 		}
 
@@ -214,6 +217,7 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 // ExactBodyMatch Exact body match
 func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, *models.Mock) {
 	for _, mock := range schemaMatched {
+		h.Logger.Debug("mock name under consideration for exact body match", zap.String("mock name", mock.Name))
 		if mock.Spec.HTTPReq.Body == string(body) {
 			return true, mock
 		}
@@ -251,6 +255,7 @@ func (h *HTTP) PerformBodyMatch(ctx context.Context, schemaMatched []*models.Moc
 
 	var bodyMatched []*models.Mock
 	for _, mock := range schemaMatched {
+		h.Logger.Debug("mock name under consideration for performbodymatch function", zap.String("mock name", mock.Name))
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -316,6 +321,7 @@ func (h *HTTP) findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
 	encodedReq := encode(reqBuff)
 	for _, mock := range tcsMocks {
+		h.Logger.Debug("mock name under consideration for performfuzzyMatch function", zap.String("mock name", mock.Name))
 		encodedMock, _ := decode(mock.Spec.HTTPReq.Body)
 		if string(encodedMock) == string(reqBuff) || mock.Spec.HTTPReq.Body == encodedReq {
 			return true, mock
@@ -329,11 +335,13 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 	if util.IsASCII(string(reqBuff)) {
 		idx := h.findStringMatch(string(reqBuff), mockStrings)
 		if idx != -1 {
+			h.Logger.Debug("string match found", zap.String("mock name", tcsMocks[idx].Name))
 			return true, tcsMocks[idx]
 		}
 	}
 	idx := h.findBinaryMatch(tcsMocks, reqBuff)
 	if idx != -1 {
+		h.Logger.Debug("binary match found", zap.String("mock name", tcsMocks[idx].Name))
 		return true, tcsMocks[idx]
 	}
 	return false, nil
