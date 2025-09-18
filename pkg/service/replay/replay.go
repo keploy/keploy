@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -60,6 +61,59 @@ type Replayer struct {
 	instrument      bool
 	isLastTestSet   bool
 	isLastTestCase  bool
+}
+
+// hasTemplate checks if a string contains a keploy-style template placeholder
+func hasTemplate(s string) bool {
+	if s == "" {
+		return false
+	}
+	// quick check then regex for {{ ... }} with optional func and a dot reference
+	if !strings.Contains(s, "{{") || !strings.Contains(s, "}}") {
+		return false
+	}
+	re := regexp.MustCompile(`\{\{\s*(?:string\s+|int\s+|float\s+)?\.[^{}]*?\}\}`)
+	return re.MatchString(s)
+}
+
+// extractTemplateVars extracts variables like .id from placeholders like {{string .id}}
+func extractTemplateVars(s string) []string {
+	re := regexp.MustCompile(`\{\{\s*(?:string\s+|int\s+|float\s+)?\.(.*?)\s*\}\}`)
+	matches := re.FindAllStringSubmatch(s, -1)
+	vars := make([]string, 0, len(matches))
+	for _, m := range matches {
+		if len(m) > 1 {
+			vars = append(vars, m[1])
+		}
+	}
+	return vars
+}
+
+// updateTemplateValue writes a value to the test set template map in config.yaml
+func (r *Replayer) updateTemplateValue(ctx context.Context, testSetID string, key string, value interface{}) error {
+	if r.testSetConf == nil {
+		return nil
+	}
+	conf, err := r.testSetConf.Read(ctx, testSetID)
+	if err != nil || conf == nil {
+		// create new if missing
+		conf = &models.TestSet{}
+	}
+	if conf.Template == nil {
+		conf.Template = map[string]interface{}{}
+	}
+	conf.Template[key] = value
+	return r.testSetConf.Write(ctx, testSetID, conf)
+}
+
+// isPureTemplate returns true if the entire string is a single template placeholder
+func isPureTemplate(s string) bool {
+	if !hasTemplate(s) {
+		return false
+	}
+	s = strings.TrimSpace(s)
+	re := regexp.MustCompile(`^\{\{\s*(?:string\s+|int\s+|float\s+)?\.[^{}]*?\s*\}\}$`)
+	return re.MatchString(s)
 }
 
 func NewReplayer(logger *zap.Logger, testDB TestDB, mockDB MockDB, reportDB ReportDB, testSetConf TestSetConfig, telemetry Telemetry, instrumentation Instrumentation, auth service.Auth, storage Storage, config *config.Config) Service {
@@ -1626,17 +1680,230 @@ func (r *Replayer) NormalizeTestCases(ctx context.Context, testRun string, testS
 		// Handle normalization based on test case kind
 		switch testCase.Kind {
 		case models.HTTP:
-			// Store the original timestamp to preserve it during normalization
 			originalTimestamp := testCase.HTTPResp.Timestamp
-			testCase.HTTPResp = testCaseResultMap[testCase.Name].Res
-			// Restore the original timestamp after normalization
+			updated := testCaseResultMap[testCase.Name].Res
+			if len(r.config.Normalize.Fields) == 0 {
+				// Full normalization with protection for templatized fields
+				old := testCase.HTTPResp
+				testCase.HTTPResp = updated
+				// Restore templated body
+				if hasTemplate(old.Body) {
+					testCase.HTTPResp.Body = old.Body
+				}
+				// Restore templated headers
+				for hk, hv := range old.Header {
+					if hasTemplate(hv) {
+						if testCase.HTTPResp.Header == nil {
+							testCase.HTTPResp.Header = map[string]string{}
+						}
+						testCase.HTTPResp.Header[hk] = hv
+					}
+				}
+			} else {
+				// Field-level normalization
+				for _, f := range r.config.Normalize.Fields {
+					switch strings.ToLower(strings.TrimSpace(f)) {
+					case "resp.body", "body":
+						// If body is templatized and explicitly targeted, try updating config template
+						if hasTemplate(testCase.HTTPResp.Body) {
+							if isPureTemplate(testCase.HTTPResp.Body) {
+								vars := extractTemplateVars(testCase.HTTPResp.Body)
+								if len(vars) > 0 {
+									_ = r.updateTemplateValue(ctx, testSetID, vars[0], updated.Body)
+								}
+							}
+							// keep testcase body as-is to preserve template
+							break
+						}
+						testCase.HTTPResp.Body = updated.Body
+					case "resp.status_code", "status_code", "statuscode", "status":
+						testCase.HTTPResp.StatusCode = updated.StatusCode
+					case "resp.status_message", "status_message", "statusmessage":
+						testCase.HTTPResp.StatusMessage = updated.StatusMessage
+					case "resp.proto_major", "proto_major":
+						testCase.HTTPResp.ProtoMajor = updated.ProtoMajor
+					case "resp.proto_minor", "proto_minor":
+						testCase.HTTPResp.ProtoMinor = updated.ProtoMinor
+					default:
+						// Support header field selection like resp.header.Content-Type or header.Content-Type
+						lower := strings.ToLower(f)
+						if strings.HasPrefix(lower, "resp.header.") || strings.HasPrefix(lower, "header.") {
+							parts := strings.SplitN(f, ".", 3)
+							var headerKey string
+							if len(parts) == 3 {
+								headerKey = parts[2]
+							} else if len(parts) == 2 {
+								headerKey = parts[1]
+							}
+							if headerKey != "" {
+								// If existing value is templatized and field is explicitly targeted, update config.yaml template value instead
+								oldVal := testCase.HTTPResp.Header[headerKey]
+								newVal := ""
+								if updated.Header != nil {
+									newVal = updated.Header[headerKey]
+								}
+								if hasTemplate(oldVal) {
+									vars := extractTemplateVars(oldVal)
+									if len(vars) > 0 {
+										_ = r.updateTemplateValue(ctx, testSetID, vars[0], newVal)
+									}
+									break
+								}
+								if testCase.HTTPResp.Header == nil {
+									testCase.HTTPResp.Header = map[string]string{}
+								}
+								testCase.HTTPResp.Header[headerKey] = newVal
+							}
+						}
+					}
+				}
+			}
+			// Restore timestamp
 			testCase.HTTPResp.Timestamp = originalTimestamp
 
 		case models.GRPC_EXPORT:
-			// Store the original timestamp to preserve it during normalization
 			originalTimestamp := testCase.GrpcResp.Timestamp
-			testCase.GrpcResp = testCaseResultMap[testCase.Name].GrpcRes
-			// Restore the original timestamp after normalization
+			updated := testCaseResultMap[testCase.Name].GrpcRes
+			if len(r.config.Normalize.Fields) == 0 {
+				// Full normalization with protection for templatized headers/trailers
+				old := testCase.GrpcResp
+				testCase.GrpcResp = updated
+				// Restore templated headers
+				for hk, hv := range old.Headers.OrdinaryHeaders {
+					if hasTemplate(hv) {
+						if testCase.GrpcResp.Headers.OrdinaryHeaders == nil {
+							testCase.GrpcResp.Headers.OrdinaryHeaders = map[string]string{}
+						}
+						testCase.GrpcResp.Headers.OrdinaryHeaders[hk] = hv
+					}
+				}
+				for hk, hv := range old.Headers.PseudoHeaders {
+					if hasTemplate(hv) {
+						if testCase.GrpcResp.Headers.PseudoHeaders == nil {
+							testCase.GrpcResp.Headers.PseudoHeaders = map[string]string{}
+						}
+						testCase.GrpcResp.Headers.PseudoHeaders[hk] = hv
+					}
+				}
+				// Restore templated trailers
+				for hk, hv := range old.Trailers.OrdinaryHeaders {
+					if hasTemplate(hv) {
+						if testCase.GrpcResp.Trailers.OrdinaryHeaders == nil {
+							testCase.GrpcResp.Trailers.OrdinaryHeaders = map[string]string{}
+						}
+						testCase.GrpcResp.Trailers.OrdinaryHeaders[hk] = hv
+					}
+				}
+				for hk, hv := range old.Trailers.PseudoHeaders {
+					if hasTemplate(hv) {
+						if testCase.GrpcResp.Trailers.PseudoHeaders == nil {
+							testCase.GrpcResp.Trailers.PseudoHeaders = map[string]string{}
+						}
+						testCase.GrpcResp.Trailers.PseudoHeaders[hk] = hv
+					}
+				}
+			} else {
+				for _, f := range r.config.Normalize.Fields {
+					switch strings.ToLower(strings.TrimSpace(f)) {
+					case "resp.body", "body":
+						testCase.GrpcResp.Body = updated.Body
+					case "resp.headers", "headers":
+						testCase.GrpcResp.Headers = updated.Headers
+					case "resp.trailers", "trailers":
+						testCase.GrpcResp.Trailers = updated.Trailers
+					default:
+						// Support header and trailer keys like resp.headers.ordinary.X or resp.trailers.pseudo.:status
+						lower := strings.ToLower(f)
+						if strings.HasPrefix(lower, "resp.headers.") || strings.HasPrefix(lower, "headers.") {
+							// expected patterns:
+							// resp.headers.ordinary.Content-Type or resp.headers.pseudo.:status
+							parts := strings.Split(f, ".")
+							if len(parts) >= 3 {
+								category := strings.ToLower(parts[2]) // ordinary or pseudo
+								key := strings.Join(parts[3:], ".")
+								if category == "ordinary" {
+									if testCase.GrpcResp.Headers.OrdinaryHeaders == nil {
+										testCase.GrpcResp.Headers.OrdinaryHeaders = map[string]string{}
+									}
+									newVal := ""
+									if updated.Headers.OrdinaryHeaders != nil {
+										newVal = updated.Headers.OrdinaryHeaders[key]
+									}
+									oldVal := testCase.GrpcResp.Headers.OrdinaryHeaders[key]
+									if hasTemplate(oldVal) {
+										vars := extractTemplateVars(oldVal)
+										if len(vars) > 0 {
+											_ = r.updateTemplateValue(ctx, testSetID, vars[0], newVal)
+										}
+										break
+									}
+									testCase.GrpcResp.Headers.OrdinaryHeaders[key] = newVal
+								} else if category == "pseudo" {
+									if testCase.GrpcResp.Headers.PseudoHeaders == nil {
+										testCase.GrpcResp.Headers.PseudoHeaders = map[string]string{}
+									}
+									newVal := ""
+									if updated.Headers.PseudoHeaders != nil {
+										newVal = updated.Headers.PseudoHeaders[key]
+									}
+									oldVal := testCase.GrpcResp.Headers.PseudoHeaders[key]
+									if hasTemplate(oldVal) {
+										vars := extractTemplateVars(oldVal)
+										if len(vars) > 0 {
+											_ = r.updateTemplateValue(ctx, testSetID, vars[0], newVal)
+										}
+										break
+									}
+									testCase.GrpcResp.Headers.PseudoHeaders[key] = newVal
+								}
+							}
+						}
+						if strings.HasPrefix(lower, "resp.trailers.") || strings.HasPrefix(lower, "trailers.") {
+							parts := strings.Split(f, ".")
+							if len(parts) >= 3 {
+								category := strings.ToLower(parts[2])
+								key := strings.Join(parts[3:], ".")
+								if category == "ordinary" {
+									if testCase.GrpcResp.Trailers.OrdinaryHeaders == nil {
+										testCase.GrpcResp.Trailers.OrdinaryHeaders = map[string]string{}
+									}
+									newVal := ""
+									if updated.Trailers.OrdinaryHeaders != nil {
+										newVal = updated.Trailers.OrdinaryHeaders[key]
+									}
+									oldVal := testCase.GrpcResp.Trailers.OrdinaryHeaders[key]
+									if hasTemplate(oldVal) {
+										vars := extractTemplateVars(oldVal)
+										if len(vars) > 0 {
+											_ = r.updateTemplateValue(ctx, testSetID, vars[0], newVal)
+										}
+										break
+									}
+									testCase.GrpcResp.Trailers.OrdinaryHeaders[key] = newVal
+								} else if category == "pseudo" {
+									if testCase.GrpcResp.Trailers.PseudoHeaders == nil {
+										testCase.GrpcResp.Trailers.PseudoHeaders = map[string]string{}
+									}
+									newVal := ""
+									if updated.Trailers.PseudoHeaders != nil {
+										newVal = updated.Trailers.PseudoHeaders[key]
+									}
+									oldVal := testCase.GrpcResp.Trailers.PseudoHeaders[key]
+									if hasTemplate(oldVal) {
+										vars := extractTemplateVars(oldVal)
+										if len(vars) > 0 {
+											_ = r.updateTemplateValue(ctx, testSetID, vars[0], newVal)
+										}
+										break
+									}
+									testCase.GrpcResp.Trailers.PseudoHeaders[key] = newVal
+								}
+							}
+						}
+					}
+				}
+			}
+			// Restore timestamp
 			testCase.GrpcResp.Timestamp = originalTimestamp
 		}
 		err = r.testDB.UpdateTestCase(ctx, testCase, testSetID, true)
