@@ -205,6 +205,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated testcases/mocks/reports are stored")
 		cmd.Flags().String("test-run", "", "Test Run to be normalized")
 		cmd.Flags().String("tests", "", "Test Sets to be normalized")
+		cmd.Flags().StringSlice("fields", nil, "Response fields to normalize (e.g. resp.body, resp.header.Content-Type)")
 	case "config":
 		cmd.Flags().StringP("path", "p", ".", "Path to local directory where generated config is stored")
 		cmd.Flags().Bool("generate", false, "Generate a new keploy configuration file")
@@ -1058,9 +1059,17 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		err = config.SetSelectedTestsNormalize(c.cfg, tests)
 		if err != nil {
-			errMsg := "failed to normalize the selected test"
+			errMsg := "failed to normalize the selected tests"
 			utils.LogError(c.logger, err, errMsg)
 			return errors.New(errMsg)
+		}
+		if cmd.Flags().Changed("fields") {
+			fields, ferr := cmd.Flags().GetStringSlice("fields")
+			if ferr != nil {
+				utils.LogError(c.logger, ferr, "failed to read fields for normalization")
+				return errors.New("failed to read fields for normalization")
+			}
+			c.cfg.Normalize.Fields = fields
 		}
 
 	case "templatize":
