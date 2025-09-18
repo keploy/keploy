@@ -51,6 +51,7 @@ type Proxy struct {
 
 	MockManagers         sync.Map
 	integrationsPriority []ParserPriority
+	errChannel           chan error
 
 	sessions *core.Sessions
 
@@ -62,29 +63,30 @@ type Proxy struct {
 	Listener net.Listener
 
 	//to store the nsswitch.conf file data
-	nsswitchData []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
-	UDPDNSServer *dns.Server
-	TCPDNSServer *dns.Server
-	portMapping  sync.Map // A thread-safe map to store port mappings [uint16 -> uint16]
-	hooks        *Hooks.Hooks
+	nsswitchData      []byte // in test mode we change the configuration of "hosts" in nsswitch.conf file to disable resolution over unix socket
+	UDPDNSServer      *dns.Server
+	TCPDNSServer      *dns.Server
+	GlobalPassthrough bool
+  hooks             *Hooks.Hooks
 }
 
 func New(logger *zap.Logger, info core.DestInfo, opts *config.Config) *Proxy {
 	h := info.(*Hooks.Hooks)
 	return &Proxy{
-		logger:       logger,
-		Port:         opts.ProxyPort, // default: 16789
-		hooks:        h,
-		portMapping:  sync.Map{},
-		DNSPort:      opts.DNSPort, // default: 26789
-		IP4:          "127.0.0.1",  // default: "127.0.0.1" <-> (2130706433)
-		IP6:          "::1",        //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
-		ipMutex:      &sync.Mutex{},
-		connMutex:    &sync.Mutex{},
-		DestInfo:     info,
-		sessions:     core.NewSessions(),
-		MockManagers: sync.Map{},
-		Integrations: make(map[integrations.IntegrationType]integrations.Integrations),
+		logger:            logger,
+		Port:              opts.ProxyPort, // default: 16789
+    hooks:             h,
+		DNSPort:           opts.DNSPort,   // default: 26789
+		IP4:               "127.0.0.1",    // default: "127.0.0.1" <-> (2130706433)
+		IP6:               "::1",          //default: "::1" <-> ([4]uint32{0000, 0000, 0000, 0001})
+		ipMutex:           &sync.Mutex{},
+		connMutex:         &sync.Mutex{},
+		DestInfo:          info,
+		sessions:          core.NewSessions(),
+		MockManagers:      sync.Map{},
+		Integrations:      make(map[integrations.IntegrationType]integrations.Integrations),
+		GlobalPassthrough: opts.Record.GlobalPassthrough,
+		errChannel:        make(chan error, 100), // buffered channel to prevent blocking
 	}
 }
 
@@ -417,7 +419,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}()
 
 	//check for global passthrough in test mode
-	if !rule.Mocking && rule.Mode == models.MODE_TEST {
+	if p.GlobalPassthrough || (!rule.Mocking && (rule.Mode == models.MODE_TEST)) {
 
 		dstConn, err = net.Dial("tcp", dstAddr)
 		if err != nil {
@@ -464,8 +466,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 		//mock the outgoing message
 		err := p.Integrations[integrations.MYSQL].MockOutgoing(parserCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, m.(*MockManager), rule.OutgoingOptions)
-		if err != nil {
+		if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) {
 			utils.LogError(p.logger, err, "failed to mock the outgoing message")
+			// Send specific error type to error channel for external monitoring
+			proxyErr := models.ParserError{
+				ParserErrorType: models.ErrMockNotFound,
+				Err:             err,
+			}
+			p.SendError(proxyErr)
 			return err
 		}
 		return nil
@@ -639,8 +647,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 		case models.MODE_TEST:
 			err := matchedParser.MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
-			if err != nil && err != io.EOF {
+			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
+				// Send specific error type to error channel for external monitoring
+				proxyErr := models.ParserError{
+					ParserErrorType: models.ErrMockNotFound,
+					Err:             err,
+				}
+				p.SendError(proxyErr)
 				return err
 			}
 		}
@@ -656,8 +670,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			}
 		} else {
 			err := p.Integrations[integrations.GENERIC].MockOutgoing(parserCtx, srcConn, dstCfg, m.(*MockManager), rule.OutgoingOptions)
-			if err != nil {
+			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) {
 				utils.LogError(logger, err, "failed to mock the outgoing message")
+				// Send specific error type to error channel for external monitoring
+				proxyErr := models.ParserError{
+					ParserErrorType: models.ErrMockNotFound,
+					Err:             err,
+				}
+				p.SendError(proxyErr)
 				return err
 			}
 		}
@@ -692,6 +712,9 @@ func (p *Proxy) StopProxyServer(ctx context.Context) {
 		utils.LogError(p.logger, err, "failed to stop the dns servers")
 		return
 	}
+
+	// Close the error channel
+	p.CloseErrorChannel()
 
 	p.logger.Info("proxy stopped...")
 }
@@ -766,4 +789,25 @@ func (p *Proxy) GetConsumedMocks(_ context.Context, id uint64) ([]models.MockSta
 		return nil, fmt.Errorf("mock manager not found to get consumed filtered mocks")
 	}
 	return m.(*MockManager).GetConsumedMocks(), nil
+}
+
+// GetErrorChannel returns the error channel for external monitoring
+func (p *Proxy) GetErrorChannel() <-chan error {
+	return p.errChannel
+}
+
+// SendError sends an error to the error channel for external monitoring
+func (p *Proxy) SendError(err error) {
+	select {
+	case p.errChannel <- err:
+		// Error sent successfully
+	default:
+		// Channel is full, log the error instead
+		p.logger.Warn("Error channel is full, dropping error", zap.Error(err))
+	}
+}
+
+// CloseErrorChannel closes the error channel
+func (p *Proxy) CloseErrorChannel() {
+	close(p.errChannel)
 }

@@ -113,6 +113,7 @@ require (
 	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgproto3/v2 v2.3.2
+	github.com/keploy/integrations v0.0.0-20250905110920-0febf76e4225
 	github.com/keploy/jsonDiff v1.0.8
 	github.com/shirou/gopsutil/v3 v3.24.3
 	github.com/spf13/viper v1.19.0
