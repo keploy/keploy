@@ -81,6 +81,7 @@ type ReRecord struct {
 	Port          uint32   `json:"port" yaml:"port" mapstructure:"port"`
 	ShowDiff      bool     `json:"showDiff" yaml:"showDiff" mapstructure:"showDiff"` // show response diff during rerecord (disabled by default)
 	GRPCPort      uint32   `json:"grpcPort" yaml:"grpcPort" mapstructure:"grpcPort"`
+	APITimeout    uint64   `json:"apiTimeout" yaml:"apiTimeout" mapstructure:"apiTimeout"`
 }
 type Contract struct {
 	Services []string `json:"services" yaml:"services" mapstructure:"services"`
