@@ -55,6 +55,7 @@ type Proxy interface {
 	SetMocks(ctx context.Context, id uint64, filtered []*models.Mock, unFiltered []*models.Mock) error
 	GetConsumedMocks(ctx context.Context, id uint64) ([]models.MockState, error)
 	MakeClientDeRegisterd(ctx context.Context) error
+	GetErrorChannel() <-chan error
 }
 
 type ProxyOptions struct {
