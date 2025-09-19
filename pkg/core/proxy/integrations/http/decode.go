@@ -112,8 +112,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				zap.Any("url", input.url),
 				zap.Any("header", input.header),
 				zap.Any("body", string(input.body)),
-				zap.Any("raw", string(input.raw)),
-				zap.Any("url params", input.url.Query()))
+				zap.Any("raw", string(input.raw)))
 
 			ok, stub, err := h.match(ctx, input, mockDb) // calling match function to match mocks
 			if err != nil {
