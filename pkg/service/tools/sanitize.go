@@ -132,19 +132,22 @@ func (t *Tools) sanitizeTestSetDir(ctx context.Context, testSetDir string) error
 		return nil
 	}
 
-	for _, f := range files {
-		// Check for context cancellation
-		select {
-		case <-ctx.Done():
-			t.logger.Info("File sanitization cancelled by context")
-			return ctx.Err()
-		default:
+	// Create a shared detector to avoid repeated initialization
+	detector, err := detect.NewDetectorDefaultConfig()
+	if err != nil {
+		t.logger.Error("Failed to create detector", zap.Error(err))
+		// Fallback to per-file detector creation
+		for _, filePath := range files {
+			if err := SanitizeFileInPlace(filePath, aggSecrets); err != nil {
+				t.logger.Error("Failed to sanitize file", zap.String("file", filePath), zap.Error(err))
+			}
 		}
-
-		if err := SanitizeFileInPlace(f, aggSecrets); err != nil {
-			// Continue to next file
-			t.logger.Error("Failed to sanitize file", zap.String("file", f), zap.Error(err))
-			continue
+	} else {
+		// Process files with shared detector
+		for _, filePath := range files {
+			if err := SanitizeFileInPlaceWithDetector(filePath, aggSecrets, detector); err != nil {
+				t.logger.Error("Failed to sanitize file", zap.String("file", filePath), zap.Error(err))
+			}
 		}
 	}
 
@@ -163,15 +166,21 @@ type replacement struct {
 }
 
 // RedactYAML applies secret detection + redaction to a YAML blob.
-// - Populates/extends aggSecrets (shared across files in a test-set)
-// - Writes placeholders into the YAML
-// - Handles JSON-in-string and curl header blobs
 func RedactYAML(yamlBytes []byte, aggSecrets map[string]string) ([]byte, error) {
-	// 1) Detect secrets
-	detector, err := detect.NewDetectorDefaultConfig()
-	if err != nil {
-		return nil, fmt.Errorf("gitleaks: %w", err)
+	return RedactYAMLWithDetector(yamlBytes, aggSecrets, nil)
+}
+
+// RedactYAMLWithDetector allows reusing a detector instance for better performance
+func RedactYAMLWithDetector(yamlBytes []byte, aggSecrets map[string]string, detector *detect.Detector) ([]byte, error) {
+	// 1) Detect secrets - reuse detector if provided
+	var err error
+	if detector == nil {
+		detector, err = detect.NewDetectorDefaultConfig()
+		if err != nil {
+			return nil, fmt.Errorf("gitleaks: %w", err)
+		}
 	}
+	
 	findings := detector.DetectString(string(yamlBytes))
 	secretSet := collectSecrets(findings)
 
@@ -188,7 +197,7 @@ func RedactYAML(yamlBytes []byte, aggSecrets map[string]string) ([]byte, error) 
 
 	redactNode(&root, nil, secretSet, secretsMap, &repls, headerKeyToPlaceholder)
 
-	// 4) Patch any curl strings using only the mappings we already created
+	// 4) Patch any curl strings using the mappings we created
 	applyCurlUsingMaps(&root, repls, headerKeyToPlaceholder)
 
 	// 5) Emit YAML
@@ -220,6 +229,7 @@ func lastPath(path []string) string {
 	return path[len(path)-1]
 }
 
+// redactNode recursively processes YAML nodes to replace secrets with placeholders
 func redactNode(
 	n *yaml.Node,
 	path []string,
@@ -482,9 +492,15 @@ func lastUnescapedIndexByte(s string, ch byte) int {
 }
 
 func containsAnySecret(s string, secretSet map[string]struct{}) bool {
-	if s == "" {
+	if s == "" || len(secretSet) == 0 {
 		return false
 	}
+	
+	// Skip already templated values
+	if strings.Contains(s, "{{string .secret.") {
+		return false
+	}
+	
 	for secret := range secretSet {
 		if secret != "" && strings.Contains(s, secret) {
 			return true
@@ -573,14 +589,29 @@ func uniqueKeyForValue(base, val string, existing map[string]string) string {
 // SanitizeFileInPlace reads a YAML file, redacts secrets, and writes back in-place.
 // aggSecrets is a shared map across the entire test-set (key -> original value).
 func SanitizeFileInPlace(path string, aggSecrets map[string]string) error {
+	return SanitizeFileInPlaceWithDetector(path, aggSecrets, nil)
+}
+
+// SanitizeFileInPlaceWithDetector allows reusing a detector for better performance
+func SanitizeFileInPlaceWithDetector(path string, aggSecrets map[string]string, detector *detect.Detector) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
 
-	redacted, err := RedactYAML(raw, aggSecrets)
+	// Skip processing if file is likely already sanitized
+	if bytes.Contains(raw, []byte("{{string .secret.")) {
+		return nil
+	}
+
+	redacted, err := RedactYAMLWithDetector(raw, aggSecrets, detector)
 	if err != nil {
 		return fmt.Errorf("redact %s: %w", path, err)
+	}
+
+	// Only write if content actually changed
+	if bytes.Equal(raw, redacted) {
+		return nil
 	}
 
 	// Normalize YAML formatting

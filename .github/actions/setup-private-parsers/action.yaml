@@ -4,7 +4,7 @@ description: 'Sets up Go, loads an SSH key, fetches private Go dependencies, and
 inputs:
   ssh-private-key:
     description: 'The private SSH deploy key for the integrations repository.'
-    required: true
+    required: false
 
 runs:
   using: composite
@@ -15,6 +15,7 @@ runs:
         go-version: ">=1.24"
 
     - name: Load Private SSH Key
+      if: ${{ inputs.ssh-private-key && inputs.ssh-private-key != '' }}
       uses: webfactory/ssh-agent@v0.9.0
       with:
         ssh-private-key: ${{ inputs.ssh-private-key }}
@@ -22,14 +23,15 @@ runs:
     - name: Configure Git, Fetch Dependencies, and Create Parsers File
       shell: bash
       run: |
-        git config --global url."git@github.com:".insteadOf "https://github.com/"
-        
-        echo "Fetching private integrations dependency via SSH..."
-        GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations
-        
-        echo "Creating extraparsers.go..."
-        mkdir -p pkg/core/proxy
-        cat <<'EOF' > pkg/core/proxy/extraparsers.go
+        if [ -n "${{ inputs.ssh-private-key || '' }}" ]; then
+          git config --global url."git@github.com:".insteadOf "https://github.com/"
+          
+          echo "Fetching private integrations dependency via SSH..."
+          GOPRIVATE=github.com/keploy/integrations go get github.com/keploy/integrations
+          
+          echo "Creating extraparsers.go..."
+          mkdir -p pkg/core/proxy
+          cat <<'EOF' > pkg/core/proxy/extraparsers.go
         //go:build linux
 
         package proxy
@@ -38,3 +40,15 @@ runs:
         	_ "github.com/keploy/integrations/pkg/parsers"
         )
         EOF
+        else
+          echo "No SSH key provided, skipping private integrations setup"
+          echo "Creating empty extraparsers.go..."
+          mkdir -p pkg/core/proxy
+          cat <<'EOF' > pkg/core/proxy/extraparsers.go
+        //go:build linux
+
+        package proxy
+
+        // No private parsers loaded
+        EOF
+        fi
